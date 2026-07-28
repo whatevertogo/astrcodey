@@ -7,7 +7,7 @@ mod prepare;
 
 use std::sync::Arc;
 
-use astrcode_core::{storage::ToolResultArtifactReader, tool::ToolDefinition};
+use astrcode_core::tool::{ToolDefinition, ToolResultArtifactReader};
 use astrcode_extension_sdk::runtime_ports::TurnHooks;
 use tokio_util::sync::CancellationToken;
 

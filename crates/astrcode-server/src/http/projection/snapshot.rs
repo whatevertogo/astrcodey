@@ -2,13 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use astrcode_core::{
-    storage::{PendingToolApprovalView, PendingToolInteractionView, SessionReadModel},
-    types::ToolCallId,
-};
+use astrcode_core::types::ToolCallId;
 use astrcode_protocol::http::{
     AgentSessionLinkDto, ConversationBlockDto, ConversationCursorDto,
     ConversationSnapshotResponseDto, ToolCallStatusDto,
+};
+use astrcode_session_projection::{
+    PendingToolApprovalView, PendingToolInteractionView, SessionReadModel,
 };
 
 use super::{
@@ -139,7 +139,7 @@ mod tests {
         session.working_dir = "D:/work/project".into();
         session
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage {
                     role: LlmRole::Assistant,
                     content: vec![LlmContent::ToolCall {
@@ -164,7 +164,7 @@ mod tests {
         session.latest_seq = Some(9);
         session
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::user("hello"),
                 updated_seq: 1,
                 source: None,
@@ -186,7 +186,7 @@ mod tests {
         );
         session
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::tool("read", "tool-1", "file contents", false),
                 updated_seq: 2,
                 source: None,
@@ -224,7 +224,7 @@ mod tests {
         );
         session.pending_tool_approvals.insert(
             "tool-approval".into(),
-            astrcode_core::storage::PendingToolApprovalView {
+            astrcode_session_projection::PendingToolApprovalView {
                 prompt: "Run shell command?".into(),
                 rule_key: Some("shell:write".into()),
             },
@@ -274,7 +274,8 @@ mod tests {
 
     #[test]
     fn conversation_snapshot_places_compact_summary_before_retained_messages() {
-        use astrcode_core::{extension::CompactStrategy, storage::CompactBoundaryView};
+        use astrcode_core::extension::CompactStrategy;
+        use astrcode_session_projection::CompactBoundaryView;
 
         let mut session = SessionReadModel::empty("session-compact".into());
         session.working_dir = "D:/work/project".into();
@@ -282,14 +283,14 @@ mod tests {
         // compact 之后的 retained messages
         session
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::user("recent user"),
                 updated_seq: 1,
                 source: None,
             });
         session
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::assistant("recent assistant"),
                 updated_seq: 2,
                 source: None,
@@ -325,7 +326,8 @@ mod tests {
 
     #[test]
     fn conversation_snapshot_shows_only_latest_compact_before_retained_messages() {
-        use astrcode_core::{extension::CompactStrategy, storage::CompactBoundaryView};
+        use astrcode_core::extension::CompactStrategy;
+        use astrcode_session_projection::CompactBoundaryView;
 
         use crate::http::projection::blocks::COMPACT_SUMMARY_BLOCK_ID;
 
@@ -334,7 +336,7 @@ mod tests {
         session.latest_seq = Some(20);
         session
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::user("latest user"),
                 updated_seq: 1,
                 source: None,

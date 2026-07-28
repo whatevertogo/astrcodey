@@ -12,7 +12,6 @@ use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    storage::AgentSessionStatus,
     types::SessionId,
 };
 use astrcode_protocol::{
@@ -22,6 +21,7 @@ use astrcode_protocol::{
         ConversationStreamEnvelopeDto,
     },
 };
+use astrcode_session_projection::AgentSessionStatus;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,

@@ -167,12 +167,11 @@ mod tests {
             EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
         },
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        storage::EventStore,
         tool::ToolDefinition,
     };
     use astrcode_extensions::runner::ExtensionRunner;
     use astrcode_session::SessionCreateParams;
-    use astrcode_storage::in_memory::InMemoryEventStore;
+    use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -268,7 +267,7 @@ mod tests {
     }
 
     async fn make_session(sid: &str) -> Arc<Session> {
-        let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+        let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
         let runtime = Arc::new(astrcode_session::SessionRuntimeState::new(
             Arc::new(NeverLlm),
             Arc::new(NeverLlm),

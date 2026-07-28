@@ -16,19 +16,19 @@ use astrcode_core::{
     },
     event::{Event, EventPayload, Phase},
     extension::{
-        CommandContext, CompactStrategy, Extension, ExtensionCommandResult, ExtensionError,
-        ExtensionEvent, HookMode, HookResult, LifecycleContext, Registrar, SlashCommand,
+        CommandContext, CompactStrategy, ExtensionCommandResult, ExtensionError, ExtensionEvent,
+        HookMode, HookResult, LifecycleContext, Registrar, SlashCommand,
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
-    storage::EventStore,
     tool::ToolDefinition,
     types::{SessionId, ToolCallId, new_session_id},
 };
+use astrcode_extensions::Extension;
 use astrcode_protocol::{
     commands::ClientCommand, events::ClientNotification, wire::CommandSourceDto,
 };
 use astrcode_session::{compact_boundary_payload, session_continued_from_compaction_payload};
-use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use astrcode_support::event_fanout::EventFanout;
 use tokio::sync::mpsc;
 
@@ -746,7 +746,7 @@ fn test_runtime_with_settings(
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
-    let event_store = Arc::new(InMemoryEventStore::new()) as Arc<dyn EventStore>;
+    let event_store = Arc::new(InMemoryEventStore::new()) as Arc<dyn SessionStore>;
     let extension_runner = Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
         Duration::from_secs(1),
     ));
@@ -939,7 +939,7 @@ async fn drain_until_compact_boundary(
 }
 
 async fn append_user_assistant_pair(
-    store: &Arc<dyn EventStore>,
+    store: &Arc<dyn SessionStore>,
     session_id: &SessionId,
     user: &str,
     assistant: &str,
@@ -1591,7 +1591,7 @@ async fn repair_stale_runs_marks_child_without_active_execution_interrupted() {
     let link = state.agent_sessions.first().unwrap();
     assert_eq!(
         link.status,
-        astrcode_core::storage::AgentSessionStatus::Failed
+        astrcode_session_projection::AgentSessionStatus::Failed
     );
     assert_eq!(
         link.final_session_id.as_ref().map(|id| id.as_str()),

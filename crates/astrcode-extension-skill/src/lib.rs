@@ -205,7 +205,7 @@ impl CommandHandler for SkillCommandHandler {
         Ok(ExtensionCommandResult::start_turn(render_skill_content(
             skill,
             Some(arguments),
-            &ctx.scope.session_id,
+            &ctx.session_id,
         )))
     }
 }

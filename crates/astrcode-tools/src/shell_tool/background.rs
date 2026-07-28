@@ -59,7 +59,7 @@ impl ShellTool {
 
         let adopted = adopt_running_shell(
             AdoptBackgroundShellParams {
-                session_id: ctx.session_id.to_string(),
+                session_id: ctx.scope.session_id.to_string(),
                 timeout_secs: remaining_timeout,
                 shell_id: shell_id.clone(),
                 output_path: output_path.clone(),
@@ -143,7 +143,7 @@ impl ShellTool {
         let (command, pipeline_semantics) =
             apply_pipeline_policy(&shell, &command).map_err(ToolError::InvalidArguments)?;
         let spawned = spawn_background_shell(BackgroundShellSpawnParams {
-            session_id: ctx.session_id.to_string(),
+            session_id: ctx.scope.session_id.to_string(),
             command,
             intent: args.intent.clone(),
             cwd,

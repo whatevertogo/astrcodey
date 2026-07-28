@@ -283,7 +283,7 @@ impl ExtensionRunner {
             .host_services
             .read()
             .as_ref()
-            .and_then(|services| services.scoped_to(&capabilities))
+            .and_then(|services| services.scoped_to(&id, &capabilities))
             .map(Arc::new);
         let ctx = ExtensionCtx::with_host_services(
             tasks.clone(),

@@ -10,9 +10,9 @@ use astrcode_core::{
     extension::{ExtensionCapability, ExtensionHttpMethod},
     llm::{LlmRole, ThinkingLevel},
     permission::{ApprovalDecision, ApprovalMode},
-    storage::AgentSessionStatus,
     tool::{ExecutionMode, ToolOrigin},
 };
+use astrcode_session_projection::AgentSessionStatus;
 use serde::{Deserialize, Serialize};
 
 macro_rules! impl_wire_values {

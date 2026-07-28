@@ -12,11 +12,11 @@ use std::{
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    storage::{
-        CompactSnapshotInput, EventReader, EventStore, SessionReadModel, SessionSummary,
-        StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
-    },
+    tool::ToolResultArtifactSlice,
     types::{Cursor, SessionId, project_key_from_path, validate_session_id},
+};
+use astrcode_session_projection::{
+    AgentSessionLinkView, SessionReadModel, SessionSummary, reduce, replay,
 };
 use astrcode_support::{hostpaths, perf_snapshot};
 use chrono::Utc;
@@ -26,8 +26,9 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::{
+    CompactSnapshotInput, EventReader, EventStore, SessionPathResolver, SessionReader,
+    StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
     event_log::EventLog,
-    projection,
     snapshot::SnapshotManager,
     tool_artifacts::{slice_tool_result, write_tool_result_file},
 };
@@ -343,7 +344,7 @@ impl FileSystemSessionRepository {
         }
 
         let events = log.replay_all().await?;
-        Ok(projection::replay(session_id.clone(), &events))
+        Ok(replay(session_id.clone(), &events))
     }
 }
 
@@ -370,7 +371,7 @@ async fn restore_from_snapshot(
     // Reapply only the events that occurred after the snapshot. The snapshot
     // serves as a recovery checkpoint, not as an authoritative source of truth.
     for event in log.replay_after(latest_seq).await? {
-        projection::reduce(&event, &mut model);
+        reduce(&event, &mut model);
     }
     Ok(model)
 }
@@ -382,6 +383,45 @@ impl EventReader for FileSystemSessionRepository {
         meta.log.replay_all().await
     }
 
+    async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let cursor = meta
+            .projection
+            .read()
+            .await
+            .latest_seq
+            .map(|seq| seq.to_string());
+        Ok(cursor)
+    }
+
+    async fn replay_from(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+    ) -> Result<Vec<Event>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let seq = parse_cursor(cursor)?;
+        meta.log.replay_after(seq).await
+    }
+
+    async fn replay_from_limited(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+        max_events: usize,
+    ) -> Result<Vec<Event>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let seq = parse_cursor(cursor)?;
+        meta.log.replay_after_limited(seq, max_events).await
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
+        self.list_session_dirs().await
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionReader for FileSystemSessionRepository {
     async fn session_read_model(
         &self,
         session_id: &SessionId,
@@ -418,7 +458,7 @@ impl EventReader for FileSystemSessionRepository {
     async fn session_agent_sessions(
         &self,
         session_id: &SessionId,
-    ) -> Result<Vec<astrcode_core::storage::AgentSessionLinkView>, StorageError> {
+    ) -> Result<Vec<AgentSessionLinkView>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
         let agent_sessions = meta.projection.read().await.agent_sessions.clone();
         Ok(agent_sessions)
@@ -453,44 +493,10 @@ impl EventReader for FileSystemSessionRepository {
         summaries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         Ok(summaries)
     }
+}
 
-    async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let cursor = meta
-            .projection
-            .read()
-            .await
-            .latest_seq
-            .map(|seq| seq.to_string());
-        Ok(cursor)
-    }
-
-    async fn replay_from(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<Vec<Event>, StorageError> {
-        // session_id 验证由 get_or_open_meta 统一守卫
-        let meta = self.get_or_open_meta(session_id).await?;
-        let seq = parse_cursor(cursor)?;
-        meta.log.replay_after(seq).await
-    }
-
-    async fn replay_from_limited(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-        max_events: usize,
-    ) -> Result<Vec<Event>, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let seq = parse_cursor(cursor)?;
-        meta.log.replay_after_limited(seq, max_events).await
-    }
-
-    async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
-        self.list_session_dirs().await
-    }
-
+#[async_trait::async_trait]
+impl ToolResultArtifactStore for FileSystemSessionRepository {
     async fn read_tool_result_artifact_by_path(
         &self,
         session_id: &SessionId,
@@ -519,6 +525,19 @@ impl EventReader for FileSystemSessionRepository {
         ))
     }
 
+    async fn write_tool_result_artifact(
+        &self,
+        session_id: &SessionId,
+        artifact: ToolResultArtifactInput,
+    ) -> Result<ToolResultArtifactRef, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let dir = meta.dir.join("tool-results");
+        Ok(write_tool_result_file(&dir, &artifact)?)
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionPathResolver for FileSystemSessionRepository {
     async fn session_store_dir(
         &self,
         session_id: &SessionId,
@@ -576,7 +595,7 @@ impl EventStore for FileSystemSessionRepository {
             EventLog::create(Self::event_log_path(&dir, session_id), start_event).await?;
 
         let mut projection = SessionReadModel::empty(session_id.clone());
-        projection::reduce(&stored_event, &mut projection);
+        reduce(&stored_event, &mut projection);
 
         self.sessions.write().await.insert(
             session_id.clone(),
@@ -598,7 +617,7 @@ impl EventStore for FileSystemSessionRepository {
         let session_id = event.session_id.clone();
         let meta = self.get_or_open_meta(&session_id).await?;
         let stored = meta.log.append(event).await?;
-        projection::reduce(&stored, &mut *meta.projection.write().await);
+        reduce(&stored, &mut *meta.projection.write().await);
         Ok(stored)
     }
 
@@ -765,17 +784,6 @@ impl EventStore for FileSystemSessionRepository {
         tokio::fs::write(&path, content).await?;
 
         Ok(Some(path.to_string_lossy().to_string()))
-    }
-
-    async fn write_tool_result_artifact(
-        &self,
-        session_id: &SessionId,
-        artifact: ToolResultArtifactInput,
-    ) -> Result<ToolResultArtifactRef, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-
-        let dir = meta.dir.join("tool-results");
-        Ok(write_tool_result_file(&dir, &artifact)?)
     }
 
     async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
@@ -963,11 +971,11 @@ mod tests {
     use astrcode_core::{
         event::EventPayload,
         llm::{LlmContent, LlmMessage, LlmRole},
-        storage::CompactSnapshotInput,
         types::{new_message_id, project_key_from_path},
     };
 
     use super::*;
+    use crate::CompactSnapshotInput;
 
     #[test]
     fn session_owner_lock_reports_existing_owner() {

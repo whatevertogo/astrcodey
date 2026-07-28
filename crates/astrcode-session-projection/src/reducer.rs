@@ -5,21 +5,51 @@
 use astrcode_core::{
     event::{Event, EventPayload, Phase},
     llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message},
-    storage::{
-        AgentSessionLinkView, AgentSessionStatus, CompactBoundaryView, PendingToolApprovalView,
-        SequencedLlmMessage, SessionReadModel, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
-        TranscriptArtifactView,
-    },
     types::SessionId,
 };
 
+use crate::{
+    AgentSessionLinkView, AgentSessionStatus, CompactBoundaryView, PendingToolApprovalView,
+    PendingToolInteractionView, SequencedLlmMessage, SessionReadModel, TOOL_CALL_CANCELLED_SOURCE,
+    TOOL_CALL_FAILED_SOURCE, TranscriptArtifactView,
+};
+
+#[derive(Clone)]
+pub struct SessionReadModelProjection {
+    model: SessionReadModel,
+}
+
+impl SessionReadModelProjection {
+    pub fn new(session_id: SessionId) -> Self {
+        Self {
+            model: SessionReadModel::empty(session_id),
+        }
+    }
+
+    pub fn from_read_model(model: SessionReadModel) -> Self {
+        Self { model }
+    }
+
+    pub fn apply(&mut self, event: &Event) {
+        reduce(event, &mut self.model);
+    }
+
+    pub fn snapshot(&self) -> SessionReadModel {
+        self.model.clone()
+    }
+
+    pub fn last_seq(&self) -> Option<u64> {
+        self.model.latest_seq
+    }
+}
+
 /// 从事件序列重建会话读模型。
 pub fn replay(session_id: SessionId, events: &[Event]) -> SessionReadModel {
-    let mut model = SessionReadModel::empty(session_id);
+    let mut projection = SessionReadModelProjection::new(session_id);
     for event in events {
-        reduce(event, &mut model);
+        projection.apply(event);
     }
-    model
+    projection.snapshot()
 }
 
 /// 将单个持久事件归约到读模型。
@@ -242,7 +272,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.phase = Phase::CallingTool;
             model.pending_tool_interactions.insert(
                 call_id.clone(),
-                astrcode_core::storage::PendingToolInteractionView {
+                PendingToolInteractionView {
                     content: content.clone(),
                     metadata: metadata.clone(),
                 },
@@ -487,12 +517,15 @@ mod tests {
         extension::CompactStrategy,
         llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
         permission::{ApprovalDecision, ApprovalSource},
-        storage::{TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE, TranscriptArtifactView},
         tool::ToolResult,
         types::{SessionId, new_message_id},
     };
 
     use super::replay;
+    use crate::{
+        AgentSessionStatus, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
+        TranscriptArtifactView,
+    };
 
     fn event(seq: u64, session_id: &SessionId, payload: EventPayload) -> Event {
         let mut event = Event::new(session_id.clone(), None, payload);
@@ -694,10 +727,7 @@ mod tests {
         );
         assert_eq!(link.summary.as_deref(), Some("done"));
         assert!(link.error.is_none());
-        assert_eq!(
-            link.status,
-            astrcode_core::storage::AgentSessionStatus::Completed
-        );
+        assert_eq!(link.status, AgentSessionStatus::Completed);
     }
 
     #[test]

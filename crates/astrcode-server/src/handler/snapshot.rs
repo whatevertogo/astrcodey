@@ -15,7 +15,7 @@ fn is_wire_compact_summary(content: &str) -> bool {
 
 /// 构建会话快照 DTO，用于客户端同步。
 pub(crate) fn session_snapshot(
-    state: &astrcode_core::storage::SessionReadModel,
+    state: &astrcode_session_projection::SessionReadModel,
 ) -> SessionSnapshot {
     SessionSnapshot {
         session_id: state.session_id.to_string(),

@@ -2,7 +2,7 @@
 //!
 //! 从 `storage` 根模块拆出,仅含错误枚举。
 
-use crate::types::SessionId;
+use astrcode_core::types::SessionId;
 
 /// 存储操作产生的错误。
 #[derive(Debug, thiserror::Error)]

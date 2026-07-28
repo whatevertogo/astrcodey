@@ -1,6 +1,7 @@
 //! Tool result budgeting and LLM-facing persisted-result summaries.
 
-use astrcode_core::{storage::ToolResultArtifactRef, tool::ToolResult};
+use astrcode_core::tool::ToolResult;
+use astrcode_storage::ToolResultArtifactRef;
 
 pub const PERSISTED_TOOL_RESULT_METADATA_KEY: &str = "persistedToolResult";
 

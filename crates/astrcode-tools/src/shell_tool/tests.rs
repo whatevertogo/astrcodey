@@ -199,7 +199,7 @@ async fn shell_captures_stdout_and_stderr_without_live_events() {
         timeout_secs: 30,
     };
     let mut ctx = empty_ctx();
-    ctx.tool_call_id = Some("shell-capture".into());
+    ctx.scope.tool_call_id = Some("shell-capture".into());
 
     let result = tool
         .execute(

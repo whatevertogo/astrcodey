@@ -7,16 +7,15 @@ use std::collections::HashMap;
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    storage::{
-        CompactSnapshotInput, EventReader, EventStore, SessionReadModel, SessionSummary,
-        StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
-    },
+    tool::ToolResultArtifactSlice,
     types::{Cursor, SessionId},
 };
+use astrcode_session_projection::{AgentSessionLinkView, SessionReadModel, SessionSummary, reduce};
 use tokio::sync::Mutex;
 
 use crate::{
-    projection,
+    CompactSnapshotInput, EventReader, EventStore, SessionPathResolver, SessionReader,
+    StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
     tool_artifacts::{slice_tool_result, tool_result_file_name_with_suffix},
 };
 
@@ -51,6 +50,35 @@ impl EventReader for InMemoryEventStore {
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))
     }
 
+    async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
+        let map = self.sessions.lock().await;
+        map.get(session_id)
+            .map(|session| session.projection.latest_seq.map(|seq| seq.to_string()))
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))
+    }
+
+    async fn replay_from(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+    ) -> Result<Vec<Event>, StorageError> {
+        let events = self.replay_events(session_id).await?;
+        let Ok(seq) = cursor.parse::<u64>() else {
+            return Err(StorageError::InvalidId(format!("Invalid cursor: {cursor}")));
+        };
+        Ok(events
+            .into_iter()
+            .filter(|event| event.seq.unwrap_or(0) > seq)
+            .collect())
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
+        Ok(self.sessions.lock().await.keys().cloned().collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionReader for InMemoryEventStore {
     async fn session_read_model(
         &self,
         session_id: &SessionId,
@@ -91,7 +119,7 @@ impl EventReader for InMemoryEventStore {
     async fn session_agent_sessions(
         &self,
         session_id: &SessionId,
-    ) -> Result<Vec<astrcode_core::storage::AgentSessionLinkView>, StorageError> {
+    ) -> Result<Vec<AgentSessionLinkView>, StorageError> {
         let map = self.sessions.lock().await;
         map.get(session_id)
             .map(|session| session.projection.agent_sessions.clone())
@@ -119,33 +147,10 @@ impl EventReader for InMemoryEventStore {
         summaries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
         Ok(summaries)
     }
+}
 
-    async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
-        let map = self.sessions.lock().await;
-        map.get(session_id)
-            .map(|session| session.projection.latest_seq.map(|seq| seq.to_string()))
-            .ok_or_else(|| StorageError::NotFound(session_id.clone()))
-    }
-
-    async fn replay_from(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<Vec<Event>, StorageError> {
-        let events = self.replay_events(session_id).await?;
-        let Ok(seq) = cursor.parse::<u64>() else {
-            return Err(StorageError::InvalidId(format!("Invalid cursor: {cursor}")));
-        };
-        Ok(events
-            .into_iter()
-            .filter(|event| event.seq.unwrap_or(0) > seq)
-            .collect())
-    }
-
-    async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
-        Ok(self.sessions.lock().await.keys().cloned().collect())
-    }
-
+#[async_trait::async_trait]
+impl ToolResultArtifactStore for InMemoryEventStore {
     async fn read_tool_result_artifact_by_path(
         &self,
         session_id: &SessionId,
@@ -168,99 +173,6 @@ impl EventReader for InMemoryEventStore {
             .get(path)
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
         Ok(slice_tool_result(path, content, char_offset, max_chars))
-    }
-
-    async fn session_store_dir(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<std::path::PathBuf>, StorageError> {
-        let map = self.sessions.lock().await;
-        if map.contains_key(session_id) {
-            Ok(None)
-        } else {
-            Err(StorageError::NotFound(session_id.clone()))
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl EventStore for InMemoryEventStore {
-    async fn create_session(
-        &self,
-        session_id: &SessionId,
-        working_dir: &str,
-        model_id: &str,
-        parent_session_id: Option<&SessionId>,
-        tool_selection: Option<&astrcode_core::extension::SessionToolSelection>,
-        source_extension: Option<&str>,
-    ) -> Result<Event, StorageError> {
-        let mut event = Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::SessionStarted {
-                working_dir: working_dir.into(),
-                model_id: model_id.into(),
-                parent_session_id: parent_session_id.cloned(),
-                tool_selection: tool_selection.cloned(),
-                source_extension: source_extension.map(String::from),
-            },
-        );
-        // EventLog seq 是会话内 0-indexed；第一条 SessionStarted 为 0。
-        event.seq = Some(0);
-
-        let mut projection = SessionReadModel::empty(session_id.clone());
-        projection::reduce(&event, &mut projection);
-        self.sessions.lock().await.insert(
-            session_id.clone(),
-            InMemorySession {
-                events: vec![event.clone()],
-                projection,
-                tool_results: HashMap::new(),
-            },
-        );
-        Ok(event)
-    }
-
-    async fn append_event(&self, mut event: Event) -> Result<Event, StorageError> {
-        let mut map = self.sessions.lock().await;
-        let session = map
-            .get_mut(&event.session_id)
-            .ok_or_else(|| StorageError::NotFound(event.session_id.clone()))?;
-        event.seq = Some(session.events.len() as u64);
-        session.events.push(event.clone());
-        projection::reduce(&event, &mut session.projection);
-        Ok(event)
-    }
-
-    async fn checkpoint(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<(), StorageError> {
-        let map = self.sessions.lock().await;
-        let session = map
-            .get(session_id)
-            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
-        let latest_cursor = session.projection.cursor();
-        if cursor != &latest_cursor {
-            return Err(StorageError::InvalidId(format!(
-                "checkpoint cursor {cursor} does not match latest cursor {latest_cursor}"
-            )));
-        }
-        Ok(())
-    }
-
-    async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
-        self.sessions.lock().await.remove(session_id);
-        Ok(())
-    }
-
-    async fn write_compact_snapshot(
-        &self,
-        _session_id: &SessionId,
-        _snapshot: CompactSnapshotInput,
-    ) -> Result<Option<String>, StorageError> {
-        Ok(None)
     }
 
     async fn write_tool_result_artifact(
@@ -301,6 +213,102 @@ impl EventStore for InMemoryEventStore {
         Err(StorageError::InvalidId(
             "too many tool result artifact filename collisions".into(),
         ))
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionPathResolver for InMemoryEventStore {
+    async fn session_store_dir(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<std::path::PathBuf>, StorageError> {
+        let map = self.sessions.lock().await;
+        if map.contains_key(session_id) {
+            Ok(None)
+        } else {
+            Err(StorageError::NotFound(session_id.clone()))
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EventStore for InMemoryEventStore {
+    async fn create_session(
+        &self,
+        session_id: &SessionId,
+        working_dir: &str,
+        model_id: &str,
+        parent_session_id: Option<&SessionId>,
+        tool_selection: Option<&astrcode_core::extension::SessionToolSelection>,
+        source_extension: Option<&str>,
+    ) -> Result<Event, StorageError> {
+        let mut event = Event::new(
+            session_id.clone(),
+            None,
+            EventPayload::SessionStarted {
+                working_dir: working_dir.into(),
+                model_id: model_id.into(),
+                parent_session_id: parent_session_id.cloned(),
+                tool_selection: tool_selection.cloned(),
+                source_extension: source_extension.map(String::from),
+            },
+        );
+        // EventLog seq 是会话内 0-indexed；第一条 SessionStarted 为 0。
+        event.seq = Some(0);
+
+        let mut projection = SessionReadModel::empty(session_id.clone());
+        reduce(&event, &mut projection);
+        self.sessions.lock().await.insert(
+            session_id.clone(),
+            InMemorySession {
+                events: vec![event.clone()],
+                projection,
+                tool_results: HashMap::new(),
+            },
+        );
+        Ok(event)
+    }
+
+    async fn append_event(&self, mut event: Event) -> Result<Event, StorageError> {
+        let mut map = self.sessions.lock().await;
+        let session = map
+            .get_mut(&event.session_id)
+            .ok_or_else(|| StorageError::NotFound(event.session_id.clone()))?;
+        event.seq = Some(session.events.len() as u64);
+        session.events.push(event.clone());
+        reduce(&event, &mut session.projection);
+        Ok(event)
+    }
+
+    async fn checkpoint(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+    ) -> Result<(), StorageError> {
+        let map = self.sessions.lock().await;
+        let session = map
+            .get(session_id)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        let latest_cursor = session.projection.cursor();
+        if cursor != &latest_cursor {
+            return Err(StorageError::InvalidId(format!(
+                "checkpoint cursor {cursor} does not match latest cursor {latest_cursor}"
+            )));
+        }
+        Ok(())
+    }
+
+    async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        self.sessions.lock().await.remove(session_id);
+        Ok(())
+    }
+
+    async fn write_compact_snapshot(
+        &self,
+        _session_id: &SessionId,
+        _snapshot: CompactSnapshotInput,
+    ) -> Result<Option<String>, StorageError> {
+        Ok(None)
     }
 }
 

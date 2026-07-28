@@ -10,13 +10,14 @@ use astrcode_core::{
     event::{Event, EventPayload},
     extension::{ExtensionEvent, SessionToolSelection},
     lifecycle::SessionResourceCleanup,
-    storage::{EventStore, SessionReadModel, SessionSummary, StorageError},
     types::{Cursor, SessionId},
 };
 use astrcode_session::{
     Session, SessionCreateParams, SessionError, SessionRuntimeServices, SessionRuntimeState,
     emit_lifecycle_for_read_model,
 };
+use astrcode_session_projection::{AgentSessionLinkView, SessionReadModel, SessionSummary};
+use astrcode_storage::{SessionStore, StorageError};
 use parking_lot::Mutex;
 
 use crate::{config_manager::ConfigManager, server_event_bus::ServerEventBus};
@@ -45,7 +46,7 @@ pub enum SessionManagerError {
 /// 不处理 active turn、输入队列或 child completion——那些由 [`crate::turn_scheduler`]
 /// 与 [`crate::child_session`] 负责。
 pub struct SessionManager {
-    event_store: Arc<dyn EventStore>,
+    event_store: Arc<dyn SessionStore>,
     config: Arc<ConfigManager>,
     runtime_registry: SessionRuntimeRegistry,
     runtime_services: Arc<SessionRuntimeServices>,
@@ -57,7 +58,7 @@ impl SessionManager {
     // ─── 生命周期 ─────────────────────────────────────────────────────
 
     pub fn new(
-        event_store: Arc<dyn EventStore>,
+        event_store: Arc<dyn SessionStore>,
         config: Arc<ConfigManager>,
         runtime_services: Arc<SessionRuntimeServices>,
         resource_cleanups: Vec<Arc<dyn SessionResourceCleanup>>,
@@ -280,7 +281,7 @@ impl SessionManager {
     pub(crate) async fn agent_sessions(
         &self,
         session_id: &SessionId,
-    ) -> Result<Vec<astrcode_core::storage::AgentSessionLinkView>, SessionManagerError> {
+    ) -> Result<Vec<AgentSessionLinkView>, SessionManagerError> {
         self.event_store
             .session_agent_sessions(session_id)
             .await
@@ -398,7 +399,7 @@ impl SessionManager {
                 .filter(|e| e.seq.unwrap_or(0) <= truncated_seq)
                 .collect();
             let truncated_model =
-                astrcode_storage::projection::replay(source_id.clone(), &truncated_events);
+                astrcode_session_projection::replay(source_id.clone(), &truncated_events);
             (truncated_model.context_messages, truncated_model.messages)
         } else {
             (source_model.context_messages, source_model.messages)

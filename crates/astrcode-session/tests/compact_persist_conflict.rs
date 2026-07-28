@@ -19,7 +19,6 @@ use astrcode_core::{
     extension::CompactStrategy,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
     prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
-    storage::EventStore,
     tool::ToolDefinition,
     types::{SessionId, new_message_id, new_session_id, new_turn_id},
 };
@@ -27,7 +26,7 @@ use astrcode_session::{
     Session, SessionCreateParams, SessionHostServices, SessionRuntimeServices, SessionRuntimeState,
     compact::persist_compact_result,
 };
-use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use astrcode_support::hash::hex_fingerprint;
 use tokio::sync::mpsc;
 
@@ -212,8 +211,8 @@ fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<Session
 async fn spawn_session(
     llm: Arc<dyn LlmProvider>,
     context: ContextSettings,
-) -> (Session, Arc<dyn EventStore>) {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+) -> (Session, Arc<dyn SessionStore>) {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let caps = test_caps(llm, context);
     let sid = new_session_id();
     let runtime = Arc::new(SessionRuntimeState::new(
@@ -304,7 +303,7 @@ fn sample_compaction() -> CompactResult {
     }
 }
 
-async fn compact_boundary_event_count(store: &dyn EventStore, session_id: &SessionId) -> usize {
+async fn compact_boundary_event_count(store: &dyn SessionStore, session_id: &SessionId) -> usize {
     store
         .replay_events(session_id)
         .await

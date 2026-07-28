@@ -16,7 +16,6 @@
 //! - [`prompt`]：提示词组合 trait 和类型
 //! - [`read_tool_image`]：read 工具内联图片 tool result 契约
 //! - [`render`]：结构化 UI 渲染协议
-//! - [`storage`]：会话存储 trait
 //! - [`tool`]：工具 trait 及关联类型
 //! - [`types`]：核心共享标识符和数据类型
 //!
@@ -36,7 +35,6 @@ pub mod permission;
 pub mod prompt;
 pub mod read_tool_image;
 pub mod render;
-pub mod storage;
 pub mod thinking;
 pub mod tool;
 pub mod tool_access;

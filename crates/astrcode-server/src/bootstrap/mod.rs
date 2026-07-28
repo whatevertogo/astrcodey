@@ -7,16 +7,16 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
-    config::ConfigStore, extension::ExtensionHostServices, lifecycle::SessionResourceCleanup,
-    storage::EventStore, tool::SessionOperations,
+    config::ConfigStore, lifecycle::SessionResourceCleanup, tool::SessionOperations,
 };
 use astrcode_extensions::{
+    ExtensionHostServices, StorageSessionQueryFactory,
     build_host_router_with_public_http_dispatcher,
     loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime},
     runner::ExtensionRunner,
 };
 use astrcode_session::SessionRuntimeServices;
-use astrcode_storage::config_store::FileConfigStore;
+use astrcode_storage::{SessionStore, config_store::FileConfigStore};
 
 mod config_resolve;
 mod server_system;
@@ -69,7 +69,7 @@ use crate::{
 /// 这是服务器运行时的核心容器，持有所有共享服务的引用。
 /// 各组件通过 `Arc` 共享，支持并发访问。
 pub struct ServerRuntime {
-    pub(crate) event_store: Arc<dyn EventStore>,
+    pub(crate) event_store: Arc<dyn SessionStore>,
     pub(crate) config_manager: Arc<ConfigManager>,
     pub(crate) context_assembler: Arc<LlmContextAssembler>,
     pub(crate) session_manager: Arc<SessionManager>,
@@ -81,7 +81,7 @@ pub struct ServerRuntime {
 }
 
 impl ServerRuntime {
-    pub fn event_store(&self) -> &Arc<dyn EventStore> {
+    pub fn event_store(&self) -> &Arc<dyn SessionStore> {
         &self.event_store
     }
 
@@ -188,13 +188,13 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 测试启动（config_path.is_some()）使用内存存储，避免污染真实会话目录；
     // 正常启动按项目路径选择文件系统会话仓库。
     #[cfg(feature = "testing")]
-    let store: Arc<dyn astrcode_core::storage::EventStore> = if opts.config_path.is_some() {
+    let store: Arc<dyn SessionStore> = if opts.config_path.is_some() {
         Arc::new(astrcode_storage::in_memory::InMemoryEventStore::new())
     } else {
         Arc::new(astrcode_storage::session_repo::FileSystemSessionRepository::new())
     };
     #[cfg(not(feature = "testing"))]
-    let store: Arc<dyn astrcode_core::storage::EventStore> =
+    let store: Arc<dyn SessionStore> =
         Arc::new(astrcode_storage::session_repo::FileSystemSessionRepository::new());
     let event_store = store;
 
@@ -246,7 +246,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // SessionControl 的 trusted bundled extension。不传给磁盘 IPC 扩展。
     let host_services = Arc::new(
         ExtensionHostServices::new(
-            Arc::clone(&event_store),
+            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&event_store))),
             Some(runtime_services.llm()),
             Some(runtime_services.small_llm()),
         )
@@ -256,9 +256,14 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         ),
     );
     extension_runner.bind_host_services(Arc::clone(&host_services));
-    let load_errors =
-        load_extensions_into_runner(&extension_runner, &runtime_services, &host_services, &cwd)
-            .await;
+    let load_errors = load_extensions_into_runner(
+        &extension_runner,
+        &runtime_services,
+        &host_services,
+        Arc::clone(&event_store),
+        &cwd,
+    )
+    .await;
     for err in &load_errors {
         tracing::warn!("Extension load error: {err}");
     }
@@ -291,7 +296,7 @@ impl ServerRuntime {
     /// 集成测试用：从已组装的部件构造运行时（避免测试直接访问私有字段）。
     #[allow(clippy::too_many_arguments)] // 字段与 `ServerRuntime` 一一对应，拆 struct 无收益
     pub fn assemble_for_test(
-        event_store: Arc<dyn EventStore>,
+        event_store: Arc<dyn SessionStore>,
         config_manager: Arc<ConfigManager>,
         context_assembler: Arc<LlmContextAssembler>,
         session_manager: Arc<SessionManager>,
@@ -326,7 +331,9 @@ impl ServerRuntime {
     pub async fn reload_extensions(&self) -> Vec<String> {
         let runtime_services = self.runtime_services();
         let mut host_services = ExtensionHostServices::new(
-            Arc::clone(self.event_store()),
+            Arc::new(StorageSessionQueryFactory::new(Arc::clone(
+                self.event_store(),
+            ))),
             Some(runtime_services.llm()),
             Some(runtime_services.small_llm()),
         );
@@ -345,6 +352,7 @@ impl ServerRuntime {
             self.extension_runner(),
             self.runtime_services(),
             &host_services,
+            Arc::clone(self.event_store()),
             self.startup_working_dir(),
         )
         .await;
@@ -357,6 +365,7 @@ async fn load_extensions_into_runner(
     runner: &Arc<ExtensionRunner>,
     runtime_services: &SessionRuntimeServices,
     host_services: &Arc<ExtensionHostServices>,
+    session_store: Arc<dyn SessionStore>,
     cwd: &std::path::Path,
 ) -> Vec<String> {
     let effective = runtime_services.read_effective();
@@ -380,6 +389,7 @@ async fn load_extensions_into_runner(
             working_dir: Some(cwd.to_string_lossy().to_string()),
             host_router: Some(build_host_router_with_public_http_dispatcher(
                 Arc::clone(host_services),
+                session_store,
                 Some(cwd.to_string_lossy().to_string()),
                 runner.clone(),
             )),

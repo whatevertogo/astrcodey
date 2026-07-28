@@ -5,18 +5,18 @@ mod session;
 
 use std::{path::Path, sync::Arc};
 
-use astrcode_core::extension::{
-    CommandContext, CommandHandler, CompactContext, CompactEvent, CompactHandler, CompactResult,
-    ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
-    ContinueAfterStopResult, Extension, ExtensionCapability, ExtensionCommandResult,
-    ExtensionError, ExtensionEvent, ExtensionEventDecl, ExtensionHttpHandler, ExtensionHttpRequest,
-    ExtensionHttpResponse, HookMode, HookResult, LifecycleContext, LifecycleHandler,
-    PostToolUseContext, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
-    PreToolUseHandler, PreToolUseResult, PromptBuildContext, PromptBuildHandler,
-    PromptContributions, ProviderContext, ProviderHandler, ProviderResult, Registrar, SlashCommand,
-    StopReason, ToolHandler,
-};
 use astrcode_extension_sdk::{
+    extension::{
+        CommandContext, CommandHandler, CompactContext, CompactEvent, CompactHandler,
+        CompactResult, ContinueAfterStopContext, ContinueAfterStopHandler,
+        ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCapability,
+        ExtensionCommandResult, ExtensionError, ExtensionEvent, ExtensionEventDecl,
+        ExtensionHttpHandler, ExtensionHttpRequest, ExtensionHttpResponse, HookMode, HookResult,
+        LifecycleContext, LifecycleHandler, PostToolUseContext, PostToolUseHandler,
+        PostToolUseResult, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
+        PromptBuildContext, PromptBuildHandler, PromptContributions, ProviderContext,
+        ProviderHandler, ProviderResult, Registrar, SlashCommand, StopReason, ToolHandler,
+    },
     s5r::event_to_name,
     tool::{ToolDefinition, ToolResult},
 };
@@ -405,7 +405,7 @@ impl CommandHandler for S5rCommandHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.extension_id,
-            Some(ctx.scope.session_id.to_string()),
+            Some(ctx.session_id.to_string()),
             Some(working_dir.to_string()),
             None,
             None,
@@ -418,7 +418,7 @@ impl CommandHandler for S5rCommandHandler {
                 "command_name": command_name,
                 "arguments": arguments,
                 "working_dir": working_dir,
-                "session_id": ctx.scope.session_id,
+                "session_id": ctx.session_id,
                 "model": ctx.model,
             }
         });
@@ -442,14 +442,14 @@ impl PreToolUseHandler for S5rPreToolUseHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.scope.session_id.clone()),
+            Some(ctx.session_id.clone()),
             Some(ctx.working_dir.clone()),
             ctx.session_store_dir,
-            ctx.scope.event_tx,
+            ctx.event_tx,
             None,
         );
         let input = json!({
-            "session_id": ctx.scope.session_id,
+            "session_id": ctx.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "call_id": ctx.call_id,
@@ -482,14 +482,14 @@ impl PostToolUseHandler for S5rPostToolUseHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.scope.session_id.clone()),
+            Some(ctx.session_id.clone()),
             Some(ctx.working_dir.clone()),
             ctx.session_store_dir,
-            ctx.scope.event_tx,
+            ctx.event_tx,
             None,
         );
         let input = json!({
-            "session_id": ctx.scope.session_id,
+            "session_id": ctx.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "call_id": ctx.call_id,
@@ -523,14 +523,14 @@ impl ProviderHandler for S5rProviderHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.scope.session_id.clone()),
+            Some(ctx.session_id.clone()),
             Some(ctx.working_dir.clone()),
             ctx.session_store_dir,
             None,
             None,
         );
         let input = json!({
-            "session_id": ctx.scope.session_id,
+            "session_id": ctx.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "messages": ctx.messages,
@@ -562,14 +562,14 @@ impl ContinueAfterStopHandler for S5rContinueAfterStopHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.scope.session_id.clone()),
+            Some(ctx.session_id.clone()),
             Some(ctx.working_dir.clone()),
             None,
             None,
             None,
         );
         let input = json!({
-            "session_id": ctx.scope.session_id,
+            "session_id": ctx.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "assistant_text": ctx.assistant_text,
@@ -600,14 +600,14 @@ impl PromptBuildHandler for S5rPromptBuildHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.scope.session_id.clone()),
+            Some(ctx.session_id.clone()),
             Some(ctx.working_dir.clone()),
             None,
             None,
             None,
         );
         let input = json!({
-            "session_id": ctx.scope.session_id,
+            "session_id": ctx.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
         });
@@ -636,14 +636,14 @@ impl CompactHandler for S5rCompactHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.scope.session_id.clone()),
+            Some(ctx.session_id.clone()),
             Some(ctx.working_dir.clone()),
             None,
             None,
             None,
         );
         let input = json!({
-            "session_id": ctx.scope.session_id,
+            "session_id": ctx.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "trigger": ctx.trigger,
@@ -677,14 +677,14 @@ impl LifecycleHandler for S5rLifecycleHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.scope.session_id.clone()),
+            Some(ctx.session_id.clone()),
             Some(ctx.working_dir.clone()),
             None,
-            ctx.scope.event_tx,
+            ctx.event_tx,
             None,
         );
         let input = json!({
-            "session_id": ctx.scope.session_id,
+            "session_id": ctx.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "mid_turn_user_messages_synced": ctx.mid_turn_user_messages_synced,

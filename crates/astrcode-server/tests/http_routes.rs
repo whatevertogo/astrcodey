@@ -16,19 +16,15 @@ use astrcode_core::{
     },
     event::{Event, EventPayload},
     extension::{
-        Extension, ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
         ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
         MAX_EXTENSION_HTTP_BODY_BYTES, Registrar, SessionToolSelection,
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    storage::{
-        EventReader, EventStore, SessionReadModel, SessionSummary, StorageError,
-        ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
-    },
-    tool::{ToolDefinition, ToolResult},
+    tool::{ToolDefinition, ToolResult, ToolResultArtifactSlice},
     types::{Cursor, SessionId, new_message_id},
 };
-use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_extensions::{Extension, runner::ExtensionRunner};
 use astrcode_protocol::{
     events::ClientNotification,
     http::{
@@ -48,7 +44,12 @@ use astrcode_server::{
         TurnRegistry, TurnScheduler,
     },
 };
-use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_session_projection::{SessionReadModel, SessionSummary};
+use astrcode_storage::{
+    EventReader, EventStore, SessionPathResolver, SessionReader, SessionStore, StorageError,
+    ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
+    in_memory::InMemoryEventStore,
+};
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -1995,6 +1996,25 @@ impl EventReader for TestEventStore {
         self.inner.replay_events(session_id).await
     }
 
+    async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
+        self.inner.latest_cursor(session_id).await
+    }
+
+    async fn replay_from(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+    ) -> Result<Vec<Event>, StorageError> {
+        self.inner.replay_from(session_id, cursor).await
+    }
+
+    async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
+        self.inner.list_sessions().await
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionReader for TestEventStore {
     async fn session_read_model(
         &self,
         session_id: &SessionId,
@@ -2012,23 +2032,10 @@ impl EventReader for TestEventStore {
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
         self.inner.list_session_summaries().await
     }
+}
 
-    async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
-        self.inner.latest_cursor(session_id).await
-    }
-
-    async fn replay_from(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<Vec<Event>, StorageError> {
-        self.inner.replay_from(session_id, cursor).await
-    }
-
-    async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
-        self.inner.list_sessions().await
-    }
-
+#[async_trait::async_trait]
+impl ToolResultArtifactStore for TestEventStore {
     async fn read_tool_result_artifact_by_path(
         &self,
         session_id: &SessionId,
@@ -2041,6 +2048,19 @@ impl EventReader for TestEventStore {
             .await
     }
 
+    async fn write_tool_result_artifact(
+        &self,
+        session_id: &SessionId,
+        artifact: ToolResultArtifactInput,
+    ) -> Result<ToolResultArtifactRef, StorageError> {
+        self.inner
+            .write_tool_result_artifact(session_id, artifact)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionPathResolver for TestEventStore {
     async fn session_store_dir(
         &self,
         session_id: &SessionId,
@@ -2088,16 +2108,6 @@ impl EventStore for TestEventStore {
 
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
         self.inner.delete_session(session_id).await
-    }
-
-    async fn write_tool_result_artifact(
-        &self,
-        session_id: &SessionId,
-        artifact: ToolResultArtifactInput,
-    ) -> Result<ToolResultArtifactRef, StorageError> {
-        self.inner
-            .write_tool_result_artifact(session_id, artifact)
-            .await
     }
 }
 
@@ -2169,7 +2179,7 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
-    let event_store = Arc::new(TestEventStore::new()) as Arc<dyn EventStore>;
+    let event_store = Arc::new(TestEventStore::new()) as Arc<dyn SessionStore>;
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
     extension_runner
         .register(astrcode_extension_mode::extension())

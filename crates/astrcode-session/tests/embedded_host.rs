@@ -17,7 +17,6 @@ use astrcode_core::{
     },
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
-    storage::EventStore,
     tool::{
         ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
         ToolResult,
@@ -32,7 +31,7 @@ use astrcode_session::{
     Session, SessionCreateParams, SessionExtensionPorts, SessionHostServices,
     SessionRuntimeServices, SessionRuntimeState,
 };
-use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::mpsc;
 
 struct EmbeddedLlm;
@@ -183,7 +182,7 @@ impl Tool for EmbeddedEchoTool {
 
 #[tokio::test]
 async fn embedded_host_initializes_session_with_custom_services() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let llm: Arc<dyn LlmProvider> = Arc::new(EmbeddedLlm);
     let tool_pack_calls = Arc::new(AtomicUsize::new(0));
     let tool_catalog_calls = Arc::new(AtomicUsize::new(0));

@@ -3,8 +3,8 @@
 use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole, provider_visible_messages},
     prompt::system_messages_from_prompt,
-    storage::SessionReadModel,
 };
+use astrcode_session_projection::SessionReadModel;
 
 /// assembler / should_auto_compact 用的「可见历史」（无 system 行）。
 pub(crate) fn visible_messages_for_assembler(model: &SessionReadModel) -> Vec<LlmMessage> {
@@ -53,9 +53,9 @@ pub(crate) fn committed_tool_result_content_len(model: &SessionReadModel) -> usi
 mod tests {
     use astrcode_core::{
         llm::{LlmContent, LlmMessage, LlmRole},
-        storage::{SequencedLlmMessage, SessionReadModel},
         types::new_session_id,
     };
+    use astrcode_session_projection::{SequencedLlmMessage, SessionReadModel};
 
     use super::*;
 

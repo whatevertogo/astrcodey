@@ -91,7 +91,7 @@ impl Extension for MemoryExtension {
                 "memory extension requires a configured small model provider".into(),
             ));
         }
-        if services.session_read.is_none() {
+        if services.session_query.is_none() {
             return Err(ExtensionError::Internal(
                 "memory extension requires session history access".into(),
             ));

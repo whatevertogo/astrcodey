@@ -10,11 +10,11 @@ use astrcode_core::{
     event::EventPayload,
     extension::{CompactStrategy, CompactTrigger},
     llm::{LlmMessage, LlmProvider},
-    storage::SessionReadModel,
     tool::ToolDefinition,
     types::TurnId,
 };
 use astrcode_extension_sdk::runtime_ports::TurnHooks;
+use astrcode_session_projection::SessionReadModel;
 use astrcode_support::{hash::hex_fingerprint, sync::lock_parking};
 
 use crate::{

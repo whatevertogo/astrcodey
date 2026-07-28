@@ -2,12 +2,9 @@
 
 use std::{sync::Arc, time::Instant};
 
-use astrcode_core::{
-    storage::ToolResultArtifactReader,
-    tool::{
-        FileObservation, FileObservationStore, LlmModelIds, ToolCapabilities, ToolDefinition,
-        ToolError, ToolExecutionContext,
-    },
+use astrcode_core::tool::{
+    FileObservation, FileObservationStore, LlmModelIds, ToolCapabilities, ToolDefinition,
+    ToolError, ToolExecutionContext, ToolResultArtifactReader,
 };
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -31,7 +28,7 @@ pub(crate) struct TurnToolContext {
 impl TurnToolContext {
     pub(crate) fn for_turn(
         session: &Session,
-        session_state: &astrcode_core::storage::SessionReadModel,
+        session_state: &astrcode_session_projection::SessionReadModel,
         session_store_dir: Option<std::path::PathBuf>,
     ) -> Self {
         let runtime_services = session.runtime_services();

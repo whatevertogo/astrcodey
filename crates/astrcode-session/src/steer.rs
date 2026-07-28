@@ -4,7 +4,7 @@
 //! 本模块在每个 step 开始前统计读模型中的 user 条数；增量写入
 //! [`LifecycleContext::mid_turn_user_messages_synced`] 并随 [`ExtensionEvent::StepStart`] 派发。
 
-use astrcode_core::storage::SessionReadModel;
+use astrcode_session_projection::SessionReadModel;
 
 /// 统计读模型中 provider 可见的非合成 user 消息条数。
 pub(crate) fn count_visible_user_messages(model: &SessionReadModel) -> usize {
@@ -21,7 +21,8 @@ pub(crate) fn has_pending_mid_turn_user_messages(
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::{llm::LlmMessage, storage::SequencedLlmMessage, types::SessionId};
+    use astrcode_core::{llm::LlmMessage, types::SessionId};
+    use astrcode_session_projection::SequencedLlmMessage;
 
     use super::*;
 

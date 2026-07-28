@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use astrcode_core::{extension::SessionToolSelection, storage::SessionSummary, types::SessionId};
+use astrcode_core::{extension::SessionToolSelection, types::SessionId};
 use astrcode_protocol::{
     commands::ClientCommand,
     http::{
@@ -14,6 +14,7 @@ use astrcode_protocol::{
         ToolApprovalRequest, ToolSelectionDto, ToolUiRespondRequest, ToolUiRespondResponse,
     },
 };
+use astrcode_session_projection::SessionSummary;
 use axum::{
     Json,
     extract::{Path, Query, State},

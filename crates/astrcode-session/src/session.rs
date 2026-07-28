@@ -6,13 +6,15 @@ use astrcode_core::{
     event::{Event, EventPayload},
     extension::{ExtensionEvent, SessionToolSelection},
     llm::LlmMessage,
-    storage::{
-        CompactSnapshotInput, EventStore, SessionReadModel, StorageError, ToolResultArtifactInput,
-        ToolResultArtifactReader, ToolResultArtifactRef, ToolResultArtifactSlice,
-    },
+    tool::{ToolResultArtifactError, ToolResultArtifactReader, ToolResultArtifactSlice},
     types::*,
 };
 use astrcode_extension_sdk::runtime_ports::RuntimeSnapshotState;
+use astrcode_session_projection::SessionReadModel;
+use astrcode_storage::{
+    CompactSnapshotInput, SessionStore, StorageError, ToolResultArtifactInput,
+    ToolResultArtifactRef,
+};
 use astrcode_support::perf_snapshot;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -38,7 +40,7 @@ use crate::{
 /// 创建 session 所需的参数集合。
 #[derive(Clone)]
 pub struct SessionCreateParams {
-    pub store: Arc<dyn EventStore>,
+    pub store: Arc<dyn SessionStore>,
     pub session_id: SessionId,
     pub working_dir: String,
     pub model_id: String,
@@ -61,7 +63,7 @@ pub struct SessionCreateParams {
 #[derive(Clone)]
 pub struct Session {
     pub(crate) id: SessionId,
-    pub(crate) store: Arc<dyn EventStore>,
+    pub(crate) store: Arc<dyn SessionStore>,
     pub(crate) runtime: Arc<SessionRuntimeState>,
     pub(crate) runtime_services: Arc<SessionRuntimeServices>,
 }
@@ -105,7 +107,7 @@ impl Session {
 
     /// 从磁盘恢复已有会话并附带运行时服务和事件广播。
     pub async fn open(
-        store: Arc<dyn EventStore>,
+        store: Arc<dyn SessionStore>,
         id: SessionId,
         runtime: Arc<SessionRuntimeState>,
         runtime_services: Arc<SessionRuntimeServices>,
@@ -152,10 +154,16 @@ impl ToolResultArtifactReader for Session {
         path: &str,
         char_offset: usize,
         max_chars: usize,
-    ) -> Result<ToolResultArtifactSlice, StorageError> {
+    ) -> Result<ToolResultArtifactSlice, ToolResultArtifactError> {
         self.store
             .read_tool_result_artifact_by_path(&self.id, path, char_offset, max_chars)
             .await
+            .map_err(|error| match error {
+                StorageError::InvalidId(message) => ToolResultArtifactError::InvalidPath(message),
+                StorageError::NotFound(_) => ToolResultArtifactError::NotFound(path.to_owned()),
+                StorageError::Unsupported(message) => ToolResultArtifactError::Unsupported(message),
+                error => ToolResultArtifactError::Read(error.to_string()),
+            })
     }
 }
 
@@ -175,7 +183,7 @@ pub enum SessionError {
 }
 
 async fn resolve_initial_tool_selection(
-    store: &dyn EventStore,
+    store: &dyn SessionStore,
     parent_session_id: Option<&SessionId>,
     requested: Option<&SessionToolSelection>,
 ) -> Result<Option<SessionToolSelection>, SessionError> {
@@ -192,7 +200,7 @@ async fn resolve_initial_tool_selection(
 }
 
 async fn resolve_effective_tool_selection(
-    store: &dyn EventStore,
+    store: &dyn SessionStore,
     session_id: &SessionId,
     model: &SessionReadModel,
 ) -> Result<Option<SessionToolSelection>, SessionError> {

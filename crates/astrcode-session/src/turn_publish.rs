@@ -1,7 +1,7 @@
 //! Turn 内事件发布 — durable 同步写入 store，live 直发 fanout。
 //!
 //! 已打开 session 的 `read_model()` 克隆内存投影（非全量 replay）。本模块在 turn 内
-//! 用 [`astrcode_storage::projection::reduce`] 增量更新缓存，避免每步 tool commit / prepare
+//! 用 [`astrcode_session_projection::reduce`] 增量更新缓存，避免每步 tool commit / prepare
 //! 重复克隆整份 [`SessionReadModel`]。
 //!
 //! ## 事件 ingress
@@ -16,8 +16,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use astrcode_core::{event::EventPayload, storage::SessionReadModel, types::TurnId};
-use astrcode_storage::projection;
+use astrcode_core::{event::EventPayload, types::TurnId};
+use astrcode_session_projection::{SessionReadModel, reduce};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::{
@@ -85,7 +85,7 @@ impl TurnEvents {
     /// 统计 provider 可见的非合成 user 消息条数；优先读 turn 内 cache，避免 clone 整份读模型。
     ///
     /// cache 命中时假定计数已与投影一致：要么 turn 入口时 cache 为空（走 store），
-    /// 要么本 turn 内 durable 事件已通过 [`projection::reduce`] 同步到 cache。
+    /// 要么本 turn 内 durable 事件已通过 [`reduce`] 同步到 cache。
     /// 外部 bypass 写入后须先 [`Self::invalidate_model_cache`] 或 [`Self::reload_model_cache`]。
     pub(crate) async fn visible_user_message_count(&self) -> Result<usize, TurnError> {
         let cached_count = {
@@ -119,14 +119,14 @@ impl TurnEvents {
         if should_reduce {
             let mut cache = self.model_cache.lock().await;
             if let Some(model) = cache.as_mut() {
-                projection::reduce(&stored, model);
+                reduce(&stored, model);
             }
             return Ok(());
         }
         let model = self.session.read_model().await?;
         let mut cache = self.model_cache.lock().await;
         match cache.as_mut() {
-            Some(cached) => projection::reduce(&stored, cached),
+            Some(cached) => reduce(&stored, cached),
             None => *cache = Some(model),
         }
         Ok(())
@@ -488,8 +488,7 @@ mod tests {
     async fn test_session_with_runtime_services(
         runtime_services: Arc<SessionRuntimeServices>,
     ) -> Session {
-        let store: Arc<dyn astrcode_core::storage::EventStore> =
-            Arc::new(InMemoryEventStore::new());
+        let store: Arc<dyn astrcode_storage::SessionStore> = Arc::new(InMemoryEventStore::new());
         let session_id = new_session_id();
         let runtime = Arc::new(SessionRuntimeState::new(
             runtime_services.llm(),

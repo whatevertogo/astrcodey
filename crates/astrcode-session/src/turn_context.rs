@@ -5,10 +5,10 @@ use astrcode_core::{
     event::EventPayload,
     extension::{ExchangeSummary, ExtensionEvent, LifecycleContext, ProviderContext},
     llm::LlmMessage,
-    storage::SessionReadModel,
     types::*,
 };
 use astrcode_extension_sdk::runtime_ports::TurnHooks;
+use astrcode_session_projection::SessionReadModel;
 use tokio::sync::mpsc;
 
 // ─── Turn event channel ──────────────────────────────────────────────────

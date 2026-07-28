@@ -9,7 +9,6 @@ use astrcode_core::{
     },
     event::EventPayload,
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    storage::{AgentSessionStatus, EventStore},
     tool::{
         CreateSessionRequest, SessionAccess, SessionDeliveryOutcome, SessionOperations,
         SubmitTurnRequest, SubmitTurnResult, ToolDefinition,
@@ -22,7 +21,8 @@ use astrcode_server::test_support::{
     SessionManager, TurnRegistry, TurnScheduler,
 };
 use astrcode_session::SessionRuntimeServices;
-use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_session_projection::AgentSessionStatus;
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use astrcode_support::event_fanout::EventFanout;
 use tokio::sync::mpsc;
 
@@ -102,7 +102,7 @@ impl LlmProvider for StaticTextLlm {
 }
 
 fn build_test_ops_with_llm(
-    store: Arc<dyn EventStore>,
+    store: Arc<dyn SessionStore>,
     llm_provider: Arc<dyn LlmProvider>,
 ) -> Arc<ServerSessionOperations> {
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
@@ -204,7 +204,7 @@ fn build_test_ops_with_llm(
 }
 
 fn build_test_ops(
-    store: Arc<dyn EventStore>,
+    store: Arc<dyn SessionStore>,
     llm_text: &'static str,
 ) -> Arc<ServerSessionOperations> {
     build_test_ops_with_llm(store, Arc::new(StaticTextLlm { text: llm_text }))
@@ -212,7 +212,7 @@ fn build_test_ops(
 
 #[tokio::test]
 async fn inject_message_during_active_turn_binds_turn_id() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
     store
         .create_session(&parent_id, ".", "mock", None, None, None)
@@ -294,7 +294,7 @@ async fn inject_message_during_active_turn_binds_turn_id() {
 
 #[tokio::test]
 async fn inject_message_when_idle_starts_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let session_id = new_session_id();
     store
         .create_session(&session_id, ".", "mock", None, None, None)
@@ -331,7 +331,7 @@ async fn inject_message_when_idle_starts_turn() {
 
 #[tokio::test]
 async fn inject_message_after_turn_task_finished_starts_new_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let session_id = new_session_id();
     store
         .create_session(&session_id, ".", "mock", None, None, None)
@@ -406,7 +406,7 @@ async fn inject_message_after_turn_task_finished_starts_new_turn() {
 
 #[tokio::test]
 async fn submit_turn_sync_returns_llm_output() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
     store
         .create_session(&parent_id, ".", "mock", None, None, None)
@@ -457,7 +457,7 @@ async fn submit_turn_sync_returns_llm_output() {
 
 #[tokio::test]
 async fn submit_turn_async_returns_backgrounded_and_completes() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
     store
         .create_session(&parent_id, ".", "mock", None, None, None)
@@ -538,7 +538,7 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
 
 #[tokio::test]
 async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
     store
         .create_session(&parent_id, ".", "mock", None, None, None)
@@ -635,7 +635,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
 
 #[tokio::test]
 async fn parent_abort_stops_sync_child_and_recycles() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
     store
         .create_session(&parent_id, ".", "mock", None, None, None)

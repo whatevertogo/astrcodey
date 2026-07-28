@@ -12,10 +12,12 @@ testing = []
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
+astrcode-session-projection = { path = "../astrcode-session-projection" }
 astrcode-support = { path = "../astrcode-support" }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 toml = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

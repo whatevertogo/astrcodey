@@ -500,6 +500,7 @@ version = "0.3.12"
 dependencies = [
  "astrcode-core",
  "astrcode-extension-sdk",
+ "astrcode-session-projection",
  "astrcode-storage",
  "astrcode-support",
  "async-trait",
@@ -536,6 +537,7 @@ name = "astrcode-protocol"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
+ "astrcode-session-projection",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -557,6 +559,7 @@ dependencies = [
  "astrcode-log",
  "astrcode-protocol",
  "astrcode-session",
+ "astrcode-session-projection",
  "astrcode-storage",
  "astrcode-support",
  "astrcode-tools",
@@ -586,6 +589,7 @@ dependencies = [
  "astrcode-ai",
  "astrcode-core",
  "astrcode-extension-sdk",
+ "astrcode-session-projection",
  "astrcode-storage",
  "astrcode-support",
  "async-trait",
@@ -601,10 +605,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrcode-session-projection"
+version = "0.3.12"
+dependencies = [
+ "astrcode-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "astrcode-storage"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
+ "astrcode-session-projection",
  "astrcode-support",
  "async-trait",
  "chrono",
@@ -613,6 +627,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "toml 0.8.2",
  "tracing",

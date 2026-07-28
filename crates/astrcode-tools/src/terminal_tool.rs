@@ -280,13 +280,13 @@ impl Tool for TerminalTool {
         let result = match args.action.as_str() {
             "start" => {
                 let tool = self.working_dir.clone();
-                let session_id = ctx.session_id.as_str().to_string();
+                let session_id = ctx.scope.session_id.as_str().to_string();
                 run_blocking(move || action_start(&tool, args, &session_id)).await?
             },
             "send" => action_send(args)?,
             "read" => action_read(args).await?,
             "close" => action_close(args)?,
-            "list" => action_list(ctx.session_id.as_str())?,
+            "list" => action_list(ctx.scope.session_id.as_str())?,
             other => {
                 return Err(ToolError::InvalidArguments(format!(
                     "unknown action '{other}', expected start / send / read / close / list"

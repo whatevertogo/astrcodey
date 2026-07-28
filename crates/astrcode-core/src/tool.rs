@@ -18,10 +18,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use crate::{
-    event::EventPayload, storage::ToolResultArtifactReader, tool_access::ResourceAccess,
-    types::SessionId,
-};
+use crate::{event::EventPayload, tool_access::ResourceAccess, types::SessionId};
 
 /// 工具来源分类，影响诊断日志和策略优先级，不改变执行路径。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -187,6 +184,40 @@ pub struct ToolResult {
     /// 工具执行耗时（毫秒），由调用方测量。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolResultArtifactSlice {
+    pub path: String,
+    pub bytes: usize,
+    pub char_offset: usize,
+    pub returned_chars: usize,
+    pub next_char_offset: Option<usize>,
+    pub has_more: bool,
+    pub content: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ToolResultArtifactError {
+    #[error("invalid tool result artifact path: {0}")]
+    InvalidPath(String),
+    #[error("tool result artifact not found: {0}")]
+    NotFound(String),
+    #[error("tool result artifact reading is unsupported: {0}")]
+    Unsupported(String),
+    #[error("tool result artifact read failed: {0}")]
+    Read(String),
+}
+
+#[async_trait::async_trait]
+pub trait ToolResultArtifactReader: Send + Sync {
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        session_id: &SessionId,
+        path: &str,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, ToolResultArtifactError>;
 }
 
 impl ToolResult {

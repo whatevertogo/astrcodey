@@ -5,7 +5,10 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::{storage::StorageError, tool::*, tool_access::ResourceAccess};
+use astrcode_core::{
+    tool::{ToolResultArtifactError, *},
+    tool_access::ResourceAccess,
+};
 use astrcode_support::hostpaths::resolve_path;
 use serde::Deserialize;
 
@@ -290,12 +293,14 @@ async fn read_persisted_tool_result_path(
         .min(MAX_TOOL_RESULT_READ_CHARS);
     let path = path.display().to_string();
     let slice = match reader
-        .read_tool_result_artifact_by_path(&ctx.session_id, &path, char_offset, max_chars)
+        .read_tool_result_artifact_by_path(&ctx.scope.session_id, &path, char_offset, max_chars)
         .await
     {
         Ok(slice) => slice,
-        Err(StorageError::InvalidId(_) | StorageError::Unsupported(_)) => return Ok(None),
-        Err(StorageError::NotFound(_)) => {
+        Err(ToolResultArtifactError::InvalidPath(_) | ToolResultArtifactError::Unsupported(_)) => {
+            return Ok(None);
+        },
+        Err(ToolResultArtifactError::NotFound(_)) => {
             return Ok(Some(error_result(
                 started_at,
                 format!("tool result path not found: {path}"),

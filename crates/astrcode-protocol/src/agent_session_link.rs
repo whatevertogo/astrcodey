@@ -1,6 +1,6 @@
 //! 子 Agent 会话链接：唯一线缆 DTO 与集中构造逻辑。
 
-use astrcode_core::storage::AgentSessionLinkView;
+use astrcode_session_projection::AgentSessionLinkView;
 use serde::{Deserialize, Serialize};
 
 pub use crate::wire::AgentSessionStatusDto;
@@ -127,10 +127,8 @@ impl AgentSessionLinkDto {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::{
-        storage::{AgentSessionLinkView, AgentSessionStatus},
-        types::{SessionId, ToolCallId},
-    };
+    use astrcode_core::types::{SessionId, ToolCallId};
+    use astrcode_session_projection::{AgentSessionLinkView, AgentSessionStatus};
     use serde_json::json;
 
     use super::*;

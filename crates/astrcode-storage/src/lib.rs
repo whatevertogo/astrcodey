@@ -3,10 +3,20 @@
 //! JSONL event log, snapshots, and atomic config writes.
 
 pub mod config_store;
+mod error;
 pub mod event_log;
 #[cfg(feature = "testing")]
 pub mod in_memory;
-pub mod projection;
 pub mod session_repo;
 pub(crate) mod snapshot;
 pub(crate) mod tool_artifacts;
+mod traits;
+mod types;
+
+pub use astrcode_core::tool::ToolResultArtifactSlice;
+pub use error::StorageError;
+pub use traits::{
+    EventReader, EventStore, SessionPathResolver, SessionReader, SessionStore,
+    ToolResultArtifactStore,
+};
+pub use types::{CompactSnapshotInput, ToolResultArtifactInput, ToolResultArtifactRef};

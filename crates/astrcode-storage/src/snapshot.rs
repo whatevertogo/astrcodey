@@ -5,10 +5,12 @@
 
 use std::{cmp::Reverse, path::PathBuf};
 
-use astrcode_core::storage::{SessionReadModel, StorageError};
+use astrcode_session_projection::SessionReadModel;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::StorageError;
 
 const SNAPSHOT_VERSION: u32 = 2;
 

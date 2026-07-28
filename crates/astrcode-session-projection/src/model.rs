@@ -1,74 +1,13 @@
-//! 会话读模型与投影类型。
-//!
-//! 从 `storage` 根模块拆出:包含 [`SessionReadModel`]、其投影实现,以及所有
-//! 视图/快照结构(`*View`、`*Input`、`SequencedLlmMessage` 等)。wire 格式不变。
+//! Session read-model state derived from durable events.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use serde::{Deserialize, Serialize};
-
-use crate::{
+use astrcode_core::{
     event::Phase,
     llm::{LlmContent, LlmMessage, LlmRole},
     types::*,
 };
-
-/// compact 前 transcript snapshot 的存储输入。
-///
-/// 这是持久化边界的数据包；调用方决定收集哪些 provider messages，存储层只负责
-/// 把它写成可读的 JSONL 文件。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompactSnapshotInput {
-    /// compact 触发来源，例如 `auto_threshold`。
-    pub trigger: String,
-    /// 当前模型标识。
-    pub model_id: String,
-    /// 当前工作目录。
-    pub working_dir: String,
-    /// 当前 session system prompt。
-    pub system_prompt: Option<String>,
-    /// compact 前的 provider 可见消息，不包含单独记录的 system prompt。
-    pub provider_messages: Vec<LlmMessage>,
-}
-
-/// 工具结果 artifact 写入输入。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResultArtifactInput {
-    /// 工具调用 ID。
-    pub call_id: String,
-    /// 工具名称。
-    pub tool_name: String,
-    /// 原始工具输出正文。
-    pub content: String,
-}
-
-/// 已持久化工具结果的引用。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ToolResultArtifactRef {
-    /// 原始正文 UTF-8 字节数。
-    pub bytes: usize,
-    /// 可展示给 `read` 使用的存储路径；内存存储可用虚拟路径。
-    pub path: Option<String>,
-}
-
-/// 工具结果 artifact 的分页读取结果。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ToolResultArtifactSlice {
-    /// artifact 路径。
-    pub path: String,
-    /// artifact 原始 UTF-8 字节数。
-    pub bytes: usize,
-    /// 本次读取的字符偏移。
-    pub char_offset: usize,
-    /// 本次返回的字符数。
-    pub returned_chars: usize,
-    /// 下一次读取的字符偏移；没有更多内容时为空。
-    pub next_char_offset: Option<usize>,
-    /// 是否还有更多内容。
-    pub has_more: bool,
-    /// 本次读取的正文片段。
-    pub content: String,
-}
+use serde::{Deserialize, Serialize};
 
 /// 子 Agent 会话的运行状态。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -138,7 +77,7 @@ pub struct CompactBoundaryView {
     /// compact 基于的事件 seq（幂等校验键）。
     pub base_event_seq: u64,
     /// compact 策略。
-    pub strategy: crate::extension::CompactStrategy,
+    pub strategy: astrcode_core::extension::CompactStrategy,
 }
 
 /// 工具执行失败消息的读模型来源标记。
@@ -319,7 +258,7 @@ pub struct SessionReadModel {
     /// 初始值来自 `SessionStarted.tool_selection`，后续可由
     /// `SessionToolsConfigured` 更新。`None` 表示不限制工具。
     #[serde(default)]
-    pub tool_selection: Option<crate::extension::SessionToolSelection>,
+    pub tool_selection: Option<astrcode_core::extension::SessionToolSelection>,
     /// 创建该子 session 的扩展 ID。
     #[serde(default)]
     pub source_extension: Option<String>,
@@ -382,7 +321,7 @@ impl SessionReadModel {
                 .chain(self.messages.iter())
                 .map(|sequenced| sequenced.message.clone()),
         );
-        crate::llm::provider_visible_messages(messages)
+        astrcode_core::llm::provider_visible_messages(messages)
     }
 
     /// 是否已有普通 transcript 消息。
@@ -412,7 +351,7 @@ impl SessionReadModel {
             .iter()
             .filter(|entry| {
                 entry.message.role == LlmRole::User
-                    && !crate::context::is_synthetic_context_message(&entry.message)
+                    && !astrcode_core::context::is_synthetic_context_message(&entry.message)
             })
             .count()
     }

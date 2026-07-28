@@ -9,20 +9,22 @@ use std::{
 use astrcode_core::{
     event::EventPayload,
     extension::{
-        CommandContext, Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
-        ExtensionEvent, ExtensionHostServices, ExtensionHttpHandler, ExtensionHttpMethod,
-        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, HookMode,
-        LifecycleContext, PreToolUseContext, PreToolUseResult, Registrar, StopReason,
+        CommandContext, ExtensionCapability, ExtensionCommandResult, ExtensionError,
+        ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest,
+        ExtensionHttpResponse, ExtensionHttpRoute, HookMode, LifecycleContext, PreToolUseContext,
+        PreToolUseResult, Registrar, StopReason,
     },
     llm::{LlmEvent, LlmMessage, LlmProvider},
     tool::{ToolDefinition, ToolExecutionContext},
 };
-use astrcode_extension_sdk::config::ModelSelection;
-use astrcode_extensions::{
-    build_host_router, build_host_router_with_public_http_dispatcher, loader::ExtensionLoader,
-    runner::ExtensionRunner, s5r_ext::S5rExtension,
+use astrcode_extension_sdk::{
+    config::ModelSelection, extension::Extension, trusted::ExtensionHostServices,
 };
-use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_extensions::{
+    StorageSessionQueryFactory, build_host_router, build_host_router_with_public_http_dispatcher,
+    loader::ExtensionLoader, runner::ExtensionRunner, s5r_ext::S5rExtension,
+};
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use async_trait::async_trait;
 
 fn guest_binary_path() -> std::path::PathBuf {
@@ -74,9 +76,14 @@ fn ensure_guest_built() -> std::path::PathBuf {
 }
 
 fn minimal_router() -> Arc<astrcode_extensions::HostRouter> {
-    let store: Arc<dyn astrcode_core::storage::EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     build_host_router(
-        Arc::new(ExtensionHostServices::new(store, None, None)),
+        Arc::new(ExtensionHostServices::new(
+            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
+            None,
+            None,
+        )),
+        store,
         None,
     )
 }
@@ -150,13 +157,14 @@ impl LlmProvider for MockLlm {
 }
 
 fn mock_router() -> Arc<astrcode_extensions::HostRouter> {
-    let store: Arc<dyn astrcode_core::storage::EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     build_host_router(
         Arc::new(ExtensionHostServices::new(
-            store,
+            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
             Some(Arc::new(MockLlm)),
             Some(Arc::new(MockLlm)),
         )),
+        store,
         None,
     )
 }
@@ -275,9 +283,14 @@ async fn s5r_host_client_dispatches_to_another_extensions_public_route() {
         .register(Arc::new(DispatchTargetExtension))
         .await
         .unwrap();
-    let store: Arc<dyn astrcode_core::storage::EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let router = build_host_router_with_public_http_dispatcher(
-        Arc::new(ExtensionHostServices::new(store, None, None)),
+        Arc::new(ExtensionHostServices::new(
+            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
+            None,
+            None,
+        )),
+        store,
         None,
         runner.clone(),
     );

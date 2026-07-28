@@ -15,15 +15,17 @@ use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 use astrcode_core::{
     event::EventPayload,
     extension::{
-        ExtensionCapability, ExtensionError, ExtensionEventDecl, ExtensionHostServices,
-        ExtensionHttpRequest, ExtensionHttpResponse, OutboundNetworkService,
+        ExtensionCapability, ExtensionError, ExtensionEventDecl, ExtensionHttpRequest,
+        ExtensionHttpResponse, OutboundNetworkService,
     },
     llm::LlmProvider,
     tool::SessionOperations,
 };
-use astrcode_extension_sdk::s5r::{
-    CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage,
+use astrcode_extension_sdk::{
+    s5r::{CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage},
+    trusted::ExtensionHostServices,
 };
+use astrcode_storage::{EventReader, SessionReader, SessionStore};
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -130,7 +132,8 @@ pub struct InvokeContext {
 pub struct HostBackends {
     pub main_llm: Option<Arc<dyn LlmProvider>>,
     pub small_llm: Option<Arc<dyn LlmProvider>>,
-    pub session_read: Option<Arc<dyn astrcode_core::storage::EventReader>>,
+    pub event_reader: Option<Arc<dyn EventReader>>,
+    pub session_reader: Option<Arc<dyn SessionReader>>,
     pub default_working_dir: Option<String>,
     pub public_http_dispatcher: Option<Arc<dyn PublicHttpDispatcher>>,
     pub outbound_network: Option<Arc<dyn OutboundNetworkService>>,
@@ -157,11 +160,18 @@ pub struct HostRouter {
 }
 
 impl HostRouter {
-    pub fn new(host_services: &ExtensionHostServices, default_working_dir: Option<String>) -> Self {
+    pub fn new(
+        host_services: &ExtensionHostServices,
+        session_store: Arc<dyn SessionStore>,
+        default_working_dir: Option<String>,
+    ) -> Self {
+        let event_reader: Arc<dyn EventReader> = session_store.clone();
+        let session_reader: Arc<dyn SessionReader> = session_store;
         Self::from_backends(HostBackends {
             main_llm: host_services.main_llm.clone(),
             small_llm: host_services.small_llm.clone(),
-            session_read: host_services.session_read.clone(),
+            event_reader: Some(event_reader),
+            session_reader: Some(session_reader),
             default_working_dir,
             public_http_dispatcher: None,
             outbound_network: host_services.outbound_network.clone(),
@@ -172,14 +182,15 @@ impl HostRouter {
         let HostBackends {
             main_llm,
             small_llm,
-            session_read,
+            event_reader,
+            session_reader,
             default_working_dir,
             public_http_dispatcher,
             outbound_network,
         } = backends;
         Self {
             llm: LlmGroup::new(main_llm, small_llm),
-            session: SessionGroup::new(session_read),
+            session: SessionGroup::new(event_reader, session_reader),
             context: ContextGroup,
             workspace: WorkspaceGroup::new(default_working_dir.clone()),
             process: ProcessGroup::new(default_working_dir),
@@ -395,9 +406,14 @@ pub fn decls_to_map(decls: &[ExtensionEventDecl]) -> HashMap<String, ExtensionEv
 /// 从 [`ExtensionHostServices`] 构造共享 [`HostRouter`]。
 pub fn build_host_router(
     host_services: Arc<ExtensionHostServices>,
+    session_store: Arc<dyn SessionStore>,
     default_working_dir: Option<String>,
 ) -> Arc<HostRouter> {
-    Arc::new(HostRouter::new(&host_services, default_working_dir))
+    Arc::new(HostRouter::new(
+        &host_services,
+        session_store,
+        default_working_dir,
+    ))
 }
 
 /// 构造 trusted bundled extensions 与 worker 共用的受限出站网络服务。
@@ -407,11 +423,12 @@ pub fn default_outbound_network_service() -> Arc<dyn OutboundNetworkService> {
 
 pub fn build_host_router_with_public_http_dispatcher(
     host_services: Arc<ExtensionHostServices>,
+    session_store: Arc<dyn SessionStore>,
     default_working_dir: Option<String>,
     dispatcher: Arc<dyn PublicHttpDispatcher>,
 ) -> Arc<HostRouter> {
     Arc::new(
-        HostRouter::new(&host_services, default_working_dir)
+        HostRouter::new(&host_services, session_store, default_working_dir)
             .with_public_http_dispatcher(dispatcher),
     )
 }
@@ -429,14 +446,13 @@ mod tests {
     use astrcode_core::{
         extension::SessionToolSelection,
         permission::ApprovalDecision,
-        storage::{EventReader, EventStore},
         tool::{
             CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
             SessionDeliveryOutcome, SessionHandle, SessionStatus, SubmitTurnRequest,
             SubmitTurnResult,
         },
     };
-    use astrcode_storage::in_memory::InMemoryEventStore;
+    use astrcode_storage::{EventReader, EventStore, SessionReader, in_memory::InMemoryEventStore};
     use serde_json::json;
 
     use super::*;
@@ -483,9 +499,11 @@ mod tests {
             .create_session(&session_id, "/workspace", "test-model", None, None, None)
             .await
             .expect("create session");
-        let reader: Arc<dyn EventReader> = store;
+        let event_reader: Arc<dyn EventReader> = store.clone();
+        let session_reader: Arc<dyn SessionReader> = store;
         let router = HostRouter::from_backends(HostBackends {
-            session_read: Some(reader),
+            event_reader: Some(event_reader),
+            session_reader: Some(session_reader),
             ..Default::default()
         });
         let ctx = InvokeContext {

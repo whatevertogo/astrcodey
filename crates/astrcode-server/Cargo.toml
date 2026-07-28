@@ -25,6 +25,7 @@ astrcode-protocol = { path = "../astrcode-protocol" }
 astrcode-ai = { path = "../astrcode-ai" }
 astrcode-tools = { path = "../astrcode-tools" }
 astrcode-storage = { path = "../astrcode-storage" }
+astrcode-session-projection = { path = "../astrcode-session-projection" }
 astrcode-context = { path = "../astrcode-context" }
 astrcode-session = { path = "../astrcode-session" }
 astrcode-extensions = { path = "../astrcode-extensions" }

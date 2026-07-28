@@ -14,12 +14,11 @@ use astrcode_core::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, LlmTokenUsage,
         LlmTokenUsageSource, ModelLimits, ProviderInputTokenCount,
     },
-    storage::EventStore,
     tool::ToolDefinition,
     types::{new_message_id, new_session_id, new_turn_id},
 };
 use astrcode_session::{Session, SessionCreateParams, SessionRuntimeServices, SessionRuntimeState};
-use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::mpsc;
 
 mod common;
@@ -37,10 +36,10 @@ async fn spawn_session_with_store(
     llm: Arc<dyn LlmProvider>,
 ) -> (
     Session,
-    Arc<dyn EventStore>,
+    Arc<dyn SessionStore>,
     astrcode_core::types::SessionId,
 ) {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let caps = test_caps(llm);
     let sid = new_session_id();
     let runtime = Arc::new(SessionRuntimeState::new(

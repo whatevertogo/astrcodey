@@ -4,12 +4,12 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use astrcode_core::{
     extension::{
-        Extension, ExtensionError, HookMode, HookResult, LifecycleContext, PreToolUseContext,
+        ExtensionError, HookMode, HookResult, LifecycleContext, PreToolUseContext,
         PreToolUseResult, Registrar, ToolHandler,
     },
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
-use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_extensions::{Extension, runner::ExtensionRunner};
 use astrcode_session::ToolRegistry;
 
 // ─── Test extensions using register() ─────────────────────────────────────

@@ -1,10 +1,9 @@
-use astrcode_core::{
-    event::EventPayload, extension::CompactTrigger, storage::CompactSnapshotInput, types::SessionId,
-};
+use astrcode_core::{event::EventPayload, extension::CompactTrigger, types::SessionId};
 use astrcode_protocol::events::ClientNotification;
 use astrcode_session::compaction_run::{
     IdleCompactionOutcome, IdleCompactionParams, compact_idle_session,
 };
+use astrcode_storage::CompactSnapshotInput;
 
 use super::{CommandHandler, HandlerError, session_snapshot};
 

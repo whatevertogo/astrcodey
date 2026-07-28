@@ -7,7 +7,6 @@ mod store;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use astrcode_extension_sdk::{
-    event::EventPayload,
     extension::{
         CommandContext, CommandHandler, ContinueAfterStopContext, ContinueAfterStopHandler,
         ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCapability,
@@ -15,8 +14,8 @@ use astrcode_extension_sdk::{
         ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand, ToolHandler,
     },
     llm::LlmMessage,
+    session_query::SessionQuery,
     state,
-    storage::EventReader,
     tool::{
         ExecutionMode, ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolResult, tool_metadata,
     },
@@ -65,61 +64,45 @@ pub fn extension() -> Arc<dyn Extension> {
 
 #[derive(Default)]
 struct GoalRuntime {
-    session_read: RwLock<Option<Arc<dyn EventReader>>>,
+    session_query: RwLock<Option<Arc<dyn SessionQuery>>>,
 }
 
 impl GoalRuntime {
-    fn set_session_read(&self, reader: Option<Arc<dyn EventReader>>) {
-        *self.session_read.write() = reader;
+    fn set_session_query(&self, query: Option<Arc<dyn SessionQuery>>) {
+        *self.session_query.write() = query;
     }
 
-    fn session_read(&self) -> Option<Arc<dyn EventReader>> {
-        self.session_read.read().clone()
+    fn session_query(&self) -> Option<Arc<dyn SessionQuery>> {
+        self.session_query.read().clone()
     }
 
-    async fn session_store_dir(&self, session_id: &str) -> Result<Option<PathBuf>, String> {
-        let Some(reader) = self.session_read() else {
+    async fn extension_data_dir(&self, session_id: &str) -> Result<Option<PathBuf>, String> {
+        let Some(query) = self.session_query() else {
             return Ok(None);
         };
-        reader
-            .session_store_dir(&SessionId::from(session_id))
+        query
+            .extension_data_dir(&SessionId::from(session_id))
             .await
-            .map_err(|error| format!("read session store dir: {error}"))
+            .map_err(|error| format!("read extension data dir: {error}"))
     }
 
     async fn total_token_usage(
         &self,
         session_id: &str,
     ) -> Result<Option<TokenUsageSnapshot>, String> {
-        let Some(reader) = self.session_read() else {
+        let Some(query) = self.session_query() else {
             return Ok(None);
         };
-        let events = reader
-            .replay_events(&SessionId::from(session_id))
+        query
+            .token_usage(&SessionId::from(session_id))
             .await
-            .map_err(|error| format!("replay session events: {error}"))?;
-
-        let mut total_tokens = 0u64;
-        let mut saw_usage = false;
-        let mut model_context_window = None;
-        for event in events {
-            if let EventPayload::TokenUsageRecorded {
-                usage,
-                model_context_window: window,
-            } = event.payload
-            {
-                if let Some(tokens) = goal_token_count(&usage) {
-                    total_tokens = total_tokens.saturating_add(tokens);
-                    saw_usage = true;
-                }
-                model_context_window = Some(window);
-            }
-        }
-
-        Ok(saw_usage.then_some(TokenUsageSnapshot {
-            total_tokens,
-            model_context_window,
-        }))
+            .map(|usage| {
+                usage.map(|usage| TokenUsageSnapshot {
+                    total_tokens: usage.total_tokens,
+                    model_context_window: usage.model_context_window,
+                })
+            })
+            .map_err(|error| format!("read session token usage: {error}"))
     }
 
     async fn usage_for_goal(&self, session_id: &str, goal: &GoalState) -> GoalUsage {
@@ -161,9 +144,9 @@ impl Extension for GoalExtension {
     }
 
     async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
-        self.runtime.set_session_read(
+        self.runtime.set_session_query(
             ctx.host_services()
-                .and_then(|services| services.session_read.clone()),
+                .and_then(|services| services.session_query.clone()),
         );
         Ok(())
     }
@@ -341,13 +324,13 @@ impl ContinueAfterStopHandler for GoalContinueAfterStopHandler {
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
         let Some(session_store_dir) = self
             .runtime
-            .session_store_dir(&ctx.session_id)
+            .extension_data_dir(&ctx.session_id)
             .await
             .map_err(ExtensionError::Internal)?
         else {
             return Ok(ContinueAfterStopResult::EndTurn);
         };
-        let store = GoalStore::new(goal_root_from_session_base(&session_store_dir));
+        let store = GoalStore::new(goal_dir_from_base(&session_store_dir));
         let Some(mut goal) = store.load().map_err(ExtensionError::Internal)? else {
             return Ok(ContinueAfterStopResult::EndTurn);
         };
@@ -845,19 +828,6 @@ fn escape_xml_text(input: &str) -> String {
 ///
 /// 当 `input_tokens` 或 `output_tokens` 任一缺失时，分项无法可靠合成，整体回退
 /// 到 provider 的 `total_tokens`，并尽量扣除 reasoning 以保持口径一致。
-fn goal_token_count(usage: &astrcode_extension_sdk::llm::LlmTokenUsage) -> Option<u64> {
-    match (usage.input_tokens, usage.output_tokens) {
-        (Some(input), Some(output)) => {
-            let non_cached_input =
-                input.saturating_sub(usage.cached_input_tokens.unwrap_or_default());
-            Some(non_cached_input.saturating_add(output))
-        },
-        _ => usage
-            .total_tokens
-            .map(|total| total.saturating_sub(usage.reasoning_output_tokens.unwrap_or_default())),
-    }
-}
-
 fn goal_root_from_session_base(session_base: &std::path::Path) -> PathBuf {
     goal_dir_from_base(&state::session_data_dir(session_base, EXTENSION_ID))
 }
@@ -1107,31 +1077,5 @@ mod tests {
 
         assert!(content.contains("Goal status updated to blocked"));
         assert!(!content.contains("Final goal budget"));
-    }
-
-    #[test]
-    fn goal_token_count_uses_parts_or_provider_fallback() {
-        let cases = [
-            (Some(10), Some(5), Some(7), Some(3), Some(20), Some(12)),
-            (None, None, None, Some(3), Some(20), Some(17)),
-            (Some(10), None, None, Some(2), Some(30), Some(28)),
-            (None, None, Some(8), None, Some(25), Some(25)),
-            (None, None, None, None, None, None),
-            (Some(10), Some(10), Some(5), Some(99), Some(200), Some(5)),
-        ];
-
-        for (input, cached, output, reasoning, total, expected) in cases {
-            let usage = astrcode_extension_sdk::llm::LlmTokenUsage {
-                input_tokens: input,
-                cached_input_tokens: cached,
-                cache_creation_input_tokens: None,
-                output_tokens: output,
-                reasoning_output_tokens: reasoning,
-                total_tokens: total,
-                source: None,
-            };
-
-            assert_eq!(goal_token_count(&usage), expected);
-        }
     }
 }

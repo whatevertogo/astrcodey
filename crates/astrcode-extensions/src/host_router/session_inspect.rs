@@ -6,10 +6,6 @@ use astrcode_core::{
     event::Phase,
     extension::CompactStrategy,
     llm::{LlmContent, LlmMessage},
-    storage::{
-        AgentSessionLinkView, AgentSessionStatus, EventReader, SequencedLlmMessage,
-        SessionReadModel, SessionSummary, StorageError,
-    },
     types::SessionId,
 };
 use astrcode_extension_sdk::{
@@ -23,12 +19,16 @@ use astrcode_extension_sdk::{
         SessionInspectSnapshotOutput,
     },
 };
+use astrcode_session_projection::{
+    AgentSessionLinkView, AgentSessionStatus, SequencedLlmMessage, SessionReadModel, SessionSummary,
+};
+use astrcode_storage::{SessionReader, StorageError};
 use serde::Serialize;
 use serde_json::Value;
 
 use super::HOST_INVOKE_TIMEOUT;
 
-pub(super) async fn list(reader: Arc<dyn EventReader>) -> Result<Value, ErrorPayload> {
+pub(super) async fn list(reader: Arc<dyn SessionReader>) -> Result<Value, ErrorPayload> {
     let summaries = storage_call("session.inspect.list", reader.list_session_summaries()).await?;
     to_value(SessionInspectListOutput {
         sessions: summaries.into_iter().map(list_item).collect(),
@@ -36,7 +36,7 @@ pub(super) async fn list(reader: Arc<dyn EventReader>) -> Result<Value, ErrorPay
 }
 
 pub(super) async fn snapshot(
-    reader: Arc<dyn EventReader>,
+    reader: Arc<dyn SessionReader>,
     input: Value,
 ) -> Result<Value, ErrorPayload> {
     let session_id = session_id(&input)?;
@@ -69,7 +69,7 @@ pub(super) async fn snapshot(
 }
 
 pub(super) async fn read_model(
-    reader: Arc<dyn EventReader>,
+    reader: Arc<dyn SessionReader>,
     input: Value,
 ) -> Result<Value, ErrorPayload> {
     let session_id = session_id(&input)?;
@@ -84,7 +84,7 @@ pub(super) async fn read_model(
 }
 
 pub(super) async fn provider_messages(
-    reader: Arc<dyn EventReader>,
+    reader: Arc<dyn SessionReader>,
     input: Value,
 ) -> Result<Value, ErrorPayload> {
     let session_id = session_id(&input)?;
@@ -317,7 +317,8 @@ fn to_value(value: impl Serialize) -> Result<Value, ErrorPayload> {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::{llm::LlmMessage, storage::SessionReadModel};
+    use astrcode_core::llm::LlmMessage;
+    use astrcode_session_projection::SessionReadModel;
 
     use super::*;
 

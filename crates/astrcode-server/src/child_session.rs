@@ -8,11 +8,11 @@ use std::{
 
 use astrcode_core::{
     event::EventPayload,
-    storage::AgentSessionStatus,
     tool::{CreateSessionRequest, SessionApiError},
     types::{SessionId, TurnId},
 };
 use astrcode_session::{TurnError, TurnHandle, TurnShutdownHandle};
+use astrcode_session_projection::AgentSessionStatus;
 use astrcode_support::channel_policy::CHILD_SESSION_COMPLETE_CAPACITY;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};

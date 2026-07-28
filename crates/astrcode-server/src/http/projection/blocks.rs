@@ -5,13 +5,13 @@ use std::collections::BTreeMap;
 use astrcode_core::{
     event::{Event, EventPayload},
     llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, attachments_from_user_message},
-    storage::{
-        CompactBoundaryView, SequencedLlmMessage, TOOL_CALL_CANCELLED_SOURCE,
-        TOOL_CALL_FAILED_SOURCE, TranscriptArtifactView,
-    },
 };
 use astrcode_protocol::http::{
     ConversationBlockDto, ConversationBlockStatusDto, ToolCallStatusDto,
+};
+use astrcode_session_projection::{
+    CompactBoundaryView, SequencedLlmMessage, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
+    TranscriptArtifactView,
 };
 
 use super::{args::format_args_inline, non_empty_metadata};
@@ -391,9 +391,11 @@ fn visible_message_text(message: &LlmMessage) -> String {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::{
-        llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message},
-        storage::{SequencedLlmMessage, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE},
+    use astrcode_core::llm::{
+        LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message,
+    };
+    use astrcode_session_projection::{
+        SequencedLlmMessage, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
     };
 
     use super::*;

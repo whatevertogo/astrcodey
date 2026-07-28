@@ -7,6 +7,7 @@ members = [
     "crates/astrcode-ai",
     "crates/astrcode-tools",
     "crates/astrcode-storage",
+    "crates/astrcode-session-projection",
     "crates/astrcode-context",
     "crates/astrcode-session",
     "crates/astrcode-extensions",

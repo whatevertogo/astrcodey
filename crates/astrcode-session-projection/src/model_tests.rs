@@ -1,5 +1,6 @@
+use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
+
 use super::*;
-use crate::llm::{LlmContent, LlmMessage, LlmRole};
 
 #[test]
 fn session_read_model_serializes_round_trip() {
@@ -35,9 +36,9 @@ fn session_read_model_cursor_defaults_to_zero() {
 fn first_user_message_ignores_source_marked_context() {
     let mut model = SessionReadModel::empty("session-test".into());
     model.messages.push(SequencedLlmMessage {
-        message: crate::llm::turn_aborted_context_message(),
+        message: astrcode_core::llm::turn_aborted_context_message(),
         updated_seq: 1,
-        source: Some(crate::llm::TURN_ABORTED_SOURCE.into()),
+        source: Some(astrcode_core::llm::TURN_ABORTED_SOURCE.into()),
     });
     model.messages.push(SequencedLlmMessage {
         message: LlmMessage::user("hello"),

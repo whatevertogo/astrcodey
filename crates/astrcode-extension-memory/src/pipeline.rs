@@ -5,7 +5,7 @@ use std::sync::Arc;
 use astrcode_extension_sdk::{
     extension::ExtensionError,
     llm::{LlmContent, LlmMessage, LlmProvider, LlmRole},
-    storage::{EventReader, SessionReadModel, SessionSummary},
+    session_query::{SessionQuery, SessionSummary, SessionTranscript},
 };
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
@@ -38,7 +38,7 @@ struct SessionExtraction {
 
 pub async fn run(
     scoped: &ScopedMemoryStores,
-    session_read: Arc<dyn EventReader>,
+    session_query: Arc<dyn SessionQuery>,
     small_llm: &dyn LlmProvider,
     current_session_id: &str,
     config: &MemoryConfig,
@@ -52,7 +52,7 @@ pub async fn run(
     }
 
     let candidates = find_changed_candidates(
-        Arc::clone(&session_read),
+        Arc::clone(&session_query),
         store,
         current_session_id,
         config.max_changed_sessions,
@@ -72,7 +72,7 @@ pub async fn run(
     .map_err(|e| ExtensionError::Internal(e.to_string()))?;
 
     let extractions = extract_batch(
-        Arc::clone(&session_read),
+        Arc::clone(&session_query),
         small_llm,
         &candidates,
         &existing_memory,
@@ -114,13 +114,13 @@ fn format_existing_memories(
 }
 
 async fn find_changed_candidates(
-    session_read: Arc<dyn EventReader>,
+    session_query: Arc<dyn SessionQuery>,
     store: &MemoryStore,
     current_session_id: &str,
     max_candidates: usize,
 ) -> Result<Vec<Candidate>, ExtensionError> {
-    let summaries = session_read
-        .list_session_summaries()
+    let summaries = session_query
+        .list_summaries()
         .await
         .map_err(|e| ExtensionError::Internal(e.to_string()))?;
     let processed = store
@@ -156,7 +156,7 @@ async fn find_changed_candidates(
 }
 
 async fn extract_batch(
-    session_read: Arc<dyn EventReader>,
+    session_query: Arc<dyn SessionQuery>,
     small_llm: &dyn LlmProvider,
     candidates: &[Candidate],
     existing_memories: &str,
@@ -167,12 +167,12 @@ async fn extract_batch(
 
     for candidate in candidates {
         let session_id = &candidate.summary.session_id;
-        let read_model = session_read
-            .session_read_model(session_id)
+        let transcript = session_query
+            .transcript(session_id)
             .await
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
 
-        let conversation = extract_conversation(&read_model);
+        let conversation = extract_conversation(&transcript);
         if conversation.chars().count() < min_conversation_chars {
             continue;
         }
@@ -255,11 +255,11 @@ fn map_batch_to_candidates(
     Ok(results)
 }
 
-fn extract_conversation(model: &SessionReadModel) -> String {
+fn extract_conversation(transcript: &SessionTranscript) -> String {
     const MAX_BYTES: usize = 2000;
     const MAX_TURNS: usize = 15;
 
-    let turns: Vec<String> = model
+    let turns: Vec<String> = transcript
         .messages
         .iter()
         .filter_map(|msg| {

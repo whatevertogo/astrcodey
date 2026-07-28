@@ -168,7 +168,7 @@ impl ToolCalls {
         let preview = tool_result_preview(&original_content, TOOL_RESULT_PREVIEW_CHARS);
         let reference = self
             .session
-            .write_tool_artifact(astrcode_core::storage::ToolResultArtifactInput {
+            .write_tool_artifact(astrcode_storage::ToolResultArtifactInput {
                 call_id: call_id.to_string(),
                 tool_name: tool_name.to_string(),
                 content: original_content,

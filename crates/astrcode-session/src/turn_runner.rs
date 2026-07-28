@@ -16,10 +16,10 @@ use astrcode_core::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, LlmTokenUsage, LlmTokenUsageSource,
         provider_visible_messages, token_estimate,
     },
-    storage::SessionReadModel,
     tool::ToolDefinition,
     types::*,
 };
+use astrcode_session_projection::SessionReadModel;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 

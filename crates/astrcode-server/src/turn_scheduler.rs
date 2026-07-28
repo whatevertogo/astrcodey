@@ -33,7 +33,6 @@ use std::{
 use astrcode_core::{
     event::{EventPayload, Phase},
     message_attachment::MessageAttachment,
-    storage::SessionReadModel,
     types::*,
 };
 use astrcode_session::{
@@ -44,6 +43,7 @@ use astrcode_session::{
         turn_completed_payload,
     },
 };
+use astrcode_session_projection::SessionReadModel;
 use parking_lot::Mutex;
 use thiserror::Error;
 use tokio::{sync::Mutex as AsyncMutex, task::JoinHandle};
@@ -896,7 +896,7 @@ async fn repair_stale_runs_for_state(
     for link in state
         .agent_sessions
         .iter()
-        .filter(|link| link.status == astrcode_core::storage::AgentSessionStatus::Running)
+        .filter(|link| link.status == astrcode_session_projection::AgentSessionStatus::Running)
     {
         let child_sid = &link.child_session_id;
         if scheduler.registry().has_active(child_sid) {

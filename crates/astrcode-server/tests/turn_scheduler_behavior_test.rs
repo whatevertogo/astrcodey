@@ -9,7 +9,6 @@ use astrcode_core::{
     },
     event::EventPayload,
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    storage::EventStore,
     tool::ToolDefinition,
     types::{SessionId, new_session_id},
 };
@@ -20,7 +19,7 @@ use astrcode_server::test_support::{
     TurnScheduleError, TurnScheduler, recycle_completed_session_for_test,
 };
 use astrcode_session::SessionRuntimeServices;
-use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::mpsc;
 
 struct StaticTextLlm;
@@ -67,7 +66,7 @@ impl LlmProvider for PendingLlm {
     }
 }
 
-async fn seed_session(store: &Arc<dyn EventStore>) -> SessionId {
+async fn seed_session(store: &Arc<dyn SessionStore>) -> SessionId {
     let sid = new_session_id();
     store
         .create_session(&sid, ".", "mock", None, None, None)
@@ -76,12 +75,12 @@ async fn seed_session(store: &Arc<dyn EventStore>) -> SessionId {
     sid
 }
 
-fn build_scheduler(store: Arc<dyn EventStore>) -> TurnScheduler {
+fn build_scheduler(store: Arc<dyn SessionStore>) -> TurnScheduler {
     build_scheduler_with_llm(store, Arc::new(StaticTextLlm))
 }
 
 fn build_scheduler_with_llm(
-    store: Arc<dyn EventStore>,
+    store: Arc<dyn SessionStore>,
     llm: Arc<dyn LlmProvider>,
 ) -> TurnScheduler {
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
@@ -176,7 +175,7 @@ fn build_scheduler_with_llm(
 
 #[tokio::test]
 async fn idle_submit_emits_turn_started_and_user_message() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -203,7 +202,7 @@ async fn idle_submit_emits_turn_started_and_user_message() {
 
 #[tokio::test]
 async fn running_submit_returns_busy() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -220,7 +219,7 @@ async fn running_submit_returns_busy() {
 
 #[tokio::test]
 async fn concurrent_start_with_completion_accepts_only_one_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
     let sid = seed_session(&store).await;
 
@@ -261,7 +260,7 @@ async fn concurrent_start_with_completion_accepts_only_one_turn() {
 
 #[tokio::test]
 async fn running_inject_writes_user_message_under_active_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -300,7 +299,7 @@ async fn running_inject_writes_user_message_under_active_turn() {
 
 #[tokio::test]
 async fn running_queue_does_not_start_second_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -322,7 +321,7 @@ async fn running_queue_does_not_start_second_turn() {
 
 #[tokio::test]
 async fn running_queue_rejects_when_pending_limit_is_reached() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
     let sid = seed_session(&store).await;
 
@@ -363,7 +362,7 @@ async fn running_queue_rejects_when_pending_limit_is_reached() {
 
 #[tokio::test]
 async fn oversized_prompt_is_rejected_before_turn_starts() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -403,7 +402,7 @@ fn turn_completed_reasons(events: &[astrcode_core::event::Event]) -> Vec<String>
 
 #[tokio::test]
 async fn release_completed_execution_is_non_destructive() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -425,7 +424,7 @@ async fn release_completed_execution_is_non_destructive() {
 
 #[tokio::test]
 async fn stale_completion_does_not_recycle_newer_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -456,7 +455,7 @@ async fn stale_completion_does_not_recycle_newer_turn() {
 
 #[tokio::test]
 async fn cleanup_after_finished_registry_entry_does_not_emit_duplicate_terminal() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -478,7 +477,7 @@ async fn cleanup_after_finished_registry_entry_does_not_emit_duplicate_terminal(
 
 #[tokio::test]
 async fn execution_view_uses_registry_for_active_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -493,7 +492,7 @@ async fn execution_view_uses_registry_for_active_turn() {
 
 #[tokio::test]
 async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
     let sid = seed_session(&store).await;
 
@@ -524,7 +523,7 @@ async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish(
 
 #[tokio::test]
 async fn detached_task_tracking_prunes_finished_handles() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -556,7 +555,7 @@ async fn detached_task_tracking_prunes_finished_handles() {
 
 #[tokio::test]
 async fn interrupt_and_start_replaces_active_turn_under_delivery_gate() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
     let sid = seed_session(&store).await;
 

@@ -6,9 +6,9 @@ use std::{
     path::Path,
 };
 
-use astrcode_core::storage::{
-    ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
-};
+use astrcode_core::tool::ToolResultArtifactSlice;
+
+use crate::{ToolResultArtifactInput, ToolResultArtifactRef};
 
 pub(crate) fn tool_result_file_name(tool_name: &str, call_id: &str) -> String {
     let safe_tool = sanitize_for_filename(tool_name);

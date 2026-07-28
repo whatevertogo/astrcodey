@@ -13,11 +13,10 @@ use std::{
     },
 };
 
-use astrcode_core::{
-    event::{Event, EventPayload},
-    storage::StorageError,
-};
+use astrcode_core::event::{Event, EventPayload};
 use tokio::sync::{mpsc, oneshot};
+
+use crate::StorageError;
 
 /// `(first_event, last_event, first_user_message)` from a single log scan.
 pub(crate) type EventLogEnds = (Option<Event>, Option<Event>, Option<String>);

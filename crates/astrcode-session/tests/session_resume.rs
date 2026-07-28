@@ -6,7 +6,6 @@ use astrcode_core::{
     event::Phase,
     extension::{ExtensionError, PromptBuildContext, PromptContributions, SessionToolSelection},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    storage::EventStore,
     tool::{
         ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
         ToolResult,
@@ -21,7 +20,7 @@ use astrcode_session::{
     Session, SessionCreateParams, SessionExtensionPorts, SessionRuntimeServices,
     SessionRuntimeState,
 };
-use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::mpsc;
 
 mod common;
@@ -98,7 +97,7 @@ fn test_caps() -> Arc<SessionRuntimeServices> {
 
 #[tokio::test]
 async fn refresh_prompt_with_none_preserves_existing_extra() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let caps = test_caps();
     let sid = new_session_id();
 
@@ -178,7 +177,7 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
 
 #[tokio::test]
 async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
     let caps =
         common::test_runtime_services_with_tool_packs(llm, vec![Arc::new(ReadWriteToolPack)]);
@@ -299,7 +298,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
 
 #[tokio::test]
 async fn turn_setup_failure_returns_session_to_idle() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
     let noop = Arc::new(NoopRuntimePorts);
     let caps = common::test_runtime_services_with_extensions(

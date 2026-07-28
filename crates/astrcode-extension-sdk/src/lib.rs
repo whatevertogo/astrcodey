@@ -11,12 +11,12 @@ pub mod extension {
         CompactResult, CompactStrategy, CompactTrigger, ContinueAfterStopContext,
         ContinueAfterStopHandler, ContinueAfterStopLimit, ContinueAfterStopOptions,
         ContinueAfterStopRegistration, ContinueAfterStopResult, DEFAULT_EXTENSION_HTTP_BODY_BYTES,
-        DiscoveredTool, EXTENSION_TOOL_OUTCOME_KEY, ExchangeSummary, Extension,
-        ExtensionCapability, ExtensionCommandResult, ExtensionConfig, ExtensionCtx, ExtensionError,
-        ExtensionEvent, ExtensionEventDecl, ExtensionEventDeclBuilder, ExtensionEventSink,
-        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
-        ExtensionHttpRoute, ExtensionHttpRouteRegistration, ExtensionManifest, ExtensionTasks,
-        ExtensionToolOutcome, HookMode, HookResult, Keybinding, LifecycleContext, LifecycleHandler,
+        DiscoveredTool, EXTENSION_TOOL_OUTCOME_KEY, ExchangeSummary, ExtensionCapability,
+        ExtensionCommandResult, ExtensionConfig, ExtensionError, ExtensionEvent,
+        ExtensionEventDecl, ExtensionEventDeclBuilder, ExtensionEventSink, ExtensionHttpHandler,
+        ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
+        ExtensionHttpRouteRegistration, ExtensionManifest, ExtensionTasks, ExtensionToolOutcome,
+        HookMode, HookResult, Keybinding, LifecycleContext, LifecycleHandler,
         MAX_EXTENSION_HTTP_BODY_BYTES, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
         PreToolUseContext, PreToolUseHandler, PreToolUseResult, PromptBuildContext,
         PromptBuildHandler, PromptContributions, ProviderContext, ProviderEvent, ProviderHandler,
@@ -26,6 +26,8 @@ pub mod extension {
         UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration, UserMessageEnvelopeResult,
         extension_http_route_patterns_conflict, match_extension_http_route,
     };
+
+    pub use crate::authoring_runtime::{Extension, ExtensionCtx};
 }
 
 /// Typed access to the host's single restricted outbound-network service.
@@ -36,11 +38,8 @@ pub mod network {
     };
 }
 
-#[cfg(feature = "trusted-bundled")]
 pub mod trusted {
-    /// Host services are only for trusted bundled extensions started in-process.
-    /// Disk/IPC extensions must use the capability-gated host API instead.
-    pub use astrcode_core::extension::ExtensionHostServices;
+    pub use crate::authoring_runtime::ExtensionHostServices;
 }
 
 pub mod config {
@@ -62,9 +61,7 @@ pub mod event {
     pub use astrcode_core::event::{Event, EventPayload};
 }
 
-pub mod storage {
-    pub use astrcode_core::storage::{EventReader, SessionReadModel, SessionSummary};
-}
+pub mod session_query;
 
 pub mod tool {
     pub use astrcode_core::{
@@ -118,6 +115,7 @@ pub mod permission {
     pub use astrcode_core::permission::{ApprovalDecision, ApprovalMode};
 }
 
+mod authoring_runtime;
 pub mod builder;
 pub mod manifest;
 pub mod runtime;

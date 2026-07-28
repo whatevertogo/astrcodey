@@ -9,10 +9,10 @@ use astrcode_core::{
     },
     extension::{CompactStrategy, CompactTrigger},
     llm::{LlmMessage, LlmProvider},
-    storage::SessionReadModel,
     tool::ToolDefinition,
 };
 use astrcode_extension_sdk::runtime_ports::TurnHooks;
+use astrcode_session_projection::SessionReadModel;
 use astrcode_support::hash::hex_fingerprint;
 
 use crate::{
