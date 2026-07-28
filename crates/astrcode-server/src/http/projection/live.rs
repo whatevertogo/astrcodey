@@ -592,7 +592,7 @@ mod tests {
                 transcript_path: None,
                 continued_session_id: "session-1".into(),
                 base_event_seq: 3,
-                strategy: astrcode_core::extension::CompactStrategy::Auto,
+                strategy: astrcode_core::compaction::CompactStrategy::Auto,
             },
         );
         boundary.seq = Some(4);

@@ -1,6 +1,6 @@
 //! 会话创建、恢复与 fork。
 
-use astrcode_core::{extension::SessionToolSelection, types::SessionId};
+use astrcode_core::{tool::SessionToolSelection, types::SessionId};
 use astrcode_protocol::events::ClientNotification;
 
 use super::{CommandHandler, HandlerError, snapshot::session_snapshot};

@@ -1,9 +1,11 @@
 //! s5r 扩展握手 manifest 类型与解析。
 
-use astrcode_core::extension::{
-    ContinueAfterStopLimit, ExtensionCapability, ExtensionEventDecl, ExtensionHttpRoute,
+use astrcode_extension_sdk::{
+    extension::{
+        ContinueAfterStopLimit, ExtensionCapability, ExtensionEventDecl, ExtensionHttpRoute,
+    },
+    s5r::capability_from_wire,
 };
-use astrcode_extension_sdk::s5r::capability_from_wire;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

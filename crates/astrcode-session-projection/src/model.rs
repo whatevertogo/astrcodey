@@ -77,7 +77,7 @@ pub struct CompactBoundaryView {
     /// compact 基于的事件 seq（幂等校验键）。
     pub base_event_seq: u64,
     /// compact 策略。
-    pub strategy: astrcode_core::extension::CompactStrategy,
+    pub strategy: astrcode_core::compaction::CompactStrategy,
 }
 
 /// 工具执行失败消息的读模型来源标记。
@@ -258,7 +258,7 @@ pub struct SessionReadModel {
     /// 初始值来自 `SessionStarted.tool_selection`，后续可由
     /// `SessionToolsConfigured` 更新。`None` 表示不限制工具。
     #[serde(default)]
-    pub tool_selection: Option<astrcode_core::extension::SessionToolSelection>,
+    pub tool_selection: Option<astrcode_core::tool::SessionToolSelection>,
     /// 创建该子 session 的扩展 ID。
     #[serde(default)]
     pub source_extension: Option<String>,

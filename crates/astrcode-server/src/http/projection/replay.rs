@@ -93,7 +93,7 @@ mod tests {
                 transcript_path: Some("compact.jsonl".into()),
                 continued_session_id: "session-1".into(),
                 base_event_seq: 0,
-                strategy: astrcode_core::extension::CompactStrategy::Manual {
+                strategy: astrcode_core::compaction::CompactStrategy::Manual {
                     keep_recent_turns: None,
                 },
             },

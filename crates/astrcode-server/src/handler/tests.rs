@@ -10,18 +10,19 @@ use std::{
 
 use astrcode_context::{compaction::CompactResult, context_assembler::LlmContextAssembler};
 use astrcode_core::{
+    compaction::CompactStrategy,
     config::{
         ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme,
         ProviderWireFormat,
     },
     event::{Event, EventPayload, Phase},
-    extension::{
-        CommandContext, CompactStrategy, ExtensionCommandResult, ExtensionError, ExtensionEvent,
-        HookMode, HookResult, LifecycleContext, Registrar, SlashCommand,
-    },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
     tool::ToolDefinition,
     types::{SessionId, ToolCallId, new_session_id},
+};
+use astrcode_extension_sdk::extension::{
+    CommandContext, ExtensionCommandResult, ExtensionError, ExtensionEvent, HookMode, HookResult,
+    LifecycleContext, Registrar, SlashCommand,
 };
 use astrcode_extensions::Extension;
 use astrcode_protocol::{
@@ -325,7 +326,7 @@ struct RecordingLifecycleHandler {
 }
 
 #[async_trait::async_trait]
-impl astrcode_core::extension::LifecycleHandler for RecordingLifecycleHandler {
+impl astrcode_extension_sdk::extension::LifecycleHandler for RecordingLifecycleHandler {
     async fn handle(&self, _ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
         self.events.lock().unwrap().push(self.event.clone());
         Ok(HookResult::Allow)
@@ -361,7 +362,7 @@ struct StaticCommandHandler {
 }
 
 #[async_trait::async_trait]
-impl astrcode_core::extension::CommandHandler for StaticCommandHandler {
+impl astrcode_extension_sdk::extension::CommandHandler for StaticCommandHandler {
     async fn execute(
         &self,
         command_name: &str,
@@ -460,7 +461,7 @@ struct BlockingSessionResumeHandler {
 }
 
 #[async_trait::async_trait]
-impl astrcode_core::extension::LifecycleHandler for FailFirstSessionResumeHandler {
+impl astrcode_extension_sdk::extension::LifecycleHandler for FailFirstSessionResumeHandler {
     async fn handle(&self, _ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             return Err(ExtensionError::Internal("session resume failed".into()));
@@ -470,7 +471,7 @@ impl astrcode_core::extension::LifecycleHandler for FailFirstSessionResumeHandle
 }
 
 #[async_trait::async_trait]
-impl astrcode_core::extension::LifecycleHandler for BlockingSessionResumeHandler {
+impl astrcode_extension_sdk::extension::LifecycleHandler for BlockingSessionResumeHandler {
     async fn handle(&self, _ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.notify_one();
@@ -482,7 +483,7 @@ impl astrcode_core::extension::LifecycleHandler for BlockingSessionResumeHandler
 struct FailSessionStartHandler;
 
 #[async_trait::async_trait]
-impl astrcode_core::extension::LifecycleHandler for FailSessionStartHandler {
+impl astrcode_extension_sdk::extension::LifecycleHandler for FailSessionStartHandler {
     async fn handle(&self, _ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
         Err(ExtensionError::Internal("session start failed".into()))
     }

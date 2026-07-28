@@ -106,7 +106,7 @@ impl ToolHandler for SkillToolHandler {
         tool_name: &str,
         arguments: Value,
         working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != SKILL_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
@@ -669,7 +669,7 @@ mod tests {
     use astrcode_extension_sdk::{
         config::ModelSelection,
         extension::CommandContext,
-        tool::{ToolCapabilities, ToolExecutionContext},
+        tool::{ExtensionToolContext, ToolCapabilities, ToolExecutionContext},
     };
 
     use super::*;
@@ -838,13 +838,16 @@ mod tests {
     }
 
 
-    fn tool_ctx(working_dir: &Path) -> ToolExecutionContext {
-        ToolExecutionContext::new(
-            "session".into(),
-            working_dir.to_string_lossy().into_owned(),
+    fn tool_ctx(working_dir: &Path) -> ExtensionToolContext {
+        ExtensionToolContext::new(
+            ToolExecutionContext::new(
+                "session".into(),
+                working_dir.to_string_lossy().into_owned(),
+                None,
+                None,
+                ToolCapabilities::default(),
+            ),
             None,
-            None,
-            ToolCapabilities::default(),
         )
     }
 

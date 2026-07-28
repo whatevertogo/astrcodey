@@ -50,11 +50,21 @@ pub enum ExtensionHttpMethod {
     Delete,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtensionHttpAccess {
+    #[default]
+    Public,
+    Authenticated,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionHttpRoute {
     pub method: ExtensionHttpMethod,
     pub path: String,
+    #[serde(default)]
+    pub access: ExtensionHttpAccess,
     #[serde(default)]
     pub description: String,
     #[serde(default = "default_extension_http_body_bytes")]
@@ -70,6 +80,17 @@ impl ExtensionHttpRoute {
         Self {
             method,
             path: path.into(),
+            access: ExtensionHttpAccess::Public,
+            description: String::new(),
+            max_body_bytes: DEFAULT_EXTENSION_HTTP_BODY_BYTES,
+        }
+    }
+
+    pub fn authenticated(method: ExtensionHttpMethod, path: impl Into<String>) -> Self {
+        Self {
+            method,
+            path: path.into(),
+            access: ExtensionHttpAccess::Authenticated,
             description: String::new(),
             max_body_bytes: DEFAULT_EXTENSION_HTTP_BODY_BYTES,
         }

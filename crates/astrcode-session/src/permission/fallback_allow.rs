@@ -1,4 +1,4 @@
-use astrcode_core::permission::{PermissionContext, PermissionDecision, PermissionPolicy};
+use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
 /// manual 模式兜底：未命中更具体策略的工具默认放行。
 ///

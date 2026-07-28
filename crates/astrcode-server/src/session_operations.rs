@@ -3,11 +3,10 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    extension::SessionToolSelection,
     tool::{
         CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
         SessionDeliveryOutcome, SessionExecutionView, SessionHandle, SessionOperations,
-        SessionStatus, SubmitTurnRequest, SubmitTurnResult,
+        SessionStatus, SessionToolSelection, SubmitTurnRequest, SubmitTurnResult,
     },
     types::SessionId,
 };

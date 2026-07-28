@@ -1,4 +1,4 @@
-use astrcode_core::permission::{PermissionContext, PermissionDecision, PermissionPolicy};
+use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
 pub struct DefaultReadApprovePolicy;
 
@@ -18,7 +18,7 @@ impl PermissionPolicy for DefaultReadApprovePolicy {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::permission::{ApprovalMode, PermissionContext};
+    use astrcode_core::permission::ApprovalMode;
 
     use super::*;
 
@@ -31,7 +31,6 @@ mod tests {
             working_dir: std::path::Path::new("/tmp"),
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
-            session_id: "s",
             tool_selection: None,
         };
         assert_eq!(

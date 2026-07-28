@@ -6,9 +6,7 @@
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
-use astrcode_core::{
-    config::ConfigStore, lifecycle::SessionResourceCleanup, tool::SessionOperations,
-};
+use astrcode_core::{config::ConfigStore, tool::SessionOperations};
 use astrcode_extensions::{
     ExtensionHostServices, StorageSessionQueryFactory,
     build_host_router_with_public_http_dispatcher,
@@ -17,6 +15,8 @@ use astrcode_extensions::{
 };
 use astrcode_session::SessionRuntimeServices;
 use astrcode_storage::{SessionStore, config_store::FileConfigStore};
+
+use crate::session_resource_cleanup::SessionResourceCleanup;
 
 mod config_resolve;
 mod server_system;

@@ -1,8 +1,9 @@
-use astrcode_core::permission::{
-    ApprovalMode, PermissionContext, PermissionDecision, PermissionPolicy,
-};
+use astrcode_core::permission::ApprovalMode;
 
-use super::paths::{extract_tool_paths, path_for_matching};
+use super::{
+    PermissionContext, PermissionDecision, PermissionPolicy,
+    paths::{extract_tool_paths, path_for_matching},
+};
 
 pub struct GitPathAskPolicy;
 

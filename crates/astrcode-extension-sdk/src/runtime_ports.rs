@@ -1,14 +1,12 @@
 use std::sync::Arc;
 
-use astrcode_core::{
-    extension::{
-        CompactContext, CompactEvent, CompactResult, ContinueAfterStopContext,
-        ContinueAfterStopResult, ExtensionError, ExtensionEvent, LifecycleContext,
-        PostToolUseContext, PostToolUseResult, PreToolUseContext, PreToolUseResult,
-        PromptBuildContext, PromptContributions, ProviderContext, ProviderEvent, ProviderResult,
-        UserMessageEnvelopeContext, UserMessageEnvelopeResult,
-    },
-    tool::{SessionOperations, Tool},
+use astrcode_core::tool::{SessionOperations, Tool};
+
+use crate::extension::{
+    CompactContext, CompactEvent, CompactResult, ContinueAfterStopContext, ContinueAfterStopResult,
+    ExtensionError, ExtensionEvent, LifecycleContext, PostToolUseContext, PostToolUseResult,
+    PreToolUseContext, PreToolUseResult, PromptBuildContext, PromptContributions, ProviderContext,
+    ProviderEvent, ProviderResult, UserMessageEnvelopeContext, UserMessageEnvelopeResult,
 };
 
 /// Publication state shared by all runtime ports used to prepare one turn.

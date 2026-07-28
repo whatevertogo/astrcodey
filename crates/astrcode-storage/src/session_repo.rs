@@ -554,7 +554,7 @@ impl EventStore for FileSystemSessionRepository {
         working_dir: &str,
         model_id: &str,
         parent_session_id: Option<&SessionId>,
-        tool_selection: Option<&astrcode_core::extension::SessionToolSelection>,
+        tool_selection: Option<&astrcode_core::tool::SessionToolSelection>,
         source_extension: Option<&str>,
     ) -> Result<Event, StorageError> {
         validate_storage_session_id(session_id)?;
@@ -1571,7 +1571,7 @@ mod tests {
                 transcript_path: Some("compact.jsonl".into()),
                 continued_session_id: session_id.clone(),
                 base_event_seq: 0,
-                strategy: astrcode_core::extension::CompactStrategy::Manual {
+                strategy: astrcode_core::compaction::CompactStrategy::Manual {
                     keep_recent_turns: None,
                 },
             },

@@ -24,7 +24,7 @@ use astrcode_extension_sdk::{
         RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY, UI_SUMMARY_METADATA_KEY,
     },
     tool::{
-        ExecutionMode, ToolDefinition, ToolExecutionContext, ToolOrigin, ToolResult, tool_metadata,
+        ExecutionMode, ExtensionToolContext, ToolDefinition, ToolOrigin, ToolResult, tool_metadata,
     },
 };
 use parking_lot::{Mutex, RwLock};
@@ -166,7 +166,7 @@ impl ToolHandler for WebSearchToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         _working_dir: &str,
-        _ctx: &ToolExecutionContext,
+        _ctx: &ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != config::WEB_SEARCH_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
@@ -226,7 +226,7 @@ impl ToolHandler for FetchUrlToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         _working_dir: &str,
-        _ctx: &ToolExecutionContext,
+        _ctx: &ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != config::FETCH_URL_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));

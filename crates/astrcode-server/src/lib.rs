@@ -16,5 +16,6 @@ mod handler;
 mod server_event_bus;
 mod session_manager;
 mod session_operations;
+mod session_resource_cleanup;
 mod turn_registry;
 mod turn_scheduler;

@@ -4,35 +4,11 @@
 //! host's internal crates. The runtime remains responsible for adapting these
 //! contracts to session, storage, and provider implementations.
 
-pub mod extension {
-    pub use astrcode_core::extension::{
-        CommandCompletionItem, CommandCompletions, CommandContext, CommandDiscoveryHandler,
-        CommandHandler, CompactContext, CompactContributions, CompactEvent, CompactHandler,
-        CompactResult, CompactStrategy, CompactTrigger, ContinueAfterStopContext,
-        ContinueAfterStopHandler, ContinueAfterStopLimit, ContinueAfterStopOptions,
-        ContinueAfterStopRegistration, ContinueAfterStopResult, DEFAULT_EXTENSION_HTTP_BODY_BYTES,
-        DiscoveredTool, EXTENSION_TOOL_OUTCOME_KEY, ExchangeSummary, ExtensionCapability,
-        ExtensionCommandResult, ExtensionConfig, ExtensionError, ExtensionEvent,
-        ExtensionEventDecl, ExtensionEventDeclBuilder, ExtensionEventSink, ExtensionHttpHandler,
-        ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        ExtensionHttpRouteRegistration, ExtensionManifest, ExtensionTasks, ExtensionToolOutcome,
-        HookMode, HookResult, Keybinding, LifecycleContext, LifecycleHandler,
-        MAX_EXTENSION_HTTP_BODY_BYTES, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
-        PreToolUseContext, PreToolUseHandler, PreToolUseResult, PromptBuildContext,
-        PromptBuildHandler, PromptContributions, ProviderContext, ProviderEvent, ProviderHandler,
-        ProviderResult, Registrar, SessionToolSelection, SlashCommand, StatusItem,
-        StatusItemUpdatePayload, StopReason, ToolDiscoveryHandler, ToolHandler,
-        ToolHookRegistration, ToolHookTarget, UserMessageEnvelopeContext,
-        UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration, UserMessageEnvelopeResult,
-        extension_http_route_patterns_conflict, match_extension_http_route,
-    };
-
-    pub use crate::authoring_runtime::{Extension, ExtensionCtx};
-}
+pub mod extension;
 
 /// Typed access to the host's single restricted outbound-network service.
 pub mod network {
-    pub use astrcode_core::extension::{
+    pub use crate::extension::{
         NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkErrorKind,
         OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
     };
@@ -79,6 +55,8 @@ pub mod tool {
             ToolResultUiWire, ToolUiWire,
         },
     };
+
+    pub use crate::extension::ExtensionToolContext;
 }
 
 pub mod types {
@@ -107,7 +85,16 @@ pub mod shell {
 
 /// Protocol types needed by extensions.
 pub mod protocol {
-    pub use astrcode_protocol::framing::JsonRpcError;
+    use serde::{Deserialize, Serialize};
+
+    /// S5R JSON-RPC 边界使用的错误对象。
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct JsonRpcError {
+        pub code: i32,
+        pub message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub data: Option<serde_json::Value>,
+    }
 }
 
 /// Tool Gate 权限类型（扩展只读 `PreToolUseContext::approval_mode`）。
@@ -163,7 +150,7 @@ pub mod prelude {
             SessionInspectSnapshotOutput,
         },
         tool::{
-            ExecutionMode, ToolCallScope, ToolCapabilities, ToolDefinition, ToolExecutionContext,
+            ExecutionMode, ExtensionToolContext, ToolCallScope, ToolCapabilities, ToolDefinition,
             ToolResult,
         },
         worker::{

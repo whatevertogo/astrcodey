@@ -6,6 +6,7 @@ use std::sync::{
 };
 
 use astrcode_core::{
+    compaction::CompactStrategy,
     config::{
         AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
         ProviderAuthScheme, ProviderWireFormat,
@@ -16,7 +17,6 @@ use astrcode_core::{
         PreparedCompaction, is_compact_summary_message,
     },
     event::EventPayload,
-    extension::CompactStrategy,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
     prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
     tool::ToolDefinition,

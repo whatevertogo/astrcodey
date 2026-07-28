@@ -1,10 +1,10 @@
 use std::{collections::BTreeSet, path::Path, sync::Arc};
 
-use astrcode_core::permission::{
-    ApprovalDecision, PermissionContext, PermissionDecision, PermissionPolicy,
-};
+use astrcode_core::permission::ApprovalDecision;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+
+use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -117,7 +117,7 @@ fn history_lookup_keys(ctx: &PermissionContext<'_>) -> [String; 3] {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::permission::{ApprovalMode, PermissionContext};
+    use astrcode_core::permission::ApprovalMode;
 
     use super::*;
 
@@ -133,7 +133,6 @@ mod tests {
             working_dir: std::path::Path::new("/tmp"),
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
-            session_id: "s",
             tool_selection: None,
         };
         assert_eq!(policy.evaluate(&ctx), PermissionDecision::Allow);
@@ -151,7 +150,6 @@ mod tests {
             working_dir: std::path::Path::new("/tmp"),
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
-            session_id: "s",
             tool_selection: None,
         };
         assert_eq!(policy.evaluate(&ctx), PermissionDecision::Allow);

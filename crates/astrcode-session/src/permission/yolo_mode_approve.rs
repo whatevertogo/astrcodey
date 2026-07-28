@@ -1,6 +1,6 @@
-use astrcode_core::permission::{
-    ApprovalMode, PermissionContext, PermissionDecision, PermissionPolicy,
-};
+use astrcode_core::permission::ApprovalMode;
+
+use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
 pub struct YoloModeApprovePolicy;
 

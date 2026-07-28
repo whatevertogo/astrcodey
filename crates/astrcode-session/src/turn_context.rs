@@ -1,13 +1,12 @@
 //! Turn 基础设施 — 事件通道、共享上下文、错误类型。
 
-use astrcode_core::{
-    config::ModelSelection,
-    event::EventPayload,
-    extension::{ExchangeSummary, ExtensionEvent, LifecycleContext, ProviderContext},
-    llm::LlmMessage,
-    types::*,
+use astrcode_core::{config::ModelSelection, event::EventPayload, llm::LlmMessage, types::*};
+use astrcode_extension_sdk::{
+    extension::{
+        ExchangeSummary, ExtensionError, ExtensionEvent, LifecycleContext, ProviderContext,
+    },
+    runtime_ports::TurnHooks,
 };
-use astrcode_extension_sdk::runtime_ports::TurnHooks;
 use astrcode_session_projection::SessionReadModel;
 use tokio::sync::mpsc;
 
@@ -60,8 +59,8 @@ pub(crate) struct SharedTurnContext {
     /// 当前 turn 的事件 ingress（`ExtensionEvents` 在 `process_prompt` 期间注入）。
     pub(crate) turn_event_sender: Option<std::sync::Arc<crate::turn_publish::TurnEventSender>>,
     pub(crate) approval_mode: astrcode_core::permission::ApprovalMode,
-    pub(crate) tool_selection: Option<astrcode_core::extension::SessionToolSelection>,
-    pub(crate) permission_chain: std::sync::Arc<astrcode_core::permission::PermissionChain>,
+    pub(crate) tool_selection: Option<astrcode_core::tool::SessionToolSelection>,
+    pub(crate) permission_chain: std::sync::Arc<crate::permission::PermissionChain>,
     pub(crate) approval_history: std::sync::Arc<crate::permission::ApprovalHistoryStore>,
 }
 
@@ -76,9 +75,7 @@ impl SharedTurnContext {
             turn_event_sender: None,
             approval_mode: astrcode_core::permission::ApprovalMode::default(),
             tool_selection: model.tool_selection.clone(),
-            permission_chain: std::sync::Arc::new(astrcode_core::permission::PermissionChain::new(
-                vec![],
-            )),
+            permission_chain: std::sync::Arc::new(crate::permission::PermissionChain::new(vec![])),
             approval_history: std::sync::Arc::new(
                 crate::permission::ApprovalHistoryStore::default(),
             ),
@@ -151,7 +148,7 @@ pub enum TurnError {
     #[error("Tool error: {0}")]
     Tool(#[from] astrcode_core::tool::ToolError),
     #[error("Extension error: {0}")]
-    Extension(#[from] astrcode_core::extension::ExtensionError),
+    Extension(#[from] ExtensionError),
     #[error("{0}")]
     Session(#[from] crate::session::SessionError),
     #[error("prompt is still too long after reactive compaction")]

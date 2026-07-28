@@ -1,4 +1,4 @@
-use astrcode_core::{event::EventPayload, extension::CompactTrigger, types::SessionId};
+use astrcode_core::{compaction::CompactTrigger, event::EventPayload, types::SessionId};
 use astrcode_protocol::events::ClientNotification;
 use astrcode_session::compaction_run::{
     IdleCompactionOutcome, IdleCompactionParams, compact_idle_session,

@@ -212,7 +212,7 @@ impl ToolHandler for GoalToolHandler {
         tool_name: &str,
         arguments: Value,
         _working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         let root = ctx
             .capabilities

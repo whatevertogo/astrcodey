@@ -8,16 +8,16 @@ use std::{sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::EventPayload,
-    extension::{
-        ContinueAfterStopContext, ContinueAfterStopResult, ExtensionEvent, ProviderEvent,
-        ProviderResult,
-    },
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, LlmTokenUsage, LlmTokenUsageSource,
         provider_visible_messages, token_estimate,
     },
     tool::ToolDefinition,
     types::*,
+};
+use astrcode_extension_sdk::extension::{
+    ContinueAfterStopContext, ContinueAfterStopResult, ExtensionEvent, ProviderEvent,
+    ProviderResult,
 };
 use astrcode_session_projection::SessionReadModel;
 use tokio::sync::mpsc;

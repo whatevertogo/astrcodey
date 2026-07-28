@@ -12,16 +12,12 @@ mod workspace;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
-use astrcode_core::{
-    event::EventPayload,
+use astrcode_core::{event::EventPayload, llm::LlmProvider, tool::SessionOperations};
+use astrcode_extension_sdk::{
     extension::{
         ExtensionCapability, ExtensionError, ExtensionEventDecl, ExtensionHttpRequest,
         ExtensionHttpResponse, OutboundNetworkService,
     },
-    llm::LlmProvider,
-    tool::SessionOperations,
-};
-use astrcode_extension_sdk::{
     s5r::{CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage},
     trusted::ExtensionHostServices,
 };
@@ -444,12 +440,11 @@ mod tests {
     };
 
     use astrcode_core::{
-        extension::SessionToolSelection,
         permission::ApprovalDecision,
         tool::{
             CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
-            SessionDeliveryOutcome, SessionHandle, SessionStatus, SubmitTurnRequest,
-            SubmitTurnResult,
+            SessionDeliveryOutcome, SessionHandle, SessionStatus, SessionToolSelection,
+            SubmitTurnRequest, SubmitTurnResult,
         },
     };
     use astrcode_storage::{EventReader, EventStore, SessionReader, in_memory::InMemoryEventStore};
@@ -900,15 +895,15 @@ mod tests {
     impl OutboundNetworkService for FakeOutboundNetwork {
         async fn request(
             &self,
-            request: astrcode_core::extension::OutboundNetworkRequest,
+            request: astrcode_extension_sdk::extension::OutboundNetworkRequest,
             _cancellation: Option<CancellationToken>,
         ) -> Result<
-            astrcode_core::extension::OutboundNetworkResponse,
-            astrcode_core::extension::OutboundNetworkError,
+            astrcode_extension_sdk::extension::OutboundNetworkResponse,
+            astrcode_extension_sdk::extension::OutboundNetworkError,
         > {
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(request.url, "https://example.com/start");
-            Ok(astrcode_core::extension::OutboundNetworkResponse {
+            Ok(astrcode_extension_sdk::extension::OutboundNetworkResponse {
                 final_url: "https://example.com/final".into(),
                 status: 200,
                 headers: BTreeMap::new(),

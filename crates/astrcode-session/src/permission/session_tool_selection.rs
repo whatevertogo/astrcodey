@@ -1,4 +1,4 @@
-use astrcode_core::permission::{PermissionContext, PermissionDecision, PermissionPolicy};
+use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
 pub struct SessionToolSelectionPolicy;
 

@@ -4,7 +4,10 @@ use astrcode_core::tool_access::ResourceAccess;
 use astrcode_extension_sdk::{
     extension::*,
     runtime_ports::{ToolCatalogCompleteness, ToolCatalogDiagnostic, ToolCatalogSnapshot},
-    tool::{ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult},
+    tool::{
+        ExecutionMode, ExtensionToolContext, Tool, ToolDefinition, ToolError, ToolExecutionContext,
+        ToolResult,
+    },
 };
 
 use super::{ExtensionRunner, bind_extension_event_sink};
@@ -196,16 +199,14 @@ impl Tool for HandlerTool {
             ctx.capabilities.models.small = None;
             ctx.capabilities.models.tiers.small = None;
         }
-        ctx.capabilities.host.extension_event_sink = if self
-            .capabilities
-            .contains(&ExtensionCapability::EmitEvents)
-        {
+        let event_sink = if self.capabilities.contains(&ExtensionCapability::EmitEvents) {
             ctx.scope.event_tx.clone().and_then(|event_tx| {
                 bind_extension_event_sink(&self.extension_id, &self.event_declarations, event_tx)
             })
         } else {
             None
         };
+        let ctx = ExtensionToolContext::new(ctx, event_sink);
         let mut result = match self
             .handler
             .execute(&self.definition.name, arguments, &self.working_dir, &ctx)

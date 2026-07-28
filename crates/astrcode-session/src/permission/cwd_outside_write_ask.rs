@@ -1,7 +1,6 @@
-use astrcode_core::{
-    permission::{ApprovalMode, PermissionContext, PermissionDecision, PermissionPolicy},
-    tool_access::ResourceAccess,
-};
+use astrcode_core::{permission::ApprovalMode, tool_access::ResourceAccess};
+
+use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
 pub struct CwdOutsideWriteAskPolicy;
 

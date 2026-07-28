@@ -23,8 +23,8 @@ use astrcode_extension_sdk::{
     },
     runtime_ports::{RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness},
     tool::{
-        ExecutionMode, ToolCapabilities, ToolDefinition, ToolExecutionContext, ToolOrigin,
-        ToolResult,
+        ExecutionMode, ExtensionToolContext, ToolCapabilities, ToolDefinition,
+        ToolExecutionContext, ToolOrigin, ToolResult,
     },
 };
 use serde_json::json;
@@ -233,7 +233,7 @@ impl ToolHandler for StateProbeTool {
         _tool_name: &str,
         _arguments: serde_json::Value,
         _working_dir: &str,
-        ctx: &ToolExecutionContext,
+        ctx: &ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         Ok(ToolResult::text(
             ctx.capabilities.paths.store_dir.is_some().to_string(),
@@ -359,7 +359,7 @@ impl ToolHandler for SmallModelProbeTool {
         _tool_name: &str,
         _arguments: serde_json::Value,
         _working_dir: &str,
-        ctx: &ToolExecutionContext,
+        ctx: &ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         Ok(ToolResult::text(
             ctx.capabilities.models.small.is_some().to_string(),
@@ -1411,6 +1411,53 @@ async fn public_http_route_dispatches_with_path_params() {
     assert_eq!(response.status, 201);
     assert_eq!(response.body["pathParams"]["jobId"], "job-1");
     assert_eq!(response.body["query"], "run=true");
+}
+
+#[tokio::test]
+async fn authenticated_http_routes_are_capability_checked_and_extension_scoped() {
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    let missing_capability = runner
+        .register(Arc::new(HttpProbeExtension {
+            id: "missing-authenticated-http",
+            capabilities: Vec::new(),
+            route: ExtensionHttpRoute::authenticated(ExtensionHttpMethod::Get, "/status"),
+        }))
+        .await
+        .expect_err("authenticated route must declare its capability");
+    assert!(
+        missing_capability
+            .to_string()
+            .contains("authenticated_http")
+    );
+
+    for id in ["authenticated-one", "authenticated-two"] {
+        runner
+            .register(Arc::new(HttpProbeExtension {
+                id,
+                capabilities: vec![ExtensionCapability::AuthenticatedHttp],
+                route: ExtensionHttpRoute::authenticated(ExtensionHttpMethod::Get, "/items/{id}"),
+            }))
+            .await
+            .expect("same authenticated path is isolated by extension id");
+    }
+
+    let request = ExtensionHttpRequest::new(ExtensionHttpMethod::Get, "/items/item-1");
+    let result = runner
+        .dispatch_authenticated_http_route("authenticated-two", request.clone(), &[])
+        .await
+        .expect("dispatch authenticated route");
+    let ExtensionHttpDispatchResult::Response(response) = result else {
+        panic!("expected authenticated response");
+    };
+    assert_eq!(response.body["pathParams"]["id"], "item-1");
+
+    assert!(matches!(
+        runner
+            .dispatch_public_http_route(request, &[])
+            .await
+            .expect("public lookup"),
+        ExtensionHttpDispatchResult::NotFound
+    ));
 }
 
 #[tokio::test]

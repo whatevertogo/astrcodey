@@ -238,22 +238,29 @@ pub(super) fn validate_http_route_registrations(
     for (index, registration) in routes.iter().enumerate() {
         let route = &registration.route;
         route.validate()?;
-        if !capabilities.contains(&ExtensionCapability::PublicHttp) {
+        let required_capability = match route.access {
+            ExtensionHttpAccess::Public => ExtensionCapability::PublicHttp,
+            ExtensionHttpAccess::Authenticated => ExtensionCapability::AuthenticatedHttp,
+        };
+        if !capabilities.contains(&required_capability) {
             return Err(format!(
                 "extension {extension_id} route {} {} requires capability {}",
                 http_method_name(route.method),
                 route.path,
-                astrcode_extension_sdk::s5r::capability_to_wire(ExtensionCapability::PublicHttp),
+                astrcode_extension_sdk::s5r::capability_to_wire(required_capability),
             ));
         }
-        if route.path == "/api" || route.path.starts_with("/api/") {
+        if route.access == ExtensionHttpAccess::Public
+            && (route.path == "/api" || route.path.starts_with("/api/"))
+        {
             return Err(format!(
                 "extension {extension_id} public route {} uses reserved /api namespace",
                 route.path
             ));
         }
         if routes[..index].iter().any(|existing| {
-            existing.route.method == route.method
+            existing.route.access == route.access
+                && existing.route.method == route.method
                 && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
         }) {
             return Err(format!(
@@ -262,12 +269,15 @@ pub(super) fn validate_http_route_registrations(
                 route.path
             ));
         }
-        if existing_records.iter().any(|record| {
-            record.reg.http_routes().iter().any(|existing| {
-                existing.route.method == route.method
-                    && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
+        if route.access == ExtensionHttpAccess::Public
+            && existing_records.iter().any(|record| {
+                record.reg.http_routes().iter().any(|existing| {
+                    existing.route.access == ExtensionHttpAccess::Public
+                        && existing.route.method == route.method
+                        && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
+                })
             })
-        }) {
+        {
             return Err(format!(
                 "extension {extension_id} public route conflicts with an existing {} route: {}",
                 http_method_name(route.method),

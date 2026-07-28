@@ -243,6 +243,7 @@ dependencies = [
  "astrcode-context",
  "astrcode-core",
  "astrcode-eval",
+ "astrcode-extension-sdk",
  "astrcode-log",
  "astrcode-protocol",
  "astrcode-server",
@@ -441,7 +442,6 @@ name = "astrcode-extension-sdk"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
- "astrcode-protocol",
  "astrcode-support",
  "async-trait",
  "parking_lot",
@@ -537,6 +537,7 @@ name = "astrcode-protocol"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
+ "astrcode-extension-sdk",
  "astrcode-session-projection",
  "serde",
  "serde_json",
@@ -554,6 +555,7 @@ dependencies = [
  "astrcode-context",
  "astrcode-core",
  "astrcode-extension-mode",
+ "astrcode-extension-sdk",
  "astrcode-extension-skill",
  "astrcode-extensions",
  "astrcode-log",

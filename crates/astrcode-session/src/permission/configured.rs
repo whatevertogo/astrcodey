@@ -1,9 +1,10 @@
-use astrcode_core::permission::{
-    ApprovalMode, PermissionContext, PermissionDecision, PermissionPolicy, PermissionRule,
-};
+use astrcode_core::permission::{ApprovalMode, PermissionRule};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use super::paths::{extract_tool_paths, path_for_matching};
+use super::{
+    PermissionContext, PermissionDecision, PermissionPolicy,
+    paths::{extract_tool_paths, path_for_matching},
+};
 
 pub struct ConfiguredDenyPolicy {
     rules: Vec<CompiledRule>,

@@ -4,7 +4,7 @@ use std::{future::Future, sync::Arc};
 
 use crate::{
     extension::{ContinueAfterStopContext, ContinueAfterStopResult, ExtensionError, ToolHandler},
-    tool::{ExecutionMode, ToolDefinition, ToolExecutionContext, ToolOrigin, ToolResult},
+    tool::{ExecutionMode, ExtensionToolContext, ToolDefinition, ToolOrigin, ToolResult},
 };
 
 // ─── handler_fn ──────────────────────────────────────────────────────────
@@ -25,7 +25,7 @@ use crate::{
 /// ```
 pub fn handler_fn<F, Fut>(f: F) -> Arc<dyn ToolHandler>
 where
-    F: Fn(&str, serde_json::Value, &str, &ToolExecutionContext) -> Fut + Send + Sync + 'static,
+    F: Fn(&str, serde_json::Value, &str, &ExtensionToolContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<ToolResult, ExtensionError>> + Send + 'static,
 {
     Arc::new(FnToolHandler { f })
@@ -38,7 +38,7 @@ struct FnToolHandler<F> {
 #[async_trait::async_trait]
 impl<F, Fut> ToolHandler for FnToolHandler<F>
 where
-    F: Fn(&str, serde_json::Value, &str, &ToolExecutionContext) -> Fut + Send + Sync + 'static,
+    F: Fn(&str, serde_json::Value, &str, &ExtensionToolContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<ToolResult, ExtensionError>> + Send + 'static,
 {
     async fn execute(
@@ -46,7 +46,7 @@ where
         tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        ctx: &ToolExecutionContext,
+        ctx: &ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         (self.f)(tool_name, arguments, working_dir, ctx).await
     }
@@ -196,12 +196,15 @@ mod tests {
                 Default::default(),
             ))
         });
-        let ctx = ToolExecutionContext::new(
-            SessionId::new("test"),
-            String::new(),
+        let ctx = ExtensionToolContext::new(
+            astrcode_core::tool::ToolExecutionContext::new(
+                SessionId::new("test"),
+                String::new(),
+                None,
+                None,
+                ToolCapabilities::default(),
+            ),
             None,
-            None,
-            ToolCapabilities::default(),
         );
         let result = handler
             .execute("test", serde_json::json!({}), "", &ctx)

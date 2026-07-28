@@ -7,10 +7,10 @@ use serde::{Deserialize, Serialize};
 
 use super::envelope::ToolOutputStream;
 use crate::{
-    extension::SessionToolSelection,
+    compaction::CompactStrategy,
     llm::{LlmMessage, LlmTokenUsage},
     message_attachment::MessageAttachment,
-    tool::ToolResult,
+    tool::{SessionToolSelection, ToolResult},
     types::*,
 };
 
@@ -386,7 +386,7 @@ pub enum EventPayload {
         /// compact 基于的事件 seq（replay 后、compact 前锁定），用于幂等校验。
         base_event_seq: u64,
         /// compact 策略，记录用于 replay 和审计。
-        strategy: crate::extension::CompactStrategy,
+        strategy: CompactStrategy,
     },
 
     /// 同一条 session log 上的 compact 续写投影（摘要 + 保留消息替换 transcript）。
@@ -445,8 +445,8 @@ pub enum EventPayload {
 
     /// 插件命名空间事件。
     ///
-    /// 由 [`crate::extension::ExtensionEventSink`] 发出，`extension_id` 由 runtime
-    /// 在构造 sink 时注入，插件无法伪造。`event_type` 必须在 Registrar 中声明。
+    /// 由扩展运行时发出，`extension_id` 由宿主注入，插件无法伪造。
+    /// `event_type` 必须在扩展 registrar 中声明。
     ExtensionEvent {
         /// 插件 ID，充当事件命名空间。
         extension_id: String,

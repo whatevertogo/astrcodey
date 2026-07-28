@@ -3,16 +3,18 @@
 use std::sync::Arc;
 
 use astrcode_core::{
+    compaction::CompactStrategy,
     config::ModelSelection,
     context::{CompactError, CompactRequestFn, CompactResult},
     event::Event,
-    extension::{
-        CompactContext, CompactEvent, CompactResult as TypedCompactResult, CompactStrategy,
-        ExtensionError,
-    },
     llm::{self, LlmProvider},
 };
-use astrcode_extension_sdk::runtime_ports::TurnHooks;
+use astrcode_extension_sdk::{
+    extension::{
+        CompactContext, CompactEvent, CompactResult as TypedCompactResult, ExtensionError,
+    },
+    runtime_ports::TurnHooks,
+};
 
 use crate::{Session, session::SessionError};
 
@@ -21,7 +23,7 @@ pub struct CompactHookContext<'a> {
     pub session_id: &'a str,
     pub working_dir: &'a str,
     pub model_id: &'a str,
-    pub trigger: astrcode_core::extension::CompactTrigger,
+    pub trigger: astrcode_core::compaction::CompactTrigger,
     pub message_count: usize,
 }
 

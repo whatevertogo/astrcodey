@@ -195,7 +195,7 @@ impl ToolHandler for AgentToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != "agent" {
             return Err(ExtensionError::NotFound(tool_name.into()));

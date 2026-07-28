@@ -274,7 +274,7 @@ mod tests {
 
     #[test]
     fn conversation_snapshot_places_compact_summary_before_retained_messages() {
-        use astrcode_core::extension::CompactStrategy;
+        use astrcode_core::compaction::CompactStrategy;
         use astrcode_session_projection::CompactBoundaryView;
 
         let mut session = SessionReadModel::empty("session-compact".into());
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn conversation_snapshot_shows_only_latest_compact_before_retained_messages() {
-        use astrcode_core::extension::CompactStrategy;
+        use astrcode_core::compaction::CompactStrategy;
         use astrcode_session_projection::CompactBoundaryView;
 
         use crate::http::projection::blocks::COMPACT_SUMMARY_BLOCK_ID;

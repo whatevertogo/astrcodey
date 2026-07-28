@@ -313,6 +313,12 @@ mod tests {
             CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
         },
         event::EventPayload,
+        llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
+        prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
+        tool::ToolDefinition,
+        types::{new_session_id, new_turn_id},
+    };
+    use astrcode_extension_sdk::{
         extension::{
             CompactContext, CompactEvent, CompactResult, ContinueAfterStopContext,
             ContinueAfterStopResult, ExtensionError, ExtensionEvent, LifecycleContext,
@@ -320,12 +326,8 @@ mod tests {
             ProviderContext, ProviderEvent, ProviderResult, UserMessageEnvelopeContext,
             UserMessageEnvelopeResult,
         },
-        llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
-        tool::ToolDefinition,
-        types::{new_session_id, new_turn_id},
+        runtime_ports::{NoopRuntimePorts, TurnHooks},
     };
-    use astrcode_extension_sdk::runtime_ports::{NoopRuntimePorts, TurnHooks};
     use astrcode_storage::in_memory::InMemoryEventStore;
     use tokio::sync::mpsc;
 
@@ -572,7 +574,7 @@ mod tests {
         async fn emit_pre_tool_use(
             &self,
             ctx: PreToolUseContext,
-        ) -> Result<PreToolUseResult, astrcode_core::extension::ExtensionError> {
+        ) -> Result<PreToolUseResult, ExtensionError> {
             let tx = ctx
                 .event_tx
                 .ok_or_else(|| ExtensionError::Internal("no turn event sender".into()))?;

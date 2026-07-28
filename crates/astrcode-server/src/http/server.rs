@@ -9,7 +9,7 @@ use axum::{
     extract::DefaultBodyLimit,
     http::{Method, header},
     middleware,
-    routing::{delete, get, post, put},
+    routing::{any, delete, get, post, put},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -166,6 +166,10 @@ fn router_parts(runtime: Arc<ServerRuntime>) -> Result<RouterParts, HttpServerEr
             post(extensions::reload_extensions),
         )
         .route("/api/extensions/set-enabled", post(extensions::set_enabled))
+        .route(
+            "/api/extensions/{extension_id}/{*path}",
+            any(extensions::dispatch_authenticated_http),
+        )
         .route("/api/models/current", get(models::get_current_model))
         .route("/api/models", get(models::list_models))
         .route("/api/models/test", post(models::test_model))
@@ -183,7 +187,7 @@ fn router_parts(runtime: Arc<ServerRuntime>) -> Result<RouterParts, HttpServerEr
     let public_extension_http = Router::new()
         .fallback(extensions::dispatch_public_http)
         .layer(DefaultBodyLimit::max(
-            astrcode_core::extension::MAX_EXTENSION_HTTP_BODY_BYTES,
+            astrcode_extension_sdk::extension::MAX_EXTENSION_HTTP_BODY_BYTES,
         ));
     let app = Router::new()
         .merge(protected_api)

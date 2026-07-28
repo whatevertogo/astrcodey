@@ -3,15 +3,15 @@
 use std::sync::Arc;
 
 use astrcode_core::{
+    compaction::{CompactStrategy, CompactTrigger},
     context::{
         CompactIfNeededOutcome, CompactMessagesOptions, CompactSummaryRenderOptions,
         ContextAssembler, PostCompactEnrichInput,
     },
-    extension::{CompactStrategy, CompactTrigger},
     llm::{LlmMessage, LlmProvider},
     tool::ToolDefinition,
 };
-use astrcode_extension_sdk::runtime_ports::TurnHooks;
+use astrcode_extension_sdk::{extension::ExtensionError, runtime_ports::TurnHooks};
 use astrcode_session_projection::SessionReadModel;
 use astrcode_support::hash::hex_fingerprint;
 
@@ -43,7 +43,7 @@ pub enum IdleCompactionError {
     #[error("{0}")]
     Session(#[from] SessionError),
     #[error("{0}")]
-    Extension(#[from] astrcode_core::extension::ExtensionError),
+    Extension(#[from] ExtensionError),
     #[error("{0}")]
     Persist(#[from] PersistCompactError),
     #[error("{0}")]

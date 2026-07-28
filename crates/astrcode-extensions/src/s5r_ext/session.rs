@@ -9,8 +9,8 @@ use std::{
     },
 };
 
-use astrcode_core::extension::{ExtensionCapability, ExtensionError, ExtensionEventDecl};
 use astrcode_extension_sdk::{
+    extension::{ExtensionCapability, ExtensionError, ExtensionEventDecl},
     runtime::{
         CancelToken, InitializeHandler, InvokeHandler, InvokeReply, OutboundInvokeControl, Peer,
         StdioFrameTransport,

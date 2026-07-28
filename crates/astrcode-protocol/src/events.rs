@@ -3,7 +3,8 @@
 //! 定义服务器向连接的客户端推送的所有通知，
 //! 包括运行时事件、会话列表、UI 交互请求和错误信息。
 
-use astrcode_core::{event::Event, extension::Keybinding};
+use astrcode_core::event::Event;
+use astrcode_extension_sdk::extension::Keybinding;
 use serde::{Deserialize, Serialize};
 
 pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};

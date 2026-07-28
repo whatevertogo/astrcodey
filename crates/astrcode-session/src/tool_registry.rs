@@ -7,10 +7,9 @@ use std::{
 };
 
 use astrcode_core::{
-    extension::SessionToolSelection,
     tool::{
-        ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolPromptMetadata,
-        ToolResult,
+        ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
+        ToolPromptMetadata, ToolResult,
     },
     tool_access::ResourceAccess,
 };

@@ -11,9 +11,17 @@ mod hooks;
 mod http;
 mod registrar;
 mod runtime;
+mod tool_context;
 
+pub use astrcode_core::{
+    compaction::{CompactStrategy, CompactTrigger},
+    tool::SessionToolSelection,
+};
 pub use events::*;
 pub use hooks::*;
 pub use http::*;
 pub use registrar::*;
 pub use runtime::*;
+pub use tool_context::*;
+
+pub use crate::authoring_runtime::{Extension, ExtensionCtx};

@@ -4,12 +4,19 @@ use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    extension::{ExtensionEvent, SessionToolSelection},
     llm::LlmMessage,
-    tool::{ToolResultArtifactError, ToolResultArtifactReader, ToolResultArtifactSlice},
+    tool::{
+        SessionToolSelection, ToolResultArtifactError, ToolResultArtifactReader,
+        ToolResultArtifactSlice,
+    },
     types::*,
 };
-use astrcode_extension_sdk::runtime_ports::RuntimeSnapshotState;
+use astrcode_extension_sdk::{
+    extension::{
+        ExtensionError, ExtensionEvent, UserMessageEnvelopeContext, UserMessageEnvelopeResult,
+    },
+    runtime_ports::RuntimeSnapshotState,
+};
 use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{
     CompactSnapshotInput, SessionStore, StorageError, ToolResultArtifactInput,
@@ -173,7 +180,7 @@ pub enum SessionError {
     #[error("Storage error: {0}")]
     Storage(#[from] StorageError),
     #[error("Extension error: {0}")]
-    Extension(#[from] astrcode_core::extension::ExtensionError),
+    Extension(#[from] ExtensionError),
     #[error("invalid session cursor (expected u64 event seq): {0}")]
     InvalidCursor(Cursor),
     #[error("extension runtime changed during session preparation after {attempts} attempts")]
@@ -693,7 +700,7 @@ impl Session {
         trigger_name: String,
         compaction: astrcode_core::context::CompactResult,
         base_event_seq: u64,
-        strategy: astrcode_core::extension::CompactStrategy,
+        strategy: astrcode_core::compaction::CompactStrategy,
     ) -> Result<Vec<Event>, SessionError> {
         // compact 语义：冻结 base_event_seq 之前的历史前缀。
         // 即使 compact 计算期间有新事件写入，也必须以 base_event_seq 作为边界标记，
@@ -847,7 +854,7 @@ impl Session {
     ) -> Result<String, TurnError> {
         let state = self.read_model().await?;
         let original_text = text.clone();
-        let ctx = astrcode_core::extension::UserMessageEnvelopeContext {
+        let ctx = UserMessageEnvelopeContext {
             session_id: self.id.to_string(),
             turn_id: turn_id.to_string(),
             working_dir: state.working_dir.clone(),
@@ -862,9 +869,9 @@ impl Session {
             .emit_user_message_envelope(ctx)
             .await?
         {
-            astrcode_core::extension::UserMessageEnvelopeResult::Allow => Ok(original_text),
-            astrcode_core::extension::UserMessageEnvelopeResult::ReplaceText { text } => Ok(text),
-            astrcode_core::extension::UserMessageEnvelopeResult::AppendText { text } => {
+            UserMessageEnvelopeResult::Allow => Ok(original_text),
+            UserMessageEnvelopeResult::ReplaceText { text } => Ok(text),
+            UserMessageEnvelopeResult::AppendText { text } => {
                 let mut combined = original_text;
                 if !combined.is_empty() && !text.is_empty() {
                     combined.push_str("\n\n");
@@ -872,9 +879,7 @@ impl Session {
                 combined.push_str(&text);
                 Ok(combined)
             },
-            astrcode_core::extension::UserMessageEnvelopeResult::Block { reason } => {
-                Err(TurnError::InputBlocked { reason })
-            },
+            UserMessageEnvelopeResult::Block { reason } => Err(TurnError::InputBlocked { reason }),
         }
     }
 

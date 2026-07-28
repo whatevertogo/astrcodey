@@ -7,11 +7,11 @@
 use astrcode_core::{
     config::{ProviderAuthScheme, ProviderWireFormat},
     event::{Phase, ToolOutputStream},
-    extension::{ExtensionCapability, ExtensionHttpMethod},
     llm::{LlmRole, ThinkingLevel},
     permission::{ApprovalDecision, ApprovalMode},
     tool::{ExecutionMode, ToolOrigin},
 };
+use astrcode_extension_sdk::extension::{ExtensionCapability, ExtensionHttpMethod};
 use astrcode_session_projection::AgentSessionStatus;
 use serde::{Deserialize, Serialize};
 
@@ -341,6 +341,7 @@ pub enum ExtensionCapabilityDto {
     SessionControl,
     SessionInspect,
     PublicHttp,
+    AuthenticatedHttp,
     PublicHttpDispatch,
     MainModel,
     SmallModel,
@@ -362,6 +363,7 @@ impl_bidirectional_wire_conversion!(ExtensionCapability => ExtensionCapabilityDt
     SessionControl,
     SessionInspect,
     PublicHttp,
+    AuthenticatedHttp,
     PublicHttpDispatch,
     MainModel,
     SmallModel,

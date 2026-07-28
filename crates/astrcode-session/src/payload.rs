@@ -1,9 +1,9 @@
 //! 事件载荷构造。
 
 use astrcode_core::{
+    compaction::CompactStrategy,
     context::CompactResult,
     event::EventPayload,
-    extension::CompactStrategy,
     types::{Cursor, SessionId},
 };
 

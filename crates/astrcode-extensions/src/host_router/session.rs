@@ -2,12 +2,9 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
-use astrcode_core::{
-    extension::SessionToolSelection,
-    tool::{
-        CreateSessionRequest, SessionAccessPair, SessionDeliveryOutcome, SessionOperations,
-        SubmitTurnRequest,
-    },
+use astrcode_core::tool::{
+    CreateSessionRequest, SessionAccessPair, SessionDeliveryOutcome, SessionOperations,
+    SessionToolSelection, SubmitTurnRequest,
 };
 use astrcode_extension_sdk::{
     s5r::ErrorPayload,

@@ -82,7 +82,7 @@ pub enum HandlerError {
     #[error("LLM error: {0}")]
     Llm(#[source] astrcode_core::llm::LlmError),
     #[error(transparent)]
-    Extension(astrcode_core::extension::ExtensionError),
+    Extension(astrcode_extension_sdk::extension::ExtensionError),
     /// Command actor 通道已关闭，服务不可用。
     #[error("Command actor is unavailable")]
     ActorUnavailable,

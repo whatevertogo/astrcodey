@@ -1,8 +1,6 @@
 use std::path::Path;
 
-use astrcode_core::permission::{PermissionContext, PermissionDecision, PermissionPolicy};
-
-use super::paths::extract_tool_paths;
+use super::{PermissionContext, PermissionDecision, PermissionPolicy, paths::extract_tool_paths};
 
 pub struct GitCwdWriteApprovePolicy;
 
@@ -45,7 +43,7 @@ fn is_within(path: &Path, working_dir: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::permission::{ApprovalMode, PermissionContext};
+    use astrcode_core::permission::ApprovalMode;
 
     use super::*;
 
@@ -58,7 +56,6 @@ mod tests {
             working_dir: std::path::Path::new("/project"),
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
-            session_id: "s",
             tool_selection: None,
         };
         assert_eq!(

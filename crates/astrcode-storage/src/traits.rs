@@ -119,7 +119,7 @@ pub trait EventStore: EventReader + Send + Sync {
         working_dir: &str,
         model_id: &str,
         parent_session_id: Option<&SessionId>,
-        tool_selection: Option<&astrcode_core::extension::SessionToolSelection>,
+        tool_selection: Option<&astrcode_core::tool::SessionToolSelection>,
         source_extension: Option<&str>,
     ) -> Result<Event, StorageError>;
 

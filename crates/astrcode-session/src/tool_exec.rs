@@ -226,7 +226,6 @@ fn tool_capabilities_from_runtime(
         host: ToolHostServices {
             result_reader: tool_result_reader,
             available_tools: Some(tools.as_ref().to_vec()),
-            extension_event_sink: None,
         },
     }
 }

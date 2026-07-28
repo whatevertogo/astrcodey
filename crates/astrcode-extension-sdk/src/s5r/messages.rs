@@ -262,9 +262,8 @@ pub fn event_to_name(event: &ExtensionEvent) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::extension::LifecycleContext;
-
     use super::*;
+    use crate::extension::LifecycleContext;
 
     #[test]
     fn lifecycle_context_for_step_start_carries_sync_count() {

@@ -21,6 +21,8 @@ pub enum ExtensionCapability {
     SessionInspect,
     /// 注册无需宿主 bearer token 的公开 HTTP 路由。
     PublicHttp,
+    /// 注册复用宿主 bearer token 的扩展 HTTP 路由。
+    AuthenticatedHttp,
     /// 从插件内部调用其他插件的公开 HTTP 路由。
     PublicHttpDispatch,
     /// 调用宿主配置的主模型（当前 session 的 active model）。

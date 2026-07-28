@@ -2,8 +2,10 @@
 
 use std::sync::Arc;
 
-use astrcode_core::extension::{ExtensionError, ExtensionHttpRequest};
-use astrcode_extension_sdk::s5r::ErrorPayload;
+use astrcode_extension_sdk::{
+    extension::{ExtensionError, ExtensionHttpRequest},
+    s5r::ErrorPayload,
+};
 use serde_json::Value;
 
 use super::{

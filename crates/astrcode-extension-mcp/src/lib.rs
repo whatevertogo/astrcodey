@@ -21,7 +21,7 @@ use astrcode_extension_sdk::{
         ToolDiscoveryHandler, ToolHandler,
     },
     tool::{
-        DEFERRED_TOOLS_METADATA_KEY, ExecutionMode, ToolDefinition, ToolExecutionContext,
+        DEFERRED_TOOLS_METADATA_KEY, ExecutionMode, ExtensionToolContext, ToolDefinition,
         ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
     },
 };
@@ -391,7 +391,7 @@ impl ToolHandler for McpToolHandler {
         tool_name: &str,
         arguments: Value,
         working_dir: &str,
-        _ctx: &ToolExecutionContext,
+        _ctx: &ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name == TOOL_SEARCH_TOOL_NAME {
             return Ok(self.handle_tool_search(arguments, working_dir).await);

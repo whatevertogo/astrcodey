@@ -77,7 +77,7 @@ impl ToolHandler for TodoWriteToolHandler {
         tool_name: &str,
         arguments: Value,
         _working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != TODO_WRITE_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));

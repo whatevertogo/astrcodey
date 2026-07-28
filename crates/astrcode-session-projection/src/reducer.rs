@@ -513,8 +513,8 @@ fn apply_tool_terminal(
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
+        compaction::CompactStrategy,
         event::{Event, EventPayload, Phase},
-        extension::CompactStrategy,
         llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
         permission::{ApprovalDecision, ApprovalSource},
         tool::ToolResult,

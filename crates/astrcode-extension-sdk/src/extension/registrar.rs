@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
+use astrcode_core::tool_ui::ToolUiWire;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -11,10 +12,7 @@ use super::{
     SlashCommand, ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
     UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
 };
-use crate::{
-    tool::{ToolDefinition, ToolPromptMetadata},
-    tool_ui::ToolUiWire,
-};
+use crate::tool::{ToolDefinition, ToolPromptMetadata};
 
 // ─── Registrar ───────────────────────────────────────────────────
 

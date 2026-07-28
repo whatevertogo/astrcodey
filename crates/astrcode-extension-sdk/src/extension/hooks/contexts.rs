@@ -2,11 +2,14 @@
 
 use std::{fmt, path::PathBuf, sync::Arc};
 
-use super::types::{CompactTrigger, ExchangeSummary};
+use astrcode_core::{
+    compaction::CompactTrigger, message_attachment::MessageAttachment, types::ToolCallId,
+};
+
+use super::types::ExchangeSummary;
 use crate::{
     config::ModelSelection,
     extension::ExtensionEventSink,
-    message_attachment::MessageAttachment,
     tool::{ToolDefinition, ToolResult},
 };
 
@@ -39,7 +42,7 @@ pub struct PreToolUseContext {
     pub session_id: String,
     pub working_dir: String,
     pub model: ModelSelection,
-    pub call_id: crate::types::ToolCallId,
+    pub call_id: ToolCallId,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub approval_mode: crate::permission::ApprovalMode,
@@ -69,7 +72,7 @@ pub struct PostToolUseContext {
     pub session_id: String,
     pub working_dir: String,
     pub model: ModelSelection,
-    pub call_id: crate::types::ToolCallId,
+    pub call_id: ToolCallId,
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub tool_result: ToolResult,

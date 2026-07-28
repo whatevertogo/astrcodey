@@ -37,7 +37,6 @@ name = "astrcode-extension-sdk"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
- "astrcode-protocol",
  "astrcode-support",
  "async-trait",
  "parking_lot",
@@ -47,16 +46,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "astrcode-protocol"
-version = "0.3.12"
-dependencies = [
- "astrcode-core",
- "serde",
- "serde_json",
- "thiserror",
 ]
 
 [[package]]

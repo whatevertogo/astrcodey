@@ -8,10 +8,10 @@ use std::{
 
 use astrcode_core::{
     event::{Event, EventPayload},
-    extension::{ExtensionEvent, SessionToolSelection},
-    lifecycle::SessionResourceCleanup,
+    tool::SessionToolSelection,
     types::{Cursor, SessionId},
 };
+use astrcode_extension_sdk::extension::ExtensionEvent;
 use astrcode_session::{
     Session, SessionCreateParams, SessionError, SessionRuntimeServices, SessionRuntimeState,
     emit_lifecycle_for_read_model,
@@ -20,7 +20,10 @@ use astrcode_session_projection::{AgentSessionLinkView, SessionReadModel, Sessio
 use astrcode_storage::{SessionStore, StorageError};
 use parking_lot::Mutex;
 
-use crate::{config_manager::ConfigManager, server_event_bus::ServerEventBus};
+use crate::{
+    config_manager::ConfigManager, server_event_bus::ServerEventBus,
+    session_resource_cleanup::SessionResourceCleanup,
+};
 
 pub(crate) struct CreatedSession {
     pub(crate) session: Session,
@@ -34,7 +37,7 @@ pub enum SessionManagerError {
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error(transparent)]
-    Extension(#[from] astrcode_core::extension::ExtensionError),
+    Extension(#[from] astrcode_extension_sdk::extension::ExtensionError),
     #[error("session created but no events found")]
     MissingStartEvent,
     #[error("invalid fork cursor: {0}")]

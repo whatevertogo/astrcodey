@@ -139,7 +139,7 @@ impl ToolCatalogProvider for EmbeddedToolCatalog {
     async fn tool_catalog(
         &self,
         _working_dir: &str,
-    ) -> Result<ToolCatalogSnapshot, astrcode_core::extension::ExtensionError> {
+    ) -> Result<ToolCatalogSnapshot, astrcode_extension_sdk::extension::ExtensionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ToolCatalogSnapshot::complete(vec![
             Arc::new(EmbeddedEchoTool {
@@ -245,7 +245,7 @@ async fn embedded_host_initializes_session_with_custom_services() {
         .await
         .unwrap();
     session
-        .configure_tools(astrcode_core::extension::SessionToolSelection::Only {
+        .configure_tools(astrcode_core::tool::SessionToolSelection::Only {
             names: vec!["embeddedEcho".into()],
         })
         .await

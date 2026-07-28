@@ -2,12 +2,10 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use astrcode_core::{
-    extension::{
-        ExtensionError, HookMode, HookResult, LifecycleContext, PreToolUseContext,
-        PreToolUseResult, Registrar, ToolHandler,
-    },
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
+use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult};
+use astrcode_extension_sdk::extension::{
+    ExtensionError, HookMode, HookResult, LifecycleContext, PreToolUseContext, PreToolUseResult,
+    Registrar, ToolHandler,
 };
 use astrcode_extensions::{Extension, runner::ExtensionRunner};
 use astrcode_session::ToolRegistry;
@@ -29,7 +27,7 @@ impl Extension for SecurityExtension {
 struct SecurityHandler;
 
 #[async_trait::async_trait]
-impl astrcode_core::extension::PreToolUseHandler for SecurityHandler {
+impl astrcode_extension_sdk::extension::PreToolUseHandler for SecurityHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
         if ctx.tool_name == "shell"
             && ctx
@@ -61,7 +59,7 @@ impl Extension for AlwaysBlockExtension {
 struct AlwaysBlockHandler;
 
 #[async_trait::async_trait]
-impl astrcode_core::extension::PreToolUseHandler for AlwaysBlockHandler {
+impl astrcode_extension_sdk::extension::PreToolUseHandler for AlwaysBlockHandler {
     async fn handle(&self, _ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
         Ok(PreToolUseResult::Block {
             reason: "blocked by AlwaysBlockExtension".into(),
@@ -105,7 +103,7 @@ impl ToolHandler for EchoToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        _ctx: &astrcode_core::tool::ToolExecutionContext,
+        _ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != "extensionEcho" {
             return Err(ExtensionError::NotFound(tool_name.into()));
@@ -171,7 +169,7 @@ impl ToolHandler for FixedToolHandler {
         tool_name: &str,
         _arguments: serde_json::Value,
         _working_dir: &str,
-        _ctx: &astrcode_core::tool::ToolExecutionContext,
+        _ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         if tool_name != self.tool_name {
             return Err(ExtensionError::NotFound(tool_name.into()));
@@ -197,7 +195,7 @@ impl Extension for FireAndForgetExt {
 
     fn register(&self, reg: &mut Registrar) {
         reg.on_event(
-            astrcode_core::extension::ExtensionEvent::TurnStart,
+            astrcode_extension_sdk::extension::ExtensionEvent::TurnStart,
             HookMode::NonBlocking,
             0,
             Arc::new(FafHandler),
@@ -208,7 +206,7 @@ impl Extension for FireAndForgetExt {
 struct FafHandler;
 
 #[async_trait::async_trait]
-impl astrcode_core::extension::LifecycleHandler for FafHandler {
+impl astrcode_extension_sdk::extension::LifecycleHandler for FafHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
         assert_eq!(ctx.session_id, "test-session");
         assert_eq!(ctx.working_dir, "/tmp");
@@ -378,7 +376,10 @@ async fn extension_context_snapshot_works_for_nonblocking() {
     };
 
     runner
-        .emit_lifecycle(astrcode_core::extension::ExtensionEvent::TurnStart, ctx)
+        .emit_lifecycle(
+            astrcode_extension_sdk::extension::ExtensionEvent::TurnStart,
+            ctx,
+        )
         .await
         .unwrap();
 
@@ -400,7 +401,10 @@ async fn dispatch_with_no_registered_extensions_is_noop() {
         mid_turn_user_messages_synced: 0,
     };
     runner
-        .emit_lifecycle(astrcode_core::extension::ExtensionEvent::SessionStart, ctx)
+        .emit_lifecycle(
+            astrcode_extension_sdk::extension::ExtensionEvent::SessionStart,
+            ctx,
+        )
         .await
         .unwrap();
 
@@ -429,7 +433,7 @@ async fn extension_subscribes_only_to_matching_events() {
     // SessionStart should pass through without blocking.
     runner
         .emit_lifecycle(
-            astrcode_core::extension::ExtensionEvent::SessionStart,
+            astrcode_extension_sdk::extension::ExtensionEvent::SessionStart,
             lifecycle_ctx,
         )
         .await

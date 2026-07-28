@@ -17,7 +17,24 @@ impl ExtensionRunner {
         request: ExtensionHttpRequest,
         body: &[u8],
     ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
-        self.dispatch_http_route(None, request, body).await
+        self.dispatch_http_route(ExtensionHttpAccess::Public, None, None, request, body)
+            .await
+    }
+
+    pub async fn dispatch_authenticated_http_route(
+        &self,
+        extension_id: &str,
+        request: ExtensionHttpRequest,
+        body: &[u8],
+    ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
+        self.dispatch_http_route(
+            ExtensionHttpAccess::Authenticated,
+            Some(extension_id),
+            None,
+            request,
+            body,
+        )
+        .await
     }
 
     pub async fn dispatch_public_http_route_from(
@@ -26,12 +43,20 @@ impl ExtensionRunner {
         request: ExtensionHttpRequest,
         body: &[u8],
     ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
-        self.dispatch_http_route(Some(caller_extension_id), request, body)
-            .await
+        self.dispatch_http_route(
+            ExtensionHttpAccess::Public,
+            None,
+            Some(caller_extension_id),
+            request,
+            body,
+        )
+        .await
     }
 
     async fn dispatch_http_route(
         &self,
+        access: ExtensionHttpAccess,
+        target_extension_id: Option<&str>,
         caller_extension_id: Option<&str>,
         mut request: ExtensionHttpRequest,
         body: &[u8],
@@ -39,6 +64,12 @@ impl ExtensionRunner {
         let index = self.load_index();
         let mut path_matched = false;
         let matched = index.http_routes.iter().find_map(|entry| {
+            if entry.route.access != access
+                || target_extension_id
+                    .is_some_and(|extension_id| extension_id != entry.extension_id)
+            {
+                return None;
+            }
             let params = match_extension_http_route(&entry.route.path, &request.path)?;
             path_matched = true;
             (entry.route.method == request.method).then_some((entry.clone(), params))

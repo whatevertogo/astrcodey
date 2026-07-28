@@ -1,16 +1,15 @@
 use std::sync::Arc;
 
-use astrcode_core::{
+use astrcode_core::{llm::LlmProvider, tool::SessionOperations};
+use tokio_util::sync::CancellationToken;
+
+use crate::{
     extension::{
         ExtensionCapability, ExtensionConfig, ExtensionError, ExtensionEventSink, ExtensionTasks,
         OutboundNetworkService, Registrar, StopReason,
     },
-    llm::LlmProvider,
-    tool::SessionOperations,
+    session_query::{SessionQuery, SessionQueryFactory},
 };
-use tokio_util::sync::CancellationToken;
-
-use crate::session_query::{SessionQuery, SessionQueryFactory};
 
 #[async_trait::async_trait]
 pub trait Extension: Send + Sync {

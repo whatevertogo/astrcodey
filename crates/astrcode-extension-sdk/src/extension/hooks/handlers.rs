@@ -15,7 +15,10 @@ use super::{
     },
     types::ExtensionError,
 };
-use crate::tool::{ToolDefinition, ToolExecutionContext, ToolPromptMetadata, ToolResult};
+use crate::{
+    extension::ExtensionToolContext,
+    tool::{ToolDefinition, ToolPromptMetadata, ToolResult},
+};
 
 /// PreToolUse 钩子处理器。
 #[async_trait::async_trait]
@@ -82,7 +85,7 @@ pub trait ToolHandler: Send + Sync {
         tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        ctx: &ToolExecutionContext,
+        ctx: &ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError>;
 }
 

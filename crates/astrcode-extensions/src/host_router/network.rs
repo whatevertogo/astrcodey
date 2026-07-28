@@ -9,11 +9,11 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::extension::{
-    NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkErrorKind, OutboundNetworkRequest,
-    OutboundNetworkResponse, OutboundNetworkService,
-};
 use astrcode_extension_sdk::{
+    extension::{
+        NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkErrorKind,
+        OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
+    },
     s5r::ErrorPayload,
     worker::{HostNetworkRequest, HostNetworkResponse},
 };

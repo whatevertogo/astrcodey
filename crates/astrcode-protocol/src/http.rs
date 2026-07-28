@@ -3,10 +3,8 @@
 //! 这些类型只描述外部协议形状；server 负责把 storage read model 映射到这里，
 //! storage 不依赖也不返回这些 DTO。
 
-use astrcode_core::{
-    extension::{ExtensionEventDecl, Keybinding, SessionToolSelection, SlashCommand, StatusItem},
-    message_attachment::MessageAttachment,
-};
+use astrcode_core::{message_attachment::MessageAttachment, tool::SessionToolSelection};
+use astrcode_extension_sdk::extension::{ExtensionEventDecl, Keybinding, SlashCommand, StatusItem};
 use serde::{Deserialize, Serialize};
 
 pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
@@ -772,6 +770,7 @@ impl From<astrcode_core::tool::ToolDefinition> for ToolDefinitionDto {
 pub struct ExtensionHttpRouteDto {
     pub method: ExtensionHttpMethodDto,
     pub path: String,
+    pub authenticated: bool,
     pub description: String,
     pub max_body_bytes: usize,
 }

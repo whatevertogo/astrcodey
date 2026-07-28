@@ -6,9 +6,10 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    extension::{CommandCompletions, SessionToolSelection},
+    tool::SessionToolSelection,
     types::{SessionId, TurnId},
 };
+use astrcode_extension_sdk::extension::CommandCompletions;
 use astrcode_protocol::commands::ClientCommand;
 use tokio::sync::{mpsc, oneshot};
 

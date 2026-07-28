@@ -156,7 +156,7 @@ fn durable_classification_matches_event_log_policy() {
             transcript_path: None,
             continued_session_id: "child".into(),
             base_event_seq: 0,
-            strategy: crate::extension::CompactStrategy::Manual {
+            strategy: crate::compaction::CompactStrategy::Manual {
                 keep_recent_turns: None,
             },
         }
@@ -191,7 +191,7 @@ fn compact_boundary_created_serializes_continuation_target() {
         transcript_path: Some("compact.jsonl".into()),
         continued_session_id: "child-session".into(),
         base_event_seq: 42,
-        strategy: crate::extension::CompactStrategy::Manual {
+        strategy: crate::compaction::CompactStrategy::Manual {
             keep_recent_turns: None,
         },
     };
@@ -474,7 +474,7 @@ fn event_payload_variants_stay_nested() {
             transcript_path: None,
             continued_session_id: "c".into(),
             base_event_seq: 0,
-            strategy: crate::extension::CompactStrategy::Manual {
+            strategy: crate::compaction::CompactStrategy::Manual {
                 keep_recent_turns: None,
             },
         },

@@ -1,9 +1,10 @@
-use astrcode_core::permission::{
-    ApprovalMode, PermissionContext, PermissionDecision, PermissionPolicy,
-};
+use astrcode_core::permission::ApprovalMode;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use super::paths::{extract_tool_paths, path_for_matching};
+use super::{
+    PermissionContext, PermissionDecision, PermissionPolicy,
+    paths::{extract_tool_paths, path_for_matching},
+};
 
 const SENSITIVE_PATTERNS: &[&str] = &[
     ".env",
@@ -81,8 +82,6 @@ impl PermissionPolicy for SensitiveFileAskPolicy {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::permission::PermissionContext;
-
     use super::*;
 
     #[test]
@@ -95,7 +94,6 @@ mod tests {
             working_dir: std::path::Path::new("/project"),
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
-            session_id: "s",
             tool_selection: None,
         };
         assert!(matches!(

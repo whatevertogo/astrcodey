@@ -20,6 +20,10 @@ use tokio::sync::mpsc;
 
 use crate::{event::EventPayload, tool_access::ResourceAccess, types::SessionId};
 
+pub mod selection;
+
+pub use selection::SessionToolSelection;
+
 /// 工具来源分类，影响诊断日志和策略优先级，不改变执行路径。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -399,8 +403,8 @@ pub trait SessionOperations: Send + Sync {
     async fn configure_tools(
         &self,
         _access: SessionAccess<'_>,
-        _selection: crate::extension::SessionToolSelection,
-    ) -> Result<crate::extension::SessionToolSelection, SessionApiError> {
+        _selection: SessionToolSelection,
+    ) -> Result<SessionToolSelection, SessionApiError> {
         Err(SessionApiError::Unsupported(
             "session tool configuration is not supported by this host".into(),
         ))
@@ -467,7 +471,7 @@ pub struct CreateSessionRequest {
     /// 模型偏好。`None` 表示继承父 session。
     pub model_preference: Option<String>,
     /// 子会话工具集策略。
-    pub tool_selection: Option<crate::extension::SessionToolSelection>,
+    pub tool_selection: Option<SessionToolSelection>,
     /// 创建该子 session 的扩展 ID。
     pub source_extension: Option<String>,
     /// 一次性子 session，首个 turn 完成后自动回收。
@@ -730,15 +734,13 @@ pub struct ToolFileServices {
     pub observation_store: Option<Arc<dyn FileObservationStore>>,
 }
 
-/// 宿主侧服务：artifact 读取、FFI 工具目录、扩展事件。
+/// 宿主侧服务：artifact 读取与 FFI 工具目录。
 #[derive(Clone, Default)]
 pub struct ToolHostServices {
     /// 当前 session 的工具结果 artifact 读取能力（仅 `read` 工具需要）。
     pub result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
     /// 当前可用的工具定义列表（仅 FFI bridge 需要）。
     pub available_tools: Option<Vec<ToolDefinition>>,
-    /// 插件事件发射器（仅声明 `emit_events` 的扩展工具会有值）。
-    pub extension_event_sink: Option<Arc<dyn crate::extension::ExtensionEventSink>>,
 }
 
 /// 工具调用时按需注入的能力集合。
@@ -914,9 +916,7 @@ pub trait Tool: Send + Sync {
 
     /// 使用给定参数和调用上下文执行工具。
     ///
-    /// 内置工具通常忽略 `ctx`。扩展工具通过它访问会话状态，
-    /// 并可通过 [`crate::extension::ExtensionToolOutcome::RunSession`]
-    /// 请求创建子会话。
+    /// 内置工具通常只使用自己声明过的窄能力。
     async fn execute(
         &self,
         arguments: serde_json::Value,

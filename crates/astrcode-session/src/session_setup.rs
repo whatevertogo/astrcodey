@@ -8,7 +8,6 @@ use std::collections::HashMap;
 
 use astrcode_core::{
     config::ModelSelection,
-    extension::{ExtensionError, PromptBuildContext},
     prompt::{
         ExtensionPromptBlock, ExtensionSection, PromptFileProvider, PromptProvider,
         SystemPromptInput,
@@ -16,8 +15,9 @@ use astrcode_core::{
     tool::{ToolDefinition, ToolPromptMetadata},
     tool_pack::{ToolPack, ToolPackScope},
 };
-use astrcode_extension_sdk::runtime_ports::{
-    PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider,
+use astrcode_extension_sdk::{
+    extension::{ExtensionError, PromptBuildContext},
+    runtime_ports::{PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider},
 };
 use astrcode_support::{hash::hex_fingerprint, shell::resolve_shell};
 

@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use astrcode_core::{extension::SessionToolSelection, types::SessionId};
+use astrcode_core::{tool::SessionToolSelection, types::SessionId};
 use astrcode_protocol::{
     commands::ClientCommand,
     http::{

@@ -1,16 +1,17 @@
 use std::{collections::HashMap, path::Path};
 
 use astrcode_core::{
-    extension::{PreToolUseContext, PreToolUseResult},
-    permission::{ApprovalSource, PermissionContext, PermissionDecision},
+    permission::ApprovalSource,
     tool::{ExecutionMode, ToolDefinition},
     tool_access::ResourceAccess,
 };
+use astrcode_extension_sdk::extension::{PreToolUseContext, PreToolUseResult};
 
 use super::{ToolCalls, events::declare_tool_batch};
 use crate::{
     deferred_tools::{tool_is_visible, unavailable_tool_guidance},
     early_tool_scheduler::EarlyExecutionEntry,
+    permission::{PermissionContext, PermissionDecision},
     tool_deduplicator::{SameStepCheck, ToolCallDeduplicator},
     tool_json_repair::parse_and_repair_json,
     tool_types::{
@@ -207,7 +208,6 @@ impl ToolCalls {
             working_dir: Path::new(&self.turn.shared.working_dir),
             resource_accesses: &accesses,
             approval_mode: self.turn.shared.approval_mode,
-            session_id: self.turn.shared.session_id.as_str(),
             tool_selection: self.turn.shared.tool_selection.as_ref(),
         };
         match self.turn.shared.permission_chain.decide(&ctx) {

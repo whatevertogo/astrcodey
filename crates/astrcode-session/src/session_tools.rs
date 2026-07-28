@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use astrcode_core::extension::SessionToolSelection;
+use astrcode_core::tool::SessionToolSelection;
 use astrcode_extension_sdk::runtime_ports::ToolCatalogCompleteness;
 use parking_lot::Mutex;
 use tokio::{sync::watch, time::Instant};

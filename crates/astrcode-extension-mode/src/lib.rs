@@ -148,7 +148,7 @@ impl ToolHandler for ModeToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         _working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         let base = require_session_base(&ctx.capabilities.paths.store_dir)?;
         let mode_root = store::mode_dir_from_base(&base);

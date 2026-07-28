@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use astrcode_core::extension::{ExtensionHttpMethod, ExtensionHttpRequest};
+use astrcode_extension_sdk::extension::{
+    ExtensionHttpAccess, ExtensionHttpMethod, ExtensionHttpRequest,
+};
 use astrcode_extensions::runner::{
     ExtensionHttpDispatchResult, ExtensionStageDiagnostics, ExtensionStageStatus,
 };
@@ -17,7 +19,7 @@ use astrcode_protocol::{
 use axum::{
     Json,
     body::Bytes,
-    extract::{OriginalUri, State},
+    extract::{OriginalUri, Path, State},
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -111,8 +113,33 @@ pub(in crate::http) async fn dispatch_public_http(
     extension_http_response(result)
 }
 
+pub(in crate::http) async fn dispatch_authenticated_http(
+    State(state): State<HttpState>,
+    Path((extension_id, path)): Path<(String, String)>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> Response {
+    let Some(method) = extension_http_method(&method) else {
+        return not_found_response("route_not_found", "route not found");
+    };
+    let request = ExtensionHttpRequest {
+        method,
+        path: format!("/{path}"),
+        path_params: BTreeMap::new(),
+        query: uri.query().map(str::to_owned),
+        body: serde_json::Value::Null,
+    };
+    let result = state
+        .runtime
+        .extension_runner()
+        .dispatch_authenticated_http_route(&extension_id, request, &body)
+        .await;
+    extension_http_response(result)
+}
+
 fn extension_http_response(
-    result: Result<ExtensionHttpDispatchResult, astrcode_core::extension::ExtensionError>,
+    result: Result<ExtensionHttpDispatchResult, astrcode_extension_sdk::extension::ExtensionError>,
 ) -> Response {
     match result {
         Ok(ExtensionHttpDispatchResult::Response(response)) => {
@@ -239,11 +266,12 @@ fn extension_declaration_dto(
 }
 
 fn extension_http_route_dto(
-    route: astrcode_core::extension::ExtensionHttpRoute,
+    route: astrcode_extension_sdk::extension::ExtensionHttpRoute,
 ) -> ExtensionHttpRouteDto {
     ExtensionHttpRouteDto {
         method: route.method.into(),
         path: route.path,
+        authenticated: route.access == ExtensionHttpAccess::Authenticated,
         description: route.description,
         max_body_bytes: route.max_body_bytes,
     }

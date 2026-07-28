@@ -8,17 +8,19 @@ use std::{
 
 use astrcode_core::{
     event::EventPayload,
-    extension::{
-        CommandContext, ExtensionCapability, ExtensionCommandResult, ExtensionError,
-        ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest,
-        ExtensionHttpResponse, ExtensionHttpRoute, HookMode, LifecycleContext, PreToolUseContext,
-        PreToolUseResult, Registrar, StopReason,
-    },
     llm::{LlmEvent, LlmMessage, LlmProvider},
     tool::{ToolDefinition, ToolExecutionContext},
 };
 use astrcode_extension_sdk::{
-    config::ModelSelection, extension::Extension, trusted::ExtensionHostServices,
+    config::ModelSelection,
+    extension::{
+        CommandContext, Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
+        ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest,
+        ExtensionHttpResponse, ExtensionHttpRoute, HookMode, LifecycleContext, PreToolUseContext,
+        PreToolUseResult, Registrar, StopReason,
+    },
+    tool::ExtensionToolContext,
+    trusted::ExtensionHostServices,
 };
 use astrcode_extensions::{
     StorageSessionQueryFactory, build_host_router, build_host_router_with_public_http_dispatcher,
@@ -191,13 +193,16 @@ async fn load_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<S5rExtens
         .expect("load s5r extension")
 }
 
-fn tool_ctx(working_dir: &str) -> ToolExecutionContext {
-    ToolExecutionContext::new(
-        "e2e-session".into(),
-        working_dir,
+fn tool_ctx(working_dir: &str) -> ExtensionToolContext {
+    ExtensionToolContext::new(
+        ToolExecutionContext::new(
+            "e2e-session".into(),
+            working_dir,
+            None,
+            None,
+            Default::default(),
+        ),
         None,
-        None,
-        Default::default(),
     )
 }
 
@@ -221,14 +226,15 @@ fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> PreToolUs
 async fn s5r_manifest_registers_tools_hooks_and_capabilities() {
     let ext = load_s5r(minimal_router()).await;
     assert_eq!(ext.id(), "s5r-guest-demo");
-    assert!(
-        ext.capabilities()
-            .iter()
-            .any(|c| { matches!(c, astrcode_core::extension::ExtensionCapability::SmallModel) })
-    );
+    assert!(ext.capabilities().iter().any(|c| {
+        matches!(
+            c,
+            astrcode_extension_sdk::extension::ExtensionCapability::SmallModel
+        )
+    }));
     assert!(ext.capabilities().iter().any(|capability| matches!(
         capability,
-        astrcode_core::extension::ExtensionCapability::SessionInspect
+        astrcode_extension_sdk::extension::ExtensionCapability::SessionInspect
     )));
 
     let mut reg = Registrar::new();
@@ -239,7 +245,7 @@ async fn s5r_manifest_registers_tools_hooks_and_capabilities() {
     assert_eq!(reg.pre_tool_use()[0].mode, HookMode::Blocking);
     assert!(matches!(
         reg.pre_tool_use()[0].target,
-        astrcode_core::extension::ToolHookTarget::All
+        astrcode_extension_sdk::extension::ToolHookTarget::All
     ));
     assert_eq!(reg.commands().len(), 1);
     assert_eq!(reg.http_routes().len(), 1);

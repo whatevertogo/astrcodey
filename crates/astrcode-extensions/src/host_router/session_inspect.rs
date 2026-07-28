@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, future::Future, sync::Arc};
 
 use astrcode_core::{
+    compaction::CompactStrategy,
     event::Phase,
-    extension::CompactStrategy,
     llm::{LlmContent, LlmMessage},
     types::SessionId,
 };

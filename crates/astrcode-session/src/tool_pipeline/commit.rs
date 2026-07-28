@@ -3,10 +3,8 @@ use std::{
     sync::Arc,
 };
 
-use astrcode_core::{
-    extension::{PostToolUseContext, PostToolUseResult},
-    tool::ToolResult,
-};
+use astrcode_core::tool::ToolResult;
+use astrcode_extension_sdk::extension::{PostToolUseContext, PostToolUseResult};
 
 use super::{
     ToolCalls,

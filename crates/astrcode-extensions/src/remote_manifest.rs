@@ -2,14 +2,13 @@
 
 use std::collections::HashMap;
 
-use astrcode_core::extension::{
-    CompactContributions, CompactResult, ContinueAfterStopOptions, ContinueAfterStopResult,
-    EXTENSION_TOOL_OUTCOME_KEY, ExtensionCommandResult, ExtensionError, ExtensionEvent,
-    ExtensionEventDecl, ExtensionHttpResponse, ExtensionToolOutcome, HookMode, HookResult,
-    PostToolUseResult, PreToolUseResult, PromptContributions, ProviderResult,
-};
 use astrcode_extension_sdk::{
-    extension::SlashCommand,
+    extension::{
+        CompactContributions, CompactResult, ContinueAfterStopOptions, ContinueAfterStopResult,
+        EXTENSION_TOOL_OUTCOME_KEY, ExtensionCommandResult, ExtensionError, ExtensionEvent,
+        ExtensionEventDecl, ExtensionHttpResponse, ExtensionToolOutcome, HookMode, HookResult,
+        PostToolUseResult, PreToolUseResult, PromptContributions, ProviderResult, SlashCommand,
+    },
     s5r::{effects::HandlerResult, event_from_name, mode_from_name},
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
 };

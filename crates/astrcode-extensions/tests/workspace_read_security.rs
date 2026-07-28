@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use astrcode_core::extension::ExtensionCapability;
+use astrcode_extension_sdk::extension::ExtensionCapability;
 use astrcode_extensions::host_router::{HostBackends, HostRouter, InvokeContext};
 use serde_json::json;
 

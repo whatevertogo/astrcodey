@@ -3,12 +3,12 @@
 use std::sync::Arc;
 
 use astrcode_core::{
+    compaction::{CompactStrategy, CompactTrigger},
     context::{
         CompactIfNeededOutcome, CompactMessagesOptions, CompactResult, CompactSummaryRenderOptions,
         ContextPrepareInput, PostCompactEnrichInput,
     },
     event::EventPayload,
-    extension::{CompactStrategy, CompactTrigger},
     llm::{LlmMessage, LlmProvider},
     tool::ToolDefinition,
     types::TurnId,

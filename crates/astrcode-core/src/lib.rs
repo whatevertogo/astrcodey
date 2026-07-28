@@ -10,8 +10,6 @@
 //!
 //! - [`config`]：配置系统（原始类型、解析类型、解析逻辑、默认值）
 //! - [`event`]：统一的运行时事件与持久化事件类型
-//! - [`extension`]：扩展与钩子系统类型
-//! - [`lifecycle`]：session 生命周期相关的 trait
 //! - [`llm`]：LLM 提供者抽象与消息类型
 //! - [`prompt`]：提示词组合 trait 和类型
 //! - [`read_tool_image`]：read 工具内联图片 tool result 契约
@@ -24,11 +22,10 @@
 //! 下游 crate 应使用完整模块路径导入，如 `use astrcode_core::event::EventPayload`，
 //! 而非依赖 crate root 的 glob re-export。
 
+pub mod compaction;
 pub mod config;
 pub mod context;
 pub mod event;
-pub mod extension;
-pub mod lifecycle;
 pub mod llm;
 pub mod message_attachment;
 pub mod permission;

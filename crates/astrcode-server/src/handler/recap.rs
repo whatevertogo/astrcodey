@@ -2,9 +2,9 @@
 
 use astrcode_core::{
     event::EventPayload,
-    extension::ExtensionEvent,
     llm::{self, LlmMessage},
 };
+use astrcode_extension_sdk::extension::ExtensionEvent;
 
 use super::{CommandHandler, HandlerError};
 
@@ -74,7 +74,7 @@ impl CommandHandler {
             .map_err(HandlerError::Session)?;
 
         // PostRecap hook (non-blocking)
-        let lifecycle_ctx = astrcode_core::extension::LifecycleContext {
+        let lifecycle_ctx = astrcode_extension_sdk::extension::LifecycleContext {
             session_id: sid.to_string(),
             working_dir: state.working_dir.clone(),
             model: astrcode_core::config::ModelSelection::simple(state.model_id.clone()),

@@ -1,10 +1,6 @@
 //! Tool Gate 权限类型：审批模式、策略决策、用户审批决议。
 
-use std::path::Path;
-
 use serde::{Deserialize, Serialize};
-
-use crate::{extension::SessionToolSelection, tool_access::ResourceAccess};
 
 /// 工具审批模式（全局配置）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -42,21 +38,6 @@ impl std::str::FromStr for ApprovalMode {
     }
 }
 
-/// 权限链单条策略的评估结果。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PermissionDecision {
-    Allow,
-    Deny {
-        reason: String,
-    },
-    Ask {
-        prompt: String,
-        rule_key: Option<String>,
-    },
-    /// 本策略不决策，交给下一条。
-    Pass,
-}
-
 /// 用户对挂起审批的决议。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -73,54 +54,12 @@ impl ApprovalDecision {
     }
 }
 
-/// 审批请求来源（扩展 PreToolUse::Ask 或 Core PermissionChain）。
+/// 审批请求来源（扩展 PreToolUse::Ask 或 session 权限链）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalSource {
     Extension,
     Core,
-}
-
-/// 传给权限策略的上下文。
-#[derive(Debug, Clone)]
-pub struct PermissionContext<'a> {
-    pub tool_name: &'a str,
-    pub tool_input: &'a serde_json::Value,
-    pub working_dir: &'a Path,
-    pub resource_accesses: &'a [ResourceAccess],
-    pub approval_mode: ApprovalMode,
-    pub session_id: &'a str,
-    pub tool_selection: Option<&'a SessionToolSelection>,
-}
-
-/// 单条权限策略。
-pub trait PermissionPolicy: Send + Sync {
-    fn priority(&self) -> u32;
-    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision;
-}
-
-/// 按 priority 升序评估，第一条非 Pass 结果胜出；全部 Pass 时拒绝（fail-closed）。
-pub struct PermissionChain {
-    policies: Vec<Box<dyn PermissionPolicy>>,
-}
-
-impl PermissionChain {
-    pub fn new(mut policies: Vec<Box<dyn PermissionPolicy>>) -> Self {
-        policies.sort_by_key(|p| p.priority());
-        Self { policies }
-    }
-
-    pub fn decide(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
-        for policy in &self.policies {
-            let decision = policy.evaluate(ctx);
-            if !matches!(decision, PermissionDecision::Pass) {
-                return decision;
-            }
-        }
-        PermissionDecision::Deny {
-            reason: "no permission policy matched".into(),
-        }
-    }
 }
 
 /// 用户配置的权限规则（第三期 DSL）。
@@ -149,68 +88,6 @@ pub struct PermissionRule {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    struct FixedPolicy {
-        priority: u32,
-        decision: PermissionDecision,
-    }
-
-    impl PermissionPolicy for FixedPolicy {
-        fn priority(&self) -> u32 {
-            self.priority
-        }
-
-        fn evaluate(&self, _ctx: &PermissionContext<'_>) -> PermissionDecision {
-            self.decision.clone()
-        }
-    }
-
-    fn empty_ctx<'a>(input: &'a serde_json::Value) -> PermissionContext<'a> {
-        PermissionContext {
-            tool_name: "shell",
-            tool_input: input,
-            working_dir: Path::new("/tmp"),
-            resource_accesses: &[],
-            approval_mode: ApprovalMode::Manual,
-            session_id: "s1",
-            tool_selection: None,
-        }
-    }
-
-    #[test]
-    fn chain_first_non_pass_wins() {
-        let input = serde_json::json!({});
-        let chain = PermissionChain::new(vec![
-            Box::new(FixedPolicy {
-                priority: 10,
-                decision: PermissionDecision::Pass,
-            }),
-            Box::new(FixedPolicy {
-                priority: 20,
-                decision: PermissionDecision::Allow,
-            }),
-            Box::new(FixedPolicy {
-                priority: 30,
-                decision: PermissionDecision::Deny {
-                    reason: "never".into(),
-                },
-            }),
-        ]);
-        assert_eq!(chain.decide(&empty_ctx(&input)), PermissionDecision::Allow);
-    }
-
-    #[test]
-    fn chain_all_pass_without_allow_policy_denies() {
-        let input = serde_json::json!({});
-        let chain = PermissionChain::new(vec![Box::new(FixedPolicy {
-            priority: 10,
-            decision: PermissionDecision::Pass,
-        })]);
-        assert!(matches!(
-            chain.decide(&empty_ctx(&input)),
-            PermissionDecision::Deny { .. }
-        ));
-    }
 
     #[test]
     fn approval_mode_from_str() {

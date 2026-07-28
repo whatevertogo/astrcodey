@@ -15,14 +15,14 @@ use astrcode_core::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
     event::{Event, EventPayload},
-    extension::{
-        ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
-        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        MAX_EXTENSION_HTTP_BODY_BYTES, Registrar, SessionToolSelection,
-    },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    tool::{ToolDefinition, ToolResult, ToolResultArtifactSlice},
+    tool::{SessionToolSelection, ToolDefinition, ToolResult, ToolResultArtifactSlice},
     types::{Cursor, SessionId, new_message_id},
+};
+use astrcode_extension_sdk::extension::{
+    ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
+    ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, MAX_EXTENSION_HTTP_BODY_BYTES,
+    Registrar,
 };
 use astrcode_extensions::{Extension, runner::ExtensionRunner};
 use astrcode_protocol::{

@@ -132,7 +132,7 @@ impl ToolHandler for MemorySaveHandler {
         _tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         let args: SaveArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
@@ -212,7 +212,7 @@ impl ToolHandler for MemoryDeleteHandler {
         _tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         let args: DeleteArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
@@ -227,7 +227,7 @@ impl ToolHandler for MemoryDeleteHandler {
         .await?;
 
         if !removed.is_empty() {
-            if let Some(ref sink) = ctx.capabilities.host.extension_event_sink {
+            if let Some(ref sink) = ctx.events {
                 let payload = json!({
                     "match": pattern_for_emit,
                     "deleted_count": removed.len(),
@@ -272,7 +272,7 @@ impl ToolHandler for MemoryListHandler {
         _tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        _ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
+        _ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
     ) -> Result<ToolResult, ExtensionError> {
         let args: ListArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;

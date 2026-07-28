@@ -1,9 +1,8 @@
 //! Session-scoped slash command service.
 
-use astrcode_core::{
-    config::ModelSelection,
-    extension::{CommandCompletions, ExtensionCommandResult, ExtensionError},
-    types::SessionId,
+use astrcode_core::{config::ModelSelection, types::SessionId};
+use astrcode_extension_sdk::extension::{
+    CommandCompletions, ExtensionCommandResult, ExtensionError,
 };
 use astrcode_extensions::runner::CommandSource;
 use astrcode_protocol::{events::ExtensionCommandInfoDto, wire::CommandSourceDto};
@@ -222,7 +221,7 @@ impl CommandHandler {
     async fn command_context(
         &self,
         sid: &SessionId,
-    ) -> Result<(String, astrcode_core::extension::CommandContext), HandlerError> {
+    ) -> Result<(String, astrcode_extension_sdk::extension::CommandContext), HandlerError> {
         let state = self
             .runtime
             .session_manager()
@@ -230,7 +229,7 @@ impl CommandHandler {
             .await
             .map_err(HandlerError::SessionManager)?;
         let working_dir = state.working_dir;
-        let ctx = astrcode_core::extension::CommandContext {
+        let ctx = astrcode_extension_sdk::extension::CommandContext {
             session_id: sid.to_string(),
             working_dir: working_dir.clone(),
             model: ModelSelection::simple(

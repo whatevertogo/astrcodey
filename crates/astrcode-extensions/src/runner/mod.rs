@@ -451,7 +451,7 @@ impl ExtensionRunner {
     /// 返回进程内稳定复用的宿主出站网络服务。
     pub fn outbound_network_service(
         &self,
-    ) -> Option<Arc<dyn astrcode_core::extension::OutboundNetworkService>> {
+    ) -> Option<Arc<dyn astrcode_extension_sdk::extension::OutboundNetworkService>> {
         self.host_services
             .read()
             .as_ref()
