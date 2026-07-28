@@ -6,6 +6,9 @@
 //! - [`LlmProvider`] trait：所有 LLM 后端的统一接口
 //! - [`LlmClientConfig`]：LLM 客户端配置
 //! - [`LlmError`]：LLM 操作错误类型
+//!
+//! 本模块不含具体 provider 实现与 HTTP/重试逻辑（位于 `astrcode-ai`），也不含
+//! 具体工具的展示特判（属于 server 投影层）。
 
 use serde::{Deserialize, Serialize};
 
@@ -108,22 +111,13 @@ impl LlmContent {
     /// 这是有损转换——不可能完全还原原始渲染效果。
     /// - `Text` / `ToolResult`：原样输出。
     /// - `Image`：返回占位符 `[image]`。
-    /// - `ToolCall`：大多数工具调用只输出工具名；`upsertSessionPlan` 额外提取 arguments.content
-    ///   中的 plan 正文。
+    /// - `ToolCall`：只输出工具名；具体工具的展示特判属于投影层（如 server 对 `upsertSessionPlan`
+    ///   提取 plan 正文），不在契约层硬编码。
     pub fn to_display_text(&self) -> String {
         match self {
             LlmContent::Text { text } => text.clone(),
             LlmContent::Image { .. } => "[image]".into(),
-            LlmContent::ToolCall {
-                name, arguments, ..
-            } => match name.as_str() {
-                "upsertSessionPlan" => arguments
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default(),
-                _ => format!("tool call: {name}"),
-            },
+            LlmContent::ToolCall { name, .. } => format!("tool call: {name}"),
             LlmContent::ToolResult { content, .. } => content.clone(),
         }
     }
@@ -757,6 +751,21 @@ mod tests {
         let visible = provider_visible_messages(messages);
 
         assert_eq!(visible, vec![LlmMessage::user("start")]);
+    }
+
+    #[test]
+    fn provider_visible_filters_empty_system_messages() {
+        let messages = vec![LlmMessage::user("hello"), LlmMessage::system("")];
+        let visible = provider_visible_messages(messages);
+        assert_eq!(visible.len(), 1);
+        assert!(matches!(visible[0].role, LlmRole::User));
+    }
+
+    #[test]
+    fn provider_visible_keeps_non_empty() {
+        let messages = vec![LlmMessage::user("hello"), LlmMessage::assistant("world")];
+        let visible = provider_visible_messages(messages);
+        assert_eq!(visible.len(), 2);
     }
 
     #[test]

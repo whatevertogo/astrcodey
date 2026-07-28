@@ -526,7 +526,7 @@ impl TurnLoop {
         tools: &[ToolDefinition],
     ) -> Option<LlmTokenUsage> {
         let effective = self.session.runtime_services().read_effective();
-        match llm
+        let (input_tokens, source) = match llm
             .count_input_tokens(request_messages.clone(), tools.to_vec())
             .await
         {
@@ -537,15 +537,10 @@ impl TurnLoop {
                     stage = "turn_usage",
                     "provider stream did not include usage; recording provider count fallback"
                 );
-                Some(LlmTokenUsage {
-                    input_tokens: Some(count.input_tokens),
-                    cached_input_tokens: None,
-                    cache_creation_input_tokens: None,
-                    output_tokens: None,
-                    reasoning_output_tokens: None,
-                    total_tokens: None,
-                    source: Some(LlmTokenUsageSource::ProviderCountFallback),
-                })
+                (
+                    Some(count.input_tokens),
+                    LlmTokenUsageSource::ProviderCountFallback,
+                )
             },
             Err(error) => {
                 tracing::warn!(
@@ -556,20 +551,21 @@ impl TurnLoop {
                     "provider stream did not include usage and provider count failed; recording \
                      local estimate fallback"
                 );
-                Some(LlmTokenUsage {
-                    input_tokens: Some(token_estimate::estimate_request_tokens(
-                        &request_messages,
-                        None,
-                    ) as u64),
-                    cached_input_tokens: None,
-                    cache_creation_input_tokens: None,
-                    output_tokens: None,
-                    reasoning_output_tokens: None,
-                    total_tokens: None,
-                    source: Some(LlmTokenUsageSource::LocalEstimateFallback),
-                })
+                (
+                    Some(token_estimate::estimate_request_tokens(&request_messages, None) as u64),
+                    LlmTokenUsageSource::LocalEstimateFallback,
+                )
             },
-        }
+        };
+        Some(LlmTokenUsage {
+            input_tokens,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            output_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
+            source: Some(source),
+        })
     }
 
     async fn tools_stage(

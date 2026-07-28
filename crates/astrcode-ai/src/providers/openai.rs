@@ -283,6 +283,10 @@ mod tests {
             &[sample_tool()],
         );
 
+        assert_eq!(
+            p.input_tokens_endpoint(),
+            "https://api.test/v1/responses/input_tokens"
+        );
         assert_eq!(body["model"], "gpt-test");
         assert_eq!(body["instructions"], "s");
         assert!(body["input"].is_array());

@@ -4,6 +4,9 @@
 //! - [`Phase`]：会话执行阶段的枚举
 //! - [`EventPayload`]：事件载荷的统一枚举类型
 //! - [`Event`]：携带会话/轮次标识和存储序号的事件信封
+//!
+//! 本模块只做类型与 wire 格式定义：不追加、不派发、不投影事件，那些属于
+//! `astrcode-storage` / `astrcode-session`。
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, Serializer};

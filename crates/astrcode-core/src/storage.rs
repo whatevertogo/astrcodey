@@ -7,6 +7,8 @@
 //!
 //! 通过 trait upcasting（Rust 1.86+），`Arc<dyn EventStore>` 可直接转换为
 //! `Arc<dyn EventReader>` 传递给只读消费者，不泄漏写入能力。
+//!
+//! 本模块不含任何具体存储实现（SQLite/文件等实现位于 `astrcode-storage`）。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 

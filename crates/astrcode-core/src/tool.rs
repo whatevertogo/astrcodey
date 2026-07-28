@@ -9,6 +9,9 @@
 //! - [`ToolResult`]：工具执行结果
 //! - [`ToolExecutionContext`]：每次工具调用的上下文
 //! - [`ToolPromptMetadata`]：结构化工具提示词元数据
+//!
+//! 本模块不含具体工具实现与调度逻辑（注册表、并行调度、权限门禁位于
+//! `astrcode-session` / 各工具 crate）。
 
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 

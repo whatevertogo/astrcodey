@@ -317,8 +317,6 @@ pub fn non_empty_reasoning_content(reasoning_content: String) -> Option<String> 
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::llm::{LlmMessage, provider_visible_messages};
-
     use super::*;
 
     #[test]
@@ -332,20 +330,5 @@ mod tests {
     #[test]
     fn non_empty_reasoning_empty_returns_none() {
         assert_eq!(non_empty_reasoning_content(String::new()), None);
-    }
-
-    #[test]
-    fn provider_visible_filters_empty_system_messages() {
-        let messages = vec![LlmMessage::user("hello"), LlmMessage::system("")];
-        let visible = provider_visible_messages(messages);
-        assert_eq!(visible.len(), 1);
-        assert!(matches!(visible[0].role, astrcode_core::llm::LlmRole::User));
-    }
-
-    #[test]
-    fn provider_visible_keeps_non_empty() {
-        let messages = vec![LlmMessage::user("hello"), LlmMessage::assistant("world")];
-        let visible = provider_visible_messages(messages);
-        assert_eq!(visible.len(), 2);
     }
 }

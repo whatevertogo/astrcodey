@@ -496,3 +496,93 @@ impl ExtensionHostServices {
         .then_some(scoped)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn spawn_after_cancel_is_skipped() {
+        let tasks = ExtensionTasks::new("ext");
+        tasks.cancel();
+        tasks.spawn("late", async {});
+        assert!(
+            tasks.lock_state().tasks.is_empty(),
+            "no task should be recorded after shutdown"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_completes_when_task_observes_shutdown() {
+        let tasks = ExtensionTasks::new("ext");
+        let shutdown = tasks.shutdown();
+        let finished = Arc::new(AtomicBool::new(false));
+        let finished_clone = finished.clone();
+        tasks.spawn("cooperative", async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                }
+            }
+            finished_clone.store(true, Ordering::SeqCst);
+        });
+        tasks.cancel();
+        tasks.wait(Duration::from_secs(1)).await;
+        assert!(
+            finished.load(Ordering::SeqCst),
+            "cooperative task should run to completion before the timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_aborts_task_that_ignores_shutdown() {
+        let tasks = ExtensionTasks::new("ext");
+        tasks.spawn("stuck", async move {
+            // 永不观察共享 shutdown token,只有被 abort 才会停止。
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+        tasks.cancel();
+        let start = tokio::time::Instant::now();
+        tasks.wait(Duration::from_millis(50)).await;
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "wait should abort the stuck task instead of blocking; elapsed={:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_absorbs_panicking_task() {
+        // 注意:被 abort 的 panic 仍会经默认 panic hook 打到 stderr,这是预期噪声,
+        // 此处只验证 wait 不会把 panic 传播给调用方。
+        let tasks = ExtensionTasks::new("ext");
+        tasks.spawn("boom", async {
+            panic!("extension task exploded");
+        });
+        tasks.cancel();
+        tasks.wait(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn operations_recover_from_poisoned_state() {
+        let tasks = ExtensionTasks::new("ext");
+        // 手动毒化内部 mutex:一个 OS 线程持锁后 panic。
+        let state = tasks.state.clone();
+        let join = std::thread::spawn(move || {
+            let _guard = state.lock().unwrap();
+            panic!("poison the mutex");
+        });
+        assert!(join.join().is_err(), "helper thread should have panicked");
+
+        // 尽管已毒化,所有经由 lock_state() 的操作都应恢复,而非 panic。
+        tasks.spawn("after-poison", async {});
+        assert_eq!(tasks.lock_state().tasks.len(), 1);
+        tasks.cancel();
+        assert!(tasks.lock_state().shutdown);
+    }
+}

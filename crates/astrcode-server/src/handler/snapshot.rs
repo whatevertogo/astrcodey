@@ -1,6 +1,9 @@
 //! 会话快照 — 内部模型转传输层 DTO。
 
-use astrcode_core::{context::COMPACT_SUMMARY_MARKER, llm::LlmMessage};
+use astrcode_core::{
+    context::COMPACT_SUMMARY_MARKER,
+    llm::{LlmContent, LlmMessage},
+};
 use astrcode_protocol::{
     events::{AgentSessionLinkDto, MessageDto, SessionSnapshot},
     wire::MessageRoleDto,
@@ -40,7 +43,7 @@ pub fn message_to_dto(message: &LlmMessage) -> MessageDto {
     let content = message
         .content
         .iter()
-        .map(|c| c.to_display_text())
+        .map(content_display_text)
         .collect::<String>();
 
     // Compact summary 消息是 synthetic user message，但在客户端应显示为系统消息。
@@ -51,6 +54,21 @@ pub fn message_to_dto(message: &LlmMessage) -> MessageDto {
     };
 
     MessageDto { role, content }
+}
+
+/// 单块内容的展示文本：`upsertSessionPlan` 提取 plan 正文，其余走契约层的
+/// [`LlmContent::to_display_text`]。
+fn content_display_text(content: &LlmContent) -> String {
+    match content {
+        LlmContent::ToolCall {
+            name, arguments, ..
+        } if name == "upsertSessionPlan" => arguments
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        other => other.to_display_text(),
+    }
 }
 
 #[cfg(test)]

@@ -9,6 +9,13 @@ use std::{collections::BTreeMap, process::Command};
 
 use crate::config::{effective::*, raw::*};
 
+/// 环境变量查找函数。注入式解析让纯函数可测，测试无需修改进程环境。
+type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
+
+fn process_env_lookup(key: &str) -> Option<String> {
+    std::env::var(key).ok()
+}
+
 /// 配置解析过程中可能发生的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ResolveError {
@@ -132,15 +139,16 @@ fn classify_api_key_input(raw: &str) -> Option<(ApiKeyInputKind, &str)> {
 fn resolve_profile_api_key(
     profile: &Profile,
     allow_shell_command: bool,
+    env: EnvLookup<'_>,
 ) -> Result<String, ResolveError> {
     // 1) explicit api_key in config
     if let Some(raw) = profile.api_key.as_deref().filter(|s| !s.trim().is_empty()) {
-        return resolve_api_key_with_policy(raw, allow_shell_command);
+        return resolve_api_key_with_policy(raw, allow_shell_command, env);
     }
 
     // 2) fallback to known env keys (pi-mono style)
     for key in known_env_keys_for_profile(profile) {
-        if let Ok(val) = std::env::var(key) {
+        if let Some(val) = env(key) {
             if !val.trim().is_empty() {
                 return Ok(val);
             }
@@ -156,6 +164,7 @@ fn resolve_llm_settings(
     profile_name: &str,
     model_name: &str,
     runtime: &RuntimeSection,
+    env: EnvLookup<'_>,
 ) -> Result<LlmSettings, ResolveError> {
     if profile_name.is_empty() && model_name.is_empty() {
         return Ok(LlmSettings::unconfigured());
@@ -178,6 +187,7 @@ fn resolve_llm_settings(
     let api_key = resolve_profile_api_key(
         profile,
         runtime.allow_api_key_shell_command.unwrap_or(false),
+        env,
     )?;
 
     let options = model.model_options.as_ref();
@@ -291,12 +301,17 @@ impl Config {
             &self.active_profile,
             &self.active_model,
             &self.runtime,
+            &process_env_lookup,
         )?;
 
         let small_llm = match (&self.active_small_profile, &self.active_small_model) {
-            (Some(profile), Some(model)) => {
-                resolve_llm_settings(&self.profiles, profile, model, &self.runtime)?
-            },
+            (Some(profile), Some(model)) => resolve_llm_settings(
+                &self.profiles,
+                profile,
+                model,
+                &self.runtime,
+                &process_env_lookup,
+            )?,
             _ => llm.clone(),
         };
 
@@ -326,19 +341,20 @@ impl Config {
 ///
 /// 空字符串在此函数被调用前已由调用方（`into_effective`）拦截。
 pub fn resolve_api_key(raw: &str) -> Result<String, ResolveError> {
-    resolve_api_key_with_policy(raw, true)
+    resolve_api_key_with_policy(raw, true, &process_env_lookup)
 }
 
 fn resolve_api_key_with_policy(
     raw: &str,
     allow_shell_command: bool,
+    env: EnvLookup<'_>,
 ) -> Result<String, ResolveError> {
     let Some((kind, value)) = classify_api_key_input(raw) else {
         return Ok(String::new());
     };
     match kind {
         ApiKeyInputKind::EnvRef => {
-            std::env::var(value).map_err(|_| ResolveError::MissingEnvVar(value.into()))
+            env(value).ok_or_else(|| ResolveError::MissingEnvVar(value.into()))
         },
         ApiKeyInputKind::ShellCommand => {
             if !allow_shell_command {
@@ -346,9 +362,9 @@ fn resolve_api_key_with_policy(
             }
             resolve_shell_command(value)
         },
-        ApiKeyInputKind::EnvVarLike => match std::env::var(value) {
-            Ok(val) => Ok(val),
-            Err(_) => {
+        ApiKeyInputKind::EnvVarLike => match env(value) {
+            Some(val) => Ok(val),
+            None => {
                 tracing::warn!(
                     key = value,
                     "Config value looks like an env var name but the variable is not set; using \
@@ -370,7 +386,7 @@ pub fn profile_has_resolvable_api_key(profile: &Profile) -> bool {
         if let Some((kind, value)) = classify_api_key_input(raw) {
             match kind {
                 ApiKeyInputKind::EnvRef => {
-                    return std::env::var(value).is_ok_and(|v| !v.trim().is_empty());
+                    return process_env_lookup(value).is_some_and(|v| !v.trim().is_empty());
                 },
                 ApiKeyInputKind::ShellCommand
                 | ApiKeyInputKind::EnvVarLike
@@ -381,7 +397,7 @@ pub fn profile_has_resolvable_api_key(profile: &Profile) -> bool {
 
     known_env_keys_for_profile(profile)
         .iter()
-        .any(|k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty()))
+        .any(|k| process_env_lookup(k).is_some_and(|v| !v.trim().is_empty()))
 }
 
 fn build_context_settings(runtime: &RuntimeSection) -> ContextSettings {
@@ -569,13 +585,15 @@ mod tests {
 
     #[test]
     fn test_resolve_api_key_env_prefix() {
-        let key = format!("TEST_API_KEY_{}", std::process::id());
-        std::env::set_var(&key, "sk-test-123");
+        let env = |key: &str| (key == "TEST_API_KEY").then(|| "sk-test-123".to_string());
         assert_eq!(
-            resolve_api_key(&format!("env:{key}")).unwrap(),
+            resolve_api_key_with_policy("env:TEST_API_KEY", true, &env).unwrap(),
             "sk-test-123"
         );
-        std::env::remove_var(&key);
+        assert!(matches!(
+            resolve_api_key_with_policy("env:MISSING_VAR", true, &env),
+            Err(ResolveError::MissingEnvVar(_))
+        ));
     }
 
     #[test]

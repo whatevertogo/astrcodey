@@ -1,7 +1,10 @@
 //! astrcode-core：astrcode 平台的共享类型、trait 和数据模型。
 //!
 //! 本 crate 是基础层——定义了所有其他 crate 实现或消费的公共接口。
-//! 不包含业务逻辑。
+//! 内容限定为:契约类型(wire/持久化格式)、trait 抽象,以及紧贴这些类型的
+//! 纯函数与投影逻辑(如 provider 可见消息归一化、配置解析)。agent loop、
+//! turn 调度、compact 编排等运行时行为不在这里,见 `astrcode-session` /
+//! `astrcode-context`。
 //!
 //! # 模块结构
 //!
