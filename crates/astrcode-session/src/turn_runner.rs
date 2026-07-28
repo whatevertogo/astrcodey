@@ -637,7 +637,7 @@ impl TurnLoop {
     /// 不入事件日志；仅对本次 LLM 调用生效。
     ///
     /// **性能注记**：`send_messages.clone()` 不可消除。
-    /// `ProviderContext` 在 `astrcode-core::extension::ProviderContext` 上
+    /// `ProviderContext` 在 `astrcode-extension-sdk::extension::ProviderContext` 上
     /// 定义为持有 `Vec<LlmMessage>` **所有权**，`emit_provider` 又需
     /// `&self` 借用；caller 必须 clone 才能让 hook 看到消息。`AppendMessages`
     /// 分支看似可避免 clone（`send_messages` 走 move），但为了在同一

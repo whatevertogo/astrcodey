@@ -3,7 +3,7 @@ import { cn } from '../../../lib/utils'
 import { toolCodePreviewBleed } from '../../../lib/styles'
 import { toolCallHasError, type ToolCallStatus } from '../../../services/types'
 import { DiffCodeLines } from '../DiffCodeLines'
-import { previewText, type ToolCall } from './helpers'
+import { defaultToolResultText, previewText, type ToolCall } from './helpers'
 
 export function StatusIndicatorDot({
   status,
@@ -156,7 +156,5 @@ export function ReadContentPreview({ text }: { text: string }) {
 }
 
 export function DefaultToolDetails({ block }: { block: ToolCall }) {
-  const resultText =
-    block.text || (block.status === 'streaming' ? '等待输出...' : '')
-  return <CodePreview text={resultText} />
+  return <CodePreview text={defaultToolResultText(block)} />
 }

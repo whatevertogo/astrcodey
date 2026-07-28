@@ -1,0 +1,13 @@
+{
+  "ui_render": {
+    "type": "markdown",
+    "text": "must be ignored"
+  },
+  "ui_summary": "must be ignored",
+  "toolUi": {
+    "result": {
+      "kind": "builtin",
+      "variant": "legacy"
+    }
+  }
+}

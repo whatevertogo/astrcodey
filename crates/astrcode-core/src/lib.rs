@@ -12,7 +12,6 @@
 //! - [`event`]：统一的运行时事件与持久化事件类型
 //! - [`llm`]：LLM 提供者抽象与消息类型
 //! - [`prompt`]：提示词组合 trait 和类型
-//! - [`read_tool_image`]：read 工具内联图片 tool result 契约
 //! - [`tool`]：工具 trait 及关联类型
 //! - [`types`]：核心共享标识符和数据类型
 //!
@@ -29,7 +28,6 @@ pub mod llm;
 pub mod message_attachment;
 pub mod permission;
 pub mod prompt;
-pub mod read_tool_image;
 pub mod thinking;
 pub mod tool;
 pub mod types;

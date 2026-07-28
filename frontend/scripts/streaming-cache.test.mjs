@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
 
 import {
   fenceCount,
@@ -10,7 +11,10 @@ import {
   extractThinkingBlocks,
   updateThinkingExtractionState,
 } from '../../target/frontend-streaming/thinkingExtraction.js'
-import { previewText } from '../../target/frontend-streaming/tools/helpers.js'
+import {
+  defaultToolResultText,
+  previewText,
+} from '../../target/frontend-streaming/tools/helpers.js'
 
 function legacyFenceCount(text) {
   return text.match(/```/g)?.length ?? 0
@@ -116,4 +120,23 @@ assert.equal(boundedPreview.content.split('\n').length, 24)
 assert.equal(
   boundedPreview.omittedCharacters,
   longToolOutput.length - boundedPreview.content.length
+)
+
+assert.equal(
+  defaultToolResultText({
+    kind: 'toolCall',
+    id: 'unknown-tool',
+    name: 'thirdPartyTool',
+    arguments: '{}',
+    text: 'plain fallback',
+    status: 'complete',
+    metadata: JSON.parse(
+      fs.readFileSync(
+        new URL('./fixtures/legacy-tool-metadata.json', import.meta.url),
+        'utf8'
+      )
+    ),
+  }),
+  'plain fallback',
+  'unknown tools must render their text and ignore legacy backend UI metadata'
 )

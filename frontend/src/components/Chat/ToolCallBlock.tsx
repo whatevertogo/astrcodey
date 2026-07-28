@@ -30,7 +30,7 @@ import { buildStreamingAgentSpec } from './tools/agentSpec'
 import { AgentChildSessionPanel } from './tools/AgentChildSessionPanel'
 import { AskUserCard } from './tools/AskUserCard'
 import { askUserSummary, isPendingAskUser } from './tools/askUser'
-import { GateApprovalCard } from './tools/ToolApprovalCard'
+import { ToolApprovalCard } from './tools/ToolApprovalCard'
 import { Icon, type IconName } from '../ui/Icon'
 
 interface ToolCallBlockProps {
@@ -178,9 +178,8 @@ function ToolCallDetailsPanel({
             </DetailRow>
           ) : null}
           {gatePending && sessionId && block.approval ? (
-            <GateApprovalCard
+            <ToolApprovalCard
               sessionId={sessionId}
-              callId={block.id}
               toolName={block.name}
               approval={block.approval}
               args={args}

@@ -1014,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_completion_shows_compact_summary() {
+    fn tool_completion_uses_builtin_and_unknown_fallbacks() {
         let mut app = make_app();
         apply_payload(
             &mut app,
@@ -1035,6 +1035,24 @@ mod tests {
         );
         assert_eq!(app.messages.len(), 1);
         assert!(app.messages[0].body.plain_text().contains("● 3 match"));
+
+        apply_payload(
+            &mut app,
+            EventPayload::ToolCallCompleted {
+                call_id: "call-extension".into(),
+                tool_name: "thirdPartyTool".into(),
+                result: tool_result("plain extension output", false),
+                arguments: String::new(),
+                arguments_json: None,
+            },
+        );
+        assert_eq!(app.messages.len(), 2);
+        assert!(
+            app.messages[1]
+                .body
+                .plain_text()
+                .contains("plain extension output")
+        );
     }
 
     #[test]

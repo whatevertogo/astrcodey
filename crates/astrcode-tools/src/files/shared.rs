@@ -7,8 +7,8 @@ use std::{
 };
 
 use astrcode_core::{
-    message_attachment::MAX_ATTACHMENT_CONTENT_BYTES, read_tool_image::ReadToolInlinePayload,
-    tool::*,
+    message_attachment::MAX_ATTACHMENT_CONTENT_BYTES,
+    tool::{read_image::ReadToolInlinePayload, *},
 };
 use astrcode_support::hostpaths::resolve_path;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};

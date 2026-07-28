@@ -72,7 +72,7 @@ AstrCode 当前 workspace 有 28 个成员：`crates/` 下 27 个 crate，加上
 - `permission`：权限审批模式和审批结果等通用类型。
 - `context`：上下文组装和 compact 所需的跨 crate 类型。
 - `prompt`：system prompt 贡献者、section、排序等契约。
-- `message_attachment`、`read_tool_image`：消息附件和 read 工具图片结果契约。
+- `message_attachment`：消息附件契约；read 工具图片和 artifact 读取契约位于 `tool`。
 
 依赖边界：无 workspace 内部依赖，只依赖 serde、tokio、uuid、chrono、thiserror、tracing 等基础库。它是 workspace 的根契约层，下游应通过完整模块路径导入，例如 `astrcode_core::event::EventPayload`。
 

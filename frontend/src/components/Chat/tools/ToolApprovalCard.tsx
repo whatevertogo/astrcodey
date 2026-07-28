@@ -41,15 +41,13 @@ const secondaryButton =
 const dangerButton =
   'rounded-lg border border-danger/20 bg-surface px-3 py-1.5 text-[12px] font-medium text-danger transition-colors hover:border-danger/40 hover:bg-danger-soft/30 disabled:cursor-not-allowed disabled:opacity-40'
 
-export function GateApprovalCard({
+export function ToolApprovalCard({
   sessionId,
-  callId,
   toolName,
   approval,
   args = {},
 }: {
   sessionId: string
-  callId: string
   toolName: string
   approval: ToolApproval
   args?: JsonRecord
@@ -68,7 +66,7 @@ export function GateApprovalCard({
     setBusy(true)
     setError(null)
     try {
-      await submitToolGateApproval(sessionId, callId, decision)
+      await submitToolGateApproval(sessionId, approval.callId, decision)
       await refreshConversationSnapshot()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))

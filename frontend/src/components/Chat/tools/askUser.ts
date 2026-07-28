@@ -97,17 +97,6 @@ export function parseAskUserOutput(text: string): AskUserOutput | null {
   }
 }
 
-export function isAwaitingUserInput(text: string): boolean {
-  const trimmed = text.trim()
-  if (!trimmed.startsWith('{')) return false
-  try {
-    const obj = asRecord(JSON.parse(trimmed) as unknown)
-    return obj.status === 'awaiting_user_input'
-  } catch {
-    return false
-  }
-}
-
 type AskUserBlock = Extract<ConversationBlock, { kind: 'toolCall' }>
 
 export function isPendingAskUser(block: AskUserBlock): boolean {

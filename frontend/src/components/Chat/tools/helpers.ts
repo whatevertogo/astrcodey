@@ -138,6 +138,10 @@ export function toolMeta(block: ToolCall): JsonRecord {
   return asRecord(block.metadata)
 }
 
+export function defaultToolResultText(block: ToolCall): string {
+  return block.text || (block.status === 'streaming' ? '等待输出...' : '')
+}
+
 export function pathFor(block: ToolCall): string {
   const args = toolArgs(block)
   const meta = toolMeta(block)

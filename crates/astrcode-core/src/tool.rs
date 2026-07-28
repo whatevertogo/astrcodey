@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use crate::{event::EventPayload, types::SessionId};
 
 pub mod access;
+pub mod read_image;
 pub mod selection;
 
 use access::ResourceAccess;

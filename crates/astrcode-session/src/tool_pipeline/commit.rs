@@ -137,6 +137,7 @@ impl ToolCalls {
                 result.content = format!("Tool result blocked by hook: {reason}");
                 result.is_error = true;
                 result.error = Some(reason);
+                result.discovered_tool_names.clear();
             },
             PostToolUseResult::Allow => {},
         }
