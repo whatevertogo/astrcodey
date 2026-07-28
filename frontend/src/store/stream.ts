@@ -1,10 +1,10 @@
 import { consumeSseStream } from '../services/sse-stream'
-import type { ConversationDelta } from '../services/types'
 import { applyDeltasToState } from './delta/applyDelta'
 import {
   SessionStreamController,
   type SessionStreamScheduler,
 } from './sessionStreamController'
+import { ConversationDeltaFrameBuffer } from './delta/frameBuffer'
 import type { ActiveSessionStream, AppState } from './types'
 
 const SSE_RECONNECT_BASE_MS = 1000
@@ -32,8 +32,7 @@ export function startSessionStream(
     partial: Partial<AppState> | ((s: AppState) => Partial<AppState>)
   ) => void
 ): ActiveSessionStream {
-  const pendingDeltas: ConversationDelta[] = []
-  let latestCursor: string | null = null
+  const frameBuffer = new ConversationDeltaFrameBuffer()
   let rafId: number | null = null
   let timeoutId: number | null = null
 
@@ -50,19 +49,10 @@ export function startSessionStream(
 
   const flushPending = () => {
     clearFlushSchedule()
+    if (frameBuffer.isEmpty()) return
 
-    if (pendingDeltas.length === 0) {
-      if (latestCursor !== null) {
-        set({ cursor: latestCursor })
-        latestCursor = null
-      }
-      return
-    }
-
-    const deltas = pendingDeltas.splice(0)
-    const cursor = latestCursor
-    latestCursor = null
-    applyDeltasToState(deltas, get, set, cursor ?? undefined)
+    const frame = frameBuffer.drain()
+    applyDeltasToState(frame.deltas, get, set, frame.cursor ?? undefined)
   }
 
   const scheduleFlush = () => {
@@ -83,11 +73,21 @@ export function startSessionStream(
       isActive: () => get().activeSessionId === sessionId,
       applyEnvelope: (envelope) => {
         if (get().activeSessionId !== sessionId) return
-        latestCursor = envelope.cursor.value
-        pendingDeltas.push(envelope.delta)
-        scheduleFlush()
+        const shouldFlush = frameBuffer.push(
+          envelope.delta,
+          envelope.cursor.value
+        )
+        if (shouldFlush) {
+          flushPending()
+        } else {
+          scheduleFlush()
+        }
       },
-      rehydrate: () => get().refreshConversationSnapshot(),
+      rehydrate: async () => {
+        flushPending()
+        if (get().activeSessionId !== sessionId) return null
+        return get().refreshConversationSnapshot()
+      },
       updateStatus: (sessionStreamStatus, sessionStreamError) => {
         if (get().activeSessionId !== sessionId) return
         set({ sessionStreamStatus, sessionStreamError })
@@ -99,8 +99,7 @@ export function startSessionStream(
   return {
     stop: () => {
       clearFlushSchedule()
-      pendingDeltas.length = 0
-      latestCursor = null
+      frameBuffer.clear()
       controller.stop()
     },
   }

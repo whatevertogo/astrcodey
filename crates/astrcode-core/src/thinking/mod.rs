@@ -5,6 +5,11 @@
 //! provider/wire/model combination supports, and the built-in capability lookup
 //! by provider kind + wire format + model family.
 
+mod catalog;
+mod legacy;
+
+pub use catalog::resolve_thinking_capability;
+pub use legacy::{effort_to_thinking_level, legacy_to_thinking_config, thinking_level_to_effort};
 use serde::{Deserialize, Serialize};
 
 // ── Normalized Thinking Config ──────────────────────────────────────────
@@ -91,133 +96,7 @@ const fn default_can_disable() -> bool {
     true
 }
 
-// ── Built-in Thinking Capability Catalog ───────────────────────────────
-
-/// Convenience helper to create a `Some(vec![])` for the toggle-only case.
-fn empty_effort() -> Option<Vec<String>> {
-    Some(vec![])
-}
-
-/// Create the static built-in thinking capability catalog.
-fn builtin_thinking_specs() -> Vec<BuiltinThinkingSpec> {
-    vec![
-        // OpenAI reasoning models with the stable low/medium/high effort set.
-        BuiltinThinkingSpec {
-            provider_kinds: &["openai"],
-            wire_format: super::config::raw::ProviderWireFormat::OpenAiResponses,
-            model_family_prefixes: &["o1", "o3"],
-            capability: ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiResponses,
-                allowed_effort: Some(vec!["low".into(), "medium".into(), "high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: false,
-            },
-        },
-        // New Anthropic models expose adaptive thinking plus output effort.
-        BuiltinThinkingSpec {
-            provider_kinds: &["anthropic"],
-            wire_format: super::config::raw::ProviderWireFormat::AnthropicMessages,
-            model_family_prefixes: &["claude-opus-4-6", "claude-sonnet-4-6"],
-            capability: ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::AnthropicAdaptive,
-                allowed_effort: Some(vec![
-                    "low".into(),
-                    "medium".into(),
-                    "high".into(),
-                    "max".into(),
-                ]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            },
-        },
-        // Older Claude models use explicit extended-thinking token budgets.
-        BuiltinThinkingSpec {
-            provider_kinds: &["anthropic"],
-            wire_format: super::config::raw::ProviderWireFormat::AnthropicMessages,
-            model_family_prefixes: &["claude"],
-            capability: ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::AnthropicBudget,
-                allowed_effort: empty_effort(),
-                budget_min: Some(1024),
-                budget_max: Some(64_000),
-                can_disable: true,
-            },
-        },
-        // DeepSeek (OpenAI Chat Completions reasoning via `reasoning` field)
-        BuiltinThinkingSpec {
-            provider_kinds: &["deepseek"],
-            wire_format: super::config::raw::ProviderWireFormat::OpenAiChatCompletions,
-            model_family_prefixes: &["deepseek"],
-            capability: ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiChat,
-                allowed_effort: empty_effort(),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            },
-        },
-        // Zhipu models
-        BuiltinThinkingSpec {
-            provider_kinds: &["zhipu"],
-            wire_format: super::config::raw::ProviderWireFormat::OpenAiChatCompletions,
-            model_family_prefixes: &["glm"],
-            capability: ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiChat,
-                allowed_effort: empty_effort(),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            },
-        },
-    ]
-}
-
-/// A static entry in the built-in thinking capability catalog.
-struct BuiltinThinkingSpec {
-    provider_kinds: &'static [&'static str],
-    wire_format: super::config::raw::ProviderWireFormat,
-    /// Glob-like model ID prefix patterns. Empty means match all models for the provider.
-    model_family_prefixes: &'static [&'static str],
-    capability: ThinkingCapability,
-}
-
-/// Resolve the built-in [`ThinkingCapability`] for a given provider + wire + model.
-///
-/// Returns `None` for unknown `provider_kind` / `wire_format` combinations (including
-/// generic `"openai-compatible"` providers, which are not matched by the catalog).
-///
-/// Matching uses:
-/// - Exact `provider_kind` match
-/// - Exact `wire_format` match
-/// - Model ID starts with one of the family prefixes (empty prefix list matches all models)
-pub fn resolve_thinking_capability(
-    provider_kind: &str,
-    wire_format: super::config::raw::ProviderWireFormat,
-    model_id: &str,
-) -> Option<ThinkingCapability> {
-    for spec in builtin_thinking_specs() {
-        if !spec.provider_kinds.contains(&provider_kind) {
-            continue;
-        }
-        if spec.wire_format != wire_format {
-            continue;
-        }
-        if !spec.model_family_prefixes.is_empty()
-            && !spec
-                .model_family_prefixes
-                .iter()
-                .any(|p| model_id.starts_with(p))
-        {
-            continue;
-        }
-        return Some(spec.capability);
-    }
-    None
-}
-
-/// Validate and normalize a [`ThinkingConfig`] against a [`ThinkingCapability`].
+/// Validate a [`ThinkingConfig`] against a [`ThinkingCapability`].
 ///
 /// Returns a list of validation issues (empty = valid). The `ThinkingConfig` is
 /// not mutated — the caller should decide whether to clamp/fallback based on the
@@ -287,38 +166,6 @@ pub fn validate_thinking(config: &ThinkingConfig, capability: &ThinkingCapabilit
     }
 
     issues
-}
-
-/// Convert legacy [`crate::llm::ThinkingLevel`] effort to an effort string.
-pub fn thinking_level_to_effort(level: crate::llm::ThinkingLevel) -> &'static str {
-    level.as_wire_value()
-}
-
-/// Convert a legacy `(reasoning: bool, thinking_level: Option<ThinkingLevel>)` pair
-/// into a [`ThinkingConfig`].
-pub fn legacy_to_thinking_config(
-    reasoning: bool,
-    thinking_level: Option<crate::llm::ThinkingLevel>,
-) -> ThinkingConfig {
-    if !reasoning && thinking_level.is_none() {
-        return ThinkingConfig::default();
-    }
-    ThinkingConfig {
-        enabled: true,
-        effort: thinking_level.map(|l| l.as_wire_value().to_string()),
-        budget_tokens: None,
-    }
-}
-
-/// Convert a [`ThinkingConfig`] effort string back to a [`ThinkingLevel`] if it
-/// matches one of the standard levels.
-pub fn effort_to_thinking_level(effort: &str) -> Option<crate::llm::ThinkingLevel> {
-    match effort {
-        "low" => Some(crate::llm::ThinkingLevel::Low),
-        "medium" => Some(crate::llm::ThinkingLevel::Medium),
-        "high" => Some(crate::llm::ThinkingLevel::High),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

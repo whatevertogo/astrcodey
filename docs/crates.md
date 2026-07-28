@@ -579,6 +579,8 @@ Feature：
 - `transport`：stdio transport 和 JSON-RPC 初始化/错误响应。
 - `acp`：Agent Client Protocol 适配和事件转换。
 - `http`：Axum HTTP server、认证、SSE stream、REST routes、conversation projection。
+- `http/stream/replay`：校验 cursor、限制 replay 数量并决定是否要求 rehydrate。
+- `http/stream/child_sessions`：维护父会话可见的 child lineage、compact leaf 与阶段投影。
 - `session_manager`：session 创建、恢复、列表、删除、fork/recycle 等管理。
 - `session_operations`：给扩展使用的、带 session 树访问校验的操作 facade。
 - `turn_scheduler`：输入投递策略、turn 启动、队列、注入、完成后启动下一条。

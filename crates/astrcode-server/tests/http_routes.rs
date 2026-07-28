@@ -1143,6 +1143,17 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
         .await
         .unwrap();
 
+    let mut stream_body = stream_response.into_body();
+    let connected = tokio::time::timeout(Duration::from_secs(1), stream_body.frame())
+        .await
+        .expect("SSE connection comment should be immediate")
+        .expect("SSE body should stay open")
+        .unwrap();
+    assert_eq!(
+        connected.data_ref().map(|data| data.as_ref()),
+        Some(&b": connected\n\n"[..])
+    );
+
     let accepted = post_json(
         app,
         &format!("/api/sessions/{session_id}/prompt"),
@@ -1152,7 +1163,7 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     .await;
     assert_eq!(accepted.status(), StatusCode::OK);
 
-    let body = read_sse_until(stream_response.into_body(), "finalizeBlock").await;
+    let body = read_sse_until(stream_body, "finalizeBlock").await;
     assert!(body.contains("conversation"));
     assert!(body.contains("hello"));
     assert!(body.contains("hello from http"));
@@ -1586,16 +1597,21 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
         .await
         .unwrap();
 
-    let mut child_event = Event::new(
+    events.send_notification(ClientNotification::Event(Event::new(
         child_sid.clone(),
+        None,
+        EventPayload::AssistantMessageStarted {
+            message_id: "child-message".into(),
+        },
+    )));
+    events.send_notification(ClientNotification::Event(Event::new(
+        child_sid,
         None,
         EventPayload::AssistantTextDelta {
             message_id: "child-message".into(),
             delta: "child live text must not leak".into(),
         },
-    );
-    child_event.seq = Some(99);
-    events.send_notification(ClientNotification::Event(child_event));
+    )));
 
     let body = read_sse_until(response.into_body(), "agentSessionUpdated").await;
     assert!(body.contains("agentSessionUpdated"));

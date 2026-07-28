@@ -43,6 +43,9 @@ Session::emit / Session::append_event
 `ServerEventBus` 不写 EventStore，只做"session broadcast → 客户端通知"的桥接。
 broadcast 发生 lag 时，forwarder 主动推送 `SessionResumed` 快照触发客户端 rehydrate。
 
+Conversation snapshot、cursor、SSE replay、前端逐帧归并和虚拟化渲染的完整契约见
+[Conversation stream contract](architecture/conversation-stream.md)。
+
 ### 事件日志格式
 
 每行一个 JSON 对象（JSONL）。顶层是事件信封，领域事实位于 `payload` 子对象：
@@ -270,6 +273,8 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 - 路由：sessions CRUD、prompt 提交、compact、abort、fork、SSE 事件流
 - SSE 流携带 `cursor`（event seq），客户端断连后可从 cursor 恢复
 - broadcast channel 溢出时发送 `RehydrateRequired` delta，通知客户端重新拉取 snapshot
+- 前端在动画帧边界无损归并流式 delta；缓冲达到数量或文本预算时提前 flush，不丢事件
+- Settings、Plugins 和 Markdown parser 按行为边界延迟加载，聊天主路径保持轻量
 
 ### 传输层
 

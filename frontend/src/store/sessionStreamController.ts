@@ -107,17 +107,18 @@ export class SessionStreamController {
       )
       if (result === 'ended' && this.canContinue()) {
         this.host.updateStatus('reconnecting', null)
-        this.scheduleReconnect(opened ? 0 : attempt + 1, false)
+        this.scheduleReconnect(opened ? 0 : attempt + 1, opened)
       }
     } catch (error) {
       if (abortController.signal.aborted || !this.canContinue()) return
-      const requiresRehydrate = error instanceof SessionStreamProtocolError
+      const protocolError = error instanceof SessionStreamProtocolError
+      const requiresRehydrate = opened || protocolError
       this.host.updateStatus(
         requiresRehydrate ? 'degraded' : 'reconnecting',
         error instanceof Error ? error.message : String(error)
       )
       this.scheduleReconnect(
-        opened && !requiresRehydrate ? 0 : attempt + 1,
+        opened && !protocolError ? 0 : attempt + 1,
         requiresRehydrate
       )
     } finally {

@@ -5,15 +5,17 @@
 //! 2. `replay_stream`：从 `EventStore` 拉历史事件转 deltas（按 cursor 起点）。
 //! 3. `live_stream`：订阅当前 conversation 的 scoped event fanout 与全局非事件通知。
 
+mod child_sessions;
+mod replay;
+
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
-    event::{Event, EventPayload, Phase},
+    event::{Event, EventPayload},
     storage::AgentSessionStatus,
-    types::{Cursor, SessionId},
+    types::SessionId,
 };
 use astrcode_protocol::{
-    agent_session_link::AgentSessionLinkDto,
     events::ClientNotification,
     http::{
         ConversationBlockDto, ConversationCursorDto, ConversationDeltaDto,
@@ -28,7 +30,9 @@ use axum::{
         sse::{Event as SseEvent, KeepAlive, Sse},
     },
 };
+use child_sessions::ChildSessionTracker;
 use futures_util::{StreamExt, stream};
+use replay::replay_after_cursor;
 use serde::Deserialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -40,7 +44,6 @@ use super::{
 use crate::bootstrap::ServerRuntime;
 
 type SseItem = Result<axum::response::sse::Event, std::convert::Infallible>;
-const MAX_REPLAY_EVENTS: usize = 1_000;
 
 /// SSE live stream 的内部状态。
 ///
@@ -61,12 +64,7 @@ struct LiveStreamState {
     /// 是否已完成初始 stale event 排水。
     /// replay_max_seq 存在时为 false，首次 unfold 调用时执行一次性排水。
     drained: bool,
-    /// 父会话中的 initial child id -> 当前 leaf child id。
-    child_sessions: HashMap<SessionId, SessionId>,
-    /// 当前 leaf child id -> initial child id，用于 O(1) 匹配子会话 live 事件。
-    leaf_child_sessions: HashMap<SessionId, SessionId>,
-    /// 子会话最近 live 阶段，用于避免重复投影。
-    last_child_phase: HashMap<SessionId, Phase>,
+    child_sessions: ChildSessionTracker,
     /// 缓存的最新 cursor，用于 live-only 事件（避免每次查询存储）。
     cached_cursor: Option<String>,
 }
@@ -121,7 +119,7 @@ pub(in crate::http) async fn session_stream(
             );
         },
     };
-    let child_sessions = agent_sessions
+    let child_sessions: HashMap<SessionId, SessionId> = agent_sessions
         .iter()
         .filter(|link| link.status == AgentSessionStatus::Running)
         .map(|link| {
@@ -133,7 +131,6 @@ pub(in crate::http) async fn session_stream(
             )
         })
         .collect();
-    let leaf_child_sessions = reverse_child_session_index(&child_sessions);
     let last_child_phase = agent_sessions
         .iter()
         .filter_map(|link| {
@@ -141,6 +138,7 @@ pub(in crate::http) async fn session_stream(
                 .map(|phase| (link.child_session_id.clone(), phase))
         })
         .collect();
+    let child_session_tracker = ChildSessionTracker::new(child_sessions.clone(), last_child_phase);
 
     http_state
         .event_bus
@@ -216,9 +214,7 @@ pub(in crate::http) async fn session_stream(
             has_messages,
             drained: false,
             cached_cursor: None,
-            child_sessions,
-            leaf_child_sessions,
-            last_child_phase,
+            child_sessions: child_session_tracker,
         },
         |mut state| async move {
             if state.closing {
@@ -263,64 +259,14 @@ pub(in crate::http) async fn session_stream(
     // poll the old live receiver after sending the marker, otherwise it could
     // deliver deltas while the replacement snapshot is being installed.
     let live_stream = live_stream.take(if replay_error { 0 } else { usize::MAX });
-    let stream = replay_error_stream.chain(replay_stream).chain(live_stream);
+    let connected_stream = stream::iter([Ok(SseEvent::default().comment("connected"))]);
+    let stream = connected_stream
+        .chain(replay_error_stream)
+        .chain(replay_stream)
+        .chain(live_stream);
     Sse::new(stream)
         .keep_alive(KeepAlive::default())
         .into_response()
-}
-
-async fn replay_after_cursor(
-    runtime: &ServerRuntime,
-    session_id: &SessionId,
-    cursor: &str,
-) -> (Vec<Event>, bool) {
-    let Ok(requested_seq) = cursor.parse::<u64>() else {
-        return (Vec::new(), true);
-    };
-    let latest_seq = match runtime.session_manager.latest_cursor(session_id).await {
-        Ok(Some(latest)) => match latest.parse::<u64>() {
-            Ok(latest) => latest,
-            Err(error) => {
-                tracing::warn!(session_id = %session_id, latest, %error, "stored SSE cursor is invalid");
-                return (Vec::new(), true);
-            },
-        },
-        Ok(None) => 0,
-        Err(error) => {
-            tracing::warn!(session_id = %session_id, cursor, "failed to validate SSE cursor: {error}");
-            return (Vec::new(), true);
-        },
-    };
-    if requested_seq > latest_seq {
-        tracing::info!(
-            session_id = %session_id,
-            cursor,
-            latest_seq,
-            "SSE cursor is ahead of the session; requesting rehydrate"
-        );
-        return (Vec::new(), true);
-    }
-
-    match runtime
-        .session_manager
-        .replay_from_limited(session_id, &Cursor::from(cursor), MAX_REPLAY_EVENTS + 1)
-        .await
-    {
-        Ok(events) if events.len() > MAX_REPLAY_EVENTS => {
-            tracing::info!(
-                session_id = %session_id,
-                cursor,
-                replay_limit = MAX_REPLAY_EVENTS,
-                "SSE replay limit exceeded; requesting rehydrate"
-            );
-            (Vec::new(), true)
-        },
-        Ok(events) => (events, false),
-        Err(error) => {
-            tracing::warn!(session_id = %session_id, cursor, "failed to replay SSE cursor: {error}");
-            (Vec::new(), true)
-        },
-    }
 }
 
 async fn recv_live_input(state: &mut LiveStreamState) -> Option<LiveInput> {
@@ -378,7 +324,7 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
                 continue;
             }
             buffered.push(LiveInput::Event(event));
-        } else if is_tracked_child_event(state, &event) {
+        } else if state.child_sessions.is_tracked_event(&event) {
             buffered.push(LiveInput::Event(event));
         }
     }
@@ -421,7 +367,7 @@ async fn event_to_sse_items(state: &mut LiveStreamState, event: Arc<Event>) -> V
             if event_adds_message(event) {
                 state.has_messages = true;
             }
-            update_child_tracking_from_parent_event(state, event);
+            state.child_sessions.update_from_parent_event(event);
 
             // 更新缓存的 cursor（如果有 seq）
             if let Some(seq) = event.seq {
@@ -446,7 +392,7 @@ async fn event_to_sse_items(state: &mut LiveStreamState, event: Arc<Event>) -> V
                 .collect()
         },
         event => {
-            let Some(delta) = child_event_to_agent_update(state, event) else {
+            let Some(delta) = state.child_sessions.project_event(event) else {
                 return Vec::new();
             };
             // 子事件的 seq 属于子会话，不能用来更新父会话的 cursor
@@ -506,160 +452,6 @@ async fn get_or_fetch_cursor(state: &mut LiveStreamState) -> String {
         let cursor = state_cursor(&state.runtime, &state.session_id).await;
         state.cached_cursor = Some(cursor.clone());
         cursor
-    }
-}
-
-fn update_child_tracking_from_parent_event(state: &mut LiveStreamState, event: &Event) {
-    match &event.payload {
-        EventPayload::AgentSessionSpawned {
-            child_session_id, ..
-        } => {
-            state
-                .child_sessions
-                .insert(child_session_id.clone(), child_session_id.clone());
-            state
-                .leaf_child_sessions
-                .insert(child_session_id.clone(), child_session_id.clone());
-            state
-                .last_child_phase
-                .insert(child_session_id.clone(), Phase::Thinking);
-        },
-        EventPayload::AgentSessionCompleted {
-            child_session_id, ..
-        }
-        | EventPayload::AgentSessionFailed {
-            child_session_id, ..
-        }
-        | EventPayload::AgentSessionRecycled { child_session_id } => {
-            if let Some(leaf_child_id) = state.child_sessions.remove(child_session_id) {
-                state.leaf_child_sessions.remove(&leaf_child_id);
-            }
-            state.last_child_phase.remove(child_session_id);
-        },
-        _ => {},
-    }
-}
-
-fn child_event_to_agent_update(
-    state: &mut LiveStreamState,
-    event: &Event,
-) -> Option<ConversationDeltaDto> {
-    if update_compacted_child_leaf(state, event) {
-        return None;
-    }
-
-    let initial_child_id = resolve_initial_child_id(state, &event.session_id)?;
-    let projection = map_child_phase(&event.payload)?;
-
-    if is_duplicate_child_phase(state, &initial_child_id, &projection) {
-        return None;
-    }
-    state
-        .last_child_phase
-        .insert(initial_child_id.clone(), projection.phase);
-
-    Some(child_phase_delta(initial_child_id, projection))
-}
-
-#[derive(Debug)]
-struct ChildPhaseProjection {
-    phase: Phase,
-    current_tool: Option<String>,
-}
-
-fn reverse_child_session_index(
-    child_sessions: &HashMap<SessionId, SessionId>,
-) -> HashMap<SessionId, SessionId> {
-    child_sessions
-        .iter()
-        .map(|(initial, leaf)| (leaf.clone(), initial.clone()))
-        .collect()
-}
-
-fn is_tracked_child_event(state: &LiveStreamState, event: &Event) -> bool {
-    if state.leaf_child_sessions.contains_key(&event.session_id) {
-        return true;
-    }
-    matches!(
-        &event.payload,
-        EventPayload::SessionContinuedFromCompaction {
-            parent_session_id,
-            ..
-        } if state.leaf_child_sessions.contains_key(parent_session_id)
-    )
-}
-
-fn update_compacted_child_leaf(state: &mut LiveStreamState, event: &Event) -> bool {
-    let EventPayload::SessionContinuedFromCompaction {
-        parent_session_id, ..
-    } = &event.payload
-    else {
-        return false;
-    };
-    let Some(initial_child_id) = state.leaf_child_sessions.remove(parent_session_id) else {
-        return true;
-    };
-    state
-        .child_sessions
-        .insert(initial_child_id.clone(), event.session_id.clone());
-    state
-        .leaf_child_sessions
-        .insert(event.session_id.clone(), initial_child_id);
-    true
-}
-
-fn resolve_initial_child_id(
-    state: &LiveStreamState,
-    leaf_child_id: &SessionId,
-) -> Option<SessionId> {
-    state.leaf_child_sessions.get(leaf_child_id).cloned()
-}
-
-fn map_child_phase(payload: &EventPayload) -> Option<ChildPhaseProjection> {
-    let (phase, current_tool) = match payload {
-        EventPayload::TurnStarted | EventPayload::AgentRunStarted => (Phase::Thinking, None),
-        EventPayload::AssistantMessageStarted { .. } | EventPayload::AssistantTextDelta { .. } => {
-            (Phase::Streaming, None)
-        },
-        EventPayload::ToolCallStarted { tool_name, .. }
-        | EventPayload::ToolCallRequested { tool_name, .. } => {
-            (Phase::CallingTool, Some(tool_name.clone()))
-        },
-        EventPayload::ToolCallCompleted { .. } => (Phase::Thinking, None),
-        EventPayload::TurnCompleted { .. } | EventPayload::AgentRunCompleted { .. } => {
-            (Phase::Idle, None)
-        },
-        EventPayload::ErrorOccurred { .. } => (Phase::Error, None),
-        _ => return None,
-    };
-    Some(ChildPhaseProjection {
-        phase,
-        current_tool,
-    })
-}
-
-fn is_duplicate_child_phase(
-    state: &LiveStreamState,
-    initial_child_id: &SessionId,
-    projection: &ChildPhaseProjection,
-) -> bool {
-    projection.current_tool.is_none()
-        && state
-            .last_child_phase
-            .get(initial_child_id)
-            .is_some_and(|last| *last == projection.phase)
-}
-
-fn child_phase_delta(
-    initial_child_id: SessionId,
-    projection: ChildPhaseProjection,
-) -> ConversationDeltaDto {
-    ConversationDeltaDto::AgentSessionUpdated {
-        agent_session: AgentSessionLinkDto::phase_only(
-            initial_child_id,
-            projection.phase.into(),
-            projection.current_tool,
-        ),
     }
 }
 

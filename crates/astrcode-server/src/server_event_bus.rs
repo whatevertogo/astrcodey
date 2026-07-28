@@ -8,7 +8,7 @@ use std::{
 };
 
 use astrcode_core::{
-    event::{Event, EventPayload},
+    event::{Event, EventPayload, Phase},
     types::{MessageId, SessionId},
 };
 use astrcode_protocol::events::ClientNotification;
@@ -25,11 +25,35 @@ pub(crate) struct StreamingSnapshot {
 
 type StreamingState = parking_lot::Mutex<Option<(MessageId, String, String)>>;
 
+#[derive(Clone)]
+enum SessionRoute {
+    Conversation(SessionId),
+    AgentChild(SessionId),
+}
+
+impl SessionRoute {
+    fn root_session_id(&self) -> &SessionId {
+        match self {
+            Self::Conversation(session_id) | Self::AgentChild(session_id) => session_id,
+        }
+    }
+
+    fn forwards_to_root(&self, payload: &EventPayload) -> bool {
+        match self {
+            Self::Conversation(_) => true,
+            Self::AgentChild(_) => {
+                agent_session_progress(payload).is_some()
+                    || matches!(payload, EventPayload::SessionContinuedFromCompaction { .. })
+            },
+        }
+    }
+}
+
 pub struct ServerEventBus {
     legacy_tx: Option<Arc<EventFanout<ClientNotification>>>,
     global_notifications: Arc<EventFanout<ClientNotification>>,
     conversation_events: Mutex<HashMap<SessionId, Arc<EventFanout<Arc<Event>>>>>,
-    session_roots: Mutex<HashMap<SessionId, SessionId>>,
+    session_routes: Mutex<HashMap<SessionId, SessionRoute>>,
     attached: Mutex<HashSet<SessionId>>,
     streaming: Mutex<HashMap<SessionId, Arc<StreamingState>>>,
 }
@@ -50,7 +74,7 @@ impl ServerEventBus {
             legacy_tx,
             global_notifications: Arc::new(EventFanout::new(Self::EVENT_FANOUT_CAPACITY)),
             conversation_events: Mutex::new(HashMap::new()),
-            session_roots: Mutex::new(HashMap::new()),
+            session_routes: Mutex::new(HashMap::new()),
             attached: Mutex::new(HashSet::new()),
             streaming: Mutex::new(HashMap::new()),
         }
@@ -76,13 +100,14 @@ impl ServerEventBus {
             return;
         }
 
-        let mut roots = self.session_roots.lock();
-        roots
+        let mut routes = self.session_routes.lock();
+        routes
             .entry(conversation_session_id.clone())
-            .or_insert_with(|| conversation_session_id.clone());
+            .or_insert_with(|| SessionRoute::Conversation(conversation_session_id.clone()));
         for (initial_child_id, leaf_child_id) in child_sessions {
-            roots.insert(initial_child_id.clone(), conversation_session_id.clone());
-            roots.insert(leaf_child_id.clone(), conversation_session_id.clone());
+            let route = SessionRoute::AgentChild(conversation_session_id.clone());
+            routes.insert(initial_child_id.clone(), route.clone());
+            routes.insert(leaf_child_id.clone(), route);
         }
     }
 
@@ -100,12 +125,12 @@ impl ServerEventBus {
 
     pub fn publish_event(&self, event: Arc<Event>) {
         let session_deleted = matches!(event.payload, EventPayload::SessionDeleted);
-        let root_session_id = self.conversation_root_for_event(&event);
-        self.remember_event_routes(&event, &root_session_id);
+        let route = self.route_for_event(&event);
+        self.remember_event_route(&event, &route);
         self.update_streaming_snapshot(&event);
         self.send_to_existing_conversation_fanout(&event.session_id, Arc::clone(&event));
-        if root_session_id != event.session_id {
-            self.send_to_existing_conversation_fanout(&root_session_id, Arc::clone(&event));
+        if route.root_session_id() != &event.session_id && route.forwards_to_root(&event.payload) {
+            self.send_to_existing_conversation_fanout(route.root_session_id(), Arc::clone(&event));
         }
         if let Some(legacy_tx) = &self.legacy_tx {
             legacy_tx.send(ClientNotification::Event((*event).clone()));
@@ -142,9 +167,9 @@ impl ServerEventBus {
     fn forget_session_routes(&self, session_id: &SessionId) {
         self.streaming.lock().remove(session_id);
         self.conversation_events.lock().remove(session_id);
-        self.session_roots
-            .lock()
-            .retain(|session, root| session != session_id && root != session_id);
+        self.session_routes.lock().retain(|session, route| {
+            session != session_id && route.root_session_id() != session_id
+        });
     }
 
     pub(crate) fn streaming_snapshot(&self, session_id: &SessionId) -> Option<StreamingSnapshot> {
@@ -189,50 +214,60 @@ impl ServerEventBus {
         }
     }
 
-    fn conversation_root_for_event(&self, event: &Event) -> SessionId {
+    fn route_for_event(&self, event: &Event) -> SessionRoute {
         match &event.payload {
             EventPayload::SessionStarted {
                 parent_session_id: Some(parent_session_id),
                 ..
-            }
-            | EventPayload::SessionContinuedFromCompaction {
+            } => SessionRoute::AgentChild(
+                self.route_for_session(parent_session_id)
+                    .root_session_id()
+                    .clone(),
+            ),
+            EventPayload::SessionContinuedFromCompaction {
                 parent_session_id, ..
-            } => self.session_root(parent_session_id),
-            _ => self.session_root(&event.session_id),
+            } => self.route_for_session(parent_session_id),
+            _ => self.route_for_session(&event.session_id),
         }
     }
 
-    fn session_root(&self, session_id: &SessionId) -> SessionId {
-        self.session_roots
+    fn route_for_session(&self, session_id: &SessionId) -> SessionRoute {
+        self.session_routes
             .lock()
             .get(session_id)
             .cloned()
-            .unwrap_or_else(|| session_id.clone())
+            .unwrap_or_else(|| SessionRoute::Conversation(session_id.clone()))
     }
 
-    fn remember_event_routes(&self, event: &Event, root_session_id: &SessionId) {
-        let mut roots = self.session_roots.lock();
-        roots
+    fn remember_event_route(&self, event: &Event, route: &SessionRoute) {
+        let mut routes = self.session_routes.lock();
+        routes
             .entry(event.session_id.clone())
-            .or_insert_with(|| root_session_id.clone());
+            .or_insert_with(|| route.clone());
         match &event.payload {
             EventPayload::SessionStarted {
                 parent_session_id: None,
                 ..
             } => {
-                roots.insert(event.session_id.clone(), event.session_id.clone());
+                routes.insert(
+                    event.session_id.clone(),
+                    SessionRoute::Conversation(event.session_id.clone()),
+                );
             },
             EventPayload::SessionStarted {
                 parent_session_id: Some(_),
                 ..
             }
             | EventPayload::SessionContinuedFromCompaction { .. } => {
-                roots.insert(event.session_id.clone(), root_session_id.clone());
+                routes.insert(event.session_id.clone(), route.clone());
             },
             EventPayload::AgentSessionSpawned {
                 child_session_id, ..
             } => {
-                roots.insert(child_session_id.clone(), root_session_id.clone());
+                routes.insert(
+                    child_session_id.clone(),
+                    SessionRoute::AgentChild(route.root_session_id().clone()),
+                );
             },
             _ => {},
         }
@@ -246,6 +281,23 @@ impl ServerEventBus {
                 .or_insert_with(|| Arc::new(StreamingState::new(None))),
         );
         update_streaming(&state, &event.payload);
+    }
+}
+
+pub(crate) fn agent_session_progress(payload: &EventPayload) -> Option<(Phase, Option<String>)> {
+    match payload {
+        EventPayload::TurnStarted | EventPayload::AgentRunStarted => Some((Phase::Thinking, None)),
+        EventPayload::AssistantMessageStarted { .. } => Some((Phase::Streaming, None)),
+        EventPayload::ToolCallStarted { tool_name, .. }
+        | EventPayload::ToolCallRequested { tool_name, .. } => {
+            Some((Phase::CallingTool, Some(tool_name.clone())))
+        },
+        EventPayload::ToolCallCompleted { .. } => Some((Phase::Thinking, None)),
+        EventPayload::TurnCompleted { .. } | EventPayload::AgentRunCompleted { .. } => {
+            Some((Phase::Idle, None))
+        },
+        EventPayload::ErrorOccurred { .. } => Some((Phase::Error, None)),
+        _ => None,
     }
 }
 
@@ -280,7 +332,11 @@ fn update_streaming(state: &StreamingState, payload: &EventPayload) {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::{event::EventPayload, types::SessionId};
+    use astrcode_core::{
+        event::EventPayload,
+        types::{SessionId, ToolCallId},
+    };
+    use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
 
@@ -327,5 +383,97 @@ mod tests {
             ClientNotification::Event(event) => assert_eq!(event.session_id, session_id),
             other => panic!("expected event notification, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn conversation_routes_filter_agent_noise_and_preserve_continuations() {
+        let bus = ServerEventBus::new();
+        let parent = SessionId::new("parent");
+        let child = SessionId::new("child");
+        let continued_child = SessionId::new("continued-child");
+        let continued = SessionId::new("continued");
+        let mut parent_rx = bus.subscribe_conversation_events(&parent);
+
+        bus.publish_event(Arc::new(Event::session(
+            parent.clone(),
+            EventPayload::AgentSessionSpawned {
+                child_session_id: child.clone(),
+                agent_name: "explore".into(),
+                task: "inspect".into(),
+                tool_selection: None,
+                tool_call_id: ToolCallId::new("agent-call"),
+            },
+        )));
+        assert!(matches!(
+            parent_rx.recv().await,
+            Some(event) if event.session_id == parent
+        ));
+
+        for _ in 0..=ServerEventBus::EVENT_FANOUT_CAPACITY {
+            bus.publish_event(Arc::new(Event::session(
+                child.clone(),
+                EventPayload::AssistantTextDelta {
+                    message_id: "message-1".into(),
+                    delta: "token".into(),
+                },
+            )));
+        }
+        assert!(matches!(parent_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        bus.publish_event(Arc::new(Event::session(
+            continued_child.clone(),
+            EventPayload::SessionContinuedFromCompaction {
+                parent_session_id: child,
+                parent_cursor: "2".into(),
+                summary: "child summary".into(),
+                transcript_path: None,
+                context_messages: Vec::new(),
+                retained_messages: Vec::new(),
+            },
+        )));
+        assert!(matches!(
+            parent_rx.recv().await,
+            Some(event) if event.session_id == continued_child
+        ));
+
+        bus.publish_event(Arc::new(Event::session(
+            continued_child.clone(),
+            EventPayload::ToolCallStarted {
+                call_id: "tool-1".into(),
+                tool_name: "read".into(),
+            },
+        )));
+        assert!(matches!(
+            parent_rx.recv().await,
+            Some(event) if event.session_id == continued_child
+        ));
+
+        bus.publish_event(Arc::new(Event::session(
+            continued.clone(),
+            EventPayload::SessionContinuedFromCompaction {
+                parent_session_id: parent.clone(),
+                parent_cursor: "4".into(),
+                summary: "summary".into(),
+                transcript_path: None,
+                context_messages: Vec::new(),
+                retained_messages: Vec::new(),
+            },
+        )));
+        assert!(matches!(
+            parent_rx.recv().await,
+            Some(event) if event.session_id == continued
+        ));
+
+        bus.publish_event(Arc::new(Event::session(
+            continued.clone(),
+            EventPayload::AssistantTextDelta {
+                message_id: "message-2".into(),
+                delta: "continued token".into(),
+            },
+        )));
+        assert!(matches!(
+            parent_rx.recv().await,
+            Some(event) if event.session_id == continued
+        ));
     }
 }

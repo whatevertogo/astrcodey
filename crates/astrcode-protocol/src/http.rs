@@ -1117,6 +1117,14 @@ pub struct ModelTestResponseDto {
 mod tests {
     use super::*;
 
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ConversationReducerFixture {
+        initial_blocks: Vec<ConversationBlockDto>,
+        envelopes: Vec<ConversationStreamEnvelopeDto>,
+        expected: serde_json::Value,
+    }
+
     #[test]
     fn conversation_stream_fixture_matches_wire_contract() {
         let fixture = include_str!("../fixtures/conversation-stream.json");
@@ -1171,6 +1179,35 @@ mod tests {
         assert!(encoded.contains("\"textDelta\""));
         assert!(!encoded.contains("block_id"));
         assert!(!encoded.contains("text_delta"));
+    }
+
+    #[test]
+    fn conversation_reducer_fixture_matches_wire_contract() {
+        let fixture = include_str!("../fixtures/conversation-reducer.json");
+        let fixture: ConversationReducerFixture =
+            serde_json::from_str(fixture).expect("reducer fixture should deserialize");
+
+        assert_eq!(fixture.initial_blocks.len(), 2);
+        assert_eq!(fixture.envelopes.len(), 12);
+        assert_eq!(
+            fixture
+                .envelopes
+                .last()
+                .map(|envelope| envelope.cursor.value.as_str()),
+            Some("13")
+        );
+        assert!(fixture.expected.get("blocks").is_some());
+
+        let encoded =
+            serde_json::to_value(&fixture.envelopes).expect("fixture envelopes should serialize");
+        assert_eq!(
+            encoded[0]["delta"]["kind"],
+            serde_json::Value::String("patchBlock".into())
+        );
+        assert_eq!(
+            encoded[8]["delta"]["block"]["argumentsJson"]["path"],
+            serde_json::Value::String("Cargo.toml".into())
+        );
     }
 
     #[test]

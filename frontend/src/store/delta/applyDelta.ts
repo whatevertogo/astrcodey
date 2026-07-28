@@ -11,6 +11,7 @@ import {
   coalesceDeltas,
   type CoalescedDelta,
 } from './coalesce'
+import { applyConversationDeltaEffects } from './effects'
 
 type BlockDelta = Exclude<CoalescedDelta, { kind: 'other' }>
 
@@ -100,7 +101,7 @@ export function reduceConversationDeltas(
 
   const flushBlockDeltas = () => {
     if (pendingBlockDeltas.length === 0) return
-    blocks = applyCoalescedDeltas(blocks, pendingBlockDeltas).blocks
+    blocks = applyCoalescedDeltas(blocks, pendingBlockDeltas)
     pendingBlockDeltas = []
   }
 
@@ -250,51 +251,6 @@ export function reduceConversationDeltas(
   return patch
 }
 
-function runDeltaEffects(
-  deltas: ConversationDelta[],
-  get: () => AppState
-): void {
-  let shouldRefreshSessions = false
-  let shouldRefreshExtensions = false
-  let shouldRehydrate = false
-  let continuation:
-    | Extract<ConversationDelta, { kind: 'sessionContinued' }>
-    | undefined
-
-  for (const delta of deltas) {
-    if (delta.kind === 'appendBlock' && delta.block.kind === 'user') {
-      shouldRefreshSessions = true
-    } else if (delta.kind === 'sessionContinued') {
-      shouldRefreshSessions = true
-      continuation = delta
-    } else if (delta.kind === 'rehydrateRequired') {
-      shouldRehydrate = true
-    } else if (delta.kind === 'extensionRegistryChanged') {
-      shouldRefreshExtensions = true
-    }
-  }
-
-  if (shouldRefreshSessions) {
-    void get().refreshSessions()
-  }
-  if (shouldRefreshExtensions) {
-    void get().refreshExtensionData()
-  }
-
-  if (continuation) {
-    if (continuation.newSessionId === continuation.parentSessionId) {
-      void get().refreshConversationSnapshot()
-    } else {
-      void get().switchSession(continuation.newSessionId)
-    }
-  } else if (shouldRehydrate) {
-    const sessionId = get().activeSessionId
-    if (sessionId) {
-      void get().switchSession(sessionId)
-    }
-  }
-}
-
 export function applyDeltasToState(
   deltas: ConversationDelta[],
   get: () => AppState,
@@ -309,7 +265,7 @@ export function applyDeltasToState(
     const patch = reduceConversationDeltas(current, deltas, cursor)
     return Object.keys(patch).length > 0 ? patch : current
   })
-  runDeltaEffects(deltas, get)
+  applyConversationDeltaEffects(deltas, get)
 }
 
 export function applyDeltaToState(

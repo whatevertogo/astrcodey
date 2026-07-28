@@ -48,6 +48,7 @@ async function flushMicrotasks() {
   const calls = []
   const statuses = []
   const scheduler = testScheduler()
+  let rehydrateCount = 0
 
   const controller = new SessionStreamController({
     sessionId: 'session-1',
@@ -77,7 +78,10 @@ async function flushMicrotasks() {
     host: {
       isActive: () => true,
       applyEnvelope: () => undefined,
-      rehydrate: async () => null,
+      rehydrate: async () => {
+        rehydrateCount += 1
+        return '3'
+      },
       updateStatus: (status, error) => statuses.push({ status, error }),
     },
     scheduler: scheduler.scheduler,
@@ -95,11 +99,17 @@ async function flushMicrotasks() {
   assert.equal(statuses.at(-1).status, 'reconnecting')
   assert.equal(scheduler.timers[0].delayMs, 1000)
 
-  controller.stop()
-  assert.equal(scheduler.timers[0].cancelled, true)
-  scheduler.timers[0].callback()
+  scheduler.runNext()
   await flushMicrotasks()
-  assert.equal(calls.length, 1, 'stopped controller must not reconnect')
+  assert.equal(rehydrateCount, 1)
+  assert.equal(calls[1].cursor, '3')
+
+  controller.stop()
+  const pendingReconnect = scheduler.timers.at(-1)
+  assert.equal(pendingReconnect.cancelled, true)
+  pendingReconnect.callback()
+  await flushMicrotasks()
+  assert.equal(calls.length, 2, 'stopped controller must not reconnect again')
 }
 
 {

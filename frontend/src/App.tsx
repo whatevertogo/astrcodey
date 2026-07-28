@@ -1,15 +1,24 @@
-import { useEffect, useState } from 'react'
+import { lazy, Suspense, useEffect, useState } from 'react'
 import { useAppStore } from './store/conversation'
 import Sidebar from './components/Sidebar/Sidebar'
 import ChatView from './components/Chat/ChatView'
-import PluginsPage from './components/Plugins/PluginsPage'
-import SettingsPage from './components/Settings/SettingsPage'
 import ConnectingScreen from './components/ConnectingScreen'
 import ErrorBoundary from './components/ErrorBoundary'
 import TransientHintDialog from './components/TransientHintDialog'
 import { useSidebarResize } from './hooks/useSidebarResize'
 
+const PluginsPage = lazy(() => import('./components/Plugins/PluginsPage'))
+const SettingsPage = lazy(() => import('./components/Settings/SettingsPage'))
+
 export type MainView = 'chat' | 'plugins' | 'settings'
+
+function DeferredViewFallback() {
+  return (
+    <div className="flex min-h-0 flex-1 items-center justify-center bg-panel-bg text-[13px] text-text-muted">
+      正在加载…
+    </div>
+  )
+}
 
 export default function App() {
   const connectionStatus = useAppStore((s) => s.connectionStatus)
@@ -61,21 +70,25 @@ export default function App() {
           />
         )}
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-          {mainView === 'plugins' ? (
-            <PluginsPage
-              isSidebarOpen={isOpen}
-              onToggleSidebar={toggle}
-              onOpenSettings={() => setMainView('settings')}
-            />
-          ) : mainView === 'settings' ? (
-            <SettingsPage
-              isSidebarOpen={isOpen}
-              onToggleSidebar={toggle}
-              onOpenPlugins={() => setMainView('plugins')}
-            />
-          ) : (
-            <ChatView isSidebarOpen={isOpen} onToggleSidebar={toggle} />
-          )}
+          <Suspense fallback={<DeferredViewFallback />}>
+            {mainView === 'plugins' && (
+              <PluginsPage
+                isSidebarOpen={isOpen}
+                onToggleSidebar={toggle}
+                onOpenSettings={() => setMainView('settings')}
+              />
+            )}
+            {mainView === 'settings' && (
+              <SettingsPage
+                isSidebarOpen={isOpen}
+                onToggleSidebar={toggle}
+                onOpenPlugins={() => setMainView('plugins')}
+              />
+            )}
+            {mainView === 'chat' && (
+              <ChatView isSidebarOpen={isOpen} onToggleSidebar={toggle} />
+            )}
+          </Suspense>
           <TransientHintDialog />
         </div>
       </div>
