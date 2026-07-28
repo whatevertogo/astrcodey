@@ -7,7 +7,10 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::llm::{PromptCacheRetention, ThinkingLevel};
+use crate::{
+    llm::{PromptCacheRetention, ThinkingLevel},
+    thinking::{ThinkingCapability, ThinkingConfig},
+};
 
 /// 扩展配置的原始值类型。
 /// 用户可在 `config.toml` 的 `extensions.<id>` 下写入扩展自定义配置，
@@ -111,9 +114,6 @@ pub enum ProviderWireFormat {
     /// Anthropic Messages wire format.
     #[serde(rename = "anthropic_messages")]
     AnthropicMessages,
-    /// Google Generative Language API wire format.
-    #[serde(rename = "google_genai")]
-    GoogleGenAi,
 }
 
 impl ProviderWireFormat {
@@ -125,7 +125,7 @@ impl ProviderWireFormat {
         match self {
             Self::OpenAiChatCompletions => Some(OpenAiApiMode::ChatCompletions),
             Self::OpenAiResponses => Some(OpenAiApiMode::Responses),
-            Self::AnthropicMessages | Self::GoogleGenAi => None,
+            Self::AnthropicMessages => None,
         }
     }
 }
@@ -140,8 +140,6 @@ pub enum ProviderAuthScheme {
     Bearer,
     /// `x-api-key: <key>`.
     XApiKey,
-    /// `x-goog-api-key: <key>`.
-    XGoogApiKey,
 }
 
 /// OpenAI wire format 的内部模式。
@@ -181,6 +179,9 @@ pub struct ModelConfig {
     /// 统一模型选项（推荐）：集中承载模型能力参数。
     #[serde(default)]
     pub model_options: Option<ModelOptionsConfig>,
+    /// 显式 thinking 能力覆盖（用于自定义/未内置认知的模型）。
+    #[serde(default)]
+    pub thinking_capability: Option<ThinkingCapability>,
 }
 
 /// 模型能力选项（按模型粒度）。
@@ -191,6 +192,10 @@ pub struct ModelOptionsConfig {
     pub reasoning: Option<bool>,
     /// 推理强度级别（如 OpenAI Responses reasoning.effort）。
     pub thinking_level: Option<ThinkingLevel>,
+    /// 标准化 thinking 配置（新字段；与 `reasoning`/`thinkingLevel` 共存，
+    /// 解析时优先使用本字段，回退到遗留字段）。
+    #[serde(default)]
+    pub thinking: Option<ThinkingConfig>,
 }
 
 // ─── Runtime Section (placeholder for future use) ────────────────────────
@@ -332,7 +337,6 @@ mod tests {
                 ProviderWireFormat::AnthropicMessages,
                 "\"anthropic_messages\"",
             ),
-            (ProviderWireFormat::GoogleGenAi, "\"google_genai\""),
         ];
 
         for (format, expected_json) in cases {
@@ -342,5 +346,50 @@ mod tests {
                 format
             );
         }
+    }
+
+    #[test]
+    fn thinking_config_uses_documented_camel_case_contract() {
+        let thinking: crate::thinking::ThinkingConfig = serde_json::from_str(
+            r#"
+{
+  "enabled": true,
+  "effort": "high",
+  "budgetTokens": 4096
+}
+"#,
+        )
+        .unwrap();
+        assert!(thinking.enabled);
+        assert_eq!(thinking.effort.as_deref(), Some("high"));
+        assert_eq!(thinking.budget_tokens, Some(4096));
+
+        let capability: crate::thinking::ThinkingCapability = serde_json::from_str(
+            r#"
+{
+  "wireMapping": "open_ai_chat",
+  "allowedEffort": [],
+  "budgetMin": 1024,
+  "budgetMax": 64000,
+  "canDisable": false
+}
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            capability.wire_mapping,
+            crate::thinking::ThinkingWireMapping::OpenAiChat
+        );
+        assert_eq!(capability.allowed_effort, Some(Vec::new()));
+        assert_eq!(capability.budget_min, Some(1024));
+        assert_eq!(capability.budget_max, Some(64_000));
+        assert!(!capability.can_disable);
+
+        assert!(
+            serde_json::from_str::<crate::thinking::ThinkingConfig>(
+                r#"{"enabled":true,"budget_tokens":4096}"#
+            )
+            .is_err()
+        );
     }
 }

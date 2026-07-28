@@ -8,8 +8,6 @@ export function providerWireFormatLabel(value: ProviderWireFormat): string {
       return 'OpenAI Responses'
     case 'anthropic_messages':
       return 'Anthropic Messages'
-    case 'google_genai':
-      return 'Google GenAI'
   }
 }
 
@@ -21,7 +19,5 @@ export function providerAuthSchemeLabel(value: ProviderAuthScheme): string {
       return 'Bearer'
     case 'x_api_key':
       return 'x-api-key'
-    case 'x_goog_api_key':
-      return 'x-goog-api-key'
   }
 }

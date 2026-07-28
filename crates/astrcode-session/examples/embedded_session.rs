@@ -16,9 +16,9 @@ use astrcode_core::{
         ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolOrigin,
         ToolResult,
     },
+    tool_pack::{ToolPack, ToolPackScope},
     types::new_session_id,
 };
-use astrcode_extension_sdk::tool_pack::{ToolPack, ToolPackScope};
 use astrcode_session::{
     Session, SessionCreateParams, SessionHostServices, SessionRuntimeServices, SessionRuntimeState,
 };
@@ -223,6 +223,9 @@ fn effective_config() -> EffectiveConfig {
         prompt_cache_retention: None,
         reasoning: false,
         thinking_level: None,
+        thinking: Default::default(),
+        thinking_capability: None,
+        thinking_configured: false,
     };
     EffectiveConfig {
         llm: llm.clone(),

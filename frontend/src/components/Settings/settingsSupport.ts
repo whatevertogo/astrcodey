@@ -1,5 +1,10 @@
 import type { ThemePreference } from '../../lib/theme'
 import type {
+  ThinkingCapabilityDto,
+  ThinkingConfigDto,
+  UpdateModelOptionsRequest,
+} from '../../services/generated'
+import type {
   ConfigView,
   ModelTestResult,
   ProfileView,
@@ -48,11 +53,167 @@ export const settingsDangerButtonClass =
 export const compactPillClass =
   'inline-flex min-h-6 shrink-0 items-center rounded-md border border-border bg-panel-bg px-2 text-[11px] font-medium text-text-secondary'
 
+// ── Thinking Form ──
+
+export type ThinkingFormMode = 'default' | 'enabled' | 'disabled'
+
+export interface ThinkingFormValue {
+  mode: ThinkingFormMode
+  effort: string
+  budgetTokens: string
+}
+
+type ThinkingFormCapability = Pick<
+  ThinkingCapabilityDto,
+  'allowedEffort' | 'budgetMin' | 'budgetMax' | 'canDisable'
+>
+
+export const DEFAULT_THINKING_FORM: ThinkingFormValue = {
+  mode: 'default',
+  effort: '',
+  budgetTokens: '',
+}
+
+export const EFFORT_LABELS: Record<string, string> = {
+  low: '低',
+  medium: '中',
+  high: '高',
+  minimal: '最小',
+  max: '最大',
+}
+
+/**
+ * 从模型的 thinkingCapability 和当前 thinking 配置推导表单初始值。
+ * 模型无 thinkingCapability 时不参与 UI 渲染，此处仍返回 default。
+ */
+export function deriveThinkingFormValue(
+  thinkingCapability: ThinkingFormCapability | null | undefined,
+  currentThinking: ThinkingConfigDto | null | undefined
+): ThinkingFormValue {
+  if (!thinkingCapability) {
+    return DEFAULT_THINKING_FORM
+  }
+  if (currentThinking == null) {
+    return DEFAULT_THINKING_FORM
+  }
+  if (currentThinking.enabled) {
+    return {
+      mode: 'enabled',
+      effort: currentThinking.effort ?? '',
+      budgetTokens:
+        currentThinking.budgetTokens != null
+          ? String(currentThinking.budgetTokens)
+          : '',
+    }
+  }
+  return thinkingCapability.canDisable === false
+    ? DEFAULT_THINKING_FORM
+    : { mode: 'disabled', effort: '', budgetTokens: '' }
+}
+
+/**
+ * 将表单值映射为 API 请求体。
+ * default → thinking 为 undefined 以恢复默认；
+ * disabled → { enabled: false }；
+ * enabled → { enabled: true } 附带 effort/budgetTokens。
+ */
+export function thinkingFormToRequest(
+  profileName: string,
+  modelId: string,
+  form: ThinkingFormValue,
+  capability?: ThinkingFormCapability | null
+): UpdateModelOptionsRequest {
+  const base: UpdateModelOptionsRequest = { profileName, modelId }
+  if (form.mode === 'default') {
+    return { ...base, thinking: undefined }
+  }
+  if (!capability) {
+    throw new Error('此模型未声明 Thinking 能力')
+  }
+  if (form.mode === 'disabled') {
+    if (capability.canDisable === false) {
+      throw new Error('此模型不支持关闭 Thinking')
+    }
+    return { ...base, thinking: { enabled: false } }
+  }
+  const allowedEffort = capability.allowedEffort
+  if (Array.isArray(allowedEffort)) {
+    if (allowedEffort.length > 0 && !form.effort) {
+      throw new Error('请选择思考努力层级')
+    }
+    if (allowedEffort.length === 0 && form.effort) {
+      throw new Error('此模型不支持设置思考努力层级')
+    }
+    if (
+      form.effort &&
+      allowedEffort.length > 0 &&
+      !allowedEffort.includes(form.effort)
+    ) {
+      throw new Error(`不支持的思考努力层级：${form.effort}`)
+    }
+  }
+  const supportsBudget =
+    capability.budgetMin != null || capability.budgetMax != null
+  const requiresBudget = capability.budgetMin != null
+  if (requiresBudget && !form.budgetTokens) {
+    throw new Error('请输入思考预算 Token')
+  }
+  if (!supportsBudget && form.budgetTokens) {
+    throw new Error('此模型不支持设置思考预算 Token')
+  }
+  const thinking: ThinkingConfigDto = { enabled: true }
+  if (form.effort) {
+    thinking.effort = form.effort
+  }
+  if (form.budgetTokens) {
+    const budgetTokens = Number(form.budgetTokens)
+    if (!Number.isInteger(budgetTokens) || budgetTokens <= 0) {
+      throw new Error('思考预算 Token 必须是正整数')
+    }
+    if (capability?.budgetMin != null && budgetTokens < capability.budgetMin) {
+      throw new Error(`思考预算 Token 不能小于 ${capability.budgetMin}`)
+    }
+    if (capability?.budgetMax != null && budgetTokens > capability.budgetMax) {
+      throw new Error(`思考预算 Token 不能大于 ${capability.budgetMax}`)
+    }
+    thinking.budgetTokens = budgetTokens
+  }
+  return { ...base, thinking }
+}
+
+/**
+ * effort 选项列表（wire 值 ➝ 中文标签）。
+ */
+export function effortOptions(
+  allowedEffort: string[]
+): { label: string; value: string }[] {
+  return allowedEffort.map((value) => ({
+    label: EFFORT_LABELS[value] ?? value,
+    value,
+  }))
+}
+
+/**
+ * 判断模型是否仅有 toggle（无 effort/budget 控制）。
+ */
+export function isToggleOnlyThinking(
+  capability: ThinkingFormCapability | null | undefined
+): boolean {
+  if (!capability) return false
+  const hasEffort =
+    capability.allowedEffort == null || capability.allowedEffort.length > 0
+  const hasBudget = capability.budgetMin != null || capability.budgetMax != null
+  return !hasEffort && !hasBudget
+}
+
+// ── Model Selection ──
+
 export interface ModelSelection {
   profileName: string
   modelId: string
   smallProfileName: string
   smallModelId: string
+  thinkingFormValue: ThinkingFormValue
 }
 
 export const EMPTY_MODEL_SELECTION: ModelSelection = {
@@ -60,15 +221,35 @@ export const EMPTY_MODEL_SELECTION: ModelSelection = {
   modelId: '',
   smallProfileName: '',
   smallModelId: '',
+  thinkingFormValue: DEFAULT_THINKING_FORM,
 }
 
-export function modelSelectionFromConfig(config: ConfigView): ModelSelection {
+export function modelSelectionFromConfig(
+  config: ConfigView,
+  profiles: ProfileView[]
+): ModelSelection {
+  const profile = profiles.find((p) => p.name === config.activeProfile)
+  const model = profile?.models.find((m) => m.id === config.activeModel)
   return {
     profileName: config.activeProfile,
     modelId: config.activeModel,
     smallProfileName: config.activeSmallProfile ?? '',
     smallModelId: config.activeSmallModel ?? '',
+    thinkingFormValue: deriveThinkingFormValue(
+      model?.thinkingCapability,
+      model?.thinking
+    ),
   }
+}
+
+export function deriveModelThinkingForm(
+  profiles: ProfileView[],
+  profileName: string,
+  modelId: string
+): ThinkingFormValue {
+  const profile = profiles.find((p) => p.name === profileName)
+  const model = profile?.models.find((m) => m.id === modelId)
+  return deriveThinkingFormValue(model?.thinkingCapability, model?.thinking)
 }
 
 export type PendingOperation =

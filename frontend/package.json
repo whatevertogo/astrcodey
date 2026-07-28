@@ -23,12 +23,14 @@
     "test:contract": "esbuild src/services/protocol.ts --bundle --format=esm --outfile=../target/frontend-contract/services/protocol.js && node scripts/protocol-contract.test.mjs",
     "test:dev-server": "node scripts/dev-server.test.mjs",
     "test:assistant-run": "esbuild src/components/Chat/assistantRunModel.ts --bundle --format=esm --outfile=../target/frontend-assistant-run/assistantRunModel.js && node scripts/assistant-run-model.test.mjs",
-    "test:streaming-cache": "esbuild src/components/Chat/markdownStreaming.ts src/components/Chat/thinkingExtraction.ts --bundle --format=esm --outdir=../target/frontend-streaming && node scripts/streaming-cache.test.mjs",
-    "test:delta": "esbuild src/store/delta/coalesce.ts --bundle --format=esm --outfile=../target/frontend-delta/coalesce.js && node scripts/delta-coalesce.test.mjs",
+    "test:streaming-cache": "esbuild src/components/Chat/markdownStreaming.ts src/components/Chat/thinkingExtraction.ts src/components/Chat/tools/helpers.ts --bundle --format=esm --outdir=../target/frontend-streaming && node scripts/streaming-cache.test.mjs",
+    "test:delta": "esbuild src/store/delta/coalesce.ts src/store/delta/applyDelta.ts --bundle --platform=node --format=esm --outdir=../target/frontend-delta && node scripts/delta-coalesce.test.mjs",
     "test:session-stream": "esbuild src/store/sessionStreamController.ts --bundle --platform=node --format=esm --outfile=../target/frontend-session-stream/sessionStreamController.js && node scripts/session-stream-controller.test.mjs",
-    "check": "npm run check:protocol && npm run typecheck && npm run lint && npm run format:check && npm run test:contract && npm run test:assistant-run && npm run test:streaming-cache && npm run test:delta && npm run test:session-stream"
+    "test:settings-model-options": "esbuild src/components/Settings/settingsSupport.ts --bundle --platform=node --format=esm --outfile=../target/frontend-settings-model-options/settingsSupport.js && node scripts/settings-model-options.test.mjs",
+    "check": "npm run check:protocol && npm run typecheck && npm run lint && npm run format:check && npm run test:contract && npm run test:assistant-run && npm run test:streaming-cache && npm run test:delta && npm run test:session-stream && npm run test:settings-model-options"
   },
   "dependencies": {
+    "@tanstack/react-virtual": "^3.14.8",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-http": "^2.5.9",
     "clsx": "^2.1.1",

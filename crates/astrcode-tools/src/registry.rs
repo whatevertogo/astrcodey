@@ -8,8 +8,11 @@ use std::{
     },
 };
 
-use astrcode_core::{config::defaults::DEFAULT_SHELL_TIMEOUT_SECS, tool::Tool};
-use astrcode_extension_sdk::tool_pack::{ToolPack, ToolPackScope};
+use astrcode_core::{
+    config::defaults::DEFAULT_SHELL_TIMEOUT_SECS,
+    tool::Tool,
+    tool_pack::{ToolPack, ToolPackScope},
+};
 
 /// First-party file, shell, and terminal tools.
 pub struct BuiltinToolPack {

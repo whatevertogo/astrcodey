@@ -12,7 +12,7 @@
 
 用 Rust 从零构建的 AI 编程助手平台。
 
-AstrCode 是一个全栈 AI 编程助手，在 `crates/` 下包含 25 个 Rust crate（另加 Tauri 桌面壳），合计约 10.44 万行 Rust，外加 React + TypeScript 前端（约 1.24 万行）。包含带工具执行的 Agent 循环、基于 SSE 流式传输的多 Provider LLM 层（Anthropic、OpenAI、Google GenAI）、基于 SDK 与 IPC 子进程的扩展/钩子系统（后台预热、健康检查、启动阶段事件通道）、MCP 常驻进程池（跨 turn 复用长连接）、内置 Web 搜索与 URL 抓取工具、带自动压缩的上下文窗口管理、评测框架，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
+AstrCode 是一个全栈 AI 编程助手，在 `crates/` 下包含 25 个 Rust crate（另加 Tauri 桌面壳），合计约 10.44 万行 Rust，外加 React + TypeScript 前端（约 1.24 万行）。包含带工具执行的 Agent 循环、基于 SSE 流式传输的多 Provider LLM 层（Anthropic 与 OpenAI 兼容 Provider）、基于 SDK 与 IPC 子进程的扩展/钩子系统（后台预热、健康检查、启动阶段事件通道）、MCP 常驻进程池（跨 turn 复用长连接）、内置 Web 搜索与 URL 抓取工具、带自动压缩的上下文窗口管理、评测框架，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
 
 ## 目录
 
@@ -70,7 +70,7 @@ activeSmallModel = "deepseek-v4-flash"
 
 [[profiles]]
 name = "deepseek"
-providerKind = "openai"
+providerKind = "deepseek"
 baseUrl = "https://api.deepseek.com"
 apiKey = "env:DEEPSEEK_API_KEY"
 wireFormat = "openai_chat_completions"
@@ -80,7 +80,7 @@ authScheme = "bearer"
 id = "deepseek-v4-flash"
 maxTokens = 393216
 contextLimit = 1000000
-modelOptions = { reasoning = true }
+modelOptions = { thinking = { enabled = true } }
 
 [[profiles]]
 name = "openai"
@@ -94,7 +94,6 @@ authScheme = "bearer"
 id = "gpt-4.1"
 maxTokens = 16384
 contextLimit = 128000
-modelOptions = { thinkingLevel = "medium" }
 
 [[profiles]]
 name = "anthropic"
@@ -244,13 +243,11 @@ apiKey = "env:OPENAI_API_KEY"
 id = "gpt-4o"
 maxTokens = 128000
 contextLimit = 128000
-modelOptions = { thinkingLevel = "medium" }
 
 [[profiles.models]]
 id = "gpt-4o-mini"
 maxTokens = 128000
 contextLimit = 128000
-modelOptions = { thinkingLevel = "low" }
 EOF
 
 # 3. 设置 API 密钥环境变量
@@ -280,7 +277,7 @@ cargo run --features dev-mode -- eval
 AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。旧版 `config.json` 仍会作为迁移 fallback 读取，并在首次加载后自动写出 `config.toml`。配置支持多个 LLM Provider、模型选择、运行时行为调优和项目级覆盖。
 
 **主要配置特性：**
-- 多 Provider 支持（Anthropic、OpenAI、Google GenAI）
+- 多 Provider 支持（Anthropic 与 OpenAI 兼容 Provider）
 - 独立的小模型配置供扩展使用（如记忆提取）
 - 通过 `.astrcode/config.toml` 进行项目级配置覆盖
 - API 密钥的环境变量替换（`env:VAR_NAME`）
@@ -319,7 +316,7 @@ AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。旧�
     │            │ │extensions │ │ tools        │
     │ Anthropic  │ │钩子系统    │ │文件/Shell/   │
     │ OpenAI     │ │扩展 SDK   │ │Task 工具     │
-    │ Google     │ │IPC 扩展   │ │              │
+    │ 兼容协议   │ │IPC 扩展   │ │              │
     │ SSE + 重试  │ │           │ │              │
     └────────┬───┘ └─────┬─────┘ └──────────────┘
              │           │
@@ -354,7 +351,7 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **25 个 crate**，另有 [`s
 
 | Crate | 行数 | 说明 |
 |---|---|---|
-| [`astrcode-ai`](crates/astrcode-ai) | 5.9k | 多 Provider LLM 层（Anthropic、OpenAI 兼容、Google GenAI）、SSE 流式、重试 |
+| [`astrcode-ai`](crates/astrcode-ai) | 5.9k | 多 Provider LLM 层（Anthropic 与 OpenAI 兼容 Provider）、SSE 流式、重试 |
 | [`astrcode-storage`](crates/astrcode-storage) | 5.0k | JSONL 事件日志、快照、配置持久化、文件锁 |
 | [`astrcode-context`](crates/astrcode-context) | 4.5k | Token 估算、上下文窗口预算、自动压缩、提示词引擎 |
 | [`astrcode-tools`](crates/astrcode-tools) | 7.8k | 内置工具：read、write、edit、patch、glob、grep、shell、terminal、task |
@@ -423,7 +420,7 @@ Agent 支持运行模式切换（Code / Plan）。Plan 模式下只暴露只读�
 
 ### LLM Provider 层
 
-`astrcode-ai` 支持多个 Provider — Anthropic（原生 Messages API）、OpenAI 兼容（Chat Completions + Responses API）、Google GenAI。核心组件：
+`astrcode-ai` 支持 Anthropic 原生 Messages API，以及 OpenAI 兼容的 Chat Completions 和 Responses API。核心组件：
 
 - **`Utf8StreamDecoder`** — 跨 TCP chunk 处理多字节 UTF-8 边界和坏字节恢复
 - **`SseLineReader`** — 通用 SSE 行缓冲（可供所有 Provider 复用）

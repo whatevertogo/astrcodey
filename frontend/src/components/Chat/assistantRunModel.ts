@@ -4,7 +4,7 @@ import { readToolUi, readToolUiPhase } from '../../tool-ui/wire'
 import { extractThinkingBlocks } from './thinkingExtraction'
 import {
   boolValue,
-  compactLine,
+  compactPreviewLine,
   numberValue,
   pathFor,
   stringValue,
@@ -119,7 +119,7 @@ export function buildMessageListItems(
       }
       items.push({
         type: 'assistantRun',
-        id: runBlocks.map((item) => item.id).join(':'),
+        id: `assistant-run:${runBlocks[0].id}`,
         blocks: runBlocks,
         index: firstIndex,
       })
@@ -136,17 +136,6 @@ export function buildMessageListItems(
   }
 
   return items
-}
-
-export function streamingMessageListItemId(
-  items: MessageListItem[]
-): string | null {
-  const last = items[items.length - 1]
-  if (!last) return null
-  if (last.type !== 'assistantRun') return null
-  return last.blocks.some((block) => block.status === 'streaming')
-    ? last.id
-    : null
 }
 
 export function assistantThinkingBlocks(block: AssistantBlock): string[] {
@@ -179,12 +168,9 @@ function durationLabel(meta: Record<string, unknown>): string {
 function commandLabel(block: ToolBlock): string {
   const args = toolArgs(block)
   const meta = toolMeta(block)
-  return compactLine(
-    stringValue(meta, 'command') ||
-      stringValue(args, 'command') ||
-      block.arguments ||
-      block.name
-  )
+  const command = stringValue(meta, 'command') || stringValue(args, 'command')
+  const intent = stringValue(meta, 'intent') || stringValue(args, 'intent')
+  return compactPreviewLine(command || intent || block.name, 144)
 }
 
 export function toolActivityFor(block: ToolBlock): ToolActivity {
@@ -302,7 +288,6 @@ export function finalReplyBlockFor(
 }
 
 function toolHasAttention(block: ToolBlock): boolean {
-  if (block.status === 'error') return true
   if (readGateApproval(block.metadata)?.pending === true) return true
 
   const meta = toolMeta(block)
@@ -367,7 +352,7 @@ function processSegmentFor(entries: ProcessEntry[]): AssistantRunSegment {
 
   return {
     type: 'process',
-    id: entries.map((entry) => entry.id).join(':'),
+    id: `process:${entries[0].id}`,
     entries,
     durationSeconds,
     hasAttention,

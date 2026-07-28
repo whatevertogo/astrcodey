@@ -1,6 +1,7 @@
 //! 在官方 SWE-bench instance image 中运行单个求解 session。
 
 use std::{
+    collections::HashSet,
     fs::File,
     io::Read,
     path::Path,
@@ -16,7 +17,7 @@ use tokio::{
 
 use crate::{
     EvalError, SweBenchInstanceConfig, SweBenchStreamingHarnessConfig,
-    case::{EvalCase, JudgeConfig},
+    case::{EvalCase, JudgeConfig, Setup},
     client::EvalClient,
     report::SweBenchPrediction,
 };
@@ -338,7 +339,7 @@ async fn run_case_in_image(
             &mut containers,
         )
         .await?;
-        run_session(case, solver_name, relay_name).await
+        run_session(case, solver_name, relay_name, case_audit_dir).await
     }
     .await;
     containers.stop_solver().await;
@@ -352,10 +353,13 @@ async fn run_session(
     case: &EvalCase,
     solver_name: &str,
     relay_name: &str,
+    case_audit_dir: &Path,
 ) -> Result<InstanceOutcome, EvalError> {
     docker_checked(["start", solver_name]).await?;
     docker_checked(["start", relay_name]).await?;
     let server_addr = wait_for_server(solver_name, relay_name).await?;
+    sanitize_repository_for_session(case, solver_name, case_audit_dir).await?;
+    let baseline_untracked_paths = list_untracked_paths(solver_name).await?;
     let client = EvalClient::new(&server_addr, SERVER_AUTH_TOKEN)?;
     let session_id = client.create_session(INSTANCE_WORKDIR).await?;
 
@@ -366,13 +370,169 @@ async fn run_session(
             .await?;
     }
 
-    let model_patch = collect_model_patch(solver_name).await?;
+    let model_patch = collect_model_patch(solver_name, &baseline_untracked_paths).await?;
     let has_patch = !model_patch.trim().is_empty();
     Ok(InstanceOutcome {
         session_id,
         prediction: prediction(case.id.clone(), model_patch),
         has_patch,
     })
+}
+
+async fn sanitize_repository_for_session(
+    case: &EvalCase,
+    container_name: &str,
+    case_audit_dir: &Path,
+) -> Result<(), EvalError> {
+    let configured_base_commit = match &case.setup {
+        Setup::Git { commit, .. } => commit,
+        _ => {
+            return Err(EvalError::Setup(format!(
+                "{}: official instance case does not declare a Git base commit",
+                case.id
+            )));
+        },
+    };
+    let base_revision = format!("{configured_base_commit}^{{commit}}");
+    let base_commit = git_capture(container_name, &["rev-parse", &base_revision], false)
+        .await?
+        .trim()
+        .to_string();
+    let original_head = git_capture(container_name, &["rev-parse", "HEAD"], false)
+        .await?
+        .trim()
+        .to_string();
+    verify_base_is_ancestor(container_name, &base_commit).await?;
+
+    let tracked_status = git_capture_output(
+        container_name,
+        &["status", "--porcelain=v1", "-uno", "-z"],
+        false,
+    )
+    .await?;
+    git_capture(container_name, &["add", "--update"], false).await?;
+    let baseline_tree = git_capture(container_name, &["write-tree"], false)
+        .await?
+        .trim()
+        .to_string();
+    let baseline_head = git_capture(
+        container_name,
+        &[
+            "-c",
+            "user.name=Astrcode SWE-bench",
+            "-c",
+            "user.email=astrcode-swebench@invalid",
+            "commit-tree",
+            &baseline_tree,
+            "-m",
+            "Astrcode SWE-bench clean session baseline",
+        ],
+        false,
+    )
+    .await?
+    .trim()
+    .to_string();
+    git_capture(
+        container_name,
+        &["checkout", "--detach", &baseline_head],
+        false,
+    )
+    .await?;
+
+    let refs = git_capture(
+        container_name,
+        &["for-each-ref", "--format=%(refname)"],
+        false,
+    )
+    .await?;
+    let refs = refs.lines().filter(|reference| !reference.is_empty());
+    let mut removed_ref_count = 0_usize;
+    for reference in refs {
+        git_capture(container_name, &["update-ref", "-d", reference], false).await?;
+        removed_ref_count += 1;
+    }
+    git_capture(
+        container_name,
+        &["reflog", "expire", "--expire=now", "--all"],
+        false,
+    )
+    .await?;
+    git_capture(container_name, &["repack", "-Ad"], false).await?;
+    git_capture(container_name, &["prune-packed"], false).await?;
+    git_capture(container_name, &["prune", "--expire=now"], false).await?;
+
+    let remaining_refs = git_capture(
+        container_name,
+        &["for-each-ref", "--format=%(refname)"],
+        false,
+    )
+    .await?;
+    if !remaining_refs.trim().is_empty() {
+        return Err(EvalError::Setup(format!(
+            "{}: repository isolation left reachable refs: {}",
+            case.id,
+            remaining_refs.lines().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    let unreachable = git_capture(
+        container_name,
+        &["fsck", "--unreachable", "--no-reflogs"],
+        false,
+    )
+    .await?;
+    if !unreachable.trim().is_empty() {
+        return Err(EvalError::Setup(format!(
+            "{}: repository isolation left unreachable Git objects",
+            case.id
+        )));
+    }
+    verify_single_commit_history(container_name, &baseline_head).await?;
+
+    let audit = serde_json::json!({
+        "base_commit": base_commit,
+        "original_head": original_head,
+        "baseline_head": baseline_head,
+        "baseline_had_tracked_changes": !tracked_status.is_empty(),
+        "removed_ref_count": removed_ref_count,
+        "remaining_ref_count": 0,
+        "unreachable_object_count": 0,
+        "history_commit_count": 1,
+    });
+    std::fs::write(
+        case_audit_dir.join("repository-isolation.json"),
+        serde_json::to_vec_pretty(&audit)
+            .map_err(|error| EvalError::Other(format!("serialize repository audit: {error}")))?,
+    )
+    .map_err(EvalError::Io)
+}
+
+async fn verify_base_is_ancestor(container_name: &str, base_commit: &str) -> Result<(), EvalError> {
+    let merge_base =
+        git_capture(container_name, &["merge-base", base_commit, "HEAD"], false).await?;
+    if merge_base.trim() != base_commit {
+        return Err(EvalError::Setup(format!(
+            "official instance HEAD does not descend from base commit {base_commit}"
+        )));
+    }
+    Ok(())
+}
+
+async fn verify_single_commit_history(
+    container_name: &str,
+    baseline_head: &str,
+) -> Result<(), EvalError> {
+    let history = git_capture(container_name, &["rev-list", "--parents", "HEAD"], false).await?;
+    let commits = history.lines().collect::<Vec<_>>();
+    let fields = commits
+        .first()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>())
+        .unwrap_or_default();
+    if commits.len() != 1 || fields.as_slice() != [baseline_head] {
+        return Err(EvalError::Setup(
+            "repository isolation did not produce a single root baseline commit".into(),
+        ));
+    }
+    Ok(())
 }
 
 async fn create_solver(
@@ -418,6 +578,8 @@ async fn create_solver(
         "--env",
         "PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:\
          /usr/sbin:/usr/bin:/sbin:/bin",
+        "--env",
+        "SHELL=/bin/bash",
         "--env",
         "CONDA_DEFAULT_ENV=testbed",
         "--env",
@@ -519,14 +681,108 @@ async fn wait_for_server(solver_name: &str, relay_name: &str) -> Result<String, 
     )))
 }
 
-async fn collect_model_patch(container_name: &str) -> Result<String, EvalError> {
-    git_capture(container_name, &["add", "--intent-to-add", "--all"], false).await?;
+async fn collect_model_patch(
+    container_name: &str,
+    baseline_untracked_paths: &HashSet<String>,
+) -> Result<String, EvalError> {
+    git_with_paths(
+        container_name,
+        &["reset", "--quiet", "HEAD", "--"],
+        baseline_untracked_paths,
+    )
+    .await?;
+
+    let current_untracked_paths = list_untracked_paths(container_name).await?;
+    let new_untracked_paths =
+        new_untracked_paths(baseline_untracked_paths, &current_untracked_paths);
+    git_with_paths(
+        container_name,
+        &["add", "--intent-to-add", "--"],
+        &new_untracked_paths,
+    )
+    .await?;
+
     git_capture(
         container_name,
         &["diff", "--no-ext-diff", "--binary", "HEAD", "--"],
         false,
     )
     .await
+}
+
+async fn list_untracked_paths(container_name: &str) -> Result<HashSet<String>, EvalError> {
+    let bytes = git_capture_output(
+        container_name,
+        &["ls-files", "--others", "--exclude-standard", "-z"],
+        false,
+    )
+    .await?;
+    parse_untracked_paths(&bytes)
+}
+
+fn parse_untracked_paths(bytes: &[u8]) -> Result<HashSet<String>, EvalError> {
+    bytes
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            String::from_utf8(path.to_vec()).map_err(|error| {
+                EvalError::Other(format!("untracked path is not valid UTF-8: {error}"))
+            })
+        })
+        .collect()
+}
+
+fn new_untracked_paths(baseline: &HashSet<String>, current: &HashSet<String>) -> HashSet<String> {
+    current
+        .difference(baseline)
+        .filter(|path| !is_generated_artifact_path(path))
+        .cloned()
+        .collect()
+}
+
+fn is_generated_artifact_path(path: &str) -> bool {
+    const GENERATED_DIRECTORIES: &[&str] = &[
+        ".mypy_cache",
+        ".nox",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "node_modules",
+        "target",
+        "venv",
+    ];
+
+    let mut components = path.split('/');
+    let file_name = components.next_back().unwrap_or(path);
+    components.any(|component| GENERATED_DIRECTORIES.contains(&component))
+        || GENERATED_DIRECTORIES.contains(&file_name)
+        || file_name == ".DS_Store"
+        || file_name == "core"
+        || file_name
+            .strip_prefix("core.")
+            .is_some_and(|suffix| suffix.chars().all(|character| character.is_ascii_digit()))
+        || file_name.ends_with(".pyc")
+        || file_name.ends_with(".pyo")
+}
+
+async fn git_with_paths(
+    container_name: &str,
+    prefix: &[&str],
+    paths: &HashSet<String>,
+) -> Result<(), EvalError> {
+    let mut paths = paths.iter().map(String::as_str).collect::<Vec<_>>();
+    paths.sort_unstable();
+    for chunk in paths.chunks(256) {
+        let mut args = Vec::with_capacity(prefix.len() + chunk.len());
+        args.extend_from_slice(prefix);
+        args.extend_from_slice(chunk);
+        git_capture(container_name, &args, false).await?;
+    }
+    Ok(())
 }
 
 async fn git_capture(
@@ -1158,6 +1414,21 @@ mod tests {
     fn official_image_pull_has_bounded_attempt_duration() {
         assert_eq!(IMAGE_PULL_TIMEOUT, Duration::from_secs(60 * 60));
         assert_eq!(IMAGE_PULL_RETRY_DELAY, Duration::from_secs(15));
+    }
+
+    #[test]
+    fn patch_collection_includes_only_untracked_paths_created_during_session() {
+        let baseline = parse_untracked_paths(b"build/lib/generated.py\0cache file\0").unwrap();
+        let current = parse_untracked_paths(
+            b"build/lib/generated.py\0cache file\0new source.py\0new/module.py\0\
+              generated/build/output.py\0core.123\0package/__pycache__/module.pyc\0",
+        )
+        .unwrap();
+
+        assert_eq!(
+            new_untracked_paths(&baseline, &current),
+            HashSet::from(["new source.py".to_string(), "new/module.py".to_string()])
+        );
     }
 
     #[test]

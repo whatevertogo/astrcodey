@@ -54,7 +54,7 @@ allow = []
 
 [[profiles]]
 name = "deepseek"
-providerKind = "openai"
+providerKind = "deepseek"
 baseUrl = "https://api.deepseek.com"
 apiKey = "env:DEEPSEEK_API_KEY"
 wireFormat = "openai_chat_completions"
@@ -64,7 +64,7 @@ authScheme = "bearer"
 id = "deepseek-v4-flash"
 maxTokens = 393216
 contextLimit = 1000000
-modelOptions = { reasoning = true }
+modelOptions = { thinking = { enabled = true } }
 
 [extensions.astrcode-web-tools.search]
 provider = "duckduckgo"
@@ -146,9 +146,9 @@ allow = [{ tool = "read" }]
 | 字段 | 说明 |
 |------|------|
 | `name` | 唯一标识，供 `activeProfile` 引用 |
-| `providerKind` | 展示/分组用 provider 家族，如 `openai`、`anthropic`、`google_genai` |
-| `wireFormat` | 实际协议格式：`openai_chat_completions`、`openai_responses`、`anthropic_messages`、`google_genai` |
-| `authScheme` | API key 鉴权方式：`bearer`、`x_api_key`、`x_goog_api_key`、`none` |
+| `providerKind` | 展示/分组用 provider 家族，如 `openai`、`anthropic`、`deepseek` |
+| `wireFormat` | 实际协议格式：`openai_chat_completions`、`openai_responses`、`anthropic_messages` |
+| `authScheme` | API key 鉴权方式：`bearer`、`x_api_key`、`none` |
 | `baseUrl` | API 根 URL；Anthropic 若 URL 无 `/v1` 段会自动补全 |
 | `apiKey` | 见 §6.3；可省略，则按 profile 名回退已知环境变量 |
 | `models` | 模型列表 |
@@ -179,7 +179,6 @@ union` 的理论容量，因此 `terminal` 会稳定成为溢出项；注册表�
 |----------|--------------|----------|
 | OpenAI | `tools[].function.strict`（Chat）或 `tools[].strict`（Responses） | 官方 preset 开启 |
 | Anthropic | `tools[].strict`，且有单次请求聚合上限 | 官方 preset 开启；超限按上述规则确定性降级 |
-| Google Gemini | 请求级 `functionCallingConfig.mode = VALIDATED`，会约束本次请求的全部函数 | 不映射逐工具声明 |
 | DeepSeek | `/beta` 端点，且本次请求的全部函数都必须为 strict | 默认关闭，不能仅切换该开关 |
 | Qwen、Ark、Zhipu | 当前 preset 未确认与逐工具 strict 契约一致 | 默认关闭 |
 
@@ -193,8 +192,36 @@ union` 的理论容量，因此 `terminal` 会稳定成为溢出项；注册表�
 | `id` | 模型标识 |
 | `maxTokens` | 最大输出 token（缺省解析为 `8192`） |
 | `contextLimit` | 上下文窗口（缺省 `65536`） |
-| `modelOptions.reasoning` | 是否启用推理模式（provider 相关） |
-| `modelOptions.thinkingLevel` | `low` / `medium` / `high`（OpenAI Responses `reasoning.effort`） |
+| `modelOptions.thinking` | 推荐的统一推理配置：`enabled`、可选 `effort`、可选 `budgetTokens` |
+| `modelOptions.reasoning` | 兼容字段；未设置 `thinking` 时转换为统一推理配置 |
+| `modelOptions.thinkingLevel` | 兼容字段：`low` / `medium` / `high`；未设置 `thinking` 时转换为 `effort` |
+| `thinkingCapability` | 自定义模型的显式能力声明；内置已知模型通常无需填写 |
+
+不写 `modelOptions.thinking` 表示沿用模型默认行为；显式 `{ enabled = false }` 表示要求
+provider 关闭 Thinking。部分模型（例如 OpenAI Responses 的 o 系列）无法显式关闭，此时设置页
+不会提供“关闭”选项，HTTP 更新会拒绝该配置，手写配置会在解析时输出能力告警。
+
+```toml
+# OpenAI Responses：使用推理强度
+modelOptions = { thinking = { enabled = true, effort = "medium" } }
+
+# Anthropic 旧版 extended thinking：使用 token 预算
+modelOptions = { thinking = { enabled = true, budgetTokens = 4096 } }
+
+# DeepSeek / Zhipu Chat Completions：仅开关
+modelOptions = { thinking = { enabled = true } }
+```
+
+内置能力按 `providerKind + wireFormat + model id` 解析。自定义或兼容网关若不在内置目录中，可在
+模型上声明 `thinkingCapability`：
+
+```toml
+thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisable = true }
+```
+
+`wireMapping` 可为 `open_ai_responses`、`anthropic_adaptive`、`anthropic_budget`、
+`open_ai_chat`；`allowedEffort = []` 表示仅支持开关，省略表示允许 provider 自定义强度；
+`budgetMin` / `budgetMax` 约束预算范围；`canDisable` 缺省为 `true`。
 
 ### 6.3 API Key 解析
 
@@ -205,7 +232,7 @@ union` 的理论容量，因此 `terminal` 会稳定成为溢出项；注册表�
 | 全大写 `VAR_NAME` | 尝试作环境变量；未设置则 **警告** 并把字符串当作明文 key |
 | 其他字符串 | 明文 key（不推荐提交到仓库） |
 
-按 profile 名的环境变量回退：`openai` → `OPENAI_API_KEY`，`deepseek` → `DEEPSEEK_API_KEY`，`anthropic` → `ANTHROPIC_API_KEY`，`gemini` → `GOOGLE_API_KEY` 或 `GEMINI_API_KEY`。
+按 profile 名的环境变量回退：`openai` → `OPENAI_API_KEY`，`deepseek` → `DEEPSEEK_API_KEY`，`anthropic` → `ANTHROPIC_API_KEY`。
 
 ### 6.4 小模型
 

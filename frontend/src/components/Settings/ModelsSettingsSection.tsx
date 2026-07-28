@@ -2,9 +2,11 @@ import type { ReactNode } from 'react'
 import { fieldInput } from '../../lib/styles'
 import { cn } from '../../lib/utils'
 import type { ProfileView } from '../../services/types'
+import type { ThinkingCapabilityDto } from '../../services/generated'
 import { Button } from '../ui'
 import {
   compactPillClass,
+  effortOptions,
   type ModelSelection,
   type PendingOperation,
   pickModel,
@@ -13,6 +15,7 @@ import {
   settingsPanelClass,
   settingsPrimaryButtonClass,
   settingsRowClass,
+  type ThinkingFormValue,
   authLabel,
   wireLabel,
 } from './settingsSupport'
@@ -22,6 +25,7 @@ interface ModelsSettingsSectionProps {
   selection: ModelSelection
   operation: PendingOperation | null
   onSelectionChange: (patch: Partial<ModelSelection>) => void
+  onThinkingFormChange: (value: ThinkingFormValue) => void
   onReload: () => void
   onTest: () => void
   onSave: () => void
@@ -88,11 +92,152 @@ function SettingsSelectRow({
   )
 }
 
+const THINKING_MODE_OPTIONS: {
+  value: ThinkingFormValue['mode']
+  label: string
+}[] = [
+  { value: 'default', label: '使用模型默认值' },
+  { value: 'enabled', label: '启用' },
+  { value: 'disabled', label: '关闭' },
+]
+
+function ThinkingSettingsSection({
+  capability,
+  formValue,
+  onChange,
+}: {
+  capability: ThinkingCapabilityDto
+  formValue: ThinkingFormValue
+  onChange: (value: ThinkingFormValue) => void
+}) {
+  const acceptsCustomEffort = capability.allowedEffort == null
+  const hasEffort =
+    acceptsCustomEffort || (capability.allowedEffort?.length ?? 0) > 0
+  const hasBudget = capability.budgetMin != null || capability.budgetMax != null
+  const toggleOnly = !hasEffort && !hasBudget
+  const options =
+    capability.allowedEffort != null
+      ? effortOptions(capability.allowedEffort)
+      : []
+  const modeOptions = THINKING_MODE_OPTIONS.filter(
+    (option) => option.value !== 'disabled' || capability.canDisable
+  )
+
+  const budgetHint = [
+    capability.budgetMin != null ? `最小 ${capability.budgetMin}` : '',
+    capability.budgetMax != null ? `最大 ${capability.budgetMax}` : '',
+  ]
+    .filter(Boolean)
+    .join('，')
+
+  return (
+    <>
+      <div className={cn(settingsRowClass, 'border-t border-border')}>
+        <div className="min-w-0">
+          <div className="text-[13px] font-medium text-text-primary">
+            Thinking
+          </div>
+          <div className="mt-0.5 truncate text-[12px] text-text-muted">
+            {toggleOnly ? '仅开关' : '思考与推理'}
+          </div>
+        </div>
+        <select
+          className={cn(fieldInput, 'max-w-full sm:w-[200px]')}
+          value={formValue.mode}
+          onChange={(event) =>
+            onChange({
+              ...formValue,
+              mode: event.target.value as ThinkingFormValue['mode'],
+              effort: event.target.value !== 'enabled' ? '' : formValue.effort,
+              budgetTokens:
+                event.target.value !== 'enabled' ? '' : formValue.budgetTokens,
+            })
+          }
+        >
+          {modeOptions.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {formValue.mode === 'enabled' && hasEffort && (
+        <div className={settingsRowClass}>
+          <div className="min-w-0">
+            <div className="text-[13px] font-medium text-text-primary">
+              努力层级
+            </div>
+            <div className="mt-0.5 truncate text-[12px] text-text-muted">
+              思考深度
+            </div>
+          </div>
+          {acceptsCustomEffort ? (
+            <input
+              type="text"
+              className={cn(fieldInput, 'max-w-full sm:w-[200px]')}
+              placeholder="可选，例如 high"
+              value={formValue.effort}
+              onChange={(event) =>
+                onChange({ ...formValue, effort: event.target.value })
+              }
+            />
+          ) : (
+            <select
+              className={cn(fieldInput, 'max-w-full sm:w-[200px]')}
+              value={formValue.effort}
+              onChange={(event) =>
+                onChange({ ...formValue, effort: event.target.value })
+              }
+            >
+              <option value="">请选择</option>
+              {options.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
+          )}
+        </div>
+      )}
+
+      {formValue.mode === 'enabled' && hasBudget && (
+        <div className={settingsRowClass}>
+          <div className="min-w-0">
+            <div className="text-[13px] font-medium text-text-primary">
+              预算 Token
+            </div>
+            <div className="mt-0.5 truncate text-[12px] text-text-muted">
+              {budgetHint}
+            </div>
+          </div>
+          <input
+            type="number"
+            className={cn(fieldInput, 'max-w-full sm:w-[200px]')}
+            placeholder={
+              capability.budgetMax != null
+                ? `最大 ${capability.budgetMax}`
+                : '输入 Token 数'
+            }
+            min={capability.budgetMin ?? undefined}
+            max={capability.budgetMax ?? undefined}
+            value={formValue.budgetTokens}
+            onChange={(event) =>
+              onChange({ ...formValue, budgetTokens: event.target.value })
+            }
+          />
+        </div>
+      )}
+    </>
+  )
+}
+
 export function ModelsSettingsSection({
   profiles,
   selection,
   operation,
   onSelectionChange,
+  onThinkingFormChange,
   onReload,
   onTest,
   onSave,
@@ -103,6 +248,10 @@ export function ModelsSettingsSection({
   const currentSmallProfile = profiles.find(
     (profile) => profile.name === selection.smallProfileName
   )
+  const currentModel = currentProfile?.models.find(
+    (model) => model.id === selection.modelId
+  )
+  const thinkingCapability = currentModel?.thinkingCapability
   const busy = operation !== null
   const saving = operation?.kind === 'save'
   const reloading = operation?.kind === 'reload'
@@ -127,6 +276,14 @@ export function ModelsSettingsSection({
           profile={selection.smallProfileName || '不使用'}
         />
       </div>
+
+      {thinkingCapability && (
+        <ThinkingSettingsSection
+          capability={thinkingCapability}
+          formValue={selection.thinkingFormValue}
+          onChange={onThinkingFormChange}
+        />
+      )}
 
       <SettingsSelectRow
         label="Profile"

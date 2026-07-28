@@ -18,6 +18,14 @@ export function compactLine(text: string): string {
   return text.replace(/\s+/g, ' ').trim()
 }
 
+export function compactPreviewLine(text: string, maxLength = 160): string {
+  const scanLength = Math.max(maxLength, maxLength * 4)
+  const compacted = compactLine(text.slice(0, scanLength))
+  return compacted.length > maxLength
+    ? `${compacted.slice(0, Math.max(0, maxLength - 1))}…`
+    : compacted
+}
+
 export function asRecord(value: unknown): JsonRecord {
   return value && typeof value === 'object' && !Array.isArray(value)
     ? (value as JsonRecord)
@@ -83,9 +91,34 @@ export function truncateMiddle(text: string, max = 96): string {
   return `${text.slice(0, head)}…${text.slice(text.length - tail)}`
 }
 
-export function previewText(text: string, max = 12000): string {
-  if (text.length <= max) return text
-  return `${text.slice(0, max)}\n\n… truncated ${text.length - max} characters`
+export interface TextPreview {
+  content: string
+  truncated: boolean
+  omittedCharacters: number
+}
+
+export function previewText(
+  text: string,
+  maxCharacters = 6000,
+  maxLines = 24
+): TextPreview {
+  let end = Math.min(text.length, maxCharacters)
+  let lines = 1
+  for (let index = 0; index < end; index += 1) {
+    if (text[index] !== '\n') continue
+    lines += 1
+    if (lines > maxLines) {
+      end = index
+      break
+    }
+  }
+
+  const truncated = end < text.length
+  return {
+    content: truncated ? text.slice(0, end) : text,
+    truncated,
+    omittedCharacters: truncated ? text.length - end : 0,
+  }
 }
 
 export function countLines(text: string): number {

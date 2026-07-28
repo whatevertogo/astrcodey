@@ -222,15 +222,12 @@ pub enum ProviderWireFormatDto {
     OpenAiResponses,
     #[serde(rename = "anthropic_messages")]
     AnthropicMessages,
-    #[serde(rename = "google_genai")]
-    GoogleGenAi,
 }
 
 impl_bidirectional_wire_conversion!(ProviderWireFormat => ProviderWireFormatDto {
     OpenAiChatCompletions,
     OpenAiResponses,
     AnthropicMessages,
-    GoogleGenAi,
 });
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -240,14 +237,12 @@ pub enum ProviderAuthSchemeDto {
     None,
     Bearer,
     XApiKey,
-    XGoogApiKey,
 }
 
 impl_bidirectional_wire_conversion!(ProviderAuthScheme => ProviderAuthSchemeDto {
     None,
     Bearer,
     XApiKey,
-    XGoogApiKey,
 });
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -260,6 +255,66 @@ pub enum ThinkingLevelDto {
 }
 
 impl_bidirectional_wire_conversion!(ThinkingLevel => ThinkingLevelDto { Low, Medium, High });
+
+// ── Thinking Wire Mapping DTO ────────────────────────────────────────────
+
+/// Wire-mapping DTO that shadows the core enum without exposing it directly.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ThinkingWireMappingDto {
+    OpenAiResponses,
+    AnthropicAdaptive,
+    AnthropicBudget,
+    OpenAiChat,
+}
+
+impl_wire_values!(ThinkingWireMappingDto {
+    OpenAiResponses,
+    AnthropicAdaptive,
+    AnthropicBudget,
+    OpenAiChat,
+});
+
+impl From<astrcode_core::thinking::ThinkingWireMapping> for ThinkingWireMappingDto {
+    fn from(value: astrcode_core::thinking::ThinkingWireMapping) -> Self {
+        match value {
+            astrcode_core::thinking::ThinkingWireMapping::OpenAiResponses => Self::OpenAiResponses,
+            astrcode_core::thinking::ThinkingWireMapping::AnthropicAdaptive => {
+                Self::AnthropicAdaptive
+            },
+            astrcode_core::thinking::ThinkingWireMapping::AnthropicBudget => Self::AnthropicBudget,
+            astrcode_core::thinking::ThinkingWireMapping::OpenAiChat => Self::OpenAiChat,
+        }
+    }
+}
+
+/// DTO for thinking capability, using the DTO wire-mapping enum.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThinkingCapabilityDto {
+    pub wire_mapping: ThinkingWireMappingDto,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_effort: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_min: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_max: Option<u32>,
+    pub can_disable: bool,
+}
+
+impl From<astrcode_core::thinking::ThinkingCapability> for ThinkingCapabilityDto {
+    fn from(value: astrcode_core::thinking::ThinkingCapability) -> Self {
+        Self {
+            wire_mapping: value.wire_mapping.into(),
+            allowed_effort: value.allowed_effort,
+            budget_min: value.budget_min,
+            budget_max: value.budget_max,
+            can_disable: value.can_disable,
+        }
+    }
+}
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -380,7 +435,6 @@ mod tests {
                 "openai_chat_completions",
                 "openai_responses",
                 "anthropic_messages",
-                "google_genai",
             ],
         );
         assert_wire_values(
@@ -408,11 +462,17 @@ mod tests {
             &["GET", "POST", "PUT", "PATCH", "DELETE"],
         );
         assert_wire_values(ToolOutputStreamDto::ALL, &["stdout", "stderr"]);
-        assert_wire_values(
-            ProviderAuthSchemeDto::ALL,
-            &["none", "bearer", "x_api_key", "x_goog_api_key"],
-        );
+        assert_wire_values(ProviderAuthSchemeDto::ALL, &["none", "bearer", "x_api_key"]);
         assert_wire_values(ThinkingLevelDto::ALL, &["low", "medium", "high"]);
+        assert_wire_values(
+            ThinkingWireMappingDto::ALL,
+            &[
+                "open_ai_responses",
+                "anthropic_adaptive",
+                "anthropic_budget",
+                "open_ai_chat",
+            ],
+        );
         assert_wire_values(
             AgentSessionStatusDto::ALL,
             &["running", "completed", "failed"],

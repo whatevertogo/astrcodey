@@ -310,6 +310,9 @@ fn effective_config() -> EffectiveConfig {
         prompt_cache_retention: None,
         reasoning: false,
         thinking_level: None,
+        thinking: Default::default(),
+        thinking_capability: None,
+        thinking_configured: false,
     };
     EffectiveConfig {
         llm: llm.clone(),

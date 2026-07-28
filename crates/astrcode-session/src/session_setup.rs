@@ -14,10 +14,10 @@ use astrcode_core::{
         SystemPromptInput,
     },
     tool::{ToolDefinition, ToolPromptMetadata},
-};
-use astrcode_extension_sdk::{
-    runtime_ports::{PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider},
     tool_pack::{ToolPack, ToolPackScope},
+};
+use astrcode_extension_sdk::runtime_ports::{
+    PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider,
 };
 use astrcode_support::{hash::hex_fingerprint, shell::resolve_shell};
 

@@ -13,8 +13,8 @@ pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
 use crate::wire::{
     ApprovalDecisionDto, ApprovalModeDto, CommandSourceDto, ExecutionModeDto,
     ExtensionCapabilityDto, ExtensionHttpMethodDto, ExtensionSourceDto, ExtensionStageStatusDto,
-    PhaseDto, ProviderAuthSchemeDto, ProviderWireFormatDto, ThinkingLevelDto, ToolOriginDto,
-    ToolOutputStreamDto,
+    PhaseDto, ProviderAuthSchemeDto, ProviderWireFormatDto, ThinkingCapabilityDto,
+    ThinkingLevelDto, ToolOriginDto, ToolOutputStreamDto,
 };
 
 /// 新建会话请求。
@@ -953,6 +953,39 @@ pub struct RemoveProviderPresetResponseDto {
     pub warning: Option<String>,
 }
 
+/// 标准化 thinking 配置 DTO（映射 core::thinking::ThinkingConfig）。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThinkingConfigDto {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tokens: Option<u32>,
+}
+
+impl From<astrcode_core::thinking::ThinkingConfig> for ThinkingConfigDto {
+    fn from(value: astrcode_core::thinking::ThinkingConfig) -> Self {
+        Self {
+            enabled: value.enabled,
+            effort: value.effort,
+            budget_tokens: value.budget_tokens,
+        }
+    }
+}
+
+impl From<ThinkingConfigDto> for astrcode_core::thinking::ThinkingConfig {
+    fn from(value: ThinkingConfigDto) -> Self {
+        Self {
+            enabled: value.enabled,
+            effort: value.effort,
+            budget_tokens: value.budget_tokens,
+        }
+    }
+}
+
 /// Profile 中的模型选项（与 config.toml 的 `modelOptions` 对齐）。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -960,6 +993,9 @@ pub struct RemoveProviderPresetResponseDto {
 pub struct ModelOptionsDto {
     pub reasoning: Option<bool>,
     pub thinking_level: Option<ThinkingLevelDto>,
+    /// 标准化 thinking 配置（新字段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfigDto>,
 }
 
 /// Profile 中的模型信息。
@@ -972,6 +1008,34 @@ pub struct ModelDto {
     pub context_limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_options: Option<ModelOptionsDto>,
+    /// 当前模型的标准化 thinking 配置（归一化后）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfigDto>,
+    /// 当前模型已解析的 thinking 能力（显式覆盖优先，其次内置查找）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_capability: Option<ThinkingCapabilityDto>,
+}
+
+/// POST /api/config/model-options 请求。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateModelOptionsRequest {
+    pub profile_name: String,
+    pub model_id: String,
+    /// 可为 null 或缺失以恢复默认。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<ThinkingConfigDto>,
+}
+
+/// POST /api/config/model-options 响应。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateModelOptionsResponseDto {
+    pub success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
 }
 
 /// POST /api/config/active-selection 请求。

@@ -29,8 +29,8 @@ use output::{
     is_auto_background_allowed, render_shell_output,
 };
 pub(crate) use process::{
-    PipelinePolicy, PipelineSemantics, apply_pipeline_policy, command_args, exit_signal,
-    hide_command_window, preprocess_shell_command, setup_process_group, terminate_child_tree,
+    PipelineSemantics, apply_pipeline_policy, command_args, exit_signal, hide_command_window,
+    preprocess_shell_command, setup_process_group, terminate_child_tree,
 };
 
 /// 前台命令超过此时间仍运行时，自动收编为后台 shell（参考 Claude Code assistant blocking budget）。
@@ -69,9 +69,6 @@ struct ShellArgs {
     /// 通过 stdin 传入命令的输入数据。
     #[serde(default)]
     stdin: Option<String>,
-    /// 管道退出状态策略。默认 strict；lastCommand 用于有意忽略上游状态的展示型管道。
-    #[serde(default)]
-    pipeline_policy: Option<PipelinePolicyArg>,
     /// 为 true 时在后台运行，立即返回 `shellId`；之后通过 `shellId` 查询增量输出。
     #[serde(default)]
     run_in_background: Option<bool>,
@@ -84,23 +81,6 @@ struct ShellArgs {
     /// 与 `shellId` 联用：本次增量输出预览的 token 预算。
     #[serde(default, rename = "maxOutputTokens")]
     max_output_tokens: Option<usize>,
-}
-
-/// Shell tool wire contract for selecting pipeline exit behavior.
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "camelCase")]
-enum PipelinePolicyArg {
-    Strict,
-    LastCommand,
-}
-
-impl From<PipelinePolicyArg> for PipelinePolicy {
-    fn from(value: PipelinePolicyArg) -> Self {
-        match value {
-            PipelinePolicyArg::Strict => Self::Strict,
-            PipelinePolicyArg::LastCommand => Self::LastCommand,
-        }
-    }
 }
 
 #[async_trait::async_trait]
@@ -153,11 +133,6 @@ impl Tool for ShellTool {
                     "cannot specify both shellId and runInBackground".into(),
                 ));
             }
-            if args.pipeline_policy.is_some() {
-                return Err(ToolError::InvalidArguments(
-                    "pipelinePolicy can only be used when starting a shell command".into(),
-                ));
-            }
             return execute_background_shell_wait(
                 shell_id,
                 args.block_until_ms.unwrap_or(0),
@@ -198,10 +173,8 @@ impl ShellTool {
     ) -> Result<ToolResult, ToolError> {
         let shell = resolve_shell();
         let command = preprocess_shell_command(&args.command, &shell);
-        let pipeline_policy = args.pipeline_policy.map(Into::into).unwrap_or_default();
         let (command, pipeline_semantics) =
-            apply_pipeline_policy(&shell, &command, pipeline_policy)
-                .map_err(ToolError::InvalidArguments)?;
+            apply_pipeline_policy(&shell, &command).map_err(ToolError::InvalidArguments)?;
         let command_args = command_args(&shell, &command);
         let cwd = args
             .cwd

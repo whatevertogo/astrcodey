@@ -60,11 +60,11 @@ export default function TopBar({
   return (
     <header
       className={cn(
-        'relative shrink-0 border-b border-border bg-surface-soft/96 backdrop-blur-[12px]',
+        'relative shrink-0 border-b border-border/70 bg-panel-bg/92 backdrop-blur-[12px]',
         isSidebarOpen ? 'z-10 md:z-30' : 'z-30'
       )}
     >
-      <div className="relative flex min-h-[52px] items-center px-[var(--layout-page-padding-x)] py-2">
+      <div className="relative flex min-h-[48px] items-center px-[var(--layout-page-padding-x)] py-1.5">
         {!isSidebarOpen && (
           <div className="absolute left-[var(--layout-page-padding-x)] top-1/2 -translate-y-1/2">
             <IconButton

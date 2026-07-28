@@ -49,13 +49,6 @@ const ANTHROPIC_ENDPOINTS: &[ProviderEndpointPreset] = &[ProviderEndpointPreset 
     is_default: true,
 }];
 
-const GEMINI_ENDPOINTS: &[ProviderEndpointPreset] = &[ProviderEndpointPreset {
-    id: "official",
-    label: "Official",
-    base_url: Some("https://generativelanguage.googleapis.com/v1beta"),
-    is_default: true,
-}];
-
 const DEEPSEEK_ENDPOINTS: &[ProviderEndpointPreset] = &[ProviderEndpointPreset {
     id: "official",
     label: "Official",
@@ -147,17 +140,6 @@ const BUILTIN_PROVIDER_CATALOG: &[ProviderSpec] = &[
         api_key_env_vars: &["ANTHROPIC_API_KEY"],
         endpoints: ANTHROPIC_ENDPOINTS,
         capabilities: ANTHROPIC_CAPABILITIES,
-    },
-    ProviderSpec {
-        id: "gemini",
-        display_name: "Google Gemini",
-        provider_kind: "gemini",
-        wire_format: ProviderWireFormat::GoogleGenAi,
-        auth_scheme: ProviderAuthScheme::XGoogApiKey,
-        default_model: "gemini-2.5-flash",
-        api_key_env_vars: &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
-        endpoints: GEMINI_ENDPOINTS,
-        capabilities: BASIC_CAPABILITIES,
     },
     ProviderSpec {
         id: "deepseek",

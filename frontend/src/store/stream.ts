@@ -1,12 +1,6 @@
 import { consumeSseStream } from '../services/sse-stream'
 import type { ConversationDelta } from '../services/types'
-import { applyDeltaToState } from './delta/applyDelta'
-import {
-  applyCoalescedDeltas,
-  coalesceDeltas,
-  isDeferrableDelta,
-  type CoalescedDelta,
-} from './delta/coalesce'
+import { applyDeltasToState } from './delta/applyDelta'
 import {
   SessionStreamController,
   type SessionStreamScheduler,
@@ -16,7 +10,6 @@ import type { ActiveSessionStream, AppState } from './types'
 const SSE_RECONNECT_BASE_MS = 1000
 const SSE_RECONNECT_MAX_MS = 30_000
 const STREAM_FLUSH_FALLBACK_MS = 16
-type BlockDelta = Exclude<CoalescedDelta, { kind: 'other' }>
 
 const browserScheduler: SessionStreamScheduler = {
   schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
@@ -44,15 +37,6 @@ export function startSessionStream(
   let rafId: number | null = null
   let timeoutId: number | null = null
 
-  const flushBlockDeltas = (blockDeltas: BlockDelta[]) => {
-    if (blockDeltas.length === 0) return
-    const deltas = blockDeltas.splice(0)
-    set((current) => {
-      const { blocks: newBlocks } = applyCoalescedDeltas(current.blocks, deltas)
-      return { blocks: newBlocks }
-    })
-  }
-
   const clearFlushSchedule = () => {
     if (rafId !== null) {
       cancelAnimationFrame(rafId)
@@ -76,25 +60,9 @@ export function startSessionStream(
     }
 
     const deltas = pendingDeltas.splice(0)
-    const cursorUpdate = latestCursor !== null ? { cursor: latestCursor } : null
+    const cursor = latestCursor
     latestCursor = null
-
-    const coalesced = coalesceDeltas(deltas)
-    const blockDeltas: BlockDelta[] = []
-
-    for (const coalescedDelta of coalesced) {
-      if (coalescedDelta.kind === 'other') {
-        flushBlockDeltas(blockDeltas)
-        applyDeltaToState(get(), coalescedDelta.delta, get, set)
-      } else {
-        blockDeltas.push(coalescedDelta)
-      }
-    }
-
-    flushBlockDeltas(blockDeltas)
-    if (cursorUpdate) {
-      set(cursorUpdate)
-    }
+    applyDeltasToState(deltas, get, set, cursor ?? undefined)
   }
 
   const scheduleFlush = () => {
@@ -116,13 +84,8 @@ export function startSessionStream(
       applyEnvelope: (envelope) => {
         if (get().activeSessionId !== sessionId) return
         latestCursor = envelope.cursor.value
-        if (isDeferrableDelta(envelope.delta)) {
-          pendingDeltas.push(envelope.delta)
-          scheduleFlush()
-        } else {
-          flushPending()
-          applyDeltaToState(get(), envelope.delta, get, set)
-        }
+        pendingDeltas.push(envelope.delta)
+        scheduleFlush()
       },
       rehydrate: () => get().refreshConversationSnapshot(),
       updateStatus: (sessionStreamStatus, sessionStreamError) => {

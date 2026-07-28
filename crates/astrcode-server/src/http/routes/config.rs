@@ -2,8 +2,8 @@
 
 use astrcode_core::{
     config::{
-        Config, ConfigStoreError, ModelConfig, Profile, ProviderCapabilities, ProviderSpec,
-        builtin_provider_catalog,
+        Config, ConfigStoreError, ModelConfig, ModelOptionsConfig, Profile, ProviderCapabilities,
+        ProviderSpec, builtin_provider_catalog,
     },
     permission::ApprovalMode,
 };
@@ -12,7 +12,7 @@ use astrcode_protocol::http::{
     ConfigViewResponseDto, ModelDto, ModelOptionsDto, ProfileDto, ProviderCatalogResponseDto,
     ProviderEndpointPresetDto, ProviderSpecCapabilitiesDto, ProviderSpecDto,
     RemoveProviderPresetRequest, RemoveProviderPresetResponseDto, UpdateActiveSelectionRequest,
-    UpdateActiveSelectionResponseDto,
+    UpdateActiveSelectionResponseDto, UpdateModelOptionsRequest, UpdateModelOptionsResponseDto,
 };
 use axum::{
     Json,
@@ -56,7 +56,33 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
                     model_options: m.model_options.as_ref().map(|o| ModelOptionsDto {
                         reasoning: o.reasoning,
                         thinking_level: o.thinking_level.map(Into::into),
+                        thinking: o.thinking.clone().map(Into::into),
                     }),
+                    thinking: m
+                        .model_options
+                        .as_ref()
+                        .and_then(|options| {
+                            options.thinking.clone().or_else(|| {
+                                (options.reasoning.is_some() || options.thinking_level.is_some())
+                                    .then(|| {
+                                        astrcode_core::thinking::legacy_to_thinking_config(
+                                            options.reasoning.unwrap_or(false),
+                                            options.thinking_level,
+                                        )
+                                    })
+                            })
+                        })
+                        .map(Into::into),
+                    thinking_capability: {
+                        let cap = m.thinking_capability.clone().or_else(|| {
+                            astrcode_core::thinking::resolve_thinking_capability(
+                                &p.provider_kind,
+                                p.wire_format,
+                                &m.id,
+                            )
+                        });
+                        cap.map(Into::into)
+                    },
                 })
                 .collect(),
         })
@@ -317,6 +343,133 @@ pub(in crate::http) async fn update_active_selection(
     .into_response()
 }
 
+pub(in crate::http) async fn update_model_options(
+    State(state): State<HttpState>,
+    Json(request): Json<UpdateModelOptionsRequest>,
+) -> Response {
+    // 1. Locate profile + model
+    let mut candidate = state.runtime.config_manager().raw_config_snapshot();
+    let profile_idx = match candidate
+        .profiles
+        .iter()
+        .position(|p| p.name == request.profile_name)
+    {
+        Some(idx) => idx,
+        None => {
+            return bad_request_response(
+                "unknown_profile",
+                format!("Profile {:?} not found", request.profile_name),
+            );
+        },
+    };
+    let model_idx = match candidate.profiles[profile_idx]
+        .models
+        .iter()
+        .position(|m| m.id == request.model_id)
+    {
+        Some(idx) => idx,
+        None => {
+            return bad_request_response(
+                "unknown_model",
+                format!(
+                    "Model {:?} not found in profile {:?}",
+                    request.model_id, request.profile_name
+                ),
+            );
+        },
+    };
+
+    let profile = &candidate.profiles[profile_idx];
+    let model = &profile.models[model_idx];
+
+    // 2. Convert incoming thinking DTO -> core ThinkingConfig (None/null = default/disabled)
+    let thinking_submitted = request.thinking.is_some();
+    let new_thinking: astrcode_core::thinking::ThinkingConfig = request
+        .thinking
+        .map(astrcode_core::thinking::ThinkingConfig::from)
+        .unwrap_or_default()
+        .normalized();
+
+    // 3. Resolve capability: explicit override > built-in lookup
+    let capability: Option<astrcode_core::thinking::ThinkingCapability> =
+        model.thinking_capability.clone().or_else(|| {
+            astrcode_core::thinking::resolve_thinking_capability(
+                &profile.provider_kind,
+                profile.wire_format,
+                &model.id,
+            )
+        });
+
+    // 4. Validate every explicit override. An omitted value means "use model default".
+    if thinking_submitted {
+        match capability.as_ref() {
+            None => {
+                return bad_request_response(
+                    "no_thinking_capability",
+                    "Thinking is not supported for this model (no matching capability found). Set \
+                     a `thinkingCapability` override on the model in config.toml if this model \
+                     should support thinking.",
+                );
+            },
+            Some(cap) => {
+                // Run general validation
+                let issues = astrcode_core::thinking::validate_thinking(&new_thinking, cap);
+                if !issues.is_empty() {
+                    return bad_request_response(
+                        "invalid_thinking_config",
+                        format!("Thinking config validation failed: {}", issues.join("; ")),
+                    );
+                }
+
+                // Anthropic-specific: budget_tokens must be < model.max_tokens
+                if matches!(
+                    cap.wire_mapping,
+                    astrcode_core::thinking::ThinkingWireMapping::AnthropicBudget
+                        | astrcode_core::thinking::ThinkingWireMapping::AnthropicAdaptive
+                ) {
+                    if let Some(budget) = new_thinking.budget_tokens {
+                        if let Some(max_tokens) = model.max_tokens {
+                            if budget >= max_tokens {
+                                return bad_request_response(
+                                    "invalid_budget_tokens",
+                                    format!(
+                                        "budget_tokens ({}) must be less than model max_tokens \
+                                         ({})",
+                                        budget, max_tokens
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    // 5. Persist: set new `thinking` on modelOptions, clear legacy fields
+    let model = &mut candidate.profiles[profile_idx].models[model_idx];
+    if thinking_submitted || model.model_options.is_some() {
+        let opts = model
+            .model_options
+            .get_or_insert_with(ModelOptionsConfig::default);
+        opts.thinking = thinking_submitted.then_some(new_thinking);
+        opts.reasoning = None;
+        opts.thinking_level = None;
+        if opts.thinking.is_none() {
+            model.model_options = None;
+        }
+    }
+
+    match persist_and_apply_config(&state, candidate).await {
+        Ok(warning) => Json(UpdateModelOptionsResponseDto {
+            success: true,
+            warning,
+        })
+        .into_response(),
+        Err(error) => internal_error_response("save_failed", error),
+    }
+}
+
 async fn persist_and_apply_config(
     state: &HttpState,
     candidate: Config,
@@ -446,6 +599,7 @@ fn profile_from_provider_spec(
             max_tokens: None,
             context_limit: None,
             model_options: None,
+            thinking_capability: None,
         }],
     }
 }

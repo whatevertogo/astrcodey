@@ -34,7 +34,7 @@ Before the first run, configure an LLM provider in `~/.astrcode/config.toml`. Le
 
 ## Features
 
-- **Multi-provider AI**: Anthropic, OpenAI-compatible, Google GenAI
+- **Multi-provider AI**: Anthropic and OpenAI-compatible providers
 - **Structured editing**: read, write, edit, patch tools
 - **Code search**: glob, grep
 - **Web tools**: built-in `web-search` and `fetch-url` (DuckDuckGo default; Brave/Serper optional)
@@ -76,7 +76,7 @@ astrcode
 
 ### 功能特性
 
-- **多 Provider AI**：Anthropic、OpenAI 兼容、Google GenAI
+- **多 Provider AI**：Anthropic 与 OpenAI 兼容 Provider
 - **智能编辑**：read、write、edit、patch 等结构化工具
 - **代码搜索**：glob、grep 快速定位代码
 - **Web 工具**：内置 `web-search` 与 `fetch-url`（默认 DuckDuckGo；可选 Brave/Serper）

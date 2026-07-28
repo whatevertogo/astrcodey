@@ -121,10 +121,10 @@
   --prose-table-header: #201b16;
   --font-outfit: 'Outfit', -apple-system, sans-serif;
   /* Layout tokens */
-  --layout-page-padding-x: clamp(24px, 3vw, 40px);
-  --layout-content-max-width: clamp(760px, 64vw, 960px);
-  --layout-hero-composer-max-width: clamp(680px, 58vw, 860px);
-  --layout-content-inset-x: 24px;
+  --layout-page-padding-x: clamp(18px, 2.4vw, 32px);
+  --layout-content-max-width: clamp(720px, 60vw, 820px);
+  --layout-hero-composer-max-width: clamp(680px, 58vw, 780px);
+  --layout-content-inset-x: 12px;
   --layout-avatar-size: 48px;
   --layout-avatar-gap: 10px;
   --layout-assistant-indent: calc(
@@ -143,8 +143,8 @@
   :root,
   [data-theme='light'],
   [data-theme='dark'] {
-    --layout-page-padding-x: 24px;
-    --layout-content-inset-x: 20px;
+    --layout-page-padding-x: 12px;
+    --layout-content-inset-x: 4px;
     --layout-avatar-gap: 12px;
   }
 }

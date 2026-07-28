@@ -17,8 +17,7 @@ import {
   stringValue,
   toolArgs,
   toolMeta,
-  truncateMiddle,
-  compactLine,
+  compactPreviewLine,
   asRecord,
   type ToolCall,
 } from './helpers'
@@ -123,9 +122,9 @@ export function FileToolDetails({ block }: { block: ToolCall }) {
             return (
               <div key={index} className="min-w-0">
                 <span className="text-text-muted">#{index + 1}</span>{' '}
-                <span>{truncateMiddle(compactLine(itemOld), 80)}</span>
+                <span>{compactPreviewLine(itemOld, 80)}</span>
                 <span className="text-text-muted"> -&gt; </span>
-                <span>{truncateMiddle(compactLine(itemNew), 80)}</span>
+                <span>{compactPreviewLine(itemNew, 80)}</span>
               </div>
             )
           })}

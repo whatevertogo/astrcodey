@@ -6,33 +6,19 @@ use astrcode_support::shell::{ShellFamily, ShellInfo};
 use regex::Regex;
 use tokio::process::Command;
 
-/// Determines which command in a shell pipeline controls the reported exit status.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum PipelinePolicy {
-    /// Report failure when any command in a pipeline fails, when the selected shell supports it.
-    #[default]
-    Strict,
-    /// Preserve the shell's native behavior where the final command controls the exit status.
-    LastCommand,
-}
-
 /// The pipeline behavior requested for a concrete shell invocation.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PipelineSemantics {
-    policy: PipelinePolicy,
     enforced: bool,
 }
 
 impl PipelineSemantics {
     pub(crate) fn policy_name(self) -> &'static str {
-        match self.policy {
-            PipelinePolicy::Strict => "strict",
-            PipelinePolicy::LastCommand => "lastCommand",
-        }
+        "strict"
     }
 
     pub(crate) fn status_scope(self) -> &'static str {
-        if self.policy == PipelinePolicy::Strict && self.enforced {
+        if self.enforced {
             "allPipelineStages"
         } else {
             "lastPipelineStage"
@@ -51,26 +37,24 @@ impl PipelineSemantics {
 pub(crate) fn apply_pipeline_policy(
     shell: &ShellInfo,
     command: &str,
-    policy: PipelinePolicy,
 ) -> Result<(String, PipelineSemantics), String> {
     let has_pipeline = has_pipeline_operator(shell, command);
     let strict_supported = supports_pipefail(shell);
-    if policy == PipelinePolicy::Strict && has_pipeline && !strict_supported {
+    if has_pipeline && !strict_supported {
         return Err(format!(
-            "pipelinePolicy=strict cannot be enforced by shell '{}'. Run the command without a \
-             pipeline, select bash/zsh, or explicitly set pipelinePolicy=lastCommand when only \
-             the final stage should determine success",
+            "strict pipeline status cannot be enforced by shell '{}'. Run the command without a \
+             pipeline or select bash/zsh",
             shell.name
         ));
     }
 
-    let enforced = policy == PipelinePolicy::LastCommand || !has_pipeline || strict_supported;
-    let command = if policy == PipelinePolicy::Strict && strict_supported {
+    let enforced = !has_pipeline || strict_supported;
+    let command = if strict_supported {
         format!("set -o pipefail\n{command}")
     } else {
         command.to_string()
     };
-    Ok((command, PipelineSemantics { policy, enforced }))
+    Ok((command, PipelineSemantics { enforced }))
 }
 
 /// Finds a shell pipeline operator while ignoring quoted or escaped `|` characters and `||`.

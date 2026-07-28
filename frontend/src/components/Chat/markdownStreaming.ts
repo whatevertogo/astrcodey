@@ -155,6 +155,13 @@ export function cachedStreamingMarkdownSplit(
   return next
 }
 
+export function safeStreamingMarkdownCommit(
+  currentCommitted: string,
+  renderedCommit: string
+): string {
+  return currentCommitted.startsWith(renderedCommit) ? renderedCommit : ''
+}
+
 /** 统计 text 中 ``` 出现次数（奇数表示仍在代码块内）。 */
 export function fenceCount(text: string): number {
   return rebuildSplitState(text).fenceCount

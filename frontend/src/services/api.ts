@@ -12,6 +12,8 @@ import type {
   ToolUiRespondResponse,
   UpdateActiveSelectionRequest,
   UpdateActiveSelectionResponseDto,
+  UpdateModelOptionsRequest,
+  UpdateModelOptionsResponseDto,
 } from './generated'
 import type {
   CreateSessionResponse,
@@ -316,6 +318,15 @@ export async function updateActiveSelection(
   return request('/api/config/active-selection', {
     method: 'POST',
     body: JSON.stringify(body),
+  })
+}
+
+export async function updateModelOptions(
+  requestBody: UpdateModelOptionsRequest
+): Promise<UpdateModelOptionsResponseDto> {
+  return request('/api/config/model-options', {
+    method: 'POST',
+    body: JSON.stringify(requestBody),
   })
 }
 

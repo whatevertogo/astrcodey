@@ -2,6 +2,7 @@ import {
   boolValue,
   changesLabel,
   compactLine,
+  compactPreviewLine,
   formatBytes,
   numberValue,
   paginationLabel,
@@ -136,7 +137,7 @@ registerToolRenderer({
   match: ({ block }) => block.name === 'shell',
   summary: ({ args, meta }) => {
     const command = stringValue(meta, 'command') || stringValue(args, 'command')
-    return command ? `$ ${compactLine(command)}` : ''
+    return command ? `$ ${compactPreviewLine(command, 140)}` : ''
   },
   render: ({ block }) => <ShellToolDetails block={block} />,
 })

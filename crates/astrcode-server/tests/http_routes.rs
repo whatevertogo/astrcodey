@@ -648,6 +648,355 @@ async fn provider_preset_apply_uses_submitted_api_key() {
 }
 
 #[tokio::test]
+async fn model_options_rejects_unknown_profile() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let body = serde_json::json!({
+        "profileName": "nonexistent",
+        "modelId": "test",
+        "thinking": { "enabled": true, "effort": "high" }
+    })
+    .to_string();
+
+    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = body_bytes(response).await;
+    let err: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(err["code"], "unknown_profile");
+}
+
+#[tokio::test]
+async fn model_options_rejects_unknown_model() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+
+    // First create a profile via provider preset
+    let body = serde_json::json!({
+        "providerId": "qwen",
+        "endpointId": "dashscope-compatible",
+        "profileName": "test-profile",
+        "activate": false
+    })
+    .to_string();
+    let response = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        body,
+        &token,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Now try updating a non-existent model
+    let body = serde_json::json!({
+        "profileName": "test-profile",
+        "modelId": "no-such-model",
+        "thinking": { "enabled": true }
+    })
+    .to_string();
+    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = body_bytes(response).await;
+    let err: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(err["code"], "unknown_model");
+}
+
+#[tokio::test]
+async fn model_options_rejects_thinking_without_capability() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+
+    // openai-compatible has no built-in thinking capability
+    let body = serde_json::json!({
+        "providerId": "openai-compatible",
+        "profileName": "nocap-profile",
+        "baseUrl": "https://api.example.com/v1",
+        "activate": false
+    })
+    .to_string();
+    let response = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        body,
+        &token,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Try enabling thinking (should fail since no capability exists)
+    let body = serde_json::json!({
+        "profileName": "nocap-profile",
+        "modelId": "gpt-4.1",
+        "thinking": { "enabled": true, "effort": "high" }
+    })
+    .to_string();
+    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = body_bytes(response).await;
+    let err: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(err["code"], "no_thinking_capability");
+}
+
+#[tokio::test]
+async fn model_options_persists_and_clears_legacy_fields() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+
+    // deepseek has built-in thinking capability (OpenAiChat, toggle-only)
+    let body = serde_json::json!({
+        "providerId": "deepseek",
+        "endpointId": "official",
+        "profileName": "thinking-test",
+        "activate": false
+    })
+    .to_string();
+    let response = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        body,
+        &token,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let deepseek_default_model = "deepseek-v4-flash";
+
+    // Persist thinking config (toggle-only, no effort needed)
+    let body = serde_json::json!({
+        "profileName": "thinking-test",
+        "modelId": deepseek_default_model,
+        "thinking": { "enabled": true }
+    })
+    .to_string();
+    let response = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let resp: serde_json::Value = serde_json::from_slice(&body_bytes(response).await).unwrap();
+    assert_eq!(resp["success"], true);
+
+    // Verify persisted config
+    let config = runtime.config_manager().raw_config_snapshot();
+    let profile = config
+        .profiles
+        .iter()
+        .find(|p| p.name == "thinking-test")
+        .unwrap();
+    let model = profile
+        .models
+        .iter()
+        .find(|m| m.id == deepseek_default_model)
+        .unwrap();
+    let opts = model
+        .model_options
+        .as_ref()
+        .expect("model_options should exist");
+    assert_eq!(opts.thinking.as_ref().map(|t| t.enabled), Some(true));
+    // Legacy fields should be cleared
+    assert_eq!(opts.reasoning, None);
+    assert_eq!(opts.thinking_level, None);
+}
+
+#[tokio::test]
+async fn model_options_can_disable_thinking() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+
+    // Use deepseek which has a built-in thinking capability
+    let body = serde_json::json!({
+        "providerId": "deepseek",
+        "endpointId": "official",
+        "profileName": "disable-test",
+        "activate": false
+    })
+    .to_string();
+    let response = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        body,
+        &token,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let deepseek_default_model = "deepseek-v4-flash";
+
+    // Set enabled first
+    let body = serde_json::json!({
+        "profileName": "disable-test",
+        "modelId": deepseek_default_model,
+        "thinking": { "enabled": true }
+    })
+    .to_string();
+    let response = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Now disable by sending enabled:false
+    let body = serde_json::json!({
+        "profileName": "disable-test",
+        "modelId": deepseek_default_model,
+        "thinking": { "enabled": false }
+    })
+    .to_string();
+    let response = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Verify disabled
+    let config = runtime.config_manager().raw_config_snapshot();
+    let model = config
+        .profiles
+        .iter()
+        .find(|p| p.name == "disable-test")
+        .unwrap()
+        .models
+        .iter()
+        .find(|m| m.id == deepseek_default_model)
+        .unwrap();
+    let opts = model
+        .model_options
+        .as_ref()
+        .expect("model_options should exist");
+    assert_eq!(
+        opts.thinking.as_ref().map(|thinking| thinking.enabled),
+        Some(false)
+    );
+
+    let body = serde_json::json!({
+        "providerId": "openai",
+        "endpointId": "official",
+        "profileName": "cannot-disable-test",
+        "modelId": "o3-mini",
+        "activate": false
+    })
+    .to_string();
+    let response = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        body,
+        &token,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = serde_json::json!({
+        "profileName": "cannot-disable-test",
+        "modelId": "o3-mini",
+        "thinking": { "enabled": false }
+    })
+    .to_string();
+    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = body_bytes(response).await;
+    let error: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(error["code"], "invalid_thinking_config");
+}
+
+#[tokio::test]
+async fn model_options_null_thinking_restores_model_default() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+
+    let body = serde_json::json!({
+        "providerId": "deepseek",
+        "endpointId": "official",
+        "profileName": "null-test",
+        "activate": false
+    })
+    .to_string();
+    let response = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        body,
+        &token,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let deepseek_default_model = "deepseek-v4-flash";
+
+    // Send request with thinking: null (explicit null)
+    let body = serde_json::json!({
+        "profileName": "null-test",
+        "modelId": deepseek_default_model,
+        "thinking": null
+    })
+    .to_string();
+    let response = post_json_owned(app, "/api/config/model-options", body, &token).await;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let config = runtime.config_manager().raw_config_snapshot();
+    let model = config
+        .profiles
+        .iter()
+        .find(|p| p.name == "null-test")
+        .unwrap()
+        .models
+        .iter()
+        .find(|m| m.id == deepseek_default_model)
+        .unwrap();
+    assert!(model.model_options.is_none());
+}
+
+#[tokio::test]
+async fn get_config_exposes_thinking_and_capability() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let event_tx = Arc::new(EventFanout::new(1024));
+    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+
+    // deepseek has built-in thinking capability (OpenAiChat mapping)
+    let body = serde_json::json!({
+        "providerId": "deepseek",
+        "endpointId": "official",
+        "profileName": "config-test",
+        "activate": false
+    })
+    .to_string();
+    let response = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        body,
+        &token,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let deepseek_default_model = "deepseek-v4-flash";
+
+    // Set thinking
+    let body = serde_json::json!({
+        "profileName": "config-test",
+        "modelId": deepseek_default_model,
+        "thinking": { "enabled": true }
+    })
+    .to_string();
+    let _ = post_json_owned(app.clone(), "/api/config/model-options", body, &token).await;
+
+    // GET /api/config should show thinking and capability
+    let config_resp = get_json::<serde_json::Value>(app, "/api/config", &token).await;
+    let profiles = config_resp["profiles"].as_array().unwrap();
+    let test_profile = profiles
+        .iter()
+        .find(|p| p["name"] == "config-test")
+        .unwrap();
+    let model = &test_profile["models"][0];
+    assert_eq!(model["id"], deepseek_default_model);
+
+    // model_options should include thinking
+    let opts = &model["modelOptions"];
+    assert_eq!(opts["thinking"]["enabled"], true);
+
+    // top-level thinking should mirror model_options.thinking
+    assert_eq!(model["thinking"]["enabled"], true);
+
+    // thinking_capability should be present (deepseek has built-in capability)
+    let cap = &model["thinkingCapability"];
+    assert_eq!(cap["wireMapping"], "open_ai_chat");
+}
+
+#[tokio::test]
 async fn concurrent_prompt_accepts_one_and_queues_one() {
     let runtime = runtime(Arc::new(PendingLlm)).await;
     let event_tx = Arc::new(EventFanout::new(1024));
@@ -1795,6 +2144,9 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,
+            thinking: Default::default(),
+            thinking_capability: None,
+            thinking_configured: false,
         },
         small_llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -1815,6 +2167,9 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,
+            thinking: Default::default(),
+            thinking_capability: None,
+            thinking_configured: false,
         },
         context: ContextSettings {
             auto_compact_enabled: true,

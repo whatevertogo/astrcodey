@@ -61,10 +61,16 @@ pub struct LlmSettings {
     pub supports_strict_tool_use: bool,
     /// 可选的 OpenAI prompt cache retention。
     pub prompt_cache_retention: Option<crate::llm::PromptCacheRetention>,
-    /// 是否启用推理模式（如 DeepSeek reasoner）。
+    /// 是否启用推理模式（如 DeepSeek reasoner）。派生自 `thinking.enabled`，保留兼容。
     pub reasoning: bool,
-    /// 推理强度级别（provider 支持时生效）。
+    /// 推理强度级别（provider 支持时生效）。派生自 `thinking.effort`，保留兼容。
     pub thinking_level: Option<crate::llm::ThinkingLevel>,
+    /// 标准化 thinking 配置（新字段；`reasoning` 和 `thinking_level` 的权威来源）。
+    pub thinking: crate::thinking::ThinkingConfig,
+    /// 当前模型已解析的 thinking 能力；None 表示不得发送 thinking 参数。
+    pub thinking_capability: Option<crate::thinking::ThinkingCapability>,
+    /// 是否存在显式 thinking 配置；用于区分“模型默认值”和“明确关闭”。
+    pub thinking_configured: bool,
 }
 
 impl LlmSettings {
@@ -92,6 +98,9 @@ impl LlmSettings {
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,
+            thinking: crate::thinking::ThinkingConfig::default(),
+            thinking_capability: None,
+            thinking_configured: false,
         }
     }
 }

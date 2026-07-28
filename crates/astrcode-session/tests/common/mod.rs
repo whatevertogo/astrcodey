@@ -11,8 +11,8 @@ use astrcode_core::{
     },
     llm::{LlmMessage, LlmProvider},
     prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
+    tool_pack::ToolPack,
 };
-use astrcode_extension_sdk::tool_pack::ToolPack;
 use astrcode_session::{SessionExtensionPorts, SessionHostServices, SessionRuntimeServices};
 
 pub fn test_runtime_services(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeServices> {
@@ -148,6 +148,9 @@ fn effective_config(context: ContextSettings) -> EffectiveConfig {
         prompt_cache_retention: None,
         reasoning: false,
         thinking_level: None,
+        thinking: Default::default(),
+        thinking_capability: None,
+        thinking_configured: false,
     };
     EffectiveConfig {
         llm: llm.clone(),

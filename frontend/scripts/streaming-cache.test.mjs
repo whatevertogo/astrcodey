@@ -3,12 +3,14 @@ import assert from 'node:assert/strict'
 import {
   fenceCount,
   findStreamingCommitIndex,
+  safeStreamingMarkdownCommit,
   updateStreamingMarkdownSplit,
 } from '../../target/frontend-streaming/markdownStreaming.js'
 import {
   extractThinkingBlocks,
   updateThinkingExtractionState,
 } from '../../target/frontend-streaming/thinkingExtraction.js'
+import { previewText } from '../../target/frontend-streaming/tools/helpers.js'
 
 function legacyFenceCount(text) {
   return text.match(/```/g)?.length ?? 0
@@ -65,6 +67,16 @@ for (const text of markdownCases) {
   }
 }
 
+assert.equal(
+  safeStreamingMarkdownCommit('before\n', 'before\nunsafe fence\n'),
+  '',
+  'a throttled commit must be discarded when the current safe boundary moves backward'
+)
+assert.equal(
+  safeStreamingMarkdownCommit('before\nsafe paragraph\n', 'before\n'),
+  'before\n'
+)
+
 const thinkingCases = [
   'plain answer',
   'emoji🙂 before <think-block> hidden </think-block> after',
@@ -93,3 +105,15 @@ for (const text of thinkingCases) {
     )
   }
 }
+
+const longToolOutput = Array.from(
+  { length: 80 },
+  (_, index) => `${index + 1}\tline ${index + 1}`
+).join('\n')
+const boundedPreview = previewText(longToolOutput)
+assert.equal(boundedPreview.truncated, true)
+assert.equal(boundedPreview.content.split('\n').length, 24)
+assert.equal(
+  boundedPreview.omittedCharacters,
+  longToolOutput.length - boundedPreview.content.length
+)

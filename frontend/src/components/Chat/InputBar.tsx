@@ -404,7 +404,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
         'shrink-0',
         isHero
           ? 'w-full'
-          : 'bg-panel-bg px-[var(--layout-page-padding-x)] pb-5 pt-2'
+          : 'bg-gradient-to-t from-panel-bg via-panel-bg to-panel-bg/0 px-[var(--layout-page-padding-x)] pb-4 pt-3'
       )}
     >
       <div
@@ -433,7 +433,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                 'relative',
                 isHero
                   ? 'px-[var(--layout-content-inset-x)] pb-3 pt-4'
-                  : 'px-[var(--layout-content-inset-x)] pb-3.5 pt-4 sm:pt-5'
+                  : 'px-4 pb-3 pt-3.5'
               )}
             >
               <ComposerAttachments
@@ -446,7 +446,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                   'w-full resize-none overflow-y-auto border-0 bg-transparent p-0 text-text-primary placeholder:text-text-muted focus:outline-none disabled:cursor-not-allowed disabled:opacity-60',
                   isHero
                     ? 'mb-5 max-h-44 min-h-12 text-[16px] leading-[1.55]'
-                    : 'mb-5 max-h-60 min-h-14 text-[16px] leading-[1.6]'
+                    : 'mb-3 max-h-60 min-h-10 text-[15px] leading-[1.6]'
                 )}
                 placeholder={isHero ? '随心输入' : '向 AstrCode 提问...'}
                 value={value}

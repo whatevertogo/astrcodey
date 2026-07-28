@@ -29,7 +29,7 @@ AstrCode 当前 workspace 有 26 个成员：`crates/` 下 25 个 crate，加上
 | `astrcode-core` | `crates/astrcode-core` | lib | 核心共享类型、trait、事件、工具、配置、LLM、存储契约 |
 | `astrcode-support` | `crates/astrcode-support` | lib | host 环境工具：路径、shell、frontmatter、文本、事件广播等 |
 | `astrcode-protocol` | `crates/astrcode-protocol` | lib | JSON-RPC、HTTP DTO、事件通知、协议版本等 wire 类型 |
-| `astrcode-ai` | `crates/astrcode-ai` | lib | OpenAI/Anthropic/Gemini provider、流式解码、重试 |
+| `astrcode-ai` | `crates/astrcode-ai` | lib | OpenAI/Anthropic provider、流式解码、重试 |
 | `astrcode-storage` | `crates/astrcode-storage` | lib | JSONL EventLog、投影、快照、session 仓库、配置存储 |
 | `astrcode-context` | `crates/astrcode-context` | lib | prompt 组装、上下文裁剪、token 预算、compact |
 | `astrcode-tools` | `crates/astrcode-tools` | lib | 内置文件工具、shell、terminal、后台 shell、默认工具包 |
@@ -133,7 +133,6 @@ AstrCode 当前 workspace 有 26 个成员：`crates/` 下 25 个 crate，加上
 
 - `providers/openai.rs`：OpenAI 兼容 provider。包含标准内容累积器 `StandardAccumulator`、可替换 `ChatAccumulator` trait、SSE/chat response 处理。
 - `providers/anthropic.rs`：Anthropic provider 适配。
-- `providers/google_genai.rs`：Google Gemini/GenAI provider 适配。
 - `common`：provider 间共享请求/响应辅助。
 - `retry`：`RetryPolicy` 和指数退避重试。
 - `stream_decoder`：多字节安全 UTF-8/SSE 流式解码。

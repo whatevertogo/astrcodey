@@ -67,7 +67,12 @@ impl StandardProvider {
             supports_prompt_cache_key: self.config.supports_prompt_cache_key(),
             supports_strict_tool_use: self.config.supports_strict_tool_use,
             prompt_cache_retention: self.config.prompt_cache_retention(),
-            thinking_level: self.config.thinking_level(),
+            thinking: &self.config.thinking,
+            thinking_capability: self
+                .config
+                .thinking_configured
+                .then_some(self.config.thinking_capability.as_ref())
+                .flatten(),
         }
     }
 
@@ -182,6 +187,7 @@ impl LlmProvider for StandardProvider {
 mod tests {
     use astrcode_core::{
         config::OpenAiApiMode,
+        thinking::ThinkingConfig,
         tool::{ExecutionMode, ToolDefinition, ToolOrigin},
     };
 
@@ -198,7 +204,8 @@ mod tests {
     fn provider(
         api_mode: OpenAiApiMode,
         supports_cache_key: bool,
-        thinking_level: Option<ThinkingLevel>,
+        thinking: ThinkingConfig,
+        thinking_capability: Option<astrcode_core::thinking::ThinkingCapability>,
     ) -> StandardProvider {
         use astrcode_core::llm::{OpenAiProviderExtras, ProviderExtras};
         let config = LlmClientConfig {
@@ -209,8 +216,10 @@ mod tests {
                 supports_stream_usage: true,
                 prompt_cache_retention: supports_cache_key
                     .then_some(PromptCacheRetention::TwentyFourHours),
-                thinking_level,
             }),
+            thinking_configured: thinking_capability.is_some(),
+            thinking,
+            thinking_capability,
             ..LlmClientConfig::default()
         };
         StandardProvider::new(config, api_mode, "gpt-test".into(), Some(1024), Some(8192)).unwrap()
@@ -233,7 +242,12 @@ mod tests {
 
     #[test]
     fn chat_request_includes_prompt_cache_key() {
-        let p = provider(OpenAiApiMode::ChatCompletions, true, None);
+        let p = provider(
+            OpenAiApiMode::ChatCompletions,
+            true,
+            ThinkingConfig::default(),
+            None,
+        );
         let body = p.build_request_body(
             &[LlmMessage::system("s"), LlmMessage::user("hi")],
             &[sample_tool()],
@@ -248,14 +262,34 @@ mod tests {
 
     #[test]
     fn chat_request_includes_stream_usage_when_supported() {
-        let p = provider(OpenAiApiMode::ChatCompletions, false, None);
+        let p = provider(
+            OpenAiApiMode::ChatCompletions,
+            false,
+            ThinkingConfig::default(),
+            None,
+        );
         let body = p.build_request_body(&[LlmMessage::user("hi")], &[]);
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
     #[test]
     fn responses_count_body_keeps_provider_visible_input_and_tools() {
-        let p = provider(OpenAiApiMode::Responses, true, Some(ThinkingLevel::Medium));
+        let p = provider(
+            OpenAiApiMode::Responses,
+            true,
+            ThinkingConfig {
+                enabled: true,
+                effort: Some("medium".into()),
+                budget_tokens: None,
+            },
+            Some(astrcode_core::thinking::ThinkingCapability {
+                wire_mapping: astrcode_core::thinking::ThinkingWireMapping::OpenAiResponses,
+                allowed_effort: Some(vec!["medium".into()]),
+                budget_min: None,
+                budget_max: None,
+                can_disable: false,
+            }),
+        );
         let body = p.build_responses_count_body(
             &[LlmMessage::system("s"), LlmMessage::user("hi")],
             &[sample_tool()],
@@ -269,21 +303,31 @@ mod tests {
         assert_eq!(body["instructions"], "s");
         assert!(body["input"].is_array());
         assert!(body["tools"].is_array());
-        assert_eq!(body["reasoning"]["effort"], "medium");
+        assert!(body.get("reasoning").is_none());
         assert!(body.get("stream").is_none());
         assert!(body.get("max_output_tokens").is_none());
     }
 
     #[test]
     fn request_omits_prompt_cache_fields_when_unsupported() {
-        let p = provider(OpenAiApiMode::ChatCompletions, false, None);
+        let p = provider(
+            OpenAiApiMode::ChatCompletions,
+            false,
+            ThinkingConfig::default(),
+            None,
+        );
         let body = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("hi")], &[]);
         assert!(body.get("prompt_cache_key").is_none());
     }
 
     #[tokio::test]
     async fn generate_rejects_invalid_strict_schema_before_transport() {
-        let mut provider = provider(OpenAiApiMode::Responses, false, None);
+        let mut provider = provider(
+            OpenAiApiMode::Responses,
+            false,
+            ThinkingConfig::default(),
+            None,
+        );
         provider.config.supports_strict_tool_use = true;
         let mut invalid = sample_tool();
         invalid.strict = true;
@@ -302,7 +346,12 @@ mod tests {
 
     #[test]
     fn cache_key_identical_for_same_system() {
-        let p = provider(OpenAiApiMode::Responses, true, None);
+        let p = provider(
+            OpenAiApiMode::Responses,
+            true,
+            ThinkingConfig::default(),
+            None,
+        );
         let t = vec![sample_tool()];
         let a = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("a")], &t);
         let b = p.build_request_body(
@@ -318,7 +367,12 @@ mod tests {
 
     #[test]
     fn cache_key_differs_when_tools_differ() {
-        let p = provider(OpenAiApiMode::Responses, true, None);
+        let p = provider(
+            OpenAiApiMode::Responses,
+            true,
+            ThinkingConfig::default(),
+            None,
+        );
         let messages = [LlmMessage::system("s"), LlmMessage::user("hi")];
         let mut other = sample_tool();
         other.name = "other".into();
@@ -452,8 +506,24 @@ mod tests {
     }
 
     #[test]
-    fn responses_request_includes_reasoning_effort_when_thinking_level_set() {
-        let p = provider(OpenAiApiMode::Responses, false, Some(ThinkingLevel::High));
+    fn responses_request_includes_reasoning_effort_when_thinking_enabled_with_effort() {
+        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        let p = provider(
+            OpenAiApiMode::Responses,
+            false,
+            ThinkingConfig {
+                enabled: true,
+                effort: Some("high".into()),
+                budget_tokens: None,
+            },
+            Some(ThinkingCapability {
+                wire_mapping: ThinkingWireMapping::OpenAiResponses,
+                allowed_effort: Some(vec!["high".into()]),
+                budget_min: None,
+                budget_max: None,
+                can_disable: false,
+            }),
+        );
         let body = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("hi")], &[]);
         assert_eq!(body["reasoning"]["effort"], "high");
     }

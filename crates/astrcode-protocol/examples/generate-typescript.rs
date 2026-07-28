@@ -136,6 +136,10 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         RemoveProviderPresetResponseDto,
         ModelOptionsDto,
         ModelDto,
+        ThinkingConfigDto,
+        ThinkingCapabilityDto,
+        UpdateModelOptionsRequest,
+        UpdateModelOptionsResponseDto,
         UpdateActiveSelectionRequest,
         UpdateActiveSelectionResponseDto,
         ConfigReloadResponseDto,
@@ -194,6 +198,11 @@ fn write_wire_values(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         ProviderAuthSchemeDto::ALL,
     )?;
     push_wire_values(&mut output, "THINKING_LEVELS", ThinkingLevelDto::ALL)?;
+    push_wire_values(
+        &mut output,
+        "THINKING_WIRE_MAPPINGS",
+        ThinkingWireMappingDto::ALL,
+    )?;
     push_wire_values(
         &mut output,
         "AGENT_SESSION_STATUSES",

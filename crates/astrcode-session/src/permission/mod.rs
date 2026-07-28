@@ -93,6 +93,9 @@ mod tests {
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,
+            thinking: Default::default(),
+            thinking_capability: None,
+            thinking_configured: false,
         }
     }
 

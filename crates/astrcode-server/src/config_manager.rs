@@ -47,7 +47,6 @@ fn build_provider_from_settings(
             supports_prompt_cache_key: settings.supports_prompt_cache_key,
             supports_stream_usage: settings.supports_stream_usage,
             prompt_cache_retention: settings.prompt_cache_retention,
-            thinking_level: settings.thinking_level,
         })
     } else {
         ProviderExtras::None
@@ -64,6 +63,9 @@ fn build_provider_from_settings(
         supports_strict_tool_use: settings.supports_strict_tool_use,
         extras,
         extra_headers: Default::default(),
+        thinking: settings.thinking.clone(),
+        thinking_capability: settings.thinking_capability.clone(),
+        thinking_configured: settings.thinking_configured,
     };
     create_provider(
         &settings.provider_kind,

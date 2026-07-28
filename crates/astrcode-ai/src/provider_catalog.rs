@@ -12,8 +12,7 @@ use astrcode_core::{
 };
 
 use crate::providers::{
-    anthropic::AnthropicProvider, google_genai::GeminiProvider,
-    openai::StandardProvider as OpenAiStandardProvider,
+    anthropic::AnthropicProvider, openai::StandardProvider as OpenAiStandardProvider,
 };
 
 pub(crate) struct ProviderInstance {
@@ -53,12 +52,6 @@ impl ProviderInstance {
 pub(crate) fn build_provider(instance: ProviderInstance) -> Result<Arc<dyn LlmProvider>, LlmError> {
     let provider: Arc<dyn LlmProvider> = match instance.wire_format {
         ProviderWireFormat::AnthropicMessages => Arc::new(AnthropicProvider::new(
-            instance.config,
-            instance.model_id,
-            instance.max_tokens,
-            instance.context_limit,
-        )?),
-        ProviderWireFormat::GoogleGenAi => Arc::new(GeminiProvider::new(
             instance.config,
             instance.model_id,
             instance.max_tokens,

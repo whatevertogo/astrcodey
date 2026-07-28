@@ -4,8 +4,8 @@ use astrcode_core::tool::{Tool, ToolCapabilities, ToolExecutionContext, ToolResu
 use astrcode_support::shell::{ShellFamily, ShellInfo, resolve_shell};
 
 use super::{
-    MAX_CAPTURE_BYTES_PER_STREAM, PipelinePolicy, ShellTool, apply_pipeline_policy, capture_stream,
-    command_args, preprocess_shell_command,
+    MAX_CAPTURE_BYTES_PER_STREAM, ShellTool, apply_pipeline_policy, capture_stream, command_args,
+    preprocess_shell_command,
 };
 
 fn empty_ctx() -> ToolExecutionContext {
@@ -135,8 +135,7 @@ fn command_args_match_resolved_shell_family() {
     assert_eq!(command_args(&posix, command), vec!["-lc", command]);
 
     let (strict_command, strict_semantics) =
-        apply_pipeline_policy(&posix, "false | true", PipelinePolicy::Strict)
-            .expect("bash supports strict pipelines");
+        apply_pipeline_policy(&posix, "false | true").expect("bash supports strict pipelines");
     assert_eq!(strict_command, "set -o pipefail\nfalse | true");
     assert!(strict_semantics.is_enforced());
     assert_eq!(strict_semantics.status_scope(), "allPipelineStages");
@@ -146,23 +145,16 @@ fn command_args_match_resolved_shell_family() {
         name: "sh".into(),
         path: "/bin/sh".into(),
     };
-    let unsupported = apply_pipeline_policy(&sh, "false | true", PipelinePolicy::Strict)
+    let unsupported = apply_pipeline_policy(&sh, "false | true")
         .expect_err("sh pipeline must fail closed when strict status is unavailable");
     assert!(unsupported.contains("cannot be enforced"));
 
     for command in ["printf '%s' '|'", "false || true"] {
-        let (prepared, semantics) = apply_pipeline_policy(&sh, command, PipelinePolicy::Strict)
+        let (prepared, semantics) = apply_pipeline_policy(&sh, command)
             .expect("quoted pipes and boolean OR are not pipelines");
         assert_eq!(prepared, command);
         assert!(semantics.is_enforced());
     }
-
-    let (last_command, last_command_semantics) =
-        apply_pipeline_policy(&sh, "false | true", PipelinePolicy::LastCommand)
-            .expect("last-command semantics are available on every shell");
-    assert_eq!(last_command, "false | true");
-    assert!(last_command_semantics.is_enforced());
-    assert_eq!(last_command_semantics.status_scope(), "lastPipelineStage");
 }
 
 #[test]
@@ -355,9 +347,9 @@ async fn shell_nonzero_exit_code_is_error() {
 }
 
 #[tokio::test]
-async fn shell_pipeline_policy_controls_foreground_and_background_status() {
+async fn shell_pipeline_failures_are_strict_in_foreground_and_background() {
     let shell = resolve_shell();
-    let Ok(_) = apply_pipeline_policy(&shell, "false | true", PipelinePolicy::Strict) else {
+    let Ok(_) = apply_pipeline_policy(&shell, "false | true") else {
         return;
     };
 
@@ -385,26 +377,6 @@ async fn shell_pipeline_policy_controls_foreground_and_background_status() {
     assert_eq!(
         strict.metadata["pipelineStatusScope"],
         serde_json::json!("allPipelineStages")
-    );
-
-    let last_command = tool
-        .execute(
-            serde_json::json!({
-                "command": "false | true",
-                "pipelinePolicy": "lastCommand"
-            }),
-            &ctx,
-        )
-        .await
-        .expect("last-command pipeline should execute");
-    assert!(!last_command.is_error, "{last_command:?}");
-    assert_eq!(
-        last_command.metadata["executionStatus"],
-        serde_json::json!("succeeded")
-    );
-    assert_eq!(
-        last_command.metadata["pipelineStatusScope"],
-        serde_json::json!("lastPipelineStage")
     );
 
     let background = tool

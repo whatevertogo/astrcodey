@@ -1,4 +1,11 @@
-import React, { memo, useState, useCallback, Component } from 'react'
+import React, {
+  memo,
+  useState,
+  useCallback,
+  useEffect,
+  useRef,
+  Component,
+} from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
@@ -8,7 +15,10 @@ import {
   ghostIconButton,
 } from '../../lib/styles'
 import { cn } from '../../lib/utils'
-import { cachedStreamingMarkdownSplit } from './markdownStreaming'
+import {
+  cachedStreamingMarkdownSplit,
+  safeStreamingMarkdownCommit,
+} from './markdownStreaming'
 
 class MarkdownGuard extends Component<
   { fallback: string; children: React.ReactNode },
@@ -197,8 +207,39 @@ const StreamingCursor = () => (
   </span>
 )
 
+const STREAMING_MARKDOWN_RENDER_INTERVAL_MS = 100
+
+function useThrottledStreamingText(text: string): string {
+  const [rendered, setRendered] = useState(text)
+  const latestRef = useRef(text)
+  const timeoutRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    latestRef.current = text
+    if (rendered === text || timeoutRef.current !== null) return
+
+    timeoutRef.current = window.setTimeout(() => {
+      timeoutRef.current = null
+      setRendered((current) =>
+        current === latestRef.current ? current : latestRef.current
+      )
+    }, STREAMING_MARKDOWN_RENDER_INTERVAL_MS)
+  }, [rendered, text])
+
+  useEffect(
+    () => () => {
+      if (timeoutRef.current !== null) {
+        window.clearTimeout(timeoutRef.current)
+      }
+    },
+    []
+  )
+
+  return rendered
+}
+
 /** Streaming 时：已稳定部分走 ReactMarkdown，未完成尾巴纯文本。 */
-export function StreamingMarkdown({
+function StreamingMarkdownContent({
   text,
   cacheKey,
 }: {
@@ -207,6 +248,12 @@ export function StreamingMarkdown({
 }) {
   const split = cachedStreamingMarkdownSplit(cacheKey, text)
   const hasCommit = split.commitIndex !== -1
+  const renderedCommit = useThrottledStreamingText(split.committed)
+  const safeRenderedCommit = safeStreamingMarkdownCommit(
+    split.committed,
+    renderedCommit
+  )
+  const liveTail = text.slice(safeRenderedCommit.length)
 
   if (!hasCommit) {
     return (
@@ -219,11 +266,17 @@ export function StreamingMarkdown({
 
   return (
     <>
-      {split.committed ? <MarkdownContent text={split.committed} /> : null}
-      {split.tail ? (
-        <span className="whitespace-pre-wrap break-words">{split.tail}</span>
+      {safeRenderedCommit ? (
+        <MarkdownContent text={safeRenderedCommit} />
+      ) : null}
+      {liveTail ? (
+        <span className="whitespace-pre-wrap break-words">{liveTail}</span>
       ) : null}
       <StreamingCursor />
     </>
   )
+}
+
+export function StreamingMarkdown(props: { text: string; cacheKey: string }) {
+  return <StreamingMarkdownContent key={props.cacheKey} {...props} />
 }

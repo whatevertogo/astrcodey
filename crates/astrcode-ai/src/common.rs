@@ -15,7 +15,6 @@ use astrcode_core::{
     llm::{LlmClientConfig, LlmError, LlmEvent, LlmTokenUsage},
 };
 use futures_util::StreamExt;
-use parking_lot::Mutex;
 use tokio::sync::mpsc;
 
 use crate::{
@@ -86,9 +85,6 @@ pub(crate) fn apply_auth_header(
         ProviderAuthScheme::XApiKey => {
             ensure_header(headers, "x-api-key", api_key);
         },
-        ProviderAuthScheme::XGoogApiKey => {
-            ensure_header(headers, "x-goog-api-key", api_key);
-        },
     }
 }
 
@@ -135,33 +131,11 @@ pub fn send_event(tx: &mpsc::UnboundedSender<LlmEvent>, event: LlmEvent) -> bool
 #[derive(Debug, Default)]
 pub struct StreamEventSink {
     done_sent: bool,
-    usage_reported: bool,
-    fallback_call_id: u64,
 }
 
 impl StreamEventSink {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn done_sent(&self) -> bool {
         self.done_sent
-    }
-
-    pub fn usage_reported(&self) -> bool {
-        self.usage_reported
-    }
-
-    pub fn mark_usage_reported(&mut self) {
-        self.usage_reported = true;
-    }
-
-    pub fn tool_call_id(&mut self, provider_id: Option<&str>) -> String {
-        if let Some(id) = provider_id.filter(|id| !id.is_empty()) {
-            return id.to_string();
-        }
-        self.fallback_call_id += 1;
-        format!("call_{}", self.fallback_call_id)
     }
 
     pub fn emit_done(
@@ -183,62 +157,6 @@ impl StreamEventSink {
 
     pub fn ensure_done(&mut self, tx: &mpsc::UnboundedSender<LlmEvent>) -> bool {
         self.emit_done(tx, "stop")
-    }
-}
-
-/// 跨 SSE 回调共享的 [`StreamEventSink`]，封装 `Arc<Mutex<_>>` 与收尾逻辑。
-pub struct SharedStreamSink {
-    inner: Arc<Mutex<StreamEventSink>>,
-}
-
-impl SharedStreamSink {
-    pub fn new() -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(StreamEventSink::new())),
-        }
-    }
-
-    pub fn with_mut<R>(&self, f: impl FnOnce(&mut StreamEventSink) -> R) -> R {
-        let mut guard = self.inner.lock();
-        f(&mut guard)
-    }
-
-    /// 包装 SSE 事件处理器：自动加锁 sink 后交给 `handler`。
-    pub fn wrap<F>(
-        &self,
-        handler: F,
-    ) -> impl Fn(&str, &serde_json::Value, &mpsc::UnboundedSender<LlmEvent>) -> bool
-    + Send
-    + Sync
-    + 'static
-    where
-        F: Fn(
-                &mut StreamEventSink,
-                &str,
-                &serde_json::Value,
-                &mpsc::UnboundedSender<LlmEvent>,
-            ) -> bool
-            + Send
-            + Sync
-            + 'static,
-    {
-        let sink = Arc::clone(&self.inner);
-        move |event_type, event, tx| {
-            let mut guard = sink.lock();
-            handler(&mut guard, event_type, event, tx)
-        }
-    }
-
-    /// 流结束后统一处理：成功时补发 `Done`，失败时发送 `Error`。
-    pub fn finalize(&self, result: Result<(), LlmError>, tx: &mpsc::UnboundedSender<LlmEvent>) {
-        if result.is_ok() {
-            self.with_mut(|sink| {
-                if !sink.done_sent() {
-                    sink.ensure_done(tx);
-                }
-            });
-        }
-        report_stream_error(result, tx);
     }
 }
 
@@ -416,25 +334,6 @@ impl HttpPostRequest {
         }
     }
 
-    /// 发起带重试的 SSE `data:` 行流式请求。
-    ///
-    /// `on_data` 在每条成功解析为 JSON 的 `data:` 行到达时被调用，参数为
-    /// `(event_type, parsed_json, tx)`。Data-only 模式下 `event_type` 始终为 `""`。
-    /// 返回 `false` 表示接收端已关闭，停止处理。
-    pub async fn stream_data_lines(
-        &self,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-        on_data: impl Fn(&str, &serde_json::Value, &mpsc::UnboundedSender<LlmEvent>) -> bool
-        + Send
-        + Sync
-        + 'static,
-    ) -> Result<(), LlmError> {
-        let tx = tx.clone();
-        let on_data: SseCallback = Arc::new(on_data);
-        self.run(move |response| parse_sse_bytes(response, tx.clone(), false, Arc::clone(&on_data)))
-            .await
-    }
-
     /// 发起带重试的 SSE 流式请求，支持 `event:` + `data:` 行模式（Anthropic 风格）。
     ///
     /// `handle_event` 参数为 `(event_type, parsed_json, tx)`；返回 `false` 表示接收端已关闭。
@@ -470,33 +369,6 @@ impl HttpPostRequest {
 }
 
 // ─── 便捷入口函数 ──────────────────────────────────────────────────────
-
-/// 发起带重试的 HTTP POST 流式请求，并通过回调解析 SSE 事件。
-///
-/// `on_data` 会在每条 SSE `data:` 行到达并成功解析为 JSON 后被调用。
-/// 对于 Anthropic 风格的 `event:` + `data:` 行，使用 [`stream_with_event_type`]。
-pub async fn stream_with_retry(
-    client: reqwest::Client,
-    endpoint: String,
-    headers: Vec<(String, String)>,
-    body: serde_json::Value,
-    retry: RetryPolicy,
-    tx: mpsc::UnboundedSender<LlmEvent>,
-    on_data: impl Fn(&str, &serde_json::Value, &mpsc::UnboundedSender<LlmEvent>) -> bool
-    + Send
-    + Sync
-    + 'static,
-) -> Result<(), LlmError> {
-    HttpPostRequest {
-        client,
-        endpoint,
-        headers,
-        body,
-        retry,
-    }
-    .stream_data_lines(&tx, on_data)
-    .await
-}
 
 /// 发起带重试的 SSE 流式请求，支持 `event:` + `data:` 行模式（Anthropic 风格）。
 ///
@@ -543,7 +415,7 @@ pub async fn read_http_error_body(response: reqwest::Response, endpoint: &str) -
 
 /// 解析 SSE 字节流，提取 `data:` 行并回调处理。
 ///
-/// 统一了 data-only 模式（Gemini/OpenAI）和 event+data 模式（Anthropic）：
+/// 统一了 data-only 模式（OpenAI）和 event+data 模式（Anthropic）：
 /// - `track_event_type = false`：忽略 `event:` 行，回调的 `event_type` 参数始终为 `""`
 /// - `track_event_type = true`：跟踪 `event:` 行，回调的 `event_type` 参数为实际值
 ///
@@ -870,7 +742,7 @@ mod tests {
     #[test]
     fn stream_event_sink_emits_done_once() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut sink = StreamEventSink::new();
+        let mut sink = StreamEventSink::default();
         assert!(sink.emit_done(&tx, "stop"));
         assert!(sink.emit_done(&tx, "stop"));
         assert!(matches!(
@@ -949,18 +821,8 @@ mod tests {
     }
 
     #[test]
-    fn stream_event_sink_allocates_unique_fallback_call_ids() {
-        let mut sink = StreamEventSink::new();
-        assert_eq!(sink.tool_call_id(Some("provider-id")), "provider-id");
-        assert_eq!(sink.tool_call_id(None), "call_1");
-        assert_eq!(sink.tool_call_id(None), "call_2");
-    }
-
-    #[test]
     fn transport_errors_redact_sensitive_query_values() {
-        let endpoint = redacted_endpoint(
-            "https://generativelanguage.googleapis.com/v1/models/m:streamGenerateContent?alt=sse&key=secret",
-        );
+        let endpoint = redacted_endpoint("https://api.example.com/v1/models/m?alt=sse&key=secret");
 
         assert!(endpoint.contains("alt=sse"));
         assert!(endpoint.contains("key=%3Credacted%3E"));

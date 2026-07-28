@@ -9,7 +9,11 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{message_attachment::MessageAttachment, tool::ToolDefinition};
+use crate::{
+    message_attachment::MessageAttachment,
+    thinking::{ThinkingCapability, ThinkingConfig},
+    tool::ToolDefinition,
+};
 
 pub mod token_estimate;
 
@@ -591,7 +595,7 @@ impl ThinkingLevel {
     }
 }
 
-/// OpenAI 兼容 API 的 provider 特有选项（prompt cache、thinking level 等）。
+/// OpenAI 兼容 API 的 provider 特有选项（prompt cache 等）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OpenAiProviderExtras {
     /// 当前 provider 是否支持 OpenAI `prompt_cache_key`。
@@ -600,8 +604,6 @@ pub struct OpenAiProviderExtras {
     pub supports_stream_usage: bool,
     /// 可选的 OpenAI prompt cache retention。
     pub prompt_cache_retention: Option<PromptCacheRetention>,
-    /// 可选的推理强度（用于 OpenAI Responses `reasoning.effort`）。
-    pub thinking_level: Option<ThinkingLevel>,
 }
 
 /// Provider 特有配置；通用字段留在 [`LlmClientConfig`]。
@@ -638,6 +640,15 @@ pub struct LlmClientConfig {
     pub extras: ProviderExtras,
     /// 额外的 HTTP 请求头。
     pub extra_headers: std::collections::HashMap<String, String>,
+    /// 标准化 thinking 配置。
+    #[serde(default)]
+    pub thinking: ThinkingConfig,
+    /// 决定 thinking 配置如何映射到当前模型的 wire 请求。
+    #[serde(default)]
+    pub thinking_capability: Option<ThinkingCapability>,
+    /// 是否显式配置了 thinking；false 时 provider 必须使用模型默认值并省略参数。
+    #[serde(default)]
+    pub thinking_configured: bool,
 }
 
 impl LlmClientConfig {
@@ -663,7 +674,10 @@ impl LlmClientConfig {
     }
 
     pub fn thinking_level(&self) -> Option<ThinkingLevel> {
-        self.openai_extras().and_then(|e| e.thinking_level)
+        self.thinking
+            .effort
+            .as_deref()
+            .and_then(crate::thinking::effort_to_thinking_level)
     }
 }
 
@@ -681,6 +695,9 @@ impl Default for LlmClientConfig {
             supports_strict_tool_use: false,
             extras: ProviderExtras::None,
             extra_headers: std::collections::HashMap::new(),
+            thinking: ThinkingConfig::default(),
+            thinking_capability: None,
+            thinking_configured: false,
         }
     }
 }

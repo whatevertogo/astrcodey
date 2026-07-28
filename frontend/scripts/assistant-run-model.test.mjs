@@ -5,7 +5,6 @@ import {
   buildAssistantRunModel,
   buildMessageListItems,
   processSummaryTitle,
-  streamingMessageListItemId,
 } from '../../target/frontend-assistant-run/assistantRunModel.js'
 
 function assistant(id, text, status = 'complete', extra = {}) {
@@ -107,14 +106,35 @@ assert.deepEqual(
   messageItems.map((item) => item.type),
   ['block', 'assistantRun', 'block']
 )
-assert.equal(messageItems[1].id, 'a4:t4:a5')
-assert.equal(streamingMessageListItemId(messageItems), null)
+assert.equal(messageItems[1].id, 'assistant-run:a4')
 
-const streamingTail = buildMessageListItems([
-  { kind: 'user', id: 'u2', text: 'hi' },
-  assistant('a6', 'reply', 'streaming'),
+const extendedMessageItems = buildMessageListItems([
+  { kind: 'user', id: 'u1', text: 'hi' },
+  assistant('a4', 'thinking', 'complete'),
+  tool('t4', 'read', 'complete'),
+  assistant('a5', 'reply', 'streaming'),
+  tool('t5', 'shell', 'streaming'),
 ])
-assert.equal(streamingMessageListItemId(streamingTail), 'a6')
+assert.equal(
+  extendedMessageItems[1].id,
+  messageItems[1].id,
+  'appending work must not remount the active assistant run'
+)
+
+const longRunBlocks = [
+  assistant('a-long', '', 'streaming'),
+  ...Array.from({ length: 50 }, (_, index) =>
+    tool(`t-long-${index}`, 'read', index === 49 ? 'streaming' : 'complete')
+  ),
+]
+const longRunItems = buildMessageListItems([
+  { kind: 'user', id: 'u-long', text: 'inspect everything' },
+  ...longRunBlocks,
+])
+const longRunModel = buildAssistantRunModel(longRunBlocks)
+assert.equal(longRunItems[1].id, 'assistant-run:a-long')
+assert.equal(longRunModel.segments[0].id, 'process:t-long-0')
+assert.equal(longRunModel.processEntries.length, 50)
 
 assert.equal(
   assistantVisibleText(

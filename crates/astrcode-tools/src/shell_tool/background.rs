@@ -144,10 +144,8 @@ impl ShellTool {
             .unwrap_or_else(|| self.working_dir.clone());
         let timeout_secs = args.timeout.unwrap_or(self.timeout_secs).min(600);
         let command = preprocess_shell_command(&args.command, &shell);
-        let pipeline_policy = args.pipeline_policy.map(Into::into).unwrap_or_default();
         let (command, pipeline_semantics) =
-            apply_pipeline_policy(&shell, &command, pipeline_policy)
-                .map_err(ToolError::InvalidArguments)?;
+            apply_pipeline_policy(&shell, &command).map_err(ToolError::InvalidArguments)?;
         let spawned = spawn_background_shell(BackgroundShellSpawnParams {
             session_id: ctx.session_id.to_string(),
             command,

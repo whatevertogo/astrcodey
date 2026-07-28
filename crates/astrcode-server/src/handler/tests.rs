@@ -695,6 +695,9 @@ fn test_runtime_with_settings(
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,
+            thinking: Default::default(),
+            thinking_capability: None,
+            thinking_configured: false,
         },
         small_llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -715,6 +718,9 @@ fn test_runtime_with_settings(
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,
+            thinking: Default::default(),
+            thinking_capability: None,
+            thinking_configured: false,
         },
         context: ContextSettings {
             auto_compact_enabled: context_settings.auto_compact_enabled,

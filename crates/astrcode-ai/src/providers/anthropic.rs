@@ -60,6 +60,12 @@ impl AnthropicProvider {
             model_id: &self.model_id,
             max_output_tokens: self.model_limits_val.max_output_tokens,
             supports_strict_tool_use: self.config.supports_strict_tool_use,
+            thinking: &self.config.thinking,
+            thinking_capability: self
+                .config
+                .thinking_configured
+                .then_some(self.config.thinking_capability.as_ref())
+                .flatten(),
         }
     }
 
@@ -68,7 +74,7 @@ impl AnthropicProvider {
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
         stream: bool,
-    ) -> serde_json::Value {
+    ) -> Result<serde_json::Value, LlmError> {
         anthropic_wire::build_request_body(self.wire_config(), messages, tools, stream)
     }
 
@@ -106,7 +112,7 @@ impl LlmProvider for AnthropicProvider {
             self.config.supports_strict_tool_use,
             StrictToolProvider::Anthropic,
         )?;
-        let request_body = self.build_request_body(&messages, &tools, true);
+        let request_body = self.build_request_body(&messages, &tools, true)?;
         let endpoint = self.endpoint();
         let mut headers = self.headers();
         ensure_header(&mut headers, "Accept", "text/event-stream");

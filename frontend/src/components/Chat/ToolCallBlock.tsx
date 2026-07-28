@@ -3,7 +3,7 @@ import {
   useElapsedSeconds,
   runningElapsedLabel,
 } from '../../hooks/useElapsedSeconds'
-import type { ConversationBlock } from '../../services/types'
+import type { AgentSessionLink, ConversationBlock } from '../../services/types'
 import { useAppStore } from '../../store/conversation'
 import { cn } from '../../lib/utils'
 import {
@@ -27,7 +27,12 @@ import {
   type ToolRenderer,
   type ToolRendererContext,
 } from './tools/registry'
-import { compactLine, numberValue, toolArgs, toolMeta } from './tools/helpers'
+import {
+  compactPreviewLine,
+  numberValue,
+  toolArgs,
+  toolMeta,
+} from './tools/helpers'
 import { DefaultToolDetails } from './tools/shared'
 import { buildStreamingAgentSpec } from './tools/agentSpec'
 import { AgentChildSessionPanel } from './tools/AgentChildSessionPanel'
@@ -137,6 +142,85 @@ function durationFromMetadata(meta: Record<string, unknown>): string {
   return durationSeconds != null ? formatDuration(durationSeconds) : ''
 }
 
+function ToolCallDetailsPanel({
+  context,
+  toolUiContext,
+  renderer,
+  linkedAgent,
+  onOpenChild,
+  summaryLine,
+  gatePending,
+}: {
+  context: ToolRendererContext
+  toolUiContext: ToolUiContext
+  renderer?: ToolRenderer
+  linkedAgent?: AgentSessionLink
+  onOpenChild: (childSessionId: string) => void
+  summaryLine: string
+  gatePending: boolean
+}) {
+  const { block, args } = context
+  const detailArgs = formatArgs(args, block.arguments)
+  const approvalUi = renderToolApprovalUi(toolUiContext)
+  const agentChildUi =
+    linkedAgent && block.status === 'streaming' ? (
+      <AgentChildSessionPanel agent={linkedAgent} onOpenChild={onOpenChild} />
+    ) : null
+
+  return (
+    <div
+      className={cn(
+        'min-w-0 overflow-hidden',
+        'border-t border-border/70 bg-surface/45 px-3 py-2'
+      )}
+    >
+      <div className={toolPanelScrollViewport}>
+        <div className="space-y-3 pb-1">
+          <DetailRow label="ID">
+            <DetailValue>{block.id}</DetailValue>
+          </DetailRow>
+          <DetailRow label="Args">
+            <pre className="m-0 max-h-[200px] overflow-auto whitespace-pre-wrap bg-transparent font-mono text-[12px] leading-relaxed text-text-secondary">
+              {detailArgs}
+            </pre>
+          </DetailRow>
+          {summaryLine && summaryLine !== detailArgs ? (
+            <DetailRow label="Summary">
+              <DetailValue>{summaryLine}</DetailValue>
+            </DetailRow>
+          ) : null}
+          {gatePending && toolUiContext.sessionId ? (
+            <GateApprovalCard
+              sessionId={toolUiContext.sessionId}
+              callId={block.id}
+              toolName={block.name}
+              metadata={block.metadata}
+              args={args}
+            />
+          ) : (
+            <DetailRow label="Result">
+              <div
+                className={cn(
+                  'min-w-0 rounded-lg border border-border bg-surface-soft px-3 py-2',
+                  block.status === 'error' &&
+                    'border-danger/25 bg-danger-soft/40'
+                )}
+              >
+                <ToolDetails
+                  toolContext={context}
+                  approvalUi={approvalUi}
+                  renderer={renderer}
+                  agentChildUi={agentChildUi}
+                />
+              </div>
+            </DetailRow>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function toolIconName(name: string): IconName {
   const lower = name.toLowerCase()
   if (lower.includes('shell') || lower.includes('terminal')) return 'monitor'
@@ -179,8 +263,12 @@ function ToolCallBlock({
   summaryIconName,
 }: ToolCallBlockProps) {
   const [isOpen, setIsOpen] = useState(defaultOpen)
-  const agentSessions = useAppStore((s) => s.agentSessions)
   const switchSession = useAppStore((s) => s.switchSession)
+  const linkedAgent = useAppStore((state) =>
+    block.name === 'agent'
+      ? state.agentSessions.find((agent) => agent.toolCallId === block.id)
+      : undefined
+  )
   const args = toolArgs(block)
   const meta = toolMeta(block)
 
@@ -197,7 +285,6 @@ function ToolCallBlock({
     meta,
     renderSpec,
   }
-  const approvalUi = renderToolApprovalUi(toolUiCtx)
 
   const context: ToolRendererContext = {
     block,
@@ -215,32 +302,22 @@ function ToolCallBlock({
       ? runningElapsedLabel(elapsed, 'en')
       : null
 
-  const summaryLine = compactLine(
+  const summarySource =
     extractRenderSummary(block.metadata) ||
-      toolApprovalSummary(toolUiCtx) ||
-      renderer?.summary?.(context) ||
-      block.arguments ||
-      block.text ||
-      shellRunningSummary ||
-      (streaming ? runningElapsedLabel(elapsed, 'zh') : '(无输出)')
-  )
+    toolApprovalSummary(toolUiCtx) ||
+    renderer?.summary?.(context) ||
+    block.arguments ||
+    block.text ||
+    shellRunningSummary ||
+    (streaming ? runningElapsedLabel(elapsed, 'zh') : '(无输出)')
+  const summaryLine = compactPreviewLine(summarySource)
 
   const gateApproval = readGateApproval(block.metadata)
   const gatePending = gateApproval?.pending === true
   const questionnairePending = toolApprovalPending(toolUiCtx)
-  const linkedAgent =
-    block.name === 'agent'
-      ? agentSessions.find((agent) => agent.toolCallId === block.id)
-      : undefined
-  const agentChildUi =
-    linkedAgent && block.status === 'streaming' ? (
-      <AgentChildSessionPanel
-        agent={linkedAgent}
-        onOpenChild={(childSessionId) => void switchSession(childSessionId)}
-      />
-    ) : null
-  const autoExpand =
-    toolApprovalShouldAutoExpand(toolUiCtx) || gatePending || !!agentChildUi
+  const autoExpand = toolApprovalShouldAutoExpand(toolUiCtx) || gatePending
+  const forceOpen = autoExpand
+  const open = forceOpen || isOpen
 
   const displayStatus =
     block.status === 'error'
@@ -256,20 +333,27 @@ function ToolCallBlock({
           elapsed,
         })
   const durationLabel = durationFromMetadata(meta)
-  const detailArgs = formatArgs(args, block.arguments)
   const toolName = block.name || 'tool'
   const summaryIcon = summaryIconName ?? toolIconName(toolName)
 
   return (
     <details
       className={cn(
-        'group mb-1 block min-w-0 animate-block-enter text-text-secondary motion-reduce:animate-none',
+        'group mb-1 block min-w-0 text-text-secondary',
         embedded
           ? 'max-w-full overflow-hidden rounded-lg border border-border bg-surface-soft/80 shadow-soft'
           : 'ml-[var(--layout-assistant-indent)] max-w-[760px]'
       )}
-      open={block.status === 'error' || isOpen || !!agentSpec || autoExpand}
-      onToggle={(e) => setIsOpen(e.currentTarget.open)}
+      open={open}
+      onToggle={(event) => {
+        if (forceOpen) {
+          if (!event.currentTarget.open) {
+            event.currentTarget.open = true
+          }
+          return
+        }
+        setIsOpen(event.currentTarget.open)
+      }}
     >
       <summary
         className={cn(
@@ -298,58 +382,17 @@ function ToolCallBlock({
           <Icon name="chevron-right" size={16} />
         </span>
       </summary>
-      <div
-        className={cn(
-          'min-w-0 overflow-hidden',
-          embedded
-            ? 'border-t border-border bg-surface/45 px-3 py-2'
-            : 'mt-2 pl-[26px]'
-        )}
-      >
-        <div className={toolPanelScrollViewport}>
-          <div className="space-y-3 pb-1">
-            <DetailRow label="ID">
-              <DetailValue>{block.id}</DetailValue>
-            </DetailRow>
-            <DetailRow label="Args">
-              <pre className="m-0 max-h-[200px] overflow-auto whitespace-pre-wrap bg-transparent font-mono text-[12px] leading-relaxed text-text-secondary">
-                {detailArgs}
-              </pre>
-            </DetailRow>
-            {summaryLine && summaryLine !== detailArgs ? (
-              <DetailRow label="Summary">
-                <DetailValue>{summaryLine}</DetailValue>
-              </DetailRow>
-            ) : null}
-            {gatePending && sessionId ? (
-              <GateApprovalCard
-                sessionId={sessionId}
-                callId={block.id}
-                toolName={block.name}
-                metadata={block.metadata}
-                args={args}
-              />
-            ) : (
-              <DetailRow label="Result">
-                <div
-                  className={cn(
-                    'min-w-0 rounded-lg border border-border bg-surface-soft px-3 py-2',
-                    block.status === 'error' &&
-                      'border-danger/25 bg-danger-soft/40'
-                  )}
-                >
-                  <ToolDetails
-                    toolContext={context}
-                    approvalUi={approvalUi}
-                    renderer={renderer}
-                    agentChildUi={agentChildUi}
-                  />
-                </div>
-              </DetailRow>
-            )}
-          </div>
-        </div>
-      </div>
+      {open ? (
+        <ToolCallDetailsPanel
+          context={context}
+          toolUiContext={toolUiCtx}
+          renderer={renderer}
+          linkedAgent={linkedAgent}
+          onOpenChild={(childSessionId) => void switchSession(childSessionId)}
+          summaryLine={summaryLine}
+          gatePending={gatePending}
+        />
+      ) : null}
     </details>
   )
 }

@@ -512,7 +512,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   applyDelta: (delta: ConversationDelta) => {
-    applyDeltaToState(get(), delta, get, set)
+    applyDeltaToState(delta, get, set)
   },
 
   clearTransientHint: () => {

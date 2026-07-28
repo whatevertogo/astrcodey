@@ -405,6 +405,15 @@ fn normalize_repo_url(repo: &str) -> String {
     }
 }
 
+fn official_swe_bench_task_prompt(problem: &str) -> String {
+    format!(
+        "Resolve the following issue in the checked-out repository. Work autonomously: inspect \
+         the code, make the necessary repository changes, and run relevant validation. Do not \
+         merely describe a solution or ask whether to proceed. Stay within the issue's \
+         scope.\n\nIssue:\n{problem}"
+    )
+}
+
 fn map_swe_record_to_case(record: SweBenchRecord) -> Result<EvalCase, EvalError> {
     let official = is_official_swe_bench_record(&record);
     let id = record.id;
@@ -412,7 +421,11 @@ fn map_swe_record_to_case(record: SweBenchRecord) -> Result<EvalCase, EvalError>
         .problem_statement
         .or(record.question)
         .unwrap_or_else(|| format!("SWE case [{}]", id));
-    let mut prompts = vec![problem];
+    let mut prompts = vec![if official {
+        official_swe_bench_task_prompt(&problem)
+    } else {
+        problem
+    }];
     if !official {
         if let Some(hints) = record.hints {
             prompts.extend(hints.into_iter().map(|hint| format!("Hint: {hint}")));
@@ -496,7 +509,7 @@ mod tests {
                 "instance_id": "django__django-12345",
                 "repo": "django/django",
                 "base_commit": "abc123",
-                "problem_statement": "Fix the issue.",
+                "problem_statement": "Should this API behave differently?",
                 "hints": ["SECRET_HINT_LIST"],
                 "hints_text": "SECRET_HINT_TEXT",
                 "FAIL_TO_PASS": "[\"SECRET_FAIL_TO_PASS\"]",
@@ -512,7 +525,12 @@ mod tests {
         assert_eq!(case.description, "Official SWE-bench case");
         assert_eq!(case.timeout_secs, NO_TIMEOUT_SECS);
         assert!(case.tags.contains(&"official-swe-bench".to_string()));
-        assert_eq!(case.prompts, ["Fix the issue."]);
+        assert_eq!(
+            case.prompts,
+            [official_swe_bench_task_prompt(
+                "Should this API behave differently?"
+            )]
+        );
         assert!(matches!(
             case.judges.as_slice(),
             [JudgeConfig::SweBenchPatch { instance_id }] if instance_id == "django__django-12345"

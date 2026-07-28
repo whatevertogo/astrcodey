@@ -19,16 +19,19 @@ import {
   SettingsFeedbackView,
 } from './SettingsPanels'
 import {
+  deriveThinkingFormValue,
   EMPTY_MODEL_SELECTION,
   modelSelectionFromConfig,
+  thinkingFormToRequest,
   type ModelSelection,
   type PendingOperation,
   type ProviderConfigDialogState,
   type ProviderDialogState,
   type ProviderRemoveDialogState,
-  SETTINGS_NAV_ITEMS,
   type SettingsFeedback,
   type SettingsSection,
+  type ThinkingFormValue,
+  SETTINGS_NAV_ITEMS,
 } from './settingsSupport'
 
 const EMPTY_PROFILES: ProfileView[] = []
@@ -62,7 +65,7 @@ export default function SettingsPage({
 
   const applyConfig = useCallback((config: ConfigView) => {
     setConfigView(config)
-    setSelection(modelSelectionFromConfig(config))
+    setSelection(modelSelectionFromConfig(config, config.profiles))
     setYoloEnabled(config.approvalMode === 'yolo')
   }, [])
 
@@ -129,18 +132,49 @@ export default function SettingsPage({
   const handleSave = useCallback(() => {
     if (!selection.profileName || !selection.modelId) return
     return runOperation({ kind: 'save' }, async () => {
-      await api.updateActiveSelection(
-        selection.profileName,
-        selection.modelId,
-        selection.smallProfileName || undefined,
-        selection.smallModelId || undefined,
-        yoloEnabled ? 'yolo' : 'manual'
-      )
-      await refreshConfig()
-      bumpModelRefreshKey()
-      setFeedback({ kind: 'success', message: '已保存' })
+      try {
+        const profile = configView?.profiles.find(
+          (item) => item.name === selection.profileName
+        )
+        const model = profile?.models.find(
+          (item) => item.id === selection.modelId
+        )
+        await api.updateModelOptions(
+          thinkingFormToRequest(
+            selection.profileName,
+            selection.modelId,
+            selection.thinkingFormValue,
+            model?.thinkingCapability
+          )
+        )
+        await api.updateActiveSelection(
+          selection.profileName,
+          selection.modelId,
+          selection.smallProfileName || undefined,
+          selection.smallModelId || undefined,
+          yoloEnabled ? 'yolo' : 'manual'
+        )
+        await refreshConfig()
+        bumpModelRefreshKey()
+        setFeedback({ kind: 'success', message: '已保存' })
+      } catch (error) {
+        await refreshConfig()
+        throw error
+      }
     })
-  }, [bumpModelRefreshKey, refreshConfig, runOperation, selection, yoloEnabled])
+  }, [
+    bumpModelRefreshKey,
+    configView,
+    refreshConfig,
+    runOperation,
+    selection,
+    yoloEnabled,
+  ])
+
+  const handleThinkingFormChange = useCallback((value: ThinkingFormValue) => {
+    setSelection((current) => ({ ...current, thinkingFormValue: value }))
+    setFeedback(null)
+  }, [])
 
   const handleReload = useCallback(
     () =>
@@ -277,10 +311,22 @@ export default function SettingsPage({
 
   const handleSelectionChange = useCallback(
     (patch: Partial<ModelSelection>) => {
-      setSelection((current) => ({ ...current, ...patch }))
+      setSelection((current) => {
+        const next = { ...current, ...patch }
+        if (patch.profileName !== undefined || patch.modelId !== undefined) {
+          const ps = configView?.profiles ?? []
+          const profile = ps.find((p) => p.name === next.profileName)
+          const model = profile?.models.find((m) => m.id === next.modelId)
+          next.thinkingFormValue = deriveThinkingFormValue(
+            model?.thinkingCapability,
+            model?.thinking
+          )
+        }
+        return next
+      })
       setFeedback(null)
     },
-    []
+    [configView]
   )
 
   const handleProviderConfigChange = useCallback(
@@ -319,6 +365,7 @@ export default function SettingsPage({
         selection={selection}
         operation={operation}
         onSelectionChange={handleSelectionChange}
+        onThinkingFormChange={handleThinkingFormChange}
         onReload={() => void handleReload()}
         onTest={() => void handleTest()}
         onSave={() => void handleSave()}

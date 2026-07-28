@@ -12,7 +12,7 @@
 
 A Rust-built AI coding agent platform.
 
-AstrCode is a full-stack AI coding assistant built from scratch in ~104.4k lines of Rust across 25 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~12.4k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic, OpenAI, Google GenAI), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), built-in web search and URL fetch tools, context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
+AstrCode is a full-stack AI coding assistant built from scratch in ~104.4k lines of Rust across 25 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~12.4k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic and OpenAI-compatible providers), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), built-in web search and URL fetch tools, context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
 
 ## Table of Contents
 
@@ -70,7 +70,7 @@ activeSmallModel = "deepseek-v4-flash"
 
 [[profiles]]
 name = "deepseek"
-providerKind = "openai"
+providerKind = "deepseek"
 baseUrl = "https://api.deepseek.com"
 apiKey = "env:DEEPSEEK_API_KEY"
 wireFormat = "openai_chat_completions"
@@ -80,7 +80,7 @@ authScheme = "bearer"
 id = "deepseek-v4-flash"
 maxTokens = 393216
 contextLimit = 1000000
-modelOptions = { reasoning = true }
+modelOptions = { thinking = { enabled = true } }
 
 [[profiles]]
 name = "openai"
@@ -94,7 +94,6 @@ authScheme = "bearer"
 id = "gpt-4.1"
 maxTokens = 16384
 contextLimit = 128000
-modelOptions = { thinkingLevel = "medium" }
 
 [[profiles]]
 name = "anthropic"
@@ -244,13 +243,11 @@ apiKey = "env:OPENAI_API_KEY"
 id = "gpt-4o"
 maxTokens = 128000
 contextLimit = 128000
-modelOptions = { thinkingLevel = "medium" }
 
 [[profiles.models]]
 id = "gpt-4o-mini"
 maxTokens = 128000
 contextLimit = 128000
-modelOptions = { thinkingLevel = "low" }
 EOF
 
 # 3. Set API key environment variable
@@ -280,7 +277,7 @@ cargo run --features dev-mode -- eval
 AstrCode uses a TOML-based configuration system stored in `~/.astrcode/config.toml`. Legacy `config.json` files are still loaded as a migration fallback and are automatically written out as `config.toml` on first load. The configuration supports multiple LLM providers, model selection, runtime behavior tuning, and project-level overrides.
 
 **Key configuration features:**
-- Multi-provider support (Anthropic, OpenAI, Google GenAI)
+- Multi-provider support (Anthropic and OpenAI-compatible providers)
 - Separate small LLM configuration for extensions (e.g., memory extraction)
 - Project-level config overrides via `.astrcode/config.toml`
 - Environment variable substitution for API keys (`env:VAR_NAME`)
@@ -319,7 +316,7 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
     │            │ │extensions │ │ tools        │
     │ Anthropic  │ │Hook system│ │File/shell/   │
     │ OpenAI     │ │Ext SDK    │ │task tools    │
-    │ Google     │ │IPC ext    │ │              │
+    │ compatible │ │IPC ext    │ │              │
     │ SSE+retry  │ │           │ │              │
     └────────┬───┘ └─────┬─────┘ └──────────────┘
              │           │
@@ -354,7 +351,7 @@ The Cargo workspace under [`crates/`](crates/) contains **25 crates**, plus [`sr
 
 | Crate | Lines | Description |
 |---|---|---|
-| [`astrcode-ai`](crates/astrcode-ai) | 5.9k | Multi-provider LLM layer (Anthropic, OpenAI-compatible, Google GenAI), SSE streaming, retry |
+| [`astrcode-ai`](crates/astrcode-ai) | 5.9k | Multi-provider LLM layer (Anthropic and OpenAI-compatible providers), SSE streaming, retry |
 | [`astrcode-storage`](crates/astrcode-storage) | 5.0k | JSONL event log, snapshots, config persistence, file locking |
 | [`astrcode-context`](crates/astrcode-context) | 4.5k | Token estimation, context window budgeting, auto-compact, prompt engine |
 | [`astrcode-tools`](crates/astrcode-tools) | 7.8k | Built-in tools: read, write, edit, patch, glob, grep, shell, terminal, task |
@@ -423,7 +420,7 @@ The `ToolPipeline` struct owns tool preprocessing, parallel scheduling, and resu
 
 ### LLM Provider Layer
 
-`astrcode-ai` supports multiple providers — Anthropic (native Messages API), OpenAI-compatible (Chat Completions + Responses API), and Google GenAI. Key components:
+`astrcode-ai` supports Anthropic's native Messages API and OpenAI-compatible Chat Completions and Responses APIs. Key components:
 
 - **`Utf8StreamDecoder`** — handles multi-byte UTF-8 boundaries and bad-byte recovery across TCP chunks
 - **`SseLineReader`** — generic SSE line buffering (reusable across all providers)

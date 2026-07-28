@@ -163,6 +163,10 @@ fn router_parts(
             "/api/config/active-selection",
             post(config::update_active_selection),
         )
+        .route(
+            "/api/config/model-options",
+            post(config::update_model_options),
+        )
         .route("/api/extensions", get(extensions::list_extensions))
         .route(
             "/api/extensions/reload",

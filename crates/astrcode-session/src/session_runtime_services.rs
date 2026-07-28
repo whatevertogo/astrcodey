@@ -15,13 +15,11 @@ use astrcode_core::{
     context::{ContextAssembler, NoopPostCompactEnricher, PostCompactEnricher},
     llm::LlmProvider,
     prompt::{PromptFileProvider, PromptProvider},
-};
-use astrcode_extension_sdk::{
-    runtime_ports::{
-        PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
-        SessionOperationsProvider, ToolCatalogProvider, TurnHooks,
-    },
     tool_pack::ToolPack,
+};
+use astrcode_extension_sdk::runtime_ports::{
+    PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState, SessionOperationsProvider,
+    ToolCatalogProvider, TurnHooks,
 };
 
 use crate::SessionExtensionPorts;
@@ -405,6 +403,9 @@ mod tests {
             prompt_cache_retention: None,
             reasoning: false,
             thinking_level: None,
+            thinking: Default::default(),
+            thinking_capability: None,
+            thinking_configured: false,
         };
         EffectiveConfig {
             llm: llm.clone(),

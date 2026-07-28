@@ -52,11 +52,9 @@ pub(super) fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                  server process/session or was cleaned up; stop polling that id.\n",
                 "- Independent commands may run together; chain dependent ones with `&&`\n",
                 "- Set `cwd` instead of using `cd`. Use `stdin` to pipe data.\n",
-                "- Pipeline failures are strict by default on bash/zsh/WSL: failure in any stage \
-                 produces an error. For intentional display-only pipelines such as `grep | head`, \
-                 set `pipelinePolicy` to `lastCommand`; result metadata records the effective \
-                 scope. On shells without pipefail support, strict pipelines are rejected before \
-                 execution instead of silently accepting an unreliable exit status.\n",
+                "- Pipeline failures are always strict on bash/zsh/WSL: failure in any stage \
+                 produces an error. On shells without pipefail support, pipelines are rejected \
+                 before execution instead of silently accepting an unreliable exit status.\n",
                 "- Non-zero exit codes produce errors. Check `executionStatus`, `exitCode`, and \
                  `timedOut` in result metadata instead of inferring success from output text.\n",
                 "- Foreground output is returned when the command finishes (not streamed live).\n",
@@ -93,12 +91,6 @@ pub(super) fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                 "stdin": {
                     "type": "string",
                     "description": "Pipe data into stdin (jq, wc, python, etc.)."
-                },
-                "pipelinePolicy": {
-                    "type": "string",
-                    "enum": ["strict", "lastCommand"],
-                    "default": "strict",
-                    "description": "Pipeline exit behavior. strict (default) fails when any stage fails on bash/zsh/WSL and rejects pipelines on unsupported shells. lastCommand intentionally uses the final stage's exit status for display-only pipelines."
                 },
                 "runInBackground": {
                     "type": "boolean",

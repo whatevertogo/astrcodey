@@ -1,4 +1,4 @@
-import { memo } from 'react'
+import { memo, useState } from 'react'
 import {
   useElapsedSeconds,
   runningElapsedLabel,
@@ -40,7 +40,6 @@ function toolNeedsAttention(
     renderSpec: extractRenderSpec(block.metadata),
   }
   return (
-    block.status === 'error' ||
     readGateApproval(block.metadata)?.pending === true ||
     toolApprovalPending(ctx)
   )
@@ -111,66 +110,95 @@ function ProcessSummary({
   entries,
   sessionId,
   hasFollowingContent,
-  shouldAutoOpen,
+  forceOpen,
 }: {
   title: string
   entries: ProcessEntry[]
   sessionId: string | null
   hasFollowingContent: boolean
-  shouldAutoOpen: boolean
+  forceOpen: boolean
 }) {
+  const [userOpen, setUserOpen] = useState(false)
   if (entries.length === 0) return null
-  const autoOpenProps = shouldAutoOpen ? { open: true } : {}
+  const open = forceOpen || userOpen
+  const hasError = entries.some(
+    (entry) => entry.type === 'tool' && entry.activity.block.status === 'error'
+  )
+  const latestEntry = entries[entries.length - 1]
+  const latestLabel =
+    latestEntry.type === 'tool'
+      ? `${latestEntry.activity.title} ${latestEntry.activity.label}`
+      : latestEntry.entry.streaming
+        ? '正在思考'
+        : '思考过程'
 
   return (
     <details
-      key={shouldAutoOpen ? 'auto-open' : 'manual-closed'}
       className={cn(
         'group bg-transparent border-none rounded-0 overflow-visible',
         hasFollowingContent ? 'mb-2.5' : 'my-2.5'
       )}
-      {...autoOpenProps}
+      open={open}
+      onToggle={(event) => {
+        if (forceOpen) {
+          if (!event.currentTarget.open) {
+            event.currentTarget.open = true
+          }
+          return
+        }
+        setUserOpen(event.currentTarget.open)
+      }}
     >
-      <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-2 py-1 text-[15px] font-medium leading-relaxed text-text-muted select-none transition-colors duration-150 hover:text-text-secondary [&::-webkit-details-marker]:hidden">
-        <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap">
-          {title}
+      <summary className="inline-flex max-w-full cursor-pointer list-none items-center gap-2 rounded-md py-1 text-[14px] font-medium leading-relaxed text-text-muted select-none transition-colors duration-150 hover:text-text-secondary [&::-webkit-details-marker]:hidden">
+        <span className={cn('shrink-0', hasError && 'text-danger')}>
+          {hasError ? '处理失败' : title}
         </span>
+        <span className="min-w-0 overflow-hidden text-ellipsis whitespace-nowrap text-[13px] font-normal text-text-muted/80">
+          {latestLabel}
+        </span>
+        {entries.length > 1 ? (
+          <span className="shrink-0 text-[11px] font-normal text-text-muted/70">
+            {entries.length} 项
+          </span>
+        ) : null}
         <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-text-muted/90 transition-transform duration-150 ease-out group-open:rotate-90">
           <Icon name="chevron-right" size={16} />
         </span>
       </summary>
 
-      <div className="mt-1.5 min-w-0 pb-1">
-        <div className="space-y-2">
-          {entries.map((entry) => {
-            if (entry.type === 'thinking') {
-              return (
-                <div
-                  key={entry.id}
-                  className="prose-chat border-l-2 border-border pl-4 text-[14.5px] leading-relaxed text-text-primary"
-                >
-                  {entry.entry.streaming ? (
-                    <StreamingMarkdown
-                      text={entry.entry.text}
-                      cacheKey={`${entry.entry.blockId}:run-thinking`}
-                    />
-                  ) : (
-                    <MarkdownContent text={entry.entry.text} />
-                  )}
-                </div>
-              )
-            }
+      {open ? (
+        <div className="mt-1.5 min-w-0 border-l border-border pb-1 pl-3">
+          <div className="space-y-1.5">
+            {entries.map((entry) => {
+              if (entry.type === 'thinking') {
+                return (
+                  <div
+                    key={entry.id}
+                    className="prose-chat py-1 text-[13.5px] leading-relaxed text-text-secondary"
+                  >
+                    {entry.entry.streaming ? (
+                      <StreamingMarkdown
+                        text={entry.entry.text}
+                        cacheKey={`${entry.entry.blockId}:run-thinking`}
+                      />
+                    ) : (
+                      <MarkdownContent text={entry.entry.text} />
+                    )}
+                  </div>
+                )
+              }
 
-            return (
-              <ActivityToolRow
-                key={entry.id}
-                activity={entry.activity}
-                sessionId={sessionId}
-              />
-            )
-          })}
+              return (
+                <ActivityToolRow
+                  key={entry.id}
+                  activity={entry.activity}
+                  sessionId={sessionId}
+                />
+              )
+            })}
+          </div>
         </div>
-      </div>
+      ) : null}
     </details>
   )
 }
@@ -210,9 +238,7 @@ function AssistantRunMessage({ blocks, sessionId }: AssistantRunMessageProps) {
             }
 
             const nextSegment = runModel.segments[index + 1]
-            const shouldAutoOpen =
-              segment.hasStreamingWork ||
-              segmentNeedsAttention(segment, sessionId)
+            const forceOpen = segmentNeedsAttention(segment, sessionId)
 
             return (
               <ProcessSummary
@@ -221,7 +247,7 @@ function AssistantRunMessage({ blocks, sessionId }: AssistantRunMessageProps) {
                 entries={segment.entries}
                 sessionId={sessionId}
                 hasFollowingContent={nextSegment?.type === 'content'}
-                shouldAutoOpen={shouldAutoOpen}
+                forceOpen={forceOpen}
               />
             )
           })}

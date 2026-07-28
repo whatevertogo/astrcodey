@@ -66,16 +66,10 @@ fn known_env_keys_for_profile(profile: &Profile) -> &'static [&'static str] {
         return &["OPENAI_API_KEY"];
     }
 
-    match name {
-        // astrcode historically uses GOOGLE_API_KEY; pi-mono uses GEMINI_API_KEY.
-        // Accept both (prefer the one that's set).
-        "gemini" | "google" => &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
-        _ => match profile.wire_format {
-            ProviderWireFormat::AnthropicMessages => &["ANTHROPIC_API_KEY"],
-            ProviderWireFormat::GoogleGenAi => &["GOOGLE_API_KEY", "GEMINI_API_KEY"],
-            // openai-compatible providers vary widely; do not guess here.
-            ProviderWireFormat::OpenAiChatCompletions | ProviderWireFormat::OpenAiResponses => &[],
-        },
+    match profile.wire_format {
+        ProviderWireFormat::AnthropicMessages => &["ANTHROPIC_API_KEY"],
+        // openai-compatible providers vary widely; do not guess here.
+        ProviderWireFormat::OpenAiChatCompletions | ProviderWireFormat::OpenAiResponses => &[],
     }
 }
 
@@ -189,6 +183,60 @@ fn resolve_llm_settings(
     let options = model.model_options.as_ref();
     let reasoning = options.and_then(|o| o.reasoning).unwrap_or(false);
     let thinking_level = options.and_then(|o| o.thinking_level);
+    let thinking_configured = options.is_some_and(|options| {
+        options.thinking.is_some()
+            || options.reasoning.is_some()
+            || options.thinking_level.is_some()
+    });
+
+    // Resolve thinking config: new `thinking` field takes priority over legacy fields
+    let thinking = options
+        .and_then(|o| o.thinking.clone())
+        .or_else(|| {
+            let legacy_tc = crate::thinking::legacy_to_thinking_config(reasoning, thinking_level);
+            if legacy_tc.enabled {
+                Some(legacy_tc)
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default()
+        .normalized();
+
+    // Resolve thinking capability: explicit override > built-in lookup
+    let capability = model.thinking_capability.clone().or_else(|| {
+        crate::thinking::resolve_thinking_capability(
+            &profile.provider_kind,
+            profile.wire_format,
+            &model.id,
+        )
+    });
+
+    // Log validation issues for non-trivial mismatches
+    if thinking_configured {
+        if let Some(ref cap) = capability {
+            let issues = crate::thinking::validate_thinking(&thinking, cap);
+            for issue in &issues {
+                tracing::warn!(
+                    model = %model.id,
+                    issue = %issue,
+                    "thinking config validation"
+                );
+            }
+        } else {
+            tracing::warn!(
+                model = %model.id,
+                "thinking is configured but the model has no declared thinking capability"
+            );
+        }
+    }
+
+    // Derive compatibility fields
+    let resolved_reasoning = thinking.enabled;
+    let resolved_thinking_level = thinking
+        .effort
+        .as_deref()
+        .and_then(crate::thinking::effort_to_thinking_level);
 
     Ok(LlmSettings {
         provider_kind: profile.provider_kind.clone(),
@@ -221,8 +269,11 @@ fn resolve_llm_settings(
             .supports_strict_tool_use
             .unwrap_or(false),
         prompt_cache_retention: profile.capabilities.prompt_cache_retention,
-        reasoning,
-        thinking_level,
+        reasoning: resolved_reasoning,
+        thinking_level: resolved_thinking_level,
+        thinking,
+        thinking_capability: capability,
+        thinking_configured,
     })
 }
 
@@ -583,6 +634,7 @@ mod tests {
                     max_tokens: Some(1024),
                     context_limit: Some(4096),
                     model_options: None,
+                    thinking_capability: None,
                 }],
             }],
             active_profile: "test".into(),
@@ -609,6 +661,7 @@ mod tests {
                 max_tokens: None,
                 context_limit: None,
                 model_options: None,
+                thinking_capability: None,
             }],
         };
         assert_eq!(
@@ -644,6 +697,7 @@ mod tests {
                     max_tokens: Some(8192),
                     context_limit: Some(65536),
                     model_options: None,
+                    thinking_capability: None,
                 }],
             }],
             active_profile: "deepseek".into(),
@@ -678,6 +732,7 @@ mod tests {
                     max_tokens: Some(16384),
                     context_limit: Some(128000),
                     model_options: None,
+                    thinking_capability: None,
                 }],
             }],
             active_profile: "openai".into(),
@@ -709,6 +764,7 @@ mod tests {
                         max_tokens: Some(8192),
                         context_limit: Some(65536),
                         model_options: None,
+                        thinking_capability: None,
                     }],
                 },
                 Profile {
@@ -724,6 +780,7 @@ mod tests {
                         max_tokens: Some(8192),
                         context_limit: Some(200000),
                         model_options: None,
+                        thinking_capability: None,
                     }],
                 },
             ],
@@ -815,7 +872,9 @@ mod tests {
                     model_options: Some(ModelOptionsConfig {
                         reasoning: Some(true),
                         thinking_level: Some(crate::llm::ThinkingLevel::High),
+                        thinking: None,
                     }),
+                    thinking_capability: None,
                 }],
             }],
             active_profile: "openai".into(),
@@ -829,5 +888,97 @@ mod tests {
             effective.llm.thinking_level,
             Some(crate::llm::ThinkingLevel::High)
         );
+        // New thinking field derived from legacy fields
+        assert!(effective.llm.thinking.enabled);
+        assert_eq!(effective.llm.thinking.effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn test_thinking_config_new_field_takes_priority_over_legacy() {
+        let config = Config {
+            profiles: vec![Profile {
+                name: "openai".into(),
+                provider_kind: "openai".into(),
+                base_url: "https://api.openai.com/v1".into(),
+                api_key: Some("sk-test".into()),
+                wire_format: ProviderWireFormat::OpenAiResponses,
+                auth_scheme: ProviderAuthScheme::Bearer,
+                capabilities: ProviderCapabilities::default(),
+                models: vec![ModelConfig {
+                    id: "gpt-4.1".into(),
+                    max_tokens: Some(8192),
+                    context_limit: Some(128000),
+                    model_options: Some(ModelOptionsConfig {
+                        reasoning: Some(false),
+                        thinking_level: Some(crate::llm::ThinkingLevel::High),
+                        thinking: Some(crate::thinking::ThinkingConfig {
+                            enabled: true,
+                            effort: Some("max".into()),
+                            budget_tokens: Some(4096),
+                        }),
+                    }),
+                    thinking_capability: None,
+                }],
+            }],
+            active_profile: "openai".into(),
+            active_model: "gpt-4.1".into(),
+            ..Config::default()
+        };
+
+        let effective = config.into_effective().unwrap();
+        assert!(effective.llm.reasoning, "derived from thinking.enabled");
+        assert_eq!(
+            effective.llm.thinking_level, None,
+            "legacy thinkingLevel must not leak through an explicit thinking config"
+        );
+        assert!(effective.llm.thinking.enabled);
+        assert_eq!(effective.llm.thinking.effort.as_deref(), Some("max"));
+        assert_eq!(effective.llm.thinking.budget_tokens, Some(4096));
+    }
+
+    #[test]
+    fn test_explicit_thinking_capability_override() {
+        use crate::thinking::{ThinkingCapability, ThinkingWireMapping};
+
+        let config = Config {
+            profiles: vec![Profile {
+                name: "custom".into(),
+                provider_kind: "openai-compatible".into(),
+                base_url: "https://custom.example.com/v1".into(),
+                api_key: Some("sk-custom".into()),
+                wire_format: ProviderWireFormat::OpenAiChatCompletions,
+                auth_scheme: ProviderAuthScheme::Bearer,
+                capabilities: ProviderCapabilities::default(),
+                models: vec![ModelConfig {
+                    id: "custom-model".into(),
+                    max_tokens: Some(4096),
+                    context_limit: Some(65536),
+                    model_options: Some(ModelOptionsConfig {
+                        reasoning: Some(true),
+                        thinking_level: Some(crate::llm::ThinkingLevel::Medium),
+                        thinking: None,
+                    }),
+                    thinking_capability: Some(ThinkingCapability {
+                        wire_mapping: ThinkingWireMapping::OpenAiResponses,
+                        allowed_effort: Some(vec!["low".into(), "medium".into(), "high".into()]),
+                        budget_min: None,
+                        budget_max: None,
+                        can_disable: true,
+                    }),
+                }],
+            }],
+            active_profile: "custom".into(),
+            active_model: "custom-model".into(),
+            ..Config::default()
+        };
+
+        let effective = config.into_effective().unwrap();
+        assert!(effective.llm.reasoning);
+        assert_eq!(
+            effective.llm.thinking_level,
+            Some(crate::llm::ThinkingLevel::Medium)
+        );
+        assert!(effective.llm.thinking.enabled);
+        assert_eq!(effective.llm.thinking.effort.as_deref(), Some("medium"));
     }
 }

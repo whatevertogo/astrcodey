@@ -230,12 +230,3 @@ export function applyCoalescedDeltas(
 
   return { blocks: newBlocks }
 }
-
-export function isDeferrableDelta(delta: ConversationDelta): boolean {
-  return (
-    delta.kind === 'patchBlock' ||
-    delta.kind === 'thinkingDelta' ||
-    delta.kind === 'patchArguments' ||
-    delta.kind === 'toolOutput'
-  )
-}

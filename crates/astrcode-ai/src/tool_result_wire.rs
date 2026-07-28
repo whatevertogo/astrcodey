@@ -54,37 +54,6 @@ pub(crate) fn openai_chat_tool_result_content(content: &str) -> serde_json::Valu
     serde_json::json!(content)
 }
 
-/// Gemini user `parts`：在 functionResponse 之后追加 inlineData 图片块。
-pub(crate) fn gemini_tool_result_parts(
-    tool_name: &str,
-    result_text: &str,
-    is_error: bool,
-) -> Vec<serde_json::Value> {
-    let function_response = serde_json::json!({
-        "functionResponse": {
-            "name": tool_name,
-            "response": {"output": result_text, "error": is_error}
-        }
-    });
-    let Some((base64, media_type)) = parse_read_tool_image(result_text) else {
-        return vec![function_response];
-    };
-    vec![
-        serde_json::json!({
-            "functionResponse": {
-                "name": tool_name,
-                "response": {
-                    "output": "Read image file.",
-                    "error": is_error
-                }
-            }
-        }),
-        serde_json::json!({
-            "inlineData": {"mimeType": media_type, "data": base64}
-        }),
-    ]
-}
-
 #[cfg(test)]
 mod tests {
     use astrcode_core::read_tool_image::ReadToolInlinePayload;

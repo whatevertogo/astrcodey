@@ -6,16 +6,19 @@
 
 use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole},
+    thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping},
     tool::ToolDefinition,
 };
 
-use crate::{serialization::ContentMapper, tool_result_wire::anthropic_tool_result_content};
+use crate::tool_result_wire::anthropic_tool_result_content;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AnthropicRequestConfig<'a> {
     pub model_id: &'a str,
     pub max_output_tokens: usize,
     pub supports_strict_tool_use: bool,
+    pub thinking: &'a ThinkingConfig,
+    pub thinking_capability: Option<&'a ThinkingCapability>,
 }
 
 pub(crate) fn endpoint_url(base_url: &str) -> String {
@@ -43,7 +46,7 @@ pub(crate) fn build_request_body(
     messages: &[LlmMessage],
     tools: &[ToolDefinition],
     stream: bool,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, astrcode_core::llm::LlmError> {
     let (system, api_messages) = convert_messages(messages);
     let mut request_body = serde_json::json!({
         "model": config.model_id,
@@ -59,7 +62,52 @@ pub(crate) fn build_request_body(
     if !tools.is_empty() {
         request_body["tools"] = convert_tools(tools, config.supports_strict_tool_use);
     }
-    request_body
+    apply_anthropic_thinking(config, &mut request_body)?;
+    Ok(request_body)
+}
+
+/// Apply Anthropic thinking fields based on capability mapping.
+fn apply_anthropic_thinking(
+    config: AnthropicRequestConfig<'_>,
+    body: &mut serde_json::Value,
+) -> Result<(), astrcode_core::llm::LlmError> {
+    let Some(cap) = config.thinking_capability else {
+        return Ok(());
+    };
+    match cap.wire_mapping {
+        ThinkingWireMapping::AnthropicAdaptive => {
+            if config.thinking.enabled {
+                if let Some(ref effort) = config.thinking.effort {
+                    body["thinking"] = serde_json::json!({"type": "adaptive"});
+                    body["output_config"] = serde_json::json!({
+                        "effort": effort
+                    });
+                }
+            }
+            // Disabled → omit thinking field entirely
+        },
+        ThinkingWireMapping::AnthropicBudget if config.thinking.enabled => {
+            let budget = config.thinking.budget_tokens.ok_or_else(|| {
+                astrcode_core::llm::LlmError::Unsupported(
+                    "budget_tokens is required when AnthropicBudget thinking is enabled".into(),
+                )
+            })?;
+            if budget as usize >= config.max_output_tokens {
+                return Err(astrcode_core::llm::LlmError::Unsupported(format!(
+                    "budget_tokens ({}) must be less than max_output_tokens ({})",
+                    budget, config.max_output_tokens
+                )));
+            }
+            body["thinking"] = serde_json::json!({
+                "type": "enabled",
+                "budget_tokens": budget
+            });
+        },
+        _ => {
+            // Not an Anthropic mapping → no change
+        },
+    }
+    Ok(())
 }
 
 pub(crate) fn build_count_tokens_body(
@@ -67,11 +115,31 @@ pub(crate) fn build_count_tokens_body(
     messages: &[LlmMessage],
     tools: &[ToolDefinition],
 ) -> serde_json::Value {
-    let mut body = build_request_body(config, messages, tools, false);
+    let mut body = build_request_without_thinking(config, messages, tools);
     if let Some(obj) = body.as_object_mut() {
         obj.remove("max_tokens");
     }
     body
+}
+
+/// Build request body without any thinking fields (used for count-tokens).
+fn build_request_without_thinking(
+    config: AnthropicRequestConfig<'_>,
+    messages: &[LlmMessage],
+    tools: &[ToolDefinition],
+) -> serde_json::Value {
+    let (system, api_messages) = convert_messages(messages);
+    let mut request_body = serde_json::json!({
+        "model": config.model_id,
+        "messages": api_messages,
+    });
+    if let Some(sys) = system {
+        request_body["system"] = sys;
+    }
+    if !tools.is_empty() {
+        request_body["tools"] = convert_tools(tools, config.supports_strict_tool_use);
+    }
+    request_body
 }
 
 fn convert_messages(
@@ -135,7 +203,56 @@ fn convert_messages(
 
 struct AnthropicMapper;
 
-impl ContentMapper for AnthropicMapper {
+impl AnthropicMapper {
+    fn map_user(message: &LlmMessage) -> serde_json::Value {
+        let mut content = message
+            .content
+            .iter()
+            .filter_map(|item| match item {
+                LlmContent::Text { text } => Some(Self::text(text)),
+                LlmContent::Image {
+                    base64, media_type, ..
+                } => Some(Self::image(base64, media_type)),
+                LlmContent::ToolResult {
+                    tool_call_id,
+                    content,
+                    is_error,
+                } => Some(Self::tool_result(tool_call_id, content, *is_error)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if content.is_empty() {
+            content.push(Self::empty());
+        }
+        serde_json::json!({"role": "user", "content": content})
+    }
+
+    fn map_assistant(message: &LlmMessage) -> serde_json::Value {
+        let mut content = message
+            .content
+            .iter()
+            .filter_map(|item| match item {
+                LlmContent::Text { text } => Some(Self::text(text)),
+                LlmContent::ToolCall {
+                    call_id,
+                    name,
+                    arguments,
+                    raw_arguments,
+                } => Some(Self::tool_call(
+                    call_id,
+                    name,
+                    arguments,
+                    raw_arguments.as_deref(),
+                )),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if content.is_empty() {
+            content.push(Self::empty());
+        }
+        serde_json::json!({"role": "assistant", "content": content})
+    }
+
     fn text(text: &str) -> serde_json::Value {
         serde_json::json!({"type": "text", "text": text})
     }
@@ -165,25 +282,17 @@ impl ContentMapper for AnthropicMapper {
         })
     }
 
-    fn tool_result(id: &str, content: &str, is_error: bool) -> Option<serde_json::Value> {
-        Some(serde_json::json!({
+    fn tool_result(id: &str, content: &str, is_error: bool) -> serde_json::Value {
+        serde_json::json!({
             "type": "tool_result",
             "tool_use_id": id,
             "content": content,
             "is_error": is_error,
-        }))
+        })
     }
 
     fn empty() -> serde_json::Value {
         serde_json::json!({"type": "text", "text": ""})
-    }
-
-    fn wrap_user(parts: Vec<serde_json::Value>) -> serde_json::Value {
-        serde_json::json!({"role": "user", "content": parts})
-    }
-
-    fn wrap_assistant(parts: Vec<serde_json::Value>) -> serde_json::Value {
-        serde_json::json!({"role": "assistant", "content": parts})
     }
 }
 
@@ -262,6 +371,7 @@ fn mark_history_cache_breakpoint(api_messages: &mut [serde_json::Value]) {
 mod tests {
     use astrcode_core::{
         llm::{LlmContent, LlmMessage, LlmRole},
+        thinking::ThinkingConfig,
         tool::{ExecutionMode, ToolDefinition, ToolOrigin},
     };
 
@@ -360,6 +470,8 @@ mod tests {
             model_id: "claude-test",
             max_output_tokens: 1024,
             supports_strict_tool_use: false,
+            thinking: &ThinkingConfig::default(),
+            thinking_capability: None,
         };
         let body = build_count_tokens_body(
             config,
@@ -426,5 +538,142 @@ mod tests {
         assert_eq!(sys[0]["text"], "You are helpful");
         assert_eq!(api_messages.len(), 1);
         assert_eq!(api_messages[0]["role"], "user");
+    }
+
+    // ─── Thinking wire mapping tests ─────────────────────────────────
+
+    #[test]
+    fn anthropic_adaptive_thinking_emits_type_adaptive_and_effort() {
+        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        let config = AnthropicRequestConfig {
+            model_id: "claude-opus-4-6",
+            max_output_tokens: 8192,
+            supports_strict_tool_use: false,
+            thinking: &ThinkingConfig {
+                enabled: true,
+                effort: Some("high".into()),
+                budget_tokens: None,
+            },
+            thinking_capability: Some(&ThinkingCapability {
+                wire_mapping: ThinkingWireMapping::AnthropicAdaptive,
+                allowed_effort: Some(vec!["high".into()]),
+                budget_min: None,
+                budget_max: None,
+                can_disable: true,
+            }),
+        };
+        let body = build_request_body(config, &[], &[], false).unwrap();
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["output_config"]["effort"], "high");
+    }
+
+    #[test]
+    fn anthropic_budget_thinking_emits_type_enabled_and_budget_tokens() {
+        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        let config = AnthropicRequestConfig {
+            model_id: "claude-sonnet-4-6",
+            max_output_tokens: 8192,
+            supports_strict_tool_use: false,
+            thinking: &ThinkingConfig {
+                enabled: true,
+                effort: None,
+                budget_tokens: Some(4096),
+            },
+            thinking_capability: Some(&ThinkingCapability {
+                wire_mapping: ThinkingWireMapping::AnthropicBudget,
+                allowed_effort: Some(vec![]),
+                budget_min: Some(1024),
+                budget_max: Some(64000),
+                can_disable: true,
+            }),
+        };
+        let body = build_request_body(config, &[], &[], false).unwrap();
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["thinking"]["budget_tokens"], 4096);
+    }
+
+    #[test]
+    fn anthropic_budget_rejects_when_budget_equals_or_exceeds_max_output_tokens() {
+        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        let config = AnthropicRequestConfig {
+            model_id: "claude-sonnet-4-6",
+            max_output_tokens: 4096,
+            supports_strict_tool_use: false,
+            thinking: &ThinkingConfig {
+                enabled: true,
+                effort: None,
+                budget_tokens: Some(4096),
+            },
+            thinking_capability: Some(&ThinkingCapability {
+                wire_mapping: ThinkingWireMapping::AnthropicBudget,
+                allowed_effort: Some(vec![]),
+                budget_min: Some(1024),
+                budget_max: Some(64000),
+                can_disable: true,
+            }),
+        };
+        let result = build_request_body(config, &[], &[], false);
+        assert!(
+            result.is_err(),
+            "budget >= max_output_tokens should be rejected"
+        );
+    }
+
+    #[test]
+    fn anthropic_thinking_omitted_when_disabled() {
+        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        let config = AnthropicRequestConfig {
+            model_id: "claude-opus-4-6",
+            max_output_tokens: 8192,
+            supports_strict_tool_use: false,
+            thinking: &ThinkingConfig {
+                enabled: false,
+                effort: None,
+                budget_tokens: None,
+            },
+            thinking_capability: Some(&ThinkingCapability {
+                wire_mapping: ThinkingWireMapping::AnthropicAdaptive,
+                allowed_effort: Some(vec!["high".into()]),
+                budget_min: None,
+                budget_max: None,
+                can_disable: true,
+            }),
+        };
+        let body = build_request_body(config, &[], &[], false).unwrap();
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking should be omitted when disabled"
+        );
+    }
+
+    #[test]
+    fn anthropic_count_tokens_omits_thinking() {
+        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        let config = AnthropicRequestConfig {
+            model_id: "claude-opus-4-6",
+            max_output_tokens: 8192,
+            supports_strict_tool_use: false,
+            thinking: &ThinkingConfig {
+                enabled: true,
+                effort: Some("high".into()),
+                budget_tokens: None,
+            },
+            thinking_capability: Some(&ThinkingCapability {
+                wire_mapping: ThinkingWireMapping::AnthropicAdaptive,
+                allowed_effort: Some(vec!["high".into()]),
+                budget_min: None,
+                budget_max: None,
+                can_disable: true,
+            }),
+        };
+        let body = build_count_tokens_body(config, &[], &[]);
+        assert!(
+            body.get("thinking").is_none(),
+            "count tokens body should omit thinking"
+        );
+        assert!(
+            body.get("max_tokens").is_none(),
+            "count tokens body should omit max_tokens"
+        );
     }
 }
