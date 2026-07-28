@@ -1,0 +1,484 @@
+//! [`EventPayload`] —— 事件载荷的统一枚举类型。
+//!
+//! 从 `event` 根模块拆出,仅含载荷枚举本体与其方法(如 `is_durable`)。
+//! wire 格式(`#[serde(tag = "type")]`)与变体名保持不变。
+
+use serde::{Deserialize, Serialize};
+
+use super::envelope::ToolOutputStream;
+use crate::{
+    extension::SessionToolSelection,
+    llm::{LlmMessage, LlmTokenUsage},
+    message_attachment::MessageAttachment,
+    tool::ToolResult,
+    types::*,
+};
+
+/// 统一的 astrcode 事件载荷。
+///
+/// 使用 `#[serde(tag = "type")]` 实现扁平化的 JSON 序列化，
+/// 每个变体在序列化时会自动带上 `"type"` 字段用于区分。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EventPayload {
+    /// 会话已创建。
+    SessionStarted {
+        /// 工作目录路径。
+        working_dir: String,
+        /// 使用的模型标识。
+        model_id: String,
+        /// 父会话 ID，用于子会话场景。根会话为 `None`。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        parent_session_id: Option<SessionId>,
+        /// Session 创建时生效的工具集策略。
+        ///
+        /// 写在 session 自己的事件日志中，使 resume 能从本地事件流恢复工具边界。
+        /// `None` 表示不限制工具；子 session 每轮还会与当前父链边界取交集。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_selection: Option<SessionToolSelection>,
+        /// 创建该子 session 的扩展 ID，用于按插件组织存储目录。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_extension: Option<String>,
+    },
+
+    /// 会话使用的模型已变更。
+    ///
+    /// 由 handler 在运行时配置的 model_id 与 session 创建时不同时写入，
+    /// 确保 session 始终反映当前生效的模型。
+    ModelIdChanged { model_id: String },
+
+    /// 后续 turn 使用的 session 工具边界已变更。
+    SessionToolsConfigured { selection: SessionToolSelection },
+
+    /// 会话 system prompt 已固定。
+    ///
+    /// 这是 session 级事实：同一 session 后续回合复用这份提示词，
+    /// 不再按轮次重新组装。
+    SystemPromptConfigured {
+        /// 完整 system prompt 文本。
+        text: String,
+        /// system prompt 文本的稳定指纹，用于调试 prompt 是否漂移。
+        fingerprint: String,
+        /// 额外注入的 system prompt（子会话场景）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extra_system_prompt: Option<String>,
+    },
+
+    /// 会话已删除。
+    SessionDeleted,
+
+    /// 父会话记录派生了子 Agent 会话。
+    ///
+    /// 写入父 Session 的事件日志，表达"从父看子"的关系。
+    /// 子侧通过 `SessionStarted.parent_session_id` 表达"从子看父"。
+    ///
+    /// `child_session_id` 为最初委托的子 session，父侧投影用其作为稳定锚点。
+    /// 若子 session 经跨 session continuation 产生 leaf，见
+    /// [`AgentSessionCompleted::final_session_id`](EventPayload::AgentSessionCompleted)。
+    AgentSessionSpawned {
+        child_session_id: SessionId,
+        agent_name: String,
+        task: String,
+        /// 子会话创建时生效的工具选择（`None` 表示继承父 session 当前边界）。
+        ///
+        /// 持久化以便子 session resume；每轮仍会与当前父链边界取交集。
+        #[serde(default)]
+        tool_selection: Option<SessionToolSelection>,
+        /// 触发此子会话的工具调用 ID（用于 TUI 路由子 session 事件）。
+        tool_call_id: ToolCallId,
+    },
+
+    /// Agent 运行开始。
+    AgentRunStarted,
+
+    /// Agent 运行完成。
+    AgentRunCompleted {
+        /// 完成原因描述。
+        reason: String,
+    },
+
+    /// 子 Agent 会话成功完成。
+    ///
+    /// 由 `ChildSessionCompletionGuard` / server 在子 session 结束后追加到父会话。
+    ///
+    /// **双 `SessionId` 说明（勿删其一）**：`child_session_id` 锚定
+    /// `AgentSessionSpawned`；`final_session_id` 为结果所在 leaf。当前 compact 为
+    /// 同 session 原地续写（`append_compact_boundary` 不换 id），故二者恒等；
+    /// 构造载荷请用 `astrcode_session::payload::agent_session_completed_payload`。
+    AgentSessionCompleted {
+        /// 初始子会话 ID（与 `AgentSessionSpawned` 一致；compact 不会改此锚点）。
+        child_session_id: SessionId,
+        /// 产出结果的 leaf session；**当前实现**与 `child_session_id` 相同。
+        final_session_id: SessionId,
+        /// 子 Agent 输出摘要。
+        summary: String,
+    },
+
+    /// 子 Agent 会话失败。
+    ///
+    /// 由 `ChildSessionCompletionGuard` / server 在子 session 结束后追加到父会话。
+    /// 双 `SessionId` 语义同 [`AgentSessionCompleted`]。
+    AgentSessionFailed {
+        /// 初始子会话 ID（与 `AgentSessionSpawned` 一致）。
+        child_session_id: SessionId,
+        /// leaf session；**当前实现**与 `child_session_id` 相同。
+        final_session_id: SessionId,
+        /// 错误描述。
+        error: String,
+    },
+
+    /// 子 Agent 会话已回收。
+    ///
+    /// 在 `recycle_session` 时追加到父会话，用于从父会话的 `agent_sessions` 投影中
+    /// 移除对应条目，使前端不再显示已回收的子 agent。
+    AgentSessionRecycled {
+        /// 初始子会话 ID。
+        child_session_id: SessionId,
+    },
+
+    /// 用户轮次开始。
+    TurnStarted,
+
+    /// 用户轮次完成。
+    TurnCompleted {
+        /// 完成原因（如 "stop"、"tool_use" 等）。
+        finish_reason: String,
+    },
+
+    /// 上一轮被用户中断的模型上下文。
+    ///
+    /// Projection 会将其追加为 provider 可见、普通 transcript 隐藏的 User 消息。
+    TurnAbortedContext,
+
+    /// 用户发送的消息。
+    UserMessage {
+        /// 消息唯一标识。
+        message_id: MessageId,
+        /// 消息文本内容。
+        text: String,
+        /// 粘贴或选取的图片/文件（可选）。
+        #[serde(default)]
+        attachments: Vec<MessageAttachment>,
+    },
+
+    /// Recap 摘要已生成。
+    ///
+    /// 持久化事件，用于展示和事件溯源。不进入下一轮 LLM 对话历史。
+    RecapGenerated {
+        /// 摘要文本。
+        text: String,
+        /// 触发来源：`"manual"`（/recap 命令）或 `"auto"`（future away summary）。
+        source: String,
+    },
+
+    /// 助手消息开始（流式输出的起始标记）。
+    AssistantMessageStarted {
+        /// 消息唯一标识。
+        message_id: MessageId,
+    },
+
+    /// 助手消息的文本增量（流式输出片段）。
+    AssistantTextDelta {
+        /// 消息唯一标识。
+        message_id: MessageId,
+        /// 本次增量文本。
+        delta: String,
+    },
+
+    /// 助手消息已完成（流式输出结束）。
+    AssistantMessageCompleted {
+        /// 消息唯一标识。
+        message_id: MessageId,
+        /// 完整的消息文本（不含 thinking）。
+        text: String,
+        /// 推理模型的思维链内容。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
+    },
+
+    /// 单次 LLM 调用的 token 使用统计。
+    TokenUsageRecorded {
+        usage: LlmTokenUsage,
+        model_context_window: usize,
+    },
+
+    /// 思考过程的文本增量（用于推理模型的思维链）。
+    ThinkingDelta {
+        /// 所属助手消息唯一标识。
+        message_id: MessageId,
+        /// 本次增量文本。
+        delta: String,
+    },
+
+    /// 工具调用已开始。
+    ToolCallStarted {
+        /// 工具调用唯一标识。
+        call_id: ToolCallId,
+        /// 工具名称。
+        tool_name: String,
+    },
+
+    /// 工具调用参数的增量数据（流式解析）。
+    ToolCallArgumentsDelta {
+        /// 工具调用唯一标识。
+        call_id: ToolCallId,
+        /// 本次增量参数 JSON 片段。
+        delta: String,
+    },
+
+    /// 工具调用请求已完成（参数解析完毕，准备执行）。
+    ToolCallRequested {
+        /// 工具调用唯一标识。
+        call_id: ToolCallId,
+        /// 工具名称。
+        tool_name: String,
+        /// 完整的工具调用参数（JSON 值）。
+        arguments: serde_json::Value,
+        /// Provider 返回但无法解析的原始参数；合法 JSON 参数不写该字段。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        raw_arguments: Option<String>,
+    },
+
+    /// 工具执行过程中的输出增量（stdout/stderr 流）。
+    ToolOutputDelta {
+        /// 工具调用唯一标识。
+        call_id: ToolCallId,
+        /// 输出流类型（标准输出或标准错误）。
+        stream: ToolOutputStream,
+        /// 本次增量输出文本。
+        delta: String,
+    },
+
+    /// 工具执行需用户审批（Tool Gate 挂起）。
+    ToolApprovalRequested {
+        call_id: ToolCallId,
+        tool_name: String,
+        prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rule_key: Option<String>,
+        source: crate::permission::ApprovalSource,
+        arguments: serde_json::Value,
+    },
+
+    /// 用户对挂起审批的决议。
+    ToolApprovalResolved {
+        call_id: ToolCallId,
+        decision: crate::permission::ApprovalDecision,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
+
+    /// 工具调用进入等待用户交互阶段（durable；在工具终态之前写入）。
+    ///
+    /// 用于 askUser 等 Approval UI：execute 已返回 `awaiting_user_input`，
+    /// turn 阻塞等待用户提交后才写入工具终态事件。
+    ToolCallInteractionPending {
+        call_id: ToolCallId,
+        /// 工具结果正文（如 `{"status":"awaiting_user_input",...}`）。
+        content: String,
+        /// 投影到前端 block.metadata（含 `toolUi` / `toolUiPhase` 等）。
+        metadata: std::collections::BTreeMap<String, serde_json::Value>,
+    },
+
+    /// 工具调用已完成。
+    ToolCallCompleted {
+        /// 工具调用唯一标识。
+        call_id: ToolCallId,
+        /// 工具名称。
+        tool_name: String,
+        /// 工具执行结果。
+        result: ToolResult,
+        /// 原始调用参数的折叠摘要文本。
+        #[serde(default)]
+        arguments: String,
+        /// 原始调用参数的 JSON 值。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments_json: Option<serde_json::Value>,
+    },
+
+    /// 工具执行或编排失败。
+    ToolCallFailed {
+        /// 工具调用唯一标识。
+        call_id: ToolCallId,
+        /// 工具名称。
+        tool_name: String,
+        /// 提供给用户和模型的失败说明。
+        error: String,
+        /// 失败附带的结构化元数据。
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        metadata: std::collections::BTreeMap<String, serde_json::Value>,
+        /// 工具执行耗时（毫秒）；准备阶段失败时为空。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        /// 原始调用参数的折叠摘要文本。
+        #[serde(default)]
+        arguments: String,
+        /// 原始调用参数的 JSON 值。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments_json: Option<serde_json::Value>,
+    },
+
+    /// 工具调用被显式取消。
+    ToolCallCancelled {
+        /// 工具调用唯一标识。
+        call_id: ToolCallId,
+        /// 工具名称。
+        tool_name: String,
+        /// 取消原因。
+        reason: String,
+        /// 取消前已执行的耗时（毫秒）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        duration_ms: Option<u64>,
+        /// 原始调用参数的折叠摘要文本。
+        #[serde(default)]
+        arguments: String,
+        /// 原始调用参数的 JSON 值。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        arguments_json: Option<serde_json::Value>,
+    },
+
+    /// 上下文压缩已开始。
+    ///
+    /// 这是 live 状态事件，不持久化；恢复时只依赖 durable 的 compact
+    /// boundary / continuation 事件。
+    CompactionStarted,
+
+    /// 上下文压缩已完成。
+    ///
+    /// 这是 live 状态事件；压缩结果由 durable compact boundary 记录。
+    CompactionCompleted {
+        /// 被移除的消息数量。
+        messages_removed: usize,
+    },
+
+    /// 上下文压缩已跳过（compare-and-append 冲突或条件不满足）。
+    ///
+    /// live 状态事件，不持久化。
+    CompactionSkipped {
+        /// 跳过原因。
+        reason: String,
+    },
+
+    /// 上下文压缩失败。
+    ///
+    /// live 状态事件，不持久化。
+    CompactionFailed {
+        /// 失败原因。
+        reason: String,
+    },
+
+    /// compact 在父会话中创建了 continuation 边界。
+    CompactBoundaryCreated {
+        /// compact 触发来源，例如 `manual_command`。
+        trigger: String,
+        /// 压缩前的 token 数量。
+        pre_tokens: usize,
+        /// 压缩后的 token 数量。
+        post_tokens: usize,
+        /// 压缩生成的摘要文本。
+        summary: String,
+        /// compact 前 transcript snapshot 的可读路径。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
+        /// 接续对话的 session id。生产路径 `append_compact_boundary` 中为 **当前 session**
+        /// （原地 compact，不换 id）；仅跨 session continuation 设计下才指向另一 session。
+        continued_session_id: SessionId,
+        /// compact 基于的事件 seq（replay 后、compact 前锁定），用于幂等校验。
+        base_event_seq: u64,
+        /// compact 策略，记录用于 replay 和审计。
+        strategy: crate::extension::CompactStrategy,
+    },
+
+    /// 同一条 session log 上的 compact 续写投影（摘要 + 保留消息替换 transcript）。
+    ///
+    /// 生产路径中 `parent_session_id` 为 **本 session**（与 `Event.session_id` 相同），
+    /// 并非另开子 session；与 `CompactBoundaryCreated` 成对追加。
+    SessionContinuedFromCompaction {
+        /// compact 前的 session（原地续写时等于本 log 的 `session_id`）。
+        parent_session_id: SessionId,
+        /// 父会话 compact 前的 durable cursor。
+        parent_cursor: Cursor,
+        /// 压缩生成的摘要文本。
+        summary: String,
+        /// compact 前 transcript snapshot 的可读路径。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        transcript_path: Option<String>,
+        /// 注入 provider 的隐藏上下文消息。
+        context_messages: Vec<LlmMessage>,
+        /// compact 后保留在可见 transcript 中的近期消息。
+        retained_messages: Vec<LlmMessage>,
+    },
+
+    /// 从源会话 fork 而来。
+    ///
+    /// fork 点之前的消息原样保留，保证 provider KV 缓存前缀命中。
+    /// 与 `SessionContinuedFromCompaction` 区别：fork 不做摘要压缩，
+    /// 只是在 fork 点截断后复制原始消息前缀。
+    SessionForked {
+        /// 源会话 ID。
+        source_session_id: SessionId,
+        /// 源会话 fork 点 durable cursor。
+        source_cursor: Cursor,
+        /// 注入 provider 的隐藏上下文消息（通常为空，为未来兼容 compact+fork 保留）。
+        context_messages: Vec<LlmMessage>,
+        /// fork 点之前保留的可见 transcript 消息（原样复制，保证 KV 前缀一致）。
+        retained_messages: Vec<LlmMessage>,
+    },
+
+    /// 发生错误。
+    ErrorOccurred {
+        /// 错误码。
+        code: i32,
+        /// 错误消息。
+        message: String,
+        /// 是否可恢复（可恢复的错误允许继续会话）。
+        recoverable: bool,
+    },
+
+    /// 自定义事件（由扩展或外部系统发出）。
+    Custom {
+        /// 事件名称。
+        name: String,
+        /// 事件数据（任意 JSON 值）。
+        data: serde_json::Value,
+    },
+
+    /// 插件命名空间事件。
+    ///
+    /// 由 [`crate::extension::ExtensionEventSink`] 发出，`extension_id` 由 runtime
+    /// 在构造 sink 时注入，插件无法伪造。`event_type` 必须在 Registrar 中声明。
+    ExtensionEvent {
+        /// 插件 ID，充当事件命名空间。
+        extension_id: String,
+        /// 插件声明的事件类型名（如 `"memory.accepted"`）。
+        event_type: String,
+        /// payload schema 版本，用于向前兼容。
+        #[serde(default)]
+        schema_version: u32,
+        /// 不透明事件载荷。
+        payload: serde_json::Value,
+    },
+}
+
+impl EventPayload {
+    /// 判断该事件是否应持久化到会话的 JSONL 事件日志中。
+    ///
+    /// 采用「默认持久化」策略：仅排除 live/增量类事件；新增 [`EventPayload`] 变体若未加入
+    /// 排除列表会自动持久化（更安全，但新增 live-only 变体时须记得更新此列表）。
+    pub fn is_durable(&self) -> bool {
+        !matches!(
+            self,
+            Self::ToolCallStarted { .. }
+                | Self::AssistantTextDelta { .. }
+                | Self::ThinkingDelta { .. }
+                | Self::ToolCallArgumentsDelta { .. }
+                | Self::ToolOutputDelta { .. }
+                | Self::AgentRunStarted
+                | Self::AgentRunCompleted { .. }
+                | Self::CompactionStarted
+                | Self::CompactionCompleted { .. }
+                | Self::CompactionSkipped { .. }
+                | Self::CompactionFailed { .. }
+        )
+    }
+}

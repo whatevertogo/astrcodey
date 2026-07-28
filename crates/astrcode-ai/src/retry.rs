@@ -41,6 +41,10 @@ impl RetryPolicy {
     /// 根据状态码和尝试次数判断是否应该重试。
     ///
     /// 仅对以下状态码进行重试：408（超时）、429（限流）、500/502/503/504（服务端错误）。
+    ///
+    /// 注意:重试发生在 HTTP 层、在错误分类为 [`LlmError`](astrcode_core::llm::LlmError)
+    /// 之前,因此本清单需与 [`LlmError::is_retryable`](astrcode_core::llm::LlmError::is_retryable)
+    /// (429→`RateLimited`、5xx/408→`ServerError`)同步维护——两处在语义上等价。
     pub fn should_retry(&self, attempt: u32, status: u16) -> bool {
         if attempt > self.max_retries {
             return false;

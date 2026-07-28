@@ -491,29 +491,95 @@ pub enum LlmEvent {
 }
 
 /// LLM 提供者操作产生的错误。
-#[derive(Debug, thiserror::Error)]
+///
+/// 跨 provider 的统一错误分类。HTTP 状态码与响应体在边界(`astrcode-ai` 的
+/// `classify_error`)归一化为这些变体;[`LlmError::is_retryable`] 是连接期
+/// 是否重试的唯一事实来源。同时实现 serde,以便将来作为结构化错误跨边界传输。
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LlmError {
+    /// API key 无效或缺失(401/403)。
+    #[error("invalid api key ({status}): {message}")]
+    InvalidApiKey { status: u16, message: String },
+    /// 模型不存在(404)。
+    #[error("model not found ({status}): {message}")]
+    ModelNotFound { status: u16, message: String },
+    /// 请求参数无效(400/422)。
+    #[error("invalid parameter ({status}): {message}")]
+    InvalidParameter { status: u16, message: String },
+    /// 配额/计费耗尽(402,或 429 的配额类响应)。
+    #[error("quota exceeded ({status}): {message}")]
+    QuotaExceeded { status: u16, message: String },
     /// 提示词超出模型上下文长度限制。
-    #[error("Prompt too long: {0}")]
-    PromptTooLong(String),
-    /// 客户端错误（4xx 状态码）。
-    #[error("Client error ({status}): {message}")]
+    #[error("context window exceeded: {message}")]
+    ContextWindowExceeded { message: String },
+    /// 被限流(429)。`retry_after_ms` 来自 `Retry-After` 响应头(若提供)。
+    #[error("rate limited ({status}): {message}")]
+    RateLimited {
+        status: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_ms: Option<u64>,
+        message: String,
+    },
+    /// 其他客户端错误(4xx)。
+    #[error("client error ({status}): {message}")]
     ClientError { status: u16, message: String },
-    /// 服务端错误（5xx 状态码）。
-    #[error("Server error ({status}): {message}")]
+    /// 服务端错误(5xx,含 408 超时)。
+    #[error("server error ({status}): {message}")]
     ServerError { status: u16, message: String },
-    /// 网络传输错误。
-    #[error("Transport error: {0}")]
-    Transport(String),
-    /// 请求被中断（用户取消）。
-    #[error("Request interrupted")]
-    Interrupted,
+    /// 网络传输错误(连接、TLS、DNS 等)。
+    #[error("transport error: {message}")]
+    Transport { message: String },
+    /// 流式响应意外断开。
+    #[error("stream disconnected: {message}")]
+    StreamDisconnected { message: String },
     /// 流式响应解析错误。
-    #[error("Stream parse error: {0}")]
-    StreamParse(String),
-    /// 当前 provider 不支持该操作。
-    #[error("Unsupported LLM operation: {0}")]
-    Unsupported(String),
+    #[error("stream parse error: {message}")]
+    StreamParse { message: String },
+    /// 响应被内容安全策略过滤。
+    #[error("content filtered: {message}")]
+    ContentFilter { message: String },
+    /// 输出 token 超出限制。
+    #[error("output token limit: {message}")]
+    TokenLimit { message: String },
+    /// 模型返回空响应。
+    #[error("empty response")]
+    EmptyResponse,
+    /// 请求被中断(用户取消)。
+    #[error("request interrupted")]
+    Interrupted,
+    /// 当前 provider 不支持该操作(能力缺口,非 HTTP 错误分类)。
+    #[error("unsupported LLM operation: {message}")]
+    Unsupported { message: String },
+}
+
+impl LlmError {
+    /// 便捷构造传输错误。
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self::Transport {
+            message: message.into(),
+        }
+    }
+
+    /// 便捷构造流解析错误。
+    pub fn stream_parse(message: impl Into<String>) -> Self {
+        Self::StreamParse {
+            message: message.into(),
+        }
+    }
+
+    /// 连接期重试是否值得;流内失败按设计不重试(无中途恢复)。
+    ///
+    /// 与 `astrcode-ai::retry::RetryPolicy::should_retry` 的状态码集合一致
+    /// (429→`RateLimited`、5xx/408→`ServerError`);重试发生在 HTTP 层、在错误分类之前,
+    /// 因此两处状态码清单需同步维护。
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } | Self::Transport { .. } => true,
+            Self::ServerError { status, .. } => matches!(status, 408 | 500 | 502 | 503 | 504),
+            _ => false,
+        }
+    }
 }
 
 /// OpenAI prompt cache retention 声明。
@@ -669,9 +735,9 @@ pub trait LlmProvider: Send + Sync {
         _messages: Vec<LlmMessage>,
         _tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
-        Err(LlmError::Unsupported(
-            "input token counting is not supported by this provider".into(),
-        ))
+        Err(LlmError::Unsupported {
+            message: "input token counting is not supported by this provider".into(),
+        })
     }
 
     /// 返回模型的上下文窗口限制。
@@ -698,7 +764,7 @@ pub async fn collect_stream_text(
         match event {
             LlmEvent::ContentDelta { delta } => text.push_str(&delta),
             LlmEvent::Done { .. } => break,
-            LlmEvent::Error { message } => return Err(LlmError::StreamParse(message)),
+            LlmEvent::Error { message } => return Err(LlmError::stream_parse(message)),
             _ => {},
         }
     }
@@ -791,5 +857,179 @@ mod tests {
             .expect("text attachment");
         assert!(text.starts_with("<attachment filename=\"note.txt\" media_type=\"text/plain\">"));
         assert!(text.ends_with("</attachment>"));
+    }
+
+    #[test]
+    fn transport_and_stream_parse_helpers_build_matching_variants() {
+        assert!(matches!(
+            LlmError::transport("boom"),
+            LlmError::Transport { message } if message == "boom"
+        ));
+        assert!(matches!(
+            LlmError::stream_parse("bad json"),
+            LlmError::StreamParse { message } if message == "bad json"
+        ));
+    }
+
+    #[test]
+    fn is_retryable_classifies_correctly() {
+        // 恒可重试
+        assert!(
+            LlmError::Transport {
+                message: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            LlmError::RateLimited {
+                status: 429,
+                retry_after_ms: None,
+                message: "x".into(),
+            }
+            .is_retryable()
+        );
+
+        // ServerError 仅 408/500/502/503/504 可重试
+        for retryable in [408, 500, 502, 503, 504] {
+            assert!(
+                LlmError::ServerError {
+                    status: retryable,
+                    message: "x".into(),
+                }
+                .is_retryable(),
+                "{retryable} should be retryable"
+            );
+        }
+        assert!(
+            !LlmError::ServerError {
+                status: 501,
+                message: "x".into(),
+            }
+            .is_retryable()
+        );
+
+        // 其余变体不可重试
+        assert!(
+            !LlmError::InvalidApiKey {
+                status: 401,
+                message: "x".into(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !LlmError::ContextWindowExceeded {
+                message: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !LlmError::Unsupported {
+                message: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(!LlmError::Interrupted.is_retryable());
+    }
+
+    #[test]
+    fn llm_error_serializes_with_snake_case_kind_tag() {
+        // 内部 tag = "kind",变体名 snake_case;struct 字段内联。
+        let json = serde_json::to_value(LlmError::ContextWindowExceeded {
+            message: "too big".into(),
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "context_window_exceeded");
+        assert_eq!(json["message"], "too big");
+
+        // RateLimited 省略 None 的 retry_after_ms
+        let json = serde_json::to_value(LlmError::RateLimited {
+            status: 429,
+            retry_after_ms: None,
+            message: "slow down".into(),
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "rate_limited");
+        assert_eq!(json["status"], 429);
+        assert!(json.get("retry_after_ms").is_none());
+
+        // retry_after_ms 有值时序列化
+        let json = serde_json::to_value(LlmError::RateLimited {
+            status: 429,
+            retry_after_ms: Some(1500),
+            message: "slow down".into(),
+        })
+        .unwrap();
+        assert_eq!(json["retry_after_ms"], 1500);
+
+        // unit 变体只带 tag
+        let json = serde_json::to_value(LlmError::Interrupted).unwrap();
+        assert_eq!(json, serde_json::json!({"kind": "interrupted"}));
+    }
+
+    #[test]
+    fn llm_error_round_trips_through_serde() {
+        let cases: Vec<LlmError> = vec![
+            LlmError::InvalidApiKey {
+                status: 401,
+                message: "bad key".into(),
+            },
+            LlmError::ModelNotFound {
+                status: 404,
+                message: "no model".into(),
+            },
+            LlmError::InvalidParameter {
+                status: 400,
+                message: "bad param".into(),
+            },
+            LlmError::QuotaExceeded {
+                status: 402,
+                message: "no funds".into(),
+            },
+            LlmError::ContextWindowExceeded {
+                message: "too long".into(),
+            },
+            LlmError::RateLimited {
+                status: 429,
+                retry_after_ms: Some(2000),
+                message: "rl".into(),
+            },
+            LlmError::ClientError {
+                status: 418,
+                message: "teapot".into(),
+            },
+            LlmError::ServerError {
+                status: 503,
+                message: "down".into(),
+            },
+            LlmError::Transport {
+                message: "t".into(),
+            },
+            LlmError::StreamDisconnected {
+                message: "d".into(),
+            },
+            LlmError::StreamParse {
+                message: "p".into(),
+            },
+            LlmError::ContentFilter {
+                message: "c".into(),
+            },
+            LlmError::TokenLimit {
+                message: "l".into(),
+            },
+            LlmError::EmptyResponse,
+            LlmError::Interrupted,
+            LlmError::Unsupported {
+                message: "u".into(),
+            },
+        ];
+        for original in cases {
+            let json = serde_json::to_string(&original).unwrap();
+            let back: LlmError = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                serde_json::to_string(&back).unwrap(),
+                json,
+                "round-trip mismatch for {original:?}"
+            );
+        }
     }
 }

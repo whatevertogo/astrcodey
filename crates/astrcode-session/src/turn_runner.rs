@@ -227,7 +227,7 @@ impl TurnLoop {
                 .await
             {
                 Ok(outcome) => outcome,
-                Err(TurnError::Llm(LlmError::PromptTooLong(_)))
+                Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. }))
                     if !state.reactive_compact_used() =>
                 {
                     state.mark_reactive_compact_used();
@@ -247,7 +247,7 @@ impl TurnLoop {
                     }
                     continue;
                 },
-                Err(TurnError::Llm(LlmError::PromptTooLong(_))) => {
+                Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
                     return end_turn_with_error_typed(TurnError::CompactExhausted);
                 },
                 Err(error) => return Err(error),
@@ -459,7 +459,7 @@ impl TurnLoop {
             Ok(outcome) => Ok(self
                 .with_usage_fallback(outcome, &prepared.llm, request_messages, tools)
                 .await),
-            Err(e @ TurnError::Llm(LlmError::PromptTooLong(_))) => Err(e),
+            Err(e @ TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => Err(e),
             Err(error) => end_turn_with_error_typed(error),
         }
     }
@@ -699,8 +699,8 @@ impl TurnLoop {
         };
         match result {
             Ok(rx) => Ok(rx),
-            Err(LlmError::PromptTooLong(message)) => {
-                Err(TurnError::Llm(LlmError::PromptTooLong(message)))
+            Err(LlmError::ContextWindowExceeded { message }) => {
+                Err(TurnError::Llm(LlmError::ContextWindowExceeded { message }))
             },
             Err(e) => {
                 publisher

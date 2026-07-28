@@ -26,7 +26,7 @@ const MAX_TOOL_CALLS_PER_RESPONSE: usize = 64;
 const MAX_TOOL_CALL_ARGUMENTS_BYTES: usize = 4 * 1024 * 1024;
 
 fn stream_parse_limit_error(message: impl Into<String>) -> TurnError {
-    TurnError::Llm(LlmError::StreamParse(message.into()))
+    TurnError::Llm(LlmError::stream_parse(message.into()))
 }
 
 fn ensure_tool_call_args_limit(size: usize) -> Result<(), TurnError> {
@@ -245,12 +245,12 @@ pub async fn consume_llm_stream(
                 let recoverable = is_prompt_too_long_message(&message);
                 if recoverable {
                     publisher.live_error(-32603, message.clone(), true).await;
-                    return Err(TurnError::Llm(LlmError::PromptTooLong(message)));
+                    return Err(TurnError::Llm(LlmError::ContextWindowExceeded { message }));
                 }
                 publisher
                     .durable_error(-32603, message.clone(), false)
                     .await?;
-                return Err(TurnError::Llm(LlmError::StreamParse(message)));
+                return Err(TurnError::Llm(LlmError::stream_parse(message)));
             },
             LlmEvent::ToolCallCompleted { call_id } => {
                 if scheduled_tool_call_ids.contains(&call_id) {

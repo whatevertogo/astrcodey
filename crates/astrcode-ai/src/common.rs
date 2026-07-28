@@ -20,7 +20,7 @@ use crate::{
 };
 
 fn stream_decoder_error(error: StreamDecoderError) -> LlmError {
-    LlmError::StreamParse(error.to_string())
+    LlmError::stream_parse(error.to_string())
 }
 
 pub(crate) fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
@@ -46,7 +46,7 @@ pub fn build_client(config: &LlmClientConfig) -> Result<reqwest::Client, LlmErro
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Duration::from_secs(30))
         .build()
-        .map_err(|error| LlmError::Transport(format!("failed to create HTTP client: {error}")))
+        .map_err(|error| LlmError::transport(format!("failed to create HTTP client: {error}")))
 }
 
 /// 添加 HTTP 头；若调用方已显式传入同名头（大小写无关）则保留调用方设置。
@@ -208,7 +208,7 @@ impl HttpPostRequest {
             if status.is_success() {
                 match on_success(response).await {
                     Ok(()) => return Ok(()),
-                    Err(LlmError::Transport(message)) => {
+                    Err(LlmError::Transport { message }) => {
                         if self.retry.should_retry_transport(attempt) {
                             let delay = self.retry.delay(attempt);
                             tracing::warn!(
@@ -220,7 +220,7 @@ impl HttpPostRequest {
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        return Err(LlmError::Transport(message));
+                        return Err(LlmError::transport(message));
                     },
                     Err(error) => return Err(error),
                 }
@@ -237,8 +237,9 @@ impl HttpPostRequest {
                 continue;
             }
 
+            let retry_after_ms = parse_retry_after_ms(response.headers());
             let text = read_http_error_body(response, &self.endpoint).await;
-            return Err(classify_error(status.as_u16(), text));
+            return Err(classify_error(status.as_u16(), retry_after_ms, &text));
         }
     }
 
@@ -274,7 +275,7 @@ impl HttpPostRequest {
                     .await
                     .map_err(|error| transport_error("read JSON response", &endpoint, error))?;
                 return serde_json::from_str(&text).map_err(|error| {
-                    LlmError::StreamParse(format!(
+                    LlmError::stream_parse(format!(
                         "failed to parse LLM JSON response from {}: {error}",
                         redacted_endpoint(&endpoint)
                     ))
@@ -293,8 +294,9 @@ impl HttpPostRequest {
                 continue;
             }
 
+            let retry_after_ms = parse_retry_after_ms(response.headers());
             let text = read_http_error_body(response, &self.endpoint).await;
-            return Err(classify_error(status.as_u16(), text));
+            return Err(classify_error(status.as_u16(), retry_after_ms, &text));
         }
     }
 
@@ -341,7 +343,7 @@ impl SseStreamSummary {
     /// 响应体非空却没有任何 `data:` 行 → 视为非 SSE，返回结构化错误。
     pub(crate) fn require_data_lines(&self, has_data_line: bool) -> Result<(), LlmError> {
         if self.bytes_read > 0 && !has_data_line {
-            return Err(LlmError::StreamParse(format!(
+            return Err(LlmError::stream_parse(format!(
                 "LLM returned 200 but response is not valid SSE (no data: lines found). \
                  Content-Type: {}, bytes: {}, preview: {}",
                 self.content_type.as_deref().unwrap_or("<missing>"),
@@ -445,24 +447,72 @@ fn consume_decoded_lines(
 
 // ─── 错误工具函数 ──────────────────────────────────────────────────────
 
-pub fn classify_error(status: u16, text: String) -> LlmError {
-    if status >= 500 {
-        LlmError::ServerError {
+/// 将 HTTP 状态码与错误响应体归一化为 [`LlmError`]。
+///
+/// 4xx/5xx 的细分(鉴权/模型/参数/配额/限流/上下文溢出/内容过滤)依据状态码与
+/// 错误体关键词,与 vbot 的 provider 分类一致;`retry_after_ms` 来自 `Retry-After`
+/// 响应头(仅 429 限流时携带)。该分类与 [`LlmError::is_retryable`] 共同构成重试决策。
+pub fn classify_error(status: u16, retry_after_ms: Option<u64>, body: &str) -> LlmError {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let error_value = parsed
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .or(parsed.as_ref());
+    let field = |key: &str| {
+        error_value
+            .and_then(|error| error.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let message = field("message").unwrap_or_else(|| body.to_string());
+    let code = field("code").or_else(|| field("type")).unwrap_or_default();
+    let haystack = format!("{code} {message}").to_ascii_lowercase();
+
+    match status {
+        401 | 403 => LlmError::InvalidApiKey { status, message },
+        404 => LlmError::ModelNotFound { status, message },
+        400 if haystack.contains("context window")
+            || haystack.contains("context length")
+            || haystack.contains("context_length")
+            || haystack.contains("prompt too long")
+            || haystack.contains("maximum context") =>
+        {
+            LlmError::ContextWindowExceeded { message }
+        },
+        400 | 422 if haystack.contains("content_filter") || haystack.contains("content filter") => {
+            LlmError::ContentFilter { message }
+        },
+        400 | 422 => LlmError::InvalidParameter { status, message },
+        429 if haystack.contains("quota") || haystack.contains("billing") => {
+            LlmError::QuotaExceeded { status, message }
+        },
+        402 => LlmError::QuotaExceeded { status, message },
+        429 => LlmError::RateLimited {
             status,
-            message: text,
-        }
-    } else {
-        LlmError::ClientError {
-            status,
-            message: text,
-        }
+            retry_after_ms,
+            message,
+        },
+        status if (500..600).contains(&status) || status == 408 => {
+            LlmError::ServerError { status, message }
+        },
+        _ => LlmError::ClientError { status, message },
     }
+}
+
+/// 从 `Retry-After` 响应头解析退避毫秒数。仅支持 delta-seconds 形式(常见于 LLM API)。
+pub fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|seconds| seconds * 1000)
 }
 
 pub fn transport_error(stage: &str, endpoint: &str, error: reqwest::Error) -> LlmError {
     let source_chain = error_source_chain(&error);
     let endpoint = redacted_endpoint(endpoint);
-    LlmError::Transport(format!(
+    LlmError::transport(format!(
         "{stage} failed for {endpoint}: {error}{source_chain}"
     ))
 }
@@ -477,7 +527,7 @@ pub fn stream_body_error(
 ) -> LlmError {
     let source_chain = error_source_chain(&error);
     let endpoint = redacted_endpoint(endpoint);
-    LlmError::Transport(format!(
+    LlmError::transport(format!(
         "read streaming response body failed for {endpoint}: status={status}, content-type={}, \
          content-encoding={}, bytes-read={bytes_read}: {error}{source_chain}",
         content_type.unwrap_or("<missing>"),
@@ -574,5 +624,101 @@ mod tests {
         assert!(endpoint.contains("alt=sse"));
         assert!(endpoint.contains("key=%3Credacted%3E"));
         assert!(!endpoint.contains("secret"));
+    }
+
+    #[test]
+    fn classify_error_maps_status_and_body_to_typed_variants() {
+        use astrcode_core::llm::LlmError;
+
+        // 鉴权 / 模型 / 参数 / 配额
+        assert!(matches!(
+            classify_error(401, None, r#"{"error":{"message":"bad key"}}"#),
+            LlmError::InvalidApiKey { status: 401, .. }
+        ));
+        assert!(matches!(
+            classify_error(403, None, "forbidden"),
+            LlmError::InvalidApiKey { status: 403, .. }
+        ));
+        assert!(matches!(
+            classify_error(404, None, "no model"),
+            LlmError::ModelNotFound { status: 404, .. }
+        ));
+        assert!(matches!(
+            classify_error(402, None, "no funds"),
+            LlmError::QuotaExceeded { status: 402, .. }
+        ));
+        assert!(matches!(
+            classify_error(400, None, r#"{"error":{"message":"bad shape"}}"#),
+            LlmError::InvalidParameter { status: 400, .. }
+        ));
+
+        // 上下文溢出(关键词命中 → ContextWindowExceeded,触发压缩路径)
+        assert!(matches!(
+            classify_error(
+                400,
+                None,
+                r#"{"error":{"message":"This model's maximum context length is exceeded"}}"#
+            ),
+            LlmError::ContextWindowExceeded { .. }
+        ));
+        assert!(matches!(
+            classify_error(400, None, "prompt too long"),
+            LlmError::ContextWindowExceeded { .. }
+        ));
+
+        // 内容过滤
+        assert!(matches!(
+            classify_error(
+                400,
+                None,
+                r#"{"error":{"code":"content_filter","message":"blocked"}}"#
+            ),
+            LlmError::ContentFilter { .. }
+        ));
+
+        // 配额类 429 vs 限流 429(携带 retry_after)
+        assert!(matches!(
+            classify_error(
+                429,
+                None,
+                r#"{"error":{"message":"billing quota exceeded"}}"#
+            ),
+            LlmError::QuotaExceeded { status: 429, .. }
+        ));
+        assert!(matches!(
+            classify_error(429, Some(1500), r#"{"error":{"message":"slow down"}}"#),
+            LlmError::RateLimited {
+                retry_after_ms: Some(1500),
+                ..
+            }
+        ));
+
+        // 服务端 / 兜底客户端
+        assert!(matches!(
+            classify_error(503, None, "down"),
+            LlmError::ServerError { status: 503, .. }
+        ));
+        assert!(matches!(
+            classify_error(418, None, "teapot"),
+            LlmError::ClientError { status: 418, .. }
+        ));
+    }
+
+    #[test]
+    fn parse_retry_after_ms_reads_delta_seconds_header() {
+        use reqwest::header::{HeaderMap, RETRY_AFTER};
+
+        let mut headers = HeaderMap::new();
+        assert_eq!(parse_retry_after_ms(&headers), None);
+
+        headers.insert(RETRY_AFTER, "2".parse().unwrap());
+        assert_eq!(parse_retry_after_ms(&headers), Some(2000));
+
+        // 非 delta-seconds(HTTP-date 等)不解析,返回 None 而非猜测。
+        headers.insert(
+            RETRY_AFTER,
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(parse_retry_after_ms(&headers), None);
     }
 }

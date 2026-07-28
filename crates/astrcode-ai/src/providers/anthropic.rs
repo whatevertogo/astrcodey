@@ -160,7 +160,7 @@ impl LlmProvider for AnthropicProvider {
             .get("input_tokens")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| {
-                LlmError::StreamParse(format!(
+                LlmError::stream_parse(format!(
                     "Anthropic count_tokens response missing input_tokens: {value}"
                 ))
             })?;
@@ -204,7 +204,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(LlmError::Unsupported(message))
+            Err(LlmError::Unsupported { message })
                 if message.contains("strict tool `bounded` schema at `$`")
         ));
     }

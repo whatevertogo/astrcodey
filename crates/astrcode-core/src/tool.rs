@@ -766,20 +766,6 @@ impl ToolExecutionContext {
     }
 }
 
-impl std::ops::Deref for ToolExecutionContext {
-    type Target = ToolCallScope;
-
-    fn deref(&self) -> &Self::Target {
-        &self.scope
-    }
-}
-
-impl std::ops::DerefMut for ToolExecutionContext {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.scope
-    }
-}
-
 /// Build a metadata map from key-value pairs.
 pub fn tool_metadata<const N: usize>(
     entries: [(&str, serde_json::Value); N],

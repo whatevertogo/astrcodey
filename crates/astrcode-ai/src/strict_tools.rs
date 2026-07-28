@@ -1199,10 +1199,9 @@ fn child_path(parent: &str, segment: &str) -> String {
 }
 
 fn schema_error(tool: &ToolDefinition, path: &str, message: &str) -> LlmError {
-    LlmError::Unsupported(format!(
-        "strict tool `{}` schema at `{path}`: {message}",
-        tool.name
-    ))
+    LlmError::Unsupported {
+        message: format!("strict tool `{}` schema at `{path}`: {message}", tool.name),
+    }
 }
 
 #[cfg(test)]

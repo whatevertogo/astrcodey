@@ -36,12 +36,14 @@ pub(crate) fn build_provider(
             context_limit,
         )?),
         ProviderWireFormat::OpenAiChatCompletions | ProviderWireFormat::OpenAiResponses => {
-            let api_mode = wire_format.openai_api_mode().ok_or_else(|| {
-                LlmError::Unsupported(format!(
-                    "provider '{}' does not use an OpenAI wire format",
-                    provider_kind
-                ))
-            })?;
+            let api_mode = wire_format
+                .openai_api_mode()
+                .ok_or_else(|| LlmError::Unsupported {
+                    message: format!(
+                        "provider '{}' does not use an OpenAI wire format",
+                        provider_kind
+                    ),
+                })?;
             Arc::new(OpenAiStandardProvider::new(
                 config,
                 api_mode,

@@ -291,9 +291,9 @@ mod tests {
                     keep_recent_turns: None,
                 },
                 |_msgs| async {
-                    Err(CompactError::Llm(astrcode_core::llm::LlmError::Transport(
-                        "test".into(),
-                    )))
+                    Err(CompactError::Llm(astrcode_core::llm::LlmError::Transport {
+                        message: "test".into(),
+                    }))
                 },
             )
             .await;
@@ -316,9 +316,9 @@ mod tests {
                     keep_recent_turns: None,
                 },
                 |_msgs| async {
-                    Err(CompactError::Llm(astrcode_core::llm::LlmError::Transport(
-                        "test".into(),
-                    )))
+                    Err(CompactError::Llm(astrcode_core::llm::LlmError::Transport {
+                        message: "test".into(),
+                    }))
                 },
             )
             .await;

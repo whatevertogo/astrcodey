@@ -34,9 +34,9 @@ impl LlmProvider for EmbeddedLlm {
         _messages: Vec<LlmMessage>,
         _tools: Vec<ToolDefinition>,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        Err(LlmError::Transport(
-            "embedded example initializes the runtime without calling the provider".into(),
-        ))
+        Err(LlmError::Transport {
+            message: "embedded example initializes the runtime without calling the provider".into(),
+        })
     }
 
     fn model_limits(&self) -> ModelLimits {

@@ -139,9 +139,11 @@ impl LlmProvider for StandardProvider {
         mut tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         if self.api_mode != OpenAiApiMode::Responses {
-            return Err(LlmError::Unsupported(
-                "OpenAI Chat Completions does not expose provider-side input token counting".into(),
-            ));
+            return Err(LlmError::Unsupported {
+                message: "OpenAI Chat Completions does not expose provider-side input token \
+                          counting"
+                    .into(),
+            });
         }
         prepare_strict_tools(
             &mut tools,
@@ -167,7 +169,7 @@ impl LlmProvider for StandardProvider {
             .or_else(|| value.get("total_tokens"))
             .and_then(|v| v.as_u64())
             .ok_or_else(|| {
-                LlmError::StreamParse(format!(
+                LlmError::stream_parse(format!(
                     "OpenAI input token count response missing input_tokens: {value}"
                 ))
             })?;
@@ -327,7 +329,7 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(LlmError::Unsupported(message))
+            Err(LlmError::Unsupported { message })
                 if message.contains("strict tool `read` schema at `$`")
         ));
     }

@@ -243,7 +243,7 @@ impl ToolHandler for AgentToolHandler {
         // 1. 创建子会话
         let handle = session_ops
             .create_session(
-                ctx.session_id.as_str(),
+                ctx.scope.session_id.as_str(),
                 CreateSessionRequest {
                     name: matched.name.clone(),
                     working_dir: None,
@@ -252,18 +252,19 @@ impl ToolHandler for AgentToolHandler {
                     tool_selection: matched.tool_selection.clone(),
                     source_extension: Some("astrcode-agent-tools".into()),
                     ephemeral: true,
-                    tool_call_id: ctx.tool_call_id.clone().unwrap_or_default(),
+                    tool_call_id: ctx.scope.tool_call_id.clone().unwrap_or_default(),
                 },
             )
             .await
             .map_err(|e| ExtensionError::Internal(format!("create_session: {e}")))?;
 
         // 2. 提交 turn
-        let child_access = SessionAccess::new(ctx.session_id.as_str(), handle.session_id.as_str());
+        let child_access =
+            SessionAccess::new(ctx.scope.session_id.as_str(), handle.session_id.as_str());
         let submit = session_ops
             .submit_turn(
                 SubmitTurnRequest::for_child(
-                    ctx.session_id.as_str(),
+                    ctx.scope.session_id.as_str(),
                     handle.session_id.as_str(),
                     args.prompt,
                 )
@@ -277,7 +278,7 @@ impl ToolHandler for AgentToolHandler {
                     ))
                 })
                 .recycle_on_complete(!args.wait_for_result)
-                .tool_call_id(ctx.tool_call_id.clone()),
+                .tool_call_id(ctx.scope.tool_call_id.clone()),
             )
             .await;
         if let Err(ref e) = submit {

@@ -229,8 +229,10 @@ pub fn compact_messages_deterministic(
 }
 
 fn should_retry_prompt_too_long(error: &CompactError) -> bool {
-    matches!(error, CompactError::Llm(LlmError::PromptTooLong(_)))
-        || is_prompt_too_long_message(&error.to_string())
+    matches!(
+        error,
+        CompactError::Llm(LlmError::ContextWindowExceeded { .. })
+    ) || is_prompt_too_long_message(&error.to_string())
 }
 
 pub fn parse_compact_summary_message(content: &str) -> Option<CompactSummaryEnvelope> {
@@ -885,10 +887,10 @@ scratchpad that should not survive
                     let mut attempts = attempts.lock().unwrap();
                     *attempts += 1;
                     if *attempts == 1 {
-                        Err(
-                            LlmError::PromptTooLong("compact request exceeded context".into())
-                                .into(),
-                        )
+                        Err(LlmError::ContextWindowExceeded {
+                            message: "compact request exceeded context".into(),
+                        }
+                        .into())
                     } else {
                         Ok(valid_compact_summary().to_string())
                     }

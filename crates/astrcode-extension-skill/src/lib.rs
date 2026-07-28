@@ -115,7 +115,7 @@ impl ToolHandler for SkillToolHandler {
         Ok(handle_skill_tool(
             arguments,
             working_dir,
-            ctx.session_id.as_str(),
+            ctx.scope.session_id.as_str(),
             &self.shared,
         ))
     }
@@ -205,7 +205,7 @@ impl CommandHandler for SkillCommandHandler {
         Ok(ExtensionCommandResult::start_turn(render_skill_content(
             skill,
             Some(arguments),
-            &ctx.session_id,
+            &ctx.scope.session_id,
         )))
     }
 }

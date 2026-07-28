@@ -174,7 +174,7 @@ impl ToolHandler for MemorySaveHandler {
                             self.store_pool.clone(),
                             &self.services,
                             self.config.clone(),
-                            ctx.session_id.to_string(),
+                            ctx.scope.session_id.to_string(),
                             working_dir.to_string(),
                         );
                     }
@@ -314,7 +314,7 @@ impl PromptBuildHandler for MemoryRecallHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
         let store_pool = self.store_pool.clone();
         let working_dir = ctx.working_dir.clone();
-        let session_id = ctx.session_id.clone();
+        let session_id = ctx.scope.session_id.clone();
         let session_prefs = self.session_prefs.clone();
 
         let global_prefs = tokio::task::spawn_blocking(move || {
@@ -490,7 +490,7 @@ pub(crate) struct MemorySessionStartHandler {
 impl LifecycleHandler for MemorySessionStartHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
         let Some(tasks) = self.tasks.lock().clone() else {
-            tracing::debug!(session_id = %ctx.session_id, "memory extension not started");
+            tracing::debug!(session_id = %ctx.scope.session_id, "memory extension not started");
             return Ok(HookResult::Allow);
         };
         if tasks.shutdown().is_cancelled() {
@@ -504,7 +504,7 @@ impl LifecycleHandler for MemorySessionStartHandler {
         let store_pool = self.store_pool.clone();
         let session_prefs = self.session_prefs.clone();
         let working_dir = ctx.working_dir.clone();
-        let session_id = ctx.session_id.clone();
+        let session_id = ctx.scope.session_id.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || {
             let scoped = store_pool.get_scoped(&working_dir)?;
             session_prefs.preload_for_session(&session_id, || scoped.all_user_preference_lines())
@@ -525,7 +525,7 @@ impl LifecycleHandler for MemorySessionStartHandler {
             self.store_pool.clone(),
             &self.services,
             self.config.clone(),
-            ctx.session_id.to_string(),
+            ctx.scope.session_id.to_string(),
             ctx.working_dir.to_string(),
         );
 

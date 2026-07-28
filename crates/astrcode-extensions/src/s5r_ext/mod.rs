@@ -358,10 +358,10 @@ impl ToolHandler for S5rToolHandler {
     ) -> Result<ToolResult, ExtensionError> {
         let invoke_ctx = InvokeContext {
             extension_id: self.extension_id.clone(),
-            session_id: Some(ctx.session_id.to_string()),
+            session_id: Some(ctx.scope.session_id.to_string()),
             session_store_dir: ctx.capabilities.paths.store_dir.clone(),
             session_ops: ctx.capabilities.session.ops.clone(),
-            event_tx: ctx.event_tx.clone(),
+            event_tx: ctx.scope.event_tx.clone(),
             working_dir: Some(working_dir.to_string()),
             cancel_token: None,
             event_declarations: self.session.event_decls(),
@@ -375,8 +375,8 @@ impl ToolHandler for S5rToolHandler {
                 "tool_name": tool_name,
                 "arguments": arguments,
                 "working_dir": working_dir,
-                "session_id": ctx.session_id,
-                "tool_call_id": ctx.tool_call_id,
+                "session_id": ctx.scope.session_id,
+                "tool_call_id": ctx.scope.tool_call_id,
             }
         });
         let hid = handler_id(&self.extension_id, "tool", tool_name);
@@ -405,7 +405,7 @@ impl CommandHandler for S5rCommandHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.extension_id,
-            Some(ctx.session_id.to_string()),
+            Some(ctx.scope.session_id.to_string()),
             Some(working_dir.to_string()),
             None,
             None,
@@ -418,7 +418,7 @@ impl CommandHandler for S5rCommandHandler {
                 "command_name": command_name,
                 "arguments": arguments,
                 "working_dir": working_dir,
-                "session_id": ctx.session_id,
+                "session_id": ctx.scope.session_id,
                 "model": ctx.model,
             }
         });
@@ -442,14 +442,14 @@ impl PreToolUseHandler for S5rPreToolUseHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.session_id.clone()),
+            Some(ctx.scope.session_id.clone()),
             Some(ctx.working_dir.clone()),
             ctx.session_store_dir,
-            ctx.event_tx,
+            ctx.scope.event_tx,
             None,
         );
         let input = json!({
-            "session_id": ctx.session_id,
+            "session_id": ctx.scope.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "call_id": ctx.call_id,
@@ -482,14 +482,14 @@ impl PostToolUseHandler for S5rPostToolUseHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.session_id.clone()),
+            Some(ctx.scope.session_id.clone()),
             Some(ctx.working_dir.clone()),
             ctx.session_store_dir,
-            ctx.event_tx,
+            ctx.scope.event_tx,
             None,
         );
         let input = json!({
-            "session_id": ctx.session_id,
+            "session_id": ctx.scope.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "call_id": ctx.call_id,
@@ -523,14 +523,14 @@ impl ProviderHandler for S5rProviderHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.session_id.clone()),
+            Some(ctx.scope.session_id.clone()),
             Some(ctx.working_dir.clone()),
             ctx.session_store_dir,
             None,
             None,
         );
         let input = json!({
-            "session_id": ctx.session_id,
+            "session_id": ctx.scope.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "messages": ctx.messages,
@@ -562,14 +562,14 @@ impl ContinueAfterStopHandler for S5rContinueAfterStopHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.session_id.clone()),
+            Some(ctx.scope.session_id.clone()),
             Some(ctx.working_dir.clone()),
             None,
             None,
             None,
         );
         let input = json!({
-            "session_id": ctx.session_id,
+            "session_id": ctx.scope.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "assistant_text": ctx.assistant_text,
@@ -600,14 +600,14 @@ impl PromptBuildHandler for S5rPromptBuildHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.session_id.clone()),
+            Some(ctx.scope.session_id.clone()),
             Some(ctx.working_dir.clone()),
             None,
             None,
             None,
         );
         let input = json!({
-            "session_id": ctx.session_id,
+            "session_id": ctx.scope.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
         });
@@ -636,14 +636,14 @@ impl CompactHandler for S5rCompactHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.session_id.clone()),
+            Some(ctx.scope.session_id.clone()),
             Some(ctx.working_dir.clone()),
             None,
             None,
             None,
         );
         let input = json!({
-            "session_id": ctx.session_id,
+            "session_id": ctx.scope.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "trigger": ctx.trigger,
@@ -677,14 +677,14 @@ impl LifecycleHandler for S5rLifecycleHandler {
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
-            Some(ctx.session_id.clone()),
+            Some(ctx.scope.session_id.clone()),
             Some(ctx.working_dir.clone()),
             None,
-            ctx.event_tx,
+            ctx.scope.event_tx,
             None,
         );
         let input = json!({
-            "session_id": ctx.session_id,
+            "session_id": ctx.scope.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
             "mid_turn_user_messages_synced": ctx.mid_turn_user_messages_synced,

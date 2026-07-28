@@ -200,7 +200,7 @@ impl Tool for HandlerTool {
             .capabilities
             .contains(&ExtensionCapability::EmitEvents)
         {
-            ctx.event_tx.clone().and_then(|event_tx| {
+            ctx.scope.event_tx.clone().and_then(|event_tx| {
                 bind_extension_event_sink(&self.extension_id, &self.event_declarations, event_tx)
             })
         } else {

@@ -89,15 +89,18 @@ fn apply_anthropic_thinking(
         },
         ThinkingWireMapping::AnthropicBudget if config.thinking.enabled => {
             let budget = config.thinking.budget_tokens.ok_or_else(|| {
-                astrcode_core::llm::LlmError::Unsupported(
-                    "budget_tokens is required when AnthropicBudget thinking is enabled".into(),
-                )
+                astrcode_core::llm::LlmError::Unsupported {
+                    message: "budget_tokens is required when AnthropicBudget thinking is enabled"
+                        .into(),
+                }
             })?;
             if budget as usize >= config.max_output_tokens {
-                return Err(astrcode_core::llm::LlmError::Unsupported(format!(
-                    "budget_tokens ({}) must be less than max_output_tokens ({})",
-                    budget, config.max_output_tokens
-                )));
+                return Err(astrcode_core::llm::LlmError::Unsupported {
+                    message: format!(
+                        "budget_tokens ({}) must be less than max_output_tokens ({})",
+                        budget, config.max_output_tokens
+                    ),
+                });
             }
             body["thinking"] = serde_json::json!({
                 "type": "enabled",

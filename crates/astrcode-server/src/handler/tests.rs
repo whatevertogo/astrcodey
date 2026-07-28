@@ -149,7 +149,9 @@ impl LlmProvider for ReactiveCompactLlm {
         }
 
         if call == 0 {
-            return Err(LlmError::PromptTooLong("prompt too long".into()));
+            return Err(LlmError::ContextWindowExceeded {
+                message: "prompt too long".into(),
+            });
         }
 
         assert!(
@@ -201,7 +203,9 @@ impl LlmProvider for ExhaustedReactiveCompactLlm {
             return Ok(rx);
         }
 
-        Err(LlmError::PromptTooLong("prompt too long".into()))
+        Err(LlmError::ContextWindowExceeded {
+            message: "prompt too long".into(),
+        })
     }
 
     fn model_limits(&self) -> ModelLimits {
@@ -226,7 +230,7 @@ impl LlmProvider for AutoCompactFailingLlm {
                     .contains("Do not call tools")
         });
         if is_compact_request {
-            return Err(LlmError::Transport("compact llm failed".into()));
+            return Err(LlmError::transport("compact llm failed"));
         }
 
         let (tx, rx) = mpsc::unbounded_channel();
