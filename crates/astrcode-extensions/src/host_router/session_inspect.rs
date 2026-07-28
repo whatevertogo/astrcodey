@@ -1,6 +1,6 @@
 //! `session_inspect` 宿主适配：存储领域模型只在此处映射为稳定 wire DTO。
 
-use std::{collections::BTreeMap, future::Future, sync::Arc};
+use std::{future::Future, sync::Arc};
 
 use astrcode_core::{
     compaction::CompactStrategy,
@@ -13,10 +13,9 @@ use astrcode_extension_sdk::{
     session_inspect::{
         SessionInspectAgentSession, SessionInspectCompactBoundary, SessionInspectContent,
         SessionInspectListItem, SessionInspectListOutput, SessionInspectMessage,
-        SessionInspectPendingApproval, SessionInspectPendingInteraction,
-        SessionInspectProviderMessagesOutput, SessionInspectReadModel,
-        SessionInspectReadModelOutput, SessionInspectSequencedMessage, SessionInspectSnapshot,
-        SessionInspectSnapshotOutput,
+        SessionInspectPendingApproval, SessionInspectProviderMessagesOutput,
+        SessionInspectReadModel, SessionInspectReadModelOutput, SessionInspectSequencedMessage,
+        SessionInspectSnapshot, SessionInspectSnapshotOutput,
     },
 };
 use astrcode_session_projection::{
@@ -171,19 +170,6 @@ fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel {
                 )
             })
             .collect(),
-        pending_tool_interactions: model
-            .pending_tool_interactions
-            .into_iter()
-            .map(|(id, interaction)| {
-                (
-                    id.to_string(),
-                    SessionInspectPendingInteraction {
-                        content: interaction.content,
-                        metadata: interaction.metadata,
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>(),
         created_at: model.created_at,
         updated_at: model.updated_at,
         parent_session_id: model.parent_session_id.map(|id| id.to_string()),

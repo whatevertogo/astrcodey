@@ -1,6 +1,10 @@
-import type { AskUserOption, AskUserQuestion } from '../../services/types'
+import type {
+  AskUserOption,
+  AskUserQuestion,
+  ConversationBlock,
+} from '../../../services/types'
 
-export type { AskUserOption, AskUserQuestion } from '../../services/types'
+export type { AskUserOption, AskUserQuestion } from '../../../services/types'
 
 export interface AskUserInput {
   questions: AskUserQuestion[]
@@ -102,4 +106,27 @@ export function isAwaitingUserInput(text: string): boolean {
   } catch {
     return false
   }
+}
+
+type AskUserBlock = Extract<ConversationBlock, { kind: 'toolCall' }>
+
+export function isPendingAskUser(block: AskUserBlock): boolean {
+  return block.name === 'askUser' && block.status === 'streaming'
+}
+
+export function askUserSummary(
+  block: AskUserBlock,
+  args: JsonRecord
+): string | undefined {
+  if (block.name !== 'askUser') return undefined
+  const input = parseAskUserInput(args)
+  if (!input) return undefined
+  const first = input.questions[0]
+  return [
+    block.name,
+    first.header,
+    input.questions.length === 1
+      ? '1 question'
+      : `${input.questions.length} questions`,
+  ].join(' · ')
 }

@@ -5,15 +5,13 @@
 
 use std::sync::Arc;
 
-use astrcode_core::{
-    render::{RenderKeyValue, RenderSpec, RenderTone},
-    tool::ToolResult,
-};
+use astrcode_core::tool::ToolResult;
 
 use super::{
     fallback::DefaultToolRenderer,
     tool::{ToolRenderCtx, ToolRenderer, ToolRendererRegistry},
 };
+use crate::tui::render::{RenderKeyValue, RenderSpec, RenderTone};
 
 // ─── Read ─────────────────────────────────────────────────────────────────
 

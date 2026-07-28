@@ -29,10 +29,6 @@ pub mod llm {
     };
 }
 
-pub mod render {
-    pub use astrcode_core::render::*;
-}
-
 pub mod event {
     pub use astrcode_core::event::{Event, EventPayload};
 }
@@ -40,20 +36,13 @@ pub mod event {
 pub mod session_query;
 
 pub mod tool {
-    pub use astrcode_core::{
-        tool::{
-            CreateRootSessionRequest, CreateSessionRequest, ExecutionMode, SessionAccess,
-            SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionHandle,
-            SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult, Tool,
-            ToolCallScope, ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext,
-            ToolExecutionResult, ToolFileServices, ToolHostServices, ToolModelAccess, ToolOrigin,
-            ToolPromptMetadata, ToolPromptTag, ToolResult, ToolSessionControl, ToolSessionPaths,
-            tool_metadata,
-        },
-        tool_ui::{
-            TOOL_UI_METADATA_KEY, TOOL_UI_PHASE_METADATA_KEY, ToolApprovalUiWire, ToolInputUiWire,
-            ToolResultUiWire, ToolUiWire,
-        },
+    pub use astrcode_core::tool::{
+        CreateRootSessionRequest, CreateSessionRequest, ExecutionMode, SessionAccess,
+        SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionHandle,
+        SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult, Tool, ToolCallScope,
+        ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionResult,
+        ToolFileServices, ToolHostServices, ToolModelAccess, ToolOrigin, ToolPromptMetadata,
+        ToolPromptTag, ToolResult, ToolSessionControl, ToolSessionPaths, tool_metadata,
     };
 
     pub use crate::extension::ExtensionToolContext;

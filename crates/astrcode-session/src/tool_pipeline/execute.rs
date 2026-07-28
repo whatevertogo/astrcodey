@@ -8,7 +8,6 @@ use astrcode_core::{
     event::EventPayload,
     permission::{ApprovalDecision, ApprovalSource},
     tool::{ExecutionMode, ToolDefinition},
-    tool_ui::{complete_questionnaire_content, is_awaiting_user_input_content},
     types::ToolCallId,
 };
 use tokio::{sync::oneshot, task::JoinSet};
@@ -21,11 +20,9 @@ use crate::{
     permission::APPROVAL_TIMEOUT_SECS,
     tool_exec::execute_tool_call,
     tool_types::{
-        ExecutableToolInvocation, ExecuteToolBatch, PreparedToolDisposition,
-        PreparedToolInvocation, ToolExecutionOutcome, ToolResultCommit,
+        ExecutableToolInvocation, ExecuteToolBatch, PreparedToolDisposition, ToolExecutionOutcome,
     },
     turn_context::TurnError,
-    turn_publish::TurnEvents,
 };
 
 impl ToolCalls {
@@ -424,20 +421,6 @@ impl ToolCalls {
         position: usize,
         outcome: ToolExecutionOutcome,
     ) -> Result<Vec<String>, TurnError> {
-        let outcome = match outcome {
-            ToolExecutionOutcome::Completed(result)
-                if is_awaiting_user_input_content(&result.content) =>
-            {
-                self.await_tool_ui_response(
-                    &input.batch.calls[position],
-                    result,
-                    Arc::clone(&input.publisher),
-                )
-                .await?
-            },
-            other => other,
-        };
-
         let mut outcomes = HashMap::new();
         outcomes.insert(input.batch.calls[position].index, outcome);
         self.commit_tool_outcomes(
@@ -448,60 +431,5 @@ impl ToolCalls {
             Arc::clone(&input.publisher),
         )
         .await
-    }
-
-    async fn await_tool_ui_response(
-        &self,
-        call: &PreparedToolInvocation,
-        mut result: ToolResultCommit,
-        publisher: Arc<TurnEvents>,
-    ) -> Result<ToolExecutionOutcome, TurnError> {
-        publisher
-            .durable(EventPayload::ToolCallInteractionPending {
-                call_id: call.call_id.clone().into(),
-                content: result.content.clone(),
-                metadata: result.metadata.clone(),
-            })
-            .await?;
-
-        let (tx, rx) = oneshot::channel();
-        let runtime = self.session.runtime();
-        let _pending_response =
-            runtime.register_pending_tool_ui_response(ToolCallId::from(call.call_id.as_str()), tx);
-
-        let answers = tokio::select! {
-            _ = self.cancellation_token.cancelled() => return Err(TurnError::Aborted),
-            response = tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx) => {
-                match response {
-                    Ok(Ok(answers)) => answers,
-                    Ok(Err(_)) => {
-                        return Ok(ToolExecutionOutcome::failed(
-                            "tool UI response channel closed before user answered",
-                        ));
-                    }
-                    Err(_) => {
-                        return Ok(ToolExecutionOutcome::failed(
-                            format!(
-                                "tool UI response timed out after {APPROVAL_TIMEOUT_SECS}s"
-                            ),
-                        ));
-                    }
-                }
-            }
-        };
-
-        let questions = call
-            .tool_input
-            .get("questions")
-            .cloned()
-            .unwrap_or_else(|| serde_json::json!([]));
-        let content = match complete_questionnaire_content(&questions, &answers) {
-            Ok(content) => content,
-            Err(error) => {
-                return Ok(ToolExecutionOutcome::failed(error));
-            },
-        };
-        result.content = content;
-        Ok(ToolExecutionOutcome::Completed(result))
     }
 }

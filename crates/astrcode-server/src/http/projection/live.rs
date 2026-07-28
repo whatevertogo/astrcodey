@@ -3,13 +3,15 @@
 use astrcode_core::event::{Event, EventPayload, Phase};
 use astrcode_protocol::{
     agent_session_link::AgentSessionLinkDto,
-    http::{ConversationControlStateDto, ConversationCursorDto, ConversationDeltaDto},
+    http::{
+        ConversationControlStateDto, ConversationCursorDto, ConversationDeltaDto, ToolApprovalDto,
+    },
 };
 
 use super::{
     args::format_args_inline,
     blocks::{block_from_payload, streaming_assistant_block, streaming_tool_call_block},
-    cross_session_compact_deltas, non_empty_metadata,
+    cross_session_compact_deltas,
 };
 
 pub(in crate::http) fn event_to_deltas(
@@ -135,37 +137,24 @@ pub(in crate::http) fn event_to_deltas(
             prompt,
             rule_key,
             ..
-        } => vec![ConversationDeltaDto::PatchToolMetadata {
-            block_id: call_id.to_string(),
-            metadata: serde_json::json!({
-                "toolGateApproval": {
-                    "pending": true,
-                    "prompt": prompt,
-                    "ruleKey": rule_key,
-                }
-            }),
+        } => vec![ConversationDeltaDto::ToolApprovalRequested {
+            approval: ToolApprovalDto {
+                call_id: call_id.to_string(),
+                prompt: prompt.clone(),
+                rule_key: rule_key.clone(),
+            },
         }],
 
-        EventPayload::ToolApprovalResolved { call_id, .. } => {
-            vec![ConversationDeltaDto::PatchToolMetadata {
-                block_id: call_id.to_string(),
-                metadata: serde_json::json!({
-                    "toolGateApproval": { "pending": false }
-                }),
+        EventPayload::ToolApprovalResolved {
+            call_id, decision, ..
+        } => {
+            vec![ConversationDeltaDto::ToolApprovalResolved {
+                call_id: call_id.to_string(),
+                decision: (*decision).into(),
             }]
         },
 
-        EventPayload::ToolCallInteractionPending {
-            call_id,
-            content,
-            metadata,
-        } => {
-            vec![ConversationDeltaDto::PatchToolCall {
-                block_id: call_id.to_string(),
-                text: content.clone(),
-                metadata: non_empty_metadata(metadata),
-            }]
-        },
+        EventPayload::LegacyToolCallInteractionPending { .. } => vec![],
 
         EventPayload::AgentSessionSpawned {
             child_session_id,
@@ -242,7 +231,7 @@ fn projected_phase(payload: &EventPayload) -> Phase {
         | EventPayload::ToolCallArgumentsDelta { .. }
         | EventPayload::ToolCallRequested { .. }
         | EventPayload::ToolOutputDelta { .. }
-        | EventPayload::ToolCallInteractionPending { .. } => Phase::CallingTool,
+        | EventPayload::LegacyToolCallInteractionPending { .. } => Phase::CallingTool,
         EventPayload::ToolCallCompleted { .. }
         | EventPayload::ToolCallFailed { .. }
         | EventPayload::ToolCallCancelled { .. } => Phase::Thinking,
@@ -435,47 +424,18 @@ mod tests {
     }
 
     #[test]
-    fn tool_interaction_pending_patches_text_and_metadata() {
-        use std::collections::BTreeMap;
-
-        use astrcode_core::tool_ui::{TOOL_UI_METADATA_KEY, TOOL_UI_PHASE_METADATA_KEY};
-
-        let mut metadata = BTreeMap::new();
-        metadata.insert(
-            TOOL_UI_METADATA_KEY.into(),
-            serde_json::json!({
-                "approval": { "kind": "builtin", "variant": "questionnaire" }
-            }),
-        );
-        metadata.insert(
-            TOOL_UI_PHASE_METADATA_KEY.into(),
-            serde_json::json!("approval"),
-        );
-
+    fn legacy_tool_interaction_is_ignored() {
         let event = Event::new(
             "session-1".into(),
             None,
-            EventPayload::ToolCallInteractionPending {
+            EventPayload::LegacyToolCallInteractionPending {
                 call_id: "tool-ask".into(),
                 content: r#"{"status":"awaiting_user_input","questions":[]}"#.into(),
-                metadata,
+                metadata: Default::default(),
             },
         );
 
-        let deltas = event_to_deltas(&event, true);
-        assert_eq!(deltas.len(), 1);
-        match &deltas[0] {
-            ConversationDeltaDto::PatchToolCall {
-                block_id,
-                text,
-                metadata,
-            } => {
-                assert_eq!(block_id, "tool-ask");
-                assert!(text.contains("awaiting_user_input"));
-                assert!(metadata.as_ref().is_some_and(|m| m.get("toolUi").is_some()));
-            },
-            other => panic!("unexpected delta: {other:?}"),
-        }
+        assert!(event_to_deltas(&event, true).is_empty());
     }
 
     #[test]

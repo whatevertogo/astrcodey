@@ -117,10 +117,6 @@ fn router_parts(runtime: Arc<ServerRuntime>) -> Result<RouterParts, HttpServerEr
             "/api/sessions/{id}/approve",
             post(sessions::resolve_tool_approval),
         )
-        .route(
-            "/api/sessions/{id}/tool-calls/{call_id}/tool-ui/respond",
-            post(sessions::submit_tool_ui_respond),
-        )
         .route("/api/sessions/{id}/commands", get(sessions::list_commands))
         .route(
             "/api/sessions/{id}/commands/{name}/complete",

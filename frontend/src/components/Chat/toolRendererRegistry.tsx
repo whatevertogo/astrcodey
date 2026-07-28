@@ -13,7 +13,6 @@ export interface ToolRendererContext {
   block: ToolCallBlockModel
   args: ToolJsonRecord
   meta: ToolJsonRecord
-  renderSpec?: RenderSpec
   agentSpec?: RenderSpec
 }
 

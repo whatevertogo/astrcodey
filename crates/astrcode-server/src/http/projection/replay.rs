@@ -7,7 +7,6 @@ use super::{
     blocks::{block_from_payload, streaming_assistant_block, streaming_tool_call_block},
     cross_session_compact_deltas,
     live::control_from_phase,
-    non_empty_metadata,
 };
 
 pub(in crate::http) fn event_to_replay_deltas(
@@ -52,18 +51,6 @@ pub(in crate::http) fn event_to_replay_deltas(
                 tool_name,
                 raw_arguments.is_none().then_some(arguments),
             ),
-        }];
-    }
-    if let EventPayload::ToolCallInteractionPending {
-        call_id,
-        content,
-        metadata,
-    } = &event.payload
-    {
-        return vec![ConversationDeltaDto::PatchToolCall {
-            block_id: call_id.to_string(),
-            text: content.clone(),
-            metadata: non_empty_metadata(metadata),
         }];
     }
     if matches!(&event.payload, EventPayload::TurnCompleted { .. }) {

@@ -1016,14 +1016,5 @@ mod tests {
         ) -> Result<(), SessionApiError> {
             Ok(())
         }
-
-        async fn resolve_tool_ui_response(
-            &self,
-            _target_session_id: &str,
-            _call_id: &str,
-            _answers: std::collections::BTreeMap<String, String>,
-        ) -> Result<(), SessionApiError> {
-            Ok(())
-        }
     }
 }

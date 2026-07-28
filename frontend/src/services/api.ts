@@ -12,7 +12,6 @@ import type {
   ModelListResponseDto,
   SetExtensionEnabledResponseDto,
   ToolApprovalRequest,
-  ToolUiRespondResponse,
   UpdateActiveSelectionRequest,
   UpdateActiveSelectionResponseDto,
   UpdateModelOptionsRequest,
@@ -400,46 +399,6 @@ export async function setExtensionEnabled(
     method: 'POST',
     body: JSON.stringify({ extensionId, enabled }),
   })
-}
-
-/** Tool Approval UI 提交（如 askUser 问卷）。 */
-export async function submitToolUiRespond(
-  sessionId: string,
-  callId: string,
-  toolName: string,
-  answers: Record<string, string>
-): Promise<ToolUiRespondResponse> {
-  const response = await (
-    await resolveFetch()
-  )(
-    `${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/tool-calls/${encodeURIComponent(callId)}/tool-ui/respond`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authHeaders(),
-      },
-      body: JSON.stringify({ toolName, answers }),
-    }
-  )
-
-  if (response.status === 501) {
-    throw new Error(
-      'Tool UI 提交接口尚未实现（POST …/tool-ui/respond）。见 docs/tool-ui-architecture.md'
-    )
-  }
-
-  if (!response.ok) {
-    const body = await response.text()
-    if (response.status === 404 && !body.trim()) {
-      throw new Error(
-        'Tool UI 提交接口尚未实现（POST …/tool-ui/respond）。见 docs/tool-ui-architecture.md'
-      )
-    }
-    throw new Error(await formatRequestError(response, body))
-  }
-
-  return (await response.json()) as ToolUiRespondResponse
 }
 
 export type ToolGateApprovalDecision = ToolApprovalRequest['decision']

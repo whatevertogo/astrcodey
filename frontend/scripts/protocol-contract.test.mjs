@@ -108,6 +108,34 @@ assert.equal(extensionEvent.delta.kind, 'extensionEvent')
 assert.equal(extensionEvent.delta.extensionId, 'astrcode-ask-user')
 assert.equal(extensionEvent.delta.payload.callId, 'call-1')
 
+const approvalRequested = decodeConversationStreamEnvelope({
+  sessionId: 'session-1',
+  cursor: { value: '11' },
+  delta: {
+    kind: 'toolApprovalRequested',
+    approval: {
+      callId: 'tool-approval',
+      prompt: 'Run shell command?',
+      ruleKey: 'shell:write',
+    },
+  },
+})
+assert.equal(approvalRequested.delta.kind, 'toolApprovalRequested')
+assert.equal(approvalRequested.delta.approval.callId, 'tool-approval')
+assert.equal(approvalRequested.delta.approval.ruleKey, 'shell:write')
+
+const approvalResolved = decodeConversationStreamEnvelope({
+  sessionId: 'session-1',
+  cursor: { value: '12' },
+  delta: {
+    kind: 'toolApprovalResolved',
+    callId: 'tool-approval',
+    decision: 'allow_once',
+  },
+})
+assert.equal(approvalResolved.delta.kind, 'toolApprovalResolved')
+assert.equal(approvalResolved.delta.decision, 'allow_once')
+
 assert.throws(
   () =>
     decodeConversationStreamEnvelope({
@@ -175,6 +203,22 @@ for (const status of ['error', 'failed', 'cancelled']) {
   assert.equal(toolBlock.kind, 'toolCall')
   assert.equal(toolBlock.status, status)
 }
+
+const toolWithApproval = decodeConversationBlock({
+  kind: 'toolCall',
+  id: 'tool-approval',
+  name: 'shell',
+  arguments: 'git push',
+  text: '',
+  status: 'streaming',
+  approval: {
+    callId: 'tool-approval',
+    prompt: 'Run shell command?',
+    ruleKey: 'shell:write',
+  },
+})
+assert.equal(toolWithApproval.kind, 'toolCall')
+assert.equal(toolWithApproval.approval?.prompt, 'Run shell command?')
 
 assert.throws(
   () =>

@@ -5,7 +5,7 @@ use std::{
 
 use astrcode_extension_sdk::{
     extension::*,
-    tool::{ToolDefinition, ToolPromptMetadata, ToolUiWire},
+    tool::{ToolDefinition, ToolPromptMetadata},
 };
 
 use super::{ExtensionRecord, ExtensionRunner};
@@ -42,7 +42,6 @@ pub(super) struct HandlerIndex {
     pub(super) lifecycle: HashMap<ExtensionEvent, Vec<ExtensionHandler<dyn LifecycleHandler>>>,
     // 预计算的 collect 缓存
     pub(super) tool_metadata: HashMap<String, ToolPromptMetadata>,
-    pub(super) tool_ui: HashMap<String, ToolUiWire>,
     pub(super) static_tools: Vec<(
         ToolDefinition,
         Arc<dyn ToolHandler>,
@@ -82,7 +81,6 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut user_message_envelope = Vec::new();
     let mut lifecycle = Vec::new();
     let mut tool_metadata = HashMap::new();
-    let mut tool_ui = HashMap::new();
     let mut static_tools = Vec::new();
     let mut tool_discoveries = Vec::new();
     let mut static_commands = Vec::new();
@@ -157,9 +155,6 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         for (name, metadata) in record.reg.all_tool_metadata() {
             tool_metadata.insert(name.clone(), metadata.clone());
         }
-        for (name, ui) in record.reg.all_tool_ui() {
-            tool_ui.insert(name.clone(), ui.clone());
-        }
         for (definition, handler) in record.reg.tools() {
             static_tools.push((
                 definition.clone(),
@@ -215,7 +210,6 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         user_message_envelope: handlers_by_priority(user_message_envelope),
         lifecycle: handlers_by_event(lifecycle),
         tool_metadata,
-        tool_ui,
         static_tools,
         tool_discoveries,
         static_commands,

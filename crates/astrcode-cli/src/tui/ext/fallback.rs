@@ -1,9 +1,10 @@
 //! Default fallback ToolRenderer — generic tool summary.
 
-use astrcode_core::{render::RenderSpec, tool::ToolResult};
+use astrcode_core::tool::ToolResult;
 use astrcode_support::text::compact_inline;
 
 use super::tool::{ToolRenderCtx, ToolRenderer};
+use crate::tui::render::{RenderSpec, RenderTone};
 
 /// Default renderer used when no specific ToolRenderer is registered.
 pub struct DefaultToolRenderer;
@@ -18,7 +19,7 @@ impl ToolRenderer for DefaultToolRenderer {
         Some(RenderSpec::Text {
             text: body,
             tone: if result.is_error {
-                astrcode_core::render::RenderTone::Error
+                RenderTone::Error
             } else {
                 Default::default()
             },

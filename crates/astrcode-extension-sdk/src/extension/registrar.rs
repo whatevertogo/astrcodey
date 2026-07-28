@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_core::tool_ui::ToolUiWire;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -31,7 +30,6 @@ pub struct Registrar {
     tools: Vec<(ToolDefinition, Arc<dyn ToolHandler>)>,
     tool_discovery: Vec<Arc<dyn ToolDiscoveryHandler>>,
     tool_metadata: HashMap<String, ToolPromptMetadata>,
-    tool_ui: HashMap<String, ToolUiWire>,
     commands: Vec<(SlashCommand, Arc<dyn CommandHandler>)>,
     command_discovery: Vec<Arc<dyn CommandDiscoveryHandler>>,
     http_routes: Vec<ExtensionHttpRouteRegistration>,
@@ -64,11 +62,6 @@ impl Registrar {
 
     pub fn tool_metadata(&mut self, meta: HashMap<String, ToolPromptMetadata>) {
         self.tool_metadata.extend(meta);
-    }
-
-    /// 注册工具前端贡献（按 tool name；宿主投影到 metadata，不进 LLM）。
-    pub fn tool_ui(&mut self, ui: HashMap<String, ToolUiWire>) {
-        self.tool_ui.extend(ui);
     }
 
     pub fn command(&mut self, cmd: SlashCommand, handler: Arc<dyn CommandHandler>) {
@@ -243,7 +236,6 @@ impl Registrar {
         self.tools.is_empty()
             && self.tool_discovery.is_empty()
             && self.tool_metadata.is_empty()
-            && self.tool_ui.is_empty()
             && self.commands.is_empty()
             && self.command_discovery.is_empty()
             && self.http_routes.is_empty()
@@ -287,10 +279,6 @@ impl Registrar {
 
     pub fn all_tool_metadata(&self) -> &HashMap<String, ToolPromptMetadata> {
         &self.tool_metadata
-    }
-
-    pub fn all_tool_ui(&self) -> &HashMap<String, ToolUiWire> {
-        &self.tool_ui
     }
 
     pub fn commands(&self) -> &[(SlashCommand, Arc<dyn CommandHandler>)] {
@@ -367,13 +355,9 @@ mod registrar_tests {
         let mut registrar = Registrar::new();
         assert!(registrar.is_empty());
 
-        registrar.tool_ui(HashMap::from([(
+        registrar.tool_metadata(HashMap::from([(
             "example".to_owned(),
-            ToolUiWire {
-                input: None,
-                approval: None,
-                result: None,
-            },
+            ToolPromptMetadata::new("example"),
         )]));
         assert!(!registrar.is_empty());
 

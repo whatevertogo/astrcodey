@@ -3,6 +3,7 @@
 
 import type {
   AgentSessionStatusDto,
+  ApprovalDecisionDto,
   ApprovalModeDto,
   ApplyProviderPresetRequest,
   ApplyProviderPresetResponseDto,
@@ -45,11 +46,13 @@ import type {
   SlashCommandListResponseDto,
   StatusItemDto,
   ToolCallStatusDto,
+  ToolApprovalDto,
   ToolOutputStreamDto,
 } from './generated'
 
 export {
   AGENT_SESSION_STATUSES,
+  APPROVAL_DECISIONS,
   APPROVAL_MODES,
   BLOCK_STATUSES,
   PHASES,
@@ -64,6 +67,8 @@ export type ToolOutputStream = ToolOutputStreamDto
 export type BlockStatus = ConversationBlockStatusDto
 export type ToolCallStatus = ToolCallStatusDto
 export type ApprovalMode = ApprovalModeDto
+export type ApprovalDecision = ApprovalDecisionDto
+export type ToolApproval = ToolApprovalDto
 
 export function toolCallHasError(status: ToolCallStatus): boolean {
   return status === 'error' || status === 'failed'
@@ -172,6 +177,7 @@ export type ConversationBlock =
       text: string
       status: ToolCallStatus
       metadata?: Record<string, unknown>
+      approval?: ToolApproval
     }
   | { kind: 'error'; id: string; message: string }
   | { kind: 'systemNote'; id: string; text: string }
@@ -264,15 +270,13 @@ export type ConversationDelta =
       payload: Record<string, unknown>
     }
   | {
-      kind: 'patchToolMetadata'
-      blockId: string
-      metadata: Record<string, unknown>
+      kind: 'toolApprovalRequested'
+      approval: ToolApproval
     }
   | {
-      kind: 'patchToolCall'
-      blockId: string
-      text: string
-      metadata?: Record<string, unknown>
+      kind: 'toolApprovalResolved'
+      callId: string
+      decision: ApprovalDecision
     }
 
 // ── App State ──

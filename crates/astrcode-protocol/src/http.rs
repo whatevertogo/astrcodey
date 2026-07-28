@@ -124,21 +124,15 @@ pub struct ToolApprovalRequest {
     pub decision: ApprovalDecisionDto,
 }
 
-/// Tool Approval UI 提交（如 askUser 问卷答案）。
+/// 当前挂起的核心工具审批。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ToolUiRespondRequest {
-    pub tool_name: String,
-    pub answers: std::collections::BTreeMap<String, String>,
-}
-
-/// Tool Approval UI 提交响应。
-#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolUiRespondResponse {
-    pub accepted: bool,
+pub struct ToolApprovalDto {
+    pub call_id: String,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_key: Option<String>,
 }
 
 /// prompt 提交结果。
@@ -462,6 +456,9 @@ pub enum ConversationBlockDto {
         /// 工具元数据（如 planContent、path 等），不进入 LLM 上下文。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
+        /// 当前挂起的核心工具审批。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval: Option<ToolApprovalDto>,
         /// 原始 JSON 参数，供前端结构化解析（如 agent 工具的 task/agent 提取）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arguments_json: Option<serde_json::Value>,
@@ -596,24 +593,19 @@ pub enum ConversationDeltaDto {
     },
     /// 扩展注册表发生变化，客户端应重新拉取命令/快捷键/状态栏快照。
     ExtensionRegistryChanged,
+    ToolApprovalRequested {
+        approval: ToolApprovalDto,
+    },
+    ToolApprovalResolved {
+        call_id: String,
+        decision: ApprovalDecisionDto,
+    },
     /// 扩展发出的实时事件。客户端按 extension/event type 解释 payload。
     ExtensionEvent {
         extension_id: String,
         event_type: String,
         schema_version: u32,
         payload: serde_json::Value,
-    },
-    /// 合并 toolCall block 的 metadata（如 Tool Gate 审批挂起）。
-    PatchToolMetadata {
-        block_id: String,
-        metadata: serde_json::Value,
-    },
-    /// 工具执行中进入交互等待态：同步更新 text 与 metadata（live-only）。
-    PatchToolCall {
-        block_id: String,
-        text: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
     },
 }
 

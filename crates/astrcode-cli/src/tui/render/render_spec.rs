@@ -1,8 +1,7 @@
-//! RenderSpec → Vec<Line> conversion, markdown parser, visual layout engine.
+//! CLI-local render tree → Vec<Line> conversion, markdown parser, visual layout engine.
 //!
 //! Pure functions: no dependency on App state, Message structs, or extension points.
 
-use astrcode_core::render::{RenderSpec, RenderTone};
 use ratatui::{
     style::Style,
     text::{Line, Span},
@@ -10,6 +9,81 @@ use ratatui::{
 use unicode_width::UnicodeWidthChar;
 
 use crate::tui::theme::Theme;
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RenderTone {
+    #[default]
+    Default,
+    Muted,
+    Accent,
+    Success,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenderKeyValue {
+    pub key: String,
+    pub value: String,
+    pub tone: RenderTone,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenderSpec {
+    Text {
+        text: String,
+        tone: RenderTone,
+    },
+    Markdown {
+        text: String,
+        tone: RenderTone,
+    },
+    Box {
+        title: Option<String>,
+        tone: RenderTone,
+        children: Vec<RenderSpec>,
+    },
+    KeyValue {
+        entries: Vec<RenderKeyValue>,
+        tone: RenderTone,
+    },
+    Diff {
+        text: String,
+        tone: RenderTone,
+    },
+    Code {
+        language: Option<String>,
+        text: String,
+        tone: RenderTone,
+    },
+}
+
+impl RenderSpec {
+    pub fn plain_text_fallback(&self) -> String {
+        match self {
+            Self::Text { text, .. }
+            | Self::Markdown { text, .. }
+            | Self::Diff { text, .. }
+            | Self::Code { text, .. } => text.clone(),
+            Self::Box {
+                title, children, ..
+            } => {
+                let mut output = title.clone().unwrap_or_default();
+                for child in children {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&child.plain_text_fallback());
+                }
+                output
+            },
+            Self::KeyValue { entries, .. } => entries
+                .iter()
+                .map(|entry| format!("{}: {}", entry.key, entry.value))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
 
 pub(crate) fn render_spec_inner(
     spec: &RenderSpec,
@@ -45,19 +119,6 @@ pub(crate) fn render_spec_inner(
                 render_spec_inner(child, lines, width, theme, &child_prefix);
             }
         },
-        RenderSpec::List { items, .. } => {
-            for item in items {
-                match item {
-                    RenderSpec::Text { text, tone: _ } => {
-                        push_wrapped_line(lines, prefix, &format!("* {text}"), theme.body, width);
-                    },
-                    other => {
-                        let item_prefix = format!("{prefix}* ");
-                        render_spec_inner(other, lines, width, theme, &item_prefix);
-                    },
-                }
-            }
-        },
         RenderSpec::KeyValue { entries, tone: _ } => {
             for entry in entries {
                 let text = format!("{}: {}", entry.key, entry.value);
@@ -68,22 +129,6 @@ pub(crate) fn render_spec_inner(
                 };
                 push_wrapped_line(lines, prefix, &text, style, width);
             }
-        },
-        RenderSpec::Progress {
-            label,
-            status,
-            value,
-            tone: _,
-        } => {
-            let mut text = format!("* {label}");
-            if let Some(s) = status {
-                text.push_str(" · ");
-                text.push_str(s);
-            }
-            if let Some(v) = value {
-                text.push_str(&format!(" · {:.0}%", v.clamp(0.0, 1.0) * 100.0));
-            }
-            push_wrapped_line(lines, prefix, &text, theme.body, width);
         },
         RenderSpec::Diff { text, tone: _ } => {
             for line in text.lines() {
@@ -104,22 +149,6 @@ pub(crate) fn render_spec_inner(
                 push_wrapped_line(lines, prefix, &format!("```{lang}"), theme.dim, width);
             }
             for line in text.lines() {
-                push_wrapped_line(lines, prefix, line, theme.body, width);
-            }
-        },
-        RenderSpec::ImageRef { uri, alt, tone: _ } => {
-            let caption = alt.as_deref().unwrap_or(uri);
-            push_wrapped_line(
-                lines,
-                prefix,
-                &format!("[image: {caption}]"),
-                theme.body,
-                width,
-            );
-        },
-        RenderSpec::RawAnsiLimited { text, tone: _ } => {
-            let safe = strip_ansi_limited(text);
-            for line in safe.lines() {
                 push_wrapped_line(lines, prefix, line, theme.body, width);
             }
         },
@@ -412,32 +441,8 @@ pub(crate) fn tone_style(tone: &RenderTone, theme: &Theme) -> Style {
         RenderTone::Muted => theme.dim,
         RenderTone::Accent => theme.assistant_label,
         RenderTone::Success => theme.tool_label,
-        RenderTone::Warning => theme.tool_label,
         RenderTone::Error => theme.error_label,
     }
-}
-
-fn strip_ansi_limited(text: &str) -> String {
-    let mut output = String::new();
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        let is_csi = if ch == '\u{1b}' && chars.peek() == Some(&'[') {
-            chars.next();
-            true
-        } else {
-            ch == '\u{9b}'
-        };
-        if is_csi {
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) {
-                    break;
-                }
-            }
-        } else if ch == '\n' || ch == '\t' || !ch.is_control() {
-            output.push(ch);
-        }
-    }
-    output
 }
 
 fn text_width(text: &str) -> usize {

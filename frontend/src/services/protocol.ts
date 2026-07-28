@@ -1,5 +1,6 @@
 import {
   AGENT_SESSION_STATUSES,
+  APPROVAL_DECISIONS,
   BLOCK_STATUSES,
   PHASES,
   TOOL_CALL_STATUSES,
@@ -16,6 +17,7 @@ import type {
   PendingAskUserQuestion,
   PendingAskUserQuestionsResponse,
   PromptAttachmentWire,
+  ToolApproval,
 } from './types'
 
 type JsonObject = Record<string, unknown>
@@ -131,6 +133,20 @@ const decodeAgentSessionStatus = stringEnumDecoder(
   AGENT_SESSION_STATUSES,
   'running'
 )
+const decodeApprovalDecision = stringEnumDecoder(
+  'approval decision',
+  APPROVAL_DECISIONS
+)
+
+function decodeToolApproval(value: unknown): ToolApproval {
+  const object = decodeObject(value, 'tool approval')
+  return {
+    callId: requiredString(object, 'callId'),
+    prompt: requiredString(object, 'prompt'),
+    ruleKey: optionalString(object, 'ruleKey'),
+  }
+}
+
 export function decodeConversationCursor(value: unknown): ConversationCursor {
   const object = decodeObject(value, 'cursor')
   return { value: requiredString(object, 'value') }
@@ -173,7 +189,13 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
         reasoningContent: optionalString(object, 'reasoningContent'),
         status: decodeBlockStatus(object.status),
       }
-    case 'toolCall':
+    case 'toolCall': {
+      const metadata = optionalObject(object, 'metadata')
+      const approval =
+        object.approval == null
+          ? undefined
+          : decodeToolApproval(object.approval)
+      const argumentsJson = optionalObject(object, 'argumentsJson')
       return {
         kind,
         id,
@@ -181,12 +203,11 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
         arguments: requiredString(object, 'arguments'),
         text: requiredString(object, 'text'),
         status: decodeToolCallStatus(object.status),
-        metadata: optionalObject(object, 'metadata'),
-        argumentsJson:
-          object.argumentsJson && typeof object.argumentsJson === 'object'
-            ? (object.argumentsJson as Record<string, unknown>)
-            : undefined,
+        ...(metadata ? { metadata } : {}),
+        ...(approval ? { approval } : {}),
+        ...(argumentsJson ? { argumentsJson } : {}),
       }
+    }
     case 'error':
       return { kind, id, message: requiredString(object, 'message') }
     case 'systemNote':
@@ -295,18 +316,16 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
         schemaVersion: requiredNumber(object, 'schemaVersion'),
         payload: decodeObject(object.payload, 'extension event payload'),
       }
-    case 'patchToolMetadata':
+    case 'toolApprovalRequested':
       return {
         kind,
-        blockId: requiredString(object, 'blockId'),
-        metadata: optionalObject(object, 'metadata') ?? {},
+        approval: decodeToolApproval(object.approval),
       }
-    case 'patchToolCall':
+    case 'toolApprovalResolved':
       return {
         kind,
-        blockId: requiredString(object, 'blockId'),
-        text: requiredString(object, 'text'),
-        metadata: optionalObject(object, 'metadata'),
+        callId: requiredString(object, 'callId'),
+        decision: decodeApprovalDecision(object.decision),
       }
     default:
       throw new ProtocolDecodeError(`invalid delta kind ${kind}`)

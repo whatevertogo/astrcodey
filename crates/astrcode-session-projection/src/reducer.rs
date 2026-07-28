@@ -10,8 +10,8 @@ use astrcode_core::{
 
 use crate::{
     AgentSessionLinkView, AgentSessionStatus, CompactBoundaryView, PendingToolApprovalView,
-    PendingToolInteractionView, SequencedLlmMessage, SessionReadModel, TOOL_CALL_CANCELLED_SOURCE,
-    TOOL_CALL_FAILED_SOURCE, TranscriptArtifactView,
+    SequencedLlmMessage, SessionReadModel, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
+    TranscriptArtifactView,
 };
 
 #[derive(Clone)]
@@ -96,7 +96,6 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.system_prompt_fingerprint = None;
             model.pending_tool_calls.clear();
             model.pending_tool_approvals.clear();
-            model.pending_tool_interactions.clear();
             model.compact_boundaries.clear();
             model.agent_sessions.clear();
             model.extension_events = Default::default();
@@ -184,7 +183,6 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             model.phase = Phase::Idle;
             model.pending_tool_calls.clear();
             model.pending_tool_approvals.clear();
-            model.pending_tool_interactions.clear();
         },
         EventPayload::TurnAbortedContext => {
             model.messages.push(SequencedLlmMessage {
@@ -264,20 +262,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         EventPayload::ToolApprovalResolved { call_id, .. } => {
             model.pending_tool_approvals.remove(call_id);
         },
-        EventPayload::ToolCallInteractionPending {
-            call_id,
-            content,
-            metadata,
-        } => {
-            model.phase = Phase::CallingTool;
-            model.pending_tool_interactions.insert(
-                call_id.clone(),
-                PendingToolInteractionView {
-                    content: content.clone(),
-                    metadata: metadata.clone(),
-                },
-            );
-        },
+        EventPayload::LegacyToolCallInteractionPending { .. } => {},
         EventPayload::ToolCallCompleted {
             call_id,
             tool_name,
@@ -488,7 +473,6 @@ fn apply_tool_terminal(
 ) {
     model.pending_tool_calls.remove(call_id);
     model.pending_tool_approvals.remove(call_id);
-    model.pending_tool_interactions.remove(call_id);
     model.messages.push(SequencedLlmMessage {
         message: LlmMessage {
             role: LlmRole::Tool,
@@ -916,7 +900,7 @@ mod tests {
             event(
                 5,
                 &session_id,
-                EventPayload::ToolCallInteractionPending {
+                EventPayload::LegacyToolCallInteractionPending {
                     call_id: "cancelled".into(),
                     content: "waiting".into(),
                     metadata: Default::default(),
@@ -991,6 +975,5 @@ mod tests {
         assert_eq!(model.phase, Phase::Thinking);
         assert!(model.pending_tool_calls.is_empty());
         assert!(model.pending_tool_approvals.is_empty());
-        assert!(model.pending_tool_interactions.is_empty());
     }
 }

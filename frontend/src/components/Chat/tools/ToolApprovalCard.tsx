@@ -1,15 +1,12 @@
 import { useState } from 'react'
-import { cn } from '../../lib/utils'
+import { cn } from '../../../lib/utils'
 import {
   submitToolGateApproval,
   type ToolGateApprovalDecision,
-} from '../../services/api'
-import { useAppStore } from '../../store/conversation'
-import {
-  stringValue,
-  type JsonRecord,
-} from '../../components/Chat/tools/helpers'
-import { readGateApproval } from './gateApprovalMeta'
+} from '../../../services/api'
+import type { ToolApproval } from '../../../services/types'
+import { useAppStore } from '../../../store/conversation'
+import { stringValue, type JsonRecord } from './helpers'
 
 function commandFromPrompt(prompt?: string): string | undefined {
   if (!prompt) return undefined
@@ -48,27 +45,24 @@ export function GateApprovalCard({
   sessionId,
   callId,
   toolName,
-  metadata,
+  approval,
   args = {},
 }: {
   sessionId: string
   callId: string
   toolName: string
-  metadata: Record<string, unknown> | undefined
+  approval: ToolApproval
   args?: JsonRecord
 }) {
-  const gate = readGateApproval(metadata)
   const refreshConversationSnapshot = useAppStore(
     (state) => state.refreshConversationSnapshot
   )
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  if (!gate?.pending) return null
-
-  const command = resolveCommand(args, gate.prompt)
+  const command = resolveCommand(args, approval.prompt)
   const intent = resolveIntent(args)
-  const headline = approvalHeadline(toolName, gate.prompt)
+  const headline = approvalHeadline(toolName, approval.prompt)
 
   async function decide(decision: ToolGateApprovalDecision) {
     setBusy(true)
@@ -100,8 +94,8 @@ export function GateApprovalCard({
           <span className="select-none text-text-muted">$ </span>
           <span className="wrap-break-word">{command}</span>
         </pre>
-      ) : gate.prompt ? (
-        <p className="text-[13px] text-text-secondary">{gate.prompt}</p>
+      ) : approval.prompt ? (
+        <p className="text-[13px] text-text-secondary">{approval.prompt}</p>
       ) : null}
 
       {error ? <p className={cn('text-[12px] text-danger')}>{error}</p> : null}

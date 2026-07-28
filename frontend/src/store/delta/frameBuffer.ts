@@ -22,8 +22,6 @@ function deltaTextChars(delta: ConversationDelta): number {
       return delta.delta.length
     case 'patchArguments':
       return delta.arguments.length
-    case 'patchToolCall':
-      return delta.text.length
     case 'statusItemUpdate':
       return delta.text.length
     default:

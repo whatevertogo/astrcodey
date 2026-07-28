@@ -2,7 +2,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_core::render::RenderSpec;
+use crate::tui::render::RenderSpec;
 
 /// Options passed to a message renderer.
 #[derive(Default)]

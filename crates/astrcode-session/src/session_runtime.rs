@@ -1,8 +1,4 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::Event, llm::LlmProvider, permission::ApprovalDecision, tool::FileObservationStore,
@@ -28,32 +24,12 @@ impl Drop for PendingApprovalRegistration<'_> {
     }
 }
 
-pub struct PendingToolUiResponseRegistration<'a> {
-    runtime: &'a SessionRuntimeState,
-    call_id: ToolCallId,
-}
-
-impl Drop for PendingToolUiResponseRegistration<'_> {
-    fn drop(&mut self) {
-        self.runtime.remove_pending_tool_ui_response(&self.call_id);
-    }
-}
-
 /// 解析挂起工具审批时的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ToolApprovalResolveError {
     #[error("no pending approval for call_id {call_id}")]
     NotPending { call_id: ToolCallId },
     #[error("approval receiver dropped for call_id {call_id}")]
-    ReceiverDropped { call_id: ToolCallId },
-}
-
-/// 解析挂起 Tool UI 交互（如 askUser 问卷）时的错误。
-#[derive(Debug, thiserror::Error)]
-pub enum ToolUiResponseResolveError {
-    #[error("no pending tool UI response for call_id {call_id}")]
-    NotPending { call_id: ToolCallId },
-    #[error("tool UI response receiver dropped for call_id {call_id}")]
     ReceiverDropped { call_id: ToolCallId },
 }
 
@@ -112,9 +88,6 @@ pub struct SessionRuntimeState {
     approval_history: Arc<ApprovalHistoryStore>,
     /// 挂起中的工具审批（call_id → oneshot sender）。
     pending_approvals: Mutex<HashMap<ToolCallId, oneshot::Sender<ApprovalDecision>>>,
-    /// 挂起中的 Tool UI 交互（call_id → 问卷答案 sender）。
-    pending_tool_ui_responses:
-        Mutex<HashMap<ToolCallId, oneshot::Sender<BTreeMap<String, String>>>>,
 }
 
 impl SessionRuntimeState {
@@ -142,7 +115,6 @@ impl SessionRuntimeState {
             event_out,
             approval_history: Arc::new(ApprovalHistoryStore::default()),
             pending_approvals: Mutex::new(HashMap::new()),
-            pending_tool_ui_responses: Mutex::new(HashMap::new()),
         }
     }
 
@@ -254,47 +226,6 @@ impl SessionRuntimeState {
 
     pub fn cancel_pending_approvals(&self) {
         self.pending_approvals.lock().clear();
-    }
-
-    pub fn register_pending_tool_ui_response(
-        &self,
-        call_id: ToolCallId,
-        sender: oneshot::Sender<BTreeMap<String, String>>,
-    ) -> PendingToolUiResponseRegistration<'_> {
-        self.pending_tool_ui_responses
-            .lock()
-            .insert(call_id.clone(), sender);
-        PendingToolUiResponseRegistration {
-            runtime: self,
-            call_id,
-        }
-    }
-
-    fn remove_pending_tool_ui_response(&self, call_id: &ToolCallId) {
-        self.pending_tool_ui_responses.lock().remove(call_id);
-    }
-
-    pub fn resolve_tool_ui_response(
-        &self,
-        call_id: &ToolCallId,
-        answers: BTreeMap<String, String>,
-    ) -> Result<(), ToolUiResponseResolveError> {
-        let sender = self
-            .pending_tool_ui_responses
-            .lock()
-            .remove(call_id)
-            .ok_or(ToolUiResponseResolveError::NotPending {
-                call_id: call_id.clone(),
-            })?;
-        sender
-            .send(answers)
-            .map_err(|_| ToolUiResponseResolveError::ReceiverDropped {
-                call_id: call_id.clone(),
-            })
-    }
-
-    pub fn cancel_pending_tool_ui_responses(&self) {
-        self.pending_tool_ui_responses.lock().clear();
     }
 }
 
@@ -410,21 +341,6 @@ mod tests {
         assert!(matches!(
             runtime.resolve_tool_approval(&call_id, ApprovalDecision::DenyOnce),
             Err(ToolApprovalResolveError::NotPending { .. })
-        ));
-    }
-
-    #[test]
-    fn pending_tool_ui_response_registration_cleans_up_on_drop() {
-        let runtime = SessionRuntimeState::new(provider(1), provider(1001), "1".to_string());
-        let (tx, _rx) = oneshot::channel();
-        let call_id = ToolCallId::from("tool-1");
-
-        let guard = runtime.register_pending_tool_ui_response(call_id.clone(), tx);
-        drop(guard);
-
-        assert!(matches!(
-            runtime.resolve_tool_ui_response(&call_id, BTreeMap::new()),
-            Err(ToolUiResponseResolveError::NotPending { .. })
         ));
     }
 }

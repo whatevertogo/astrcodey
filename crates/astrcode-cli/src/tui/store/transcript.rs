@@ -1,6 +1,6 @@
 //! Transcript data types: Message, MessageBody, ScrollbackEntry.
 
-use astrcode_core::render::RenderSpec;
+use crate::tui::render::RenderSpec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MessageRole {

@@ -150,6 +150,45 @@ assert.equal(
   'duplicate child-agent projections should not notify subscribers'
 )
 
+const approvalState = {
+  ...frameState,
+  blocks: [
+    {
+      kind: 'toolCall',
+      id: 'tool-approval',
+      name: 'shell',
+      arguments: 'git push',
+      text: '',
+      status: 'streaming',
+    },
+  ],
+}
+const approvalRequestedPatch = reduceConversationDeltas(approvalState, [
+  {
+    kind: 'toolApprovalRequested',
+    approval: {
+      callId: 'tool-approval',
+      prompt: 'Run shell command?',
+      ruleKey: 'shell:write',
+    },
+  },
+])
+assert.equal(
+  approvalRequestedPatch.blocks?.[0].approval.prompt,
+  'Run shell command?'
+)
+const approvalResolvedPatch = reduceConversationDeltas(
+  { ...approvalState, blocks: approvalRequestedPatch.blocks },
+  [
+    {
+      kind: 'toolApprovalResolved',
+      callId: 'tool-approval',
+      decision: 'allow_once',
+    },
+  ]
+)
+assert.equal(approvalResolvedPatch.blocks?.[0].approval, undefined)
+
 const askUserPending = {
   sessionId: 'session-1',
   callId: 'call-1',

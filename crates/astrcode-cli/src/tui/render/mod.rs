@@ -8,5 +8,5 @@
 pub mod render_spec;
 pub mod scrollback;
 
-pub use render_spec::{layout_visual_text, visual_lines};
+pub use render_spec::{RenderKeyValue, RenderSpec, RenderTone, layout_visual_text, visual_lines};
 pub use scrollback::scrollback_entry_to_lines;

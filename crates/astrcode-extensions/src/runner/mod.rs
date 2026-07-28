@@ -1033,12 +1033,6 @@ impl ExtensionRunner {
         self.load_index().tool_metadata.clone()
     }
 
-    pub async fn collect_tool_ui(
-        &self,
-    ) -> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolUiWire> {
-        self.load_index().tool_ui.clone()
-    }
-
     /// 收集所有插件注册的快捷键绑定。
     pub fn collect_keybindings(&self) -> Vec<astrcode_extension_sdk::extension::Keybinding> {
         self.load_index().keybindings.clone()

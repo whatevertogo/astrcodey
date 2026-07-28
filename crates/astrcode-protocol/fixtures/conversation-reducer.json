@@ -77,13 +77,11 @@
       "sessionId": "session-contract",
       "cursor": { "value": "8" },
       "delta": {
-        "kind": "patchToolMetadata",
-        "blockId": "tool-contract",
-        "metadata": {
-          "toolGateApproval": {
-            "pending": true,
-            "prompt": "approve"
-          }
+        "kind": "toolApprovalRequested",
+        "approval": {
+          "callId": "tool-contract",
+          "prompt": "approve",
+          "ruleKey": "read"
         }
       }
     },
@@ -173,13 +171,7 @@
         "arguments": "Cargo.toml",
         "argumentsJson": { "path": "Cargo.toml" },
         "text": "out\n[stderr] err",
-        "status": "complete",
-        "metadata": {
-          "toolGateApproval": {
-            "pending": true,
-            "prompt": "approve"
-          }
-        }
+        "status": "complete"
       }
     ],
     "control": {

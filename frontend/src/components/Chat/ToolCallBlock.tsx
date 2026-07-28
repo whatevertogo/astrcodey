@@ -10,19 +10,6 @@ import {
 } from '../../services/types'
 import { useAppStore } from '../../store/conversation'
 import { cn } from '../../lib/utils'
-import {
-  extractRenderSpec,
-  extractRenderSummary,
-} from '../../types/render-spec'
-import {
-  renderToolApprovalUi,
-  toolApprovalShouldAutoExpand,
-  toolApprovalSummary,
-  toolApprovalPending,
-  type ToolUiContext,
-} from '../../tool-ui'
-import { GateApprovalCard } from '../../tool-ui/components/GateApprovalCard'
-import { readGateApproval } from '../../tool-ui/components/gateApprovalMeta'
 import { toolPanelScrollViewport } from '../../lib/styles'
 import { RenderSpecViewer } from './RenderSpecViewer'
 import './tools/builtinRenderers'
@@ -41,6 +28,9 @@ import {
 import { DefaultToolDetails } from './tools/shared'
 import { buildStreamingAgentSpec } from './tools/agentSpec'
 import { AgentChildSessionPanel } from './tools/AgentChildSessionPanel'
+import { AskUserCard } from './tools/AskUserCard'
+import { askUserSummary, isPendingAskUser } from './tools/askUser'
+import { GateApprovalCard } from './tools/ToolApprovalCard'
 import { Icon, type IconName } from '../ui/Icon'
 
 interface ToolCallBlockProps {
@@ -63,14 +53,6 @@ function ToolDetails({
   renderer?: ToolRenderer
   agentChildUi?: ReactNode | null
 }) {
-  if (toolContext.renderSpec) {
-    return (
-      <div className="space-y-3">
-        <RenderSpecViewer spec={toolContext.renderSpec} />
-        {agentChildUi}
-      </div>
-    )
-  }
   if (toolContext.agentSpec) {
     return (
       <div className="space-y-3">
@@ -149,7 +131,8 @@ function durationFromMetadata(meta: Record<string, unknown>): string {
 
 function ToolCallDetailsPanel({
   context,
-  toolUiContext,
+  sessionId,
+  approvalUi,
   renderer,
   linkedAgent,
   onOpenChild,
@@ -157,7 +140,8 @@ function ToolCallDetailsPanel({
   gatePending,
 }: {
   context: ToolRendererContext
-  toolUiContext: ToolUiContext
+  sessionId: string | null
+  approvalUi: ReactNode | null
   renderer?: ToolRenderer
   linkedAgent?: AgentSessionLink
   onOpenChild: (childSessionId: string) => void
@@ -166,7 +150,6 @@ function ToolCallDetailsPanel({
 }) {
   const { block, args } = context
   const detailArgs = formatArgs(args, block.arguments)
-  const approvalUi = renderToolApprovalUi(toolUiContext)
   const agentChildUi =
     linkedAgent && block.status === 'streaming' ? (
       <AgentChildSessionPanel agent={linkedAgent} onOpenChild={onOpenChild} />
@@ -194,12 +177,12 @@ function ToolCallDetailsPanel({
               <DetailValue>{summaryLine}</DetailValue>
             </DetailRow>
           ) : null}
-          {gatePending && toolUiContext.sessionId ? (
+          {gatePending && sessionId && block.approval ? (
             <GateApprovalCard
-              sessionId={toolUiContext.sessionId}
+              sessionId={sessionId}
               callId={block.id}
               toolName={block.name}
-              metadata={block.metadata}
+              approval={block.approval}
               args={args}
             />
           ) : (
@@ -276,28 +259,22 @@ function ToolCallBlock({
   const args = toolArgs(block)
   const meta = toolMeta(block)
 
-  const renderSpec = extractRenderSpec(block.metadata)
   const agentSpec =
-    block.name === 'agent' && block.argumentsJson && !renderSpec
+    block.name === 'agent' && block.argumentsJson
       ? buildStreamingAgentSpec(block.argumentsJson)
       : undefined
-
-  const toolUiCtx: ToolUiContext = {
-    block,
-    sessionId,
-    args,
-    meta,
-    renderSpec,
-  }
 
   const context: ToolRendererContext = {
     block,
     args,
     meta,
-    renderSpec,
     agentSpec,
   }
   const renderer = getToolRenderer(context)
+  const approvalUi =
+    block.name === 'askUser' ? (
+      <AskUserCard block={block} sessionId={sessionId} args={args} />
+    ) : null
 
   const streaming = block.status === 'streaming'
   const elapsed = useElapsedSeconds(streaming)
@@ -307,8 +284,7 @@ function ToolCallBlock({
       : null
 
   const summarySource =
-    extractRenderSummary(block.metadata) ||
-    toolApprovalSummary(toolUiCtx) ||
+    askUserSummary(block, args) ||
     renderer?.summary?.(context) ||
     block.arguments ||
     block.text ||
@@ -316,11 +292,9 @@ function ToolCallBlock({
     (streaming ? runningElapsedLabel(elapsed, 'zh') : '(无输出)')
   const summaryLine = compactPreviewLine(summarySource)
 
-  const gateApproval = readGateApproval(block.metadata)
-  const gatePending =
-    block.status === 'streaming' && gateApproval?.pending === true
-  const questionnairePending = toolApprovalPending(toolUiCtx)
-  const autoExpand = toolApprovalShouldAutoExpand(toolUiCtx) || gatePending
+  const gatePending = block.status === 'streaming' && block.approval != null
+  const questionnairePending = isPendingAskUser(block)
+  const autoExpand = questionnairePending || gatePending
   const forceOpen = autoExpand
   const open = forceOpen || isOpen
 
@@ -386,7 +360,8 @@ function ToolCallBlock({
       {open ? (
         <ToolCallDetailsPanel
           context={context}
-          toolUiContext={toolUiCtx}
+          sessionId={sessionId}
+          approvalUi={approvalUi}
           renderer={renderer}
           linkedAgent={linkedAgent}
           onOpenChild={(childSessionId) => void switchSession(childSessionId)}

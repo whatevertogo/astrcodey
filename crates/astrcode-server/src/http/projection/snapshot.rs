@@ -5,11 +5,9 @@ use std::collections::BTreeMap;
 use astrcode_core::types::ToolCallId;
 use astrcode_protocol::http::{
     AgentSessionLinkDto, ConversationBlockDto, ConversationCursorDto,
-    ConversationSnapshotResponseDto, ToolCallStatusDto,
+    ConversationSnapshotResponseDto, ToolApprovalDto,
 };
-use astrcode_session_projection::{
-    PendingToolApprovalView, PendingToolInteractionView, SessionReadModel,
-};
+use astrcode_session_projection::{PendingToolApprovalView, SessionReadModel};
 
 use super::{
     blocks::{
@@ -38,11 +36,7 @@ pub(in crate::http) fn conversation_to_dto(
         &session.messages,
         &session.transcript_artifacts,
     ));
-    apply_pending_tool_state(
-        &mut blocks,
-        &session.pending_tool_approvals,
-        &session.pending_tool_interactions,
-    );
+    apply_pending_tool_approvals(&mut blocks, &session.pending_tool_approvals);
 
     // 如果有正在流式传输的 assistant 消息，追加一个 streaming block。
     // durable 投影不含 streaming 消息（`AssistantTextDelta` 是 live 事件），
@@ -72,53 +66,27 @@ pub(in crate::http) fn conversation_to_dto(
     }
 }
 
-fn apply_pending_tool_state(
+fn apply_pending_tool_approvals(
     blocks: &mut [ConversationBlockDto],
     approvals: &BTreeMap<ToolCallId, PendingToolApprovalView>,
-    interactions: &BTreeMap<ToolCallId, PendingToolInteractionView>,
 ) {
     for block in blocks {
         let ConversationBlockDto::ToolCall {
             id,
-            text,
-            metadata,
-            status,
+            approval: block_approval,
             ..
         } = block
         else {
             continue;
         };
-        let approval = approvals.get(id.as_str());
-        let interaction = interactions.get(id.as_str());
-        if approval.is_none() && interaction.is_none() {
+        let Some(approval) = approvals.get(id.as_str()) else {
             continue;
-        }
-
-        let mut merged = match metadata.take() {
-            Some(serde_json::Value::Object(metadata)) => metadata,
-            _ => serde_json::Map::new(),
         };
-        if let Some(approval) = approval {
-            merged.insert(
-                "toolGateApproval".into(),
-                serde_json::json!({
-                    "pending": true,
-                    "prompt": &approval.prompt,
-                    "ruleKey": &approval.rule_key,
-                }),
-            );
-        }
-        if let Some(interaction) = interaction {
-            *text = interaction.content.clone();
-            *status = ToolCallStatusDto::Streaming;
-            merged.extend(
-                interaction
-                    .metadata
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone())),
-            );
-        }
-        *metadata = (!merged.is_empty()).then_some(serde_json::Value::Object(merged));
+        *block_approval = Some(ToolApprovalDto {
+            call_id: id.clone(),
+            prompt: approval.prompt.clone(),
+            rule_key: approval.rule_key.clone(),
+        });
     }
 }
 
@@ -215,7 +183,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_snapshot_applies_pending_tool_state() {
+    fn conversation_snapshot_applies_explicit_pending_tool_approval() {
         let mut session = session_with_tool_call(
             "session-approval",
             "tool-approval",
@@ -229,44 +197,16 @@ mod tests {
                 rule_key: Some("shell:write".into()),
             },
         );
-        session.pending_tool_interactions.insert(
-            "tool-approval".into(),
-            PendingToolInteractionView {
-                content: "awaiting confirmation".into(),
-                metadata: BTreeMap::from([(
-                    "toolUi".into(),
-                    serde_json::json!({ "kind": "confirmation" }),
-                )]),
-            },
-        );
-
         let dto = conversation_to_dto(session, None);
 
         match &dto.blocks[0] {
             ConversationBlockDto::ToolCall {
-                text,
-                status,
-                metadata: Some(metadata),
+                approval: Some(approval),
                 ..
             } => {
-                assert_eq!(text, "awaiting confirmation");
-                assert!(matches!(status, ToolCallStatusDto::Streaming));
-                let approval = metadata
-                    .get("toolGateApproval")
-                    .expect("toolGateApproval metadata");
-                assert_eq!(
-                    approval.get("pending").and_then(|v| v.as_bool()),
-                    Some(true)
-                );
-                assert_eq!(
-                    approval.get("prompt").and_then(|v| v.as_str()),
-                    Some("Run shell command?")
-                );
-                assert_eq!(
-                    approval.get("ruleKey").and_then(|v| v.as_str()),
-                    Some("shell:write")
-                );
-                assert_eq!(metadata["toolUi"]["kind"], "confirmation");
+                assert_eq!(approval.call_id, "tool-approval");
+                assert_eq!(approval.prompt, "Run shell command?");
+                assert_eq!(approval.rule_key.as_deref(), Some("shell:write"));
             },
             other => panic!("unexpected block: {other:?}"),
         }

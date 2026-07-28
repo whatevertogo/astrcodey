@@ -15,8 +15,6 @@ use astrcode_extension_sdk::{
         Extension, ExtensionCapability, ExtensionError, PromptBuildContext, PromptBuildHandler,
         PromptContributions, Registrar, ToolHandler,
     },
-    render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
-    text::compact_inline,
     tool::{
         CreateSessionRequest, ExecutionMode, SessionAccess, SubmitTurnRequest, ToolDefinition,
         ToolOrigin, ToolResult, tool_metadata,
@@ -139,51 +137,6 @@ const fn default_wait_for_result() -> bool {
     true
 }
 
-fn agent_run_render_spec(args: &AgentArgs, agent_name: &str, resolved_model: &str) -> RenderSpec {
-    let model = resolved_model;
-    let mode_label = if args.wait_for_result {
-        "sync"
-    } else {
-        "async"
-    };
-
-    RenderSpec::Box {
-        title: None,
-        tone: RenderTone::Default,
-        children: vec![
-            RenderSpec::KeyValue {
-                entries: vec![
-                    RenderKeyValue {
-                        key: "task".into(),
-                        value: args.description.clone(),
-                        tone: RenderTone::Accent,
-                    },
-                    RenderKeyValue {
-                        key: "agent".into(),
-                        value: agent_name.into(),
-                        tone: RenderTone::Accent,
-                    },
-                    RenderKeyValue {
-                        key: "model".into(),
-                        value: model.into(),
-                        tone: RenderTone::Muted,
-                    },
-                    RenderKeyValue {
-                        key: "mode".into(),
-                        value: mode_label.into(),
-                        tone: RenderTone::Muted,
-                    },
-                ],
-                tone: RenderTone::Default,
-            },
-            RenderSpec::Text {
-                text: format!("prompt: {}", compact_inline(&args.prompt, 180)),
-                tone: RenderTone::Muted,
-            },
-        ],
-    }
-}
-
 struct AgentToolHandler {
     shared: Arc<AgentShared>,
 }
@@ -227,12 +180,7 @@ impl ToolHandler for AgentToolHandler {
         };
 
         let model_preference = resolve_child_small_model(&ctx.capabilities)?;
-        let model_label = model_preference.as_str();
-
-        // 构造 UI 渲染元数据
-        let render = agent_run_render_spec(&args, &matched.name, model_label);
-        let render_json = serde_json::to_value(&render)
-            .map_err(|e| ExtensionError::Internal(format!("serialize render: {e}")))?;
+        let model_label = model_preference.as_str().to_owned();
 
         // 获取 session_ops
         let session_ops =
@@ -294,8 +242,10 @@ impl ToolHandler for AgentToolHandler {
 
         // 3. 构造 ToolResult
         let mut metadata = tool_metadata([
-            (UI_RENDER_METADATA_KEY, render_json),
             ("child_session_id", serde_json::json!(handle.session_id)),
+            ("agent_name", serde_json::json!(matched.name)),
+            ("model", serde_json::json!(model_label)),
+            ("wait_for_result", serde_json::json!(args.wait_for_result)),
         ]);
 
         match result {

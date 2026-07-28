@@ -459,7 +459,7 @@ fn event_payload_variants_stay_nested() {
             decision: crate::permission::ApprovalDecision::AllowOnce,
             detail: None,
         },
-        EventPayload::ToolCallInteractionPending {
+        EventPayload::LegacyToolCallInteractionPending {
             call_id: "c".into(),
             content: "ok".into(),
             metadata: BTreeMap::new(),

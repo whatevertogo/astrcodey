@@ -67,6 +67,7 @@ pub(in crate::http) fn streaming_tool_call_block(
         text: String::new(),
         status: ToolCallStatusDto::Streaming,
         metadata: None,
+        approval: None,
         arguments_json: arguments.cloned(),
     }
 }
@@ -113,6 +114,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
                 ToolCallStatusDto::Complete
             },
             metadata: tool_terminal_metadata(&result.metadata, result.duration_ms),
+            approval: None,
             arguments_json: arguments_json.clone(),
         }),
         EventPayload::ToolCallFailed {
@@ -130,6 +132,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             text: error.clone(),
             status: ToolCallStatusDto::Failed,
             metadata: tool_terminal_metadata(metadata, *duration_ms),
+            approval: None,
             arguments_json: arguments_json.clone(),
         }),
         EventPayload::ToolCallCancelled {
@@ -146,6 +149,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             text: format!("Tool cancelled: {reason}"),
             status: ToolCallStatusDto::Cancelled,
             metadata: tool_terminal_metadata(&BTreeMap::new(), *duration_ms),
+            approval: None,
             arguments_json: arguments_json.clone(),
         }),
         EventPayload::ErrorOccurred { message, .. } => Some(ConversationBlockDto::Error {
@@ -322,6 +326,7 @@ fn push_tool_result_block(
                 text: content.clone(),
                 status,
                 metadata: None,
+                approval: None,
                 arguments_json: None,
             },
         });
@@ -338,6 +343,7 @@ fn push_tool_result_block(
                 text: visible_message_text(message),
                 status: tool_status_from_message(false, source),
                 metadata: None,
+                approval: None,
                 arguments_json: None,
             },
         });

@@ -268,15 +268,13 @@ pub enum EventPayload {
         detail: Option<String>,
     },
 
-    /// 工具调用进入等待用户交互阶段（durable；在工具终态之前写入）。
+    /// 旧版通用 Tool UI 等待事件，仅用于解码历史日志。
     ///
-    /// 用于 askUser 等 Approval UI：execute 已返回 `awaiting_user_input`，
-    /// turn 阻塞等待用户提交后才写入工具终态事件。
-    ToolCallInteractionPending {
+    /// 新运行时不得产生此事件；客户端忽略其中的旧 UI metadata。
+    #[serde(rename = "tool_call_interaction_pending")]
+    LegacyToolCallInteractionPending {
         call_id: ToolCallId,
-        /// 工具结果正文（如 `{"status":"awaiting_user_input",...}`）。
         content: String,
-        /// 投影到前端 block.metadata（含 `toolUi` / `toolUiPhase` 等）。
         metadata: std::collections::BTreeMap<String, serde_json::Value>,
     },
 

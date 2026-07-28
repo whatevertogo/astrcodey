@@ -261,37 +261,18 @@ export function reduceConversationDeltas(
         break
       }
 
-      case 'patchToolMetadata':
-        blocks = updateToolCall(blocks, delta.blockId, (block) => ({
+      case 'toolApprovalRequested':
+        blocks = updateToolCall(blocks, delta.approval.callId, (block) => ({
           ...block,
-          metadata: {
-            ...(block.metadata ?? {}),
-            ...delta.metadata,
-            toolGateApproval: {
-              ...((block.metadata?.toolGateApproval as
-                | Record<string, unknown>
-                | undefined) ?? {}),
-              ...((delta.metadata.toolGateApproval as
-                | Record<string, unknown>
-                | undefined) ?? {}),
-            },
-          },
+          approval: delta.approval,
         }))
         break
 
-      case 'patchToolCall':
-        blocks = updateToolCall(blocks, delta.blockId, (block) => {
-          const metadata = delta.metadata
-            ? {
-                ...(block.metadata ?? {}),
-                ...delta.metadata,
-              }
-            : block.metadata
-          return {
-            ...block,
-            text: delta.text,
-            ...(metadata ? { metadata } : {}),
-          }
+      case 'toolApprovalResolved':
+        blocks = updateToolCall(blocks, delta.callId, (block) => {
+          const next = { ...block }
+          delete next.approval
+          return next
         })
         break
 

@@ -101,13 +101,6 @@ pub struct SessionInspectPendingApproval {
     pub rule_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionInspectPendingInteraction {
-    pub content: String,
-    pub metadata: BTreeMap<String, Value>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInspectAgentSession {
@@ -151,7 +144,6 @@ pub struct SessionInspectReadModel {
     pub system_prompt_fingerprint: Option<String>,
     pub pending_tool_call_ids: Vec<String>,
     pub pending_tool_approvals: BTreeMap<String, SessionInspectPendingApproval>,
-    pub pending_tool_interactions: BTreeMap<String, SessionInspectPendingInteraction>,
     pub created_at: String,
     pub updated_at: String,
     pub parent_session_id: Option<String>,

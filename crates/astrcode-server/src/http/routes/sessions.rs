@@ -11,7 +11,7 @@ use astrcode_protocol::{
         ConfigureSessionToolsRequest, ConfigureSessionToolsResponse, CreateSessionRequest,
         CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest, PromptSubmitResponse,
         SessionListItemDto, SessionListResponseDto, SlashCommandListResponseDto,
-        ToolApprovalRequest, ToolSelectionDto, ToolUiRespondRequest, ToolUiRespondResponse,
+        ToolApprovalRequest, ToolSelectionDto,
     },
 };
 use astrcode_session_projection::SessionSummary;
@@ -220,36 +220,6 @@ pub(in crate::http) async fn resolve_tool_approval(
         Err(error) => handler_error_response(
             HandlerError::SessionNotFound(error.to_string()),
             "approval_failed",
-        ),
-    }
-}
-
-pub(in crate::http) async fn submit_tool_ui_respond(
-    State(state): State<HttpState>,
-    Path((session_id, call_id)): Path<(String, String)>,
-    Json(request): Json<ToolUiRespondRequest>,
-) -> Response {
-    let session_id_str = session_id.clone();
-    let Some(ops) = state.runtime.runtime_services().session_ops() else {
-        return internal_error_response(
-            "session_ops_unavailable",
-            "session operations unavailable",
-        );
-    };
-    if request.answers.is_empty() {
-        return handler_error_response(
-            HandlerError::InvalidRequest("answers must not be empty".into()),
-            "tool_ui_respond_failed",
-        );
-    }
-    match ops
-        .resolve_tool_ui_response(&session_id_str, &call_id, request.answers)
-        .await
-    {
-        Ok(()) => Json(ToolUiRespondResponse { accepted: true }).into_response(),
-        Err(error) => handler_error_response(
-            HandlerError::SessionNotFound(error.to_string()),
-            "tool_ui_respond_failed",
         ),
     }
 }

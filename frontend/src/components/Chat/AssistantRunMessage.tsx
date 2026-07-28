@@ -4,10 +4,7 @@ import {
   runningElapsedLabel,
 } from '../../hooks/useElapsedSeconds'
 import { cn } from '../../lib/utils'
-import { toolApprovalPending, type ToolUiContext } from '../../tool-ui'
-import { extractRenderSpec } from '../../types/render-spec'
 import { toolCallHasError, toolCallIsTerminal } from '../../services/types'
-import { readGateApproval } from '../../tool-ui/components/gateApprovalMeta'
 import { Icon, type IconName } from '../ui/Icon'
 import { AssistantMessageContent } from './AssistantMessage'
 import { MarkdownContent, StreamingMarkdown } from './MarkdownContent'
@@ -20,31 +17,16 @@ import {
   type ToolActivity,
   processSummaryTitle,
 } from './assistantRunModel'
-import { toolArgs, toolMeta } from './tools/helpers'
+import { isPendingAskUser } from './tools/askUser'
 
 interface AssistantRunMessageProps {
   blocks: AssistantLikeBlock[]
   sessionId: string | null
 }
 
-function toolNeedsAttention(
-  block: ToolActivity['block'],
-  sessionId: string | null
-) {
+function toolNeedsAttention(block: ToolActivity['block']) {
   if (toolCallIsTerminal(block.status)) return false
-  const args = toolArgs(block)
-  const meta = toolMeta(block)
-  const ctx: ToolUiContext = {
-    block,
-    sessionId,
-    args,
-    meta,
-    renderSpec: extractRenderSpec(block.metadata),
-  }
-  return (
-    readGateApproval(block.metadata)?.pending === true ||
-    toolApprovalPending(ctx)
-  )
+  return block.approval != null || isPendingAskUser(block)
 }
 
 function activityIconName(activity: ToolActivity): IconName {
@@ -206,17 +188,13 @@ function ProcessSummary({
   )
 }
 
-function segmentNeedsAttention(
-  segment: AssistantRunSegment,
-  sessionId: string | null
-) {
+function segmentNeedsAttention(segment: AssistantRunSegment) {
   if (segment.type !== 'process') return false
   return (
     segment.hasAttention ||
     segment.entries.some(
       (entry) =>
-        entry.type === 'tool' &&
-        toolNeedsAttention(entry.activity.block, sessionId)
+        entry.type === 'tool' && toolNeedsAttention(entry.activity.block)
     )
   )
 }
@@ -241,7 +219,7 @@ function AssistantRunMessage({ blocks, sessionId }: AssistantRunMessageProps) {
             }
 
             const nextSegment = runModel.segments[index + 1]
-            const forceOpen = segmentNeedsAttention(segment, sessionId)
+            const forceOpen = segmentNeedsAttention(segment)
 
             return (
               <ProcessSummary

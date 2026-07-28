@@ -1,16 +1,17 @@
 import { useCallback, useMemo, useReducer, useState } from 'react'
-import { useAppStore } from '../../store/conversation'
-import { cn } from '../../lib/utils'
+import { useAppStore } from '../../../store/conversation'
+import { cn } from '../../../lib/utils'
 import {
   rejectAskUserQuestion,
   respondAskUserQuestion,
-} from '../../services/api'
-import type { ToolUiContext } from '../types'
+} from '../../../services/api'
+import type { ConversationBlock } from '../../../services/types'
+import type { JsonRecord } from './helpers'
 import {
   parseAskUserInput,
   parseAskUserOutput,
   type AskUserQuestion,
-} from './questionnaireTypes'
+} from './askUser'
 
 type QuestionState = {
   selectedLabels: string[]
@@ -121,9 +122,15 @@ function CompletedAnswers({ answers }: { answers: Record<string, string> }) {
   )
 }
 
-/** 宿主内置 `approval.variant = questionnaire` 卡片（后端注册，非 askUser 硬编码）。 */
-export function QuestionnaireApprovalCard({ ctx }: { ctx: ToolUiContext }) {
-  const { block, sessionId } = ctx
+export function AskUserCard({
+  block,
+  sessionId,
+  args,
+}: {
+  block: Extract<ConversationBlock, { kind: 'toolCall' }>
+  sessionId: string | null
+  args: JsonRecord
+}) {
   const pendingQuestion = useAppStore(
     (state) => state.pendingAskUserQuestions[block.id]
   )
@@ -134,8 +141,8 @@ export function QuestionnaireApprovalCard({ ctx }: { ctx: ToolUiContext }) {
             questions: pendingQuestion.questions,
             metadata: pendingQuestion.metadata,
           }
-        : parseAskUserInput(block.argumentsJson ?? ctx.args),
-    [block.argumentsJson, ctx.args, pendingQuestion]
+        : parseAskUserInput(block.argumentsJson ?? args),
+    [args, block.argumentsJson, pendingQuestion]
   )
   const completed = useMemo(() => parseAskUserOutput(block.text), [block.text])
   const pending = pendingQuestion != null

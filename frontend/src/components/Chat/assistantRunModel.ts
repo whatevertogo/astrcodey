@@ -3,8 +3,6 @@ import {
   toolCallIsTerminal,
   type ConversationBlock,
 } from '../../services/types'
-import { readGateApproval } from '../../tool-ui/components/gateApprovalMeta'
-import { readToolUi, readToolUiPhase } from '../../tool-ui/wire'
 import { extractThinkingBlocks } from './thinkingExtraction'
 import {
   boolValue,
@@ -293,13 +291,7 @@ export function finalReplyBlockFor(
 
 function toolHasAttention(block: ToolBlock): boolean {
   if (toolCallIsTerminal(block.status)) return false
-  if (readGateApproval(block.metadata)?.pending === true) return true
-
-  const meta = toolMeta(block)
-  const toolUi = readToolUi(meta)
-  if (toolUi?.approval && readToolUiPhase(meta) !== 'result') return true
-
-  return false
+  return block.approval != null || block.name === 'askUser'
 }
 
 export function buildAssistantRunModel(
