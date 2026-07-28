@@ -6,6 +6,7 @@
 
 pub(crate) mod body;
 pub mod parser;
+pub(crate) mod serialization;
 pub(crate) mod transport;
 
 pub(crate) use body::{

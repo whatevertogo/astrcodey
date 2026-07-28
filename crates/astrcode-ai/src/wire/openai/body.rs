@@ -11,7 +11,7 @@ use astrcode_core::{
     tool::ToolDefinition,
 };
 
-use crate::serialization::{
+use super::serialization::{
     chat_message_to_json, prompt_cache_retention_wire_value, responses_input_items,
     responses_tools_json, stable_hash_hex, system_text, tools_to_json,
 };
@@ -80,12 +80,12 @@ pub(crate) fn build_input_token_count_body(
         api_mode: OpenAiApiMode::Responses,
         ..config
     };
-    let mut body = build_responses_request_body(config, messages, tools);
+    let system = system_text(messages);
+    let mut body = build_responses_body(config, messages, tools, &system);
     if let Some(obj) = body.as_object_mut() {
         obj.remove("max_output_tokens");
         obj.remove("stream");
         obj.remove("parallel_tool_calls");
-        obj.remove("reasoning");
     }
     body
 }
@@ -112,7 +112,8 @@ fn build_chat_request_body(
         body["tool_choice"] = serde_json::json!("auto");
     }
     apply_common_chat_thinking(config, &mut body);
-    apply_prompt_cache_fields(config, &mut body, messages, tools);
+    let system = system_text(messages);
+    apply_prompt_cache_fields(config, &mut body, &system);
     body
 }
 
@@ -137,10 +138,15 @@ fn apply_common_chat_thinking(config: OpenAiRequestConfig<'_>, body: &mut serde_
     }
 }
 
-fn build_responses_request_body(
+/// 构建 Responses 请求体的公共形状（model/instructions/input/tools/parallel_tool_calls）。
+///
+/// 不含 prompt cache 字段与 reasoning——由具体调用方按需追加。`system` 由调用方算好传入，
+/// 避免正式请求与 count_tokens 各自重复计算系统提示；count_tokens 路径也因此完全不触碰缓存键。
+fn build_responses_body(
     config: OpenAiRequestConfig<'_>,
     messages: &[LlmMessage],
     tools: &[ToolDefinition],
+    system: &str,
 ) -> serde_json::Value {
     let input: Vec<serde_json::Value> = messages
         .iter()
@@ -150,7 +156,7 @@ fn build_responses_request_body(
 
     let mut body = serde_json::json!({
         "model": config.model_id,
-        "instructions": system_text(messages),
+        "instructions": system,
         "input": input,
         "max_output_tokens": config.max_output_tokens,
         "stream": true,
@@ -160,9 +166,18 @@ fn build_responses_request_body(
         body["parallel_tool_calls"] = serde_json::json!(true);
         body["tools"] = responses_tools_json(tools, config.supports_strict_tool_use);
     }
-    apply_prompt_cache_fields(config, &mut body, messages, tools);
-    apply_responses_thinking(config, &mut body);
+    body
+}
 
+fn build_responses_request_body(
+    config: OpenAiRequestConfig<'_>,
+    messages: &[LlmMessage],
+    tools: &[ToolDefinition],
+) -> serde_json::Value {
+    let system = system_text(messages);
+    let mut body = build_responses_body(config, messages, tools, &system);
+    apply_prompt_cache_fields(config, &mut body, &system);
+    apply_responses_thinking(config, &mut body);
     body
 }
 
@@ -189,20 +204,14 @@ fn apply_responses_thinking(config: OpenAiRequestConfig<'_>, body: &mut serde_js
 fn apply_prompt_cache_fields(
     config: OpenAiRequestConfig<'_>,
     body: &mut serde_json::Value,
-    messages: &[LlmMessage],
-    tools: &[ToolDefinition],
+    system_text: &str,
 ) {
     if !config.supports_prompt_cache_key {
         return;
     }
 
-    body["prompt_cache_key"] = serde_json::json!(prompt_cache_key(
-        config.api_mode,
-        config.model_id,
-        messages,
-        tools,
-        config.supports_strict_tool_use
-    ));
+    body["prompt_cache_key"] =
+        serde_json::json!(prompt_cache_key(config.model_id, system_text, body));
     if let Some(retention) = config.prompt_cache_retention {
         body["prompt_cache_retention"] = serde_json::json!(prompt_cache_retention_wire_value(
             config.api_mode,
@@ -211,22 +220,18 @@ fn apply_prompt_cache_fields(
     }
 }
 
-fn prompt_cache_key(
-    api_mode: OpenAiApiMode,
-    model_id: &str,
-    messages: &[LlmMessage],
-    tools: &[ToolDefinition],
-    supports_strict_tool_use: bool,
-) -> String {
-    let sys = system_text(messages);
-    let tools_json = match api_mode {
-        OpenAiApiMode::ChatCompletions => tools_to_json(tools, supports_strict_tool_use),
-        OpenAiApiMode::Responses => responses_tools_json(tools, supports_strict_tool_use),
-    };
-    let tools_text = serde_json::to_string(&tools_json).unwrap_or_default();
+/// 派生 OpenAI prompt cache key：哈希 (model, system 文本, tools 序列化文本)。
+///
+/// tools 已由请求体构建器按当前 api_mode 组装进 `body["tools"]`，这里直接序列化复用，
+/// 不再按原始 `tools` 重建——避免每个请求把全部工具 schema 重建并序列化两次。
+fn prompt_cache_key(model_id: &str, system_text: &str, body: &serde_json::Value) -> String {
+    let tools_text = body
+        .get("tools")
+        .map(|tools| serde_json::to_string(tools).unwrap_or_default())
+        .unwrap_or_else(|| "[]".to_string());
     format!(
         "astrcode-{}",
-        stable_hash_hex(&[model_id, sys.as_str(), tools_text.as_str()])
+        stable_hash_hex(&[model_id, system_text, tools_text.as_str()])
     )
 }
 
@@ -521,5 +526,66 @@ mod tests {
         };
         let body = build_chat_request_body(config, &[], &[]);
         assert_eq!(body["thinking"]["type"], "enabled");
+    }
+
+    #[test]
+    fn prompt_cache_key_pinned_for_chat_and_responses() {
+        use astrcode_core::{
+            llm::LlmMessage,
+            thinking::ThinkingConfig,
+            tool::{ExecutionMode, ToolDefinition, ToolOrigin},
+        };
+        let thinking = ThinkingConfig {
+            enabled: false,
+            effort: None,
+            budget_tokens: None,
+        };
+        let sample_tool = || ToolDefinition {
+            name: "read".into(),
+            description: "read a file".into(),
+            parameters: serde_json::json!({"type":"object"}),
+            strict: false,
+            origin: ToolOrigin::Builtin,
+            execution_mode: ExecutionMode::Parallel,
+        };
+        let messages = [LlmMessage::system("sys"), LlmMessage::user("hi")];
+
+        let responses_body = build_responses_request_body(
+            OpenAiRequestConfig {
+                api_mode: OpenAiApiMode::Responses,
+                model_id: "pin-model",
+                max_output_tokens: 1024,
+                supports_stream_usage: false,
+                supports_prompt_cache_key: true,
+                supports_strict_tool_use: false,
+                prompt_cache_retention: None,
+                thinking: &thinking,
+                thinking_capability: None,
+            },
+            &messages,
+            &[sample_tool()],
+        );
+        let chat_body = build_chat_request_body(
+            OpenAiRequestConfig {
+                api_mode: OpenAiApiMode::ChatCompletions,
+                model_id: "pin-model",
+                max_output_tokens: 1024,
+                supports_stream_usage: false,
+                supports_prompt_cache_key: true,
+                supports_strict_tool_use: false,
+                prompt_cache_retention: None,
+                thinking: &thinking,
+                thinking_capability: None,
+            },
+            &messages,
+            &[sample_tool()],
+        );
+        // 缓存键是与上游网关的事实线缆契约，逐位钉死：重构（复用 body["tools"]、
+        // system_text 只算一次）后必须保持不变。
+        assert_eq!(
+            responses_body["prompt_cache_key"],
+            "astrcode-9c44520b23fa5dcf"
+        );
+        assert_eq!(chat_body["prompt_cache_key"], "astrcode-08191e4b2a01666b");
     }
 }
