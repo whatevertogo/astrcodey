@@ -11,8 +11,7 @@ use astrcode_core::{
     types::{Cursor, SessionId},
 };
 use astrcode_session_projection::{
-    AgentSessionLinkView, ProjectionError, SessionReadModel, SessionReadModelProjection,
-    SessionSummary, reduce,
+    AgentSessionLinkView, SessionReadModel, SessionReadModelProjection, SessionSummary, reduce,
 };
 use tokio::sync::Mutex;
 
@@ -254,16 +253,8 @@ impl EventStore for InMemoryEventStore {
             .get_mut(&event.session_id)
             .ok_or_else(|| StorageError::NotFound(event.session_id.clone()))?;
         let stored = StoredEvent::new(session.events.len() as u64, event);
-        reduce(&stored, &mut session.projection).map_err(|error| match error {
-            ProjectionError::StaleTranscriptRewrite {
-                source_seq,
-                current_seq,
-            } => StorageError::ConcurrentModification {
-                expected_seq: source_seq,
-                current_seq,
-            },
-            error => StorageError::InvalidEvent(error.to_string()),
-        })?;
+        reduce(&stored, &mut session.projection)
+            .map_err(|error| StorageError::InvalidEvent(error.to_string()))?;
         session.events.push(stored.clone());
         Ok(stored)
     }

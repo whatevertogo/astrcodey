@@ -718,7 +718,7 @@ impl Session {
 // ── Transcript rewrite ──
 
 impl Session {
-    /// 原子地记录 compact 并重写同一 session 的 provider transcript。
+    /// 记录 compact 并重写同一 session 的 provider transcript 前缀。
     pub async fn rewrite_transcript_for_compaction(
         &self,
         trigger_name: String,

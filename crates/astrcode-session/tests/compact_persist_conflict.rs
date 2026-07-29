@@ -1,4 +1,4 @@
-//! Compact 持久化 CAS 与 turn 内回退行为的集成测试。
+//! Compact 持久化与并发 tail 保留行为的集成测试。
 
 use std::sync::{
     Arc,
@@ -24,7 +24,6 @@ use astrcode_extension_sdk::runtime_ports::NoopRuntimePorts;
 use astrcode_session::{
     Session, SessionCreateParams, SessionExtensionPorts, SessionRuntimeServices,
     SessionRuntimeState,
-    compact::{PersistCompactionOutcome, persist_compact_result},
 };
 use astrcode_session_projection::{SessionReadModel, TranscriptArtifactView};
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
@@ -343,7 +342,7 @@ impl LlmProvider for RaceOnCompactLlm {
 }
 
 #[tokio::test]
-async fn persist_compact_result_rejects_a_stale_snapshot() {
+async fn transcript_rewrite_preserves_new_tail_events() {
     let (session, store) = spawn_session(Arc::new(StaticOkLlm), ContextSettings::default()).await;
     configure_system_prompt(&session).await;
     seed_history(&session, 2).await;
@@ -368,32 +367,37 @@ async fn persist_compact_result_rejects_a_stale_snapshot() {
         .await
         .unwrap();
 
-    let outcome = persist_compact_result(
-        &session,
-        &sample_compaction(),
-        "auto_threshold",
-        stale_seq,
-        CompactStrategy::Auto,
-    )
-    .await
-    .expect("a stale rewrite should be a typed outcome");
-    assert!(matches!(outcome, PersistCompactionOutcome::Stale));
+    session
+        .rewrite_transcript_for_compaction(
+            "auto_threshold".into(),
+            sample_compaction(),
+            stale_seq,
+            CompactStrategy::Auto,
+        )
+        .await
+        .expect("persist should preserve events after source_seq");
     assert_eq!(
         compact_event_count(store.as_ref(), session.id()).await,
-        0,
-        "a stale candidate must not append a rewrite event"
+        1,
+        "compact should append one rewrite event"
     );
     let provider_messages = projected_provider_messages(&session.read_model().await.unwrap());
     assert!(
         provider_messages
             .iter()
+            .any(|m| m.joined_display_text("\n").contains("kept tail")),
+        "retained compact messages should remain visible"
+    );
+    assert!(
+        provider_messages
+            .iter()
             .any(|m| m.joined_display_text("\n").contains("race event")),
-        "the event that made the candidate stale must remain in projection"
+        "events after source_seq must remain in projection"
     );
 }
 
 #[tokio::test]
-async fn auto_compact_discards_a_stale_candidate_and_uses_fresh_projection() {
+async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
     let main_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let session_to_race = Arc::new(std::sync::Mutex::new(None));
     let llm = Arc::new(RaceOnCompactLlm {
@@ -433,14 +437,14 @@ async fn auto_compact_discards_a_stale_candidate_and_uses_fresh_projection() {
         .pop()
         .expect("main provider request should be captured");
     assert!(
-        !main_messages.iter().any(is_compact_summary_message),
-        "a stale compact summary must not reach the provider"
+        main_messages.iter().any(is_compact_summary_message),
+        "provider request should use the compact summary"
     );
     assert!(
-        main_messages
+        !main_messages
             .iter()
             .any(|m| m.joined_display_text("\n").contains("old user 0")),
-        "the provider request should be rebuilt from the fresh projection"
+        "provider request should not contain compacted-away history"
     );
     assert!(
         main_messages
@@ -451,14 +455,14 @@ async fn auto_compact_discards_a_stale_candidate_and_uses_fresh_projection() {
 
     assert_eq!(
         compact_event_count(store.as_ref(), session.id()).await,
-        0,
-        "a stale candidate must not append a rewrite event"
+        1,
+        "compact should append one rewrite event"
     );
     let model = session.read_model().await.unwrap();
     let provider_messages = projected_provider_messages(&model);
     assert!(
-        !provider_messages.iter().any(is_compact_summary_message),
-        "projection must not contain a discarded summary"
+        provider_messages.iter().any(is_compact_summary_message),
+        "projection should contain the compact summary"
     );
     assert!(
         model.transcript.artifacts.iter().any(|artifact| matches!(
@@ -466,7 +470,7 @@ async fn auto_compact_discards_a_stale_candidate_and_uses_fresh_projection() {
             TranscriptArtifactView::SystemNote { text, .. }
                 if text == "concurrent race during compact"
         )),
-        "projection must preserve the event that invalidated compact"
+        "projection must preserve artifacts appended during compact"
     );
     assert!(
         provider_messages
@@ -501,8 +505,8 @@ async fn auto_compact_discards_a_stale_candidate_and_uses_fresh_projection() {
 }
 
 #[tokio::test]
-async fn compact_idle_session_skips_when_cursor_races_during_llm() {
-    use astrcode_session::compaction_run::{IdleCompactionOutcome, compact_idle_session};
+async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
+    use astrcode_session::compaction::{IdleCompactionOutcome, compact_idle_session};
 
     let session_to_race = Arc::new(std::sync::Mutex::new(None));
     let race_llm = Arc::new(RaceOnCompactLlm {
@@ -531,13 +535,13 @@ async fn compact_idle_session_skips_when_cursor_races_during_llm() {
 
     let outcome = compact_task.await.unwrap().unwrap();
     assert!(
-        matches!(outcome, IdleCompactionOutcome::Skipped { .. }),
-        "idle compact should discard a stale candidate, got {outcome:?}"
+        matches!(outcome, IdleCompactionOutcome::Compacted { .. }),
+        "idle compact should preserve the concurrent tail, got {outcome:?}"
     );
     assert_eq!(
         compact_event_count(store.as_ref(), session.as_ref().id()).await,
-        0,
-        "stale manual compact must not write a rewrite event"
+        1,
+        "manual compact should append one rewrite event"
     );
     let model = session.read_model().await.unwrap();
     assert!(
@@ -546,7 +550,7 @@ async fn compact_idle_session_skips_when_cursor_races_during_llm() {
             TranscriptArtifactView::SystemNote { text, .. }
                 if text == "race during idle compact"
         )),
-        "projection must preserve the event that invalidated compact"
+        "projection must preserve artifacts appended during compact"
     );
 }
 

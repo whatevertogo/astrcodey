@@ -2,10 +2,7 @@
 //!
 //! 负责 Session 生命周期、Turn 执行、工具管线、事件发射和 compact。
 
-pub mod compact;
-pub(crate) mod compact_circuit_breaker;
-pub(crate) mod compaction_coordinator;
-pub mod compaction_run;
+pub mod compaction;
 pub(crate) mod deferred_tools;
 pub(crate) mod early_tool_scheduler;
 pub(crate) mod llm_stream;

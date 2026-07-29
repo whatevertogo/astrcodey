@@ -1,6 +1,8 @@
 use astrcode_core::{event::LiveEventPayload, types::SessionId};
 use astrcode_protocol::events::ClientNotification;
-use astrcode_session::compaction_run::{IdleCompactionOutcome, compact_idle_session};
+use astrcode_session::compaction::{
+    IdleCompactionError, IdleCompactionOutcome, compact_idle_session,
+};
 
 use super::{CommandHandler, HandlerError, session_snapshot};
 
@@ -86,15 +88,8 @@ impl CommandHandler {
         let result = compact_idle_session(session, keep_recent_turns)
             .await
             .map_err(|error| match error {
-                astrcode_session::compaction_run::IdleCompactionError::Session(e) => {
-                    HandlerError::Session(e)
-                },
-                astrcode_session::compaction_run::IdleCompactionError::Extension(e) => {
-                    HandlerError::Extension(e)
-                },
-                astrcode_session::compaction_run::IdleCompactionError::Persist(e) => {
-                    HandlerError::InvalidRequest(e.to_string())
-                },
+                IdleCompactionError::Session(error) => HandlerError::Session(error),
+                IdleCompactionError::Extension(error) => HandlerError::Extension(error),
             })?;
 
         match result {

@@ -131,6 +131,31 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
         &event(
             7,
             &session_id,
+            DurableEventPayload::UserMessage {
+                message_id: new_message_id(),
+                text: "concurrent tail".into(),
+                attachments: vec![],
+            },
+        ),
+        &mut model,
+    )
+    .unwrap();
+    reduce(
+        &event(
+            8,
+            &session_id,
+            DurableEventPayload::RecapGenerated {
+                text: "tail artifact".into(),
+                source: "manual".into(),
+            },
+        ),
+        &mut model,
+    )
+    .unwrap();
+    reduce(
+        &event(
+            9,
+            &session_id,
             DurableEventPayload::TranscriptRewritten {
                 source_seq: 6,
                 messages: vec![LlmMessage::user(
@@ -151,8 +176,23 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
         &mut model,
     )
     .unwrap();
-    assert_eq!(model.transcript.messages.len(), 1);
-    assert!(model.transcript.artifacts.is_empty());
+    assert_eq!(model.transcript.messages.len(), 2);
+    assert!(
+        model.transcript.messages[0]
+            .message
+            .joined_display_text("\n")
+            .contains("summary")
+    );
+    assert!(
+        model.transcript.messages[1]
+            .message
+            .joined_display_text("\n")
+            .contains("concurrent tail")
+    );
+    assert!(matches!(
+        model.transcript.artifacts.as_slice(),
+        [TranscriptArtifactView::SystemNote { text, .. }] if text == "tail artifact"
+    ));
     assert_eq!(model.first_user_message().as_deref(), Some("inspect"));
 
     let fork_id = SessionId::new("session-fork");
@@ -165,7 +205,7 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
                 &fork_id,
                 DurableEventPayload::SessionForked {
                     source_session_id: session_id,
-                    source_cursor: "7".into(),
+                    source_cursor: "9".into(),
                     first_user_message: model.first_user_message(),
                     messages: model
                         .transcript
@@ -210,6 +250,27 @@ fn projection_rejects_invalid_stream_shapes_without_mutating_valid_state() {
             DurableEventPayload::TurnStarted
         )),
         Err(ProjectionError::SessionMismatch { .. })
+    ));
+    assert!(matches!(
+        projection.apply(&event(
+            1,
+            &session_id,
+            DurableEventPayload::TranscriptRewritten {
+                source_seq: 1,
+                messages: vec![LlmMessage::user("future rewrite")],
+                reason: TranscriptRewriteReason::Compaction(CompactionDetails {
+                    trigger: "manual".into(),
+                    pre_tokens: 10,
+                    post_tokens: 5,
+                    summary: "future".into(),
+                    transcript_path: None,
+                    strategy: CompactStrategy::Manual {
+                        keep_recent_turns: None,
+                    },
+                }),
+            }
+        )),
+        Err(ProjectionError::InvalidTranscriptRewriteSource { .. })
     ));
     assert_eq!(
         projection.apply(&event(2, &session_id, DurableEventPayload::TurnStarted)),

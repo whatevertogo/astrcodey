@@ -39,16 +39,7 @@ fn validate_storage_session_id(id: &SessionId) -> Result<(), StorageError> {
 }
 
 fn invalid_event(error: ProjectionError) -> StorageError {
-    match error {
-        ProjectionError::StaleTranscriptRewrite {
-            source_seq,
-            current_seq,
-        } => StorageError::ConcurrentModification {
-            expected_seq: source_seq,
-            current_seq,
-        },
-        error => StorageError::InvalidEvent(error.to_string()),
-    }
+    StorageError::InvalidEvent(error.to_string())
 }
 
 fn corrupt_projection(error: ProjectionError) -> StorageError {

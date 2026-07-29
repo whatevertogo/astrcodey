@@ -40,8 +40,8 @@ pub enum ProjectionError {
     DuplicateSessionStarted(u64),
     #[error("expected event seq {expected}, got {actual}")]
     NonContiguousSequence { expected: u64, actual: u64 },
-    #[error("transcript rewrite source seq {source_seq} does not match current seq {current_seq}")]
-    StaleTranscriptRewrite { source_seq: u64, current_seq: u64 },
+    #[error("transcript rewrite source seq {source_seq} exceeds current seq {current_seq}")]
+    InvalidTranscriptRewriteSource { source_seq: u64, current_seq: u64 },
 }
 
 impl SessionReadModelProjection {
@@ -339,7 +339,7 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
             messages,
             reason,
         } => {
-            apply_transcript_rewrite(model, messages, event_seq);
+            apply_transcript_rewrite(model, messages, *source_seq);
             match reason {
                 TranscriptRewriteReason::Compaction(details) => {
                     model.compactions.push(CompactionView {
@@ -402,17 +402,33 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
     Ok(())
 }
 
-fn apply_transcript_rewrite(model: &mut SessionReadModel, messages: &[LlmMessage], event_seq: u64) {
+fn apply_transcript_rewrite(
+    model: &mut SessionReadModel,
+    messages: &[LlmMessage],
+    source_seq: u64,
+) {
+    let tail = model
+        .transcript
+        .messages
+        .iter()
+        .filter(|message| message.updated_seq > source_seq)
+        .cloned();
     model.transcript.messages = messages
         .iter()
         .cloned()
         .map(|message| SequencedLlmMessage {
             message,
-            updated_seq: event_seq,
+            // Rewrite output represents the frozen prefix, not a new tail fact.
+            // Anchoring it here also lets a later concurrent rewrite replace it cleanly.
+            updated_seq: source_seq,
             source: None,
         })
+        .chain(tail)
         .collect();
-    model.transcript.artifacts.clear();
+    model
+        .transcript
+        .artifacts
+        .retain(|artifact| artifact.seq() > source_seq);
 }
 
 /// 校验事件能否作为读模型的下一条事实，不修改读模型。
@@ -439,8 +455,8 @@ fn validate_next_event_details(
         return Err(ProjectionError::DuplicateSessionStarted(seq));
     }
     if let DurableEventPayload::TranscriptRewritten { source_seq, .. } = &event.payload {
-        if *source_seq != model.stats.last_seq {
-            return Err(ProjectionError::StaleTranscriptRewrite {
+        if *source_seq > model.stats.last_seq {
+            return Err(ProjectionError::InvalidTranscriptRewriteSource {
                 source_seq: *source_seq,
                 current_seq: model.stats.last_seq,
             });

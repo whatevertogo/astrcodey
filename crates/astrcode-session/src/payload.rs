@@ -40,7 +40,7 @@ pub fn system_prompt_configured_payload(
     }
 }
 
-/// 构造原子的 transcript 重写事件。
+/// 构造 transcript 前缀重写事件；`source_seq` 之后的 tail 由 projection 保留。
 pub fn transcript_rewritten_payload(
     trigger: impl Into<String>,
     compaction: &CompactResult,

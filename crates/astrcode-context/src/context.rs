@@ -13,7 +13,7 @@ pub const POST_COMPACT_CONTEXT_MARKER: &str = "<post_compact_context>";
 
 /// 同一 durable revision 下的完整 provider context。
 ///
-/// Compact candidate 必须从一个 snapshot 生成，并用 `source_seq` 原子提交。
+/// Compact candidate 从该 snapshot 生成；提交时 `source_seq` 用于保留之后到达的 transcript tail。
 #[derive(Debug, Clone)]
 pub struct ContextSnapshot {
     pub source_seq: u64,

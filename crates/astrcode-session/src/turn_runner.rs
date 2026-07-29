@@ -24,9 +24,9 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    compaction_coordinator::{
-        CompactionHost, PreparedProviderHistory, build_auto_compaction_request,
-        prepare_provider_history, run_reactive_compaction,
+    compaction::{
+        CompactionHost, PreparedProviderHistory, plan_auto_compaction, prepare_provider_history,
+        run_reactive_compaction,
     },
     llm_stream::{StreamOutcome, consume_llm_stream, non_empty_reasoning_content},
     projection_context::context_snapshot,
@@ -371,22 +371,11 @@ impl TurnLoop {
         let snapshot = context_snapshot(&model);
         let llm = Arc::clone(host.llm);
         let visible_tools = state.visible_tools();
-        let compaction_request =
-            build_auto_compaction_request(&host, &snapshot, &visible_tools).await;
+        let compaction_plan = plan_auto_compaction(&host, &snapshot, &visible_tools).await;
 
-        let PreparedProviderHistory {
-            snapshot,
-            messages,
-            outcome: _,
-        } = prepare_provider_history(
-            &host,
-            state,
-            snapshot,
-            turn_id,
-            compaction_request,
-            publisher,
-        )
-        .await?;
+        let PreparedProviderHistory { snapshot, messages } =
+            prepare_provider_history(&host, state, snapshot, turn_id, compaction_plan, publisher)
+                .await?;
 
         let mut messages = snapshot.request_messages(messages);
         if let Some(reminder) = state.tool_deduplicator().check_reminder() {

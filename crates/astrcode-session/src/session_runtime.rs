@@ -9,7 +9,7 @@ use parking_lot::Mutex;
 use tokio::sync::oneshot;
 
 use crate::{
-    compact_circuit_breaker::CompactCircuitBreaker, permission::ApprovalHistoryStore,
+    compaction::CompactCircuitBreaker, permission::ApprovalHistoryStore,
     session_tools::SessionToolCache, tool_exec::InMemoryFileObservationStore,
 };
 
@@ -167,11 +167,11 @@ impl SessionRuntimeState {
         *lock_parking(&self.extra_system_prompt) = prompt;
     }
 
-    pub fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {
+    pub(crate) fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {
         &self.compact_circuit_breaker
     }
 
-    pub fn configure_compact_circuit_breaker(&self, threshold: u32, cooldown: Duration) {
+    pub(crate) fn configure_compact_circuit_breaker(&self, threshold: u32, cooldown: Duration) {
         lock_parking(&self.compact_circuit_breaker).reconfigure(threshold, cooldown);
     }
 

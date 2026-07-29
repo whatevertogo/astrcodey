@@ -87,7 +87,10 @@ pub const TOOL_CALL_CANCELLED_SOURCE: &str = "tool_call_cancelled";
 pub struct SequencedLlmMessage {
     /// LLM 协议消息内容（内部结构）。
     pub message: LlmMessage,
-    /// 最近一次将该消息更新到 durable 时序中的 seq。
+    /// 消息所属的 durable 时序边界。
+    ///
+    /// 普通消息记录最近更新它的事件 seq；rewrite 输出锚定到其 `source_seq`，
+    /// 以便后续 rewrite 能稳定区分前缀与并发 tail。
     pub updated_seq: u64,
     /// 消息来源标记，用于前端区分渲染。
     ///
