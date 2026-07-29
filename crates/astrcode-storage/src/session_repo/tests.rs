@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use astrcode_core::types::SessionId;
+use astrcode_core::{
+    event::{DurableEvent, DurableEventPayload, Phase},
+    types::{SessionId, TurnId},
+};
 use tempfile::tempdir;
 
 use super::FileSystemSessionRepository;
@@ -78,4 +81,88 @@ async fn filesystem_repository_validates_and_orders_appends_before_commit() {
     assert_eq!(model.stats.event_count, 33);
     assert_eq!(model.transcript.messages.len(), 32);
     assert_eq!(repo.replay_events(&session_id).await.unwrap().len(), 33);
+}
+
+#[tokio::test]
+async fn filesystem_repository_cold_and_hot_summaries_are_equivalent() {
+    let dir = tempdir().unwrap();
+    let session_id = SessionId::new("session-summary");
+    let turn_id = TurnId::new("turn-summary");
+    let repo = FileSystemSessionRepository::with_projects_base(dir.path().into());
+
+    repo.create_session(started_event(&session_id))
+        .await
+        .unwrap();
+    repo.append_event(user_event(&session_id, "summary title"))
+        .await
+        .unwrap();
+    repo.append_event(DurableEvent::session(
+        session_id.clone(),
+        DurableEventPayload::ModelIdChanged {
+            model_id: "model-b".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    repo.append_event(DurableEvent::turn(
+        session_id.clone(),
+        turn_id,
+        DurableEventPayload::TurnStarted,
+    ))
+    .await
+    .unwrap();
+    repo.sync_durable_events(&session_id).await.unwrap();
+
+    let hot = repo.list_session_summaries().await.unwrap();
+    assert_eq!(hot.len(), 1);
+    assert_eq!(hot[0].model_id, "model-b");
+    assert_eq!(hot[0].phase, Phase::Thinking);
+    assert_eq!(hot[0].first_user_message.as_deref(), Some("summary title"));
+    drop(repo);
+
+    let reopened = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    let cold = reopened.list_session_summaries().await.unwrap();
+    assert_eq!(cold, hot);
+}
+
+#[tokio::test]
+async fn filesystem_repository_rejects_snapshot_from_another_session() {
+    let dir = tempdir().unwrap();
+    let source_id = SessionId::new("session-snapshot-source");
+    let target_id = SessionId::new("session-snapshot-target");
+    let repo = FileSystemSessionRepository::with_projects_base(dir.path().into());
+
+    repo.create_session(started_event(&source_id))
+        .await
+        .unwrap();
+    repo.append_event(user_event(&source_id, "source message"))
+        .await
+        .unwrap();
+    repo.checkpoint(&source_id, &"1".into()).await.unwrap();
+
+    repo.create_session(started_event(&target_id))
+        .await
+        .unwrap();
+    repo.append_event(user_event(&target_id, "target message"))
+        .await
+        .unwrap();
+    repo.sync_durable_events(&target_id).await.unwrap();
+
+    let source_dir = repo.find_session_dir(&source_id).await.unwrap();
+    let target_dir = repo.find_session_dir(&target_id).await.unwrap();
+    drop(repo);
+
+    let target_snapshots = target_dir.join("snapshots");
+    tokio::fs::create_dir_all(&target_snapshots).await.unwrap();
+    tokio::fs::copy(
+        source_dir.join("snapshots/snapshot-1.json"),
+        target_snapshots.join("snapshot-1.json"),
+    )
+    .await
+    .unwrap();
+
+    let reopened = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    let model = reopened.session_read_model(&target_id).await.unwrap();
+    assert_eq!(model.identity.session_id, target_id);
+    assert_eq!(model.first_user_message(), Some("target message"));
 }

@@ -1,6 +1,6 @@
 //! Session read-model state derived from durable events.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use astrcode_core::{
     event::{ParentSessionRef, Phase, SessionStarted, SystemPromptSource},
@@ -71,6 +71,13 @@ pub struct CompactionView {
     pub source_seq: u64,
     /// compact 策略。
     pub strategy: astrcode_core::compaction::CompactStrategy,
+}
+
+/// 创建 fork session 时记录的来源位置。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ForkSourceRef {
+    pub session_id: SessionId,
+    pub cursor: Cursor,
 }
 
 /// 工具执行失败消息的读模型来源标记。
@@ -168,6 +175,8 @@ pub struct SessionIdentity {
     pub working_dir: String,
     pub model_id: String,
     pub parent: Option<ParentSessionRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forked_from: Option<ForkSourceRef>,
     pub tool_selection: SessionToolSelection,
     pub source_extension: Option<String>,
 }
@@ -198,6 +207,8 @@ pub struct SessionTranscript {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionExecutionState {
     pub phase: Phase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unsettled_turn_id: Option<TurnId>,
     pub pending_tool_calls: HashSet<ToolCallId>,
     pub pending_tool_approvals: BTreeMap<ToolCallId, PendingToolApprovalView>,
 }
@@ -214,6 +225,7 @@ impl SessionReadModel {
                 working_dir: started.working_dir.clone(),
                 model_id: started.model_id.clone(),
                 parent: started.parent.clone(),
+                forked_from: None,
                 tool_selection: started.tool_selection.clone(),
                 source_extension: started.source_extension.clone(),
             },
@@ -247,8 +259,8 @@ impl SessionReadModel {
     }
 
     /// 首条用户消息的文本内容，无用户消息时返回 None。
-    pub fn first_user_message(&self) -> Option<String> {
-        self.transcript.first_user_message.clone()
+    pub fn first_user_message(&self) -> Option<&str> {
+        self.transcript.first_user_message.as_deref()
     }
 
     /// 生成会话列表摘要，只复制列表接口需要的少量字段。
@@ -266,7 +278,7 @@ impl SessionReadModel {
                 .map(|parent| parent.session_id.clone()),
             phase: self.execution.phase,
             latest_cursor: self.cursor(),
-            first_user_message: self.first_user_message(),
+            first_user_message: self.first_user_message().map(str::to_owned),
             source_extension: self.identity.source_extension.clone(),
         }
     }
@@ -292,7 +304,7 @@ impl SessionReadModel {
     }
 
     fn pending_requested_tool_calls(&self) -> Vec<UnansweredToolCall> {
-        let mut remaining = self.execution.pending_tool_calls.clone();
+        let mut seen = HashSet::new();
         let mut pending = Vec::new();
 
         for message in &self.transcript.messages {
@@ -303,7 +315,9 @@ impl SessionReadModel {
                 let LlmContent::ToolCall { call_id, name, .. } = content else {
                     continue;
                 };
-                if remaining.remove(call_id.as_str()) {
+                if self.execution.pending_tool_calls.contains(call_id.as_str())
+                    && seen.insert(call_id.as_str())
+                {
                     pending.push(UnansweredToolCall {
                         call_id: call_id.clone(),
                         tool_name: name.clone(),
@@ -328,20 +342,7 @@ impl SessionReadModel {
         };
 
         let assistant = &self.transcript.messages[last_assistant_index].message;
-        let mut pending = assistant
-            .content
-            .iter()
-            .filter_map(|content| match content {
-                LlmContent::ToolCall { call_id, name, .. } => Some((
-                    call_id.clone(),
-                    UnansweredToolCall {
-                        call_id: call_id.clone(),
-                        tool_name: name.clone(),
-                    },
-                )),
-                _ => None,
-            })
-            .collect::<HashMap<_, _>>();
+        let mut answered = HashSet::new();
 
         for message in self
             .transcript
@@ -356,11 +357,26 @@ impl SessionReadModel {
                 let LlmContent::ToolResult { tool_call_id, .. } = content else {
                     continue;
                 };
-                pending.remove(tool_call_id);
+                answered.insert(tool_call_id.as_str());
             }
         }
 
-        pending.into_values().collect()
+        let mut seen = HashSet::new();
+        assistant
+            .content
+            .iter()
+            .filter_map(|content| match content {
+                LlmContent::ToolCall { call_id, name, .. }
+                    if !answered.contains(call_id.as_str()) && seen.insert(call_id.as_str()) =>
+                {
+                    Some(UnansweredToolCall {
+                        call_id: call_id.clone(),
+                        tool_name: name.clone(),
+                    })
+                },
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -387,10 +403,4 @@ pub struct SessionSummary {
     pub first_user_message: Option<String>,
     /// 创建该子 session 的扩展 ID。
     pub source_extension: Option<String>,
-}
-
-impl From<SessionReadModel> for SessionSummary {
-    fn from(model: SessionReadModel) -> Self {
-        model.to_summary()
-    }
 }

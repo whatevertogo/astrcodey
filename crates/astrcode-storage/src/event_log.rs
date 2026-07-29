@@ -14,12 +14,13 @@ use std::{
 };
 
 use astrcode_core::event::{DurableEvent, DurableEventPayload, StoredEvent};
+use astrcode_session_projection::{SessionSummary, SessionSummaryProjection};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::StorageError;
 
-/// `(first_event, last_event, first_user_message)` from a single log scan.
-pub(crate) type EventLogEnds = (Option<StoredEvent>, Option<StoredEvent>, Option<String>);
+/// `(first_event, last_event)` from a single log scan.
+type EventLogEnds = (Option<StoredEvent>, Option<StoredEvent>);
 
 async fn run_blocking_io<F, T>(f: F) -> Result<T, StorageError>
 where
@@ -171,6 +172,46 @@ fn parse_event_line(
     Ok(event)
 }
 
+fn scan_events_at_path(
+    path: &Path,
+    mut visit: impl FnMut(StoredEvent) -> Result<bool, StorageError>,
+) -> Result<(), StorageError> {
+    let file = File::open(path).map_err(|e| {
+        StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut validator = EventStreamValidator::default();
+    let mut line_number = 0usize;
+    loop {
+        let mut line = String::new();
+        let bytes_read = reader.read_line(&mut line).map_err(|e| {
+            StorageError::Io(std::io::Error::new(e.kind(), enhance_read_error(path, e)))
+        })?;
+        if bytes_read == 0 {
+            break;
+        }
+        if !line.ends_with('\n') {
+            tracing::warn!(
+                path = %path.display(),
+                discarded_bytes = bytes_read,
+                "ignored incomplete trailing event log record while scanning"
+            );
+            break;
+        }
+        if line.trim().is_empty() {
+            continue;
+        }
+        line_number += 1;
+        let event = parse_event_line(path, line_number, &line)?;
+        validator.observe(&event, line_number, path)?;
+        if !visit(event)? {
+            return Ok(());
+        }
+    }
+    validator.finish(path)?;
+    Ok(())
+}
+
 fn replay_events_at_path(
     path: &Path,
     after_seq: Option<u64>,
@@ -179,93 +220,50 @@ fn replay_events_at_path(
     if max_events == Some(0) {
         return Ok(Vec::new());
     }
-    let file = File::open(path).map_err(|e| {
-        StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
-    })?;
-    let mut reader = BufReader::new(file);
     let mut events = Vec::new();
-    let mut validator = EventStreamValidator::default();
-    let mut line_number = 0usize;
-    loop {
-        let mut line = String::new();
-        let bytes_read = reader.read_line(&mut line).map_err(|e| {
-            StorageError::Io(std::io::Error::new(e.kind(), enhance_read_error(path, e)))
-        })?;
-        if bytes_read == 0 {
-            break;
-        }
-        if !line.ends_with('\n') {
-            tracing::warn!(
-                path = %path.display(),
-                discarded_bytes = bytes_read,
-                "ignored incomplete trailing event log record while replaying"
-            );
-            break;
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-        line_number += 1;
-        let event = parse_event_line(path, line_number, &line)?;
-        validator.observe(&event, line_number, path)?;
+    scan_events_at_path(path, |event| {
         if after_seq.is_none_or(|seq| event.seq > seq) {
             events.push(event);
-            if max_events.is_some_and(|limit| events.len() >= limit) {
-                return Ok(events);
-            }
         }
-    }
-    validator.finish(path)?;
+        Ok(!max_events.is_some_and(|limit| events.len() >= limit))
+    })?;
     Ok(events)
 }
 
 fn read_first_and_last_at_path(path: &Path) -> Result<EventLogEnds, StorageError> {
     if !path.exists() {
-        return Ok((None, None, None));
+        return Ok((None, None));
     }
-    let file = File::open(path).map_err(|e| {
-        StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
-    })?;
-    let mut reader = BufReader::new(file);
     let mut first: Option<StoredEvent> = None;
     let mut last: Option<StoredEvent> = None;
-    let mut first_user: Option<String> = None;
-    let mut validator = EventStreamValidator::default();
-    let mut line_number = 0usize;
-    loop {
-        let mut line = String::new();
-        let bytes_read = reader.read_line(&mut line).map_err(|e| {
-            StorageError::Io(std::io::Error::new(e.kind(), enhance_read_error(path, e)))
-        })?;
-        if bytes_read == 0 {
-            break;
-        }
-        if !line.ends_with('\n') {
-            tracing::warn!(
-                path = %path.display(),
-                discarded_bytes = bytes_read,
-                "ignored incomplete trailing event log record while reading summary"
-            );
-            break;
-        }
-        if line.trim().is_empty() {
-            continue;
-        }
-        line_number += 1;
-        let event = parse_event_line(path, line_number, &line)?;
-        validator.observe(&event, line_number, path)?;
+    scan_events_at_path(path, |event| {
         if first.is_none() {
             first = Some(event.clone());
         }
-        if first_user.is_none() {
-            if let DurableEventPayload::UserMessage { text, .. } = &event.payload {
-                first_user = Some(text.clone());
-            }
-        }
         last = Some(event);
+        Ok(true)
+    })?;
+    Ok((first, last))
+}
+
+fn read_summary_at_path(
+    path: &Path,
+    session_id: astrcode_core::types::SessionId,
+) -> Result<Option<SessionSummary>, StorageError> {
+    if !path.exists() {
+        return Ok(None);
     }
-    validator.finish(path)?;
-    Ok((first, last, first_user))
+    let mut projection = SessionSummaryProjection::new(session_id);
+    scan_events_at_path(path, |event| {
+        projection
+            .apply(&event)
+            .map_err(|error| StorageError::CorruptLog(format!("{}: {error}", path.display())))?;
+        Ok(true)
+    })?;
+    projection
+        .snapshot()
+        .map(Some)
+        .map_err(|error| StorageError::CorruptLog(format!("{}: {error}", path.display())))
 }
 
 // ── Write-side commands ───────────────────────────────────────────────────────
@@ -491,7 +489,7 @@ fn open_at_path(path: PathBuf) -> Result<WriterState, StorageError> {
         .into());
     }
     recover_incomplete_tail(&path)?;
-    let (first, last, _) = read_first_and_last_at_path(&path)?;
+    let (first, last) = read_first_and_last_at_path(&path)?;
     let first = first
         .as_ref()
         .ok_or_else(|| StorageError::CorruptLog(format!("{} is empty", path.display())))?;
@@ -690,11 +688,13 @@ impl EventLog {
             .map_err(|_| StorageError::Io(std::io::Error::other("event log writer dropped")))?
     }
 
-    /// Read the first event, last event, and first user message from the log
-    /// in a single pass. Returns `(first, last, first_user_message)`.
-    pub(crate) async fn read_first_and_last(path: &Path) -> Result<EventLogEnds, StorageError> {
+    /// Project a session-list summary directly from an event log.
+    pub(crate) async fn read_summary(
+        path: &Path,
+        session_id: astrcode_core::types::SessionId,
+    ) -> Result<Option<SessionSummary>, StorageError> {
         let path = path.to_path_buf();
-        run_blocking_io(move || read_first_and_last_at_path(&path)).await
+        run_blocking_io(move || read_summary_at_path(&path, session_id)).await
     }
 }
 

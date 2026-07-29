@@ -1,19 +1,34 @@
 use astrcode_core::{
     compaction::CompactStrategy,
     event::{
-        CompactionDetails, DurableEvent, DurableEventPayload, PersistedSystemPrompt,
+        CompactionDetails, DurableEvent, DurableEventPayload, PersistedSystemPrompt, Phase,
         SessionStarted, StoredEvent, SystemPromptSource, TranscriptRewriteReason,
     },
     llm::{LlmMessage, LlmRole},
+    permission::{ApprovalDecision, ApprovalSource},
     tool::{SessionToolSelection, ToolResult},
-    types::{SessionId, ToolCallId, new_message_id},
+    types::{SessionId, ToolCallId, TurnId, new_message_id},
 };
 
 use super::{ProjectionError, SessionReadModelProjection, reduce, replay};
-use crate::TranscriptArtifactView;
+use crate::{
+    AgentSessionStatus, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE, TranscriptArtifactView,
+};
 
 fn event(seq: u64, session_id: &SessionId, payload: DurableEventPayload) -> StoredEvent {
     StoredEvent::new(seq, DurableEvent::session(session_id.clone(), payload))
+}
+
+fn turn_event(
+    seq: u64,
+    session_id: &SessionId,
+    turn_id: &TurnId,
+    payload: DurableEventPayload,
+) -> StoredEvent {
+    StoredEvent::new(
+        seq,
+        DurableEvent::turn(session_id.clone(), turn_id.clone(), payload),
+    )
 }
 
 fn started(seq: u64, session_id: &SessionId) -> StoredEvent {
@@ -193,7 +208,7 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
         model.transcript.artifacts.as_slice(),
         [TranscriptArtifactView::SystemNote { text, .. }] if text == "tail artifact"
     ));
-    assert_eq!(model.first_user_message().as_deref(), Some("inspect"));
+    assert_eq!(model.first_user_message(), Some("inspect"));
 
     let fork_id = SessionId::new("session-fork");
     let fork = replay(
@@ -206,7 +221,7 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
                 DurableEventPayload::SessionForked {
                     source_session_id: session_id,
                     source_cursor: "9".into(),
-                    first_user_message: model.first_user_message(),
+                    first_user_message: model.first_user_message().map(str::to_owned),
                     messages: model
                         .transcript
                         .messages
@@ -218,7 +233,334 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
         ],
     )
     .unwrap();
-    assert_eq!(fork.first_user_message().as_deref(), Some("inspect"));
+    assert_eq!(fork.first_user_message(), Some("inspect"));
+}
+
+#[test]
+fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
+    let session_id = SessionId::new("session-matrix");
+    let turn_id = TurnId::new("turn-a");
+    let other_turn_id = TurnId::new("turn-b");
+    let first_call_id = ToolCallId::new("call-b");
+    let second_call_id = ToolCallId::new("call-a");
+    let completed_child_id = SessionId::new("child-completed");
+    let failed_child_id = SessionId::new("child-failed");
+    let mut projection = SessionReadModelProjection::new(session_id.clone());
+
+    let events = vec![
+        started(0, &session_id),
+        event(
+            1,
+            &session_id,
+            DurableEventPayload::ModelIdChanged {
+                model_id: "model-b".into(),
+            },
+        ),
+        event(
+            2,
+            &session_id,
+            DurableEventPayload::SessionToolsConfigured {
+                selection: SessionToolSelection::All {
+                    except: vec!["write".into()],
+                },
+            },
+        ),
+        event(
+            3,
+            &session_id,
+            DurableEventPayload::SystemPromptConfigured {
+                text: "replacement system".into(),
+                fingerprint: "replacement fingerprint".into(),
+                extra_system_prompt: None,
+                source: SystemPromptSource::Inherited,
+            },
+        ),
+        event(
+            4,
+            &session_id,
+            DurableEventPayload::AgentSessionSpawned {
+                child_session_id: completed_child_id.clone(),
+                agent_name: "researcher".into(),
+                task: "inspect".into(),
+                tool_selection: None,
+                tool_call_id: ToolCallId::new("agent-call-completed"),
+            },
+        ),
+        event(
+            5,
+            &session_id,
+            DurableEventPayload::AgentSessionCompleted {
+                child_session_id: completed_child_id.clone(),
+                final_session_id: completed_child_id.clone(),
+                summary: "done".into(),
+            },
+        ),
+        event(
+            6,
+            &session_id,
+            DurableEventPayload::AgentSessionSpawned {
+                child_session_id: failed_child_id.clone(),
+                agent_name: "reviewer".into(),
+                task: "review".into(),
+                tool_selection: None,
+                tool_call_id: ToolCallId::new("agent-call-failed"),
+            },
+        ),
+        event(
+            7,
+            &session_id,
+            DurableEventPayload::AgentSessionFailed {
+                child_session_id: failed_child_id.clone(),
+                final_session_id: failed_child_id.clone(),
+                error: "failed".into(),
+            },
+        ),
+        turn_event(8, &session_id, &turn_id, DurableEventPayload::TurnStarted),
+        turn_event(
+            9,
+            &session_id,
+            &turn_id,
+            DurableEventPayload::UserMessage {
+                message_id: new_message_id(),
+                text: "matrix prompt".into(),
+                attachments: vec![],
+            },
+        ),
+        turn_event(
+            10,
+            &session_id,
+            &turn_id,
+            DurableEventPayload::AssistantMessageCompleted {
+                message_id: new_message_id(),
+                text: "running tools".into(),
+                reasoning_content: None,
+            },
+        ),
+        turn_event(
+            11,
+            &session_id,
+            &turn_id,
+            DurableEventPayload::ToolCallRequested {
+                call_id: first_call_id.clone(),
+                tool_name: "read-b".into(),
+                arguments: serde_json::json!({}),
+                raw_arguments: None,
+            },
+        ),
+        turn_event(
+            12,
+            &session_id,
+            &turn_id,
+            DurableEventPayload::ToolCallRequested {
+                call_id: second_call_id.clone(),
+                tool_name: "read-a".into(),
+                arguments: serde_json::json!({}),
+                raw_arguments: None,
+            },
+        ),
+        turn_event(
+            13,
+            &session_id,
+            &turn_id,
+            DurableEventPayload::ToolApprovalRequested {
+                call_id: first_call_id.clone(),
+                tool_name: "read-b".into(),
+                prompt: "approve read-b".into(),
+                rule_key: Some("read-b:*".into()),
+                source: ApprovalSource::Core,
+                arguments: serde_json::json!({}),
+            },
+        ),
+    ];
+    for event in &events {
+        projection.apply(event).unwrap();
+    }
+
+    let pending = projection.snapshot().unwrap();
+    assert_eq!(pending.identity.model_id, "model-b");
+    assert_eq!(
+        pending.identity.tool_selection,
+        SessionToolSelection::All {
+            except: vec!["write".into()]
+        }
+    );
+    assert_eq!(pending.system_prompt.text, "replacement system");
+    assert_eq!(pending.system_prompt.source, SystemPromptSource::Inherited);
+    assert_eq!(pending.execution.phase, Phase::CallingTool);
+    assert_eq!(pending.execution.unsettled_turn_id.as_ref(), Some(&turn_id));
+    assert_eq!(
+        pending
+            .tool_calls_needing_interruption()
+            .into_iter()
+            .map(|call| call.call_id)
+            .collect::<Vec<_>>(),
+        vec![first_call_id.to_string(), second_call_id.to_string()]
+    );
+    let mut tail_only = pending.clone();
+    tail_only.execution.pending_tool_calls.clear();
+    assert_eq!(
+        tail_only
+            .tool_calls_needing_interruption()
+            .into_iter()
+            .map(|call| call.call_id)
+            .collect::<Vec<_>>(),
+        vec![first_call_id.to_string(), second_call_id.to_string()]
+    );
+    assert_eq!(
+        pending
+            .execution
+            .pending_tool_approvals
+            .get(&first_call_id)
+            .map(|approval| approval.prompt.as_str()),
+        Some("approve read-b")
+    );
+
+    let terminal_events = vec![
+        turn_event(
+            14,
+            &session_id,
+            &turn_id,
+            DurableEventPayload::ToolApprovalResolved {
+                call_id: first_call_id.clone(),
+                decision: ApprovalDecision::AllowOnce,
+                detail: None,
+            },
+        ),
+        turn_event(
+            15,
+            &session_id,
+            &turn_id,
+            DurableEventPayload::ToolCallFailed {
+                call_id: first_call_id,
+                tool_name: "read-b".into(),
+                error: "read failed".into(),
+                metadata: Default::default(),
+                duration_ms: Some(1),
+                arguments: "{}".into(),
+                arguments_json: Some(serde_json::json!({})),
+            },
+        ),
+        turn_event(
+            16,
+            &session_id,
+            &turn_id,
+            DurableEventPayload::ToolCallCancelled {
+                call_id: second_call_id,
+                tool_name: "read-a".into(),
+                reason: "interrupted".into(),
+                duration_ms: Some(2),
+                arguments: "{}".into(),
+                arguments_json: Some(serde_json::json!({})),
+            },
+        ),
+        turn_event(
+            17,
+            &session_id,
+            &other_turn_id,
+            DurableEventPayload::TurnCompleted {
+                finish_reason: "stale".into(),
+            },
+        ),
+    ];
+    for event in &terminal_events {
+        projection.apply(event).unwrap();
+    }
+
+    let before_matching_completion = projection.snapshot().unwrap();
+    assert_eq!(before_matching_completion.execution.phase, Phase::Thinking);
+    assert_eq!(
+        before_matching_completion
+            .execution
+            .unsettled_turn_id
+            .as_ref(),
+        Some(&turn_id)
+    );
+    assert!(
+        before_matching_completion
+            .execution
+            .pending_tool_calls
+            .is_empty()
+    );
+    assert!(
+        before_matching_completion
+            .execution
+            .pending_tool_approvals
+            .is_empty()
+    );
+    assert_eq!(
+        before_matching_completion.agent_sessions[0].status,
+        AgentSessionStatus::Completed
+    );
+    assert_eq!(
+        before_matching_completion.agent_sessions[0]
+            .summary
+            .as_deref(),
+        Some("done")
+    );
+    assert_eq!(
+        before_matching_completion.agent_sessions[1].status,
+        AgentSessionStatus::Failed
+    );
+    assert_eq!(
+        before_matching_completion.agent_sessions[1]
+            .error
+            .as_deref(),
+        Some("failed")
+    );
+    assert_eq!(
+        before_matching_completion.transcript.messages[2]
+            .source
+            .as_deref(),
+        Some(TOOL_CALL_FAILED_SOURCE)
+    );
+    assert_eq!(
+        before_matching_completion.transcript.messages[3]
+            .source
+            .as_deref(),
+        Some(TOOL_CALL_CANCELLED_SOURCE)
+    );
+
+    projection
+        .apply(&turn_event(
+            18,
+            &session_id,
+            &turn_id,
+            DurableEventPayload::TurnCompleted {
+                finish_reason: "stop".into(),
+            },
+        ))
+        .unwrap();
+    let completed = projection.snapshot().unwrap();
+    assert_eq!(completed.execution.phase, Phase::Idle);
+    assert_eq!(completed.execution.unsettled_turn_id, None);
+
+    let fork_id = SessionId::new("session-fork-matrix");
+    let fork = replay(
+        fork_id.clone(),
+        &[
+            started(0, &fork_id),
+            event(
+                1,
+                &fork_id,
+                DurableEventPayload::SessionForked {
+                    source_session_id: session_id.clone(),
+                    source_cursor: "18".into(),
+                    first_user_message: completed.first_user_message().map(str::to_owned),
+                    messages: completed
+                        .transcript
+                        .messages
+                        .iter()
+                        .map(|message| message.message.clone())
+                        .collect(),
+                },
+            ),
+        ],
+    )
+    .unwrap();
+    let forked_from = fork.identity.forked_from.as_ref().unwrap();
+    assert_eq!(forked_from.session_id, session_id);
+    assert_eq!(forked_from.cursor, "18");
+    assert_eq!(fork.first_user_message(), Some("matrix prompt"));
 }
 
 #[test]

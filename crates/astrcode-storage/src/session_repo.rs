@@ -370,7 +370,7 @@ impl FileSystemSessionRepository {
     ) -> Result<SessionReadModel, StorageError> {
         // Snapshot first because it's faster than replaying the full event log.
         if let Some(snapshot) = snapshot_mgr.latest_snapshot().await? {
-            match restore_from_snapshot(log, snapshot).await {
+            match restore_from_snapshot(session_id, log, snapshot).await {
                 Ok(model) => return Ok(model),
                 Err(error) => {
                     tracing::warn!(
@@ -387,9 +387,16 @@ impl FileSystemSessionRepository {
 }
 
 async fn restore_from_snapshot(
+    expected_session_id: &SessionId,
     log: &EventLog,
     snapshot: crate::snapshot::SessionProjectionSnapshot,
 ) -> Result<SessionReadModel, StorageError> {
+    if snapshot.model.identity.session_id != *expected_session_id {
+        return Err(StorageError::CorruptLog(format!(
+            "projection snapshot belongs to session {}, expected {}",
+            snapshot.model.identity.session_id, expected_session_id
+        )));
+    }
     let latest_seq = snapshot.model.stats.last_seq;
 
     // `count()` returns the next seq to assign (= number of persisted events).
@@ -487,8 +494,8 @@ impl SessionReader for FileSystemSessionRepository {
                 // 已打开的会话直接使用内存中的投影
                 summaries.push(meta.projection.read().await.to_summary());
             } else {
-                // 未打开的会话只读首行和末行事件构造轻量摘要
-                if let Some(summary) = self.read_summary_from_event_ends(&session_id).await? {
+                // 未打开的会话从事件流构造轻量摘要，不加载完整 transcript。
+                if let Some(summary) = self.read_summary_from_event_log(&session_id).await? {
                     summaries.push(summary);
                 }
             }
@@ -931,12 +938,8 @@ impl FileSystemSessionRepository {
         }
     }
 
-    /// 从事件日志的首行和末行事件构造轻量级 SessionSummary。
-    ///
-    /// 单次遍历读取首行获取 SessionStarted 元数据（working_dir, model_id 等），
-    /// 末行获取更准确的 updated_at 和 latest_cursor。
-    /// 避免为未打开的会话重放整个事件日志。
-    async fn read_summary_from_event_ends(
+    /// 从事件日志投影轻量级 SessionSummary，不构造完整 transcript。
+    async fn read_summary_from_event_log(
         &self,
         session_id: &SessionId,
     ) -> Result<Option<SessionSummary>, StorageError> {
@@ -944,45 +947,7 @@ impl FileSystemSessionRepository {
             return Ok(None);
         };
         let log_path = Self::event_log_path(&dir, session_id);
-        let (first_event, last_event, first_user_message) =
-            EventLog::read_first_and_last(&log_path).await?;
-        let Some(first_event) = first_event else {
-            return Ok(None);
-        };
-
-        let first_timestamp = first_event.timestamp;
-
-        let (working_dir, model_id, parent_session_id, source_extension) =
-            match first_event.event.payload {
-                DurableEventPayload::SessionStarted(started) => (
-                    started.working_dir,
-                    started.model_id,
-                    started.parent.map(|parent| parent.session_id),
-                    started.source_extension,
-                ),
-                _ => return Ok(None),
-            };
-
-        let updated_at = last_event
-            .as_ref()
-            .map(|e| e.timestamp.to_rfc3339())
-            .unwrap_or_else(|| first_timestamp.to_rfc3339());
-        let latest_cursor = last_event
-            .map(|event| event.seq.to_string())
-            .unwrap_or_else(|| "0".into());
-
-        Ok(Some(SessionSummary {
-            session_id: session_id.clone(),
-            working_dir,
-            model_id,
-            parent_session_id,
-            created_at: first_timestamp.to_rfc3339(),
-            updated_at,
-            phase: astrcode_core::event::Phase::default(),
-            latest_cursor,
-            first_user_message,
-            source_extension,
-        }))
+        EventLog::read_summary(&log_path, session_id.clone()).await
     }
 }
 

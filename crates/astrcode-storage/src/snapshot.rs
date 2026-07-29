@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::StorageError;
 
-const SNAPSHOT_VERSION: u32 = 3;
+const SNAPSHOT_VERSION: u32 = 4;
 
 /// 保留的最大快照数量。创建新快照后自动清理超出数量的旧快照。
 const MAX_SNAPSHOTS: usize = 4;

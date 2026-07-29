@@ -10,15 +10,23 @@ use astrcode_core::{
 use thiserror::Error;
 
 use crate::{
-    AgentSessionLinkView, AgentSessionStatus, CompactionView, PendingToolApprovalView,
-    SequencedLlmMessage, SessionReadModel, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
-    TranscriptArtifactView,
+    AgentSessionLinkView, AgentSessionStatus, CompactionView, ForkSourceRef,
+    PendingToolApprovalView, SequencedLlmMessage, SessionExecutionState, SessionReadModel,
+    SessionSummary, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE, TranscriptArtifactView,
 };
 
 #[derive(Clone)]
 pub struct SessionReadModelProjection {
     session_id: SessionId,
     model: Option<SessionReadModel>,
+}
+
+#[derive(Clone)]
+pub struct SessionSummaryProjection {
+    session_id: SessionId,
+    summary: Option<SessionSummary>,
+    execution: SessionExecutionState,
+    last_seq: u64,
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -63,12 +71,7 @@ impl SessionReadModelProjection {
         match self.model.as_mut() {
             Some(model) => reduce(event, model),
             None => {
-                if event.seq != 0 {
-                    return Err(ProjectionError::InvalidFirstSequence(event.seq));
-                }
-                if event.turn_id.is_some() {
-                    return Err(ProjectionError::SessionStartedHasTurn);
-                }
+                validate_first_event(event)?;
                 let DurableEventPayload::SessionStarted(started) = &event.payload else {
                     return Err(ProjectionError::InvalidFirstEvent);
                 };
@@ -93,6 +96,69 @@ impl SessionReadModelProjection {
     }
 }
 
+impl SessionSummaryProjection {
+    pub fn new(session_id: SessionId) -> Self {
+        Self {
+            session_id,
+            summary: None,
+            execution: SessionExecutionState::default(),
+            last_seq: 0,
+        }
+    }
+
+    pub fn apply(&mut self, event: &StoredEvent) -> Result<(), ProjectionError> {
+        if event.session_id != self.session_id {
+            return Err(ProjectionError::SessionMismatch {
+                expected: self.session_id.clone(),
+                actual: event.session_id.clone(),
+            });
+        }
+
+        let Some(summary) = self.summary.as_mut() else {
+            validate_first_event(event)?;
+            let DurableEventPayload::SessionStarted(started) = &event.payload else {
+                return Err(ProjectionError::InvalidFirstEvent);
+            };
+            let model =
+                SessionReadModel::from_started(self.session_id.clone(), started, event.timestamp);
+            self.summary = Some(model.to_summary());
+            self.last_seq = event.seq;
+            return Ok(());
+        };
+
+        validate_next_event_details(event.seq, &event.event, &self.session_id, self.last_seq)?;
+
+        apply_execution_event(event, &mut self.execution);
+        match &event.payload {
+            DurableEventPayload::ModelIdChanged { model_id } => {
+                summary.model_id = model_id.clone();
+            },
+            DurableEventPayload::UserMessage { text, .. } => {
+                if summary.first_user_message.is_none() {
+                    summary.first_user_message = Some(text.clone());
+                }
+            },
+            DurableEventPayload::SessionForked {
+                first_user_message, ..
+            } => {
+                summary.first_user_message = first_user_message.clone();
+            },
+            _ => {},
+        }
+        summary.updated_at = event.timestamp.to_rfc3339();
+        summary.latest_cursor = event.seq.to_string();
+        summary.phase = self.execution.phase;
+        self.last_seq = event.seq;
+        Ok(())
+    }
+
+    pub fn snapshot(&self) -> Result<SessionSummary, ProjectionError> {
+        self.summary
+            .clone()
+            .ok_or_else(|| ProjectionError::MissingSessionStarted(self.session_id.clone()))
+    }
+}
+
 /// 从事件序列重建会话读模型。
 pub fn replay(
     session_id: SessionId,
@@ -107,12 +173,13 @@ pub fn replay(
 
 /// 将单个持久事件归约到读模型。
 pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), ProjectionError> {
-    validate_next_event_details(event.seq, &event.event, model)?;
+    validate_next_event(event.seq, &event.event, model)?;
 
     model.stats.last_seq = event.seq;
     model.stats.updated_at = event.timestamp;
     model.stats.event_count += 1;
     let event_seq = event.seq;
+    apply_execution_event(event, &mut model.execution);
 
     match &event.payload {
         DurableEventPayload::SessionStarted(_) => {
@@ -191,7 +258,6 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
             model.system_prompt.source = *source;
         },
         DurableEventPayload::TurnStarted | DurableEventPayload::UserMessage { .. } => {
-            model.execution.phase = Phase::Thinking;
             if let DurableEventPayload::UserMessage {
                 text, attachments, ..
             } = &event.payload
@@ -206,11 +272,7 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                 });
             }
         },
-        DurableEventPayload::TurnCompleted { .. } => {
-            model.execution.phase = Phase::Idle;
-            model.execution.pending_tool_calls.clear();
-            model.execution.pending_tool_approvals.clear();
-        },
+        DurableEventPayload::TurnCompleted { .. } => {},
         DurableEventPayload::TurnAbortedContext => {
             model.transcript.messages.push(SequencedLlmMessage {
                 message: turn_aborted_context_message(),
@@ -230,7 +292,6 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                 updated_seq: event_seq,
                 source: None,
             });
-            model.execution.phase = Phase::Thinking;
         },
         DurableEventPayload::ToolCallRequested {
             call_id,
@@ -238,7 +299,6 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
             arguments,
             raw_arguments,
         } => {
-            model.execution.pending_tool_calls.insert(call_id.clone());
             let tool_call = LlmContent::ToolCall {
                 call_id: call_id.to_string(),
                 name: tool_name.clone(),
@@ -266,26 +326,9 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                     });
                 },
             }
-            model.execution.phase = Phase::CallingTool;
         },
-        DurableEventPayload::ToolApprovalRequested {
-            call_id,
-            prompt,
-            rule_key,
-            ..
-        } => {
-            model.execution.phase = Phase::CallingTool;
-            model.execution.pending_tool_approvals.insert(
-                call_id.clone(),
-                PendingToolApprovalView {
-                    prompt: prompt.clone(),
-                    rule_key: rule_key.clone(),
-                },
-            );
-        },
-        DurableEventPayload::ToolApprovalResolved { call_id, .. } => {
-            model.execution.pending_tool_approvals.remove(call_id);
-        },
+        DurableEventPayload::ToolApprovalRequested { .. }
+        | DurableEventPayload::ToolApprovalResolved { .. } => {},
         DurableEventPayload::ToolCallCompleted {
             call_id,
             tool_name,
@@ -352,17 +395,19 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                         source_seq: *source_seq,
                         strategy: details.strategy.clone(),
                     });
-                    if details.trigger != "auto_threshold" {
-                        model.execution.phase = Phase::Idle;
-                    }
                 },
             }
         },
         DurableEventPayload::SessionForked {
+            source_session_id,
+            source_cursor,
             first_user_message,
             messages,
-            ..
         } => {
+            model.identity.forked_from = Some(ForkSourceRef {
+                session_id: source_session_id.clone(),
+                cursor: source_cursor.clone(),
+            });
             model.transcript.first_user_message = first_user_message.clone();
             model.transcript.messages = messages
                 .iter()
@@ -373,7 +418,6 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                     source: None,
                 })
                 .collect();
-            model.execution.phase = Phase::Idle;
         },
         DurableEventPayload::ErrorOccurred { message, .. } => {
             model
@@ -384,7 +428,6 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                     message: message.clone(),
                     seq: event_seq,
                 });
-            model.execution.phase = Phase::Error;
         },
         DurableEventPayload::RecapGenerated { text, .. } => {
             model
@@ -437,17 +480,18 @@ pub fn validate_next_event(
     event: &DurableEvent,
     model: &SessionReadModel,
 ) -> Result<(), ProjectionError> {
-    validate_next_event_details(seq, event, model)
+    validate_next_event_details(seq, event, &model.identity.session_id, model.stats.last_seq)
 }
 
 fn validate_next_event_details(
     seq: u64,
     event: &DurableEvent,
-    model: &SessionReadModel,
+    expected_session_id: &SessionId,
+    current_seq: u64,
 ) -> Result<(), ProjectionError> {
-    if event.session_id != model.identity.session_id {
+    if event.session_id != *expected_session_id {
         return Err(ProjectionError::SessionMismatch {
-            expected: model.identity.session_id.clone(),
+            expected: expected_session_id.clone(),
             actual: event.session_id.clone(),
         });
     }
@@ -455,14 +499,14 @@ fn validate_next_event_details(
         return Err(ProjectionError::DuplicateSessionStarted(seq));
     }
     if let DurableEventPayload::TranscriptRewritten { source_seq, .. } = &event.payload {
-        if *source_seq > model.stats.last_seq {
+        if *source_seq > current_seq {
             return Err(ProjectionError::InvalidTranscriptRewriteSource {
                 source_seq: *source_seq,
-                current_seq: model.stats.last_seq,
+                current_seq,
             });
         }
     }
-    let expected_seq = model.stats.last_seq.saturating_add(1);
+    let expected_seq = current_seq.saturating_add(1);
     if seq != expected_seq {
         return Err(ProjectionError::NonContiguousSequence {
             expected: expected_seq,
@@ -470,6 +514,91 @@ fn validate_next_event_details(
         });
     }
     Ok(())
+}
+
+fn validate_first_event(event: &StoredEvent) -> Result<(), ProjectionError> {
+    if event.seq != 0 {
+        return Err(ProjectionError::InvalidFirstSequence(event.seq));
+    }
+    if event.turn_id.is_some() {
+        return Err(ProjectionError::SessionStartedHasTurn);
+    }
+    if !matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
+        return Err(ProjectionError::InvalidFirstEvent);
+    }
+    Ok(())
+}
+
+fn apply_execution_event(event: &StoredEvent, execution: &mut SessionExecutionState) {
+    match &event.payload {
+        DurableEventPayload::TurnStarted => {
+            execution.phase = Phase::Thinking;
+            execution.unsettled_turn_id = event.turn_id.clone();
+        },
+        DurableEventPayload::UserMessage { .. }
+        | DurableEventPayload::AssistantMessageCompleted { .. } => {
+            execution.phase = Phase::Thinking;
+        },
+        DurableEventPayload::ToolCallRequested { call_id, .. } => {
+            execution.pending_tool_calls.insert(call_id.clone());
+            execution.phase = Phase::CallingTool;
+        },
+        DurableEventPayload::ToolApprovalRequested {
+            call_id,
+            prompt,
+            rule_key,
+            ..
+        } => {
+            execution.pending_tool_approvals.insert(
+                call_id.clone(),
+                PendingToolApprovalView {
+                    prompt: prompt.clone(),
+                    rule_key: rule_key.clone(),
+                },
+            );
+            execution.phase = Phase::CallingTool;
+        },
+        DurableEventPayload::ToolApprovalResolved { call_id, .. } => {
+            execution.pending_tool_approvals.remove(call_id);
+        },
+        DurableEventPayload::ToolCallCompleted { call_id, .. }
+        | DurableEventPayload::ToolCallFailed { call_id, .. }
+        | DurableEventPayload::ToolCallCancelled { call_id, .. } => {
+            execution.pending_tool_calls.remove(call_id);
+            execution.pending_tool_approvals.remove(call_id);
+            execution.phase = if execution.pending_tool_calls.is_empty() {
+                Phase::Thinking
+            } else {
+                Phase::CallingTool
+            };
+        },
+        DurableEventPayload::TurnCompleted { .. }
+            if event.turn_id.is_none()
+                || execution.unsettled_turn_id.is_none()
+                || event.turn_id.as_ref() == execution.unsettled_turn_id.as_ref() =>
+        {
+            execution.phase = Phase::Idle;
+            execution.unsettled_turn_id = None;
+            execution.pending_tool_calls.clear();
+            execution.pending_tool_approvals.clear();
+        },
+        DurableEventPayload::TranscriptRewritten {
+            reason: TranscriptRewriteReason::Compaction(details),
+            ..
+        } if details.trigger != "auto_threshold" => {
+            execution.phase = Phase::Idle;
+        },
+        DurableEventPayload::SessionForked { .. } => {
+            execution.phase = Phase::Idle;
+            execution.unsettled_turn_id = None;
+            execution.pending_tool_calls.clear();
+            execution.pending_tool_approvals.clear();
+        },
+        DurableEventPayload::ErrorOccurred { .. } => {
+            execution.phase = Phase::Error;
+        },
+        _ => {},
+    }
 }
 
 fn apply_tool_terminal(
@@ -481,8 +610,6 @@ fn apply_tool_terminal(
     source: Option<&str>,
     event_seq: u64,
 ) {
-    model.execution.pending_tool_calls.remove(call_id);
-    model.execution.pending_tool_approvals.remove(call_id);
     model.transcript.messages.push(SequencedLlmMessage {
         message: LlmMessage {
             role: LlmRole::Tool,
@@ -497,11 +624,6 @@ fn apply_tool_terminal(
         updated_seq: event_seq,
         source: source.map(str::to_owned),
     });
-    model.execution.phase = if model.execution.pending_tool_calls.is_empty() {
-        Phase::Thinking
-    } else {
-        Phase::CallingTool
-    };
 }
 
 #[cfg(test)]

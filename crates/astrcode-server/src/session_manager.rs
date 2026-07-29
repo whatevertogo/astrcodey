@@ -415,12 +415,12 @@ impl SessionManager {
                 .collect();
             let truncated_model =
                 astrcode_session_projection::replay(source_id.clone(), &truncated_events)?;
-            let first_user_message = truncated_model.first_user_message();
+            let first_user_message = truncated_model.first_user_message().map(str::to_owned);
             (truncated_model.transcript.messages, first_user_message)
         } else {
             (
                 source_model.transcript.messages.clone(),
-                source_model.first_user_message(),
+                source_model.first_user_message().map(str::to_owned),
             )
         };
 

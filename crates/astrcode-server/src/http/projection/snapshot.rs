@@ -24,6 +24,7 @@ pub(in crate::http) fn conversation_to_dto(
 ) -> ConversationSnapshotResponseDto {
     let title = session
         .first_user_message()
+        .map(str::to_owned)
         .unwrap_or_else(|| session_title_from_working_dir(&session.identity.working_dir));
 
     // 与 provider_messages 一致：最新 compact 摘要紧挨保留消息之前（被压掉的历史不在 UI 展示）
