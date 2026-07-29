@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use astrcode_protocol::events::ClientNotification;
-use astrcode_support::event_fanout::EventFanout;
+use tokio::sync::broadcast;
 
 use super::ServerRuntime;
 use crate::{
@@ -20,7 +20,7 @@ pub struct ServerSystem {
 
 pub fn spawn_server_system(
     runtime: &Arc<ServerRuntime>,
-    event_tx: Arc<EventFanout<ClientNotification>>,
+    event_tx: broadcast::Sender<ClientNotification>,
 ) -> ServerSystem {
     spawn_server_system_with_legacy(runtime, Some(event_tx))
 }
@@ -31,12 +31,12 @@ pub fn spawn_server_system_without_legacy(runtime: &Arc<ServerRuntime>) -> Serve
 
 fn spawn_server_system_with_legacy(
     runtime: &Arc<ServerRuntime>,
-    event_tx: Option<Arc<EventFanout<ClientNotification>>>,
+    event_tx: Option<broadcast::Sender<ClientNotification>>,
 ) -> ServerSystem {
     let scheduler = Arc::clone(runtime.scheduler());
 
-    let event_bus = match &event_tx {
-        Some(event_tx) => Arc::new(ServerEventBus::with_legacy_tx(Arc::clone(event_tx))),
+    let event_bus = match event_tx {
+        Some(event_tx) => Arc::new(ServerEventBus::with_legacy_tx(event_tx)),
         None => Arc::new(ServerEventBus::new()),
     };
 

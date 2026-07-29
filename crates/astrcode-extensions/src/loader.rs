@@ -7,8 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use astrcode_core::hostpaths;
 use astrcode_extension_sdk::extension::{Extension, StopReason};
-use astrcode_support::hostpaths;
 
 use crate::{host_router::HostRouter, runner::ExtensionRunner};
 
@@ -159,7 +159,7 @@ impl ExtensionLoader {
         let mut load_failures: Vec<ExtensionLoadFailure> = Vec::new();
         let mut load_success_durations = BTreeMap::new();
 
-        let global_dir = hostpaths::extensions_dir();
+        let global_dir = hostpaths::astrcode_dir().join("extensions");
         if global_dir.exists() {
             let (exts, errs, failures, durations) =
                 Self::load_from_dir(&global_dir, &host_router, working_dir).await;

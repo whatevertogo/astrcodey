@@ -7,6 +7,7 @@ pub(crate) mod deferred_tools;
 pub(crate) mod early_tool_scheduler;
 pub(crate) mod llm_stream;
 pub mod payload;
+mod perf_snapshot;
 pub(crate) mod permission;
 pub(crate) mod projection_context;
 pub(crate) mod runtime_stability;

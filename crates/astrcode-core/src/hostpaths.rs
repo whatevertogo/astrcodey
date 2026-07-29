@@ -1,11 +1,8 @@
-//! 宿主路径解析。
+//! AstrCode 宿主根目录与安全路径解析。
 //!
-//! 解析 astrcode 各类目录路径，包括配置目录、会话目录、项目目录和运行时数据目录。
-//! 同时提供路径安全检查，防止路径遍历攻击。
+//! 业务子目录由各自的所有者基于 [`astrcode_dir`] 派生。
 
 use std::path::{Component, Path, PathBuf};
-
-use astrcode_core::types::project_key_from_path;
 
 /// 工作区路径解析失败（路径穿越、绝对路径、非法组件等）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,77 +119,6 @@ pub fn astrcode_dir() -> PathBuf {
     resolve_home_dir().join(".astrcode")
 }
 
-/// 获取项目总目录：`~/.astrcode/projects/`。
-pub fn projects_dir() -> PathBuf {
-    astrcode_dir().join("projects")
-}
-
-/// 获取特定项目的目录：`~/.astrcode/projects/<project_key>/`。
-pub fn project_dir(project_key: &str) -> PathBuf {
-    projects_dir().join(project_key)
-}
-
-/// 获取某项目下的会话目录：`~/.astrcode/projects/<project_key>/sessions/`。
-pub fn sessions_dir(project_key: &str) -> PathBuf {
-    project_dir(project_key).join("sessions")
-}
-
-/// 获取某个会话目录：`~/.astrcode/projects/<project_key>/sessions/<session>/`。
-pub fn session_dir(project_key: &str, session_id: &str) -> PathBuf {
-    sessions_dir(project_key).join(session_id)
-}
-
-/// 根据真实项目路径获取当前可读 project key 的会话目录。
-pub fn sessions_dir_for_project_path(project_path: &Path) -> PathBuf {
-    sessions_dir(&project_key_from_path(project_path))
-}
-
-/// 获取运行时目录：`~/.astrcode/runtime/`。
-pub fn runtime_dir() -> PathBuf {
-    astrcode_dir().join("runtime")
-}
-
-/// 获取全局扩展目录：`~/.astrcode/extensions/`。
-pub fn extensions_dir() -> PathBuf {
-    astrcode_dir().join("extensions")
-}
-
-/// 获取日志目录：`~/.astrcode/logs/`。
-pub fn logs_dir() -> PathBuf {
-    astrcode_dir().join("logs")
-}
-
-/// 获取跨项目共享的用户记忆目录：`~/.astrcode/memory/`。
-pub fn memory_dir() -> PathBuf {
-    astrcode_dir().join("memory")
-}
-
-/// 获取测试专用目录。
-///
-/// 该目录位于系统临时目录下，调用方负责在测试前后清理。
-pub fn test_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join("astrcode-tests").join(name)
-}
-
-/// 获取项目级扩展目录：`<workspace>/.astrcode/extensions/`。
-pub fn project_extensions_dir(workspace: &str) -> PathBuf {
-    PathBuf::from(workspace)
-        .join(".astrcode")
-        .join("extensions")
-}
-
-/// 获取插件专属数据目录：`~/.astrcode/extension_data/<extension_id>/`。
-pub fn extensions_data_dir(extension_id: &str) -> PathBuf {
-    astrcode_dir()
-        .join("extensions_data_dir")
-        .join(extension_id)
-}
-
-/// 确保目录存在，如不存在则递归创建（包含父目录）。
-pub fn ensure_dir(path: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(path)
-}
-
 /// 将可能是相对路径的 `raw` 相对于 `cwd` 解析为绝对路径。
 ///
 /// 如果 `raw` 已经是绝对路径，则原样返回；否则将其与 `cwd` 拼接。
@@ -269,13 +195,6 @@ mod tests {
     fn test_astrcode_dir() {
         let dir = astrcode_dir();
         assert!(dir.ends_with(".astrcode"));
-    }
-
-    #[test]
-    fn project_path_sessions_use_readable_project_key() {
-        let path = sessions_dir_for_project_path(Path::new(r"D:\work\astrcode"));
-
-        assert!(path.ends_with(Path::new("D-work-astrcode").join("sessions")));
     }
 
     #[test]

@@ -334,16 +334,17 @@ pub(crate) fn system_text(messages: &[LlmMessage]) -> String {
 }
 
 /// 稳定的十六进制指纹：对每段 part 逐字节做 FNV-1a，段间插入 `0xff` 分隔。
-///
-/// 复用 [`astrcode_support::hash`] 的 FNV 原语，避免在本 crate 复制魔数常量；
-/// 段间 `0xff` 通过拼接到同一缓冲区实现，输出与原先逐段内联计算逐位一致。
 pub(crate) fn stable_hash_hex(parts: &[&str]) -> String {
-    let mut bytes = Vec::new();
+    let mut hash = 0xcbf29ce484222325u64;
     for part in parts {
-        bytes.extend_from_slice(part.as_bytes());
-        bytes.push(0xff);
+        for &byte in part.as_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash ^= 0xff;
+        hash = hash.wrapping_mul(0x100000001b3);
     }
-    astrcode_support::hash::hex_fingerprint(&bytes)
+    format!("{hash:016x}")
 }
 
 pub(crate) fn prompt_cache_retention_wire_value(
@@ -428,8 +429,7 @@ mod tests {
     #[test]
     fn stable_hash_hex_matches_reference_fnv1a_with_ff_separators() {
         // 独立参考实现：FNV-1a，每段 part 后插入 0xff 分隔。
-        // 底层改用 astrcode_support::hash 后，输出必须与此参考逐位一致——
-        // prompt_cache_key 是与上游网关的事实线缆契约，漂移会让缓存失效。
+        // prompt_cache_key 是与上游网关的事实线缆契约，输出必须与参考逐位一致。
         fn reference(parts: &[&str]) -> String {
             let mut hash = 0xcbf29ce484222325u64;
             for part in parts {

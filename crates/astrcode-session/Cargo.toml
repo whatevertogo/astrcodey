@@ -11,7 +11,6 @@ astrcode-context = { path = "../astrcode-context" }
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 astrcode-storage = { path = "../astrcode-storage" }
 astrcode-session-projection = { path = "../astrcode-session-projection" }
-astrcode-support = { path = "../astrcode-support" }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

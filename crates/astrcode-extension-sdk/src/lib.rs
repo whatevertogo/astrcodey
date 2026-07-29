@@ -5,6 +5,8 @@
 //! contracts to session, storage, and provider implementations.
 
 pub mod extension;
+pub mod frontmatter;
+pub mod shell;
 
 /// Typed access to the host's single restricted outbound-network service.
 pub mod network {
@@ -54,22 +56,9 @@ pub mod types {
 
 /// Host path utilities usable by extensions.
 pub mod hostpaths {
-    pub use astrcode_support::hostpaths::*;
-}
-
-/// Frontmatter parsing helpers usable by extensions.
-pub mod frontmatter {
-    pub use astrcode_support::frontmatter::*;
-}
-
-/// Text formatting helpers usable by extensions.
-pub mod text {
-    pub use astrcode_support::text::*;
-}
-
-/// Shell detection helpers usable by extensions.
-pub mod shell {
-    pub use astrcode_support::shell::*;
+    pub use astrcode_core::hostpaths::{
+        astrcode_dir, is_path_within, resolve_home_dir, resolve_path,
+    };
 }
 
 /// Protocol types needed by extensions.

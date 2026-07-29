@@ -12,7 +12,7 @@
 
 用 Rust 从零构建的 AI 编程助手平台。
 
-AstrCode 是一个全栈 AI 编程助手，在 `crates/` 下包含 25 个 Rust crate（另加 Tauri 桌面壳），合计约 10.44 万行 Rust，外加 React + TypeScript 前端（约 1.24 万行）。包含带工具执行的 Agent 循环、基于 SSE 流式传输的多 Provider LLM 层（Anthropic 与 OpenAI 兼容 Provider）、基于 SDK 与 IPC 子进程的扩展/钩子系统（后台预热、健康检查、启动阶段事件通道）、MCP 常驻进程池（跨 turn 复用长连接）、内置 Web 搜索与 URL 抓取工具、带自动压缩的上下文窗口管理、评测框架，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
+AstrCode 是一个全栈 AI 编程助手，在 `crates/` 下包含 26 个 Rust crate（另加 Tauri 桌面壳），合计约 10.44 万行 Rust，外加 React + TypeScript 前端（约 1.24 万行）。包含带工具执行的 Agent 循环、基于 SSE 流式传输的多 Provider LLM 层（Anthropic 与 OpenAI 兼容 Provider）、基于 SDK 与 IPC 子进程的扩展/钩子系统（后台预热、健康检查、启动阶段事件通道）、MCP 常驻进程池（跨 turn 复用长连接）、内置 Web 搜索与 URL 抓取工具、带自动压缩的上下文窗口管理、评测框架，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
 
 ## 目录
 
@@ -330,14 +330,14 @@ AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。旧�
                    └────────────────────────────┘
         ┌─────────────────────────────────────┐
         │              共享基础层               │
-        │ core · protocol · storage · support │
-        │ log · client                        │
+        │ core · protocol · storage · log     │
+        │ client                              │
         └─────────────────────────────────────┘
 ```
 
 ## Crate 一览
 
-Cargo workspace 在 [`crates/`](crates/) 下包含 **25 个 crate**，另有 [`src-tauri/`](src-tauri/) 作为桌面壳（workspace 共 **26 个成员**）。按架构分层如下（详见[架构设计](docs/architecture.md)）。
+Cargo workspace 在 [`crates/`](crates/) 下包含 **26 个 crate**，另有 [`src-tauri/`](src-tauri/) 作为桌面壳（workspace 共 **27 个成员**）。按架构分层如下（详见[架构设计](docs/architecture.md)）。
 
 ### Layer 0：基础契约层
 
@@ -345,7 +345,6 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **25 个 crate**，另有 [`s
 |---|---|---|
 | [`astrcode-core`](crates/astrcode-core) | 9.5k | 共享领域类型、trait、配置系统、扩展契约、提示词组合 |
 | [`astrcode-protocol`](crates/astrcode-protocol) | 1.9k | JSON-RPC 2.0 线协议类型、命令、事件、HTTP/UI DTO |
-| [`astrcode-support`](crates/astrcode-support) | 1.3k | 宿主工具：路径解析、Shell 检测、工具结果持久化 |
 
 ### Layer 1：基础能力实现层
 
@@ -400,7 +399,7 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **25 个 crate**，另有 [`s
 |---|---|---|
 | [`astrcode-eval`](crates/astrcode-eval) | 2.0k | 评测运行器：HTTP 服务器控制、事件日志指标、结构化报告 |
 
-**合计：** Rust 约 10.44 万行（25 个 crate + Tauri，共 26 个 workspace 成员），**326** 个 `.rs` 文件；`frontend/` 约 1.24 万行 TypeScript（整体约 **11.68 万行**）。
+**合计：** Rust 约 10.44 万行（26 个 crate + Tauri，共 27 个 workspace 成员），**326** 个 `.rs` 文件；`frontend/` 约 1.24 万行 TypeScript（整体约 **11.68 万行**）。
 
 ## 核心设计
 

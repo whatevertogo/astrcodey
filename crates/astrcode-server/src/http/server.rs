@@ -232,7 +232,7 @@ pub async fn run_http_server(
 ///
 /// 文件权限设为 600（仅属主可读写），因为其中含 auth token。
 fn write_run_info(port: u16, auth_token: &str) {
-    let dir = astrcode_support::hostpaths::astrcode_dir();
+    let dir = astrcode_core::hostpaths::astrcode_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(path = %dir.display(), error = %e, "failed to create astrcode dir for run.json");
         return;
@@ -263,7 +263,7 @@ fn write_run_info_at(path: &Path, port: u16, auth_token: &str) {
 
 /// 退出时清理 `run.json`。
 fn remove_run_info_if_current(port: u16, auth_token: &str) {
-    let path = astrcode_support::hostpaths::astrcode_dir().join("run.json");
+    let path = astrcode_core::hostpaths::astrcode_dir().join("run.json");
     remove_run_info_if_current_at(&path, port, auth_token);
 }
 

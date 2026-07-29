@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use astrcode_core::event::{DurableEventPayload, EventPayload};
 use astrcode_protocol::{commands::*, events::*};
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 use crate::{
     error::ClientError,
@@ -47,7 +47,7 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     {
         let mut rx = self.transport.subscribe().await?;
         self.transport.send(cmd).await?;
-        while let Some(notification) = rx.recv().await {
+        while let Ok(notification) = rx.recv().await {
             if predicate(&notification) {
                 return Ok(notification);
             }
@@ -198,8 +198,9 @@ impl ClientTransport for MockTransport {
         Ok(())
     }
 
-    async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError> {
-        let (_, rx) = mpsc::channel::<ClientNotification>(1);
+    async fn subscribe(&self) -> Result<broadcast::Receiver<ClientNotification>, TransportError> {
+        let (tx, rx) = broadcast::channel(1);
+        drop(tx);
         Ok(rx)
     }
 }
@@ -230,15 +231,14 @@ mod tests {
             Ok(())
         }
 
-        async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError> {
-            let (tx, rx) = mpsc::channel::<ClientNotification>(16);
+        async fn subscribe(
+            &self,
+        ) -> Result<broadcast::Receiver<ClientNotification>, TransportError> {
+            let (tx, rx) = broadcast::channel::<ClientNotification>(16);
             let responses = std::mem::take(&mut *self.responses.lock().expect("responses lock"));
-            tokio::spawn(async move {
-                for notification in responses {
-                    let _ = tx.send(notification).await;
-                }
-                // tx drops here, closing the channel after all responses are sent
-            });
+            for notification in responses {
+                let _ = tx.send(notification);
+            }
             Ok(rx)
         }
     }

@@ -7,8 +7,11 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::tool::{access::ResourceAccess, *};
-use astrcode_support::{hostpaths::resolve_path, shell::resolve_shell};
+use astrcode_core::{
+    hostpaths::resolve_path,
+    tool::{access::ResourceAccess, *},
+};
+use astrcode_extension_sdk::shell::resolve_shell;
 use serde::Deserialize;
 use tokio::process::Command;
 

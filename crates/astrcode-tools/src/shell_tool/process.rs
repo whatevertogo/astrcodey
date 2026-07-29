@@ -2,7 +2,7 @@
 use std::process::Stdio;
 use std::{process::ExitStatus, sync::OnceLock};
 
-use astrcode_support::shell::{ShellFamily, ShellInfo};
+use astrcode_extension_sdk::shell::{ShellFamily, ShellInfo};
 use regex::Regex;
 use tokio::process::Command;
 

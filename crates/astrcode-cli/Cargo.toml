@@ -19,7 +19,6 @@ astrcode-client = { path = "../astrcode-client" }
 astrcode-core = { path = "../astrcode-core" }
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 astrcode-protocol = { path = "../astrcode-protocol" }
-astrcode-support = { path = "../astrcode-support" }
 astrcode-eval = { path = "../astrcode-eval", optional = true }
 astrcode-log = { path = "../astrcode-log" }
 astrcode-context = { path = "../astrcode-context" }

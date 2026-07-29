@@ -3,7 +3,6 @@ resolver = "2"
 default-members = ["crates/astrcode-cli"]
 members = [
     "crates/astrcode-core",
-    "crates/astrcode-support",
     "crates/astrcode-ai",
     "crates/astrcode-tools",
     "crates/astrcode-storage",

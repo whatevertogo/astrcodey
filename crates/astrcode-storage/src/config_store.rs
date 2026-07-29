@@ -2,8 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use astrcode_core::config::{Config, ConfigOverlay, ConfigStore, ConfigStoreError};
-use astrcode_support::hostpaths;
+use astrcode_core::{
+    config::{Config, ConfigOverlay, ConfigStore, ConfigStoreError},
+    hostpaths,
+};
 use serde::{Serialize, de::DeserializeOwned};
 
 /// File-system implementation of ConfigStore.

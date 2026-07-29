@@ -206,7 +206,6 @@ fn trim_lines_to_char_budget(lines: Vec<String>, max_chars: usize) -> Vec<String
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_sdk::hostpaths::ensure_dir;
     use tempfile::TempDir;
 
     use super::*;
@@ -230,7 +229,6 @@ mod tests {
     #[test]
     fn rank_for_query_filters_low_scores() {
         let tmp = TempDir::new().unwrap();
-        ensure_dir(tmp.path()).unwrap();
         let index = MemoryIndex::new(tmp.path());
         index
             .upsert_record(

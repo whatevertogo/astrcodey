@@ -1,4 +1,4 @@
-//! Shell 检测，用于跨平台命令执行。
+//! 扩展与工具使用的跨平台 Shell 检测。
 //!
 //! 根据运行环境自动检测当前 Shell 类型（POSIX、PowerShell、CMD、WSL），
 //! 也支持通过 `ASTRCODE_SHELL` 环境变量手动覆盖。
@@ -117,21 +117,6 @@ fn detect_windows_shell() -> ShellInfo {
         name: "powershell".into(),
         path: "powershell.exe".into(),
     }
-}
-
-static CACHED_GH_CLI: OnceLock<bool> = OnceLock::new();
-
-/// 检测 GitHub CLI (`gh`) 是否在 PATH 中可用。
-///
-/// 结果在同一进程内缓存，避免重复扫描 PATH。
-pub fn is_gh_cli_available() -> bool {
-    *CACHED_GH_CLI.get_or_init(|| {
-        if cfg!(windows) {
-            find_in_path("gh.exe").is_some() || find_in_path("gh").is_some()
-        } else {
-            find_in_path("gh").is_some()
-        }
-    })
 }
 
 /// 在 PATH 中查找可执行文件。

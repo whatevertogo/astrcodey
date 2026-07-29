@@ -22,8 +22,7 @@ use astrcode_server::test_support::{
 };
 use astrcode_session_projection::AgentSessionStatus;
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
-use astrcode_support::event_fanout::EventFanout;
-use tokio::sync::mpsc;
+use tokio::sync::{broadcast, mpsc};
 
 struct StaticTextLlm {
     text: &'static str,
@@ -189,9 +188,7 @@ fn build_test_ops_with_llm(
         Arc::clone(&child_sessions),
     ));
     child_sessions.spawn_completion_watcher(Arc::clone(&scheduler));
-    let event_bus = Arc::new(ServerEventBus::with_legacy_tx(Arc::new(EventFanout::new(
-        1024,
-    ))));
+    let event_bus = Arc::new(ServerEventBus::with_legacy_tx(broadcast::channel(1024).0));
     session_manager.bind_event_bus(event_bus);
     Arc::new(ServerSessionOperations {
         session_manager,

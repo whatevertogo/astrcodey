@@ -13,9 +13,8 @@ use astrcode_core::{
 };
 use astrcode_protocol::events::ClientNotification;
 use astrcode_session::Session;
-use astrcode_support::event_fanout::EventFanout;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 pub(crate) struct StreamingSnapshot {
     pub message_id: String,
@@ -47,29 +46,30 @@ impl SessionRoute {
 }
 
 pub struct ServerEventBus {
-    legacy_tx: Option<Arc<EventFanout<ClientNotification>>>,
-    global_notifications: Arc<EventFanout<ClientNotification>>,
-    conversation_events: Mutex<HashMap<SessionId, Arc<EventFanout<Arc<Event>>>>>,
+    legacy_tx: Option<broadcast::Sender<ClientNotification>>,
+    global_notifications: broadcast::Sender<ClientNotification>,
+    conversation_events: Mutex<HashMap<SessionId, broadcast::Sender<Arc<Event>>>>,
     session_routes: Mutex<HashMap<SessionId, SessionRoute>>,
     attached: Mutex<HashSet<SessionId>>,
     streaming: Mutex<HashMap<SessionId, Arc<StreamingState>>>,
 }
 
 impl ServerEventBus {
-    const EVENT_FANOUT_CAPACITY: usize = 1024;
+    const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
     pub fn new() -> Self {
         Self::new_with_legacy_tx(None)
     }
 
-    pub fn with_legacy_tx(legacy_tx: Arc<EventFanout<ClientNotification>>) -> Self {
+    pub fn with_legacy_tx(legacy_tx: broadcast::Sender<ClientNotification>) -> Self {
         Self::new_with_legacy_tx(Some(legacy_tx))
     }
 
-    fn new_with_legacy_tx(legacy_tx: Option<Arc<EventFanout<ClientNotification>>>) -> Self {
+    fn new_with_legacy_tx(legacy_tx: Option<broadcast::Sender<ClientNotification>>) -> Self {
+        let (global_notifications, _) = broadcast::channel(Self::EVENT_CHANNEL_CAPACITY);
         Self {
             legacy_tx,
-            global_notifications: Arc::new(EventFanout::new(Self::EVENT_FANOUT_CAPACITY)),
+            global_notifications,
             conversation_events: Mutex::new(HashMap::new()),
             session_routes: Mutex::new(HashMap::new()),
             attached: Mutex::new(HashSet::new()),
@@ -77,14 +77,14 @@ impl ServerEventBus {
         }
     }
 
-    pub fn subscribe_global_notifications(&self) -> mpsc::Receiver<ClientNotification> {
+    pub fn subscribe_global_notifications(&self) -> broadcast::Receiver<ClientNotification> {
         self.global_notifications.subscribe()
     }
 
     pub fn subscribe_conversation_events(
         &self,
         session_id: &SessionId,
-    ) -> mpsc::Receiver<Arc<Event>> {
+    ) -> broadcast::Receiver<Arc<Event>> {
         self.conversation_fanout(session_id).subscribe()
     }
 
@@ -112,9 +112,9 @@ impl ServerEventBus {
         match notification {
             ClientNotification::Event(event) => self.publish_event(Arc::new(event)),
             notification => {
-                self.global_notifications.send(notification.clone());
+                let _ = self.global_notifications.send(notification.clone());
                 if let Some(legacy_tx) = &self.legacy_tx {
-                    legacy_tx.send(notification);
+                    let _ = legacy_tx.send(notification);
                 }
             },
         }
@@ -129,7 +129,7 @@ impl ServerEventBus {
             self.send_to_existing_conversation_fanout(route.root_session_id(), Arc::clone(&event));
         }
         if let Some(legacy_tx) = &self.legacy_tx {
-            legacy_tx.send(ClientNotification::Event((*event).clone()));
+            let _ = legacy_tx.send(ClientNotification::Event((*event).clone()));
         }
     }
 
@@ -141,7 +141,7 @@ impl ServerEventBus {
         let mut rx = session.subscribe();
         let event_bus = Arc::clone(self);
         crate::task_utils::spawn_traced("server_event_bus_fanout", async move {
-            while let Some(event) = rx.recv().await {
+            while let Ok(event) = rx.recv().await {
                 event_bus.publish_event(event);
             }
         });
@@ -177,28 +177,24 @@ impl ServerEventBus {
         })
     }
 
-    fn conversation_fanout(&self, session_id: &SessionId) -> Arc<EventFanout<Arc<Event>>> {
-        Arc::clone(
-            self.conversation_events
-                .lock()
-                .entry(session_id.clone())
-                .or_insert_with(|| Arc::new(EventFanout::new(Self::EVENT_FANOUT_CAPACITY))),
-        )
+    fn conversation_fanout(&self, session_id: &SessionId) -> broadcast::Sender<Arc<Event>> {
+        self.conversation_events
+            .lock()
+            .entry(session_id.clone())
+            .or_insert_with(|| broadcast::channel(Self::EVENT_CHANNEL_CAPACITY).0)
+            .clone()
     }
 
     fn existing_conversation_fanout(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<EventFanout<Arc<Event>>>> {
-        self.conversation_events
-            .lock()
-            .get(session_id)
-            .map(Arc::clone)
+    ) -> Option<broadcast::Sender<Arc<Event>>> {
+        self.conversation_events.lock().get(session_id).cloned()
     }
 
     fn send_to_existing_conversation_fanout(&self, session_id: &SessionId, event: Arc<Event>) {
         if let Some(fanout) = self.existing_conversation_fanout(session_id) {
-            fanout.send(event);
+            let _ = fanout.send(event);
         }
     }
 
@@ -334,7 +330,7 @@ mod tests {
         event::{DurableEvent, LiveEvent, StoredEvent},
         types::{SessionId, ToolCallId},
     };
-    use tokio::sync::mpsc::error::TryRecvError;
+    use tokio::sync::broadcast::error::TryRecvError;
 
     use super::*;
 
@@ -374,8 +370,8 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_event_broadcast_is_only_sent_when_enabled() {
-        let legacy_tx = Arc::new(EventFanout::new(8));
-        let bus = ServerEventBus::with_legacy_tx(Arc::clone(&legacy_tx));
+        let (legacy_tx, _) = broadcast::channel(8);
+        let bus = ServerEventBus::with_legacy_tx(legacy_tx.clone());
         let session_id = SessionId::new("session-1");
         let mut legacy_rx = legacy_tx.subscribe();
 
@@ -407,10 +403,10 @@ mod tests {
         ));
         assert!(matches!(
             parent_rx.recv().await,
-            Some(event) if event.session_id == parent
+            Ok(event) if event.session_id == parent
         ));
 
-        for _ in 0..=ServerEventBus::EVENT_FANOUT_CAPACITY {
+        for _ in 0..=ServerEventBus::EVENT_CHANNEL_CAPACITY {
             bus.publish_event(live(
                 child.clone(),
                 LiveEventPayload::AssistantTextDelta {
@@ -430,7 +426,7 @@ mod tests {
         ));
         assert!(matches!(
             parent_rx.recv().await,
-            Some(event) if event.session_id == child
+            Ok(event) if event.session_id == child
         ));
     }
 }

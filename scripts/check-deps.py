@@ -3,7 +3,7 @@
 
 Layer hierarchy:
   L0 Foundation:   astrcode-core, astrcode-desktop
-  L1 Primitives:   astrcode-support, astrcode-session-projection, astrcode-eval
+  L1 Primitives:   astrcode-session-projection, astrcode-eval
   L2 Services:     astrcode-extension-sdk, astrcode-ai, astrcode-context,
                    astrcode-log, astrcode-storage
   L3 Integration:  astrcode-protocol, astrcode-tools, astrcode-extensions,
@@ -28,8 +28,7 @@ LAYERS: dict[str, int] = {
     # L0 – Foundation
     "astrcode-core": 0,
     "astrcode-desktop": 0,
-    # L1 – Primitive contracts and support
-    "astrcode-support": 1,
+    # L1 – Primitive contracts
     "astrcode-eval": 1,
     "astrcode-session-projection": 1,
     # L2 – Services

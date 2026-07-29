@@ -27,7 +27,6 @@ use astrcode_session::{
 };
 use astrcode_session_projection::{SessionReadModel, TranscriptArtifactView};
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
-use astrcode_support::hash::hex_fingerprint;
 use tokio::sync::mpsc;
 
 const VALID_COMPACT_SUMMARY: &str = r#"<summary>
@@ -218,7 +217,7 @@ async fn configure_system_prompt(session: &Session) {
             None,
             DurableEventPayload::SystemPromptConfigured {
                 text: "integration system prompt".into(),
-                fingerprint: hex_fingerprint(b"integration system prompt"),
+                fingerprint: "integration-system-prompt".into(),
                 extra_system_prompt: None,
                 source: Default::default(),
             },

@@ -6,8 +6,8 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use astrcode_core::hostpaths::resolve_under_workspace_root;
 use astrcode_extension_sdk::s5r::ErrorPayload;
-use astrcode_support::hostpaths::resolve_under_workspace_root;
 use globset::Glob;
 use regex::Regex;
 use serde_json::{Value, json};

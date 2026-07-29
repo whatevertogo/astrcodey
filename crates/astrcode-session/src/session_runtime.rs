@@ -4,14 +4,15 @@ use astrcode_core::{
     event::Event, llm::LlmProvider, permission::ApprovalDecision, tool::FileObservationStore,
     types::ToolCallId,
 };
-use astrcode_support::{event_fanout::EventFanout, sync::lock_parking};
 use parking_lot::Mutex;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 
 use crate::{
     compaction::CompactCircuitBreaker, permission::ApprovalHistoryStore,
     session_tools::SessionToolCache, tool_exec::InMemoryFileObservationStore,
 };
+
+const SESSION_EVENT_CAPACITY: usize = 1024;
 
 pub struct PendingApprovalRegistration<'a> {
     runtime: &'a SessionRuntimeState,
@@ -68,7 +69,7 @@ struct ToolResources {
 ///
 /// `event_out` 故意放在 `SessionRuntimeState` 而非 `Session`：同一 sid 多次
 /// `Session::open` 会得到多个 `Session` 实例（廉价的 store handle clone），
-/// 但所有实例必须共享同一份 `SessionRuntimeState`（含 EventFanout）才能让所有订阅者
+/// 但所有实例必须共享同一份 `SessionRuntimeState`（含 broadcast sender）才能让所有订阅者
 /// 看到全部事件。SessionRuntimeRegistry / SessionManager 保证 per-sid 唯一。
 ///
 /// 注意：直接通过 `Session::create_with_params` 绕过 `SessionRuntimeRegistry` 时，runtime
@@ -83,7 +84,7 @@ pub struct SessionRuntimeState {
     compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
     /// 本 session 事件的 fan-out 通道。同一 sid 下所有 Session 实例共享这份 sender，
     /// 通过 SessionRuntimeState 的 Arc 共享保证订阅一致性。
-    event_out: Arc<EventFanout<Arc<Event>>>,
+    event_out: broadcast::Sender<Arc<Event>>,
     /// 会话级 AllowAlways / DenyAlways 审批记忆。
     approval_history: Arc<ApprovalHistoryStore>,
     /// 挂起中的工具审批（call_id → oneshot sender）。
@@ -96,7 +97,7 @@ impl SessionRuntimeState {
         small_llm: Arc<dyn LlmProvider>,
         model_id: String,
     ) -> Self {
-        let event_out = Arc::new(EventFanout::new(1024));
+        let (event_out, _) = broadcast::channel(SESSION_EVENT_CAPACITY);
         Self {
             model: Mutex::new(SessionModelBinding {
                 llm,
@@ -123,19 +124,19 @@ impl SessionRuntimeState {
     /// 需要同时读取 `llm` / `small_llm` / `model_id` 时请用此方法；
     /// 分别调用 [`Self::llm`]、[`Self::small_llm`] 可能在替换间隙读到不一致组合。
     pub fn model_binding(&self) -> SessionModelBinding {
-        lock_parking(&self.model).clone()
+        self.model.lock().clone()
     }
 
     pub fn llm(&self) -> Arc<dyn LlmProvider> {
-        Arc::clone(&lock_parking(&self.model).llm)
+        Arc::clone(&self.model.lock().llm)
     }
 
     pub fn small_llm(&self) -> Arc<dyn LlmProvider> {
-        Arc::clone(&lock_parking(&self.model).small_llm)
+        Arc::clone(&self.model.lock().small_llm)
     }
 
     pub fn model_id(&self) -> String {
-        lock_parking(&self.model).model_id.clone()
+        self.model.lock().model_id.clone()
     }
 
     pub fn replace_model_binding(
@@ -144,7 +145,7 @@ impl SessionRuntimeState {
         small_llm: Arc<dyn LlmProvider>,
         model_id: String,
     ) {
-        *lock_parking(&self.model) = SessionModelBinding {
+        *self.model.lock() = SessionModelBinding {
             llm,
             small_llm,
             model_id,
@@ -160,11 +161,11 @@ impl SessionRuntimeState {
     }
 
     pub fn prompt_extra(&self) -> Option<String> {
-        lock_parking(&self.extra_system_prompt).clone()
+        self.extra_system_prompt.lock().clone()
     }
 
     pub fn update_prompt_extra(&self, prompt: Option<String>) {
-        *lock_parking(&self.extra_system_prompt) = prompt;
+        *self.extra_system_prompt.lock() = prompt;
     }
 
     pub(crate) fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {
@@ -172,17 +173,19 @@ impl SessionRuntimeState {
     }
 
     pub(crate) fn configure_compact_circuit_breaker(&self, threshold: u32, cooldown: Duration) {
-        lock_parking(&self.compact_circuit_breaker).reconfigure(threshold, cooldown);
+        self.compact_circuit_breaker
+            .lock()
+            .reconfigure(threshold, cooldown);
     }
 
     /// 订阅本 session 的事件流。
-    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<Arc<Event>> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<Event>> {
         self.event_out.subscribe()
     }
 
     /// 向本 session 的 fan-out 通道推一个事件。
     pub(crate) fn fanout(&self, event: Event) {
-        self.event_out.send(Arc::new(event));
+        let _ = self.event_out.send(Arc::new(event));
     }
 
     pub fn approval_history(&self) -> Arc<ApprovalHistoryStore> {

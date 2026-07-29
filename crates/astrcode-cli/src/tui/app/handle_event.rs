@@ -6,7 +6,6 @@ use astrcode_core::event::{
 use astrcode_protocol::events::{
     ClientNotification, ExtensionCommandInfoDto, SessionListItemDto, SessionSnapshot, UiRequestKind,
 };
-use astrcode_support::text::truncate_first_line;
 
 use super::App;
 use crate::tui::{
@@ -532,7 +531,7 @@ fn apply_extension_event(app: &mut App, extension: &ExtensionEventData) {
     let name = &extension.event_type;
     let fallback = format!(
         "[{name}] {}",
-        astrcode_support::text::compact_inline(&extension.payload.to_string(), 80)
+        astrcode_core::text::compact_inline(&extension.payload.to_string(), 80)
     );
     let body = MessageBody::with_custom(name.clone(), extension.payload.clone(), fallback);
     let message = Message {
@@ -699,7 +698,7 @@ fn apply_session_list(app: &mut App, sessions: &[SessionListItemDto]) {
                 .title
                 .as_deref()
                 .filter(|t| !t.trim().is_empty())
-                .map(|t| astrcode_support::text::compact_inline(t, 60))
+                .map(|t| astrcode_core::text::compact_inline(t, 60))
                 .unwrap_or_else(|| short_id(&s.session_id).to_string());
             SessionEntry {
                 session_id: s.session_id.clone(),
@@ -777,6 +776,17 @@ fn apply_extension_command_list(
 
 fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
+}
+
+fn truncate_first_line(text: &str, max_chars: usize) -> String {
+    let first_line = text.lines().next().unwrap_or(text);
+    if first_line.chars().count() <= max_chars {
+        return first_line.to_owned();
+    }
+
+    let mut truncated = first_line.chars().take(max_chars).collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 fn ready_status(reason: &str) -> String {
@@ -903,6 +913,19 @@ mod tests {
             error: None,
             metadata: BTreeMap::new(),
             duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn first_line_preview_preserves_content_and_limits_characters() {
+        for (text, max_chars, expected) in [
+            ("hello", 10, "hello"),
+            ("first\nsecond", 80, "first"),
+            ("0123456789abcdef", 8, "01234567…"),
+            ("你好世界abcd", 8, "你好世界abcd"),
+            ("hello   world", 80, "hello   world"),
+        ] {
+            assert_eq!(truncate_first_line(text, max_chars), expected);
         }
     }
 

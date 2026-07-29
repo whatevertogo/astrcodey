@@ -4,7 +4,7 @@ use std::{
 };
 
 use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolOrigin};
-use astrcode_support::shell::resolve_shell;
+use astrcode_extension_sdk::shell::resolve_shell;
 
 use crate::background_shell::{DEFAULT_STATUS_OUTPUT_MAX_TOKENS, MAX_STATUS_OUTPUT_MAX_TOKENS};
 

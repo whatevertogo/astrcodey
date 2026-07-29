@@ -490,7 +490,6 @@ impl MemoryIndex {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_sdk::hostpaths::ensure_dir;
     use tempfile::TempDir;
 
     use super::*;
@@ -498,7 +497,6 @@ mod tests {
     #[test]
     fn upsert_updates_similar_memories() {
         let tmp = TempDir::new().unwrap();
-        ensure_dir(tmp.path()).unwrap();
         let index = MemoryIndex::new(tmp.path());
 
         assert!(matches!(
@@ -535,7 +533,6 @@ mod tests {
     #[test]
     fn link_entities_dedupes_record_ids_on_update() {
         let tmp = TempDir::new().unwrap();
-        ensure_dir(tmp.path()).unwrap();
         let index = MemoryIndex::new(tmp.path());
 
         index
@@ -569,7 +566,6 @@ mod tests {
     #[test]
     fn upsert_skips_exact_duplicate() {
         let tmp = TempDir::new().unwrap();
-        ensure_dir(tmp.path()).unwrap();
         let index = MemoryIndex::new(tmp.path());
 
         index

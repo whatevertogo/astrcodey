@@ -15,7 +15,9 @@ use astrcode_protocol::{
     version::negotiate_version,
 };
 use astrcode_server::transport::{StdioTransport, write_error_response, write_initialize_response};
-use astrcode_support::event_fanout::EventFanout;
+use tokio::sync::broadcast;
+
+const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 #[tokio::main]
 async fn main() {
@@ -58,15 +60,14 @@ async fn main() {
     };
     write_initialize_response(request_id, accepted_version);
 
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let server_system =
-        astrcode_server::bootstrap::spawn_server_system(&runtime, Arc::clone(&event_tx));
+    let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+    let server_system = astrcode_server::bootstrap::spawn_server_system(&runtime, event_tx.clone());
     let handler = server_system.handler;
 
     // Background task: forward events → stdout
     let mut event_rx = event_tx.subscribe();
     astrcode_server::task_utils::spawn_traced("stdout_forwarder", async move {
-        while let Some(event) = event_rx.recv().await {
+        while let Ok(event) = event_rx.recv().await {
             let line = match notification_to_jsonrpc_message(&event)
                 .and_then(|message| to_jsonl_line(&message))
             {
@@ -87,7 +88,7 @@ async fn main() {
     tracing::info!("Server ready");
     while let Some(cmd) = transport.read_command().await {
         if let Err(e) = handler.handle(cmd).await {
-            event_tx.send(ClientNotification::Error {
+            let _ = event_tx.send(ClientNotification::Error {
                 code: -32603,
                 message: e.to_string(),
             });

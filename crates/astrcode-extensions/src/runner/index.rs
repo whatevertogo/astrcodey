@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::*,
@@ -58,7 +55,6 @@ pub(super) struct HandlerIndex {
     pub(super) keybindings: Vec<Keybinding>,
     pub(super) status_items: Vec<StatusItem>,
     pub(super) extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>>,
-    pub(super) extension_data_dir_extensions: HashSet<String>,
     pub(super) capabilities: HashMap<String, Vec<ExtensionCapability>>,
     pub(super) http_routes: Vec<HttpRouteEntry>,
 }
@@ -88,7 +84,6 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut keybindings = Vec::new();
     let mut status_items = Vec::new();
     let mut extension_event_decls = HashMap::new();
-    let mut extension_data_dir_extensions = HashSet::new();
     let mut capabilities = HashMap::new();
     let mut http_routes = Vec::new();
 
@@ -184,9 +179,6 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
                 record.reg.extension_event_decls().to_vec(),
             );
         }
-        if record.reg.needs_extension_data_dir() {
-            extension_data_dir_extensions.insert(record.id.clone());
-        }
         http_routes.extend(
             record
                 .reg
@@ -217,7 +209,6 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         keybindings,
         status_items,
         extension_event_decls,
-        extension_data_dir_extensions,
         capabilities,
         http_routes,
     }

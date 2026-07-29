@@ -1,21 +1,19 @@
-//! Dev-only event snapshots for coarse performance diagnosis.
+//! Dev-only session event snapshots for coarse performance diagnosis.
 //!
 //! This intentionally samples event boundaries instead of spreading tracing spans
 //! through the call graph. A snapshot answers: "what event just happened, and how
 //! long has it been since the previous event for the same session/turn?"
 
 #[cfg(debug_assertions)]
-use std::{
-    collections::HashMap,
-    sync::{Mutex, OnceLock},
-    time::Instant,
-};
+use std::{collections::HashMap, sync::OnceLock, time::Instant};
 
 use astrcode_core::event::Event;
 #[cfg(debug_assertions)]
 use astrcode_core::event::{
     DurableEventPayload, EventPayload, LiveEventPayload, TranscriptRewriteReason,
 };
+#[cfg(debug_assertions)]
+use parking_lot::Mutex;
 
 #[cfg(debug_assertions)]
 static LAST_EVENT_AT: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
@@ -27,8 +25,7 @@ pub fn capture_event(source: &'static str, event: &Event) {
     let since_previous_ms = LAST_EVENT_AT
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
-        .ok()
-        .and_then(|mut last_event_at| last_event_at.insert(key, now))
+        .insert(key, now)
         .map(|previous| now.duration_since(previous).as_millis());
 
     tracing::debug!(

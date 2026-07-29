@@ -107,10 +107,10 @@ async fn cleanup_session_removes_shells_and_kills_running() {
     };
 
     let temp = tempfile::tempdir().unwrap();
-    let shell = astrcode_support::shell::resolve_shell();
+    let shell = astrcode_extension_sdk::shell::resolve_shell();
     let echo_cmd = match shell.family {
-        astrcode_support::shell::ShellFamily::PowerShell => "Write-Output hello".into(),
-        astrcode_support::shell::ShellFamily::Cmd => "echo hello".into(),
+        astrcode_extension_sdk::shell::ShellFamily::PowerShell => "Write-Output hello".into(),
+        astrcode_extension_sdk::shell::ShellFamily::Cmd => "echo hello".into(),
         _ => "echo hello".into(),
     };
 
@@ -146,10 +146,10 @@ async fn cleanup_session_is_scoped_to_target_session() {
     };
 
     let temp = tempfile::tempdir().unwrap();
-    let shell = astrcode_support::shell::resolve_shell();
+    let shell = astrcode_extension_sdk::shell::resolve_shell();
     let echo_cmd = match shell.family {
-        astrcode_support::shell::ShellFamily::PowerShell => "Write-Output hi".into(),
-        astrcode_support::shell::ShellFamily::Cmd => "echo hi".into(),
+        astrcode_extension_sdk::shell::ShellFamily::PowerShell => "Write-Output hi".into(),
+        astrcode_extension_sdk::shell::ShellFamily::Cmd => "echo hi".into(),
         _ => "echo hi".into(),
     };
 
@@ -174,10 +174,10 @@ async fn cleanup_session_is_scoped_to_target_session() {
 #[tokio::test]
 async fn wait_background_shell_allows_repeated_terminal_poll_without_error() {
     let temp = tempfile::tempdir().unwrap();
-    let shell = astrcode_support::shell::resolve_shell();
+    let shell = astrcode_extension_sdk::shell::resolve_shell();
     let echo_cmd = match shell.family {
-        astrcode_support::shell::ShellFamily::PowerShell => "Write-Output done".into(),
-        astrcode_support::shell::ShellFamily::Cmd => "echo done".into(),
+        astrcode_extension_sdk::shell::ShellFamily::PowerShell => "Write-Output done".into(),
+        astrcode_extension_sdk::shell::ShellFamily::Cmd => "echo done".into(),
         _ => "echo done".into(),
     };
 
@@ -212,14 +212,15 @@ async fn wait_background_shell_allows_repeated_terminal_poll_without_error() {
 #[tokio::test]
 async fn wait_background_shell_returns_incremental_output() {
     let temp = tempfile::tempdir().unwrap();
-    let shell = astrcode_support::shell::resolve_shell();
+    let shell = astrcode_extension_sdk::shell::resolve_shell();
     let command = match shell.family {
-        astrcode_support::shell::ShellFamily::PowerShell => {
+        astrcode_extension_sdk::shell::ShellFamily::PowerShell => {
             "Write-Output first; Start-Sleep -Seconds 2; Write-Output second".into()
         },
-        astrcode_support::shell::ShellFamily::Cmd => "echo first & powershell -NoProfile -Command \
-                                                      \"Start-Sleep -Seconds 2\" & echo second"
-            .into(),
+        astrcode_extension_sdk::shell::ShellFamily::Cmd => {
+            "echo first & powershell -NoProfile -Command \"Start-Sleep -Seconds 2\" & echo second"
+                .into()
+        },
         _ => "echo first; sleep 2; echo second".into(),
     };
 

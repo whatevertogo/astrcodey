@@ -12,6 +12,7 @@ use std::{
 
 use astrcode_core::{
     event::{DurableEvent, DurableEventPayload, StoredEvent},
+    hostpaths,
     tool::ToolResultArtifactSlice,
     types::{Cursor, SessionId, project_key_from_path, validate_session_id},
 };
@@ -19,7 +20,6 @@ use astrcode_session_projection::{
     AgentSessionLinkView, ProjectionError, SessionReadModel, SessionSummary, reduce, replay,
     validate_next_event,
 };
-use astrcode_support::hostpaths;
 use chrono::Utc;
 use fs2::FileExt;
 use parking_lot::Mutex;
@@ -190,7 +190,7 @@ impl FileSystemSessionRepository {
     ///
     /// 会话按 `working_dir` 动态分发到对应的项目目录，不再绑定启动时的 cwd。
     pub fn new() -> Self {
-        Self::with_projects_base(hostpaths::projects_dir())
+        Self::with_projects_base(hostpaths::astrcode_dir().join("projects"))
     }
 
     fn with_projects_base(projects_base: PathBuf) -> Self {

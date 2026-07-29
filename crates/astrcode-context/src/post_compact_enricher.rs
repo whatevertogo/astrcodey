@@ -7,10 +7,10 @@ use std::{
 
 use astrcode_core::{
     config::ContextSettings,
+    hostpaths::{is_path_within, resolve_path},
     llm::LlmMessage,
     tool::{ToolDefinition, ToolOrigin},
 };
-use astrcode_support::hostpaths::{is_path_within, resolve_path};
 
 use crate::{
     CompactResult, PostCompactEnrichInput, PostCompactEnricher,

@@ -1,6 +1,6 @@
 //! 进程内传输层 —— 服务器在 tokio 任务中运行，无需子进程。
 //!
-//! 通过 mpsc 通道发送命令，通过 EventFanout 通道接收事件，
+//! 通过 mpsc 通道发送命令，通过 broadcast 通道接收事件，
 //! 实现客户端与服务器的进程内通信。
 
 use std::sync::Arc;
@@ -8,8 +8,10 @@ use std::sync::Arc;
 use astrcode_client::transport::{ClientTransport, TransportError};
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 use astrcode_server::bootstrap;
-use astrcode_support::{channel_policy::CLIENT_COMMAND_CAPACITY, event_fanout::EventFanout};
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
+
+const CLIENT_COMMAND_CAPACITY: usize = 128;
+const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 #[derive(Debug, Clone)]
 enum BootstrapState {
@@ -21,12 +23,12 @@ enum BootstrapState {
 /// 进程内传输实现，在后台 tokio 任务中运行服务器。
 ///
 /// 命令通过 `cmd_tx`（mpsc 通道）发送到服务器任务，
-/// 事件通过 `event_tx`（EventFanout 通道）广播给所有订阅者。
+/// 事件通过 `event_tx` 广播给所有订阅者。
 pub struct InProcessTransport {
     /// 命令发送端，将 ClientCommand 发送到服务器处理循环
     cmd_tx: mpsc::Sender<ClientCommand>,
-    /// 事件 fan-out 发送端，服务器处理完命令后通过此通道广播通知
-    event_tx: Arc<EventFanout<ClientNotification>>,
+    /// 事件广播发送端，服务器处理完命令后通过此通道广播通知
+    event_tx: broadcast::Sender<ClientNotification>,
     ready_rx: watch::Receiver<BootstrapState>,
 }
 
@@ -47,9 +49,9 @@ impl InProcessTransport {
     /// 可覆盖审批模式等启动选项的进程内传输。
     pub fn start_with(bootstrap_opts: bootstrap::BootstrapOptions) -> Self {
         let (cmd_tx, mut cmd_rx) = mpsc::channel::<ClientCommand>(CLIENT_COMMAND_CAPACITY);
-        let event_tx = Arc::new(EventFanout::new(1024));
+        let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         let (ready_tx, ready_rx) = watch::channel(BootstrapState::Starting);
-        let tx = Arc::clone(&event_tx);
+        let tx = event_tx.clone();
 
         // 在后台 tokio 任务中运行服务器
         tokio::spawn(async move {
@@ -60,7 +62,7 @@ impl InProcessTransport {
                     let message = e.to_string();
                     let _ = ready_tx.send(BootstrapState::Failed(message.clone()));
                     // 引导失败时通过事件通道通知客户端
-                    tx.send(ClientNotification::Error {
+                    let _ = tx.send(ClientNotification::Error {
                         code: -32603,
                         message,
                     });
@@ -125,8 +127,8 @@ impl ClientTransport for InProcessTransport {
             .map_err(|_| TransportError::Connection("server task ended".into()))
     }
 
-    /// 订阅事件 fan-out 通道，返回一个新的接收端。
-    async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError> {
+    /// 订阅事件通道，返回一个新的接收端。
+    async fn subscribe(&self) -> Result<broadcast::Receiver<ClientNotification>, TransportError> {
         Ok(self.event_tx.subscribe())
     }
 }

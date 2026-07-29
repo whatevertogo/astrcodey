@@ -13,7 +13,6 @@ use astrcode_core::{
 };
 use astrcode_session::{TurnError, TurnHandle, TurnShutdownHandle};
 use astrcode_session_projection::AgentSessionStatus;
-use astrcode_support::channel_policy::CHILD_SESSION_COMPLETE_CAPACITY;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
 
@@ -32,6 +31,7 @@ enum ChildOutcome {
 
 /// 完成通知内嵌的输出上限（字节）。
 const AGENT_NOTIFICATION_OUTPUT_MAX_BYTES: usize = 16 * 1024;
+const CHILD_SESSION_COMPLETE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildCleanup {
@@ -748,7 +748,7 @@ async fn write_agent_failed(
 }
 
 fn one_line_summary(text: &str) -> String {
-    astrcode_support::text::compact_inline(text, 159)
+    astrcode_core::text::compact_inline(text, 159)
 }
 
 async fn build_background_agent_notification(guard: &ChildSessionCompletionGuard) -> String {

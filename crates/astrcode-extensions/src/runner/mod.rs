@@ -250,21 +250,6 @@ impl ExtensionRunner {
             );
             return Err(error);
         }
-        if reg.needs_extension_data_dir() {
-            let dir = astrcode_support::hostpaths::extensions_data_dir(&id);
-            if let Err(error) = std::fs::create_dir_all(&dir) {
-                let error = ExtensionError::Internal(format!(
-                    "failed to create extension data dir: {error}"
-                ));
-                self.record_stage_result(
-                    &id,
-                    DiagnosticStage::Register,
-                    Some(register_started.elapsed()),
-                    StageOutcome::Failed(error.to_string()),
-                );
-                return Err(error);
-            }
-        }
         self.record_stage_result(
             &id,
             DiagnosticStage::Register,
@@ -421,19 +406,9 @@ impl ExtensionRunner {
             .collect()
     }
 
-    fn ensure_extensions_data_dir_dirs(&self, index: &HandlerIndex) {
-        for extension_id in &index.extension_data_dir_extensions {
-            let dir = astrcode_support::hostpaths::extensions_data_dir(extension_id);
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                tracing::warn!(extension_id = %extension_id, error = %e, "failed to create extension data dir");
-            }
-        }
-    }
-
     fn rebuild_index(&self, records: &[ExtensionRecord]) {
         log_handler_dispatch_order(records);
         let index = Arc::new(build_handler_index(records));
-        self.ensure_extensions_data_dir_dirs(&index);
         let _publication = RuntimePublicationGuard::begin(&self.runtime_publication);
         *self.index.write() = index;
     }

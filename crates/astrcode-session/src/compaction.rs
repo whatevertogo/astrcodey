@@ -25,7 +25,6 @@ use astrcode_extension_sdk::{
     runtime_ports::TurnHooks,
 };
 use astrcode_storage::CompactSnapshotInput;
-use astrcode_support::sync::lock_parking;
 
 use crate::{
     deferred_tools::append_deferred_tools_reminder,
@@ -324,7 +323,11 @@ async fn update_compaction_token_counts(
 }
 
 fn should_attempt_auto_llm_compact(session: &Session) -> bool {
-    lock_parking(session.runtime().compact_circuit_breaker()).should_attempt()
+    session
+        .runtime()
+        .compact_circuit_breaker()
+        .lock()
+        .should_attempt()
 }
 
 fn compact_hook_context(
@@ -372,7 +375,11 @@ async fn commit_compaction(
         .await;
 
     if meta.trigger == CompactTrigger::AutoThreshold && meta.llm_api_failed {
-        lock_parking(host.session.runtime().compact_circuit_breaker()).record_llm_failure();
+        host.session
+            .runtime()
+            .compact_circuit_breaker()
+            .lock()
+            .record_llm_failure();
     }
 
     let result = persist_compact_result(
@@ -386,7 +393,10 @@ async fn commit_compaction(
     match result {
         Ok(()) => {
             if meta.trigger == CompactTrigger::AutoThreshold && !meta.llm_api_failed {
-                lock_parking(host.session.runtime().compact_circuit_breaker())
+                host.session
+                    .runtime()
+                    .compact_circuit_breaker()
+                    .lock()
                     .record_compact_success();
             }
             let hook = compact_hook_context(host.shared, snapshot.messages.len(), meta.trigger);

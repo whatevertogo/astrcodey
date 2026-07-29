@@ -38,7 +38,7 @@ fn resolve_relative(working_dir: &Path, raw: &Path) -> std::path::PathBuf {
 }
 
 fn is_within(path: &Path, working_dir: &Path) -> bool {
-    astrcode_support::hostpaths::is_path_within(path, working_dir)
+    astrcode_core::hostpaths::is_path_within(path, working_dir)
 }
 
 #[cfg(test)]

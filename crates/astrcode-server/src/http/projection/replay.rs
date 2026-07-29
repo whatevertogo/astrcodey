@@ -50,8 +50,13 @@ pub(in crate::http) fn event_to_replay_deltas(
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::event::{
-        CompactionDetails, DurableEvent, StoredEvent, TranscriptRewriteReason,
+    use astrcode_core::{
+        compaction::CompactStrategy,
+        event::{
+            CompactionDetails, DurableEvent, DurableEventPayload, StoredEvent,
+            TranscriptRewriteReason,
+        },
+        types::{SessionId, ToolCallId, new_message_id},
     };
 
     use super::*;
@@ -71,7 +76,7 @@ mod tests {
                         post_tokens: 20,
                         summary: "summary".into(),
                         transcript_path: Some("compact.jsonl".into()),
-                        strategy: astrcode_core::compaction::CompactStrategy::Manual {
+                        strategy: CompactStrategy::Manual {
                             keep_recent_turns: None,
                         },
                     }),
@@ -83,5 +88,137 @@ mod tests {
             event_to_replay_deltas(&rewrite, true).as_slice(),
             [ConversationDeltaDto::RehydrateRequired]
         ));
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    enum ReplayExpectation {
+        AppendBlock,
+        Rehydrate,
+        ControlState,
+        Empty,
+    }
+
+    /// 每个 `DurableEventPayload` 变体在重放中应产出的 delta 类别。
+    ///
+    /// 此 match **故意不写通配臂**：新增 `DurableEventPayload` 变体会让本函数编译
+    /// 失败，迫使作者显式归类其重放语义，从而堵住 `event_to_replay_deltas` 末尾
+    /// `Vec::new()` 兜底把新变体静默丢弃的缺口。新增变体后，若其路由不属于现有
+    /// 任意类别，请在 `replay_routes_each_payload_category` 补一个样本断言。
+    fn replay_expectation(payload: &DurableEventPayload) -> ReplayExpectation {
+        use DurableEventPayload::*;
+        match payload {
+            // 结构性改写，无法增量重放 → 客户端必须重拉快照。
+            TranscriptRewritten { .. } | SessionForked { .. } => ReplayExpectation::Rehydrate,
+            TurnCompleted { .. } => ReplayExpectation::ControlState,
+            // 经 block_from_payload 委托，或 ToolCallRequested 的流式 block 分支产出可见 block。
+            UserMessage { .. }
+            | AssistantMessageCompleted { .. }
+            | ToolCallCompleted { .. }
+            | ToolCallFailed { .. }
+            | ToolCallCancelled { .. }
+            | ErrorOccurred { .. }
+            | RecapGenerated { .. }
+            | ToolCallRequested { .. } => ReplayExpectation::AppendBlock,
+            // 重放时不产出 delta 的载荷。SessionStarted 是首事件，cursor 之后不会出现。
+            // 子 Agent 血缘 delta 仅在 live 流发出；重放依赖快照/rehydrate 重建。
+            SessionStarted(_)
+            | ModelIdChanged { .. }
+            | SessionToolsConfigured { .. }
+            | SystemPromptConfigured { .. }
+            | TurnStarted
+            | TurnAbortedContext
+            | TokenUsageRecorded { .. }
+            | ToolApprovalRequested { .. }
+            | ToolApprovalResolved { .. }
+            | AgentSessionSpawned { .. }
+            | AgentSessionCompleted { .. }
+            | AgentSessionFailed { .. }
+            | AgentSessionRecycled { .. }
+            | ExtensionEvent(_) => ReplayExpectation::Empty,
+        }
+    }
+
+    #[test]
+    fn replay_routes_each_payload_category() {
+        let session_id = SessionId::new("session-replay");
+        let cases: Vec<DurableEventPayload> = vec![
+            // 结构性改写 → RehydrateRequired
+            DurableEventPayload::TranscriptRewritten {
+                source_seq: 0,
+                messages: Vec::new(),
+                reason: TranscriptRewriteReason::Compaction(CompactionDetails {
+                    trigger: "manual_command".into(),
+                    pre_tokens: 100,
+                    post_tokens: 20,
+                    summary: "summary".into(),
+                    transcript_path: None,
+                    strategy: CompactStrategy::Manual {
+                        keep_recent_turns: None,
+                    },
+                }),
+            },
+            DurableEventPayload::SessionForked {
+                source_session_id: session_id.clone(),
+                source_cursor: "0".into(),
+                first_user_message: None,
+                messages: Vec::new(),
+            },
+            // 控制态切换
+            DurableEventPayload::TurnCompleted {
+                finish_reason: "stop".into(),
+            },
+            // 委托 block_from_payload → AppendBlock
+            DurableEventPayload::UserMessage {
+                message_id: new_message_id(),
+                text: "hello".into(),
+                attachments: Vec::new(),
+            },
+            // 绕过 block_from_payload 的特殊 AppendBlock（流式工具调用 block）
+            DurableEventPayload::ToolCallRequested {
+                call_id: ToolCallId::new("call-1"),
+                tool_name: "read".into(),
+                arguments: serde_json::json!({"path": "README.md"}),
+                raw_arguments: None,
+            },
+            // 无操作
+            DurableEventPayload::ModelIdChanged {
+                model_id: "model-b".into(),
+            },
+        ];
+
+        for (seq, payload) in cases.into_iter().enumerate() {
+            let expected = replay_expectation(&payload);
+            let event = Event::from(StoredEvent::new(
+                seq as u64,
+                DurableEvent::session(session_id.clone(), payload),
+            ));
+            let deltas = event_to_replay_deltas(&event, true);
+            assert_replay_delta(&deltas, expected, seq);
+        }
+    }
+
+    fn assert_replay_delta(
+        deltas: &[ConversationDeltaDto],
+        expected: ReplayExpectation,
+        seq: usize,
+    ) {
+        match expected {
+            ReplayExpectation::AppendBlock => assert!(
+                matches!(deltas, [ConversationDeltaDto::AppendBlock { .. }]),
+                "seq {seq}: expected AppendBlock, got {deltas:?}"
+            ),
+            ReplayExpectation::Rehydrate => assert!(
+                matches!(deltas, [ConversationDeltaDto::RehydrateRequired]),
+                "seq {seq}: expected RehydrateRequired, got {deltas:?}"
+            ),
+            ReplayExpectation::ControlState => assert!(
+                matches!(deltas, [ConversationDeltaDto::UpdateControlState { .. }]),
+                "seq {seq}: expected UpdateControlState, got {deltas:?}"
+            ),
+            ReplayExpectation::Empty => assert!(
+                deltas.is_empty(),
+                "seq {seq}: expected no delta, got {deltas:?}"
+            ),
+        }
     }
 }

@@ -1,7 +1,6 @@
 //! Default fallback ToolRenderer — generic tool summary.
 
-use astrcode_core::tool::ToolResult;
-use astrcode_support::text::compact_inline;
+use astrcode_core::{text::compact_inline, tool::ToolResult};
 
 use super::tool::{ToolRenderCtx, ToolRenderer};
 use crate::tui::render::{RenderSpec, RenderTone};

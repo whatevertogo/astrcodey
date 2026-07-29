@@ -284,9 +284,9 @@ struct SkillRoot {
 
 #[derive(Debug, Default, Deserialize)]
 struct RawSkillFrontmatter {
-    name: Option<serde_yaml::Value>,
-    description: Option<serde_yaml::Value>,
-    when_to_use: Option<serde_yaml::Value>,
+    name: Option<String>,
+    description: Option<String>,
+    when_to_use: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -491,20 +491,25 @@ fn parse_skill_md(
         return None;
     }
 
-    let description = frontmatter::yaml_string_value(raw.description.as_ref())
-        .filter(|text| !text.trim().is_empty())
-        .or_else(|| extract_description_from_markdown(&guide))?;
+    let description =
+        trimmed_nonempty(raw.description).or_else(|| extract_description_from_markdown(&guide))?;
 
     Some(SkillDefinition {
         id: id.to_string(),
-        display_name: frontmatter::yaml_string_value(raw.name.as_ref()).filter(|name| name != id),
+        display_name: trimmed_nonempty(raw.name).filter(|name| name != id),
         description,
-        when_to_use: frontmatter::yaml_string_value(raw.when_to_use.as_ref()),
+        when_to_use: trimmed_nonempty(raw.when_to_use),
         guide,
         asset_files: collect_asset_files(&skill_root),
         skill_root,
         source,
     })
+}
+
+fn trimmed_nonempty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn normalize_skill_content(content: &str) -> String {

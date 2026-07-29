@@ -24,7 +24,6 @@ use astrcode_storage::{
     CompactSnapshotInput, SessionStore, StorageError, ToolResultArtifactInput,
     ToolResultArtifactRef,
 };
-use astrcode_support::perf_snapshot;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -34,6 +33,7 @@ use crate::{
         TURN_FINISH_ABORTED, agent_run_completed_payload, system_prompt_configured_payload,
         transcript_rewritten_payload, turn_completed_payload,
     },
+    perf_snapshot,
     runtime_stability::RuntimeStabilityBudget,
     session_runtime::SessionRuntimeState,
     session_runtime_services::SessionRuntimeServices,
@@ -177,7 +177,7 @@ impl Session {
         self.store.session_store_dir(&self.id).await.ok().flatten()
     }
 
-    pub fn subscribe(&self) -> tokio::sync::mpsc::Receiver<Arc<Event>> {
+    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Arc<Event>> {
         self.runtime.subscribe()
     }
 }

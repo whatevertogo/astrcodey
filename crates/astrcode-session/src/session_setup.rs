@@ -4,7 +4,7 @@
 //! `Session` 自己的工具边界和事件日志（追加 `SystemPromptConfigured`），把它们搬到
 //! session crate 后能让 Session 真正掌控自己的运行时。
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
 use astrcode_context::prompt_engine::{
     ExtensionPromptBlock, ExtensionSection, PromptEngine, SystemPromptInput, load_prompt_files,
@@ -18,8 +18,8 @@ use astrcode_extension_sdk::{
     runtime_ports::{
         PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider, ToolCatalogScope,
     },
+    shell::resolve_shell,
 };
-use astrcode_support::{hash::hex_fingerprint, shell::resolve_shell};
 
 use crate::{ToolRegistry, session::normalize_extra_system_prompt};
 
@@ -155,7 +155,7 @@ pub(crate) async fn build_system_prompt_snapshot(
         working_dir: working_dir.to_string(),
         os: std::env::consts::OS.into(),
         shell: resolve_shell().name,
-        gh_cli_available: astrcode_support::shell::is_gh_cli_available(),
+        gh_cli_available: is_gh_cli_available(),
         identity: prompt_files.identity,
         user_rules: prompt_files.user_rules,
         project_rules: prompt_files.project_rules,
@@ -166,6 +166,30 @@ pub(crate) async fn build_system_prompt_snapshot(
     };
 
     let system_prompt = PromptEngine.assemble(&prompt_input);
-    let fingerprint = hex_fingerprint(system_prompt.as_bytes());
+    let fingerprint = system_prompt_fingerprint(&system_prompt);
     Ok((system_prompt, fingerprint))
+}
+
+fn system_prompt_fingerprint(system_prompt: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for &byte in system_prompt.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn is_gh_cli_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let names: &[&str] = if cfg!(windows) {
+            &["gh.exe", "gh"]
+        } else {
+            &["gh"]
+        };
+        std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path)
+                .any(|dir| names.iter().any(|name| dir.join(name).is_file()))
+        })
+    })
 }

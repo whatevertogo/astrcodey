@@ -203,7 +203,6 @@ dependencies = [
  "astrcode-bundled-extensions",
  "astrcode-core",
  "astrcode-extension-sdk",
- "astrcode-support",
  "astrcode-tools",
  "async-trait",
  "futures-util",
@@ -248,7 +247,6 @@ dependencies = [
  "astrcode-log",
  "astrcode-protocol",
  "astrcode-server",
- "astrcode-support",
  "async-trait",
  "base64 0.22.1",
  "chrono",
@@ -275,7 +273,6 @@ version = "0.3.12"
 dependencies = [
  "astrcode-core",
  "astrcode-protocol",
- "astrcode-support",
  "async-trait",
  "parking_lot",
  "serde",
@@ -289,7 +286,6 @@ name = "astrcode-context"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
- "astrcode-support",
  "async-trait",
  "serde_json",
  "tokio",
@@ -302,6 +298,7 @@ version = "0.3.12"
 dependencies = [
  "async-trait",
  "chrono",
+ "dirs",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -456,7 +453,6 @@ name = "astrcode-extension-sdk"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
- "astrcode-support",
  "async-trait",
  "parking_lot",
  "serde",
@@ -516,7 +512,6 @@ dependencies = [
  "astrcode-extension-sdk",
  "astrcode-session-projection",
  "astrcode-storage",
- "astrcode-support",
  "async-trait",
  "dirs",
  "futures-util",
@@ -539,7 +534,7 @@ dependencies = [
 name = "astrcode-log"
 version = "0.3.12"
 dependencies = [
- "astrcode-support",
+ "astrcode-core",
  "chrono",
  "tracing",
  "tracing-appender",
@@ -577,7 +572,6 @@ dependencies = [
  "astrcode-session",
  "astrcode-session-projection",
  "astrcode-storage",
- "astrcode-support",
  "astrcode-tools",
  "async-trait",
  "axum",
@@ -608,7 +602,6 @@ dependencies = [
  "astrcode-extension-sdk",
  "astrcode-session-projection",
  "astrcode-storage",
- "astrcode-support",
  "async-trait",
  "chrono",
  "globset",
@@ -638,7 +631,6 @@ version = "0.3.12"
 dependencies = [
  "astrcode-core",
  "astrcode-session-projection",
- "astrcode-support",
  "async-trait",
  "chrono",
  "fs2",
@@ -654,25 +646,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "astrcode-support"
-version = "0.3.12"
-dependencies = [
- "astrcode-core",
- "dirs",
- "parking_lot",
- "serde",
- "serde_yaml",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "astrcode-tools"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
  "astrcode-extension-sdk",
- "astrcode-support",
  "async-trait",
  "base64 0.22.1",
  "globset",

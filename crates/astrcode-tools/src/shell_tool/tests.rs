@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use astrcode_core::tool::{Tool, ToolCapabilities, ToolExecutionContext, ToolResult};
-use astrcode_support::shell::{ShellFamily, ShellInfo, resolve_shell};
+use astrcode_extension_sdk::shell::{ShellFamily, ShellInfo, resolve_shell};
 
 use super::{
     MAX_CAPTURE_BYTES_PER_STREAM, ShellTool, apply_pipeline_policy, capture_stream, command_args,

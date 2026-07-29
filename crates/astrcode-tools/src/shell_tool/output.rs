@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use astrcode_support::shell::ShellInfo;
+use astrcode_extension_sdk::shell::ShellInfo;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     sync::Notify,

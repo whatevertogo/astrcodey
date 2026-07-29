@@ -17,7 +17,7 @@ use agent_client_protocol::{
     },
 };
 use astrcode_core::{event::Event, types::SessionId};
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::{
@@ -148,12 +148,12 @@ async fn handle_prompt(
         tokio::select! {
             result = event_rx.recv() => {
                 match result {
-                    Some(event) => {
+                    Ok(event) => {
                         if event_belongs_to_prompt(&event, &accepted_sessions, &turn_id) {
                             forward_event(&event, &acp_session_id, cx);
                         }
                     },
-                    None => {
+                    Err(_) => {
                         return Ok(StopReason::EndTurn);
                     },
                 }
@@ -185,7 +185,7 @@ async fn handle_prompt(
 /// Deterministic flush of queued events after completion signal.
 /// Uses `try_recv` to drain without blocking.
 fn flush_queued_events(
-    event_rx: &mut mpsc::Receiver<Arc<Event>>,
+    event_rx: &mut broadcast::Receiver<Arc<Event>>,
     accepted_sessions: &mut HashSet<SessionId>,
     turn_id: &astrcode_core::types::TurnId,
     acp_session_id: &SessionId,

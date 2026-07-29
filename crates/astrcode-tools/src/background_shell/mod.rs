@@ -11,7 +11,7 @@ use astrcode_core::{
     llm::token_estimate::{estimate_char_budget, estimate_char_tokens},
     tool::ToolError,
 };
-use astrcode_support::shell::ShellInfo;
+use astrcode_extension_sdk::shell::ShellInfo;
 use parking_lot::Mutex;
 use tokio::{
     fs::OpenOptions,

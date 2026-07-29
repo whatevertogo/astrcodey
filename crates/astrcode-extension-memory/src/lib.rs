@@ -118,7 +118,6 @@ impl Extension for MemoryExtension {
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.extension_data_dir();
         reg.extension_event("memory.created").register();
         reg.extension_event("memory.deleted").register();
 

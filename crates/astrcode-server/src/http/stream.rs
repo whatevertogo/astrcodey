@@ -3,7 +3,7 @@
 //! 三段流串联：
 //! 1. `replay_error_stream`：cursor 解析或重放失败时推一条 `RehydrateRequired`。
 //! 2. `replay_stream`：从 `EventStore` 拉历史事件转 deltas（按 cursor 起点）。
-//! 3. `live_stream`：订阅当前 conversation 的 scoped event fanout 与全局非事件通知。
+//! 3. `live_stream`：订阅当前 conversation 的事件广播与全局非事件通知。
 
 mod child_sessions;
 mod replay;
@@ -34,7 +34,7 @@ use child_sessions::ChildSessionTracker;
 use futures_util::{StreamExt, stream};
 use replay::replay_after_cursor;
 use serde::Deserialize;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use super::{
@@ -49,8 +49,8 @@ type SseItem = Result<axum::response::sse::Event, std::convert::Infallible>;
 ///
 /// 从 `stream::unfold` 的匿名元组中抽出，提高可读性并方便未来扩展。
 struct LiveStreamState {
-    event_rx: mpsc::Receiver<Arc<Event>>,
-    notification_rx: mpsc::Receiver<ClientNotification>,
+    event_rx: broadcast::Receiver<Arc<Event>>,
+    notification_rx: broadcast::Receiver<ClientNotification>,
     runtime: Arc<ServerRuntime>,
     session_id: SessionId,
     /// replay 阶段已发送的最大 seq，live 阶段跳过 <= 该值的事件避免重复。
@@ -204,6 +204,9 @@ pub(in crate::http) async fn session_stream(
                 state.drained = true;
                 drain_stale_live_events(&mut state).await;
             }
+            if state.closing {
+                return None;
+            }
 
             if let Some(item) = state.pending.pop_front() {
                 return Some((item, state));
@@ -248,9 +251,9 @@ async fn recv_live_input(state: &mut LiveStreamState) -> Option<LiveInput> {
     // channels. We preserve ordering inside each channel, but do not promise a
     // total order across them.
     tokio::select! {
-        event = state.event_rx.recv() => event.map(LiveInput::Event),
+        event = state.event_rx.recv() => event.ok().map(LiveInput::Event),
         notification = state.notification_rx.recv() => {
-            notification.map(|notification| LiveInput::Notification(Box::new(notification)))
+            notification.ok().map(|notification| LiveInput::Notification(Box::new(notification)))
         },
     }
 }
@@ -287,29 +290,49 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
         return;
     };
     let mut buffered = Vec::new();
-    while let Ok(event) = state.event_rx.try_recv() {
-        if event.session_id == state.session_id {
-            // live-only 事件（无 seq）属于 replay 时段残留，直接丢弃。
-            let Some(seq) = event.seq else {
-                continue;
-            };
-            // 已被 replay 覆盖的 durable 事件也丢弃。
-            if seq <= replay_max {
-                continue;
-            }
-            buffered.push(LiveInput::Event(event));
-        } else if state.child_sessions.is_tracked_event(&event) {
-            buffered.push(LiveInput::Event(event));
+    loop {
+        match state.event_rx.try_recv() {
+            Ok(event) => {
+                if event.session_id == state.session_id {
+                    // live-only 事件（无 seq）属于 replay 时段残留，直接丢弃。
+                    let Some(seq) = event.seq else {
+                        continue;
+                    };
+                    // 已被 replay 覆盖的 durable 事件也丢弃。
+                    if seq <= replay_max {
+                        continue;
+                    }
+                    buffered.push(LiveInput::Event(event));
+                } else if state.child_sessions.is_tracked_event(&event) {
+                    buffered.push(LiveInput::Event(event));
+                }
+            },
+            Err(broadcast::error::TryRecvError::Empty) => break,
+            Err(
+                broadcast::error::TryRecvError::Closed | broadcast::error::TryRecvError::Lagged(_),
+            ) => {
+                state.closing = true;
+                return;
+            },
         }
     }
-    while let Ok(notification) = state.notification_rx.try_recv() {
-        match notification {
-            ClientNotification::StatusItemUpdate { .. }
-            | ClientNotification::ExtensionRegistryChanged
-            | ClientNotification::ExtensionCommandResult { .. } => {
-                buffered.push(LiveInput::Notification(Box::new(notification)));
+    loop {
+        match state.notification_rx.try_recv() {
+            Ok(notification) => match notification {
+                ClientNotification::StatusItemUpdate { .. }
+                | ClientNotification::ExtensionRegistryChanged
+                | ClientNotification::ExtensionCommandResult { .. } => {
+                    buffered.push(LiveInput::Notification(Box::new(notification)));
+                },
+                _ => {},
             },
-            _ => {},
+            Err(broadcast::error::TryRecvError::Empty) => break,
+            Err(
+                broadcast::error::TryRecvError::Closed | broadcast::error::TryRecvError::Lagged(_),
+            ) => {
+                state.closing = true;
+                return;
+            },
         }
     }
     for input in buffered {

@@ -10,10 +10,11 @@ use astrcode_protocol::{
     },
     version::{InitializeRequest, InitializeResponse, ServerCapabilities, ServerInfo},
 };
-use astrcode_support::channel_policy::STDIO_MESSAGE_CAPACITY;
 use tokio::sync::mpsc;
 
 use super::TransportError;
+
+const STDIO_MESSAGE_CAPACITY: usize = 128;
 
 /// stdio transport: JSON-RPC 2.0 over stdin/stdout.
 pub struct StdioTransport {

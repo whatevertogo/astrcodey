@@ -5,8 +5,10 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::tool::{access::ResourceAccess, *};
-use astrcode_support::hostpaths::resolve_path;
+use astrcode_core::{
+    hostpaths::resolve_path,
+    tool::{access::ResourceAccess, *},
+};
 use serde::Deserialize;
 
 use super::shared::{compute_unified_diff, run_blocking};

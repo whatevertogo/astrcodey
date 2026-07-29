@@ -6,8 +6,10 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::tool::{access::ResourceAccess, *};
-use astrcode_support::hostpaths::resolve_path;
+use astrcode_core::{
+    hostpaths::resolve_path,
+    tool::{access::ResourceAccess, *},
+};
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
     BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,

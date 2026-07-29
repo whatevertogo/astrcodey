@@ -10,8 +10,10 @@
 
 use std::future::Future;
 
-use astrcode_core::llm::{LlmContent, LlmError, LlmMessage, LlmRole};
-use astrcode_support::text::compact_inline;
+use astrcode_core::{
+    llm::{LlmContent, LlmError, LlmMessage, LlmRole},
+    text::compact_inline,
+};
 
 use crate::ContextSettings;
 

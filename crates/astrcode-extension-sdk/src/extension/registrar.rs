@@ -44,7 +44,6 @@ pub struct Registrar {
     user_message_envelope: Vec<UserMessageEnvelopeRegistration<dyn UserMessageEnvelopeHandler>>,
     lifecycle: Vec<(ExtensionEvent, HookMode, i32, Arc<dyn LifecycleHandler>)>,
     extension_event_decls: Vec<ExtensionEventDecl>,
-    needs_extension_data_dir: bool,
 }
 
 impl Registrar {
@@ -250,14 +249,6 @@ impl Registrar {
             && self.user_message_envelope.is_empty()
             && self.lifecycle.is_empty()
             && self.extension_event_decls.is_empty()
-            && !self.needs_extension_data_dir
-    }
-
-    /// 声明插件需要专属数据目录（`~/.astrcode/extension_data/<extension_id>/`）。
-    ///
-    /// 注册后由 runtime 自动创建目录。插件通过 `hostpaths::extension_data_dir()` 获取路径。
-    pub fn extension_data_dir(&mut self) {
-        self.needs_extension_data_dir = true;
     }
 
     /// 声明插件可发出的事件类型，返回构建器。
@@ -340,10 +331,6 @@ impl Registrar {
     pub fn extension_event_decls(&self) -> &[ExtensionEventDecl] {
         &self.extension_event_decls
     }
-
-    pub fn needs_extension_data_dir(&self) -> bool {
-        self.needs_extension_data_dir
-    }
 }
 
 #[cfg(test)]
@@ -359,10 +346,6 @@ mod registrar_tests {
             "example".to_owned(),
             ToolPromptMetadata::new("example"),
         )]));
-        assert!(!registrar.is_empty());
-
-        let mut registrar = Registrar::default();
-        registrar.extension_data_dir();
         assert!(!registrar.is_empty());
     }
 }

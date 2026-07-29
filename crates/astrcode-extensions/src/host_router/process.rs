@@ -2,8 +2,8 @@
 
 use std::{future::Future, process::Stdio, sync::Arc, time::Duration};
 
+use astrcode_core::hostpaths::resolve_under_workspace_root;
 use astrcode_extension_sdk::s5r::ErrorPayload;
-use astrcode_support::hostpaths::resolve_under_workspace_root;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},

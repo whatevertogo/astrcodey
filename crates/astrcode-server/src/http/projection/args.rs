@@ -1,6 +1,6 @@
 //! 工具调用参数 → 折叠摘要文本格式化。
 
-use astrcode_support::text::compact_inline;
+use astrcode_core::text::compact_inline;
 
 const MAX_ARGUMENT_SUMMARY_CHARS: usize = 140;
 
