@@ -6,7 +6,7 @@ pub mod http;
 pub mod task_utils;
 pub mod transport;
 
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub mod test_support;
 
 mod child_session;
