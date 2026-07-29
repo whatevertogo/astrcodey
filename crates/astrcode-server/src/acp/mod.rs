@@ -1,8 +1,8 @@
 //! ACP (Agent Client Protocol) server adapter.
 //!
-//! Bridges the ACP JSON-RPC protocol (over stdio) to astrcode's internal
-//! CommandHandle / broadcast event architecture. This module is purely a
-//! DTO-mapping boundary — no session-runtime types leak through.
+//! Bridges the ACP JSON-RPC protocol (over stdio) to astrcode's session command
+//! service and event bus. This module is purely a DTO-mapping boundary — no
+//! session-runtime types leak through.
 
 mod events;
 
@@ -21,19 +21,20 @@ use tokio::sync::broadcast;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::{
-    bootstrap::ServerRuntime,
-    handler::{CommandHandle, HandlerError, TurnCompletion},
+    bootstrap::ServerApp,
+    handler::{HandlerError, TurnCompletion},
     server_event_bus::ServerEventBus,
+    session_command_service::SessionCommandService,
 };
 
 /// Run the ACP server, reading from stdin and writing to stdout.
 ///
 /// This function blocks until the connection is closed or an unrecoverable
 /// error occurs.
-pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protocol::Result<()> {
-    let server_system = crate::bootstrap::spawn_server_system_without_legacy(&runtime);
-    let event_bus = server_system.event_bus;
-    let command_handle = server_system.handler;
+pub async fn run_acp_server(server_app: Arc<ServerApp>) -> agent_client_protocol::Result<()> {
+    server_app.initialize().await;
+    let event_bus = Arc::clone(server_app.event_bus());
+    let session_commands = server_app.session_commands().clone();
 
     let result = Agent
         .builder()
@@ -58,13 +59,13 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
         )
         .on_receive_request(
             {
-                let command_handle = command_handle.clone();
+                let session_commands = session_commands.clone();
 
                 async move |req: NewSessionRequest,
                             responder: Responder<NewSessionResponse>,
                             _cx: ConnectionTo<Client>| {
                     let working_dir = req.cwd.to_string_lossy().to_string();
-                    match command_handle.create_session(working_dir).await {
+                    match session_commands.create_session(working_dir, None).await {
                         Ok(session_id) => {
                             let acp_sid = AcpSessionId::new(session_id.to_string());
                             responder.respond(NewSessionResponse::new(acp_sid))
@@ -77,13 +78,13 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
         )
         .on_receive_request(
             {
-                let command_handle = command_handle.clone();
+                let session_commands = session_commands.clone();
                 let event_bus = Arc::clone(&event_bus);
 
                 async move |req: PromptRequest,
                             responder: Responder<PromptResponse>,
                             cx: ConnectionTo<Client>| {
-                    match handle_prompt(req, &command_handle, &event_bus, &cx).await {
+                    match handle_prompt(req, &session_commands, &event_bus, &cx).await {
                         Ok(stop_reason) => responder.respond(PromptResponse::new(stop_reason)),
                         Err(error) => responder.respond_with_error(error),
                     }
@@ -93,11 +94,11 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
         )
         .on_receive_notification(
             {
-                let command_handle = command_handle.clone();
+                let session_commands = session_commands.clone();
 
                 async move |notif: CancelNotification, _cx: ConnectionTo<Client>| {
                     let sid = SessionId::from(notif.session_id.to_string());
-                    let _ = command_handle.abort_session(sid).await;
+                    let _ = session_commands.abort_session(&sid).await;
                     Ok(())
                 }
             },
@@ -117,14 +118,13 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
             tokio::io::stdin().compat(),
         ))
         .await;
-    runtime.scheduler().drain_detached_tasks().await;
-    runtime.shutdown_extensions().await;
+    server_app.shutdown().await;
     result
 }
 
 async fn handle_prompt(
     req: PromptRequest,
-    command_handle: &CommandHandle,
+    session_commands: &SessionCommandService,
     event_bus: &Arc<ServerEventBus>,
     cx: &ConnectionTo<Client>,
 ) -> Result<StopReason, Error> {
@@ -132,8 +132,8 @@ async fn handle_prompt(
     let text = prompt_to_text(&req.prompt)?;
     let mut event_rx = event_bus.subscribe_conversation_events(&session_id);
 
-    let (turn_id, mut completion_rx) = command_handle
-        .submit_prompt_with_completion(
+    let (turn_id, mut completion_rx) = session_commands
+        .submit_input_with_completion(
             session_id.clone(),
             crate::turn_scheduler::PromptInput::text_only(text),
         )

@@ -2,7 +2,7 @@
 
 Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k），`crates/` 下 26 个 crate + Tauri 桌面壳（共 27 个 workspace 成员），支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
-核心判断：**EventLog 是事实，Session 是投影，Agent 是无状态运行时。**
+核心判断：**EventLog 是事实，SessionReadModel 是投影，Agent 是无状态运行时。**
 
 ---
 
@@ -14,12 +14,13 @@ Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k�
 - 工具结果超过阈值时持久化到 artifact 文件，日志只留引用，保持轻量
 - 会话恢复 = 从 EventLog 重新投影，fork = 从某个 seq 开始重放
 
-### Session — 投影层 + 进程内运行时
+### Session — 应用句柄 + 进程内运行时
 
-- `Session` 是系统唯一的持久事实来源，同时持有进程内瞬态资源
-- 持久层：`EventStore` 负责 JSONL 事件日志，`SessionReadModel` 是投影结果
-- 瞬态层：`SessionRuntimeState` 持有 file observation store、审批状态和 session 级 broadcast channel；工具表由每个 Turn 显式持有不可变快照
-- 同一 sid 的所有 `Session` 实例共享同一份 `SessionRuntimeState`（由 `SessionManager` 的 `runtime_states` HashMap 保证），订阅者通过 `Session::subscribe()` 接收该 session 的所有事件
+- `Session` 是持久事实的应用句柄；EventLog 才是唯一事实来源
+- 持久层：`SessionEventJournal` 负责 durable 写入，storage 持有 EventLog 的唯一
+  `SessionReadModel` 实例
+- 瞬态层：`SessionRuntimeState` 持有有序 publisher、file observation store、审批状态和 session 级 broadcast channel；工具表由每个 Turn 显式持有不可变快照
+- 同一 sid 的所有 `Session` 实例共享同一份 `SessionRuntimeState`（由 `SessionManager` 的 `SessionRuntimeRegistry` 保证），订阅者通过 `Session::subscribe()` 接收该 session 的所有事件
 - 不需要"保存 session"——事件已经写回了
 
 ### Agent — 无状态运行时
@@ -31,17 +32,20 @@ Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k�
 
 ### 事件流路径
 
+Session 持久化、projection 所有权、文件 lease 以及读写应用端口的当前设计见
+[Session 持久化与有序事件管线](architecture/session-persistence-and-event-pipeline.md)。
+
 ```
-Session::emit / Session::append_event
-  → durable: EventStore（持久化并分配 seq）
-  → live: 跳过 EventStore
-  → SessionRuntimeState::fanout（broadcast）
+Session::emit_durable / Session::emit_live
+  → SessionEventPublisher（同一 session 的 bounded FIFO）
+    → durable: SessionEventJournal → projection → fan-out
+    → live: 跳过 storage/projection → fan-out
     → ServerEventBus forwarder（attach 后订阅）
       → ClientNotification broadcast
         → SSE / ACP 客户端
 ```
 
-`ServerEventBus` 不写 EventStore，只做"session broadcast → 客户端通知"的桥接。
+`ServerEventBus` 不写 EventLog，只做"session broadcast → 客户端通知"的桥接。
 broadcast 发生 lag 时，forwarder 主动推送 `SessionResumed` 快照触发客户端 rehydrate。
 
 Conversation snapshot、cursor、SSE replay、前端逐帧归并和虚拟化渲染的完整契约见
@@ -83,7 +87,7 @@ session-A (root)
 
 | 层 | 位置 | 含义 |
 |---|---|---|
-| Durable | `EventStore` / `SessionReadModel` | 持久化、可重放、进程重启后仍成立 |
+| Durable | `EventLog` / `SessionReadModel` | 持久化、可重放、进程重启后仍成立 |
 | 进程 | `TurnRegistry` | 当前是否有活跃 turn 任务（优化索引，需 `repair_stale` 对齐） |
 | 传输 | `CommandHandler.active_session_id` | stdio/ACP 的「当前会话」；HTTP 在 path 中带 `session_id` |
 
@@ -226,7 +230,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 ### 生命周期钩子
 
-扩展订阅 agent 生命周期事件，可拦截、修改或阻止操作：
+扩展订阅 agent 生命周期事件；控制型 hook 可以拦截或修改操作，通知型 hook 只观察：
 
 - `PreToolUse` / `PostToolUse` — 检查、修改或阻止工具执行
 - `BeforeProviderRequest` / `AfterProviderResponse` — 修改消息或阻止 LLM 调用
@@ -239,6 +243,9 @@ Identity → System → Task Guidelines → Communication → Environment
 - **Blocking**：同步执行，可返回 Block / ModifiedInput / ModifiedResult
 - **NonBlocking**：即发即弃，使用快照上下文，不阻塞主流程
 - **Advisory**：结果仅记录日志，不强制执行
+
+通用生命周期事件中只有 `TurnStart` 和 `UserPromptSubmit` 允许 Blocking。
+Session、Step 和结束类事件已发生或正在收尾，注册为 Blocking 会被宿主拒绝。
 
 ### 快捷键与状态栏注册
 

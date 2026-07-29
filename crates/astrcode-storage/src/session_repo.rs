@@ -1,4 +1,4 @@
-//! 基于文件系统的会话仓库，实现 EventStore trait。
+//! 基于文件系统的会话仓库。
 //!
 //! 管理按项目组织的会话事件日志，目录结构为：
 //! `~/.astrcode/projects/<project>/sessions/<session>/`
@@ -11,8 +11,8 @@ use std::{
 };
 
 use astrcode_core::{
+    config::defaults::astrcode_dir,
     event::{DurableEvent, DurableEventPayload, StoredEvent},
-    hostpaths,
     tool::ToolResultArtifactSlice,
     types::{Cursor, SessionId, project_key_from_path, validate_session_id},
 };
@@ -27,8 +27,9 @@ use tokio::sync::{RwLock, Semaphore};
 use uuid::Uuid;
 
 use crate::{
-    CompactSnapshotInput, EventReader, EventStore, SessionPathResolver, SessionReader,
-    StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
+    CompactSnapshotInput, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
+    SessionStore, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
+    ToolResultArtifactStore,
     event_log::EventLog,
     snapshot::SnapshotManager,
     tool_artifacts::{slice_tool_result, write_tool_result_file},
@@ -83,58 +84,110 @@ fn source_extension_dir_component(source_extension: &str) -> Result<String, Stor
 ///
 /// 内存中缓存已打开的会话元数据，避免频繁的磁盘 I/O。
 pub struct FileSystemSessionRepository {
+    owner: Arc<()>,
     /// 已打开的会话元数据缓存，按会话 ID 索引
     sessions: Arc<RwLock<HashMap<SessionId, Arc<SessionMeta>>>>,
     /// 所有项目目录的父目录：`~/.astrcode/projects/`
     projects_base: PathBuf,
 }
 
-static SESSION_OWNER_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<SessionOwnerLockInner>>>> =
+static SESSION_OWNER_LEASES: OnceLock<Mutex<HashMap<PathBuf, Weak<SessionOwnerLeaseInner>>>> =
     OnceLock::new();
 
-fn session_owner_locks() -> &'static Mutex<HashMap<PathBuf, Weak<SessionOwnerLockInner>>> {
-    SESSION_OWNER_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+fn session_owner_leases() -> &'static Mutex<HashMap<PathBuf, Weak<SessionOwnerLeaseInner>>> {
+    SESSION_OWNER_LEASES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// 会话的内部元数据，持有事件日志和快照管理器。
 struct SessionMeta {
-    /// 本进程对该 session 目录的所有权锁。
+    /// 本进程对该 session 目录的所有权租约。
     ///
-    /// 当前文件系统仓库刻意采用单 server owner 模型：同一进程可复用已持有的
-    /// owner lock，另一个 server 进程若尝试打开同一 session 会收到明确错误。
-    _owner_lock: SessionOwnerLock,
+    /// 当前文件系统仓库刻意采用单 repository owner 模型：同一 repository 可复用
+    /// 已持有的 owner lease，其他 repository 或进程会收到明确错误。
+    _owner_lease: SessionOwnerLease,
     /// 事件日志实例，负责追加式写入和重放
-    log: Arc<EventLog>,
+    log: EventLog,
     /// 快照管理器，负责创建和列出恢复点
     snapshot_mgr: SnapshotManager,
     /// 当前会话所在目录。
     dir: PathBuf,
-    /// 从事件日志同步维护的内部读模型（本进程内由 `append_event` 增量更新）。
+    /// 从事件日志同步维护的 projection 实例（本进程内由 `append_event` 增量更新）。
     ///
-    /// 文件系统仓库不支持多个 server 进程同时拥有同一个 session 目录。`_owner_lock`
-    /// 会在打开/创建 session 时阻止第二个进程进入，避免投影缓存和 JSONL writer
-    /// 出现跨进程失效问题。
-    projection: RwLock<SessionReadModel>,
-    /// 保证 event log 分配 seq 与 projection 应用事件的顺序一致。
-    append_lane: Semaphore,
+    /// reducer 规则归 `astrcode-session-projection`；storage 只拥有这个可重建缓存的实例。
+    projection: SessionProjection,
+    /// 串行化 journal commit 与 projection 更新。
+    ///
+    /// 这是进程内 storage 一致性边界；OS owner lease 只处理跨进程目录所有权。
+    commit_lane: Semaphore,
 }
 
-struct SessionOwnerLock {
-    _inner: Arc<SessionOwnerLockInner>,
+struct SessionProjection {
+    model: RwLock<Arc<SessionReadModel>>,
 }
 
-struct SessionOwnerLockInner {
+impl SessionProjection {
+    fn new(model: SessionReadModel) -> Self {
+        Self {
+            model: RwLock::new(Arc::new(model)),
+        }
+    }
+
+    async fn snapshot(&self) -> Arc<SessionReadModel> {
+        let model = self.model.read().await;
+        Arc::clone(&model)
+    }
+
+    async fn validate(&self, event: &DurableEvent) -> Result<u64, StorageError> {
+        let model = self.model.read().await;
+        let seq =
+            model.stats.last_seq.checked_add(1).ok_or_else(|| {
+                StorageError::CorruptLog("session event sequence overflow".into())
+            })?;
+        validate_next_event(seq, event, &model).map_err(invalid_event)?;
+        Ok(seq)
+    }
+
+    async fn apply(&self, event: &StoredEvent) -> Result<(), StorageError> {
+        let mut model = self.model.write().await;
+        reduce(event, Arc::make_mut(&mut model)).map_err(corrupt_projection)
+    }
+}
+
+struct SessionOwnerLease {
+    _inner: Arc<SessionOwnerLeaseInner>,
+}
+
+struct SessionOwnerLeaseInner {
     path: PathBuf,
+    owner: Arc<()>,
     _file: File,
 }
 
-impl SessionOwnerLock {
-    fn acquire(session_dir: &Path) -> Result<Self, StorageError> {
-        let key = std::fs::canonicalize(session_dir).unwrap_or_else(|_| session_dir.to_path_buf());
-        let mut locks = session_owner_locks().lock();
+impl SessionOwnerLease {
+    async fn acquire(session_dir: &Path, owner: &Arc<()>) -> Result<Self, StorageError> {
+        let session_dir = session_dir.to_path_buf();
+        let owner = Arc::clone(owner);
+        tokio::task::spawn_blocking(move || Self::acquire_blocking(&session_dir, &owner))
+            .await
+            .map_err(|error| {
+                StorageError::Io(std::io::Error::other(format!(
+                    "session owner lease task failed: {error}"
+                )))
+            })?
+    }
 
-        if let Some(inner) = locks.get(&key).and_then(Weak::upgrade) {
-            return Ok(Self { _inner: inner });
+    fn acquire_blocking(session_dir: &Path, owner: &Arc<()>) -> Result<Self, StorageError> {
+        let key = std::fs::canonicalize(session_dir).map_err(StorageError::Io)?;
+        let mut leases = session_owner_leases().lock();
+
+        if let Some(inner) = leases.get(&key).and_then(Weak::upgrade) {
+            if Arc::ptr_eq(&inner.owner, owner) {
+                return Ok(Self { _inner: inner });
+            }
+            return Err(StorageError::LockError(format!(
+                "session directory {} is already owned by another AstrCode repository",
+                key.display()
+            )));
         }
 
         let lock_path = key.join(".astrcode-session-owner.lock");
@@ -149,8 +202,8 @@ impl SessionOwnerLock {
         file.try_lock_exclusive().map_err(|error| {
             if error.kind() == std::io::ErrorKind::WouldBlock {
                 StorageError::LockError(format!(
-                    "session directory {} is already owned by another AstrCode server process; \
-                     stop that process before opening this session here",
+                    "session directory {} is already owned by another AstrCode repository; stop \
+                     that server before opening this session here",
                     key.display()
                 ))
             } else {
@@ -158,23 +211,24 @@ impl SessionOwnerLock {
             }
         })?;
 
-        let inner = Arc::new(SessionOwnerLockInner {
+        let inner = Arc::new(SessionOwnerLeaseInner {
             path: key.clone(),
+            owner: Arc::clone(owner),
             _file: file,
         });
-        locks.insert(key, Arc::downgrade(&inner));
+        leases.insert(key, Arc::downgrade(&inner));
         Ok(Self { _inner: inner })
     }
 }
 
-impl Drop for SessionOwnerLockInner {
+impl Drop for SessionOwnerLeaseInner {
     fn drop(&mut self) {
-        let mut locks = session_owner_locks().lock();
-        if locks
+        let mut leases = session_owner_leases().lock();
+        if leases
             .get(&self.path)
-            .is_some_and(|existing| existing.strong_count() == 0)
+            .is_some_and(|lease| lease.strong_count() == 0)
         {
-            locks.remove(&self.path);
+            leases.remove(&self.path);
         }
     }
 }
@@ -190,7 +244,7 @@ impl FileSystemSessionRepository {
     ///
     /// 会话按 `working_dir` 动态分发到对应的项目目录，不再绑定启动时的 cwd。
     pub fn new() -> Self {
-        Self::with_projects_base(hostpaths::astrcode_dir().join("projects"))
+        Self::with_projects_base(astrcode_dir().join("projects"))
     }
 
     fn with_projects_base(projects_base: PathBuf) -> Self {
@@ -201,6 +255,7 @@ impl FileSystemSessionRepository {
             );
         }
         Self {
+            owner: Arc::new(()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             projects_base,
         }
@@ -338,19 +393,19 @@ impl FileSystemSessionRepository {
         // 否则会阻塞同实例上的 append/checkpoint，并在 Windows 上与未释放的
         // EventLog 句柄争用同一 JSONL 文件。
         let dir = self.existing_session_dir(session_id).await?;
-        let owner_lock = SessionOwnerLock::acquire(&dir)?;
-        let log = Arc::new(EventLog::open(Self::event_log_path(&dir, session_id)).await?);
+        let owner_lease = SessionOwnerLease::acquire(&dir, &self.owner).await?;
+        let log = EventLog::open(Self::event_log_path(&dir, session_id)).await?;
         let snapshot_mgr = SnapshotManager::new(dir.join("snapshots"));
         let projection = self
             .restore_projection(session_id, &log, &snapshot_mgr)
             .await?;
         let opened = Arc::new(SessionMeta {
-            _owner_lock: owner_lock,
+            _owner_lease: owner_lease,
             log,
             snapshot_mgr,
             dir,
-            projection: RwLock::new(projection),
-            append_lane: Semaphore::new(1),
+            projection: SessionProjection::new(projection),
+            commit_lane: Semaphore::new(1),
         });
 
         let mut sessions = self.sessions.write().await;
@@ -428,7 +483,7 @@ impl EventReader for FileSystemSessionRepository {
 
     async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        let cursor = meta.projection.read().await.cursor();
+        let cursor = meta.projection.snapshot().await.cursor();
         Ok(Some(cursor))
     }
 
@@ -463,15 +518,14 @@ impl SessionReader for FileSystemSessionRepository {
     async fn session_read_model(
         &self,
         session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError> {
+    ) -> Result<Arc<SessionReadModel>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        let model = meta.projection.read().await.clone();
-        Ok(model)
+        Ok(meta.projection.snapshot().await)
     }
 
     async fn session_has_messages(&self, session_id: &SessionId) -> Result<bool, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        let has_messages = meta.projection.read().await.has_messages();
+        let has_messages = meta.projection.snapshot().await.has_messages();
         Ok(has_messages)
     }
 
@@ -480,7 +534,7 @@ impl SessionReader for FileSystemSessionRepository {
         session_id: &SessionId,
     ) -> Result<Vec<AgentSessionLinkView>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        let agent_sessions = meta.projection.read().await.agent_sessions.clone();
+        let agent_sessions = meta.projection.snapshot().await.agent_sessions.clone();
         Ok(agent_sessions)
     }
 
@@ -492,7 +546,7 @@ impl SessionReader for FileSystemSessionRepository {
         for session_id in session_ids {
             if let Some(meta) = sessions.get(&session_id) {
                 // 已打开的会话直接使用内存中的投影
-                summaries.push(meta.projection.read().await.to_summary());
+                summaries.push(meta.projection.snapshot().await.to_summary());
             } else {
                 // 未打开的会话从事件流构造轻量摘要，不加载完整 transcript。
                 if let Some(summary) = self.read_summary_from_event_log(&session_id).await? {
@@ -519,15 +573,18 @@ impl ToolResultArtifactStore for FileSystemSessionRepository {
 
         let path = PathBuf::from(path);
         let artifact_dir = meta.dir.join("tool-results");
-        if !hostpaths::is_path_within(&path, &artifact_dir) {
+        if !path.exists() {
+            return Err(StorageError::NotFound(session_id.clone()));
+        }
+        let session_dir = tokio::fs::canonicalize(&meta.dir).await?;
+        let artifact_dir = tokio::fs::canonicalize(artifact_dir).await?;
+        let canonical_path = tokio::fs::canonicalize(&path).await?;
+        if !artifact_dir.starts_with(&session_dir) || !canonical_path.starts_with(&artifact_dir) {
             return Err(StorageError::InvalidId(
                 "tool result path is outside this session artifact directory".into(),
             ));
         }
-        if !path.exists() {
-            return Err(StorageError::NotFound(session_id.clone()));
-        }
-        let content = tokio::fs::read_to_string(&path).await?;
+        let content = tokio::fs::read_to_string(canonical_path).await?;
         Ok(slice_tool_result(
             &path.to_string_lossy(),
             &content,
@@ -571,7 +628,7 @@ impl SessionPathResolver for FileSystemSessionRepository {
 }
 
 #[async_trait::async_trait]
-impl EventStore for FileSystemSessionRepository {
+impl SessionEventJournal for FileSystemSessionRepository {
     async fn create_session(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         validate_storage_session_id(&event.session_id)?;
         if event.turn_id.is_some() {
@@ -596,7 +653,7 @@ impl EventStore for FileSystemSessionRepository {
             )
             .await?;
         tokio::fs::create_dir_all(&dir).await?;
-        let owner_lock = SessionOwnerLock::acquire(&dir)?;
+        let owner_lease = SessionOwnerLease::acquire(&dir, &self.owner).await?;
 
         let (log, stored_event) =
             EventLog::create(Self::event_log_path(&dir, &session_id), event).await?;
@@ -607,12 +664,12 @@ impl EventStore for FileSystemSessionRepository {
         self.sessions.write().await.insert(
             session_id,
             Arc::new(SessionMeta {
-                _owner_lock: owner_lock,
-                log: Arc::new(log),
+                _owner_lease: owner_lease,
+                log,
                 snapshot_mgr: SnapshotManager::new(dir.join("snapshots")),
                 dir,
-                projection: RwLock::new(projection),
-                append_lane: Semaphore::new(1),
+                projection: SessionProjection::new(projection),
+                commit_lane: Semaphore::new(1),
             }),
         );
 
@@ -623,17 +680,10 @@ impl EventStore for FileSystemSessionRepository {
         let session_id = event.session_id.clone();
         let meta = self.get_or_open_meta(&session_id).await?;
         let _permit =
-            meta.append_lane.acquire().await.map_err(|_| {
-                StorageError::Io(std::io::Error::other("session append lane closed"))
+            meta.commit_lane.acquire().await.map_err(|_| {
+                StorageError::Io(std::io::Error::other("session commit lane closed"))
             })?;
-        let expected_seq = {
-            let projection = meta.projection.read().await;
-            let seq = projection.stats.last_seq.checked_add(1).ok_or_else(|| {
-                StorageError::CorruptLog("session event sequence overflow".into())
-            })?;
-            validate_next_event(seq, &event, &projection).map_err(invalid_event)?;
-            seq
-        };
+        let expected_seq = meta.projection.validate(&event).await?;
         let log_next_seq = meta.log.count().await? as u64;
         if log_next_seq != expected_seq {
             return Err(StorageError::CorruptLog(format!(
@@ -648,17 +698,25 @@ impl EventStore for FileSystemSessionRepository {
                 stored.seq
             )));
         }
-        reduce(&stored, &mut *meta.projection.write().await).map_err(corrupt_projection)?;
+        meta.projection.apply(&stored).await?;
         Ok(stored)
     }
 
+    async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        meta.log.force_sync().await
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionStore for FileSystemSessionRepository {
     async fn checkpoint(
         &self,
         session_id: &SessionId,
         cursor: &Cursor,
     ) -> Result<(), StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        let model = meta.projection.read().await.clone();
+        let model = meta.projection.snapshot().await;
         let latest_cursor = model.cursor();
         // Checkpoints are only written when the cursor matches the current
         // recovered projection state. This prevents stale or out-of-order
@@ -668,7 +726,7 @@ impl EventStore for FileSystemSessionRepository {
                 "checkpoint cursor {cursor} does not match latest cursor {latest_cursor}"
             )));
         }
-        meta.snapshot_mgr.create_snapshot(model).await?;
+        meta.snapshot_mgr.create_snapshot((*model).clone()).await?;
         Ok(())
     }
 
@@ -815,11 +873,6 @@ impl EventStore for FileSystemSessionRepository {
         tokio::fs::write(&path, content).await?;
 
         Ok(Some(path.to_string_lossy().to_string()))
-    }
-
-    async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        meta.log.force_sync().await
     }
 }
 

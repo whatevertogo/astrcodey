@@ -6,7 +6,9 @@
 
 use std::collections::BTreeMap;
 
-use astrcode_extensions::loader::{ExtensionLoadContext, ExtensionSource, LoadExtensionsResult};
+use astrcode_extensions::loader::{
+    DiscoverExtensionsResult, ExtensionCandidate, ExtensionLoadContext, ExtensionSource,
+};
 
 /// Source for all enabled first-party bundled extensions.
 pub struct BundledExtensionSource {
@@ -27,15 +29,29 @@ impl Default for BundledExtensionSource {
 
 #[async_trait::async_trait]
 impl ExtensionSource for BundledExtensionSource {
-    async fn load(&self, _ctx: &ExtensionLoadContext) -> LoadExtensionsResult {
+    async fn discover(&self, _ctx: &ExtensionLoadContext) -> DiscoverExtensionsResult {
         let mut errors = Vec::new();
         let extensions = bundled_extensions(&self.extension_states, &mut errors);
-        LoadExtensionsResult {
-            extensions,
+        let candidates = extensions
+            .into_iter()
+            .map(|extension| {
+                let extension_id = extension.id().to_string();
+                ExtensionCandidate::ready(
+                    format!("bundled:{extension_id}"),
+                    format!("{}:{extension_id}", env!("CARGO_PKG_VERSION")),
+                    extension,
+                )
+            })
+            .collect();
+        DiscoverExtensionsResult {
+            candidates,
             errors,
-            load_failures: Vec::new(),
-            load_success_durations: BTreeMap::new(),
+            failures: Vec::new(),
         }
+    }
+
+    fn owns_source_key(&self, source_key: &str) -> bool {
+        source_key.starts_with("bundled:")
     }
 }
 

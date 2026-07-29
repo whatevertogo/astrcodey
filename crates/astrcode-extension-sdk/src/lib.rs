@@ -6,6 +6,7 @@
 
 pub mod extension;
 pub mod frontmatter;
+pub mod hostpaths;
 pub mod shell;
 
 /// Typed access to the host's single restricted outbound-network service.
@@ -52,13 +53,6 @@ pub mod tool {
 
 pub mod types {
     pub use astrcode_core::types::{SessionId, project_key_from_path};
-}
-
-/// Host path utilities usable by extensions.
-pub mod hostpaths {
-    pub use astrcode_core::hostpaths::{
-        astrcode_dir, is_path_within, resolve_home_dir, resolve_path,
-    };
 }
 
 /// Protocol types needed by extensions.

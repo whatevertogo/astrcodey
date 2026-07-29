@@ -57,7 +57,7 @@ pub fn discover_agents(working_dir: Option<&str>) -> Vec<AgentConfig> {
 
     // 扫描用户主目录下的 Agent
     {
-        let home = hostpaths::resolve_home_dir();
+        let home = hostpaths::user_home_dir();
         for d in &[
             home.join(".claude").join("agents"),
             home.join(".astrcode").join("agents"),

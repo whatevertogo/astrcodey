@@ -11,6 +11,7 @@ use super::App;
 use crate::tui::{
     command::slash::SlashCommandSpec,
     ext::tool::ToolRenderCtx,
+    render::inline_preview,
     store::transcript::{Message, MessageBody, MessageRole, ScrollbackEntry},
     streaming::controller::StreamController,
     tool_vocab::tool_display_name,
@@ -531,7 +532,7 @@ fn apply_extension_event(app: &mut App, extension: &ExtensionEventData) {
     let name = &extension.event_type;
     let fallback = format!(
         "[{name}] {}",
-        astrcode_core::text::compact_inline(&extension.payload.to_string(), 80)
+        inline_preview(&extension.payload.to_string(), 80)
     );
     let body = MessageBody::with_custom(name.clone(), extension.payload.clone(), fallback);
     let message = Message {
@@ -698,7 +699,7 @@ fn apply_session_list(app: &mut App, sessions: &[SessionListItemDto]) {
                 .title
                 .as_deref()
                 .filter(|t| !t.trim().is_empty())
-                .map(|t| astrcode_core::text::compact_inline(t, 60))
+                .map(|text| inline_preview(text, 60))
                 .unwrap_or_else(|| short_id(&s.session_id).to_string());
             SessionEntry {
                 session_id: s.session_id.clone(),

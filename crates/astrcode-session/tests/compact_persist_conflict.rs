@@ -151,6 +151,8 @@ async fn spawn_session(
     let caps = test_caps(llm, context);
     let sid = new_session_id();
     let runtime = Arc::new(SessionRuntimeState::new(
+        sid.clone(),
+        store.clone(),
         caps.llm(),
         caps.small_llm(),
         "mock-model".into(),
@@ -158,10 +160,7 @@ async fn spawn_session(
     let working_dir = std::env::temp_dir().join(sid.as_str());
     std::fs::create_dir_all(&working_dir).unwrap();
     let session = Session::create_with_params(SessionCreateParams {
-        store: Arc::clone(&store),
-        session_id: sid.clone(),
         working_dir: working_dir.to_string_lossy().into_owned(),
-        model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,

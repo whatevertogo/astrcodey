@@ -6,7 +6,7 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
-use tokio::task::JoinHandle;
+use tokio::{sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 /// 扩展可以显式申请的宿主能力。
@@ -101,12 +101,19 @@ pub struct ExtensionTasks {
     extension_id: Arc<str>,
     shutdown: CancellationToken,
     state: Arc<Mutex<ExtensionTaskState>>,
+    lifecycle: watch::Sender<ExtensionTaskLifecycle>,
 }
 
 #[derive(Default)]
 struct ExtensionTaskState {
-    shutdown: bool,
     tasks: Vec<ExtensionTask>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtensionTaskLifecycle {
+    Suspended,
+    Active,
+    Shutdown { was_active: bool },
 }
 
 struct ExtensionTask {
@@ -116,10 +123,20 @@ struct ExtensionTask {
 
 impl ExtensionTasks {
     pub fn new(extension_id: impl Into<String>) -> Self {
+        Self::with_lifecycle(extension_id, ExtensionTaskLifecycle::Active)
+    }
+
+    #[doc(hidden)]
+    pub fn new_suspended(extension_id: impl Into<String>) -> Self {
+        Self::with_lifecycle(extension_id, ExtensionTaskLifecycle::Suspended)
+    }
+
+    fn with_lifecycle(extension_id: impl Into<String>, lifecycle: ExtensionTaskLifecycle) -> Self {
         Self {
             extension_id: Arc::from(extension_id.into()),
             shutdown: CancellationToken::new(),
             state: Arc::new(Mutex::new(ExtensionTaskState::default())),
+            lifecycle: watch::channel(lifecycle).0,
         }
     }
 
@@ -127,28 +144,78 @@ impl ExtensionTasks {
         self.shutdown.clone()
     }
 
-    pub fn spawn<F>(&self, name: impl Into<String>, fut: F)
+    #[doc(hidden)]
+    pub fn activate(&self) {
+        self.lifecycle.send_if_modified(|lifecycle| {
+            if *lifecycle == ExtensionTaskLifecycle::Suspended {
+                *lifecycle = ExtensionTaskLifecycle::Active;
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    /// 登记由扩展生命周期托管的后台任务。
+    ///
+    /// 宿主可在扩展启动阶段暂停任务，直到 registration 对其他运行时组件可见。
+    /// `Extension::start()` 不应等待这里登记的任务完成。
+    pub fn spawn<F>(&self, name: impl Into<String>, future: F)
     where
         F: Future<Output = ()> + Send + 'static,
     {
         let mut state = self.lock_state();
-        if state.shutdown {
-            tracing::debug!(
-                extension_id = %self.extension_id,
-                "skip spawning extension task after shutdown"
-            );
-            return;
-        }
-
         let name = name.into();
-        let handle = tokio::spawn(fut);
+        let handle = match *self.lifecycle.borrow() {
+            ExtensionTaskLifecycle::Active => tokio::spawn(future),
+            ExtensionTaskLifecycle::Suspended => {
+                let mut lifecycle = self.lifecycle.subscribe();
+                tokio::spawn(async move {
+                    loop {
+                        let current_lifecycle = *lifecycle.borrow_and_update();
+                        match current_lifecycle {
+                            ExtensionTaskLifecycle::Active
+                            | ExtensionTaskLifecycle::Shutdown { was_active: true } => {
+                                future.await;
+                                return;
+                            },
+                            ExtensionTaskLifecycle::Shutdown { was_active: false } => return,
+                            ExtensionTaskLifecycle::Suspended => {
+                                if lifecycle.changed().await.is_err() {
+                                    return;
+                                }
+                            },
+                        }
+                    }
+                })
+            },
+            ExtensionTaskLifecycle::Shutdown { .. } => {
+                tracing::debug!(
+                    extension_id = %self.extension_id,
+                    "skip spawning extension task after shutdown"
+                );
+                return;
+            },
+        };
         state.tasks.push(ExtensionTask { name, handle });
     }
 
     pub fn cancel(&self) {
-        let mut state = self.lock_state();
-        state.shutdown = true;
+        let _state = self.lock_state();
         self.shutdown.cancel();
+        self.lifecycle.send_if_modified(|lifecycle| {
+            let shutdown = match lifecycle {
+                ExtensionTaskLifecycle::Suspended => {
+                    ExtensionTaskLifecycle::Shutdown { was_active: false }
+                },
+                ExtensionTaskLifecycle::Active => {
+                    ExtensionTaskLifecycle::Shutdown { was_active: true }
+                },
+                ExtensionTaskLifecycle::Shutdown { .. } => return false,
+            };
+            *lifecycle = shutdown;
+            true
+        });
     }
 
     pub async fn wait(&self, timeout: Duration) {
@@ -307,6 +374,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn suspended_tasks_start_only_after_activation() {
+        let tasks = ExtensionTasks::new_suspended("ext");
+        let started = Arc::new(AtomicBool::new(false));
+        let task_started = Arc::clone(&started);
+        tasks.spawn("deferred", async move {
+            task_started.store(true, Ordering::SeqCst);
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!started.load(Ordering::SeqCst));
+
+        tasks.activate();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !started.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        tasks.cancel();
+        tasks.wait(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
     async fn wait_completes_when_task_observes_shutdown() {
         let tasks = ExtensionTasks::new("ext");
         let shutdown = tasks.shutdown();
@@ -375,6 +466,9 @@ mod tests {
         tasks.spawn("after-poison", async {});
         assert_eq!(tasks.lock_state().tasks.len(), 1);
         tasks.cancel();
-        assert!(tasks.lock_state().shutdown);
+        assert!(matches!(
+            *tasks.lifecycle.borrow(),
+            ExtensionTaskLifecycle::Shutdown { .. }
+        ));
     }
 }

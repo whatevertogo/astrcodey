@@ -5,10 +5,8 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::{
-    hostpaths::resolve_path,
-    tool::{ToolResultArtifactError, access::ResourceAccess, *},
-};
+use astrcode_core::tool::{ToolResultArtifactError, access::ResourceAccess, *};
+use astrcode_extension_sdk::hostpaths::resolve_path;
 use serde::Deserialize;
 
 use super::shared::{

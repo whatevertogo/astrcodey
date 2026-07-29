@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use astrcode_core::hostpaths::astrcode_dir;
+use astrcode_core::config::defaults::astrcode_dir;
 
 use super::PromptFiles;
 

@@ -1,13 +1,7 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
-};
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
-    event::{DurableEvent, DurableEventPayload, Event},
+    event::{DurableEventPayload, Event},
     tool::SessionToolSelection,
     types::{Cursor, SessionId},
 };
@@ -19,6 +13,7 @@ use astrcode_session::{
 use astrcode_session_projection::{AgentSessionLinkView, SessionReadModel, SessionSummary};
 use astrcode_storage::{SessionStore, StorageError};
 use parking_lot::Mutex;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     config_manager::ConfigManager, server_event_bus::ServerEventBus,
@@ -44,6 +39,8 @@ pub enum SessionManagerError {
     MissingStartEvent,
     #[error("invalid fork cursor: {0}")]
     InvalidCursor(String),
+    #[error("session close task failed: {0}")]
+    CloseTask(String),
 }
 
 /// Session durable 生命周期门面（create/open/delete/fork）与 per-session runtime 唯一性。
@@ -53,9 +50,9 @@ pub enum SessionManagerError {
 pub struct SessionManager {
     event_store: Arc<dyn SessionStore>,
     config: Arc<ConfigManager>,
-    runtime_registry: SessionRuntimeRegistry,
+    runtime_registry: Arc<SessionRuntimeRegistry>,
     runtime_services: Arc<SessionRuntimeServices>,
-    event_bus: OnceLock<Arc<ServerEventBus>>,
+    event_bus: Arc<ServerEventBus>,
     resource_cleanups: Vec<Arc<dyn SessionResourceCleanup>>,
 }
 
@@ -71,43 +68,31 @@ impl SessionManager {
         Self {
             event_store,
             config,
-            runtime_registry: SessionRuntimeRegistry::default(),
+            runtime_registry: Arc::new(SessionRuntimeRegistry::default()),
             runtime_services,
-            event_bus: OnceLock::new(),
+            event_bus: Arc::new(ServerEventBus::new()),
             resource_cleanups,
         }
     }
 
-    /// 绑定事件总线（含 internal reactor）。create/fork/open 时 attach，delete/recycle 时 detach。
-    pub fn bind_event_bus(&self, event_bus: Arc<ServerEventBus>) {
-        let _ = self.event_bus.set(event_bus);
+    pub(crate) fn event_bus(&self) -> &Arc<ServerEventBus> {
+        &self.event_bus
     }
 
     fn attach_session_subscribers(&self, session: &Session) {
-        if let Some(bus) = self.event_bus.get() {
-            bus.attach(session);
-        }
-    }
-
-    fn detach_session_subscribers(&self, session_id: &SessionId) {
-        if let Some(bus) = self.event_bus.get() {
-            bus.detach(session_id);
-        }
-    }
-
-    fn get_or_create_runtime(&self, session_id: &SessionId) -> Arc<SessionRuntimeState> {
-        self.runtime_registry
-            .get_or_create(session_id, || self.new_runtime_state())
+        self.event_bus.attach(session);
     }
 
     fn runtime_for_open(&self, session_id: &SessionId) -> RuntimeForOpen {
         self.runtime_registry
-            .runtime_for_open(session_id, || self.new_runtime_state())
+            .runtime_for_open(session_id, || self.new_runtime_state(session_id))
     }
 
-    fn new_runtime_state(&self) -> Arc<SessionRuntimeState> {
+    fn new_runtime_state(&self, session_id: &SessionId) -> Arc<SessionRuntimeState> {
         let model_id = self.config.read_effective().llm.model_id.clone();
         Arc::new(SessionRuntimeState::new(
+            session_id.clone(),
+            self.event_store.clone(),
             self.runtime_services.llm(),
             self.runtime_services.small_llm(),
             model_id,
@@ -120,13 +105,12 @@ impl SessionManager {
 
     /// 把子会话的 runtime 注册到 manager。
     ///
-    /// 子会话由 `Session::spawn_child` 创建，其 runtime 不经过 `get_or_create_runtime`，
+    /// 子会话由 `Session::spawn_child` 创建，其 runtime 不经过 manager 的创建路径，
     /// 必须手动注册才能让后续 `open(child_sid)` 拿到同一个 runtime（共享广播通道）。
     /// event_bus 的 attach 由 TurnScheduler 在 submit 时统一处理。
     pub(crate) fn register_child_session(&self, session: &Session) {
-        let sid = session.id().clone();
         let runtime = session.runtime_arc();
-        self.runtime_registry.insert(sid, runtime);
+        self.runtime_registry.insert(runtime);
     }
 
     pub(crate) async fn configure_session_tools(
@@ -151,15 +135,12 @@ impl SessionManager {
         working_dir: &str,
         tool_selection: Option<&SessionToolSelection>,
     ) -> Result<CreatedSession, SessionManagerError> {
-        let model_id = self.config.read_effective().llm.model_id.clone();
         // 先在 registry 里登记 runtime，再创建 Session 让两者共享同一份。
         let sid = astrcode_core::types::new_session_id();
-        let runtime = self.get_or_create_runtime(&sid);
+        let runtime = self.new_runtime_state(&sid);
+        self.runtime_registry.insert(Arc::clone(&runtime));
         let session = match Session::create_with_params(SessionCreateParams {
-            store: Arc::clone(&self.event_store),
-            session_id: sid.clone(),
             working_dir: working_dir.to_owned(),
-            model_id,
             parent_session_id: None,
             tool_selection: tool_selection.cloned(),
             source_extension: None,
@@ -199,17 +180,12 @@ impl SessionManager {
         loop {
             match self.runtime_for_open(&session_id) {
                 RuntimeForOpen::Ready(runtime) => {
-                    let session = Session::open(
-                        Arc::clone(&self.event_store),
-                        session_id.clone(),
-                        runtime,
-                        Arc::clone(&self.runtime_services),
-                    )
-                    .await?;
+                    let session =
+                        Session::open(runtime, Arc::clone(&self.runtime_services)).await?;
                     self.attach_session_subscribers(&session);
                     return Ok(session);
                 },
-                RuntimeForOpen::Resuming(pending) => {
+                RuntimeForOpen::Waiting(pending) => {
                     pending.wait().await;
                 },
                 RuntimeForOpen::Started(runtime) => {
@@ -218,13 +194,8 @@ impl SessionManager {
                         session_id.clone(),
                         Arc::clone(&runtime),
                     );
-                    let session = Session::open(
-                        Arc::clone(&self.event_store),
-                        session_id.clone(),
-                        runtime,
-                        Arc::clone(&self.runtime_services),
-                    )
-                    .await?;
+                    let session =
+                        Session::open(runtime, Arc::clone(&self.runtime_services)).await?;
                     session
                         .emit_lifecycle(ExtensionEvent::SessionResume)
                         .await?;
@@ -237,10 +208,8 @@ impl SessionManager {
     }
 
     pub(crate) async fn delete(&self, session_id: &SessionId) -> Result<(), SessionManagerError> {
-        self.emit_session_shutdown(session_id).await?;
-        self.event_store.delete_session(session_id).await?;
-        self.cleanup_session_resources(session_id);
-        Ok(())
+        self.close_session(session_id, CloseSessionAction::Delete)
+            .await
     }
 
     async fn emit_session_shutdown(
@@ -258,24 +227,12 @@ impl SessionManager {
         .map_err(SessionManagerError::from)
     }
 
-    /// 释放 session 占用的进程内资源。
-    ///
-    /// delete 和 recycle 共享同一套清理流程，确保两条路径不会出现遗漏。
-    fn cleanup_session_resources(&self, session_id: &SessionId) {
-        self.runtime_registry.cleanup_runtime(session_id);
-        self.detach_session_subscribers(session_id);
-        // 外部资源清理（trait 注入）。
-        for cleanup in &self.resource_cleanups {
-            cleanup.cleanup(session_id);
-        }
-    }
-
     // ─── 只读查询 ─────────────────────────────────────────────────────
 
     pub(crate) async fn read_model(
         &self,
         session_id: &SessionId,
-    ) -> Result<SessionReadModel, SessionManagerError> {
+    ) -> Result<Arc<SessionReadModel>, SessionManagerError> {
         self.event_store
             .session_read_model(session_id)
             .await
@@ -344,6 +301,18 @@ impl SessionManager {
 
     /// 强制 fsync 指定会话的 durable event log。
     pub(crate) async fn sync_durable_events(&self, session_id: &SessionId) {
+        if let Some(runtime) = self.runtime_registry.get(session_id) {
+            match runtime.sync_durable_events().await {
+                Ok(()) => return,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %session_id,
+                        %error,
+                        "session publisher sync unavailable; falling back to journal sync"
+                    );
+                },
+            }
+        }
         if let Err(e) = self.event_store.sync_durable_events(session_id).await {
             tracing::error!(session_id = %session_id, error = %e, "failed to sync durable events");
         }
@@ -351,7 +320,7 @@ impl SessionManager {
 
     /// 将共享运行时服务中的 provider / model_id 同步到所有已打开的 session runtime。
     ///
-    /// 配置热更新只改 `SessionRuntimeServices`；调用方在 `apply_raw_config_and_rebuild`
+    /// 配置热更新先改 `SessionRuntimeServices`；调用方在配置事务提交
     /// 之后必须调用此方法，否则非 active session 的 turn 仍会用旧的 per-session binding。
     pub(crate) fn sync_all_model_bindings_from_config(&self) {
         let effective = self.config.read_effective();
@@ -362,17 +331,81 @@ impl SessionManager {
         );
     }
 
+    pub(crate) async fn shutdown_runtimes(&self) {
+        for runtime in self.runtime_registry.runtimes() {
+            if let Err(error) = runtime.shutdown_event_publisher().await {
+                tracing::warn!(
+                    session_id = %runtime.session_id(),
+                    %error,
+                    "failed to stop session event publisher"
+                );
+            }
+        }
+    }
+
     pub(crate) async fn recycle_session(
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionManagerError> {
-        self.emit_session_shutdown(session_id).await?;
-        self.event_store
-            .recycle_session(session_id)
+        self.close_session(session_id, CloseSessionAction::Recycle)
             .await
-            .map_err(SessionManagerError::from)?;
-        self.cleanup_session_resources(session_id);
-        Ok(())
+    }
+
+    async fn close_session(
+        &self,
+        session_id: &SessionId,
+        action: CloseSessionAction,
+    ) -> Result<(), SessionManagerError> {
+        self.emit_session_shutdown(session_id).await?;
+        let (closing, runtime) = self.begin_session_close(session_id).await;
+        let event_store = Arc::clone(&self.event_store);
+        let event_bus = Arc::clone(&self.event_bus);
+        let resource_cleanups = self.resource_cleanups.clone();
+        let session_id = session_id.clone();
+
+        tokio::spawn(async move {
+            let _closing = closing;
+            if let Some(runtime) = runtime {
+                runtime
+                    .shutdown_event_publisher()
+                    .await
+                    .map_err(SessionError::from)?;
+            } else {
+                event_store.sync_durable_events(&session_id).await?;
+            }
+            match action {
+                CloseSessionAction::Delete => event_store.delete_session(&session_id).await?,
+                CloseSessionAction::Recycle => event_store.recycle_session(&session_id).await?,
+            }
+            event_bus.detach(&session_id).await;
+            for cleanup in resource_cleanups {
+                cleanup.cleanup(&session_id);
+            }
+            Ok::<_, SessionManagerError>(())
+        })
+        .await
+        .map_err(|error| SessionManagerError::CloseTask(error.to_string()))?
+    }
+
+    async fn begin_session_close(
+        &self,
+        session_id: &SessionId,
+    ) -> (SessionCloseGuard, Option<Arc<SessionRuntimeState>>) {
+        loop {
+            match self.runtime_registry.runtime_for_close(session_id) {
+                RuntimeForClose::Waiting(pending) => pending.wait().await,
+                RuntimeForClose::Started { runtime, pending } => {
+                    return (
+                        SessionCloseGuard::new(
+                            Arc::clone(&self.runtime_registry),
+                            session_id.clone(),
+                            pending,
+                        ),
+                        runtime,
+                    );
+                },
+            }
+        }
     }
 
     /// 从 .recycled/ 恢复一个已回收的 session。
@@ -424,9 +457,9 @@ impl SessionManager {
             )
         };
 
-        let model_id = self.config.read_effective().llm.model_id.clone();
         let new_sid = astrcode_core::types::new_session_id();
-        let runtime = self.get_or_create_runtime(&new_sid);
+        let runtime = self.new_runtime_state(&new_sid);
+        self.runtime_registry.insert(Arc::clone(&runtime));
         let initial_system_prompt = Some(astrcode_core::event::PersistedSystemPrompt {
             text: source_model.system_prompt.text.clone(),
             fingerprint: source_model.system_prompt.fingerprint.clone(),
@@ -434,10 +467,7 @@ impl SessionManager {
             source: astrcode_core::event::SystemPromptSource::Inherited,
         });
         let session = match Session::create_with_params(SessionCreateParams {
-            store: Arc::clone(&self.event_store),
-            session_id: new_sid.clone(),
             working_dir: source_model.identity.working_dir.clone(),
-            model_id,
             parent_session_id: None,
             tool_selection: None,
             source_extension: None,
@@ -457,8 +487,7 @@ impl SessionManager {
         self.attach_session_subscribers(&session);
 
         session
-            .append_event(DurableEvent::new(
-                new_sid.clone(),
+            .emit_durable(
                 None,
                 DurableEventPayload::SessionForked {
                     source_session_id: source_id.clone(),
@@ -469,36 +498,24 @@ impl SessionManager {
                         .map(|message| message.message)
                         .collect(),
                 },
-            ))
+            )
             .await?;
 
         Ok(session)
     }
 }
 
-/// 首次 cold open 的 SessionResume 完成前，后续 open 需在此 gate 上等待。
+/// session runtime 状态转换完成前供并发操作等待。
 #[derive(Default)]
-struct PendingSessionResume {
-    done: AtomicBool,
-    notify: tokio::sync::Notify,
-}
+struct PendingSessionTransition(CancellationToken);
 
-impl PendingSessionResume {
+impl PendingSessionTransition {
     async fn wait(&self) {
-        loop {
-            let notified = self.notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if self.done.load(Ordering::Acquire) {
-                return;
-            }
-            notified.await;
-        }
+        self.0.cancelled().await;
     }
 
     fn finish(&self) {
-        self.done.store(true, Ordering::Release);
-        self.notify.notify_waiters();
+        self.0.cancel();
     }
 }
 
@@ -506,22 +523,41 @@ enum SessionRuntimeEntry {
     Ready(Arc<SessionRuntimeState>),
     Resuming {
         runtime: Arc<SessionRuntimeState>,
-        pending: Arc<PendingSessionResume>,
+        pending: Arc<PendingSessionTransition>,
+    },
+    Closing {
+        runtime: Option<Arc<SessionRuntimeState>>,
+        pending: Arc<PendingSessionTransition>,
     },
 }
 
 impl SessionRuntimeEntry {
-    fn runtime(&self) -> &Arc<SessionRuntimeState> {
+    fn runtime(&self) -> Option<&Arc<SessionRuntimeState>> {
         match self {
-            Self::Ready(runtime) | Self::Resuming { runtime, .. } => runtime,
+            Self::Ready(runtime) | Self::Resuming { runtime, .. } => Some(runtime),
+            Self::Closing { runtime, .. } => runtime.as_ref(),
         }
     }
 }
 
 enum RuntimeForOpen {
     Ready(Arc<SessionRuntimeState>),
-    Resuming(Arc<PendingSessionResume>),
+    Waiting(Arc<PendingSessionTransition>),
     Started(Arc<SessionRuntimeState>),
+}
+
+enum RuntimeForClose {
+    Waiting(Arc<PendingSessionTransition>),
+    Started {
+        runtime: Option<Arc<SessionRuntimeState>>,
+        pending: Arc<PendingSessionTransition>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum CloseSessionAction {
+    Delete,
+    Recycle,
 }
 
 /// 保证同一 `SessionId` 在当前进程里只有一份 local runtime state。
@@ -531,21 +567,12 @@ struct SessionRuntimeRegistry {
 }
 
 impl SessionRuntimeRegistry {
-    fn get_or_create(
-        &self,
-        session_id: &SessionId,
-        create: impl FnOnce() -> Arc<SessionRuntimeState>,
-    ) -> Arc<SessionRuntimeState> {
-        let mut states = self.states.lock();
-        if let Some(entry) = states.get(session_id) {
-            return Arc::clone(entry.runtime());
-        }
-        let runtime = create();
-        states.insert(
-            session_id.clone(),
-            SessionRuntimeEntry::Ready(Arc::clone(&runtime)),
-        );
-        runtime
+    fn get(&self, session_id: &SessionId) -> Option<Arc<SessionRuntimeState>> {
+        self.states
+            .lock()
+            .get(session_id)
+            .and_then(SessionRuntimeEntry::runtime)
+            .map(Arc::clone)
     }
 
     fn runtime_for_open(
@@ -556,8 +583,9 @@ impl SessionRuntimeRegistry {
         let mut states = self.states.lock();
         match states.get(session_id) {
             Some(SessionRuntimeEntry::Ready(runtime)) => RuntimeForOpen::Ready(Arc::clone(runtime)),
-            Some(SessionRuntimeEntry::Resuming { pending, .. }) => {
-                RuntimeForOpen::Resuming(Arc::clone(pending))
+            Some(SessionRuntimeEntry::Resuming { pending, .. })
+            | Some(SessionRuntimeEntry::Closing { pending, .. }) => {
+                RuntimeForOpen::Waiting(Arc::clone(pending))
             },
             None => {
                 let runtime = create();
@@ -573,10 +601,50 @@ impl SessionRuntimeRegistry {
         }
     }
 
-    fn insert(&self, session_id: SessionId, runtime: Arc<SessionRuntimeState>) {
-        self.states
-            .lock()
-            .insert(session_id, SessionRuntimeEntry::Ready(runtime));
+    fn runtime_for_close(&self, session_id: &SessionId) -> RuntimeForClose {
+        let mut states = self.states.lock();
+        match states.get(session_id) {
+            Some(SessionRuntimeEntry::Resuming { pending, .. })
+            | Some(SessionRuntimeEntry::Closing { pending, .. }) => {
+                RuntimeForClose::Waiting(Arc::clone(pending))
+            },
+            Some(SessionRuntimeEntry::Ready(runtime)) => {
+                let runtime = Arc::clone(runtime);
+                let pending = Arc::default();
+                states.insert(
+                    session_id.clone(),
+                    SessionRuntimeEntry::Closing {
+                        runtime: Some(Arc::clone(&runtime)),
+                        pending: Arc::clone(&pending),
+                    },
+                );
+                RuntimeForClose::Started {
+                    runtime: Some(runtime),
+                    pending,
+                }
+            },
+            None => {
+                let pending = Arc::default();
+                states.insert(
+                    session_id.clone(),
+                    SessionRuntimeEntry::Closing {
+                        runtime: None,
+                        pending: Arc::clone(&pending),
+                    },
+                );
+                RuntimeForClose::Started {
+                    runtime: None,
+                    pending,
+                }
+            },
+        }
+    }
+
+    fn insert(&self, runtime: Arc<SessionRuntimeState>) {
+        self.states.lock().insert(
+            runtime.session_id().clone(),
+            SessionRuntimeEntry::Ready(runtime),
+        );
     }
 
     fn complete_session_resume(&self, session_id: &SessionId, expected: &Arc<SessionRuntimeState>) {
@@ -620,17 +688,51 @@ impl SessionRuntimeRegistry {
         model_id: String,
     ) {
         for entry in self.states.lock().values() {
-            entry.runtime().replace_model_binding(
-                Arc::clone(&llm),
-                Arc::clone(&small_llm),
-                model_id.clone(),
-            );
+            if let Some(runtime) = entry.runtime() {
+                runtime.replace_model_binding(
+                    Arc::clone(&llm),
+                    Arc::clone(&small_llm),
+                    model_id.clone(),
+                );
+            }
         }
+    }
+
+    fn runtimes(&self) -> Vec<Arc<SessionRuntimeState>> {
+        self.states
+            .lock()
+            .values()
+            .filter_map(SessionRuntimeEntry::runtime)
+            .cloned()
+            .collect()
     }
 
     fn cleanup_runtime(&self, session_id: &SessionId) {
         let removed = self.states.lock().remove(session_id);
-        if let Some(SessionRuntimeEntry::Resuming { pending, .. }) = removed {
+        match removed {
+            Some(SessionRuntimeEntry::Resuming { pending, .. })
+            | Some(SessionRuntimeEntry::Closing { pending, .. }) => pending.finish(),
+            Some(SessionRuntimeEntry::Ready(_)) | None => {},
+        }
+    }
+
+    fn complete_session_close(
+        &self,
+        session_id: &SessionId,
+        expected: &Arc<PendingSessionTransition>,
+    ) {
+        let mut states = self.states.lock();
+        let pending = match states.get(session_id) {
+            Some(SessionRuntimeEntry::Closing { pending, .. })
+                if Arc::ptr_eq(pending, expected) =>
+            {
+                Some(Arc::clone(pending))
+            },
+            _ => None,
+        };
+        if let Some(pending) = pending {
+            states.remove(session_id);
+            drop(states);
             pending.finish();
         }
     }
@@ -670,5 +772,87 @@ impl Drop for SessionResumeGuard<'_> {
             self.registry
                 .fail_session_resume(&self.session_id, &self.runtime);
         }
+    }
+}
+
+struct SessionCloseGuard {
+    registry: Arc<SessionRuntimeRegistry>,
+    session_id: SessionId,
+    pending: Arc<PendingSessionTransition>,
+}
+
+impl SessionCloseGuard {
+    fn new(
+        registry: Arc<SessionRuntimeRegistry>,
+        session_id: SessionId,
+        pending: Arc<PendingSessionTransition>,
+    ) -> Self {
+        Self {
+            registry,
+            session_id,
+            pending,
+        }
+    }
+}
+
+impl Drop for SessionCloseGuard {
+    fn drop(&mut self) {
+        self.registry
+            .complete_session_close(&self.session_id, &self.pending);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn runtime_registry_blocks_open_until_close_finishes() {
+        let registry = Arc::new(SessionRuntimeRegistry::default());
+        let session_id = SessionId::new("session-closing");
+
+        let RuntimeForClose::Started {
+            runtime: None,
+            pending,
+        } = registry.runtime_for_close(&session_id)
+        else {
+            panic!("cold session should start closing without a runtime");
+        };
+
+        let RuntimeForOpen::Waiting(waiting) =
+            registry.runtime_for_open(&session_id, || panic!("open must not create a runtime"))
+        else {
+            panic!("open should wait while the session is closing");
+        };
+        assert!(Arc::ptr_eq(&pending, &waiting));
+
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let task_release = Arc::clone(&release);
+        let closing = SessionCloseGuard::new(
+            Arc::clone(&registry),
+            session_id.clone(),
+            Arc::clone(&pending),
+        );
+        let detached = tokio::spawn(async move {
+            task_release.acquire().await.unwrap().forget();
+            drop(closing);
+        });
+        drop(detached);
+        assert!(matches!(
+            registry.runtime_for_open(&session_id, || panic!("close task still owns the guard")),
+            RuntimeForOpen::Waiting(_)
+        ));
+
+        release.add_permits(1);
+        waiting.wait().await;
+
+        let RuntimeForClose::Started {
+            runtime: None,
+            pending,
+        } = registry.runtime_for_close(&session_id)
+        else {
+            panic!("completed close should release the registry entry");
+        };
+        registry.complete_session_close(&session_id, &pending);
     }
 }

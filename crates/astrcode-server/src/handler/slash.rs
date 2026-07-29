@@ -3,20 +3,20 @@
 use super::HandlerError;
 
 /// 解析后的斜杠命令。
-pub(in crate::handler) struct ParsedSlashCommand {
+pub(crate) struct ParsedSlashCommand {
     pub name: String,
     pub arguments: String,
 }
 
 impl ParsedSlashCommand {
-    pub(in crate::handler) fn has_name(&self) -> bool {
+    pub(crate) fn has_name(&self) -> bool {
         !self.name.trim().trim_start_matches('/').is_empty()
     }
 }
 
 /// 解析斜杠命令，如 "/compact arg1 arg2"。
 /// 返回 None 表示不是斜杠命令。
-pub(in crate::handler) fn parse_slash_command(text: &str) -> Option<ParsedSlashCommand> {
+pub(crate) fn parse_slash_command(text: &str) -> Option<ParsedSlashCommand> {
     let trimmed = text.trim();
     let body = trimmed.strip_prefix('/')?.trim();
     if body.is_empty() {

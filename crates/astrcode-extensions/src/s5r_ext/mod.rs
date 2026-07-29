@@ -88,7 +88,10 @@ fn build_extension(session: Arc<S5rSession>, reg: ExtensionRegistration) -> Arc<
     })
 }
 
-fn parse_command(manifest: &Value, ext_dir: &Path) -> Result<(String, Vec<String>), String> {
+pub(crate) fn parse_command(
+    manifest: &Value,
+    ext_dir: &Path,
+) -> Result<(String, Vec<String>), String> {
     let cmd = manifest
         .get("command")
         .ok_or("extension.json missing 'command' array for s5r extension")?;

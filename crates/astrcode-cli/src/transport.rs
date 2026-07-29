@@ -70,9 +70,16 @@ impl InProcessTransport {
                 },
             };
 
-            // 组装 server 核心系统（事件总线 + handler actor）
-            let server_system = bootstrap::spawn_server_system(&runtime, tx);
-            let handler = server_system.handler;
+            let server_app = bootstrap::ServerApp::new(runtime);
+            server_app.initialize().await;
+            let handler = server_app.command_handle().clone();
+            let mut notifications = server_app.event_bus().subscribe_all_notifications();
+            let event_tx = tx.clone();
+            let event_forwarder = tokio::spawn(async move {
+                while let Ok(notification) = notifications.recv().await {
+                    let _ = event_tx.send(notification);
+                }
+            });
             let _ = ready_tx.send(BootstrapState::Ready);
             while let Some(cmd) = cmd_rx.recv().await {
                 if let Err(e) = handler.handle(cmd).await {
@@ -80,6 +87,9 @@ impl InProcessTransport {
                     tracing::error!("Command handler error: {e}");
                 }
             }
+            server_app.shutdown().await;
+            event_forwarder.abort();
+            let _ = event_forwarder.await;
         });
 
         Self {

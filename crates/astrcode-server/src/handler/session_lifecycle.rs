@@ -39,27 +39,20 @@ impl CommandHandler {
         working_dir: String,
         tool_selection: Option<SessionToolSelection>,
     ) -> Result<SessionId, HandlerError> {
-        tracing::info!(working_dir = %working_dir, "creating session");
-        let created = match self
-            .runtime
-            .session_manager()
-            .create_with_tool_selection(&working_dir, tool_selection.as_ref())
+        match self
+            .session_commands
+            .create_session(working_dir, tool_selection)
             .await
         {
-            Ok(created) => created,
-            Err(error) => {
-                tracing::error!(working_dir = %working_dir, error = %error, "create session failed");
-                self.send_error(-32603, &error.to_string());
-                return Err(HandlerError::SessionManager(error));
+            Ok(session_id) => {
+                self.focused_session_id = Some(session_id.clone());
+                Ok(session_id)
             },
-        };
-        let sid = created.session.id().clone();
-        self.focused_session_id = Some(sid.clone());
-
-        tracing::info!(session_id = %sid, "session created, dispatching SessionStart");
-        self.broadcast_event(created.start_event);
-        tracing::info!(session_id = %sid, "session fully initialized");
-        Ok(sid)
+            Err(error) => {
+                self.send_error(-32603, &error.to_string());
+                Err(error)
+            },
+        }
     }
 
     pub(super) async fn active_session_working_dir(&self) -> Result<String, String> {
@@ -73,7 +66,7 @@ impl CommandHandler {
             .session_manager()
             .read_model(sid)
             .await
-            .map(|state| state.identity.working_dir)
+            .map(|state| state.identity.working_dir.clone())
             .map_err(|e| format!("read session {sid}: {e}"))
     }
 

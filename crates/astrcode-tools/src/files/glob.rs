@@ -5,10 +5,8 @@ use std::{
     time::{Instant, SystemTime},
 };
 
-use astrcode_core::{
-    hostpaths::resolve_path,
-    tool::{access::ResourceAccess, *},
-};
+use astrcode_core::tool::{access::ResourceAccess, *};
+use astrcode_extension_sdk::hostpaths::resolve_path;
 use serde::Deserialize;
 
 use super::shared::{FileCollectOptions, collect_candidate_files, run_blocking};

@@ -5,7 +5,7 @@ use astrcode_extension_sdk::{
     tool::{ToolDefinition, ToolPromptMetadata},
 };
 
-use super::{ExtensionRecord, ExtensionRunner};
+use super::{ExtensionRunner, HostedExtension};
 
 pub(super) type ExtensionHandler<H> = (String, HookMode, Arc<H>);
 pub(super) type ToolExtensionHandler<H> = (String, HookMode, ToolHookTarget, Arc<H>);
@@ -23,7 +23,7 @@ pub(super) struct HttpRouteEntry {
 
 /// 预排序的 handler 索引。
 ///
-/// 在每次 `register()` 后从所有 records 重建，确保分发时无需遍历+排序。
+/// 在每次 registration 发布后从所有运行时清单重建，确保分发时无需遍历+排序。
 /// 各列表按 priority 降序排列，provider/compact/lifecycle 按 event 分组。
 #[derive(Default)]
 #[allow(clippy::type_complexity)]
@@ -67,7 +67,7 @@ impl HandlerIndex {
     }
 }
 
-pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
+pub(super) fn build_handler_index(extensions: &[HostedExtension]) -> HandlerIndex {
     let mut pre_tool_use = Vec::new();
     let mut post_tool_use = Vec::new();
     let mut provider = Vec::new();
@@ -87,105 +87,106 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut capabilities = HashMap::new();
     let mut http_routes = Vec::new();
 
-    for record in records {
-        capabilities.insert(record.id.clone(), record.capabilities.clone());
-        for registration in record.reg.pre_tool_use() {
+    for hosted in extensions {
+        let manifest = &hosted.manifest;
+        let registrations = &manifest.registrations;
+        capabilities.insert(manifest.id.clone(), manifest.capabilities.clone());
+        for registration in registrations.pre_tool_use() {
             pre_tool_use.push((
                 registration.priority,
                 (
-                    record.id.clone(),
+                    manifest.id.clone(),
                     registration.mode,
                     registration.target.clone(),
                     Arc::clone(&registration.handler),
                 ),
             ));
         }
-        for registration in record.reg.post_tool_use() {
+        for registration in registrations.post_tool_use() {
             post_tool_use.push((
                 registration.priority,
                 (
-                    record.id.clone(),
+                    manifest.id.clone(),
                     registration.mode,
                     registration.target.clone(),
                     Arc::clone(&registration.handler),
                 ),
             ));
         }
-        for (event, mode, priority, handler) in record.reg.provider() {
+        for (event, mode, priority, handler) in registrations.provider() {
             provider.push((
                 *event,
                 *priority,
-                (record.id.clone(), *mode, Arc::clone(handler)),
+                (manifest.id.clone(), *mode, Arc::clone(handler)),
             ));
         }
-        for (priority, handler) in record.reg.prompt_build() {
+        for (priority, handler) in registrations.prompt_build() {
             prompt_build.push((*priority, Arc::clone(handler)));
         }
-        for (event, priority, handler) in record.reg.compact() {
+        for (event, priority, handler) in registrations.compact() {
             compact.push((*event, *priority, Arc::clone(handler)));
         }
-        for registration in record.reg.continue_after_stop() {
+        for registration in registrations.continue_after_stop() {
             continue_after_stop.push((
                 registration.priority,
                 (
-                    record.id.clone(),
+                    manifest.id.clone(),
                     registration.options,
                     Arc::clone(&registration.handler),
                 ),
             ));
         }
-        for registration in record.reg.user_message_envelope() {
+        for registration in registrations.user_message_envelope() {
             user_message_envelope.push((
                 registration.priority,
-                (record.id.clone(), Arc::clone(&registration.handler)),
+                (manifest.id.clone(), Arc::clone(&registration.handler)),
             ));
         }
-        for (event, mode, priority, handler) in record.reg.lifecycle() {
+        for (event, mode, priority, handler) in registrations.lifecycle() {
             lifecycle.push((
                 event.clone(),
                 *priority,
-                (record.id.clone(), *mode, Arc::clone(handler)),
+                (manifest.id.clone(), *mode, Arc::clone(handler)),
             ));
         }
-        for (name, metadata) in record.reg.all_tool_metadata() {
+        for (name, metadata) in registrations.all_tool_metadata() {
             tool_metadata.insert(name.clone(), metadata.clone());
         }
-        for (definition, handler) in record.reg.tools() {
+        for (definition, handler) in registrations.tools() {
             static_tools.push((
                 definition.clone(),
                 Arc::clone(handler),
-                record.id.clone(),
-                record.capabilities.clone(),
+                manifest.id.clone(),
+                manifest.capabilities.clone(),
             ));
         }
-        for discovery in record.reg.tool_discoveries() {
+        for discovery in registrations.tool_discoveries() {
             tool_discoveries.push((
-                record.id.clone(),
+                manifest.id.clone(),
                 Arc::clone(discovery),
-                record.capabilities.clone(),
+                manifest.capabilities.clone(),
             ));
         }
-        for (command, handler) in record.reg.commands() {
-            static_commands.push((record.id.clone(), command.clone(), Arc::clone(handler)));
+        for (command, handler) in registrations.commands() {
+            static_commands.push((manifest.id.clone(), command.clone(), Arc::clone(handler)));
         }
-        for discovery in record.reg.command_discoveries() {
-            command_discoveries.push((record.id.clone(), Arc::clone(discovery)));
+        for discovery in registrations.command_discoveries() {
+            command_discoveries.push((manifest.id.clone(), Arc::clone(discovery)));
         }
-        keybindings.extend_from_slice(record.reg.keybindings());
-        status_items.extend_from_slice(record.reg.status_items());
-        if !record.reg.extension_event_decls().is_empty() {
+        keybindings.extend_from_slice(registrations.keybindings());
+        status_items.extend_from_slice(registrations.status_items());
+        if !registrations.extension_event_decls().is_empty() {
             extension_event_decls.insert(
-                record.id.clone(),
-                record.reg.extension_event_decls().to_vec(),
+                manifest.id.clone(),
+                registrations.extension_event_decls().to_vec(),
             );
         }
         http_routes.extend(
-            record
-                .reg
+            registrations
                 .http_routes()
                 .iter()
                 .map(|registration| HttpRouteEntry {
-                    extension_id: record.id.clone(),
+                    extension_id: manifest.id.clone(),
                     route: registration.route.clone(),
                     handler: Arc::clone(&registration.handler),
                 }),
@@ -214,75 +215,6 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     }
 }
 
-pub(super) fn validate_http_route_registrations(
-    extension_id: &str,
-    capabilities: &[ExtensionCapability],
-    routes: &[ExtensionHttpRouteRegistration],
-    existing_records: &[ExtensionRecord],
-) -> Result<(), String> {
-    for (index, registration) in routes.iter().enumerate() {
-        let route = &registration.route;
-        route.validate()?;
-        let required_capability = match route.access {
-            ExtensionHttpAccess::Public => ExtensionCapability::PublicHttp,
-            ExtensionHttpAccess::Authenticated => ExtensionCapability::AuthenticatedHttp,
-        };
-        if !capabilities.contains(&required_capability) {
-            return Err(format!(
-                "extension {extension_id} route {} {} requires capability {}",
-                http_method_name(route.method),
-                route.path,
-                astrcode_extension_sdk::s5r::capability_to_wire(required_capability),
-            ));
-        }
-        if route.access == ExtensionHttpAccess::Public
-            && (route.path == "/api" || route.path.starts_with("/api/"))
-        {
-            return Err(format!(
-                "extension {extension_id} public route {} uses reserved /api namespace",
-                route.path
-            ));
-        }
-        if routes[..index].iter().any(|existing| {
-            existing.route.access == route.access
-                && existing.route.method == route.method
-                && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
-        }) {
-            return Err(format!(
-                "extension {extension_id} has conflicting {} routes for {}",
-                http_method_name(route.method),
-                route.path
-            ));
-        }
-        if route.access == ExtensionHttpAccess::Public
-            && existing_records.iter().any(|record| {
-                record.reg.http_routes().iter().any(|existing| {
-                    existing.route.access == ExtensionHttpAccess::Public
-                        && existing.route.method == route.method
-                        && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
-                })
-            })
-        {
-            return Err(format!(
-                "extension {extension_id} public route conflicts with an existing {} route: {}",
-                http_method_name(route.method),
-                route.path
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn http_method_name(method: ExtensionHttpMethod) -> &'static str {
-    match method {
-        ExtensionHttpMethod::Get => "GET",
-        ExtensionHttpMethod::Post => "POST",
-        ExtensionHttpMethod::Put => "PUT",
-        ExtensionHttpMethod::Patch => "PATCH",
-        ExtensionHttpMethod::Delete => "DELETE",
-    }
-}
-
 fn handlers_by_priority<T>(mut handlers: Vec<Prioritized<T>>) -> Vec<T> {
     handlers.sort_by_key(|handler| std::cmp::Reverse(handler.0));
     handlers.into_iter().map(|(_, handler)| handler).collect()
@@ -303,9 +235,9 @@ where
 /// 在 debug 级日志里输出每个事件的 handler 调度顺序（按优先级降序，extension_id 标注）。
 ///
 /// 排查「我的 hook 没生效 / 顺序不对」时打开 `RUST_LOG=astrcode_extensions=debug`
-/// 即可看到每次 register 后的最终调度表。同优先级的 hook 顺序由 records 的注册
+/// 即可看到每次 register 后的最终调度表。同优先级的 hook 顺序由扩展的注册
 /// 顺序决定（即 loader 加载顺序），日志按这个顺序原样输出。
-pub(super) fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
+pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
     if !tracing::enabled!(tracing::Level::DEBUG) {
         return;
     }
@@ -317,9 +249,11 @@ pub(super) fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
     let mut compact: Vec<(&str, CompactEvent, i32)> = Vec::new();
     let mut lifecycle: Vec<(&str, ExtensionEvent, i32, HookMode)> = Vec::new();
 
-    for record in records {
-        let id = record.id.as_str();
-        for registration in record.reg.pre_tool_use() {
+    for hosted in extensions {
+        let manifest = &hosted.manifest;
+        let registrations = &manifest.registrations;
+        let id = manifest.id.as_str();
+        for registration in registrations.pre_tool_use() {
             pre.push((
                 id,
                 registration.priority,
@@ -327,7 +261,7 @@ pub(super) fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
                 registration.target.clone(),
             ));
         }
-        for registration in record.reg.post_tool_use() {
+        for registration in registrations.post_tool_use() {
             post.push((
                 id,
                 registration.priority,
@@ -335,16 +269,16 @@ pub(super) fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
                 registration.target.clone(),
             ));
         }
-        for (event, mode, priority, _) in record.reg.provider() {
+        for (event, mode, priority, _) in registrations.provider() {
             provider.push((id, *event, *priority, *mode));
         }
-        for (priority, _) in record.reg.prompt_build() {
+        for (priority, _) in registrations.prompt_build() {
             prompt.push((id, *priority));
         }
-        for (event, priority, _) in record.reg.compact() {
+        for (event, priority, _) in registrations.compact() {
             compact.push((id, *event, *priority));
         }
-        for (event, mode, priority, _) in record.reg.lifecycle() {
+        for (event, mode, priority, _) in registrations.lifecycle() {
             lifecycle.push((id, event.clone(), *priority, *mode));
         }
     }

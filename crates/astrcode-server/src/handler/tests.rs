@@ -283,17 +283,19 @@ struct ReadThenEditAcrossTurnsLlm {
     call_count: AtomicUsize,
 }
 
-struct FailSessionStartExtension;
+struct FailingSessionStartObserver {
+    calls: Arc<AtomicUsize>,
+}
 
 struct RecordSessionResumeExtension {
     events: Arc<Mutex<Vec<ExtensionEvent>>>,
 }
 
-struct FailFirstSessionResumeExtension {
+struct FailingSessionResumeObserver {
     calls: Arc<AtomicUsize>,
 }
 
-struct BlockingSessionResumeExtension {
+struct AwaitedSessionResumeObserver {
     calls: Arc<AtomicUsize>,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
@@ -327,7 +329,7 @@ impl Extension for RecordingLifecycleExtension {
         ] {
             reg.on_event(
                 event.clone(),
-                HookMode::Blocking,
+                HookMode::Advisory,
                 0,
                 Arc::new(RecordingLifecycleHandler {
                     event,
@@ -396,17 +398,19 @@ impl astrcode_extension_sdk::extension::CommandHandler for StaticCommandHandler 
 }
 
 #[async_trait::async_trait]
-impl Extension for FailSessionStartExtension {
+impl Extension for FailingSessionStartObserver {
     fn id(&self) -> &str {
-        "fail-session-start"
+        "failing-session-start-observer"
     }
 
     fn register(&self, reg: &mut Registrar) {
         reg.on_event(
             ExtensionEvent::SessionStart,
-            HookMode::Blocking,
+            HookMode::Advisory,
             0,
-            Arc::new(FailSessionStartHandler),
+            Arc::new(FailingSessionStartHandler {
+                calls: Arc::clone(&self.calls),
+            }),
         );
     }
 }
@@ -420,7 +424,7 @@ impl Extension for RecordSessionResumeExtension {
     fn register(&self, reg: &mut Registrar) {
         reg.on_event(
             ExtensionEvent::SessionResume,
-            HookMode::Blocking,
+            HookMode::Advisory,
             0,
             Arc::new(RecordingLifecycleHandler {
                 event: ExtensionEvent::SessionResume,
@@ -431,17 +435,17 @@ impl Extension for RecordSessionResumeExtension {
 }
 
 #[async_trait::async_trait]
-impl Extension for FailFirstSessionResumeExtension {
+impl Extension for FailingSessionResumeObserver {
     fn id(&self) -> &str {
-        "fail-first-session-resume"
+        "failing-session-resume-observer"
     }
 
     fn register(&self, reg: &mut Registrar) {
         reg.on_event(
             ExtensionEvent::SessionResume,
-            HookMode::Blocking,
+            HookMode::Advisory,
             0,
-            Arc::new(FailFirstSessionResumeHandler {
+            Arc::new(FailingSessionResumeHandler {
                 calls: Arc::clone(&self.calls),
             }),
         );
@@ -449,17 +453,17 @@ impl Extension for FailFirstSessionResumeExtension {
 }
 
 #[async_trait::async_trait]
-impl Extension for BlockingSessionResumeExtension {
+impl Extension for AwaitedSessionResumeObserver {
     fn id(&self) -> &str {
-        "blocking-session-resume"
+        "awaited-session-resume-observer"
     }
 
     fn register(&self, reg: &mut Registrar) {
         reg.on_event(
             ExtensionEvent::SessionResume,
-            HookMode::Blocking,
+            HookMode::Advisory,
             0,
-            Arc::new(BlockingSessionResumeHandler {
+            Arc::new(AwaitedSessionResumeHandler {
                 calls: Arc::clone(&self.calls),
                 entered: Arc::clone(&self.entered),
                 release: Arc::clone(&self.release),
@@ -468,18 +472,18 @@ impl Extension for BlockingSessionResumeExtension {
     }
 }
 
-struct FailFirstSessionResumeHandler {
+struct FailingSessionResumeHandler {
     calls: Arc<AtomicUsize>,
 }
 
-struct BlockingSessionResumeHandler {
+struct AwaitedSessionResumeHandler {
     calls: Arc<AtomicUsize>,
     entered: Arc<tokio::sync::Notify>,
     release: Arc<tokio::sync::Notify>,
 }
 
 #[async_trait::async_trait]
-impl astrcode_extension_sdk::extension::LifecycleHandler for FailFirstSessionResumeHandler {
+impl astrcode_extension_sdk::extension::LifecycleHandler for FailingSessionResumeHandler {
     async fn handle(&self, _ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             return Err(ExtensionError::Internal("session resume failed".into()));
@@ -489,7 +493,7 @@ impl astrcode_extension_sdk::extension::LifecycleHandler for FailFirstSessionRes
 }
 
 #[async_trait::async_trait]
-impl astrcode_extension_sdk::extension::LifecycleHandler for BlockingSessionResumeHandler {
+impl astrcode_extension_sdk::extension::LifecycleHandler for AwaitedSessionResumeHandler {
     async fn handle(&self, _ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         self.entered.notify_one();
@@ -498,11 +502,14 @@ impl astrcode_extension_sdk::extension::LifecycleHandler for BlockingSessionResu
     }
 }
 
-struct FailSessionStartHandler;
+struct FailingSessionStartHandler {
+    calls: Arc<AtomicUsize>,
+}
 
 #[async_trait::async_trait]
-impl astrcode_extension_sdk::extension::LifecycleHandler for FailSessionStartHandler {
+impl astrcode_extension_sdk::extension::LifecycleHandler for FailingSessionStartHandler {
     async fn handle(&self, _ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         Err(ExtensionError::Internal("session start failed".into()))
     }
 }
@@ -805,7 +812,6 @@ fn test_runtime_with_settings(
     Arc::new(ServerRuntime {
         event_store,
         config_manager: config,
-        context_assembler,
         session_manager,
         scheduler,
         extension_runner,
@@ -875,12 +881,13 @@ fn test_event_bus(
     runtime: &Arc<crate::bootstrap::ServerRuntime>,
     event_tx: broadcast::Sender<ClientNotification>,
 ) -> Arc<crate::server_event_bus::ServerEventBus> {
-    let event_bus = Arc::new(crate::server_event_bus::ServerEventBus::with_legacy_tx(
-        event_tx,
-    ));
-    runtime
-        .session_manager()
-        .bind_event_bus(Arc::clone(&event_bus));
+    let event_bus = Arc::clone(runtime.session_manager().event_bus());
+    let mut notifications = event_bus.subscribe_all_notifications();
+    tokio::spawn(async move {
+        while let Ok(notification) = notifications.recv().await {
+            let _ = event_tx.send(notification);
+        }
+    });
     event_bus
 }
 
@@ -1136,33 +1143,26 @@ async fn create_session_persists_initial_system_prompt() {
 }
 
 #[tokio::test]
-async fn client_create_session_reports_start_hook_failure() {
+async fn client_create_session_ignores_start_observer_failure() {
     let runtime = test_runtime();
+    let calls = Arc::new(AtomicUsize::new(0));
     runtime
         .extension_runner
-        .register(Arc::new(FailSessionStartExtension))
+        .register(Arc::new(FailingSessionStartObserver {
+            calls: Arc::clone(&calls),
+        }))
         .await
         .unwrap();
     let event_tx = event_channel(1024);
-    let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
 
-    let error = handler
+    handler
         .handle(ClientCommand::CreateSession {
             working_dir: ".".into(),
         })
         .await
-        .unwrap_err();
-
-    assert!(error.to_string().contains("session start failed"));
-    let mut saw_error = false;
-    while let Ok(notification) = event_rx.try_recv() {
-        if let ClientNotification::Error { code, message } = notification {
-            saw_error = code == -32603 && message.contains("session start failed");
-            break;
-        }
-    }
-    assert!(saw_error, "client should receive create-session failure");
+        .expect("observer failure must not block session creation");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1194,12 +1194,12 @@ async fn reopening_persisted_session_emits_resume_once_per_runtime() {
 }
 
 #[tokio::test]
-async fn failed_session_resume_is_retried_on_next_open() {
+async fn failed_session_resume_observer_does_not_fail_or_repeat_open() {
     let runtime = test_runtime();
     let calls = Arc::new(AtomicUsize::new(0));
     runtime
         .extension_runner
-        .register(Arc::new(FailFirstSessionResumeExtension {
+        .register(Arc::new(FailingSessionResumeObserver {
             calls: Arc::clone(&calls),
         }))
         .await
@@ -1215,9 +1215,9 @@ async fn failed_session_resume_is_retried_on_next_open() {
         .await
         .unwrap();
 
-    assert!(runtime.session_manager().open(sid.clone()).await.is_err());
+    assert!(runtime.session_manager().open(sid.clone()).await.is_ok());
     assert!(runtime.session_manager().open(sid).await.is_ok());
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1228,7 +1228,7 @@ async fn concurrent_open_waits_for_initial_session_resume() {
     let release = Arc::new(tokio::sync::Notify::new());
     runtime
         .extension_runner
-        .register(Arc::new(BlockingSessionResumeExtension {
+        .register(Arc::new(AwaitedSessionResumeObserver {
             calls: Arc::clone(&calls),
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
@@ -1273,7 +1273,7 @@ async fn cancelled_initial_resume_allows_retry() {
     let release = Arc::new(tokio::sync::Notify::new());
     runtime
         .extension_runner
-        .register(Arc::new(BlockingSessionResumeExtension {
+        .register(Arc::new(AwaitedSessionResumeObserver {
             calls: Arc::clone(&calls),
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
@@ -1373,13 +1373,23 @@ async fn submit_prompt_uses_one_turn_id_for_turn_events() {
 }
 
 #[tokio::test]
-async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
+async fn startup_repairs_stale_pending_tool_calls() {
     let runtime = test_runtime();
     let sid = new_session_id();
+    let clean_sid = new_session_id();
     runtime
         .event_store()
         .create_session(crate::test_support::session_started_event_for_test(
             sid.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+    runtime
+        .event_store()
+        .create_session(crate::test_support::session_started_event_for_test(
+            clean_sid.clone(),
             ".",
             "mock",
         ))
@@ -1412,17 +1422,13 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
             .contains(&ToolCallId::from("call-1"))
     );
 
-    let event_tx = event_channel(1024);
-    let (actor_tx, _actor_rx) = mpsc::channel(super::actor::COMMAND_ACTOR_CAPACITY);
-    let scheduler = test_scheduler(&runtime);
-    let handler = CommandHandler::new(
-        Arc::clone(&runtime),
-        Arc::clone(&scheduler),
-        test_event_bus(&runtime, event_tx),
-        actor_tx,
+    let app = crate::bootstrap::ServerApp::new(Arc::clone(&runtime));
+    app.initialize().await;
+    assert!(app.event_bus().is_attached(&sid));
+    assert!(
+        !app.event_bus().is_attached(&clean_sid),
+        "startup should not retain a runtime task for a clean historical session"
     );
-
-    handler.repair_stale_session(&sid).await.unwrap();
 
     let state = runtime
         .event_store()
@@ -1451,6 +1457,7 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
             .iter()
             .any(|message| { message.joined_display_text("").contains("<turn_aborted>") })
     );
+    app.shutdown().await;
 }
 
 #[tokio::test]
@@ -1501,13 +1508,11 @@ async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
     assert!(stale_state.execution.pending_tool_calls.is_empty());
 
     let event_tx = event_channel(1024);
-    let (actor_tx, _actor_rx) = mpsc::channel(super::actor::COMMAND_ACTOR_CAPACITY);
     let scheduler = test_scheduler(&runtime);
     let handler = CommandHandler::new(
         Arc::clone(&runtime),
         Arc::clone(&scheduler),
         test_event_bus(&runtime, event_tx),
-        actor_tx,
     );
 
     handler.repair_stale_session(&sid).await.unwrap();
@@ -1580,13 +1585,11 @@ async fn repair_stale_runs_marks_child_without_active_execution_interrupted() {
         .unwrap();
 
     let event_tx = event_channel(1024);
-    let (actor_tx, _actor_rx) = mpsc::channel(super::actor::COMMAND_ACTOR_CAPACITY);
     let scheduler = test_scheduler(&runtime);
     let handler = CommandHandler::new(
         Arc::clone(&runtime),
         Arc::clone(&scheduler),
         test_event_bus(&runtime, event_tx),
-        actor_tx,
     );
 
     handler.repair_stale_session(&parent_id).await.unwrap();
@@ -1858,6 +1861,27 @@ async fn abort_stops_active_turn_and_records_completion() {
 }
 
 #[tokio::test]
+async fn server_shutdown_stops_active_turn_before_draining_watchers() {
+    let runtime = test_runtime_with_llm(Arc::new(PendingLlm));
+    let app = crate::bootstrap::ServerApp::new(runtime);
+    let session_id = app
+        .command_handle()
+        .create_session(".".into())
+        .await
+        .unwrap();
+    let submission = app
+        .command_handle()
+        .submit_input_for_session(session_id, "keep running".into())
+        .await
+        .unwrap();
+    assert!(matches!(submission, PromptSubmission::Accepted { .. }));
+
+    tokio::time::timeout(Duration::from_secs(4), app.shutdown())
+        .await
+        .expect("shutdown should not wait forever for an active turn");
+}
+
+#[tokio::test]
 async fn abort_stops_inner_turn_before_late_provider_events_are_persisted() {
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
@@ -1935,47 +1959,6 @@ async fn compact_session_rejects_running_turn_without_compaction_started() {
     assert!(saw_conflict);
 
     handler.abort_session(sid).await.unwrap();
-}
-
-#[tokio::test]
-async fn stale_agent_finish_after_abort_is_ignored() {
-    let event_tx = event_channel(1024);
-    let mut event_rx = event_tx.subscribe();
-    let runtime = test_runtime_with_llm(Arc::new(PendingLlm));
-    let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
-
-    let sid = handler.create_session(".".into()).await.unwrap();
-    let PromptSubmission::Accepted { turn_id } = handler
-        .submit_input_for_session(sid.clone(), "keep running".into())
-        .await
-        .unwrap()
-    else {
-        panic!("expected Accepted");
-    };
-    handler.abort_session(sid.clone()).await.unwrap();
-    assert_eq!(wait_for_turn_completed(&mut event_rx).await, "aborted");
-
-    handler
-        .tx
-        .send(CommandMessage::AgentTurnCleanup {
-            session_id: sid,
-            turn_id,
-            completion: TurnCompletion::Dropped,
-        })
-        .await
-        .unwrap();
-    tokio::time::sleep(Duration::from_millis(10)).await;
-
-    while let Ok(notification) = event_rx.try_recv() {
-        if let ClientNotification::Event(event) = notification {
-            if matches!(
-                event.payload,
-                EventPayload::Durable(DurableEventPayload::TurnCompleted { .. })
-            ) {
-                panic!("stale AgentTurnFinished should not emit a second completion");
-            }
-        }
-    }
 }
 
 #[tokio::test]

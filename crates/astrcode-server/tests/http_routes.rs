@@ -37,8 +37,8 @@ use astrcode_protocol::{
     wire::{CommandSourceDto, ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
 use astrcode_server::{
-    bootstrap::ServerRuntime,
-    http::{router, router_with_event_publisher},
+    bootstrap::{ServerApp, ServerRuntime},
+    http::{router as app_router, router_with_event_publisher},
     test_support::{
         ChildSessionCoordinator, ConfigManager, MAX_PROMPT_TEXT_BYTES, SessionManager,
         TurnRegistry, TurnScheduler,
@@ -46,8 +46,8 @@ use astrcode_server::{
 };
 use astrcode_session_projection::{SessionReadModel, SessionSummary};
 use astrcode_storage::{
-    EventReader, EventStore, SessionPathResolver, SessionReader, SessionStore, StorageError,
-    ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
+    EventReader, SessionEventJournal, SessionPathResolver, SessionReader, SessionStore,
+    StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
     in_memory::InMemoryEventStore,
 };
 use axum::{
@@ -58,6 +58,12 @@ use axum::{
 use http_body_util::BodyExt;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
+
+fn router(
+    runtime: Arc<ServerRuntime>,
+) -> Result<(Router, String), astrcode_server::http::HttpServerError> {
+    app_router(ServerApp::new(runtime))
+}
 
 struct ImmediateLlm;
 
@@ -591,6 +597,52 @@ async fn provider_preset_apply_persists_profile_from_catalog() {
         "https://dashscope.aliyuncs.com/compatible-mode/v1"
     );
     assert_eq!(profile.api_key.as_deref(), Some("env:DASHSCOPE_API_KEY"));
+}
+
+#[tokio::test]
+async fn concurrent_config_updates_preserve_both_profiles() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let first = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        serde_json::json!({
+            "providerId": "qwen",
+            "endpointId": "dashscope-compatible",
+            "profileName": "concurrent-qwen",
+            "activate": false
+        })
+        .to_string(),
+        &token,
+    );
+    let second = post_json_owned(
+        app,
+        "/api/config/provider-preset/apply",
+        serde_json::json!({
+            "providerId": "openai-compatible",
+            "baseUrl": "https://concurrent.example.test/v1",
+            "profileName": "concurrent-compatible",
+            "modelId": "test-model",
+            "activate": false
+        })
+        .to_string(),
+        &token,
+    );
+
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let config = runtime.config_manager().raw_config_snapshot();
+    for expected in ["concurrent-qwen", "concurrent-compatible"] {
+        assert!(
+            config
+                .profiles
+                .iter()
+                .any(|profile| profile.name == expected),
+            "missing profile {expected}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1580,7 +1632,8 @@ async fn stream_ignores_events_from_other_sessions() {
 #[tokio::test]
 async fn stream_projects_tracked_child_events_to_parent_stream() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token, events) = router_with_event_publisher(Arc::clone(&runtime)).unwrap();
+    let (app, token, events) =
+        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let parent_sid = SessionId::from(session_id.clone());
     let child_sid = SessionId::from(format!("{session_id}-child"));
@@ -2044,7 +2097,7 @@ impl SessionReader for TestEventStore {
     async fn session_read_model(
         &self,
         session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError> {
+    ) -> Result<Arc<SessionReadModel>, StorageError> {
         self.inner.session_read_model(session_id).await
     }
 
@@ -2101,7 +2154,7 @@ impl SessionPathResolver for TestEventStore {
 }
 
 #[async_trait::async_trait]
-impl EventStore for TestEventStore {
+impl SessionEventJournal for TestEventStore {
     async fn create_session(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         self.inner.create_session(event).await
     }
@@ -2109,7 +2162,10 @@ impl EventStore for TestEventStore {
     async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         self.inner.append_event(event).await
     }
+}
 
+#[async_trait::async_trait]
+impl SessionStore for TestEventStore {
     async fn checkpoint(
         &self,
         session_id: &SessionId,
@@ -2117,7 +2173,6 @@ impl EventStore for TestEventStore {
     ) -> Result<(), StorageError> {
         self.inner.checkpoint(session_id, cursor).await
     }
-
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
         self.inner.delete_session(session_id).await
     }
@@ -2235,7 +2290,6 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     Arc::new(ServerRuntime::assemble_for_test(
         event_store,
         config,
-        context_assembler,
         session_manager,
         scheduler,
         extension_runner,

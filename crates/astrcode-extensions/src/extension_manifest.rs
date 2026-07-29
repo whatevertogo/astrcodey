@@ -13,7 +13,6 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub struct ExtensionRegistration {
     pub extension_id: String,
-    pub version: String,
     pub capabilities: Vec<ExtensionCapability>,
     pub tools: Vec<ManifestTool>,
     pub commands: Vec<ManifestCommand>,
@@ -119,12 +118,6 @@ fn registration_from_manifest_value(value: &Value) -> Result<ExtensionRegistrati
         .ok_or("initialize manifest missing extension_id")?
         .to_string();
 
-    let version = value
-        .get("version")
-        .and_then(|v| v.as_str())
-        .unwrap_or("0.0.0")
-        .to_string();
-
     let capabilities: Vec<ExtensionCapability> = value
         .get("capabilities")
         .and_then(|v| v.as_array())
@@ -168,7 +161,6 @@ fn registration_from_manifest_value(value: &Value) -> Result<ExtensionRegistrati
 
     Ok(ExtensionRegistration {
         extension_id,
-        version,
         capabilities,
         tools,
         commands,

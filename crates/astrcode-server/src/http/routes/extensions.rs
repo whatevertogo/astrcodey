@@ -29,7 +29,7 @@ use super::{
         HttpState, bad_request_response, error_response, internal_error_response,
         not_found_response,
     },
-    notify_extensions_config_changed, reload_extension_registry,
+    ConfigRequestError, reload_extension_registry, update_config,
 };
 
 pub(in crate::http) async fn list_extensions(State(state): State<HttpState>) -> Response {
@@ -48,37 +48,22 @@ pub(in crate::http) async fn set_enabled(
     State(state): State<HttpState>,
     Json(request): Json<SetExtensionEnabledRequest>,
 ) -> Response {
-    let mut candidate = state.runtime.config_manager().raw_config_snapshot();
-    let extension_states = candidate
-        .runtime
-        .extension_states
-        .get_or_insert_with(BTreeMap::new);
-    extension_states.insert(request.extension_id.clone(), request.enabled);
-
-    if let Err(error) = candidate.clone().into_effective() {
-        return bad_request_response("invalid_extension_state", error);
+    let update_result = update_config(&state, |candidate| {
+        candidate
+            .runtime
+            .extension_states
+            .get_or_insert_with(BTreeMap::new)
+            .insert(request.extension_id, request.enabled);
+        candidate
+            .clone()
+            .into_effective()
+            .map_err(|error| ConfigRequestError::new("invalid_extension_state", error))?;
+        Ok(())
+    })
+    .await;
+    if let Err(error) = update_result {
+        return error.into_response();
     }
-
-    if let Err(error) = state
-        .runtime
-        .config_manager
-        .config_store()
-        .save(&candidate)
-        .await
-    {
-        return internal_error_response("save_failed", error);
-    }
-
-    if let Err(error) = state
-        .runtime
-        .config_manager
-        .apply_raw_config_and_rebuild(candidate)
-    {
-        return bad_request_response("invalid_extension_state", error);
-    }
-    state.runtime.sync_session_model_bindings();
-
-    notify_extensions_config_changed(&state).await;
 
     let reload_errors = reload_extension_registry(&state).await;
 
@@ -106,7 +91,8 @@ pub(in crate::http) async fn dispatch_public_http(
         body: serde_json::Value::Null,
     };
     let result = state
-        .runtime
+        .app
+        .runtime()
         .extension_runner()
         .dispatch_public_http_route(request, &body)
         .await;
@@ -131,7 +117,8 @@ pub(in crate::http) async fn dispatch_authenticated_http(
         body: serde_json::Value::Null,
     };
     let result = state
-        .runtime
+        .app
+        .runtime()
         .extension_runner()
         .dispatch_authenticated_http_route(&extension_id, request, &body)
         .await;
@@ -181,8 +168,8 @@ fn extension_http_method(method: &Method) -> Option<ExtensionHttpMethod> {
 }
 
 async fn collect_extensions(state: &HttpState) -> Vec<ExtensionStateDto> {
-    let effective = state.runtime.config_manager().read_effective();
-    let runner = state.runtime.extension_runner();
+    let effective = state.app.runtime().config_manager().read_effective();
+    let runner = state.app.runtime().extension_runner();
     let loaded_ids = runner.registered_extension_ids().await;
     let loaded_set: BTreeSet<_> = loaded_ids.iter().cloned().collect();
     let registry = runner.registry_snapshot().await;

@@ -194,10 +194,9 @@ async fn run_compaction(
     )
     .await;
 
-    // PreCompact may append durable facts. Compact must start from the projection after the
-    // hook, not from the probe snapshot used only to decide whether compaction is needed.
-    publisher.reload_model_cache().await?;
-    let source_snapshot = context_snapshot(&publisher.snapshot_model().await?);
+    // PreCompact may append durable facts, so read the storage projection after the hook.
+    let source_model = publisher.snapshot_model().await?;
+    let source_snapshot = context_snapshot(&source_model);
     let custom_instructions = match custom_instructions {
         Ok(instructions) => instructions,
         Err(error) => {
@@ -253,11 +252,8 @@ async fn run_compaction(
         },
     )
     .await;
-    publisher.reload_model_cache().await?;
-    Ok((
-        context_snapshot(&publisher.snapshot_model().await?),
-        outcome,
-    ))
+    let model = publisher.snapshot_model().await?;
+    Ok((context_snapshot(&model), outcome))
 }
 
 pub(crate) async fn run_reactive_compaction(
@@ -266,8 +262,8 @@ pub(crate) async fn run_reactive_compaction(
     turn_id: &TurnId,
     publisher: &TurnEvents,
 ) -> Result<bool, TurnError> {
-    publisher.reload_model_cache().await?;
-    let snapshot = context_snapshot(&publisher.snapshot_model().await?);
+    let model = publisher.snapshot_model().await?;
+    let snapshot = context_snapshot(&model);
     let (_, outcome) = run_compaction(
         host,
         state,
@@ -354,8 +350,7 @@ async fn commit_compaction(
     meta: CompactionStageMeta,
 ) -> CompactionOutcome {
     host.session
-        .emit_live(Some(turn_id), LiveEventPayload::CompactionStarted)
-        .await;
+        .emit_live(Some(turn_id), LiveEventPayload::CompactionStarted);
     let tools = state.visible_tools();
     host.session
         .runtime_services()
@@ -404,26 +399,22 @@ async fn commit_compaction(
             {
                 tracing::warn!(error = %error, "PostCompact extension dispatch failed");
             }
-            host.session
-                .emit_live(
-                    Some(turn_id),
-                    LiveEventPayload::CompactionCompleted {
-                        messages_removed: compaction.messages_removed,
-                    },
-                )
-                .await;
+            host.session.emit_live(
+                Some(turn_id),
+                LiveEventPayload::CompactionCompleted {
+                    messages_removed: compaction.messages_removed,
+                },
+            );
             CompactionOutcome::Committed
         },
         Err(error) => {
             tracing::warn!(error = %error, "compaction persist failed");
-            host.session
-                .emit_live(
-                    Some(turn_id),
-                    LiveEventPayload::CompactionSkipped {
-                        reason: error.to_string(),
-                    },
-                )
-                .await;
+            host.session.emit_live(
+                Some(turn_id),
+                LiveEventPayload::CompactionSkipped {
+                    reason: error.to_string(),
+                },
+            );
             CompactionOutcome::Skipped
         },
     }
@@ -548,7 +539,7 @@ pub async fn compact_idle_session(
 
     let state = session.read_model().await?;
     let pre_hook = CompactHookContext {
-        session_id: session.id.as_str(),
+        session_id: session.id().as_str(),
         working_dir: &state.identity.working_dir,
         model_id: &state.identity.model_id,
         trigger: CompactTrigger::ManualCommand,
@@ -561,7 +552,7 @@ pub async fn compact_idle_session(
     let snapshot = context_snapshot(&state);
     let llm = runtime_services.llm();
     let post_hook = CompactHookContext {
-        session_id: session.id.as_str(),
+        session_id: session.id().as_str(),
         working_dir: &state.identity.working_dir,
         model_id: &state.identity.model_id,
         trigger: CompactTrigger::ManualCommand,
@@ -611,7 +602,7 @@ pub async fn compact_idle_session(
         .enrich(
             &mut compaction,
             PostCompactEnrichInput {
-                session_id: session.id.as_str(),
+                session_id: session.id().as_str(),
                 source_messages: &snapshot.messages,
                 working_dir: &state.identity.working_dir,
                 system_prompt: Some(&snapshot.system_prompt),

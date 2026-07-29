@@ -3,7 +3,7 @@
 //! 通过 crate feature `testing` 暴露给跨 crate 集成测试；本 crate 内单元测试也可启用该 feature。
 //! 不要用 `#[cfg(test)]` 单独 gating：否则 `astrcode-server` 等集成测试无法链接此模块。
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
     event::{DurableEvent, DurableEventPayload, StoredEvent},
@@ -16,12 +16,13 @@ use astrcode_session_projection::{
 use tokio::sync::Mutex;
 
 use crate::{
-    CompactSnapshotInput, EventReader, EventStore, SessionPathResolver, SessionReader,
-    StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
+    CompactSnapshotInput, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
+    SessionStore, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
+    ToolResultArtifactStore,
     tool_artifacts::{slice_tool_result, tool_result_file_name_with_suffix},
 };
 
-/// 纯内存 EventStore 实现。
+/// 纯内存 session persistence 实现。
 ///
 /// 这个类型维护完整事件列表和同步投影，因此不是 no-op；测试使用它能覆盖
 /// 文件系统存储相同的读模型语义。
@@ -84,10 +85,10 @@ impl SessionReader for InMemoryEventStore {
     async fn session_read_model(
         &self,
         session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError> {
+    ) -> Result<Arc<SessionReadModel>, StorageError> {
         let map = self.sessions.lock().await;
         map.get(session_id)
-            .map(|session| session.projection.clone())
+            .map(|session| Arc::new(session.projection.clone()))
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))
     }
 
@@ -214,7 +215,7 @@ impl SessionPathResolver for InMemoryEventStore {
 }
 
 #[async_trait::async_trait]
-impl EventStore for InMemoryEventStore {
+impl SessionEventJournal for InMemoryEventStore {
     async fn create_session(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         if event.turn_id.is_some()
             || !matches!(&event.payload, DurableEventPayload::SessionStarted(_))
@@ -258,7 +259,10 @@ impl EventStore for InMemoryEventStore {
         session.events.push(stored.clone());
         Ok(stored)
     }
+}
 
+#[async_trait::async_trait]
+impl SessionStore for InMemoryEventStore {
     async fn checkpoint(
         &self,
         session_id: &SessionId,

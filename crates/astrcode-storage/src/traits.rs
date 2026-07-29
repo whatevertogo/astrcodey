@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use astrcode_core::{
     event::{DurableEvent, StoredEvent},
@@ -41,7 +41,7 @@ pub trait SessionReader: Send + Sync {
     async fn session_read_model(
         &self,
         session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError>;
+    ) -> Result<Arc<SessionReadModel>, StorageError>;
 
     async fn session_has_messages(&self, session_id: &SessionId) -> Result<bool, StorageError> {
         Ok(self.session_read_model(session_id).await?.has_messages())
@@ -51,7 +51,11 @@ pub trait SessionReader: Send + Sync {
         &self,
         session_id: &SessionId,
     ) -> Result<Vec<AgentSessionLinkView>, StorageError> {
-        Ok(self.session_read_model(session_id).await?.agent_sessions)
+        Ok(self
+            .session_read_model(session_id)
+            .await?
+            .agent_sessions
+            .clone())
     }
 
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError>;
@@ -94,18 +98,32 @@ pub trait ToolResultArtifactStore: Send + Sync {
     }
 }
 
+/// Durable session event 的存储写端口。
 #[async_trait::async_trait]
-pub trait EventStore: EventReader + Send + Sync {
+pub trait SessionEventJournal: Send + Sync {
     /// 原子创建 session 并提交 seq=0 的 `SessionStarted`。
     async fn create_session(&self, event: DurableEvent) -> Result<StoredEvent, StorageError>;
 
     async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError>;
 
+    async fn sync_durable_events(&self, _session_id: &SessionId) -> Result<(), StorageError> {
+        Ok(())
+    }
+}
+
+/// 完整 session repository 的组合入口。
+///
+/// 独立调用方使用上面的 reader/journal 窄端口；生命周期、checkpoint 和辅助快照只由
+/// repository 门面使用，不再为它们各建一个单实现 trait。
+#[async_trait::async_trait]
+pub trait SessionStore:
+    EventReader + SessionEventJournal + SessionReader + SessionPathResolver + ToolResultArtifactStore
+{
     async fn checkpoint(&self, session_id: &SessionId, cursor: &Cursor)
     -> Result<(), StorageError>;
 
-    async fn open_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
-        self.replay_events(session_id).await.map(|_| ())
+    async fn open_session(&self, _session_id: &SessionId) -> Result<(), StorageError> {
+        Ok(())
     }
 
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError>;
@@ -113,13 +131,12 @@ pub trait EventStore: EventReader + Send + Sync {
     async fn recycle_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
         tracing::warn!(
             session_id = %session_id,
-            "EventStore::recycle_session fell back to delete_session; this storage implementation does not preserve recycled session data"
+            "SessionStore::recycle_session fell back to delete_session; this storage implementation does not preserve recycled session data"
         );
         self.delete_session(session_id).await
     }
 
-    async fn restore_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
-        let _ = session_id;
+    async fn restore_session(&self, _session_id: &SessionId) -> Result<(), StorageError> {
         Err(StorageError::Unsupported(
             "restore_session is not supported by this storage implementation".into(),
         ))
@@ -132,18 +149,4 @@ pub trait EventStore: EventReader + Send + Sync {
     ) -> Result<Option<String>, StorageError> {
         Ok(None)
     }
-
-    async fn sync_durable_events(&self, _session_id: &SessionId) -> Result<(), StorageError> {
-        Ok(())
-    }
-}
-
-pub trait SessionStore:
-    EventStore + SessionReader + SessionPathResolver + ToolResultArtifactStore + Send + Sync
-{
-}
-
-impl<T> SessionStore for T where
-    T: EventStore + SessionReader + SessionPathResolver + ToolResultArtifactStore + Send + Sync
-{
 }

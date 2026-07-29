@@ -16,7 +16,6 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-dirs = { workspace = true }
 parking_lot = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
@@ -24,6 +23,7 @@ futures-util = { workspace = true }
 globset = { workspace = true }
 regex = { workspace = true }
 walkdir = { workspace = true }
+sha2 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

@@ -22,11 +22,12 @@
 
 | 模块 | 职责 |
 |------|------|
-| `astrcode-core::extension` | `Extension` trait、能力、钩子、Registrar |
+| `astrcode-extension-sdk::extension` | `Extension` trait、能力、钩子、Registrar |
 | `astrcode-extensions::loader` | 发现 `extension.json`、启动 s5r 子进程 |
 | `astrcode-extensions::s5r_ext` | `S5rExtension`、Peer 会话、宿主 `invoke` 路由 |
 | `astrcode-extensions::host_router` | 唯一 `astrcode.*` 宿主能力实现 |
-| `astrcode-extensions::remote_manifest` | manifest 构建、HandlerResult 解析 |
+| `astrcode-extensions::runner` | 统一运行时 manifest、registration 校验、索引发布与生命周期 |
+| `astrcode-extensions::remote_manifest` | 内部 s5r 握手适配与 `HandlerResult` 解析 |
 | `astrcode-extension-sdk::s5r` | 线缆类型、`HandlerResult`、事件名、能力 wire 名 |
 | `astrcode-extension-sdk::runtime` | `Peer`、帧传输、取消、流式 |
 | `astrcode-extension-sdk::worker` | Worker 入口、`HandlerRegistry`、`HostClient` |
@@ -130,8 +131,12 @@ LLM、session、context、workspace、process、network 与公开扩展 HTTP 各
 | `session_control` | `astrcode.session.control.*` | 创建、提交、注入、中断、取消、查询执行状态或回收子会话。中断并提交在 session delivery gate 内切换 turn。 |
 | `session_inspect` | `astrcode.session.inspect.*` | 宿主级全局读取权限：跨 session lineage 列出所有宿主可见会话，读取快照、完整投影或 provider 可见消息。只应授予需要全局观察或后台接续会话的扩展。 |
 | `public_http` | 公开路由注册 | 注册无需 bearer token 的 JSON HTTP 路由；禁止占用 `/api` 命名空间。 |
+| `authenticated_http` | 管理路由注册 | 注册复用宿主 bearer token、按扩展 id 隔离的 JSON HTTP 路由。 |
 | `public_http_dispatch` | `astrcode.extension.http.public` | 从插件内部调用另一插件的公开路由；同步自调用会被拒绝以避免 s5r 重入死锁。 |
 | `emit_events` | `astrcode.event.emit` | 发射 manifest 已声明的扩展事件。 |
+| `provider_request` | Provider 与 user-message hooks | 读取或改写 provider 请求/响应及 durable user-message envelope。 |
+| `tool_intercept` | Blocking pre/post tool hooks | 阻断或改写工具输入、结果。 |
+| `turn_continuation_control` | Continue-after-stop hook | 决定 LLM 自然停止后是否继续一个 agent step。 |
 | `workspace_read` | `astrcode.workspace.read/list/grep/glob` | 有界读取、目录遍历、正则搜索和 glob；拒绝越界路径、symlink 和密钥类路径，默认忽略 `.git`/`node_modules`。 |
 | `workspace_write` | `astrcode.workspace.write` / `astrcode.workspace.edit` | 创建、替换或精确编辑工作区内的非敏感文件；拒绝越界路径、symlink 和密钥类路径。 |
 | `process_spawn` | `astrcode.process.spawn` | 在工作区目录运行子进程。并发、总时长、stdin 和输出均受限；取消/超时会清理进程组。 |
@@ -149,6 +154,23 @@ Worker 可使用 `HostClient::spawn_process` / `HostClient::network_request` 的
 HTTP 路由由 `Worker::http_route(route, http_handler(...))` 同时写入握手 manifest 与
 handler 注册表。宿主在安装时校验 scope capability、路径格式、全局公开路由冲突和
 每路由请求体上限（默认 64 KiB，最高 1 MiB）；handler 响应体与执行时间同样有界。
+
+宿主也会在启动扩展前校验 hook 注册与 capability 声明是否一致。扩展事件、
+compact、provider、blocking tool intercept、continue-after-stop 等敏感注册缺少对应
+capability 时会直接拒绝加载。生命周期事件中只有 `TurnStart` 和
+`UserPromptSubmit` 可以使用 Blocking；session、step 和结束类事件只能作为通知。
+
+所有来源最终都解析成 runner 内唯一的 `ResolvedExtensionManifest`。索引、快照、
+能力检查和冲突检查只读取这份运行时清单，不再分别维护扩展实例、注册记录和任务表。
+`start()` 中登记的后台任务会保持 suspended；单个注册在索引发布后激活，loader
+批量同步则在整批成功 registration 都可见后统一激活。启动失败或超时的任务不会被
+轮询，宿主会直接丢弃任务并执行启动回滚。
+
+来源同步分为 discovery 与 load 两阶段。每个候选携带稳定的 `source_key` 和内容
+fingerprint；reconcile 直接保留两者未变化的运行实例，只加载新增或变更候选，并停止
+已经消失的来源。磁盘来源的 fingerprint 覆盖 `extension.json`、显式路径命令程序及
+命令中引用的本地文件，因此普通 reload 不会启动未变化的 s5r 子进程。增量完成后 runner 会
+恢复来源顺序，再统一激活新任务，handler 优先级与全量加载保持一致。
 
 ---
 

@@ -15,12 +15,6 @@ use tokio::sync::mpsc;
 /// Turn 内扩展/工具 → event bridge 的入口（unbounded，不丢事件、durable 由单 worker 保序）。
 pub type TurnEventTx = mpsc::UnboundedSender<EventPayload>;
 
-pub(crate) fn send_event(event_tx: Option<&TurnEventTx>, payload: EventPayload) {
-    if let Some(tx) = event_tx {
-        let _ = tx.send(payload);
-    }
-}
-
 /// StepEnd 生命周期钩子：失败只记录 warn，不中断 turn。
 pub(crate) async fn on_step_end_best_effort(
     extension_runner: &dyn TurnHooks,

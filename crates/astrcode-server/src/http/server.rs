@@ -19,7 +19,7 @@ use super::{
     routes::{config, extensions, lifecycle, models, sessions},
     stream,
 };
-use crate::{bootstrap::ServerRuntime, server_event_bus::ServerEventBus};
+use crate::{bootstrap::ServerApp, server_event_bus::ServerEventBus};
 
 type RouterParts = (Router, String, Arc<ServerEventBus>);
 
@@ -53,28 +53,23 @@ pub enum HttpServerError {
 ///
 /// Returns `(Router, auth_token)` — the token must be passed to the frontend
 /// so it can include it in `Authorization: Bearer <token>` headers.
-pub fn router(runtime: Arc<ServerRuntime>) -> Result<(Router, String), HttpServerError> {
-    let (app, auth_token, _) = router_parts(runtime)?;
-    Ok((app, auth_token))
+pub fn router(server_app: Arc<ServerApp>) -> Result<(Router, String), HttpServerError> {
+    let (router, auth_token, _) = router_parts(server_app)?;
+    Ok((router, auth_token))
 }
 
 #[cfg(feature = "testing")]
 pub fn router_with_event_publisher(
-    runtime: Arc<ServerRuntime>,
+    server_app: Arc<ServerApp>,
 ) -> Result<(Router, String, TestEventPublisher), HttpServerError> {
-    let (app, auth_token, event_bus) = router_parts(runtime)?;
-    Ok((app, auth_token, TestEventPublisher { event_bus }))
+    let (router, auth_token, event_bus) = router_parts(server_app)?;
+    Ok((router, auth_token, TestEventPublisher { event_bus }))
 }
 
-fn router_parts(runtime: Arc<ServerRuntime>) -> Result<RouterParts, HttpServerError> {
+fn router_parts(server_app: Arc<ServerApp>) -> Result<RouterParts, HttpServerError> {
     let auth_token = configured_auth_token();
-    let server_system = crate::bootstrap::spawn_server_system_without_legacy(&runtime);
-    let event_bus = Arc::clone(&server_system.event_bus);
-    let state = HttpState {
-        runtime,
-        handler: server_system.handler,
-        event_bus: server_system.event_bus,
-    };
+    let event_bus = Arc::clone(server_app.event_bus());
+    let state = HttpState { app: server_app };
     let expected_bearer = format!("Bearer {auth_token}");
 
     let allowed_origins = collect_allowed_origins();
@@ -196,12 +191,12 @@ fn router_parts(runtime: Arc<ServerRuntime>) -> Result<RouterParts, HttpServerEr
 
 /// Convenience wrapper: build router and run until graceful shutdown.
 pub async fn run_http_server(
-    runtime: Arc<ServerRuntime>,
+    server_app: Arc<ServerApp>,
     addr: std::net::SocketAddr,
 ) -> Result<(), HttpServerError> {
-    let shutdown_token = runtime.shutdown_token().clone();
-    let runtime_for_shutdown = Arc::clone(&runtime);
-    let (app, auth_token) = router(Arc::clone(&runtime))?;
+    server_app.initialize().await;
+    let shutdown_token = server_app.runtime().shutdown_token().clone();
+    let (app, auth_token) = router(Arc::clone(&server_app))?;
     tracing::info!("Auth token: {}", masked_token(&auth_token));
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
@@ -216,13 +211,9 @@ pub async fn run_http_server(
         .with_graceful_shutdown(async move {
             shutdown_token.cancelled().await;
             tracing::info!("graceful shutdown triggered");
-            runtime_for_shutdown
-                .scheduler()
-                .drain_detached_tasks()
-                .await;
-            runtime_for_shutdown.shutdown_extensions().await;
         })
         .await;
+    server_app.shutdown().await;
     remove_run_info_if_current(local_port, &auth_token);
     result?;
     Ok(())
@@ -232,7 +223,7 @@ pub async fn run_http_server(
 ///
 /// 文件权限设为 600（仅属主可读写），因为其中含 auth token。
 fn write_run_info(port: u16, auth_token: &str) {
-    let dir = astrcode_core::hostpaths::astrcode_dir();
+    let dir = astrcode_core::config::defaults::astrcode_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(path = %dir.display(), error = %e, "failed to create astrcode dir for run.json");
         return;
@@ -263,7 +254,7 @@ fn write_run_info_at(path: &Path, port: u16, auth_token: &str) {
 
 /// 退出时清理 `run.json`。
 fn remove_run_info_if_current(port: u16, auth_token: &str) {
-    let path = astrcode_core::hostpaths::astrcode_dir().join("run.json");
+    let path = astrcode_core::config::defaults::astrcode_dir().join("run.json");
     remove_run_info_if_current_at(&path, port, auth_token);
 }
 

@@ -19,7 +19,7 @@ use super::{
 use crate::server_event_bus::StreamingSnapshot;
 
 pub(in crate::http) fn conversation_to_dto(
-    session: SessionReadModel,
+    session: &SessionReadModel,
     streaming: Option<&StreamingSnapshot>,
 ) -> ConversationSnapshotResponseDto {
     let title = session
@@ -176,7 +176,7 @@ mod tests {
                 source: None,
             });
 
-        let dto = conversation_to_dto(session, None);
+        let dto = conversation_to_dto(&session, None);
 
         assert_eq!(dto.cursor.value, "9");
         assert_eq!(dto.blocks.len(), 1);
@@ -199,7 +199,7 @@ mod tests {
                 source: None,
             });
 
-        let dto = conversation_to_dto(session, None);
+        let dto = conversation_to_dto(&session, None);
 
         assert_eq!(dto.blocks.len(), 1);
         match &dto.blocks[0] {
@@ -236,7 +236,7 @@ mod tests {
                 rule_key: Some("shell:write".into()),
             },
         );
-        let dto = conversation_to_dto(session, None);
+        let dto = conversation_to_dto(&session, None);
 
         match &dto.blocks[0] {
             ConversationBlockDto::ToolCall {
@@ -289,7 +289,7 @@ mod tests {
             },
         });
 
-        let dto = conversation_to_dto(session, None);
+        let dto = conversation_to_dto(&session, None);
 
         // 顺序：CompactSummary → User → Assistant
         assert_eq!(dto.blocks.len(), 3);
@@ -342,7 +342,7 @@ mod tests {
             strategy: CompactStrategy::Auto,
         });
 
-        let dto = conversation_to_dto(session, None);
+        let dto = conversation_to_dto(&session, None);
 
         assert_eq!(dto.blocks.len(), 2);
         match &dto.blocks[0] {

@@ -5,6 +5,7 @@ mod context;
 mod extension_http;
 mod llm;
 mod network;
+mod path;
 mod process;
 mod session;
 mod session_inspect;
@@ -467,7 +468,9 @@ mod tests {
             SubmitTurnRequest, SubmitTurnResult,
         },
     };
-    use astrcode_storage::{EventReader, EventStore, SessionReader, in_memory::InMemoryEventStore};
+    use astrcode_storage::{
+        EventReader, SessionEventJournal, SessionReader, in_memory::InMemoryEventStore,
+    };
     use serde_json::json;
 
     use super::*;

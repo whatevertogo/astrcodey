@@ -1,13 +1,11 @@
 //! 远程扩展（IPC）共用的 manifest 构建与 HandlerResult 解析。
 
-use std::collections::HashMap;
-
 use astrcode_extension_sdk::{
     extension::{
         CompactContributions, CompactResult, ContinueAfterStopOptions, ContinueAfterStopResult,
-        ExtensionCommandResult, ExtensionError, ExtensionEvent, ExtensionEventDecl,
-        ExtensionHttpResponse, HookMode, HookResult, PostToolUseResult, PreToolUseResult,
-        PromptContributions, ProviderResult, SlashCommand,
+        ExtensionCommandResult, ExtensionError, ExtensionEvent, ExtensionHttpResponse, HookMode,
+        HookResult, PostToolUseResult, PreToolUseResult, PromptContributions, ProviderResult,
+        SlashCommand,
     },
     s5r::{effects::HandlerResult, event_from_name, mode_from_name},
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
@@ -286,10 +284,6 @@ pub fn parse_lifecycle_result(resp: &HandlerResult) -> Result<HookResult, Extens
     }
 }
 
-pub fn event_decls_map(reg: &ExtensionRegistration) -> HashMap<String, ExtensionEventDecl> {
-    crate::host_router::decls_to_map(&reg.extension_events)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,7 +292,6 @@ mod tests {
     fn registration_with_hook(on: &str, mode: &str) -> ExtensionRegistration {
         ExtensionRegistration {
             extension_id: "test-extension".into(),
-            version: "0.0.0".into(),
             capabilities: Vec::new(),
             tools: Vec::new(),
             commands: Vec::new(),

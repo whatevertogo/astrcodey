@@ -17,12 +17,12 @@ use astrcode_core::{
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
-    ChildSessionCoordinator, ConfigManager, ServerEventBus, ServerSessionOperations,
-    SessionManager, TurnRegistry, TurnScheduler, session_started_event_for_test,
+    ChildSessionCoordinator, ConfigManager, ServerSessionOperations, SessionManager, TurnRegistry,
+    TurnScheduler, session_started_event_for_test,
 };
 use astrcode_session_projection::AgentSessionStatus;
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 
 struct StaticTextLlm {
     text: &'static str,
@@ -188,8 +188,6 @@ fn build_test_ops_with_llm(
         Arc::clone(&child_sessions),
     ));
     child_sessions.spawn_completion_watcher(Arc::clone(&scheduler));
-    let event_bus = Arc::new(ServerEventBus::with_legacy_tx(broadcast::channel(1024).0));
-    session_manager.bind_event_bus(event_bus);
     Arc::new(ServerSessionOperations {
         session_manager,
         scheduler,
@@ -303,7 +301,8 @@ async fn inject_message_when_idle_starts_turn() {
         .await
         .unwrap();
 
-    let ops = build_test_ops(Arc::clone(&store), "handled notification");
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
 
     assert!(
         !ops.scheduler.registry().has_active(&session_id),
@@ -329,6 +328,14 @@ async fn inject_message_when_idle_starts_turn() {
         ops.scheduler.registry().has_active(&session_id),
         "idle inject must start a turn"
     );
+
+    release.notify_one();
+    for _ in 0..100 {
+        if !ops.scheduler.registry().has_active(&session_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 #[tokio::test]

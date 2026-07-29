@@ -2,7 +2,7 @@ use astrcode_core::types::SessionId;
 
 use super::InMemoryEventStore;
 use crate::{
-    EventReader, EventStore, SessionReader, StorageError,
+    EventReader, SessionEventJournal, SessionReader, SessionStore, StorageError,
     test_support::{started_event, user_event},
 };
 

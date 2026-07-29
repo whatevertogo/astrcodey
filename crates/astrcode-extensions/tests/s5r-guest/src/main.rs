@@ -1,9 +1,7 @@
 //! s5r 扩展 E2E guest — 使用 Worker SDK（manifest 与 handler 一体注册）。
 
 use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
-    },
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
     time::Duration,
 };
 
@@ -68,6 +66,7 @@ async fn run() -> Result<(), ErrorPayload> {
         .capability("session_inspect")
         .capability("public_http")
         .capability("public_http_dispatch")
+        .capability("tool_intercept")
         .extension_event(json!({
             "event_type": "s5r_guest.probe",
             "schema_version": 1,
@@ -124,7 +123,10 @@ async fn run() -> Result<(), ErrorPayload> {
             }))
             .build(),
         tool_handler_args(|args: AddArgs, _ctx| async move {
-            Ok(tool_text(format!("{} + {} = {}", args.a, args.b, args.a + args.b), false))
+            Ok(tool_text(
+                format!("{} + {} = {}", args.a, args.b, args.a + args.b),
+                false,
+            ))
         }),
     )?;
 
@@ -166,11 +168,8 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(json!({ "type": "object" }))
             .build(),
         tool_handler(|_ctx| async move {
-            let out = HostClient::call(
-                "astrcode.workspace.read",
-                json!({ "path": "probe.txt" }),
-            )
-            .await?;
+            let out =
+                HostClient::call("astrcode.workspace.read", json!({ "path": "probe.txt" })).await?;
             let content = out["content"].as_str().unwrap_or("");
             Ok(tool_text(format!("read probe.txt: {content}"), false))
         }),

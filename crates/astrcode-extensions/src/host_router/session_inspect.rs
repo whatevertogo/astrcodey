@@ -55,14 +55,15 @@ pub(super) async fn snapshot(
         snapshot: SessionInspectSnapshot {
             session_id: model.identity.session_id.to_string(),
             cursor: model.cursor(),
-            working_dir: model.identity.working_dir,
-            model_id: model.identity.model_id,
+            working_dir: model.identity.working_dir.clone(),
+            model_id: model.identity.model_id.clone(),
             phase: phase_name(model.execution.phase).into(),
             parent_session_id: model
                 .identity
                 .parent
+                .as_ref()
                 .map(|parent| parent.session_id.to_string()),
-            source_extension: model.identity.source_extension,
+            source_extension: model.identity.source_extension.clone(),
             message_count: model.transcript.messages.len(),
             pending_tool_call_ids,
             agent_session_count: model.agent_sessions.len(),
@@ -81,7 +82,7 @@ pub(super) async fn read_model(
     )
     .await?;
     to_value(SessionInspectReadModelOutput {
-        read_model: read_model_dto(model),
+        read_model: read_model_dto((*model).clone()),
     })
 }
 
@@ -99,8 +100,8 @@ pub(super) async fn provider_messages(
         model
             .transcript
             .messages
-            .into_iter()
-            .map(|message| message.message)
+            .iter()
+            .map(|message| message.message.clone())
             .collect(),
     );
     to_value(SessionInspectProviderMessagesOutput {

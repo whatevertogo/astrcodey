@@ -1,4 +1,4 @@
-//! SSOT Route A 行为回归：turn 历史仅来自 EventStore projection。
+//! SSOT Route A 行为回归：turn 历史仅来自 EventLog projection。
 
 use std::{
     sync::{
@@ -60,6 +60,8 @@ async fn spawn_session_with_store(
     let caps = test_caps(llm);
     let sid = new_session_id();
     let runtime = Arc::new(SessionRuntimeState::new(
+        sid.clone(),
+        store.clone(),
         caps.llm(),
         caps.small_llm(),
         "mock-model".into(),
@@ -67,10 +69,7 @@ async fn spawn_session_with_store(
     let working_dir = std::env::temp_dir().join(sid.as_str());
     std::fs::create_dir_all(&working_dir).unwrap();
     let session = Session::create_with_params(SessionCreateParams {
-        store: Arc::clone(&store),
-        session_id: sid.clone(),
         working_dir: working_dir.to_string_lossy().into_owned(),
-        model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
@@ -540,9 +539,9 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
         .unwrap();
     let _ = handle.wait().await.unwrap();
 
-    let messages = session.read_model().await.unwrap().transcript.messages;
+    let model = session.read_model().await.unwrap();
     assert!(
-        messages.iter().any(|message| {
+        model.transcript.messages.iter().any(|message| {
             message.message.role == LlmRole::Assistant
                 && message.message.content.iter().any(|content| {
                     matches!(

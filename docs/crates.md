@@ -62,15 +62,13 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 
 主要模块：
 
-- `config`：配置系统。拆分为 raw/effective/defaults/resolve 等模块，区分原始配置、解析后配置、默认值和合并逻辑。
+- `config`：配置系统。拆分为 raw/effective/defaults/resolve 等模块，区分原始配置、解析后配置、默认值和合并逻辑；`defaults` 同时拥有产品级用户目录与数据目录。
 - `types`：核心标识符和共享数据类型，例如 session/project 相关 id。
 - `event`：分离的 durable/live payload、未分配序号的事件信封与 `StoredEvent`，是 EventLog 和 UI 投影的事实来源。
 - `llm`：`LlmProvider` 抽象、消息、内容块、模型限制、流式事件和收集工具。
 - `tool`：工具 trait、定义、显式执行结果、session access、host services、工具 origin 和 execution mode；`tool::access` 描述权限检查需要的资源访问，`tool::selection` 定义 session 工具可见性。
 - `compaction`：compact trigger 和 strategy 领域类型。
 - `permission`：权限审批模式和审批结果等通用类型。
-- `hostpaths`：宿主根目录、相对路径解析和路径边界校验。
-- `text`：跨 crate 边界使用的短文本归一化原语。
 - `message_attachment`：消息附件契约；read 工具图片和 artifact 读取契约位于 `tool`。
 
 依赖边界：无 workspace 内部依赖，只依赖 serde、tokio、uuid、chrono、thiserror、tracing 等基础库。它是 workspace 的根契约层，下游应通过完整模块路径导入，例如 `astrcode_core::event::EventPayload`。
@@ -121,7 +119,7 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 
 路径：`crates/astrcode-storage`
 
-职责：实现持久化层：append-only JSONL EventLog、快照、session repository、配置存储和大工具结果 artifact；read model 的纯投影逻辑由 `astrcode-session-projection` 提供。
+职责：实现持久化层：append-only JSONL EventLog、快照、session repository、配置存储和大工具结果 artifact；持有唯一的可变 session projection，并通过 copy-on-write `Arc` 共享不可变读快照；read model 的纯投影逻辑由 `astrcode-session-projection` 提供。
 
 主要模块：
 
@@ -130,7 +128,8 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 - `session_repo`：文件系统 session repository，负责 session 目录、列表、fork/recycle/delete/restore 等操作。
 - `config_store`：配置文件原子读写。
 - `tool_artifacts`：大工具结果文件名、写入、切片和摘要引用。
-- `traits`：拆分 `EventReader`、`SessionReader`、`SessionPathResolver`、`ToolResultArtifactStore`，并用无额外方法的 `SessionStore` 组合注入。
+- `traits`：独立调用方使用 journal、事件读取、状态读取、路径和 artifact 窄端口；
+  `SessionStore` 组合完整 repository 所需的生命周期、checkpoint 和 compact snapshot 能力。
 - `in_memory`：`testing` feature 下的内存存储，供测试使用。
 
 依赖边界：依赖 `astrcode-core` 和 `astrcode-session-projection`；不依赖 session/server。依赖方向保持为 `session/server → storage → session-projection → core`。
@@ -211,8 +210,10 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 
 主要模块：
 
-- `session`：session 对象、事件追加、恢复、订阅、读模型访问。
-- `session_runtime`：进程内 runtime state，持有 file observation store、审批状态、broadcast，以及按代次键控的不可变工具快照缓存。
+- `session`：session 对象、payload 级事件写入、恢复、订阅和读模型访问。
+- `event_publisher`：每个 session 一条 durable/live 有序发布管线。
+- `session_state`：应用层只读状态端口及 storage adapter。
+- `session_runtime`：进程内 runtime state，持有 publisher、broadcast、file observation store、审批状态和不可变工具快照缓存。
 - `session_runtime_services`：跨 session 共享的运行时服务。
 - `session_extension_ports`：runtime snapshot、tool catalog、prompt contribution、turn hooks、session operations 五个窄端口。
 - `session_tools`：按 catalog revision、working directory 和工具选择缓存快照，处理 partial TTL 与 single-flight。
@@ -230,7 +231,7 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 - `permission/*`：默认权限链，包括 yolo、配置 allow/deny/ask、cwd 外写入、git 路径、敏感文件、shell broad access、子 session 限制、approval history。
 - `compact`、`compaction_run`、`compaction_coordinator`、`compact_circuit_breaker`：自动/手动 compact、CAS 持久化、熔断。
 - `steer`：运行中注入用户消息。
-- `turn_publish`、`payload`：事件 payload 构建和发布。
+- `turn_publish`、`payload`：turn 事件 ingress、storage projection 读取和 payload 构建。
 
 依赖边界：依赖 `astrcode-core`、`astrcode-context`、`astrcode-extension-sdk`、`astrcode-storage` 和 `astrcode-session-projection`。它刻意不依赖 `astrcode-tools`、`astrcode-extensions`、`astrcode-server`；server 在 composition root 通过 `SessionRuntimeServices` 注入这些能力。
 
@@ -249,7 +250,7 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 - `session_query`：扩展可见的窄查询接口，只暴露 summary、transcript、token usage 和 namespaced 数据目录。
 - `runtime_ports`：Session 消费的 tool catalog、prompt contribution、turn hooks 和 session operations 窄端口；`ToolCatalogScope` 同时携带 working dir 与 session store dir。
 - `llm`、`permission`、`config`：按扩展需要 re-export 的稳定 core 契约。
-- `hostpaths`：re-export `astrcode-core` 中扩展可用的宿主路径原语。
+- `hostpaths`：扩展可用的相对路径解析和路径边界校验，并暴露产品级用户目录与数据目录。
 - `frontmatter`、`shell`：扩展文件解析和宿主 shell 检测。
 - `builder`：进程内扩展 handler 辅助函数。
 - `manifest`：扩展 manifest 校验。
@@ -675,7 +676,7 @@ Feature：
 - 环境变量：`ASTRCODE_LOG` 覆盖 stderr level，`ASTRCODE_LOG_FILE` 覆盖 file level。
 - 清理策略：保留 30 天日志，并兼容清理 legacy daily log 文件名。
 
-依赖边界：依赖 `astrcode-core` 的宿主路径原语。它被 CLI/server/desktop 等入口使用。
+依赖边界：依赖 `astrcode-core` 的产品级默认数据目录。它被 CLI/server/desktop 等入口使用。
 
 测试线索：单元测试覆盖日志文件名不复用、latest pointer、旧日志清理。
 

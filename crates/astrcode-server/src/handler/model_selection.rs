@@ -8,7 +8,7 @@ use astrcode_protocol::{
 };
 
 use super::HandlerError;
-use crate::config_manager::ConfigManager;
+use crate::config_manager::{ConfigManager, ConfigUpdateError};
 
 const TARGET_REQUEST_ID: &str = "model.target";
 const MODEL_REQUEST_ID: &str = "model.model";
@@ -158,43 +158,34 @@ impl ModelSelectionFlow {
         profile: &str,
         model: &str,
     ) -> Result<(), HandlerError> {
-        let mut candidate = self.config_manager.raw_config_snapshot();
-        validate_profile_model(&candidate, profile, model)?;
-
-        match target {
-            ModelTarget::Main => {
-                candidate.active_profile = profile.to_string();
-                candidate.active_model = model.to_string();
-            },
-            ModelTarget::Small => {
-                candidate.active_small_profile = Some(profile.to_string());
-                candidate.active_small_model = Some(model.to_string());
-            },
-        }
-
-        candidate.clone().into_effective().map_err(|error| {
-            HandlerError::InvalidRequest(format!("Invalid model selection: {error}"))
-        })?;
-
-        // 先应用到内存，再持久化到磁盘。
-        // 如果 save 失败，内存配置已经更新，下次进程启动会回退到磁盘旧值。
-        // 这种不对称比 save 成功后 apply 失败更可取：
-        // 前者只是新配置没落盘（用户下次重选即可），后者会导致内存和磁盘配置不一致。
         self.config_manager
-            .apply_raw_config_and_rebuild(candidate.clone())
-            .map_err(|error| {
-                HandlerError::InvalidRequest(format!("Failed to apply config: {error}"))
-            })?;
-
-        self.config_manager
-            .config_store()
-            .save(&candidate)
+            .update_and_save(|candidate| {
+                validate_profile_model(candidate, profile, model)?;
+                match target {
+                    ModelTarget::Main => {
+                        candidate.active_profile = profile.to_string();
+                        candidate.active_model = model.to_string();
+                    },
+                    ModelTarget::Small => {
+                        candidate.active_small_profile = Some(profile.to_string());
+                        candidate.active_small_model = Some(model.to_string());
+                    },
+                }
+                Ok(())
+            })
             .await
-            .map_err(|error| {
-                HandlerError::InvalidRequest(format!("Failed to write config: {error}"))
-            })?;
-
-        Ok(())
+            .map_err(|error| match error {
+                ConfigUpdateError::Mutation(error) => error,
+                ConfigUpdateError::Resolve(error) => {
+                    HandlerError::InvalidRequest(format!("Invalid model selection: {error}"))
+                },
+                ConfigUpdateError::Provider(error) => {
+                    HandlerError::InvalidRequest(format!("Failed to build model provider: {error}"))
+                },
+                ConfigUpdateError::Store(error) => {
+                    HandlerError::InvalidRequest(format!("Failed to write config: {error}"))
+                },
+            })
     }
 
     fn success_notification(target: ModelTarget, profile: &str, model: &str) -> ClientNotification {

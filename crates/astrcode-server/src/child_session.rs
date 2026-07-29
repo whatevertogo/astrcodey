@@ -15,6 +15,7 @@ use astrcode_session::{TurnError, TurnHandle, TurnShutdownHandle};
 use astrcode_session_projection::AgentSessionStatus;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     session_manager::SessionManager,
@@ -57,6 +58,8 @@ pub struct ChildSessionCoordinator {
     by_parent: Mutex<HashMap<SessionId, CompletionGuards>>,
     completed_tx: mpsc::Sender<SessionId>,
     completed_rx: Mutex<Option<mpsc::Receiver<SessionId>>>,
+    watcher_shutdown: CancellationToken,
+    watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl ChildSessionCoordinator {
@@ -67,6 +70,8 @@ impl ChildSessionCoordinator {
             by_parent: Mutex::new(HashMap::new()),
             completed_tx,
             completed_rx: Mutex::new(Some(completed_rx)),
+            watcher_shutdown: CancellationToken::new(),
+            watcher: Mutex::new(None),
         }
     }
 
@@ -79,13 +84,40 @@ impl ChildSessionCoordinator {
             return;
         };
         let coordinator = Arc::clone(self);
-        crate::task_utils::spawn_traced("child_session_completion_watcher", async move {
-            while let Some(parent_sid) = rx.recv().await {
-                coordinator
-                    .drain_completed(scheduler.as_ref(), &parent_sid)
-                    .await;
+        let shutdown = self.watcher_shutdown.clone();
+        let watcher = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    parent_sid = rx.recv() => {
+                        let Some(parent_sid) = parent_sid else {
+                            break;
+                        };
+                        coordinator
+                            .drain_completed(scheduler.as_ref(), &parent_sid)
+                            .await;
+                    },
+                    _ = shutdown.cancelled() => {
+                        while let Ok(parent_sid) = rx.try_recv() {
+                            coordinator
+                                .drain_completed(scheduler.as_ref(), &parent_sid)
+                                .await;
+                        }
+                        break;
+                    },
+                }
             }
         });
+        *self.watcher.lock() = Some(watcher);
+    }
+
+    pub async fn shutdown_completion_watcher(&self) {
+        self.watcher_shutdown.cancel();
+        let watcher = self.watcher.lock().take();
+        if let Some(watcher) = watcher {
+            if let Err(error) = watcher.await {
+                tracing::warn!(%error, "child completion watcher failed to stop");
+            }
+        }
     }
 
     pub async fn verify_access(
@@ -103,12 +135,12 @@ impl ChildSessionCoordinator {
                 .read_model(&current)
                 .await
                 .map_err(|e| SessionApiError::NotFound(e.to_string()))?;
-            match model.identity.parent {
+            match &model.identity.parent {
                 Some(parent) => {
                     if &parent.session_id == caller {
                         return Ok(());
                     }
-                    current = parent.session_id;
+                    current = parent.session_id.clone();
                 },
                 None => {
                     return Err(SessionApiError::PermissionDenied(format!(
@@ -128,10 +160,10 @@ impl ChildSessionCoordinator {
                 .read_model(&current)
                 .await
                 .map_err(SessionApiError::internal)?;
-            match model.identity.parent {
+            match &model.identity.parent {
                 Some(parent) => {
                     depth += 1;
-                    current = parent.session_id;
+                    current = parent.session_id.clone();
                 },
                 None => break,
             }
@@ -171,11 +203,11 @@ impl ChildSessionCoordinator {
 
         let working_dir = request
             .working_dir
-            .unwrap_or(parent_model.identity.working_dir);
+            .unwrap_or_else(|| parent_model.identity.working_dir.clone());
         let model_id = request
             .model_preference
             .filter(|m| m != "inherit" && !m.is_empty())
-            .unwrap_or(parent_model.identity.model_id);
+            .unwrap_or_else(|| parent_model.identity.model_id.clone());
 
         let child = parent_session
             .spawn_child(
@@ -342,13 +374,12 @@ impl ChildSessionCoordinator {
         }
         if let Ok(parent_session) = self.session_manager.open(parent_sid.clone()).await {
             if let Err(e) = parent_session
-                .append_event(astrcode_core::event::DurableEvent::new(
-                    parent_sid.clone(),
+                .emit_durable(
                     None,
                     DurableEventPayload::AgentSessionRecycled {
                         child_session_id: child_sid.clone(),
                     },
-                ))
+                )
                 .await
             {
                 tracing::warn!(
@@ -691,14 +722,7 @@ async fn append_parent_agent_event(
     failure_log: &'static str,
 ) {
     if let Ok(parent_session) = session_manager.open(parent_sid.clone()).await {
-        if let Err(e) = parent_session
-            .append_event(astrcode_core::event::DurableEvent::new(
-                parent_sid.clone(),
-                None,
-                payload,
-            ))
-            .await
-        {
+        if let Err(e) = parent_session.emit_durable(None, payload).await {
             tracing::warn!(
                 parent_session_id = %parent_sid,
                 child_session_id = %child_sid,
@@ -748,7 +772,7 @@ async fn write_agent_failed(
 }
 
 fn one_line_summary(text: &str) -> String {
-    astrcode_core::text::compact_inline(text, 159)
+    crate::presentation::inline_preview(text, 159)
 }
 
 async fn build_background_agent_notification(guard: &ChildSessionCompletionGuard) -> String {

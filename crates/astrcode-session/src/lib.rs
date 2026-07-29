@@ -5,6 +5,7 @@
 pub mod compaction;
 pub(crate) mod deferred_tools;
 pub(crate) mod early_tool_scheduler;
+mod event_publisher;
 pub(crate) mod llm_stream;
 pub mod payload;
 mod perf_snapshot;
@@ -16,6 +17,7 @@ mod session_extension_ports;
 mod session_runtime;
 mod session_runtime_services;
 pub(crate) mod session_setup;
+mod session_state;
 pub(crate) mod session_tools;
 pub(crate) mod steer;
 #[cfg(test)]
@@ -33,6 +35,7 @@ pub(crate) mod turn_publish;
 pub(crate) mod turn_runner;
 pub(crate) mod turn_stages;
 
+pub use event_publisher::SessionEventPublishError;
 pub use payload::{
     agent_session_completed_payload, agent_session_failed_payload,
     system_prompt_configured_payload, transcript_rewritten_payload,
@@ -44,7 +47,7 @@ pub use session::{
 pub use session_extension_ports::SessionExtensionPorts;
 pub use session_runtime::{SessionModelBinding, SessionRuntimeState, ToolApprovalResolveError};
 pub use session_runtime_services::SessionRuntimeServices;
-pub use tool_registry::ToolRegistry;
+pub use tool_registry::{ToolRegistry, ToolRegistryError};
 pub use turn_context::{TurnError, TurnEventTx};
 pub use turn_handle::{TurnHandle, TurnShutdownHandle};
 pub use turn_runner::{RunTurnResult, TurnOutput};

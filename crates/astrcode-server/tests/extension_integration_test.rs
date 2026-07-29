@@ -4,8 +4,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult};
 use astrcode_extension_sdk::extension::{
-    ExtensionError, HookMode, HookResult, LifecycleContext, PreToolUseContext, PreToolUseResult,
-    Registrar, ToolHandler,
+    ExtensionCapability, ExtensionError, HookMode, HookResult, LifecycleContext, PreToolUseContext,
+    PreToolUseResult, Registrar, ToolHandler,
 };
 use astrcode_extensions::{Extension, runner::ExtensionRunner};
 use astrcode_session::ToolRegistry;
@@ -17,6 +17,10 @@ struct SecurityExtension;
 impl Extension for SecurityExtension {
     fn id(&self) -> &str {
         "test-security"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::ToolIntercept]
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -49,6 +53,10 @@ struct AlwaysBlockExtension;
 impl Extension for AlwaysBlockExtension {
     fn id(&self) -> &str {
         "test-always-block"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::ToolIntercept]
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -237,7 +245,7 @@ fn pre_tool_use_context(command: &str) -> PreToolUseContext {
 // ─── Tests ────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn duplicate_extension_tools_keep_first_registration() {
+async fn duplicate_extension_tools_are_rejected_at_registration() {
     let runner = ExtensionRunner::new(Duration::from_secs(5));
     runner
         .register(Arc::new(FixedToolExtension {
@@ -247,34 +255,25 @@ async fn duplicate_extension_tools_keep_first_registration() {
         }))
         .await
         .unwrap();
-    runner
+    let error = runner
         .register(Arc::new(FixedToolExtension {
             id: "global",
             tool_name: "sharedTool",
             content: "global",
         }))
         .await
-        .unwrap();
+        .unwrap_err();
 
-    let tools = runner.tool_catalog_snapshot_typed("/workspace").await.tools;
-    let mut tool_registry = ToolRegistry::new();
-    for tool in tools.into_iter().rev() {
-        tool_registry.register(tool);
-    }
-
-    let ctx = astrcode_core::tool::ToolExecutionContext::new(
-        "test".into(),
-        String::new(),
-        None,
-        None,
-        Default::default(),
-    );
-    let result = tool_registry
-        .execute("sharedTool", serde_json::json!({}), &ctx)
-        .await
-        .unwrap();
-
-    assert_eq!(result.content, "project");
+    assert!(matches!(
+        error,
+        ExtensionError::ToolConflict {
+            extension_id,
+            tool_name,
+            conflicting_extension_id,
+        } if extension_id == "global"
+            && tool_name == "sharedTool"
+            && conflicting_extension_id == "project"
+    ));
 }
 
 #[tokio::test]
@@ -293,8 +292,8 @@ async fn extension_tools_are_adapted_into_tool_registry() {
 
     let tools = runner.tool_catalog_snapshot_typed("/workspace").await.tools;
     let mut tool_registry = ToolRegistry::new();
-    for tool in tools.into_iter().rev() {
-        tool_registry.register(tool);
+    for tool in tools {
+        tool_registry.register(tool).unwrap();
     }
 
     let definitions = tool_registry.list_definitions();

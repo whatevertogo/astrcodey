@@ -1,14 +1,9 @@
 //! 配置与 LLM 提供者的联合管理器。
 //!
-//! 封装 `config_store` / `raw_config` 的写入路径；`effective` 和 `llm_provider`
-//! 的存储位置统一在 [`SessionRuntimeServices`] 内，`ConfigManager` 只持有引用。
-//! 这样消除了 `ConfigManager` 与 session runtime services 各持一份再手动同步的双份事实。
-//!
-//! 写入路径（`apply_raw_config_and_rebuild` / `rebuild_provider_from_effective` /
-//! `set_llm_provider`）会先更新原始配置，再尝试更新 runtime services 内的 `llm` 与
-//! `effective_config`。若配置已持久化但当前环境暂时无法解析为 effective config（例如
-//! 缺少 API key 环境变量），原始配置仍保持为最新，运行时 provider 保持旧值。已打开的
-//! per-session `SessionRuntimeState` 需由
+//! 封装 `config_store` / `raw_config` 的唯一写入路径；`effective` 和 `llm_provider`
+//! 的存储位置统一在 [`SessionRuntimeServices`] 内。更新会串行执行并在落盘前完成解析与
+//! provider 构建，避免并发 snapshot-modify-save 丢更新，也避免磁盘与运行态各成功一半。
+//! 已打开的 per-session `SessionRuntimeState` 需由
 //! [`crate::session_manager::SessionManager::sync_all_model_bindings_from_config`]
 //! 在配置写入后同步。
 
@@ -22,7 +17,7 @@ use astrcode_context::{
     context_assembler::LlmContextAssembler, post_compact_enricher::DefaultPostCompactEnricher,
 };
 use astrcode_core::{
-    config::{Config, ConfigStore, EffectiveConfig, LlmSettings},
+    config::{Config, ConfigStore, ConfigStoreError, EffectiveConfig, LlmSettings, ResolveError},
     llm::{LlmClientConfig, LlmProvider, OpenAiProviderExtras, ProviderExtras},
 };
 use astrcode_extension_sdk::runtime_ports::{CompositeToolCatalogProvider, ToolCatalogProvider};
@@ -39,6 +34,21 @@ pub struct ConfigManager {
     /// `effective` 与 `llm_provider` 的真正存储位置在这里，避免双份事实。
     runtime_services: Arc<SessionRuntimeServices>,
     shell_timeout_secs: Arc<AtomicU64>,
+    update_lock: tokio::sync::Mutex<()>,
+}
+
+pub(crate) enum ConfigUpdateError<E> {
+    Mutation(E),
+    Resolve(ResolveError),
+    Provider(astrcode_core::llm::LlmError),
+    Store(ConfigStoreError),
+}
+
+struct PreparedConfig {
+    raw: Config,
+    effective: EffectiveConfig,
+    llm: Arc<dyn LlmProvider>,
+    small_llm: Arc<dyn LlmProvider>,
 }
 
 fn build_provider_from_settings(
@@ -135,6 +145,7 @@ impl ConfigManager {
             extension_runner,
             runtime_services: Arc::clone(&runtime_services),
             shell_timeout_secs,
+            update_lock: tokio::sync::Mutex::new(()),
         };
         Ok((manager, runtime_services))
     }
@@ -154,6 +165,7 @@ impl ConfigManager {
             extension_runner,
             shell_timeout_secs,
             runtime_services,
+            update_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -171,6 +183,12 @@ impl ConfigManager {
 
     pub fn raw_config_snapshot(&self) -> Config {
         self.raw_config.read().clone()
+    }
+
+    /// 同时读取 raw/effective 配置时与更新事务串行，避免响应混合两个版本。
+    pub(crate) async fn config_snapshot(&self) -> (Config, Arc<EffectiveConfig>) {
+        let _update = self.update_lock.lock().await;
+        (self.raw_config_snapshot(), self.read_effective())
     }
 
     pub fn read_llm_provider(&self) -> Arc<dyn LlmProvider> {
@@ -191,42 +209,64 @@ impl ConfigManager {
         self.runtime_services.swap_llm(provider);
     }
 
-    pub fn rebuild_provider_from_effective(&self) {
-        let effective = self.read_effective();
-        match build_provider_from_settings(&effective.llm) {
-            Ok(provider) => self.runtime_services.swap_llm(provider),
-            Err(error) => {
-                tracing::error!(%error, "failed to rebuild LLM provider, keeping previous");
-            },
-        }
-        match build_provider_from_settings(&effective.small_llm) {
-            Ok(provider) => self.runtime_services.swap_small_llm(provider),
-            Err(error) => {
-                tracing::error!(%error, "failed to rebuild small LLM provider, keeping previous");
-            },
-        }
+    pub(crate) async fn update_and_save<T, E>(
+        &self,
+        update: impl FnOnce(&mut Config) -> Result<T, E>,
+    ) -> Result<T, ConfigUpdateError<E>> {
+        let _update = self.update_lock.lock().await;
+        let mut candidate = self.raw_config_snapshot();
+        let result = update(&mut candidate).map_err(ConfigUpdateError::Mutation)?;
+        let prepared = Self::prepare(candidate)?;
+        self.config_store
+            .save(&prepared.raw)
+            .await
+            .map_err(ConfigUpdateError::Store)?;
+        self.publish(prepared);
+        Ok(result)
     }
 
-    pub fn apply_raw_config_and_rebuild(
+    pub(crate) async fn apply_loaded_config<E>(
         &self,
         config: Config,
-    ) -> Result<(), astrcode_core::config::ResolveError> {
-        {
-            let mut guard = self.raw_config.write();
-            *guard = config.clone();
-        }
+    ) -> Result<(), ConfigUpdateError<E>> {
+        let _update = self.update_lock.lock().await;
+        let prepared = Self::prepare(config)?;
+        self.publish(prepared);
+        Ok(())
+    }
 
-        let new_effective = config.into_effective()?;
+    fn prepare<E>(config: Config) -> Result<PreparedConfig, ConfigUpdateError<E>> {
+        let effective = config
+            .clone()
+            .into_effective()
+            .map_err(ConfigUpdateError::Resolve)?;
+        let llm =
+            build_provider_from_settings(&effective.llm).map_err(ConfigUpdateError::Provider)?;
+        let small_llm = build_provider_from_settings(&effective.small_llm)
+            .map_err(ConfigUpdateError::Provider)?;
+        Ok(PreparedConfig {
+            raw: config,
+            effective,
+            llm,
+            small_llm,
+        })
+    }
+
+    fn publish(&self, prepared: PreparedConfig) {
         let changed = {
             let old_effective = self.read_effective();
-            old_effective.extensions.extension_configs != new_effective.extensions.extension_configs
+            old_effective.extensions.extension_configs
+                != prepared.effective.extensions.extension_configs
         };
-        self.shell_timeout_secs
-            .store(new_effective.agent.shell_timeout_secs, Ordering::Release);
-        self.runtime_services.update_effective(new_effective);
-        self.rebuild_provider_from_effective();
+        self.shell_timeout_secs.store(
+            prepared.effective.agent.shell_timeout_secs,
+            Ordering::Release,
+        );
+        self.runtime_services.update_effective(prepared.effective);
+        self.runtime_services.swap_llm(prepared.llm);
+        self.runtime_services.swap_small_llm(prepared.small_llm);
+        *self.raw_config.write() = prepared.raw;
         if changed {
-            // 原子替换运行器中的配置映射（同步），后续由调用方异步通知扩展
             let effective = self.read_effective();
             let configs: std::collections::BTreeMap<_, _> = effective
                 .extensions
@@ -236,12 +276,11 @@ impl ConfigManager {
                 .collect();
             self.extension_runner().update_extension_configs(configs);
         }
-        Ok(())
     }
 
     /// 在配置热更新后，异步通知所有受影响的扩展。
     ///
-    /// 应在 `apply_raw_config_and_rebuild` 之后调用（通常在 HTTP handler 的 async 上下文中）。
+    /// 应在配置提交之后调用（通常在 HTTP handler 的 async 上下文中）。
     pub async fn notify_extensions_config_changed(&self) -> Vec<String> {
         if self.extension_runner().count().await == 0 {
             return Vec::new();

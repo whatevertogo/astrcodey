@@ -26,6 +26,12 @@ pub struct ToolRegistry {
     tools: BTreeMap<String, RegisteredTool>,
 }
 
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ToolRegistryError {
+    #[error("duplicate tool registered: {0}")]
+    DuplicateTool(String),
+}
+
 impl ToolRegistry {
     pub fn new() -> Self {
         Self {
@@ -33,13 +39,13 @@ impl ToolRegistry {
         }
     }
 
-    pub fn register(&mut self, tool: Arc<dyn Tool>) {
+    pub fn register(&mut self, tool: Arc<dyn Tool>) -> Result<(), ToolRegistryError> {
         let mut definition = tool.definition();
         definition.execution_mode = tool.execution_mode();
         let name = definition.name.clone();
         let prompt_metadata = tool.prompt_metadata();
         if self.tools.contains_key(&name) {
-            tracing::warn!("Tool '{}' already registered, overwriting", name);
+            return Err(ToolRegistryError::DuplicateTool(name));
         }
         self.tools.insert(
             name,
@@ -49,6 +55,7 @@ impl ToolRegistry {
                 prompt_metadata,
             },
         );
+        Ok(())
     }
 
     pub fn list_definitions(&self) -> Vec<ToolDefinition> {
@@ -333,9 +340,15 @@ mod tests {
     #[test]
     fn list_definitions_is_sorted_by_tool_name() {
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(NamedTool("zeta", ExecutionMode::Sequential)));
-        registry.register(Arc::new(NamedTool("alpha", ExecutionMode::Sequential)));
-        registry.register(Arc::new(NamedTool("middle", ExecutionMode::Sequential)));
+        registry
+            .register(Arc::new(NamedTool("zeta", ExecutionMode::Sequential)))
+            .unwrap();
+        registry
+            .register(Arc::new(NamedTool("alpha", ExecutionMode::Sequential)))
+            .unwrap();
+        registry
+            .register(Arc::new(NamedTool("middle", ExecutionMode::Sequential)))
+            .unwrap();
 
         let names = registry
             .list_definitions()
@@ -347,10 +360,29 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_tool_registration_is_rejected_without_replacing_the_original() {
+        let mut registry = ToolRegistry::new();
+        registry
+            .register(Arc::new(NamedTool("shared", ExecutionMode::Parallel)))
+            .unwrap();
+
+        let error = registry
+            .register(Arc::new(NamedTool("shared", ExecutionMode::Sequential)))
+            .unwrap_err();
+
+        assert_eq!(error, ToolRegistryError::DuplicateTool("shared".to_owned()));
+        assert_eq!(registry.execution_mode("shared"), ExecutionMode::Parallel);
+    }
+
+    #[test]
     fn discovered_tools_must_be_unique_known_members_of_the_declared_gate() {
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(DeferredTool("mcp_a", "mcp")));
-        registry.register(Arc::new(DeferredTool("other_a", "other")));
+        registry
+            .register(Arc::new(DeferredTool("mcp_a", "mcp")))
+            .unwrap();
+        registry
+            .register(Arc::new(DeferredTool("other_a", "other")))
+            .unwrap();
 
         let cases = [
             (Some("mcp"), vec!["mcp_a".into()], true),
@@ -373,7 +405,9 @@ mod tests {
     #[test]
     fn list_definitions_carries_tool_execution_mode() {
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(NamedTool("parallel", ExecutionMode::Parallel)));
+        registry
+            .register(Arc::new(NamedTool("parallel", ExecutionMode::Parallel)))
+            .unwrap();
 
         let definition = registry.find_definition("parallel").unwrap();
         assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
@@ -382,8 +416,12 @@ mod tests {
     #[test]
     fn session_tool_selection_derives_filtered_registry() {
         let mut registry = ToolRegistry::new();
-        registry.register(Arc::new(NamedTool("read", ExecutionMode::Parallel)));
-        registry.register(Arc::new(NamedTool("shell", ExecutionMode::Sequential)));
+        registry
+            .register(Arc::new(NamedTool("read", ExecutionMode::Parallel)))
+            .unwrap();
+        registry
+            .register(Arc::new(NamedTool("shell", ExecutionMode::Sequential)))
+            .unwrap();
 
         let without_shell = registry.filtered(&SessionToolSelection::All {
             except: vec!["shell".into()],

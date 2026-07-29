@@ -34,7 +34,11 @@ const UPDATE_GOAL_TOOL_NAME: &str = "updateGoal";
 const CONTINUATION_PROMPT_TEMPLATE: &str = include_str!("../templates/continuation.md");
 const BUDGET_LIMIT_PROMPT_TEMPLATE: &str = include_str!("../templates/budget_limit.md");
 
-const CAPABILITIES: &[ExtensionCapability] = &[ExtensionCapability::SessionHistory];
+const CAPABILITIES: &[ExtensionCapability] = &[
+    ExtensionCapability::SessionHistory,
+    ExtensionCapability::ProviderRequest,
+    ExtensionCapability::TurnContinuationControl,
+];
 
 const CREATE_GOAL_DESCRIPTION: &str =
     "Create a session goal for multi-turn autonomous work. Use this only when the user or \

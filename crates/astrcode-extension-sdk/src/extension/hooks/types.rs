@@ -136,6 +136,34 @@ pub enum ExtensionError {
     Timeout(u64),
     #[error("blocked by hook: {reason}")]
     Blocked { reason: String },
+    #[error("extension {extension_id} registered {hook} without declaring {capability:?}")]
+    MissingCapability {
+        extension_id: String,
+        hook: &'static str,
+        capability: crate::extension::ExtensionCapability,
+    },
+    #[error(
+        "extension {extension_id} registered lifecycle {event:?} with blocking mode, but this \
+         event is observe-only"
+    )]
+    InvalidLifecycleMode {
+        extension_id: String,
+        event: crate::extension::ExtensionEvent,
+    },
+    #[error(
+        "extension {extension_id} tool `{tool_name}` conflicts with extension \
+         {conflicting_extension_id}"
+    )]
+    ToolConflict {
+        extension_id: String,
+        tool_name: String,
+        conflicting_extension_id: String,
+    },
+    #[error("extension {extension_id} has an invalid registration: {reason}")]
+    InvalidRegistration {
+        extension_id: String,
+        reason: String,
+    },
     #[error("extension error: {0}")]
     Internal(String),
 }

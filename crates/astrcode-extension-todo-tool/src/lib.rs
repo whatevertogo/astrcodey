@@ -8,9 +8,9 @@ use std::{
 
 use astrcode_extension_sdk::{
     extension::{
-        Extension, ExtensionError, HookMode, PostToolUseContext, PostToolUseHandler,
-        PostToolUseResult, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
-        Registrar, ToolHandler,
+        Extension, ExtensionCapability, ExtensionError, HookMode, PostToolUseContext,
+        PostToolUseHandler, PostToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
+        ProviderResult, Registrar, ToolHandler,
     },
     state,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
@@ -50,6 +50,13 @@ struct TodoToolExtension;
 impl Extension for TodoToolExtension {
     fn id(&self) -> &str {
         "astrcode-todo-tool"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[
+            ExtensionCapability::ProviderRequest,
+            ExtensionCapability::ToolIntercept,
+        ]
     }
 
     fn register(&self, reg: &mut Registrar) {

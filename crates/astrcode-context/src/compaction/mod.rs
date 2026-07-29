@@ -10,10 +10,7 @@
 
 use std::future::Future;
 
-use astrcode_core::{
-    llm::{LlmContent, LlmError, LlmMessage, LlmRole},
-    text::compact_inline,
-};
+use astrcode_core::llm::{LlmContent, LlmError, LlmMessage, LlmRole};
 
 use crate::ContextSettings;
 
@@ -462,7 +459,7 @@ fn summarize_prefix(messages: &[LlmMessage]) -> String {
         if text.trim().is_empty() {
             continue;
         }
-        let text = compact_inline(&text, MAX_SUMMARY_LINE_CHARS);
+        let text = summary_line(&text);
         if message.role == LlmRole::User {
             lines.push(format!("   - {text}"));
         } else {
@@ -482,6 +479,15 @@ fn summarize_prefix(messages: &[LlmMessage]) -> String {
     ]);
 
     lines.join("\n")
+}
+
+fn summary_line(text: &str) -> String {
+    let mut line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some((byte_index, _)) = line.char_indices().nth(MAX_SUMMARY_LINE_CHARS) {
+        line.truncate(byte_index);
+        line.push('…');
+    }
+    line
 }
 
 #[cfg(test)]

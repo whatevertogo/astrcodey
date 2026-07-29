@@ -1,10 +1,10 @@
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
-use astrcode_core::{
+use astrcode_core::tool::{ToolError, ToolExecutionContext, ToolResult};
+use astrcode_extension_sdk::{
     hostpaths::resolve_path,
-    tool::{ToolError, ToolExecutionContext, ToolResult},
+    shell::{ShellInfo, resolve_shell},
 };
-use astrcode_extension_sdk::shell::{ShellInfo, resolve_shell};
 
 use super::{
     AUTO_BACKGROUND_AFTER_MS, BackgroundTransfer, CapturedOutput, PipelineSemantics, ShellArgs,

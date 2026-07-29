@@ -8,7 +8,8 @@ use tempfile::tempdir;
 
 use super::FileSystemSessionRepository;
 use crate::{
-    EventReader, EventStore, SessionReader, StorageError,
+    EventReader, SessionEventJournal, SessionReader, SessionStore, StorageError,
+    ToolResultArtifactInput, ToolResultArtifactStore,
     test_support::{started_event, user_event},
 };
 
@@ -42,15 +43,80 @@ async fn filesystem_repository_rebuilds_grouped_projection_and_snapshot_tail() {
 }
 
 #[tokio::test]
-async fn filesystem_repository_validates_and_orders_appends_before_commit() {
+async fn tool_result_artifacts_stay_inside_the_session_directory() {
+    let dir = tempdir().unwrap();
+    let session_id = SessionId::new("session-artifacts");
+    let repo = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    repo.create_session(started_event(&session_id))
+        .await
+        .unwrap();
+
+    let artifact = repo
+        .write_tool_result_artifact(
+            &session_id,
+            ToolResultArtifactInput {
+                call_id: "call-1".into(),
+                tool_name: "shell".into(),
+                content: "artifact content".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let artifact_path = artifact.path.unwrap();
+    let slice = repo
+        .read_tool_result_artifact_by_path(&session_id, &artifact_path, 0, 100)
+        .await
+        .unwrap();
+    assert_eq!(slice.content, "artifact content");
+
+    let outside = dir.path().join("outside.txt");
+    std::fs::write(&outside, "outside").unwrap();
+    let error = repo
+        .read_tool_result_artifact_by_path(&session_id, outside.to_str().unwrap(), 0, 100)
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StorageError::InvalidId(_)));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+
+        let artifact_path = std::path::PathBuf::from(artifact_path);
+        let artifact_dir = artifact_path.parent().unwrap().to_path_buf();
+        std::fs::remove_file(&artifact_path).unwrap();
+        std::fs::remove_dir(&artifact_dir).unwrap();
+        symlink(dir.path(), &artifact_dir).unwrap();
+
+        let error = repo
+            .read_tool_result_artifact_by_path(&session_id, outside.to_str().unwrap(), 0, 100)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StorageError::InvalidId(_)));
+    }
+}
+
+#[tokio::test]
+async fn filesystem_repository_enforces_owner_validation_and_append_order() {
     let dir = tempdir().unwrap();
     let session_id = SessionId::new("session-ordered");
+    let projects_base = dir.path().to_path_buf();
     let repo = Arc::new(FileSystemSessionRepository::with_projects_base(
-        dir.path().into(),
+        projects_base.clone(),
     ));
     repo.create_session(started_event(&session_id))
         .await
         .unwrap();
+    let initial_model = repo.session_read_model(&session_id).await.unwrap();
+    assert!(Arc::ptr_eq(
+        &initial_model,
+        &repo.session_read_model(&session_id).await.unwrap()
+    ));
+
+    let competing = FileSystemSessionRepository::with_projects_base(projects_base);
+    assert!(matches!(
+        competing.session_read_model(&session_id).await,
+        Err(StorageError::LockError(_))
+    ));
 
     let invalid = started_event(&session_id);
     assert!(matches!(
@@ -77,6 +143,12 @@ async fn filesystem_repository_validates_and_orders_appends_before_commit() {
 
     assert_eq!(sequences, (1..=32).collect::<Vec<_>>());
     let model = repo.session_read_model(&session_id).await.unwrap();
+    assert!(!Arc::ptr_eq(&initial_model, &model));
+    assert_eq!(initial_model.stats.last_seq, 0);
+    assert!(Arc::ptr_eq(
+        &model,
+        &repo.session_read_model(&session_id).await.unwrap()
+    ));
     assert_eq!(model.stats.last_seq, 32);
     assert_eq!(model.stats.event_count, 33);
     assert_eq!(model.transcript.messages.len(), 32);

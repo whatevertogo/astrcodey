@@ -2,9 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use astrcode_core::{
-    config::{Config, ConfigOverlay, ConfigStore, ConfigStoreError},
-    hostpaths,
+use astrcode_core::config::{
+    Config, ConfigOverlay, ConfigStore, ConfigStoreError, defaults::astrcode_dir,
 };
 use serde::{Serialize, de::DeserializeOwned};
 
@@ -21,7 +20,7 @@ impl FileConfigStore {
     /// Create a new store with the default config path.
     pub fn default_path() -> Self {
         Self {
-            path: hostpaths::astrcode_dir().join("config.toml"),
+            path: astrcode_dir().join("config.toml"),
         }
     }
 

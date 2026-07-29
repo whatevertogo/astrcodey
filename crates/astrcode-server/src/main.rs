@@ -15,9 +15,6 @@ use astrcode_protocol::{
     version::negotiate_version,
 };
 use astrcode_server::transport::{StdioTransport, write_error_response, write_initialize_response};
-use tokio::sync::broadcast;
-
-const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 #[tokio::main]
 async fn main() {
@@ -60,13 +57,13 @@ async fn main() {
     };
     write_initialize_response(request_id, accepted_version);
 
-    let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
-    let server_system = astrcode_server::bootstrap::spawn_server_system(&runtime, event_tx.clone());
-    let handler = server_system.handler;
+    let server_app = astrcode_server::bootstrap::ServerApp::new(runtime);
+    server_app.initialize().await;
+    let handler = server_app.command_handle().clone();
 
     // Background task: forward events → stdout
-    let mut event_rx = event_tx.subscribe();
-    astrcode_server::task_utils::spawn_traced("stdout_forwarder", async move {
+    let mut event_rx = server_app.event_bus().subscribe_all_notifications();
+    let stdout_forwarder = tokio::spawn(async move {
         while let Ok(event) = event_rx.recv().await {
             let line = match notification_to_jsonrpc_message(&event)
                 .and_then(|message| to_jsonl_line(&message))
@@ -88,15 +85,16 @@ async fn main() {
     tracing::info!("Server ready");
     while let Some(cmd) = transport.read_command().await {
         if let Err(e) = handler.handle(cmd).await {
-            let _ = event_tx.send(ClientNotification::Error {
-                code: -32603,
-                message: e.to_string(),
-            });
+            server_app
+                .event_bus()
+                .send_notification(ClientNotification::Error {
+                    code: -32603,
+                    message: e.to_string(),
+                });
         }
     }
     tracing::info!("Server shutting down");
-    runtime.shutdown_token().cancel();
-    handler.shutdown().await;
-    server_system.scheduler.drain_detached_tasks().await;
-    runtime.shutdown_extensions().await;
+    server_app.shutdown().await;
+    stdout_forwarder.abort();
+    let _ = stdout_forwarder.await;
 }

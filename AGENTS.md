@@ -53,7 +53,7 @@
 
 写新代码前,先查找现有实现,在现有基础上扩展而不是重复编写:
 
-- **共享原语**:不要创建无明确领域归属的 `support`/`utils` 桶。宿主路径与短文本归一化在 `astrcode-core::{hostpaths,text}`,扩展 frontmatter/shell 在 `astrcode-extension-sdk`,日志在 `astrcode-log`;领域专用哈希、格式化和运行时策略留在所属 crate。写新函数前先按语义在 `crates/<owner>/src` 与调用方中搜索签名。重新实现工作区已有的原语,或手写 `std`/`tokio` 已提供的功能,属于 review 意见而非风格偏好。
+- **共享原语**:不要创建无明确领域归属的 `support`/`utils` 桶。产品级默认目录在 `astrcode-core::config::defaults`;扩展可用的路径、frontmatter 和 shell 能力在 `astrcode-extension-sdk`;工作区沙箱、展示格式化、哈希和运行时策略留在所属 crate,日志在 `astrcode-log`。写新函数前先按语义在 `crates/<owner>/src` 与调用方中搜索签名。重新实现工作区已有的原语,或手写 `std`/`tokio` 已提供的功能,属于 review 意见而非风格偏好。
 - **语义匹配而非名称匹配**:采用一个函数前,确认它的归一化、错误类型、超时/重试行为是否适用于调用点。语义不同时,新建一个名称更明确的函数,并在注释里指出被放弃的近似函数。
 - **常量与固定标记**:协议标签、错误标识、事件名称、命令标签等,先找语义相同的现有常量/枚举复用。确属新值时,在相关逻辑附近定义本地常量,不要把字面量散落各处;修改既有行为时,命名与格式要与既有常量一致。
 - **测试脚手架**:复用 `crates/*/tests/fixtures`、`crates/astrcode-protocol/fixtures` 等现有 fixtures,而非新写 setup。写测试前先 `rg -l '<fn-under-test>' <crate>/src <crate>/tests`。新测试必须能暴露现有测试未覆盖的失败模式。

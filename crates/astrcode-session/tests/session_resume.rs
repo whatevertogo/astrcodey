@@ -9,7 +9,7 @@ use astrcode_core::{
         ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
         ToolOrigin,
     },
-    types::{ToolCallId, new_session_id},
+    types::{SessionId, ToolCallId, new_session_id},
 };
 use astrcode_extension_sdk::{
     extension::{ExtensionError, PromptBuildContext, PromptContributions},
@@ -108,23 +108,30 @@ fn test_caps() -> Arc<SessionRuntimeServices> {
     common::test_runtime_services(llm)
 }
 
+fn runtime(
+    session_id: SessionId,
+    store: &Arc<dyn SessionStore>,
+    caps: &SessionRuntimeServices,
+) -> Arc<SessionRuntimeState> {
+    Arc::new(SessionRuntimeState::new(
+        session_id,
+        store.clone(),
+        caps.llm(),
+        caps.small_llm(),
+        "mock-model".into(),
+    ))
+}
+
 #[tokio::test]
 async fn reopen_restores_native_extra_system_prompt() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let caps = test_caps();
     let sid = new_session_id();
 
-    let runtime_a = Arc::new(SessionRuntimeState::new(
-        caps.llm(),
-        caps.small_llm(),
-        "mock-model".into(),
-    ));
+    let runtime_a = runtime(sid.clone(), &store, &caps);
     runtime_a.update_prompt_extra(Some("child agent body".into()));
     let session_a = Session::create_with_params(SessionCreateParams {
-        store: Arc::clone(&store),
-        session_id: sid.clone(),
         working_dir: ".".into(),
-        model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
@@ -144,20 +151,11 @@ async fn reopen_restores_native_extra_system_prompt() {
     // 模拟跨进程重启：丢弃 runtime_a，开新 runtime + Session 实例
     drop(session_a);
     drop(runtime_a);
-    let runtime_b = Arc::new(SessionRuntimeState::new(
-        caps.llm(),
-        caps.small_llm(),
-        "mock-model".into(),
-    ));
+    let runtime_b = runtime(sid.clone(), &store, &caps);
     assert!(runtime_b.prompt_extra().is_none());
-    let session_b = Session::open(
-        Arc::clone(&store),
-        sid.clone(),
-        Arc::clone(&runtime_b),
-        Arc::clone(&caps),
-    )
-    .await
-    .unwrap();
+    let session_b = Session::open(Arc::clone(&runtime_b), Arc::clone(&caps))
+        .await
+        .unwrap();
     let state_after_second = session_b.read_model().await.unwrap();
     assert_eq!(
         state_after_second.system_prompt.extra.as_deref(),
@@ -179,39 +177,27 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
     let parent_selection = SessionToolSelection::Only {
         names: vec!["write".into(), "read".into()],
     };
+    let parent_id = new_session_id();
     let parent = Session::create_with_params(SessionCreateParams {
-        store: Arc::clone(&store),
-        session_id: new_session_id(),
         working_dir: ".".into(),
-        model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: Some(parent_selection),
         source_extension: None,
         initial_system_prompt: None,
-        runtime: Arc::new(SessionRuntimeState::new(
-            caps.llm(),
-            caps.small_llm(),
-            "mock-model".into(),
-        )),
+        runtime: runtime(parent_id, &store, &caps),
         runtime_services: Arc::clone(&caps),
     })
     .await
     .unwrap();
 
+    let direct_child_id = new_session_id();
     let direct_child = Session::create_with_params(SessionCreateParams {
-        store: Arc::clone(&store),
-        session_id: new_session_id(),
         working_dir: ".".into(),
-        model_id: "mock-model".into(),
         parent_session_id: Some(parent.id().clone()),
         tool_selection: None,
         source_extension: None,
         initial_system_prompt: None,
-        runtime: Arc::new(SessionRuntimeState::new(
-            caps.llm(),
-            caps.small_llm(),
-            "mock-model".into(),
-        )),
+        runtime: runtime(direct_child_id, &store, &caps),
         runtime_services: Arc::clone(&caps),
     })
     .await
@@ -266,18 +252,9 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
 
     let child_id = child.id().clone();
     drop(child);
-    let reopened = Session::open(
-        Arc::clone(&store),
-        child_id,
-        Arc::new(SessionRuntimeState::new(
-            caps.llm(),
-            caps.small_llm(),
-            "mock-model".into(),
-        )),
-        caps,
-    )
-    .await
-    .unwrap();
+    let reopened = Session::open(runtime(child_id, &store, &caps), caps)
+        .await
+        .unwrap();
     assert_eq!(
         reopened.read_model().await.unwrap().identity.tool_selection,
         SessionToolSelection::Only {
@@ -313,19 +290,12 @@ async fn prompt_failure_does_not_create_session() {
     );
     let session_id = new_session_id();
     let error = match Session::create_with_params(SessionCreateParams {
-        store: Arc::clone(&store),
-        session_id,
         working_dir: ".".into(),
-        model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
         initial_system_prompt: None,
-        runtime: Arc::new(SessionRuntimeState::new(
-            llm,
-            caps.small_llm(),
-            "mock-model".into(),
-        )),
+        runtime: runtime(session_id, &store, &caps),
         runtime_services: caps,
     })
     .await
@@ -350,19 +320,12 @@ async fn inherited_initial_prompt_survives_initialization_and_reopen() {
         source: SystemPromptSource::Inherited,
     };
     let session = Session::create_with_params(SessionCreateParams {
-        store: Arc::clone(&store),
-        session_id: session_id.clone(),
         working_dir: ".".into(),
-        model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
         initial_system_prompt: Some(inherited.clone()),
-        runtime: Arc::new(SessionRuntimeState::new(
-            Arc::clone(&llm),
-            caps.small_llm(),
-            "mock-model".into(),
-        )),
+        runtime: runtime(session_id.clone(), &store, &caps),
         runtime_services: Arc::clone(&caps),
     })
     .await
@@ -373,18 +336,9 @@ async fn inherited_initial_prompt_survives_initialization_and_reopen() {
     assert_eq!(model.system_prompt.text, inherited.text);
     assert_eq!(model.system_prompt.source, SystemPromptSource::Inherited);
 
-    let reopened = Session::open(
-        Arc::clone(&store),
-        session_id,
-        Arc::new(SessionRuntimeState::new(
-            llm,
-            caps.small_llm(),
-            "mock-model".into(),
-        )),
-        caps,
-    )
-    .await
-    .unwrap();
+    let reopened = Session::open(runtime(session_id, &store, &caps), caps)
+        .await
+        .unwrap();
     assert_eq!(
         reopened.runtime().prompt_extra().as_deref(),
         inherited.extra_system_prompt.as_deref()

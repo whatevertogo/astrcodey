@@ -384,7 +384,7 @@ fn handle_skill_tool(
 }
 
 fn discover_skills(working_dir: &str) -> Vec<SkillDefinition> {
-    let home_dir = hostpaths::resolve_home_dir();
+    let home_dir = hostpaths::user_home_dir();
     discover_skills_with_home(Path::new(working_dir), Some(&home_dir))
 }
 

@@ -79,6 +79,7 @@ impl Extension for MemoryExtension {
             ExtensionCapability::SmallModel,
             ExtensionCapability::SessionHistory,
             ExtensionCapability::EmitEvents,
+            ExtensionCapability::ProviderRequest,
         ]
     }
 

@@ -5,19 +5,16 @@
 //!
 //! 运行中输入的路由策略由 [`TurnScheduler::deliver_input`] 统一执行：
 //! HTTP/ACP 连发 prompt 用 `QueueIfRunningElseStart`；显式 mid-turn 注入用
-//! `InjectIfRunningElseStart`（见 `prompt::inject_input_for_session`）。本模块不再维护独立队列。
+//! `InjectOnly`（见 `prompt::inject_input_for_session`）。本模块不再维护独立队列。
 
 use std::sync::Arc;
 
 use astrcode_core::types::*;
-use astrcode_protocol::{
-    commands::{ClientCommand, UiResponseValue},
-    events::ClientNotification,
-};
-use tokio::sync::mpsc;
+use astrcode_protocol::commands::UiResponseValue;
 
 use crate::{
-    bootstrap::ServerRuntime, session_manager::SessionManagerError, turn_scheduler::TurnScheduler,
+    bootstrap::ServerRuntime, session_command_service::SessionCommandService,
+    session_manager::SessionManagerError, turn_scheduler::TurnScheduler,
 };
 
 mod actor;
@@ -28,18 +25,15 @@ mod notifications;
 mod prompt;
 mod recap;
 mod router;
-mod session_command;
+pub(crate) mod session_command;
 mod session_lifecycle;
 pub(crate) mod slash;
 pub(crate) mod snapshot;
 pub(in crate::handler) mod turn;
 
 pub use actor::CommandHandle;
-use actor::CommandMessage;
 pub use compact::ManualCompactOutcome;
 use model_selection::ModelSelectionController;
-use snapshot::session_snapshot;
-
 /// 用户输入提交结果：被接受进入 Turn，或被斜杠命令处理。
 #[derive(Debug)]
 pub enum PromptSubmission {
@@ -91,7 +85,7 @@ pub enum HandlerError {
     InvalidRequest(String),
 }
 
-pub(crate) use turn::TurnCompletion;
+pub(crate) use crate::turn_scheduler::TurnCompletion;
 
 /// 命令处理器，处理客户端命令并通过广播通道发送通知。
 pub(crate) struct CommandHandler {
@@ -102,8 +96,8 @@ pub(crate) struct CommandHandler {
     scheduler: Arc<TurnScheduler>,
     /// 事件总线，用于发送客户端通知
     event_bus: Arc<crate::server_event_bus::ServerEventBus>,
-    /// Actor 消息通道发送端，用于在后台任务中发送消息回 Handler
-    actor_tx: mpsc::Sender<CommandMessage>,
+    /// 显式 session 命令的无状态实现。
+    session_commands: SessionCommandService,
     /// 模型选择流程。
     model_selection: ModelSelectionController,
 }
@@ -126,71 +120,17 @@ impl CommandHandler {
         source_id: SessionId,
         at_cursor: Option<String>,
     ) -> Result<SessionId, HandlerError> {
-        let session = self
-            .runtime
-            .session_manager()
-            .fork(&source_id, at_cursor.as_ref())
-            .await
-            .map_err(HandlerError::SessionManager)?;
-
-        let new_sid = session.id().clone();
-        self.focused_session_id = Some(new_sid.clone());
-
-        // 通知客户端
-        let state = self
-            .runtime
-            .session_manager()
-            .read_model(&new_sid)
-            .await
-            .map_err(HandlerError::SessionManager)?;
-        let snapshot = session_snapshot(&state);
-        self.event_bus
-            .send_notification(ClientNotification::SessionResumed {
-                session_id: new_sid.as_str().to_owned(),
-                snapshot,
-            });
-
-        tracing::info!(
-            source_session_id = %source_id,
-            new_session_id = %new_sid,
-            "session forked"
-        );
-        Ok(new_sid)
+        let session_id = self
+            .session_commands
+            .fork_session(source_id, at_cursor)
+            .await?;
+        self.focused_session_id = Some(session_id.clone());
+        Ok(session_id)
     }
 
     /// 删除指定工作目录下的所有会话，返回删除数量。
     pub async fn delete_project(&mut self, working_dir: String) -> Result<usize, HandlerError> {
-        let summaries = self
-            .runtime
-            .session_manager()
-            .list_summaries()
-            .await
-            .map_err(HandlerError::SessionManager)?;
-
-        let matching: Vec<_> = summaries
-            .into_iter()
-            .filter(|s| s.working_dir == working_dir)
-            .collect();
-
-        let mut deleted_count = 0usize;
-        for summary in &matching {
-            match self
-                .handle(ClientCommand::DeleteSession {
-                    session_id: summary.session_id.to_string(),
-                })
-                .await
-            {
-                Ok(()) => deleted_count += 1,
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = %summary.session_id,
-                        error = %error,
-                        "delete_project: failed to delete session, continuing"
-                    );
-                },
-            }
-        }
-        Ok(deleted_count)
+        self.session_commands.delete_project(&working_dir).await
     }
 
     // ─── 模型选择 ───────────────────────────────────────────────────────

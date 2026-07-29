@@ -49,10 +49,10 @@ pub(crate) async fn build_base_tool_registry(
             "tool catalog diagnostic"
         );
     }
-    // Catalog tools are ordered from highest to lowest priority. Registering in
-    // reverse preserves the first provider's value on duplicate names.
-    for tool in catalog.tools.into_iter().rev() {
-        tool_registry.register(tool);
+    for tool in catalog.tools {
+        tool_registry
+            .register(tool)
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
     }
 
     Ok(BuiltBaseToolRegistry {

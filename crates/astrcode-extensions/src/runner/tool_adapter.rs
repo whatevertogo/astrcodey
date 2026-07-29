@@ -265,6 +265,10 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
             "Try different arguments or use a builtin tool as an alternative. Do not retry the \
              identical call.",
         ),
+        registration_error => (
+            format!("Tool `{tool_name}` failed: {registration_error}"),
+            "The extension is misconfigured. Disable or update it before retrying this tool.",
+        ),
     };
 
     // suggestion 拼进 content 让 LLM 看到——metadata 不会进 LLM prompt。

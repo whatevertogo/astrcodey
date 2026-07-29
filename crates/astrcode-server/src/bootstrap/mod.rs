@@ -21,7 +21,7 @@ use crate::session_resource_cleanup::SessionResourceCleanup;
 mod config_resolve;
 mod server_system;
 
-pub use server_system::{ServerSystem, spawn_server_system, spawn_server_system_without_legacy};
+pub use server_system::ServerApp;
 
 fn apply_approval_mode_bootstrap_options(
     config: &mut astrcode_core::config::Config,
@@ -71,7 +71,6 @@ use crate::{
 pub struct ServerRuntime {
     pub(crate) event_store: Arc<dyn SessionStore>,
     pub(crate) config_manager: Arc<ConfigManager>,
-    pub(crate) context_assembler: Arc<LlmContextAssembler>,
     pub(crate) session_manager: Arc<SessionManager>,
     pub(crate) scheduler: Arc<TurnScheduler>,
     pub(crate) extension_runner: Arc<ExtensionRunner>,
@@ -87,10 +86,6 @@ impl ServerRuntime {
 
     pub fn config_manager(&self) -> &Arc<ConfigManager> {
         &self.config_manager
-    }
-
-    pub fn context_assembler(&self) -> &Arc<LlmContextAssembler> {
-        &self.context_assembler
     }
 
     pub fn session_manager(&self) -> &Arc<SessionManager> {
@@ -272,7 +267,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     Ok(ServerRuntime {
         event_store,
         config_manager,
-        context_assembler,
         session_manager,
         scheduler,
         extension_runner,
@@ -298,7 +292,6 @@ impl ServerRuntime {
     pub fn assemble_for_test(
         event_store: Arc<dyn SessionStore>,
         config_manager: Arc<ConfigManager>,
-        context_assembler: Arc<LlmContextAssembler>,
         session_manager: Arc<SessionManager>,
         scheduler: Arc<TurnScheduler>,
         extension_runner: Arc<ExtensionRunner>,
@@ -308,7 +301,6 @@ impl ServerRuntime {
         Self {
             event_store,
             config_manager,
-            context_assembler,
             session_manager,
             scheduler,
             extension_runner,

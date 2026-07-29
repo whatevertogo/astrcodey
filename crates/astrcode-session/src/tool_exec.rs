@@ -29,6 +29,7 @@ impl TurnToolContext {
     pub(crate) fn for_turn(
         session: &Session,
         session_state: &astrcode_session_projection::SessionReadModel,
+        tool_selection: astrcode_core::tool::SessionToolSelection,
         session_store_dir: Option<std::path::PathBuf>,
     ) -> Self {
         let runtime_services = session.runtime_services();
@@ -50,7 +51,7 @@ impl TurnToolContext {
             session_store_dir,
             turn_event_sender: None,
             approval_mode: effective.agent.approval_mode,
-            tool_selection: Some(session_state.identity.tool_selection.clone()),
+            tool_selection: Some(tool_selection),
             permission_chain,
             approval_history,
         };

@@ -151,6 +151,10 @@ impl TurnRegistry {
             .map(|e| e.turn_id.clone())
     }
 
+    pub(crate) fn active_session_ids(&self) -> Vec<SessionId> {
+        self.entries.lock().keys().cloned().collect()
+    }
+
     /// 获取指定 session 的活跃 turn 与 session。
     pub fn active_execution(&self, session_id: &SessionId) -> Option<(TurnId, Arc<Session>)> {
         self.entries
@@ -266,17 +270,17 @@ mod tests {
 
     async fn make_session(sid: &str) -> Arc<Session> {
         let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+        let session_id = SessionId::from(sid);
         let runtime = Arc::new(astrcode_session::SessionRuntimeState::new(
+            session_id,
+            store,
             Arc::new(NeverLlm),
             Arc::new(NeverLlm),
             "mock".into(),
         ));
         Arc::new(
             Session::create_with_params(SessionCreateParams {
-                store,
-                session_id: SessionId::from(sid),
                 working_dir: ".".into(),
-                model_id: "mock".into(),
                 parent_session_id: None,
                 tool_selection: None,
                 source_extension: None,

@@ -23,6 +23,8 @@ mod commands;
 mod diagnostics;
 mod http;
 mod index;
+mod manifest;
+mod registration;
 mod snapshot;
 mod tool_adapter;
 
@@ -36,10 +38,9 @@ pub use diagnostics::{
     ExtensionDiagnostics, ExtensionHealthReport, ExtensionStageDiagnostics, ExtensionStageStatus,
 };
 pub use http::ExtensionHttpDispatchResult;
-use index::{
-    HandlerIndex, build_handler_index, log_handler_dispatch_order,
-    validate_http_route_registrations,
-};
+use index::{HandlerIndex, build_handler_index, log_handler_dispatch_order};
+use manifest::ResolvedExtensionManifest;
+use registration::validate_registrations;
 pub use snapshot::{ExtensionDeclarationSnapshot, ExtensionRegistrySnapshot};
 
 /// 将生命周期事件分发到所有已注册的扩展。
@@ -51,18 +52,16 @@ pub use snapshot::{ExtensionDeclarationSnapshot, ExtensionRegistrySnapshot};
 pub struct ExtensionRunner {
     /// 串行化注册/注销，避免同一扩展并发 start/stop。
     lifecycle_lock: AsyncMutex<()>,
-    /// 已注册的扩展列表（读写锁保护）
-    extensions: RwLock<Vec<Arc<dyn Extension>>>,
-    /// 从 register() 收集的类型化能力记录
-    records: RwLock<Vec<ExtensionRecord>>,
+    /// 串行化来源发现与增量协调，避免并发 reload 基于过期快照互相覆盖。
+    source_reconcile_lock: AsyncMutex<()>,
+    /// 已发布的扩展实例、清单与生命周期资源。
+    extensions: RwLock<Vec<HostedExtension>>,
     /// 预计算的 handler 索引，注册时重建，分发时直接查表
     index: parking_lot::RwLock<Arc<HandlerIndex>>,
     runtime_publication: parking_lot::Mutex<RuntimePublication>,
     diagnostics: parking_lot::RwLock<BTreeMap<String, ExtensionDiagnostics>>,
     /// 会话原子操作能力（在 bind_session_ops() 调用前为 None）
     session_ops: Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>>,
-    /// 每个扩展的宿主管理任务集合。
-    extension_tasks: RwLock<HashMap<String, ExtensionTasks>>,
     /// 钩子执行超时时间
     timeout: Duration,
     /// 扩展专有配置映射。key 为扩展 id，value 为用户配置的 JSON。
@@ -107,15 +106,52 @@ impl Drop for RuntimePublicationGuard<'_> {
     }
 }
 
-/// 从 `register()` 调用中收集的扩展能力记录。
-struct ExtensionRecord {
-    pub(super) id: String,
-    pub(super) reg: Registrar,
-    pub(super) capabilities: Vec<ExtensionCapability>,
+struct HostedExtension {
+    extension: Arc<dyn Extension>,
+    manifest: ResolvedExtensionManifest,
+    origin: ExtensionOrigin,
+    tasks: ExtensionTasks,
     /// 注册时的配置快照，用于 diff 检测热更新。
     config: serde_json::Value,
     /// 串行化同一扩展的配置回调与 stop，不阻塞其他扩展。
     operation_gate: Arc<AsyncMutex<()>>,
+}
+
+enum ExtensionOrigin {
+    Direct,
+    Source { key: String, fingerprint: String },
+}
+
+pub(crate) struct RegisteredSourceExtension {
+    pub(crate) id: String,
+    pub(crate) key: String,
+    pub(crate) fingerprint: String,
+}
+
+/// 保证批量注册的取消安全：已发布任务会在批次边界显式激活，
+/// 中断批次则通过析构此句柄激活。
+pub(crate) struct DeferredTaskActivation {
+    tasks: Option<ExtensionTasks>,
+}
+
+impl DeferredTaskActivation {
+    fn new(tasks: ExtensionTasks) -> Self {
+        Self { tasks: Some(tasks) }
+    }
+
+    pub(crate) fn activate(mut self) {
+        if let Some(tasks) = self.tasks.take() {
+            tasks.activate();
+        }
+    }
+}
+
+impl Drop for DeferredTaskActivation {
+    fn drop(&mut self) {
+        if let Some(tasks) = self.tasks.take() {
+            tasks.activate();
+        }
+    }
 }
 
 // ─── BoundExtensionEventSink ──────────────────────────────────────────────
@@ -190,13 +226,12 @@ impl ExtensionRunner {
     pub fn new(timeout: Duration) -> Self {
         Self {
             lifecycle_lock: AsyncMutex::new(()),
+            source_reconcile_lock: AsyncMutex::new(()),
             extensions: RwLock::new(Vec::new()),
-            records: RwLock::new(Vec::new()),
             index: parking_lot::RwLock::new(Arc::new(HandlerIndex::default())),
             runtime_publication: parking_lot::Mutex::new(RuntimePublication::default()),
             diagnostics: parking_lot::RwLock::new(BTreeMap::new()),
             session_ops: Arc::new(StdRwLock::new(None)),
-            extension_tasks: RwLock::new(HashMap::new()),
             timeout,
             extension_configs: parking_lot::RwLock::new(BTreeMap::new()),
             startup_event_tx: parking_lot::RwLock::new(None),
@@ -216,10 +251,53 @@ impl ExtensionRunner {
         startup_working_dir: Option<&str>,
     ) -> Result<bool, ExtensionError> {
         let _lifecycle = self.lifecycle_lock.lock().await;
+        let Some(tasks) = self
+            .publish_registration_locked(ext, startup_working_dir, ExtensionOrigin::Direct)
+            .await?
+        else {
+            return Ok(false);
+        };
+        tasks.activate();
+        Ok(true)
+    }
+
+    pub(crate) async fn register_deferred(
+        &self,
+        ext: Arc<dyn Extension>,
+        startup_working_dir: Option<&str>,
+        source_key: String,
+        source_fingerprint: String,
+    ) -> Result<Option<DeferredTaskActivation>, ExtensionError> {
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        Ok(self
+            .publish_registration_locked(
+                ext,
+                startup_working_dir,
+                ExtensionOrigin::Source {
+                    key: source_key,
+                    fingerprint: source_fingerprint,
+                },
+            )
+            .await?
+            .map(DeferredTaskActivation::new))
+    }
+
+    async fn publish_registration_locked(
+        &self,
+        ext: Arc<dyn Extension>,
+        startup_working_dir: Option<&str>,
+        origin: ExtensionOrigin,
+    ) -> Result<Option<ExtensionTasks>, ExtensionError> {
         let id = ext.id().to_string();
         let capabilities = ext.capabilities().to_vec();
 
-        if self.extensions.read().await.iter().any(|e| e.id() == id) {
+        if self
+            .extensions
+            .read()
+            .await
+            .iter()
+            .any(|hosted| hosted.manifest.id == id)
+        {
             tracing::warn!(extension_id = %id, "extension already registered, skipping duplicate");
             self.record_stage_result(
                 &id,
@@ -227,7 +305,7 @@ impl ExtensionRunner {
                 Some(Duration::ZERO),
                 StageOutcome::Skipped,
             );
-            return Ok(false);
+            return Ok(None);
         }
 
         // register() 只收集声明；start() 才进入运行态。
@@ -235,13 +313,9 @@ impl ExtensionRunner {
         let register_started = std::time::Instant::now();
         let mut reg = Registrar::new();
         ext.register(&mut reg);
-        if let Err(message) = validate_http_route_registrations(
-            &id,
-            &capabilities,
-            reg.http_routes(),
-            &self.records.read().await,
-        ) {
-            let error = ExtensionError::Internal(message);
+        if let Err(error) =
+            validate_registrations(&id, &capabilities, &reg, &self.extensions.read().await)
+        {
             self.record_stage_result(
                 &id,
                 DiagnosticStage::Register,
@@ -257,7 +331,7 @@ impl ExtensionRunner {
             StageOutcome::Succeeded,
         );
 
-        let tasks = ExtensionTasks::new(id.clone());
+        let tasks = ExtensionTasks::new_suspended(id.clone());
         let ext_config = extension_config(&self.extension_configs.read(), &id);
 
         let event_sink =
@@ -308,22 +382,23 @@ impl ExtensionRunner {
             StageOutcome::Succeeded,
         );
 
-        self.extensions.write().await.push(ext);
-        self.extension_tasks.write().await.insert(id.clone(), tasks);
-
-        if !reg.is_empty() {
-            let mut records = self.records.write().await;
-            records.push(ExtensionRecord {
-                id,
-                reg,
-                capabilities,
+        {
+            let mut extensions = self.extensions.write().await;
+            extensions.push(HostedExtension {
+                extension: ext,
+                manifest: ResolvedExtensionManifest {
+                    id,
+                    capabilities,
+                    registrations: reg,
+                },
+                origin,
+                tasks: tasks.clone(),
                 config: ext_config,
                 operation_gate: Arc::new(AsyncMutex::new(())),
             });
-            self.rebuild_index(&records);
+            self.rebuild_index(&extensions);
         }
-
-        Ok(true)
+        Ok(Some(tasks))
     }
 
     /// 注销一个扩展，并重建分发表。
@@ -335,8 +410,8 @@ impl ExtensionRunner {
         reason: StopReason,
     ) -> Result<bool, ExtensionError> {
         let (_operation_guard, _lifecycle) = loop {
-            let operation_gate = self.records.read().await.iter().find_map(|record| {
-                (record.id == extension_id).then(|| Arc::clone(&record.operation_gate))
+            let operation_gate = self.extensions.read().await.iter().find_map(|hosted| {
+                (hosted.manifest.id == extension_id).then(|| Arc::clone(&hosted.operation_gate))
             });
             let operation_guard = match &operation_gate {
                 Some(gate) => Some(Arc::clone(gate).lock_owned().await),
@@ -344,41 +419,37 @@ impl ExtensionRunner {
             };
             let lifecycle = self.lifecycle_lock.lock().await;
             let operation_gate_is_current = self
-                .records
+                .extensions
                 .read()
                 .await
                 .iter()
-                .find(|record| record.id == extension_id)
-                .map(|record| {
+                .find(|hosted| hosted.manifest.id == extension_id)
+                .map(|hosted| {
                     operation_gate
                         .as_ref()
-                        .is_some_and(|gate| Arc::ptr_eq(gate, &record.operation_gate))
+                        .is_some_and(|gate| Arc::ptr_eq(gate, &hosted.operation_gate))
                 })
                 .unwrap_or(operation_gate.is_none());
             if operation_gate_is_current {
                 break (operation_guard, lifecycle);
             }
         };
-        let mut exts = self.extensions.write().await;
-        let Some(pos) = exts.iter().position(|ext| ext.id() == extension_id) else {
-            return Ok(false);
+        let hosted = {
+            let mut extensions = self.extensions.write().await;
+            let Some(position) = extensions
+                .iter()
+                .position(|hosted| hosted.manifest.id == extension_id)
+            else {
+                return Ok(false);
+            };
+            let hosted = extensions.remove(position);
+            self.rebuild_index(&extensions);
+            hosted
         };
-        let ext = exts.remove(pos);
-        drop(exts);
 
-        let mut records = self.records.write().await;
-        records.retain(|record| record.id != extension_id);
-        self.rebuild_index(&records);
-        drop(records);
-
-        let tasks = self.extension_tasks.write().await.remove(extension_id);
-        if let Some(tasks) = &tasks {
-            tasks.cancel();
-        }
-        if let Some(tasks) = tasks {
-            tasks.wait(self.timeout).await;
-        }
-        let stop_result = ext.stop(reason).await;
+        hosted.tasks.cancel();
+        hosted.tasks.wait(self.timeout).await;
+        let stop_result = hosted.extension.stop(reason).await;
         stop_result?;
         self.diagnostics.write().remove(extension_id);
         Ok(true)
@@ -402,13 +473,62 @@ impl ExtensionRunner {
             .read()
             .await
             .iter()
-            .map(|ext| ext.id().to_string())
+            .map(|hosted| hosted.manifest.id.clone())
             .collect()
     }
 
-    fn rebuild_index(&self, records: &[ExtensionRecord]) {
-        log_handler_dispatch_order(records);
-        let index = Arc::new(build_handler_index(records));
+    pub(crate) async fn registered_source_extensions(&self) -> Vec<RegisteredSourceExtension> {
+        self.extensions
+            .read()
+            .await
+            .iter()
+            .filter_map(|hosted| match &hosted.origin {
+                ExtensionOrigin::Direct => None,
+                ExtensionOrigin::Source { key, fingerprint } => Some(RegisteredSourceExtension {
+                    id: hosted.manifest.id.clone(),
+                    key: key.clone(),
+                    fingerprint: fingerprint.clone(),
+                }),
+            })
+            .collect()
+    }
+
+    pub(crate) async fn lock_source_reconcile(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.source_reconcile_lock.lock().await
+    }
+
+    pub(crate) async fn reorder_source_extensions(&self, desired_ids: &[String]) {
+        let order = desired_ids
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (id.as_str(), index))
+            .collect::<HashMap<_, _>>();
+        let _lifecycle = self.lifecycle_lock.lock().await;
+        let mut extensions = self.extensions.write().await;
+        let already_ordered = extensions
+            .iter()
+            .map(|hosted| {
+                order
+                    .get(hosted.manifest.id.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX)
+            })
+            .is_sorted();
+        if already_ordered {
+            return;
+        }
+        extensions.sort_by_key(|hosted| {
+            order
+                .get(hosted.manifest.id.as_str())
+                .copied()
+                .unwrap_or(usize::MAX)
+        });
+        self.rebuild_index(&extensions);
+    }
+
+    fn rebuild_index(&self, extensions: &[HostedExtension]) {
+        log_handler_dispatch_order(extensions);
+        let index = Arc::new(build_handler_index(extensions));
         let _publication = RuntimePublicationGuard::begin(&self.runtime_publication);
         *self.index.write() = index;
     }
@@ -448,23 +568,24 @@ impl ExtensionRunner {
 
     /// 通知所有已注册扩展其配置已变更。
     ///
-    /// 将当前 `extension_configs` 与各 `ExtensionRecord` 中保存的快照做 diff，
+    /// 将当前 `extension_configs` 与各已发布扩展保存的快照做 diff，
     /// 仅在有变化时调用 `ext.on_config_changed()`。
     /// 返回每个扩展的 notify 结果（仅记录错误，不中断）。
     pub async fn notify_config_changed(&self) -> Vec<String> {
         let current_configs = self.extension_configs.read().clone();
         let pending: Vec<_> = self
-            .records
+            .extensions
             .read()
             .await
             .iter()
-            .filter_map(|record| {
-                let config = extension_config(&current_configs, &record.id);
-                (record.config != config).then(|| {
+            .filter_map(|hosted| {
+                let config = extension_config(&current_configs, &hosted.manifest.id);
+                (hosted.config != config).then(|| {
                     (
-                        record.id.clone(),
+                        hosted.manifest.id.clone(),
+                        Arc::clone(&hosted.extension),
                         config,
-                        Arc::clone(&record.operation_gate),
+                        Arc::clone(&hosted.operation_gate),
                     )
                 })
             })
@@ -472,36 +593,18 @@ impl ExtensionRunner {
         if pending.is_empty() {
             return Vec::new();
         }
-        let changes: Vec<_> = {
-            let extensions = self.extensions.read().await;
-            pending
-                .into_iter()
-                .filter_map(|(extension_id, config, operation_gate)| {
-                    extensions
-                        .iter()
-                        .find(|extension| extension.id() == extension_id)
-                        .map(|extension| {
-                            (extension_id, Arc::clone(extension), config, operation_gate)
-                        })
-                })
-                .collect()
-        };
         let _publication = RuntimePublicationGuard::begin(&self.runtime_publication);
 
         let mut errors = Vec::new();
-        for (extension_id, extension, new_config, operation_gate) in changes {
+        for (extension_id, extension, new_config, operation_gate) in pending {
             let _operation = operation_gate.lock().await;
-            let record_is_current = self.records.read().await.iter().any(|record| {
-                record.id == extension_id
-                    && Arc::ptr_eq(&record.operation_gate, &operation_gate)
-                    && record.config != new_config
+            let extension_is_current = self.extensions.read().await.iter().any(|current| {
+                current.manifest.id == extension_id
+                    && Arc::ptr_eq(&current.operation_gate, &operation_gate)
+                    && Arc::ptr_eq(&current.extension, &extension)
+                    && current.config != new_config
             });
-            let extension_is_current =
-                self.extensions.read().await.iter().any(|current| {
-                    current.id() == extension_id && Arc::ptr_eq(current, &extension)
-                });
-            if !record_is_current
-                || !extension_is_current
+            if !extension_is_current
                 || extension_config(&self.extension_configs.read(), &extension_id) != new_config
             {
                 continue;
@@ -515,13 +618,14 @@ impl ExtensionRunner {
                     "config changed handler failed for {extension_id}: {error}"
                 ));
             } else {
-                let mut records = self.records.write().await;
+                let mut extensions = self.extensions.write().await;
                 if extension_config(&self.extension_configs.read(), &extension_id) == new_config {
-                    if let Some(record) = records.iter_mut().find(|record| {
-                        record.id == extension_id
-                            && Arc::ptr_eq(&record.operation_gate, &operation_gate)
+                    if let Some(hosted) = extensions.iter_mut().find(|hosted| {
+                        hosted.manifest.id == extension_id
+                            && Arc::ptr_eq(&hosted.operation_gate, &operation_gate)
+                            && Arc::ptr_eq(&hosted.extension, &extension)
                     }) {
-                        record.config = new_config;
+                        hosted.config = new_config;
                     }
                 }
             }
@@ -545,7 +649,13 @@ impl ExtensionRunner {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        let tasks = self.extension_tasks.read().await.get(extension_id).cloned();
+        let tasks = self
+            .extensions
+            .read()
+            .await
+            .iter()
+            .find(|hosted| hosted.manifest.id == extension_id)
+            .map(|hosted| hosted.tasks.clone());
         if let Some(tasks) = tasks {
             tasks.spawn(task_name, fut);
         } else {
@@ -1029,11 +1139,6 @@ impl ExtensionRunner {
         let index = self.load_index();
         let decls = index.extension_event_decls.get(extension_id)?;
         bind_extension_event_sink(extension_id, decls, event_tx)
-    }
-
-    /// 判断是否有任何扩展注册了类型化能力。
-    pub async fn has_records(&self) -> bool {
-        !self.records.read().await.is_empty()
     }
 }
 

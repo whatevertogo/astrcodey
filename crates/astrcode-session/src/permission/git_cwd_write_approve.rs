@@ -1,5 +1,7 @@
 use std::path::Path;
 
+use astrcode_extension_sdk::hostpaths::is_path_within;
+
 use super::{PermissionContext, PermissionDecision, PermissionPolicy, paths::extract_tool_paths};
 
 pub struct GitCwdWriteApprovePolicy;
@@ -19,7 +21,7 @@ impl PermissionPolicy for GitCwdWriteApprovePolicy {
         }
         let all_in_cwd = paths.iter().all(|p| {
             let resolved = resolve_relative(ctx.working_dir, p);
-            is_within(resolved.as_path(), ctx.working_dir)
+            is_path_within(&resolved, ctx.working_dir)
         });
         if all_in_cwd {
             PermissionDecision::Allow
@@ -35,10 +37,6 @@ fn resolve_relative(working_dir: &Path, raw: &Path) -> std::path::PathBuf {
     } else {
         working_dir.join(raw)
     }
-}
-
-fn is_within(path: &Path, working_dir: &Path) -> bool {
-    astrcode_core::hostpaths::is_path_within(path, working_dir)
 }
 
 #[cfg(test)]

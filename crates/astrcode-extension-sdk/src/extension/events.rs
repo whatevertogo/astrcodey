@@ -70,6 +70,17 @@ pub enum ExtensionEvent {
     PostRecap,
 }
 
+/// Returns whether a lifecycle event may gate host control flow.
+///
+/// Only turn-entry events run before the corresponding work begins. All other
+/// lifecycle events are observations of work that has already started or
+/// finished and therefore cannot safely fail closed.
+pub fn lifecycle_event_allows_blocking(event: &ExtensionEvent) -> bool {
+    matches!(
+        event,
+        ExtensionEvent::TurnStart | ExtensionEvent::UserPromptSubmit
+    )
+}
 
 // ─── extension Event System ────────────────────────────────────────────────
 

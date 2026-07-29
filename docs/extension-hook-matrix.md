@@ -16,15 +16,26 @@ Default session context/API, no manifest capability required:
 | `astrcode.session.state.read` | Reads state namespaced by current session and extension id. |
 | `astrcode.session.state.write` | Writes state namespaced by current session and extension id. |
 
-Sensitive APIs still require capabilities: `session_control`, `session_history`,
-`main_model`, `small_model`, `emit_events`, `workspace_read`, `process_spawn`,
+Sensitive APIs and registrations still require capabilities: `session_control`,
+`session_history`, `main_model`, `small_model`, `emit_events`, `provider_request`,
+`tool_intercept`, `turn_continuation_control`, `workspace_read`, `process_spawn`,
 and `network_client`.
+
+The runner rejects privileged registrations that omit their capability:
+
+| Registration | Required capability |
+| --- | --- |
+| Extension event declaration | `emit_events` |
+| Compact hook | `session_history` |
+| Before/after provider hook or user message envelope | `provider_request` |
+| Blocking pre/post tool hook | `tool_intercept` |
+| Continue after stop | `turn_continuation_control` |
 
 ## Hook Families
 
 | Hook | Registration API | Runtime entry | Result semantics |
 | --- | --- | --- | --- |
-| Lifecycle | `on_event(event, mode, priority, handler)` | `emit_lifecycle` | Blocking handlers may return `Block`; the call site decides whether that aborts flow. Advisory/nonblocking are notifications. |
+| Lifecycle | `on_event(event, mode, priority, handler)` | `emit_lifecycle` | Only `TurnStart` and `UserPromptSubmit` may be Blocking. Other lifecycle events are observe-only and reject Blocking registration. |
 | Prompt build | `on_prompt_build(priority, handler)` | `collect_prompt_contributions` | Contributions merge by priority. |
 | Pre tool use | `on_pre_tool_use*` | `emit_pre_tool_use` | Blocking handlers may modify input, ask, or block. Advisory/nonblocking do not change flow. |
 | Post tool use | `on_post_tool_use*` | `emit_post_tool_use` | Runs only after a tool returns a completed result (including semantic error results). Blocking handlers may modify or block that result. Advisory/nonblocking do not change flow. |

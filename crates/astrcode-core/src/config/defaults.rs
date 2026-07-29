@@ -2,6 +2,32 @@
 //!
 //! 集中定义配置常量和 serde 默认值函数，便于统一管理和修改。
 
+use std::path::PathBuf;
+
+const TEST_HOME_ENV: &str = "ASTRCODE_TEST_HOME";
+const USER_HOME_ENV: &str = "ASTRCODE_HOME_DIR";
+
+/// 返回 AstrCode 使用的用户主目录。
+///
+/// 测试隔离目录优先于用户覆盖；均未设置时使用系统主目录，无法解析则回退到当前目录。
+pub fn user_home_dir() -> PathBuf {
+    env_path(TEST_HOME_ENV)
+        .or_else(|| env_path(USER_HOME_ENV))
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// 返回 AstrCode 的进程级数据目录，默认是 `~/.astrcode`。
+pub fn astrcode_dir() -> PathBuf {
+    user_home_dir().join(".astrcode")
+}
+
+fn env_path(name: &str) -> Option<PathBuf> {
+    std::env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
 // ── 配置文件版本与默认选项 ──────────────────────────────────────────────
 
 /// 配置文件格式的默认版本号。
@@ -78,4 +104,37 @@ pub(crate) fn default_active_model() -> String {
 /// serde 用：返回内置的默认配置文件列表。
 pub(crate) fn default_profiles() -> Vec<super::raw::Profile> {
     Vec::new()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Mutex, OnceLock};
+
+    use super::*;
+
+    #[test]
+    fn application_directories_follow_test_home() {
+        let _guard = env_lock().lock().unwrap();
+        let previous = std::env::var_os(TEST_HOME_ENV);
+        std::env::set_var(TEST_HOME_ENV, "/tmp/astrcode-config-defaults");
+
+        assert_eq!(
+            user_home_dir(),
+            PathBuf::from("/tmp/astrcode-config-defaults")
+        );
+        assert_eq!(
+            astrcode_dir(),
+            PathBuf::from("/tmp/astrcode-config-defaults/.astrcode")
+        );
+
+        match previous {
+            Some(value) => std::env::set_var(TEST_HOME_ENV, value),
+            None => std::env::remove_var(TEST_HOME_ENV),
+        }
+    }
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 }

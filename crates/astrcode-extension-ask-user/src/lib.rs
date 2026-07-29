@@ -104,7 +104,7 @@ impl Extension for AskUserExtension {
         );
         registrar.on_event(
             ExtensionEvent::SessionShutdown,
-            HookMode::Blocking,
+            HookMode::Advisory,
             0,
             Arc::new(AskUserSessionShutdown {
                 registry: Arc::clone(&self.registry),

@@ -2,8 +2,8 @@
 
 use astrcode_core::{
     config::{
-        Config, ConfigStoreError, ModelConfig, ModelOptionsConfig, Profile, ProviderCapabilities,
-        ProviderSpec, builtin_provider_catalog, model_thinking_config, resolve_thinking_capability,
+        Config, ModelConfig, ModelOptionsConfig, Profile, ProviderCapabilities, ProviderSpec,
+        builtin_provider_catalog, model_thinking_config, resolve_thinking_capability,
     },
     llm::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping, validate_thinking},
     permission::ApprovalMode,
@@ -23,16 +23,19 @@ use axum::{
 
 use super::{
     super::{HttpState, bad_request_response, internal_error_response},
-    notify_extensions_config_changed, reload_extension_registry,
+    ConfigRequestError, notify_extensions_config_changed, reload_extension_registry, update_config,
 };
-use crate::bootstrap::{self, BootstrapOptions};
+use crate::{
+    bootstrap::{self, BootstrapOptions},
+    config_manager::ConfigUpdateError,
+};
 
 pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Response {
-    let raw = state.runtime.config_manager().raw_config_snapshot();
-    let effective = state.runtime.config_manager().read_effective();
+    let (raw, effective) = state.app.runtime().config_manager().config_snapshot().await;
     let config_path = state
-        .runtime
-        .config_manager
+        .app
+        .runtime()
+        .config_manager()
         .config_store()
         .path()
         .display()
@@ -135,46 +138,50 @@ pub(in crate::http) async fn apply_provider_preset(
         );
     };
 
-    let mut candidate = state.runtime.config_manager().raw_config_snapshot();
-    let existing_api_key = candidate
-        .profiles
-        .iter()
-        .find(|profile| profile.name == profile_name)
-        .and_then(|profile| profile.api_key.clone());
-    let api_key = provider_preset_api_key(spec, request.api_key.as_deref(), existing_api_key);
-    let profile = profile_from_provider_spec(
-        spec,
-        profile_name.clone(),
-        model_id.clone(),
-        base_url,
-        api_key,
-    );
-    upsert_profile(&mut candidate.profiles, profile);
+    let requested_api_key = request.api_key;
+    let activate = request.activate;
+    let update_result = update_config(&state, |candidate| {
+        let existing_api_key = candidate
+            .profiles
+            .iter()
+            .find(|profile| profile.name == profile_name)
+            .and_then(|profile| profile.api_key.clone());
+        let api_key = provider_preset_api_key(spec, requested_api_key.as_deref(), existing_api_key);
+        let profile = profile_from_provider_spec(
+            spec,
+            profile_name.clone(),
+            model_id.clone(),
+            base_url,
+            api_key,
+        );
+        upsert_profile(&mut candidate.profiles, profile);
 
-    let mut activated = false;
-    let mut warning = None;
-    if request.activate {
-        let mut activated_candidate = candidate.clone();
-        activated_candidate.active_profile = profile_name.clone();
-        activated_candidate.active_model = model_id.clone();
-        match activated_candidate.clone().into_effective() {
-            Ok(_) => {
-                candidate = activated_candidate;
-                activated = true;
-            },
+        if !activate {
+            return Ok((false, None));
+        }
+        let previous_profile = candidate.active_profile.clone();
+        let previous_model = candidate.active_model.clone();
+        candidate.active_profile = profile_name.clone();
+        candidate.active_model = model_id.clone();
+        match candidate.clone().into_effective() {
+            Ok(_) => Ok((true, None)),
             Err(error) => {
-                warning = Some(format!(
-                    "Profile saved but not activated: {error}. Configure the API key first."
-                ));
+                candidate.active_profile = previous_profile;
+                candidate.active_model = previous_model;
+                Ok((
+                    false,
+                    Some(format!(
+                        "Profile saved but not activated: {error}. Configure the API key first."
+                    )),
+                ))
             },
         }
-    }
-
-    match persist_and_apply_config(&state, candidate).await {
-        Ok(Some(apply_warning)) => append_warning(&mut warning, apply_warning),
-        Ok(None) => {},
-        Err(error) => return internal_error_response("save_failed", error),
-    }
+    })
+    .await;
+    let (activated, warning) = match update_result {
+        Ok(result) => result,
+        Err(error) => return error.into_response(),
+    };
 
     Json(ApplyProviderPresetResponseDto {
         success: true,
@@ -195,36 +202,39 @@ pub(in crate::http) async fn remove_provider_preset(
         return bad_request_response("invalid_profile_name", "Profile name cannot be empty");
     }
 
-    let mut candidate = state.runtime.config_manager().raw_config_snapshot();
-    let profile_count = candidate.profiles.len();
-    candidate
-        .profiles
-        .retain(|profile| profile.name != profile_name);
-    if candidate.profiles.len() == profile_count {
-        return bad_request_response(
-            "unknown_profile",
-            format!("Profile {profile_name:?} is not configured"),
-        );
-    }
-    if candidate.active_profile == profile_name {
-        if let Some((next_profile, next_model)) = first_profile_model(&candidate.profiles) {
-            candidate.active_profile = next_profile;
-            candidate.active_model = next_model;
-        } else {
-            candidate.active_profile.clear();
-            candidate.active_model.clear();
+    let update_result = update_config(&state, |candidate| {
+        let profile_count = candidate.profiles.len();
+        candidate
+            .profiles
+            .retain(|profile| profile.name != profile_name);
+        if candidate.profiles.len() == profile_count {
+            return Err(ConfigRequestError::new(
+                "unknown_profile",
+                format!("Profile {profile_name:?} is not configured"),
+            ));
         }
-    }
-    if candidate.active_small_profile.as_deref() == Some(profile_name) {
-        candidate.active_small_profile = None;
-        candidate.active_small_model = None;
-    }
-
-    let active_profile = candidate.active_profile.clone();
-    let active_model = candidate.active_model.clone();
-    let warning = match persist_and_apply_config(&state, candidate).await {
-        Ok(warning) => warning,
-        Err(error) => return internal_error_response("save_failed", error),
+        if candidate.active_profile == profile_name {
+            if let Some((next_profile, next_model)) = first_profile_model(&candidate.profiles) {
+                candidate.active_profile = next_profile;
+                candidate.active_model = next_model;
+            } else {
+                candidate.active_profile.clear();
+                candidate.active_model.clear();
+            }
+        }
+        if candidate.active_small_profile.as_deref() == Some(profile_name) {
+            candidate.active_small_profile = None;
+            candidate.active_small_model = None;
+        }
+        Ok((
+            candidate.active_profile.clone(),
+            candidate.active_model.clone(),
+        ))
+    })
+    .await;
+    let (active_profile, active_model) = match update_result {
+        Ok(result) => result,
+        Err(error) => return error.into_response(),
     };
 
     Json(RemoveProviderPresetResponseDto {
@@ -232,18 +242,18 @@ pub(in crate::http) async fn remove_provider_preset(
         removed_profile_name: profile_name.to_string(),
         active_profile,
         active_model,
-        warning,
+        warning: None,
     })
     .into_response()
 }
 
 pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Response {
     let reload_opts = BootstrapOptions {
-        working_dir: Some(state.runtime.startup_working_dir().clone()),
+        working_dir: Some(state.app.runtime().startup_working_dir().clone()),
         ..BootstrapOptions::default()
     };
     let config = match bootstrap::load_merged_config(
-        state.runtime.config_manager().config_store().as_ref(),
+        state.app.runtime().config_manager().config_store().as_ref(),
         &reload_opts,
     )
     .await
@@ -258,17 +268,24 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
     let active_small_profile = config.active_small_profile.clone();
     let active_small_model = config.active_small_model.clone();
 
-    if let Err(error) = state
-        .runtime
-        .config_manager
-        .apply_raw_config_and_rebuild(config)
-    {
-        return bad_request_response(
-            "invalid_config",
-            format!("Reloaded config is invalid: {error}"),
-        );
+    let apply_result: Result<(), ConfigUpdateError<ConfigRequestError>> = state
+        .app
+        .runtime()
+        .config_manager()
+        .apply_loaded_config(config)
+        .await;
+    if let Err(error) = apply_result {
+        return match error {
+            ConfigUpdateError::Mutation(error) => bad_request_response(error.code, error.message),
+            ConfigUpdateError::Resolve(error) => bad_request_response(
+                "invalid_config",
+                format!("Reloaded config is invalid: {error}"),
+            ),
+            ConfigUpdateError::Provider(error) => bad_request_response("invalid_provider", error),
+            ConfigUpdateError::Store(error) => internal_error_response("reload_failed", error),
+        };
     }
-    state.runtime.sync_session_model_bindings();
+    state.app.runtime().sync_session_model_bindings();
     // 通知扩展配置已变更（针对已运行扩展的配置热更新）
     notify_extensions_config_changed(&state).await;
     // 重载扩展（处理启用/禁用状态变化）
@@ -294,33 +311,30 @@ pub(in crate::http) async fn update_active_selection(
         );
     };
 
-    let mut candidate = state.runtime.config_manager().raw_config_snapshot();
-    candidate.active_profile = request.active_profile;
-    candidate.active_model = request.active_model;
-
-    if let (Some(p), Some(m)) = (request.active_small_profile, request.active_small_model) {
-        candidate.active_small_profile = Some(p);
-        candidate.active_small_model = Some(m);
-    }
-
-    candidate.runtime.approval_mode = Some(approval_mode.as_str().into());
-
-    // Validate before persisting.
-    if let Err(error) = candidate.clone().into_effective() {
-        return bad_request_response("invalid_selection", error);
+    let update_result = update_config(&state, |candidate| {
+        candidate.active_profile = request.active_profile;
+        candidate.active_model = request.active_model;
+        if let (Some(profile), Some(model)) =
+            (request.active_small_profile, request.active_small_model)
+        {
+            candidate.active_small_profile = Some(profile);
+            candidate.active_small_model = Some(model);
+        }
+        candidate.runtime.approval_mode = Some(approval_mode.as_str().into());
+        candidate
+            .clone()
+            .into_effective()
+            .map_err(|error| ConfigRequestError::new("invalid_selection", error))?;
+        Ok(())
+    })
+    .await;
+    if let Err(error) = update_result {
+        return error.into_response();
     };
-
-    let warning = match persist_and_apply_config(&state, candidate).await {
-        Ok(warning) => warning,
-        Err(error) => return internal_error_response("save_failed", error),
-    };
-
-    // 通知扩展配置已变更（如果有扩展配置变化）
-    notify_extensions_config_changed(&state).await;
 
     Json(UpdateActiveSelectionResponseDto {
         success: true,
-        warning,
+        warning: None,
     })
     .into_response()
 }
@@ -329,8 +343,24 @@ pub(in crate::http) async fn update_model_options(
     State(state): State<HttpState>,
     Json(request): Json<UpdateModelOptionsRequest>,
 ) -> Response {
-    // 1. Locate profile + model
-    let mut candidate = state.runtime.config_manager().raw_config_snapshot();
+    match update_config(&state, |candidate| {
+        apply_model_options_update(candidate, request)
+    })
+    .await
+    {
+        Ok(()) => Json(UpdateModelOptionsResponseDto {
+            success: true,
+            warning: None,
+        })
+        .into_response(),
+        Err(error) => error.into_response(),
+    }
+}
+
+fn apply_model_options_update(
+    candidate: &mut Config,
+    request: UpdateModelOptionsRequest,
+) -> Result<(), ConfigRequestError> {
     let profile_idx = match candidate
         .profiles
         .iter()
@@ -338,10 +368,10 @@ pub(in crate::http) async fn update_model_options(
     {
         Some(idx) => idx,
         None => {
-            return bad_request_response(
+            return Err(ConfigRequestError::new(
                 "unknown_profile",
                 format!("Profile {:?} not found", request.profile_name),
-            );
+            ));
         },
     };
     let model_idx = match candidate.profiles[profile_idx]
@@ -351,13 +381,13 @@ pub(in crate::http) async fn update_model_options(
     {
         Some(idx) => idx,
         None => {
-            return bad_request_response(
+            return Err(ConfigRequestError::new(
                 "unknown_model",
                 format!(
                     "Model {:?} not found in profile {:?}",
                     request.model_id, request.profile_name
                 ),
-            );
+            ));
         },
     };
 
@@ -381,24 +411,22 @@ pub(in crate::http) async fn update_model_options(
     if thinking_submitted {
         match capability.as_ref() {
             None => {
-                return bad_request_response(
+                return Err(ConfigRequestError::new(
                     "no_thinking_capability",
                     "Thinking is not supported for this model (no matching capability found). Set \
                      a `thinkingCapability` override on the model in config.toml if this model \
                      should support thinking.",
-                );
+                ));
             },
             Some(cap) => {
-                // Run general validation
                 let issues = validate_thinking(&new_thinking, cap);
                 if !issues.is_empty() {
-                    return bad_request_response(
+                    return Err(ConfigRequestError::new(
                         "invalid_thinking_config",
                         format!("Thinking config validation failed: {}", issues.join("; ")),
-                    );
+                    ));
                 }
 
-                // Anthropic-specific: budget_tokens must be < model.max_tokens
                 if matches!(
                     cap.wire_mapping,
                     ThinkingWireMapping::AnthropicBudget | ThinkingWireMapping::AnthropicAdaptive
@@ -406,14 +434,14 @@ pub(in crate::http) async fn update_model_options(
                     if let Some(budget) = new_thinking.budget_tokens {
                         if let Some(max_tokens) = model.max_tokens {
                             if budget >= max_tokens {
-                                return bad_request_response(
+                                return Err(ConfigRequestError::new(
                                     "invalid_budget_tokens",
                                     format!(
                                         "budget_tokens ({}) must be less than model max_tokens \
                                          ({})",
                                         budget, max_tokens
                                     ),
-                                );
+                                ));
                             }
                         }
                     }
@@ -422,7 +450,6 @@ pub(in crate::http) async fn update_model_options(
         }
     }
 
-    // 5. Persist: set new `thinking` on modelOptions, clear legacy fields
     let model = &mut candidate.profiles[profile_idx].models[model_idx];
     if thinking_submitted || model.model_options.is_some() {
         let opts = model
@@ -436,40 +463,7 @@ pub(in crate::http) async fn update_model_options(
         }
     }
 
-    match persist_and_apply_config(&state, candidate).await {
-        Ok(warning) => Json(UpdateModelOptionsResponseDto {
-            success: true,
-            warning,
-        })
-        .into_response(),
-        Err(error) => internal_error_response("save_failed", error),
-    }
-}
-
-async fn persist_and_apply_config(
-    state: &HttpState,
-    candidate: Config,
-) -> Result<Option<String>, ConfigStoreError> {
-    state
-        .runtime
-        .config_manager
-        .config_store()
-        .save(&candidate)
-        .await?;
-
-    if let Err(error) = state
-        .runtime
-        .config_manager
-        .apply_raw_config_and_rebuild(candidate)
-    {
-        tracing::warn!("apply_raw_config_and_rebuild failed after save: {error}");
-        return Ok(Some(format!(
-            "Saved to disk but runtime kept the previous effective configuration: {error}."
-        )));
-    }
-
-    state.runtime.sync_session_model_bindings();
-    Ok(None)
+    Ok(())
 }
 
 fn provider_spec_to_dto(spec: &ProviderSpec) -> ProviderSpecDto {
@@ -588,15 +582,5 @@ fn upsert_profile(profiles: &mut Vec<Profile>, profile: Profile) {
         *existing = profile;
     } else {
         profiles.push(profile);
-    }
-}
-
-fn append_warning(warning: &mut Option<String>, next: String) {
-    match warning {
-        Some(existing) => {
-            existing.push(' ');
-            existing.push_str(&next);
-        },
-        None => *warning = Some(next),
     }
 }

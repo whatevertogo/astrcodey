@@ -2,7 +2,7 @@
 //!
 //! 三段流串联：
 //! 1. `replay_error_stream`：cursor 解析或重放失败时推一条 `RehydrateRequired`。
-//! 2. `replay_stream`：从 `EventStore` 拉历史事件转 deltas（按 cursor 起点）。
+//! 2. `replay_stream`：从 EventLog history 拉事件转 deltas（按 cursor 起点）。
 //! 3. `live_stream`：订阅当前 conversation 的事件广播与全局非事件通知。
 
 mod child_sessions;
@@ -89,8 +89,9 @@ pub(in crate::http) async fn session_stream(
 
     // Validate session exists before opening the stream.
     let has_messages = match http_state
-        .runtime
-        .session_manager
+        .app
+        .runtime()
+        .session_manager()
         .has_messages(&session_id)
         .await
     {
@@ -104,8 +105,9 @@ pub(in crate::http) async fn session_stream(
         },
     };
     let agent_sessions = match http_state
-        .runtime
-        .session_manager
+        .app
+        .runtime()
+        .session_manager()
         .agent_sessions(&session_id)
         .await
     {
@@ -139,18 +141,20 @@ pub(in crate::http) async fn session_stream(
     let child_session_tracker = ChildSessionTracker::new(child_sessions.clone(), last_child_phase);
 
     http_state
-        .event_bus
+        .app
+        .event_bus()
         .register_conversation_children(&session_id, &child_sessions);
     let event_rx = http_state
-        .event_bus
+        .app
+        .event_bus()
         .subscribe_conversation_events(&session_id);
-    let notification_rx = http_state.event_bus.subscribe_global_notifications();
+    let notification_rx = http_state.app.event_bus().subscribe_global_notifications();
     let (missed_events, replay_error) = match query.cursor.as_ref() {
-        Some(cursor) => replay_after_cursor(&http_state.runtime, &session_id, cursor).await,
+        Some(cursor) => replay_after_cursor(http_state.app.runtime(), &session_id, cursor).await,
         None => (Vec::new(), false),
     };
     let replay_max_seq = missed_events.iter().filter_map(|event| event.seq).max();
-    let replay_runtime = Arc::clone(&http_state.runtime);
+    let replay_runtime = Arc::clone(http_state.app.runtime());
     let replay_session_id = session_id.clone();
     let replay_has_messages = has_messages;
     let replay_stream = stream::iter(missed_events)
@@ -175,7 +179,7 @@ pub(in crate::http) async fn session_stream(
         )
     }));
 
-    let live_runtime = Arc::clone(&http_state.runtime);
+    let live_runtime = Arc::clone(http_state.app.runtime());
     let live_stream = stream::unfold(
         LiveStreamState {
             event_rx,

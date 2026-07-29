@@ -15,13 +15,12 @@ use axum::{
 use super::super::HttpState;
 
 pub(in crate::http) async fn get_current_model(State(state): State<HttpState>) -> Response {
-    let raw = state.runtime.config_manager().raw_config_snapshot();
-    let eff = state.runtime.config_manager().read_effective();
+    let (raw, eff) = state.app.runtime().config_manager().config_snapshot().await;
     current_model_response(raw.active_profile, &eff.llm)
 }
 
 pub(in crate::http) async fn list_models(State(state): State<HttpState>) -> Response {
-    let raw = state.runtime.config_manager().raw_config_snapshot();
+    let raw = state.app.runtime().config_manager().raw_config_snapshot();
     let models: Vec<AvailableModelDto> = raw
         .profiles
         .iter()
@@ -60,12 +59,12 @@ async fn run_model_test(
 }
 
 pub(in crate::http) async fn test_model(State(state): State<HttpState>) -> Response {
-    Json(run_model_test(&state.runtime.config_manager().read_llm_provider()).await).into_response()
+    Json(run_model_test(&state.app.runtime().config_manager().read_llm_provider()).await)
+        .into_response()
 }
 
 pub(in crate::http) async fn get_small_current_model(State(state): State<HttpState>) -> Response {
-    let eff = state.runtime.config_manager().read_effective();
-    let raw = state.runtime.config_manager().raw_config_snapshot();
+    let (raw, eff) = state.app.runtime().config_manager().config_snapshot().await;
     let profile_name = match (&raw.active_small_profile, &raw.active_small_model) {
         (Some(p), Some(_)) => p.clone(),
         _ => raw.active_profile.clone(),
@@ -84,6 +83,15 @@ fn current_model_response(profile_name: String, model: &LlmSettings) -> Response
 }
 
 pub(in crate::http) async fn test_small_model(State(state): State<HttpState>) -> Response {
-    Json(run_model_test(&state.runtime.config_manager().read_small_llm_provider()).await)
-        .into_response()
+    Json(
+        run_model_test(
+            &state
+                .app
+                .runtime()
+                .config_manager()
+                .read_small_llm_provider(),
+        )
+        .await,
+    )
+    .into_response()
 }

@@ -130,26 +130,20 @@ pub async fn consume_llm_stream(
         };
         match event {
             LlmEvent::ContentDelta { delta } => {
-                ensure_assistant_message_started(publisher, &message_id, &mut message_started)
-                    .await;
+                ensure_assistant_message_started(publisher, &message_id, &mut message_started);
                 current_text.push_str(&delta);
-                publisher
-                    .live(LiveEventPayload::AssistantTextDelta {
-                        message_id: message_id.clone(),
-                        delta,
-                    })
-                    .await;
+                publisher.live(LiveEventPayload::AssistantTextDelta {
+                    message_id: message_id.clone(),
+                    delta,
+                });
             },
             LlmEvent::ThinkingDelta { delta } => {
-                ensure_assistant_message_started(publisher, &message_id, &mut message_started)
-                    .await;
+                ensure_assistant_message_started(publisher, &message_id, &mut message_started);
                 reasoning_content.push_str(&delta);
-                publisher
-                    .live(LiveEventPayload::ThinkingDelta {
-                        message_id: message_id.clone(),
-                        delta,
-                    })
-                    .await;
+                publisher.live(LiveEventPayload::ThinkingDelta {
+                    message_id: message_id.clone(),
+                    delta,
+                });
             },
             LlmEvent::ToolCallStart {
                 call_id,
@@ -172,19 +166,15 @@ pub async fn consume_llm_stream(
                         )));
                     }
                     ensure_tool_call_args_limit(arguments.len())?;
-                    publisher
-                        .live(LiveEventPayload::ToolCallStarted {
-                            call_id: call_id.clone().into(),
-                            tool_name: name.clone(),
-                        })
-                        .await;
+                    publisher.live(LiveEventPayload::ToolCallStarted {
+                        call_id: call_id.clone().into(),
+                        tool_name: name.clone(),
+                    });
                     if !arguments.is_empty() {
-                        publisher
-                            .live(LiveEventPayload::ToolCallArgumentsDelta {
-                                call_id: call_id.clone().into(),
-                                delta: arguments.clone(),
-                            })
-                            .await;
+                        publisher.live(LiveEventPayload::ToolCallArgumentsDelta {
+                            call_id: call_id.clone().into(),
+                            delta: arguments.clone(),
+                        });
                     }
                     tool_calls.push(StreamedToolCall {
                         call_id,
@@ -198,12 +188,10 @@ pub async fn consume_llm_stream(
                     ensure_tool_call_args_limit(tc.arguments.len().saturating_add(delta.len()))?;
                     tc.arguments.push_str(&delta);
                 }
-                publisher
-                    .live(LiveEventPayload::ToolCallArgumentsDelta {
-                        call_id: call_id.into(),
-                        delta,
-                    })
-                    .await;
+                publisher.live(LiveEventPayload::ToolCallArgumentsDelta {
+                    call_id: call_id.into(),
+                    delta,
+                });
             },
             LlmEvent::Usage { usage } => {
                 captured_usage = Some(usage);
@@ -244,7 +232,7 @@ pub async fn consume_llm_stream(
             LlmEvent::Error { message } => {
                 let recoverable = is_prompt_too_long_message(&message);
                 if recoverable {
-                    publisher.live_error(-32603, message.clone(), true).await;
+                    publisher.live_error(-32603, message.clone(), true);
                     return Err(TurnError::Llm(LlmError::ContextWindowExceeded { message }));
                 }
                 publisher
@@ -291,7 +279,7 @@ async fn poll_early_tool(
     scheduler.poll_completed().await
 }
 
-async fn ensure_assistant_message_started(
+fn ensure_assistant_message_started(
     publisher: &TurnEvents,
     message_id: &MessageId,
     message_started: &mut bool,
@@ -299,11 +287,9 @@ async fn ensure_assistant_message_started(
     if *message_started {
         return;
     }
-    publisher
-        .live(LiveEventPayload::AssistantMessageStarted {
-            message_id: message_id.clone(),
-        })
-        .await;
+    publisher.live(LiveEventPayload::AssistantMessageStarted {
+        message_id: message_id.clone(),
+    });
     *message_started = true;
 }
 

@@ -24,9 +24,9 @@ use std::{path::PathBuf, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::{
-        CommandContext, CommandHandler, Extension, ExtensionCommandResult, ExtensionError,
-        HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext,
-        ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
+        CommandContext, CommandHandler, Extension, ExtensionCapability, ExtensionCommandResult,
+        ExtensionError, HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
+        ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
         StatusItemUpdatePayload, ToolHandler,
     },
     llm::LlmMessage,
@@ -66,6 +66,13 @@ struct ModeExtension {
 impl Extension for ModeExtension {
     fn id(&self) -> &str {
         "astrcode-mode"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[
+            ExtensionCapability::ProviderRequest,
+            ExtensionCapability::ToolIntercept,
+        ]
     }
 
     fn register(&self, reg: &mut Registrar) {

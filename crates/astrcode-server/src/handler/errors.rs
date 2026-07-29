@@ -19,14 +19,3 @@ impl From<TurnScheduleError> for HandlerError {
         }
     }
 }
-
-/// 将 turn 调度错误映射为客户端错误码与 handler 错误（用于需要 `send_error` 的路径）。
-pub(crate) fn turn_schedule_error_for_client(error: TurnScheduleError) -> (i32, HandlerError) {
-    match &error {
-        TurnScheduleError::TurnAlreadyRunning => (40900, HandlerError::TurnAlreadyRunning),
-        TurnScheduleError::QueueFull { .. } | TurnScheduleError::InputTooLarge { .. } => {
-            (-32602, HandlerError::from(error))
-        },
-        _ => (-32603, HandlerError::from(error)),
-    }
-}

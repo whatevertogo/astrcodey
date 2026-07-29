@@ -3,27 +3,7 @@
 use astrcode_core::{message_attachment::MessageAttachment, types::SessionId};
 
 use super::{CommandHandler, HandlerError, PromptSubmission, slash};
-use crate::turn_scheduler::{DeliveryOutcome, InputDelivery, PromptInput};
-
-fn validate_prompt_attachments(attachments: &[MessageAttachment]) -> Result<(), HandlerError> {
-    astrcode_core::message_attachment::validate_attachments(attachments)
-        .map_err(|error| HandlerError::InvalidRequest(error.to_string()))
-}
-
-/// DeliveryOutcome → PromptSubmission 的统一映射。
-pub(in crate::handler) fn prompt_submission_from_delivery(
-    outcome: DeliveryOutcome,
-) -> PromptSubmission {
-    match outcome {
-        DeliveryOutcome::Queued { .. } => PromptSubmission::Handled {
-            message: "queued for next turn".into(),
-        },
-        DeliveryOutcome::Started { turn_id } => PromptSubmission::Accepted { turn_id },
-        DeliveryOutcome::Injected { .. } => PromptSubmission::Handled {
-            message: "injected into active turn".into(),
-        },
-    }
-}
+use crate::turn_scheduler::PromptInput;
 
 impl CommandHandler {
     pub(super) async fn submit_prompt(
@@ -36,11 +16,11 @@ impl CommandHandler {
             text: text.clone(),
             attachments,
         };
+        if self.scheduler.registry().has_active(&sid) {
+            return self.inject_mid_turn_message_for_session(&sid, text).await;
+        }
         match self.submit_input_for_session(sid.clone(), input).await {
             Ok(_) => Ok(()),
-            Err(HandlerError::TurnAlreadyRunning) => {
-                self.inject_mid_turn_message_for_session(&sid, text).await
-            },
             Err(error) => {
                 self.send_error(slash::command_error_code(&error), &error.to_string());
                 Err(error)
@@ -70,32 +50,14 @@ impl CommandHandler {
             .map(|_| ())
     }
 
-    /// Mid-turn 注入：要求当前 session 有活跃 turn，经 [`InputDelivery::InjectIfRunningElseStart`]
+    /// Mid-turn 注入：要求当前 session 有活跃 turn，经 [`InputDelivery::InjectOnly`]
     /// 写入 durable `UserMessage`，由 `TurnRunner` 在下一 agent step 并入 LLM 上下文。
     pub async fn inject_input_for_session(
         &self,
         sid: SessionId,
         text: String,
     ) -> Result<PromptSubmission, HandlerError> {
-        if !self.scheduler.registry().has_active(&sid) {
-            return Err(HandlerError::NoActiveTurn);
-        }
-        match self
-            .scheduler
-            .deliver_input(
-                sid,
-                PromptInput::text_only(text),
-                InputDelivery::InjectIfRunningElseStart,
-            )
-            .await?
-        {
-            // inject 投递从不出队（见 TurnScheduler::deliver_input_gated），防御性返回错误而非
-            // panic。
-            DeliveryOutcome::Queued { .. } => Err(HandlerError::InvalidRequest(
-                "inject delivery unexpectedly enqueued input".into(),
-            )),
-            outcome => Ok(prompt_submission_from_delivery(outcome)),
-        }
+        self.session_commands.inject_input(sid, text).await
     }
 
     pub async fn submit_input_for_session(
@@ -103,18 +65,13 @@ impl CommandHandler {
         sid: SessionId,
         input: PromptInput,
     ) -> Result<PromptSubmission, HandlerError> {
-        validate_prompt_attachments(&input.attachments)?;
         if let Some(command) =
             slash::parse_slash_command(&input.text).filter(|command| command.has_name())
         {
-            match self.execute_command_for_session(sid.clone(), command).await {
-                Err(HandlerError::UnknownCommand(_)) => {},
-                other => return other,
+            if command.name == "model" {
+                return self.execute_command_for_session(sid, command).await;
             }
         }
-
-        self.start_turn_for_session(sid, input.text, input.attachments, None)
-            .await
-            .map(|turn_id| PromptSubmission::Accepted { turn_id })
+        self.session_commands.submit_input(sid, input).await
     }
 }

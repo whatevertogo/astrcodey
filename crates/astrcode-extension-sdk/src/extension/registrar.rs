@@ -231,26 +231,6 @@ impl Registrar {
         self.lifecycle.push((event, mode, priority, handler));
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.tools.is_empty()
-            && self.tool_discovery.is_empty()
-            && self.tool_metadata.is_empty()
-            && self.commands.is_empty()
-            && self.command_discovery.is_empty()
-            && self.http_routes.is_empty()
-            && self.keybindings.is_empty()
-            && self.status_items.is_empty()
-            && self.pre_tool_use.is_empty()
-            && self.post_tool_use.is_empty()
-            && self.provider.is_empty()
-            && self.prompt_build.is_empty()
-            && self.compact.is_empty()
-            && self.continue_after_stop.is_empty()
-            && self.user_message_envelope.is_empty()
-            && self.lifecycle.is_empty()
-            && self.extension_event_decls.is_empty()
-    }
-
     /// 声明插件可发出的事件类型，返回构建器。
     pub fn extension_event(&mut self, event_type: &str) -> ExtensionEventDeclBuilder<'_> {
         ExtensionEventDeclBuilder::new(self, event_type)
@@ -330,23 +310,6 @@ impl Registrar {
 
     pub fn extension_event_decls(&self) -> &[ExtensionEventDecl] {
         &self.extension_event_decls
-    }
-}
-
-#[cfg(test)]
-mod registrar_tests {
-    use super::*;
-
-    #[test]
-    fn emptiness_tracks_non_handler_registrations() {
-        let mut registrar = Registrar::new();
-        assert!(registrar.is_empty());
-
-        registrar.tool_metadata(HashMap::from([(
-            "example".to_owned(),
-            ToolPromptMetadata::new("example"),
-        )]));
-        assert!(!registrar.is_empty());
     }
 }
 

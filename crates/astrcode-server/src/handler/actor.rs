@@ -1,14 +1,13 @@
-//! Actor 框架 — CommandHandler 的异步消息驱动封装。
+//! 交互式 CommandHandler 的异步消息驱动封装。
 //!
-//! 提供 `CommandHandle` 作为外部访问入口，所有操作通过消息通道异步执行，
-//! 避免并发冲突并简化状态管理。
+//! `CommandHandle` 保留 focus、UI 选择等有状态交互的串行语义；HTTP/ACP
+//! 这类显式携带 session ID 的请求直接使用 `SessionCommandService`。
 
 use std::sync::Arc;
 
-use astrcode_core::{
-    tool::SessionToolSelection,
-    types::{SessionId, TurnId},
-};
+#[cfg(test)]
+use astrcode_core::types::TurnId;
+use astrcode_core::{tool::SessionToolSelection, types::SessionId};
 use astrcode_extension_sdk::extension::CommandCompletions;
 use astrcode_protocol::commands::ClientCommand;
 use tokio::sync::{mpsc, oneshot};
@@ -19,7 +18,7 @@ use super::{
 };
 use crate::{
     bootstrap::ServerRuntime,
-    turn_scheduler::{InputDelivery, PromptInput, TurnScheduler},
+    turn_scheduler::{PromptInput, TurnCompletionEvent, TurnScheduler},
 };
 
 /// Command actor 队列容量；满时 `send().await` 对调用方施加背压。
@@ -29,6 +28,7 @@ pub(in crate::handler) const COMMAND_ACTOR_CAPACITY: usize = 256;
 #[derive(Clone)]
 pub struct CommandHandle {
     pub(super) tx: mpsc::Sender<CommandMessage>,
+    task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl CommandHandle {
@@ -74,6 +74,7 @@ impl CommandHandle {
     }
 
     /// 提交提示词，返回 Turn ID 和完成通知接收器。
+    #[cfg(test)]
     pub(crate) async fn submit_prompt_with_completion(
         &self,
         session_id: SessionId,
@@ -203,9 +204,28 @@ impl CommandHandle {
 
     /// 停止 actor 主循环并等待任务退出。
     pub async fn shutdown(&self) {
-        let (reply, rx) = oneshot::channel();
-        if self.post(CommandMessage::Shutdown { reply }).await.is_ok() {
-            let _ = rx.await;
+        let graceful = async {
+            let (reply, rx) = oneshot::channel();
+            self.post(CommandMessage::Shutdown { reply }).await?;
+            rx.await.map_err(|_| HandlerError::ActorUnavailable)
+        };
+        let graceful = tokio::time::timeout(std::time::Duration::from_secs(1), graceful)
+            .await
+            .is_ok_and(|result| result.is_ok());
+
+        let task = self.task.lock().await.take();
+        if let Some(task) = task {
+            if !graceful {
+                tracing::warn!("command actor did not stop gracefully; aborting task");
+                task.abort();
+            }
+            if let Err(error) = task.await {
+                if error.is_panic() {
+                    tracing::error!("command actor task panicked");
+                } else if !error.is_cancelled() {
+                    tracing::warn!(%error, "command actor task failed");
+                }
+            }
         }
     }
 
@@ -272,16 +292,8 @@ pub(in crate::handler) enum CommandMessage {
         cursor: Option<usize>,
         reply: oneshot::Sender<Result<CommandCompletions, HandlerError>>,
     },
-    /// Agent Turn 完成/失败后的清理（事件已由 turn task 直接广播）。
-    ///
-    /// `session_id` / `completion` 供 actor 侧空闲 recap 门控；
-    /// `turn_id` 用于日志与后续 stale-cleanup 校验。
-    AgentTurnCleanup {
-        session_id: SessionId,
-        turn_id: TurnId,
-        completion: TurnCompletion,
-    },
     /// 提交提示词并等待完成通知
+    #[cfg(test)]
     SubmitInputWithCompletion {
         session_id: SessionId,
         input: PromptInput,
@@ -308,33 +320,25 @@ pub(in crate::handler) enum CommandMessage {
 }
 
 impl CommandHandler {
-    async fn queue_input_for_next_turn(
-        &self,
-        session_id: SessionId,
-        input: PromptInput,
-    ) -> Result<PromptSubmission, HandlerError> {
-        self.scheduler
-            .deliver_input(session_id, input, InputDelivery::QueueIfRunningElseStart)
-            .await
-            .map(super::prompt::prompt_submission_from_delivery)
-            .map_err(HandlerError::from)
-    }
-
     /// 创建新的 Handler 实例。
     pub(super) fn new(
         runtime: Arc<ServerRuntime>,
         scheduler: Arc<TurnScheduler>,
         event_bus: Arc<crate::server_event_bus::ServerEventBus>,
-        actor_tx: mpsc::Sender<CommandMessage>,
     ) -> Self {
         let model_selection =
             super::model_selection::ModelSelectionController::new(runtime.config_manager().clone());
+        let session_commands = crate::session_command_service::SessionCommandService::new(
+            Arc::clone(&runtime),
+            Arc::clone(&scheduler),
+            Arc::clone(&event_bus),
+        );
         Self {
             runtime,
             focused_session_id: None,
             scheduler,
             event_bus,
-            actor_tx,
+            session_commands,
             model_selection,
         }
     }
@@ -346,11 +350,14 @@ impl CommandHandler {
         event_bus: Arc<crate::server_event_bus::ServerEventBus>,
     ) -> CommandHandle {
         let (tx, rx) = mpsc::channel(COMMAND_ACTOR_CAPACITY);
-        let mut handler = Self::new(runtime, scheduler, event_bus, tx.clone());
-        crate::task_utils::spawn_traced("command_handler_actor", async move {
+        let mut handler = Self::new(runtime, scheduler, event_bus);
+        let task = tokio::spawn(async move {
             handler.run(rx).await;
         });
-        CommandHandle { tx }
+        CommandHandle {
+            tx,
+            task: Arc::new(tokio::sync::Mutex::new(Some(task))),
+        }
     }
 
     /// Actor 主循环：接收并处理消息直到通道关闭。
@@ -360,72 +367,87 @@ impl CommandHandler {
     async fn run(&mut self, mut rx: mpsc::Receiver<CommandMessage>) {
         use std::time::Duration;
 
-        use tokio::time::{Instant, sleep_until};
+        use tokio::{
+            sync::broadcast,
+            time::{Instant, sleep_until},
+        };
 
         const IDLE_RECAP_DELAY: Duration = Duration::from_secs(300); // 5 分钟
 
-        // None = 无计时；Some(deadline) = 等待中
+        enum Wake {
+            Message(Option<CommandMessage>),
+            Completion(Result<TurnCompletionEvent, broadcast::error::RecvError>),
+            Recap,
+        }
+
+        let mut completion_rx = self.scheduler.subscribe_completions();
         let mut recap_deadline: Option<Instant> = None;
 
         loop {
-            let maybe_msg = if let Some(deadline) = recap_deadline {
+            let wake = if let Some(deadline) = recap_deadline {
                 tokio::select! {
-                    msg = rx.recv() => msg,
-                    _ = sleep_until(deadline) => {
-                        // 空闲超时，触发自动 recap
-                        recap_deadline = None;
-                        if self.focused_session_id.as_ref().is_some_and(|sid| {
-                            !self.scheduler.registry().has_active(sid)
-                        }) {
-                            if let Err(e) = self.recap_session().await {
-                                tracing::debug!(error = %e, "auto-recap skipped");
-                            }
-                        }
-                        continue;
-                    }
+                    message = rx.recv() => Wake::Message(message),
+                    completion = completion_rx.recv() => Wake::Completion(completion),
+                    _ = sleep_until(deadline) => Wake::Recap,
                 }
             } else {
-                rx.recv().await
+                tokio::select! {
+                    message = rx.recv() => Wake::Message(message),
+                    completion = completion_rx.recv() => Wake::Completion(completion),
+                }
             };
 
-            let Some(message) = maybe_msg else { break };
-
-            // 用户提交 prompt → 取消 recap 计时
-            let resets_timer = matches!(
-                &message,
-                CommandMessage::ClientCommand {
-                    command: ClientCommand::SubmitPrompt { .. },
-                    ..
-                } | CommandMessage::SubmitInputForSession { .. }
-                    | CommandMessage::SubmitInputWithCompletion { .. }
-            );
-            if resets_timer {
-                recap_deadline = None;
-            }
-
-            // Turn 正常结束且仍是当前活跃 session → 启动空闲 recap 计时
-            let starts_recap_timer = match &message {
-                CommandMessage::AgentTurnCleanup {
-                    session_id,
-                    completion,
-                    ..
-                } => {
-                    matches!(completion, TurnCompletion::Completed { .. })
-                        && self.focused_session_id.as_ref() == Some(session_id)
-                        && !self.scheduler.registry().has_active(session_id)
+            match wake {
+                Wake::Message(Some(message)) => {
+                    if matches!(
+                        &message,
+                        CommandMessage::ClientCommand {
+                            command: ClientCommand::SubmitPrompt { .. },
+                            ..
+                        } | CommandMessage::SubmitInputForSession { .. }
+                    ) {
+                        recap_deadline = None;
+                    }
+                    let shutting_down = matches!(&message, CommandMessage::Shutdown { .. });
+                    self.handle_message(message).await;
+                    if shutting_down {
+                        break;
+                    }
                 },
-                _ => false,
-            };
-
-            if matches!(&message, CommandMessage::Shutdown { .. }) {
-                let _ = self.handle_message(message).await;
-                break;
-            }
-
-            self.handle_message(message).await;
-
-            if starts_recap_timer {
-                recap_deadline = Some(Instant::now() + IDLE_RECAP_DELAY);
+                Wake::Message(None) => break,
+                Wake::Completion(Ok(event)) => {
+                    tracing::debug!(
+                        session_id = %event.session_id,
+                        turn_id = %event.turn_id,
+                        completion = ?event.completion,
+                        "turn completion observed by command actor"
+                    );
+                    if matches!(event.completion, TurnCompletion::Completed { .. })
+                        && self.focused_session_id.as_ref() == Some(&event.session_id)
+                        && !self.scheduler.registry().has_active(&event.session_id)
+                    {
+                        recap_deadline = Some(Instant::now() + IDLE_RECAP_DELAY);
+                    }
+                },
+                Wake::Completion(Err(broadcast::error::RecvError::Lagged(skipped))) => {
+                    tracing::warn!(skipped, "command actor lagged behind turn completions");
+                },
+                Wake::Completion(Err(broadcast::error::RecvError::Closed)) => {
+                    tracing::warn!("turn completion channel closed");
+                    break;
+                },
+                Wake::Recap => {
+                    recap_deadline = None;
+                    if self
+                        .focused_session_id
+                        .as_ref()
+                        .is_some_and(|sid| !self.scheduler.registry().has_active(sid))
+                    {
+                        if let Err(error) = self.recap_session().await {
+                            tracing::debug!(%error, "auto-recap skipped");
+                        }
+                    }
+                },
             }
         }
     }
@@ -451,12 +473,7 @@ impl CommandHandler {
                 input,
                 reply,
             } => {
-                let result = if self.scheduler.registry().has_active(&session_id) {
-                    self.queue_input_for_next_turn(session_id, input).await
-                } else {
-                    self.submit_input_for_session(session_id, input).await
-                };
-                let _ = reply.send(result);
+                let _ = reply.send(self.submit_input_for_session(session_id, input).await);
             },
             CommandMessage::InjectInputForSession {
                 session_id,
@@ -504,20 +521,7 @@ impl CommandHandler {
                         .await,
                 );
             },
-            // Agent Turn 清理（终态事件已由 turn task 直接广播）
-            CommandMessage::AgentTurnCleanup {
-                session_id,
-                turn_id,
-                completion,
-            } => {
-                tracing::debug!(
-                    session_id = %session_id,
-                    turn_id = %turn_id,
-                    ?completion,
-                    "agent turn cleanup"
-                );
-                // 排队输入由 TurnCompleted → TurnScheduler::finish_and_maybe_start_next 统一出队。
-            },
+            #[cfg(test)]
             CommandMessage::SubmitInputWithCompletion {
                 session_id,
                 input,
@@ -539,7 +543,6 @@ impl CommandHandler {
                 let _ = reply.send(self.delete_project(working_dir).await);
             },
             CommandMessage::Shutdown { reply } => {
-                self.scheduler.drain_detached_tasks().await;
                 let _ = reply.send(());
             },
         }

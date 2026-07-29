@@ -49,11 +49,7 @@ pub(crate) async fn drive_agent(
     user_text: &str,
     turn_id: &TurnId,
 ) -> (Result<TurnOutput, TurnError>, bool) {
-    let publisher = Arc::new(TurnEvents::new(
-        agent.session().clone(),
-        turn_id.clone(),
-        None,
-    ));
+    let publisher = Arc::new(TurnEvents::new(agent.session().clone(), turn_id.clone()));
     let output = agent.process_prompt(user_text, turn_id, &publisher).await;
     (output, publisher.emitted_error())
 }
@@ -91,6 +87,7 @@ impl TurnLoop {
     pub(crate) fn new_with_llm(
         session: Session,
         session_state: &SessionReadModel,
+        tool_selection: astrcode_core::tool::SessionToolSelection,
         session_store_dir: Option<std::path::PathBuf>,
         llm: Arc<dyn astrcode_core::llm::LlmProvider>,
         tool_registry: Arc<crate::ToolRegistry>,
@@ -98,7 +95,8 @@ impl TurnLoop {
     ) -> Result<Self, TurnError> {
         let runtime = session.runtime();
         let runtime_services = session.runtime_services();
-        let turn = TurnToolContext::for_turn(&session, session_state, session_store_dir);
+        let turn =
+            TurnToolContext::for_turn(&session, session_state, tool_selection, session_store_dir);
         let tools = ToolCalls::new(
             turn,
             tool_registry,
@@ -312,11 +310,9 @@ impl TurnLoop {
                     );
                     if !tool_calls.is_empty() || message_started {
                         if !message_started {
-                            publisher
-                                .live(LiveEventPayload::AssistantMessageStarted {
-                                    message_id: message_id.clone(),
-                                })
-                                .await;
+                            publisher.live(LiveEventPayload::AssistantMessageStarted {
+                                message_id: message_id.clone(),
+                            });
                         }
                         publisher
                             .durable(DurableEventPayload::AssistantMessageCompleted {
@@ -727,7 +723,6 @@ impl TurnLoop {
         publisher: &Arc<TurnEvents>,
         state: &mut TurnState,
     ) -> Result<u32, TurnError> {
-        publisher.invalidate_model_cache().await;
         let model = publisher.snapshot_model().await?;
         let current = count_visible_user_messages(&model);
         let previous = state.tracked_user_message_count();
@@ -749,7 +744,6 @@ impl TurnLoop {
         publisher: &Arc<TurnEvents>,
         state: &TurnState,
     ) -> Result<bool, TurnError> {
-        publisher.invalidate_model_cache().await;
         let model = publisher.snapshot_model().await?;
         Ok(has_pending_mid_turn_user_messages(
             &model,

@@ -2,10 +2,7 @@
 //!
 //! Session 事件按 conversation 分发，非事件通知走全局通道。
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
     event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase},
@@ -46,11 +43,11 @@ impl SessionRoute {
 }
 
 pub struct ServerEventBus {
-    legacy_tx: Option<broadcast::Sender<ClientNotification>>,
+    all_notifications: broadcast::Sender<ClientNotification>,
     global_notifications: broadcast::Sender<ClientNotification>,
     conversation_events: Mutex<HashMap<SessionId, broadcast::Sender<Arc<Event>>>>,
     session_routes: Mutex<HashMap<SessionId, SessionRoute>>,
-    attached: Mutex<HashSet<SessionId>>,
+    attached: Mutex<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
     streaming: Mutex<HashMap<SessionId, Arc<StreamingState>>>,
 }
 
@@ -58,23 +55,25 @@ impl ServerEventBus {
     const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
     pub fn new() -> Self {
-        Self::new_with_legacy_tx(None)
-    }
-
-    pub fn with_legacy_tx(legacy_tx: broadcast::Sender<ClientNotification>) -> Self {
-        Self::new_with_legacy_tx(Some(legacy_tx))
-    }
-
-    fn new_with_legacy_tx(legacy_tx: Option<broadcast::Sender<ClientNotification>>) -> Self {
+        let (all_notifications, _) = broadcast::channel(Self::EVENT_CHANNEL_CAPACITY);
         let (global_notifications, _) = broadcast::channel(Self::EVENT_CHANNEL_CAPACITY);
         Self {
-            legacy_tx,
+            all_notifications,
             global_notifications,
             conversation_events: Mutex::new(HashMap::new()),
             session_routes: Mutex::new(HashMap::new()),
-            attached: Mutex::new(HashSet::new()),
+            attached: Mutex::new(HashMap::new()),
             streaming: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Subscribe to the complete transport-facing notification stream.
+    ///
+    /// Unlike [`Self::subscribe_global_notifications`], this includes session
+    /// events and is intended for transports such as stdio/TUI that expose one
+    /// process-wide notification channel.
+    pub fn subscribe_all_notifications(&self) -> broadcast::Receiver<ClientNotification> {
+        self.all_notifications.subscribe()
     }
 
     pub fn subscribe_global_notifications(&self) -> broadcast::Receiver<ClientNotification> {
@@ -113,9 +112,7 @@ impl ServerEventBus {
             ClientNotification::Event(event) => self.publish_event(Arc::new(event)),
             notification => {
                 let _ = self.global_notifications.send(notification.clone());
-                if let Some(legacy_tx) = &self.legacy_tx {
-                    let _ = legacy_tx.send(notification);
-                }
+                let _ = self.all_notifications.send(notification);
             },
         }
     }
@@ -128,28 +125,47 @@ impl ServerEventBus {
         if route.root_session_id() != &event.session_id && route.forwards_to_root(&event.payload) {
             self.send_to_existing_conversation_fanout(route.root_session_id(), Arc::clone(&event));
         }
-        if let Some(legacy_tx) = &self.legacy_tx {
-            let _ = legacy_tx.send(ClientNotification::Event((*event).clone()));
-        }
+        let _ = self
+            .all_notifications
+            .send(ClientNotification::Event((*event).clone()));
     }
 
     pub fn attach(self: &Arc<Self>, session: &Session) {
         let session_id = session.id().clone();
-        if !self.attached.lock().insert(session_id) {
+        let mut attached = self.attached.lock();
+        if attached.contains_key(&session_id) {
             return;
         }
         let mut rx = session.subscribe();
         let event_bus = Arc::clone(self);
-        crate::task_utils::spawn_traced("server_event_bus_fanout", async move {
+        let task = tokio::spawn(async move {
             while let Ok(event) = rx.recv().await {
                 event_bus.publish_event(event);
             }
         });
+        attached.insert(session_id, task);
     }
 
-    pub fn detach(&self, session_id: &SessionId) {
-        self.attached.lock().remove(session_id);
+    pub async fn detach(&self, session_id: &SessionId) {
+        let task = self.attached.lock().remove(session_id);
+        if let Some(task) = task {
+            task.abort();
+            let _ = task.await;
+        }
         self.forget_session_routes(session_id);
+    }
+
+    pub async fn shutdown(&self) {
+        let tasks = self
+            .attached
+            .lock()
+            .drain()
+            .map(|(_, task)| task)
+            .collect::<Vec<_>>();
+        for task in tasks {
+            task.abort();
+            let _ = task.await;
+        }
     }
 
     fn forget_session_routes(&self, session_id: &SessionId) {
@@ -175,6 +191,11 @@ impl ServerEventBus {
                     },
                 })
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_attached(&self, session_id: &SessionId) -> bool {
+        self.attached.lock().contains_key(session_id)
     }
 
     fn conversation_fanout(&self, session_id: &SessionId) -> broadcast::Sender<Arc<Event>> {
@@ -369,19 +390,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_event_broadcast_is_only_sent_when_enabled() {
-        let (legacy_tx, _) = broadcast::channel(8);
-        let bus = ServerEventBus::with_legacy_tx(legacy_tx.clone());
+    async fn all_notifications_include_events_and_global_notifications() {
+        let bus = ServerEventBus::new();
         let session_id = SessionId::new("session-1");
-        let mut legacy_rx = legacy_tx.subscribe();
+        let mut all_rx = bus.subscribe_all_notifications();
 
         bus.publish_event(turn_started(&session_id));
+        bus.send_notification(ClientNotification::ExtensionRegistryChanged);
 
-        let notification = legacy_rx.recv().await.expect("legacy event");
+        let notification = all_rx.recv().await.expect("event notification");
         match notification {
             ClientNotification::Event(event) => assert_eq!(event.session_id, session_id),
             other => panic!("expected event notification, got {other:?}"),
         }
+        assert!(matches!(
+            all_rx.recv().await,
+            Ok(ClientNotification::ExtensionRegistryChanged)
+        ));
     }
 
     #[tokio::test]

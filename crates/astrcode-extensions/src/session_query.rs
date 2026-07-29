@@ -65,14 +65,14 @@ impl SessionQuery for StorageSessionQuery {
             .await
             .map_err(query_error)?;
         Ok(SessionTranscript {
-            session_id: model.identity.session_id,
+            session_id: model.identity.session_id.clone(),
             messages: model
                 .transcript
                 .messages
-                .into_iter()
+                .iter()
                 .map(|message| SessionTranscriptMessage {
-                    message: message.message,
-                    source: message.source,
+                    message: message.message.clone(),
+                    source: message.source.clone(),
                 })
                 .collect(),
         })
