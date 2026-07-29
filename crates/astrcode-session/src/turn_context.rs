@@ -69,12 +69,12 @@ impl SharedTurnContext {
     pub fn from_read_model(session_id: &SessionId, model: &SessionReadModel) -> Self {
         Self {
             session_id: session_id.clone(),
-            working_dir: model.working_dir.clone(),
-            model_id: model.model_id.clone(),
+            working_dir: model.identity.working_dir.clone(),
+            model_id: model.identity.model_id.clone(),
             session_store_dir: None,
             turn_event_sender: None,
             approval_mode: astrcode_core::permission::ApprovalMode::default(),
-            tool_selection: model.tool_selection.clone(),
+            tool_selection: Some(model.identity.tool_selection.clone()),
             permission_chain: std::sync::Arc::new(crate::permission::PermissionChain::new(vec![])),
             approval_history: std::sync::Arc::new(
                 crate::permission::ApprovalHistoryStore::default(),
@@ -151,6 +151,8 @@ pub enum TurnError {
     Extension(#[from] ExtensionError),
     #[error("{0}")]
     Session(#[from] crate::session::SessionError),
+    #[error("session projection error: {0}")]
+    Projection(#[from] astrcode_session_projection::ProjectionError),
     #[error("prompt is still too long after reactive compaction")]
     CompactExhausted,
     #[error("LLM stream ended unexpectedly")]

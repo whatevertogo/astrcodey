@@ -15,7 +15,7 @@ use astrcode_core::{
         ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme,
         ProviderWireFormat,
     },
-    event::{Event, EventPayload, Phase},
+    event::{DurableEvent, DurableEventPayload, EventPayload, LiveEventPayload, Phase},
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
     tool::ToolDefinition,
     types::{SessionId, ToolCallId, new_session_id},
@@ -753,16 +753,14 @@ fn test_runtime_with_settings(
     ));
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings));
     let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
-    let runtime_services = Arc::new(astrcode_session::SessionRuntimeServices::new(
+    let runtime_services = crate::config_manager::assemble_session_runtime_services(
         llm_provider.clone(),
         llm_provider,
         effective,
-        crate::default_host::first_party_host_services(
-            extension_runner.clone(),
-            context_assembler.clone(),
-            std::sync::Arc::clone(&shell_timeout_secs),
-        ),
-    ));
+        extension_runner.clone(),
+        context_assembler.clone(),
+        std::sync::Arc::clone(&shell_timeout_secs),
+    );
     let config = Arc::new(crate::config_manager::ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
             std::path::PathBuf::from("target/test-config.toml"),
@@ -915,7 +913,9 @@ async fn wait_for_turn_completed(event_rx: &mut mpsc::Receiver<ClientNotificatio
         let ClientNotification::Event(event) = notification else {
             continue;
         };
-        if let EventPayload::TurnCompleted { finish_reason } = event.payload {
+        if let EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) =
+            event.payload
+        {
             return finish_reason;
         }
     }
@@ -929,10 +929,10 @@ async fn drain_until_compact_boundary(
         let ClientNotification::Event(event) = notification else {
             continue;
         };
-        if let EventPayload::CompactBoundaryCreated {
+        if let EventPayload::Durable(DurableEventPayload::CompactBoundaryCreated {
             continued_session_id,
             ..
-        } = event.payload
+        }) = event.payload
         {
             return continued_session_id;
         }
@@ -946,10 +946,10 @@ async fn append_user_assistant_pair(
     assistant: &str,
 ) {
     store
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             session_id.clone(),
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: user.into(),
                 attachments: vec![],
@@ -958,10 +958,10 @@ async fn append_user_assistant_pair(
         .await
         .unwrap();
     store
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             session_id.clone(),
             None,
-            EventPayload::AssistantMessageCompleted {
+            DurableEventPayload::AssistantMessageCompleted {
                 message_id: new_message_id(),
                 text: assistant.into(),
                 reasoning_content: None,
@@ -981,12 +981,14 @@ async fn collect_turn_ids_until_completed(
             continue;
         };
         match event.payload {
-            EventPayload::TurnStarted
-            | EventPayload::UserMessage { .. }
-            | EventPayload::AssistantMessageCompleted { .. } => {
+            EventPayload::Durable(
+                DurableEventPayload::TurnStarted
+                | DurableEventPayload::UserMessage { .. }
+                | DurableEventPayload::AssistantMessageCompleted { .. },
+            ) => {
                 turn_ids.push(event.turn_id);
             },
-            EventPayload::TurnCompleted { finish_reason } => {
+            EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) => {
                 turn_ids.push(event.turn_id);
                 return (finish_reason, turn_ids);
             },
@@ -1034,7 +1036,7 @@ fn compact_payload_helpers_split_projection_and_audit_fields() {
 
     assert!(matches!(
         boundary,
-        EventPayload::CompactBoundaryCreated {
+        DurableEventPayload::CompactBoundaryCreated {
             continued_session_id,
             transcript_path: Some(path),
             ..
@@ -1042,7 +1044,7 @@ fn compact_payload_helpers_split_projection_and_audit_fields() {
     ));
     assert!(matches!(
         continued,
-        EventPayload::SessionContinuedFromCompaction {
+        DurableEventPayload::SessionContinuedFromCompaction {
             parent_session_id,
             parent_cursor,
             context_messages,
@@ -1061,23 +1063,28 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
     let sid = new_session_id();
     runtime
         .event_store()
-        .create_session(&sid, ".", "mock-model", None, None, None)
+        .create_session(crate::test_support::session_started_event_for_test(
+            sid.clone(),
+            ".",
+            "mock-model",
+        ))
         .await
         .unwrap();
     let event_tx = Arc::new(EventFanout::new(1024));
     let mut event_rx = event_tx.subscribe();
 
-    let event = Event::new(
+    let event = DurableEvent::new(
         sid.clone(),
         None,
-        EventPayload::SystemPromptConfigured {
+        DurableEventPayload::SystemPromptConfigured {
             text: "ordered prompt".into(),
             fingerprint: "fingerprint".into(),
             extra_system_prompt: None,
+            source: Default::default(),
         },
     );
     let event = runtime.event_store().append_event(event).await.unwrap();
-    event_tx.send(ClientNotification::Event(event));
+    event_tx.send(ClientNotification::Event(event.into()));
 
     let ClientNotification::Event(event) = recv_event(&mut event_rx).await else {
         panic!("expected event notification");
@@ -1089,11 +1096,11 @@ async fn record_and_broadcast_updates_projection_before_broadcast() {
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert_eq!(model.system_prompt.as_deref(), Some("ordered prompt"));
+    assert_eq!(model.system_prompt.text, "ordered prompt");
 }
 
 #[tokio::test]
-async fn create_session_configures_system_prompt() {
+async fn create_session_persists_initial_system_prompt() {
     let runtime = test_runtime();
     let event_tx = Arc::new(EventFanout::new(1024));
     let mut event_rx = event_tx.subscribe();
@@ -1101,33 +1108,23 @@ async fn create_session_configures_system_prompt() {
 
     let sid = handler.create_session(".".into()).await.unwrap();
 
-    let mut saw_configured = false;
-    for _ in 0..2 {
-        if let ClientNotification::Event(event) = recv_event(&mut event_rx).await {
-            if let EventPayload::SystemPromptConfigured {
-                text, fingerprint, ..
-            } = event.payload
-            {
-                saw_configured = true;
-                assert!(text.contains("[Identity]"));
-                assert!(!fingerprint.is_empty());
-            }
-        }
-    }
-    assert!(saw_configured);
+    let ClientNotification::Event(event) = recv_event(&mut event_rx).await else {
+        panic!("expected session start event");
+    };
+    let EventPayload::Durable(DurableEventPayload::SessionStarted(started)) = event.payload else {
+        panic!("session start should contain its initial prompt");
+    };
+    let prompt = started.initial_system_prompt;
+    assert!(prompt.text.contains("[Identity]"));
+    assert!(!prompt.fingerprint.is_empty());
 
     let state = runtime
         .event_store()
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert!(
-        state
-            .system_prompt
-            .as_deref()
-            .is_some_and(|prompt| prompt.contains("[Identity]"))
-    );
-    assert!(state.messages.is_empty());
+    assert!(state.system_prompt.text.contains("[Identity]"));
+    assert!(state.transcript.messages.is_empty());
 }
 
 #[tokio::test]
@@ -1174,7 +1171,11 @@ async fn reopening_persisted_session_emits_resume_once_per_runtime() {
     let sid = new_session_id();
     runtime
         .event_store()
-        .create_session(&sid, ".", "mock-model", None, None, None)
+        .create_session(crate::test_support::session_started_event_for_test(
+            sid.clone(),
+            ".",
+            "mock-model",
+        ))
         .await
         .unwrap();
 
@@ -1198,7 +1199,11 @@ async fn failed_session_resume_is_retried_on_next_open() {
     let sid = new_session_id();
     runtime
         .event_store()
-        .create_session(&sid, ".", "mock-model", None, None, None)
+        .create_session(crate::test_support::session_started_event_for_test(
+            sid.clone(),
+            ".",
+            "mock-model",
+        ))
         .await
         .unwrap();
 
@@ -1225,7 +1230,11 @@ async fn concurrent_open_waits_for_initial_session_resume() {
     let sid = new_session_id();
     runtime
         .event_store()
-        .create_session(&sid, ".", "mock-model", None, None, None)
+        .create_session(crate::test_support::session_started_event_for_test(
+            sid.clone(),
+            ".",
+            "mock-model",
+        ))
         .await
         .unwrap();
 
@@ -1266,7 +1275,11 @@ async fn cancelled_initial_resume_allows_retry() {
     let sid = new_session_id();
     runtime
         .event_store()
-        .create_session(&sid, ".", "mock-model", None, None, None)
+        .create_session(crate::test_support::session_started_event_for_test(
+            sid.clone(),
+            ".",
+            "mock-model",
+        ))
         .await
         .unwrap();
 
@@ -1325,38 +1338,6 @@ async fn submit_prompt_reuses_session_system_prompt() {
 }
 
 #[tokio::test]
-async fn submit_prompt_configures_missing_session_system_prompt() {
-    let runtime = test_runtime();
-    let sid = new_session_id();
-    runtime
-        .event_store()
-        .create_session(&sid, ".", "mock-model", None, None, None)
-        .await
-        .unwrap();
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let mut event_rx = event_tx.subscribe();
-    let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
-
-    handler
-        .submit_input_for_session(sid.clone(), "hello".into())
-        .await
-        .unwrap();
-    assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
-
-    let state = runtime
-        .event_store()
-        .session_read_model(&sid)
-        .await
-        .unwrap();
-    assert!(
-        state
-            .system_prompt
-            .as_deref()
-            .is_some_and(|prompt| prompt.contains("[Identity]"))
-    );
-}
-
-#[tokio::test]
 async fn submit_prompt_uses_one_turn_id_for_turn_events() {
     let runtime = test_runtime();
     let event_tx = Arc::new(EventFanout::new(1024));
@@ -1389,15 +1370,19 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
     let sid = new_session_id();
     runtime
         .event_store()
-        .create_session(&sid, ".", "mock", None, None, None)
+        .create_session(crate::test_support::session_started_event_for_test(
+            sid.clone(),
+            ".",
+            "mock",
+        ))
         .await
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             Some("stale-turn".into()),
-            EventPayload::ToolCallRequested {
+            DurableEventPayload::ToolCallRequested {
                 call_id: "call-1".into(),
                 tool_name: "todoWrite".into(),
                 arguments: serde_json::json!({}),
@@ -1411,9 +1396,10 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert_eq!(stale_state.phase, Phase::CallingTool);
+    assert_eq!(stale_state.execution.phase, Phase::CallingTool);
     assert!(
         stale_state
+            .execution
             .pending_tool_calls
             .contains(&ToolCallId::from("call-1"))
     );
@@ -1435,9 +1421,9 @@ async fn stale_pending_tool_calls_are_repaired_on_explicit_repair() {
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert_eq!(state.phase, Phase::Idle);
-    assert!(state.pending_tool_calls.is_empty());
-    assert!(state.messages.iter().any(|message| {
+    assert_eq!(state.execution.phase, Phase::Idle);
+    assert!(state.execution.pending_tool_calls.is_empty());
+    assert!(state.transcript.messages.iter().any(|message| {
         message.message.content.iter().any(|content| {
             matches!(
                 content,
@@ -1465,15 +1451,19 @@ async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
     let sid = new_session_id();
     runtime
         .event_store()
-        .create_session(&sid, ".", "mock", None, None, None)
+        .create_session(crate::test_support::session_started_event_for_test(
+            sid.clone(),
+            ".",
+            "mock",
+        ))
         .await
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             Some("aborted-turn".into()),
-            EventPayload::ToolCallRequested {
+            DurableEventPayload::ToolCallRequested {
                 call_id: "call-abort".into(),
                 tool_name: "shell".into(),
                 arguments: serde_json::json!({ "command": "sleep" }),
@@ -1484,10 +1474,10 @@ async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             Some("aborted-turn".into()),
-            EventPayload::TurnCompleted {
+            DurableEventPayload::TurnCompleted {
                 finish_reason: "aborted".into(),
             },
         ))
@@ -1499,8 +1489,8 @@ async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert_eq!(stale_state.phase, Phase::Idle);
-    assert!(stale_state.pending_tool_calls.is_empty());
+    assert_eq!(stale_state.execution.phase, Phase::Idle);
+    assert!(stale_state.execution.pending_tool_calls.is_empty());
 
     let event_tx = Arc::new(EventFanout::new(1024));
     let (actor_tx, _actor_rx) = mpsc::channel(super::actor::COMMAND_ACTOR_CAPACITY);
@@ -1519,7 +1509,7 @@ async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert!(state.messages.iter().any(|message| {
+    assert!(state.transcript.messages.iter().any(|message| {
         message.message.content.iter().any(|content| {
             matches!(
                 content,
@@ -1548,20 +1538,29 @@ async fn repair_stale_runs_marks_child_without_active_execution_interrupted() {
     let child_id = new_session_id();
     runtime
         .event_store()
-        .create_session(&parent_id, ".", "mock", None, None, None)
+        .create_session(crate::test_support::session_started_event_for_test(
+            parent_id.clone(),
+            ".",
+            "mock",
+        ))
         .await
         .unwrap();
     runtime
         .event_store()
-        .create_session(&child_id, ".", "mock", Some(&parent_id), None, None)
+        .create_session(crate::test_support::child_session_started_event_for_test(
+            child_id.clone(),
+            ".",
+            "mock",
+            parent_id.clone(),
+        ))
         .await
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             parent_id.clone(),
             None,
-            EventPayload::AgentSessionSpawned {
+            DurableEventPayload::AgentSessionSpawned {
                 child_session_id: child_id.clone(),
                 agent_name: "explorer".into(),
                 task: "inspect".into(),
@@ -1664,6 +1663,7 @@ async fn queue_input_started_from_idle_is_cleaned_up() {
             .session_read_model(&sid)
             .await
             .unwrap()
+            .execution
             .phase,
         Phase::Idle
     );
@@ -1712,8 +1712,8 @@ async fn queued_inputs_run_fifo_for_same_session() {
     let events = runtime.event_store().replay_events(&sid).await.unwrap();
     let user_messages: Vec<String> = events
         .into_iter()
-        .filter_map(|event| match event.payload {
-            EventPayload::UserMessage { text, .. } => Some(text),
+        .filter_map(|event| match event.event.payload {
+            DurableEventPayload::UserMessage { text, .. } => Some(text),
             _ => None,
         })
         .collect();
@@ -1818,7 +1818,7 @@ async fn read_before_edit_guard_survives_across_turns() {
     assert!(events.iter().any(|event| {
         matches!(
             &event.payload,
-            EventPayload::ToolCallCompleted {
+            DurableEventPayload::ToolCallCompleted {
                 call_id,
                 tool_name,
                 result,
@@ -1877,7 +1877,8 @@ async fn abort_stops_inner_turn_before_late_provider_events_are_persisted() {
     assert!(!events.iter().any(|event| {
         matches!(
             &event.payload,
-            EventPayload::AssistantMessageCompleted { text, .. } if text.contains("late output")
+            DurableEventPayload::AssistantMessageCompleted { text, .. }
+                if text.contains("late output")
         )
     }));
 }
@@ -1913,7 +1914,10 @@ async fn compact_session_rejects_running_turn_without_compaction_started() {
             },
             ClientNotification::Event(event) => {
                 assert!(
-                    !matches!(event.payload, EventPayload::CompactionStarted),
+                    !matches!(
+                        event.payload,
+                        EventPayload::Live(LiveEventPayload::CompactionStarted)
+                    ),
                     "rejected compact must not leave clients in compacting state"
                 );
             },
@@ -1956,7 +1960,10 @@ async fn stale_agent_finish_after_abort_is_ignored() {
 
     while let Ok(notification) = event_rx.try_recv() {
         if let ClientNotification::Event(event) = notification {
-            if matches!(event.payload, EventPayload::TurnCompleted { .. }) {
+            if matches!(
+                event.payload,
+                EventPayload::Durable(DurableEventPayload::TurnCompleted { .. })
+            ) {
                 panic!("stale AgentTurnFinished should not emit a second completion");
             }
         }
@@ -1997,13 +2004,13 @@ async fn compact_command_rewrites_provider_history_without_exposing_summary() {
         .session_read_model(&session_id)
         .await
         .unwrap();
-    assert!(!state.context_messages.is_empty());
+    assert!(!state.transcript.context_messages.is_empty());
     assert!(state.provider_messages().iter().any(|message| {
         message_to_dto(message)
             .content
             .contains("<compact_summary>")
     }));
-    assert!(state.messages.iter().all(|message| {
+    assert!(state.transcript.messages.iter().all(|message| {
         !message_to_dto(&message.message)
             .content
             .contains("<compact_summary>")
@@ -2044,6 +2051,7 @@ async fn slash_compact_uses_backend_command_without_user_message() {
         .unwrap();
     assert!(
         state
+            .transcript
             .messages
             .iter()
             .all(|message| message_to_dto(&message.message).content != "/compact")
@@ -2213,6 +2221,7 @@ async fn skill_slash_command_uses_skill_content_as_user_message() {
         .unwrap();
     assert!(
         state
+            .transcript
             .messages
             .iter()
             .any(|message| message_to_dto(&message.message)
@@ -2310,7 +2319,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
             .session_read_model(&session_id)
             .await
             .unwrap();
-        message_to_dto(&state.context_messages[0].message).content
+        message_to_dto(&state.transcript.context_messages[0].message).content
     };
 
     handler
@@ -2334,7 +2343,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
         .session_read_model(&session_id)
         .await
         .unwrap();
-    let second_summary = message_to_dto(&state.context_messages[0].message).content;
+    let second_summary = message_to_dto(&state.transcript.context_messages[0].message).content;
     assert!(
         second_summary.contains("Compacted conversation summary"),
         "second compact should preserve a provider summary"
@@ -2360,10 +2369,10 @@ async fn auto_compact_applies_in_memory_during_turn() {
     for index in 0..3 {
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 session_id.clone(),
                 None,
-                EventPayload::UserMessage {
+                DurableEventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: format!("old user {index} {}", "x ".repeat(20)),
                     attachments: vec![],
@@ -2373,10 +2382,10 @@ async fn auto_compact_applies_in_memory_during_turn() {
             .unwrap();
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 session_id.clone(),
                 None,
-                EventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessageCompleted {
                     message_id: new_message_id(),
                     text: format!("old answer {index} {}", "y ".repeat(20)),
                     reasoning_content: None,
@@ -2400,11 +2409,11 @@ async fn auto_compact_applies_in_memory_during_turn() {
             continue;
         };
         match event.payload {
-            EventPayload::CompactionStarted => {
+            EventPayload::Live(LiveEventPayload::CompactionStarted) => {
                 compaction_started_count += 1;
                 assert_eq!(event.session_id, session_id);
             },
-            EventPayload::TurnCompleted { finish_reason } => {
+            EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) => {
                 assert_eq!(finish_reason, "stop");
                 assert_eq!(
                     event.session_id, session_id,
@@ -2437,10 +2446,10 @@ async fn prompt_too_long_triggers_reactive_compact_and_retries_once() {
     for index in 0..3 {
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 session_id.clone(),
                 None,
-                EventPayload::UserMessage {
+                DurableEventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: format!("old user {index} {}", "x ".repeat(20)),
                     attachments: vec![],
@@ -2450,10 +2459,10 @@ async fn prompt_too_long_triggers_reactive_compact_and_retries_once() {
             .unwrap();
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 session_id.clone(),
                 None,
-                EventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessageCompleted {
                     message_id: new_message_id(),
                     text: format!("old answer {index} {}", "y ".repeat(20)),
                     reasoning_content: None,
@@ -2476,11 +2485,15 @@ async fn prompt_too_long_triggers_reactive_compact_and_retries_once() {
             continue;
         };
         match event.payload {
-            EventPayload::CompactionStarted => saw_compaction_started += 1,
-            EventPayload::CompactionCompleted { .. } => saw_compaction_completed += 1,
-            EventPayload::AssistantMessageCompleted { text, .. }
-                if text == "reactive retry succeeded" =>
-            {
+            EventPayload::Live(LiveEventPayload::CompactionStarted) => {
+                saw_compaction_started += 1;
+            },
+            EventPayload::Live(LiveEventPayload::CompactionCompleted { .. }) => {
+                saw_compaction_completed += 1;
+            },
+            EventPayload::Durable(DurableEventPayload::AssistantMessageCompleted {
+                text, ..
+            }) if text == "reactive retry succeeded" => {
                 break;
             },
             _ => {},
@@ -2496,7 +2509,7 @@ async fn prompt_too_long_triggers_reactive_compact_and_retries_once() {
         .session_read_model(&session_id)
         .await
         .unwrap();
-    assert!(!state.context_messages.is_empty());
+    assert!(!state.transcript.context_messages.is_empty());
 }
 
 #[tokio::test]
@@ -2534,12 +2547,15 @@ async fn prompt_too_long_after_reactive_retry_returns_compact_exhausted() {
             continue;
         };
         match event.payload {
-            EventPayload::CompactionCompleted { .. } => saw_compaction_completed = true,
-            EventPayload::ErrorOccurred { message, .. } => {
+            EventPayload::Live(LiveEventPayload::CompactionCompleted { .. }) => {
+                saw_compaction_completed = true;
+            },
+            EventPayload::Durable(DurableEventPayload::ErrorOccurred { message, .. })
+            | EventPayload::Live(LiveEventPayload::ErrorOccurred { message, .. }) => {
                 saw_compact_exhausted =
                     message.contains("prompt is still too long after reactive compaction");
             },
-            EventPayload::TurnCompleted { finish_reason } => {
+            EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) => {
                 assert_eq!(finish_reason, "error");
                 break;
             },
@@ -2588,6 +2604,7 @@ async fn auto_compact_uses_configured_keep_recent_turns() {
         .await
         .unwrap();
     let visible = state
+        .transcript
         .messages
         .iter()
         .map(|message| message_to_dto(&message.message).content)
@@ -2643,8 +2660,8 @@ async fn auto_compact_breaker_skips_llm_but_still_runs_deterministic_compact() {
             continue;
         };
         match event.payload {
-            EventPayload::CompactionStarted => first_compactions += 1,
-            EventPayload::TurnCompleted { finish_reason } => {
+            EventPayload::Live(LiveEventPayload::CompactionStarted) => first_compactions += 1,
+            EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) => {
                 assert_eq!(finish_reason, "stop");
                 break;
             },
@@ -2665,8 +2682,8 @@ async fn auto_compact_breaker_skips_llm_but_still_runs_deterministic_compact() {
             continue;
         };
         match event.payload {
-            EventPayload::CompactionStarted => second_compactions += 1,
-            EventPayload::TurnCompleted { finish_reason } => {
+            EventPayload::Live(LiveEventPayload::CompactionStarted) => second_compactions += 1,
+            EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) => {
                 assert_eq!(finish_reason, "stop");
                 break;
             },
@@ -2775,7 +2792,7 @@ async fn streaming_tool_call_completed_executes_tools() {
         .filter(|event| {
             matches!(
                 &event.payload,
-                EventPayload::ToolCallCompleted { call_id, .. }
+                DurableEventPayload::ToolCallCompleted { call_id, .. }
                     if call_id.as_str() == "stream-read-1"
                         || call_id.as_str() == "stream-read-2"
             )

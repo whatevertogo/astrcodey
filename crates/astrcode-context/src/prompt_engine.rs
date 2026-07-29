@@ -7,32 +7,68 @@
 //! ## 扩展动态贡献流程
 //!
 //! 扩展不直接依赖此模块。它们实现 `PromptBuildHandler` 返回
-//! `PromptContributions`（定义在 `astrcode-core`）。TurnRunner 每轮收集
-//! 最新贡献，由 `DefaultPromptProvider` 组装完整 prompt。
+//! `PromptContributions`（定义在 `astrcode-extension-sdk`）。Session 每轮收集
+//! 最新贡献，由 [`PromptEngine`] 组装完整 prompt。
 //!
 //! ```text
 //! TurnRunner (每轮)
 //!   → ExtensionRunner::collect_prompt_contributions_typed()
-//!   → DefaultPromptProvider::assemble(input)
-//!     → build_system_prompt(input)
+//!   → PromptEngine::assemble(input)
 //! ```
 //!
-//! MCP 断连/重连、skill 文件变化等都会在下一轮自动反映到 prompt。
+//! Native session 会在下一轮把 MCP 断连/重连、skill 文件变化等反映到 prompt；
+//! fork 继承的 prompt 则保持创建时文本不变。
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::collections::HashMap;
 
-pub use astrcode_core::prompt::system_messages_from_prompt;
-use astrcode_core::{
-    prompt::{
-        ExtensionPromptBlock, ExtensionSection, PromptFileProvider, PromptFiles, PromptPlan,
-        PromptProvider, SystemPromptInput,
-    },
-    tool::{ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolPromptTag},
-};
-use astrcode_support::hostpaths::astrcode_dir;
+use astrcode_core::tool::{ToolDefinition, ToolPromptMetadata};
+
+mod prompt_files;
+mod provider_messages;
+mod tool_summary;
+
+pub use prompt_files::load_prompt_files;
+pub use provider_messages::system_messages_from_prompt;
+
+/// 从宿主环境加载到的 prompt 文件内容。
+#[derive(Debug, Clone, Default)]
+pub struct PromptFiles {
+    pub identity: Option<String>,
+    pub user_rules: Option<String>,
+    pub project_rules: Option<String>,
+}
+
+/// Prompt 渲染所需的结构化输入。
+#[derive(Debug, Clone)]
+pub struct SystemPromptInput<'a> {
+    pub working_dir: String,
+    pub os: String,
+    pub shell: String,
+    pub gh_cli_available: bool,
+    pub identity: Option<String>,
+    pub user_rules: Option<String>,
+    pub project_rules: Option<String>,
+    pub tools: &'a [ToolDefinition],
+    pub tool_prompt_metadata: HashMap<String, ToolPromptMetadata>,
+    pub extension_blocks: Vec<ExtensionPromptBlock>,
+    pub extra_instructions: Option<String>,
+}
+
+/// 扩展贡献的文本块，带逻辑分类标签。
+#[derive(Debug, Clone)]
+pub struct ExtensionPromptBlock {
+    pub section: ExtensionSection,
+    pub content: String,
+}
+
+/// 扩展可贡献文本的逻辑分组。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionSection {
+    PlatformInstructions,
+    AdditionalInstructions,
+    Skills,
+    Agents,
+}
 
 // ─── 内置常量 ──────────────────────────────────────────────────────────
 
@@ -42,8 +78,6 @@ const DEFAULT_IDENTITY: &str = "You are Astrcode, an agent that helps users with
                                 perspectives grounded in facts and careful thinking—not neutral \
                                 summaries.\nCommunicate naturally and warmly: straightforward \
                                 when simple, thoughtful and precise when not.";
-
-const MAX_IDENTITY_SIZE: usize = 8192;
 
 const SYSTEM_RULES: &str = "1. All text you output outside of tool use is displayed to the user, \
                             rendered as CommonMark markdown in a monospace font.\n2. The system \
@@ -103,86 +137,14 @@ const COMMUNICATION: &str =
      outcome, verification, and remaining risk.\n\nVoice concerns and constructive disagreement — \
      you are a collaborator, not just an executor.";
 
-const TOOL_GUIDANCE: &str = "Read before you write; search before you ask.\nMatching workflow → \
-                             `Skill` | External MCP only → `tool_search_tool` (not for builtin \
-                             tools like `glob`) | Substantial independent subtask → `agent`";
+/// Astrcode 的具体 prompt 组装器。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PromptEngine;
 
-const TOOL_SECTION_BUILTIN: &str = "Builtin Tools";
-const TOOL_SECTION_AGENT_COLLABORATION: &str = "Agent Collaboration Tools";
-const TOOL_SECTION_EXTERNAL_MCP: &str = "External MCP Tools";
-const TOOL_SECTION_EXTENSION: &str = "Extension Tools";
-const TOOL_AGENT_COLLABORATION_GUIDANCE: &str =
-    "- `subagentType` from [Agents]; see detailed guide for delegation patterns.";
-
-/// Default system prompt assembler used by the first-party host.
-pub struct DefaultPromptProvider;
-
-#[async_trait::async_trait]
-impl PromptProvider for DefaultPromptProvider {
-    async fn assemble(&self, input: SystemPromptInput) -> PromptPlan {
-        PromptPlan::from_system_prompt(build_system_prompt(&input))
+impl PromptEngine {
+    pub fn assemble(&self, input: &SystemPromptInput<'_>) -> String {
+        build_system_prompt(input)
     }
-}
-
-/// Default disk-backed prompt file loader used by the first-party host.
-pub struct DefaultPromptFileProvider;
-
-#[async_trait::async_trait]
-impl PromptFileProvider for DefaultPromptFileProvider {
-    async fn load(&self, working_dir: &str, include_agents_rules: bool) -> PromptFiles {
-        load_system_prompt_files_with_scope(working_dir, include_agents_rules).await
-    }
-}
-
-// ─── Identity 加载 ─────────────────────────────────────────────────────
-
-fn user_identity_md_path() -> PathBuf {
-    astrcode_dir().join("IDENTITY.md")
-}
-
-fn user_agents_md_path() -> PathBuf {
-    astrcode_dir().join("AGENTS.md")
-}
-
-fn load_identity_md(path: &Path) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    let trimmed = content.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let identity = if trimmed.len() > MAX_IDENTITY_SIZE {
-        truncate_to_char_boundary(trimmed, MAX_IDENTITY_SIZE)
-    } else {
-        trimmed
-    };
-    Some(identity.to_string())
-}
-
-fn load_user_rules(path: &Path) -> Option<String> {
-    let content = fs::read_to_string(path).ok()?;
-    let content = content.trim();
-    if content.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "User-wide instructions from {}:\n{}",
-        path.display(),
-        content
-    ))
-}
-
-fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
 }
 
 // ─── 核心构建函数 ──────────────────────────────────────────────────────
@@ -190,7 +152,7 @@ fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
 /// 根据结构化输入构建完整的 system prompt 字符串。
 ///
 /// 纯函数，无副作用。section 顺序固定，不可配置。
-fn build_system_prompt(input: &SystemPromptInput) -> String {
+fn build_system_prompt(input: &SystemPromptInput<'_>) -> String {
     let mut sections = default_contributors()
         .into_iter()
         .flat_map(|contributor| contributor.contribute(input))
@@ -232,7 +194,7 @@ enum PromptContributor {
 }
 
 impl PromptContributor {
-    fn contribute(self, input: &SystemPromptInput) -> Vec<PromptSection> {
+    fn contribute(self, input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
         match self {
             Self::Identity => identity_sections(input),
             Self::System => system_sections(),
@@ -280,7 +242,7 @@ impl PromptSection {
     }
 }
 
-fn identity_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
+fn identity_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
     let identity = input.identity.as_deref().unwrap_or(DEFAULT_IDENTITY).trim();
     vec![PromptSection::new(
         PromptSectionOrder::Identity,
@@ -289,7 +251,7 @@ fn identity_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
     )]
 }
 
-fn environment_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
+fn environment_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
     let mut body = format!(
         "Working directory: {}\nOS: {}\nShell: {}",
         input.working_dir, input.os, input.shell
@@ -328,7 +290,7 @@ fn communication_sections() -> Vec<PromptSection> {
     )]
 }
 
-fn rules_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
+fn rules_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
     let mut sections = Vec::new();
     if let Some(rules) = &input.user_rules {
         sections.push(PromptSection::new(
@@ -347,9 +309,9 @@ fn rules_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
     sections
 }
 
-fn tool_summary_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
+fn tool_summary_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
     let mut sections = Vec::new();
-    if let Some(tool_summary) = tool_summary_section(input) {
+    if let Some(tool_summary) = tool_summary::tool_summary(input) {
         sections.push(PromptSection::new(
             PromptSectionOrder::ToolSummary,
             "Tool Summary",
@@ -359,7 +321,7 @@ fn tool_summary_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
     sections
 }
 
-fn extension_prompt_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
+fn extension_prompt_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
     [
         (
             PromptSectionOrder::SystemPromptInstruction,
@@ -385,7 +347,7 @@ fn extension_prompt_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
     .collect()
 }
 
-fn extra_instruction_sections(input: &SystemPromptInput) -> Vec<PromptSection> {
+fn extra_instruction_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
     let mut instructions = Vec::new();
     if let Some(body) = extension_section_body(
         &input.extension_blocks,
@@ -446,294 +408,13 @@ fn indent_body(body: &str) -> String {
         .join("\n")
 }
 
-fn tool_summary_section(input: &SystemPromptInput) -> Option<String> {
-    if input.tools.is_empty() {
-        return None;
-    }
-
-    let mut lines = Vec::new();
-
-    // Builtin tools + bundled tools with prompt tags (sorted by rank).
-    let mut builtin: Vec<&ToolDefinition> = input
-        .tools
-        .iter()
-        .filter(|tool| {
-            tool.origin == ToolOrigin::Builtin
-                || input.tool_prompt_metadata.contains_key(&tool.name)
-        })
-        .collect();
-    builtin.sort_by_key(|tool| (tool_summary_rank(&tool.name), tool.name.clone()));
-
-    // Separate collaboration-tagged tools from regular builtin.
-    let is_collab = |tool: &&ToolDefinition| {
-        input
-            .tool_prompt_metadata
-            .get(&tool.name)
-            .map(|m| m.has_tag(ToolPromptTag::Collaboration))
-            .unwrap_or(false)
-    };
-    let (collab, regular): (Vec<_>, Vec<_>) = builtin.into_iter().partition(is_collab);
-
-    if !regular.is_empty() {
-        lines.push(TOOL_SECTION_BUILTIN.into());
-        push_tool_list_entries(&mut lines, &regular, true);
-    }
-
-    if !collab.is_empty() {
-        push_tool_section(
-            &mut lines,
-            TOOL_SECTION_AGENT_COLLABORATION,
-            Some(TOOL_AGENT_COLLABORATION_GUIDANCE),
-        );
-        push_tool_list_entries(&mut lines, &collab, false);
-    }
-
-    let mcp_tools: Vec<_> = input
-        .tools
-        .iter()
-        .filter(|tool| is_mcp_tool(tool))
-        .collect();
-    if !mcp_tools.is_empty() {
-        push_tool_section(&mut lines, TOOL_SECTION_EXTERNAL_MCP, None);
-        push_tool_list_entries(&mut lines, &mcp_tools, false);
-    }
-
-    let extension_tools: Vec<_> = input
-        .tools
-        .iter()
-        .filter(|tool| is_extension_tool(tool))
-        .collect();
-    if !extension_tools.is_empty() {
-        push_tool_section(&mut lines, TOOL_SECTION_EXTENSION, None);
-        push_tool_list_entries(&mut lines, &extension_tools, false);
-    }
-
-    // Append detailed guides for discovery/collaboration tools.
-    let detailed_guides: Vec<_> = input
-        .tools
-        .iter()
-        .filter_map(|tool| {
-            let meta = input.tool_prompt_metadata.get(&tool.name)?;
-            if meta.should_render_detailed_guide() {
-                build_detailed_guide(meta)
-            } else {
-                None
-            }
-        })
-        .collect();
-
-    if !detailed_guides.is_empty() {
-        lines.push(String::new());
-        for guide in detailed_guides {
-            lines.push(String::new());
-            lines.push(guide);
-        }
-    }
-
-    let body = if lines.is_empty() {
-        TOOL_GUIDANCE.to_string()
-    } else {
-        format!("{TOOL_GUIDANCE}\n\n{}", lines.join("\n"))
-    };
-    Some(body.trim().to_string())
-}
-
-fn push_tool_section(lines: &mut Vec<String>, heading: &str, guidance: Option<&str>) {
-    if !lines.is_empty() {
-        lines.push(String::new());
-    }
-    lines.push(heading.to_string());
-    if let Some(guidance) = guidance {
-        lines.push(guidance.to_string());
-    }
-}
-
-fn push_tool_list_entries(
-    lines: &mut Vec<String>,
-    tools: &[&ToolDefinition],
-    with_short_desc: bool,
-) {
-    for tool in tools {
-        if with_short_desc {
-            let short = tool_short_description(&tool.name);
-            if short.is_empty() {
-                lines.push(format!("- `{}`", tool.name));
-            } else {
-                lines.push(format!("- `{}`: {}", tool.name, short));
-            }
-        } else {
-            lines.push(format!("- `{}`", tool.name));
-        }
-    }
-}
-
-fn tool_summary_rank(name: &str) -> u8 {
-    match name {
-        "read" => 0,
-        "glob" => 1,
-        "grep" => 2,
-        "shell" => 3,
-        "tool_search_tool" => 4,
-        "Skill" => 5,
-        "todoWrite" => 6,
-        "switchMode" => 7,
-        "upsertSessionPlan" => 8,
-        "agent" => 9,
-        "patch" => 90,
-        "edit" => 91,
-        "write" => 92,
-        _ => 50,
-    }
-}
-
-/// One-line summary for each builtin tool, shown in the Tool Summary list.
-fn tool_short_description(name: &str) -> &'static str {
-    match name {
-        "read" => "read file content with line numbers",
-        "glob" => "match file paths by glob pattern",
-        "grep" => "search file contents by regex or literal text",
-        "shell" => "execute shell commands",
-        "terminal" => "manage interactive PTY sessions",
-        "tool_search_tool" => "find MCP tools by name or keyword",
-        "Skill" => "load a named skill's instructions",
-        "todoWrite" => "update session progress todo list",
-        "switchMode" => "switch between code and plan modes",
-        "upsertSessionPlan" => "create or update the session plan",
-        "agent" => "delegate to a specialized [Agents] subagent",
-        "patch" => "apply unified diff across multiple files",
-        "edit" => "exact string replacement in a file",
-        "write" => "create or completely overwrite a file",
-        _ => "",
-    }
-}
-
-fn build_detailed_guide(meta: &ToolPromptMetadata) -> Option<String> {
-    let mut parts = vec![meta.guide.clone()];
-    if !meta.caveats.is_empty() {
-        parts.push(format!(
-            "Caveats:\n{}",
-            meta.caveats
-                .iter()
-                .map(|c| format!("- {c}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-    if !meta.examples.is_empty() {
-        parts.push(format!(
-            "Examples:\n{}",
-            meta.examples
-                .iter()
-                .map(|e| format!("- {e}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        ));
-    }
-    let body = parts.join("\n\n");
-    if body.trim().is_empty() {
-        None
-    } else {
-        Some(body)
-    }
-}
-
-fn is_mcp_tool(tool: &ToolDefinition) -> bool {
-    tool.name.starts_with("mcp__")
-}
-
-fn is_extension_tool(tool: &ToolDefinition) -> bool {
-    tool.origin == ToolOrigin::Extension
-        || (tool.origin == ToolOrigin::Bundled && !tool.name.starts_with("mcp__"))
-}
-
-// ─── AGENTS.md 加载 ────────────────────────────────────────────────────
-
-/// 从 working_dir 向上遍历查找所有 AGENTS.md，由浅到深排序。
-fn find_agents_files(working_dir: &Path) -> Vec<PathBuf> {
-    let mut files = working_dir
-        .ancestors()
-        .map(|dir| dir.join("AGENTS.md"))
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
-    files.reverse();
-    files
-}
-
-/// 读取并合并 AGENTS.md 文件为一段 project rules 文本。
-fn load_project_rules(working_dir: &Path) -> Option<String> {
-    let files = find_agents_files(working_dir);
-    if files.is_empty() {
-        return None;
-    }
-
-    let mut content = String::from(
-        "以下内容来自 AGENTS.md。必须遵守；如果规则冲突，目录更深的 AGENTS.md 优先。\n",
-    );
-    for path in files {
-        if let Ok(text) = fs::read_to_string(&path) {
-            content.push_str("\n--- ");
-            content.push_str(&path.display().to_string());
-            content.push_str(" ---\n");
-            content.push_str(&text);
-            if !text.ends_with('\n') {
-                content.push('\n');
-            }
-        }
-    }
-
-    non_empty_string(content)
-}
-
-fn non_empty_string(text: String) -> Option<String> {
-    if text.trim().is_empty() {
-        None
-    } else {
-        Some(text)
-    }
-}
-
-// ─── Prompt file loading ───────────────────────────────────────────────
-
-/// 按会话类型加载系统提示词文件。
-///
-/// 子 agent 使用专用 body，不应继承 AGENTS.md（项目级与用户级）。
-async fn load_system_prompt_files_with_scope(
-    working_dir: &str,
-    include_agents_rules: bool,
-) -> PromptFiles {
-    let working_dir = PathBuf::from(working_dir);
-    let fallback_dir = working_dir.clone();
-    tokio::task::spawn_blocking(move || {
-        read_system_prompt_files(&working_dir, include_agents_rules)
-    })
-    .await
-    .unwrap_or_else(|error| {
-        tracing::warn!(error = %error, "prompt file preload task failed; reading inline");
-        read_system_prompt_files(&fallback_dir, include_agents_rules)
-    })
-}
-
-fn read_system_prompt_files(working_dir: &Path, include_agents_rules: bool) -> PromptFiles {
-    PromptFiles {
-        identity: load_identity_md(&user_identity_md_path()),
-        user_rules: if include_agents_rules {
-            load_user_rules(&user_agents_md_path())
-        } else {
-            None
-        },
-        project_rules: if include_agents_rules {
-            load_project_rules(working_dir)
-        } else {
-            None
-        },
-    }
-}
-
 // ─── Tests ─────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::tool::ExecutionMode;
+    use std::path::Path;
+
+    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
 
     use super::*;
 
@@ -748,7 +429,7 @@ mod tests {
         }
     }
 
-    fn input() -> SystemPromptInput {
+    fn input() -> SystemPromptInput<'static> {
         SystemPromptInput {
             working_dir: env!("CARGO_MANIFEST_DIR").to_string(),
             os: "windows".into(),
@@ -757,7 +438,7 @@ mod tests {
             identity: None,
             user_rules: None,
             project_rules: None,
-            tools: vec![],
+            tools: &[],
             extension_blocks: vec![],
             extra_instructions: None,
             tool_prompt_metadata: std::collections::HashMap::new(),
@@ -766,6 +447,24 @@ mod tests {
 
     #[test]
     fn build_renders_all_sections_in_order() {
+        let tools = vec![
+            tool("read", "Read files.", ToolOrigin::Builtin),
+            tool(
+                "tool_search_tool",
+                "Search external tools.",
+                ToolOrigin::Bundled,
+            ),
+            tool(
+                "mcp__demo__search",
+                "Search demo server.",
+                ToolOrigin::Bundled,
+            ),
+            tool(
+                "extension_lookup",
+                "Lookup through a configured extension.",
+                ToolOrigin::Extension,
+            ),
+        ];
         let input = SystemPromptInput {
             working_dir: "/test".into(),
             os: "linux".into(),
@@ -774,24 +473,7 @@ mod tests {
             identity: Some("custom identity".into()),
             user_rules: Some("test rules".into()),
             project_rules: Some("project rules content".into()),
-            tools: vec![
-                tool("read", "Read files.", ToolOrigin::Builtin),
-                tool(
-                    "tool_search_tool",
-                    "Search external tools.",
-                    ToolOrigin::Bundled,
-                ),
-                tool(
-                    "mcp__demo__search",
-                    "Search demo server.",
-                    ToolOrigin::Bundled,
-                ),
-                tool(
-                    "extension_lookup",
-                    "Lookup through a configured extension.",
-                    ToolOrigin::Extension,
-                ),
-            ],
+            tools: &tools,
             extension_blocks: vec![
                 ExtensionPromptBlock {
                     section: ExtensionSection::Skills,
@@ -829,9 +511,9 @@ mod tests {
         assert!(prompt.contains("[Project Rules]\n  project rules content"));
         assert!(prompt.contains("[Tool Summary]"));
         assert!(prompt.contains("- `read`"));
-        assert!(prompt.contains(TOOL_SECTION_EXTERNAL_MCP));
+        assert!(prompt.contains("External MCP Tools"));
         assert!(prompt.contains("- `mcp__demo__search`"));
-        assert!(prompt.contains(TOOL_SECTION_EXTENSION));
+        assert!(prompt.contains("Extension Tools"));
         assert!(prompt.contains("- `extension_lookup`"));
         assert!(prompt.contains("[SystemPromptInstruction]\n  extra hint"));
         assert!(prompt.contains("[Skills]\n  skill a"));
@@ -876,7 +558,7 @@ mod tests {
             identity: None,
             user_rules: None,
             project_rules: None,
-            tools: vec![],
+            tools: &[],
             extension_blocks: vec![],
             extra_instructions: None,
             tool_prompt_metadata: std::collections::HashMap::new(),
@@ -899,6 +581,19 @@ mod tests {
 
     #[test]
     fn extension_tools_render_without_mcp_tools() {
+        let tools = vec![
+            tool("read", "Read files.", ToolOrigin::Builtin),
+            tool(
+                "tool_search_tool",
+                "Search configured MCP tools.",
+                ToolOrigin::Bundled,
+            ),
+            tool(
+                "extension_lookup",
+                "Lookup through a configured extension.",
+                ToolOrigin::Extension,
+            ),
+        ];
         let input = SystemPromptInput {
             working_dir: "/test".into(),
             os: "linux".into(),
@@ -907,19 +602,7 @@ mod tests {
             identity: None,
             user_rules: None,
             project_rules: None,
-            tools: vec![
-                tool("read", "Read files.", ToolOrigin::Builtin),
-                tool(
-                    "tool_search_tool",
-                    "Search configured MCP tools.",
-                    ToolOrigin::Bundled,
-                ),
-                tool(
-                    "extension_lookup",
-                    "Lookup through a configured extension.",
-                    ToolOrigin::Extension,
-                ),
-            ],
+            tools: &tools,
             extension_blocks: vec![],
             extra_instructions: None,
             tool_prompt_metadata: std::collections::HashMap::new(),
@@ -947,6 +630,7 @@ mod tests {
 
     #[test]
     fn environment_changes_keep_identity_prefix_stable() {
+        let tools = [tool("read", "Read files.", ToolOrigin::Builtin)];
         let base = SystemPromptInput {
             working_dir: "/one".into(),
             os: "linux".into(),
@@ -955,7 +639,7 @@ mod tests {
             identity: Some("stable identity".into()),
             user_rules: Some("stable user rules".into()),
             project_rules: Some("stable project rules".into()),
-            tools: vec![tool("read", "Read files.", ToolOrigin::Builtin)],
+            tools: &tools,
             extension_blocks: vec![
                 ExtensionPromptBlock {
                     section: ExtensionSection::PlatformInstructions,
@@ -990,8 +674,8 @@ mod tests {
             .ancestors()
             .nth(2)
             .unwrap();
-        let with_rules = read_system_prompt_files(working_dir, true);
-        let without_rules = read_system_prompt_files(working_dir, false);
+        let with_rules = prompt_files::read_prompt_files(working_dir, true);
+        let without_rules = prompt_files::read_prompt_files(working_dir, false);
 
         if with_rules.project_rules.is_some() || with_rules.user_rules.is_some() {
             assert!(

@@ -25,10 +25,11 @@ mod tests {
     use astrcode_session_projection::SequencedLlmMessage;
 
     use super::*;
+    use crate::test_support::read_model;
 
     fn model_with_messages(messages: Vec<LlmMessage>) -> SessionReadModel {
-        let mut model = SessionReadModel::empty(SessionId::new("s-test"));
-        model.messages = messages
+        let mut model = read_model(SessionId::new("s-test"));
+        model.transcript.messages = messages
             .into_iter()
             .enumerate()
             .map(|(updated_seq, message)| SequencedLlmMessage {

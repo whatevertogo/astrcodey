@@ -8,12 +8,12 @@ use astrcode_core::{
     context::{
         CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
         CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
+        NoopPostCompactEnricher,
     },
     llm::{LlmMessage, LlmProvider},
-    prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
 };
-use astrcode_extension_sdk::runtime_ports::ToolCatalogProvider;
-use astrcode_session::{SessionExtensionPorts, SessionHostServices, SessionRuntimeServices};
+use astrcode_extension_sdk::runtime_ports::{NoopRuntimePorts, ToolCatalogProvider};
+use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices};
 
 pub fn test_runtime_services(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeServices> {
     test_runtime_services_with_context(llm, ContextSettings::default())
@@ -66,20 +66,16 @@ fn test_runtime_services_with_context_and_extensions(
     let context_assembler: Arc<dyn ContextAssembler> = Arc::new(NoopContextAssembler {
         settings: context.clone(),
     });
-    let mut host_services = SessionHostServices::embedded(
-        context_assembler,
-        Arc::new(StaticPromptProvider),
-        Arc::new(StaticPromptFileProvider),
-    )
-    .with_extension_ports(extension_ports);
-    if let Some(tool_catalog) = tool_catalog {
-        host_services = host_services.with_tool_catalog(tool_catalog);
-    }
+    let tool_catalog =
+        tool_catalog.unwrap_or_else(|| Arc::new(NoopRuntimePorts) as Arc<dyn ToolCatalogProvider>);
     Arc::new(SessionRuntimeServices::new(
         llm.clone(),
         llm,
         effective_config(context),
-        host_services,
+        extension_ports,
+        context_assembler,
+        Arc::new(NoopPostCompactEnricher),
+        tool_catalog,
     ))
 }
 
@@ -107,27 +103,6 @@ impl ContextAssembler for NoopContextAssembler {
         _request_text: CompactRequestFn,
     ) -> CompactIfNeededOutcome {
         CompactIfNeededOutcome::NotRun { messages }
-    }
-}
-
-struct StaticPromptProvider;
-
-#[async_trait::async_trait]
-impl PromptProvider for StaticPromptProvider {
-    async fn assemble(&self, input: SystemPromptInput) -> PromptPlan {
-        PromptPlan::from_system_prompt(format!(
-            "[Identity]\n  test host\n\n[Environment]\n  Working directory: {}\nOS: {}\nShell: {}",
-            input.working_dir, input.os, input.shell
-        ))
-    }
-}
-
-struct StaticPromptFileProvider;
-
-#[async_trait::async_trait]
-impl PromptFileProvider for StaticPromptFileProvider {
-    async fn load(&self, _working_dir: &str, _include_agents_rules: bool) -> PromptFiles {
-        PromptFiles::default()
     }
 }
 

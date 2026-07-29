@@ -12,7 +12,11 @@ mod workspace;
 
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
-use astrcode_core::{event::EventPayload, llm::LlmProvider, tool::SessionOperations};
+use astrcode_core::{
+    event::{DurableEventPayload, EventPayload, ExtensionEventData, LiveEventPayload},
+    llm::LlmProvider,
+    tool::SessionOperations,
+};
 use astrcode_extension_sdk::{
     extension::{
         ExtensionCapability, ExtensionError, ExtensionEventDecl, ExtensionHttpRequest,
@@ -362,14 +366,19 @@ pub fn emit_for_sink(
         .ok_or_else(|| {
             ExtensionError::Internal(format!("undeclared extension event type: {event_type}"))
         })?;
+    let event = ExtensionEventData {
+        extension_id: extension_id.to_owned(),
+        event_type: event_type.to_owned(),
+        schema_version,
+        payload,
+    };
+    let payload = if durable {
+        EventPayload::Durable(DurableEventPayload::ExtensionEvent(event))
+    } else {
+        EventPayload::Live(LiveEventPayload::ExtensionEvent(event))
+    };
     event_tx
-        .send(EventPayload::ExtensionEvent {
-            extension_id: extension_id.to_owned(),
-            event_type: event_type.to_owned(),
-            schema_version,
-            durable,
-            payload,
-        })
+        .send(payload)
         .map_err(|_| ExtensionError::Internal("event channel closed".into()))
 }
 
@@ -447,6 +456,10 @@ mod tests {
     };
 
     use astrcode_core::{
+        event::{
+            DurableEvent, DurableEventPayload, PersistedSystemPrompt, SessionStarted,
+            SystemPromptSource,
+        },
         permission::ApprovalDecision,
         tool::{
             CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
@@ -498,7 +511,22 @@ mod tests {
         let store = Arc::new(InMemoryEventStore::new());
         let session_id = astrcode_core::types::SessionId::new("inspect-session");
         store
-            .create_session(&session_id, "/workspace", "test-model", None, None, None)
+            .create_session(DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::SessionStarted(SessionStarted {
+                    working_dir: "/workspace".into(),
+                    model_id: "test-model".into(),
+                    parent: None,
+                    tool_selection: SessionToolSelection::default(),
+                    source_extension: None,
+                    initial_system_prompt: PersistedSystemPrompt {
+                        text: "system".into(),
+                        fingerprint: "fingerprint".into(),
+                        extra_system_prompt: None,
+                        source: SystemPromptSource::Native,
+                    },
+                }),
+            ))
             .await
             .expect("create session");
         let event_reader: Arc<dyn EventReader> = store.clone();

@@ -7,7 +7,6 @@ mod model;
 mod reducer;
 
 pub use model::*;
-pub use reducer::{SessionReadModelProjection, reduce, replay};
-
-#[cfg(test)]
-mod model_tests;
+pub use reducer::{
+    ProjectionError, SessionReadModelProjection, reduce, replay, validate_next_event,
+};

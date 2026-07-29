@@ -33,7 +33,8 @@ Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k�
 
 ```
 Session::emit / Session::append_event
-  → EventStore（持久化）
+  → durable: EventStore（持久化并分配 seq）
+  → live: 跳过 EventStore
   → SessionRuntimeState::fanout（broadcast）
     → ServerEventBus forwarder（attach 后订阅）
       → ClientNotification broadcast
@@ -51,13 +52,15 @@ Conversation snapshot、cursor、SSE replay、前端逐帧归并和虚拟化渲�
 每行一个 JSON 对象（JSONL）。顶层是事件信封，领域事实位于 `payload` 子对象：
 
 ```jsonl
-{"seq":0,"id":"evt0","session_id":"abc123","timestamp":"...","payload":{"type":"session_started","working_dir":"/project","model_id":"deepseek-chat"}}
-{"seq":1,"id":"evt1","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"user_message","message_id":"msg1","text":"explain main.rs"}}
-{"seq":2,"id":"evt2","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"turn_started"}}
-{"seq":3,"id":"evt3","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"assistant_message_started","message_id":"msg2"}}
-{"seq":4,"id":"evt4","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"assistant_message_completed","message_id":"msg2","text":"..."}}
-{"seq":5,"id":"evt5","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"turn_completed","finish_reason":"stop"}}
+{"seq":0,"id":"evt0","session_id":"abc123","timestamp":"...","payload":{"type":"session_started","working_dir":"/project","model_id":"deepseek-chat","tool_selection":{"mode":"all","except":[]},"initial_system_prompt":{"text":"...","fingerprint":"..."}}}
+{"seq":1,"id":"evt1","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"turn_started"}}
+{"seq":2,"id":"evt2","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"user_message","message_id":"msg1","text":"explain main.rs","attachments":[]}}
+{"seq":3,"id":"evt3","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"assistant_message_completed","message_id":"msg2","text":"..."}}
+{"seq":4,"id":"evt4","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"turn_completed","finish_reason":"stop"}}
 ```
+
+`AssistantTextDelta`、`ToolCallStarted` 等 live 事件只进入进程内和客户端事件流，
+不带 `seq`，也不会出现在 JSONL 中。
 
 ### Session 树与快照恢复
 
@@ -80,7 +83,7 @@ session-A (root)
 
 | 层 | 位置 | 含义 |
 |---|---|---|
-| Durable | `EventStore` / session `phase` | 持久化、可重放、进程重启后仍成立 |
+| Durable | `EventStore` / `SessionReadModel` | 持久化、可重放、进程重启后仍成立 |
 | 进程 | `TurnRegistry` | 当前是否有活跃 turn 任务（优化索引，需 `repair_stale` 对齐） |
 | 传输 | `CommandHandler.active_session_id` | stdio/ACP 的「当前会话」；HTTP 在 path 中带 `session_id` |
 
@@ -170,13 +173,14 @@ Identity → System → Task Guidelines → Communication → Environment
 → User Rules → Project Rules → Tool Summary → Extension → Additional
 ```
 
-稳定部分（Identity、System、Task Guidelines）排在前面，易变部分（Environment、date）排在后面，配合 prompt cache 利用前缀匹配。
+稳定部分（Identity、System、Task Guidelines、Communication）排在前面；Environment、用户/项目规则、工具和扩展贡献作为动态后缀，配合 prompt cache 利用前缀匹配。普通 turn 和 compact 使用同一套 provider message 分组。
 
 ### 用户定制
 
 - `~/.astrcode/IDENTITY.md` 覆盖默认身份
 - 项目目录下 `AGENTS.md` 作为 project rules（从 working_dir 向上查找，深层覆盖浅层）
 - 扩展通过 `PromptBuild` 事件注入 Skills、Agents、PlatformInstructions 等 section
+- 新 session 在写入第一条事件前完成工具快照和 prompt 组装，`SessionStarted` 携带初始 prompt；构建失败不会留下半初始化日志
 
 ### 设计取舍
 
@@ -322,16 +326,6 @@ Session 是唯一的持久事实来源。所有状态变化都以不可变事件
 ### 工具-First 而非 extension-First
 
 工具是运行时基础能力，extension、SDK、MCP 都只是 tool source。所有工具走同一条执行路径，确保可观测性和统一调度。
-
-### Session 嵌入边界
-
-`astrcode-session` 只依赖 `astrcode-core` / `astrcode-extension-sdk` / storage/support 等内核契约，
-不直接依赖 first-party 的 context、tools、extensions 或 server 默认实现。嵌入宿主通过
-`SessionHostServices` 注入 context、prompt、窄 extension ports、post-compact enrichment 和 tool packs。
-每个 turn 固定持有同一份不可变 `ToolRegistry`；session 只按 extension runtime 代次、
-工作目录、子会话工具策略和 tool-pack 配置版本缓存快照，无需 server 广播失效。
-
-最小嵌入方式与可替换能力清单见 [session-embedding.md](session-embedding.md)。
 
 ### 前后端分离
 

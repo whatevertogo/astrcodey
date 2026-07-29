@@ -20,6 +20,8 @@ mod session_runtime_services;
 pub(crate) mod session_setup;
 pub(crate) mod session_tools;
 pub(crate) mod steer;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod tool_deduplicator;
 pub(crate) mod tool_exec;
 pub(crate) mod tool_json_repair;
@@ -43,7 +45,7 @@ pub use session::{
 };
 pub use session_extension_ports::SessionExtensionPorts;
 pub use session_runtime::{SessionModelBinding, SessionRuntimeState, ToolApprovalResolveError};
-pub use session_runtime_services::{SessionHostServices, SessionRuntimeServices};
+pub use session_runtime_services::SessionRuntimeServices;
 pub use tool_registry::ToolRegistry;
 pub use turn_context::{TurnError, TurnEventTx};
 pub use turn_handle::{TurnHandle, TurnShutdownHandle};

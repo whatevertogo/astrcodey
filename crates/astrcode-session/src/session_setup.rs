@@ -6,12 +6,11 @@
 
 use std::collections::HashMap;
 
+use astrcode_context::prompt_engine::{
+    ExtensionPromptBlock, ExtensionSection, PromptEngine, SystemPromptInput, load_prompt_files,
+};
 use astrcode_core::{
     config::ModelSelection,
-    prompt::{
-        ExtensionPromptBlock, ExtensionSection, PromptFileProvider, PromptProvider,
-        SystemPromptInput,
-    },
     tool::{ToolDefinition, ToolPromptMetadata},
 };
 use astrcode_extension_sdk::{
@@ -65,8 +64,6 @@ pub(crate) async fn build_base_tool_registry(
 
 pub(crate) struct SystemPromptSnapshotInput<'a> {
     pub prompt_contributor: &'a dyn PromptContributor,
-    pub prompt_provider: &'a dyn PromptProvider,
-    pub prompt_file_provider: &'a dyn PromptFileProvider,
     pub session_id: &'a str,
     pub working_dir: &'a str,
     pub model_id: &'a str,
@@ -133,8 +130,6 @@ pub(crate) async fn build_system_prompt_snapshot(
 ) -> Result<(String, String), ExtensionError> {
     let SystemPromptSnapshotInput {
         prompt_contributor,
-        prompt_provider,
-        prompt_file_provider,
         session_id,
         working_dir,
         model_id,
@@ -154,9 +149,7 @@ pub(crate) async fn build_system_prompt_snapshot(
     .await?;
 
     let extra_instructions = normalize_extra_system_prompt(extra_system_prompt);
-    let prompt_files = prompt_file_provider
-        .load(working_dir, include_agents_rules)
-        .await;
+    let prompt_files = load_prompt_files(working_dir, include_agents_rules).await;
 
     let prompt_input = SystemPromptInput {
         working_dir: working_dir.to_string(),
@@ -166,17 +159,13 @@ pub(crate) async fn build_system_prompt_snapshot(
         identity: prompt_files.identity,
         user_rules: prompt_files.user_rules,
         project_rules: prompt_files.project_rules,
-        tools: tools.to_vec(),
+        tools,
         tool_prompt_metadata,
         extension_blocks,
         extra_instructions,
     };
 
-    let system_prompt = prompt_provider
-        .assemble(prompt_input)
-        .await
-        .system_prompt
-        .unwrap_or_default();
+    let system_prompt = PromptEngine.assemble(&prompt_input);
     let fingerprint = hex_fingerprint(system_prompt.as_bytes());
     Ok((system_prompt, fingerprint))
 }

@@ -5,7 +5,7 @@ use std::{
 };
 
 use astrcode_core::{
-    event::EventPayload,
+    event::DurableEventPayload,
     permission::{ApprovalDecision, ApprovalSource},
     tool::{ExecutionMode, ToolDefinition},
     types::ToolCallId,
@@ -266,7 +266,7 @@ impl ToolCalls {
             runtime.register_pending_approval(ToolCallId::from(call.call_id.as_str()), tx);
         input
             .publisher
-            .durable(EventPayload::ToolApprovalRequested {
+            .durable(DurableEventPayload::ToolApprovalRequested {
                 call_id: call.call_id.clone().into(),
                 tool_name: call.name.clone(),
                 prompt: prompt.clone(),
@@ -294,7 +294,7 @@ impl ToolCalls {
         };
         input
             .publisher
-            .durable(EventPayload::ToolApprovalResolved {
+            .durable(DurableEventPayload::ToolApprovalResolved {
                 call_id: call.call_id.clone().into(),
                 decision,
                 detail: resolution_detail.clone(),

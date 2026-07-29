@@ -67,8 +67,8 @@ pub async fn compact_idle_session(
     } = params;
     let hook_ctx = CompactHookContext {
         session_id: session.id.as_str(),
-        working_dir: &state.working_dir,
-        model_id: &state.model_id,
+        working_dir: &state.identity.working_dir,
+        model_id: &state.identity.model_id,
         trigger: CompactTrigger::ManualCommand,
         message_count: provider_messages.len(),
     };
@@ -82,7 +82,7 @@ pub async fn compact_idle_session(
     let compact_outcome = context_assembler
         .compact_if_needed(
             provider_messages.clone(),
-            state.system_prompt.as_deref(),
+            Some(&state.system_prompt.text),
             &custom_instructions,
             render_options,
             CompactMessagesOptions {
@@ -115,8 +115,8 @@ pub async fn compact_idle_session(
             PostCompactEnrichInput {
                 session_id: session.id.as_str(),
                 source_messages: &provider_messages,
-                working_dir: &state.working_dir,
-                system_prompt: state.system_prompt.as_deref(),
+                working_dir: &state.identity.working_dir,
+                system_prompt: Some(&state.system_prompt.text),
                 tools,
                 settings: context_assembler.settings(),
                 session_store_dir,
@@ -126,9 +126,7 @@ pub async fn compact_idle_session(
 
     dispatch_post_compact(extension_runner, hook_ctx, &compaction).await?;
 
-    let system_prompt = state.system_prompt.clone().ok_or_else(|| {
-        IdleCompactionError::InvalidRequest("Cannot compact session without system prompt".into())
-    })?;
+    let system_prompt = state.system_prompt.text.clone();
     let fingerprint = hex_fingerprint(system_prompt.as_bytes());
     let persisted = match persist_compact_result(
         session,
@@ -136,7 +134,7 @@ pub async fn compact_idle_session(
         CompactTrigger::ManualCommand.as_str(),
         &system_prompt,
         &fingerprint,
-        state.extra_system_prompt.as_deref(),
+        state.system_prompt.extra.as_deref(),
         base_event_seq,
         CompactStrategy::Manual { keep_recent_turns },
     )

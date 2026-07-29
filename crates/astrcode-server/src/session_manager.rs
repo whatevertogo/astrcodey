@@ -7,7 +7,7 @@ use std::{
 };
 
 use astrcode_core::{
-    event::{Event, EventPayload},
+    event::{DurableEvent, DurableEventPayload, Event},
     tool::SessionToolSelection,
     types::{Cursor, SessionId},
 };
@@ -38,6 +38,8 @@ pub enum SessionManagerError {
     Storage(#[from] StorageError),
     #[error(transparent)]
     Extension(#[from] astrcode_extension_sdk::extension::ExtensionError),
+    #[error(transparent)]
+    Projection(#[from] astrcode_session_projection::ProjectionError),
     #[error("session created but no events found")]
     MissingStartEvent,
     #[error("invalid fork cursor: {0}")]
@@ -153,7 +155,7 @@ impl SessionManager {
         // 先在 registry 里登记 runtime，再创建 Session 让两者共享同一份。
         let sid = astrcode_core::types::new_session_id();
         let runtime = self.get_or_create_runtime(&sid);
-        let session = Session::create_with_params(SessionCreateParams {
+        let session = match Session::create_with_params(SessionCreateParams {
             store: Arc::clone(&self.event_store),
             session_id: sid.clone(),
             working_dir: working_dir.to_owned(),
@@ -161,10 +163,18 @@ impl SessionManager {
             parent_session_id: None,
             tool_selection: tool_selection.cloned(),
             source_extension: None,
+            initial_system_prompt: None,
             runtime,
             runtime_services: Arc::clone(&self.runtime_services),
         })
-        .await?;
+        .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                self.runtime_registry.cleanup_runtime(&sid);
+                return Err(error.into());
+            },
+        };
 
         self.attach_session_subscribers(&session);
 
@@ -174,7 +184,8 @@ impl SessionManager {
             .await?
             .into_iter()
             .next()
-            .ok_or(SessionManagerError::MissingStartEvent)?;
+            .ok_or(SessionManagerError::MissingStartEvent)?
+            .into();
 
         session.emit_lifecycle(ExtensionEvent::SessionStart).await?;
 
@@ -307,6 +318,7 @@ impl SessionManager {
         self.event_store
             .replay_from_limited(session_id, cursor, max_events)
             .await
+            .map(|events| events.into_iter().map(Event::from).collect())
             .map_err(SessionManagerError::from)
     }
 
@@ -399,38 +411,58 @@ impl SessionManager {
                 .map_err(|_| SessionManagerError::InvalidCursor(fork_cursor.clone()))?;
             let truncated_events: Vec<_> = events
                 .into_iter()
-                .filter(|e| e.seq.unwrap_or(0) <= truncated_seq)
+                .filter(|event| event.seq <= truncated_seq)
                 .collect();
             let truncated_model =
-                astrcode_session_projection::replay(source_id.clone(), &truncated_events);
-            (truncated_model.context_messages, truncated_model.messages)
+                astrcode_session_projection::replay(source_id.clone(), &truncated_events)?;
+            (
+                truncated_model.transcript.context_messages,
+                truncated_model.transcript.messages,
+            )
         } else {
-            (source_model.context_messages, source_model.messages)
+            (
+                source_model.transcript.context_messages.clone(),
+                source_model.transcript.messages.clone(),
+            )
         };
 
         let model_id = self.config.read_effective().llm.model_id.clone();
         let new_sid = astrcode_core::types::new_session_id();
         let runtime = self.get_or_create_runtime(&new_sid);
-        let session = Session::create_with_params(SessionCreateParams {
+        let initial_system_prompt = Some(astrcode_core::event::PersistedSystemPrompt {
+            text: source_model.system_prompt.text.clone(),
+            fingerprint: source_model.system_prompt.fingerprint.clone(),
+            extra_system_prompt: source_model.system_prompt.extra.clone(),
+            source: astrcode_core::event::SystemPromptSource::Inherited,
+        });
+        let session = match Session::create_with_params(SessionCreateParams {
             store: Arc::clone(&self.event_store),
             session_id: new_sid.clone(),
-            working_dir: source_model.working_dir.clone(),
+            working_dir: source_model.identity.working_dir.clone(),
             model_id,
             parent_session_id: None,
             tool_selection: None,
             source_extension: None,
+            initial_system_prompt,
             runtime,
             runtime_services: Arc::clone(&self.runtime_services),
         })
-        .await?;
+        .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                self.runtime_registry.cleanup_runtime(&new_sid);
+                return Err(error.into());
+            },
+        };
 
         self.attach_session_subscribers(&session);
 
         session
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 new_sid.clone(),
                 None,
-                EventPayload::SessionForked {
+                DurableEventPayload::SessionForked {
                     source_session_id: source_id.clone(),
                     source_cursor: fork_cursor,
                     context_messages: context_messages.into_iter().map(|m| m.message).collect(),
@@ -438,23 +470,6 @@ impl SessionManager {
                 },
             ))
             .await?;
-
-        if let (Some(text), Some(fingerprint)) = (
-            &source_model.system_prompt,
-            &source_model.system_prompt_fingerprint,
-        ) {
-            session
-                .append_event(Event::new(
-                    new_sid.clone(),
-                    None,
-                    EventPayload::SystemPromptConfigured {
-                        text: text.clone(),
-                        fingerprint: fingerprint.clone(),
-                        extra_system_prompt: source_model.extra_system_prompt.clone(),
-                    },
-                ))
-                .await?;
-        }
 
         Ok(session)
     }

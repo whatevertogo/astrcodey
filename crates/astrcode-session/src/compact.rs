@@ -6,7 +6,7 @@ use astrcode_core::{
     compaction::CompactStrategy,
     config::ModelSelection,
     context::{CompactError, CompactRequestFn, CompactResult},
-    event::Event,
+    event::StoredEvent,
     llm::{self, LlmProvider},
 };
 use astrcode_extension_sdk::{
@@ -97,7 +97,7 @@ pub fn make_compact_request_fn(llm: Arc<dyn LlmProvider>) -> CompactRequestFn {
 
 /// persist_compact_result 返回的持久化结果。
 pub struct PersistedCompaction {
-    pub events: Vec<Event>,
+    pub events: Vec<StoredEvent>,
     pub base_event_seq: u64,
     pub messages_removed: usize,
 }

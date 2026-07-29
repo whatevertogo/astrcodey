@@ -8,7 +8,7 @@ use astrcode_core::{
         CompactIfNeededOutcome, CompactMessagesOptions, CompactResult, CompactSummaryRenderOptions,
         ContextPrepareInput, PostCompactEnrichInput,
     },
-    event::EventPayload,
+    event::LiveEventPayload,
     llm::{LlmMessage, LlmProvider},
     tool::ToolDefinition,
     types::TurnId,
@@ -125,9 +125,7 @@ impl Compaction {
         session: &Session,
         shared: &SharedTurnContext,
     ) -> Result<(), TurnError> {
-        let Some(prompt) = session.current_system_prompt().await? else {
-            return Ok(());
-        };
+        let prompt = session.current_system_prompt().await?;
         if prompt == self.system_prompt {
             return Ok(());
         }
@@ -383,9 +381,10 @@ impl Compaction {
             model_id: &shared.model_id,
             trigger,
             message_count: model
+                .transcript
                 .context_messages
                 .len()
-                .saturating_add(model.messages.len()),
+                .saturating_add(model.transcript.messages.len()),
         }
     }
 
@@ -402,7 +401,7 @@ impl Compaction {
         meta: CompactionStageMeta,
     ) -> bool {
         host.session
-            .emit_live(Some(turn_id), EventPayload::CompactionStarted)
+            .emit_live(Some(turn_id), LiveEventPayload::CompactionStarted)
             .await;
         let visible_tools = state.visible_tools();
         let provider_messages = model.provider_messages();
@@ -453,7 +452,7 @@ impl Compaction {
                 host.session
                     .emit_live(
                         Some(turn_id),
-                        EventPayload::CompactionCompleted {
+                        LiveEventPayload::CompactionCompleted {
                             messages_removed: persisted.messages_removed,
                         },
                     )
@@ -465,7 +464,7 @@ impl Compaction {
                 host.session
                     .emit_live(
                         Some(turn_id),
-                        EventPayload::CompactionSkipped {
+                        LiveEventPayload::CompactionSkipped {
                             reason: e.to_string(),
                         },
                     )

@@ -3,21 +3,21 @@
 use astrcode_core::{
     compaction::CompactStrategy,
     context::CompactResult,
-    event::EventPayload,
+    event::{DurableEventPayload, LiveEventPayload, SystemPromptSource},
     types::{Cursor, SessionId},
 };
 
 pub const TURN_FINISH_ABORTED: &str = "aborted";
 pub const TURN_FINISH_INTERRUPTED: &str = "interrupted";
 
-pub fn turn_completed_payload(reason: impl Into<String>) -> EventPayload {
-    EventPayload::TurnCompleted {
+pub fn turn_completed_payload(reason: impl Into<String>) -> DurableEventPayload {
+    DurableEventPayload::TurnCompleted {
         finish_reason: reason.into(),
     }
 }
 
-pub fn agent_run_completed_payload(reason: impl Into<String>) -> EventPayload {
-    EventPayload::AgentRunCompleted {
+pub fn agent_run_completed_payload(reason: impl Into<String>) -> LiveEventPayload {
+    LiveEventPayload::AgentRunCompleted {
         reason: reason.into(),
     }
 }
@@ -27,11 +27,13 @@ pub fn system_prompt_configured_payload(
     text: String,
     fingerprint: String,
     extra_system_prompt: Option<String>,
-) -> EventPayload {
-    EventPayload::SystemPromptConfigured {
+    source: SystemPromptSource,
+) -> DurableEventPayload {
+    DurableEventPayload::SystemPromptConfigured {
         text,
         fingerprint,
         extra_system_prompt,
+        source,
     }
 }
 
@@ -42,8 +44,8 @@ pub fn compact_boundary_payload(
     continued_session_id: SessionId,
     base_event_seq: u64,
     strategy: CompactStrategy,
-) -> EventPayload {
-    EventPayload::CompactBoundaryCreated {
+) -> DurableEventPayload {
+    DurableEventPayload::CompactBoundaryCreated {
         trigger: trigger.into(),
         pre_tokens: compaction.pre_tokens,
         post_tokens: compaction.post_tokens,
@@ -68,7 +70,7 @@ pub fn compact_boundary_payload(
 ///   落地后才可能与前者不同。勿手写双字段，统一走 [`agent_session_completed_payload`] /
 ///   [`agent_session_failed_payload`]。
 ///
-/// [`AgentSessionSpawned`]: astrcode_core::event::EventPayload::AgentSessionSpawned
+/// [`AgentSessionSpawned`]: astrcode_core::event::DurableEventPayload::AgentSessionSpawned
 fn agent_session_terminal_ids(child_session_id: SessionId) -> (SessionId, SessionId) {
     let final_session_id = child_session_id.clone();
     (child_session_id, final_session_id)
@@ -79,9 +81,9 @@ fn agent_session_terminal_ids(child_session_id: SessionId) -> (SessionId, Sessio
 pub fn agent_session_completed_payload(
     child_session_id: SessionId,
     summary: String,
-) -> EventPayload {
+) -> DurableEventPayload {
     let (child_session_id, final_session_id) = agent_session_terminal_ids(child_session_id);
-    EventPayload::AgentSessionCompleted {
+    DurableEventPayload::AgentSessionCompleted {
         child_session_id,
         final_session_id,
         summary,
@@ -90,9 +92,12 @@ pub fn agent_session_completed_payload(
 
 /// 构造写入父 session 的 `AgentSessionFailed` 载荷（双 session id 见
 /// [`agent_session_terminal_ids`]）。
-pub fn agent_session_failed_payload(child_session_id: SessionId, error: String) -> EventPayload {
+pub fn agent_session_failed_payload(
+    child_session_id: SessionId,
+    error: String,
+) -> DurableEventPayload {
     let (child_session_id, final_session_id) = agent_session_terminal_ids(child_session_id);
-    EventPayload::AgentSessionFailed {
+    DurableEventPayload::AgentSessionFailed {
         child_session_id,
         final_session_id,
         error,
@@ -104,8 +109,8 @@ pub fn session_continued_from_compaction_payload(
     parent_session_id: SessionId,
     parent_cursor: Cursor,
     compaction: &CompactResult,
-) -> EventPayload {
-    EventPayload::SessionContinuedFromCompaction {
+) -> DurableEventPayload {
+    DurableEventPayload::SessionContinuedFromCompaction {
         parent_session_id,
         parent_cursor,
         summary: compaction.summary.clone(),

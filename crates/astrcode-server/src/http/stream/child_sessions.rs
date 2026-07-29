@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use astrcode_core::{
-    event::{Event, EventPayload, Phase},
+    event::{DurableEventPayload, Event, Phase},
     types::SessionId,
 };
 use astrcode_protocol::{agent_session_link::AgentSessionLinkDto, http::ConversationDeltaDto};
@@ -33,8 +33,11 @@ impl ChildSessionTracker {
     }
 
     pub(super) fn update_from_parent_event(&mut self, event: &Event) {
-        match &event.payload {
-            EventPayload::AgentSessionSpawned {
+        let Some(payload) = event.payload.as_durable() else {
+            return;
+        };
+        match payload {
+            DurableEventPayload::AgentSessionSpawned {
                 child_session_id, ..
             } => {
                 self.initial_by_leaf
@@ -42,13 +45,13 @@ impl ChildSessionTracker {
                 self.last_progress
                     .insert(child_session_id.clone(), (Phase::Thinking, None));
             },
-            EventPayload::AgentSessionCompleted {
+            DurableEventPayload::AgentSessionCompleted {
                 child_session_id, ..
             }
-            | EventPayload::AgentSessionFailed {
+            | DurableEventPayload::AgentSessionFailed {
                 child_session_id, ..
             }
-            | EventPayload::AgentSessionRecycled { child_session_id } => {
+            | DurableEventPayload::AgentSessionRecycled { child_session_id } => {
                 self.initial_by_leaf
                     .retain(|_, initial| initial != child_session_id);
                 self.last_progress.remove(child_session_id);
@@ -62,11 +65,11 @@ impl ChildSessionTracker {
             return true;
         }
         matches!(
-            &event.payload,
-            EventPayload::SessionContinuedFromCompaction {
+            event.payload.as_durable(),
+            Some(DurableEventPayload::SessionContinuedFromCompaction {
                 parent_session_id,
                 ..
-            } if self.initial_by_leaf.contains_key(parent_session_id)
+            }) if self.initial_by_leaf.contains_key(parent_session_id)
         )
     }
 
@@ -94,9 +97,9 @@ impl ChildSessionTracker {
     }
 
     fn update_compacted_leaf(&mut self, event: &Event) -> bool {
-        let EventPayload::SessionContinuedFromCompaction {
+        let Some(DurableEventPayload::SessionContinuedFromCompaction {
             parent_session_id, ..
-        } = &event.payload
+        }) = event.payload.as_durable()
         else {
             return false;
         };
@@ -111,7 +114,17 @@ impl ChildSessionTracker {
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::event::{DurableEvent, LiveEvent, LiveEventPayload, StoredEvent};
+
     use super::*;
+
+    fn durable(session_id: SessionId, payload: DurableEventPayload) -> Event {
+        StoredEvent::new(1, DurableEvent::session(session_id, payload)).into()
+    }
+
+    fn live(session_id: SessionId, payload: LiveEventPayload) -> Event {
+        LiveEvent::session(session_id, payload).into()
+    }
 
     #[test]
     fn tracks_phase_deduplication_and_compacted_leaf_replacement() {
@@ -122,13 +135,12 @@ mod tests {
             HashMap::from([(initial.clone(), Phase::Thinking)]),
         );
 
-        let duplicate = Event::new(initial.clone(), None, EventPayload::TurnStarted);
+        let duplicate = durable(initial.clone(), DurableEventPayload::TurnStarted);
         assert!(tracker.project_event(&duplicate).is_none());
 
-        let tool = Event::new(
+        let tool = live(
             initial.clone(),
-            None,
-            EventPayload::ToolCallStarted {
+            LiveEventPayload::ToolCallStarted {
                 call_id: "call-1".into(),
                 tool_name: "read".into(),
             },
@@ -138,10 +150,9 @@ mod tests {
             Some(ConversationDeltaDto::AgentSessionUpdated { .. })
         ));
 
-        let repeated_tool = Event::new(
+        let repeated_tool = durable(
             initial.clone(),
-            None,
-            EventPayload::ToolCallRequested {
+            DurableEventPayload::ToolCallRequested {
                 call_id: "call-1".into(),
                 tool_name: "read".into(),
                 arguments: serde_json::json!({}),
@@ -150,20 +161,18 @@ mod tests {
         );
         assert!(tracker.project_event(&repeated_tool).is_none());
 
-        let text_delta = Event::new(
+        let text_delta = live(
             initial.clone(),
-            None,
-            EventPayload::AssistantTextDelta {
+            LiveEventPayload::AssistantTextDelta {
                 message_id: "message-1".into(),
                 delta: "token".into(),
             },
         );
         assert!(tracker.project_event(&text_delta).is_none());
 
-        let continued = Event::new(
+        let continued = durable(
             compacted.clone(),
-            None,
-            EventPayload::SessionContinuedFromCompaction {
+            DurableEventPayload::SessionContinuedFromCompaction {
                 parent_session_id: initial.clone(),
                 parent_cursor: "4".into(),
                 summary: "summary".into(),
@@ -175,10 +184,9 @@ mod tests {
         assert!(tracker.is_tracked_event(&continued));
         assert!(tracker.project_event(&continued).is_none());
 
-        let streaming = Event::new(
+        let streaming = live(
             compacted,
-            None,
-            EventPayload::AssistantMessageStarted {
+            LiveEventPayload::AssistantMessageStarted {
                 message_id: "message-1".into(),
             },
         );

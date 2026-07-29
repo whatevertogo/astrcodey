@@ -8,7 +8,11 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::{config::ModelSelection, event::EventPayload, tool::access::ResourceAccess};
+use astrcode_core::{
+    config::ModelSelection,
+    event::{DurableEventPayload, EventPayload, ExtensionEventData},
+    tool::access::ResourceAccess,
+};
 use astrcode_extension_sdk::{
     extension::{
         CommandCompletionItem, CommandCompletions, CommandContext, CommandHandler,
@@ -689,13 +693,12 @@ async fn start_can_emit_declared_event_through_bound_startup_channel() {
     let event = event_rx.recv().await.unwrap();
     assert!(matches!(
         event,
-        EventPayload::ExtensionEvent {
+        EventPayload::Durable(DurableEventPayload::ExtensionEvent(ExtensionEventData {
             extension_id,
             event_type,
             schema_version: 1,
-            durable: true,
             payload,
-        } if extension_id == "startup-event"
+        })) if extension_id == "startup-event"
             && event_type == "startup_ready"
             && payload == json!({"ready": true})
     ));

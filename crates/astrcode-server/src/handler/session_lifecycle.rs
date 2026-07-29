@@ -58,18 +58,8 @@ impl CommandHandler {
 
         tracing::info!(session_id = %sid, "session created, dispatching SessionStart");
         self.broadcast_event(created.start_event);
-
-        match created.session.initialize_runtime(&working_dir).await {
-            Ok(()) => {
-                tracing::info!(session_id = %sid, "session fully initialized");
-                Ok(sid)
-            },
-            Err(e) => {
-                tracing::error!(session_id = %sid, error = %e, "session prompt init failed");
-                self.send_error(-32603, &e.to_string());
-                Err(HandlerError::Session(e))
-            },
-        }
+        tracing::info!(session_id = %sid, "session fully initialized");
+        Ok(sid)
     }
 
     pub(super) async fn active_session_working_dir(&self) -> Result<String, String> {
@@ -83,7 +73,7 @@ impl CommandHandler {
             .session_manager()
             .read_model(sid)
             .await
-            .map(|state| state.working_dir)
+            .map(|state| state.identity.working_dir)
             .map_err(|e| format!("read session {sid}: {e}"))
     }
 
@@ -94,7 +84,7 @@ impl CommandHandler {
             .open(session_id.clone())
             .await
         {
-            Ok(session) => {
+            Ok(_) => {
                 if let Err(e) = self.repair_stale_session(&session_id).await {
                     self.send_error(-32603, &e.to_string());
                     return;
@@ -108,10 +98,6 @@ impl CommandHandler {
                 };
                 let snapshot = session_snapshot(&state);
 
-                if let Err(e) = session.ensure_runtime_ready().await {
-                    self.send_error(-32603, &e.to_string());
-                    return;
-                }
                 self.focused_session_id = Some(session_id.clone());
                 self.event_bus
                     .send_notification(ClientNotification::SessionResumed {

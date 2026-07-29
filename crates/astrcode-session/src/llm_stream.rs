@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use astrcode_core::{
     context::is_prompt_too_long_message,
-    event::EventPayload,
+    event::LiveEventPayload,
     llm::{LlmError, LlmEvent, LlmTokenUsage},
     types::*,
 };
@@ -134,7 +134,7 @@ pub async fn consume_llm_stream(
                     .await;
                 current_text.push_str(&delta);
                 publisher
-                    .live(EventPayload::AssistantTextDelta {
+                    .live(LiveEventPayload::AssistantTextDelta {
                         message_id: message_id.clone(),
                         delta,
                     })
@@ -145,7 +145,7 @@ pub async fn consume_llm_stream(
                     .await;
                 reasoning_content.push_str(&delta);
                 publisher
-                    .live(EventPayload::ThinkingDelta {
+                    .live(LiveEventPayload::ThinkingDelta {
                         message_id: message_id.clone(),
                         delta,
                     })
@@ -173,14 +173,14 @@ pub async fn consume_llm_stream(
                     }
                     ensure_tool_call_args_limit(arguments.len())?;
                     publisher
-                        .live(EventPayload::ToolCallStarted {
+                        .live(LiveEventPayload::ToolCallStarted {
                             call_id: call_id.clone().into(),
                             tool_name: name.clone(),
                         })
                         .await;
                     if !arguments.is_empty() {
                         publisher
-                            .live(EventPayload::ToolCallArgumentsDelta {
+                            .live(LiveEventPayload::ToolCallArgumentsDelta {
                                 call_id: call_id.clone().into(),
                                 delta: arguments.clone(),
                             })
@@ -199,7 +199,7 @@ pub async fn consume_llm_stream(
                     tc.arguments.push_str(&delta);
                 }
                 publisher
-                    .live(EventPayload::ToolCallArgumentsDelta {
+                    .live(LiveEventPayload::ToolCallArgumentsDelta {
                         call_id: call_id.into(),
                         delta,
                     })
@@ -300,7 +300,7 @@ async fn ensure_assistant_message_started(
         return;
     }
     publisher
-        .live(EventPayload::AssistantMessageStarted {
+        .live(LiveEventPayload::AssistantMessageStarted {
             message_id: message_id.clone(),
         })
         .await;

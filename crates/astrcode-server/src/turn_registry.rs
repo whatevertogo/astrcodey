@@ -254,16 +254,14 @@ mod tests {
             permissions: Default::default(),
             extensions: ExtensionSettings::default(),
         };
-        Arc::new(astrcode_session::SessionRuntimeServices::new(
+        crate::config_manager::assemble_session_runtime_services(
             Arc::clone(&llm),
             llm,
             effective,
-            crate::default_host::first_party_host_services(
-                extension_runner,
-                context_assembler,
-                std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
-            ),
-        ))
+            extension_runner,
+            context_assembler,
+            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        )
     }
 
     async fn make_session(sid: &str) -> Arc<Session> {
@@ -282,6 +280,7 @@ mod tests {
                 parent_session_id: None,
                 tool_selection: None,
                 source_extension: None,
+                initial_system_prompt: None,
                 runtime,
                 runtime_services: test_runtime_services(),
             })

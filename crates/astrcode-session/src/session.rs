@@ -3,7 +3,10 @@
 use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
-    event::{Event, EventPayload},
+    event::{
+        DurableEvent, DurableEventPayload, Event, LiveEvent, LiveEventPayload, ParentSessionRef,
+        PersistedSystemPrompt, SessionStarted, StoredEvent, SystemPromptSource,
+    },
     llm::LlmMessage,
     tool::{
         SessionToolSelection, ToolResultArtifactError, ToolResultArtifactReader,
@@ -54,6 +57,8 @@ pub struct SessionCreateParams {
     pub parent_session_id: Option<SessionId>,
     pub tool_selection: Option<SessionToolSelection>,
     pub source_extension: Option<String>,
+    /// 仅 fork 等需要精确继承 prompt 的创建路径设置；普通创建由 session 自行组装。
+    pub initial_system_prompt: Option<PersistedSystemPrompt>,
     pub runtime: Arc<SessionRuntimeState>,
     pub runtime_services: Arc<SessionRuntimeServices>,
 }
@@ -93,23 +98,44 @@ impl Session {
     }
 
     async fn create_persisted(params: SessionCreateParams) -> Result<Self, SessionError> {
-        params
-            .store
-            .create_session(
-                &params.session_id,
-                &params.working_dir,
-                &params.model_id,
-                params.parent_session_id.as_ref(),
-                params.tool_selection.as_ref(),
-                params.source_extension.as_deref(),
-            )
-            .await?;
-        Ok(Self {
-            id: params.session_id,
-            store: params.store,
-            runtime: params.runtime,
-            runtime_services: params.runtime_services,
-        })
+        let session = Self {
+            id: params.session_id.clone(),
+            store: Arc::clone(&params.store),
+            runtime: Arc::clone(&params.runtime),
+            runtime_services: Arc::clone(&params.runtime_services),
+        };
+        let initial_system_prompt = match params.initial_system_prompt {
+            Some(prompt) => prompt,
+            None => {
+                session
+                    .prepare_initial_system_prompt(
+                        &params.working_dir,
+                        &params.model_id,
+                        params.parent_session_id.as_ref(),
+                        params.tool_selection.as_ref(),
+                        params.source_extension.as_deref(),
+                    )
+                    .await?
+            },
+        };
+        let started = DurableEvent::session(
+            params.session_id.clone(),
+            DurableEventPayload::SessionStarted(SessionStarted {
+                working_dir: params.working_dir,
+                model_id: params.model_id,
+                parent: params
+                    .parent_session_id
+                    .map(|session_id| ParentSessionRef { session_id }),
+                tool_selection: params.tool_selection.unwrap_or_default(),
+                source_extension: params.source_extension,
+                initial_system_prompt: initial_system_prompt.clone(),
+            }),
+        );
+        params.store.create_session(started).await?;
+        session
+            .runtime
+            .update_prompt_extra(initial_system_prompt.extra_system_prompt);
+        Ok(session)
     }
 
     /// 从磁盘恢复已有会话并附带运行时服务和事件广播。
@@ -120,12 +146,17 @@ impl Session {
         runtime_services: Arc<SessionRuntimeServices>,
     ) -> Result<Self, SessionError> {
         store.open_session(&id).await?;
-        Ok(Self {
+        let session = Self {
             id,
             store,
             runtime,
             runtime_services,
-        })
+        };
+        let state = session.read_model().await?;
+        session
+            .runtime
+            .update_prompt_extra(state.system_prompt.extra);
+        Ok(session)
     }
 
     pub fn id(&self) -> &SessionId {
@@ -212,8 +243,12 @@ async fn resolve_effective_tool_selection(
     model: &SessionReadModel,
 ) -> Result<Option<SessionToolSelection>, SessionError> {
     let mut visited = HashSet::from([session_id.clone()]);
-    let mut selection = SessionToolSelection::intersect(None, model.tool_selection.as_ref());
-    let mut parent_session_id = model.parent_session_id.clone();
+    let mut selection = Some(model.identity.tool_selection.clone());
+    let mut parent_session_id = model
+        .identity
+        .parent
+        .as_ref()
+        .map(|parent| parent.session_id.clone());
 
     while let Some(parent_id) = parent_session_id {
         if !visited.insert(parent_id.clone()) {
@@ -222,9 +257,11 @@ async fn resolve_effective_tool_selection(
             });
         }
         let parent = store.session_read_model(&parent_id).await?;
-        selection =
-            SessionToolSelection::intersect(parent.tool_selection.as_ref(), selection.as_ref());
-        parent_session_id = parent.parent_session_id;
+        selection = SessionToolSelection::intersect(
+            Some(&parent.identity.tool_selection),
+            selection.as_ref(),
+        );
+        parent_session_id = parent.identity.parent.map(|parent| parent.session_id);
     }
 
     Ok(selection)
@@ -241,7 +278,7 @@ impl Session {
         Ok(self.store.session_provider_messages(&self.id).await?)
     }
 
-    pub async fn current_system_prompt(&self) -> Result<Option<String>, SessionError> {
+    pub async fn current_system_prompt(&self) -> Result<String, SessionError> {
         Ok(self.store.session_system_prompt(&self.id).await?)
     }
 
@@ -296,15 +333,16 @@ pub(crate) fn parse_base_event_seq(cursor: Option<Cursor>) -> Result<u64, Sessio
 // ── Event emission ──
 
 impl Session {
-    pub async fn append_event(&self, event: Event) -> Result<Event, SessionError> {
+    pub async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, SessionError> {
         let stored = self.store.append_event(event).await?;
-        self.runtime.fanout(stored.clone());
-        perf_snapshot::capture_event("session.append_event", &stored);
+        let runtime_event = Event::from(&stored);
+        self.runtime.fanout(runtime_event.clone());
+        perf_snapshot::capture_event("session.append_event", &runtime_event);
         Ok(stored)
     }
 
-    pub async fn emit_live(&self, turn_id: Option<&TurnId>, payload: EventPayload) {
-        let event = Event::new(self.id.clone(), turn_id.cloned(), payload);
+    pub async fn emit_live(&self, turn_id: Option<&TurnId>, payload: LiveEventPayload) {
+        let event = Event::from(LiveEvent::new(self.id.clone(), turn_id.cloned(), payload));
         perf_snapshot::capture_event("session.emit_live", &event);
         self.runtime.fanout(event);
     }
@@ -312,12 +350,13 @@ impl Session {
     pub async fn emit_durable(
         &self,
         turn_id: Option<&TurnId>,
-        payload: EventPayload,
-    ) -> Result<Event, SessionError> {
-        let event = Event::new(self.id.clone(), turn_id.cloned(), payload);
+        payload: DurableEventPayload,
+    ) -> Result<StoredEvent, SessionError> {
+        let event = DurableEvent::new(self.id.clone(), turn_id.cloned(), payload);
         let stored = self.store.append_event(event).await?;
-        self.runtime.fanout(stored.clone());
-        perf_snapshot::capture_event("session.emit_durable", &stored);
+        let runtime_event = Event::from(&stored);
+        self.runtime.fanout(runtime_event.clone());
+        perf_snapshot::capture_event("session.emit_durable", &runtime_event);
         Ok(stored)
     }
 
@@ -326,15 +365,18 @@ impl Session {
         emit_lifecycle_for_read_model(&self.runtime_services, &self.id, &model, event).await
     }
 
-    pub async fn update_model_id(&self, model_id: &str) -> Result<Option<Event>, SessionError> {
+    pub async fn update_model_id(
+        &self,
+        model_id: &str,
+    ) -> Result<Option<StoredEvent>, SessionError> {
         let current = self.read_model().await?;
-        if current.model_id == model_id {
+        if current.identity.model_id == model_id {
             return Ok(None);
         }
-        self.append_event(Event::new(
+        self.append_event(DurableEvent::new(
             self.id.clone(),
             None,
-            EventPayload::ModelIdChanged {
+            DurableEventPayload::ModelIdChanged {
                 model_id: model_id.to_string(),
             },
         ))
@@ -350,8 +392,9 @@ impl Session {
         requested: SessionToolSelection,
     ) -> Result<SessionToolSelection, SessionError> {
         let model = self.read_model().await?;
-        let parent_selection = match model.parent_session_id {
-            Some(parent_session_id) => {
+        let parent_selection = match model.identity.parent {
+            Some(parent) => {
+                let parent_session_id = parent.session_id;
                 let parent_model = self.store.session_read_model(&parent_session_id).await?;
                 self.effective_tool_selection(&parent_session_id, &parent_model)
                     .await?
@@ -361,7 +404,7 @@ impl Session {
         let tool_selection = SessionToolSelection::restrict(parent_selection.as_ref(), &requested);
         self.emit_durable(
             None,
-            EventPayload::SessionToolsConfigured {
+            DurableEventPayload::SessionToolsConfigured {
                 selection: tool_selection.clone(),
             },
         )
@@ -405,21 +448,6 @@ impl Session {
             .resolve_tool_registry_snapshot(working_dir, tool_selection.as_ref(), &mut stability)
             .await?
             .registry)
-    }
-
-    pub async fn initialize_runtime(&self, working_dir: &str) -> Result<(), SessionError> {
-        self.refresh_prompt(working_dir, None, None).await?;
-        Ok(())
-    }
-
-    pub async fn ensure_runtime_ready(&self) -> Result<(), SessionError> {
-        let state = self.read_model().await?;
-        if state.system_prompt.is_none() {
-            let model_id = self.runtime.model_id();
-            self.refresh_prompt_with_state(&state.working_dir, None, None, Some(&state), &model_id)
-                .await?;
-        }
-        Ok(())
     }
 }
 
@@ -470,6 +498,16 @@ impl Session {
             working_dir: working_dir.to_owned(),
             session_store_dir: self.session_store_dir().await,
         };
+        self.resolve_tool_registry_snapshot_for_scope(&scope, tool_selection, stability)
+            .await
+    }
+
+    async fn resolve_tool_registry_snapshot_for_scope(
+        &self,
+        scope: &ToolCatalogScope,
+        tool_selection: Option<&SessionToolSelection>,
+        stability: &mut RuntimeStabilityBudget,
+    ) -> Result<ResolvedToolRegistrySnapshot, SessionError> {
         loop {
             let RuntimeSnapshotState::Stable(runtime_generation) =
                 self.runtime_services.runtime_snapshot_state()
@@ -477,7 +515,7 @@ impl Session {
                 retry_runtime_snapshot(stability).await?;
                 continue;
             };
-            let base_key = self.base_tool_registry_key(&scope);
+            let base_key = self.base_tool_registry_key(scope);
             let cache = self.runtime.tool_registry_cache();
             let build = match cache.lookup_or_reserve(&base_key) {
                 ToolCacheLookup::Hit(base_registry) => {
@@ -497,7 +535,7 @@ impl Session {
 
             let built = crate::session_setup::build_base_tool_registry(
                 self.runtime_services.tool_catalog(),
-                &scope,
+                scope,
             )
             .await?;
             let base_registry = Arc::new(built.registry);
@@ -519,44 +557,60 @@ impl Session {
         }
     }
 
+    async fn prepare_initial_system_prompt(
+        &self,
+        working_dir: &str,
+        model_id: &str,
+        parent_session_id: Option<&SessionId>,
+        tool_selection: Option<&SessionToolSelection>,
+        source_extension: Option<&str>,
+    ) -> Result<PersistedSystemPrompt, SessionError> {
+        let planned_store_dir = self
+            .store
+            .planned_session_store_dir(&self.id, working_dir, parent_session_id, source_extension)
+            .await?;
+        let scope = ToolCatalogScope {
+            working_dir: working_dir.to_owned(),
+            session_store_dir: planned_store_dir,
+        };
+        let resolved_extra = normalize_extra_system_prompt(self.runtime.prompt_extra().as_deref());
+        let mut stability = RuntimeStabilityBudget::new();
+
+        loop {
+            let tool_snapshot = self
+                .resolve_tool_registry_snapshot_for_scope(&scope, tool_selection, &mut stability)
+                .await?;
+            let (text, fingerprint) = self
+                .build_system_prompt(
+                    working_dir,
+                    model_id,
+                    resolved_extra.as_deref(),
+                    parent_session_id.is_some(),
+                    tool_snapshot.registry.as_ref(),
+                )
+                .await?;
+            if self.runtime_services.runtime_snapshot_state()
+                == RuntimeSnapshotState::Stable(tool_snapshot.runtime_generation)
+                && self.runtime_services.tool_catalog().revision()
+                    == tool_snapshot.base_key.catalog_revision
+            {
+                return Ok(PersistedSystemPrompt {
+                    text,
+                    fingerprint,
+                    extra_system_prompt: resolved_extra,
+                    source: SystemPromptSource::Native,
+                });
+            }
+            retry_runtime_snapshot(&mut stability).await?;
+        }
+    }
+
     fn base_tool_registry_key(&self, scope: &ToolCatalogScope) -> BaseToolRegistryKey {
         BaseToolRegistryKey {
             catalog_revision: self.runtime_services.tool_catalog().revision(),
             working_dir: scope.working_dir.clone(),
             session_store_dir: scope.session_store_dir.clone(),
         }
-    }
-
-    pub async fn refresh_prompt(
-        &self,
-        working_dir: &str,
-        extra_system_prompt: Option<&str>,
-        stored_fingerprint: Option<&str>,
-    ) -> Result<bool, SessionError> {
-        let model_id = self.runtime.model_id();
-        self.refresh_prompt_with_state(
-            working_dir,
-            extra_system_prompt,
-            stored_fingerprint,
-            None,
-            &model_id,
-        )
-        .await
-    }
-
-    async fn refresh_prompt_with_state(
-        &self,
-        working_dir: &str,
-        extra_system_prompt: Option<&str>,
-        stored_fingerprint: Option<&str>,
-        cached_state: Option<&SessionReadModel>,
-        model_id: &str,
-    ) -> Result<bool, SessionError> {
-        let prepared = self
-            .prepare_runtime_snapshot(working_dir, extra_system_prompt, cached_state, model_id)
-            .await?;
-        self.persist_system_prompt(prepared.prompt, stored_fingerprint)
-            .await
     }
 
     async fn prepare_runtime_snapshot(
@@ -576,7 +630,7 @@ impl Session {
             },
         };
         let resolved_extra = self.resolve_extra_system_prompt(extra_system_prompt, state);
-        let is_subagent = state.parent_session_id.is_some();
+        let is_subagent = state.identity.parent.is_some();
         let tool_selection = self.effective_tool_selection(&self.id, state).await?;
 
         loop {
@@ -641,6 +695,7 @@ impl Session {
                 prepared.text,
                 prepared.fingerprint,
                 prepared.resolved_extra,
+                SystemPromptSource::Native,
             ),
         )
         .await?;
@@ -658,7 +713,7 @@ impl Session {
         if let Some(extra) = self.runtime.prompt_extra() {
             return Some(extra);
         }
-        state.extra_system_prompt.clone()
+        state.system_prompt.extra.clone()
     }
 
     async fn build_system_prompt(
@@ -678,8 +733,6 @@ impl Session {
         Ok(crate::session_setup::build_system_prompt_snapshot(
             crate::session_setup::SystemPromptSnapshotInput {
                 prompt_contributor: self.runtime_services.prompt_contributor(),
-                prompt_provider: self.runtime_services.prompt_provider(),
-                prompt_file_provider: self.runtime_services.prompt_file_provider(),
                 session_id: self.id.as_str(),
                 working_dir,
                 model_id,
@@ -710,15 +763,16 @@ impl Session {
         compaction: astrcode_core::context::CompactResult,
         base_event_seq: u64,
         strategy: astrcode_core::compaction::CompactStrategy,
-    ) -> Result<Vec<Event>, SessionError> {
+    ) -> Result<Vec<StoredEvent>, SessionError> {
         // compact 语义：冻结 base_event_seq 之前的历史前缀。
         // 即使 compact 计算期间有新事件写入，也必须以 base_event_seq 作为边界标记，
         // 后续 replay 会将这些新事件归类为 tail delta 追加，不覆盖它们。
         let cursor = base_event_seq.to_string();
         let extra_system_prompt = normalize_extra_system_prompt(extra_system_prompt.as_deref());
+        let prompt_source = self.read_model().await?.system_prompt.source;
         let mut events = Vec::with_capacity(3);
         events.push(
-            self.append_event(Event::new(
+            self.append_event(DurableEvent::new(
                 self.id.clone(),
                 None,
                 compact_boundary_payload(
@@ -732,15 +786,20 @@ impl Session {
             .await?,
         );
         events.push(
-            self.append_event(Event::new(
+            self.append_event(DurableEvent::new(
                 self.id.clone(),
                 None,
-                system_prompt_configured_payload(system_prompt, fingerprint, extra_system_prompt),
+                system_prompt_configured_payload(
+                    system_prompt,
+                    fingerprint,
+                    extra_system_prompt,
+                    prompt_source,
+                ),
             ))
             .await?,
         );
         events.push(
-            self.append_event(Event::new(
+            self.append_event(DurableEvent::new(
                 self.id.clone(),
                 None,
                 session_continued_from_compaction_payload(self.id.clone(), cursor, &compaction),
@@ -795,15 +854,16 @@ impl Session {
             parent_session_id: Some(self.id.clone()),
             tool_selection: tool_selection.clone(),
             source_extension: source_extension.map(str::to_owned),
+            initial_system_prompt: None,
             runtime: child_runtime,
             runtime_services: Arc::clone(&self.runtime_services),
         })
         .await?;
 
-        self.append_event(Event::new(
+        self.append_event(DurableEvent::new(
             self.id.clone(),
             None,
-            EventPayload::AgentSessionSpawned {
+            DurableEventPayload::AgentSessionSpawned {
                 child_session_id: child_sid,
                 agent_name,
                 task,
@@ -839,18 +899,18 @@ impl Session {
         attachments: &[astrcode_core::message_attachment::MessageAttachment],
         turn_id: &TurnId,
     ) -> Result<(), TurnError> {
-        self.emit_durable(Some(turn_id), EventPayload::TurnStarted)
+        self.emit_durable(Some(turn_id), DurableEventPayload::TurnStarted)
             .await?;
         self.emit_durable(
             Some(turn_id),
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: text.to_string(),
                 attachments: attachments.to_vec(),
             },
         )
         .await?;
-        self.emit_live(Some(turn_id), EventPayload::AgentRunStarted)
+        self.emit_live(Some(turn_id), LiveEventPayload::AgentRunStarted)
             .await;
         Ok(())
     }
@@ -866,8 +926,8 @@ impl Session {
         let ctx = UserMessageEnvelopeContext {
             session_id: self.id.to_string(),
             turn_id: turn_id.to_string(),
-            working_dir: state.working_dir.clone(),
-            model: astrcode_core::config::ModelSelection::simple(state.model_id),
+            working_dir: state.identity.working_dir.clone(),
+            model: astrcode_core::config::ModelSelection::simple(state.identity.model_id),
             text,
             attachments: attachments.to_vec(),
             session_store_dir: self.session_store_dir().await,
@@ -899,22 +959,38 @@ impl Session {
         }
 
         let pre_state = self.read_model().await?;
-        let working_dir = pre_state.working_dir.clone();
-        let stored_fingerprint = pre_state.system_prompt_fingerprint.clone();
-        let prepared = self
-            .prepare_runtime_snapshot(&working_dir, None, Some(&pre_state), model.model_id())
-            .await?;
-        let prompt_changed = self
-            .persist_system_prompt(prepared.prompt, stored_fingerprint.as_deref())
-            .await?;
+        let working_dir = pre_state.identity.working_dir.clone();
+        let (registry, tool_selection, prompt_changed) = if pre_state.system_prompt.source
+            == SystemPromptSource::Inherited
+        {
+            let tool_selection = self.effective_tool_selection(&self.id, &pre_state).await?;
+            let mut stability = RuntimeStabilityBudget::new();
+            let tool_snapshot = self
+                .resolve_tool_registry_snapshot(
+                    &working_dir,
+                    tool_selection.as_ref(),
+                    &mut stability,
+                )
+                .await?;
+            (tool_snapshot.registry, tool_selection, false)
+        } else {
+            let stored_fingerprint = pre_state.system_prompt.fingerprint.clone();
+            let prepared = self
+                .prepare_runtime_snapshot(&working_dir, None, Some(&pre_state), model.model_id())
+                .await?;
+            let prompt_changed = self
+                .persist_system_prompt(prepared.prompt, Some(&stored_fingerprint))
+                .await?;
+            (prepared.registry, prepared.tool_selection, prompt_changed)
+        };
 
         let mut session_state = if prompt_changed {
-            // refresh_prompt 可能写入了 durable event，需重读 projection。
+            // Prompt 刷新可能写入 durable event，需重读 projection。
             self.read_model().await?
         } else {
             pre_state
         };
-        session_state.tool_selection = prepared.tool_selection;
+        session_state.identity.tool_selection = tool_selection.unwrap_or_default();
         let session_store_dir = self.session_store_dir().await;
         let cancellation_token = CancellationToken::new();
         TurnLoop::new_with_llm(
@@ -922,7 +998,7 @@ impl Session {
             &session_state,
             session_store_dir,
             Arc::clone(&model.llm),
-            prepared.registry,
+            registry,
             cancellation_token,
         )
     }
@@ -955,7 +1031,7 @@ impl Session {
             if let Err(e) = session
                 .emit_durable(
                     Some(&turn_id),
-                    EventPayload::ErrorOccurred {
+                    DurableEventPayload::ErrorOccurred {
                         code: -32603,
                         message: error_msg,
                         recoverable: false,
@@ -1039,7 +1115,7 @@ impl Session {
         if let Err(persist_error) = self
             .emit_durable(
                 Some(turn_id),
-                EventPayload::ErrorOccurred {
+                DurableEventPayload::ErrorOccurred {
                     code: -32603,
                     message: error.to_string(),
                     recoverable: false,
@@ -1124,7 +1200,7 @@ pub async fn emit_interrupted_tool_results(
     let mut emitted = 0;
     for pending in state.tool_calls_needing_interruption() {
         let payload = match outcome {
-            InterruptedToolOutcome::Failed => EventPayload::ToolCallFailed {
+            InterruptedToolOutcome::Failed => DurableEventPayload::ToolCallFailed {
                 call_id: pending.call_id.into(),
                 tool_name: pending.tool_name,
                 error: "tool execution interrupted before completion".into(),
@@ -1133,7 +1209,7 @@ pub async fn emit_interrupted_tool_results(
                 arguments: String::new(),
                 arguments_json: None,
             },
-            InterruptedToolOutcome::Cancelled => EventPayload::ToolCallCancelled {
+            InterruptedToolOutcome::Cancelled => DurableEventPayload::ToolCallCancelled {
                 call_id: pending.call_id.into(),
                 tool_name: pending.tool_name,
                 reason: "turn aborted".into(),
@@ -1153,7 +1229,7 @@ pub async fn emit_turn_aborted_context(
     turn_id: Option<&TurnId>,
 ) -> Result<(), SessionError> {
     session
-        .emit_durable(turn_id, EventPayload::TurnAbortedContext)
+        .emit_durable(turn_id, DurableEventPayload::TurnAbortedContext)
         .await?;
     Ok(())
 }

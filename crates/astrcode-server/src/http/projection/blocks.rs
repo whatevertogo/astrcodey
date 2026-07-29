@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use astrcode_core::{
-    event::{Event, EventPayload},
+    event::{DurableEventPayload, Event, EventPayload, LiveEventPayload},
     llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, attachments_from_user_message},
 };
 use astrcode_protocol::http::{
@@ -74,8 +74,18 @@ pub(in crate::http) fn streaming_tool_call_block(
 
 /// 为产生单个可见 block 的 payload 构建共享投影。
 pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationBlockDto> {
-    match &event.payload {
-        EventPayload::UserMessage {
+    let payload = match &event.payload {
+        EventPayload::Durable(payload) => payload,
+        EventPayload::Live(LiveEventPayload::ErrorOccurred { message, .. }) => {
+            return Some(ConversationBlockDto::Error {
+                id: event.id.to_string(),
+                message: message.clone(),
+            });
+        },
+        EventPayload::Live(_) => return None,
+    };
+    match payload {
+        DurableEventPayload::UserMessage {
             message_id,
             text,
             attachments,
@@ -86,7 +96,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             attachments: attachments.iter().cloned().map(Into::into).collect(),
             source: None,
         }),
-        EventPayload::AssistantMessageCompleted {
+        DurableEventPayload::AssistantMessageCompleted {
             message_id,
             text,
             reasoning_content,
@@ -96,7 +106,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             reasoning_content: reasoning_content.clone(),
             status: ConversationBlockStatusDto::Complete,
         }),
-        EventPayload::ToolCallCompleted {
+        DurableEventPayload::ToolCallCompleted {
             call_id,
             tool_name,
             result,
@@ -117,7 +127,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             approval: None,
             arguments_json: arguments_json.clone(),
         }),
-        EventPayload::ToolCallFailed {
+        DurableEventPayload::ToolCallFailed {
             call_id,
             tool_name,
             error,
@@ -135,7 +145,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             approval: None,
             arguments_json: arguments_json.clone(),
         }),
-        EventPayload::ToolCallCancelled {
+        DurableEventPayload::ToolCallCancelled {
             call_id,
             tool_name,
             reason,
@@ -152,11 +162,11 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             approval: None,
             arguments_json: arguments_json.clone(),
         }),
-        EventPayload::ErrorOccurred { message, .. } => Some(ConversationBlockDto::Error {
+        DurableEventPayload::ErrorOccurred { message, .. } => Some(ConversationBlockDto::Error {
             id: event.id.to_string(),
             message: message.clone(),
         }),
-        EventPayload::CompactBoundaryCreated {
+        DurableEventPayload::CompactBoundaryCreated {
             trigger,
             pre_tokens,
             post_tokens,
@@ -171,10 +181,12 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             post_tokens: *post_tokens,
             transcript_path: transcript_path.clone(),
         }),
-        EventPayload::RecapGenerated { text, .. } => Some(ConversationBlockDto::SystemNote {
-            id: event.id.to_string(),
-            text: text.clone(),
-        }),
+        DurableEventPayload::RecapGenerated { text, .. } => {
+            Some(ConversationBlockDto::SystemNote {
+                id: event.id.to_string(),
+                text: text.clone(),
+            })
+        },
         _ => None,
     }
 }

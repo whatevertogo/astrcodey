@@ -16,7 +16,10 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
-use astrcode_core::{event::EventPayload, types::TurnId};
+use astrcode_core::{
+    event::{DurableEventPayload, EventPayload, LiveEventPayload},
+    types::TurnId,
+};
 use astrcode_session_projection::{SessionReadModel, reduce};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
@@ -100,7 +103,7 @@ impl TurnEvents {
         Ok(self.session.visible_user_message_count().await?)
     }
 
-    pub(crate) async fn durable(&self, payload: EventPayload) -> Result<(), TurnError> {
+    pub(crate) async fn durable(&self, payload: DurableEventPayload) -> Result<(), TurnError> {
         let stored = match self
             .session
             .emit_durable(Some(&self.turn_id), payload)
@@ -119,22 +122,22 @@ impl TurnEvents {
         if should_reduce {
             let mut cache = self.model_cache.lock().await;
             if let Some(model) = cache.as_mut() {
-                reduce(&stored, model);
+                reduce(&stored, model)?;
             }
             return Ok(());
         }
         let model = self.session.read_model().await?;
         let mut cache = self.model_cache.lock().await;
         match cache.as_mut() {
-            Some(cached) => reduce(&stored, cached),
+            Some(cached) => reduce(&stored, cached)?,
             None => *cache = Some(model),
         }
         Ok(())
     }
 
-    pub(crate) async fn live(&self, payload: EventPayload) {
+    pub(crate) async fn live(&self, payload: LiveEventPayload) {
         if let Some(tx) = self.live_tx.as_ref() {
-            send_event(Some(tx), payload);
+            send_event(Some(tx), EventPayload::Live(payload));
         } else {
             self.session.emit_live(Some(&self.turn_id), payload).await;
         }
@@ -147,7 +150,7 @@ impl TurnEvents {
         message: String,
         recoverable: bool,
     ) -> Result<(), TurnError> {
-        self.durable(EventPayload::ErrorOccurred {
+        self.durable(DurableEventPayload::ErrorOccurred {
             code,
             message,
             recoverable,
@@ -160,7 +163,7 @@ impl TurnEvents {
     /// 发送 live 错误事件。live 事件不会出现在后续 conversation snapshot 中，因此不能
     /// 标记 `emitted_error`，否则 turn finalizer 会跳过 durable ErrorOccurred。
     pub(crate) async fn live_error(&self, code: i32, message: String, recoverable: bool) {
-        self.live(EventPayload::ErrorOccurred {
+        self.live(LiveEventPayload::ErrorOccurred {
             code,
             message,
             recoverable,
@@ -169,7 +172,7 @@ impl TurnEvents {
     }
 }
 
-async fn durable_with_retry(publisher: &TurnEvents, payload: EventPayload) {
+async fn durable_with_retry(publisher: &TurnEvents, payload: DurableEventPayload) {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
@@ -206,10 +209,9 @@ async fn durable_with_retry(publisher: &TurnEvents, payload: EventPayload) {
 }
 
 async fn dispatch_payload(publisher: &TurnEvents, payload: EventPayload) {
-    if payload.is_durable() {
-        durable_with_retry(publisher, payload).await;
-    } else {
-        publisher.live(payload).await;
+    match payload {
+        EventPayload::Durable(payload) => durable_with_retry(publisher, payload).await,
+        EventPayload::Live(payload) => publisher.live(payload).await,
     }
 }
 
@@ -311,10 +313,10 @@ mod tests {
         context::{
             CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
             CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
+            NoopPostCompactEnricher,
         },
-        event::EventPayload,
+        event::{DurableEventPayload, EventPayload, ExtensionEventData, LiveEventPayload},
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
         tool::ToolDefinition,
         types::{new_session_id, new_turn_id},
     };
@@ -336,7 +338,7 @@ mod tests {
         SessionExtensionPorts,
         session::{Session, SessionCreateParams},
         session_runtime::SessionRuntimeState,
-        session_runtime_services::{SessionHostServices, SessionRuntimeServices},
+        session_runtime_services::SessionRuntimeServices,
     };
 
     struct UnusedLlm;
@@ -383,27 +385,6 @@ mod tests {
             _request_text: CompactRequestFn,
         ) -> CompactIfNeededOutcome {
             CompactIfNeededOutcome::NotRun { messages }
-        }
-    }
-
-    struct TestPromptProvider;
-
-    #[async_trait::async_trait]
-    impl PromptProvider for TestPromptProvider {
-        async fn assemble(&self, input: SystemPromptInput) -> PromptPlan {
-            PromptPlan::from_system_prompt(format!(
-                "[Identity]\n  test host\n\n[Environment]\n  Working directory: {}",
-                input.working_dir
-            ))
-        }
-    }
-
-    struct TestPromptFileProvider;
-
-    #[async_trait::async_trait]
-    impl PromptFileProvider for TestPromptFileProvider {
-        async fn load(&self, _working_dir: &str, _include_agents_rules: bool) -> PromptFiles {
-            PromptFiles::default()
         }
     }
 
@@ -474,12 +455,10 @@ mod tests {
             llm.clone(),
             llm,
             effective,
-            SessionHostServices::embedded(
-                context_assembler,
-                Arc::new(TestPromptProvider),
-                Arc::new(TestPromptFileProvider),
-            )
-            .with_extension_ports(SessionExtensionPorts::with_turn_hooks(turn_hooks)),
+            SessionExtensionPorts::with_turn_hooks(turn_hooks),
+            context_assembler,
+            Arc::new(NoopPostCompactEnricher),
+            Arc::new(NoopRuntimePorts),
         ))
     }
 
@@ -505,6 +484,7 @@ mod tests {
             parent_session_id: None,
             tool_selection: None,
             source_extension: None,
+            initial_system_prompt: None,
             runtime,
             runtime_services,
         })
@@ -519,7 +499,7 @@ mod tests {
         let turn_id = new_turn_id();
         let publisher = TurnEvents::new(session.clone(), turn_id, None);
         publisher
-            .durable(EventPayload::UserMessage {
+            .durable(DurableEventPayload::UserMessage {
                 message_id: astrcode_core::types::new_message_id(),
                 text: "first".into(),
                 attachments: vec![],
@@ -527,10 +507,10 @@ mod tests {
             .await
             .unwrap();
         let snap = publisher.snapshot_model().await.unwrap();
-        assert_eq!(snap.messages.len(), 1);
+        assert_eq!(snap.transcript.messages.len(), 1);
 
         publisher
-            .durable(EventPayload::UserMessage {
+            .durable(DurableEventPayload::UserMessage {
                 message_id: astrcode_core::types::new_message_id(),
                 text: "second".into(),
                 attachments: vec![],
@@ -538,7 +518,7 @@ mod tests {
             .await
             .unwrap();
         let snap = publisher.snapshot_model().await.unwrap();
-        assert_eq!(snap.messages.len(), 2);
+        assert_eq!(snap.transcript.messages.len(), 2);
     }
 
     #[tokio::test]
@@ -547,7 +527,7 @@ mod tests {
         let turn_id = new_turn_id();
         let publisher = TurnEvents::new(session.clone(), turn_id.clone(), None);
         publisher
-            .durable(EventPayload::UserMessage {
+            .durable(DurableEventPayload::UserMessage {
                 message_id: astrcode_core::types::new_message_id(),
                 text: "injected".into(),
                 attachments: vec![],
@@ -556,7 +536,7 @@ mod tests {
             .unwrap();
 
         let model = session.read_model().await.unwrap();
-        assert!(model.messages.iter().any(|message| {
+        assert!(model.transcript.messages.iter().any(|message| {
             message.message.role == astrcode_core::llm::LlmRole::User
                 && message.message.content.iter().any(|content| {
                     matches!(
@@ -578,21 +558,23 @@ mod tests {
             let tx = ctx
                 .event_tx
                 .ok_or_else(|| ExtensionError::Internal("no turn event sender".into()))?;
-            tx.send(EventPayload::ExtensionEvent {
-                extension_id: "emit-probe".into(),
-                event_type: "emit.probe".into(),
-                schema_version: 1,
-                durable: true,
-                payload: serde_json::json!({ "probe": true }),
-            })
+            tx.send(EventPayload::Durable(DurableEventPayload::ExtensionEvent(
+                ExtensionEventData {
+                    extension_id: "emit-probe".into(),
+                    event_type: "emit.probe".into(),
+                    schema_version: 1,
+                    payload: serde_json::json!({ "probe": true }),
+                },
+            )))
             .map_err(|_| ExtensionError::Internal("turn event sender closed".into()))?;
-            tx.send(EventPayload::ExtensionEvent {
-                extension_id: "emit-probe".into(),
-                event_type: "emit.live".into(),
-                schema_version: 1,
-                durable: false,
-                payload: serde_json::json!({ "probe": true }),
-            })
+            tx.send(EventPayload::Live(LiveEventPayload::ExtensionEvent(
+                ExtensionEventData {
+                    extension_id: "emit-probe".into(),
+                    event_type: "emit.live".into(),
+                    schema_version: 1,
+                    payload: serde_json::json!({ "probe": true }),
+                },
+            )))
             .map_err(|_| ExtensionError::Internal("turn event sender closed".into()))?;
             Ok(PreToolUseResult::Allow)
         }
@@ -682,15 +664,16 @@ mod tests {
         let events = session.store.replay_events(session.id()).await.unwrap();
         assert!(events.iter().any(|e| matches!(
             &e.payload,
-            EventPayload::ExtensionEvent {
+            DurableEventPayload::ExtensionEvent(ExtensionEventData {
                 extension_id,
                 event_type,
                 ..
-            } if extension_id == "emit-probe" && event_type == "emit.probe"
+            }) if extension_id == "emit-probe" && event_type == "emit.probe"
         )));
         assert!(!events.iter().any(|e| matches!(
             &e.payload,
-            EventPayload::ExtensionEvent { event_type, .. } if event_type == "emit.live"
+            DurableEventPayload::ExtensionEvent(ExtensionEventData { event_type, .. })
+                if event_type == "emit.live"
         )));
     }
 
@@ -713,11 +696,11 @@ mod tests {
             let sender = Arc::clone(&sender);
             workers.push(tokio::spawn(async move {
                 let tx = sender.event_tx();
-                tx.send(EventPayload::UserMessage {
+                tx.send(EventPayload::Durable(DurableEventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: format!("parallel-{index}"),
                     attachments: vec![],
-                })
+                }))
                 .unwrap();
                 sender.flush().await;
             }));
@@ -735,7 +718,9 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event.payload, EventPayload::UserMessage { .. }))
+                .filter(|event| {
+                    matches!(event.payload, DurableEventPayload::UserMessage { .. })
+                })
                 .count(),
             8
         );

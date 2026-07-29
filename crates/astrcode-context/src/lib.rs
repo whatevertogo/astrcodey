@@ -1,7 +1,7 @@
 //! astrcode-context：LLM 上下文窗口管理。
 //!
 //! 负责 system prompt 组装和 provider-ready 上下文构建：
-//! - `prompt_engine`：system prompt 组装（静态内容在前，动态内容在后）
+//! - `prompt_engine`：system prompt 组装（稳定内容在前，动态内容在后）
 //! - `context_assembler`：上下文窗口裁剪
 //! - `compaction`：LLM 驱动的摘要压缩
 //! - `token_budget`：token 估算

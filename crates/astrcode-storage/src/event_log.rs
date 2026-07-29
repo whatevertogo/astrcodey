@@ -13,13 +13,13 @@ use std::{
     },
 };
 
-use astrcode_core::event::{Event, EventPayload};
+use astrcode_core::event::{DurableEvent, DurableEventPayload, StoredEvent};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::StorageError;
 
 /// `(first_event, last_event, first_user_message)` from a single log scan.
-pub(crate) type EventLogEnds = (Option<Event>, Option<Event>, Option<String>);
+pub(crate) type EventLogEnds = (Option<StoredEvent>, Option<StoredEvent>, Option<String>);
 
 async fn run_blocking_io<F, T>(f: F) -> Result<T, StorageError>
 where
@@ -33,7 +33,11 @@ where
     })?
 }
 
-fn validate_event(event: &Event, line_number: usize, path: &Path) -> Result<(), StorageError> {
+fn validate_event(
+    event: &StoredEvent,
+    line_number: usize,
+    path: &Path,
+) -> Result<(), StorageError> {
     if event.session_id.as_str().is_empty() {
         return Err(StorageError::InvalidId(format!(
             "event at {}:{} has empty session_id",
@@ -51,9 +55,97 @@ fn validate_event(event: &Event, line_number: usize, path: &Path) -> Result<(), 
     Ok(())
 }
 
-fn parse_event_line(path: &Path, line_number: usize, line: &str) -> Result<Event, StorageError> {
+#[derive(Default)]
+struct EventStreamValidator {
+    session_id: Option<astrcode_core::types::SessionId>,
+    next_seq: u64,
+}
+
+impl EventStreamValidator {
+    fn observe(
+        &mut self,
+        event: &StoredEvent,
+        line_number: usize,
+        path: &Path,
+    ) -> Result<(), StorageError> {
+        if event.seq != self.next_seq {
+            return Err(corrupt_log(
+                path,
+                line_number,
+                format!("expected seq {}, got {}", self.next_seq, event.seq),
+            ));
+        }
+
+        match &self.session_id {
+            None => {
+                if event.turn_id.is_some() {
+                    return Err(corrupt_log(
+                        path,
+                        line_number,
+                        "SessionStarted must be a session-level event",
+                    ));
+                }
+                if !matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
+                    return Err(corrupt_log(
+                        path,
+                        line_number,
+                        "first event must be SessionStarted",
+                    ));
+                }
+                self.session_id = Some(event.session_id.clone());
+            },
+            Some(session_id) => {
+                if &event.session_id != session_id {
+                    return Err(corrupt_log(
+                        path,
+                        line_number,
+                        format!(
+                            "event belongs to session {}, expected {}",
+                            event.session_id, session_id
+                        ),
+                    ));
+                }
+                if matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
+                    return Err(corrupt_log(
+                        path,
+                        line_number,
+                        "SessionStarted may only appear at seq 0",
+                    ));
+                }
+            },
+        }
+
+        self.next_seq += 1;
+        Ok(())
+    }
+
+    fn finish(&self, path: &Path) -> Result<(), StorageError> {
+        if self.session_id.is_none() {
+            return Err(StorageError::CorruptLog(format!(
+                "{} is empty",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+}
+
+fn corrupt_log(path: &Path, line_number: usize, message: impl Into<String>) -> StorageError {
+    StorageError::CorruptLog(format!(
+        "{}:{}: {}",
+        path.display(),
+        line_number,
+        message.into()
+    ))
+}
+
+fn parse_event_line(
+    path: &Path,
+    line_number: usize,
+    line: &str,
+) -> Result<StoredEvent, StorageError> {
     let trimmed = line.trim();
-    let event = match serde_json::from_str::<Event>(trimmed) {
+    let event = match serde_json::from_str::<StoredEvent>(trimmed) {
         Ok(event) => event,
         Err(e) => {
             let preview = if trimmed.len() > 100 {
@@ -83,7 +175,7 @@ fn replay_events_at_path(
     path: &Path,
     after_seq: Option<u64>,
     max_events: Option<usize>,
-) -> Result<Vec<Event>, StorageError> {
+) -> Result<Vec<StoredEvent>, StorageError> {
     if max_events == Some(0) {
         return Ok(Vec::new());
     }
@@ -92,6 +184,7 @@ fn replay_events_at_path(
     })?;
     let mut reader = BufReader::new(file);
     let mut events = Vec::new();
+    let mut validator = EventStreamValidator::default();
     let mut line_number = 0usize;
     loop {
         let mut line = String::new();
@@ -114,13 +207,15 @@ fn replay_events_at_path(
         }
         line_number += 1;
         let event = parse_event_line(path, line_number, &line)?;
-        if after_seq.is_none_or(|seq| event.seq.is_some_and(|event_seq| event_seq > seq)) {
+        validator.observe(&event, line_number, path)?;
+        if after_seq.is_none_or(|seq| event.seq > seq) {
             events.push(event);
             if max_events.is_some_and(|limit| events.len() >= limit) {
-                break;
+                return Ok(events);
             }
         }
     }
+    validator.finish(path)?;
     Ok(events)
 }
 
@@ -132,9 +227,10 @@ fn read_first_and_last_at_path(path: &Path) -> Result<EventLogEnds, StorageError
         StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
     })?;
     let mut reader = BufReader::new(file);
-    let mut first: Option<Event> = None;
-    let mut last: Option<Event> = None;
+    let mut first: Option<StoredEvent> = None;
+    let mut last: Option<StoredEvent> = None;
     let mut first_user: Option<String> = None;
+    let mut validator = EventStreamValidator::default();
     let mut line_number = 0usize;
     loop {
         let mut line = String::new();
@@ -157,16 +253,18 @@ fn read_first_and_last_at_path(path: &Path) -> Result<EventLogEnds, StorageError
         }
         line_number += 1;
         let event = parse_event_line(path, line_number, &line)?;
+        validator.observe(&event, line_number, path)?;
         if first.is_none() {
             first = Some(event.clone());
         }
         if first_user.is_none() {
-            if let EventPayload::UserMessage { text, .. } = &event.payload {
+            if let DurableEventPayload::UserMessage { text, .. } = &event.payload {
                 first_user = Some(text.clone());
             }
         }
         last = Some(event);
     }
+    validator.finish(path)?;
     Ok((first, last, first_user))
 }
 
@@ -176,8 +274,8 @@ const CHANNEL_CAPACITY: usize = 1024;
 
 enum WriteCommand {
     Append {
-        event: Box<Event>,
-        done: oneshot::Sender<Result<Event, StorageError>>,
+        event: Box<DurableEvent>,
+        done: oneshot::Sender<Result<StoredEvent, StorageError>>,
     },
     FlushSync {
         done: oneshot::Sender<Result<(), StorageError>>,
@@ -187,6 +285,7 @@ enum WriteCommand {
 
 struct WriterState {
     writer: File,
+    session_id: astrcode_core::types::SessionId,
     next_seq: u64,
     committed_len: u64,
     path: PathBuf,
@@ -195,7 +294,11 @@ struct WriterState {
 }
 
 impl WriterState {
-    fn open_append(path: PathBuf, next_seq: u64) -> Result<Self, StorageError> {
+    fn open_append(
+        path: PathBuf,
+        session_id: astrcode_core::types::SessionId,
+        next_seq: u64,
+    ) -> Result<Self, StorageError> {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -206,6 +309,7 @@ impl WriterState {
         let committed_len = file.metadata().map_err(StorageError::Io)?.len();
         Ok(Self {
             writer: file,
+            session_id,
             next_seq,
             committed_len,
             path,
@@ -214,14 +318,25 @@ impl WriterState {
         })
     }
 
-    fn append_one(&mut self, mut event: Box<Event>) -> Result<Event, StorageError> {
-        event.seq = Some(self.next_seq);
-        let mut encoded = serde_json::to_vec(&*event)?;
+    fn append_one(&mut self, event: Box<DurableEvent>) -> Result<StoredEvent, StorageError> {
+        if event.session_id != self.session_id {
+            return Err(StorageError::InvalidEvent(format!(
+                "cannot append event for session {} to log for {}",
+                event.session_id, self.session_id
+            )));
+        }
+        if matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
+            return Err(StorageError::InvalidEvent(
+                "SessionStarted may only be written while creating a log".into(),
+            ));
+        }
+        let stored = StoredEvent::new(self.next_seq, *event);
+        let mut encoded = serde_json::to_vec(&stored)?;
         encoded.push(b'\n');
         self.write_committed_record(&encoded)?;
         self.next_seq += 1;
         self.dirty = true;
-        Ok(*event)
+        Ok(stored)
     }
 
     fn write_committed_record(&mut self, encoded: &[u8]) -> Result<(), StorageError> {
@@ -322,14 +437,29 @@ fn write_loop(
 
 fn create_at_path(
     path: PathBuf,
-    mut initial_event: Event,
-) -> Result<(WriterState, Event), StorageError> {
-    initial_event.seq = Some(0);
-    let file = File::create(&path).map_err(|e| {
-        StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(&path, e)))
-    })?;
+    initial_event: DurableEvent,
+) -> Result<(WriterState, StoredEvent), StorageError> {
+    if initial_event.turn_id.is_some()
+        || !matches!(
+            initial_event.payload,
+            DurableEventPayload::SessionStarted(_)
+        )
+    {
+        return Err(StorageError::InvalidEvent(
+            "event log creation requires a session-level SessionStarted event".into(),
+        ));
+    }
+    let session_id = initial_event.session_id.clone();
+    let stored_event = StoredEvent::new(0, initial_event);
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)
+        .map_err(|e| {
+            StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(&path, e)))
+        })?;
     let mut writer = file;
-    let mut encoded = serde_json::to_vec(&initial_event)?;
+    let mut encoded = serde_json::to_vec(&stored_event)?;
     encoded.push(b'\n');
     writer.write_all(&encoded)?;
     writer.flush().map_err(|e| {
@@ -341,13 +471,14 @@ fn create_at_path(
     Ok((
         WriterState {
             writer,
+            session_id,
             next_seq: 1,
             committed_len: encoded.len() as u64,
             path,
             dirty: false,
             poisoned: None,
         },
-        initial_event,
+        stored_event,
     ))
 }
 
@@ -360,8 +491,14 @@ fn open_at_path(path: PathBuf) -> Result<WriterState, StorageError> {
         .into());
     }
     recover_incomplete_tail(&path)?;
-    let next_seq = last_seq_from_path(&path)?.saturating_add(1);
-    WriterState::open_append(path, next_seq)
+    let (first, last, _) = read_first_and_last_at_path(&path)?;
+    let first = first
+        .as_ref()
+        .ok_or_else(|| StorageError::CorruptLog(format!("{} is empty", path.display())))?;
+    let next_seq = last
+        .and_then(|event| event.seq.checked_add(1))
+        .ok_or_else(|| StorageError::CorruptLog("session event sequence overflow".into()))?;
+    WriterState::open_append(path, first.session_id.clone(), next_seq)
 }
 
 /// Treat the terminating newline as the commit marker for a JSONL record.
@@ -450,8 +587,8 @@ impl EventLog {
     /// Create a new event log file with an initial event.
     pub async fn create(
         path: PathBuf,
-        initial_event: Event,
-    ) -> Result<(Self, Event), StorageError> {
+        initial_event: DurableEvent,
+    ) -> Result<(Self, StoredEvent), StorageError> {
         let (state, stored_event) =
             run_blocking_io(move || create_at_path(path, initial_event)).await?;
         Ok((Self::from_writer_state(state), stored_event))
@@ -495,7 +632,7 @@ impl EventLog {
     /// The writer thread assigns `seq`, serializes, and writes the line —
     /// no mutex contention on the write path.
     /// Writes to the OS page cache immediately; call [`force_sync`] for fsync.
-    pub async fn append(&self, event: Event) -> Result<Event, StorageError> {
+    pub async fn append(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         let (done, rx) = oneshot::channel();
         self.tx
             .send(WriteCommand::Append {
@@ -509,7 +646,7 @@ impl EventLog {
     }
 
     /// Replay all events from the beginning.
-    pub async fn replay_all(&self) -> Result<Vec<Event>, StorageError> {
+    pub async fn replay_all(&self) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
         run_blocking_io(move || replay_events_at_path(&path, None, None)).await
     }
@@ -518,7 +655,7 @@ impl EventLog {
     ///
     /// This is used when recovering from a snapshot: only the events that
     /// occurred after the snapshot point need to be replayed, not the whole log.
-    pub async fn replay_after(&self, seq: u64) -> Result<Vec<Event>, StorageError> {
+    pub async fn replay_after(&self, seq: u64) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
         run_blocking_io(move || replay_events_at_path(&path, Some(seq), None)).await
     }
@@ -529,7 +666,7 @@ impl EventLog {
         &self,
         seq: u64,
         max_events: usize,
-    ) -> Result<Vec<Event>, StorageError> {
+    ) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
         run_blocking_io(move || replay_events_at_path(&path, Some(seq), Some(max_events))).await
     }
@@ -559,86 +696,6 @@ impl EventLog {
         let path = path.to_path_buf();
         run_blocking_io(move || read_first_and_last_at_path(&path)).await
     }
-}
-
-/// 从 JSONL 文件尾部扫描最后一个事件的 seq。
-///
-/// 对于小文件（≤64KB）全量扫描；对于大文件只读取尾部 64KB，
-/// 从后往前查找最后一个包含有效 `seq` 的事件行。
-fn last_seq_from_path(path: &Path) -> Result<u64, StorageError> {
-    let file_size = fs::metadata(path)
-        .map_err(|e| {
-            StorageError::Io(std::io::Error::new(
-                e.kind(),
-                enhance_metadata_error(path, e),
-            ))
-        })?
-        .len();
-
-    if file_size == 0 {
-        return Ok(0);
-    }
-
-    const TAIL_THRESHOLD: u64 = 64 * 1024;
-    if file_size <= TAIL_THRESHOLD {
-        return scan_full_file_for_last_seq(path);
-    }
-
-    let offset = file_size - TAIL_THRESHOLD;
-    let mut file = File::open(path).map_err(|e| {
-        StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
-    })?;
-
-    // Check if the tail starts mid-line by examining the byte before offset.
-    // offset is always > 0 here: the early return above guarantees file_size > TAIL_THRESHOLD.
-    file.seek(std::io::SeekFrom::Start(offset - 1))
-        .map_err(StorageError::Io)?;
-    let mut previous = [0u8; 1];
-    file.read_exact(&mut previous).map_err(StorageError::Io)?;
-    let started_mid_line = previous[0] != b'\n';
-    file.seek(std::io::SeekFrom::Start(offset))
-        .map_err(StorageError::Io)?;
-
-    let mut tail_bytes = Vec::new();
-    file.read_to_end(&mut tail_bytes).map_err(|e| {
-        StorageError::Io(std::io::Error::new(e.kind(), enhance_read_error(path, e)))
-    })?;
-
-    // Skip the first partial line if we landed mid-line.
-    if started_mid_line {
-        let Some(position) = tail_bytes.iter().position(|b| *b == b'\n') else {
-            return scan_full_file_for_last_seq(path);
-        };
-        tail_bytes = tail_bytes[position + 1..].to_vec();
-    }
-
-    // Walk backwards through lines looking for the last valid seq.
-    for line in tail_bytes.rsplit(|b| *b == b'\n') {
-        let trimmed = line.trim_ascii();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(seq) = parse_seq_from_line(trimmed) {
-            return Ok(seq);
-        }
-    }
-
-    scan_full_file_for_last_seq(path)
-}
-
-fn scan_full_file_for_last_seq(path: &Path) -> Result<u64, StorageError> {
-    let mut last_seq: Option<u64> = None;
-    let iterator = EventLogIterator::new(path)?;
-    for event_result in iterator {
-        let (_line_number, event) = event_result?;
-        last_seq = event.seq;
-    }
-    Ok(last_seq.unwrap_or(0))
-}
-
-fn parse_seq_from_line(line: &[u8]) -> Option<u64> {
-    let v = serde_json::from_slice::<serde_json::Value>(line).ok()?;
-    v.get("seq")?.as_u64()
 }
 
 fn enhance_open_error(path: &Path, e: std::io::Error) -> String {
@@ -688,324 +745,5 @@ fn enhance_sync_error(path: &Path, e: std::io::Error) -> String {
     )
 }
 
-fn enhance_metadata_error(path: &Path, e: std::io::Error) -> String {
-    match e.kind() {
-        ErrorKind::PermissionDenied => format!(
-            "permission denied: cannot access session file '{}'. Check file permissions.",
-            path.display()
-        ),
-        ErrorKind::NotFound => format!(
-            "session file '{}' not found. The session may have been deleted or moved.",
-            path.display()
-        ),
-        _ => format!(
-            "failed to read metadata for session file '{}'",
-            path.display()
-        ),
-    }
-}
-
-/// 事件日志的流式迭代器，逐行读取并解析事件。
-struct EventLogIterator {
-    reader: BufReader<File>,
-    /// 当前读取的行号（从 1 开始，含空行），用于错误定位。
-    line_number: usize,
-    /// 文件路径，用于错误消息上下文。
-    path: PathBuf,
-}
-
-impl EventLogIterator {
-    /// 从指定路径创建事件日志迭代器。
-    fn new(path: &Path) -> Result<Self, StorageError> {
-        let file = File::open(path).map_err(|e| {
-            StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
-        })?;
-        Ok(Self {
-            reader: BufReader::new(file),
-            line_number: 0,
-            path: path.to_path_buf(),
-        })
-    }
-}
-
-impl Iterator for EventLogIterator {
-    /// 返回 (行号, 事件) 元组，跳过空行。
-    type Item = Result<(usize, Event), StorageError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            let mut line = String::new();
-            match self.reader.read_line(&mut line) {
-                Ok(0) => return None,
-                Ok(_) => {
-                    self.line_number += 1;
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    let event = match parse_event_line(&self.path, self.line_number, trimmed) {
-                        Ok(event) => event,
-                        Err(error) => return Some(Err(error)),
-                    };
-                    return Some(Ok((self.line_number, event)));
-                },
-                Err(e) => {
-                    return Some(Err(StorageError::Io(std::io::Error::new(
-                        e.kind(),
-                        enhance_read_error(&self.path, e),
-                    ))));
-                },
-            }
-        }
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use astrcode_core::event::EventPayload;
-    use tempfile::tempdir;
-
-    use super::*;
-
-    fn make_start_event(id: &str) -> Event {
-        Event::new(
-            id.into(),
-            None,
-            EventPayload::SessionStarted {
-                working_dir: "/tmp".into(),
-                model_id: "test-model".into(),
-                parent_session_id: None,
-                tool_selection: None,
-                source_extension: None,
-            },
-        )
-    }
-
-    #[tokio::test]
-    async fn create_append_and_replay_assigns_stable_seq() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("test.jsonl");
-        let (log, start) = EventLog::create(path.clone(), make_start_event("s1"))
-            .await
-            .unwrap();
-
-        assert_eq!(start.seq, Some(0));
-
-        let appended = log
-            .append(Event::new(
-                "s1".into(),
-                Some("turn-1".into()),
-                EventPayload::TurnStarted,
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(appended.seq, Some(1));
-        let events = log.replay_all().await.unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[0].seq, Some(0));
-        assert_eq!(events[1].seq, Some(1));
-    }
-
-    #[test]
-    fn partial_write_rollback_repositions_new_file_writer() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("rollback.jsonl");
-        let mut writer = WriterState {
-            writer: File::create(&path).unwrap(),
-            next_seq: 1,
-            committed_len: 9,
-            path: path.clone(),
-            dirty: false,
-            poisoned: None,
-        };
-        writer.writer.write_all(b"committedpartial").unwrap();
-
-        writer.rollback_partial_write(9).unwrap();
-        writer.writer.write_all(b"next").unwrap();
-        writer.writer.flush().unwrap();
-
-        assert_eq!(std::fs::read(path).unwrap(), b"committednext");
-    }
-
-    #[tokio::test]
-    async fn event_log_writes_nested_payload_format() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("nested.jsonl");
-        let (_log, _start) = EventLog::create(path.clone(), make_start_event("s1"))
-            .await
-            .unwrap();
-
-        let content = std::fs::read_to_string(path).unwrap();
-        let first_line = content.lines().next().unwrap();
-        let value: serde_json::Value = serde_json::from_str(first_line).unwrap();
-        assert_eq!(value["session_id"], "s1");
-        assert_eq!(value["payload"]["type"], "session_started");
-        assert!(value.get("type").is_none());
-        assert!(value.get("working_dir").is_none());
-    }
-
-    #[test]
-    fn iterator_rejects_legacy_flat_event_lines() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("flat.jsonl");
-        std::fs::write(
-            &path,
-            r#"{"seq":0,"id":"event-1","session_id":"s1","timestamp":"2026-01-01T00:00:00Z","type":"turn_started"}"#,
-        )
-        .unwrap();
-
-        let mut iter = EventLogIterator::new(&path).unwrap();
-        let err = iter.next().unwrap().unwrap_err();
-        assert!(matches!(
-            err,
-            StorageError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData
-        ));
-    }
-
-    #[tokio::test]
-    async fn open_continues_seq_from_existing_log() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("test.jsonl");
-        let (log, _) = EventLog::create(path.clone(), make_start_event("s1"))
-            .await
-            .unwrap();
-        log.append(Event::new(
-            "s1".into(),
-            Some("turn-1".into()),
-            EventPayload::TurnStarted,
-        ))
-        .await
-        .unwrap();
-
-        let reopened = EventLog::open(path).await.unwrap();
-        let appended = reopened
-            .append(Event::new(
-                "s1".into(),
-                Some("turn-1".into()),
-                EventPayload::TurnCompleted {
-                    finish_reason: "stop".into(),
-                },
-            ))
-            .await
-            .unwrap();
-
-        assert_eq!(appended.seq, Some(2));
-        assert_eq!(reopened.count().await.unwrap(), 3);
-    }
-
-    #[tokio::test]
-    async fn open_discards_only_an_incomplete_trailing_record() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("interrupted-tail.jsonl");
-        let mut start = make_start_event("s1");
-        start.seq = Some(0);
-        let committed = serde_json::to_string(&start).unwrap();
-        std::fs::write(&path, format!("{committed}\n{{\"seq\":1")).unwrap();
-
-        let log = EventLog::open(path.clone()).await.unwrap();
-        let events = log.replay_all().await.unwrap();
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].seq, Some(0));
-
-        let appended = log
-            .append(Event::new(
-                "s1".into(),
-                Some("turn-1".into()),
-                EventPayload::TurnStarted,
-            ))
-            .await
-            .unwrap();
-        assert_eq!(appended.seq, Some(1));
-
-        let content = std::fs::read_to_string(path).unwrap();
-        assert_eq!(content.lines().count(), 2);
-    }
-
-    #[tokio::test]
-    async fn drop_flushes_pending_writes() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("drop.jsonl");
-        let (log, _) = EventLog::create(path.clone(), make_start_event("s1"))
-            .await
-            .unwrap();
-
-        log.append(Event::new(
-            "s1".into(),
-            Some("turn-1".into()),
-            EventPayload::TurnStarted,
-        ))
-        .await
-        .unwrap();
-        // append() already flushed to OS page cache; data is readable before Drop.
-        drop(log);
-
-        let reopened = EventLog::open(path).await.unwrap();
-        let events = reopened.replay_all().await.unwrap();
-        assert_eq!(events.len(), 2);
-        assert_eq!(events[1].seq, Some(1));
-    }
-
-    #[tokio::test]
-    async fn read_first_and_last_rejects_malformed_jsonl_lines() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("corrupt-summary.jsonl");
-        let valid = serde_json::to_string(&make_start_event("s1")).unwrap();
-        std::fs::write(&path, format!("{valid}\nnot-json\n")).unwrap();
-        let err = EventLog::read_first_and_last(&path).await.unwrap_err();
-        assert!(matches!(
-            err,
-            StorageError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData
-        ));
-    }
-
-    #[tokio::test]
-    async fn readers_ignore_uncommitted_trailing_record() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("partial-summary.jsonl");
-        let mut start = make_start_event("s1");
-        start.seq = Some(0);
-        let committed = serde_json::to_string(&start).unwrap();
-        std::fs::write(&path, format!("{committed}\n\n{{\"seq\":1")).unwrap();
-
-        let (first, last, _) = EventLog::read_first_and_last(&path).await.unwrap();
-        assert_eq!(first.and_then(|event| event.seq), Some(0));
-        assert_eq!(last.and_then(|event| event.seq), Some(0));
-
-        let replayed = replay_events_at_path(&path, None, None).unwrap();
-        assert_eq!(replayed.len(), 1);
-        assert_eq!(replayed[0].seq, Some(0));
-    }
-
-    #[test]
-    fn iterator_malformed_line_table() {
-        let cases = [
-            ("{", false),
-            ("{\"session_id\":", false),
-            ("[]", false),
-            ("null", false),
-            ("{\"not\":\"an_event\"}", false),
-            ("not-json", true),
-        ];
-        for (idx, (line, has_valid_prefix)) in cases.iter().enumerate() {
-            let dir = tempdir().unwrap();
-            let path = dir.path().join(format!("bad-{idx}.jsonl"));
-            let prefix =
-                has_valid_prefix.then(|| serde_json::to_string(&make_start_event("s1")).unwrap());
-            let content = prefix.map_or_else(
-                || format!("{line}\n"),
-                |prefix| format!("{prefix}\n{line}\n"),
-            );
-            std::fs::write(&path, content).unwrap();
-            let mut iter = EventLogIterator::new(&path).unwrap();
-            if *has_valid_prefix {
-                assert!(iter.next().unwrap().is_ok());
-            }
-            let err = iter.next().unwrap().unwrap_err();
-            assert!(
-                matches!(err, StorageError::Io(io) if io.kind() == std::io::ErrorKind::InvalidData),
-                "case {idx} should be InvalidData"
-            );
-        }
-    }
-}
+mod tests;

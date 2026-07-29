@@ -75,11 +75,9 @@ LAYER_NAMES: dict[int, str] = {
 ALLOWED_SAME_LAYER: set[tuple[str, str]] = set()
 
 FORBIDDEN_DEPS: dict[str, set[str]] = {
-    # Session is the embeddable runtime kernel. It must not depend on the
-    # first-party default implementations, including in tests, so alternate
-    # hosts can reuse it without inheriting AstrCode's built-in profile.
+    # Session owns prompt lifecycle and intentionally depends on context's
+    # concrete prompt implementation. It must not depend on higher layers.
     "astrcode-session": {
-        "astrcode-context",
         "astrcode-tools",
         "astrcode-extensions",
         "astrcode-bundled-extensions",

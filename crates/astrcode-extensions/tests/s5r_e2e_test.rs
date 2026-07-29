@@ -7,7 +7,7 @@ use std::{
 };
 
 use astrcode_core::{
-    event::EventPayload,
+    event::{DurableEventPayload, EventPayload, ExtensionEventData},
     llm::{LlmEvent, LlmMessage, LlmProvider},
     tool::{ToolDefinition, ToolExecutionContext},
 };
@@ -503,12 +503,12 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
         .expect("timeout")
         .expect("channel closed");
     match payload {
-        EventPayload::ExtensionEvent {
+        EventPayload::Durable(DurableEventPayload::ExtensionEvent(ExtensionEventData {
             extension_id,
             event_type,
             payload,
             ..
-        } => {
+        })) => {
             assert_eq!(extension_id, "s5r-guest-demo");
             assert_eq!(event_type, "s5r_guest.probe");
             assert_eq!(payload["from"], "pre_tool_use");

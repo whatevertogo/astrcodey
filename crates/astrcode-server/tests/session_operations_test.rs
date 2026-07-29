@@ -7,7 +7,7 @@ use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
-    event::EventPayload,
+    event::DurableEventPayload,
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::{
         CreateSessionRequest, SessionAccess, SessionDeliveryOutcome, SessionOperations,
@@ -18,9 +18,8 @@ use astrcode_core::{
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
     ChildSessionCoordinator, ConfigManager, ServerEventBus, ServerSessionOperations,
-    SessionManager, TurnRegistry, TurnScheduler,
+    SessionManager, TurnRegistry, TurnScheduler, session_started_event_for_test,
 };
-use astrcode_session::SessionRuntimeServices;
 use astrcode_session_projection::AgentSessionStatus;
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use astrcode_support::event_fanout::EventFanout;
@@ -160,16 +159,14 @@ fn build_test_ops_with_llm(
         extensions: ExtensionSettings::default(),
     };
     let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
-    let capabilities = Arc::new(SessionRuntimeServices::new(
+    let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         llm_provider.clone(),
         llm_provider,
         effective,
-        astrcode_server::default_host::first_party_host_services(
-            extension_runner.clone(),
-            context_assembler,
-            std::sync::Arc::clone(&shell_timeout_secs),
-        ),
-    ));
+        extension_runner.clone(),
+        context_assembler,
+        std::sync::Arc::clone(&shell_timeout_secs),
+    );
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
             std::path::PathBuf::from("target/test-session-ops-config.toml"),
@@ -215,7 +212,11 @@ async fn inject_message_during_active_turn_binds_turn_id() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
     store
-        .create_session(&parent_id, ".", "mock", None, None, None)
+        .create_session(session_started_event_for_test(
+            parent_id.clone(),
+            ".",
+            "mock",
+        ))
         .await
         .unwrap();
 
@@ -268,7 +269,7 @@ async fn inject_message_during_active_turn_binds_turn_id() {
         .find(|e| {
             matches!(
                 &e.payload,
-                EventPayload::UserMessage { text, .. } if text == "mid-turn inject"
+                DurableEventPayload::UserMessage { text, .. } if text == "mid-turn inject"
             )
         })
         .expect("injected UserMessage must be durable");
@@ -297,7 +298,11 @@ async fn inject_message_when_idle_starts_turn() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let session_id = new_session_id();
     store
-        .create_session(&session_id, ".", "mock", None, None, None)
+        .create_session(session_started_event_for_test(
+            session_id.clone(),
+            ".",
+            "mock",
+        ))
         .await
         .unwrap();
 
@@ -334,7 +339,11 @@ async fn inject_message_after_turn_task_finished_starts_new_turn() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let session_id = new_session_id();
     store
-        .create_session(&session_id, ".", "mock", None, None, None)
+        .create_session(session_started_event_for_test(
+            session_id.clone(),
+            ".",
+            "mock",
+        ))
         .await
         .unwrap();
 
@@ -376,7 +385,7 @@ async fn inject_message_after_turn_task_finished_starts_new_turn() {
         let injected = events.iter().find(|event| {
             matches!(
                 &event.payload,
-                EventPayload::UserMessage { text, .. }
+                DurableEventPayload::UserMessage { text, .. }
                     if text.contains("late injected user message")
             )
         });
@@ -392,7 +401,7 @@ async fn inject_message_after_turn_task_finished_starts_new_turn() {
         .find(|event| {
             matches!(
                 &event.payload,
-                EventPayload::UserMessage { text, .. }
+                DurableEventPayload::UserMessage { text, .. }
                     if text.contains("late injected user message")
             )
         })
@@ -409,7 +418,11 @@ async fn submit_turn_sync_returns_llm_output() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
     store
-        .create_session(&parent_id, ".", "mock", None, None, None)
+        .create_session(session_started_event_for_test(
+            parent_id.clone(),
+            ".",
+            "mock",
+        ))
         .await
         .unwrap();
 
@@ -460,7 +473,11 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
     store
-        .create_session(&parent_id, ".", "mock", None, None, None)
+        .create_session(session_started_event_for_test(
+            parent_id.clone(),
+            ".",
+            "mock",
+        ))
         .await
         .unwrap();
 
@@ -520,7 +537,7 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
     );
 
     // notify_parent_on_complete 消息应存在，且包含子 agent 输出
-    let has_notify = parent_model.messages.iter().any(|m| {
+    let has_notify = parent_model.transcript.messages.iter().any(|m| {
         m.message.content.iter().any(|c| {
             matches!(
                 c,
@@ -541,7 +558,11 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
     store
-        .create_session(&parent_id, ".", "mock", None, None, None)
+        .create_session(session_started_event_for_test(
+            parent_id.clone(),
+            ".",
+            "mock",
+        ))
         .await
         .unwrap();
 
@@ -583,7 +604,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
         let completed = parent_events.iter().any(|e| {
             matches!(
                 &e.payload,
-                EventPayload::AgentSessionCompleted {
+                DurableEventPayload::AgentSessionCompleted {
                     child_session_id: ref sid,
                     ..
                 } if sid == &child_id
@@ -592,7 +613,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
         let recycled = parent_events.iter().any(|e| {
             matches!(
                 &e.payload,
-                EventPayload::AgentSessionRecycled {
+                DurableEventPayload::AgentSessionRecycled {
                     child_session_id: ref sid,
                 } if sid == &child_id
             )
@@ -608,7 +629,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
         parent_events.iter().any(|e| {
             matches!(
                 &e.payload,
-                EventPayload::AgentSessionCompleted {
+                DurableEventPayload::AgentSessionCompleted {
                     child_session_id: ref sid,
                     ..
                 } if sid == &child_id
@@ -620,7 +641,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
         parent_events.iter().any(|e| {
             matches!(
                 &e.payload,
-                EventPayload::AgentSessionRecycled {
+                DurableEventPayload::AgentSessionRecycled {
                     child_session_id: ref sid,
                 } if sid == &child_id
             )
@@ -638,7 +659,11 @@ async fn parent_abort_stops_sync_child_and_recycles() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let parent_id = new_session_id();
     store
-        .create_session(&parent_id, ".", "mock", None, None, None)
+        .create_session(session_started_event_for_test(
+            parent_id.clone(),
+            ".",
+            "mock",
+        ))
         .await
         .unwrap();
 
@@ -707,7 +732,7 @@ async fn parent_abort_stops_sync_child_and_recycles() {
         parent_events.iter().any(|e| {
             matches!(
                 &e.payload,
-                EventPayload::AgentSessionFailed {
+                DurableEventPayload::AgentSessionFailed {
                     child_session_id: ref sid,
                     ..
                 } if sid == &child_id
@@ -719,7 +744,7 @@ async fn parent_abort_stops_sync_child_and_recycles() {
         parent_events.iter().any(|e| {
             matches!(
                 &e.payload,
-                EventPayload::AgentSessionRecycled {
+                DurableEventPayload::AgentSessionRecycled {
                     child_session_id: ref sid,
                 } if sid == &child_id
             )

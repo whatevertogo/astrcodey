@@ -1,21 +1,26 @@
 //! 从 EventStore 读模型构建 LLM 请求历史（projection SSOT）。
 
-use astrcode_core::{
-    llm::{LlmContent, LlmMessage, LlmRole, provider_visible_messages},
-    prompt::system_messages_from_prompt,
-};
+use astrcode_context::prompt_engine::system_messages_from_prompt;
+use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole, provider_visible_messages};
 use astrcode_session_projection::SessionReadModel;
 
 /// assembler / should_auto_compact 用的「可见历史」（无 system 行）。
 pub(crate) fn visible_messages_for_assembler(model: &SessionReadModel) -> Vec<LlmMessage> {
     let mut messages = Vec::with_capacity(
         model
+            .transcript
             .context_messages
             .len()
-            .saturating_add(model.messages.len()),
+            .saturating_add(model.transcript.messages.len()),
     );
-    messages.extend(model.context_messages.iter().map(|m| m.message.clone()));
-    messages.extend(model.messages.iter().map(|m| m.message.clone()));
+    messages.extend(
+        model
+            .transcript
+            .context_messages
+            .iter()
+            .map(|m| m.message.clone()),
+    );
+    messages.extend(model.transcript.messages.iter().map(|m| m.message.clone()));
     messages.retain(|message| message.role != LlmRole::System);
     messages
 }
@@ -36,9 +41,10 @@ pub(crate) fn build_llm_request_messages(
 /// 已提交 tool 结果内容的字符总量（用于 tool 结果预算）。
 pub(crate) fn committed_tool_result_content_len(model: &SessionReadModel) -> usize {
     model
+        .transcript
         .context_messages
         .iter()
-        .chain(model.messages.iter())
+        .chain(model.transcript.messages.iter())
         .map(|entry| &entry.message)
         .filter(|message| message.role == LlmRole::Tool)
         .flat_map(|message| message.content.iter())
@@ -58,20 +64,21 @@ mod tests {
     use astrcode_session_projection::{SequencedLlmMessage, SessionReadModel};
 
     use super::*;
+    use crate::test_support::read_model;
 
     fn sample_model() -> SessionReadModel {
-        let mut model = SessionReadModel::empty(new_session_id());
-        model.messages.push(SequencedLlmMessage {
+        let mut model = read_model(new_session_id());
+        model.transcript.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("hello"),
             updated_seq: 1,
             source: None,
         });
-        model.messages.push(SequencedLlmMessage {
+        model.transcript.messages.push(SequencedLlmMessage {
             message: LlmMessage::system("stale system in store"),
             updated_seq: 2,
             source: None,
         });
-        model.context_messages.push(SequencedLlmMessage {
+        model.transcript.context_messages.push(SequencedLlmMessage {
             message: LlmMessage::assistant("ctx"),
             updated_seq: 3,
             source: None,
@@ -116,8 +123,8 @@ mod tests {
 
     #[test]
     fn committed_tool_result_content_len_sums_tool_messages() {
-        let mut model = SessionReadModel::empty(new_session_id());
-        model.messages.push(SequencedLlmMessage {
+        let mut model = sample_model();
+        model.transcript.messages.push(SequencedLlmMessage {
             message: LlmMessage {
                 role: LlmRole::Tool,
                 content: vec![LlmContent::ToolResult {
@@ -131,7 +138,7 @@ mod tests {
             updated_seq: 1,
             source: None,
         });
-        model.messages.push(SequencedLlmMessage {
+        model.transcript.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("hi"),
             updated_seq: 2,
             source: None,

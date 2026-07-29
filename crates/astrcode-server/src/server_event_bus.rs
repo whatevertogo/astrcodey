@@ -8,7 +8,7 @@ use std::{
 };
 
 use astrcode_core::{
-    event::{Event, EventPayload, Phase},
+    event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase},
     types::{MessageId, SessionId},
 };
 use astrcode_protocol::events::ClientNotification;
@@ -43,7 +43,12 @@ impl SessionRoute {
             Self::Conversation(_) => true,
             Self::AgentChild(_) => {
                 agent_session_progress(payload).is_some()
-                    || matches!(payload, EventPayload::SessionContinuedFromCompaction { .. })
+                    || matches!(
+                        payload,
+                        EventPayload::Durable(
+                            DurableEventPayload::SessionContinuedFromCompaction { .. }
+                        )
+                    )
             },
         }
     }
@@ -124,7 +129,6 @@ impl ServerEventBus {
     }
 
     pub fn publish_event(&self, event: Arc<Event>) {
-        let session_deleted = matches!(event.payload, EventPayload::SessionDeleted);
         let route = self.route_for_event(&event);
         self.remember_event_route(&event, &route);
         self.update_streaming_snapshot(&event);
@@ -134,10 +138,6 @@ impl ServerEventBus {
         }
         if let Some(legacy_tx) = &self.legacy_tx {
             legacy_tx.send(ClientNotification::Event((*event).clone()));
-        }
-        if session_deleted {
-            self.attached.lock().remove(&event.session_id);
-            self.forget_session_routes(&event.session_id);
         }
     }
 
@@ -212,17 +212,20 @@ impl ServerEventBus {
 
     fn route_for_event(&self, event: &Event) -> SessionRoute {
         match &event.payload {
-            EventPayload::SessionStarted {
-                parent_session_id: Some(parent_session_id),
+            EventPayload::Durable(DurableEventPayload::SessionStarted(started)) => {
+                let Some(parent) = &started.parent else {
+                    return self.route_for_session(&event.session_id);
+                };
+                SessionRoute::AgentChild(
+                    self.route_for_session(&parent.session_id)
+                        .root_session_id()
+                        .clone(),
+                )
+            },
+            EventPayload::Durable(DurableEventPayload::SessionContinuedFromCompaction {
+                parent_session_id,
                 ..
-            } => SessionRoute::AgentChild(
-                self.route_for_session(parent_session_id)
-                    .root_session_id()
-                    .clone(),
-            ),
-            EventPayload::SessionContinuedFromCompaction {
-                parent_session_id, ..
-            } => self.route_for_session(parent_session_id),
+            }) => self.route_for_session(parent_session_id),
             _ => self.route_for_session(&event.session_id),
         }
     }
@@ -241,25 +244,28 @@ impl ServerEventBus {
             .entry(event.session_id.clone())
             .or_insert_with(|| route.clone());
         match &event.payload {
-            EventPayload::SessionStarted {
-                parent_session_id: None,
-                ..
-            } => {
+            EventPayload::Durable(DurableEventPayload::SessionStarted(started))
+                if started.parent.is_none() =>
+            {
                 routes.insert(
                     event.session_id.clone(),
                     SessionRoute::Conversation(event.session_id.clone()),
                 );
             },
-            EventPayload::SessionStarted {
-                parent_session_id: Some(_),
-                ..
-            }
-            | EventPayload::SessionContinuedFromCompaction { .. } => {
+            EventPayload::Durable(DurableEventPayload::SessionStarted(started))
+                if started.parent.is_some() =>
+            {
                 routes.insert(event.session_id.clone(), route.clone());
             },
-            EventPayload::AgentSessionSpawned {
-                child_session_id, ..
-            } => {
+            EventPayload::Durable(DurableEventPayload::SessionContinuedFromCompaction {
+                ..
+            }) => {
+                routes.insert(event.session_id.clone(), route.clone());
+            },
+            EventPayload::Durable(DurableEventPayload::AgentSessionSpawned {
+                child_session_id,
+                ..
+            }) => {
                 routes.insert(
                     child_session_id.clone(),
                     SessionRoute::AgentChild(route.root_session_id().clone()),
@@ -282,20 +288,28 @@ impl ServerEventBus {
 
 pub(crate) fn agent_session_progress(payload: &EventPayload) -> Option<(Phase, Option<String>)> {
     match payload {
-        EventPayload::TurnStarted | EventPayload::AgentRunStarted => Some((Phase::Thinking, None)),
-        EventPayload::AssistantMessageStarted { .. } => Some((Phase::Streaming, None)),
-        EventPayload::ToolCallStarted { tool_name, .. }
-        | EventPayload::ToolCallRequested { tool_name, .. } => {
-            Some((Phase::CallingTool, Some(tool_name.clone())))
+        EventPayload::Durable(payload) => match payload {
+            DurableEventPayload::TurnStarted => Some((Phase::Thinking, None)),
+            DurableEventPayload::ToolCallRequested { tool_name, .. } => {
+                Some((Phase::CallingTool, Some(tool_name.clone())))
+            },
+            DurableEventPayload::ToolCallCompleted { .. }
+            | DurableEventPayload::ToolCallFailed { .. }
+            | DurableEventPayload::ToolCallCancelled { .. } => Some((Phase::Thinking, None)),
+            DurableEventPayload::TurnCompleted { .. } => Some((Phase::Idle, None)),
+            DurableEventPayload::ErrorOccurred { .. } => Some((Phase::Error, None)),
+            _ => None,
         },
-        EventPayload::ToolCallCompleted { .. }
-        | EventPayload::ToolCallFailed { .. }
-        | EventPayload::ToolCallCancelled { .. } => Some((Phase::Thinking, None)),
-        EventPayload::TurnCompleted { .. } | EventPayload::AgentRunCompleted { .. } => {
-            Some((Phase::Idle, None))
+        EventPayload::Live(payload) => match payload {
+            LiveEventPayload::AgentRunStarted => Some((Phase::Thinking, None)),
+            LiveEventPayload::AssistantMessageStarted { .. } => Some((Phase::Streaming, None)),
+            LiveEventPayload::ToolCallStarted { tool_name, .. } => {
+                Some((Phase::CallingTool, Some(tool_name.clone())))
+            },
+            LiveEventPayload::AgentRunCompleted { .. } => Some((Phase::Idle, None)),
+            LiveEventPayload::ErrorOccurred { .. } => Some((Phase::Error, None)),
+            _ => None,
         },
-        EventPayload::ErrorOccurred { .. } => Some((Phase::Error, None)),
-        _ => None,
     }
 }
 
@@ -308,20 +322,23 @@ impl Default for ServerEventBus {
 fn update_streaming(state: &StreamingState, payload: &EventPayload) {
     let mut guard = state.lock();
     match payload {
-        EventPayload::AssistantMessageStarted { message_id } => {
+        EventPayload::Live(LiveEventPayload::AssistantMessageStarted { message_id }) => {
             *guard = Some((message_id.clone(), String::new(), String::new()));
         },
-        EventPayload::AssistantTextDelta { delta, .. } => {
+        EventPayload::Live(LiveEventPayload::AssistantTextDelta { delta, .. }) => {
             if let Some((_, text, _)) = guard.as_mut() {
                 text.push_str(delta);
             }
         },
-        EventPayload::ThinkingDelta { delta, .. } => {
+        EventPayload::Live(LiveEventPayload::ThinkingDelta { delta, .. }) => {
             if let Some((_, _, reasoning)) = guard.as_mut() {
                 reasoning.push_str(delta);
             }
         },
-        EventPayload::AssistantMessageCompleted { .. } | EventPayload::TurnCompleted { .. } => {
+        EventPayload::Durable(
+            DurableEventPayload::AssistantMessageCompleted { .. }
+            | DurableEventPayload::TurnCompleted { .. },
+        ) => {
             *guard = None;
         },
         _ => {},
@@ -331,18 +348,23 @@ fn update_streaming(state: &StreamingState, payload: &EventPayload) {
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
-        event::EventPayload,
+        event::{DurableEvent, LiveEvent, StoredEvent},
         types::{SessionId, ToolCallId},
     };
     use tokio::sync::mpsc::error::TryRecvError;
 
     use super::*;
 
+    fn durable(session_id: SessionId, payload: DurableEventPayload) -> Arc<Event> {
+        Arc::new(StoredEvent::new(1, DurableEvent::session(session_id, payload)).into())
+    }
+
+    fn live(session_id: SessionId, payload: LiveEventPayload) -> Arc<Event> {
+        Arc::new(LiveEvent::session(session_id, payload).into())
+    }
+
     fn turn_started(session_id: &SessionId) -> Arc<Event> {
-        Arc::new(Event::session(
-            session_id.clone(),
-            EventPayload::TurnStarted,
-        ))
+        durable(session_id.clone(), DurableEventPayload::TurnStarted)
     }
 
     #[test]
@@ -392,35 +414,35 @@ mod tests {
         let continued = SessionId::new("continued");
         let mut parent_rx = bus.subscribe_conversation_events(&parent);
 
-        bus.publish_event(Arc::new(Event::session(
+        bus.publish_event(durable(
             parent.clone(),
-            EventPayload::AgentSessionSpawned {
+            DurableEventPayload::AgentSessionSpawned {
                 child_session_id: child.clone(),
                 agent_name: "explore".into(),
                 task: "inspect".into(),
                 tool_selection: None,
                 tool_call_id: ToolCallId::new("agent-call"),
             },
-        )));
+        ));
         assert!(matches!(
             parent_rx.recv().await,
             Some(event) if event.session_id == parent
         ));
 
         for _ in 0..=ServerEventBus::EVENT_FANOUT_CAPACITY {
-            bus.publish_event(Arc::new(Event::session(
+            bus.publish_event(live(
                 child.clone(),
-                EventPayload::AssistantTextDelta {
+                LiveEventPayload::AssistantTextDelta {
                     message_id: "message-1".into(),
                     delta: "token".into(),
                 },
-            )));
+            ));
         }
         assert!(matches!(parent_rx.try_recv(), Err(TryRecvError::Empty)));
 
-        bus.publish_event(Arc::new(Event::session(
+        bus.publish_event(durable(
             continued_child.clone(),
-            EventPayload::SessionContinuedFromCompaction {
+            DurableEventPayload::SessionContinuedFromCompaction {
                 parent_session_id: child,
                 parent_cursor: "2".into(),
                 summary: "child summary".into(),
@@ -428,27 +450,27 @@ mod tests {
                 context_messages: Vec::new(),
                 retained_messages: Vec::new(),
             },
-        )));
+        ));
         assert!(matches!(
             parent_rx.recv().await,
             Some(event) if event.session_id == continued_child
         ));
 
-        bus.publish_event(Arc::new(Event::session(
+        bus.publish_event(live(
             continued_child.clone(),
-            EventPayload::ToolCallStarted {
+            LiveEventPayload::ToolCallStarted {
                 call_id: "tool-1".into(),
                 tool_name: "read".into(),
             },
-        )));
+        ));
         assert!(matches!(
             parent_rx.recv().await,
             Some(event) if event.session_id == continued_child
         ));
 
-        bus.publish_event(Arc::new(Event::session(
+        bus.publish_event(durable(
             continued.clone(),
-            EventPayload::SessionContinuedFromCompaction {
+            DurableEventPayload::SessionContinuedFromCompaction {
                 parent_session_id: parent.clone(),
                 parent_cursor: "4".into(),
                 summary: "summary".into(),
@@ -456,19 +478,19 @@ mod tests {
                 context_messages: Vec::new(),
                 retained_messages: Vec::new(),
             },
-        )));
+        ));
         assert!(matches!(
             parent_rx.recv().await,
             Some(event) if event.session_id == continued
         ));
 
-        bus.publish_event(Arc::new(Event::session(
+        bus.publish_event(live(
             continued.clone(),
-            EventPayload::AssistantTextDelta {
+            LiveEventPayload::AssistantTextDelta {
                 message_id: "message-2".into(),
                 delta: "continued token".into(),
             },
-        )));
+        ));
         assert!(matches!(
             parent_rx.recv().await,
             Some(event) if event.session_id == continued

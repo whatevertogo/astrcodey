@@ -231,7 +231,7 @@ pub trait SessionOperationsProvider: Send + Sync {
     }
 }
 
-/// Empty extension runtime for embedded hosts that do not need extensions.
+/// Empty extension runtime for sessions that do not use extensions.
 pub struct NoopRuntimePorts;
 
 impl RuntimeSnapshotProvider for NoopRuntimePorts {}

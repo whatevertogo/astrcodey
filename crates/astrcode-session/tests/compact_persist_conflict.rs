@@ -14,17 +14,17 @@ use astrcode_core::{
     context::{
         COMPACT_SUMMARY_MARKER, CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
         CompactResult, CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
-        PreparedCompaction, is_compact_summary_message,
+        NoopPostCompactEnricher, PreparedCompaction, is_compact_summary_message,
     },
-    event::EventPayload,
+    event::DurableEventPayload,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
-    prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
     tool::ToolDefinition,
     types::{SessionId, new_message_id, new_session_id, new_turn_id},
 };
+use astrcode_extension_sdk::runtime_ports::NoopRuntimePorts;
 use astrcode_session::{
-    Session, SessionCreateParams, SessionHostServices, SessionRuntimeServices, SessionRuntimeState,
-    compact::persist_compact_result,
+    Session, SessionCreateParams, SessionExtensionPorts, SessionRuntimeServices,
+    SessionRuntimeState, compact::persist_compact_result,
 };
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use astrcode_support::hash::hex_fingerprint;
@@ -58,24 +58,6 @@ const VALID_COMPACT_SUMMARY: &str = r#"<summary>
 9. Optional Next Step:
    - (none)
 </summary>"#;
-
-struct TestPromptProvider;
-
-#[async_trait::async_trait]
-impl PromptProvider for TestPromptProvider {
-    async fn assemble(&self, _input: SystemPromptInput) -> PromptPlan {
-        PromptPlan::from_system_prompt("integration system prompt".into())
-    }
-}
-
-struct TestPromptFileProvider;
-
-#[async_trait::async_trait]
-impl PromptFileProvider for TestPromptFileProvider {
-    async fn load(&self, _working_dir: &str, _include_agents_rules: bool) -> PromptFiles {
-        PromptFiles::default()
-    }
-}
 
 struct TestContextAssembler {
     settings: ContextSettings,
@@ -200,11 +182,10 @@ fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<Session
         llm.clone(),
         llm,
         effective,
-        SessionHostServices::embedded(
-            context_assembler,
-            Arc::new(TestPromptProvider),
-            Arc::new(TestPromptFileProvider),
-        ),
+        SessionExtensionPorts::default(),
+        context_assembler,
+        Arc::new(NoopPostCompactEnricher),
+        Arc::new(NoopRuntimePorts),
     ))
 }
 
@@ -230,6 +211,7 @@ async fn spawn_session(
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
+        initial_system_prompt: None,
         runtime,
         runtime_services: caps,
     })
@@ -253,7 +235,7 @@ async fn seed_history(session: &Session, pairs: usize) {
         session
             .emit_durable(
                 None,
-                EventPayload::UserMessage {
+                DurableEventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: format!("old user {index} {}", "x ".repeat(24)),
                     attachments: vec![],
@@ -264,7 +246,7 @@ async fn seed_history(session: &Session, pairs: usize) {
         session
             .emit_durable(
                 None,
-                EventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessageCompleted {
                     message_id: new_message_id(),
                     text: format!("old answer {index} {}", "y ".repeat(24)),
                     reasoning_content: None,
@@ -279,10 +261,11 @@ async fn configure_system_prompt(session: &Session) {
     session
         .emit_durable(
             None,
-            EventPayload::SystemPromptConfigured {
+            DurableEventPayload::SystemPromptConfigured {
                 text: "integration system prompt".into(),
                 fingerprint: hex_fingerprint(b"integration system prompt"),
                 extra_system_prompt: None,
+                source: Default::default(),
             },
         )
         .await
@@ -309,7 +292,12 @@ async fn compact_boundary_event_count(store: &dyn SessionStore, session_id: &Ses
         .await
         .unwrap()
         .into_iter()
-        .filter(|event| matches!(event.payload, EventPayload::CompactBoundaryCreated { .. }))
+        .filter(|event| {
+            matches!(
+                event.payload,
+                DurableEventPayload::CompactBoundaryCreated { .. }
+            )
+        })
         .count()
 }
 
@@ -341,7 +329,7 @@ impl LlmProvider for RaceOnCompactLlm {
                     session
                         .emit_durable(
                             None,
-                            EventPayload::UserMessage {
+                            DurableEventPayload::UserMessage {
                                 message_id: new_message_id(),
                                 text: race_message,
                                 attachments: vec![],
@@ -405,7 +393,7 @@ async fn persist_compact_result_accepts_new_tail_events() {
     session
         .emit_durable(
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: new_message_id(),
                 text: "race event".into(),
                 attachments: vec![],
@@ -590,7 +578,7 @@ async fn compact_idle_session_skips_when_cursor_races_during_llm() {
     let context_assembler = caps.context_assembler_arc();
     let llm = caps.llm();
     let tools = session
-        .tool_registry_snapshot(&state.working_dir)
+        .tool_registry_snapshot(&state.identity.working_dir)
         .await
         .unwrap()
         .list_definitions();

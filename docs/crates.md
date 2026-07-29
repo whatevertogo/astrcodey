@@ -65,13 +65,12 @@ AstrCode 当前 workspace 有 28 个成员：`crates/` 下 27 个 crate，加上
 
 - `config`：配置系统。拆分为 raw/effective/defaults/resolve 等模块，区分原始配置、解析后配置、默认值和合并逻辑。
 - `types`：核心标识符和共享数据类型，例如 session/project 相关 id。
-- `event`：运行时事件和持久化事件 payload，是 EventLog 和 UI 投影的事实来源。
+- `event`：分离的 durable/live payload、未分配序号的事件信封与 `StoredEvent`，是 EventLog 和 UI 投影的事实来源。
 - `llm`：`LlmProvider` 抽象、消息、内容块、模型限制、流式事件和收集工具。
 - `tool`：工具 trait、定义、显式执行结果、session access、host services、工具 origin 和 execution mode；`tool::access` 描述权限检查需要的资源访问，`tool::selection` 定义 session 工具可见性。
 - `compaction`：compact trigger 和 strategy 领域类型。
 - `permission`：权限审批模式和审批结果等通用类型。
 - `context`：上下文组装和 compact 所需的跨 crate 类型。
-- `prompt`：system prompt 贡献者、section、排序等契约。
 - `message_attachment`：消息附件契约；read 工具图片和 artifact 读取契约位于 `tool`。
 
 依赖边界：无 workspace 内部依赖，只依赖 serde、tokio、uuid、chrono、thiserror、tracing 等基础库。它是 workspace 的根契约层，下游应通过完整模块路径导入，例如 `astrcode_core::event::EventPayload`。
@@ -158,7 +157,7 @@ AstrCode 当前 workspace 有 28 个成员：`crates/` 下 27 个 crate，加上
 
 依赖边界：依赖 `astrcode-core`、`astrcode-session-projection` 和 `astrcode-support`；不依赖 session/server。依赖方向保持为 `session/server → storage → session-projection → core`。
 
-测试线索：`tests/event_log_replay.rs` 覆盖 event log、旧 snapshot 和尾部 replay；`session_repo.rs`、`snapshot.rs`、`tool_artifacts.rs` 有模块内测试。任何事件 payload 或持久化格式变更都应同时验证 replay 和 session repository。
+测试线索：`event_log/tests.rs`、`session_repo/tests.rs` 和 `in_memory/tests.rs` 覆盖日志校验、尾部恢复、projection 恢复与并发追加；`snapshot.rs`、`tool_artifacts.rs` 有模块内测试。任何事件 payload 或持久化格式变更都应同时验证 replay 和 session repository。
 
 ## `astrcode-session-projection`
 
@@ -169,7 +168,7 @@ AstrCode 当前 workspace 有 28 个成员：`crates/` 下 27 个 crate，加上
 主要模块：
 
 - `model`：`SessionReadModel`、`SessionSummary` 及 approval、compact、agent session 等投影视图。
-- `reducer`：纯事件 reducer，以及 `SessionReadModelProjection::{new, from_read_model, apply, snapshot, last_seq}`。
+- `reducer`：纯事件 reducer、下一事件预校验，以及 `SessionReadModelProjection::{new, apply, snapshot, last_seq}`。
 
 依赖边界：只依赖 `astrcode-core` 和序列化基础库，不依赖 storage、session runtime 或 server。
 
@@ -183,7 +182,7 @@ AstrCode 当前 workspace 有 28 个成员：`crates/` 下 27 个 crate，加上
 
 主要模块：
 
-- `prompt_engine`：system prompt 组装。按 section order 排序，把身份、系统规则、任务指南、通信规范、环境、用户规则、项目规则、工具摘要、扩展贡献等拼成稳定 prompt。
+- `prompt_engine`：具体的 system prompt 组装、规则文件加载和 provider message 分组。稳定 section 与动态 section 分开输出，格式异常的自定义 prompt 会完整回退为单条 system message。
 - `context_assembler`：根据模型限制和 `ContextSettings` 裁剪历史消息，生成 LLM 请求上下文。
 - `token_budget`：token 粗估和预算门控。
 - `contribution`：上下文贡献类型，供扩展或宿主注入额外片段。
@@ -228,7 +227,7 @@ AstrCode 当前 workspace 有 28 个成员：`crates/` 下 27 个 crate，加上
 
 - `Session`、`SessionCreateParams`、`SessionError`：session handle 和创建参数。
 - `SessionRuntimeState`、`SessionModelBinding`：同一 session 的进程内共享状态和模型绑定。
-- `SessionRuntimeServices`、`SessionHostServices`、`SessionExtensionPorts`：宿主注入的 context、prompt、窄 extension ports、tool catalog、post-compact enrichment 等能力。
+- `SessionRuntimeServices`、`SessionExtensionPorts`：server composition root 注入的 context、窄 extension ports、tool catalog、post-compact enrichment 等能力。
 - `ToolRegistry`：由单个 turn 显式持有的不可变工具快照；session 按运行时代次缓存并复用。
 - `TurnHandle`、`TurnOutput`、`RunTurnResult`：turn 运行和停止控制。
 
@@ -236,7 +235,7 @@ AstrCode 当前 workspace 有 28 个成员：`crates/` 下 27 个 crate，加上
 
 - `session`：session 对象、事件追加、恢复、订阅、读模型访问。
 - `session_runtime`：进程内 runtime state，持有 file observation store、审批状态、broadcast，以及按代次键控的不可变工具快照缓存。
-- `session_runtime_services`：宿主服务注入边界。
+- `session_runtime_services`：跨 session 共享的运行时服务。
 - `session_extension_ports`：runtime snapshot、tool catalog、prompt contribution、turn hooks、session operations 五个窄端口。
 - `session_tools`：按 catalog revision、working directory 和工具选择缓存快照，处理 partial TTL 与 single-flight。
 - `runtime_stability`：在扩展发布期间以有截止时间的封顶退避等待稳定 generation。
@@ -255,9 +254,9 @@ AstrCode 当前 workspace 有 28 个成员：`crates/` 下 27 个 crate，加上
 - `steer`：运行中注入用户消息。
 - `turn_publish`、`payload`：事件 payload 构建和发布。
 
-依赖边界：依赖 `astrcode-core`、`astrcode-extension-sdk`、`astrcode-storage`、`astrcode-support`。它刻意不依赖 `astrcode-context`、`astrcode-tools`、`astrcode-extensions`、`astrcode-server`，这些能力由宿主通过 `SessionHostServices` 注入。
+依赖边界：依赖 `astrcode-core`、`astrcode-context`、`astrcode-extension-sdk`、`astrcode-storage`、`astrcode-support`。它刻意不依赖 `astrcode-tools`、`astrcode-extensions`、`astrcode-server`；server 在 composition root 通过 `SessionRuntimeServices` 注入这些能力。
 
-测试线索：`tests/session_resume.rs`、`tests/embedded_host.rs`、`tests/ssot_turn_history.rs`、`tests/compact_persist_conflict.rs` 覆盖恢复、嵌入、历史唯一事实源和 compact 并发；模块内测试覆盖权限链、工具 JSON 修复、工具结果、turn 发布等。
+测试线索：`tests/session_resume.rs`、`tests/ssot_turn_history.rs`、`tests/compact_persist_conflict.rs` 覆盖恢复、历史唯一事实源和 compact 并发；模块内测试覆盖权限链、工具 JSON 修复、工具结果、turn 发布等。
 
 ## `astrcode-extension-sdk`
 
@@ -604,7 +603,7 @@ Feature：
 主要模块：
 
 - `bootstrap`：server system 启动、配置解析、`ServerRuntime`、`BootstrapOptions`、启动错误。
-- `default_host`：构造第一方 host services，把 context、extensions、tools、post-compact 等注入 session runtime。
+- `config_manager`：配置读取与 reload，并在 composition root 组装 provider、context、extensions、tools 和 post-compact 能力。
 - `handler`：JSON-RPC command actor 和业务 handler。包含 prompt、compact、recap、session lifecycle、notifications、model selection、slash、snapshot、errors 等。
 - `transport`：stdio transport 和 JSON-RPC 初始化/错误响应。
 - `acp`：Agent Client Protocol 适配和事件转换。
@@ -617,7 +616,6 @@ Feature：
 - `turn_registry`：进程内活跃 turn 索引和 stale repair。
 - `child_session`：子 session lifecycle、后台 agent 完成、回收策略。
 - `server_event_bus`：session broadcast 到 client notification 的桥接。
-- `config_manager`：配置读取、reload、active model/profile 更新。
 - `task_utils`：带 tracing 的任务 spawn。
 - `test_support`：`testing` feature 下的测试辅助 re-export。
 

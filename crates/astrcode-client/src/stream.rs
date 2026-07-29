@@ -53,11 +53,13 @@ mod tests {
         let (tx, rx) = mpsc::channel::<ClientNotification>(1);
         let mut stream = ConversationStream::new(rx);
 
-        let event = astrcode_core::event::Event::new(
-            astrcode_core::types::SessionId::new("s1"),
-            None,
-            astrcode_core::event::EventPayload::TurnStarted,
-        );
+        let event = astrcode_core::event::Event::from(astrcode_core::event::StoredEvent::new(
+            1,
+            astrcode_core::event::DurableEvent::session(
+                astrcode_core::types::SessionId::new("s1"),
+                astrcode_core::event::DurableEventPayload::TurnStarted,
+            ),
+        ));
         tx.send(ClientNotification::Event(event.clone()))
             .await
             .unwrap();

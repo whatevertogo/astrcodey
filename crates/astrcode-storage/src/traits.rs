@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use astrcode_core::{
-    event::Event,
+    event::{DurableEvent, StoredEvent},
     llm::LlmMessage,
     tool::ToolResultArtifactSlice,
     types::{Cursor, SessionId},
@@ -12,7 +12,8 @@ use crate::{CompactSnapshotInput, StorageError, ToolResultArtifactInput, ToolRes
 
 #[async_trait::async_trait]
 pub trait EventReader: Send + Sync {
-    async fn replay_events(&self, session_id: &SessionId) -> Result<Vec<Event>, StorageError>;
+    async fn replay_events(&self, session_id: &SessionId)
+    -> Result<Vec<StoredEvent>, StorageError>;
 
     async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError>;
 
@@ -20,14 +21,14 @@ pub trait EventReader: Send + Sync {
         &self,
         session_id: &SessionId,
         cursor: &Cursor,
-    ) -> Result<Vec<Event>, StorageError>;
+    ) -> Result<Vec<StoredEvent>, StorageError>;
 
     async fn replay_from_limited(
         &self,
         session_id: &SessionId,
         cursor: &Cursor,
         max_events: usize,
-    ) -> Result<Vec<Event>, StorageError> {
+    ) -> Result<Vec<StoredEvent>, StorageError> {
         let mut events = self.replay_from(session_id, cursor).await?;
         events.truncate(max_events);
         Ok(events)
@@ -53,10 +54,7 @@ pub trait SessionReader: Send + Sync {
             .provider_messages())
     }
 
-    async fn session_system_prompt(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<String>, StorageError>;
+    async fn session_system_prompt(&self, session_id: &SessionId) -> Result<String, StorageError>;
 
     async fn session_has_messages(&self, session_id: &SessionId) -> Result<bool, StorageError> {
         Ok(self.session_read_model(session_id).await?.has_messages())
@@ -88,6 +86,14 @@ pub trait SessionPathResolver: Send + Sync {
         &self,
         session_id: &SessionId,
     ) -> Result<Option<PathBuf>, StorageError>;
+
+    async fn planned_session_store_dir(
+        &self,
+        session_id: &SessionId,
+        working_dir: &str,
+        parent_session_id: Option<&SessionId>,
+        source_extension: Option<&str>,
+    ) -> Result<Option<PathBuf>, StorageError>;
 }
 
 #[async_trait::async_trait]
@@ -113,17 +119,10 @@ pub trait ToolResultArtifactStore: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait EventStore: EventReader + Send + Sync {
-    async fn create_session(
-        &self,
-        session_id: &SessionId,
-        working_dir: &str,
-        model_id: &str,
-        parent_session_id: Option<&SessionId>,
-        tool_selection: Option<&astrcode_core::tool::SessionToolSelection>,
-        source_extension: Option<&str>,
-    ) -> Result<Event, StorageError>;
+    /// 原子创建 session 并提交 seq=0 的 `SessionStarted`。
+    async fn create_session(&self, event: DurableEvent) -> Result<StoredEvent, StorageError>;
 
-    async fn append_event(&self, event: Event) -> Result<Event, StorageError>;
+    async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError>;
 
     async fn checkpoint(&self, session_id: &SessionId, cursor: &Cursor)
     -> Result<(), StorageError>;

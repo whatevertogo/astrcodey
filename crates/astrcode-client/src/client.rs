@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use astrcode_core::event::EventPayload;
+use astrcode_core::event::{DurableEventPayload, EventPayload};
 use astrcode_protocol::{commands::*, events::*};
 use tokio::sync::mpsc;
 
@@ -67,13 +67,19 @@ impl<T: ClientTransport> AstrcodeClient<T> {
             .wait_for(&cmd, |n| {
                 matches!(
                     n,
-                    ClientNotification::Event(event) if matches!(event.payload, EventPayload::SessionStarted { .. })
+                    ClientNotification::Event(event)
+                        if matches!(
+                            event.payload,
+                            EventPayload::Durable(DurableEventPayload::SessionStarted(_))
+                        )
                 ) || matches!(n, ClientNotification::Error { .. })
             })
             .await?;
         match notification {
             ClientNotification::Event(event) => match event.payload {
-                EventPayload::SessionStarted { .. } => Ok(event.session_id.into_string()),
+                EventPayload::Durable(DurableEventPayload::SessionStarted(_)) => {
+                    Ok(event.session_id.into_string())
+                },
                 _ => Err(ClientError::UnexpectedResponse),
             },
             ClientNotification::Error { message, .. } => Err(ClientError::Server(message)),
@@ -133,13 +139,19 @@ impl<T: ClientTransport> AstrcodeClient<T> {
             .wait_for(&cmd, |n| {
                 matches!(
                     n,
-                    ClientNotification::Event(event) if matches!(event.payload, EventPayload::SessionStarted { .. })
+                    ClientNotification::Event(event)
+                        if matches!(
+                            event.payload,
+                            EventPayload::Durable(DurableEventPayload::SessionStarted(_))
+                        )
                 ) || matches!(n, ClientNotification::Error { .. })
             })
             .await?;
         match notification {
             ClientNotification::Event(event) => match event.payload {
-                EventPayload::SessionStarted { .. } => Ok(event.session_id.into_string()),
+                EventPayload::Durable(DurableEventPayload::SessionStarted(_)) => {
+                    Ok(event.session_id.into_string())
+                },
                 _ => Err(ClientError::UnexpectedResponse),
             },
             ClientNotification::Error { message, .. } => Err(ClientError::Server(message)),
@@ -233,21 +245,35 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_extracts_session_id() {
-        use astrcode_core::event::{Event, EventPayload};
+        use astrcode_core::{
+            event::{
+                DurableEvent, DurableEventPayload, PersistedSystemPrompt, SessionStarted,
+                StoredEvent, SystemPromptSource,
+            },
+            tool::SessionToolSelection,
+        };
 
         let session_id = astrcode_core::types::SessionId::new("test-session");
-        let event = Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::SessionStarted {
-                working_dir: "/tmp".into(),
-                model_id: "model-1".into(),
-                parent_session_id: None,
-                source_extension: None,
-                tool_selection: None,
-            },
+        let event = StoredEvent::new(
+            0,
+            DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::SessionStarted(SessionStarted {
+                    working_dir: "/tmp".into(),
+                    model_id: "model-1".into(),
+                    parent: None,
+                    source_extension: None,
+                    tool_selection: SessionToolSelection::default(),
+                    initial_system_prompt: PersistedSystemPrompt {
+                        text: "system".into(),
+                        fingerprint: "fingerprint".into(),
+                        extra_system_prompt: None,
+                        source: SystemPromptSource::Native,
+                    },
+                }),
+            ),
         );
-        let transport = StubTransport::new(vec![ClientNotification::Event(event)]);
+        let transport = StubTransport::new(vec![ClientNotification::Event(event.into())]);
         let client = AstrcodeClient::new(transport);
 
         let id = client.create_session("/tmp").await.unwrap();

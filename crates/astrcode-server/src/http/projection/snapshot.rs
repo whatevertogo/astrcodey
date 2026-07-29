@@ -25,7 +25,7 @@ pub(in crate::http) fn conversation_to_dto(
 ) -> ConversationSnapshotResponseDto {
     let title = session
         .first_user_message()
-        .unwrap_or_else(|| session_title_from_working_dir(&session.working_dir));
+        .unwrap_or_else(|| session_title_from_working_dir(&session.identity.working_dir));
 
     // 与 provider_messages 一致：最新 compact 摘要紧挨保留消息之前（被压掉的历史不在 UI 展示）
     let mut blocks: Vec<ConversationBlockDto> = Vec::new();
@@ -33,10 +33,10 @@ pub(in crate::http) fn conversation_to_dto(
         blocks.push(compact_summary_block(boundary));
     }
     blocks.extend(transcript_blocks(
-        &session.messages,
-        &session.transcript_artifacts,
+        &session.transcript.messages,
+        &session.transcript.artifacts,
     ));
-    apply_pending_tool_approvals(&mut blocks, &session.pending_tool_approvals);
+    apply_pending_tool_approvals(&mut blocks, &session.execution.pending_tool_approvals);
 
     // 如果有正在流式传输的 assistant 消息，追加一个 streaming block。
     // durable 投影不含 streaming 消息（`AssistantTextDelta` 是 live 事件），
@@ -50,13 +50,16 @@ pub(in crate::http) fn conversation_to_dto(
     }
 
     ConversationSnapshotResponseDto {
-        session_id: session.session_id.to_string(),
+        session_id: session.identity.session_id.to_string(),
         session_title: title,
         cursor: ConversationCursorDto {
             value: session.cursor(),
         },
-        phase: session.phase.into(),
-        control: control_from_phase(session.phase, !session.messages.is_empty()),
+        phase: session.execution.phase.into(),
+        control: control_from_phase(
+            session.execution.phase,
+            !session.transcript.messages.is_empty(),
+        ),
         blocks,
         agent_sessions: session
             .agent_sessions
@@ -92,10 +95,45 @@ fn apply_pending_tool_approvals(
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
+    use astrcode_core::{
+        event::{
+            DurableEvent, DurableEventPayload, PersistedSystemPrompt, SessionStarted, StoredEvent,
+            SystemPromptSource,
+        },
+        llm::{LlmContent, LlmMessage, LlmRole},
+        tool::SessionToolSelection,
+    };
     use astrcode_protocol::http::ToolCallStatusDto;
+    use astrcode_session_projection::replay;
 
     use super::*;
+
+    fn session_read_model(session_id: &str) -> SessionReadModel {
+        let session_id: astrcode_core::types::SessionId = session_id.into();
+        replay(
+            session_id.clone(),
+            &[StoredEvent::new(
+                0,
+                DurableEvent::session(
+                    session_id,
+                    DurableEventPayload::SessionStarted(SessionStarted {
+                        working_dir: "D:/work/project".into(),
+                        model_id: "model".into(),
+                        parent: None,
+                        tool_selection: SessionToolSelection::default(),
+                        source_extension: None,
+                        initial_system_prompt: PersistedSystemPrompt {
+                            text: "system".into(),
+                            fingerprint: "fingerprint".into(),
+                            extra_system_prompt: None,
+                            source: SystemPromptSource::Native,
+                        },
+                    }),
+                ),
+            )],
+        )
+        .unwrap()
+    }
 
     fn session_with_tool_call(
         session_id: &str,
@@ -103,9 +141,9 @@ mod tests {
         name: &str,
         arguments: serde_json::Value,
     ) -> SessionReadModel {
-        let mut session = SessionReadModel::empty(session_id.into());
-        session.working_dir = "D:/work/project".into();
+        let mut session = session_read_model(session_id);
         session
+            .transcript
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage {
@@ -127,10 +165,10 @@ mod tests {
 
     #[test]
     fn conversation_snapshot_cursor_is_full_snapshot_version() {
-        let mut session = SessionReadModel::empty("session-1".into());
-        session.working_dir = "D:/work/project".into();
-        session.latest_seq = Some(9);
+        let mut session = session_read_model("session-1");
+        session.stats.last_seq = 9;
         session
+            .transcript
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::user("hello"),
@@ -153,6 +191,7 @@ mod tests {
             serde_json::json!({ "path": "Cargo.toml" }),
         );
         session
+            .transcript
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::tool("read", "tool-1", "file contents", false),
@@ -190,7 +229,7 @@ mod tests {
             "shell",
             serde_json::json!({ "command": "git push" }),
         );
-        session.pending_tool_approvals.insert(
+        session.execution.pending_tool_approvals.insert(
             "tool-approval".into(),
             astrcode_session_projection::PendingToolApprovalView {
                 prompt: "Run shell command?".into(),
@@ -217,11 +256,11 @@ mod tests {
         use astrcode_core::compaction::CompactStrategy;
         use astrcode_session_projection::CompactBoundaryView;
 
-        let mut session = SessionReadModel::empty("session-compact".into());
-        session.working_dir = "D:/work/project".into();
-        session.latest_seq = Some(7);
+        let mut session = session_read_model("session-compact");
+        session.stats.last_seq = 7;
         // compact 之后的 retained messages
         session
+            .transcript
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::user("recent user"),
@@ -229,6 +268,7 @@ mod tests {
                 source: None,
             });
         session
+            .transcript
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::assistant("recent assistant"),
@@ -271,10 +311,10 @@ mod tests {
 
         use crate::http::projection::blocks::COMPACT_SUMMARY_BLOCK_ID;
 
-        let mut session = SessionReadModel::empty("session-multi-compact".into());
-        session.working_dir = "D:/work/project".into();
-        session.latest_seq = Some(20);
+        let mut session = session_read_model("session-multi-compact");
+        session.stats.last_seq = 20;
         session
+            .transcript
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::user("latest user"),

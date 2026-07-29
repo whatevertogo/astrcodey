@@ -7,7 +7,7 @@ use std::{
 };
 
 use astrcode_core::{
-    event::EventPayload,
+    event::DurableEventPayload,
     tool::{CreateSessionRequest, SessionApiError},
     types::{SessionId, TurnId},
 };
@@ -103,12 +103,12 @@ impl ChildSessionCoordinator {
                 .read_model(&current)
                 .await
                 .map_err(|e| SessionApiError::NotFound(e.to_string()))?;
-            match model.parent_session_id {
+            match model.identity.parent {
                 Some(parent) => {
-                    if &parent == caller {
+                    if &parent.session_id == caller {
                         return Ok(());
                     }
-                    current = parent;
+                    current = parent.session_id;
                 },
                 None => {
                     return Err(SessionApiError::PermissionDenied(format!(
@@ -128,10 +128,10 @@ impl ChildSessionCoordinator {
                 .read_model(&current)
                 .await
                 .map_err(SessionApiError::internal)?;
-            match model.parent_session_id {
+            match model.identity.parent {
                 Some(parent) => {
                     depth += 1;
-                    current = parent;
+                    current = parent.session_id;
                 },
                 None => break,
             }
@@ -169,11 +169,13 @@ impl ChildSessionCoordinator {
             .await
             .map_err(SessionApiError::internal)?;
 
-        let working_dir = request.working_dir.unwrap_or(parent_model.working_dir);
+        let working_dir = request
+            .working_dir
+            .unwrap_or(parent_model.identity.working_dir);
         let model_id = request
             .model_preference
             .filter(|m| m != "inherit" && !m.is_empty())
-            .unwrap_or(parent_model.model_id);
+            .unwrap_or(parent_model.identity.model_id);
 
         let child = parent_session
             .spawn_child(
@@ -340,10 +342,10 @@ impl ChildSessionCoordinator {
         }
         if let Ok(parent_session) = self.session_manager.open(parent_sid.clone()).await {
             if let Err(e) = parent_session
-                .append_event(astrcode_core::event::Event::new(
+                .append_event(astrcode_core::event::DurableEvent::new(
                     parent_sid.clone(),
                     None,
-                    EventPayload::AgentSessionRecycled {
+                    DurableEventPayload::AgentSessionRecycled {
                         child_session_id: child_sid.clone(),
                     },
                 ))
@@ -424,15 +426,10 @@ impl ChildSessionCoordinator {
     }
 
     async fn prepare_turn_target(&self, target_sid: &SessionId) -> Result<(), SessionApiError> {
-        let session = self
-            .session_manager
+        self.session_manager
             .open(target_sid.clone())
             .await
             .map_err(|e| SessionApiError::NotFound(e.to_string()))?;
-        session
-            .ensure_runtime_ready()
-            .await
-            .map_err(SessionApiError::internal)?;
         Ok(())
     }
 
@@ -690,12 +687,12 @@ async fn append_parent_agent_event(
     session_manager: &Arc<SessionManager>,
     parent_sid: &SessionId,
     child_sid: &SessionId,
-    payload: astrcode_core::event::EventPayload,
+    payload: astrcode_core::event::DurableEventPayload,
     failure_log: &'static str,
 ) {
     if let Ok(parent_session) = session_manager.open(parent_sid.clone()).await {
         if let Err(e) = parent_session
-            .append_event(astrcode_core::event::Event::new(
+            .append_event(astrcode_core::event::DurableEvent::new(
                 parent_sid.clone(),
                 None,
                 payload,
@@ -841,8 +838,6 @@ fn wrap_agent_output_cdata(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::event::EventPayload;
-
     use super::*;
 
     #[test]
@@ -893,7 +888,7 @@ mod tests {
             child.clone(),
             "done".into(),
         ) {
-            EventPayload::AgentSessionCompleted {
+            DurableEventPayload::AgentSessionCompleted {
                 child_session_id,
                 final_session_id,
                 ..

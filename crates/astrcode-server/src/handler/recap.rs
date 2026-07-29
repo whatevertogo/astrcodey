@@ -1,7 +1,7 @@
 //! Recap 生成逻辑 — `/recap` 命令的服务端实现。
 
 use astrcode_core::{
-    event::EventPayload,
+    event::DurableEventPayload,
     llm::{self, LlmMessage},
 };
 use astrcode_extension_sdk::extension::ExtensionEvent;
@@ -36,16 +36,14 @@ impl CommandHandler {
 
         let state = session.read_model().await.map_err(HandlerError::Session)?;
 
-        if state.messages.is_empty() {
+        if state.transcript.messages.is_empty() {
             self.send_error(40400, "Nothing to recap yet");
             return Ok(());
         }
 
         // 构造 LLM 请求：system + 历史 + recap prompt
         let mut messages = Vec::new();
-        if let Some(ref sp) = state.system_prompt {
-            messages.push(LlmMessage::system(sp));
-        }
+        messages.push(LlmMessage::system(&state.system_prompt.text));
         messages.extend(state.provider_messages());
         messages.push(LlmMessage::user(RECAP_PROMPT));
 
@@ -65,7 +63,7 @@ impl CommandHandler {
         session
             .emit_durable(
                 None,
-                EventPayload::RecapGenerated {
+                DurableEventPayload::RecapGenerated {
                     text: text.clone(),
                     source: "manual".into(),
                 },
@@ -76,8 +74,8 @@ impl CommandHandler {
         // PostRecap hook (non-blocking)
         let lifecycle_ctx = astrcode_extension_sdk::extension::LifecycleContext {
             session_id: sid.to_string(),
-            working_dir: state.working_dir.clone(),
-            model: astrcode_core::config::ModelSelection::simple(state.model_id.clone()),
+            working_dir: state.identity.working_dir.clone(),
+            model: astrcode_core::config::ModelSelection::simple(state.identity.model_id.clone()),
             event_tx: None,
             extension_event_sink: None,
             last_exchange: None,

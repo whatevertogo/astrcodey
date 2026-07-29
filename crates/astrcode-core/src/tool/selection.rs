@@ -12,6 +12,12 @@ pub enum SessionToolSelection {
     Only { names: Vec<String> },
 }
 
+impl Default for SessionToolSelection {
+    fn default() -> Self {
+        Self::All { except: Vec::new() }
+    }
+}
+
 impl SessionToolSelection {
     pub fn allows(&self, tool_name: &str) -> bool {
         match self {

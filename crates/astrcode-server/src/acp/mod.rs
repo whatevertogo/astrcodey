@@ -150,7 +150,7 @@ async fn handle_prompt(
                 match result {
                     Some(event) => {
                         if event_belongs_to_prompt(&event, &accepted_sessions, &turn_id) {
-                            if let astrcode_core::event::EventPayload::CompactBoundaryCreated { continued_session_id, .. } = &event.payload {
+                            if let Some(astrcode_core::event::DurableEventPayload::CompactBoundaryCreated { continued_session_id, .. }) = event.payload.as_durable() {
                                 accepted_sessions.insert(continued_session_id.clone());
                             }
                             forward_event(&event, &acp_session_id, cx);
@@ -196,10 +196,10 @@ fn flush_queued_events(
 ) {
     while let Ok(event) = event_rx.try_recv() {
         if event_belongs_to_prompt(&event, accepted_sessions, turn_id) {
-            if let astrcode_core::event::EventPayload::CompactBoundaryCreated {
+            if let Some(astrcode_core::event::DurableEventPayload::CompactBoundaryCreated {
                 continued_session_id,
                 ..
-            } = &event.payload
+            }) = event.payload.as_durable()
             {
                 accepted_sessions.insert(continued_session_id.clone());
             }
@@ -319,11 +319,29 @@ fn handler_error_to_acp(error: HandlerError) -> Error {
 mod tests {
     use agent_client_protocol::schema::{ContentBlock, ResourceLink, TextContent};
     use astrcode_core::{
-        event::{Event, EventPayload},
+        event::{
+            DurableEvent, DurableEventPayload, Event, LiveEvent, LiveEventPayload, StoredEvent,
+        },
         types::{SessionId, TurnId},
     };
 
     use super::*;
+
+    fn durable_event(
+        session_id: SessionId,
+        turn_id: Option<TurnId>,
+        payload: DurableEventPayload,
+    ) -> Event {
+        StoredEvent::new(1, DurableEvent::new(session_id, turn_id, payload)).into()
+    }
+
+    fn live_event(
+        session_id: SessionId,
+        turn_id: Option<TurnId>,
+        payload: LiveEventPayload,
+    ) -> Event {
+        LiveEvent::new(session_id, turn_id, payload).into()
+    }
 
     #[test]
     fn prompt_to_text_keeps_text_and_resource_links() {
@@ -366,10 +384,10 @@ mod tests {
         let session_id = SessionId::from("session-1");
         let turn_id = TurnId::from("turn-1");
         let other_turn = TurnId::from("turn-2");
-        let event = Event::new(
+        let event = durable_event(
             session_id.clone(),
             Some(other_turn),
-            EventPayload::TurnCompleted {
+            DurableEventPayload::TurnCompleted {
                 finish_reason: "stop".into(),
             },
         );
@@ -389,10 +407,10 @@ mod tests {
         accepted.insert(parent_session.clone());
 
         // Parent session event passes
-        let parent_event = Event::new(
+        let parent_event = live_event(
             parent_session,
             Some(turn_id.clone()),
-            EventPayload::AssistantTextDelta {
+            LiveEventPayload::AssistantTextDelta {
                 message_id: "msg-1".into(),
                 delta: "hello".into(),
             },
@@ -400,10 +418,10 @@ mod tests {
         assert!(event_belongs_to_prompt(&parent_event, &accepted, &turn_id));
 
         // Child session event is rejected before boundary
-        let child_event = Event::new(
+        let child_event = live_event(
             child_session.clone(),
             Some(turn_id.clone()),
-            EventPayload::AssistantTextDelta {
+            LiveEventPayload::AssistantTextDelta {
                 message_id: "msg-2".into(),
                 delta: "world".into(),
             },
@@ -425,7 +443,7 @@ mod tests {
         accepted.insert(session_id);
 
         // Event from unrelated session with None turn_id should be rejected
-        let event = Event::new(unrelated_session, None, EventPayload::TurnStarted);
+        let event = durable_event(unrelated_session, None, DurableEventPayload::TurnStarted);
         assert!(!event_belongs_to_prompt(&event, &accepted, &turn_id));
     }
 }

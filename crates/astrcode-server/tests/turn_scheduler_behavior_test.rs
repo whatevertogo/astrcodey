@@ -7,7 +7,7 @@ use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
-    event::EventPayload,
+    event::{DurableEventPayload, StoredEvent},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::ToolDefinition,
     types::{SessionId, new_session_id},
@@ -17,8 +17,8 @@ use astrcode_server::test_support::{
     ChildSessionCoordinator, ConfigManager, DeliveryOutcome, InputDelivery,
     MAX_PENDING_INPUTS_PER_SESSION, MAX_PROMPT_TEXT_BYTES, SessionManager, TurnRegistry,
     TurnScheduleError, TurnScheduler, recycle_completed_session_for_test,
+    session_started_event_for_test,
 };
-use astrcode_session::SessionRuntimeServices;
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::mpsc;
 
@@ -69,7 +69,7 @@ impl LlmProvider for PendingLlm {
 async fn seed_session(store: &Arc<dyn SessionStore>) -> SessionId {
     let sid = new_session_id();
     store
-        .create_session(&sid, ".", "mock", None, None, None)
+        .create_session(session_started_event_for_test(sid.clone(), ".", "mock"))
         .await
         .unwrap();
     sid
@@ -138,16 +138,14 @@ fn build_scheduler_with_llm(
         extensions: ExtensionSettings::default(),
     };
     let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
-    let capabilities = Arc::new(SessionRuntimeServices::new(
+    let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         Arc::clone(&llm),
         llm,
         effective,
-        astrcode_server::default_host::first_party_host_services(
-            extension_runner.clone(),
-            context_assembler,
-            std::sync::Arc::clone(&shell_timeout_secs),
-        ),
-    ));
+        extension_runner.clone(),
+        context_assembler,
+        std::sync::Arc::clone(&shell_timeout_secs),
+    );
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
             std::path::PathBuf::from("target/turn-behavior-config.toml"),
@@ -192,11 +190,11 @@ async fn idle_submit_emits_turn_started_and_user_message() {
     assert!(
         events
             .iter()
-            .any(|e| matches!(e.payload, EventPayload::TurnStarted))
+            .any(|e| matches!(e.payload, DurableEventPayload::TurnStarted))
     );
     assert!(events.iter().any(|e| matches!(
         &e.payload,
-        EventPayload::UserMessage { text, .. } if text == "hello"
+        DurableEventPayload::UserMessage { text, .. } if text == "hello"
     )));
 }
 
@@ -253,7 +251,7 @@ async fn concurrent_start_with_completion_accepts_only_one_turn() {
     let events = store.replay_events(&sid).await.unwrap();
     let user_messages = events
         .iter()
-        .filter(|event| matches!(event.payload, EventPayload::UserMessage { .. }))
+        .filter(|event| matches!(event.payload, DurableEventPayload::UserMessage { .. }))
         .count();
     assert_eq!(user_messages, 1);
 }
@@ -290,7 +288,7 @@ async fn running_inject_writes_user_message_under_active_turn() {
         .find(|e| {
             matches!(
                 &e.payload,
-                EventPayload::UserMessage { text, .. } if text == "inject me"
+                DurableEventPayload::UserMessage { text, .. } if text == "inject me"
             )
         })
         .expect("injected message");
@@ -386,15 +384,15 @@ async fn oversized_prompt_is_rejected_before_turn_starts() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event.payload, EventPayload::TurnStarted))
+            .any(|event| matches!(event.payload, DurableEventPayload::TurnStarted))
     );
 }
 
-fn turn_completed_reasons(events: &[astrcode_core::event::Event]) -> Vec<String> {
+fn turn_completed_reasons(events: &[StoredEvent]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match &e.payload {
-            EventPayload::TurnCompleted { finish_reason } => Some(finish_reason.clone()),
+            DurableEventPayload::TurnCompleted { finish_reason } => Some(finish_reason.clone()),
             _ => None,
         })
         .collect()

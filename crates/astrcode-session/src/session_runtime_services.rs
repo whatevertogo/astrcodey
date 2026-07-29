@@ -12,13 +12,11 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use astrcode_core::{
     config::EffectiveConfig,
-    context::{ContextAssembler, NoopPostCompactEnricher, PostCompactEnricher},
+    context::{ContextAssembler, PostCompactEnricher},
     llm::LlmProvider,
-    prompt::{PromptFileProvider, PromptProvider},
 };
 use astrcode_extension_sdk::runtime_ports::{
-    NoopRuntimePorts, PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
-    SessionOperationsProvider, ToolCatalogProvider, TurnHooks,
+    PromptContributor, RuntimeSnapshotState, ToolCatalogProvider, TurnHooks,
 };
 
 use crate::SessionExtensionPorts;
@@ -30,70 +28,8 @@ pub struct SessionRuntimeServices {
     extension_ports: SessionExtensionPorts,
     context_assembler: Arc<dyn ContextAssembler>,
     post_compact_enricher: Arc<dyn PostCompactEnricher>,
-    prompt_provider: Arc<dyn PromptProvider>,
-    prompt_file_provider: Arc<dyn PromptFileProvider>,
     effective_config: ArcSwap<EffectiveConfig>,
     tool_catalog: Arc<dyn ToolCatalogProvider>,
-}
-
-pub struct SessionHostServices {
-    extension_ports: SessionExtensionPorts,
-    context_assembler: Arc<dyn ContextAssembler>,
-    post_compact_enricher: Arc<dyn PostCompactEnricher>,
-    prompt_provider: Arc<dyn PromptProvider>,
-    prompt_file_provider: Arc<dyn PromptFileProvider>,
-    tool_catalog: Arc<dyn ToolCatalogProvider>,
-}
-
-impl SessionHostServices {
-    /// Build a minimal embeddable host surface from the required core services.
-    ///
-    /// Extension runtime, post-compact enrichment, and tool catalog default to
-    /// no-op/empty implementations so alternate hosts can opt in explicitly.
-    pub fn embedded(
-        context_assembler: Arc<dyn ContextAssembler>,
-        prompt_provider: Arc<dyn PromptProvider>,
-        prompt_file_provider: Arc<dyn PromptFileProvider>,
-    ) -> Self {
-        Self {
-            extension_ports: SessionExtensionPorts::default(),
-            context_assembler,
-            post_compact_enricher: Arc::new(NoopPostCompactEnricher),
-            prompt_provider,
-            prompt_file_provider,
-            tool_catalog: Arc::new(NoopRuntimePorts),
-        }
-    }
-
-    pub fn with_extension_adapter<T>(mut self, adapter: Arc<T>) -> Self
-    where
-        T: PromptContributor
-            + RuntimeSnapshotProvider
-            + TurnHooks
-            + SessionOperationsProvider
-            + 'static,
-    {
-        self.extension_ports = SessionExtensionPorts::from_adapter(adapter);
-        self
-    }
-
-    pub fn with_extension_ports(mut self, extension_ports: SessionExtensionPorts) -> Self {
-        self.extension_ports = extension_ports;
-        self
-    }
-
-    pub fn with_post_compact_enricher(
-        mut self,
-        post_compact_enricher: Arc<dyn PostCompactEnricher>,
-    ) -> Self {
-        self.post_compact_enricher = post_compact_enricher;
-        self
-    }
-
-    pub fn with_tool_catalog(mut self, tool_catalog: Arc<dyn ToolCatalogProvider>) -> Self {
-        self.tool_catalog = tool_catalog;
-        self
-    }
 }
 
 struct ProviderSlot {
@@ -105,20 +41,21 @@ impl SessionRuntimeServices {
         llm: Arc<dyn LlmProvider>,
         small_llm: Arc<dyn LlmProvider>,
         effective_config: EffectiveConfig,
-        host_services: SessionHostServices,
+        extension_ports: SessionExtensionPorts,
+        context_assembler: Arc<dyn ContextAssembler>,
+        post_compact_enricher: Arc<dyn PostCompactEnricher>,
+        tool_catalog: Arc<dyn ToolCatalogProvider>,
     ) -> Self {
         Self {
             llm: ArcSwap::from_pointee(ProviderSlot { provider: llm }),
             small_llm: ArcSwap::from_pointee(ProviderSlot {
                 provider: small_llm,
             }),
-            extension_ports: host_services.extension_ports,
-            context_assembler: host_services.context_assembler,
-            post_compact_enricher: host_services.post_compact_enricher,
-            prompt_provider: host_services.prompt_provider,
-            prompt_file_provider: host_services.prompt_file_provider,
+            extension_ports,
+            context_assembler,
+            post_compact_enricher,
             effective_config: ArcSwap::from_pointee(effective_config),
-            tool_catalog: host_services.tool_catalog,
+            tool_catalog,
         }
     }
 
@@ -175,14 +112,6 @@ impl SessionRuntimeServices {
         self.post_compact_enricher.as_ref()
     }
 
-    pub(crate) fn prompt_provider(&self) -> &dyn PromptProvider {
-        self.prompt_provider.as_ref()
-    }
-
-    pub(crate) fn prompt_file_provider(&self) -> &dyn PromptFileProvider {
-        self.prompt_file_provider.as_ref()
-    }
-
     pub fn read_effective(&self) -> Arc<EffectiveConfig> {
         self.effective_config.load_full()
     }
@@ -210,9 +139,9 @@ mod tests {
             PostCompactEnrichInput, PostCompactEnricher,
         },
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        prompt::{PromptFiles, PromptPlan, SystemPromptInput},
         tool::ToolDefinition,
     };
+    use astrcode_extension_sdk::runtime_ports::NoopRuntimePorts;
     use tokio::sync::mpsc;
 
     use super::*;
@@ -264,28 +193,6 @@ mod tests {
         }
     }
 
-    struct CustomPromptProvider;
-
-    #[async_trait::async_trait]
-    impl PromptProvider for CustomPromptProvider {
-        async fn assemble(&self, _input: SystemPromptInput) -> PromptPlan {
-            PromptPlan::from_system_prompt("custom prompt".into())
-        }
-    }
-
-    struct CustomPromptFileProvider;
-
-    #[async_trait::async_trait]
-    impl PromptFileProvider for CustomPromptFileProvider {
-        async fn load(&self, _working_dir: &str, include_agents_rules: bool) -> PromptFiles {
-            PromptFiles {
-                identity: Some("custom identity".into()),
-                user_rules: include_agents_rules.then(|| "custom user rules".into()),
-                project_rules: None,
-            }
-        }
-    }
-
     struct CountingPostCompactEnricher;
 
     #[async_trait::async_trait]
@@ -296,7 +203,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_custom_context_and_prompt_services() {
+    async fn accepts_custom_context_services() {
         let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
         let context = ContextSettings {
             auto_compact_enabled: false,
@@ -310,23 +217,13 @@ mod tests {
             llm.clone(),
             llm,
             effective_config(context),
-            SessionHostServices::embedded(
-                Arc::clone(&context_assembler),
-                Arc::new(CustomPromptProvider),
-                Arc::new(CustomPromptFileProvider),
-            )
-            .with_post_compact_enricher(Arc::new(CountingPostCompactEnricher)),
+            SessionExtensionPorts::default(),
+            Arc::clone(&context_assembler),
+            Arc::new(CountingPostCompactEnricher),
+            Arc::new(NoopRuntimePorts),
         );
 
         assert!(!services.context_assembler().auto_compact_enabled());
-        let plan = services
-            .prompt_provider()
-            .assemble(system_prompt_input())
-            .await;
-        assert_eq!(plan.system_prompt.as_deref(), Some("custom prompt"));
-        let files = services.prompt_file_provider().load(".", true).await;
-        assert_eq!(files.identity.as_deref(), Some("custom identity"));
-        assert_eq!(files.user_rules.as_deref(), Some("custom user rules"));
         let mut compaction = CompactResult {
             pre_tokens: 1,
             post_tokens: 1,
@@ -352,22 +249,6 @@ mod tests {
             )
             .await;
         assert_eq!(compaction.summary, "compact enriched");
-    }
-
-    fn system_prompt_input() -> SystemPromptInput {
-        SystemPromptInput {
-            working_dir: ".".into(),
-            os: "test".into(),
-            shell: "test".into(),
-            gh_cli_available: false,
-            identity: None,
-            user_rules: None,
-            project_rules: None,
-            tools: Vec::new(),
-            tool_prompt_metadata: Default::default(),
-            extension_blocks: Vec::new(),
-            extra_instructions: None,
-        }
     }
 
     fn effective_config(context: ContextSettings) -> EffectiveConfig {

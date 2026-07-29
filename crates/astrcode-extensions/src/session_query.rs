@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
-use astrcode_core::{event::EventPayload, llm::LlmTokenUsage, types::SessionId};
+use astrcode_core::{event::DurableEventPayload, llm::LlmTokenUsage, types::SessionId};
 use astrcode_extension_sdk::session_query::{
     SessionQuery, SessionQueryError, SessionQueryFactory, SessionSummary, SessionTokenUsage,
     SessionTranscript, SessionTranscriptMessage,
@@ -65,8 +65,9 @@ impl SessionQuery for StorageSessionQuery {
             .await
             .map_err(query_error)?;
         Ok(SessionTranscript {
-            session_id: model.session_id,
+            session_id: model.identity.session_id,
             messages: model
+                .transcript
                 .messages
                 .into_iter()
                 .map(|message| SessionTranscriptMessage {
@@ -90,10 +91,10 @@ impl SessionQuery for StorageSessionQuery {
         let mut saw_usage = false;
         let mut model_context_window = None;
         for event in events {
-            if let EventPayload::TokenUsageRecorded {
+            if let DurableEventPayload::TokenUsageRecorded {
                 usage,
                 model_context_window: window,
-            } = event.payload
+            } = event.event.payload
             {
                 if let Some(tokens) = non_cached_token_count(&usage) {
                     total_tokens = total_tokens.saturating_add(tokens);

@@ -136,18 +136,6 @@ impl CommandHandler {
         let new_sid = session.id().clone();
         self.focused_session_id = Some(new_sid.clone());
 
-        // 初始化 runtime（工具表在新 session 上需要重建）
-        let working_dir = self
-            .runtime
-            .session_manager()
-            .read_model(&new_sid)
-            .await
-            .map(|m| m.working_dir)
-            .unwrap_or_else(|_| ".".into());
-        if let Err(e) = session.initialize_runtime(&working_dir).await {
-            tracing::warn!(session_id = %new_sid, error = %e, "fork: runtime init failed");
-        }
-
         // 通知客户端
         let state = self
             .runtime

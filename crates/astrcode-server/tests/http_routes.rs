@@ -14,7 +14,7 @@ use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
-    event::{Event, EventPayload},
+    event::{DurableEvent, DurableEventPayload, LiveEvent, LiveEventPayload, StoredEvent},
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::{SessionToolSelection, ToolDefinition, ToolResult, ToolResultArtifactSlice},
     types::{Cursor, SessionId, new_message_id},
@@ -321,10 +321,10 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
         .await
         .unwrap();
     assert_eq!(
-        initial_model.tool_selection,
-        Some(SessionToolSelection::All {
+        initial_model.identity.tool_selection,
+        SessionToolSelection::All {
             except: vec!["shell".into()]
-        })
+        }
     );
 
     let uri = format!("/api/sessions/{session_id}/tools");
@@ -367,10 +367,10 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
         .await
         .unwrap();
     assert_eq!(
-        read_model.tool_selection,
-        Some(SessionToolSelection::Only {
+        read_model.identity.tool_selection,
+        SessionToolSelection::Only {
             names: vec!["read".into(), "write".into()]
-        })
+        }
     );
 
     let invalid = app
@@ -1148,7 +1148,7 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     )
     .await;
     assert_eq!(snapshot.session_id, session_id);
-    assert_eq!(snapshot.cursor.value, "1");
+    assert_eq!(snapshot.cursor.value, "0");
     assert!(snapshot.blocks.is_empty());
 
     let stream_response = app
@@ -1242,10 +1242,10 @@ async fn stream_preserves_global_updates_during_replay_drain() {
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid,
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: "missed-message".into(),
                 text: "missed while reconnecting".into(),
                 attachments: vec![],
@@ -1260,7 +1260,7 @@ async fn stream_preserves_global_updates_during_replay_drain() {
             Request::builder()
                 .method(Method::GET)
                 .header("authorization", format!("Bearer {token}"))
-                .uri(format!("/api/sessions/{session_id}/stream?cursor=1"))
+                .uri(format!("/api/sessions/{session_id}/stream?cursor=0"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1284,10 +1284,10 @@ async fn stream_replays_events_after_snapshot_cursor() {
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: "snapshot-message".into(),
                 text: "already in snapshot".into(),
                 attachments: vec![],
@@ -1306,10 +1306,10 @@ async fn stream_replays_events_after_snapshot_cursor() {
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid,
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: "missed-message".into(),
                 text: "missed while connecting stream".into(),
                 attachments: vec![],
@@ -1319,10 +1319,10 @@ async fn stream_replays_events_after_snapshot_cursor() {
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             SessionId::from(session_id.clone()),
             None,
-            EventPayload::AssistantMessageCompleted {
+            DurableEventPayload::AssistantMessageCompleted {
                 message_id: "missed-assistant".into(),
                 text: "completed response after snapshot".into(),
                 reasoning_content: None,
@@ -1361,10 +1361,10 @@ async fn snapshot_and_replay_preserve_durable_errors() {
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: "before-failure".into(),
                 text: "before failure".into(),
                 attachments: vec![],
@@ -1381,10 +1381,10 @@ async fn snapshot_and_replay_preserve_durable_errors() {
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::ErrorOccurred {
+            DurableEventPayload::ErrorOccurred {
                 code: -32603,
                 message: "provider rejected the selected model".into(),
                 recoverable: false,
@@ -1394,10 +1394,10 @@ async fn snapshot_and_replay_preserve_durable_errors() {
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: "after-failure".into(),
                 text: "retry after failure".into(),
                 attachments: vec![],
@@ -1407,10 +1407,10 @@ async fn snapshot_and_replay_preserve_durable_errors() {
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid,
             None,
-            EventPayload::TurnCompleted {
+            DurableEventPayload::TurnCompleted {
                 finish_reason: "error".into(),
             },
         ))
@@ -1502,7 +1502,11 @@ async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
     for _ in 0..=1_000 {
         runtime
             .event_store()
-            .append_event(Event::new(sid.clone(), None, EventPayload::TurnStarted))
+            .append_event(DurableEvent::new(
+                sid.clone(),
+                None,
+                DurableEventPayload::TurnStarted,
+            ))
             .await
             .unwrap();
     }
@@ -1584,10 +1588,10 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             parent_sid,
             None,
-            EventPayload::AgentSessionSpawned {
+            DurableEventPayload::AgentSessionSpawned {
                 child_session_id: child_sid.clone(),
                 agent_name: "worker".into(),
                 task: "check fanout routing".into(),
@@ -1610,21 +1614,27 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
         .await
         .unwrap();
 
-    events.send_notification(ClientNotification::Event(Event::new(
-        child_sid.clone(),
-        None,
-        EventPayload::AssistantMessageStarted {
-            message_id: "child-message".into(),
-        },
-    )));
-    events.send_notification(ClientNotification::Event(Event::new(
-        child_sid,
-        None,
-        EventPayload::AssistantTextDelta {
-            message_id: "child-message".into(),
-            delta: "child live text must not leak".into(),
-        },
-    )));
+    events.send_notification(ClientNotification::Event(
+        LiveEvent::new(
+            child_sid.clone(),
+            None,
+            LiveEventPayload::AssistantMessageStarted {
+                message_id: "child-message".into(),
+            },
+        )
+        .into(),
+    ));
+    events.send_notification(ClientNotification::Event(
+        LiveEvent::new(
+            child_sid,
+            None,
+            LiveEventPayload::AssistantTextDelta {
+                message_id: "child-message".into(),
+                delta: "child live text must not leak".into(),
+            },
+        )
+        .into(),
+    ));
 
     let body = read_sse_until(response.into_body(), "agentSessionUpdated").await;
     assert!(body.contains("agentSessionUpdated"));
@@ -1726,10 +1736,10 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
     for text in ["one", "two", "three"] {
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 sid.clone(),
                 None,
-                EventPayload::UserMessage {
+                DurableEventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: text.into(),
                     attachments: vec![],
@@ -1739,10 +1749,10 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
             .unwrap();
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 sid.clone(),
                 None,
-                EventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessageCompleted {
                     message_id: new_message_id(),
                     text: format!("answer {text}"),
                     reasoning_content: None,
@@ -1784,6 +1794,7 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
             .session_read_model(&sid)
             .await
             .unwrap()
+            .transcript
             .messages
             .iter()
             .flat_map(|message| message.message.content.iter())
@@ -1803,10 +1814,10 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::ToolCallRequested {
+            DurableEventPayload::ToolCallRequested {
                 call_id: "read-call-1".into(),
                 tool_name: "read".into(),
                 arguments: serde_json::json!({ "path": read_fixture }),
@@ -1817,10 +1828,10 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::ToolCallCompleted {
+            DurableEventPayload::ToolCallCompleted {
                 call_id: "read-call-1".into(),
                 tool_name: "read".into(),
                 result: ToolResult {
@@ -1840,10 +1851,10 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
     for text in ["one", "two", "three"] {
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 sid.clone(),
                 None,
-                EventPayload::UserMessage {
+                DurableEventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: text.into(),
                     attachments: vec![],
@@ -1853,10 +1864,10 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
             .unwrap();
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 sid.clone(),
                 None,
-                EventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessageCompleted {
                     message_id: new_message_id(),
                     text: format!("answer {text}"),
                     reasoning_content: None,
@@ -1900,9 +1911,10 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert!(!state.context_messages.is_empty());
+    assert!(!state.transcript.context_messages.is_empty());
     let restored_context = astrcode_core::llm::LlmContent::join_text(
         state
+            .transcript
             .context_messages
             .iter()
             .flat_map(|message| &message.message.content),
@@ -2033,7 +2045,10 @@ impl TestEventStore {
 
 #[async_trait::async_trait]
 impl EventReader for TestEventStore {
-    async fn replay_events(&self, session_id: &SessionId) -> Result<Vec<Event>, StorageError> {
+    async fn replay_events(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
         self.inner.replay_events(session_id).await
     }
 
@@ -2045,7 +2060,7 @@ impl EventReader for TestEventStore {
         &self,
         session_id: &SessionId,
         cursor: &Cursor,
-    ) -> Result<Vec<Event>, StorageError> {
+    ) -> Result<Vec<StoredEvent>, StorageError> {
         self.inner.replay_from(session_id, cursor).await
     }
 
@@ -2063,10 +2078,7 @@ impl SessionReader for TestEventStore {
         self.inner.session_read_model(session_id).await
     }
 
-    async fn session_system_prompt(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<String>, StorageError> {
+    async fn session_system_prompt(&self, session_id: &SessionId) -> Result<String, StorageError> {
         self.inner.session_system_prompt(session_id).await
     }
 
@@ -2110,32 +2122,25 @@ impl SessionPathResolver for TestEventStore {
         self.inner.session_read_model(session_id).await?;
         Ok(Some(self.temp_dir.join(session_id.as_str())))
     }
+
+    async fn planned_session_store_dir(
+        &self,
+        session_id: &SessionId,
+        _working_dir: &str,
+        _parent_session_id: Option<&SessionId>,
+        _source_extension: Option<&str>,
+    ) -> Result<Option<PathBuf>, StorageError> {
+        Ok(Some(self.temp_dir.join(session_id.as_str())))
+    }
 }
 
 #[async_trait::async_trait]
 impl EventStore for TestEventStore {
-    async fn create_session(
-        &self,
-        session_id: &SessionId,
-        working_dir: &str,
-        model_id: &str,
-        parent_session_id: Option<&SessionId>,
-        tool_selection: Option<&SessionToolSelection>,
-        source_extension: Option<&str>,
-    ) -> Result<Event, StorageError> {
-        self.inner
-            .create_session(
-                session_id,
-                working_dir,
-                model_id,
-                parent_session_id,
-                tool_selection,
-                source_extension,
-            )
-            .await
+    async fn create_session(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
+        self.inner.create_session(event).await
     }
 
-    async fn append_event(&self, event: Event) -> Result<Event, StorageError> {
+    async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         self.inner.append_event(event).await
     }
 
@@ -2228,16 +2233,14 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         .unwrap();
     let context_assembler = Arc::new(LlmContextAssembler::new(ContextSettings::default()));
     let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
-    let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
+    let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         llm_provider.clone(),
         llm_provider,
         effective,
-        astrcode_server::default_host::first_party_host_services(
-            extension_runner.clone(),
-            context_assembler.clone(),
-            std::sync::Arc::clone(&shell_timeout_secs),
-        ),
-    ));
+        extension_runner.clone(),
+        context_assembler.clone(),
+        std::sync::Arc::clone(&shell_timeout_secs),
+    );
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
             std::path::PathBuf::from(format!(

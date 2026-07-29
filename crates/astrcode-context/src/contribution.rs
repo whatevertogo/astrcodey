@@ -1,6 +1,7 @@
 //! 扩展动态贡献类型。
 //!
-//! 扩展通过 `PromptBuildHandler` 返回 `PromptContributions`（定义在 `astrcode-core`）。
+//! 扩展通过 `PromptBuildHandler` 返回 `PromptContributions`（定义在
+//! `astrcode-extension-sdk`）。
 //! 此模块定义了额外可由扩展贡献的上下文内容。
 //!
 //! ## 动态贡献流程
@@ -11,7 +12,7 @@
 //!   ├─ ExtensionRunner::collect_prompt_contributions_typed()
 //!   │    → PromptContributions
 //!   │
-//!   ├─ PromptProvider::assemble(input)
+//!   ├─ PromptEngine::assemble(input)
 //!   │    → system prompt（包含本轮最新动态贡献）
 //!   │
 //!   └─ LlmContextAssembler::prepare_messages_with_llm()

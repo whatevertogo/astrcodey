@@ -1,10 +1,10 @@
 //! 重放历史事件 → ConversationDeltaDto。
 
-use astrcode_core::event::{Event, EventPayload, Phase};
+use astrcode_core::event::{DurableEventPayload, Event, Phase};
 use astrcode_protocol::http::ConversationDeltaDto;
 
 use super::{
-    blocks::{block_from_payload, streaming_assistant_block, streaming_tool_call_block},
+    blocks::{block_from_payload, streaming_tool_call_block},
     cross_session_compact_deltas,
     live::control_from_phase,
 };
@@ -13,17 +13,21 @@ pub(in crate::http) fn event_to_replay_deltas(
     event: &Event,
     has_messages: bool,
 ) -> Vec<ConversationDeltaDto> {
-    if let EventPayload::CompactBoundaryCreated {
+    let Some(payload) = event.payload.as_durable() else {
+        return Vec::new();
+    };
+    if let DurableEventPayload::CompactBoundaryCreated {
         continued_session_id,
         ..
-    } = &event.payload
+    } = payload
     {
         return cross_session_compact_deltas(event, continued_session_id);
     }
 
     if matches!(
-        &event.payload,
-        EventPayload::SessionContinuedFromCompaction { .. } | EventPayload::SessionForked { .. }
+        payload,
+        DurableEventPayload::SessionContinuedFromCompaction { .. }
+            | DurableEventPayload::SessionForked { .. }
     ) {
         return vec![ConversationDeltaDto::RehydrateRequired];
     }
@@ -31,19 +35,12 @@ pub(in crate::http) fn event_to_replay_deltas(
     if let Some(block) = block_from_payload(event) {
         return vec![ConversationDeltaDto::AppendBlock { block }];
     }
-    // 子会话重放时，AssistantMessageStarted 应产生流式 AppendBlock，
-    // 让前端为后续的 PatchBlock / FinalizeBlock 准备占位。
-    if let EventPayload::AssistantMessageStarted { message_id } = &event.payload {
-        return vec![ConversationDeltaDto::AppendBlock {
-            block: streaming_assistant_block(message_id.to_string(), String::new(), None),
-        }];
-    }
-    if let EventPayload::ToolCallRequested {
+    if let DurableEventPayload::ToolCallRequested {
         call_id,
         tool_name,
         arguments,
         raw_arguments,
-    } = &event.payload
+    } = payload
     {
         return vec![ConversationDeltaDto::AppendBlock {
             block: streaming_tool_call_block(
@@ -53,7 +50,7 @@ pub(in crate::http) fn event_to_replay_deltas(
             ),
         }];
     }
-    if matches!(&event.payload, EventPayload::TurnCompleted { .. }) {
+    if matches!(payload, DurableEventPayload::TurnCompleted { .. }) {
         return vec![ConversationDeltaDto::UpdateControlState {
             control: control_from_phase(Phase::Idle, has_messages),
         }];
@@ -63,45 +60,51 @@ pub(in crate::http) fn event_to_replay_deltas(
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::llm::LlmMessage;
+    use astrcode_core::{
+        event::{DurableEvent, StoredEvent},
+        llm::LlmMessage,
+    };
 
     use super::*;
 
     #[test]
     fn compact_replay_preserves_rehydrate_signal() {
-        let mut boundary = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::CompactBoundaryCreated {
-                trigger: "manual_command".into(),
-                pre_tokens: 100,
-                post_tokens: 20,
-                summary: "summary".into(),
-                transcript_path: Some("compact.jsonl".into()),
-                continued_session_id: "session-1".into(),
-                base_event_seq: 0,
-                strategy: astrcode_core::compaction::CompactStrategy::Manual {
-                    keep_recent_turns: None,
+        let boundary = Event::from(StoredEvent::new(
+            7,
+            DurableEvent::session(
+                "session-1".into(),
+                DurableEventPayload::CompactBoundaryCreated {
+                    trigger: "manual_command".into(),
+                    pre_tokens: 100,
+                    post_tokens: 20,
+                    summary: "summary".into(),
+                    transcript_path: Some("compact.jsonl".into()),
+                    continued_session_id: "session-1".into(),
+                    base_event_seq: 0,
+                    strategy: astrcode_core::compaction::CompactStrategy::Manual {
+                        keep_recent_turns: None,
+                    },
                 },
-            },
-        );
-        boundary.seq = Some(7);
+            ),
+        ));
 
         let deltas = event_to_replay_deltas(&boundary, true);
         assert!(deltas.is_empty());
 
-        let continued = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::SessionContinuedFromCompaction {
-                parent_session_id: "session-1".into(),
-                parent_cursor: "7".into(),
-                summary: "summary".into(),
-                transcript_path: Some("compact.jsonl".into()),
-                context_messages: vec![LlmMessage::system("summary")],
-                retained_messages: vec![LlmMessage::user("recent")],
-            },
-        );
+        let continued = Event::from(StoredEvent::new(
+            8,
+            DurableEvent::session(
+                "session-1".into(),
+                DurableEventPayload::SessionContinuedFromCompaction {
+                    parent_session_id: "session-1".into(),
+                    parent_cursor: "7".into(),
+                    summary: "summary".into(),
+                    transcript_path: Some("compact.jsonl".into()),
+                    context_messages: vec![LlmMessage::system("summary")],
+                    retained_messages: vec![LlmMessage::user("recent")],
+                },
+            ),
+        ));
 
         assert!(matches!(
             event_to_replay_deltas(&continued, true).as_slice(),

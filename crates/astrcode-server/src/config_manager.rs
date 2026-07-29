@@ -18,15 +18,17 @@ use std::sync::{
 };
 
 use astrcode_ai::create_provider;
+use astrcode_context::{
+    context_assembler::LlmContextAssembler, post_compact_enricher::DefaultPostCompactEnricher,
+};
 use astrcode_core::{
     config::{Config, ConfigStore, EffectiveConfig, LlmSettings},
     llm::{LlmClientConfig, LlmProvider, OpenAiProviderExtras, ProviderExtras},
 };
+use astrcode_extension_sdk::runtime_ports::{CompositeToolCatalogProvider, ToolCatalogProvider};
 use astrcode_extensions::runner::ExtensionRunner;
-use astrcode_session::SessionRuntimeServices;
+use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices};
 use parking_lot::RwLock;
-
-use crate::default_host::first_party_host_services;
 
 pub struct ConfigManager {
     config_store: Arc<dyn ConfigStore>,
@@ -77,6 +79,35 @@ fn build_provider_from_settings(
     )
 }
 
+pub(crate) fn assemble_session_runtime_services(
+    llm: Arc<dyn LlmProvider>,
+    small_llm: Arc<dyn LlmProvider>,
+    effective: EffectiveConfig,
+    extension_runner: Arc<ExtensionRunner>,
+    context_assembler: Arc<LlmContextAssembler>,
+    shell_timeout_secs: Arc<AtomicU64>,
+) -> Arc<SessionRuntimeServices> {
+    let extension_catalog: Arc<dyn ToolCatalogProvider> = extension_runner.clone();
+    let builtin_catalog = astrcode_tools::registry::default_tool_catalog_with_shell_timeout_source(
+        shell_timeout_secs,
+    );
+    let tool_catalog: Arc<dyn ToolCatalogProvider> =
+        Arc::new(CompositeToolCatalogProvider::new(vec![
+            ("extensions".into(), extension_catalog),
+            ("builtins".into(), builtin_catalog),
+        ]));
+
+    Arc::new(SessionRuntimeServices::new(
+        llm,
+        small_llm,
+        effective,
+        SessionExtensionPorts::from_adapter(extension_runner),
+        context_assembler,
+        Arc::new(DefaultPostCompactEnricher),
+        tool_catalog,
+    ))
+}
+
 impl ConfigManager {
     /// 从已解析的配置组装 `ConfigManager` 与共享的 `SessionRuntimeServices`。
     ///
@@ -90,16 +121,14 @@ impl ConfigManager {
         context_assembler: Arc<astrcode_context::context_assembler::LlmContextAssembler>,
     ) -> Result<(Self, Arc<SessionRuntimeServices>), astrcode_core::llm::LlmError> {
         let shell_timeout_secs = Arc::new(AtomicU64::new(effective.agent.shell_timeout_secs));
-        let runtime_services = Arc::new(SessionRuntimeServices::new(
+        let runtime_services = assemble_session_runtime_services(
             build_provider_from_settings(&effective.llm)?,
             build_provider_from_settings(&effective.small_llm)?,
             effective,
-            first_party_host_services(
-                extension_runner.clone(),
-                context_assembler,
-                Arc::clone(&shell_timeout_secs),
-            ),
-        ));
+            extension_runner.clone(),
+            context_assembler,
+            Arc::clone(&shell_timeout_secs),
+        );
         let manager = Self {
             config_store,
             raw_config: RwLock::new(raw_config),

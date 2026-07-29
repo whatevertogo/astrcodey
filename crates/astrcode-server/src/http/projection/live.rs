@@ -1,6 +1,6 @@
 //! 实时 EventPayload → ConversationDeltaDto 投影 + 控制态推算。
 
-use astrcode_core::event::{Event, EventPayload, Phase};
+use astrcode_core::event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase};
 use astrcode_protocol::{
     agent_session_link::AgentSessionLinkDto,
     http::{
@@ -19,56 +19,30 @@ pub(in crate::http) fn event_to_deltas(
     has_messages: bool,
 ) -> Vec<ConversationDeltaDto> {
     match &event.payload {
-        EventPayload::AssistantMessageStarted { message_id } => {
-            vec![
-                ConversationDeltaDto::AppendBlock {
-                    block: streaming_assistant_block(message_id.to_string(), String::new(), None),
-                },
-                ConversationDeltaDto::UpdateControlState {
-                    control: control_from_event(event, has_messages),
-                },
-            ]
-        },
-        EventPayload::AssistantTextDelta { message_id, delta } => {
-            vec![ConversationDeltaDto::PatchBlock {
-                block_id: message_id.to_string(),
-                text_delta: delta.clone(),
-            }]
-        },
-        EventPayload::ToolCallStarted { call_id, tool_name } => {
-            vec![
-                ConversationDeltaDto::AppendBlock {
-                    block: streaming_tool_call_block(call_id.to_string(), tool_name, None),
-                },
-                ConversationDeltaDto::UpdateControlState {
-                    control: control_from_event(event, has_messages),
-                },
-            ]
-        },
-        EventPayload::ToolOutputDelta {
-            call_id,
-            stream,
-            delta,
-        } => vec![ConversationDeltaDto::ToolOutput {
-            call_id: call_id.to_string(),
-            stream: (*stream).into(),
-            delta: delta.clone(),
-        }],
+        EventPayload::Durable(payload) => durable_event_to_deltas(event, payload, has_messages),
+        EventPayload::Live(payload) => live_event_to_deltas(event, payload, has_messages),
+    }
+}
 
-        // Visible blocks — shared construction, different delta wrappers
-        EventPayload::UserMessage { .. }
-        | EventPayload::ErrorOccurred { .. }
-        | EventPayload::RecapGenerated { .. } => block_from_payload(event)
+fn durable_event_to_deltas(
+    event: &Event,
+    payload: &DurableEventPayload,
+    has_messages: bool,
+) -> Vec<ConversationDeltaDto> {
+    match payload {
+        DurableEventPayload::UserMessage { .. }
+        | DurableEventPayload::ErrorOccurred { .. }
+        | DurableEventPayload::RecapGenerated { .. } => block_from_payload(event)
             .map(|block| ConversationDeltaDto::AppendBlock { block })
             .into_iter()
             .collect(),
-        EventPayload::AssistantMessageCompleted { .. } => block_from_payload(event)
+        DurableEventPayload::AssistantMessageCompleted { .. } => block_from_payload(event)
             .map(|block| ConversationDeltaDto::FinalizeBlock { block })
             .into_iter()
             .collect(),
-        EventPayload::ToolCallCompleted { .. }
-        | EventPayload::ToolCallFailed { .. }
-        | EventPayload::ToolCallCancelled { .. } => {
+        DurableEventPayload::ToolCallCompleted { .. }
+        | DurableEventPayload::ToolCallFailed { .. }
+        | DurableEventPayload::ToolCallCancelled { .. } => {
             let Some(block) = block_from_payload(event) else {
                 return Vec::new();
             };
@@ -79,11 +53,11 @@ pub(in crate::http) fn event_to_deltas(
                 },
             ]
         },
-        EventPayload::CompactBoundaryCreated {
+        DurableEventPayload::CompactBoundaryCreated {
             continued_session_id,
             ..
         } => cross_session_compact_deltas(event, continued_session_id),
-        EventPayload::SessionContinuedFromCompaction {
+        DurableEventPayload::SessionContinuedFromCompaction {
             parent_session_id,
             parent_cursor,
             ..
@@ -96,29 +70,12 @@ pub(in crate::http) fn event_to_deltas(
                 },
             }]
         },
-
-        // Phase transitions
-        EventPayload::TurnStarted
-        | EventPayload::TurnCompleted { .. }
-        | EventPayload::AgentRunStarted
-        | EventPayload::AgentRunCompleted { .. }
-        | EventPayload::CompactionStarted
-        | EventPayload::CompactionCompleted { .. }
-        | EventPayload::CompactionSkipped { .. }
-        | EventPayload::CompactionFailed { .. } => {
+        DurableEventPayload::TurnStarted | DurableEventPayload::TurnCompleted { .. } => {
             vec![ConversationDeltaDto::UpdateControlState {
                 control: control_from_event(event, has_messages),
             }]
         },
-        EventPayload::ThinkingDelta { message_id, delta } => {
-            vec![ConversationDeltaDto::ThinkingDelta {
-                block_id: message_id.to_string(),
-                delta: delta.clone(),
-            }]
-        },
-
-        // ToolCallRequested — 将参数写入 block.arguments 作为折叠摘要行
-        EventPayload::ToolCallRequested {
+        DurableEventPayload::ToolCallRequested {
             call_id,
             tool_name,
             arguments,
@@ -131,8 +88,7 @@ pub(in crate::http) fn event_to_deltas(
                 arguments_json: raw_arguments.is_none().then(|| arguments.clone()),
             }]
         },
-
-        EventPayload::ToolApprovalRequested {
+        DurableEventPayload::ToolApprovalRequested {
             call_id,
             prompt,
             rule_key,
@@ -144,8 +100,7 @@ pub(in crate::http) fn event_to_deltas(
                 rule_key: rule_key.clone(),
             },
         }],
-
-        EventPayload::ToolApprovalResolved {
+        DurableEventPayload::ToolApprovalResolved {
             call_id, decision, ..
         } => {
             vec![ConversationDeltaDto::ToolApprovalResolved {
@@ -153,10 +108,7 @@ pub(in crate::http) fn event_to_deltas(
                 decision: (*decision).into(),
             }]
         },
-
-        EventPayload::LegacyToolCallInteractionPending { .. } => vec![],
-
-        EventPayload::AgentSessionSpawned {
+        DurableEventPayload::AgentSessionSpawned {
             child_session_id,
             agent_name,
             task,
@@ -170,8 +122,7 @@ pub(in crate::http) fn event_to_deltas(
                 task,
             ),
         }],
-
-        EventPayload::AgentSessionCompleted {
+        DurableEventPayload::AgentSessionCompleted {
             child_session_id,
             final_session_id,
             summary,
@@ -182,78 +133,149 @@ pub(in crate::http) fn event_to_deltas(
                 summary,
             ),
         }],
-
-        EventPayload::AgentSessionFailed {
+        DurableEventPayload::AgentSessionFailed {
             child_session_id,
             final_session_id,
             error,
         } => vec![ConversationDeltaDto::AgentSessionUpdated {
             agent_session: AgentSessionLinkDto::failed(child_session_id, final_session_id, error),
         }],
-
-        EventPayload::AgentSessionRecycled { child_session_id } => {
+        DurableEventPayload::AgentSessionRecycled { child_session_id } => {
             vec![ConversationDeltaDto::AgentSessionRemoved {
                 child_session_id: child_session_id.to_string(),
             }]
         },
-        EventPayload::ExtensionEvent {
-            extension_id,
-            event_type,
-            schema_version,
-            payload,
-            ..
-        } => vec![ConversationDeltaDto::ExtensionEvent {
-            extension_id: extension_id.clone(),
-            event_type: event_type.clone(),
-            schema_version: *schema_version,
-            payload: payload.clone(),
-        }],
-
-        // Events the client doesn't need as visible deltas
-        EventPayload::SystemPromptConfigured { .. }
-        | EventPayload::TurnAbortedContext
-        | EventPayload::SessionContinuedFromCompaction { .. }
-        | EventPayload::SessionForked { .. }
-        | EventPayload::ToolCallArgumentsDelta { .. } => vec![],
+        DurableEventPayload::ExtensionEvent(extension_event) => {
+            vec![ConversationDeltaDto::ExtensionEvent {
+                extension_id: extension_event.extension_id.clone(),
+                event_type: extension_event.event_type.clone(),
+                schema_version: extension_event.schema_version,
+                payload: extension_event.payload.clone(),
+            }]
+        },
+        DurableEventPayload::SystemPromptConfigured { .. }
+        | DurableEventPayload::TurnAbortedContext
+        | DurableEventPayload::SessionContinuedFromCompaction { .. }
+        | DurableEventPayload::SessionForked { .. } => vec![],
         _ => vec![],
+    }
+}
+
+fn live_event_to_deltas(
+    event: &Event,
+    payload: &LiveEventPayload,
+    has_messages: bool,
+) -> Vec<ConversationDeltaDto> {
+    match payload {
+        LiveEventPayload::AssistantMessageStarted { message_id } => vec![
+            ConversationDeltaDto::AppendBlock {
+                block: streaming_assistant_block(message_id.to_string(), String::new(), None),
+            },
+            ConversationDeltaDto::UpdateControlState {
+                control: control_from_event(event, has_messages),
+            },
+        ],
+        LiveEventPayload::AssistantTextDelta { message_id, delta } => {
+            vec![ConversationDeltaDto::PatchBlock {
+                block_id: message_id.to_string(),
+                text_delta: delta.clone(),
+            }]
+        },
+        LiveEventPayload::ThinkingDelta { message_id, delta } => {
+            vec![ConversationDeltaDto::ThinkingDelta {
+                block_id: message_id.to_string(),
+                delta: delta.clone(),
+            }]
+        },
+        LiveEventPayload::ToolCallStarted { call_id, tool_name } => vec![
+            ConversationDeltaDto::AppendBlock {
+                block: streaming_tool_call_block(call_id.to_string(), tool_name, None),
+            },
+            ConversationDeltaDto::UpdateControlState {
+                control: control_from_event(event, has_messages),
+            },
+        ],
+        LiveEventPayload::ToolOutputDelta {
+            call_id,
+            stream,
+            delta,
+        } => vec![ConversationDeltaDto::ToolOutput {
+            call_id: call_id.to_string(),
+            stream: (*stream).into(),
+            delta: delta.clone(),
+        }],
+        LiveEventPayload::ErrorOccurred { .. } => block_from_payload(event)
+            .map(|block| ConversationDeltaDto::AppendBlock { block })
+            .into_iter()
+            .collect(),
+        LiveEventPayload::AgentRunStarted
+        | LiveEventPayload::AgentRunCompleted { .. }
+        | LiveEventPayload::CompactionStarted
+        | LiveEventPayload::CompactionCompleted { .. }
+        | LiveEventPayload::CompactionSkipped { .. }
+        | LiveEventPayload::CompactionFailed { .. } => {
+            vec![ConversationDeltaDto::UpdateControlState {
+                control: control_from_event(event, has_messages),
+            }]
+        },
+        LiveEventPayload::ExtensionEvent(extension_event) => {
+            vec![ConversationDeltaDto::ExtensionEvent {
+                extension_id: extension_event.extension_id.clone(),
+                event_type: extension_event.event_type.clone(),
+                schema_version: extension_event.schema_version,
+                payload: extension_event.payload.clone(),
+            }]
+        },
+        LiveEventPayload::ToolCallArgumentsDelta { .. } => vec![],
     }
 }
 
 fn projected_phase(payload: &EventPayload) -> Phase {
     match payload {
-        EventPayload::TurnStarted
-        | EventPayload::UserMessage { .. }
-        | EventPayload::AgentRunStarted => Phase::Thinking,
-        EventPayload::AssistantMessageStarted { .. }
-        | EventPayload::AssistantTextDelta { .. }
-        | EventPayload::ThinkingDelta { .. } => Phase::Streaming,
-        EventPayload::ToolCallStarted { .. }
-        | EventPayload::ToolCallArgumentsDelta { .. }
-        | EventPayload::ToolCallRequested { .. }
-        | EventPayload::ToolOutputDelta { .. }
-        | EventPayload::LegacyToolCallInteractionPending { .. } => Phase::CallingTool,
-        EventPayload::ToolCallCompleted { .. }
-        | EventPayload::ToolCallFailed { .. }
-        | EventPayload::ToolCallCancelled { .. } => Phase::Thinking,
-        EventPayload::CompactionStarted => Phase::Compacting,
-        EventPayload::ErrorOccurred { .. } => Phase::Error,
+        EventPayload::Durable(
+            DurableEventPayload::TurnStarted | DurableEventPayload::UserMessage { .. },
+        )
+        | EventPayload::Live(LiveEventPayload::AgentRunStarted) => Phase::Thinking,
+        EventPayload::Live(
+            LiveEventPayload::AssistantMessageStarted { .. }
+            | LiveEventPayload::AssistantTextDelta { .. }
+            | LiveEventPayload::ThinkingDelta { .. },
+        ) => Phase::Streaming,
+        EventPayload::Durable(DurableEventPayload::ToolCallRequested { .. })
+        | EventPayload::Live(
+            LiveEventPayload::ToolCallStarted { .. }
+            | LiveEventPayload::ToolCallArgumentsDelta { .. }
+            | LiveEventPayload::ToolOutputDelta { .. },
+        ) => Phase::CallingTool,
+        EventPayload::Durable(
+            DurableEventPayload::ToolCallCompleted { .. }
+            | DurableEventPayload::ToolCallFailed { .. }
+            | DurableEventPayload::ToolCallCancelled { .. },
+        ) => Phase::Thinking,
+        EventPayload::Live(LiveEventPayload::CompactionStarted) => Phase::Compacting,
+        EventPayload::Durable(DurableEventPayload::ErrorOccurred { .. })
+        | EventPayload::Live(LiveEventPayload::ErrorOccurred { .. }) => Phase::Error,
         _ => Phase::Idle,
     }
 }
 
 fn active_turn_id_for_event(event: &Event) -> Option<String> {
     match &event.payload {
-        EventPayload::TurnCompleted { .. } | EventPayload::AgentRunCompleted { .. } => None,
+        EventPayload::Durable(DurableEventPayload::TurnCompleted { .. })
+        | EventPayload::Live(LiveEventPayload::AgentRunCompleted { .. }) => None,
         _ => event.turn_id.as_ref().map(|turn_id| turn_id.to_string()),
     }
 }
 
 fn control_from_event(event: &Event, has_messages: bool) -> ConversationControlStateDto {
     let phase = match &event.payload {
-        EventPayload::TurnCompleted { .. } | EventPayload::AgentRunCompleted { .. } => Phase::Idle,
-        EventPayload::CompactionCompleted { .. }
-        | EventPayload::CompactionSkipped { .. }
-        | EventPayload::CompactionFailed { .. } => {
+        EventPayload::Durable(DurableEventPayload::TurnCompleted { .. })
+        | EventPayload::Live(LiveEventPayload::AgentRunCompleted { .. }) => Phase::Idle,
+        EventPayload::Live(
+            LiveEventPayload::CompactionCompleted { .. }
+            | LiveEventPayload::CompactionSkipped { .. }
+            | LiveEventPayload::CompactionFailed { .. },
+        ) => {
             if event.turn_id.is_some() {
                 Phase::Thinking
             } else {
@@ -290,6 +312,7 @@ fn control_from_state(
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::event::{DurableEvent, ExtensionEventData, LiveEvent, StoredEvent};
     use astrcode_protocol::{
         http::{ConversationBlockDto, ConversationBlockStatusDto, ToolCallStatusDto},
         wire::PhaseDto,
@@ -297,12 +320,23 @@ mod tests {
 
     use super::*;
 
+    fn event(payload: EventPayload, turn_id: Option<&str>) -> Event {
+        match payload {
+            EventPayload::Durable(payload) => StoredEvent::new(
+                1,
+                DurableEvent::new("session-1".into(), turn_id.map(Into::into), payload),
+            )
+            .into(),
+            EventPayload::Live(payload) => {
+                LiveEvent::new("session-1".into(), turn_id.map(Into::into), payload).into()
+            },
+        }
+    }
+
     #[test]
     fn tool_request_patches_concise_arguments() {
-        let event = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::ToolCallRequested {
+        let event = event(
+            EventPayload::Durable(DurableEventPayload::ToolCallRequested {
                 call_id: "tool-1".into(),
                 tool_name: "agent".into(),
                 arguments: serde_json::json!({
@@ -311,7 +345,8 @@ mod tests {
                     "subagent_type": "explorer",
                 }),
                 raw_arguments: None,
-            },
+            }),
+            None,
         );
 
         let deltas = event_to_deltas(&event, true);
@@ -337,14 +372,13 @@ mod tests {
 
     #[test]
     fn assistant_completion_finalizes_with_full_text() {
-        let event = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::AssistantMessageCompleted {
+        let event = event(
+            EventPayload::Durable(DurableEventPayload::AssistantMessageCompleted {
                 message_id: "assistant-1".into(),
                 text: "complete answer".into(),
                 reasoning_content: None,
-            },
+            }),
+            None,
         );
 
         let deltas = event_to_deltas(&event, true);
@@ -375,13 +409,12 @@ mod tests {
 
     #[test]
     fn thinking_delta_targets_assistant_block() {
-        let event = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::ThinkingDelta {
+        let event = event(
+            EventPayload::Live(LiveEventPayload::ThinkingDelta {
                 message_id: "assistant-1".into(),
                 delta: "reasoning".into(),
-            },
+            }),
+            None,
         );
 
         let deltas = event_to_deltas(&event, true);
@@ -398,16 +431,14 @@ mod tests {
 
     #[test]
     fn extension_event_preserves_namespaced_live_payload() {
-        let event = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::ExtensionEvent {
+        let event = event(
+            EventPayload::Live(LiveEventPayload::ExtensionEvent(ExtensionEventData {
                 extension_id: "astrcode-ask-user".into(),
                 event_type: "ask_user.pending".into(),
                 schema_version: 1,
-                durable: false,
                 payload: serde_json::json!({ "callId": "call-1" }),
-            },
+            })),
+            None,
         );
 
         assert!(matches!(
@@ -424,50 +455,35 @@ mod tests {
     }
 
     #[test]
-    fn legacy_tool_interaction_is_ignored() {
-        let event = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::LegacyToolCallInteractionPending {
-                call_id: "tool-ask".into(),
-                content: r#"{"status":"awaiting_user_input","questions":[]}"#.into(),
-                metadata: Default::default(),
-            },
-        );
-
-        assert!(event_to_deltas(&event, true).is_empty());
-    }
-
-    #[test]
     fn tool_terminal_events_preserve_status_content_and_duration() {
         let cases = [
             (
-                EventPayload::ToolCallCompleted {
+                EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
                     call_id: "complete".into(),
                     tool_name: "read".into(),
                     result: astrcode_core::tool::ToolResult::success("file contents")
                         .with_duration_ms(Some(4)),
                     arguments: String::new(),
                     arguments_json: None,
-                },
+                }),
                 ToolCallStatusDto::Complete,
                 "file contents",
                 Some(4),
             ),
             (
-                EventPayload::ToolCallCompleted {
+                EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
                     call_id: "error".into(),
                     tool_name: "read".into(),
                     result: astrcode_core::tool::ToolResult::error("domain error"),
                     arguments: String::new(),
                     arguments_json: None,
-                },
+                }),
                 ToolCallStatusDto::Error,
                 "domain error",
                 None,
             ),
             (
-                EventPayload::ToolCallFailed {
+                EventPayload::Durable(DurableEventPayload::ToolCallFailed {
                     call_id: "failed".into(),
                     tool_name: "read".into(),
                     error: "executor failed".into(),
@@ -475,20 +491,20 @@ mod tests {
                     duration_ms: Some(7),
                     arguments: String::new(),
                     arguments_json: None,
-                },
+                }),
                 ToolCallStatusDto::Failed,
                 "executor failed",
                 Some(7),
             ),
             (
-                EventPayload::ToolCallCancelled {
+                EventPayload::Durable(DurableEventPayload::ToolCallCancelled {
                     call_id: "cancelled".into(),
                     tool_name: "read".into(),
                     reason: "turn aborted".into(),
                     duration_ms: Some(8),
                     arguments: String::new(),
                     arguments_json: None,
-                },
+                }),
                 ToolCallStatusDto::Cancelled,
                 "Tool cancelled: turn aborted",
                 Some(8),
@@ -496,7 +512,7 @@ mod tests {
         ];
 
         for (payload, expected_status, expected_text, expected_duration) in cases {
-            let event = Event::new("session-1".into(), None, payload);
+            let event = event(payload, None);
             let deltas = event_to_deltas(&event, true);
             let [
                 ConversationDeltaDto::FinalizeBlock {
@@ -531,34 +547,34 @@ mod tests {
     fn lifecycle_events_project_control_state() {
         let cases = [
             (
-                EventPayload::CompactionCompleted {
+                EventPayload::Live(LiveEventPayload::CompactionCompleted {
                     messages_removed: 2,
-                },
+                }),
                 Some("turn-1"),
                 PhaseDto::Thinking,
                 false,
                 Some("turn-1"),
             ),
             (
-                EventPayload::TurnStarted,
+                EventPayload::Durable(DurableEventPayload::TurnStarted),
                 Some("turn-42"),
                 PhaseDto::Thinking,
                 false,
                 Some("turn-42"),
             ),
             (
-                EventPayload::TurnCompleted {
+                EventPayload::Durable(DurableEventPayload::TurnCompleted {
                     finish_reason: "stop".into(),
-                },
+                }),
                 Some("turn-42"),
                 PhaseDto::Idle,
                 true,
                 None,
             ),
             (
-                EventPayload::CompactionCompleted {
+                EventPayload::Live(LiveEventPayload::CompactionCompleted {
                     messages_removed: 2,
-                },
+                }),
                 None,
                 PhaseDto::Idle,
                 true,
@@ -567,7 +583,7 @@ mod tests {
         ];
 
         for (payload, turn_id, phase, can_submit_prompt, active_turn_id) in cases {
-            let event = Event::new("session-1".into(), turn_id.map(Into::into), payload);
+            let event = event(payload, turn_id);
             let deltas = event_to_deltas(&event, true);
             let [ConversationDeltaDto::UpdateControlState { control }] = deltas.as_slice() else {
                 panic!("expected one control-state delta, got {deltas:?}");
@@ -580,10 +596,8 @@ mod tests {
 
     #[test]
     fn same_session_compact_refreshes_only_after_continuation_is_persisted() {
-        let mut boundary = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::CompactBoundaryCreated {
+        let boundary = event(
+            EventPayload::Durable(DurableEventPayload::CompactBoundaryCreated {
                 trigger: "auto_threshold".into(),
                 pre_tokens: 100,
                 post_tokens: 20,
@@ -592,24 +606,23 @@ mod tests {
                 continued_session_id: "session-1".into(),
                 base_event_seq: 3,
                 strategy: astrcode_core::compaction::CompactStrategy::Auto,
-            },
+            }),
+            None,
         );
-        boundary.seq = Some(4);
 
         let boundary_deltas = event_to_deltas(&boundary, true);
         assert!(boundary_deltas.is_empty());
 
-        let continuation = Event::new(
-            "session-1".into(),
-            None,
-            EventPayload::SessionContinuedFromCompaction {
+        let continuation = event(
+            EventPayload::Durable(DurableEventPayload::SessionContinuedFromCompaction {
                 parent_session_id: "session-1".into(),
                 parent_cursor: "4".into(),
                 summary: "summary".into(),
                 transcript_path: None,
                 context_messages: Vec::new(),
                 retained_messages: Vec::new(),
-            },
+            }),
+            None,
         );
         let continuation_deltas = event_to_deltas(&continuation, true);
         assert!(matches!(

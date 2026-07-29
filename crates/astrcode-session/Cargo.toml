@@ -7,6 +7,7 @@ description = "Session runtime: Session handle, turn execution, and event bus"
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
+astrcode-context = { path = "../astrcode-context" }
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 astrcode-storage = { path = "../astrcode-storage" }
 astrcode-session-projection = { path = "../astrcode-session-projection" }

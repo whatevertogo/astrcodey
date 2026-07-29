@@ -3,13 +3,13 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    event::Phase,
+    event::{PersistedSystemPrompt, SystemPromptSource},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::{
         ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
         ToolOrigin,
     },
-    types::{ToolCallId, new_session_id, new_turn_id},
+    types::{ToolCallId, new_session_id},
 };
 use astrcode_extension_sdk::{
     extension::{ExtensionError, PromptBuildContext, PromptContributions},
@@ -109,12 +109,11 @@ fn test_caps() -> Arc<SessionRuntimeServices> {
 }
 
 #[tokio::test]
-async fn refresh_prompt_with_none_preserves_existing_extra() {
+async fn reopen_restores_native_extra_system_prompt() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let caps = test_caps();
     let sid = new_session_id();
 
-    // 第一次 — 模拟子会话首次 spawn：runtime 注入 extra，refresh_prompt 显式传入
     let runtime_a = Arc::new(SessionRuntimeState::new(
         caps.llm(),
         caps.small_llm(),
@@ -129,20 +128,16 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
+        initial_system_prompt: None,
         runtime: Arc::clone(&runtime_a),
         runtime_services: Arc::clone(&caps),
     })
     .await
     .unwrap();
-    let wrote_a = session_a
-        .refresh_prompt(".", Some("child agent body"), None)
-        .await
-        .expect("first refresh_prompt should succeed");
-    assert!(wrote_a, "first refresh should write SystemPromptConfigured");
 
     let state_after_first = session_a.read_model().await.unwrap();
     assert_eq!(
-        state_after_first.extra_system_prompt.as_deref(),
+        state_after_first.system_prompt.extra.as_deref(),
         Some("child agent body"),
     );
 
@@ -163,23 +158,11 @@ async fn refresh_prompt_with_none_preserves_existing_extra() {
     )
     .await
     .unwrap();
-    // handler 风格的调用 — extra=None，期望「保留」从 projection 恢复
-    let stored_fp = state_after_first.system_prompt_fingerprint.clone();
-    let wrote_b = session_b
-        .refresh_prompt(".", None, stored_fp.as_deref())
-        .await
-        .expect("second refresh_prompt should succeed");
-    assert!(
-        !wrote_b,
-        "fingerprint hit should skip writing a new SystemPromptConfigured event",
-    );
-
-    // 关键断言：projection 仍然带着 extra；runtime 被恢复
     let state_after_second = session_b.read_model().await.unwrap();
     assert_eq!(
-        state_after_second.extra_system_prompt.as_deref(),
+        state_after_second.system_prompt.extra.as_deref(),
         Some("child agent body"),
-        "extra_system_prompt must survive refresh_prompt(None) on a reopened session",
+        "extra_system_prompt must survive reopening the session",
     );
     assert_eq!(
         runtime_b.prompt_extra().as_deref(),
@@ -204,6 +187,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
         parent_session_id: None,
         tool_selection: Some(parent_selection),
         source_extension: None,
+        initial_system_prompt: None,
         runtime: Arc::new(SessionRuntimeState::new(
             caps.llm(),
             caps.small_llm(),
@@ -222,6 +206,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
         parent_session_id: Some(parent.id().clone()),
         tool_selection: None,
         source_extension: None,
+        initial_system_prompt: None,
         runtime: Arc::new(SessionRuntimeState::new(
             caps.llm(),
             caps.small_llm(),
@@ -232,10 +217,15 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
     .await
     .unwrap();
     assert_eq!(
-        direct_child.read_model().await.unwrap().tool_selection,
-        Some(SessionToolSelection::Only {
+        direct_child
+            .read_model()
+            .await
+            .unwrap()
+            .identity
+            .tool_selection,
+        SessionToolSelection::Only {
             names: vec!["read".into(), "write".into()]
-        }),
+        },
         "every child creation path must persist the inherited parent boundary",
     );
 
@@ -255,10 +245,10 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
         .await
         .unwrap();
     assert_eq!(
-        child.read_model().await.unwrap().tool_selection,
-        Some(SessionToolSelection::Only {
+        child.read_model().await.unwrap().identity.tool_selection,
+        SessionToolSelection::Only {
             names: vec!["write".into()]
-        })
+        }
     );
 
     let effective = child
@@ -289,10 +279,10 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
     .await
     .unwrap();
     assert_eq!(
-        reopened.read_model().await.unwrap().tool_selection,
-        Some(SessionToolSelection::Only {
+        reopened.read_model().await.unwrap().identity.tool_selection,
+        SessionToolSelection::Only {
             names: vec!["read".into()]
-        })
+        }
     );
 
     parent
@@ -309,7 +299,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
 }
 
 #[tokio::test]
-async fn turn_setup_failure_returns_session_to_idle() {
+async fn prompt_failure_does_not_create_session() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
     let noop = Arc::new(NoopRuntimePorts);
@@ -321,14 +311,16 @@ async fn turn_setup_failure_returns_session_to_idle() {
             noop,
         ),
     );
-    let session = Session::create_with_params(SessionCreateParams {
+    let session_id = new_session_id();
+    let error = match Session::create_with_params(SessionCreateParams {
         store: Arc::clone(&store),
-        session_id: new_session_id(),
+        session_id,
         working_dir: ".".into(),
         model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
+        initial_system_prompt: None,
         runtime: Arc::new(SessionRuntimeState::new(
             llm,
             caps.small_llm(),
@@ -337,18 +329,68 @@ async fn turn_setup_failure_returns_session_to_idle() {
         runtime_services: caps,
     })
     .await
-    .unwrap();
-
-    let error = match session
-        .submit("hello".into(), Vec::new(), new_turn_id())
-        .await
     {
-        Ok(_) => panic!("prompt contribution failure must reject turn setup"),
+        Ok(_) => panic!("prompt contribution failure must reject session creation"),
         Err(error) => error,
     };
     assert!(error.to_string().contains("intentional prompt failure"));
+    assert!(store.list_sessions().await.unwrap().is_empty());
+}
 
+#[tokio::test]
+async fn inherited_initial_prompt_survives_initialization_and_reopen() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+    let caps = common::test_runtime_services(Arc::clone(&llm));
+    let session_id = new_session_id();
+    let inherited = PersistedSystemPrompt {
+        text: "[Identity]\n  inherited".into(),
+        fingerprint: "inherited-fingerprint".into(),
+        extra_system_prompt: Some("child body".into()),
+        source: SystemPromptSource::Inherited,
+    };
+    let session = Session::create_with_params(SessionCreateParams {
+        store: Arc::clone(&store),
+        session_id: session_id.clone(),
+        working_dir: ".".into(),
+        model_id: "mock-model".into(),
+        parent_session_id: None,
+        tool_selection: None,
+        source_extension: None,
+        initial_system_prompt: Some(inherited.clone()),
+        runtime: Arc::new(SessionRuntimeState::new(
+            Arc::clone(&llm),
+            caps.small_llm(),
+            "mock-model".into(),
+        )),
+        runtime_services: Arc::clone(&caps),
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(store.replay_events(&session_id).await.unwrap().len(), 1);
     let model = session.read_model().await.unwrap();
-    assert_eq!(model.phase, Phase::Idle);
-    assert!(model.pending_tool_calls.is_empty());
+    assert_eq!(model.system_prompt.text, inherited.text);
+    assert_eq!(model.system_prompt.source, SystemPromptSource::Inherited);
+
+    let reopened = Session::open(
+        Arc::clone(&store),
+        session_id,
+        Arc::new(SessionRuntimeState::new(
+            llm,
+            caps.small_llm(),
+            "mock-model".into(),
+        )),
+        caps,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        reopened.runtime().prompt_extra().as_deref(),
+        inherited.extra_system_prompt.as_deref()
+    );
+    assert_eq!(
+        reopened.read_model().await.unwrap().system_prompt.source,
+        SystemPromptSource::Inherited
+    );
 }

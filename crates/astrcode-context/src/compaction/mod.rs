@@ -13,7 +13,7 @@ use std::future::Future;
 use astrcode_core::llm::{LlmContent, LlmError, LlmMessage, LlmRole};
 use astrcode_support::text::compact_inline;
 
-use crate::{ContextSettings, token_budget::estimate_request_tokens};
+use crate::ContextSettings;
 
 const COMPACT_SUMMARY_END: &str = "</compact_summary>";
 const MAX_PTL_RETRIES: usize = 3;
@@ -340,7 +340,8 @@ fn prepare_compact_parts(
     }
 
     let retained_messages = messages[keep_start..].to_vec();
-    let pre_tokens = estimate_request_tokens(messages, system_prompt);
+    let pre_tokens =
+        crate::token_budget::estimate_request_tokens_with_prompt(messages, system_prompt);
     let messages_removed = removed_visible_messages(&prefix);
     Ok(PreparedCompactParts {
         prefix,
@@ -372,8 +373,10 @@ fn request_messages(
 ) -> Vec<LlmMessage> {
     let input_messages = &prepared_input.messages[message_start..];
     let mut messages = Vec::with_capacity(input_messages.len() + 2);
-    if let Some(system_prompt) = system_prompt.filter(|value| !value.trim().is_empty()) {
-        messages.push(LlmMessage::system(system_prompt.to_string()));
+    if let Some(system_prompt) = system_prompt {
+        messages.extend(crate::prompt_engine::system_messages_from_prompt(
+            system_prompt,
+        ));
     }
     messages.extend_from_slice(input_messages);
     messages.push(LlmMessage::user(prompt::render_compact_request(
@@ -412,7 +415,7 @@ fn finish_compact_summary(
         &summary,
         render_options,
     ))];
-    let post_tokens = estimate_request_tokens(
+    let post_tokens = crate::token_budget::estimate_request_tokens_with_prompt(
         &[context_messages.clone(), retained_messages.clone()].concat(),
         system_prompt,
     );

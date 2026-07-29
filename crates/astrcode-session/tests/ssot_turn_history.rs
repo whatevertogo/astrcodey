@@ -9,7 +9,7 @@ use std::{
 };
 
 use astrcode_core::{
-    event::EventPayload,
+    event::DurableEventPayload,
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, LlmTokenUsage,
         LlmTokenUsageSource, ModelLimits, ProviderInputTokenCount,
@@ -57,6 +57,7 @@ async fn spawn_session_with_store(
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
+        initial_system_prompt: None,
         runtime,
         runtime_services: caps,
     })
@@ -187,7 +188,7 @@ async fn provider_start_error_is_persisted_as_durable_error() {
     let errors = events
         .iter()
         .filter_map(|event| match &event.payload {
-            EventPayload::ErrorOccurred { message, .. } => Some(message.as_str()),
+            DurableEventPayload::ErrorOccurred { message, .. } => Some(message.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -246,13 +247,18 @@ async fn token_usage_is_persisted_as_durable_event() {
         .position(|event| {
             matches!(
                 event.payload,
-                EventPayload::AssistantMessageCompleted { .. }
+                DurableEventPayload::AssistantMessageCompleted { .. }
             )
         })
         .expect("expected AssistantMessageCompleted event");
     let token_usage_index = events
         .iter()
-        .position(|event| matches!(event.payload, EventPayload::TokenUsageRecorded { .. }))
+        .position(|event| {
+            matches!(
+                event.payload,
+                DurableEventPayload::TokenUsageRecorded { .. }
+            )
+        })
         .expect("expected TokenUsageRecorded event");
     assert!(
         token_usage_index > assistant_completed_index,
@@ -260,7 +266,7 @@ async fn token_usage_is_persisted_as_durable_event() {
     );
 
     let token_usage = match &events[token_usage_index].payload {
-        EventPayload::TokenUsageRecorded {
+        DurableEventPayload::TokenUsageRecorded {
             usage,
             model_context_window,
         } => Some((usage, model_context_window)),
@@ -326,7 +332,7 @@ async fn token_usage_missing_stream_usage_records_provider_count_fallback() {
     let usage = events
         .iter()
         .find_map(|event| match &event.payload {
-            EventPayload::TokenUsageRecorded { usage, .. } => Some(usage),
+            DurableEventPayload::TokenUsageRecorded { usage, .. } => Some(usage),
             _ => None,
         })
         .expect("expected fallback TokenUsageRecorded event");
@@ -517,7 +523,7 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
         .unwrap();
     let _ = handle.wait().await.unwrap();
 
-    let messages = session.read_model().await.unwrap().messages;
+    let messages = session.read_model().await.unwrap().transcript.messages;
     assert!(
         messages.iter().any(|message| {
             message.message.role == LlmRole::Assistant
@@ -552,13 +558,13 @@ async fn ssot_early_tool_completion_persists_request_after_assistant_message() {
         .position(|event| {
             matches!(
                 event.payload,
-                EventPayload::AssistantMessageCompleted { .. }
+                DurableEventPayload::AssistantMessageCompleted { .. }
             )
         })
         .expect("assistant message should be durable before tool request");
     let tool_requested_index = events
         .iter()
-        .position(|event| matches!(event.payload, EventPayload::ToolCallRequested { .. }))
+        .position(|event| matches!(event.payload, DurableEventPayload::ToolCallRequested { .. }))
         .expect("tool request should be durable");
     assert!(
         assistant_completed_index < tool_requested_index,
@@ -607,7 +613,7 @@ async fn ssot_mid_turn_inject_visible_on_next_prepare() {
         let _ = session_for_inject
             .emit_durable(
                 Some(&inject_turn),
-                EventPayload::UserMessage {
+                DurableEventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: "mid-turn inject".into(),
                     attachments: vec![],
@@ -625,7 +631,7 @@ async fn ssot_mid_turn_inject_visible_on_next_prepare() {
 
     let model = session.read_model().await.unwrap();
     assert!(
-        model.messages.iter().any(|message| {
+        model.transcript.messages.iter().any(|message| {
             message.message.role == LlmRole::User
                 && message.message.content.iter().any(|content| {
                     matches!(

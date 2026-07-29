@@ -31,7 +31,7 @@ use std::{
 };
 
 use astrcode_core::{
-    event::{EventPayload, Phase},
+    event::{DurableEventPayload, Phase},
     message_attachment::MessageAttachment,
     types::*,
 };
@@ -288,10 +288,10 @@ impl TurnScheduler {
             .map(|q| q.len())
             .unwrap_or(0);
         Ok(SessionExecutionView {
-            phase: state.phase,
+            phase: state.execution.phase,
             active_turn_id,
             queued_inputs,
-            message_count: state.messages.len(),
+            message_count: state.transcript.messages.len(),
         })
     }
 
@@ -578,7 +578,7 @@ impl TurnScheduler {
             Err(e) => return Err(TurnScheduleError::Session(e)),
         };
 
-        if matches!(state.phase, Phase::Idle | Phase::Error) {
+        if matches!(state.execution.phase, Phase::Idle | Phase::Error) {
             return Ok(());
         }
 
@@ -770,7 +770,7 @@ impl TurnScheduler {
         session
             .emit_durable(
                 Some(turn_id),
-                EventPayload::UserMessage {
+                DurableEventPayload::UserMessage {
                     message_id,
                     text: input.text,
                     attachments: input.attachments,
@@ -797,7 +797,7 @@ impl TurnScheduler {
             .await
             .map_err(TurnScheduleError::Session)?;
 
-        if matches!(state.phase, Phase::Idle | Phase::Error) {
+        if matches!(state.execution.phase, Phase::Idle | Phase::Error) {
             repair_incomplete_tool_protocol_for_state(&session, &state).await?;
         } else {
             repair_stale_phase_for_state(session_id, &session, &state).await?;
@@ -844,13 +844,13 @@ async fn repair_stale_phase_for_state(
     session: &Session,
     state: &SessionReadModel,
 ) -> Result<(), TurnScheduleError> {
-    if matches!(state.phase, Phase::Idle | Phase::Error) {
+    if matches!(state.execution.phase, Phase::Idle | Phase::Error) {
         return Err(TurnScheduleError::NoActiveTurn);
     }
 
     tracing::info!(
         session_id = %session_id,
-        phase = ?state.phase,
+        phase = ?state.execution.phase,
         "repairing stale turn phase"
     );
 

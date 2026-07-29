@@ -603,6 +603,7 @@ version = "0.3.12"
 dependencies = [
  "arc-swap",
  "astrcode-ai",
+ "astrcode-context",
  "astrcode-core",
  "astrcode-extension-sdk",
  "astrcode-session-projection",
@@ -625,8 +626,10 @@ name = "astrcode-session-projection"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
+ "chrono",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

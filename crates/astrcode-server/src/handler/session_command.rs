@@ -180,7 +180,9 @@ impl CommandHandler {
             .read_model(sid)
             .await
             .map_err(HandlerError::SessionManager)?;
-        Ok(self.command_list_for_working_dir(&state.working_dir).await)
+        Ok(self
+            .command_list_for_working_dir(&state.identity.working_dir)
+            .await)
     }
 
     pub(in crate::handler) async fn command_list_for_working_dir(
@@ -228,7 +230,7 @@ impl CommandHandler {
             .read_model(sid)
             .await
             .map_err(HandlerError::SessionManager)?;
-        let working_dir = state.working_dir;
+        let working_dir = state.identity.working_dir;
         let ctx = astrcode_extension_sdk::extension::CommandContext {
             session_id: sid.to_string(),
             working_dir: working_dir.clone(),

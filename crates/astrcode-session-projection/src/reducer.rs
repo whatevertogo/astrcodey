@@ -3,10 +3,11 @@
 //! EventLog 是唯一事实源；本模块只维护可从事件重建的内部读模型。
 
 use astrcode_core::{
-    event::{Event, EventPayload, Phase},
+    event::{DurableEvent, DurableEventPayload, Phase, StoredEvent},
     llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message},
     types::SessionId,
 };
+use thiserror::Error;
 
 use crate::{
     AgentSessionLinkView, AgentSessionStatus, CompactBoundaryView, PendingToolApprovalView,
@@ -16,91 +17,114 @@ use crate::{
 
 #[derive(Clone)]
 pub struct SessionReadModelProjection {
-    model: SessionReadModel,
+    session_id: SessionId,
+    model: Option<SessionReadModel>,
+}
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+pub enum ProjectionError {
+    #[error("session {0} has no SessionStarted event")]
+    MissingSessionStarted(SessionId),
+    #[error("event belongs to session {actual}, expected {expected}")]
+    SessionMismatch {
+        expected: SessionId,
+        actual: SessionId,
+    },
+    #[error("first event must have seq 0, got {0}")]
+    InvalidFirstSequence(u64),
+    #[error("first event must be SessionStarted")]
+    InvalidFirstEvent,
+    #[error("SessionStarted must be a session-level event")]
+    SessionStartedHasTurn,
+    #[error("duplicate SessionStarted at seq {0}")]
+    DuplicateSessionStarted(u64),
+    #[error("expected event seq {expected}, got {actual}")]
+    NonContiguousSequence { expected: u64, actual: u64 },
+    #[error("invalid compaction parent cursor {0}")]
+    InvalidParentCursor(String),
 }
 
 impl SessionReadModelProjection {
     pub fn new(session_id: SessionId) -> Self {
         Self {
-            model: SessionReadModel::empty(session_id),
+            session_id,
+            model: None,
         }
     }
 
-    pub fn from_read_model(model: SessionReadModel) -> Self {
-        Self { model }
+    pub fn apply(&mut self, event: &StoredEvent) -> Result<(), ProjectionError> {
+        if event.session_id != self.session_id {
+            return Err(ProjectionError::SessionMismatch {
+                expected: self.session_id.clone(),
+                actual: event.session_id.clone(),
+            });
+        }
+
+        match self.model.as_mut() {
+            Some(model) => reduce(event, model),
+            None => {
+                if event.seq != 0 {
+                    return Err(ProjectionError::InvalidFirstSequence(event.seq));
+                }
+                if event.turn_id.is_some() {
+                    return Err(ProjectionError::SessionStartedHasTurn);
+                }
+                let DurableEventPayload::SessionStarted(started) = &event.payload else {
+                    return Err(ProjectionError::InvalidFirstEvent);
+                };
+                self.model = Some(SessionReadModel::from_started(
+                    self.session_id.clone(),
+                    started,
+                    event.timestamp,
+                ));
+                Ok(())
+            },
+        }
     }
 
-    pub fn apply(&mut self, event: &Event) {
-        reduce(event, &mut self.model);
-    }
-
-    pub fn snapshot(&self) -> SessionReadModel {
-        self.model.clone()
+    pub fn snapshot(&self) -> Result<SessionReadModel, ProjectionError> {
+        self.model
+            .clone()
+            .ok_or_else(|| ProjectionError::MissingSessionStarted(self.session_id.clone()))
     }
 
     pub fn last_seq(&self) -> Option<u64> {
-        self.model.latest_seq
+        self.model.as_ref().map(|model| model.stats.last_seq)
     }
 }
 
 /// 从事件序列重建会话读模型。
-pub fn replay(session_id: SessionId, events: &[Event]) -> SessionReadModel {
+pub fn replay(
+    session_id: SessionId,
+    events: &[StoredEvent],
+) -> Result<SessionReadModel, ProjectionError> {
     let mut projection = SessionReadModelProjection::new(session_id);
     for event in events {
-        projection.apply(event);
+        projection.apply(event)?;
     }
     projection.snapshot()
 }
 
 /// 将单个持久事件归约到读模型。
-pub fn reduce(event: &Event, model: &mut SessionReadModel) {
-    // seq=None 的非持久/异常事件不推进 durable cursor。
-    // durable seq 必须单调递增：即使 reducer 被重复调用或遇到乱序输入，也不得回退。
-    if let Some(seq) = event.seq {
-        model.latest_seq = Some(model.latest_seq.map_or(seq, |current| current.max(seq)));
-    }
-    model.updated_at = event.timestamp.to_rfc3339();
-    let event_seq = event.seq.unwrap_or_default();
+pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), ProjectionError> {
+    let compaction_base_seq = validate_next_event_details(event.seq, &event.event, model)?;
+
+    model.stats.last_seq = event.seq;
+    model.stats.updated_at = event.timestamp;
+    model.stats.event_count += 1;
+    let event_seq = event.seq;
 
     match &event.payload {
-        EventPayload::SessionStarted {
-            working_dir,
-            model_id,
-            parent_session_id,
-            tool_selection,
-            source_extension,
-        } => {
-            model.working_dir = working_dir.clone();
-            model.model_id = model_id.clone();
-            model.parent_session_id = parent_session_id.clone();
-            model.tool_selection = tool_selection.clone();
-            model.source_extension = source_extension.clone();
-            model.phase = Phase::Idle;
-            if model.created_at.is_empty() {
-                model.created_at = event.timestamp.to_rfc3339();
-            }
+        DurableEventPayload::SessionStarted(_) => {
+            return Err(ProjectionError::DuplicateSessionStarted(event.seq));
         },
-        EventPayload::ModelIdChanged { model_id } => {
-            model.model_id = model_id.clone();
+        DurableEventPayload::ModelIdChanged { model_id } => {
+            model.identity.model_id = model_id.clone();
         },
-        EventPayload::SessionToolsConfigured { selection } => {
-            model.tool_selection = Some(selection.clone());
+        DurableEventPayload::SessionToolsConfigured { selection } => {
+            model.identity.tool_selection = selection.clone();
         },
-        EventPayload::SessionDeleted => {
-            model.phase = Phase::Idle;
-            model.messages.clear();
-            model.context_messages.clear();
-            model.transcript_artifacts.clear();
-            model.system_prompt = None;
-            model.extra_system_prompt = None;
-            model.system_prompt_fingerprint = None;
-            model.pending_tool_calls.clear();
-            model.pending_tool_approvals.clear();
-            model.compact_boundaries.clear();
-            model.agent_sessions.clear();
-            model.extension_events = Default::default();
-        },
-        EventPayload::AgentSessionSpawned {
+        DurableEventPayload::AgentSessionSpawned {
             child_session_id,
             agent_name,
             task,
@@ -109,18 +133,16 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
         } => {
             model.agent_sessions.push(AgentSessionLinkView {
                 child_session_id: child_session_id.clone(),
-                tool_call_id: Some(tool_call_id.clone()),
+                tool_call_id: tool_call_id.clone(),
                 agent_name: agent_name.clone(),
                 task: task.clone(),
                 status: AgentSessionStatus::Running,
                 final_session_id: None,
                 summary: None,
                 error: None,
-                phase: None,
-                current_tool: None,
             });
         },
-        EventPayload::AgentSessionCompleted {
+        DurableEventPayload::AgentSessionCompleted {
             child_session_id,
             final_session_id,
             summary,
@@ -136,7 +158,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 link.error = None;
             }
         },
-        EventPayload::AgentSessionFailed {
+        DurableEventPayload::AgentSessionFailed {
             child_session_id,
             final_session_id,
             error,
@@ -152,69 +174,68 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 link.summary = None;
             }
         },
-        EventPayload::AgentSessionRecycled { child_session_id } => {
+        DurableEventPayload::AgentSessionRecycled { child_session_id } => {
             model
                 .agent_sessions
                 .retain(|l| l.child_session_id != *child_session_id);
         },
-        EventPayload::SystemPromptConfigured {
+        DurableEventPayload::SystemPromptConfigured {
             text,
             fingerprint,
             extra_system_prompt,
+            source,
         } => {
-            model.system_prompt = Some(text.clone());
-            model.extra_system_prompt = extra_system_prompt.clone();
-            model.system_prompt_fingerprint = Some(fingerprint.clone());
+            model.system_prompt.text = text.clone();
+            model.system_prompt.extra = extra_system_prompt.clone();
+            model.system_prompt.fingerprint = fingerprint.clone();
+            model.system_prompt.source = *source;
         },
-        EventPayload::TurnStarted | EventPayload::UserMessage { .. } => {
-            model.phase = Phase::Thinking;
-            if let EventPayload::UserMessage {
+        DurableEventPayload::TurnStarted | DurableEventPayload::UserMessage { .. } => {
+            model.execution.phase = Phase::Thinking;
+            if let DurableEventPayload::UserMessage {
                 text, attachments, ..
             } = &event.payload
             {
-                model.messages.push(SequencedLlmMessage {
+                model.transcript.messages.push(SequencedLlmMessage {
                     message: LlmMessage::user_with_attachments(text, attachments),
                     updated_seq: event_seq,
                     source: None,
                 });
             }
         },
-        EventPayload::TurnCompleted { .. } => {
-            model.phase = Phase::Idle;
-            model.pending_tool_calls.clear();
-            model.pending_tool_approvals.clear();
+        DurableEventPayload::TurnCompleted { .. } => {
+            model.execution.phase = Phase::Idle;
+            model.execution.pending_tool_calls.clear();
+            model.execution.pending_tool_approvals.clear();
         },
-        EventPayload::TurnAbortedContext => {
-            model.messages.push(SequencedLlmMessage {
+        DurableEventPayload::TurnAbortedContext => {
+            model.transcript.messages.push(SequencedLlmMessage {
                 message: turn_aborted_context_message(),
                 updated_seq: event_seq,
                 source: Some(TURN_ABORTED_SOURCE.into()),
             });
         },
-        EventPayload::AssistantMessageStarted { .. } => {
-            model.phase = Phase::Streaming;
-        },
-        EventPayload::AssistantMessageCompleted {
+        DurableEventPayload::AssistantMessageCompleted {
             text,
             reasoning_content,
             ..
         } => {
             let mut msg = LlmMessage::assistant(text);
             msg.reasoning_content = reasoning_content.clone();
-            model.messages.push(SequencedLlmMessage {
+            model.transcript.messages.push(SequencedLlmMessage {
                 message: msg,
                 updated_seq: event_seq,
                 source: None,
             });
-            model.phase = Phase::Thinking;
+            model.execution.phase = Phase::Thinking;
         },
-        EventPayload::ToolCallRequested {
+        DurableEventPayload::ToolCallRequested {
             call_id,
             tool_name,
             arguments,
             raw_arguments,
         } => {
-            model.pending_tool_calls.insert(call_id.clone());
+            model.execution.pending_tool_calls.insert(call_id.clone());
             let tool_call = LlmContent::ToolCall {
                 call_id: call_id.to_string(),
                 name: tool_name.clone(),
@@ -224,13 +245,13 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
             // Merge into the previous assistant message for this model sub-turn.
             // DeepSeek thinking mode requires reasoning_content and tool_calls to
             // be replayed on the same assistant message after tool use.
-            match model.messages.last_mut() {
+            match model.transcript.messages.last_mut() {
                 Some(last) if last.message.role == LlmRole::Assistant => {
                     last.message.content.push(tool_call);
                     last.updated_seq = event_seq;
                 },
                 _ => {
-                    model.messages.push(SequencedLlmMessage {
+                    model.transcript.messages.push(SequencedLlmMessage {
                         message: LlmMessage {
                             role: LlmRole::Assistant,
                             content: vec![tool_call],
@@ -242,16 +263,16 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                     });
                 },
             }
-            model.phase = Phase::CallingTool;
+            model.execution.phase = Phase::CallingTool;
         },
-        EventPayload::ToolApprovalRequested {
+        DurableEventPayload::ToolApprovalRequested {
             call_id,
             prompt,
             rule_key,
             ..
         } => {
-            model.phase = Phase::CallingTool;
-            model.pending_tool_approvals.insert(
+            model.execution.phase = Phase::CallingTool;
+            model.execution.pending_tool_approvals.insert(
                 call_id.clone(),
                 PendingToolApprovalView {
                     prompt: prompt.clone(),
@@ -259,11 +280,10 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 },
             );
         },
-        EventPayload::ToolApprovalResolved { call_id, .. } => {
-            model.pending_tool_approvals.remove(call_id);
+        DurableEventPayload::ToolApprovalResolved { call_id, .. } => {
+            model.execution.pending_tool_approvals.remove(call_id);
         },
-        EventPayload::LegacyToolCallInteractionPending { .. } => {},
-        EventPayload::ToolCallCompleted {
+        DurableEventPayload::ToolCallCompleted {
             call_id,
             tool_name,
             result,
@@ -279,7 +299,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 event_seq,
             );
         },
-        EventPayload::ToolCallFailed {
+        DurableEventPayload::ToolCallFailed {
             call_id,
             tool_name,
             error,
@@ -295,7 +315,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 event_seq,
             );
         },
-        EventPayload::ToolCallCancelled {
+        DurableEventPayload::ToolCallCancelled {
             call_id,
             tool_name,
             reason,
@@ -311,7 +331,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 event_seq,
             );
         },
-        EventPayload::CompactBoundaryCreated {
+        DurableEventPayload::CompactBoundaryCreated {
             trigger,
             pre_tokens,
             post_tokens,
@@ -327,30 +347,33 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 post_tokens: *post_tokens,
                 summary: summary.clone(),
                 transcript_path: transcript_path.clone(),
-                seq: event.seq.unwrap_or_default(),
+                seq: event.seq,
                 base_event_seq: *base_event_seq,
                 strategy: strategy.clone(),
             });
             // Auto compact 在 turn 期间发生，不应将 phase 改为 Idle。
             // 手动 compact 时没有 active turn，Idle 是正确状态。
             if trigger != "auto_threshold" {
-                model.phase = Phase::Idle;
+                model.execution.phase = Phase::Idle;
             }
         },
-        EventPayload::SessionContinuedFromCompaction {
+        DurableEventPayload::SessionContinuedFromCompaction {
             parent_cursor,
             context_messages,
             retained_messages,
             ..
         } => {
-            let base_event_seq = parent_cursor.parse::<u64>().unwrap_or(0);
+            let Some(base_event_seq) = compaction_base_seq else {
+                return Err(ProjectionError::InvalidParentCursor(parent_cursor.clone()));
+            };
             let tail_messages: Vec<SequencedLlmMessage> = model
+                .transcript
                 .messages
                 .iter()
                 .filter(|m| m.updated_seq > base_event_seq)
                 .cloned()
                 .collect();
-            model.context_messages = context_messages
+            model.transcript.context_messages = context_messages
                 .iter()
                 .cloned()
                 .map(|message| SequencedLlmMessage {
@@ -371,20 +394,21 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                 })
                 .collect();
             messages.extend(tail_messages);
-            model.messages = messages;
+            model.transcript.messages = messages;
             model
-                .transcript_artifacts
+                .transcript
+                .artifacts
                 .retain(|artifact| artifact.seq() > base_event_seq);
             // 不改变 phase，保留之前的状态。
             // auto compact 在 turn 期间发生，phase 应保持 Thinking/Streaming。
             // 手动 compact 时 phase 已经是 Idle（由 CompactBoundaryCreated 设置）。
         },
-        EventPayload::SessionForked {
+        DurableEventPayload::SessionForked {
             context_messages,
             retained_messages,
             ..
         } => {
-            model.context_messages = context_messages
+            model.transcript.context_messages = context_messages
                 .iter()
                 .cloned()
                 .map(|message| SequencedLlmMessage {
@@ -393,7 +417,7 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                     source: None,
                 })
                 .collect();
-            model.messages = retained_messages
+            model.transcript.messages = retained_messages
                 .iter()
                 .cloned()
                 .map(|message| SequencedLlmMessage {
@@ -402,63 +426,71 @@ pub fn reduce(event: &Event, model: &mut SessionReadModel) {
                     source: None,
                 })
                 .collect();
-            model.phase = Phase::Idle;
+            model.execution.phase = Phase::Idle;
         },
-        EventPayload::ErrorOccurred { message, .. } => {
+        DurableEventPayload::ErrorOccurred { message, .. } => {
             model
-                .transcript_artifacts
+                .transcript
+                .artifacts
                 .push(TranscriptArtifactView::Error {
                     id: event.id.to_string(),
                     message: message.clone(),
                     seq: event_seq,
                 });
-            model.phase = Phase::Error;
+            model.execution.phase = Phase::Error;
         },
-        EventPayload::CompactionStarted => {
-            model.phase = Phase::Compacting;
-        },
-        EventPayload::CompactionCompleted { .. }
-        | EventPayload::CompactionSkipped { .. }
-        | EventPayload::CompactionFailed { .. } => {
-            model.phase = if model.pending_tool_calls.is_empty() {
-                Phase::Idle
-            } else {
-                Phase::CallingTool
-            };
-        },
-        EventPayload::Custom { .. } => {},
-        EventPayload::RecapGenerated { text, .. } => {
+        DurableEventPayload::RecapGenerated { text, .. } => {
             model
-                .transcript_artifacts
+                .transcript
+                .artifacts
                 .push(TranscriptArtifactView::SystemNote {
                     id: event.id.to_string(),
                     text: text.clone(),
                     seq: event_seq,
                 });
         },
-        EventPayload::TokenUsageRecorded { .. } => {},
-        EventPayload::ExtensionEvent {
-            extension_id,
-            event_type,
-            schema_version,
-            ..
-        } => {
-            model.extension_events.push(
-                event.seq.unwrap_or_default(),
-                extension_id.clone(),
-                event_type.clone(),
-                *schema_version,
-            );
-        },
-        // All durable events must be shown in the above
-        // Non-durable events: never persisted to JSONL, only broadcast for live UI.
-        EventPayload::ToolCallStarted { .. }
-        | EventPayload::AssistantTextDelta { .. }
-        | EventPayload::ThinkingDelta { .. }
-        | EventPayload::ToolCallArgumentsDelta { .. }
-        | EventPayload::ToolOutputDelta { .. }
-        | EventPayload::AgentRunStarted
-        | EventPayload::AgentRunCompleted { .. } => {},
+        DurableEventPayload::TokenUsageRecorded { .. } => {},
+        DurableEventPayload::ExtensionEvent(_) => {},
+    }
+    Ok(())
+}
+
+/// 校验事件能否作为读模型的下一条事实，不修改读模型。
+pub fn validate_next_event(
+    seq: u64,
+    event: &DurableEvent,
+    model: &SessionReadModel,
+) -> Result<(), ProjectionError> {
+    validate_next_event_details(seq, event, model).map(|_| ())
+}
+
+fn validate_next_event_details(
+    seq: u64,
+    event: &DurableEvent,
+    model: &SessionReadModel,
+) -> Result<Option<u64>, ProjectionError> {
+    if event.session_id != model.identity.session_id {
+        return Err(ProjectionError::SessionMismatch {
+            expected: model.identity.session_id.clone(),
+            actual: event.session_id.clone(),
+        });
+    }
+    if matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
+        return Err(ProjectionError::DuplicateSessionStarted(seq));
+    }
+    let expected_seq = model.stats.last_seq.saturating_add(1);
+    if seq != expected_seq {
+        return Err(ProjectionError::NonContiguousSequence {
+            expected: expected_seq,
+            actual: seq,
+        });
+    }
+    match &event.payload {
+        DurableEventPayload::SessionContinuedFromCompaction { parent_cursor, .. } => parent_cursor
+            .parse::<u64>()
+            .map(Some)
+            .map_err(|_| ProjectionError::InvalidParentCursor(parent_cursor.clone())),
+        _ => Ok(None),
     }
 }
 
@@ -471,9 +503,9 @@ fn apply_tool_terminal(
     source: Option<&str>,
     event_seq: u64,
 ) {
-    model.pending_tool_calls.remove(call_id);
-    model.pending_tool_approvals.remove(call_id);
-    model.messages.push(SequencedLlmMessage {
+    model.execution.pending_tool_calls.remove(call_id);
+    model.execution.pending_tool_approvals.remove(call_id);
+    model.transcript.messages.push(SequencedLlmMessage {
         message: LlmMessage {
             role: LlmRole::Tool,
             content: vec![LlmContent::ToolResult {
@@ -487,7 +519,7 @@ fn apply_tool_terminal(
         updated_seq: event_seq,
         source: source.map(str::to_owned),
     });
-    model.phase = if model.pending_tool_calls.is_empty() {
+    model.execution.phase = if model.execution.pending_tool_calls.is_empty() {
         Phase::Thinking
     } else {
         Phase::CallingTool
@@ -495,485 +527,4 @@ fn apply_tool_terminal(
 }
 
 #[cfg(test)]
-mod tests {
-    use astrcode_core::{
-        compaction::CompactStrategy,
-        event::{Event, EventPayload, Phase},
-        llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
-        permission::{ApprovalDecision, ApprovalSource},
-        tool::ToolResult,
-        types::{SessionId, new_message_id},
-    };
-
-    use super::replay;
-    use crate::{
-        AgentSessionStatus, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
-        TranscriptArtifactView,
-    };
-
-    fn event(seq: u64, session_id: &SessionId, payload: EventPayload) -> Event {
-        let mut event = Event::new(session_id.clone(), None, payload);
-        event.seq = Some(seq);
-        event
-    }
-
-    #[test]
-    fn replay_applies_compact_boundary_as_durable_state_transition() {
-        let session_id = SessionId::from("session-compact-replay");
-        let mut events = vec![
-            event(
-                1,
-                &session_id,
-                EventPayload::SessionStarted {
-                    working_dir: ".".into(),
-                    model_id: "mock".into(),
-                    parent_session_id: None,
-                    tool_selection: None,
-                    source_extension: None,
-                },
-            ),
-            event(
-                2,
-                &session_id,
-                EventPayload::UserMessage {
-                    message_id: new_message_id(),
-                    text: "old user".into(),
-                    attachments: vec![],
-                },
-            ),
-            event(
-                3,
-                &session_id,
-                EventPayload::AssistantMessageCompleted {
-                    message_id: new_message_id(),
-                    text: "old assistant".into(),
-                    reasoning_content: None,
-                },
-            ),
-            event(
-                4,
-                &session_id,
-                EventPayload::UserMessage {
-                    message_id: new_message_id(),
-                    text: "recent user".into(),
-                    attachments: vec![],
-                },
-            ),
-        ];
-
-        let full = replay(session_id.clone(), &events);
-        assert_eq!(
-            full.messages
-                .iter()
-                .map(|m| m.message.clone())
-                .collect::<Vec<_>>(),
-            vec![
-                LlmMessage::user("old user"),
-                LlmMessage::assistant("old assistant"),
-                LlmMessage::user("recent user"),
-            ]
-        );
-
-        let context_messages = vec![LlmMessage::user(
-            "<compact_summary>summary</compact_summary>",
-        )];
-        let retained_messages = vec![LlmMessage::user("recent user")];
-        events.extend([
-            event(
-                5,
-                &session_id,
-                EventPayload::UserMessage {
-                    message_id: new_message_id(),
-                    text: "during compact".into(),
-                    attachments: vec![],
-                },
-            ),
-            event(
-                6,
-                &session_id,
-                EventPayload::CompactBoundaryCreated {
-                    trigger: "auto_threshold".into(),
-                    pre_tokens: 100,
-                    post_tokens: 20,
-                    summary: "summary".into(),
-                    transcript_path: None,
-                    continued_session_id: session_id.clone(),
-                    base_event_seq: 4,
-                    strategy: CompactStrategy::Auto,
-                },
-            ),
-            event(
-                7,
-                &session_id,
-                EventPayload::SessionContinuedFromCompaction {
-                    parent_session_id: session_id.clone(),
-                    parent_cursor: "4".into(),
-                    summary: "summary".into(),
-                    transcript_path: None,
-                    context_messages: context_messages.clone(),
-                    retained_messages: retained_messages.clone(),
-                },
-            ),
-        ]);
-
-        let compacted = replay(session_id.clone(), &events);
-        assert_eq!(
-            compacted
-                .context_messages
-                .iter()
-                .map(|m| m.message.clone())
-                .collect::<Vec<_>>(),
-            context_messages
-        );
-        assert_eq!(
-            compacted
-                .messages
-                .iter()
-                .map(|m| m.message.clone())
-                .collect::<Vec<_>>(),
-            vec![
-                LlmMessage::user("recent user"),
-                LlmMessage::user("during compact"),
-            ]
-        );
-        assert_eq!(
-            compacted
-                .messages
-                .iter()
-                .map(|message| message.updated_seq)
-                .collect::<Vec<_>>(),
-            vec![4, 5]
-        );
-        assert_eq!(compacted.compact_boundaries[0].base_event_seq, 4);
-
-        events.push(event(
-            8,
-            &session_id,
-            EventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "after compact".into(),
-                attachments: vec![],
-            },
-        ));
-
-        let continued = replay(session_id, &events);
-        assert_eq!(
-            continued
-                .messages
-                .iter()
-                .map(|m| m.message.clone())
-                .collect::<Vec<_>>(),
-            vec![
-                LlmMessage::user("recent user"),
-                LlmMessage::user("during compact"),
-                LlmMessage::user("after compact"),
-            ]
-        );
-    }
-
-    #[test]
-    fn replay_projects_agent_session_link_details() {
-        let session_id = SessionId::from("parent-session");
-        let child_id = SessionId::from("child-session");
-        let events = vec![
-            event(
-                1,
-                &session_id,
-                EventPayload::AgentSessionSpawned {
-                    child_session_id: child_id.clone(),
-                    agent_name: "explorer".into(),
-                    task: "read the code".into(),
-                    tool_selection: None,
-                    tool_call_id: "tool-call-1".into(),
-                },
-            ),
-            event(
-                2,
-                &session_id,
-                EventPayload::AgentSessionCompleted {
-                    child_session_id: child_id,
-                    final_session_id: "leaf-session".into(),
-                    summary: "done".into(),
-                },
-            ),
-        ];
-
-        let model = replay(session_id, &events);
-        let link = &model.agent_sessions[0];
-
-        assert_eq!(
-            link.tool_call_id.as_ref().map(|id| id.as_str()),
-            Some("tool-call-1")
-        );
-        assert_eq!(
-            link.final_session_id.as_ref().map(|id| id.as_str()),
-            Some("leaf-session")
-        );
-        assert_eq!(link.summary.as_deref(), Some("done"));
-        assert!(link.error.is_none());
-        assert_eq!(link.status, AgentSessionStatus::Completed);
-    }
-
-    #[test]
-    fn turn_aborted_context_is_provider_visible_but_source_marked() {
-        let session_id = SessionId::from("session-turn-aborted-context");
-        let events = vec![
-            event(
-                1,
-                &session_id,
-                EventPayload::UserMessage {
-                    message_id: new_message_id(),
-                    text: "run a long command".into(),
-                    attachments: vec![],
-                },
-            ),
-            event(2, &session_id, EventPayload::TurnAbortedContext),
-            event(
-                3,
-                &session_id,
-                EventPayload::TurnCompleted {
-                    finish_reason: "aborted".into(),
-                },
-            ),
-        ];
-
-        let model = replay(session_id, &events);
-
-        let marker = model
-            .messages
-            .iter()
-            .find(|message| message.source.as_deref() == Some(TURN_ABORTED_SOURCE))
-            .expect("turn-aborted context should be projected");
-        assert_eq!(marker.message.role, LlmRole::User);
-        assert!(
-            marker
-                .message
-                .joined_display_text("")
-                .contains("<turn_aborted>")
-        );
-        assert!(
-            model
-                .provider_messages()
-                .iter()
-                .any(|message| message.joined_display_text("").contains("<turn_aborted>")),
-            "provider history should include the marker"
-        );
-    }
-
-    #[test]
-    fn replay_keeps_transcript_artifacts_out_of_provider_history_and_compacts_them() {
-        let session_id = SessionId::from("session-transcript-artifacts");
-        let mut events = vec![
-            event(
-                1,
-                &session_id,
-                EventPayload::SessionStarted {
-                    working_dir: ".".into(),
-                    model_id: "mock".into(),
-                    parent_session_id: None,
-                    tool_selection: None,
-                    source_extension: None,
-                },
-            ),
-            event(
-                2,
-                &session_id,
-                EventPayload::ErrorOccurred {
-                    code: -32603,
-                    message: "provider failed".into(),
-                    recoverable: false,
-                },
-            ),
-            event(
-                3,
-                &session_id,
-                EventPayload::RecapGenerated {
-                    text: "recap after failure".into(),
-                    source: "manual".into(),
-                },
-            ),
-        ];
-
-        let model = replay(session_id.clone(), &events);
-        assert!(model.provider_messages().is_empty());
-        assert!(matches!(
-            model.transcript_artifacts.as_slice(),
-            [
-                TranscriptArtifactView::Error { message, seq: 2, .. },
-                TranscriptArtifactView::SystemNote { text, seq: 3, .. }
-            ] if message == "provider failed" && text == "recap after failure"
-        ));
-
-        events.push(event(
-            4,
-            &session_id,
-            EventPayload::SessionContinuedFromCompaction {
-                parent_session_id: session_id.clone(),
-                parent_cursor: "2".into(),
-                summary: "summary".into(),
-                transcript_path: None,
-                context_messages: vec![],
-                retained_messages: vec![],
-            },
-        ));
-
-        let compacted = replay(session_id, &events);
-        assert!(matches!(
-            compacted.transcript_artifacts.as_slice(),
-            [TranscriptArtifactView::SystemNote { text, seq: 3, .. }]
-                if text == "recap after failure"
-        ));
-    }
-
-    #[test]
-    fn replay_tracks_pending_tool_approvals_until_resolved() {
-        let session_id = SessionId::from("session-approval");
-        let call_id = astrcode_core::types::ToolCallId::from("call-approval");
-        let requested = vec![event(
-            1,
-            &session_id,
-            EventPayload::ToolApprovalRequested {
-                call_id: call_id.clone(),
-                tool_name: "shell".into(),
-                prompt: "Run shell command?".into(),
-                rule_key: Some("shell:write".into()),
-                source: ApprovalSource::Core,
-                arguments: serde_json::json!({ "command": "git push" }),
-            },
-        )];
-
-        let model = replay(session_id.clone(), &requested);
-        let approval = model
-            .pending_tool_approvals
-            .get(&call_id)
-            .expect("approval should be pending");
-        assert_eq!(approval.prompt, "Run shell command?");
-        assert_eq!(approval.rule_key.as_deref(), Some("shell:write"));
-
-        let mut resolved = requested;
-        resolved.push(event(
-            2,
-            &session_id,
-            EventPayload::ToolApprovalResolved {
-                call_id: call_id.clone(),
-                decision: ApprovalDecision::AllowOnce,
-                detail: None,
-            },
-        ));
-
-        let model = replay(session_id, &resolved);
-        assert!(!model.pending_tool_approvals.contains_key(&call_id));
-    }
-
-    #[test]
-    fn replay_preserves_each_tool_terminal_outcome() {
-        let session_id = SessionId::from("session-tool-outcomes");
-        let requested = ["completed", "failed", "cancelled"]
-            .into_iter()
-            .enumerate()
-            .map(|(index, call_id)| {
-                event(
-                    index as u64 + 1,
-                    &session_id,
-                    EventPayload::ToolCallRequested {
-                        call_id: call_id.into(),
-                        tool_name: "probe".into(),
-                        arguments: serde_json::json!({ "case": call_id }),
-                        raw_arguments: None,
-                    },
-                )
-            });
-        let mut events = requested.collect::<Vec<_>>();
-        events.extend([
-            event(
-                4,
-                &session_id,
-                EventPayload::ToolApprovalRequested {
-                    call_id: "failed".into(),
-                    tool_name: "probe".into(),
-                    prompt: "approve".into(),
-                    rule_key: None,
-                    source: ApprovalSource::Core,
-                    arguments: serde_json::json!({}),
-                },
-            ),
-            event(
-                5,
-                &session_id,
-                EventPayload::LegacyToolCallInteractionPending {
-                    call_id: "cancelled".into(),
-                    content: "waiting".into(),
-                    metadata: Default::default(),
-                },
-            ),
-            event(
-                6,
-                &session_id,
-                EventPayload::ToolCallCompleted {
-                    call_id: "completed".into(),
-                    tool_name: "probe".into(),
-                    result: ToolResult::error("domain error"),
-                    arguments: String::new(),
-                    arguments_json: None,
-                },
-            ),
-            event(
-                7,
-                &session_id,
-                EventPayload::ToolCallFailed {
-                    call_id: "failed".into(),
-                    tool_name: "probe".into(),
-                    error: "executor failed".into(),
-                    metadata: Default::default(),
-                    duration_ms: Some(7),
-                    arguments: String::new(),
-                    arguments_json: None,
-                },
-            ),
-            event(
-                8,
-                &session_id,
-                EventPayload::ToolCallCancelled {
-                    call_id: "cancelled".into(),
-                    tool_name: "probe".into(),
-                    reason: "turn aborted".into(),
-                    duration_ms: Some(8),
-                    arguments: String::new(),
-                    arguments_json: None,
-                },
-            ),
-        ]);
-
-        let model = replay(session_id, &events);
-        let outcomes = model
-            .messages
-            .iter()
-            .filter(|message| message.message.role == LlmRole::Tool)
-            .map(|message| {
-                let LlmContent::ToolResult {
-                    content, is_error, ..
-                } = &message.message.content[0]
-                else {
-                    panic!("expected tool result");
-                };
-                (message.source.as_deref(), content.as_str(), *is_error)
-            })
-            .collect::<Vec<_>>();
-
-        assert_eq!(
-            outcomes,
-            vec![
-                (None, "domain error", true),
-                (Some(TOOL_CALL_FAILED_SOURCE), "executor failed", true),
-                (
-                    Some(TOOL_CALL_CANCELLED_SOURCE),
-                    "Tool cancelled: turn aborted",
-                    true,
-                ),
-            ]
-        );
-        assert_eq!(model.phase, Phase::Thinking);
-        assert!(model.pending_tool_calls.is_empty());
-        assert!(model.pending_tool_approvals.is_empty());
-    }
-}
+mod tests;

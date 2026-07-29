@@ -45,12 +45,12 @@ impl TurnToolContext {
             crate::permission::build_default_chain(&effective, Arc::clone(&approval_history));
         let shared = crate::turn_context::SharedTurnContext {
             session_id: session.id().clone(),
-            working_dir: session_state.working_dir.clone(),
-            model_id: session_state.model_id.clone(),
+            working_dir: session_state.identity.working_dir.clone(),
+            model_id: session_state.identity.model_id.clone(),
             session_store_dir,
             turn_event_sender: None,
             approval_mode: effective.agent.approval_mode,
-            tool_selection: session_state.tool_selection.clone(),
+            tool_selection: Some(session_state.identity.tool_selection.clone()),
             permission_chain,
             approval_history,
         };

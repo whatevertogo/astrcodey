@@ -13,6 +13,9 @@ pub(crate) mod tool_artifacts;
 mod traits;
 mod types;
 
+#[cfg(test)]
+mod test_support;
+
 pub use astrcode_core::tool::ToolResultArtifactSlice;
 pub use error::StorageError;
 pub use traits::{

@@ -7,7 +7,7 @@
 use std::{sync::Arc, time::Duration};
 
 use astrcode_core::{
-    event::EventPayload,
+    event::{DurableEventPayload, LiveEventPayload},
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, LlmTokenUsage, LlmTokenUsageSource,
         provider_visible_messages, token_estimate,
@@ -113,7 +113,7 @@ impl TurnLoop {
         tool_registry: Arc<crate::ToolRegistry>,
         cancellation_token: CancellationToken,
     ) -> Result<Self, TurnError> {
-        let system_prompt = session_state.system_prompt.clone().unwrap_or_default();
+        let system_prompt = session_state.system_prompt.text.clone();
         let runtime = session.runtime();
         let runtime_services = session.runtime_services();
         let turn = TurnToolContext::for_turn(&session, session_state, session_store_dir);
@@ -134,7 +134,7 @@ impl TurnLoop {
             llm,
             cancellation_token,
             tools,
-            compaction: Compaction::new(system_prompt, session_state.extra_system_prompt.clone()),
+            compaction: Compaction::new(system_prompt, session_state.system_prompt.extra.clone()),
         })
     }
 
@@ -267,7 +267,7 @@ impl TurnLoop {
                     state.record_assistant_text(&text, reasoning_content.clone());
                     if (!text.is_empty() || reasoning_content.is_some()) && message_started {
                         publisher
-                            .durable(EventPayload::AssistantMessageCompleted {
+                            .durable(DurableEventPayload::AssistantMessageCompleted {
                                 message_id,
                                 text,
                                 reasoning_content,
@@ -276,7 +276,7 @@ impl TurnLoop {
                     }
                     if let Some(usage) = usage {
                         publisher
-                            .durable(EventPayload::TokenUsageRecorded {
+                            .durable(DurableEventPayload::TokenUsageRecorded {
                                 usage,
                                 model_context_window,
                             })
@@ -336,13 +336,13 @@ impl TurnLoop {
                     if !tool_calls.is_empty() || message_started {
                         if !message_started {
                             publisher
-                                .live(EventPayload::AssistantMessageStarted {
+                                .live(LiveEventPayload::AssistantMessageStarted {
                                     message_id: message_id.clone(),
                                 })
                                 .await;
                         }
                         publisher
-                            .durable(EventPayload::AssistantMessageCompleted {
+                            .durable(DurableEventPayload::AssistantMessageCompleted {
                                 message_id,
                                 text: visible_text.to_string(),
                                 reasoning_content,
@@ -351,7 +351,7 @@ impl TurnLoop {
                     }
                     if let Some(usage) = usage {
                         publisher
-                            .durable(EventPayload::TokenUsageRecorded {
+                            .durable(DurableEventPayload::TokenUsageRecorded {
                                 usage,
                                 model_context_window,
                             })

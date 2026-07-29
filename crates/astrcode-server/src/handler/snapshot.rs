@@ -18,15 +18,16 @@ pub(crate) fn session_snapshot(
     state: &astrcode_session_projection::SessionReadModel,
 ) -> SessionSnapshot {
     SessionSnapshot {
-        session_id: state.session_id.to_string(),
+        session_id: state.identity.session_id.to_string(),
         cursor: state.cursor(),
         messages: state
+            .transcript
             .messages
             .iter()
             .map(|m| message_to_dto(&m.message))
             .collect(),
-        model_id: state.model_id.clone(),
-        working_dir: state.working_dir.clone(),
+        model_id: state.identity.model_id.clone(),
+        working_dir: state.identity.working_dir.clone(),
         agent_sessions: state
             .agent_sessions
             .iter()

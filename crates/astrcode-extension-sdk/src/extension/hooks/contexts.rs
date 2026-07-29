@@ -107,6 +107,9 @@ pub struct ProviderContext {
 }
 
 /// PromptBuild 钩子上下文。
+///
+/// 首次构建发生在 `SessionStarted` 持久化之前。处理器应只依赖此上下文和扩展自身
+/// 状态，不应假定 `session_id` 已能通过 [`crate::session_query::SessionQuery`] 查询。
 #[derive(Debug, Clone)]
 pub struct PromptBuildContext {
     pub session_id: String,

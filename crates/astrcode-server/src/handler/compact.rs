@@ -1,4 +1,4 @@
-use astrcode_core::{compaction::CompactTrigger, event::EventPayload, types::SessionId};
+use astrcode_core::{compaction::CompactTrigger, event::LiveEventPayload, types::SessionId};
 use astrcode_protocol::events::ClientNotification;
 use astrcode_session::compaction_run::{
     IdleCompactionOutcome, IdleCompactionParams, compact_idle_session,
@@ -54,7 +54,7 @@ impl CommandHandler {
             .map_err(HandlerError::SessionManager)?;
 
         session
-            .emit_live(None, EventPayload::CompactionStarted)
+            .emit_live(None, LiveEventPayload::CompactionStarted)
             .await;
 
         let outcome = self
@@ -62,14 +62,16 @@ impl CommandHandler {
             .await;
         let terminal_event = match &outcome {
             Ok((ManualCompactOutcome::Compacted { .. }, messages_removed)) => {
-                EventPayload::CompactionCompleted {
+                LiveEventPayload::CompactionCompleted {
                     messages_removed: *messages_removed,
                 }
             },
-            Ok((ManualCompactOutcome::Skipped { message }, _)) => EventPayload::CompactionSkipped {
-                reason: message.clone(),
+            Ok((ManualCompactOutcome::Skipped { message }, _)) => {
+                LiveEventPayload::CompactionSkipped {
+                    reason: message.clone(),
+                }
             },
-            Err(error) => EventPayload::CompactionFailed {
+            Err(error) => LiveEventPayload::CompactionFailed {
                 reason: error.to_string(),
             },
         };
@@ -86,7 +88,7 @@ impl CommandHandler {
     ) -> Result<(ManualCompactOutcome, usize), HandlerError> {
         let state = session.read_model().await.map_err(HandlerError::Session)?;
         let tool_registry = session
-            .tool_registry_snapshot(&state.working_dir)
+            .tool_registry_snapshot(&state.identity.working_dir)
             .await
             .map_err(HandlerError::Session)?;
         let tools = tool_registry.list_definitions();
@@ -95,9 +97,9 @@ impl CommandHandler {
         let snapshot_path = session
             .write_compact_snapshot(CompactSnapshotInput {
                 trigger: CompactTrigger::ManualCommand.as_str().into(),
-                model_id: state.model_id.clone(),
-                working_dir: state.working_dir.clone(),
-                system_prompt: state.system_prompt.clone(),
+                model_id: state.identity.model_id.clone(),
+                working_dir: state.identity.working_dir.clone(),
+                system_prompt: Some(state.system_prompt.text.clone()),
                 provider_messages: provider_messages.clone(),
             })
             .await
