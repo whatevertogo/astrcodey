@@ -74,6 +74,7 @@ fn durable_payload_type(payload: &DurableEventPayload) -> &'static str {
         DurableEventPayload::TurnStarted => "turn_started",
         DurableEventPayload::TurnCompleted { .. } => "turn_completed",
         DurableEventPayload::TurnAbortedContext => "turn_aborted_context",
+        DurableEventPayload::UserInputAccepted { .. } => "user_input_accepted",
         DurableEventPayload::UserMessage { .. } => "user_message",
         DurableEventPayload::RecapGenerated { .. } => "recap_generated",
         DurableEventPayload::AssistantMessageCompleted { .. } => "assistant_message_completed",

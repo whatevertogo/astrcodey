@@ -8,6 +8,7 @@ use astrcode_core::{
     permission::{ApprovalDecision, ApprovalSource},
     tool::{SessionToolSelection, ToolResult},
     types::{SessionId, ToolCallId, TurnId, new_message_id},
+    user_input::UserInput,
 };
 
 use super::{ProjectionError, SessionReadModelProjection, reduce, replay};
@@ -54,6 +55,47 @@ fn started(seq: u64, session_id: &SessionId) -> StoredEvent {
 }
 
 #[test]
+fn accepted_input_stays_pending_until_matching_user_message() {
+    let session_id = SessionId::new("session-pending");
+    let input = UserInput::text_only("queued");
+    let mut model = replay(
+        session_id.clone(),
+        &[
+            started(0, &session_id),
+            event(
+                1,
+                &session_id,
+                DurableEventPayload::UserInputAccepted {
+                    input: input.clone(),
+                },
+            ),
+        ],
+    )
+    .unwrap();
+
+    assert_eq!(model.execution.pending_inputs.len(), 1);
+    assert!(model.transcript.messages.is_empty());
+
+    reduce(
+        &event(
+            2,
+            &session_id,
+            DurableEventPayload::UserMessage {
+                message_id: new_message_id(),
+                text: input.text,
+                attachments: input.attachments,
+                accepted_seq: Some(1),
+            },
+        ),
+        &mut model,
+    )
+    .unwrap();
+
+    assert!(model.execution.pending_inputs.is_empty());
+    assert_eq!(model.transcript.messages.len(), 1);
+}
+
+#[test]
 fn projection_builds_complete_grouped_state_and_evolves_transcript() {
     let session_id = SessionId::new("session-1");
     let call_id = ToolCallId::new("call-1");
@@ -66,6 +108,7 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
                 message_id: new_message_id(),
                 text: "inspect".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ),
         event(
@@ -150,6 +193,7 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
                 message_id: new_message_id(),
                 text: "concurrent tail".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ),
         &mut model,
@@ -324,6 +368,7 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
                 message_id: new_message_id(),
                 text: "matrix prompt".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ),
         turn_event(

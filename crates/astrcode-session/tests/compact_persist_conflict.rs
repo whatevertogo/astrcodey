@@ -164,6 +164,7 @@ async fn spawn_session(
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
+        extra_system_prompt: None,
         initial_system_prompt: None,
         runtime,
         runtime_services: caps,
@@ -192,6 +193,7 @@ async fn seed_history(session: &Session, pairs: usize) {
                     message_id: new_message_id(),
                     text: format!("old user {index} {}", "x ".repeat(24)),
                     attachments: vec![],
+                    accepted_seq: None,
                 },
             )
             .await
@@ -360,6 +362,7 @@ async fn transcript_rewrite_preserves_new_tail_events() {
                 message_id: new_message_id(),
                 text: "race event".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         )
         .await
@@ -423,7 +426,7 @@ async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
 
     let turn_id = new_turn_id();
     let handle = session
-        .submit("current turn".into(), vec![], turn_id)
+        .submit("current turn".into(), turn_id, None)
         .await
         .unwrap();
     let result = handle.wait().await.unwrap();
@@ -484,7 +487,7 @@ async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
     );
 
     let follow_up = session
-        .submit("follow up".into(), vec![], new_turn_id())
+        .submit("follow up".into(), new_turn_id(), None)
         .await
         .unwrap();
     let follow_up_result = follow_up.wait().await.unwrap();

@@ -52,7 +52,9 @@ impl ExtensionRunner {
             }));
         }
         for (ext_id, discovery, capabilities) in &index.tool_discoveries {
-            match tokio::time::timeout(self.timeout, discovery.discover(working_dir)).await {
+            match tokio::time::timeout(self.operation_timeout, discovery.discover(working_dir))
+                .await
+            {
                 Ok(discovered) => {
                     for discovered_tool in discovered {
                         tools.push(Arc::new(HandlerTool {
@@ -73,7 +75,7 @@ impl ExtensionRunner {
                 Err(_) => {
                     let message = format!(
                         "tool discovery timed out after {} ms",
-                        self.timeout.as_millis()
+                        self.operation_timeout.as_millis()
                     );
                     tracing::warn!(extension_id = %ext_id, error = %message);
                     diagnostics.push(ToolCatalogDiagnostic {

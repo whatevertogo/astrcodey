@@ -257,11 +257,26 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
             model.system_prompt.fingerprint = fingerprint.clone();
             model.system_prompt.source = *source;
         },
+        DurableEventPayload::UserInputAccepted { input } => {
+            model.execution.pending_inputs.push(crate::PendingInput {
+                accepted_seq: event_seq,
+                input: input.clone(),
+            });
+        },
         DurableEventPayload::TurnStarted | DurableEventPayload::UserMessage { .. } => {
             if let DurableEventPayload::UserMessage {
-                text, attachments, ..
+                text,
+                attachments,
+                accepted_seq,
+                ..
             } = &event.payload
             {
+                if let Some(accepted_seq) = accepted_seq {
+                    model
+                        .execution
+                        .pending_inputs
+                        .retain(|input| input.accepted_seq != *accepted_seq);
+                }
                 if model.transcript.first_user_message.is_none() {
                     model.transcript.first_user_message = Some(text.clone());
                 }
@@ -535,6 +550,7 @@ fn apply_execution_event(event: &StoredEvent, execution: &mut SessionExecutionSt
             execution.phase = Phase::Thinking;
             execution.unsettled_turn_id = event.turn_id.clone();
         },
+        DurableEventPayload::UserInputAccepted { .. } => {},
         DurableEventPayload::UserMessage { .. }
         | DurableEventPayload::AssistantMessageCompleted { .. } => {
             execution.phase = Phase::Thinking;

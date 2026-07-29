@@ -47,7 +47,7 @@ impl ServerSessionOperations {
             .scheduler
             .deliver_input(
                 target_sid.clone(),
-                crate::turn_scheduler::PromptInput::text_only(content),
+                astrcode_core::user_input::UserInput::text_only(content),
                 delivery,
             )
             .await

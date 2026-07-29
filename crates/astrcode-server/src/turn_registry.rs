@@ -14,8 +14,22 @@ use parking_lot::Mutex;
 
 struct TurnEntry {
     turn_id: TurnId,
-    shutdown_handle: TurnShutdownHandle,
-    session: Arc<Session>,
+    state: TurnEntryState,
+}
+
+enum TurnEntryState {
+    Reserved,
+    Running {
+        shutdown_handle: TurnShutdownHandle,
+        session: Arc<Session>,
+    },
+}
+
+pub(crate) struct TurnReservation {
+    registry: Arc<TurnRegistry>,
+    session_id: SessionId,
+    turn_id: TurnId,
+    armed: bool,
 }
 
 #[derive(Default)]
@@ -31,7 +45,8 @@ impl TurnRegistry {
     }
 
     /// 注册活跃 turn。若 session_id 已有活跃 turn 则返回 false。
-    pub fn register(
+    #[cfg(test)]
+    fn register(
         &self,
         session_id: SessionId,
         turn_id: TurnId,
@@ -46,25 +61,48 @@ impl TurnRegistry {
             session_id,
             TurnEntry {
                 turn_id,
-                shutdown_handle,
-                session,
+                state: TurnEntryState::Running {
+                    shutdown_handle,
+                    session,
+                },
             },
         );
         true
     }
 
-    /// 仅在 turn_id 匹配时移除，返回被移除的 session。
-    pub fn remove_if_matches(
-        &self,
-        session_id: &SessionId,
-        turn_id: &TurnId,
-    ) -> Option<Arc<Session>> {
+    /// 在任何 session I/O 前预留 turn ownership。
+    pub(crate) fn reserve(
+        self: &Arc<Self>,
+        session_id: SessionId,
+        turn_id: TurnId,
+    ) -> Option<TurnReservation> {
+        let mut entries = self.entries.lock();
+        if entries.contains_key(&session_id) {
+            return None;
+        }
+        entries.insert(
+            session_id.clone(),
+            TurnEntry {
+                turn_id: turn_id.clone(),
+                state: TurnEntryState::Reserved,
+            },
+        );
+        Some(TurnReservation {
+            registry: Arc::clone(self),
+            session_id,
+            turn_id,
+            armed: true,
+        })
+    }
+
+    /// 仅在 turn_id 匹配时移除。
+    pub fn remove_if_matches(&self, session_id: &SessionId, turn_id: &TurnId) -> Option<()> {
         let mut entries = self.entries.lock();
         if entries
             .get(session_id)
             .is_some_and(|entry| &entry.turn_id == turn_id)
         {
-            entries.remove(session_id).map(|e| e.session)
+            entries.remove(session_id).map(|_| ())
         } else {
             None
         }
@@ -73,10 +111,15 @@ impl TurnRegistry {
     /// 仅当活跃 turn 的底层 task 已结束时移除，返回其 turn_id。
     pub fn remove_if_finished(&self, session_id: &SessionId) -> Option<TurnId> {
         let mut entries = self.entries.lock();
-        if !entries
-            .get(session_id)
-            .is_some_and(|entry| entry.shutdown_handle.is_finished())
-        {
+        if !entries.get(session_id).is_some_and(|entry| {
+            matches!(
+                &entry.state,
+                TurnEntryState::Running {
+                    shutdown_handle,
+                    ..
+                } if shutdown_handle.is_finished()
+            )
+        }) {
             return None;
         }
         let entry = entries.remove(session_id)?;
@@ -88,7 +131,13 @@ impl TurnRegistry {
     pub fn request_shutdown(&self, session_id: &SessionId) -> Option<TurnId> {
         let entries = self.entries.lock();
         let entry = entries.get(session_id)?;
-        entry.shutdown_handle.request_shutdown();
+        let TurnEntryState::Running {
+            shutdown_handle, ..
+        } = &entry.state
+        else {
+            return None;
+        };
+        shutdown_handle.request_shutdown();
         Some(entry.turn_id.clone())
     }
 
@@ -99,15 +148,22 @@ impl TurnRegistry {
         expected_turn_id: &TurnId,
     ) -> Option<(TurnId, Arc<Session>)> {
         let mut entries = self.entries.lock();
-        if !entries
-            .get(session_id)
-            .is_some_and(|entry| &entry.turn_id == expected_turn_id)
-        {
+        if !entries.get(session_id).is_some_and(|entry| {
+            &entry.turn_id == expected_turn_id
+                && matches!(entry.state, TurnEntryState::Running { .. })
+        }) {
             return None;
         }
         let entry = entries.remove(session_id)?;
-        entry.shutdown_handle.force_kill();
-        Some((entry.turn_id, entry.session))
+        let TurnEntryState::Running {
+            shutdown_handle,
+            session,
+        } = entry.state
+        else {
+            return None;
+        };
+        shutdown_handle.force_kill();
+        Some((entry.turn_id, session))
     }
 
     pub fn force_kill_and_remove_if_running(
@@ -117,20 +173,37 @@ impl TurnRegistry {
     ) -> Option<(TurnId, Arc<Session>)> {
         let mut entries = self.entries.lock();
         let entry = entries.get(session_id)?;
-        if &entry.turn_id != expected_turn_id || entry.shutdown_handle.is_finished() {
+        let TurnEntryState::Running {
+            shutdown_handle, ..
+        } = &entry.state
+        else {
+            return None;
+        };
+        if &entry.turn_id != expected_turn_id || shutdown_handle.is_finished() {
             return None;
         }
         let entry = entries.remove(session_id)?;
-        entry.shutdown_handle.force_kill();
-        Some((entry.turn_id, entry.session))
+        let TurnEntryState::Running {
+            shutdown_handle,
+            session,
+        } = entry.state
+        else {
+            return None;
+        };
+        shutdown_handle.force_kill();
+        Some((entry.turn_id, session))
     }
 
-    #[cfg(any(test, feature = "testing"))]
     pub fn active_is_finished(&self, session_id: &SessionId) -> bool {
-        self.entries
-            .lock()
-            .get(session_id)
-            .is_some_and(|entry| entry.shutdown_handle.is_finished())
+        self.entries.lock().get(session_id).is_some_and(|entry| {
+            matches!(
+                &entry.state,
+                TurnEntryState::Running {
+                    shutdown_handle,
+                    ..
+                } if shutdown_handle.is_finished()
+            )
+        })
     }
 
     /// 测试和强制清理用：强制 kill 当前活跃 turn，不校验 turn_id。
@@ -160,7 +233,46 @@ impl TurnRegistry {
         self.entries
             .lock()
             .get(session_id)
-            .map(|e| (e.turn_id.clone(), Arc::clone(&e.session)))
+            .and_then(|entry| match &entry.state {
+                TurnEntryState::Reserved => None,
+                TurnEntryState::Running { session, .. } => {
+                    Some((entry.turn_id.clone(), Arc::clone(session)))
+                },
+            })
+    }
+}
+
+impl TurnReservation {
+    pub(crate) fn activate(
+        mut self,
+        shutdown_handle: TurnShutdownHandle,
+        session: Arc<Session>,
+    ) -> bool {
+        let mut entries = self.registry.entries.lock();
+        let Some(entry) = entries
+            .get_mut(&self.session_id)
+            .filter(|entry| entry.turn_id == self.turn_id)
+        else {
+            return false;
+        };
+        if !matches!(entry.state, TurnEntryState::Reserved) {
+            return false;
+        }
+        entry.state = TurnEntryState::Running {
+            shutdown_handle,
+            session,
+        };
+        self.armed = false;
+        true
+    }
+}
+
+impl Drop for TurnReservation {
+    fn drop(&mut self) {
+        if self.armed {
+            self.registry
+                .remove_if_matches(&self.session_id, &self.turn_id);
+        }
     }
 }
 
@@ -284,6 +396,7 @@ mod tests {
                 parent_session_id: None,
                 tool_selection: None,
                 source_extension: None,
+                extra_system_prompt: None,
                 initial_system_prompt: None,
                 runtime,
                 runtime_services: test_runtime_services(),
@@ -298,6 +411,25 @@ mod tests {
             tokio::spawn(async { tokio::time::sleep(std::time::Duration::from_secs(60)).await })
                 .abort_handle();
         TurnShutdownHandle::new(CancellationToken::new(), handle)
+    }
+
+    #[test]
+    fn reservation_blocks_duplicate_start_and_rolls_back_on_drop() {
+        let registry = Arc::new(TurnRegistry::new());
+        let session_id = SessionId::from("session-reserved");
+        let reservation = registry
+            .reserve(session_id.clone(), TurnId::from("turn-1"))
+            .unwrap();
+
+        assert!(registry.has_active(&session_id));
+        assert!(
+            registry
+                .reserve(session_id.clone(), TurnId::from("turn-2"))
+                .is_none()
+        );
+
+        drop(reservation);
+        assert!(!registry.has_active(&session_id));
     }
 
     #[tokio::test]

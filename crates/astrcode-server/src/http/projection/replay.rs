@@ -127,6 +127,7 @@ mod tests {
             | SystemPromptConfigured { .. }
             | TurnStarted
             | TurnAbortedContext
+            | UserInputAccepted { .. }
             | TokenUsageRecorded { .. }
             | ToolApprovalRequested { .. }
             | ToolApprovalResolved { .. }
@@ -172,6 +173,7 @@ mod tests {
                 message_id: new_message_id(),
                 text: "hello".into(),
                 attachments: Vec::new(),
+                accepted_seq: None,
             },
             // 绕过 block_from_payload 的特殊 AppendBlock（流式工具调用 block）
             DurableEventPayload::ToolCallRequested {

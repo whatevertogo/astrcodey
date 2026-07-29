@@ -8,7 +8,9 @@ impl From<TurnScheduleError> for HandlerError {
         match error {
             TurnScheduleError::TurnAlreadyRunning => HandlerError::TurnAlreadyRunning,
             TurnScheduleError::NoActiveTurn => HandlerError::NoActiveTurn,
-            TurnScheduleError::QueueFull { .. } | TurnScheduleError::InputTooLarge { .. } => {
+            TurnScheduleError::QueueFull { .. }
+            | TurnScheduleError::EmptyInput
+            | TurnScheduleError::InputTooLarge { .. } => {
                 HandlerError::InvalidRequest(error.to_string())
             },
             TurnScheduleError::SessionNotFound(msg) => HandlerError::SessionNotFound(msg),

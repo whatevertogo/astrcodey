@@ -981,6 +981,7 @@ async fn append_user_assistant_pair(
                 message_id: new_message_id(),
                 text: user.into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ))
         .await
@@ -2390,6 +2391,7 @@ async fn auto_compact_applies_in_memory_during_turn() {
                     message_id: new_message_id(),
                     text: format!("old user {index} {}", "x ".repeat(20)),
                     attachments: vec![],
+                    accepted_seq: None,
                 },
             ))
             .await
@@ -2467,6 +2469,7 @@ async fn prompt_too_long_triggers_reactive_compact_and_retries_once() {
                     message_id: new_message_id(),
                     text: format!("old user {index} {}", "x ".repeat(20)),
                     attachments: vec![],
+                    accepted_seq: None,
                 },
             ))
             .await

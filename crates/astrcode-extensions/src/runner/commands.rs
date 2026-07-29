@@ -72,7 +72,9 @@ impl ExtensionRunner {
             cmds.push((ext_id.clone(), cmd.clone(), Arc::clone(handler)));
         }
         for (extension_id, discovery) in &index.command_discoveries {
-            match tokio::time::timeout(self.timeout, discovery.discover(working_dir)).await {
+            match tokio::time::timeout(self.operation_timeout, discovery.discover(working_dir))
+                .await
+            {
                 Ok(discovered) => {
                     for (cmd, handler) in discovered {
                         cmds.push((extension_id.clone(), cmd, handler));

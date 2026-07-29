@@ -1,6 +1,12 @@
 //! Session / Turn 行为矩阵回归测试（Phase 0）。
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
@@ -12,6 +18,10 @@ use astrcode_core::{
     tool::ToolDefinition,
     types::{SessionId, new_session_id},
 };
+use astrcode_extension_sdk::extension::{
+    Extension, ExtensionCapability, ExtensionError, Registrar, UserMessageEnvelopeContext,
+    UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+};
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
     ChildSessionCoordinator, ConfigManager, DeliveryOutcome, InputDelivery,
@@ -20,10 +30,20 @@ use astrcode_server::test_support::{
     session_started_event_for_test,
 };
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 
 struct StaticTextLlm;
 struct PendingLlm;
+struct GateFirstLlm {
+    calls: AtomicUsize,
+    release: Arc<Semaphore>,
+}
+struct FailSecondEnvelope {
+    calls: Arc<AtomicUsize>,
+}
+struct FailSecondEnvelopeHandler {
+    calls: Arc<AtomicUsize>,
+}
 
 #[async_trait::async_trait]
 impl LlmProvider for StaticTextLlm {
@@ -66,6 +86,66 @@ impl LlmProvider for PendingLlm {
     }
 }
 
+#[async_trait::async_trait]
+impl LlmProvider for GateFirstLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+            self.release.acquire().await.unwrap().forget();
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _ = tx.send(LlmEvent::Done {
+            finish_reason: "stop".into(),
+        });
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 200000,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for FailSecondEnvelope {
+    fn id(&self) -> &str {
+        "fail-second-envelope"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::ProviderRequest]
+    }
+
+    fn register(&self, registrar: &mut Registrar) {
+        registrar.on_user_message_envelope(
+            0,
+            Arc::new(FailSecondEnvelopeHandler {
+                calls: Arc::clone(&self.calls),
+            }),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl UserMessageEnvelopeHandler for FailSecondEnvelopeHandler {
+    async fn handle(
+        &self,
+        _ctx: UserMessageEnvelopeContext,
+    ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
+        if self.calls.fetch_add(1, Ordering::AcqRel) == 1 {
+            return Ok(UserMessageEnvelopeResult::Block {
+                reason: "transient test failure".into(),
+            });
+        }
+        Ok(UserMessageEnvelopeResult::Allow)
+    }
+}
+
 async fn seed_session(store: &Arc<dyn SessionStore>) -> SessionId {
     let sid = new_session_id();
     store
@@ -84,6 +164,14 @@ fn build_scheduler_with_llm(
     llm: Arc<dyn LlmProvider>,
 ) -> TurnScheduler {
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    build_scheduler_with_runtime(store, llm, extension_runner)
+}
+
+fn build_scheduler_with_runtime(
+    store: Arc<dyn SessionStore>,
+    llm: Arc<dyn LlmProvider>,
+    extension_runner: Arc<ExtensionRunner>,
+) -> TurnScheduler {
     let context_assembler = Arc::new(LlmContextAssembler::new(Default::default()));
     let effective = EffectiveConfig {
         llm: LlmSettings {
@@ -315,6 +403,179 @@ async fn running_queue_does_not_start_second_turn() {
         .unwrap();
     assert!(matches!(outcome, DeliveryOutcome::Queued { queue_len: 1 }));
     assert!(scheduler.registry().has_active(&sid));
+}
+
+#[tokio::test]
+async fn durable_queue_recovers_fifo_after_scheduler_restart() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
+    let sid = seed_session(&store).await;
+
+    let first = scheduler
+        .start_with_completion(sid.clone(), "first".into())
+        .await
+        .unwrap();
+    for text in ["queued one", "queued two"] {
+        scheduler
+            .deliver_input(
+                sid.clone(),
+                text.into(),
+                InputDelivery::QueueIfRunningElseStart,
+            )
+            .await
+            .unwrap();
+    }
+
+    let queued = store.session_read_model(&sid).await.unwrap();
+    assert_eq!(queued.execution.pending_inputs.len(), 2);
+    assert_eq!(queued.transcript.messages.len(), 1);
+
+    first.handle.force_kill();
+    drop(first.handle);
+    drop(scheduler);
+
+    let restarted = build_scheduler(Arc::clone(&store));
+    restarted.repair_stale(&sid).await.unwrap();
+    for _ in 0..100 {
+        let state = store.session_read_model(&sid).await.unwrap();
+        if !restarted.registry().has_active(&sid) && state.execution.pending_inputs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let state = store.session_read_model(&sid).await.unwrap();
+    assert!(state.execution.pending_inputs.is_empty());
+    let user_messages = store
+        .replay_events(&sid)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match &event.payload {
+            DurableEventPayload::UserMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages, ["first", "queued one", "queued two"]);
+}
+
+#[tokio::test]
+async fn queued_input_retries_after_a_transient_start_failure() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let release = Arc::new(Semaphore::new(0));
+    let envelope_calls = Arc::new(AtomicUsize::new(0));
+    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    extension_runner
+        .register(Arc::new(FailSecondEnvelope {
+            calls: Arc::clone(&envelope_calls),
+        }))
+        .await
+        .unwrap();
+    let scheduler = build_scheduler_with_runtime(
+        Arc::clone(&store),
+        Arc::new(GateFirstLlm {
+            calls: AtomicUsize::new(0),
+            release: Arc::clone(&release),
+        }),
+        extension_runner,
+    );
+    let sid = seed_session(&store).await;
+
+    scheduler
+        .deliver_input(sid.clone(), "first".into(), InputDelivery::StartNew)
+        .await
+        .unwrap();
+    scheduler
+        .deliver_input(
+            sid.clone(),
+            "queued".into(),
+            InputDelivery::QueueIfRunningElseStart,
+        )
+        .await
+        .unwrap();
+    release.add_permits(1);
+
+    for _ in 0..100 {
+        let state = store.session_read_model(&sid).await.unwrap();
+        if !scheduler.registry().has_active(&sid) && state.execution.pending_inputs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let state = store.session_read_model(&sid).await.unwrap();
+    assert!(state.execution.pending_inputs.is_empty());
+    assert_eq!(
+        state
+            .transcript
+            .messages
+            .iter()
+            .filter(|message| message.message.role == astrcode_core::llm::LlmRole::User)
+            .filter_map(|message| match message.message.content.as_slice() {
+                [astrcode_core::llm::LlmContent::Text { text }] => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ["first", "queued"]
+    );
+    assert_eq!(envelope_calls.load(Ordering::Acquire), 3);
+}
+
+#[tokio::test]
+async fn completion_handoff_never_overtakes_an_older_queued_input() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let release = Arc::new(Semaphore::new(0));
+    let scheduler = build_scheduler_with_llm(
+        Arc::clone(&store),
+        Arc::new(GateFirstLlm {
+            calls: AtomicUsize::new(0),
+            release: Arc::clone(&release),
+        }),
+    );
+    let sid = seed_session(&store).await;
+
+    scheduler
+        .deliver_input(sid.clone(), "first".into(), InputDelivery::StartNew)
+        .await
+        .unwrap();
+    scheduler
+        .deliver_input(
+            sid.clone(),
+            "older queued".into(),
+            InputDelivery::QueueIfRunningElseStart,
+        )
+        .await
+        .unwrap();
+
+    release.add_permits(1);
+    scheduler
+        .deliver_input(
+            sid.clone(),
+            "new arrival".into(),
+            InputDelivery::QueueIfRunningElseStart,
+        )
+        .await
+        .unwrap();
+
+    for _ in 0..100 {
+        let state = store.session_read_model(&sid).await.unwrap();
+        if !scheduler.registry().has_active(&sid) && state.execution.pending_inputs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let user_messages = store
+        .replay_events(&sid)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match &event.payload {
+            DurableEventPayload::UserMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages, ["first", "older queued", "new arrival"]);
 }
 
 #[tokio::test]

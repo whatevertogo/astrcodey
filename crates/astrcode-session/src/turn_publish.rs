@@ -400,6 +400,7 @@ mod tests {
             parent_session_id: None,
             tool_selection: None,
             source_extension: None,
+            extra_system_prompt: None,
             initial_system_prompt: None,
             runtime,
             runtime_services,
@@ -419,6 +420,7 @@ mod tests {
                 message_id: astrcode_core::types::new_message_id(),
                 text: "injected".into(),
                 attachments: vec![],
+                accepted_seq: None,
             })
             .await
             .unwrap();
@@ -592,6 +594,7 @@ mod tests {
                     message_id: new_message_id(),
                     text: format!("parallel-{index}"),
                     attachments: vec![],
+                    accepted_seq: None,
                 }))
                 .unwrap();
                 sender.flush().await;

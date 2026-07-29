@@ -61,6 +61,7 @@ impl ExtensionRunner {
     /// 主动采样已运行扩展的健康状态，不创建后台轮询任务。
     pub async fn check_health(&self) -> Vec<ExtensionHealthReport> {
         let extensions = self
+            .registry
             .extensions
             .read()
             .await

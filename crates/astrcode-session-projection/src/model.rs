@@ -7,6 +7,7 @@ use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole},
     tool::SessionToolSelection,
     types::*,
+    user_input::UserInput,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -152,6 +153,13 @@ pub struct PendingToolApprovalView {
     pub rule_key: Option<String>,
 }
 
+/// 已持久接受、但尚未进入 transcript 的用户输入。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PendingInput {
+    pub accepted_seq: u64,
+    pub input: UserInput,
+}
+
 /// 会话事件流的内部读模型。
 ///
 /// 这是 storage/domain 边界类型，不是 wire DTO。它只能由事件日志重建，并由
@@ -209,6 +217,8 @@ pub struct SessionExecutionState {
     pub phase: Phase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsettled_turn_id: Option<TurnId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_inputs: Vec<PendingInput>,
     pub pending_tool_calls: HashSet<ToolCallId>,
     pub pending_tool_approvals: BTreeMap<ToolCallId, PendingToolApprovalView>,
 }

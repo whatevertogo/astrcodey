@@ -86,8 +86,6 @@ pub struct SessionRuntimeState {
     store: Arc<dyn SessionStore>,
     model: Mutex<SessionModelBinding>,
     tools: ToolResources,
-    /// 子 session 专用的额外 system prompt，由 SpawnRequest 注入。
-    extra_system_prompt: Mutex<Option<String>>,
     /// 熔断器需要 &mut self 的状态转换（Open→HalfOpen）。
     compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
     /// 本 session 事件的 fan-out 通道。同一 sid 下所有 Session 实例共享这份 sender，
@@ -123,7 +121,6 @@ impl SessionRuntimeState {
                 file_observation_store: Arc::new(InMemoryFileObservationStore::default()),
                 registry_snapshots: SessionToolCache::new(),
             },
-            extra_system_prompt: Mutex::new(None),
             compact_circuit_breaker: Mutex::new(CompactCircuitBreaker::new(
                 3,
                 Duration::from_secs(60),
@@ -166,14 +163,6 @@ impl SessionRuntimeState {
 
     pub(crate) fn tool_registry_cache(&self) -> &SessionToolCache {
         &self.tools.registry_snapshots
-    }
-
-    pub fn prompt_extra(&self) -> Option<String> {
-        self.extra_system_prompt.lock().clone()
-    }
-
-    pub fn update_prompt_extra(&self, prompt: Option<String>) {
-        *self.extra_system_prompt.lock() = prompt;
     }
 
     pub(crate) fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {

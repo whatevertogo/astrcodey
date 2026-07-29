@@ -12,6 +12,7 @@ use astrcode_core::{
         ToolResultArtifactSlice,
     },
     types::*,
+    user_input::UserInput,
 };
 use astrcode_extension_sdk::{
     extension::{
@@ -51,6 +52,7 @@ pub struct SessionCreateParams {
     pub parent_session_id: Option<SessionId>,
     pub tool_selection: Option<SessionToolSelection>,
     pub source_extension: Option<String>,
+    pub extra_system_prompt: Option<String>,
     /// 仅 fork 等需要精确继承 prompt 的创建路径设置；普通创建由 session 自行组装。
     pub initial_system_prompt: Option<PersistedSystemPrompt>,
     pub runtime: Arc<SessionRuntimeState>,
@@ -110,6 +112,7 @@ impl Session {
                         params.parent_session_id.as_ref(),
                         params.tool_selection.as_ref(),
                         params.source_extension.as_deref(),
+                        params.extra_system_prompt.as_deref(),
                     )
                     .await?
             },
@@ -124,13 +127,10 @@ impl Session {
                     .map(|session_id| ParentSessionRef { session_id }),
                 tool_selection: params.tool_selection.unwrap_or_default(),
                 source_extension: params.source_extension,
-                initial_system_prompt: initial_system_prompt.clone(),
+                initial_system_prompt,
             }),
         );
         session.runtime.event_publisher().create(started).await?;
-        session
-            .runtime
-            .update_prompt_extra(initial_system_prompt.extra_system_prompt);
         Ok(session)
     }
 
@@ -140,16 +140,11 @@ impl Session {
         runtime_services: Arc<SessionRuntimeServices>,
     ) -> Result<Self, SessionError> {
         runtime.store().open_session(runtime.session_id()).await?;
-        let session = Self {
+        Ok(Self {
             state_source: SessionStateSource::new(runtime.store().clone()),
             runtime,
             runtime_services,
-        };
-        let state = session.read_model().await?;
-        session
-            .runtime
-            .update_prompt_extra(state.system_prompt.extra.clone());
-        Ok(session)
+        })
     }
 
     pub fn id(&self) -> &SessionId {
@@ -342,24 +337,6 @@ impl Session {
         emit_lifecycle_for_read_model(&self.runtime_services, self.id(), &model, event).await
     }
 
-    pub async fn update_model_id(
-        &self,
-        model_id: &str,
-    ) -> Result<Option<StoredEvent>, SessionError> {
-        let current = self.read_model().await?;
-        if current.identity.model_id == model_id {
-            return Ok(None);
-        }
-        self.emit_durable(
-            None,
-            DurableEventPayload::ModelIdChanged {
-                model_id: model_id.to_string(),
-            },
-        )
-        .await
-        .map(Some)
-    }
-
     /// 配置后续 turn 使用的工具边界。
     ///
     /// 子 session 不能扩大父 session 当前边界；活跃 turn 保留已固定的不可变快照。
@@ -540,6 +517,7 @@ impl Session {
         parent_session_id: Option<&SessionId>,
         tool_selection: Option<&SessionToolSelection>,
         source_extension: Option<&str>,
+        extra_system_prompt: Option<&str>,
     ) -> Result<PersistedSystemPrompt, SessionError> {
         let planned_store_dir = self
             .runtime
@@ -550,7 +528,7 @@ impl Session {
             working_dir: working_dir.to_owned(),
             session_store_dir: planned_store_dir,
         };
-        let resolved_extra = normalize_extra_system_prompt(self.runtime.prompt_extra().as_deref());
+        let resolved_extra = normalize_extra_system_prompt(extra_system_prompt);
         let mut stability = RuntimeStabilityBudget::new();
 
         loop {
@@ -593,20 +571,11 @@ impl Session {
     async fn prepare_runtime_snapshot(
         &self,
         working_dir: &str,
-        extra_system_prompt: Option<&str>,
-        cached_state: Option<&SessionReadModel>,
+        state: &SessionReadModel,
         model_id: &str,
     ) -> Result<PreparedRuntimeSnapshot, SessionError> {
         let mut stability = RuntimeStabilityBudget::new();
-        let loaded_state;
-        let state = match cached_state {
-            Some(state) => state,
-            None => {
-                loaded_state = self.read_model().await?;
-                &loaded_state
-            },
-        };
-        let resolved_extra = self.resolve_extra_system_prompt(extra_system_prompt, state);
+        let resolved_extra = state.system_prompt.extra.clone();
         let is_subagent = state.identity.parent.is_some();
         let tool_selection = self.effective_tool_selection(self.id(), state).await?;
 
@@ -660,12 +629,9 @@ impl Session {
         stored_fingerprint: Option<&str>,
     ) -> Result<bool, SessionError> {
         if stored_fingerprint == Some(prepared.fingerprint.as_str()) {
-            self.runtime.update_prompt_extra(prepared.resolved_extra);
             return Ok(false);
         }
 
-        self.runtime
-            .update_prompt_extra(prepared.resolved_extra.clone());
         self.emit_durable(
             None,
             system_prompt_configured_payload(
@@ -677,20 +643,6 @@ impl Session {
         )
         .await?;
         Ok(true)
-    }
-
-    fn resolve_extra_system_prompt(
-        &self,
-        extra_system_prompt: Option<&str>,
-        state: &SessionReadModel,
-    ) -> Option<String> {
-        if extra_system_prompt.is_some() {
-            return normalize_extra_system_prompt(extra_system_prompt);
-        }
-        if let Some(extra) = self.runtime.prompt_extra() {
-            return Some(extra);
-        }
-        state.system_prompt.extra.clone()
     }
 
     async fn build_system_prompt(
@@ -785,15 +737,13 @@ impl Session {
             self.runtime_services.small_llm(),
             model_id.to_string(),
         ));
-        if extra_system_prompt.is_some() {
-            child_runtime.update_prompt_extra(extra_system_prompt);
-        }
         let child = Session::create_persisted(
             SessionCreateParams {
                 working_dir: working_dir.to_owned(),
                 parent_session_id: Some(self.id().clone()),
                 tool_selection: tool_selection.clone(),
                 source_extension: source_extension.map(str::to_owned),
+                extra_system_prompt,
                 initial_system_prompt: None,
                 runtime: child_runtime,
                 runtime_services: Arc::clone(&self.runtime_services),
@@ -839,6 +789,7 @@ impl Session {
         text: &str,
         attachments: &[astrcode_core::message_attachment::MessageAttachment],
         turn_id: &TurnId,
+        accepted_seq: Option<u64>,
     ) -> Result<(), TurnError> {
         self.emit_durable(Some(turn_id), DurableEventPayload::TurnStarted)
             .await?;
@@ -848,6 +799,7 @@ impl Session {
                 message_id: new_message_id(),
                 text: text.to_string(),
                 attachments: attachments.to_vec(),
+                accepted_seq,
             },
         )
         .await?;
@@ -894,35 +846,51 @@ impl Session {
 
     async fn prepare_turn_runner(&self) -> Result<TurnLoop, TurnError> {
         let model = self.runtime.model_binding();
-        if let Err(e) = self.update_model_id(model.model_id()).await {
-            tracing::warn!(session_id = %self.id(), error = %e, "failed to update session model_id");
+        let mut pre_state = self.read_model().await?;
+        if pre_state.identity.model_id != model.model_id() {
+            match self
+                .emit_durable(
+                    None,
+                    DurableEventPayload::ModelIdChanged {
+                        model_id: model.model_id().to_owned(),
+                    },
+                )
+                .await
+            {
+                Ok(_) => pre_state = self.read_model().await?,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = %self.id(),
+                        %error,
+                        "failed to update session model_id"
+                    );
+                },
+            }
         }
 
-        let pre_state = self.read_model().await?;
         let working_dir = pre_state.identity.working_dir.clone();
-        let (registry, tool_selection, prompt_changed) = if pre_state.system_prompt.source
-            == SystemPromptSource::Inherited
-        {
-            let tool_selection = self.effective_tool_selection(self.id(), &pre_state).await?;
-            let mut stability = RuntimeStabilityBudget::new();
-            let tool_snapshot = self
-                .resolve_tool_registry_snapshot(
-                    &working_dir,
-                    tool_selection.as_ref(),
-                    &mut stability,
-                )
-                .await?;
-            (tool_snapshot.registry, tool_selection, false)
-        } else {
-            let stored_fingerprint = pre_state.system_prompt.fingerprint.clone();
-            let prepared = self
-                .prepare_runtime_snapshot(&working_dir, None, Some(&pre_state), model.model_id())
-                .await?;
-            let prompt_changed = self
-                .persist_system_prompt(prepared.prompt, Some(&stored_fingerprint))
-                .await?;
-            (prepared.registry, prepared.tool_selection, prompt_changed)
-        };
+        let (registry, tool_selection, prompt_changed) =
+            if pre_state.system_prompt.source == SystemPromptSource::Inherited {
+                let tool_selection = self.effective_tool_selection(self.id(), &pre_state).await?;
+                let mut stability = RuntimeStabilityBudget::new();
+                let tool_snapshot = self
+                    .resolve_tool_registry_snapshot(
+                        &working_dir,
+                        tool_selection.as_ref(),
+                        &mut stability,
+                    )
+                    .await?;
+                (tool_snapshot.registry, tool_selection, false)
+            } else {
+                let stored_fingerprint = pre_state.system_prompt.fingerprint.clone();
+                let prepared = self
+                    .prepare_runtime_snapshot(&working_dir, &pre_state, model.model_id())
+                    .await?;
+                let prompt_changed = self
+                    .persist_system_prompt(prepared.prompt, Some(&stored_fingerprint))
+                    .await?;
+                (prepared.registry, prepared.tool_selection, prompt_changed)
+            };
 
         let session_state = if prompt_changed {
             // Prompt 刷新可能写入 durable event，需重读 projection。
@@ -1008,14 +976,15 @@ impl Session {
 
     pub async fn submit(
         &self,
-        text: String,
-        attachments: Vec<astrcode_core::message_attachment::MessageAttachment>,
+        input: UserInput,
         turn_id: TurnId,
+        accepted_seq: Option<u64>,
     ) -> Result<TurnHandle, TurnError> {
+        let UserInput { text, attachments } = input;
         let text = self
             .apply_user_message_envelope(text, &attachments, &turn_id)
             .await?;
-        self.emit_turn_start_events(&text, &attachments, &turn_id)
+        self.emit_turn_start_events(&text, &attachments, &turn_id, accepted_seq)
             .await?;
         let agent = match self.prepare_turn_runner().await {
             Ok(agent) => agent,

@@ -145,6 +145,10 @@ struct BlockingProviderResponseExtension;
 
 struct BlockingProviderHook;
 
+struct OperationTimeoutExtension;
+
+struct PendingProviderHook;
+
 struct ContinueAfterStopProbeExtension {
     id: &'static str,
     options: ContinueAfterStopOptions,
@@ -495,6 +499,32 @@ impl ProviderHandler for BlockingProviderHook {
         Ok(ProviderResult::Block {
             reason: "response observers cannot block".into(),
         })
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for OperationTimeoutExtension {
+    fn id(&self) -> &str {
+        "operation-timeout"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::ProviderRequest]
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.on_after_provider_response(0, Arc::new(PendingProviderHook));
+    }
+
+    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+        std::future::pending().await
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderHandler for PendingProviderHook {
+    async fn handle(&self, _ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
+        std::future::pending().await
     }
 }
 
@@ -1314,12 +1344,12 @@ async fn config_notifications_are_ordered_idempotent_and_retry_failures() {
 }
 
 #[tokio::test]
-async fn recorded_blocking_hook_tracks_error_and_timeout() {
+async fn recorded_hook_tracks_error_and_timeout() {
     let runner = ExtensionRunner::new(Duration::from_millis(10));
 
     assert!(
         runner
-            .run_recorded_blocking_hook::<()>("probe", "pre_tool_use", async {
+            .run_recorded_hook::<()>("probe", "pre_tool_use", async {
                 Err(ExtensionError::Internal("injected failure".into()))
             })
             .await
@@ -1327,7 +1357,7 @@ async fn recorded_blocking_hook_tracks_error_and_timeout() {
     );
     assert!(matches!(
         runner
-            .run_recorded_blocking_hook(
+            .run_recorded_hook(
                 "probe",
                 "pre_tool_use",
                 std::future::pending::<Result<(), ExtensionError>>(),
@@ -1346,6 +1376,43 @@ async fn recorded_blocking_hook_tracks_error_and_timeout() {
             .as_deref()
             .is_some_and(|error| error.contains("timed out"))
     );
+}
+
+#[tokio::test]
+async fn operation_timeout_bounds_advisory_hooks_and_stop() {
+    let runner = ExtensionRunner::new(Duration::from_millis(10));
+    runner
+        .register(Arc::new(OperationTimeoutExtension))
+        .await
+        .unwrap();
+
+    let result = runner
+        .emit_provider(
+            ProviderEvent::AfterResponse,
+            ProviderContext {
+                session_id: "session".into(),
+                working_dir: "D:/workspace".into(),
+                model: astrcode_core::config::ModelSelection::simple("model"),
+                messages: Vec::new(),
+                session_store_dir: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, ProviderResult::Allow));
+
+    let diagnostics = runner.diagnostics_snapshot();
+    let diagnostics = diagnostics.get("operation-timeout").unwrap();
+    assert_eq!(diagnostics.hook_calls, 1);
+    assert_eq!(diagnostics.hook_timeouts, 1);
+
+    assert!(matches!(
+        runner
+            .unregister("operation-timeout", StopReason::Disabled)
+            .await,
+        Err(ExtensionError::Timeout(10))
+    ));
+    assert_eq!(runner.count().await, 0);
 }
 
 #[tokio::test]

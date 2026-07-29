@@ -11,7 +11,11 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use astrcode_context::{ContextAssembler, PostCompactEnricher};
-use astrcode_core::{config::EffectiveConfig, llm::LlmProvider};
+use astrcode_core::{
+    config::EffectiveConfig,
+    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits, ProviderInputTokenCount},
+    tool::ToolDefinition,
+};
 use astrcode_extension_sdk::runtime_ports::{
     PromptContributor, RuntimeSnapshotState, ToolCatalogProvider, TurnHooks,
 };
@@ -19,9 +23,9 @@ use astrcode_extension_sdk::runtime_ports::{
 use crate::SessionExtensionPorts;
 
 pub struct SessionRuntimeServices {
-    llm: ArcSwap<ProviderSlot>,
+    llm: Arc<ArcSwap<ProviderSlot>>,
     /// 小模型 provider slot。未配置小模型时与主模型相同。
-    small_llm: ArcSwap<ProviderSlot>,
+    small_llm: Arc<ArcSwap<ProviderSlot>>,
     extension_ports: SessionExtensionPorts,
     context_assembler: Arc<dyn ContextAssembler>,
     post_compact_enricher: Arc<dyn PostCompactEnricher>,
@@ -31,6 +35,39 @@ pub struct SessionRuntimeServices {
 
 struct ProviderSlot {
     provider: Arc<dyn LlmProvider>,
+}
+
+struct LiveLlmProvider {
+    source: Arc<ArcSwap<ProviderSlot>>,
+}
+
+impl LiveLlmProvider {
+    fn current(&self) -> Arc<dyn LlmProvider> {
+        Arc::clone(&self.source.load_full().provider)
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for LiveLlmProvider {
+    async fn generate(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        self.current().generate(messages, tools).await
+    }
+
+    async fn count_input_tokens(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ProviderInputTokenCount, LlmError> {
+        self.current().count_input_tokens(messages, tools).await
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        self.current().model_limits()
+    }
 }
 
 impl SessionRuntimeServices {
@@ -44,10 +81,10 @@ impl SessionRuntimeServices {
         tool_catalog: Arc<dyn ToolCatalogProvider>,
     ) -> Self {
         Self {
-            llm: ArcSwap::from_pointee(ProviderSlot { provider: llm }),
-            small_llm: ArcSwap::from_pointee(ProviderSlot {
+            llm: Arc::new(ArcSwap::from_pointee(ProviderSlot { provider: llm })),
+            small_llm: Arc::new(ArcSwap::from_pointee(ProviderSlot {
                 provider: small_llm,
-            }),
+            })),
             extension_ports,
             context_assembler,
             post_compact_enricher,
@@ -64,6 +101,13 @@ impl SessionRuntimeServices {
         self.llm.store(Arc::new(ProviderSlot { provider: new }));
     }
 
+    /// 返回始终转发到当前主模型 provider 的稳定句柄。
+    pub fn live_llm(&self) -> Arc<dyn LlmProvider> {
+        Arc::new(LiveLlmProvider {
+            source: Arc::clone(&self.llm),
+        })
+    }
+
     /// 返回小模型 provider。
     ///
     /// 未配置小模型时返回的与主模型相同。
@@ -75,6 +119,13 @@ impl SessionRuntimeServices {
     pub fn swap_small_llm(&self, new: Arc<dyn LlmProvider>) {
         self.small_llm
             .store(Arc::new(ProviderSlot { provider: new }));
+    }
+
+    /// 返回始终转发到当前小模型 provider 的稳定句柄。
+    pub fn live_small_llm(&self) -> Arc<dyn LlmProvider> {
+        Arc::new(LiveLlmProvider {
+            source: Arc::clone(&self.small_llm),
+        })
     }
 
     pub(crate) fn tool_catalog(&self) -> &dyn ToolCatalogProvider {
@@ -162,6 +213,28 @@ mod tests {
         }
     }
 
+    struct TaggedLlm {
+        max_input_tokens: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for TaggedLlm {
+        async fn generate(
+            &self,
+            _messages: Vec<LlmMessage>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+            unreachable!("live provider test only reads model limits")
+        }
+
+        fn model_limits(&self) -> ModelLimits {
+            ModelLimits {
+                max_input_tokens: self.max_input_tokens,
+                max_output_tokens: 1024,
+            }
+        }
+    }
+
     struct CustomContextAssembler {
         settings: ContextSettings,
     }
@@ -236,6 +309,41 @@ mod tests {
             )
             .await;
         assert_eq!(compaction.summary, "compact enriched");
+    }
+
+    #[test]
+    fn live_llm_handles_follow_main_and_small_provider_swaps() {
+        let context = ContextSettings::default();
+        let context_assembler: Arc<dyn ContextAssembler> =
+            Arc::new(LlmContextAssembler::new(context.clone()));
+        let services = SessionRuntimeServices::new(
+            Arc::new(TaggedLlm {
+                max_input_tokens: 1,
+            }),
+            Arc::new(TaggedLlm {
+                max_input_tokens: 2,
+            }),
+            effective_config(context),
+            SessionExtensionPorts::default(),
+            context_assembler,
+            Arc::new(CountingPostCompactEnricher),
+            Arc::new(NoopRuntimePorts),
+        );
+        let live_main = services.live_llm();
+        let live_small = services.live_small_llm();
+
+        assert_eq!(live_main.model_limits().max_input_tokens, 1);
+        assert_eq!(live_small.model_limits().max_input_tokens, 2);
+
+        services.swap_llm(Arc::new(TaggedLlm {
+            max_input_tokens: 3,
+        }));
+        services.swap_small_llm(Arc::new(TaggedLlm {
+            max_input_tokens: 4,
+        }));
+
+        assert_eq!(live_main.model_limits().max_input_tokens, 3);
+        assert_eq!(live_small.model_limits().max_input_tokens, 4);
     }
 
     fn effective_config(context: ContextSettings) -> EffectiveConfig {

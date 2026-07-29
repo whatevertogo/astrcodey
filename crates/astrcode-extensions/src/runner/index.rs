@@ -312,7 +312,7 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
 
 impl ExtensionRunner {
     pub(super) fn load_index(&self) -> Arc<HandlerIndex> {
-        Arc::clone(&self.index.read())
+        self.registry.index.load_full()
     }
 }
 

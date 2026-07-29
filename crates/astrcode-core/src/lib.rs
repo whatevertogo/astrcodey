@@ -26,3 +26,4 @@ pub mod message_attachment;
 pub mod permission;
 pub mod tool;
 pub mod types;
+pub mod user_input;

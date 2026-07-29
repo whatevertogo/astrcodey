@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use astrcode_core::types::TurnId;
-use astrcode_core::{tool::SessionToolSelection, types::SessionId};
+use astrcode_core::{tool::SessionToolSelection, types::SessionId, user_input::UserInput};
 use astrcode_extension_sdk::extension::CommandCompletions;
 use astrcode_protocol::commands::ClientCommand;
 use tokio::sync::{mpsc, oneshot};
@@ -18,7 +18,7 @@ use super::{
 };
 use crate::{
     bootstrap::ServerRuntime,
-    turn_scheduler::{PromptInput, TurnCompletionEvent, TurnScheduler},
+    turn_scheduler::{TurnCompletionEvent, TurnScheduler},
 };
 
 /// Command actor 队列容量；满时 `send().await` 对调用方施加背压。
@@ -78,7 +78,7 @@ impl CommandHandle {
     pub(crate) async fn submit_prompt_with_completion(
         &self,
         session_id: SessionId,
-        input: PromptInput,
+        input: UserInput,
     ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError> {
         self.request(|reply| CommandMessage::SubmitInputWithCompletion {
             session_id,
@@ -92,7 +92,7 @@ impl CommandHandle {
     pub async fn submit_input_for_session(
         &self,
         session_id: SessionId,
-        input: PromptInput,
+        input: UserInput,
     ) -> Result<PromptSubmission, HandlerError> {
         self.request(|reply| CommandMessage::SubmitInputForSession {
             session_id,
@@ -252,7 +252,7 @@ pub(in crate::handler) enum CommandMessage {
     /// 提交输入
     SubmitInputForSession {
         session_id: SessionId,
-        input: PromptInput,
+        input: UserInput,
         reply: oneshot::Sender<Result<PromptSubmission, HandlerError>>,
     },
     /// Mid-turn 注入（steer）
@@ -296,7 +296,7 @@ pub(in crate::handler) enum CommandMessage {
     #[cfg(test)]
     SubmitInputWithCompletion {
         session_id: SessionId,
-        input: PromptInput,
+        input: UserInput,
         reply: oneshot::Sender<Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError>>,
     },
     /// 修复进程重启后残留的过期 turn phase

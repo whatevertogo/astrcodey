@@ -11,8 +11,10 @@ pub mod test_support;
 
 mod child_session;
 mod config_manager;
+mod delivery_gates;
 mod handler;
 mod presentation;
+mod queue_drains;
 mod server_event_bus;
 mod session_command_service;
 mod session_manager;

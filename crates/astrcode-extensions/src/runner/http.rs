@@ -105,7 +105,7 @@ impl ExtensionRunner {
         };
         request.path_params = path_params;
         let response = self
-            .run_recorded_blocking_hook(
+            .run_recorded_hook(
                 &entry.extension_id,
                 "http_route",
                 entry.handler.handle(request),

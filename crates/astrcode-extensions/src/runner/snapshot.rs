@@ -23,7 +23,7 @@ pub struct ExtensionDeclarationSnapshot {
 
 impl ExtensionRunner {
     pub async fn registry_snapshot(&self) -> ExtensionRegistrySnapshot {
-        let hosted_extensions = self.extensions.read().await;
+        let hosted_extensions = self.registry.extensions.read().await;
         let extensions = hosted_extensions
             .iter()
             .map(|hosted| {

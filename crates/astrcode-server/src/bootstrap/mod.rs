@@ -242,8 +242,8 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     let host_services = Arc::new(
         ExtensionHostServices::new(
             Arc::new(StorageSessionQueryFactory::new(Arc::clone(&event_store))),
-            Some(runtime_services.llm()),
-            Some(runtime_services.small_llm()),
+            Some(runtime_services.live_llm()),
+            Some(runtime_services.live_small_llm()),
         )
         .with_session_ops(session_ops)
         .with_outbound_network(
@@ -326,8 +326,8 @@ impl ServerRuntime {
             Arc::new(StorageSessionQueryFactory::new(Arc::clone(
                 self.event_store(),
             ))),
-            Some(runtime_services.llm()),
-            Some(runtime_services.small_llm()),
+            Some(runtime_services.live_llm()),
+            Some(runtime_services.live_small_llm()),
         );
         if let Some(session_ops) = runtime_services.session_ops() {
             host_services = host_services.with_session_ops(session_ops);

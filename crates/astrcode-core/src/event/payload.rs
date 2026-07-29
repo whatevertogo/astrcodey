@@ -13,6 +13,7 @@ use crate::{
     permission::{ApprovalDecision, ApprovalSource},
     tool::{SessionToolSelection, ToolResult},
     types::*,
+    user_input::UserInput,
 };
 
 /// 子会话与父会话之间的稳定关系。
@@ -108,10 +109,16 @@ pub enum DurableEventPayload {
         finish_reason: String,
     },
     TurnAbortedContext,
+    UserInputAccepted {
+        input: UserInput,
+    },
     UserMessage {
         message_id: MessageId,
         text: String,
         attachments: Vec<MessageAttachment>,
+        /// 对应 `UserInputAccepted` 的 durable seq；直接启动或 turn 中注入时为空。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        accepted_seq: Option<u64>,
     },
     RecapGenerated {
         text: String,

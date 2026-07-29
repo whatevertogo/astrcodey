@@ -73,6 +73,7 @@ async fn spawn_session_with_store(
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
+        extra_system_prompt: None,
         initial_system_prompt: None,
         runtime,
         runtime_services: caps,
@@ -136,7 +137,7 @@ async fn ssot_tool_loop_projection_matches_provider_messages() {
     let session = spawn_session(llm).await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("run tools".into(), vec![], turn_id)
+        .submit("run tools".into(), turn_id, None)
         .await
         .unwrap();
     let result = handle.wait().await.unwrap();
@@ -193,7 +194,7 @@ async fn provider_start_error_is_persisted_as_durable_error() {
     let (session, store, sid) = spawn_session_with_store(Arc::new(FailingGenerateLlm)).await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("trigger provider error".into(), vec![], turn_id)
+        .submit("trigger provider error".into(), turn_id, None)
         .await
         .unwrap();
 
@@ -251,7 +252,7 @@ async fn token_usage_is_persisted_as_durable_event() {
     let (session, store, sid) = spawn_session_with_store(Arc::new(UsageLlm)).await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("record usage".into(), vec![], turn_id)
+        .submit("record usage".into(), turn_id, None)
         .await
         .unwrap();
     let result = handle.wait().await.unwrap();
@@ -338,7 +339,7 @@ async fn token_usage_missing_stream_usage_records_provider_count_fallback() {
     let (session, store, sid) = spawn_session_with_store(Arc::new(NoUsageCountingLlm)).await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("record fallback usage".into(), vec![], turn_id)
+        .submit("record fallback usage".into(), turn_id, None)
         .await
         .unwrap();
     let result = handle.wait().await.unwrap();
@@ -415,7 +416,7 @@ async fn ssot_thinking_and_tools_merge_in_projection() {
     .await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("think then tool".into(), vec![], turn_id)
+        .submit("think then tool".into(), turn_id, None)
         .await
         .unwrap();
     let _ = handle.wait().await.unwrap();
@@ -534,7 +535,7 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
     .await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("tool only".into(), vec![], turn_id)
+        .submit("tool only".into(), turn_id, None)
         .await
         .unwrap();
     let _ = handle.wait().await.unwrap();
@@ -563,7 +564,7 @@ async fn ssot_early_tool_completion_persists_request_after_assistant_message() {
     .await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("trigger early tool".into(), vec![], turn_id)
+        .submit("trigger early tool".into(), turn_id, None)
         .await
         .unwrap();
     let _ = handle.wait().await.unwrap();
@@ -633,15 +634,13 @@ async fn ssot_mid_turn_inject_visible_on_next_prepare() {
                     message_id: new_message_id(),
                     text: "mid-turn inject".into(),
                     attachments: vec![],
+                    accepted_seq: None,
                 },
             )
             .await;
     });
 
-    let handle = session
-        .submit("start".into(), vec![], turn_id)
-        .await
-        .unwrap();
+    let handle = session.submit("start".into(), turn_id, None).await.unwrap();
     let _ = handle.wait().await.unwrap();
     inject.await.unwrap();
 

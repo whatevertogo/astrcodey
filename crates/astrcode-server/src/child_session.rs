@@ -239,7 +239,7 @@ impl ChildSessionCoordinator {
         let started = scheduler
             .start_with_completion(
                 target_sid.clone(),
-                crate::turn_scheduler::PromptInput::text_only(user_prompt),
+                astrcode_core::user_input::UserInput::text_only(user_prompt),
             )
             .await
             .map_err(SessionApiError::internal)?;
@@ -291,7 +291,7 @@ impl ChildSessionCoordinator {
         let started = scheduler
             .start_with_completion(
                 target_sid.clone(),
-                crate::turn_scheduler::PromptInput::text_only(user_prompt),
+                astrcode_core::user_input::UserInput::text_only(user_prompt),
             )
             .await
             .map_err(SessionApiError::internal)?;
@@ -415,7 +415,7 @@ impl ChildSessionCoordinator {
                 if let Err(e) = scheduler
                     .deliver_input(
                         guard.parent_session_id().clone(),
-                        crate::turn_scheduler::PromptInput::text_only(message),
+                        astrcode_core::user_input::UserInput::text_only(message),
                         InputDelivery::InjectIfRunningElseStart,
                     )
                     .await

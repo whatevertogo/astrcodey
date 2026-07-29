@@ -129,12 +129,12 @@ async fn reopen_restores_native_extra_system_prompt() {
     let sid = new_session_id();
 
     let runtime_a = runtime(sid.clone(), &store, &caps);
-    runtime_a.update_prompt_extra(Some("child agent body".into()));
     let session_a = Session::create_with_params(SessionCreateParams {
         working_dir: ".".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
+        extra_system_prompt: Some("child agent body".into()),
         initial_system_prompt: None,
         runtime: Arc::clone(&runtime_a),
         runtime_services: Arc::clone(&caps),
@@ -152,7 +152,6 @@ async fn reopen_restores_native_extra_system_prompt() {
     drop(session_a);
     drop(runtime_a);
     let runtime_b = runtime(sid.clone(), &store, &caps);
-    assert!(runtime_b.prompt_extra().is_none());
     let session_b = Session::open(Arc::clone(&runtime_b), Arc::clone(&caps))
         .await
         .unwrap();
@@ -161,11 +160,6 @@ async fn reopen_restores_native_extra_system_prompt() {
         state_after_second.system_prompt.extra.as_deref(),
         Some("child agent body"),
         "extra_system_prompt must survive reopening the session",
-    );
-    assert_eq!(
-        runtime_b.prompt_extra().as_deref(),
-        Some("child agent body"),
-        "runtime_b should be hydrated from projection",
     );
 }
 
@@ -183,6 +177,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
         parent_session_id: None,
         tool_selection: Some(parent_selection),
         source_extension: None,
+        extra_system_prompt: None,
         initial_system_prompt: None,
         runtime: runtime(parent_id, &store, &caps),
         runtime_services: Arc::clone(&caps),
@@ -196,6 +191,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
         parent_session_id: Some(parent.id().clone()),
         tool_selection: None,
         source_extension: None,
+        extra_system_prompt: None,
         initial_system_prompt: None,
         runtime: runtime(direct_child_id, &store, &caps),
         runtime_services: Arc::clone(&caps),
@@ -294,6 +290,7 @@ async fn prompt_failure_does_not_create_session() {
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
+        extra_system_prompt: None,
         initial_system_prompt: None,
         runtime: runtime(session_id, &store, &caps),
         runtime_services: caps,
@@ -324,6 +321,7 @@ async fn inherited_initial_prompt_survives_initialization_and_reopen() {
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
+        extra_system_prompt: None,
         initial_system_prompt: Some(inherited.clone()),
         runtime: runtime(session_id.clone(), &store, &caps),
         runtime_services: Arc::clone(&caps),
@@ -339,12 +337,13 @@ async fn inherited_initial_prompt_survives_initialization_and_reopen() {
     let reopened = Session::open(runtime(session_id, &store, &caps), caps)
         .await
         .unwrap();
+    let reopened_model = reopened.read_model().await.unwrap();
     assert_eq!(
-        reopened.runtime().prompt_extra().as_deref(),
+        reopened_model.system_prompt.extra.as_deref(),
         inherited.extra_system_prompt.as_deref()
     );
     assert_eq!(
-        reopened.read_model().await.unwrap().system_prompt.source,
+        reopened_model.system_prompt.source,
         SystemPromptSource::Inherited
     );
 }

@@ -508,6 +508,7 @@ dependencies = [
 name = "astrcode-extensions"
 version = "0.3.12"
 dependencies = [
+ "arc-swap",
  "astrcode-core",
  "astrcode-extension-sdk",
  "astrcode-session-projection",

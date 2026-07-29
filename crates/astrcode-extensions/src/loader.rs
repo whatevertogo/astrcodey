@@ -123,10 +123,10 @@ pub struct ExtensionRuntime {
 impl ExtensionRuntime {
     pub async fn load(
         ctx: ExtensionLoadContext,
-        timeout: Duration,
+        operation_timeout: Duration,
         sources: &[&dyn ExtensionSource],
     ) -> Self {
-        let runner = Arc::new(ExtensionRunner::new(timeout));
+        let runner = Arc::new(ExtensionRunner::new(operation_timeout));
         let load_errors = Self::sync_sources(&runner, &ctx, sources).await;
         Self {
             runner,

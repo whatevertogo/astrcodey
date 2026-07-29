@@ -1,9 +1,10 @@
 //! Prompt 提交、注入与斜杠命令拦截。
 
-use astrcode_core::{message_attachment::MessageAttachment, types::SessionId};
+use astrcode_core::{
+    message_attachment::MessageAttachment, types::SessionId, user_input::UserInput,
+};
 
 use super::{CommandHandler, HandlerError, PromptSubmission, slash};
-use crate::turn_scheduler::PromptInput;
 
 impl CommandHandler {
     pub(super) async fn submit_prompt(
@@ -12,7 +13,7 @@ impl CommandHandler {
         attachments: Vec<MessageAttachment>,
     ) -> Result<(), HandlerError> {
         let sid = self.ensure_session().await?;
-        let input = PromptInput {
+        let input = UserInput {
             text: text.clone(),
             attachments,
         };
@@ -63,7 +64,7 @@ impl CommandHandler {
     pub async fn submit_input_for_session(
         &mut self,
         sid: SessionId,
-        input: PromptInput,
+        input: UserInput,
     ) -> Result<PromptSubmission, HandlerError> {
         if let Some(command) =
             slash::parse_slash_command(&input.text).filter(|command| command.has_name())

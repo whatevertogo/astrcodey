@@ -10,6 +10,7 @@ use astrcode_core::{
     event::LiveEventPayload,
     tool::SessionToolSelection,
     types::{SessionId, TurnId},
+    user_input::UserInput,
 };
 use astrcode_extension_sdk::extension::{
     CommandCompletions, ExtensionCommandResult, ExtensionError,
@@ -25,6 +26,7 @@ use astrcode_session::compaction::{
 
 use crate::{
     bootstrap::ServerRuntime,
+    delivery_gates::SessionOperationGuard,
     handler::{
         CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission,
         session_command::CommandList,
@@ -32,10 +34,7 @@ use crate::{
         snapshot::session_snapshot,
     },
     server_event_bus::ServerEventBus,
-    turn_scheduler::{
-        DeliveryOutcome, InputDelivery, PromptInput, SessionOperationGuard, TurnCompletion,
-        TurnScheduler,
-    },
+    turn_scheduler::{DeliveryOutcome, InputDelivery, TurnCompletion, TurnScheduler},
 };
 
 #[derive(Clone)]
@@ -43,6 +42,11 @@ pub(crate) struct SessionCommandService {
     runtime: Arc<ServerRuntime>,
     scheduler: Arc<TurnScheduler>,
     event_bus: Arc<ServerEventBus>,
+}
+
+enum CommandOperation {
+    Complete(CommandInvocation),
+    StartTurn(UserInput),
 }
 
 impl SessionCommandService {
@@ -80,7 +84,7 @@ impl SessionCommandService {
     pub(crate) async fn submit_input(
         &self,
         session_id: SessionId,
-        input: PromptInput,
+        input: UserInput,
     ) -> Result<PromptSubmission, HandlerError> {
         astrcode_core::message_attachment::validate_attachments(&input.attachments)
             .map_err(|error| HandlerError::InvalidRequest(error.to_string()))?;
@@ -90,15 +94,21 @@ impl SessionCommandService {
             if let Some(command) =
                 slash::parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
             {
-                match self.invoke_command_in_operation(&operation, command).await {
+                match self.prepare_command_in_operation(&operation, command).await {
                     Err(HandlerError::UnknownCommand(_)) => {},
-                    other => return other.map(invocation_to_submission),
+                    other => {
+                        let command = other?;
+                        return self
+                            .execute_command_operation(operation, command)
+                            .await
+                            .map(invocation_to_submission);
+                    },
                 }
             }
         }
 
         self.scheduler
-            .deliver_input_in_operation(&operation, input, InputDelivery::QueueIfRunningElseStart)
+            .deliver_input_in_operation(operation, input, InputDelivery::QueueIfRunningElseStart)
             .await
             .map(delivery_to_submission)
             .map_err(HandlerError::from)
@@ -107,7 +117,7 @@ impl SessionCommandService {
     pub(crate) async fn submit_input_with_completion(
         &self,
         session_id: SessionId,
-        input: PromptInput,
+        input: UserInput,
     ) -> Result<(TurnId, tokio::sync::oneshot::Receiver<TurnCompletion>), HandlerError> {
         self.scheduler
             .start_tracked_with_completion(session_id, input)
@@ -124,8 +134,8 @@ impl SessionCommandService {
         match self
             .scheduler
             .deliver_input_in_operation(
-                &operation,
-                PromptInput::text_only(text),
+                operation,
+                UserInput::text_only(text),
                 InputDelivery::InjectOnly,
             )
             .await?
@@ -296,14 +306,17 @@ impl SessionCommandService {
         command: ParsedSlashCommand,
     ) -> Result<CommandInvocation, HandlerError> {
         let operation = self.scheduler.begin_session_operation(&session_id).await?;
-        self.invoke_command_in_operation(&operation, command).await
+        let command = self
+            .prepare_command_in_operation(&operation, command)
+            .await?;
+        self.execute_command_operation(operation, command).await
     }
 
-    async fn invoke_command_in_operation(
+    async fn prepare_command_in_operation(
         &self,
         operation: &SessionOperationGuard,
         command: ParsedSlashCommand,
-    ) -> Result<CommandInvocation, HandlerError> {
+    ) -> Result<CommandOperation, HandlerError> {
         let command = normalize_command(command)?;
         let session_id = operation.session_id().clone();
 
@@ -324,11 +337,15 @@ impl SessionCommandService {
                 .compact_session_in_operation(operation, keep_recent_turns)
                 .await?
             {
-                ManualCompactOutcome::Compacted { .. } => Ok(CommandInvocation::Handled {
-                    message: "compact accepted".into(),
-                }),
+                ManualCompactOutcome::Compacted { .. } => {
+                    Ok(CommandOperation::Complete(CommandInvocation::Handled {
+                        message: "compact accepted".into(),
+                    }))
+                },
                 ManualCompactOutcome::Skipped { message } => {
-                    Ok(CommandInvocation::Handled { message })
+                    Ok(CommandOperation::Complete(CommandInvocation::Handled {
+                        message,
+                    }))
                 },
             };
         }
@@ -377,10 +394,15 @@ impl SessionCommandService {
                         content: content.clone(),
                         is_error,
                     });
-                Ok(CommandInvocation::Display { content, is_error })
+                Ok(CommandOperation::Complete(CommandInvocation::Display {
+                    content,
+                    is_error,
+                }))
             },
             Ok(ExtensionCommandResult::Handled { message }) => {
-                Ok(CommandInvocation::Handled { message })
+                Ok(CommandOperation::Complete(CommandInvocation::Handled {
+                    message,
+                }))
             },
             Ok(ExtensionCommandResult::StartTurn { instructions }) => {
                 let user_text = if instructions.trim().is_empty() {
@@ -388,29 +410,33 @@ impl SessionCommandService {
                 } else {
                     instructions
                 };
-                match self
-                    .scheduler
-                    .deliver_input_in_operation(
-                        operation,
-                        PromptInput::text_only(user_text),
-                        InputDelivery::StartNew,
-                    )
-                    .await?
-                {
-                    DeliveryOutcome::Started { turn_id } => {
-                        Ok(CommandInvocation::Started { turn_id })
-                    },
-                    DeliveryOutcome::Injected { .. } | DeliveryOutcome::Queued { .. } => {
-                        Err(HandlerError::InvalidRequest(
-                            "command start returned a non-started outcome".into(),
-                        ))
-                    },
-                }
+                Ok(CommandOperation::StartTurn(UserInput::text_only(user_text)))
             },
             Err(ExtensionError::NotFound(name)) => Err(HandlerError::UnknownCommand(
                 name.trim_start_matches('/').to_string(),
             )),
             Err(error) => Err(HandlerError::Extension(error)),
+        }
+    }
+
+    async fn execute_command_operation(
+        &self,
+        operation: SessionOperationGuard,
+        command: CommandOperation,
+    ) -> Result<CommandInvocation, HandlerError> {
+        let input = match command {
+            CommandOperation::Complete(invocation) => return Ok(invocation),
+            CommandOperation::StartTurn(input) => input,
+        };
+        match self
+            .scheduler
+            .deliver_input_in_operation(operation, input, InputDelivery::StartNew)
+            .await?
+        {
+            DeliveryOutcome::Started { turn_id } => Ok(CommandInvocation::Started { turn_id }),
+            DeliveryOutcome::Injected { .. } | DeliveryOutcome::Queued { .. } => Err(
+                HandlerError::InvalidRequest("command start returned a non-started outcome".into()),
+            ),
         }
     }
 

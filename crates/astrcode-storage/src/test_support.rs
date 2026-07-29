@@ -33,6 +33,7 @@ pub(crate) fn user_event(session_id: &SessionId, text: &str) -> DurableEvent {
             message_id: new_message_id(),
             text: text.into(),
             attachments: vec![],
+            accepted_seq: None,
         },
     )
 }

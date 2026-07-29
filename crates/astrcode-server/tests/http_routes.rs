@@ -1301,6 +1301,7 @@ async fn stream_preserves_global_updates_during_replay_drain() {
                 message_id: "missed-message".into(),
                 text: "missed while reconnecting".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ))
         .await
@@ -1343,6 +1344,7 @@ async fn stream_replays_events_after_snapshot_cursor() {
                 message_id: "snapshot-message".into(),
                 text: "already in snapshot".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ))
         .await
@@ -1365,6 +1367,7 @@ async fn stream_replays_events_after_snapshot_cursor() {
                 message_id: "missed-message".into(),
                 text: "missed while connecting stream".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ))
         .await
@@ -1420,6 +1423,7 @@ async fn snapshot_and_replay_preserve_durable_errors() {
                 message_id: "before-failure".into(),
                 text: "before failure".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ))
         .await
@@ -1453,6 +1457,7 @@ async fn snapshot_and_replay_preserve_durable_errors() {
                 message_id: "after-failure".into(),
                 text: "retry after failure".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ))
         .await
@@ -1796,6 +1801,7 @@ async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
                     message_id: new_message_id(),
                     text: text.into(),
                     attachments: vec![],
+                    accepted_seq: None,
                 },
             ))
             .await
@@ -1899,6 +1905,7 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
                     message_id: new_message_id(),
                     text: text.into(),
                     attachments: vec![],
+                    accepted_seq: None,
                 },
             ))
             .await

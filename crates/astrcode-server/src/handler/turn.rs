@@ -3,10 +3,10 @@
 use astrcode_core::types::SessionId;
 #[cfg(test)]
 use astrcode_core::types::TurnId;
+#[cfg(test)]
+use astrcode_core::user_input::UserInput;
 
 use super::{CommandHandler, HandlerError};
-#[cfg(test)]
-use crate::turn_scheduler::PromptInput;
 
 impl CommandHandler {
     pub(in crate::handler) async fn abort_session(
@@ -41,7 +41,7 @@ impl CommandHandler {
     pub(in crate::handler) async fn submit_input_with_completion(
         &self,
         session_id: SessionId,
-        input: PromptInput,
+        input: UserInput,
     ) -> Result<
         (
             TurnId,

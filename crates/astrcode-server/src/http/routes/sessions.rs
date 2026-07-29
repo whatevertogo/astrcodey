@@ -243,7 +243,7 @@ pub(in crate::http) async fn submit_prompt(
         .session_commands()
         .submit_input(
             session_id.clone(),
-            crate::turn_scheduler::PromptInput {
+            astrcode_core::user_input::UserInput {
                 text: request.text,
                 attachments,
             },
