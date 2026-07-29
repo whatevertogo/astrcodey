@@ -2,9 +2,14 @@
 //!
 //! Runtime provider construction still reads user profiles from `Config`. This
 //! catalog describes stable presets at the config boundary: provider family,
-//! wire format, auth scheme, common endpoint presets, and seed model names.
+//! wire format, auth scheme, common endpoint presets, seed model names, and
+//! built-in thinking capability defaults.
 
 use super::{ProviderAuthScheme, ProviderWireFormat};
+
+mod thinking;
+
+pub use thinking::resolve_thinking_capability;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderEndpointPreset {

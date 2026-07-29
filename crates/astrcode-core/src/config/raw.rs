@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    llm::{PromptCacheRetention, ThinkingLevel},
+use crate::llm::{
+    PromptCacheRetention, ThinkingLevel,
     thinking::{ThinkingCapability, ThinkingConfig},
 };
 
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn thinking_config_uses_documented_camel_case_contract() {
-        let thinking: crate::thinking::ThinkingConfig = serde_json::from_str(
+        let thinking: crate::llm::thinking::ThinkingConfig = serde_json::from_str(
             r#"
 {
   "enabled": true,
@@ -353,7 +353,7 @@ mod tests {
         assert_eq!(thinking.effort.as_deref(), Some("high"));
         assert_eq!(thinking.budget_tokens, Some(4096));
 
-        let capability: crate::thinking::ThinkingCapability = serde_json::from_str(
+        let capability: crate::llm::thinking::ThinkingCapability = serde_json::from_str(
             r#"
 {
   "wireMapping": "open_ai_chat",
@@ -367,7 +367,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             capability.wire_mapping,
-            crate::thinking::ThinkingWireMapping::OpenAiChat
+            crate::llm::thinking::ThinkingWireMapping::OpenAiChat
         );
         assert_eq!(capability.allowed_effort, Some(Vec::new()));
         assert_eq!(capability.budget_min, Some(1024));
@@ -375,7 +375,7 @@ mod tests {
         assert!(!capability.can_disable);
 
         assert!(
-            serde_json::from_str::<crate::thinking::ThinkingConfig>(
+            serde_json::from_str::<crate::llm::thinking::ThinkingConfig>(
                 r#"{"enabled":true,"budget_tokens":4096}"#
             )
             .is_err()

@@ -3,8 +3,9 @@
 use astrcode_core::{
     config::{
         Config, ConfigStoreError, ModelConfig, ModelOptionsConfig, Profile, ProviderCapabilities,
-        ProviderSpec, builtin_provider_catalog,
+        ProviderSpec, builtin_provider_catalog, model_thinking_config, resolve_thinking_capability,
     },
+    llm::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping, validate_thinking},
     permission::ApprovalMode,
 };
 use astrcode_protocol::http::{
@@ -57,25 +58,11 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
                     thinking: m
                         .model_options
                         .as_ref()
-                        .and_then(|options| {
-                            options.thinking.clone().or_else(|| {
-                                (options.reasoning.is_some() || options.thinking_level.is_some())
-                                    .then(|| {
-                                        astrcode_core::thinking::legacy_to_thinking_config(
-                                            options.reasoning.unwrap_or(false),
-                                            options.thinking_level,
-                                        )
-                                    })
-                            })
-                        })
+                        .and_then(model_thinking_config)
                         .map(Into::into),
                     thinking_capability: {
                         let cap = m.thinking_capability.clone().or_else(|| {
-                            astrcode_core::thinking::resolve_thinking_capability(
-                                &p.provider_kind,
-                                p.wire_format,
-                                &m.id,
-                            )
+                            resolve_thinking_capability(&p.provider_kind, p.wire_format, &m.id)
                         });
                         cap.map(Into::into)
                     },
@@ -379,21 +366,16 @@ pub(in crate::http) async fn update_model_options(
 
     // 2. Convert incoming thinking DTO -> core ThinkingConfig (None/null = default/disabled)
     let thinking_submitted = request.thinking.is_some();
-    let new_thinking: astrcode_core::thinking::ThinkingConfig = request
+    let new_thinking: ThinkingConfig = request
         .thinking
-        .map(astrcode_core::thinking::ThinkingConfig::from)
+        .map(ThinkingConfig::from)
         .unwrap_or_default()
         .normalized();
 
     // 3. Resolve capability: explicit override > built-in lookup
-    let capability: Option<astrcode_core::thinking::ThinkingCapability> =
-        model.thinking_capability.clone().or_else(|| {
-            astrcode_core::thinking::resolve_thinking_capability(
-                &profile.provider_kind,
-                profile.wire_format,
-                &model.id,
-            )
-        });
+    let capability: Option<ThinkingCapability> = model.thinking_capability.clone().or_else(|| {
+        resolve_thinking_capability(&profile.provider_kind, profile.wire_format, &model.id)
+    });
 
     // 4. Validate every explicit override. An omitted value means "use model default".
     if thinking_submitted {
@@ -408,7 +390,7 @@ pub(in crate::http) async fn update_model_options(
             },
             Some(cap) => {
                 // Run general validation
-                let issues = astrcode_core::thinking::validate_thinking(&new_thinking, cap);
+                let issues = validate_thinking(&new_thinking, cap);
                 if !issues.is_empty() {
                     return bad_request_response(
                         "invalid_thinking_config",
@@ -419,8 +401,7 @@ pub(in crate::http) async fn update_model_options(
                 // Anthropic-specific: budget_tokens must be < model.max_tokens
                 if matches!(
                     cap.wire_mapping,
-                    astrcode_core::thinking::ThinkingWireMapping::AnthropicBudget
-                        | astrcode_core::thinking::ThinkingWireMapping::AnthropicAdaptive
+                    ThinkingWireMapping::AnthropicBudget | ThinkingWireMapping::AnthropicAdaptive
                 ) {
                     if let Some(budget) = new_thinking.budget_tokens {
                         if let Some(max_tokens) = model.max_tokens {

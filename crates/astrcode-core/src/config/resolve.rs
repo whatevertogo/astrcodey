@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeMap, process::Command};
 
-use crate::config::{effective::*, raw::*};
+use crate::config::{effective::*, legacy, raw::*};
 
 /// 环境变量查找函数。注入式解析让纯函数可测，测试无需修改进程环境。
 type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
@@ -191,8 +191,6 @@ fn resolve_llm_settings(
     )?;
 
     let options = model.model_options.as_ref();
-    let reasoning = options.and_then(|o| o.reasoning).unwrap_or(false);
-    let thinking_level = options.and_then(|o| o.thinking_level);
     let thinking_configured = options.is_some_and(|options| {
         options.thinking.is_some()
             || options.reasoning.is_some()
@@ -201,21 +199,13 @@ fn resolve_llm_settings(
 
     // Resolve thinking config: new `thinking` field takes priority over legacy fields
     let thinking = options
-        .and_then(|o| o.thinking.clone())
-        .or_else(|| {
-            let legacy_tc = crate::thinking::legacy_to_thinking_config(reasoning, thinking_level);
-            if legacy_tc.enabled {
-                Some(legacy_tc)
-            } else {
-                None
-            }
-        })
+        .and_then(legacy::model_thinking_config)
         .unwrap_or_default()
         .normalized();
 
     // Resolve thinking capability: explicit override > built-in lookup
     let capability = model.thinking_capability.clone().or_else(|| {
-        crate::thinking::resolve_thinking_capability(
+        crate::config::resolve_thinking_capability(
             &profile.provider_kind,
             profile.wire_format,
             &model.id,
@@ -225,7 +215,7 @@ fn resolve_llm_settings(
     // Log validation issues for non-trivial mismatches
     if thinking_configured {
         if let Some(ref cap) = capability {
-            let issues = crate::thinking::validate_thinking(&thinking, cap);
+            let issues = crate::llm::thinking::validate_thinking(&thinking, cap);
             for issue in &issues {
                 tracing::warn!(
                     model = %model.id,
@@ -246,7 +236,7 @@ fn resolve_llm_settings(
     let resolved_thinking_level = thinking
         .effort
         .as_deref()
-        .and_then(crate::thinking::effort_to_thinking_level);
+        .and_then(legacy::effort_to_thinking_level);
 
     Ok(LlmSettings {
         provider_kind: profile.provider_kind.clone(),
@@ -929,7 +919,7 @@ mod tests {
                     model_options: Some(ModelOptionsConfig {
                         reasoning: Some(false),
                         thinking_level: Some(crate::llm::ThinkingLevel::High),
-                        thinking: Some(crate::thinking::ThinkingConfig {
+                        thinking: Some(crate::llm::thinking::ThinkingConfig {
                             enabled: true,
                             effort: Some("max".into()),
                             budget_tokens: Some(4096),
@@ -956,7 +946,7 @@ mod tests {
 
     #[test]
     fn test_explicit_thinking_capability_override() {
-        use crate::thinking::{ThinkingCapability, ThinkingWireMapping};
+        use crate::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
 
         let config = Config {
             profiles: vec![Profile {

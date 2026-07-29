@@ -1,16 +1,9 @@
-//! Model thinking/reasoning domain types and built-in capability resolution.
+//! Model thinking/reasoning domain contracts.
 //!
 //! This module defines the normalized thinking configuration model used throughout
-//! the runtime, the capability description that declares what thinking features a
-//! provider/wire/model combination supports, and the built-in capability lookup
-//! by provider kind + wire format + model family.
+//! the runtime and the capability description consumed by configuration and provider
+//! boundaries. Built-in provider policy and legacy migration live in [`crate::config`].
 
-mod catalog;
-mod legacy;
-
-pub use catalog::resolve_thinking_capability;
-pub(crate) use legacy::effort_to_thinking_level;
-pub use legacy::legacy_to_thinking_config;
 use serde::{Deserialize, Serialize};
 
 // ── Normalized Thinking Config ──────────────────────────────────────────
@@ -173,100 +166,6 @@ pub fn validate_thinking(config: &ThinkingConfig, capability: &ThinkingCapabilit
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::ThinkingLevel;
-
-    #[test]
-    fn resolve_openai_responses_has_effort_enum() {
-        let cap = resolve_thinking_capability(
-            "openai",
-            super::super::config::raw::ProviderWireFormat::OpenAiResponses,
-            "o3-mini",
-        )
-        .expect("o3 family should resolve");
-        assert_eq!(cap.wire_mapping, ThinkingWireMapping::OpenAiResponses);
-        let allowed = cap
-            .allowed_effort
-            .expect("openai responses has allowed effort");
-        assert!(allowed.contains(&"low".to_string()));
-        assert!(allowed.contains(&"medium".to_string()));
-        assert!(allowed.contains(&"high".to_string()));
-    }
-
-    #[test]
-    fn resolve_openai_responses_gpt_4_1_is_not_assumed_to_reason() {
-        assert!(
-            resolve_thinking_capability(
-                "openai",
-                super::super::config::raw::ProviderWireFormat::OpenAiResponses,
-                "gpt-4.1-nano",
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn resolve_modern_anthropic_uses_adaptive_effort() {
-        let cap = resolve_thinking_capability(
-            "anthropic",
-            super::super::config::raw::ProviderWireFormat::AnthropicMessages,
-            "claude-sonnet-4-6",
-        )
-        .expect("anthropic should resolve");
-        assert_eq!(cap.wire_mapping, ThinkingWireMapping::AnthropicAdaptive);
-        assert!(
-            cap.allowed_effort
-                .is_some_and(|values| values.contains(&"max".into()))
-        );
-        assert_eq!(cap.budget_min, None);
-    }
-
-    #[test]
-    fn resolve_legacy_anthropic_has_budget_constraints() {
-        let cap = resolve_thinking_capability(
-            "anthropic",
-            super::super::config::raw::ProviderWireFormat::AnthropicMessages,
-            "claude-3-7-sonnet-latest",
-        )
-        .expect("legacy anthropic should resolve");
-        assert_eq!(cap.wire_mapping, ThinkingWireMapping::AnthropicBudget);
-        assert_eq!(cap.budget_min, Some(1024));
-        assert_eq!(cap.budget_max, Some(64_000));
-        assert_eq!(cap.allowed_effort, Some(vec![]));
-    }
-
-    #[test]
-    fn resolve_deepseek_uses_openai_chat_mapping() {
-        let cap = resolve_thinking_capability(
-            "deepseek",
-            super::super::config::raw::ProviderWireFormat::OpenAiChatCompletions,
-            "deepseek-v4-flash",
-        )
-        .expect("deepseek should resolve");
-        assert_eq!(cap.wire_mapping, ThinkingWireMapping::OpenAiChat);
-        // Effort not allowed (toggle-only)
-        assert_eq!(cap.allowed_effort, Some(vec![]));
-    }
-
-    #[test]
-    fn resolve_unknown_openai_compatible_returns_none() {
-        // Generic openai-compatible provider_kind should NOT match any built-in spec
-        let cap = resolve_thinking_capability(
-            "openai-compatible",
-            super::super::config::raw::ProviderWireFormat::OpenAiChatCompletions,
-            "gpt-4.1",
-        );
-        assert!(cap.is_none(), "openai-compatible should not resolve");
-    }
-
-    #[test]
-    fn resolve_unknown_provider_returns_none() {
-        let cap = resolve_thinking_capability(
-            "unknown-provider",
-            super::super::config::raw::ProviderWireFormat::OpenAiChatCompletions,
-            "some-model",
-        );
-        assert!(cap.is_none());
-    }
 
     #[test]
     fn validate_thinking_valid_config() {
@@ -344,41 +243,6 @@ mod tests {
         let issues = validate_thinking(&config, &cap);
         assert!(!issues.is_empty());
         assert!(issues.iter().any(|i| i.contains("below minimum")));
-    }
-
-    #[test]
-    fn legacy_conversion_reasoning_only() {
-        let tc = legacy_to_thinking_config(true, None);
-        assert!(tc.enabled);
-        assert_eq!(tc.effort, None);
-        assert_eq!(tc.budget_tokens, None);
-    }
-
-    #[test]
-    fn legacy_conversion_reasoning_with_level() {
-        let tc = legacy_to_thinking_config(true, Some(ThinkingLevel::High));
-        assert!(tc.enabled);
-        assert_eq!(tc.effort, Some("high".into()));
-        assert_eq!(tc.budget_tokens, None);
-    }
-
-    #[test]
-    fn legacy_conversion_neither() {
-        let tc = legacy_to_thinking_config(false, None);
-        assert!(!tc.enabled);
-        assert_eq!(tc.effort, None);
-    }
-
-    #[test]
-    fn effort_round_trip() {
-        for level in [
-            ThinkingLevel::Low,
-            ThinkingLevel::Medium,
-            ThinkingLevel::High,
-        ] {
-            let effort = level.as_wire_value();
-            assert_eq!(effort_to_thinking_level(effort), Some(level));
-        }
     }
 
     #[test]

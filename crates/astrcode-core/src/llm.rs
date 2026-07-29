@@ -12,13 +12,12 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    message_attachment::MessageAttachment,
-    thinking::{ThinkingCapability, ThinkingConfig},
-    tool::ToolDefinition,
-};
+use crate::{message_attachment::MessageAttachment, tool::ToolDefinition};
 
+pub mod thinking;
 pub mod token_estimate;
+
+use thinking::{ThinkingCapability, ThinkingConfig};
 
 /// LLM 对话消息中的角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -185,7 +185,7 @@ impl LlmProvider for StandardProvider {
 mod tests {
     use astrcode_core::{
         config::OpenAiApiMode,
-        thinking::ThinkingConfig,
+        llm::thinking::ThinkingConfig,
         tool::{ExecutionMode, ToolDefinition, ToolOrigin},
     };
 
@@ -195,7 +195,7 @@ mod tests {
         api_mode: OpenAiApiMode,
         supports_cache_key: bool,
         thinking: ThinkingConfig,
-        thinking_capability: Option<astrcode_core::thinking::ThinkingCapability>,
+        thinking_capability: Option<astrcode_core::llm::thinking::ThinkingCapability>,
     ) -> StandardProvider {
         use astrcode_core::llm::{OpenAiProviderExtras, ProviderExtras};
         let config = LlmClientConfig {
@@ -272,8 +272,8 @@ mod tests {
                 effort: Some("medium".into()),
                 budget_tokens: None,
             },
-            Some(astrcode_core::thinking::ThinkingCapability {
-                wire_mapping: astrcode_core::thinking::ThinkingWireMapping::OpenAiResponses,
+            Some(astrcode_core::llm::thinking::ThinkingCapability {
+                wire_mapping: astrcode_core::llm::thinking::ThinkingWireMapping::OpenAiResponses,
                 allowed_effort: Some(vec!["medium".into()]),
                 budget_min: None,
                 budget_max: None,
@@ -374,7 +374,7 @@ mod tests {
 
     #[test]
     fn responses_request_includes_reasoning_effort_when_thinking_enabled_with_effort() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
         let p = provider(
             OpenAiApiMode::Responses,
             false,

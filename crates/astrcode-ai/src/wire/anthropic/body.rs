@@ -3,8 +3,10 @@
 //! and byte-stream transport in [`super::transport`].
 
 use astrcode_core::{
-    llm::{LlmContent, LlmMessage, LlmRole},
-    thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping},
+    llm::{
+        LlmContent, LlmMessage, LlmRole,
+        thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping},
+    },
     tool::ToolDefinition,
 };
 
@@ -370,8 +372,7 @@ fn mark_history_cache_breakpoint(api_messages: &mut [serde_json::Value]) {
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
-        llm::{LlmContent, LlmMessage, LlmRole},
-        thinking::ThinkingConfig,
+        llm::{LlmContent, LlmMessage, LlmRole, thinking::ThinkingConfig},
         tool::{ExecutionMode, ToolDefinition, ToolOrigin},
     };
 
@@ -544,7 +545,7 @@ mod tests {
 
     #[test]
     fn anthropic_adaptive_thinking_emits_type_adaptive_and_effort() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
         let config = AnthropicRequestConfig {
             model_id: "claude-opus-4-6",
             max_output_tokens: 8192,
@@ -569,7 +570,7 @@ mod tests {
 
     #[test]
     fn anthropic_budget_thinking_emits_type_enabled_and_budget_tokens() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
         let config = AnthropicRequestConfig {
             model_id: "claude-sonnet-4-6",
             max_output_tokens: 8192,
@@ -594,7 +595,7 @@ mod tests {
 
     #[test]
     fn anthropic_budget_rejects_when_budget_equals_or_exceeds_max_output_tokens() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
         let config = AnthropicRequestConfig {
             model_id: "claude-sonnet-4-6",
             max_output_tokens: 4096,
@@ -621,7 +622,7 @@ mod tests {
 
     #[test]
     fn anthropic_thinking_omitted_when_disabled() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
         let config = AnthropicRequestConfig {
             model_id: "claude-opus-4-6",
             max_output_tokens: 8192,
@@ -648,7 +649,7 @@ mod tests {
 
     #[test]
     fn anthropic_count_tokens_omits_thinking() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{ThinkingCapability, ThinkingWireMapping};
         let config = AnthropicRequestConfig {
             model_id: "claude-opus-4-6",
             max_output_tokens: 8192,

@@ -1014,7 +1014,12 @@ async fn get_config_exposes_thinking_and_capability() {
 
     // thinking_capability should be present (deepseek has built-in capability)
     let cap = &model["thinkingCapability"];
-    assert_eq!(cap["wireMapping"], "open_ai_chat");
+    assert_eq!(cap["allowedEffort"], serde_json::json!([]));
+    assert_eq!(cap["canDisable"], true);
+    assert!(
+        cap.get("wireMapping").is_none(),
+        "provider wire encoding must stay out of the UI contract"
+    );
 }
 
 #[tokio::test]

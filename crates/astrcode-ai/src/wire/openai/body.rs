@@ -6,8 +6,10 @@
 
 use astrcode_core::{
     config::OpenAiApiMode,
-    llm::{LlmMessage, LlmRole, PromptCacheRetention},
-    thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping},
+    llm::{
+        LlmMessage, LlmRole, PromptCacheRetention,
+        thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping},
+    },
     tool::ToolDefinition,
 };
 
@@ -269,7 +271,9 @@ mod tests {
 
     #[test]
     fn responses_thinking_emits_reasoning_effort_when_capability_maps_and_enabled_with_effort() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{
+            ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::Responses,
             model_id: "o3-mini",
@@ -297,7 +301,7 @@ mod tests {
 
     #[test]
     fn responses_thinking_omitted_when_no_capability() {
-        use astrcode_core::thinking::ThinkingConfig;
+        use astrcode_core::llm::thinking::ThinkingConfig;
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::Responses,
             model_id: "o3-mini",
@@ -322,7 +326,9 @@ mod tests {
 
     #[test]
     fn responses_thinking_omitted_when_disabled_even_with_capability() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{
+            ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::Responses,
             model_id: "o3-mini",
@@ -353,7 +359,9 @@ mod tests {
 
     #[test]
     fn responses_thinking_omitted_when_no_effort_even_if_enabled() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{
+            ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::Responses,
             model_id: "o3-mini",
@@ -384,7 +392,9 @@ mod tests {
 
     #[test]
     fn chat_emits_thinking_enabled_for_deepseek_when_capability_maps() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{
+            ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::ChatCompletions,
             model_id: "deepseek-chat",
@@ -416,7 +426,9 @@ mod tests {
 
     #[test]
     fn chat_emits_thinking_disabled_only_when_capability_maps_openai_chat() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{
+            ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::ChatCompletions,
             model_id: "deepseek-chat",
@@ -444,7 +456,7 @@ mod tests {
 
     #[test]
     fn chat_omits_thinking_when_no_capability() {
-        use astrcode_core::thinking::ThinkingConfig;
+        use astrcode_core::llm::thinking::ThinkingConfig;
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::ChatCompletions,
             model_id: "generic-model",
@@ -473,7 +485,9 @@ mod tests {
 
     #[test]
     fn chat_emits_reasoning_effort_when_openai_chat_capability_with_effort() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{
+            ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::ChatCompletions,
             model_id: "deepseek-chat",
@@ -502,7 +516,9 @@ mod tests {
 
     #[test]
     fn chat_emits_glm_thinking_toggle() {
-        use astrcode_core::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping};
+        use astrcode_core::llm::thinking::{
+            ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::ChatCompletions,
             model_id: "glm-5.1-flash",
@@ -531,8 +547,7 @@ mod tests {
     #[test]
     fn prompt_cache_key_pinned_for_chat_and_responses() {
         use astrcode_core::{
-            llm::LlmMessage,
-            thinking::ThinkingConfig,
+            llm::{LlmMessage, thinking::ThinkingConfig},
             tool::{ExecutionMode, ToolDefinition, ToolOrigin},
         };
         let thinking = ThinkingConfig {

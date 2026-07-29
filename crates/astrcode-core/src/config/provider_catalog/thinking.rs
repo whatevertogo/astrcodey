@@ -1,7 +1,9 @@
 use std::sync::LazyLock;
 
-use super::{ThinkingCapability, ThinkingWireMapping};
-use crate::config::raw::ProviderWireFormat;
+use crate::{
+    config::raw::ProviderWireFormat,
+    llm::thinking::{ThinkingCapability, ThinkingWireMapping},
+};
 
 static BUILTIN_THINKING_SPECS: LazyLock<Vec<BuiltinThinkingSpec>> = LazyLock::new(|| {
     vec![
@@ -101,4 +103,61 @@ pub fn resolve_thinking_capability(
                         .any(|prefix| model_id.starts_with(prefix)))
         })
         .map(|spec| spec.capability.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_known_model_families_without_guessing_unknown_profiles() {
+        let cases = [
+            (
+                "openai",
+                ProviderWireFormat::OpenAiResponses,
+                "o3-mini",
+                ThinkingWireMapping::OpenAiResponses,
+            ),
+            (
+                "anthropic",
+                ProviderWireFormat::AnthropicMessages,
+                "claude-sonnet-4-6",
+                ThinkingWireMapping::AnthropicAdaptive,
+            ),
+            (
+                "anthropic",
+                ProviderWireFormat::AnthropicMessages,
+                "claude-3-7-sonnet-latest",
+                ThinkingWireMapping::AnthropicBudget,
+            ),
+            (
+                "deepseek",
+                ProviderWireFormat::OpenAiChatCompletions,
+                "deepseek-v4-flash",
+                ThinkingWireMapping::OpenAiChat,
+            ),
+        ];
+        for (provider, wire_format, model, expected_mapping) in cases {
+            let capability = resolve_thinking_capability(provider, wire_format, model)
+                .expect("known model family should resolve");
+            assert_eq!(capability.wire_mapping, expected_mapping);
+        }
+
+        assert!(
+            resolve_thinking_capability(
+                "openai",
+                ProviderWireFormat::OpenAiResponses,
+                "gpt-4.1-nano",
+            )
+            .is_none()
+        );
+        assert!(
+            resolve_thinking_capability(
+                "openai-compatible",
+                ProviderWireFormat::OpenAiChatCompletions,
+                "gpt-4.1",
+            )
+            .is_none()
+        );
+    }
 }

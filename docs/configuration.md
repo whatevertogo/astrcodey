@@ -222,6 +222,7 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 `wireMapping` 可为 `open_ai_responses`、`anthropic_adaptive`、`anthropic_budget`、
 `open_ai_chat`；`allowedEffort = []` 表示仅支持开关，省略表示允许 provider 自定义强度；
 `budgetMin` / `budgetMax` 约束预算范围；`canDisable` 缺省为 `true`。
+`wireMapping` 仅属于持久化配置和 provider 编码边界，不会通过设置页 API 暴露给客户端。
 
 ### 6.3 API Key 解析
 

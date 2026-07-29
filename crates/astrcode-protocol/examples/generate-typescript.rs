@@ -200,11 +200,6 @@ fn write_wire_values(output_dir: &Path) -> Result<(), Box<dyn Error>> {
     push_wire_values(&mut output, "THINKING_LEVELS", ThinkingLevelDto::ALL)?;
     push_wire_values(
         &mut output,
-        "THINKING_WIRE_MAPPINGS",
-        ThinkingWireMappingDto::ALL,
-    )?;
-    push_wire_values(
-        &mut output,
         "AGENT_SESSION_STATUSES",
         AgentSessionStatusDto::ALL,
     )?;

@@ -963,7 +963,7 @@ pub struct RemoveProviderPresetResponseDto {
     pub warning: Option<String>,
 }
 
-/// 标准化 thinking 配置 DTO（映射 core::thinking::ThinkingConfig）。
+/// 标准化 thinking 配置 DTO（映射 core::llm::thinking::ThinkingConfig）。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -976,8 +976,8 @@ pub struct ThinkingConfigDto {
     pub budget_tokens: Option<u32>,
 }
 
-impl From<astrcode_core::thinking::ThinkingConfig> for ThinkingConfigDto {
-    fn from(value: astrcode_core::thinking::ThinkingConfig) -> Self {
+impl From<astrcode_core::llm::thinking::ThinkingConfig> for ThinkingConfigDto {
+    fn from(value: astrcode_core::llm::thinking::ThinkingConfig) -> Self {
         Self {
             enabled: value.enabled,
             effort: value.effort,
@@ -986,7 +986,7 @@ impl From<astrcode_core::thinking::ThinkingConfig> for ThinkingConfigDto {
     }
 }
 
-impl From<ThinkingConfigDto> for astrcode_core::thinking::ThinkingConfig {
+impl From<ThinkingConfigDto> for astrcode_core::llm::thinking::ThinkingConfig {
     fn from(value: ThinkingConfigDto) -> Self {
         Self {
             enabled: value.enabled,

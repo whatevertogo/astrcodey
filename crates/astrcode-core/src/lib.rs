@@ -28,6 +28,5 @@ pub mod llm;
 pub mod message_attachment;
 pub mod permission;
 pub mod prompt;
-pub mod thinking;
 pub mod tool;
 pub mod types;
