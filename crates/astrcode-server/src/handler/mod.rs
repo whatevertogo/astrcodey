@@ -135,11 +135,27 @@ impl CommandHandler {
 
     // ─── 模型选择 ───────────────────────────────────────────────────────
 
-    /// 全局配置已更新，同步所有已打开 session 的 provider 和 model_id。
-    async fn sync_active_session_provider(&self) -> Result<(), HandlerError> {
+    /// 将全局模型选择立即写入当前 session；其他顶层 session 在下次 turn 前同步。
+    async fn configure_focused_session_model(&self) -> Result<(), HandlerError> {
+        let Some(session_id) = self.focused_session_id.clone() else {
+            return Ok(());
+        };
+        let model_id = self
+            .runtime
+            .runtime_services()
+            .read_effective()
+            .llm
+            .model_id
+            .clone();
+        let session = self.runtime.session_manager().open(session_id).await?;
+        session
+            .configure_model(model_id)
+            .await
+            .map_err(HandlerError::Session)?;
         self.runtime
             .session_manager()
-            .sync_all_model_bindings_from_config();
+            .sync_durable_events(session.id())
+            .await;
         Ok(())
     }
 
@@ -159,7 +175,7 @@ impl CommandHandler {
             Err(error) => return Err(error),
         };
 
-        self.sync_active_session_provider().await?;
+        self.configure_focused_session_model().await?;
 
         self.event_bus.send_notification(notification);
         Ok(())
@@ -183,9 +199,9 @@ impl CommandHandler {
             .handle_response(request_id, value)
             .await?;
 
-        // 交互式选择完成时同步活跃 session 的 provider。
+        // 交互式选择完成时更新当前 session 的持久化模型。
         if self.model_selection.is_idle() {
-            self.sync_active_session_provider().await?;
+            self.configure_focused_session_model().await?;
         }
 
         self.event_bus.send_notification(notification);

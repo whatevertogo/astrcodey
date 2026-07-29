@@ -51,7 +51,7 @@ pub(crate) struct SharedTurnContext {
     pub(crate) model_id: String,
     pub(crate) session_store_dir: Option<std::path::PathBuf>,
     /// 当前 turn 的事件 ingress（`ExtensionEvents` 在 `process_prompt` 期间注入）。
-    pub(crate) turn_event_sender: Option<std::sync::Arc<crate::turn_publish::TurnEventSender>>,
+    pub(crate) turn_event_sender: Option<crate::turn_publish::TurnEventSender>,
     pub(crate) approval_mode: astrcode_core::permission::ApprovalMode,
     pub(crate) tool_selection: Option<astrcode_core::tool::SessionToolSelection>,
     pub(crate) permission_chain: std::sync::Arc<crate::permission::PermissionChain>,
@@ -147,6 +147,8 @@ pub enum TurnError {
     Session(#[from] crate::session::SessionError),
     #[error("session projection error: {0}")]
     Projection(#[from] astrcode_session_projection::ProjectionError),
+    #[error("tool approval registration error: {0}")]
+    ApprovalRegistration(#[from] crate::ToolApprovalRegistrationError),
     #[error("prompt is still too long after reactive compaction")]
     CompactExhausted,
     #[error("LLM stream ended unexpectedly")]

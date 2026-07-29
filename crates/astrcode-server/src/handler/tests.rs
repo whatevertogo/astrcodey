@@ -797,7 +797,6 @@ fn test_runtime_with_settings(
     ));
     let session_manager = Arc::new(crate::session_manager::SessionManager::new(
         Arc::clone(&event_store),
-        Arc::clone(&config),
         Arc::clone(&runtime_services),
         vec![],
     ));
@@ -1425,11 +1424,6 @@ async fn startup_repairs_stale_pending_tool_calls() {
 
     let app = crate::bootstrap::ServerApp::new(Arc::clone(&runtime));
     app.initialize().await;
-    assert!(app.event_bus().is_attached(&sid));
-    assert!(
-        !app.event_bus().is_attached(&clean_sid),
-        "startup should not retain a runtime task for a clean historical session"
-    );
 
     let state = runtime
         .event_store()

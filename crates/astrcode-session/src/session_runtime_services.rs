@@ -4,7 +4,7 @@
 //! 以及当前生效的配置。Session 创建时持有 `Arc<SessionRuntimeServices>`，运行 turn 时按需读取。
 //!
 //! `llm` 与 `effective_config` 支持热替换：server 端配置变更时通过 `swap_llm` /
-//! `update_effective` 原子更新，正在运行的 turn 在下一轮 LLM 调用前看到新值。
+//! `update_effective` 原子更新，后续 turn 会读取新值。
 //! 快路径读取使用 `ArcSwap`，避免每个 turn 为获取 provider / config 快照进入读锁。
 
 use std::sync::Arc;
@@ -20,7 +20,7 @@ use astrcode_extension_sdk::runtime_ports::{
     PromptContributor, RuntimeSnapshotState, ToolCatalogProvider, TurnHooks,
 };
 
-use crate::SessionExtensionPorts;
+use crate::{SessionExtensionPorts, SessionResourceStore};
 
 pub struct SessionRuntimeServices {
     llm: Arc<ArcSwap<ProviderSlot>>,
@@ -31,6 +31,7 @@ pub struct SessionRuntimeServices {
     post_compact_enricher: Arc<dyn PostCompactEnricher>,
     effective_config: ArcSwap<EffectiveConfig>,
     tool_catalog: Arc<dyn ToolCatalogProvider>,
+    session_resources: SessionResourceStore,
 }
 
 struct ProviderSlot {
@@ -90,6 +91,7 @@ impl SessionRuntimeServices {
             post_compact_enricher,
             effective_config: ArcSwap::from_pointee(effective_config),
             tool_catalog,
+            session_resources: SessionResourceStore::default(),
         }
     }
 
@@ -113,6 +115,15 @@ impl SessionRuntimeServices {
     /// 未配置小模型时返回的与主模型相同。
     pub fn small_llm(&self) -> Arc<dyn LlmProvider> {
         Arc::clone(&self.small_llm.load_full().provider)
+    }
+
+    pub fn llm_for_model_id(&self, model_id: &str) -> Arc<dyn LlmProvider> {
+        let effective = self.read_effective();
+        if model_id == effective.small_llm.model_id && model_id != effective.llm.model_id {
+            self.small_llm()
+        } else {
+            self.llm()
+        }
     }
 
     /// 热替换小模型 provider。
@@ -171,6 +182,10 @@ impl SessionRuntimeServices {
     /// 获取 session_ops 能力引用。
     pub fn session_ops(&self) -> Option<Arc<dyn astrcode_core::tool::SessionOperations>> {
         self.extension_ports.session_operations().session_ops()
+    }
+
+    pub fn session_resources(&self) -> &SessionResourceStore {
+        &self.session_resources
     }
 }
 

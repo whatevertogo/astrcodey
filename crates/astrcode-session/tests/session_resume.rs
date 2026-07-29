@@ -111,15 +111,9 @@ fn test_caps() -> Arc<SessionRuntimeServices> {
 fn runtime(
     session_id: SessionId,
     store: &Arc<dyn SessionStore>,
-    caps: &SessionRuntimeServices,
+    _caps: &SessionRuntimeServices,
 ) -> Arc<SessionRuntimeState> {
-    Arc::new(SessionRuntimeState::new(
-        session_id,
-        store.clone(),
-        caps.llm(),
-        caps.small_llm(),
-        "mock-model".into(),
-    ))
+    Arc::new(SessionRuntimeState::new(session_id, store.clone()))
 }
 
 #[tokio::test]
@@ -131,6 +125,7 @@ async fn reopen_restores_native_extra_system_prompt() {
     let runtime_a = runtime(sid.clone(), &store, &caps);
     let session_a = Session::create_with_params(SessionCreateParams {
         working_dir: ".".into(),
+        model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
@@ -174,6 +169,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
     let parent_id = new_session_id();
     let parent = Session::create_with_params(SessionCreateParams {
         working_dir: ".".into(),
+        model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: Some(parent_selection),
         source_extension: None,
@@ -188,6 +184,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
     let direct_child_id = new_session_id();
     let direct_child = Session::create_with_params(SessionCreateParams {
         working_dir: ".".into(),
+        model_id: "mock-model".into(),
         parent_session_id: Some(parent.id().clone()),
         tool_selection: None,
         source_extension: None,
@@ -287,6 +284,7 @@ async fn prompt_failure_does_not_create_session() {
     let session_id = new_session_id();
     let error = match Session::create_with_params(SessionCreateParams {
         working_dir: ".".into(),
+        model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
@@ -318,6 +316,7 @@ async fn inherited_initial_prompt_survives_initialization_and_reopen() {
     };
     let session = Session::create_with_params(SessionCreateParams {
         working_dir: ".".into(),
+        model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,

@@ -2283,7 +2283,6 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     ));
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
-        Arc::clone(&config),
         Arc::clone(&capabilities),
         vec![],
     ));

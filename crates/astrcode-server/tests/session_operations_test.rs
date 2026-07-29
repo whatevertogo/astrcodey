@@ -17,8 +17,8 @@ use astrcode_core::{
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
-    ChildSessionCoordinator, ConfigManager, ServerSessionOperations, SessionManager, TurnRegistry,
-    TurnScheduler, session_started_event_for_test,
+    ChildSessionCoordinator, ServerSessionOperations, SessionManager, TurnRegistry, TurnScheduler,
+    session_started_event_for_test,
 };
 use astrcode_session_projection::AgentSessionStatus;
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
@@ -166,18 +166,8 @@ fn build_test_ops_with_llm(
         context_assembler,
         std::sync::Arc::clone(&shell_timeout_secs),
     );
-    let config = Arc::new(ConfigManager::new(
-        Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-            std::path::PathBuf::from("target/test-session-ops-config.toml"),
-        )),
-        Default::default(),
-        Arc::clone(&extension_runner),
-        shell_timeout_secs,
-        Arc::clone(&capabilities),
-    ));
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&store),
-        config,
         capabilities,
         vec![],
     ));

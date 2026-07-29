@@ -56,31 +56,38 @@ async fn spawn_session_with_store(
     Arc<dyn SessionStore>,
     astrcode_core::types::SessionId,
 ) {
+    let (session, store, session_id, _) = spawn_session_with_services(llm).await;
+    (session, store, session_id)
+}
+
+async fn spawn_session_with_services(
+    llm: Arc<dyn LlmProvider>,
+) -> (
+    Session,
+    Arc<dyn SessionStore>,
+    astrcode_core::types::SessionId,
+    Arc<SessionRuntimeServices>,
+) {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let caps = test_caps(llm);
     let sid = new_session_id();
-    let runtime = Arc::new(SessionRuntimeState::new(
-        sid.clone(),
-        store.clone(),
-        caps.llm(),
-        caps.small_llm(),
-        "mock-model".into(),
-    ));
+    let runtime = Arc::new(SessionRuntimeState::new(sid.clone(), store.clone()));
     let working_dir = std::env::temp_dir().join(sid.as_str());
     std::fs::create_dir_all(&working_dir).unwrap();
     let session = Session::create_with_params(SessionCreateParams {
         working_dir: working_dir.to_string_lossy().into_owned(),
+        model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
         extra_system_prompt: None,
         initial_system_prompt: None,
         runtime,
-        runtime_services: caps,
+        runtime_services: Arc::clone(&caps),
     })
     .await
     .unwrap();
-    (session, store, sid)
+    (session, store, sid, caps)
 }
 
 struct ToolLoopLlm {
@@ -245,6 +252,33 @@ impl LlmProvider for UsageLlm {
             max_output_tokens: 4096,
         }
     }
+}
+
+#[tokio::test]
+async fn top_level_turn_persists_the_current_main_model_before_running() {
+    let (session, store, sid, services) = spawn_session_with_services(Arc::new(UsageLlm)).await;
+    let mut effective = services.read_effective().as_ref().clone();
+    effective.llm.model_id = "new-main-model".into();
+    services.update_effective(effective);
+
+    let handle = session
+        .submit("use current model".into(), new_turn_id(), None)
+        .await
+        .unwrap();
+    assert!(handle.wait().await.unwrap().output.is_ok());
+
+    assert_eq!(
+        session.read_model().await.unwrap().identity.model_id,
+        "new-main-model"
+    );
+    let model_changes = store
+        .replay_events(&sid)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| matches!(event.payload, DurableEventPayload::ModelIdChanged { .. }))
+        .count();
+    assert_eq!(model_changes, 1);
 }
 
 #[tokio::test]

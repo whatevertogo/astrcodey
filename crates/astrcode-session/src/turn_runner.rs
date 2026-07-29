@@ -169,8 +169,8 @@ impl TurnLoop {
         }
 
         let mut state = TurnState::new(all_tools);
-        if let Ok(count) = publisher.visible_user_message_count().await {
-            state.set_tracked_user_message_count(count);
+        if let Ok(model) = publisher.snapshot_model().await {
+            state.set_tracked_user_message_count(count_visible_user_messages(&model));
         }
 
         // Step

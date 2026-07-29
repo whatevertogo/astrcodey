@@ -18,10 +18,12 @@ use astrcode_core::{
     types::TurnId,
 };
 use astrcode_session_projection::SessionReadModel;
+use astrcode_storage::StorageError;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    session::Session,
+    session::{Session, SessionError},
+    session_event_sink::SessionEventPublishError,
     turn_context::{TurnError, TurnEventTx},
 };
 
@@ -32,7 +34,7 @@ const DURABLE_PUBLISH_RETRY_BASE_MS: u64 = 50;
 pub(crate) struct TurnEvents {
     session: Session,
     turn_id: TurnId,
-    emitted_durable_error: Arc<AtomicBool>,
+    emitted_durable_error: AtomicBool,
 }
 
 impl TurnEvents {
@@ -40,7 +42,7 @@ impl TurnEvents {
         Self {
             session,
             turn_id,
-            emitted_durable_error: Arc::new(AtomicBool::new(false)),
+            emitted_durable_error: AtomicBool::new(false),
         }
     }
 
@@ -53,24 +55,21 @@ impl TurnEvents {
         self.session.read_model().await.map_err(TurnError::from)
     }
 
-    /// 统计 provider 可见的非合成 user 消息条数。
-    pub(crate) async fn visible_user_message_count(&self) -> Result<usize, TurnError> {
-        let model = self.session.read_model().await?;
-        Ok(crate::steer::count_visible_user_messages(&model))
-    }
-
     pub(crate) async fn durable(&self, payload: DurableEventPayload) -> Result<(), TurnError> {
-        match self
-            .session
-            .emit_durable(Some(&self.turn_id), payload)
-            .await
-        {
-            Ok(_) => Ok(()),
+        match self.persist_durable(payload).await {
+            Ok(()) => Ok(()),
             Err(error) => {
                 self.live_error(-32603, error.to_string(), false);
-                Err(error.into())
+                Err(error)
             },
         }
+    }
+
+    async fn persist_durable(&self, payload: DurableEventPayload) -> Result<(), TurnError> {
+        self.session
+            .emit_durable(Some(&self.turn_id), payload)
+            .await?;
+        Ok(())
     }
 
     pub(crate) fn live(&self, payload: LiveEventPayload) {
@@ -109,9 +108,12 @@ async fn durable_with_retry(publisher: &TurnEvents, payload: DurableEventPayload
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        match publisher.durable(payload.clone()).await {
+        match publisher.persist_durable(payload.clone()).await {
             Ok(()) => break,
-            Err(error) if attempt < DURABLE_PUBLISH_MAX_ATTEMPTS => {
+            Err(error)
+                if attempt < DURABLE_PUBLISH_MAX_ATTEMPTS
+                    && durable_publish_error_is_retryable(&error) =>
+            {
                 tracing::warn!(
                     error = %error,
                     attempt,
@@ -127,12 +129,31 @@ async fn durable_with_retry(publisher: &TurnEvents, payload: DurableEventPayload
                 tracing::error!(
                     error = %error,
                     attempt,
-                    "turn event ingress durable publish failed after retries"
+                    "turn event ingress durable publish failed"
                 );
+                publisher.live_error(-32603, error.to_string(), false);
                 break;
             },
         }
     }
+}
+
+fn durable_publish_error_is_retryable(error: &TurnError) -> bool {
+    let TurnError::Session(SessionError::EventPublish(SessionEventPublishError::Storage(
+        StorageError::Io(error),
+    ))) = error
+    else {
+        return false;
+    };
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+    )
 }
 
 async fn dispatch_payload(publisher: &TurnEvents, payload: EventPayload) {
@@ -166,6 +187,7 @@ impl TurnEventSender {
 
 /// 单 FIFO worker：turn 内唯一的 hook/工具事件 ingress。
 pub(crate) struct TurnEventIngress {
+    shutdown_tx: oneshot::Sender<()>,
     worker: tokio::task::JoinHandle<()>,
 }
 
@@ -173,6 +195,7 @@ impl TurnEventIngress {
     pub(crate) fn start(publisher: Arc<TurnEvents>) -> (TurnEventSender, Self) {
         let (publish_tx, mut publish_rx) = mpsc::unbounded_channel::<EventPayload>();
         let (flush_tx, mut flush_rx) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
+        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let sender = TurnEventSender {
             publish_tx,
             flush_tx,
@@ -181,6 +204,17 @@ impl TurnEventIngress {
             loop {
                 tokio::select! {
                     biased;
+                    _ = &mut shutdown_rx => {
+                        publish_rx.close();
+                        flush_rx.close();
+                        while let Some(payload) = publish_rx.recv().await {
+                            dispatch_payload(&publisher, payload).await;
+                        }
+                        while let Some(ack) = flush_rx.recv().await {
+                            let _ = ack.send(());
+                        }
+                        break;
+                    }
                     Some(payload) = publish_rx.recv() => {
                         dispatch_payload(&publisher, payload).await;
                     }
@@ -194,10 +228,17 @@ impl TurnEventIngress {
                 }
             }
         });
-        (sender, Self { worker })
+        (
+            sender,
+            Self {
+                shutdown_tx,
+                worker,
+            },
+        )
     }
 
     pub(crate) async fn shutdown(self) {
+        let _ = self.shutdown_tx.send(());
         if let Err(error) = self.worker.await {
             tracing::error!(panic = %error, "turn event ingress worker panicked");
         }
@@ -207,7 +248,6 @@ impl TurnEventIngress {
 /// Turn 级扩展事件 ingress：在 `process_prompt` 期间为 hook / 工具提供 `event_tx`。
 pub(crate) struct ExtensionEvents {
     ingress: TurnEventIngress,
-    sender: Arc<TurnEventSender>,
 }
 
 impl ExtensionEvents {
@@ -216,14 +256,12 @@ impl ExtensionEvents {
         shared: &mut crate::turn_context::SharedTurnContext,
     ) -> Self {
         let (sender, ingress) = TurnEventIngress::start(publisher);
-        let sender = Arc::new(sender);
-        shared.turn_event_sender = Some(Arc::clone(&sender));
-        Self { ingress, sender }
+        shared.turn_event_sender = Some(sender);
+        Self { ingress }
     }
 
     pub(crate) async fn shutdown(self, shared: &mut crate::turn_context::SharedTurnContext) {
         shared.turn_event_sender = None;
-        drop(self.sender);
         self.ingress.shutdown().await;
     }
 }
@@ -241,7 +279,7 @@ mod tests {
             ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme,
             ProviderWireFormat,
         },
-        event::{DurableEventPayload, EventPayload, ExtensionEventData, LiveEventPayload},
+        event::{DurableEventPayload, Event, EventPayload, ExtensionEventData, LiveEventPayload},
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         tool::ToolDefinition,
         types::{new_session_id, new_turn_id},
@@ -263,9 +301,18 @@ mod tests {
     use crate::{
         SessionExtensionPorts,
         session::{Session, SessionCreateParams},
+        session_event_sink::{SessionEventObserver, SessionEventSink},
         session_runtime::SessionRuntimeState,
         session_runtime_services::SessionRuntimeServices,
     };
+
+    struct ChannelObserver(mpsc::UnboundedSender<Arc<Event>>);
+
+    impl SessionEventObserver for ChannelObserver {
+        fn publish(&self, event: Arc<Event>) {
+            let _ = self.0.send(event);
+        }
+    }
 
     struct UnusedLlm;
 
@@ -388,15 +435,17 @@ mod tests {
     ) -> Session {
         let store: Arc<dyn astrcode_storage::SessionStore> = Arc::new(InMemoryEventStore::new());
         let session_id = new_session_id();
-        let runtime = Arc::new(SessionRuntimeState::new(
-            session_id,
-            store,
-            runtime_services.llm(),
-            runtime_services.small_llm(),
-            "mock-model".into(),
-        ));
+        let runtime = Arc::new(SessionRuntimeState::new(session_id, store));
+        test_session_with_runtime(runtime_services, runtime).await
+    }
+
+    async fn test_session_with_runtime(
+        runtime_services: Arc<SessionRuntimeServices>,
+        runtime: Arc<SessionRuntimeState>,
+    ) -> Session {
         let session = Session::create_with_params(SessionCreateParams {
             working_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            model_id: "mock-model".into(),
             parent_session_id: None,
             tool_selection: None,
             source_extension: None,
@@ -408,6 +457,58 @@ mod tests {
         .await
         .unwrap();
         session
+    }
+
+    #[tokio::test]
+    async fn durable_ingress_notifies_once_for_non_retryable_failure() {
+        let retryable_error = TurnError::Session(SessionError::EventPublish(
+            SessionEventPublishError::Storage(StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "injected timeout",
+            ))),
+        ));
+        assert!(durable_publish_error_is_retryable(&retryable_error));
+
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let store: Arc<dyn astrcode_storage::SessionStore> = Arc::new(InMemoryEventStore::new());
+        let runtime = Arc::new(SessionRuntimeState::new_with_event_sink(
+            new_session_id(),
+            store,
+            Arc::new(SessionEventSink::new(Arc::new(ChannelObserver(events_tx)))),
+        ));
+        let session = test_session_with_runtime(test_runtime_services(), runtime).await;
+        while events_rx.try_recv().is_ok() {}
+
+        let duplicate_session_started = session
+            .runtime
+            .store()
+            .replay_events(session.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .event
+            .payload;
+        let publisher = TurnEvents::new(session.clone(), new_turn_id());
+        durable_with_retry(&publisher, duplicate_session_started).await;
+        session
+            .runtime
+            .event_sink()
+            .sync(session.runtime.store().clone(), session.id())
+            .await
+            .unwrap();
+
+        let mut live_error_count = 0;
+        while let Ok(event) = events_rx.try_recv() {
+            if matches!(
+                event.payload,
+                EventPayload::Live(LiveEventPayload::ErrorOccurred { .. })
+            ) {
+                live_error_count += 1;
+            }
+        }
+        assert_eq!(live_error_count, 1);
     }
 
     #[tokio::test]
@@ -574,7 +675,7 @@ mod tests {
 
     /// 模拟并行工具经同一 ingress 发 durable 并 flush。
     #[tokio::test]
-    async fn parallel_tool_senders_flush_through_single_ingress_without_deadlock() {
+    async fn parallel_tool_senders_flush_and_shutdown_with_retained_tx() {
         use std::time::Duration;
 
         use astrcode_core::types::new_message_id;
@@ -583,11 +684,11 @@ mod tests {
         let publisher = Arc::new(TurnEvents::new(session.clone(), new_turn_id()));
 
         let (sender, ingress) = TurnEventIngress::start(Arc::clone(&publisher));
-        let sender = Arc::new(sender);
+        let retained_tx = sender.event_tx();
 
         let mut workers = Vec::new();
         for index in 0..8 {
-            let sender = Arc::clone(&sender);
+            let sender = sender.clone();
             workers.push(tokio::spawn(async move {
                 let tx = sender.event_tx();
                 tx.send(EventPayload::Durable(DurableEventPayload::UserMessage {
@@ -604,10 +705,23 @@ mod tests {
         for worker in workers {
             worker.await.unwrap();
         }
+        retained_tx
+            .send(EventPayload::Durable(DurableEventPayload::UserMessage {
+                message_id: new_message_id(),
+                text: "shutdown-drain".into(),
+                attachments: vec![],
+                accepted_seq: None,
+            }))
+            .unwrap();
         drop(sender);
         tokio::time::timeout(Duration::from_secs(5), ingress.shutdown())
             .await
             .expect("parallel ingress flush timed out");
+        assert!(
+            retained_tx
+                .send(EventPayload::Live(LiveEventPayload::AgentRunStarted))
+                .is_err()
+        );
 
         let events = session
             .runtime
@@ -622,7 +736,7 @@ mod tests {
                     matches!(event.payload, DurableEventPayload::UserMessage { .. })
                 })
                 .count(),
-            8
+            9
         );
     }
 }

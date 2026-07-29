@@ -3,9 +3,6 @@
 //! 封装 `config_store` / `raw_config` 的唯一写入路径；`effective` 和 `llm_provider`
 //! 的存储位置统一在 [`SessionRuntimeServices`] 内。更新会串行执行并在落盘前完成解析与
 //! provider 构建，避免并发 snapshot-modify-save 丢更新，也避免磁盘与运行态各成功一半。
-//! 已打开的 per-session `SessionRuntimeState` 需由
-//! [`crate::session_manager::SessionManager::sync_all_model_bindings_from_config`]
-//! 在配置写入后同步。
 
 use std::sync::{
     Arc,

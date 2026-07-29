@@ -263,7 +263,7 @@ impl ToolCalls {
         let (tx, rx) = oneshot::channel();
         let runtime = self.session.runtime();
         let _pending_approval =
-            runtime.register_pending_approval(ToolCallId::from(call.call_id.as_str()), tx);
+            runtime.register_pending_approval(ToolCallId::from(call.call_id.as_str()), tx)?;
         input
             .publisher
             .durable(DurableEventPayload::ToolApprovalRequested {

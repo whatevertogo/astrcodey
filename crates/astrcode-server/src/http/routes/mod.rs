@@ -59,7 +59,6 @@ pub(in crate::http) async fn update_config<T>(
                 ConfigUpdateHttpError(Box::new(internal_error_response("save_failed", error)))
             },
         })?;
-    state.app.runtime().sync_session_model_bindings();
     notify_extensions_config_changed(state).await;
     Ok(result)
 }

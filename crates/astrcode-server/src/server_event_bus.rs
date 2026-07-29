@@ -9,7 +9,7 @@ use astrcode_core::{
     types::{MessageId, SessionId},
 };
 use astrcode_protocol::events::ClientNotification;
-use astrcode_session::Session;
+use astrcode_session::SessionEventObserver;
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
@@ -47,7 +47,6 @@ pub struct ServerEventBus {
     global_notifications: broadcast::Sender<ClientNotification>,
     conversation_events: Mutex<HashMap<SessionId, broadcast::Sender<Arc<Event>>>>,
     session_routes: Mutex<HashMap<SessionId, SessionRoute>>,
-    attached: Mutex<HashMap<SessionId, tokio::task::JoinHandle<()>>>,
     streaming: Mutex<HashMap<SessionId, Arc<StreamingState>>>,
 }
 
@@ -62,7 +61,6 @@ impl ServerEventBus {
             global_notifications,
             conversation_events: Mutex::new(HashMap::new()),
             session_routes: Mutex::new(HashMap::new()),
-            attached: Mutex::new(HashMap::new()),
             streaming: Mutex::new(HashMap::new()),
         }
     }
@@ -130,42 +128,8 @@ impl ServerEventBus {
             .send(ClientNotification::Event((*event).clone()));
     }
 
-    pub fn attach(self: &Arc<Self>, session: &Session) {
-        let session_id = session.id().clone();
-        let mut attached = self.attached.lock();
-        if attached.contains_key(&session_id) {
-            return;
-        }
-        let mut rx = session.subscribe();
-        let event_bus = Arc::clone(self);
-        let task = tokio::spawn(async move {
-            while let Ok(event) = rx.recv().await {
-                event_bus.publish_event(event);
-            }
-        });
-        attached.insert(session_id, task);
-    }
-
-    pub async fn detach(&self, session_id: &SessionId) {
-        let task = self.attached.lock().remove(session_id);
-        if let Some(task) = task {
-            task.abort();
-            let _ = task.await;
-        }
+    pub fn detach(&self, session_id: &SessionId) {
         self.forget_session_routes(session_id);
-    }
-
-    pub async fn shutdown(&self) {
-        let tasks = self
-            .attached
-            .lock()
-            .drain()
-            .map(|(_, task)| task)
-            .collect::<Vec<_>>();
-        for task in tasks {
-            task.abort();
-            let _ = task.await;
-        }
     }
 
     fn forget_session_routes(&self, session_id: &SessionId) {
@@ -191,11 +155,6 @@ impl ServerEventBus {
                     },
                 })
         })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_attached(&self, session_id: &SessionId) -> bool {
-        self.attached.lock().contains_key(session_id)
     }
 
     fn conversation_fanout(&self, session_id: &SessionId) -> broadcast::Sender<Arc<Event>> {
@@ -283,6 +242,12 @@ impl ServerEventBus {
                 .or_insert_with(|| Arc::new(StreamingState::new(None))),
         );
         update_streaming(&state, &event.payload);
+    }
+}
+
+impl SessionEventObserver for ServerEventBus {
+    fn publish(&self, event: Arc<Event>) {
+        self.publish_event(event);
     }
 }
 

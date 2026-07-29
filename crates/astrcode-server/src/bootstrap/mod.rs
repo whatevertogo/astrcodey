@@ -111,11 +111,6 @@ impl ServerRuntime {
     pub fn shutdown_token(&self) -> &tokio_util::sync::CancellationToken {
         &self.shutdown_token
     }
-
-    /// 配置热更新后同步所有 session runtime 的 LLM binding。
-    pub fn sync_session_model_bindings(&self) {
-        self.session_manager.sync_all_model_bindings_from_config();
-    }
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
@@ -216,7 +211,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 7. 创建 session manager、turn scheduler 与 session ops。
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
-        Arc::clone(&config_manager),
         Arc::clone(&runtime_services),
         vec![Arc::new(TerminalCleanup), Arc::new(BackgroundShellCleanup)],
     ));

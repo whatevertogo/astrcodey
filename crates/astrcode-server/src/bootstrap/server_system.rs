@@ -130,8 +130,7 @@ impl ServerApp {
                 self.command_handle.shutdown().await;
                 self.scheduler().shutdown_background_tasks().await;
                 self.runtime.shutdown_extensions().await;
-                self.runtime.session_manager().shutdown_runtimes().await;
-                self.event_bus.shutdown().await;
+                self.runtime.session_manager().shutdown().await;
             })
             .await;
     }

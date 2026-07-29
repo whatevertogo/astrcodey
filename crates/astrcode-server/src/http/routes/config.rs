@@ -285,7 +285,6 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
             ConfigUpdateError::Store(error) => internal_error_response("reload_failed", error),
         };
     }
-    state.app.runtime().sync_session_model_bindings();
     // 通知扩展配置已变更（针对已运行扩展的配置热更新）
     notify_extensions_config_changed(&state).await;
     // 重载扩展（处理启用/禁用状态变化）

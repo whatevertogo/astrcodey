@@ -4,7 +4,7 @@ use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
     event::{
-        DurableEvent, DurableEventPayload, Event, LiveEvent, LiveEventPayload, ParentSessionRef,
+        DurableEvent, DurableEventPayload, LiveEvent, LiveEventPayload, ParentSessionRef,
         PersistedSystemPrompt, SessionStarted, StoredEvent, SystemPromptSource,
     },
     tool::{
@@ -49,6 +49,7 @@ use crate::{
 #[derive(Clone)]
 pub struct SessionCreateParams {
     pub working_dir: String,
+    pub model_id: String,
     pub parent_session_id: Option<SessionId>,
     pub tool_selection: Option<SessionToolSelection>,
     pub source_extension: Option<String>,
@@ -62,9 +63,7 @@ pub struct SessionCreateParams {
 /// 会话句柄 — 带存储能力的会话操作入口。
 ///
 /// 字段语义：
-/// - `runtime`：进程内瞬态资源和 session 事件 publisher。broadcast 在 runtime 上而不是 Session
-///   上：同 sid 多次 `Session::open` / `clone` 仍共享同一个 broadcast，订阅者
-///   一处订阅就能看到所有实例上发出的事件。
+/// - `runtime`：按 sid 共享的进程内瞬态资源与有序事件写入入口。
 /// - `runtime_services`：跨 session 共享的基础设施（LLM、扩展、上下文组装器、配置）。
 ///
 /// `Clone` 是廉价的 Arc clone，可以自由复制。
@@ -79,8 +78,8 @@ impl Session {
     /// 使用 runtime 已绑定的 session id 创建会话。
     ///
     /// **注意**：`runtime` 必须由调用方保证「同 sid 唯一」，否则同 sid 的不同 Session
-    /// 实例会有不同的 publisher、broadcast 和工具缓存。生产路径由
-    /// `SessionRuntimeRegistry` 保证唯一；直接调用本入口的测试或嵌入方需维持相同约束。
+    /// 实例会有不同的工具缓存与审批状态。生产路径通过 [`crate::SessionResourceStore`]
+    /// 保证唯一；直接调用本入口的测试或嵌入方需维持相同约束。
     pub async fn create_with_params(mut params: SessionCreateParams) -> Result<Self, SessionError> {
         let state_source = SessionStateSource::new(params.runtime.store().clone());
         params.tool_selection = resolve_initial_tool_selection(
@@ -101,7 +100,7 @@ impl Session {
             runtime: Arc::clone(&params.runtime),
             runtime_services: Arc::clone(&params.runtime_services),
         };
-        let model_id = session.runtime.model_id();
+        let model_id = params.model_id;
         let initial_system_prompt = match params.initial_system_prompt {
             Some(prompt) => prompt,
             None => {
@@ -130,7 +129,12 @@ impl Session {
                 initial_system_prompt,
             }),
         );
-        session.runtime.event_publisher().create(started).await?;
+        session
+            .runtime
+            .event_sink()
+            .create(session.runtime.store().clone(), started)
+            .await?;
+        session.mark_lifecycle_initialized();
         Ok(session)
     }
 
@@ -155,12 +159,21 @@ impl Session {
         &self.runtime
     }
 
-    pub fn runtime_arc(&self) -> Arc<SessionRuntimeState> {
-        Arc::clone(&self.runtime)
-    }
-
     pub(crate) fn runtime_services(&self) -> &SessionRuntimeServices {
         &self.runtime_services
+    }
+
+    fn mark_lifecycle_initialized(&self) {
+        self.runtime.mark_lifecycle_initialized();
+    }
+
+    pub async fn ensure_lifecycle_initialized(
+        &self,
+        event: ExtensionEvent,
+    ) -> Result<(), SessionError> {
+        self.runtime
+            .ensure_lifecycle_initialized(|| self.emit_lifecycle(event))
+            .await
     }
 
     pub async fn session_store_dir(&self) -> Option<std::path::PathBuf> {
@@ -170,10 +183,6 @@ impl Session {
             .await
             .ok()
             .flatten()
-    }
-
-    pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<Arc<Event>> {
-        self.runtime.subscribe()
     }
 }
 
@@ -308,7 +317,11 @@ impl Session {
 impl Session {
     pub fn emit_live(&self, turn_id: Option<&TurnId>, payload: LiveEventPayload) {
         let event = LiveEvent::new(self.id().clone(), turn_id.cloned(), payload);
-        if let Err(error) = self.runtime.event_publisher().publish_live(event) {
+        if let Err(error) = self
+            .runtime
+            .event_sink()
+            .publish_live(self.runtime.store().clone(), event)
+        {
             if matches!(
                 &error,
                 SessionEventPublishError::Full { dropped } if !dropped.is_power_of_two()
@@ -329,12 +342,27 @@ impl Session {
         payload: DurableEventPayload,
     ) -> Result<StoredEvent, SessionError> {
         let event = DurableEvent::new(self.id().clone(), turn_id.cloned(), payload);
-        Ok(self.runtime.event_publisher().append(event).await?)
+        Ok(self
+            .runtime
+            .event_sink()
+            .append(self.runtime.store().clone(), event)
+            .await?)
     }
 
     pub async fn emit_lifecycle(&self, event: ExtensionEvent) -> Result<(), SessionError> {
         let model = self.read_model().await?;
         emit_lifecycle_for_read_model(&self.runtime_services, self.id(), &model, event).await
+    }
+
+    /// 配置后续 turn 使用的模型。活跃 turn 保留已固定的不可变快照。
+    pub async fn configure_model(&self, model_id: String) -> Result<bool, SessionError> {
+        if self.read_model().await?.identity.model_id == model_id {
+            return Ok(false);
+        }
+
+        self.emit_durable(None, DurableEventPayload::ModelIdChanged { model_id })
+            .await?;
+        Ok(true)
     }
 
     /// 配置后续 turn 使用的工具边界。
@@ -729,17 +757,20 @@ impl Session {
         .await?;
         let child_sid = new_session_id();
         let child_store = self.runtime.store().clone();
-        let primary_llm = primary_llm_for_model_id(&self.runtime_services, model_id);
-        let child_runtime = Arc::new(SessionRuntimeState::new(
-            child_sid.clone(),
-            child_store,
-            primary_llm,
-            self.runtime_services.small_llm(),
-            model_id.to_string(),
-        ));
+        let child_runtime =
+            self.runtime_services
+                .session_resources()
+                .resources_for(&child_sid, || {
+                    Arc::new(SessionRuntimeState::new_with_event_sink(
+                        child_sid.clone(),
+                        child_store,
+                        self.runtime.event_sink_arc(),
+                    ))
+                });
         let child = Session::create_persisted(
             SessionCreateParams {
                 working_dir: working_dir.to_owned(),
+                model_id: model_id.to_owned(),
                 parent_session_id: Some(self.id().clone()),
                 tool_selection: tool_selection.clone(),
                 source_extension: source_extension.map(str::to_owned),
@@ -764,20 +795,6 @@ impl Session {
         )
         .await?;
         Ok(child)
-    }
-}
-
-/// 子 session 的 turn 使用 `SessionModelBinding.llm`；当目标 model_id 为小模型时选用 small
-/// provider。
-fn primary_llm_for_model_id(
-    runtime_services: &SessionRuntimeServices,
-    model_id: &str,
-) -> Arc<dyn astrcode_core::llm::LlmProvider> {
-    let effective = runtime_services.read_effective();
-    if model_id == effective.small_llm.model_id && model_id != effective.llm.model_id {
-        runtime_services.small_llm()
-    } else {
-        runtime_services.llm()
     }
 }
 
@@ -845,29 +862,23 @@ impl Session {
     }
 
     async fn prepare_turn_runner(&self) -> Result<TurnLoop, TurnError> {
-        let model = self.runtime.model_binding();
         let mut pre_state = self.read_model().await?;
-        if pre_state.identity.model_id != model.model_id() {
-            match self
-                .emit_durable(
-                    None,
-                    DurableEventPayload::ModelIdChanged {
-                        model_id: model.model_id().to_owned(),
-                    },
-                )
-                .await
-            {
-                Ok(_) => pre_state = self.read_model().await?,
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = %self.id(),
-                        %error,
-                        "failed to update session model_id"
-                    );
+        let model_id = if pre_state.identity.parent.is_some() {
+            pre_state.identity.model_id.clone()
+        } else {
+            self.runtime_services.read_effective().llm.model_id.clone()
+        };
+        if pre_state.identity.model_id != model_id {
+            self.emit_durable(
+                None,
+                DurableEventPayload::ModelIdChanged {
+                    model_id: model_id.clone(),
                 },
-            }
+            )
+            .await?;
+            pre_state = self.read_model().await?;
         }
-
+        let llm = self.runtime_services.llm_for_model_id(&model_id);
         let working_dir = pre_state.identity.working_dir.clone();
         let (registry, tool_selection, prompt_changed) =
             if pre_state.system_prompt.source == SystemPromptSource::Inherited {
@@ -884,7 +895,7 @@ impl Session {
             } else {
                 let stored_fingerprint = pre_state.system_prompt.fingerprint.clone();
                 let prepared = self
-                    .prepare_runtime_snapshot(&working_dir, &pre_state, model.model_id())
+                    .prepare_runtime_snapshot(&working_dir, &pre_state, &model_id)
                     .await?;
                 let prompt_changed = self
                     .persist_system_prompt(prepared.prompt, Some(&stored_fingerprint))
@@ -905,7 +916,7 @@ impl Session {
             &session_state,
             tool_selection.unwrap_or_default(),
             session_store_dir,
-            Arc::clone(&model.llm),
+            llm,
             registry,
             cancellation_token,
         )

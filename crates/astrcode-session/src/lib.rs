@@ -5,7 +5,6 @@
 pub mod compaction;
 pub(crate) mod deferred_tools;
 pub(crate) mod early_tool_scheduler;
-mod event_publisher;
 pub(crate) mod llm_stream;
 pub mod payload;
 mod perf_snapshot;
@@ -13,7 +12,9 @@ pub(crate) mod permission;
 pub(crate) mod projection_context;
 pub(crate) mod runtime_stability;
 mod session;
+mod session_event_sink;
 mod session_extension_ports;
+mod session_resource_store;
 mod session_runtime;
 mod session_runtime_services;
 pub(crate) mod session_setup;
@@ -35,7 +36,6 @@ pub(crate) mod turn_publish;
 pub(crate) mod turn_runner;
 pub(crate) mod turn_stages;
 
-pub use event_publisher::SessionEventPublishError;
 pub use payload::{
     agent_session_completed_payload, agent_session_failed_payload,
     system_prompt_configured_payload, transcript_rewritten_payload,
@@ -44,8 +44,12 @@ pub use session::{
     InterruptedToolOutcome, Session, SessionCreateParams, SessionError,
     emit_interrupted_tool_results, emit_lifecycle_for_read_model, emit_turn_aborted_context,
 };
+pub use session_event_sink::{SessionEventObserver, SessionEventPublishError, SessionEventSink};
 pub use session_extension_ports::SessionExtensionPorts;
-pub use session_runtime::{SessionModelBinding, SessionRuntimeState, ToolApprovalResolveError};
+pub use session_resource_store::SessionResourceStore;
+pub use session_runtime::{
+    SessionRuntimeState, ToolApprovalRegistrationError, ToolApprovalResolveError,
+};
 pub use session_runtime_services::SessionRuntimeServices;
 pub use tool_registry::{ToolRegistry, ToolRegistryError};
 pub use turn_context::{TurnError, TurnEventTx};

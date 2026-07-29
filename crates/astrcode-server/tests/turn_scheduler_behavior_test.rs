@@ -24,10 +24,9 @@ use astrcode_extension_sdk::extension::{
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
-    ChildSessionCoordinator, ConfigManager, DeliveryOutcome, InputDelivery,
-    MAX_PENDING_INPUTS_PER_SESSION, MAX_PROMPT_TEXT_BYTES, SessionManager, TurnRegistry,
-    TurnScheduleError, TurnScheduler, recycle_completed_session_for_test,
-    session_started_event_for_test,
+    ChildSessionCoordinator, DeliveryOutcome, InputDelivery, MAX_PENDING_INPUTS_PER_SESSION,
+    MAX_PROMPT_TEXT_BYTES, SessionManager, TurnRegistry, TurnScheduleError, TurnScheduler,
+    recycle_completed_session_for_test, session_started_event_for_test,
 };
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::{Semaphore, mpsc};
@@ -234,18 +233,8 @@ fn build_scheduler_with_runtime(
         context_assembler,
         std::sync::Arc::clone(&shell_timeout_secs),
     );
-    let config = Arc::new(ConfigManager::new(
-        Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-            std::path::PathBuf::from("target/turn-behavior-config.toml"),
-        )),
-        Default::default(),
-        Arc::clone(&extension_runner),
-        shell_timeout_secs,
-        Arc::clone(&capabilities),
-    ));
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&store),
-        config,
         capabilities,
         vec![],
     ));

@@ -183,12 +183,7 @@ impl ChildSessionCoordinator {
             .map_err(|e| SessionApiError::NotFound(format!("parent: {e}")))?;
 
         let depth = self.session_depth(parent_session_id).await?;
-        let max_depth = self
-            .session_manager
-            .config()
-            .read_effective()
-            .agent
-            .max_depth;
+        let max_depth = self.session_manager.max_agent_depth();
         if depth >= max_depth {
             return Err(SessionApiError::MaxDepthExceeded {
                 current: depth,
@@ -223,7 +218,6 @@ impl ChildSessionCoordinator {
             .await
             .map_err(SessionApiError::internal)?;
 
-        self.session_manager.register_child_session(&child);
         Ok(child)
     }
 

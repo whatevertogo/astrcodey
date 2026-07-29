@@ -384,15 +384,12 @@ mod tests {
         let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
         let session_id = SessionId::from(sid);
         let runtime = Arc::new(astrcode_session::SessionRuntimeState::new(
-            session_id,
-            store,
-            Arc::new(NeverLlm),
-            Arc::new(NeverLlm),
-            "mock".into(),
+            session_id, store,
         ));
         Arc::new(
             Session::create_with_params(SessionCreateParams {
                 working_dir: ".".into(),
+                model_id: "mock".into(),
                 parent_session_id: None,
                 tool_selection: None,
                 source_extension: None,
