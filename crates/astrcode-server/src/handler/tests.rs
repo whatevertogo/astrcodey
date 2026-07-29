@@ -8,7 +8,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use astrcode_context::{compaction::CompactResult, context_assembler::LlmContextAssembler};
+use astrcode_context::{
+    compaction::CompactResult, context_assembler::LlmContextAssembler, is_compact_summary_message,
+};
 use astrcode_core::{
     compaction::CompactStrategy,
     config::{
@@ -28,12 +30,29 @@ use astrcode_extensions::Extension;
 use astrcode_protocol::{
     commands::ClientCommand, events::ClientNotification, wire::CommandSourceDto,
 };
-use astrcode_session::{compact_boundary_payload, session_continued_from_compaction_payload};
+use astrcode_session::transcript_rewritten_payload;
+use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use astrcode_support::event_fanout::EventFanout;
 use tokio::sync::mpsc;
 
 use super::*;
+
+trait ProviderMessages {
+    fn provider_messages(&self) -> Vec<LlmMessage>;
+}
+
+impl ProviderMessages for SessionReadModel {
+    fn provider_messages(&self) -> Vec<LlmMessage> {
+        astrcode_core::llm::provider_visible_messages(
+            self.transcript
+                .messages
+                .iter()
+                .map(|message| message.message.clone())
+                .collect(),
+        )
+    }
+}
 
 struct MockLlm;
 struct ReactiveCompactLlm {
@@ -921,7 +940,7 @@ async fn wait_for_turn_completed(event_rx: &mut mpsc::Receiver<ClientNotificatio
     }
 }
 
-async fn drain_until_compact_boundary(
+async fn drain_until_transcript_rewrite(
     event_rx: &mut mpsc::Receiver<ClientNotification>,
 ) -> SessionId {
     loop {
@@ -929,12 +948,11 @@ async fn drain_until_compact_boundary(
         let ClientNotification::Event(event) = notification else {
             continue;
         };
-        if let EventPayload::Durable(DurableEventPayload::CompactBoundaryCreated {
-            continued_session_id,
-            ..
-        }) = event.payload
-        {
-            return continued_session_id;
+        if matches!(
+            event.payload,
+            EventPayload::Durable(DurableEventPayload::TranscriptRewritten { .. })
+        ) {
+            return event.session_id;
         }
     }
 }
@@ -1011,49 +1029,34 @@ async fn wait_until_no_active_turn(
 }
 
 #[test]
-fn compact_payload_helpers_split_projection_and_audit_fields() {
+fn transcript_rewrite_payload_contains_compacted_history_and_metadata() {
     let compaction = CompactResult {
         pre_tokens: 100,
         post_tokens: 20,
         summary: "summary".into(),
         messages_removed: 2,
-        context_messages: vec![LlmMessage::system("hidden context")],
+        summary_messages: vec![LlmMessage::user("summary context")],
         retained_messages: vec![LlmMessage::user("retained")],
         transcript_path: Some("compact.jsonl".into()),
     };
 
-    let boundary = compact_boundary_payload(
+    let rewrite = transcript_rewritten_payload(
         "manual_command",
         &compaction,
-        "child".into(),
-        0,
+        7,
         CompactStrategy::Manual {
             keep_recent_turns: None,
         },
     );
-    let continued =
-        session_continued_from_compaction_payload("parent".into(), "7".into(), &compaction);
 
     assert!(matches!(
-        boundary,
-        DurableEventPayload::CompactBoundaryCreated {
-            continued_session_id,
-            transcript_path: Some(path),
-            ..
-        } if continued_session_id.as_str() == "child" && path == "compact.jsonl"
-    ));
-    assert!(matches!(
-        continued,
-        DurableEventPayload::SessionContinuedFromCompaction {
-            parent_session_id,
-            parent_cursor,
-            context_messages,
-            retained_messages,
-            ..
-        } if parent_session_id.as_str() == "parent"
-            && parent_cursor == "7"
-            && context_messages.len() == 1
-            && retained_messages.len() == 1
+        rewrite,
+        DurableEventPayload::TranscriptRewritten {
+            source_seq: 7,
+            messages,
+            reason: astrcode_core::event::TranscriptRewriteReason::Compaction(details),
+        } if messages.len() == 2
+            && details.transcript_path.as_deref() == Some("compact.jsonl")
     ));
 }
 
@@ -1971,7 +1974,7 @@ async fn stale_agent_finish_after_abort_is_ignored() {
 }
 
 #[tokio::test]
-async fn compact_command_rewrites_provider_history_without_exposing_summary() {
+async fn compact_command_rewrites_transcript_with_summary() {
     let settings = astrcode_context::ContextSettings::default();
     let runtime = test_runtime_with_settings(Arc::new(MockLlm), settings);
     let event_tx = Arc::new(EventFanout::new(1024));
@@ -1996,25 +1999,34 @@ async fn compact_command_rewrites_provider_history_without_exposing_summary() {
         compacted_id, session_id,
         "same-session compact keeps session_id"
     );
-    let continued_session_id = drain_until_compact_boundary(&mut event_rx).await;
-    assert_eq!(continued_session_id, session_id);
+    let rewritten_session_id = drain_until_transcript_rewrite(&mut event_rx).await;
+    assert_eq!(rewritten_session_id, session_id);
 
     let state = runtime
         .event_store()
         .session_read_model(&session_id)
         .await
         .unwrap();
-    assert!(!state.transcript.context_messages.is_empty());
+    assert!(
+        state
+            .provider_messages()
+            .iter()
+            .any(is_compact_summary_message)
+    );
     assert!(state.provider_messages().iter().any(|message| {
         message_to_dto(message)
             .content
             .contains("<compact_summary>")
     }));
-    assert!(state.transcript.messages.iter().all(|message| {
-        !message_to_dto(&message.message)
-            .content
-            .contains("<compact_summary>")
-    }));
+    assert_eq!(
+        state
+            .transcript
+            .messages
+            .iter()
+            .filter(|message| is_compact_summary_message(&message.message))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -2041,8 +2053,8 @@ async fn slash_compact_uses_backend_command_without_user_message() {
         .await
         .unwrap();
     assert!(matches!(result, PromptSubmission::Handled { .. }));
-    let continued_session_id = drain_until_compact_boundary(&mut event_rx).await;
-    assert_eq!(continued_session_id, session_id, "same-session compact");
+    let rewritten_session_id = drain_until_transcript_rewrite(&mut event_rx).await;
+    assert_eq!(rewritten_session_id, session_id, "same-session compact");
 
     let state = runtime
         .event_store()
@@ -2311,7 +2323,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
     assert_eq!(first_compacted, session_id, "same-session compact");
     assert_eq!(
         session_id,
-        drain_until_compact_boundary(&mut event_rx).await
+        drain_until_transcript_rewrite(&mut event_rx).await
     );
     let first_summary = {
         let state = runtime
@@ -2319,7 +2331,14 @@ async fn compact_command_compacts_existing_hidden_context_again() {
             .session_read_model(&session_id)
             .await
             .unwrap();
-        message_to_dto(&state.transcript.context_messages[0].message).content
+        let messages = state.provider_messages();
+        message_to_dto(
+            messages
+                .iter()
+                .find(|message| is_compact_summary_message(message))
+                .expect("compact summary"),
+        )
+        .content
     };
 
     handler
@@ -2335,7 +2354,7 @@ async fn compact_command_compacts_existing_hidden_context_again() {
     assert_eq!(second_compacted, session_id, "same-session compact again");
     assert_eq!(
         session_id,
-        drain_until_compact_boundary(&mut event_rx).await
+        drain_until_transcript_rewrite(&mut event_rx).await
     );
 
     let state = runtime
@@ -2343,7 +2362,14 @@ async fn compact_command_compacts_existing_hidden_context_again() {
         .session_read_model(&session_id)
         .await
         .unwrap();
-    let second_summary = message_to_dto(&state.transcript.context_messages[0].message).content;
+    let messages = state.provider_messages();
+    let second_summary = message_to_dto(
+        messages
+            .iter()
+            .find(|message| is_compact_summary_message(message))
+            .expect("compact summary"),
+    )
+    .content;
     assert!(
         second_summary.contains("Compacted conversation summary"),
         "second compact should preserve a provider summary"
@@ -2509,7 +2535,12 @@ async fn prompt_too_long_triggers_reactive_compact_and_retries_once() {
         .session_read_model(&session_id)
         .await
         .unwrap();
-    assert!(!state.transcript.context_messages.is_empty());
+    assert!(
+        state
+            .provider_messages()
+            .iter()
+            .any(is_compact_summary_message)
+    );
 }
 
 #[tokio::test]
@@ -2617,9 +2648,9 @@ async fn auto_compact_uses_configured_keep_recent_turns() {
     assert!(visible.contains("current"));
     assert!(matches!(
         state
-            .compact_boundaries
+            .compactions
             .first()
-            .map(|boundary| &boundary.strategy),
+            .map(|compaction| &compaction.strategy),
         Some(CompactStrategy::Auto)
     ));
 }

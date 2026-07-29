@@ -1,9 +1,7 @@
 //! Recap 生成逻辑 — `/recap` 命令的服务端实现。
 
-use astrcode_core::{
-    event::DurableEventPayload,
-    llm::{self, LlmMessage},
-};
+use astrcode_context::ContextSnapshot;
+use astrcode_core::{event::DurableEventPayload, llm};
 use astrcode_extension_sdk::extension::ExtensionEvent;
 
 use super::{CommandHandler, HandlerError};
@@ -41,11 +39,19 @@ impl CommandHandler {
             return Ok(());
         }
 
-        // 构造 LLM 请求：system + 历史 + recap prompt
-        let mut messages = Vec::new();
-        messages.push(LlmMessage::system(&state.system_prompt.text));
-        messages.extend(state.provider_messages());
-        messages.push(LlmMessage::user(RECAP_PROMPT));
+        let snapshot = ContextSnapshot::new(
+            state.stats.last_seq,
+            state.system_prompt.text.clone(),
+            state
+                .transcript
+                .messages
+                .iter()
+                .map(|message| message.message.clone())
+                .collect(),
+        );
+        let mut transcript = snapshot.messages.clone();
+        transcript.push(astrcode_core::llm::LlmMessage::user(RECAP_PROMPT));
+        let messages = snapshot.request_messages(transcript);
 
         // 单次调用，无 tools
         let llm = self.runtime.runtime_services().llm();

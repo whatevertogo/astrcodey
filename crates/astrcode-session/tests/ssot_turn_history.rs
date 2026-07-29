@@ -18,10 +18,27 @@ use astrcode_core::{
     types::{new_message_id, new_session_id, new_turn_id},
 };
 use astrcode_session::{Session, SessionCreateParams, SessionRuntimeServices, SessionRuntimeState};
+use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::mpsc;
 
 mod common;
+
+trait ProviderMessages {
+    fn provider_messages(&self) -> Vec<LlmMessage>;
+}
+
+impl ProviderMessages for SessionReadModel {
+    fn provider_messages(&self) -> Vec<LlmMessage> {
+        astrcode_core::llm::provider_visible_messages(
+            self.transcript
+                .messages
+                .iter()
+                .map(|message| message.message.clone())
+                .collect(),
+        )
+    }
+}
 
 fn test_caps(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeServices> {
     common::test_runtime_services(llm)

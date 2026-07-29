@@ -1,9 +1,6 @@
 use std::sync::Arc;
 
-use astrcode_core::{
-    event::{DurableEvent, DurableEventPayload},
-    types::SessionId,
-};
+use astrcode_core::types::SessionId;
 use tempfile::tempdir;
 
 use super::FileSystemSessionRepository;
@@ -52,17 +49,7 @@ async fn filesystem_repository_validates_and_orders_appends_before_commit() {
         .await
         .unwrap();
 
-    let invalid = DurableEvent::session(
-        session_id.clone(),
-        DurableEventPayload::SessionContinuedFromCompaction {
-            parent_session_id: session_id.clone(),
-            parent_cursor: "invalid".into(),
-            summary: "summary".into(),
-            transcript_path: None,
-            context_messages: vec![],
-            retained_messages: vec![],
-        },
-    );
+    let invalid = started_event(&session_id);
     assert!(matches!(
         repo.append_event(invalid).await,
         Err(StorageError::InvalidEvent(_))

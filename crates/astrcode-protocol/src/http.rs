@@ -167,9 +167,8 @@ pub struct CompactSessionRequest {
 pub struct CompactSessionResponse {
     pub accepted: bool,
     pub deferred: bool,
-    /// compact continuation 创建的子会话 ID。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_session_id: Option<String>,
+    pub session_id: Option<String>,
     pub message: String,
 }
 
@@ -556,11 +555,6 @@ pub enum ConversationDeltaDto {
     },
     /// 服务端检测到 receiver lag，客户端应重新拉全量 snapshot。
     RehydrateRequired,
-    SessionContinued {
-        parent_session_id: String,
-        new_session_id: String,
-        parent_cursor: ConversationCursorDto,
-    },
     /// 更新 toolCall block 的 arguments 字段（用于折叠摘要行显示参数）。
     PatchArguments {
         block_id: String,

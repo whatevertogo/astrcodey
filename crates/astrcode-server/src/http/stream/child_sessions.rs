@@ -61,23 +61,10 @@ impl ChildSessionTracker {
     }
 
     pub(super) fn is_tracked_event(&self, event: &Event) -> bool {
-        if self.initial_by_leaf.contains_key(&event.session_id) {
-            return true;
-        }
-        matches!(
-            event.payload.as_durable(),
-            Some(DurableEventPayload::SessionContinuedFromCompaction {
-                parent_session_id,
-                ..
-            }) if self.initial_by_leaf.contains_key(parent_session_id)
-        )
+        self.initial_by_leaf.contains_key(&event.session_id)
     }
 
     pub(super) fn project_event(&mut self, event: &Event) -> Option<ConversationDeltaDto> {
-        if self.update_compacted_leaf(event) {
-            return None;
-        }
-
         let initial_child_id = self.initial_by_leaf.get(&event.session_id)?.clone();
         let progress = agent_session_progress(&event.payload)?;
         if self.last_progress.get(&initial_child_id) == Some(&progress) {
@@ -94,21 +81,6 @@ impl ChildSessionTracker {
                 current_tool,
             ),
         })
-    }
-
-    fn update_compacted_leaf(&mut self, event: &Event) -> bool {
-        let Some(DurableEventPayload::SessionContinuedFromCompaction {
-            parent_session_id, ..
-        }) = event.payload.as_durable()
-        else {
-            return false;
-        };
-        let Some(initial_child_id) = self.initial_by_leaf.remove(parent_session_id) else {
-            return true;
-        };
-        self.initial_by_leaf
-            .insert(event.session_id.clone(), initial_child_id);
-        true
     }
 }
 
@@ -127,9 +99,8 @@ mod tests {
     }
 
     #[test]
-    fn tracks_phase_deduplication_and_compacted_leaf_replacement() {
+    fn tracks_phase_and_deduplicates_progress() {
         let initial = SessionId::from("child-initial");
-        let compacted = SessionId::from("child-compacted");
         let mut tracker = ChildSessionTracker::new(
             HashMap::from([(initial.clone(), initial.clone())]),
             HashMap::from([(initial.clone(), Phase::Thinking)]),
@@ -170,22 +141,8 @@ mod tests {
         );
         assert!(tracker.project_event(&text_delta).is_none());
 
-        let continued = durable(
-            compacted.clone(),
-            DurableEventPayload::SessionContinuedFromCompaction {
-                parent_session_id: initial.clone(),
-                parent_cursor: "4".into(),
-                summary: "summary".into(),
-                transcript_path: None,
-                context_messages: Vec::new(),
-                retained_messages: Vec::new(),
-            },
-        );
-        assert!(tracker.is_tracked_event(&continued));
-        assert!(tracker.project_event(&continued).is_none());
-
         let streaming = live(
-            compacted,
+            initial,
             LiveEventPayload::AssistantMessageStarted {
                 message_id: "message-1".into(),
             },

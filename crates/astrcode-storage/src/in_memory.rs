@@ -11,7 +11,8 @@ use astrcode_core::{
     types::{Cursor, SessionId},
 };
 use astrcode_session_projection::{
-    AgentSessionLinkView, SessionReadModel, SessionReadModelProjection, SessionSummary, reduce,
+    AgentSessionLinkView, ProjectionError, SessionReadModel, SessionReadModelProjection,
+    SessionSummary, reduce,
 };
 use tokio::sync::Mutex;
 
@@ -91,23 +92,6 @@ impl SessionReader for InMemoryEventStore {
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))
     }
 
-    async fn session_provider_messages(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Vec<astrcode_core::llm::LlmMessage>, StorageError> {
-        let map = self.sessions.lock().await;
-        map.get(session_id)
-            .map(|session| session.projection.provider_messages())
-            .ok_or_else(|| StorageError::NotFound(session_id.clone()))
-    }
-
-    async fn session_system_prompt(&self, session_id: &SessionId) -> Result<String, StorageError> {
-        let map = self.sessions.lock().await;
-        map.get(session_id)
-            .map(|session| session.projection.system_prompt.text.clone())
-            .ok_or_else(|| StorageError::NotFound(session_id.clone()))
-    }
-
     async fn session_has_messages(&self, session_id: &SessionId) -> Result<bool, StorageError> {
         let map = self.sessions.lock().await;
         map.get(session_id)
@@ -122,16 +106,6 @@ impl SessionReader for InMemoryEventStore {
         let map = self.sessions.lock().await;
         map.get(session_id)
             .map(|session| session.projection.agent_sessions.clone())
-            .ok_or_else(|| StorageError::NotFound(session_id.clone()))
-    }
-
-    async fn session_visible_user_message_count(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<usize, StorageError> {
-        let map = self.sessions.lock().await;
-        map.get(session_id)
-            .map(|session| session.projection.visible_user_message_count())
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))
     }
 
@@ -280,8 +254,16 @@ impl EventStore for InMemoryEventStore {
             .get_mut(&event.session_id)
             .ok_or_else(|| StorageError::NotFound(event.session_id.clone()))?;
         let stored = StoredEvent::new(session.events.len() as u64, event);
-        reduce(&stored, &mut session.projection)
-            .map_err(|error| StorageError::InvalidEvent(error.to_string()))?;
+        reduce(&stored, &mut session.projection).map_err(|error| match error {
+            ProjectionError::StaleTranscriptRewrite {
+                source_seq,
+                current_seq,
+            } => StorageError::ConcurrentModification {
+                expected_seq: source_seq,
+                current_seq,
+            },
+            error => StorageError::InvalidEvent(error.to_string()),
+        })?;
         session.events.push(stored.clone());
         Ok(stored)
     }

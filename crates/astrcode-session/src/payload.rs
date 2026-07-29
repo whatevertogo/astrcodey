@@ -1,10 +1,13 @@
 //! 事件载荷构造。
 
+use astrcode_context::CompactResult;
 use astrcode_core::{
     compaction::CompactStrategy,
-    context::CompactResult,
-    event::{DurableEventPayload, LiveEventPayload, SystemPromptSource},
-    types::{Cursor, SessionId},
+    event::{
+        CompactionDetails, DurableEventPayload, LiveEventPayload, SystemPromptSource,
+        TranscriptRewriteReason,
+    },
+    types::SessionId,
 };
 
 pub const TURN_FINISH_ABORTED: &str = "aborted";
@@ -37,33 +40,36 @@ pub fn system_prompt_configured_payload(
     }
 }
 
-/// 构造 compact continuation 边界事件载荷。
-pub fn compact_boundary_payload(
+/// 构造原子的 transcript 重写事件。
+pub fn transcript_rewritten_payload(
     trigger: impl Into<String>,
     compaction: &CompactResult,
-    continued_session_id: SessionId,
-    base_event_seq: u64,
+    source_seq: u64,
     strategy: CompactStrategy,
 ) -> DurableEventPayload {
-    DurableEventPayload::CompactBoundaryCreated {
-        trigger: trigger.into(),
-        pre_tokens: compaction.pre_tokens,
-        post_tokens: compaction.post_tokens,
-        summary: compaction.summary.clone(),
-        transcript_path: compaction.transcript_path.clone(),
-        continued_session_id,
-        base_event_seq,
-        strategy,
+    let messages = compaction
+        .summary_messages
+        .iter()
+        .chain(&compaction.retained_messages)
+        .cloned()
+        .collect();
+    DurableEventPayload::TranscriptRewritten {
+        source_seq,
+        messages,
+        reason: TranscriptRewriteReason::Compaction(CompactionDetails {
+            trigger: trigger.into(),
+            pre_tokens: compaction.pre_tokens,
+            post_tokens: compaction.post_tokens,
+            summary: compaction.summary.clone(),
+            transcript_path: compaction.transcript_path.clone(),
+            strategy,
+        }),
     }
 }
 
 /// 子 agent 终态事件里 `child_session_id` / `final_session_id` 的唯一构造点。
 ///
-/// **给后续维护者**：协议保留两个字段，但当前实现里 compact **不会**换
-/// `session_id`（见 `Session::append_compact_boundary`：boundary 与
-/// `SessionContinuedFromCompaction` 都写在同一条 log 上，`continued_session_id`、
-/// `parent_session_id` 均为 `self.id`）。因此 compact 前后、以及
-/// `AgentSessionCompleted` 写入时，两者应相同。
+/// **给后续维护者**：compact 只重写同一 session 的 transcript，不改变 session id。
 ///
 /// - `child_session_id`：与父 log 中 [`AgentSessionSpawned`] 一致，投影靠它定位 link。
 /// - `final_session_id`：应打开/订阅的 leaf；**仅**在未实现的跨 session continuation
@@ -101,21 +107,5 @@ pub fn agent_session_failed_payload(
         child_session_id,
         final_session_id,
         error,
-    }
-}
-
-/// 构造子会话 compact continuation 投影事件载荷。
-pub fn session_continued_from_compaction_payload(
-    parent_session_id: SessionId,
-    parent_cursor: Cursor,
-    compaction: &CompactResult,
-) -> DurableEventPayload {
-    DurableEventPayload::SessionContinuedFromCompaction {
-        parent_session_id,
-        parent_cursor,
-        summary: compaction.summary.clone(),
-        transcript_path: compaction.transcript_path.clone(),
-        context_messages: compaction.context_messages.clone(),
-        retained_messages: compaction.retained_messages.clone(),
     }
 }

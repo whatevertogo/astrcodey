@@ -85,7 +85,7 @@ impl TurnEvents {
         Ok(model)
     }
 
-    /// 统计 provider 可见的非合成 user 消息条数；优先读 turn 内 cache，避免 clone 整份读模型。
+    /// 统计 provider 可见的非合成 user 消息条数。
     ///
     /// cache 命中时假定计数已与投影一致：要么 turn 入口时 cache 为空（走 store），
     /// 要么本 turn 内 durable 事件已通过 [`reduce`] 同步到 cache。
@@ -95,12 +95,13 @@ impl TurnEvents {
             let guard = self.model_cache.lock().await;
             guard
                 .as_ref()
-                .map(SessionReadModel::visible_user_message_count)
+                .map(crate::steer::count_visible_user_messages)
         };
         if let Some(count) = cached_count {
             return Ok(count);
         }
-        Ok(self.session.visible_user_message_count().await?)
+        let model = self.session.read_model().await?;
+        Ok(crate::steer::count_visible_user_messages(&model))
     }
 
     pub(crate) async fn durable(&self, payload: DurableEventPayload) -> Result<(), TurnError> {
@@ -305,15 +306,14 @@ impl ExtensionEvents {
 mod tests {
     use std::sync::Arc;
 
+    use astrcode_context::{
+        ContextAssembler, ContextPrepareInput, NoopPostCompactEnricher, PreparedContext,
+        context_assembler::LlmContextAssembler,
+    };
     use astrcode_core::{
         config::{
             ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme,
             ProviderWireFormat,
-        },
-        context::{
-            CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
-            CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
-            NoopPostCompactEnricher,
         },
         event::{DurableEventPayload, EventPayload, ExtensionEventData, LiveEventPayload},
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
@@ -365,7 +365,6 @@ mod tests {
         settings: ContextSettings,
     }
 
-    #[async_trait::async_trait]
     impl ContextAssembler for TestContextAssembler {
         fn settings(&self) -> &ContextSettings {
             &self.settings
@@ -375,16 +374,8 @@ mod tests {
             false
         }
 
-        async fn compact_if_needed(
-            &self,
-            messages: Vec<LlmMessage>,
-            _system_prompt: Option<&str>,
-            _custom_instructions: &[String],
-            _render_options: CompactSummaryRenderOptions,
-            _options: CompactMessagesOptions,
-            _request_text: CompactRequestFn,
-        ) -> CompactIfNeededOutcome {
-            CompactIfNeededOutcome::NotRun { messages }
+        fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
+            LlmContextAssembler::new(self.settings.clone()).prepare_messages(input)
         }
     }
 

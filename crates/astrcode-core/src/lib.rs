@@ -21,7 +21,6 @@
 
 pub mod compaction;
 pub mod config;
-pub mod context;
 pub mod event;
 pub mod llm;
 pub mod message_attachment;

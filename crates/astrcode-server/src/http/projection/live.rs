@@ -3,15 +3,12 @@
 use astrcode_core::event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase};
 use astrcode_protocol::{
     agent_session_link::AgentSessionLinkDto,
-    http::{
-        ConversationControlStateDto, ConversationCursorDto, ConversationDeltaDto, ToolApprovalDto,
-    },
+    http::{ConversationControlStateDto, ConversationDeltaDto, ToolApprovalDto},
 };
 
 use super::{
     args::format_args_inline,
     blocks::{block_from_payload, streaming_assistant_block, streaming_tool_call_block},
-    cross_session_compact_deltas,
 };
 
 pub(in crate::http) fn event_to_deltas(
@@ -53,22 +50,8 @@ fn durable_event_to_deltas(
                 },
             ]
         },
-        DurableEventPayload::CompactBoundaryCreated {
-            continued_session_id,
-            ..
-        } => cross_session_compact_deltas(event, continued_session_id),
-        DurableEventPayload::SessionContinuedFromCompaction {
-            parent_session_id,
-            parent_cursor,
-            ..
-        } if parent_session_id == &event.session_id => {
-            vec![ConversationDeltaDto::SessionContinued {
-                parent_session_id: parent_session_id.to_string(),
-                new_session_id: event.session_id.to_string(),
-                parent_cursor: ConversationCursorDto {
-                    value: parent_cursor.to_string(),
-                },
-            }]
+        DurableEventPayload::TranscriptRewritten { .. } => {
+            vec![ConversationDeltaDto::RehydrateRequired]
         },
         DurableEventPayload::TurnStarted | DurableEventPayload::TurnCompleted { .. } => {
             vec![ConversationDeltaDto::UpdateControlState {
@@ -155,7 +138,6 @@ fn durable_event_to_deltas(
         },
         DurableEventPayload::SystemPromptConfigured { .. }
         | DurableEventPayload::TurnAbortedContext
-        | DurableEventPayload::SessionContinuedFromCompaction { .. }
         | DurableEventPayload::SessionForked { .. } => vec![],
         _ => vec![],
     }
@@ -595,43 +577,28 @@ mod tests {
     }
 
     #[test]
-    fn same_session_compact_refreshes_only_after_continuation_is_persisted() {
-        let boundary = event(
-            EventPayload::Durable(DurableEventPayload::CompactBoundaryCreated {
-                trigger: "auto_threshold".into(),
-                pre_tokens: 100,
-                post_tokens: 20,
-                summary: "summary".into(),
-                transcript_path: None,
-                continued_session_id: "session-1".into(),
-                base_event_seq: 3,
-                strategy: astrcode_core::compaction::CompactStrategy::Auto,
+    fn transcript_rewrite_requests_rehydrate() {
+        let rewrite = event(
+            EventPayload::Durable(DurableEventPayload::TranscriptRewritten {
+                source_seq: 3,
+                messages: Vec::new(),
+                reason: astrcode_core::event::TranscriptRewriteReason::Compaction(
+                    astrcode_core::event::CompactionDetails {
+                        trigger: "auto_threshold".into(),
+                        pre_tokens: 100,
+                        post_tokens: 20,
+                        summary: "summary".into(),
+                        transcript_path: None,
+                        strategy: astrcode_core::compaction::CompactStrategy::Auto,
+                    },
+                ),
             }),
             None,
         );
 
-        let boundary_deltas = event_to_deltas(&boundary, true);
-        assert!(boundary_deltas.is_empty());
-
-        let continuation = event(
-            EventPayload::Durable(DurableEventPayload::SessionContinuedFromCompaction {
-                parent_session_id: "session-1".into(),
-                parent_cursor: "4".into(),
-                summary: "summary".into(),
-                transcript_path: None,
-                context_messages: Vec::new(),
-                retained_messages: Vec::new(),
-            }),
-            None,
-        );
-        let continuation_deltas = event_to_deltas(&continuation, true);
         assert!(matches!(
-            continuation_deltas.as_slice(),
-            [ConversationDeltaDto::SessionContinued {
-                parent_session_id,
-                new_session_id,
-                ..
-            }] if parent_session_id == "session-1" && new_session_id == "session-1"
+            event_to_deltas(&rewrite, true).as_slice(),
+            [ConversationDeltaDto::RehydrateRequired]
         ));
     }
 }

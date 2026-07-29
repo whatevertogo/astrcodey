@@ -150,9 +150,6 @@ async fn handle_prompt(
                 match result {
                     Some(event) => {
                         if event_belongs_to_prompt(&event, &accepted_sessions, &turn_id) {
-                            if let Some(astrcode_core::event::DurableEventPayload::CompactBoundaryCreated { continued_session_id, .. }) = event.payload.as_durable() {
-                                accepted_sessions.insert(continued_session_id.clone());
-                            }
                             forward_event(&event, &acp_session_id, cx);
                         }
                     },
@@ -196,13 +193,6 @@ fn flush_queued_events(
 ) {
     while let Ok(event) = event_rx.try_recv() {
         if event_belongs_to_prompt(&event, accepted_sessions, turn_id) {
-            if let Some(astrcode_core::event::DurableEventPayload::CompactBoundaryCreated {
-                continued_session_id,
-                ..
-            }) = event.payload.as_durable()
-            {
-                accepted_sessions.insert(continued_session_id.clone());
-            }
             forward_event(&event, acp_session_id, cx);
         }
     }
@@ -398,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn event_filter_accepts_child_session_after_compact_boundary() {
+    fn event_filter_accepts_an_explicitly_registered_child_session() {
         let parent_session = SessionId::from("parent-1");
         let child_session = SessionId::from("child-1");
         let turn_id = TurnId::from("turn-1");
@@ -406,7 +396,6 @@ mod tests {
         let mut accepted = HashSet::new();
         accepted.insert(parent_session.clone());
 
-        // Parent session event passes
         let parent_event = live_event(
             parent_session,
             Some(turn_id.clone()),
@@ -417,7 +406,6 @@ mod tests {
         );
         assert!(event_belongs_to_prompt(&parent_event, &accepted, &turn_id));
 
-        // Child session event is rejected before boundary
         let child_event = live_event(
             child_session.clone(),
             Some(turn_id.clone()),
@@ -428,7 +416,6 @@ mod tests {
         );
         assert!(!event_belongs_to_prompt(&child_event, &accepted, &turn_id));
 
-        // After learning compact boundary, child events pass
         accepted.insert(child_session);
         assert!(event_belongs_to_prompt(&child_event, &accepted, &turn_id));
     }

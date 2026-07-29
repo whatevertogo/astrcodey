@@ -5,16 +5,15 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use astrcode_context::{
+    CompactResult, ContextAssembler, ContextPrepareInput, NoopPostCompactEnricher, PreparedContext,
+    context_assembler::LlmContextAssembler, is_compact_summary_message,
+};
 use astrcode_core::{
     compaction::CompactStrategy,
     config::{
         AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
         ProviderAuthScheme, ProviderWireFormat,
-    },
-    context::{
-        COMPACT_SUMMARY_MARKER, CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
-        CompactResult, CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
-        NoopPostCompactEnricher, PreparedCompaction, is_compact_summary_message,
     },
     event::DurableEventPayload,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
@@ -24,8 +23,10 @@ use astrcode_core::{
 use astrcode_extension_sdk::runtime_ports::NoopRuntimePorts;
 use astrcode_session::{
     Session, SessionCreateParams, SessionExtensionPorts, SessionRuntimeServices,
-    SessionRuntimeState, compact::persist_compact_result,
+    SessionRuntimeState,
+    compact::{PersistCompactionOutcome, persist_compact_result},
 };
+use astrcode_session_projection::{SessionReadModel, TranscriptArtifactView};
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use astrcode_support::hash::hex_fingerprint;
 use tokio::sync::mpsc;
@@ -63,7 +64,6 @@ struct TestContextAssembler {
     settings: ContextSettings,
 }
 
-#[async_trait::async_trait]
 impl ContextAssembler for TestContextAssembler {
     fn settings(&self) -> &ContextSettings {
         &self.settings
@@ -73,52 +73,8 @@ impl ContextAssembler for TestContextAssembler {
         self.settings.auto_compact_enabled && !input.messages.is_empty()
     }
 
-    async fn compact_if_needed(
-        &self,
-        messages: Vec<LlmMessage>,
-        _system_prompt: Option<&str>,
-        _custom_instructions: &[String],
-        _render_options: CompactSummaryRenderOptions,
-        options: CompactMessagesOptions,
-        mut request_text: CompactRequestFn,
-    ) -> CompactIfNeededOutcome {
-        if !options.run {
-            return CompactIfNeededOutcome::NotRun { messages };
-        }
-        if messages.is_empty() {
-            return CompactIfNeededOutcome::Skipped { messages };
-        }
-
-        let summary = if options.use_llm {
-            request_text(vec![LlmMessage::user(
-                "Do not call tools. Summarize the conversation for compaction.",
-            )])
-            .await
-            .unwrap()
-        } else {
-            "deterministic compact summary".into()
-        };
-        let retained_messages = messages.last().cloned().into_iter().collect::<Vec<_>>();
-        let context_messages = vec![LlmMessage::user(format!(
-            "{COMPACT_SUMMARY_MARKER}\nSummary:\n{summary}\n</compact_summary>"
-        ))];
-        let mut compacted_messages = context_messages.clone();
-        compacted_messages.extend(retained_messages.clone());
-        CompactIfNeededOutcome::Applied {
-            messages: compacted_messages,
-            compaction: PreparedCompaction {
-                result: CompactResult {
-                    pre_tokens: messages.len(),
-                    post_tokens: retained_messages.len().saturating_add(1),
-                    summary,
-                    messages_removed: messages.len().saturating_sub(retained_messages.len()),
-                    context_messages,
-                    retained_messages,
-                    transcript_path: None,
-                },
-                llm_api_failed: false,
-            },
-        }
+    fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
+        LlmContextAssembler::new(self.settings.clone()).prepare_messages(input)
     }
 }
 
@@ -278,7 +234,7 @@ fn sample_compaction() -> CompactResult {
         post_tokens: 10,
         summary: "integration summary".into(),
         messages_removed: 2,
-        context_messages: vec![LlmMessage::user(
+        summary_messages: vec![LlmMessage::user(
             "<compact_summary>\nSummary:\nintegration\n</compact_summary>",
         )],
         retained_messages: vec![LlmMessage::user("kept tail")],
@@ -286,7 +242,7 @@ fn sample_compaction() -> CompactResult {
     }
 }
 
-async fn compact_boundary_event_count(store: &dyn SessionStore, session_id: &SessionId) -> usize {
+async fn compact_event_count(store: &dyn SessionStore, session_id: &SessionId) -> usize {
     store
         .replay_events(session_id)
         .await
@@ -295,13 +251,24 @@ async fn compact_boundary_event_count(store: &dyn SessionStore, session_id: &Ses
         .filter(|event| {
             matches!(
                 event.payload,
-                DurableEventPayload::CompactBoundaryCreated { .. }
+                DurableEventPayload::TranscriptRewritten { .. }
             )
         })
         .count()
 }
 
-/// 在 compact LLM 调用期间注入 durable 事件，使 `base_event_seq` 过期。
+fn projected_provider_messages(model: &SessionReadModel) -> Vec<LlmMessage> {
+    astrcode_core::llm::provider_visible_messages(
+        model
+            .transcript
+            .messages
+            .iter()
+            .map(|message| message.message.clone())
+            .collect(),
+    )
+}
+
+/// 在 compact LLM 调用期间注入 durable 事件，使 `source_seq` 过期。
 ///
 /// 事件在 mock 内部、LLM 返回前注入，避免测试侧与 mock 之间的 Notify/oneshot 竞态。
 struct RaceOnCompactLlm {
@@ -329,10 +296,9 @@ impl LlmProvider for RaceOnCompactLlm {
                     session
                         .emit_durable(
                             None,
-                            DurableEventPayload::UserMessage {
-                                message_id: new_message_id(),
+                            DurableEventPayload::RecapGenerated {
                                 text: race_message,
-                                attachments: vec![],
+                                source: "test".into(),
                             },
                         )
                         .await
@@ -377,7 +343,7 @@ impl LlmProvider for RaceOnCompactLlm {
 }
 
 #[tokio::test]
-async fn persist_compact_result_accepts_new_tail_events() {
+async fn persist_compact_result_rejects_a_stale_snapshot() {
     let (session, store) = spawn_session(Arc::new(StaticOkLlm), ContextSettings::default()).await;
     configure_system_prompt(&session).await;
     seed_history(&session, 2).await;
@@ -402,42 +368,32 @@ async fn persist_compact_result_accepts_new_tail_events() {
         .await
         .unwrap();
 
-    // Even if new events arrive after `base_event_seq` was observed, persist should succeed.
-    let persisted = persist_compact_result(
+    let outcome = persist_compact_result(
         &session,
         &sample_compaction(),
         "auto_threshold",
-        "integration system prompt",
-        &hex_fingerprint(b"integration system prompt"),
-        None,
         stale_seq,
         CompactStrategy::Auto,
     )
     .await
-    .expect("persist should tolerate new tail events");
-    assert_eq!(persisted.base_event_seq, stale_seq);
+    .expect("a stale rewrite should be a typed outcome");
+    assert!(matches!(outcome, PersistCompactionOutcome::Stale));
     assert_eq!(
-        compact_boundary_event_count(store.as_ref(), session.id()).await,
-        1,
-        "persist should append compact boundary events once"
+        compact_event_count(store.as_ref(), session.id()).await,
+        0,
+        "a stale candidate must not append a rewrite event"
     );
-    let provider_messages = session.read_model().await.unwrap().provider_messages();
-    assert!(
-        provider_messages
-            .iter()
-            .any(|m| m.joined_display_text("\n").contains("kept tail")),
-        "retained messages should be queryable after persist"
-    );
+    let provider_messages = projected_provider_messages(&session.read_model().await.unwrap());
     assert!(
         provider_messages
             .iter()
             .any(|m| m.joined_display_text("\n").contains("race event")),
-        "tail delta events must be preserved after compaction"
+        "the event that made the candidate stale must remain in projection"
     );
 }
 
 #[tokio::test]
-async fn auto_compact_persist_race_preserves_tail_and_uses_compact_summary() {
+async fn auto_compact_discards_a_stale_candidate_and_uses_fresh_projection() {
     let main_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let session_to_race = Arc::new(std::sync::Mutex::new(None));
     let llm = Arc::new(RaceOnCompactLlm {
@@ -477,14 +433,14 @@ async fn auto_compact_persist_race_preserves_tail_and_uses_compact_summary() {
         .pop()
         .expect("main provider request should be captured");
     assert!(
-        main_messages.iter().any(is_compact_summary_message),
-        "provider request should use compact summary"
+        !main_messages.iter().any(is_compact_summary_message),
+        "a stale compact summary must not reach the provider"
     );
     assert!(
-        !main_messages
+        main_messages
             .iter()
             .any(|m| m.joined_display_text("\n").contains("old user 0")),
-        "provider request should not contain compacted-away history"
+        "the provider request should be rebuilt from the fresh projection"
     );
     assert!(
         main_messages
@@ -494,21 +450,23 @@ async fn auto_compact_persist_race_preserves_tail_and_uses_compact_summary() {
     );
 
     assert_eq!(
-        compact_boundary_event_count(store.as_ref(), session.id()).await,
-        1,
-        "persist should append compact boundary events"
+        compact_event_count(store.as_ref(), session.id()).await,
+        0,
+        "a stale candidate must not append a rewrite event"
     );
     let model = session.read_model().await.unwrap();
-    let provider_messages = model.provider_messages();
+    let provider_messages = projected_provider_messages(&model);
     assert!(
-        provider_messages.iter().any(is_compact_summary_message),
-        "projection should expose compact summary after persist"
+        !provider_messages.iter().any(is_compact_summary_message),
+        "projection must not contain a discarded summary"
     );
     assert!(
-        provider_messages.iter().any(|m| m
-            .joined_display_text("\n")
-            .contains("concurrent race during compact")),
-        "projection must preserve tail delta user message that arrived during compact"
+        model.transcript.artifacts.iter().any(|artifact| matches!(
+            artifact,
+            TranscriptArtifactView::SystemNote { text, .. }
+                if text == "concurrent race during compact"
+        )),
+        "projection must preserve the event that invalidated compact"
     );
     assert!(
         provider_messages
@@ -533,7 +491,7 @@ async fn auto_compact_persist_race_preserves_tail_and_uses_compact_summary() {
         "{:?}",
         follow_up_result.output
     );
-    let after_follow_up = session.read_model().await.unwrap().provider_messages();
+    let after_follow_up = projected_provider_messages(&session.read_model().await.unwrap());
     assert!(
         after_follow_up
             .iter()
@@ -544,9 +502,7 @@ async fn auto_compact_persist_race_preserves_tail_and_uses_compact_summary() {
 
 #[tokio::test]
 async fn compact_idle_session_skips_when_cursor_races_during_llm() {
-    use astrcode_session::compaction_run::{
-        IdleCompactionOutcome, IdleCompactionParams, compact_idle_session,
-    };
+    use astrcode_session::compaction_run::{IdleCompactionOutcome, compact_idle_session};
 
     let session_to_race = Arc::new(std::sync::Mutex::new(None));
     let race_llm = Arc::new(RaceOnCompactLlm {
@@ -562,63 +518,35 @@ async fn compact_idle_session_skips_when_cursor_races_during_llm() {
         compact_max_retry_attempts: 1,
         ..Default::default()
     };
-    let (session, store) = spawn_session(
-        Arc::clone(&race_llm) as Arc<dyn LlmProvider>,
-        context.clone(),
-    )
-    .await;
+    let (session, store) =
+        spawn_session(Arc::clone(&race_llm) as Arc<dyn LlmProvider>, context).await;
     let session = Arc::new(session);
     *session_to_race.lock().unwrap() = Some(Arc::clone(&session));
     configure_system_prompt(session.as_ref()).await;
     seed_history(session.as_ref(), 3).await;
 
-    let state = session.read_model().await.unwrap();
-    let caps = test_caps(race_llm.clone(), context);
-    let extension_runner = caps.turn_hooks_arc();
-    let context_assembler = caps.context_assembler_arc();
-    let llm = caps.llm();
-    let tools = session
-        .tool_registry_snapshot(&state.identity.working_dir)
-        .await
-        .unwrap()
-        .list_definitions();
-    let provider_messages = state.provider_messages();
-
     let session_for_race = Arc::clone(&session);
-    let compact_task = tokio::spawn(async move {
-        compact_idle_session(
-            session_for_race.as_ref(),
-            extension_runner.as_ref(),
-            context_assembler.as_ref(),
-            llm,
-            &state,
-            &tools,
-            IdleCompactionParams {
-                keep_recent_turns: None,
-                transcript_path: None,
-                provider_messages,
-            },
-        )
-        .await
-    });
+    let compact_task =
+        tokio::spawn(async move { compact_idle_session(session_for_race.as_ref(), None).await });
 
     let outcome = compact_task.await.unwrap().unwrap();
     assert!(
-        matches!(outcome, IdleCompactionOutcome::Compacted { .. }),
-        "idle compact should persist even when cursor races, got {outcome:?}"
+        matches!(outcome, IdleCompactionOutcome::Skipped { .. }),
+        "idle compact should discard a stale candidate, got {outcome:?}"
     );
     assert_eq!(
-        compact_boundary_event_count(store.as_ref(), session.as_ref().id()).await,
-        1,
-        "compact boundary should be written after persist"
+        compact_event_count(store.as_ref(), session.as_ref().id()).await,
+        0,
+        "stale manual compact must not write a rewrite event"
     );
     let model = session.read_model().await.unwrap();
-    let provider_messages = model.provider_messages();
     assert!(
-        provider_messages.iter().any(|m| m
-            .joined_display_text("\n")
-            .contains("race during idle compact")),
-        "projection must preserve tail delta user message that arrived during compact"
+        model.transcript.artifacts.iter().any(|artifact| matches!(
+            artifact,
+            TranscriptArtifactView::SystemNote { text, .. }
+                if text == "race during idle compact"
+        )),
+        "projection must preserve the event that invalidated compact"
     );
 }
 

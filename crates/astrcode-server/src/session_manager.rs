@@ -404,7 +404,7 @@ impl SessionManager {
 
         let fork_cursor = at_cursor.cloned().unwrap_or_else(|| source_model.cursor());
 
-        let (context_messages, retained_messages) = if at_cursor.is_some() {
+        let (transcript_messages, first_user_message) = if at_cursor.is_some() {
             let events = self.event_store.replay_events(source_id).await?;
             let truncated_seq: u64 = fork_cursor
                 .parse()
@@ -415,14 +415,12 @@ impl SessionManager {
                 .collect();
             let truncated_model =
                 astrcode_session_projection::replay(source_id.clone(), &truncated_events)?;
-            (
-                truncated_model.transcript.context_messages,
-                truncated_model.transcript.messages,
-            )
+            let first_user_message = truncated_model.first_user_message();
+            (truncated_model.transcript.messages, first_user_message)
         } else {
             (
-                source_model.transcript.context_messages.clone(),
                 source_model.transcript.messages.clone(),
+                source_model.first_user_message(),
             )
         };
 
@@ -465,8 +463,11 @@ impl SessionManager {
                 DurableEventPayload::SessionForked {
                     source_session_id: source_id.clone(),
                     source_cursor: fork_cursor,
-                    context_messages: context_messages.into_iter().map(|m| m.message).collect(),
-                    retained_messages: retained_messages.into_iter().map(|m| m.message).collect(),
+                    first_user_message,
+                    messages: transcript_messages
+                        .into_iter()
+                        .map(|message| message.message)
+                        .collect(),
                 },
             ))
             .await?;

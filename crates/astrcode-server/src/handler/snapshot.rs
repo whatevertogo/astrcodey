@@ -1,17 +1,11 @@
 //! 会话快照 — 内部模型转传输层 DTO。
 
-use astrcode_core::{
-    context::COMPACT_SUMMARY_MARKER,
-    llm::{LlmContent, LlmMessage},
-};
+use astrcode_context::is_compact_summary_message;
+use astrcode_core::llm::{LlmContent, LlmMessage};
 use astrcode_protocol::{
     events::{AgentSessionLinkDto, MessageDto, SessionSnapshot},
     wire::MessageRoleDto,
 };
-
-fn is_wire_compact_summary(content: &str) -> bool {
-    content.trim_start().starts_with(COMPACT_SUMMARY_MARKER)
-}
 
 /// 构建会话快照 DTO，用于客户端同步。
 pub(crate) fn session_snapshot(
@@ -48,7 +42,7 @@ pub fn message_to_dto(message: &LlmMessage) -> MessageDto {
         .collect::<String>();
 
     // Compact summary 消息是 synthetic user message，但在客户端应显示为系统消息。
-    let role = if is_wire_compact_summary(&content) {
+    let role = if is_compact_summary_message(message) {
         MessageRoleDto::System
     } else {
         message.role.into()
@@ -111,10 +105,13 @@ mod tests {
 
     #[test]
     fn is_compact_summary_message_detects_marker() {
-        assert!(is_wire_compact_summary("<compact_summary>\nContent"));
-        assert!(is_wire_compact_summary("  <compact_summary>\nContent"));
-        assert!(is_wire_compact_summary("\n<compact_summary>\nContent"));
-        assert!(!is_wire_compact_summary("Regular message"));
-        assert!(!is_wire_compact_summary("</compact_summary>"));
+        assert_eq!(
+            message_to_dto(&simple_text_message("  <compact_summary>\nContent")).role,
+            MessageRoleDto::System
+        );
+        assert_eq!(
+            message_to_dto(&simple_text_message("Regular message")).role,
+            MessageRoleDto::User
+        );
     }
 }

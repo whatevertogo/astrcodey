@@ -52,9 +52,9 @@ pub struct AgentSessionLinkView {
     pub error: Option<String>,
 }
 
-/// compact boundary 在会话投影中的元数据。
+/// 一次 compaction 的投影元数据。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CompactBoundaryView {
+pub struct CompactionView {
     /// compact 触发来源。
     pub trigger: String,
     /// 压缩前 token 数。
@@ -65,10 +65,10 @@ pub struct CompactBoundaryView {
     pub summary: String,
     /// compact 前 transcript snapshot 路径。
     pub transcript_path: Option<String>,
-    /// boundary 事件的 seq。
+    /// transcript rewrite 事件的 seq。
     pub seq: u64,
-    /// compact 基于的事件 seq（幂等校验键）。
-    pub base_event_seq: u64,
+    /// compact candidate 基于的 projection seq。
+    pub source_seq: u64,
     /// compact 策略。
     pub strategy: astrcode_core::compaction::CompactStrategy,
 }
@@ -155,8 +155,8 @@ pub struct SessionReadModel {
     pub execution: SessionExecutionState,
     /// 父会话派生的子 Agent 会话列表。
     pub agent_sessions: Vec<AgentSessionLinkView>,
-    /// compact boundary 元数据列表，按 seq 递增排列。
-    pub compact_boundaries: Vec<CompactBoundaryView>,
+    /// compaction 元数据列表，按 seq 递增排列。
+    pub compactions: Vec<CompactionView>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -187,8 +187,8 @@ pub struct SessionSystemPrompt {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct SessionTranscript {
+    pub first_user_message: Option<String>,
     pub messages: Vec<SequencedLlmMessage>,
-    pub context_messages: Vec<SequencedLlmMessage>,
     pub artifacts: Vec<TranscriptArtifactView>,
 }
 
@@ -229,30 +229,8 @@ impl SessionReadModel {
             transcript: SessionTranscript::default(),
             execution: SessionExecutionState::default(),
             agent_sessions: Vec::new(),
-            compact_boundaries: Vec::new(),
+            compactions: Vec::new(),
         }
-    }
-
-    /// 返回 provider 可见消息。
-    ///
-    /// 包含防御性归一化：
-    /// 1. 将连续的 assistant+tool_calls 消息合并为一条
-    /// 2. 截断不完整的 tool 协议轮，避免 DeepSeek 等严格 provider 拒绝请求
-    pub fn provider_messages(&self) -> Vec<LlmMessage> {
-        let mut messages = Vec::with_capacity(
-            self.transcript
-                .context_messages
-                .len()
-                .saturating_add(self.transcript.messages.len()),
-        );
-        messages.extend(
-            self.transcript
-                .context_messages
-                .iter()
-                .chain(self.transcript.messages.iter())
-                .map(|sequenced| sequenced.message.clone()),
-        );
-        astrcode_core::llm::provider_visible_messages(messages)
     }
 
     /// 是否已有普通 transcript 消息。
@@ -267,24 +245,7 @@ impl SessionReadModel {
 
     /// 首条用户消息的文本内容，无用户消息时返回 None。
     pub fn first_user_message(&self) -> Option<String> {
-        self.transcript
-            .messages
-            .iter()
-            .find(|m| m.source.is_none() && matches!(m.message.role, LlmRole::User))
-            .and_then(|m| m.message.content.iter().find_map(LlmContent::as_text))
-            .map(str::to_owned)
-    }
-
-    /// 统计 provider 可见的非合成 user 消息条数。
-    pub fn visible_user_message_count(&self) -> usize {
-        self.transcript
-            .messages
-            .iter()
-            .filter(|entry| {
-                entry.message.role == LlmRole::User
-                    && !astrcode_core::context::is_synthetic_context_message(&entry.message)
-            })
-            .count()
+        self.transcript.first_user_message.clone()
     }
 
     /// 生成会话列表摘要，只复制列表接口需要的少量字段。

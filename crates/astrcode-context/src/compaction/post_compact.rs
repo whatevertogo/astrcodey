@@ -2,14 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 
-use astrcode_core::{
-    context::POST_COMPACT_CONTEXT_MARKER,
-    llm::{LlmContent, LlmMessage, LlmRole},
-};
+use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
 
 use super::assemble::collapse_compaction_whitespace;
 use crate::{
-    ContextSettings,
+    ContextSettings, POST_COMPACT_CONTEXT_MARKER,
     token_budget::{estimate_text_tokens, truncate_text_to_tokens},
 };
 
@@ -92,13 +89,13 @@ pub fn agent_status_note(
 }
 
 pub fn append_post_compact_context(
-    compaction: &mut astrcode_core::context::CompactResult,
+    compaction: &mut crate::CompactResult,
     files: Vec<PostCompactFile>,
     notes: Vec<PostCompactNote>,
     settings: &ContextSettings,
 ) {
     if let Some(message) = post_compact_context_message(files, notes, settings) {
-        compaction.context_messages.push(message);
+        compaction.summary_messages.push(message);
     }
 }
 

@@ -25,10 +25,7 @@
     "sessionId": "parent-session",
     "cursor": { "value": "7" },
     "delta": {
-      "kind": "sessionContinued",
-      "parentSessionId": "parent-session",
-      "newSessionId": "child-session",
-      "parentCursor": { "value": "7" }
+      "kind": "rehydrateRequired"
     }
   },
   {

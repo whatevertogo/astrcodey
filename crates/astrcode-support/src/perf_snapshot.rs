@@ -13,7 +13,9 @@ use std::{
 
 use astrcode_core::event::Event;
 #[cfg(debug_assertions)]
-use astrcode_core::event::{DurableEventPayload, EventPayload, LiveEventPayload};
+use astrcode_core::event::{
+    DurableEventPayload, EventPayload, LiveEventPayload, TranscriptRewriteReason,
+};
 
 #[cfg(debug_assertions)]
 static LAST_EVENT_AT: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
@@ -85,10 +87,7 @@ fn durable_payload_type(payload: &DurableEventPayload) -> &'static str {
         DurableEventPayload::ToolCallCompleted { .. } => "tool_call_completed",
         DurableEventPayload::ToolCallFailed { .. } => "tool_call_failed",
         DurableEventPayload::ToolCallCancelled { .. } => "tool_call_cancelled",
-        DurableEventPayload::CompactBoundaryCreated { .. } => "compact_boundary_created",
-        DurableEventPayload::SessionContinuedFromCompaction { .. } => {
-            "session_continued_from_compaction"
-        },
+        DurableEventPayload::TranscriptRewritten { .. } => "transcript_rewritten",
         DurableEventPayload::SessionForked { .. } => "session_forked",
         DurableEventPayload::ErrorOccurred { .. } => "error_occurred",
         DurableEventPayload::ExtensionEvent(_) => "extension_event",
@@ -198,17 +197,14 @@ fn durable_payload_details(payload: &DurableEventPayload) -> String {
             )
         },
         DurableEventPayload::ModelIdChanged { model_id } => format!("model={model_id}"),
-        DurableEventPayload::CompactBoundaryCreated {
-            continued_session_id,
-            pre_tokens,
-            post_tokens,
+        DurableEventPayload::TranscriptRewritten {
+            source_seq,
+            reason: TranscriptRewriteReason::Compaction(details),
             ..
         } => format!(
-            "continued={continued_session_id} pre_tokens={pre_tokens} post_tokens={post_tokens}"
+            "source_seq={source_seq} pre_tokens={} post_tokens={}",
+            details.pre_tokens, details.post_tokens
         ),
-        DurableEventPayload::SessionContinuedFromCompaction {
-            parent_session_id, ..
-        } => format!("parent={parent_session_id}"),
         DurableEventPayload::SessionForked {
             source_session_id, ..
         } => format!("source={source_session_id}"),

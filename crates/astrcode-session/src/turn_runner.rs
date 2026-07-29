@@ -24,9 +24,12 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    compaction_coordinator::{Compaction, CompactionHost, PreparedContextMessages},
-    llm_request_history::build_llm_request_messages,
+    compaction_coordinator::{
+        CompactionHost, PreparedProviderHistory, build_auto_compaction_request,
+        prepare_provider_history, run_reactive_compaction,
+    },
     llm_stream::{StreamOutcome, consume_llm_stream, non_empty_reasoning_content},
+    projection_context::context_snapshot,
     session::Session,
     steer::{count_visible_user_messages, has_pending_mid_turn_user_messages},
     tool_deduplicator::ToolCallDeduplicator,
@@ -55,28 +58,12 @@ pub(crate) async fn drive_agent(
     (output, publisher.emitted_error())
 }
 
-/// AgentTurn — 一个临时的回合处理器。
-///
-/// **演进注记**：当前结构体同时持有 `session` / `llm` / `tools` / `compaction`
-/// 五个领域，"每一项 `process_prompt_inner` 都会用到"。如果**以下需求同时出现**，
-/// 需要拆分为独立阶段（`PrepareStage` / `LlmStage` / `ToolStage` / `CompactStage`）
-/// 并由 `TurnLoop` 以 **Trait 对象** 或 **泛型参数** 组合：
-///
-/// 1. 同一 session 并行多回合（sub-agent / tree-of-thought）；
-/// 2. 中途回滚到上一 checkpoint（需要动 `compaction` 与 `llm_stage` 边界）；
-/// 3. 多 provider 轮换（需要替换 `Arc<dyn LlmProvider>` 以外的依赖）。
-///
-/// TODO: 更好的做法是**先拆 `TurnState`**（当前 `TurnLoop` 内部状态载体）为独立阶段的状态载体，
-/// **当前不拆**：`process_prompt_inner` 三个阶段之间的状态转移
-/// （`state.tool_deduplicator_mut()` / `state.append_final_text`）
-/// 与 `compaction` 强耦合，拆为独立阶段需先拆 `TurnState`。
-/// YAGNI：在明确提出以上需求时再动。参考 issue #TBD。
+/// 一次 turn 的临时执行器；durable projection 是跨 turn 状态。
 pub(crate) struct TurnLoop {
     session: Session,
     llm: Arc<dyn astrcode_core::llm::LlmProvider>,
     cancellation_token: CancellationToken,
     tools: ToolCalls,
-    compaction: Compaction,
 }
 
 impl TurnLoop {
@@ -97,10 +84,6 @@ impl TurnLoop {
             .max(1)
     }
 
-    pub(crate) fn system_prompt(&self) -> &str {
-        self.compaction.system_prompt()
-    }
-
     fn shared(&self) -> &SharedTurnContext {
         self.tools.shared()
     }
@@ -113,7 +96,6 @@ impl TurnLoop {
         tool_registry: Arc<crate::ToolRegistry>,
         cancellation_token: CancellationToken,
     ) -> Result<Self, TurnError> {
-        let system_prompt = session_state.system_prompt.text.clone();
         let runtime = session.runtime();
         let runtime_services = session.runtime_services();
         let turn = TurnToolContext::for_turn(&session, session_state, session_store_dir);
@@ -134,7 +116,6 @@ impl TurnLoop {
             llm,
             cancellation_token,
             tools,
-            compaction: Compaction::new(system_prompt, session_state.system_prompt.extra.clone()),
         })
     }
 
@@ -238,11 +219,7 @@ impl TurnLoop {
                         shared: &shared,
                         extension_runner: extension_runner.as_ref(),
                     };
-                    if !self
-                        .compaction
-                        .run_reactive_compaction(&host, &state, turn_id, publisher)
-                        .await?
-                    {
+                    if !run_reactive_compaction(&host, &state, turn_id, publisher).await? {
                         return end_turn_with_error_typed(TurnError::CompactExhausted);
                     }
                     continue;
@@ -390,28 +367,28 @@ impl TurnLoop {
             shared: &shared,
             extension_runner,
         };
-        self.compaction
-            .refresh_system_prompt(host.session, host.shared)
-            .await?;
-
         let model = publisher.snapshot_model().await?;
+        let snapshot = context_snapshot(&model);
         let llm = Arc::clone(host.llm);
         let visible_tools = state.visible_tools();
-        let compaction_request = self
-            .compaction
-            .build_auto_compaction_request(&host, &model, &visible_tools)
-            .await?;
+        let compaction_request =
+            build_auto_compaction_request(&host, &snapshot, &visible_tools).await;
 
-        let PreparedContextMessages {
-            context_messages,
-            compaction_applied: _,
-        } = self
-            .compaction
-            .prepare_context_messages(&host, state, &model, turn_id, compaction_request, publisher)
-            .await?;
+        let PreparedProviderHistory {
+            snapshot,
+            messages,
+            outcome: _,
+        } = prepare_provider_history(
+            &host,
+            state,
+            snapshot,
+            turn_id,
+            compaction_request,
+            publisher,
+        )
+        .await?;
 
-        let messages = build_llm_request_messages(self.system_prompt(), context_messages);
-        let mut messages = messages;
+        let mut messages = snapshot.request_messages(messages);
         if let Some(reminder) = state.tool_deduplicator().check_reminder() {
             tracing::debug!("injecting tool deduplication system-reminder");
             messages.push(LlmMessage::user(reminder));

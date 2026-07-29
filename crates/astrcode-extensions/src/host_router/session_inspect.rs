@@ -11,7 +11,7 @@ use astrcode_core::{
 use astrcode_extension_sdk::{
     s5r::ErrorPayload,
     session_inspect::{
-        SessionInspectAgentSession, SessionInspectCompactBoundary, SessionInspectContent,
+        SessionInspectAgentSession, SessionInspectCompaction, SessionInspectContent,
         SessionInspectListItem, SessionInspectListOutput, SessionInspectMessage,
         SessionInspectPendingApproval, SessionInspectProviderMessagesOutput,
         SessionInspectReadModel, SessionInspectReadModelOutput, SessionInspectSequencedMessage,
@@ -64,7 +64,6 @@ pub(super) async fn snapshot(
                 .map(|parent| parent.session_id.to_string()),
             source_extension: model.identity.source_extension,
             message_count: model.transcript.messages.len(),
-            context_message_count: model.transcript.context_messages.len(),
             pending_tool_call_ids,
             agent_session_count: model.agent_sessions.len(),
         },
@@ -91,11 +90,19 @@ pub(super) async fn provider_messages(
     input: Value,
 ) -> Result<Value, ErrorPayload> {
     let session_id = session_id(&input)?;
-    let messages = storage_call(
+    let model = storage_call(
         "session.inspect.provider_messages",
-        reader.session_provider_messages(&session_id),
+        reader.session_read_model(&session_id),
     )
     .await?;
+    let messages = astrcode_core::llm::provider_visible_messages(
+        model
+            .transcript
+            .messages
+            .into_iter()
+            .map(|message| message.message)
+            .collect(),
+    );
     to_value(SessionInspectProviderMessagesOutput {
         messages: messages.into_iter().map(message_dto).collect(),
     })
@@ -155,11 +162,6 @@ fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel {
             .into_iter()
             .map(sequenced_message_dto)
             .collect(),
-        context_messages: transcript
-            .context_messages
-            .into_iter()
-            .map(sequenced_message_dto)
-            .collect(),
         working_dir: identity.working_dir,
         model_id: identity.model_id,
         phase: phase_name(execution.phase).into(),
@@ -190,19 +192,19 @@ fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel {
             .into_iter()
             .map(agent_session_dto)
             .collect(),
-        compact_boundaries: model
-            .compact_boundaries
+        compactions: model
+            .compactions
             .into_iter()
             .map(|boundary| {
                 let (strategy, keep_recent_turns) = compact_strategy(boundary.strategy);
-                SessionInspectCompactBoundary {
+                SessionInspectCompaction {
                     trigger: boundary.trigger,
                     pre_tokens: boundary.pre_tokens,
                     post_tokens: boundary.post_tokens,
                     summary: boundary.summary,
                     transcript_path: boundary.transcript_path,
                     seq: boundary.seq,
-                    base_event_seq: boundary.base_event_seq,
+                    source_seq: boundary.source_seq,
                     strategy: strategy.into(),
                     keep_recent_turns,
                 }

@@ -2,8 +2,8 @@
 
 use std::collections::HashSet;
 
+use astrcode_context::is_prompt_too_long_message;
 use astrcode_core::{
-    context::is_prompt_too_long_message,
     event::LiveEventPayload,
     llm::{LlmError, LlmEvent, LlmTokenUsage},
     types::*,

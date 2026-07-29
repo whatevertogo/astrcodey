@@ -393,14 +393,14 @@ pub(in crate::http) async fn compact_session(
         Ok(ManualCompactOutcome::Compacted { session_id }) => Json(CompactSessionResponse {
             accepted: true,
             deferred: false,
-            new_session_id: Some(session_id.into_string()),
+            session_id: Some(session_id.into_string()),
             message: "compact accepted".into(),
         })
         .into_response(),
         Ok(ManualCompactOutcome::Skipped { message }) => Json(CompactSessionResponse {
             accepted: false,
             deferred: false,
-            new_session_id: None,
+            session_id: None,
             message,
         })
         .into_response(),

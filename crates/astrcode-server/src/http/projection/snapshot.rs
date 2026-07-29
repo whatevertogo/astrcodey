@@ -11,8 +11,7 @@ use astrcode_session_projection::{PendingToolApprovalView, SessionReadModel};
 
 use super::{
     blocks::{
-        compact_summary_block, latest_compact_boundary, streaming_assistant_block,
-        transcript_blocks,
+        compact_summary_block, latest_compaction, streaming_assistant_block, transcript_blocks,
     },
     live::control_from_phase,
     session_title_from_working_dir,
@@ -29,8 +28,8 @@ pub(in crate::http) fn conversation_to_dto(
 
     // 与 provider_messages 一致：最新 compact 摘要紧挨保留消息之前（被压掉的历史不在 UI 展示）
     let mut blocks: Vec<ConversationBlockDto> = Vec::new();
-    if let Some(boundary) = latest_compact_boundary(&session.compact_boundaries) {
-        blocks.push(compact_summary_block(boundary));
+    if let Some(compaction) = latest_compaction(&session.compactions) {
+        blocks.push(compact_summary_block(compaction));
     }
     blocks.extend(transcript_blocks(
         &session.transcript.messages,
@@ -254,7 +253,7 @@ mod tests {
     #[test]
     fn conversation_snapshot_places_compact_summary_before_retained_messages() {
         use astrcode_core::compaction::CompactStrategy;
-        use astrcode_session_projection::CompactBoundaryView;
+        use astrcode_session_projection::CompactionView;
 
         let mut session = session_read_model("session-compact");
         session.stats.last_seq = 7;
@@ -275,15 +274,15 @@ mod tests {
                 updated_seq: 2,
                 source: None,
             });
-        // compact boundary 元数据
-        session.compact_boundaries.push(CompactBoundaryView {
+        // compact 元数据
+        session.compactions.push(CompactionView {
             trigger: "manual_command".into(),
             pre_tokens: 1000,
             post_tokens: 200,
             summary: "Earlier conversation was compacted".into(),
             transcript_path: None,
             seq: 5,
-            base_event_seq: 4,
+            source_seq: 4,
             strategy: CompactStrategy::Manual {
                 keep_recent_turns: None,
             },
@@ -307,7 +306,7 @@ mod tests {
     #[test]
     fn conversation_snapshot_shows_only_latest_compact_before_retained_messages() {
         use astrcode_core::compaction::CompactStrategy;
-        use astrcode_session_projection::CompactBoundaryView;
+        use astrcode_session_projection::CompactionView;
 
         use crate::http::projection::blocks::COMPACT_SUMMARY_BLOCK_ID;
 
@@ -321,24 +320,24 @@ mod tests {
                 updated_seq: 1,
                 source: None,
             });
-        session.compact_boundaries.push(CompactBoundaryView {
+        session.compactions.push(CompactionView {
             trigger: "auto_threshold".into(),
             pre_tokens: 800,
             post_tokens: 100,
             summary: "First compaction".into(),
             transcript_path: None,
             seq: 5,
-            base_event_seq: 4,
+            source_seq: 4,
             strategy: CompactStrategy::Auto,
         });
-        session.compact_boundaries.push(CompactBoundaryView {
+        session.compactions.push(CompactionView {
             trigger: "auto_threshold".into(),
             pre_tokens: 600,
             post_tokens: 80,
             summary: "Second compaction".into(),
             transcript_path: None,
             seq: 12,
-            base_event_seq: 11,
+            source_seq: 11,
             strategy: CompactStrategy::Auto,
         });
 

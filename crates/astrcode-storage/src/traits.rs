@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use astrcode_core::{
     event::{DurableEvent, StoredEvent},
-    llm::LlmMessage,
     tool::ToolResultArtifactSlice,
     types::{Cursor, SessionId},
 };
@@ -44,18 +43,6 @@ pub trait SessionReader: Send + Sync {
         session_id: &SessionId,
     ) -> Result<SessionReadModel, StorageError>;
 
-    async fn session_provider_messages(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Vec<LlmMessage>, StorageError> {
-        Ok(self
-            .session_read_model(session_id)
-            .await?
-            .provider_messages())
-    }
-
-    async fn session_system_prompt(&self, session_id: &SessionId) -> Result<String, StorageError>;
-
     async fn session_has_messages(&self, session_id: &SessionId) -> Result<bool, StorageError> {
         Ok(self.session_read_model(session_id).await?.has_messages())
     }
@@ -65,16 +52,6 @@ pub trait SessionReader: Send + Sync {
         session_id: &SessionId,
     ) -> Result<Vec<AgentSessionLinkView>, StorageError> {
         Ok(self.session_read_model(session_id).await?.agent_sessions)
-    }
-
-    async fn session_visible_user_message_count(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<usize, StorageError> {
-        Ok(self
-            .session_read_model(session_id)
-            .await?
-            .visible_user_message_count())
     }
 
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError>;

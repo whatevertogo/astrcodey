@@ -10,7 +10,7 @@ use super::{
     events::{finish_tool_call, missing_tool_outcome, tool_result_for_output},
 };
 use crate::{
-    llm_request_history::committed_tool_result_content_len,
+    projection_context::committed_tool_result_content_len,
     tool_results::{
         MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, TOOL_RESULT_PREVIEW_CHARS,
         persisted_tool_result_summary, should_auto_persist_tool_result, tool_result_preview,

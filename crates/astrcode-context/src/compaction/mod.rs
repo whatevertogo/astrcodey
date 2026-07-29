@@ -26,16 +26,17 @@ mod post_compact;
 mod prompt;
 
 pub use assemble::{CompactSummaryEnvelope, format_compact_summary};
-pub use astrcode_core::context::{
-    COMPACT_SUMMARY_MARKER, CompactError, CompactResult, CompactSkipReason,
-    CompactSummaryRenderOptions, is_compact_summary_message, is_compact_summary_text,
-    is_prompt_too_long_message, is_synthetic_context_message,
-};
 pub use parse::{CompactParseError, ParsedCompactOutput, parse_compact_output};
 use plan::{PreparedCompactInput, visible_message_text};
 pub use post_compact::{
     PostCompactFile, PostCompactNote, agent_status_note, append_post_compact_context,
     recent_read_paths,
+};
+
+pub use crate::{
+    COMPACT_SUMMARY_MARKER, CompactError, CompactResult, CompactSkipReason,
+    CompactSummaryRenderOptions, is_compact_summary_message, is_compact_summary_text,
+    is_prompt_too_long_message, is_synthetic_context_message,
 };
 
 pub struct CompactExecution {
@@ -411,12 +412,12 @@ fn finish_compact_summary(
     system_prompt: Option<&str>,
     render_options: &CompactSummaryRenderOptions,
 ) -> CompactResult {
-    let context_messages = vec![LlmMessage::user(assemble::compact_summary_message_text(
+    let summary_messages = vec![LlmMessage::user(assemble::compact_summary_message_text(
         &summary,
         render_options,
     ))];
     let post_tokens = crate::token_budget::estimate_request_tokens_with_prompt(
-        &[context_messages.clone(), retained_messages.clone()].concat(),
+        &[summary_messages.clone(), retained_messages.clone()].concat(),
         system_prompt,
     );
 
@@ -425,7 +426,7 @@ fn finish_compact_summary(
         post_tokens,
         summary,
         messages_removed,
-        context_messages,
+        summary_messages,
         retained_messages,
         transcript_path: render_options.transcript_path.clone(),
     }
@@ -553,12 +554,12 @@ The summary should preserve the compact contract and omit this scratchpad later.
         assert_eq!(result.messages_removed, 4);
         assert_eq!(result.retained_messages.len(), 1);
         assert_eq!(visible_message_text(&result.retained_messages[0]), "recent");
-        assert!(is_compact_summary_message(&result.context_messages[0]));
-        assert!(visible_message_text(&result.context_messages[0]).contains("Summary:\n"));
+        assert!(is_compact_summary_message(&result.summary_messages[0]));
+        assert!(visible_message_text(&result.summary_messages[0]).contains("Summary:\n"));
     }
 
     #[test]
-    fn compact_turn_split_ignores_synthetic_context_messages() {
+    fn compact_turn_split_ignores_synthetic_summary_messages() {
         let messages = vec![
             LlmMessage::user(assemble::compact_summary_message_text(
                 "old compacted work",

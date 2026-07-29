@@ -1727,7 +1727,7 @@ async fn command_completion_route_returns_empty_for_commands_without_completion(
 }
 
 #[tokio::test]
-async fn prompt_route_compact_returns_handled_and_streams_continuation() {
+async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
     let runtime = runtime(Arc::new(SummaryLlm)).await;
     let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
@@ -1762,19 +1762,6 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
             .unwrap();
     }
 
-    let stream_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
-                .uri(format!("/api/sessions/{session_id}/stream"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
     let response = post_json(
         app.clone(),
         &format!("/api/sessions/{session_id}/prompt"),
@@ -1786,20 +1773,21 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
     let body: PromptSubmitResponse = serde_json::from_slice(&body_bytes(response).await).unwrap();
     assert!(matches!(body, PromptSubmitResponse::Handled { .. }));
 
-    let sse = read_sse_until(stream_response.into_body(), "sessionContinued").await;
-    assert!(sse.contains("sessionContinued"));
-    assert!(
-        !runtime
-            .event_store()
-            .session_read_model(&sid)
-            .await
-            .unwrap()
-            .transcript
-            .messages
+    let state = runtime
+        .event_store()
+        .session_read_model(&sid)
+        .await
+        .unwrap();
+    assert!(state.compactions.iter().any(|compaction| {
+        compaction.trigger == "manual_command" && !compaction.summary.is_empty()
+    }));
+    assert!(!state.transcript.messages.iter().any(|message| {
+        message
+            .message
+            .content
             .iter()
-            .flat_map(|message| message.message.content.iter())
             .any(|content| matches!(content, LlmContent::Text { text } if text == "/compact"))
-    );
+    }));
 }
 
 #[tokio::test]
@@ -1877,19 +1865,6 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
             .unwrap();
     }
 
-    let stream_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
-                .uri(format!("/api/sessions/{session_id}/stream"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
     let response = post_json(
         app.clone(),
         &format!("/api/sessions/{session_id}/compact"),
@@ -1899,23 +1874,18 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body: CompactSessionResponse = serde_json::from_slice(&body_bytes(response).await).unwrap();
-    let returned_session_id = body
-        .new_session_id
-        .expect("compact should return session_id");
+    let returned_session_id = body.session_id.expect("compact should return session_id");
     assert_eq!(returned_session_id, session_id, "same-session compact");
-    let sse = read_sse_until(stream_response.into_body(), "sessionContinued").await;
-    assert!(sse.contains(&session_id));
 
     let state = runtime
         .event_store()
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert!(!state.transcript.context_messages.is_empty());
     let restored_context = astrcode_core::llm::LlmContent::join_text(
         state
             .transcript
-            .context_messages
+            .messages
             .iter()
             .flat_map(|message| &message.message.content),
         "\n",
@@ -2076,10 +2046,6 @@ impl SessionReader for TestEventStore {
         session_id: &SessionId,
     ) -> Result<SessionReadModel, StorageError> {
         self.inner.session_read_model(session_id).await
-    }
-
-    async fn session_system_prompt(&self, session_id: &SessionId) -> Result<String, StorageError> {
-        self.inner.session_system_prompt(session_id).await
     }
 
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {

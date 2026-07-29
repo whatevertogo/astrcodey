@@ -8,7 +8,8 @@ pub use envelope::{
     ToolOutputStream,
 };
 pub use payload::{
-    DurableEventPayload, ExtensionEventData, LiveEventPayload, ParentSessionRef, SessionStarted,
+    CompactionDetails, DurableEventPayload, ExtensionEventData, LiveEventPayload, ParentSessionRef,
+    SessionStarted, TranscriptRewriteReason,
 };
 use serde::{Deserialize, Serialize};
 

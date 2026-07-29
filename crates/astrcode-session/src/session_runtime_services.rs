@@ -10,11 +10,8 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use astrcode_core::{
-    config::EffectiveConfig,
-    context::{ContextAssembler, PostCompactEnricher},
-    llm::LlmProvider,
-};
+use astrcode_context::{ContextAssembler, PostCompactEnricher};
+use astrcode_core::{config::EffectiveConfig, llm::LlmProvider};
 use astrcode_extension_sdk::runtime_ports::{
     PromptContributor, RuntimeSnapshotState, ToolCatalogProvider, TurnHooks,
 };
@@ -128,15 +125,14 @@ impl SessionRuntimeServices {
 
 #[cfg(test)]
 mod tests {
+    use astrcode_context::{
+        CompactResult, ContextAssembler, ContextPrepareInput, PostCompactEnrichInput,
+        PostCompactEnricher, PreparedContext, context_assembler::LlmContextAssembler,
+    };
     use astrcode_core::{
         config::{
             AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
             ProviderAuthScheme, ProviderWireFormat,
-        },
-        context::{
-            CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn, CompactResult,
-            CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
-            PostCompactEnrichInput, PostCompactEnricher,
         },
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         tool::ToolDefinition,
@@ -170,7 +166,6 @@ mod tests {
         settings: ContextSettings,
     }
 
-    #[async_trait::async_trait]
     impl ContextAssembler for CustomContextAssembler {
         fn settings(&self) -> &ContextSettings {
             &self.settings
@@ -180,16 +175,8 @@ mod tests {
             false
         }
 
-        async fn compact_if_needed(
-            &self,
-            messages: Vec<LlmMessage>,
-            _system_prompt: Option<&str>,
-            _custom_instructions: &[String],
-            _render_options: CompactSummaryRenderOptions,
-            _options: CompactMessagesOptions,
-            _request_text: CompactRequestFn,
-        ) -> CompactIfNeededOutcome {
-            CompactIfNeededOutcome::NotRun { messages }
+        fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
+            LlmContextAssembler::new(self.settings.clone()).prepare_messages(input)
         }
     }
 
@@ -229,7 +216,7 @@ mod tests {
             post_tokens: 1,
             summary: "compact".into(),
             messages_removed: 0,
-            context_messages: Vec::new(),
+            summary_messages: Vec::new(),
             retained_messages: Vec::new(),
             transcript_path: None,
         };

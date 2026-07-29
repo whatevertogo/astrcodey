@@ -3,9 +3,8 @@
 //! Parser 负责校验模型输出；assembler 负责把摘要变成后续 provider request
 //! 能稳定识别的 synthetic user message。
 
-use astrcode_core::context::CompactSummaryRenderOptions;
-
 use super::{COMPACT_SUMMARY_END, COMPACT_SUMMARY_MARKER, parse::extract_summary_for_context};
+use crate::CompactSummaryRenderOptions;
 
 pub const COMPACT_CONTINUATION_PREAMBLE: &str =
     "This session is being continued from a previous conversation that ran out of context. The \

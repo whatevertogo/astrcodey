@@ -41,15 +41,7 @@ impl SessionRoute {
     fn forwards_to_root(&self, payload: &EventPayload) -> bool {
         match self {
             Self::Conversation(_) => true,
-            Self::AgentChild(_) => {
-                agent_session_progress(payload).is_some()
-                    || matches!(
-                        payload,
-                        EventPayload::Durable(
-                            DurableEventPayload::SessionContinuedFromCompaction { .. }
-                        )
-                    )
-            },
+            Self::AgentChild(_) => agent_session_progress(payload).is_some(),
         }
     }
 }
@@ -222,10 +214,6 @@ impl ServerEventBus {
                         .clone(),
                 )
             },
-            EventPayload::Durable(DurableEventPayload::SessionContinuedFromCompaction {
-                parent_session_id,
-                ..
-            }) => self.route_for_session(parent_session_id),
             _ => self.route_for_session(&event.session_id),
         }
     }
@@ -255,11 +243,6 @@ impl ServerEventBus {
             EventPayload::Durable(DurableEventPayload::SessionStarted(started))
                 if started.parent.is_some() =>
             {
-                routes.insert(event.session_id.clone(), route.clone());
-            },
-            EventPayload::Durable(DurableEventPayload::SessionContinuedFromCompaction {
-                ..
-            }) => {
                 routes.insert(event.session_id.clone(), route.clone());
             },
             EventPayload::Durable(DurableEventPayload::AgentSessionSpawned {
@@ -406,12 +389,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_routes_filter_agent_noise_and_preserve_continuations() {
+    async fn conversation_routes_filter_agent_noise_and_forward_progress() {
         let bus = ServerEventBus::new();
         let parent = SessionId::new("parent");
         let child = SessionId::new("child");
-        let continued_child = SessionId::new("continued-child");
-        let continued = SessionId::new("continued");
         let mut parent_rx = bus.subscribe_conversation_events(&parent);
 
         bus.publish_event(durable(
@@ -440,24 +421,8 @@ mod tests {
         }
         assert!(matches!(parent_rx.try_recv(), Err(TryRecvError::Empty)));
 
-        bus.publish_event(durable(
-            continued_child.clone(),
-            DurableEventPayload::SessionContinuedFromCompaction {
-                parent_session_id: child,
-                parent_cursor: "2".into(),
-                summary: "child summary".into(),
-                transcript_path: None,
-                context_messages: Vec::new(),
-                retained_messages: Vec::new(),
-            },
-        ));
-        assert!(matches!(
-            parent_rx.recv().await,
-            Some(event) if event.session_id == continued_child
-        ));
-
         bus.publish_event(live(
-            continued_child.clone(),
+            child.clone(),
             LiveEventPayload::ToolCallStarted {
                 call_id: "tool-1".into(),
                 tool_name: "read".into(),
@@ -465,35 +430,7 @@ mod tests {
         ));
         assert!(matches!(
             parent_rx.recv().await,
-            Some(event) if event.session_id == continued_child
-        ));
-
-        bus.publish_event(durable(
-            continued.clone(),
-            DurableEventPayload::SessionContinuedFromCompaction {
-                parent_session_id: parent.clone(),
-                parent_cursor: "4".into(),
-                summary: "summary".into(),
-                transcript_path: None,
-                context_messages: Vec::new(),
-                retained_messages: Vec::new(),
-            },
-        ));
-        assert!(matches!(
-            parent_rx.recv().await,
-            Some(event) if event.session_id == continued
-        ));
-
-        bus.publish_event(live(
-            continued.clone(),
-            LiveEventPayload::AssistantTextDelta {
-                message_id: "message-2".into(),
-                delta: "continued token".into(),
-            },
-        ));
-        assert!(matches!(
-            parent_rx.recv().await,
-            Some(event) if event.session_id == continued
+            Some(event) if event.session_id == child
         ));
     }
 }

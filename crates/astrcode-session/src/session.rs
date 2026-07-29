@@ -7,7 +7,6 @@ use astrcode_core::{
         DurableEvent, DurableEventPayload, Event, LiveEvent, LiveEventPayload, ParentSessionRef,
         PersistedSystemPrompt, SessionStarted, StoredEvent, SystemPromptSource,
     },
-    llm::LlmMessage,
     tool::{
         SessionToolSelection, ToolResultArtifactError, ToolResultArtifactReader,
         ToolResultArtifactSlice,
@@ -32,9 +31,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     ToolRegistry,
     payload::{
-        TURN_FINISH_ABORTED, agent_run_completed_payload, compact_boundary_payload,
-        session_continued_from_compaction_payload, system_prompt_configured_payload,
-        turn_completed_payload,
+        TURN_FINISH_ABORTED, agent_run_completed_payload, system_prompt_configured_payload,
+        transcript_rewritten_payload, turn_completed_payload,
     },
     runtime_stability::RuntimeStabilityBudget,
     session_runtime::SessionRuntimeState,
@@ -212,8 +210,6 @@ pub enum SessionError {
     Storage(#[from] StorageError),
     #[error("Extension error: {0}")]
     Extension(#[from] ExtensionError),
-    #[error("invalid session cursor (expected u64 event seq): {0}")]
-    InvalidCursor(Cursor),
     #[error("extension runtime changed during session preparation after {attempts} attempts")]
     RuntimeUnstable { attempts: usize },
     #[error("session parent chain contains a cycle at {session_id}")]
@@ -274,21 +270,6 @@ impl Session {
         Ok(self.store.session_read_model(&self.id).await?)
     }
 
-    pub async fn provider_messages(&self) -> Result<Vec<LlmMessage>, SessionError> {
-        Ok(self.store.session_provider_messages(&self.id).await?)
-    }
-
-    pub async fn current_system_prompt(&self) -> Result<String, SessionError> {
-        Ok(self.store.session_system_prompt(&self.id).await?)
-    }
-
-    pub async fn visible_user_message_count(&self) -> Result<usize, SessionError> {
-        Ok(self
-            .store
-            .session_visible_user_message_count(&self.id)
-            .await?)
-    }
-
     pub async fn latest_cursor(&self) -> Result<Option<Cursor>, SessionError> {
         Ok(self.store.latest_cursor(&self.id).await?)
     }
@@ -315,18 +296,6 @@ impl Session {
             .store
             .write_tool_result_artifact(&self.id, artifact)
             .await?)
-    }
-}
-
-/// 将持久化 cursor 解析为 compaction 基线 event seq。
-///
-/// 无 cursor 时返回 0（新 session）。cursor 存在但非 u64 时返回 [`SessionError::InvalidCursor`]。
-pub(crate) fn parse_base_event_seq(cursor: Option<Cursor>) -> Result<u64, SessionError> {
-    match cursor {
-        None => Ok(0),
-        Some(cursor) => cursor
-            .parse::<u64>()
-            .map_err(|_| SessionError::InvalidCursor(cursor)),
     }
 }
 
@@ -746,70 +715,33 @@ impl Session {
     }
 }
 
-// ── Compact boundary ──
+// ── Transcript rewrite ──
 
 impl Session {
-    /// 在同一条 session log 上追加 compact 边界（**不**分配新 `session_id`）。
-    ///
-    /// `continued_session_id` 与 `SessionContinuedFromCompaction.parent_session_id` 均为
-    /// `self.id`。子 agent 与主 session 共用此路径；勿假设 compact 会产生 leaf session。
-    #[allow(clippy::too_many_arguments)]
-    pub async fn append_compact_boundary(
+    /// 原子地记录 compact 并重写同一 session 的 provider transcript。
+    pub async fn rewrite_transcript_for_compaction(
         &self,
-        system_prompt: String,
-        fingerprint: String,
-        extra_system_prompt: Option<String>,
         trigger_name: String,
-        compaction: astrcode_core::context::CompactResult,
-        base_event_seq: u64,
+        compaction: astrcode_context::CompactResult,
+        source_seq: u64,
         strategy: astrcode_core::compaction::CompactStrategy,
-    ) -> Result<Vec<StoredEvent>, SessionError> {
-        // compact 语义：冻结 base_event_seq 之前的历史前缀。
-        // 即使 compact 计算期间有新事件写入，也必须以 base_event_seq 作为边界标记，
-        // 后续 replay 会将这些新事件归类为 tail delta 追加，不覆盖它们。
-        let cursor = base_event_seq.to_string();
-        let extra_system_prompt = normalize_extra_system_prompt(extra_system_prompt.as_deref());
-        let prompt_source = self.read_model().await?.system_prompt.source;
-        let mut events = Vec::with_capacity(3);
-        events.push(
-            self.append_event(DurableEvent::new(
+    ) -> Result<StoredEvent, SessionError> {
+        let event = self
+            .append_event(DurableEvent::new(
                 self.id.clone(),
                 None,
-                compact_boundary_payload(
-                    trigger_name,
-                    &compaction,
-                    self.id.clone(),
-                    base_event_seq,
-                    strategy,
-                ),
+                transcript_rewritten_payload(trigger_name, &compaction, source_seq, strategy),
             ))
-            .await?,
-        );
-        events.push(
-            self.append_event(DurableEvent::new(
-                self.id.clone(),
-                None,
-                system_prompt_configured_payload(
-                    system_prompt,
-                    fingerprint,
-                    extra_system_prompt,
-                    prompt_source,
-                ),
-            ))
-            .await?,
-        );
-        events.push(
-            self.append_event(DurableEvent::new(
-                self.id.clone(),
-                None,
-                session_continued_from_compaction_payload(self.id.clone(), cursor, &compaction),
-            ))
-            .await?,
-        );
-        if let Some(cursor) = self.latest_cursor().await? {
-            self.checkpoint(&cursor).await?;
+            .await?;
+        if let Err(error) = self.checkpoint(&event.seq.to_string()).await {
+            tracing::warn!(
+                session_id = %self.id,
+                seq = event.seq,
+                error = %error,
+                "transcript rewrite committed but checkpoint was skipped"
+            );
         }
-        Ok(events)
+        Ok(event)
     }
 }
 

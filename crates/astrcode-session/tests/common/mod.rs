@@ -1,16 +1,15 @@
 use std::sync::Arc;
 
+use astrcode_context::{
+    ContextAssembler, ContextPrepareInput, NoopPostCompactEnricher, PreparedContext,
+    context_assembler::LlmContextAssembler,
+};
 use astrcode_core::{
     config::{
         AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
         ProviderAuthScheme, ProviderWireFormat,
     },
-    context::{
-        CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
-        CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
-        NoopPostCompactEnricher,
-    },
-    llm::{LlmMessage, LlmProvider},
+    llm::LlmProvider,
 };
 use astrcode_extension_sdk::runtime_ports::{NoopRuntimePorts, ToolCatalogProvider};
 use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices};
@@ -83,7 +82,6 @@ struct NoopContextAssembler {
     settings: ContextSettings,
 }
 
-#[async_trait::async_trait]
 impl ContextAssembler for NoopContextAssembler {
     fn settings(&self) -> &ContextSettings {
         &self.settings
@@ -93,16 +91,8 @@ impl ContextAssembler for NoopContextAssembler {
         false
     }
 
-    async fn compact_if_needed(
-        &self,
-        messages: Vec<LlmMessage>,
-        _system_prompt: Option<&str>,
-        _custom_instructions: &[String],
-        _render_options: CompactSummaryRenderOptions,
-        _options: CompactMessagesOptions,
-        _request_text: CompactRequestFn,
-    ) -> CompactIfNeededOutcome {
-        CompactIfNeededOutcome::NotRun { messages }
+    fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
+        LlmContextAssembler::new(self.settings.clone()).prepare_messages(input)
     }
 }
 

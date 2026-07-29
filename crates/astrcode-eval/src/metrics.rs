@@ -54,7 +54,7 @@ impl Metrics {
                 DurableEventPayload::ErrorOccurred { .. } => {
                     metrics.errors += 1;
                 },
-                DurableEventPayload::CompactBoundaryCreated { .. } => {
+                DurableEventPayload::TranscriptRewritten { .. } => {
                     metrics.compactions += 1;
                 },
                 _ => {},

@@ -7,13 +7,13 @@ use std::{
 
 use astrcode_core::{
     config::ContextSettings,
-    context::{CompactResult, PostCompactEnrichInput, PostCompactEnricher},
     llm::LlmMessage,
     tool::{ToolDefinition, ToolOrigin},
 };
 use astrcode_support::hostpaths::{is_path_within, resolve_path};
 
 use crate::{
+    CompactResult, PostCompactEnrichInput, PostCompactEnricher,
     compaction::{
         PostCompactFile, PostCompactNote, agent_status_note, append_post_compact_context,
         recent_read_paths,
@@ -275,14 +275,13 @@ mod tests {
     };
 
     use astrcode_core::{
-        context::PostCompactEnricher,
         llm::{LlmContent, LlmRole},
         tool::ToolOrigin,
     };
     use serde_json::json;
 
     use super::*;
-    use crate::token_budget::estimate_text_tokens;
+    use crate::{PostCompactEnricher, token_budget::estimate_text_tokens};
 
     fn read_call(call_id: &str, path: &str) -> LlmMessage {
         LlmMessage {
@@ -312,7 +311,7 @@ mod tests {
             post_tokens: 10,
             summary: "summary".into(),
             messages_removed: 2,
-            context_messages: vec![LlmMessage::user("summary")],
+            summary_messages: vec![LlmMessage::user("summary")],
             retained_messages: Vec::new(),
             transcript_path: None,
         };
@@ -334,7 +333,7 @@ mod tests {
             .await;
 
         let restored = compaction
-            .context_messages
+            .summary_messages
             .last()
             .unwrap()
             .joined_display_text("\n");
@@ -384,7 +383,7 @@ mod tests {
             post_tokens: 10,
             summary: "summary".into(),
             messages_removed: 2,
-            context_messages: vec![LlmMessage::user("summary")],
+            summary_messages: vec![LlmMessage::user("summary")],
             retained_messages: Vec::new(),
             transcript_path: None,
         };
@@ -404,7 +403,7 @@ mod tests {
         std::env::remove_var("ASTRCODE_TEST_HOME");
 
         let restored = compaction
-            .context_messages
+            .summary_messages
             .last()
             .unwrap()
             .joined_display_text("\n");

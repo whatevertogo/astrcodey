@@ -2,15 +2,16 @@
 
 use std::collections::BTreeMap;
 
+use astrcode_context::is_synthetic_context_message;
 use astrcode_core::{
-    event::{DurableEventPayload, Event, EventPayload, LiveEventPayload},
+    event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, TranscriptRewriteReason},
     llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, attachments_from_user_message},
 };
 use astrcode_protocol::http::{
     ConversationBlockDto, ConversationBlockStatusDto, ToolCallStatusDto,
 };
 use astrcode_session_projection::{
-    CompactBoundaryView, SequencedLlmMessage, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
+    CompactionView, SequencedLlmMessage, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
     TranscriptArtifactView,
 };
 
@@ -19,24 +20,22 @@ use super::{args::format_args_inline, non_empty_metadata};
 /// 对话 UI 中 compact 卡片的稳定 block id（多次 compact 时 upsert / 刷新替换）。
 pub(in crate::http) const COMPACT_SUMMARY_BLOCK_ID: &str = "compact-current";
 
-/// 仅用于对话展示：返回最近一次 compact boundary。
-pub(in crate::http) fn latest_compact_boundary(
-    boundaries: &[CompactBoundaryView],
-) -> Option<&CompactBoundaryView> {
-    boundaries.iter().max_by_key(|boundary| boundary.seq)
+/// 仅用于对话展示：返回最近一次 compact 记录。
+pub(in crate::http) fn latest_compaction(
+    compactions: &[CompactionView],
+) -> Option<&CompactionView> {
+    compactions.iter().max_by_key(|compaction| compaction.seq)
 }
 
-/// 将 compact boundary 投影为对话 block（插在保留消息之前）。
-pub(in crate::http) fn compact_summary_block(
-    boundary: &CompactBoundaryView,
-) -> ConversationBlockDto {
+/// 将 compact 记录投影为对话 block（插在保留消息之前）。
+pub(in crate::http) fn compact_summary_block(compaction: &CompactionView) -> ConversationBlockDto {
     ConversationBlockDto::CompactSummary {
         id: COMPACT_SUMMARY_BLOCK_ID.to_string(),
-        summary: boundary.summary.clone(),
-        trigger: boundary.trigger.clone(),
-        pre_tokens: boundary.pre_tokens,
-        post_tokens: boundary.post_tokens,
-        transcript_path: boundary.transcript_path.clone(),
+        summary: compaction.summary.clone(),
+        trigger: compaction.trigger.clone(),
+        pre_tokens: compaction.pre_tokens,
+        post_tokens: compaction.post_tokens,
+        transcript_path: compaction.transcript_path.clone(),
     }
 }
 
@@ -166,20 +165,16 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             id: event.id.to_string(),
             message: message.clone(),
         }),
-        DurableEventPayload::CompactBoundaryCreated {
-            trigger,
-            pre_tokens,
-            post_tokens,
-            summary,
-            transcript_path,
+        DurableEventPayload::TranscriptRewritten {
+            reason: TranscriptRewriteReason::Compaction(details),
             ..
         } => Some(ConversationBlockDto::CompactSummary {
             id: COMPACT_SUMMARY_BLOCK_ID.to_string(),
-            summary: summary.clone(),
-            trigger: trigger.clone(),
-            pre_tokens: *pre_tokens,
-            post_tokens: *post_tokens,
-            transcript_path: transcript_path.clone(),
+            summary: details.summary.clone(),
+            trigger: details.trigger.clone(),
+            pre_tokens: details.pre_tokens,
+            post_tokens: details.post_tokens,
+            transcript_path: details.transcript_path.clone(),
         }),
         DurableEventPayload::RecapGenerated { text, .. } => {
             Some(ConversationBlockDto::SystemNote {
@@ -216,7 +211,7 @@ fn sequenced_message_blocks(messages: &[SequencedLlmMessage]) -> Vec<SequencedCo
     for (index, seq_msg) in messages.iter().enumerate() {
         let message = &seq_msg.message;
         let source = &seq_msg.source;
-        if source.as_deref() == Some(TURN_ABORTED_SOURCE) {
+        if source.as_deref() == Some(TURN_ABORTED_SOURCE) || is_synthetic_context_message(message) {
             continue;
         }
         let id = format!("snapshot-message-{index}");

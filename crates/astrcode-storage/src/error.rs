@@ -24,6 +24,9 @@ pub enum StorageError {
     /// 调用方提交的持久事件不能作为会话的下一条事实。
     #[error("Invalid durable event: {0}")]
     InvalidEvent(String),
+    /// 乐观并发写入所依据的 projection 已经过期。
+    #[error("Concurrent modification: expected seq {expected_seq}, current seq {current_seq}")]
+    ConcurrentModification { expected_seq: u64, current_seq: u64 },
     /// 持久事件流不能构造合法的会话状态。
     #[error("Corrupt session event log: {0}")]
     CorruptLog(String),

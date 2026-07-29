@@ -2,34 +2,23 @@
 
 use std::sync::Arc;
 
-use astrcode_core::{
-    compaction::{CompactStrategy, CompactTrigger},
-    context::{
-        CompactIfNeededOutcome, CompactMessagesOptions, CompactSummaryRenderOptions,
-        ContextAssembler, PostCompactEnrichInput,
-    },
-    llm::{LlmMessage, LlmProvider},
-    tool::ToolDefinition,
+use astrcode_context::{
+    CompactSummaryRenderOptions, PostCompactEnrichInput, compaction::compact_messages_with_fallback,
 };
-use astrcode_extension_sdk::{extension::ExtensionError, runtime_ports::TurnHooks};
-use astrcode_session_projection::SessionReadModel;
-use astrcode_support::hash::hex_fingerprint;
+use astrcode_core::compaction::{CompactStrategy, CompactTrigger};
+use astrcode_extension_sdk::extension::ExtensionError;
+use astrcode_storage::CompactSnapshotInput;
 
 use crate::{
     Session,
     compact::{
-        CompactHookContext, PersistCompactError, collect_compact_instructions,
-        dispatch_post_compact, make_compact_request_fn, persist_compact_result,
+        CompactHookContext, PersistCompactError, PersistCompactionOutcome,
+        collect_compact_instructions, dispatch_post_compact, persist_compact_result,
+        request_compact_summary,
     },
+    projection_context::context_snapshot,
     session::SessionError,
 };
-
-/// 空闲态 compact 参数。
-pub struct IdleCompactionParams {
-    pub keep_recent_turns: Option<usize>,
-    pub transcript_path: Option<String>,
-    pub provider_messages: Vec<LlmMessage>,
-}
 
 /// 空闲态 compact 结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,64 +35,73 @@ pub enum IdleCompactionError {
     Extension(#[from] ExtensionError),
     #[error("{0}")]
     Persist(#[from] PersistCompactError),
-    #[error("{0}")]
-    InvalidRequest(String),
 }
 
 /// 在无 active turn 时压缩会话历史并持久化。
 pub async fn compact_idle_session(
     session: &Session,
-    extension_runner: &dyn TurnHooks,
-    context_assembler: &dyn ContextAssembler,
-    llm: Arc<dyn LlmProvider>,
-    state: &SessionReadModel,
-    tools: &[ToolDefinition],
-    params: IdleCompactionParams,
+    keep_recent_turns: Option<usize>,
 ) -> Result<IdleCompactionOutcome, IdleCompactionError> {
-    let IdleCompactionParams {
-        keep_recent_turns,
-        transcript_path,
-        provider_messages,
-    } = params;
-    let hook_ctx = CompactHookContext {
+    let runtime_services = session.runtime_services();
+    let extension_runner = runtime_services.turn_hooks_arc();
+    let context_assembler = runtime_services.context_assembler_arc();
+
+    let state = session.read_model().await?;
+    let pre_hook = CompactHookContext {
         session_id: session.id.as_str(),
         working_dir: &state.identity.working_dir,
         model_id: &state.identity.model_id,
         trigger: CompactTrigger::ManualCommand,
-        message_count: provider_messages.len(),
+        message_count: state.transcript.messages.len(),
     };
-    let custom_instructions = collect_compact_instructions(extension_runner, hook_ctx).await?;
-    let base_event_seq = crate::session::parse_base_event_seq(session.latest_cursor().await?)?;
+    let custom_instructions =
+        collect_compact_instructions(extension_runner.as_ref(), pre_hook).await?;
+
+    let state = session.read_model().await?;
+    let snapshot = context_snapshot(&state);
+    let llm = runtime_services.llm();
+    let post_hook = CompactHookContext {
+        session_id: session.id.as_str(),
+        working_dir: &state.identity.working_dir,
+        model_id: &state.identity.model_id,
+        trigger: CompactTrigger::ManualCommand,
+        message_count: snapshot.messages.len(),
+    };
+    let tool_registry = session
+        .tool_registry_snapshot(&state.identity.working_dir)
+        .await?;
+    let tools = tool_registry.list_definitions();
+    let transcript_path = session
+        .write_compact_snapshot(CompactSnapshotInput {
+            trigger: CompactTrigger::ManualCommand.as_str().into(),
+            model_id: state.identity.model_id.clone(),
+            working_dir: state.identity.working_dir.clone(),
+            system_prompt: Some(snapshot.system_prompt.clone()),
+            provider_messages: snapshot.messages.clone(),
+        })
+        .await?;
     let render_options = CompactSummaryRenderOptions {
         transcript_path,
         custom_instructions: custom_instructions.clone(),
     };
-    let request_fn = make_compact_request_fn(llm);
-    let compact_outcome = context_assembler
-        .compact_if_needed(
-            provider_messages.clone(),
-            Some(&state.system_prompt.text),
-            &custom_instructions,
-            render_options,
-            CompactMessagesOptions {
-                run: true,
-                use_llm: true,
-                keep_recent_turns,
-            },
-            request_fn,
-        )
-        .await;
+    let compact_execution = compact_messages_with_fallback(
+        &snapshot.messages,
+        Some(&snapshot.system_prompt),
+        context_assembler.settings(),
+        &custom_instructions,
+        &render_options,
+        keep_recent_turns,
+        |messages| request_compact_summary(Arc::clone(&llm), messages),
+    )
+    .await;
 
-    let mut compaction = match compact_outcome {
-        CompactIfNeededOutcome::NotRun { .. } | CompactIfNeededOutcome::Skipped { .. } => {
+    let mut compaction = match compact_execution {
+        Err(_) => {
             return Ok(IdleCompactionOutcome::Skipped {
                 message: "Nothing to compact".into(),
             });
         },
-        CompactIfNeededOutcome::Applied {
-            compaction,
-            messages: _,
-        } => compaction.result,
+        Ok(compaction) => compaction.result,
     };
 
     let session_store_dir = session.session_store_dir().await;
@@ -114,37 +112,39 @@ pub async fn compact_idle_session(
             &mut compaction,
             PostCompactEnrichInput {
                 session_id: session.id.as_str(),
-                source_messages: &provider_messages,
+                source_messages: &snapshot.messages,
                 working_dir: &state.identity.working_dir,
-                system_prompt: Some(&state.system_prompt.text),
-                tools,
+                system_prompt: Some(&snapshot.system_prompt),
+                tools: &tools,
                 settings: context_assembler.settings(),
                 session_store_dir,
             },
         )
         .await;
 
-    dispatch_post_compact(extension_runner, hook_ctx, &compaction).await?;
-
-    let system_prompt = state.system_prompt.text.clone();
-    let fingerprint = hex_fingerprint(system_prompt.as_bytes());
-    let persisted = match persist_compact_result(
+    let persisted = persist_compact_result(
         session,
         &compaction,
         CompactTrigger::ManualCommand.as_str(),
-        &system_prompt,
-        &fingerprint,
-        state.system_prompt.extra.as_deref(),
-        base_event_seq,
+        snapshot.source_seq,
         CompactStrategy::Manual { keep_recent_turns },
     )
-    .await
-    {
-        Ok(persisted) => persisted,
-        Err(error) => return Err(error.into()),
+    .await?;
+    match persisted {
+        PersistCompactionOutcome::Committed => {},
+        PersistCompactionOutcome::Stale => {
+            return Ok(IdleCompactionOutcome::Skipped {
+                message: "Context changed during compaction; retry".into(),
+            });
+        },
     };
 
+    if let Err(error) =
+        dispatch_post_compact(extension_runner.as_ref(), post_hook, &compaction).await
+    {
+        tracing::warn!(error = %error, "PostCompact extension dispatch failed");
+    }
     Ok(IdleCompactionOutcome::Compacted {
-        messages_removed: persisted.messages_removed,
+        messages_removed: compaction.messages_removed,
     })
 }

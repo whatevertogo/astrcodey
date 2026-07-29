@@ -39,7 +39,16 @@ fn validate_storage_session_id(id: &SessionId) -> Result<(), StorageError> {
 }
 
 fn invalid_event(error: ProjectionError) -> StorageError {
-    StorageError::InvalidEvent(error.to_string())
+    match error {
+        ProjectionError::StaleTranscriptRewrite {
+            source_seq,
+            current_seq,
+        } => StorageError::ConcurrentModification {
+            expected_seq: source_seq,
+            current_seq,
+        },
+        error => StorageError::InvalidEvent(error.to_string()),
+    }
 }
 
 fn corrupt_projection(error: ProjectionError) -> StorageError {
@@ -462,21 +471,6 @@ impl SessionReader for FileSystemSessionRepository {
         Ok(model)
     }
 
-    async fn session_provider_messages(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Vec<astrcode_core::llm::LlmMessage>, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let messages = meta.projection.read().await.provider_messages();
-        Ok(messages)
-    }
-
-    async fn session_system_prompt(&self, session_id: &SessionId) -> Result<String, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let prompt = meta.projection.read().await.system_prompt.text.clone();
-        Ok(prompt)
-    }
-
     async fn session_has_messages(&self, session_id: &SessionId) -> Result<bool, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
         let has_messages = meta.projection.read().await.has_messages();
@@ -490,15 +484,6 @@ impl SessionReader for FileSystemSessionRepository {
         let meta = self.get_or_open_meta(session_id).await?;
         let agent_sessions = meta.projection.read().await.agent_sessions.clone();
         Ok(agent_sessions)
-    }
-
-    async fn session_visible_user_message_count(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<usize, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let count = meta.projection.read().await.visible_user_message_count();
-        Ok(count)
     }
 
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {

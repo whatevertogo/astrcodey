@@ -8,10 +8,10 @@ pub(crate) mod compaction_coordinator;
 pub mod compaction_run;
 pub(crate) mod deferred_tools;
 pub(crate) mod early_tool_scheduler;
-pub(crate) mod llm_request_history;
 pub(crate) mod llm_stream;
 pub mod payload;
 pub(crate) mod permission;
+pub(crate) mod projection_context;
 pub(crate) mod runtime_stability;
 mod session;
 mod session_extension_ports;
@@ -36,8 +36,8 @@ pub(crate) mod turn_runner;
 pub(crate) mod turn_stages;
 
 pub use payload::{
-    agent_session_completed_payload, agent_session_failed_payload, compact_boundary_payload,
-    session_continued_from_compaction_payload, system_prompt_configured_payload,
+    agent_session_completed_payload, agent_session_failed_payload,
+    system_prompt_configured_payload, transcript_rewritten_payload,
 };
 pub use session::{
     InterruptedToolOutcome, Session, SessionCreateParams, SessionError,

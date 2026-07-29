@@ -1,14 +1,15 @@
 use astrcode_core::{
+    compaction::CompactStrategy,
     event::{
-        DurableEvent, DurableEventPayload, PersistedSystemPrompt, SessionStarted, StoredEvent,
-        SystemPromptSource,
+        CompactionDetails, DurableEvent, DurableEventPayload, PersistedSystemPrompt,
+        SessionStarted, StoredEvent, SystemPromptSource, TranscriptRewriteReason,
     },
-    llm::LlmRole,
+    llm::{LlmMessage, LlmRole},
     tool::{SessionToolSelection, ToolResult},
     types::{SessionId, ToolCallId, new_message_id},
 };
 
-use super::{ProjectionError, SessionReadModelProjection, replay};
+use super::{ProjectionError, SessionReadModelProjection, reduce, replay};
 use crate::TranscriptArtifactView;
 
 fn event(seq: u64, session_id: &SessionId, payload: DurableEventPayload) -> StoredEvent {
@@ -99,7 +100,7 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
         ),
     ];
 
-    let model = replay(session_id.clone(), &events).unwrap();
+    let mut model = replay(session_id.clone(), &events).unwrap();
 
     assert_eq!(model.identity.session_id, session_id);
     assert_eq!(model.identity.working_dir, "/workspace");
@@ -125,6 +126,59 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
         model.to_summary().first_user_message.as_deref(),
         Some("inspect")
     );
+
+    reduce(
+        &event(
+            7,
+            &session_id,
+            DurableEventPayload::TranscriptRewritten {
+                source_seq: 6,
+                messages: vec![LlmMessage::user(
+                    "<compact_summary>summary</compact_summary>",
+                )],
+                reason: TranscriptRewriteReason::Compaction(CompactionDetails {
+                    trigger: "manual".into(),
+                    pre_tokens: 100,
+                    post_tokens: 10,
+                    summary: "summary".into(),
+                    transcript_path: None,
+                    strategy: CompactStrategy::Manual {
+                        keep_recent_turns: None,
+                    },
+                }),
+            },
+        ),
+        &mut model,
+    )
+    .unwrap();
+    assert_eq!(model.transcript.messages.len(), 1);
+    assert!(model.transcript.artifacts.is_empty());
+    assert_eq!(model.first_user_message().as_deref(), Some("inspect"));
+
+    let fork_id = SessionId::new("session-fork");
+    let fork = replay(
+        fork_id.clone(),
+        &[
+            started(0, &fork_id),
+            event(
+                1,
+                &fork_id,
+                DurableEventPayload::SessionForked {
+                    source_session_id: session_id,
+                    source_cursor: "7".into(),
+                    first_user_message: model.first_user_message(),
+                    messages: model
+                        .transcript
+                        .messages
+                        .iter()
+                        .map(|message| message.message.clone())
+                        .collect(),
+                },
+            ),
+        ],
+    )
+    .unwrap();
+    assert_eq!(fork.first_user_message().as_deref(), Some("inspect"));
 }
 
 #[test]
@@ -167,26 +221,6 @@ fn projection_rejects_invalid_stream_shapes_without_mutating_valid_state() {
     assert_eq!(
         projection.apply(&started(1, &session_id)),
         Err(ProjectionError::DuplicateSessionStarted(1))
-    );
-    assert_eq!(projection.last_seq(), Some(0));
-
-    let invalid_cursor = event(
-        1,
-        &session_id,
-        DurableEventPayload::SessionContinuedFromCompaction {
-            parent_session_id: session_id.clone(),
-            parent_cursor: "not-a-sequence".into(),
-            summary: "summary".into(),
-            transcript_path: None,
-            context_messages: vec![],
-            retained_messages: vec![],
-        },
-    );
-    assert_eq!(
-        projection.apply(&invalid_cursor),
-        Err(ProjectionError::InvalidParentCursor(
-            "not-a-sequence".into()
-        ))
     );
     assert_eq!(projection.last_seq(), Some(0));
 }

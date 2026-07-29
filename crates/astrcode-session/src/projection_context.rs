@@ -1,50 +1,28 @@
-//! 从 EventStore 读模型构建 LLM 请求历史（projection SSOT）。
+//! 从 durable projection 派生运行时 context。
 
-use astrcode_context::prompt_engine::system_messages_from_prompt;
-use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole, provider_visible_messages};
+use astrcode_context::ContextSnapshot;
+use astrcode_core::llm::{LlmContent, LlmRole};
 use astrcode_session_projection::SessionReadModel;
 
-/// assembler / should_auto_compact 用的「可见历史」（无 system 行）。
-pub(crate) fn visible_messages_for_assembler(model: &SessionReadModel) -> Vec<LlmMessage> {
-    let mut messages = Vec::with_capacity(
+pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
+    ContextSnapshot::new(
+        model.stats.last_seq,
+        model.system_prompt.text.clone(),
         model
             .transcript
-            .context_messages
-            .len()
-            .saturating_add(model.transcript.messages.len()),
-    );
-    messages.extend(
-        model
-            .transcript
-            .context_messages
+            .messages
             .iter()
-            .map(|m| m.message.clone()),
-    );
-    messages.extend(model.transcript.messages.iter().map(|m| m.message.clone()));
-    messages.retain(|message| message.role != LlmRole::System);
-    messages
-}
-
-/// 组装送 LLM 的完整消息：`system` + `prepare_context_messages` 返回的可见窗口。
-///
-/// `context_messages` 已是 compact / 未 compact 后的权威可见历史，不再叠加读模型。
-pub(crate) fn build_llm_request_messages(
-    system_prompt: &str,
-    context_messages: Vec<LlmMessage>,
-) -> Vec<LlmMessage> {
-    let mut messages = Vec::with_capacity(context_messages.len().saturating_add(4));
-    messages.extend(system_messages_from_prompt(system_prompt));
-    messages.extend(context_messages);
-    provider_visible_messages(messages)
+            .map(|entry| entry.message.clone())
+            .collect(),
+    )
 }
 
 /// 已提交 tool 结果内容的字符总量（用于 tool 结果预算）。
 pub(crate) fn committed_tool_result_content_len(model: &SessionReadModel) -> usize {
     model
         .transcript
-        .context_messages
+        .messages
         .iter()
-        .chain(model.transcript.messages.iter())
         .map(|entry| &entry.message)
         .filter(|message| message.role == LlmRole::Tool)
         .flat_map(|message| message.content.iter())
@@ -78,7 +56,7 @@ mod tests {
             updated_seq: 2,
             source: None,
         });
-        model.transcript.context_messages.push(SequencedLlmMessage {
+        model.transcript.messages.push(SequencedLlmMessage {
             message: LlmMessage::assistant("ctx"),
             updated_seq: 3,
             source: None,
@@ -87,20 +65,24 @@ mod tests {
     }
 
     #[test]
-    fn visible_messages_excludes_system_and_includes_context() {
+    fn context_snapshot_excludes_system_and_includes_transcript() {
         let model = sample_model();
-        let visible = visible_messages_for_assembler(&model);
-        assert_eq!(visible.len(), 2);
-        assert!(visible.iter().all(|m| m.role != LlmRole::System));
-        assert!(visible.iter().any(|m| m.role == LlmRole::Assistant));
-        assert!(visible.iter().any(|m| m.role == LlmRole::User));
+        let snapshot = context_snapshot(&model);
+        assert_eq!(snapshot.messages.len(), 2);
+        assert!(
+            snapshot
+                .messages
+                .iter()
+                .all(|message| message.role != LlmRole::System)
+        );
     }
 
     #[test]
-    fn build_llm_request_injects_system_from_prompt() {
-        let model = sample_model();
-        let messages =
-            build_llm_request_messages("fresh system", visible_messages_for_assembler(&model));
+    fn context_snapshot_builds_request_with_its_system_prompt() {
+        let mut model = sample_model();
+        model.system_prompt.text = "fresh system".into();
+        let snapshot = context_snapshot(&model);
+        let messages = snapshot.request_messages(snapshot.messages.clone());
         assert!(messages.iter().any(|m| {
             m.role == LlmRole::System
                 && m.content.iter().any(|c| {

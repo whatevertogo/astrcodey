@@ -3,14 +3,14 @@
 //! EventLog 是唯一事实源；本模块只维护可从事件重建的内部读模型。
 
 use astrcode_core::{
-    event::{DurableEvent, DurableEventPayload, Phase, StoredEvent},
+    event::{DurableEvent, DurableEventPayload, Phase, StoredEvent, TranscriptRewriteReason},
     llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message},
     types::SessionId,
 };
 use thiserror::Error;
 
 use crate::{
-    AgentSessionLinkView, AgentSessionStatus, CompactBoundaryView, PendingToolApprovalView,
+    AgentSessionLinkView, AgentSessionStatus, CompactionView, PendingToolApprovalView,
     SequencedLlmMessage, SessionReadModel, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
     TranscriptArtifactView,
 };
@@ -40,8 +40,8 @@ pub enum ProjectionError {
     DuplicateSessionStarted(u64),
     #[error("expected event seq {expected}, got {actual}")]
     NonContiguousSequence { expected: u64, actual: u64 },
-    #[error("invalid compaction parent cursor {0}")]
-    InvalidParentCursor(String),
+    #[error("transcript rewrite source seq {source_seq} does not match current seq {current_seq}")]
+    StaleTranscriptRewrite { source_seq: u64, current_seq: u64 },
 }
 
 impl SessionReadModelProjection {
@@ -107,7 +107,7 @@ pub fn replay(
 
 /// 将单个持久事件归约到读模型。
 pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), ProjectionError> {
-    let compaction_base_seq = validate_next_event_details(event.seq, &event.event, model)?;
+    validate_next_event_details(event.seq, &event.event, model)?;
 
     model.stats.last_seq = event.seq;
     model.stats.updated_at = event.timestamp;
@@ -196,6 +196,9 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                 text, attachments, ..
             } = &event.payload
             {
+                if model.transcript.first_user_message.is_none() {
+                    model.transcript.first_user_message = Some(text.clone());
+                }
                 model.transcript.messages.push(SequencedLlmMessage {
                     message: LlmMessage::user_with_attachments(text, attachments),
                     updated_seq: event_seq,
@@ -331,93 +334,37 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                 event_seq,
             );
         },
-        DurableEventPayload::CompactBoundaryCreated {
-            trigger,
-            pre_tokens,
-            post_tokens,
-            summary,
-            transcript_path,
-            base_event_seq,
-            strategy,
-            ..
+        DurableEventPayload::TranscriptRewritten {
+            source_seq,
+            messages,
+            reason,
         } => {
-            model.compact_boundaries.push(CompactBoundaryView {
-                trigger: trigger.clone(),
-                pre_tokens: *pre_tokens,
-                post_tokens: *post_tokens,
-                summary: summary.clone(),
-                transcript_path: transcript_path.clone(),
-                seq: event.seq,
-                base_event_seq: *base_event_seq,
-                strategy: strategy.clone(),
-            });
-            // Auto compact 在 turn 期间发生，不应将 phase 改为 Idle。
-            // 手动 compact 时没有 active turn，Idle 是正确状态。
-            if trigger != "auto_threshold" {
-                model.execution.phase = Phase::Idle;
+            apply_transcript_rewrite(model, messages, event_seq);
+            match reason {
+                TranscriptRewriteReason::Compaction(details) => {
+                    model.compactions.push(CompactionView {
+                        trigger: details.trigger.clone(),
+                        pre_tokens: details.pre_tokens,
+                        post_tokens: details.post_tokens,
+                        summary: details.summary.clone(),
+                        transcript_path: details.transcript_path.clone(),
+                        seq: event.seq,
+                        source_seq: *source_seq,
+                        strategy: details.strategy.clone(),
+                    });
+                    if details.trigger != "auto_threshold" {
+                        model.execution.phase = Phase::Idle;
+                    }
+                },
             }
         },
-        DurableEventPayload::SessionContinuedFromCompaction {
-            parent_cursor,
-            context_messages,
-            retained_messages,
-            ..
-        } => {
-            let Some(base_event_seq) = compaction_base_seq else {
-                return Err(ProjectionError::InvalidParentCursor(parent_cursor.clone()));
-            };
-            let tail_messages: Vec<SequencedLlmMessage> = model
-                .transcript
-                .messages
-                .iter()
-                .filter(|m| m.updated_seq > base_event_seq)
-                .cloned()
-                .collect();
-            model.transcript.context_messages = context_messages
-                .iter()
-                .cloned()
-                .map(|message| SequencedLlmMessage {
-                    message,
-                    updated_seq: event_seq,
-                    source: None,
-                })
-                .collect();
-            let mut messages: Vec<SequencedLlmMessage> = retained_messages
-                .iter()
-                .cloned()
-                .map(|message| SequencedLlmMessage {
-                    message,
-                    // retained_messages 属于 compact 基准游标之前的历史前缀。
-                    // 锚定到基准序号，确保 compact 计算期间写入的 tail 事件仍排在其后。
-                    updated_seq: base_event_seq,
-                    source: None,
-                })
-                .collect();
-            messages.extend(tail_messages);
-            model.transcript.messages = messages;
-            model
-                .transcript
-                .artifacts
-                .retain(|artifact| artifact.seq() > base_event_seq);
-            // 不改变 phase，保留之前的状态。
-            // auto compact 在 turn 期间发生，phase 应保持 Thinking/Streaming。
-            // 手动 compact 时 phase 已经是 Idle（由 CompactBoundaryCreated 设置）。
-        },
         DurableEventPayload::SessionForked {
-            context_messages,
-            retained_messages,
+            first_user_message,
+            messages,
             ..
         } => {
-            model.transcript.context_messages = context_messages
-                .iter()
-                .cloned()
-                .map(|message| SequencedLlmMessage {
-                    message,
-                    updated_seq: event_seq,
-                    source: None,
-                })
-                .collect();
-            model.transcript.messages = retained_messages
+            model.transcript.first_user_message = first_user_message.clone();
+            model.transcript.messages = messages
                 .iter()
                 .cloned()
                 .map(|message| SequencedLlmMessage {
@@ -455,20 +402,33 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
     Ok(())
 }
 
+fn apply_transcript_rewrite(model: &mut SessionReadModel, messages: &[LlmMessage], event_seq: u64) {
+    model.transcript.messages = messages
+        .iter()
+        .cloned()
+        .map(|message| SequencedLlmMessage {
+            message,
+            updated_seq: event_seq,
+            source: None,
+        })
+        .collect();
+    model.transcript.artifacts.clear();
+}
+
 /// 校验事件能否作为读模型的下一条事实，不修改读模型。
 pub fn validate_next_event(
     seq: u64,
     event: &DurableEvent,
     model: &SessionReadModel,
 ) -> Result<(), ProjectionError> {
-    validate_next_event_details(seq, event, model).map(|_| ())
+    validate_next_event_details(seq, event, model)
 }
 
 fn validate_next_event_details(
     seq: u64,
     event: &DurableEvent,
     model: &SessionReadModel,
-) -> Result<Option<u64>, ProjectionError> {
+) -> Result<(), ProjectionError> {
     if event.session_id != model.identity.session_id {
         return Err(ProjectionError::SessionMismatch {
             expected: model.identity.session_id.clone(),
@@ -478,6 +438,14 @@ fn validate_next_event_details(
     if matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
         return Err(ProjectionError::DuplicateSessionStarted(seq));
     }
+    if let DurableEventPayload::TranscriptRewritten { source_seq, .. } = &event.payload {
+        if *source_seq != model.stats.last_seq {
+            return Err(ProjectionError::StaleTranscriptRewrite {
+                source_seq: *source_seq,
+                current_seq: model.stats.last_seq,
+            });
+        }
+    }
     let expected_seq = model.stats.last_seq.saturating_add(1);
     if seq != expected_seq {
         return Err(ProjectionError::NonContiguousSequence {
@@ -485,13 +453,7 @@ fn validate_next_event_details(
             actual: seq,
         });
     }
-    match &event.payload {
-        DurableEventPayload::SessionContinuedFromCompaction { parent_cursor, .. } => parent_cursor
-            .parse::<u64>()
-            .map(Some)
-            .map_err(|_| ProjectionError::InvalidParentCursor(parent_cursor.clone())),
-        _ => Ok(None),
-    }
+    Ok(())
 }
 
 fn apply_tool_terminal(

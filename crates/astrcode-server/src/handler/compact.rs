@@ -1,9 +1,6 @@
-use astrcode_core::{compaction::CompactTrigger, event::LiveEventPayload, types::SessionId};
+use astrcode_core::{event::LiveEventPayload, types::SessionId};
 use astrcode_protocol::events::ClientNotification;
-use astrcode_session::compaction_run::{
-    IdleCompactionOutcome, IdleCompactionParams, compact_idle_session,
-};
-use astrcode_storage::CompactSnapshotInput;
+use astrcode_session::compaction_run::{IdleCompactionOutcome, compact_idle_session};
 
 use super::{CommandHandler, HandlerError, session_snapshot};
 
@@ -86,55 +83,19 @@ impl CommandHandler {
         sid: &SessionId,
         keep_recent_turns: Option<usize>,
     ) -> Result<(ManualCompactOutcome, usize), HandlerError> {
-        let state = session.read_model().await.map_err(HandlerError::Session)?;
-        let tool_registry = session
-            .tool_registry_snapshot(&state.identity.working_dir)
+        let result = compact_idle_session(session, keep_recent_turns)
             .await
-            .map_err(HandlerError::Session)?;
-        let tools = tool_registry.list_definitions();
-        let provider_messages = state.provider_messages();
-
-        let snapshot_path = session
-            .write_compact_snapshot(CompactSnapshotInput {
-                trigger: CompactTrigger::ManualCommand.as_str().into(),
-                model_id: state.identity.model_id.clone(),
-                working_dir: state.identity.working_dir.clone(),
-                system_prompt: Some(state.system_prompt.text.clone()),
-                provider_messages: provider_messages.clone(),
-            })
-            .await
-            .map_err(HandlerError::Session)?;
-
-        let llm = self.runtime.config_manager().read_llm_provider();
-        let context_assembler = self.runtime.context_assembler();
-        let result = compact_idle_session(
-            session,
-            self.runtime.extension_runner().as_ref(),
-            context_assembler.as_ref(),
-            llm,
-            &state,
-            &tools,
-            IdleCompactionParams {
-                keep_recent_turns,
-                transcript_path: snapshot_path,
-                provider_messages,
-            },
-        )
-        .await
-        .map_err(|error| match error {
-            astrcode_session::compaction_run::IdleCompactionError::Session(e) => {
-                HandlerError::Session(e)
-            },
-            astrcode_session::compaction_run::IdleCompactionError::Extension(e) => {
-                HandlerError::Extension(e)
-            },
-            astrcode_session::compaction_run::IdleCompactionError::Persist(e) => {
-                HandlerError::InvalidRequest(e.to_string())
-            },
-            astrcode_session::compaction_run::IdleCompactionError::InvalidRequest(message) => {
-                HandlerError::InvalidRequest(message)
-            },
-        })?;
+            .map_err(|error| match error {
+                astrcode_session::compaction_run::IdleCompactionError::Session(e) => {
+                    HandlerError::Session(e)
+                },
+                astrcode_session::compaction_run::IdleCompactionError::Extension(e) => {
+                    HandlerError::Extension(e)
+                },
+                astrcode_session::compaction_run::IdleCompactionError::Persist(e) => {
+                    HandlerError::InvalidRequest(e.to_string())
+                },
+            })?;
 
         match result {
             IdleCompactionOutcome::Skipped { message } => {

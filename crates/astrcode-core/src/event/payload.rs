@@ -46,6 +46,23 @@ pub struct ExtensionEventData {
     pub payload: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CompactionDetails {
+    pub trigger: String,
+    pub pre_tokens: usize,
+    pub post_tokens: usize,
+    pub summary: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    pub strategy: CompactStrategy,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TranscriptRewriteReason {
+    Compaction(CompactionDetails),
+}
+
 /// 可写入 session event log 的事实。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
@@ -162,31 +179,18 @@ pub enum DurableEventPayload {
         #[serde(skip_serializing_if = "Option::is_none")]
         arguments_json: Option<serde_json::Value>,
     },
-    CompactBoundaryCreated {
-        trigger: String,
-        pre_tokens: usize,
-        post_tokens: usize,
-        summary: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        transcript_path: Option<String>,
-        continued_session_id: SessionId,
-        base_event_seq: u64,
-        strategy: CompactStrategy,
-    },
-    SessionContinuedFromCompaction {
-        parent_session_id: SessionId,
-        parent_cursor: Cursor,
-        summary: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        transcript_path: Option<String>,
-        context_messages: Vec<LlmMessage>,
-        retained_messages: Vec<LlmMessage>,
+    /// 当前 projection 仍位于 `source_seq` 时，原子替换 provider transcript。
+    TranscriptRewritten {
+        source_seq: u64,
+        messages: Vec<LlmMessage>,
+        reason: TranscriptRewriteReason,
     },
     SessionForked {
         source_session_id: SessionId,
         source_cursor: Cursor,
-        context_messages: Vec<LlmMessage>,
-        retained_messages: Vec<LlmMessage>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        first_user_message: Option<String>,
+        messages: Vec<LlmMessage>,
     },
     ErrorOccurred {
         code: i32,
