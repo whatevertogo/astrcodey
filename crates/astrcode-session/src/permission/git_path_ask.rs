@@ -5,7 +5,7 @@ use super::{
     paths::{extract_tool_paths, path_for_matching},
 };
 
-pub struct GitPathAskPolicy;
+pub(super) struct GitPathAskPolicy;
 
 impl PermissionPolicy for GitPathAskPolicy {
     fn priority(&self) -> u32 {

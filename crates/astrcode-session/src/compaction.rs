@@ -44,7 +44,7 @@ pub(crate) struct CompactionPlan {
     keep_recent_turns: Option<usize>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 enum CompactionOutcome {
     Skipped,
     Committed,
@@ -422,7 +422,6 @@ async fn commit_compaction(
 
 // ── Shared hook and persistence ──
 
-#[derive(Clone, Copy)]
 struct CompactHookContext<'a> {
     session_id: &'a str,
     working_dir: &'a str,
@@ -634,14 +633,14 @@ pub async fn compact_idle_session(
 
 // ── Circuit breaker ──
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum CircuitState {
     Closed,
     Open { until: Instant },
     HalfOpen,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct CompactCircuitBreaker {
     state: CircuitState,
     consecutive_llm_failures: u32,

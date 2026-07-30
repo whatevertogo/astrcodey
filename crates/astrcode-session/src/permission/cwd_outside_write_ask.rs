@@ -2,7 +2,7 @@ use astrcode_core::{permission::ApprovalMode, tool::access::ResourceAccess};
 
 use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
-pub struct CwdOutsideWriteAskPolicy;
+pub(super) struct CwdOutsideWriteAskPolicy;
 
 impl PermissionPolicy for CwdOutsideWriteAskPolicy {
     fn priority(&self) -> u32 {

@@ -19,7 +19,7 @@ use crate::{
     turn_context::SharedTurnContext,
 };
 
-pub struct ToolCalls {
+pub(crate) struct ToolCalls {
     turn: TurnToolContext,
     tool_registry: Arc<ToolRegistry>,
     extension_runner: Arc<dyn TurnHooks>,
@@ -28,7 +28,7 @@ pub struct ToolCalls {
 }
 
 impl ToolCalls {
-    pub fn new(
+    pub(crate) fn new(
         turn: TurnToolContext,
         tool_registry: Arc<ToolRegistry>,
         extension_runner: Arc<dyn TurnHooks>,
@@ -44,7 +44,7 @@ impl ToolCalls {
         }
     }
 
-    pub fn list_definitions_with_prompt_metadata(
+    pub(crate) fn list_definitions_with_prompt_metadata(
         &self,
     ) -> Vec<(
         ToolDefinition,

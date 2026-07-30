@@ -36,7 +36,7 @@ impl ToolCalls {
     /// 1. 仅对正常完成的工具分发 `PostToolUse`。
     /// 2. 发送唯一的 durable 完成、失败或取消事件。
     /// 3. 将边界映射后的兼容结果写入 turn 输出聚合。
-    pub async fn commit_tool_outcomes(
+    pub(crate) async fn commit_tool_outcomes(
         &self,
         prepared: &[PreparedToolInvocation],
         mut outcomes: HashMap<usize, ToolExecutionOutcome>,

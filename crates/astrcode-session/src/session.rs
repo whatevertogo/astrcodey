@@ -134,7 +134,7 @@ impl Session {
             .event_sink()
             .create(session.runtime.store().clone(), started)
             .await?;
-        session.mark_lifecycle_initialized();
+        session.runtime.mark_lifecycle_initialized();
         Ok(session)
     }
 
@@ -161,10 +161,6 @@ impl Session {
 
     pub(crate) fn runtime_services(&self) -> &SessionRuntimeServices {
         &self.runtime_services
-    }
-
-    fn mark_lifecycle_initialized(&self) {
-        self.runtime.mark_lifecycle_initialized();
     }
 
     pub async fn ensure_lifecycle_initialized(

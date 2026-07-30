@@ -19,7 +19,7 @@ use parking_lot::Mutex;
 static LAST_EVENT_AT: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
 
 #[cfg(debug_assertions)]
-pub fn capture_event(source: &'static str, event: &Event) {
+pub(crate) fn capture_event(source: &'static str, event: &Event) {
     let now = Instant::now();
     let key = snapshot_key(event);
     let since_previous_ms = LAST_EVENT_AT
@@ -42,7 +42,7 @@ pub fn capture_event(source: &'static str, event: &Event) {
 }
 
 #[cfg(not(debug_assertions))]
-pub fn capture_event(_source: &'static str, _event: &Event) {}
+pub(crate) fn capture_event(_source: &'static str, _event: &Event) {}
 
 #[cfg(debug_assertions)]
 fn snapshot_key(event: &Event) -> String {

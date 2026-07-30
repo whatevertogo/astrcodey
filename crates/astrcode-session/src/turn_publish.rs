@@ -470,10 +470,10 @@ mod tests {
         assert!(durable_publish_error_is_retryable(&retryable_error));
 
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let store: Arc<dyn astrcode_storage::SessionStore> = Arc::new(InMemoryEventStore::new());
+        let store = Arc::new(InMemoryEventStore::new());
         let runtime = Arc::new(SessionRuntimeState::new_with_event_sink(
             new_session_id(),
-            store,
+            store.clone(),
             Arc::new(SessionEventSink::new(Arc::new(ChannelObserver(events_tx)))),
         ));
         let session = test_session_with_runtime(test_runtime_services(), runtime).await;
@@ -495,7 +495,7 @@ mod tests {
         session
             .runtime
             .event_sink()
-            .sync(session.runtime.store().clone(), session.id())
+            .sync(store, session.id())
             .await
             .unwrap();
 

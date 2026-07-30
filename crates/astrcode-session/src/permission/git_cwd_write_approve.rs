@@ -4,7 +4,7 @@ use astrcode_extension_sdk::hostpaths::is_path_within;
 
 use super::{PermissionContext, PermissionDecision, PermissionPolicy, paths::extract_tool_paths};
 
-pub struct GitCwdWriteApprovePolicy;
+pub(super) struct GitCwdWriteApprovePolicy;
 
 impl PermissionPolicy for GitCwdWriteApprovePolicy {
     fn priority(&self) -> u32 {

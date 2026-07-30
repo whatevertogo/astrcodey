@@ -1,6 +1,6 @@
 use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
-pub struct SessionToolSelectionPolicy;
+pub(super) struct SessionToolSelectionPolicy;
 
 impl PermissionPolicy for SessionToolSelectionPolicy {
     fn priority(&self) -> u32 {

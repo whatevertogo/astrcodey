@@ -21,7 +21,7 @@ use astrcode_extension_sdk::{
     shell::resolve_shell,
 };
 
-use crate::{ToolRegistry, session::normalize_extra_system_prompt};
+use crate::ToolRegistry;
 
 pub(crate) struct BuiltBaseToolRegistry {
     pub registry: ToolRegistry,
@@ -148,7 +148,7 @@ pub(crate) async fn build_system_prompt_snapshot(
     )
     .await?;
 
-    let extra_instructions = normalize_extra_system_prompt(extra_system_prompt);
+    let extra_instructions = extra_system_prompt.map(str::to_owned);
     let prompt_files = load_prompt_files(working_dir, include_agents_rules).await;
 
     let prompt_input = SystemPromptInput {

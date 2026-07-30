@@ -7,7 +7,7 @@ use astrcode_core::{
 
 /// 权限策略的评估结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PermissionDecision {
+pub(crate) enum PermissionDecision {
     Allow,
     Deny {
         reason: String,
@@ -22,7 +22,7 @@ pub enum PermissionDecision {
 
 /// 传给权限策略的 session 运行时上下文。
 #[derive(Debug, Clone)]
-pub struct PermissionContext<'a> {
+pub(crate) struct PermissionContext<'a> {
     pub tool_name: &'a str,
     pub tool_input: &'a serde_json::Value,
     pub working_dir: &'a Path,
@@ -31,23 +31,23 @@ pub struct PermissionContext<'a> {
     pub tool_selection: Option<&'a SessionToolSelection>,
 }
 
-pub trait PermissionPolicy: Send + Sync {
+pub(crate) trait PermissionPolicy: Send + Sync {
     fn priority(&self) -> u32;
     fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision;
 }
 
 /// 按 priority 升序评估，第一条非 Pass 结果胜出；全部 Pass 时拒绝。
-pub struct PermissionChain {
+pub(crate) struct PermissionChain {
     policies: Vec<Box<dyn PermissionPolicy>>,
 }
 
 impl PermissionChain {
-    pub fn new(mut policies: Vec<Box<dyn PermissionPolicy>>) -> Self {
+    pub(crate) fn new(mut policies: Vec<Box<dyn PermissionPolicy>>) -> Self {
         policies.sort_by_key(|policy| policy.priority());
         Self { policies }
     }
 
-    pub fn decide(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
+    pub(crate) fn decide(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
         for policy in &self.policies {
             let decision = policy.evaluate(ctx);
             if !matches!(decision, PermissionDecision::Pass) {

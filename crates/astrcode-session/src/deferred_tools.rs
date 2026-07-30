@@ -34,7 +34,7 @@ pub(crate) fn provider_visible_tools(
         .collect()
 }
 
-pub fn append_deferred_tools_reminder(
+pub(crate) fn append_deferred_tools_reminder(
     messages: &mut Vec<LlmMessage>,
     tools: &[ToolSnapshot],
     active_deferred_tools: &HashSet<String>,
@@ -61,7 +61,7 @@ pub fn append_deferred_tools_reminder(
     messages.push(LlmMessage::system(text));
 }
 
-pub fn activate_deferred_tools(
+pub(crate) fn activate_deferred_tools(
     active_deferred_tools: &mut HashSet<String>,
     tools: &[ToolSnapshot],
     discovered: Vec<String>,
@@ -80,7 +80,7 @@ pub fn activate_deferred_tools(
     changed
 }
 
-pub fn tool_is_visible(tools: &[ToolDefinition], name: &str) -> bool {
+pub(crate) fn tool_is_visible(tools: &[ToolDefinition], name: &str) -> bool {
     tools.iter().any(|tool| tool.name == name)
 }
 

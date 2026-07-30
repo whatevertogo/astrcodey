@@ -18,13 +18,7 @@ impl SessionResourceStore {
         create: impl FnOnce() -> Arc<SessionRuntimeState>,
     ) -> Arc<SessionRuntimeState> {
         let mut entries = self.entries.lock();
-        if let Some(resources) = entries.get(session_id) {
-            return Arc::clone(resources);
-        }
-
-        let resources = create();
-        entries.insert(session_id.clone(), Arc::clone(&resources));
-        resources
+        Arc::clone(entries.entry(session_id.clone()).or_insert_with(create))
     }
 
     pub fn cleanup(&self, session_id: &SessionId) {

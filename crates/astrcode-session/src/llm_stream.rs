@@ -40,7 +40,7 @@ fn ensure_tool_call_args_limit(size: usize) -> Result<(), TurnError> {
 
 // ─── StreamOutcome ───────────────────────────────────────────────────────
 
-pub enum StreamOutcome {
+pub(crate) enum StreamOutcome {
     Complete {
         text: String,
         reasoning_content: String,
@@ -80,7 +80,7 @@ pub(crate) struct EarlyExecContext<'a> {
 ///
 /// 当 `early_exec` 为 `Some` 时，在 `ToolCallCompleted` 事件到达时即准备和
 /// 调度工具执行，不等整个 LLM 响应流结束。
-pub async fn consume_llm_stream(
+pub(crate) async fn consume_llm_stream(
     mut rx: mpsc::UnboundedReceiver<LlmEvent>,
     publisher: &TurnEvents,
     message_id: MessageId,
@@ -293,7 +293,7 @@ fn ensure_assistant_message_started(
     *message_started = true;
 }
 
-pub fn non_empty_reasoning_content(reasoning_content: String) -> Option<String> {
+pub(crate) fn non_empty_reasoning_content(reasoning_content: String) -> Option<String> {
     if reasoning_content.is_empty() {
         None
     } else {

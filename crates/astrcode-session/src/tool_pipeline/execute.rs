@@ -30,7 +30,7 @@ impl ToolCalls {
     ///
     /// 只读工具按连续批次并发执行；写入、shell、terminal 以及审批/阻止结果都会先刷新当前
     /// 只读批次，再按原始顺序串行处理。
-    pub async fn execute_and_commit(
+    pub(crate) async fn execute_and_commit(
         &self,
         mut input: ExecuteToolBatch<'_>,
     ) -> Result<Vec<String>, TurnError> {

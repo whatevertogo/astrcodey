@@ -2,7 +2,7 @@ use astrcode_core::permission::ApprovalMode;
 
 use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
-pub struct ShellBroadAccessAskPolicy;
+pub(super) struct ShellBroadAccessAskPolicy;
 
 impl PermissionPolicy for ShellBroadAccessAskPolicy {
     fn priority(&self) -> u32 {

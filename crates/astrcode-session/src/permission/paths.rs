@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 /// 常见工具参数字段名。
 const PATH_KEYS: &[&str] = &["path", "file", "filePath", "target", "directory", "dir"];
 
-pub fn extract_tool_paths(input: &serde_json::Value) -> Vec<PathBuf> {
+pub(super) fn extract_tool_paths(input: &serde_json::Value) -> Vec<PathBuf> {
     let mut paths = Vec::new();
     collect_paths(input, &mut paths);
     paths.sort();
@@ -48,7 +48,7 @@ fn push_path_value(value: &serde_json::Value, out: &mut Vec<PathBuf>) {
 }
 
 /// 将路径转为相对 working_dir 的字符串用于 glob 匹配。
-pub fn path_for_matching(path: &Path, working_dir: &Path) -> String {
+pub(super) fn path_for_matching(path: &Path, working_dir: &Path) -> String {
     path.strip_prefix(working_dir)
         .unwrap_or(path)
         .to_string_lossy()

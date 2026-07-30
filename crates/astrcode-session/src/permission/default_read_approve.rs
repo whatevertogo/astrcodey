@@ -1,6 +1,6 @@
 use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
-pub struct DefaultReadApprovePolicy;
+pub(super) struct DefaultReadApprovePolicy;
 
 impl PermissionPolicy for DefaultReadApprovePolicy {
     fn priority(&self) -> u32 {

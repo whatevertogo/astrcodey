@@ -73,12 +73,12 @@ impl ApprovalHistoryStore {
     }
 }
 
-pub struct SessionApprovalHistoryPolicy {
+pub(super) struct SessionApprovalHistoryPolicy {
     store: Arc<ApprovalHistoryStore>,
 }
 
 impl SessionApprovalHistoryPolicy {
-    pub fn new(store: Arc<ApprovalHistoryStore>) -> Self {
+    pub(super) fn new(store: Arc<ApprovalHistoryStore>) -> Self {
         Self { store }
     }
 }

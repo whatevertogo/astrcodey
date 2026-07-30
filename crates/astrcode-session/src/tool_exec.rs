@@ -185,7 +185,7 @@ fn tool_failure_outcome(
 }
 
 /// 执行单个工具调用并保留完成、失败、取消三种终态。
-pub async fn execute_tool_call(
+pub(crate) async fn execute_tool_call(
     tool_registry: Arc<ToolRegistry>,
     runtime: ToolCallRuntimeContext,
     call: ExecutableToolInvocation,
@@ -330,7 +330,7 @@ async fn execute_tool_call_blocking(
 /// 以规范化路径为 key 记录最近一次 `read` 或成功 `edit` 后的文件快照。
 /// 生命周期与 session 一致（由 `TurnRunner` 创建，随 `TurnRunner` 销毁）。
 #[derive(Default)]
-pub struct InMemoryFileObservationStore {
+pub(crate) struct InMemoryFileObservationStore {
     observations: Mutex<std::collections::HashMap<String, FileObservation>>,
 }
 

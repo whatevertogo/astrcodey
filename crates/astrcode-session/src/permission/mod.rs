@@ -17,11 +17,13 @@ mod yolo_mode_approve;
 use std::{path::Path, sync::Arc};
 
 use astrcode_core::config::EffectiveConfig;
-pub use runtime::{PermissionChain, PermissionContext, PermissionDecision, PermissionPolicy};
-pub use session_approval_history::ApprovalHistoryStore;
+pub(crate) use runtime::{
+    PermissionChain, PermissionContext, PermissionDecision, PermissionPolicy,
+};
+pub(crate) use session_approval_history::ApprovalHistoryStore;
 
 /// 根据有效配置与会话审批记忆构建默认权限链。
-pub fn build_default_chain(
+pub(crate) fn build_default_chain(
     effective: &EffectiveConfig,
     history: Arc<ApprovalHistoryStore>,
 ) -> Arc<PermissionChain> {
@@ -53,10 +55,10 @@ pub fn build_default_chain(
 }
 
 /// 审批挂起超时（5 分钟）。
-pub const APPROVAL_TIMEOUT_SECS: u64 = 300;
+pub(crate) const APPROVAL_TIMEOUT_SECS: u64 = 300;
 
 /// 从 session 存储目录解析审批历史文件路径。
-pub fn approval_history_path(session_store_dir: &Path) -> std::path::PathBuf {
+pub(crate) fn approval_history_path(session_store_dir: &Path) -> std::path::PathBuf {
     session_store_dir
         .join("extension_data")
         .join("astrcode-session")

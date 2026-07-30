@@ -18,7 +18,7 @@ const SENSITIVE_PATTERNS: &[&str] = &[
     "**/id_ed25519*",
 ];
 
-pub struct SensitiveFileAskPolicy {
+pub(super) struct SensitiveFileAskPolicy {
     globset: Option<GlobSet>,
 }
 
@@ -29,7 +29,7 @@ impl Default for SensitiveFileAskPolicy {
 }
 
 impl SensitiveFileAskPolicy {
-    pub fn new() -> Self {
+    pub(super) fn new() -> Self {
         let globset = build_sensitive_globset().map_err(|error| {
             tracing::error!(%error, "failed to build sensitive file policy");
             error

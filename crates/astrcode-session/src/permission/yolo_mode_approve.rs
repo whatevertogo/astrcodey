@@ -2,7 +2,7 @@ use astrcode_core::permission::ApprovalMode;
 
 use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
-pub struct YoloModeApprovePolicy;
+pub(super) struct YoloModeApprovePolicy;
 
 impl PermissionPolicy for YoloModeApprovePolicy {
     fn priority(&self) -> u32 {

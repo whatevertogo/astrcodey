@@ -60,7 +60,7 @@ pub(crate) struct SharedTurnContext {
 
 impl SharedTurnContext {
     /// 从 session 读模型构造共享上下文（不含 session_store_dir）。
-    pub fn from_read_model(session_id: &SessionId, model: &SessionReadModel) -> Self {
+    pub(crate) fn from_read_model(session_id: &SessionId, model: &SessionReadModel) -> Self {
         Self {
             session_id: session_id.clone(),
             working_dir: model.identity.working_dir.clone(),
@@ -84,7 +84,7 @@ impl SharedTurnContext {
     }
 
     /// 构造扩展 lifecycle hook 的 ctx。
-    pub fn lifecycle_ctx(&self) -> LifecycleContext {
+    pub(crate) fn lifecycle_ctx(&self) -> LifecycleContext {
         LifecycleContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
@@ -97,7 +97,7 @@ impl SharedTurnContext {
     }
 
     /// 构造带当轮消息摘要的 lifecycle hook ctx（用于 TurnEnd）。
-    pub fn lifecycle_ctx_with_exchange(
+    pub(crate) fn lifecycle_ctx_with_exchange(
         &self,
         user_message: String,
         assistant_message: String,
@@ -117,7 +117,7 @@ impl SharedTurnContext {
     }
 
     /// 构造 provider hook 的 ctx，附带本次 LLM 请求的 messages。
-    pub fn provider_ctx(&self, messages: Vec<LlmMessage>) -> ProviderContext {
+    pub(crate) fn provider_ctx(&self, messages: Vec<LlmMessage>) -> ProviderContext {
         ProviderContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
@@ -128,7 +128,7 @@ impl SharedTurnContext {
     }
 
     /// 构造各 tool hook ctx 共用的 `ModelSelection`。
-    pub fn model_selection(&self) -> ModelSelection {
+    pub(crate) fn model_selection(&self) -> ModelSelection {
         ModelSelection::simple(self.model_id.clone())
     }
 }
