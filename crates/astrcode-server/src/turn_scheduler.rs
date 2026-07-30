@@ -380,12 +380,20 @@ impl TurnScheduler {
     }
 
     /// 启动新 turn 并返回 handle（需要等待结果时用 [`Self::start_with_completion`]）。
-    pub async fn start_with_completion(
+    pub(crate) async fn start_with_completion(
         &self,
         session_id: SessionId,
         input: UserInput,
     ) -> Result<StartedExecution, TurnScheduleError> {
         let _admission = self.admit_owned()?;
+        self.start_with_completion_admitted(session_id, input).await
+    }
+
+    async fn start_with_completion_admitted(
+        &self,
+        session_id: SessionId,
+        input: UserInput,
+    ) -> Result<StartedExecution, TurnScheduleError> {
         let operation = self.begin_session_operation(&session_id).await?;
         let reserved = self.reserve_new_execution(&operation, input).await?;
         drop(operation);
@@ -401,6 +409,15 @@ impl TurnScheduler {
         input: UserInput,
     ) -> Result<StartedExecution, TurnScheduleError> {
         let _admission = self.admit_owned()?;
+        self.start_with_completion_in_admitted_operation(operation, input)
+            .await
+    }
+
+    pub(crate) async fn start_with_completion_in_admitted_operation(
+        &self,
+        operation: &SessionOperationGuard,
+        input: UserInput,
+    ) -> Result<StartedExecution, TurnScheduleError> {
         let reserved = self.reserve_new_execution(operation, input).await?;
         self.start_reserved_execution(reserved)
             .await
@@ -426,7 +443,7 @@ impl TurnScheduler {
     ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), TurnScheduleError> {
         let admission = self.admit_owned()?;
         let StartedExecution { turn_id, handle } = self
-            .start_with_completion(session_id.clone(), input)
+            .start_with_completion_admitted(session_id.clone(), input)
             .await?;
         let (completion_tx, completion_rx) = oneshot::channel();
         self.watch_owned_turn(
@@ -452,7 +469,7 @@ impl TurnScheduler {
     {
         let admission = self.admit_owned()?;
         let StartedExecution { turn_id, handle } = self
-            .start_with_completion(session_id.clone(), input)
+            .start_with_completion_admitted(session_id.clone(), input)
             .await?;
         let (output_tx, output_rx) = oneshot::channel();
         self.watch_owned_turn(

@@ -27,9 +27,30 @@ use astrcode_server::test_support::{
     ChildSessionCoordinator, DeliveryOutcome, InputDelivery, MAX_PENDING_INPUTS_PER_SESSION,
     MAX_PROMPT_TEXT_BYTES, SessionManager, TurnRegistry, TurnScheduleError, TurnScheduler,
     recycle_completed_session_for_test, session_started_event_for_test,
+    start_with_completion_for_test,
 };
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::{Semaphore, mpsc};
+
+#[async_trait::async_trait]
+trait UntrackedStartForTest {
+    async fn start_with_completion(
+        &self,
+        session_id: SessionId,
+        input: astrcode_core::user_input::UserInput,
+    ) -> Result<astrcode_server::StartedExecution, TurnScheduleError>;
+}
+
+#[async_trait::async_trait]
+impl UntrackedStartForTest for TurnScheduler {
+    async fn start_with_completion(
+        &self,
+        session_id: SessionId,
+        input: astrcode_core::user_input::UserInput,
+    ) -> Result<astrcode_server::StartedExecution, TurnScheduleError> {
+        start_with_completion_for_test(self, session_id, input).await
+    }
+}
 
 struct StaticTextLlm;
 struct PendingLlm;

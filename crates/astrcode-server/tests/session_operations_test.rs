@@ -21,7 +21,7 @@ use astrcode_core::{
         CreateSessionRequest, SessionAccess, SessionDeliveryOutcome, SessionOperations,
         SubmitTurnRequest, SubmitTurnResult, ToolDefinition,
     },
-    types::{Cursor, SessionId, new_session_id},
+    types::{Cursor, SessionId, new_session_id, new_turn_id},
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
@@ -29,7 +29,7 @@ use astrcode_server::test_support::{
     finish_and_watch_next_for_test, pause_next_completion_guard_claim_for_test,
     pause_next_completion_guard_registration_for_test, pause_next_sync_completion_settled_for_test,
     registered_completion_guard_count_for_test, session_started_event_for_test,
-    start_with_completion_and_hold_operation_for_test,
+    start_with_completion_and_hold_operation_for_test, start_with_completion_for_test,
 };
 use astrcode_session_projection::{AgentSessionStatus, SessionReadModel, SessionSummary};
 use astrcode_storage::{
@@ -1128,6 +1128,52 @@ async fn session_tree_close_serializes_child_creation_and_parent_links() {
 }
 
 #[tokio::test]
+async fn recycle_repairs_stale_durable_turn_without_registry_ownership() {
+    let blocking_store = Arc::new(BlockingChildCreateStore::new());
+    let store: Arc<dyn SessionStore> = blocking_store.clone();
+    let session_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            session_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+    let stale_turn_id = new_turn_id();
+    store
+        .append_event(DurableEvent::new(
+            session_id.clone(),
+            Some(stale_turn_id),
+            DurableEventPayload::TurnStarted,
+        ))
+        .await
+        .unwrap();
+    let ops = build_test_ops(Arc::clone(&store), "unused");
+
+    ops.scheduler.recycle_session(&session_id).await.unwrap();
+    blocking_store.restore_session(&session_id).await.unwrap();
+
+    let restored = store.session_read_model(&session_id).await.unwrap();
+    assert_eq!(restored.execution.phase, astrcode_core::event::Phase::Idle);
+    assert!(
+        store
+            .replay_events(&session_id)
+            .await
+            .unwrap()
+            .iter()
+            .any(|event| {
+                matches!(
+                    &event.payload,
+                    DurableEventPayload::TurnCompleted { finish_reason }
+                        if finish_reason == "interrupted"
+                )
+            }),
+        "destructive close must persist a stale-turn terminal before recycling"
+    );
+}
+
+#[tokio::test]
 async fn completion_guard_registration_and_claim_serialize_tree_close() {
     let blocking_store = Arc::new(BlockingChildCreateStore::new());
     let store: Arc<dyn SessionStore> = blocking_store.clone();
@@ -1689,9 +1735,11 @@ async fn inject_message_after_turn_task_finished_starts_new_turn() {
 
     let ops = build_test_ops(Arc::clone(&store), "handled notification");
 
-    let started = ops
-        .scheduler
-        .start_with_completion(session_id.clone(), "initial".into())
+    let started = start_with_completion_for_test(
+        ops.scheduler.as_ref(),
+        session_id.clone(),
+        "initial".into(),
+    )
         .await
         .unwrap();
     let first_turn_id = started.turn_id.clone();
@@ -2211,9 +2259,9 @@ async fn shutdown_drains_active_background_and_sync_child_terminals() {
     let shutdown =
         tokio::spawn(async move { shutdown_scheduler.shutdown_background_tasks().await });
     tokio::time::timeout(Duration::from_secs(5), claim_reached)
-    .await
-    .expect("shutdown should reach child terminal persistence")
-    .unwrap();
+        .await
+        .expect("shutdown should reach child terminal persistence")
+        .unwrap();
     blocking_store.fail_next_sync_for(parent_id.clone()).await;
     let _ = release_claim.send(());
     tokio::time::timeout(Duration::from_secs(6), shutdown)

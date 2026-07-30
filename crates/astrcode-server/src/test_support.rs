@@ -127,6 +127,14 @@ pub async fn start_with_completion_and_hold_operation_for_test(
     Ok(execution)
 }
 
+pub async fn start_with_completion_for_test(
+    scheduler: &TurnScheduler,
+    session_id: astrcode_core::types::SessionId,
+    input: astrcode_core::user_input::UserInput,
+) -> Result<crate::turn_scheduler::StartedExecution, crate::turn_scheduler::TurnScheduleError> {
+    scheduler.start_with_completion(session_id, input).await
+}
+
 pub fn pause_next_completion_guard_registration_for_test(
     coordinator: &ChildSessionCoordinator,
 ) -> (

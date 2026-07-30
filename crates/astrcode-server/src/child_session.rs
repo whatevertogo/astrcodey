@@ -231,9 +231,7 @@ impl Drop for CompletionClaimLease {
             let _ = restore.completed_tx.send(parent_session_id);
         }
         if self.count > 0 {
-            self.claims
-                .active
-                .fetch_sub(self.count, Ordering::AcqRel);
+            self.claims.active.fetch_sub(self.count, Ordering::AcqRel);
         }
     }
 }
@@ -492,7 +490,7 @@ impl ChildSessionCoordinator {
             .await
             .map_err(SessionApiError::internal)?;
         let started = scheduler
-            .start_with_completion_in_operation(
+            .start_with_completion_in_admitted_operation(
                 &operation,
                 astrcode_core::user_input::UserInput::text_only(user_prompt),
             )
@@ -552,7 +550,7 @@ impl ChildSessionCoordinator {
             .await
             .map_err(SessionApiError::internal)?;
         let started = scheduler
-            .start_with_completion_in_operation(
+            .start_with_completion_in_admitted_operation(
                 &operation,
                 astrcode_core::user_input::UserInput::text_only(user_prompt),
             )
@@ -830,6 +828,7 @@ impl ChildSessionCoordinator {
                 }
             }
             guard.finish_terminal(Ok(()));
+            claim.commit();
 
             if guard.notify_text().is_some() {
                 let message = build_background_agent_notification(&guard).await;
@@ -849,7 +848,6 @@ impl ChildSessionCoordinator {
                     );
                 }
             }
-            claim.commit();
         }
     }
 
