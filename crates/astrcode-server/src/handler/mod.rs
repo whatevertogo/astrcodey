@@ -14,97 +14,30 @@ use astrcode_protocol::commands::UiResponseValue;
 
 use crate::{
     bootstrap::ServerRuntime, session_command_service::SessionCommandService,
-    session_manager::SessionManagerError, turn_scheduler::TurnScheduler,
+    turn_scheduler::TurnScheduler,
 };
 
 mod actor;
 mod compact;
-mod errors;
 mod model_selection;
 mod notifications;
 mod prompt;
 mod recap;
 mod router;
-pub(crate) mod session_command;
+mod session_command;
 mod session_lifecycle;
-pub(crate) mod slash;
-pub(crate) mod snapshot;
+mod slash;
 pub(in crate::handler) mod turn;
 
 pub use actor::CommandHandle;
-pub use compact::ManualCompactOutcome;
 use model_selection::ModelSelectionController;
-pub use session_command::CommandList;
-/// 用户输入提交结果：被接受进入 Turn，或被斜杠命令处理。
-#[derive(Debug)]
-pub enum PromptSubmission {
-    Accepted { turn_id: TurnId },
-    Handled { message: String },
-}
 
-#[derive(Debug)]
-pub enum CommandInvocation {
-    Display { content: String, is_error: bool },
-    Handled { message: String },
-    Started { turn_id: TurnId },
-}
-
-impl CommandInvocation {
-    pub(crate) fn into_prompt_submission(self) -> PromptSubmission {
-        match self {
-            Self::Display { content, is_error } => PromptSubmission::Handled {
-                message: if is_error {
-                    format!("Error: {content}")
-                } else {
-                    content
-                },
-            },
-            Self::Handled { message } => PromptSubmission::Handled { message },
-            Self::Started { turn_id } => PromptSubmission::Accepted { turn_id },
-        }
-    }
-}
-
-/// Handler 错误类型，替代原来的字符串匹配。
-#[derive(Debug, thiserror::Error)]
-pub enum HandlerError {
-    #[error("A turn is already running")]
-    TurnAlreadyRunning,
-    #[error("No active turn")]
-    NoActiveTurn,
-    #[error("No active session")]
-    NoActiveSession,
-    #[error("Session not found: {0}")]
-    SessionNotFound(String),
-    #[error("Unknown command: /{0}")]
-    UnknownCommand(String),
-    #[error("Cannot compact while a turn is running")]
-    CompactBlocked,
-    #[error("Compaction skipped: {0}")]
-    CompactionSkipped(String),
-    #[error(transparent)]
-    SessionManager(#[from] SessionManagerError),
-    #[error(transparent)]
-    Session(astrcode_session::SessionError),
-    #[error(transparent)]
-    Turn(astrcode_session::TurnError),
-    #[error(transparent)]
-    Compact(astrcode_context::CompactError),
-    #[error("LLM error: {0}")]
-    Llm(#[source] astrcode_core::llm::LlmError),
-    #[error(transparent)]
-    Extension(astrcode_extension_sdk::extension::ExtensionError),
-    #[error("Session close failed: {0}")]
-    SessionClose(String),
-    /// Command actor 通道已关闭，服务不可用。
-    #[error("Command actor is unavailable")]
-    ActorUnavailable,
-    /// 验证失败或状态不满足前置条件。
-    #[error("Invalid request: {0}")]
-    InvalidRequest(String),
-}
-
-pub(crate) use crate::turn_scheduler::TurnCompletion;
+pub(crate) use crate::{
+    session_command_contract::{
+        CommandInvocation, CommandList, HandlerError, ManualCompactOutcome, PromptSubmission,
+    },
+    turn_scheduler::TurnCompletion,
+};
 
 /// 命令处理器，处理客户端命令并通过广播通道发送通知。
 pub(crate) struct CommandHandler {
@@ -125,7 +58,7 @@ pub(crate) struct CommandHandler {
 mod tests;
 
 #[cfg(test)]
-pub(crate) use snapshot::message_to_dto;
+pub(crate) use crate::protocol_mapping::message_to_dto;
 
 impl CommandHandler {
     // ─── Fork ─────────────────────────────────────────────────────────

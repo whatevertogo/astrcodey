@@ -142,6 +142,18 @@ pub trait SessionStore:
         ))
     }
 
+    /// Rebuild a recycled session without making it active or registering runtime state.
+    ///
+    /// Stores that do not preserve recycled data may keep the default unsupported result.
+    async fn recycled_session_read_model(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<Arc<SessionReadModel>, StorageError> {
+        Err(StorageError::Unsupported(
+            "reading recycled sessions is not supported by this storage implementation".into(),
+        ))
+    }
+
     async fn write_compact_snapshot(
         &self,
         _session_id: &SessionId,

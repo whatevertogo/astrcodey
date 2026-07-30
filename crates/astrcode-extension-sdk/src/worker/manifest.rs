@@ -25,12 +25,7 @@ pub(crate) struct ManifestCatalog {
 impl ManifestCatalog {
     pub(crate) fn push_legacy_extension_event(&mut self, event: Value) {
         match serde_json::from_value::<ManifestExtensionEvent>(event) {
-            Ok(event) => self.extension_events.push(ExtensionEventDecl {
-                event_type: event.event_type,
-                schema_version: event.schema_version,
-                durable: event.durable,
-                max_payload_bytes: event.max_payload_bytes,
-            }),
+            Ok(event) => self.extension_events.push(event.into()),
             Err(error) if self.invalid_extension_event.is_none() => {
                 self.invalid_extension_event = Some(error.to_string());
             },
@@ -65,12 +60,7 @@ impl ManifestCatalog {
         let extension_events = self
             .extension_events
             .iter()
-            .map(|event| ManifestExtensionEvent {
-                event_type: event.event_type.clone(),
-                schema_version: event.schema_version,
-                durable: event.durable,
-                max_payload_bytes: event.max_payload_bytes,
-            })
+            .map(ManifestExtensionEvent::from)
             .collect();
         serde_json::to_value(InitializeManifest {
             extension_id: extension_id.into(),
@@ -172,7 +162,7 @@ mod tests {
             catalog
                 .to_metadata_value("test-extension", "0.0.0")
                 .unwrap_err()
-                .contains("event_tipe")
+                .contains("event_type")
         );
     }
 }

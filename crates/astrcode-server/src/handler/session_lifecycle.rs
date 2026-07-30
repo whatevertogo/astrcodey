@@ -3,7 +3,8 @@
 use astrcode_core::{tool::SessionToolSelection, types::SessionId};
 use astrcode_protocol::events::{ClientNotification, SessionListItemDto};
 
-use super::{CommandHandler, HandlerError, snapshot::session_snapshot};
+use super::{CommandHandler, HandlerError};
+use crate::protocol_mapping::session_snapshot;
 
 impl CommandHandler {
     pub(super) async fn send_session_list(&self) -> Result<(), HandlerError> {

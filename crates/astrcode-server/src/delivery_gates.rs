@@ -36,6 +36,8 @@ impl SessionDeliveryGate {
     pub(crate) async fn wait_for_starts(&self) {
         loop {
             let notified = self.starts_idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if self.active_starts.load(Ordering::Acquire) == 0 {
                 return;
             }
@@ -160,10 +162,6 @@ impl SessionDeliveryGates {
             session_id: operation.session_id.clone(),
             gate: operation.mark_closing(),
         }
-    }
-
-    pub(crate) async fn mark_closing(&self, session_id: &SessionId) -> Arc<SessionDeliveryGate> {
-        self.lock(session_id).await.mark_closing()
     }
 
     fn remove_if_current(&self, session_id: &SessionId, expected: &Arc<SessionDeliveryGate>) {

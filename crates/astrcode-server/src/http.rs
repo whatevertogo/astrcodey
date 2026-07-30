@@ -12,7 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::{bootstrap::ServerApp, handler::HandlerError};
+use crate::{bootstrap::ServerApp, session_command_contract::HandlerError};
 
 mod auth;
 mod projection;

@@ -598,6 +598,10 @@ impl EventLog {
         Ok(Self::from_writer_state(state))
     }
 
+    pub(crate) async fn replay_read_only(path: PathBuf) -> Result<Vec<StoredEvent>, StorageError> {
+        run_blocking_io(move || replay_events_at_path(&path, None, None)).await
+    }
+
     fn from_writer_state(state: WriterState) -> Self {
         let path = state.path.clone();
         let next_seq = Arc::new(AtomicU64::new(state.next_seq));

@@ -28,7 +28,8 @@ use astrcode_server::test_support::{
     ChildSessionCoordinator, ServerSessionOperations, SessionManager, TurnRegistry, TurnScheduler,
     finish_and_watch_next_for_test, pause_next_completion_guard_claim_for_test,
     pause_next_completion_guard_registration_for_test, pause_next_sync_completion_settled_for_test,
-    session_started_event_for_test, start_with_completion_and_hold_operation_for_test,
+    registered_completion_guard_count_for_test, session_started_event_for_test,
+    start_with_completion_and_hold_operation_for_test,
 };
 use astrcode_session_projection::{AgentSessionStatus, SessionReadModel, SessionSummary};
 use astrcode_storage::{
@@ -918,6 +919,84 @@ async fn session_tree_close_serializes_child_creation_and_parent_links() {
         .expect("failed relation write should leave the existing parent link intact");
     assert_eq!(partial_link.status, AgentSessionStatus::Running);
 
+    let cancelled_delete_child = ops
+        .create_session(
+            parent_id.as_str(),
+            CreateSessionRequest {
+                name: "cancelled-delete-owner".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let cancelled_delete_id = SessionId::from(cancelled_delete_child.session_id);
+    blocking_store.block_next_delete();
+    let delete_scheduler = Arc::clone(&ops.scheduler);
+    let delete_id = cancelled_delete_id.clone();
+    let delete_request =
+        tokio::spawn(async move { delete_scheduler.delete_session(&delete_id).await });
+    blocking_store.wait_for_delete().await;
+    delete_request.abort();
+    assert!(delete_request.await.unwrap_err().is_cancelled());
+    blocking_store.release_delete();
+    for _ in 0..100 {
+        if blocking_store
+            .session_read_model(&cancelled_delete_id)
+            .await
+            .is_err()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        blocking_store
+            .session_read_model(&cancelled_delete_id)
+            .await
+            .is_err(),
+        "the admitted delete owner must survive request cancellation"
+    );
+
+    let cancelled_recycle_child = ops
+        .create_session(
+            parent_id.as_str(),
+            CreateSessionRequest {
+                name: "cancelled-recycle-owner".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let cancelled_recycle_id = SessionId::from(cancelled_recycle_child.session_id);
+    blocking_store.block_next_recycle();
+    let recycle_scheduler = Arc::clone(&ops.scheduler);
+    let recycle_id = cancelled_recycle_id.clone();
+    let recycle_request =
+        tokio::spawn(async move { recycle_scheduler.recycle_session(&recycle_id).await });
+    blocking_store.wait_for_recycle().await;
+    recycle_request.abort();
+    assert!(recycle_request.await.unwrap_err().is_cancelled());
+    blocking_store.release_recycle();
+    for _ in 0..100 {
+        if blocking_store
+            .session_read_model(&cancelled_recycle_id)
+            .await
+            .is_err()
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        blocking_store
+            .session_read_model(&cancelled_recycle_id)
+            .await
+            .is_err(),
+        "the admitted recycle owner must survive request cancellation"
+    );
+
     let guarded_start_child = ops
         .create_session(
             parent_id.as_str(),
@@ -1290,6 +1369,94 @@ async fn completion_guard_registration_and_claim_serialize_tree_close() {
             "the winning completion owner should keep {child_id} completed"
         );
     }
+}
+
+#[tokio::test]
+async fn cancelled_completion_drain_restores_claim_for_retry() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let parent_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            parent_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
+    ops.child_sessions.shutdown_completion_watcher().await;
+
+    let child = ops
+        .create_session(
+            parent_id.as_str(),
+            CreateSessionRequest {
+                name: "cancelled-drain".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let child_id = SessionId::from(child.session_id);
+    ops.submit_turn(
+        SubmitTurnRequest::for_child(parent_id.as_str(), child_id.as_str(), "complete later")
+            .wait_for_result(false),
+    )
+    .await
+    .unwrap();
+    release.notify_one();
+    for _ in 0..100 {
+        if ops.scheduler.registry().active_is_finished(&child_id) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(ops.scheduler.registry().active_is_finished(&child_id));
+
+    let (claim_reached, release_claim) =
+        pause_next_completion_guard_claim_for_test(&ops.child_sessions);
+    let drain_ops = Arc::clone(&ops);
+    let drain_parent = parent_id.clone();
+    let drain = tokio::spawn(async move {
+        drain_ops
+            .child_sessions
+            .drain_completed(drain_ops.scheduler.as_ref(), &drain_parent)
+            .await;
+    });
+    claim_reached.await.unwrap();
+    drain.abort();
+    assert!(drain.await.unwrap_err().is_cancelled());
+    let _ = release_claim.send(());
+    assert_eq!(
+        registered_completion_guard_count_for_test(&ops.child_sessions, &parent_id),
+        1,
+        "claim Drop must restore the guard synchronously"
+    );
+
+    ops.child_sessions
+        .drain_completed(ops.scheduler.as_ref(), &parent_id)
+        .await;
+    assert_eq!(
+        registered_completion_guard_count_for_test(&ops.child_sessions, &parent_id),
+        0
+    );
+    let terminal_count = store
+        .replay_events(&parent_id)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|event| {
+            matches!(
+                &event.payload,
+                DurableEventPayload::AgentSessionCompleted {
+                    child_session_id,
+                    ..
+                } if child_session_id == &child_id
+            )
+        })
+        .count();
+    assert_eq!(terminal_count, 1);
 }
 
 #[tokio::test]
@@ -1958,5 +2125,120 @@ async fn parent_abort_stops_sync_child_and_recycles() {
             .agent_sessions
             .is_empty(),
         "recycled child should be removed from parent agent_sessions projection"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_drains_active_background_and_sync_child_terminals() {
+    let blocking_store = Arc::new(BlockingChildCreateStore::new());
+    let store: Arc<dyn SessionStore> = blocking_store.clone();
+    let parent_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(
+            parent_id.clone(),
+            ".",
+            "mock",
+        ))
+        .await
+        .unwrap();
+    let (gate_llm, release) = GateLlm::new_pair();
+    let ops = build_test_ops_with_llm(Arc::clone(&store), Arc::new(gate_llm));
+
+    let background_child = ops
+        .create_session(
+            parent_id.as_str(),
+            CreateSessionRequest {
+                name: "shutdown-background".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let sync_child = ops
+        .create_session(
+            parent_id.as_str(),
+            CreateSessionRequest {
+                name: "shutdown-sync".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let background_id = SessionId::from(background_child.session_id.as_str());
+    let sync_id = SessionId::from(sync_child.session_id.as_str());
+
+    let background = ops
+        .submit_turn(
+            SubmitTurnRequest::for_child(
+                parent_id.as_str(),
+                &background_child.session_id,
+                "background work",
+            )
+            .wait_for_result(false),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(background, SubmitTurnResult::Backgrounded { .. }));
+
+    let sync_ops = Arc::clone(&ops);
+    let sync_parent = parent_id.clone();
+    let sync_target = sync_child.session_id.clone();
+    let sync_request = tokio::spawn(async move {
+        sync_ops
+            .submit_turn(SubmitTurnRequest::for_child(
+                sync_parent.as_str(),
+                sync_target,
+                "sync work",
+            ))
+            .await
+    });
+    for _ in 0..100 {
+        if ops.scheduler.registry().has_active(&background_id)
+            && ops.scheduler.registry().has_active(&sync_id)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(ops.scheduler.registry().has_active(&background_id));
+    assert!(ops.scheduler.registry().has_active(&sync_id));
+
+    let (claim_reached, release_claim) =
+        pause_next_completion_guard_claim_for_test(&ops.child_sessions);
+    let shutdown_scheduler = Arc::clone(&ops.scheduler);
+    let shutdown =
+        tokio::spawn(async move { shutdown_scheduler.shutdown_background_tasks().await });
+    tokio::time::timeout(Duration::from_secs(5), claim_reached)
+    .await
+    .expect("shutdown should reach child terminal persistence")
+    .unwrap();
+    blocking_store.fail_next_sync_for(parent_id.clone()).await;
+    let _ = release_claim.send(());
+    tokio::time::timeout(Duration::from_secs(6), shutdown)
+        .await
+        .expect("shutdown should retry and durably drain child terminals")
+        .unwrap();
+    release.notify_waiters();
+
+    assert!(
+        sync_request
+            .await
+            .expect("sync request task should not panic")
+            .is_err(),
+        "forced shutdown should resolve the sync waiter with a terminal error"
+    );
+    assert_eq!(
+        registered_completion_guard_count_for_test(&ops.child_sessions, &parent_id),
+        0
+    );
+    let parent = store.session_read_model(&parent_id).await.unwrap();
+    assert_eq!(parent.agent_sessions.len(), 2);
+    assert!(
+        parent
+            .agent_sessions
+            .iter()
+            .all(|link| link.status == AgentSessionStatus::Failed)
     );
 }

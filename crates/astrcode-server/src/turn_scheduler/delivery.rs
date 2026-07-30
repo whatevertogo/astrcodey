@@ -1,8 +1,8 @@
 use astrcode_core::{types::SessionId, user_input::UserInput};
 
 use super::{
-    DeliveryOutcome, InputDelivery, ReservedExecution, StartedExecution, TurnScheduleError,
-    TurnScheduler, validate_user_input,
+    CompletionWatch, DeliveryOutcome, InputDelivery, ReservedExecution, StartedExecution,
+    TurnScheduleError, TurnScheduler, validate_user_input,
 };
 use crate::delivery_gates::SessionOperationGuard;
 
@@ -158,9 +158,11 @@ impl TurnScheduler {
             session_id,
             turn_id.clone(),
             handle,
-            source,
-            None,
-            None,
+            CompletionWatch {
+                source,
+                completion_tx: None,
+                output_tx: None,
+            },
         );
         Ok(DeliveryOutcome::Started { turn_id })
     }

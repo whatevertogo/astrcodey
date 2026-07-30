@@ -2,14 +2,13 @@
 
 use astrcode_core::types::SessionId;
 use astrcode_extension_sdk::extension::CommandCompletions;
-use astrcode_protocol::events::{ClientNotification, ExtensionCommandInfoDto};
+use astrcode_protocol::events::ClientNotification;
 
 use super::{CommandHandler, CommandInvocation, HandlerError, PromptSubmission, slash};
-use crate::protocol_mapping::{keybinding_to_dto, status_item_to_info_dto};
-
-pub struct CommandList {
-    pub commands: Vec<ExtensionCommandInfoDto>,
-}
+use crate::{
+    protocol_mapping::{keybinding_to_dto, status_item_to_info_dto},
+    session_command_contract::{CommandList, ParsedSlashCommand},
+};
 
 impl CommandHandler {
     pub(super) async fn send_extension_command_list(&self) {
@@ -52,7 +51,7 @@ impl CommandHandler {
         arguments: String,
     ) -> Result<(), HandlerError> {
         let session_id = self.ensure_session().await?;
-        let command = slash::ParsedSlashCommand {
+        let command = ParsedSlashCommand {
             name: command_name,
             arguments,
         };
@@ -65,7 +64,7 @@ impl CommandHandler {
     pub(in crate::handler) async fn invoke_command_for_session(
         &mut self,
         session_id: SessionId,
-        command: slash::ParsedSlashCommand,
+        command: ParsedSlashCommand,
     ) -> Result<CommandInvocation, HandlerError> {
         if command.name.trim().trim_start_matches('/') == "model" {
             self.start_model_selection();
@@ -81,7 +80,7 @@ impl CommandHandler {
     pub(in crate::handler) async fn execute_command_for_session(
         &mut self,
         session_id: SessionId,
-        command: slash::ParsedSlashCommand,
+        command: ParsedSlashCommand,
     ) -> Result<PromptSubmission, HandlerError> {
         Ok(self
             .invoke_command_for_session(session_id, command)

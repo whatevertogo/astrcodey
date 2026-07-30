@@ -168,13 +168,6 @@ impl TurnScheduler {
         self.repair_stale_locked(session_id).await
     }
 
-    /// 仅对本 session 发起协作式 shutdown（不级联子 session、不跑 stale repair）。
-    pub(super) fn request_turn_shutdown(&self, session_id: &SessionId) {
-        if let Some(turn_id) = self.registry.request_shutdown(session_id) {
-            self.schedule_force_kill(session_id.clone(), turn_id);
-        }
-    }
-
     /// completion 已产出但 task 可能尚未退出；只按 turn identity 非破坏性移除。
     pub async fn release_completed_execution(
         &self,
@@ -449,12 +442,25 @@ impl TurnScheduler {
 
         let mut cleanup_error = None;
         let mut settled_sessions = HashSet::new();
-        for session_id in session_ids.iter().rev() {
+        for node in tree.nodes.iter().rev().filter(|node| node.exists) {
+            let session_id = &node.session_id;
             match self.cleanup_execution_locked(session_id).await {
                 Ok(true) => {
                     settled_sessions.insert(session_id.clone());
                 },
-                Ok(false) => {},
+                Ok(false) => {
+                    if let Err(error) = self.repair_stale_locked(session_id).await {
+                        if cleanup_error.is_none() {
+                            cleanup_error = Some(error);
+                        } else {
+                            tracing::warn!(
+                                %session_id,
+                                %error,
+                                "additional stale session repair failure during tree close"
+                            );
+                        }
+                    }
+                },
                 Err(error) => {
                     if cleanup_error.is_none() {
                         cleanup_error = Some(error);
@@ -563,38 +569,6 @@ impl TurnScheduler {
             }
         }
         Ok(())
-    }
-
-    fn schedule_force_kill(&self, session_id: SessionId, turn_id: TurnId) {
-        let scheduler = self.clone();
-        if let Err(error) = self.spawn_owned_named("turn_force_kill", async move {
-            tokio::time::sleep(Duration::from_millis(FORCE_KILL_GRACE_MS)).await;
-            let _operation = scheduler.delivery_gates.lock(&session_id).await;
-            let Some((removed_turn_id, session)) = scheduler
-                .registry
-                .force_kill_if_running(&session_id, &turn_id)
-            else {
-                return;
-            };
-            tracing::warn!(
-                session_id = %session_id,
-                turn_id = %removed_turn_id,
-                "turn did not stop after cooperative shutdown; forced kill"
-            );
-            if let Err(error) = scheduler
-                .emit_turn_aborted(&removed_turn_id, &session, &session_id)
-                .await
-            {
-                tracing::error!(
-                    %session_id,
-                    turn_id = %removed_turn_id,
-                    %error,
-                    "failed to finalize forced abort; registry ownership retained"
-                );
-            }
-        }) {
-            tracing::debug!(%error, "force-kill owner rejected during shutdown");
-        }
     }
 
     async fn emit_turn_aborted(

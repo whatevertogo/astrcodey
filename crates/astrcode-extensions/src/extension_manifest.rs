@@ -59,12 +59,7 @@ fn registration_from_manifest(
     let extension_events = manifest
         .extension_events
         .into_iter()
-        .map(|event| ExtensionEventDecl {
-            event_type: event.event_type,
-            schema_version: event.schema_version,
-            durable: event.durable,
-            max_payload_bytes: event.max_payload_bytes,
-        })
+        .map(ExtensionEventDecl::from)
         .collect();
 
     Ok(ExtensionRegistration {
@@ -85,28 +80,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn s5r_initialize_manifest_is_strict_and_preserves_legacy_defaults() {
+    fn s5r_initialize_manifest_is_forward_compatible_and_validates_known_fields() {
         let invalid_manifests = [
             (
                 json!({
-                    "extension_id": "top-level-typo",
-                    "protocol": {"s5r": astrcode_extension_sdk::s5r::S5R_VERSION},
-                    "capabilites": []
-                }),
-                "unknown field `capabilites`",
-            ),
-            (
-                json!({
-                    "extension_id": "nested-typo",
+                    "extension_id": "bad-known-field",
                     "protocol": {"s5r": astrcode_extension_sdk::s5r::S5R_VERSION},
                     "tools": [{
                         "name": "tool",
                         "description": "",
                         "parameters": {"type": "object"},
-                        "strcit": true
+                        "strict": "yes"
                     }]
                 }),
-                "unknown field `strcit`",
+                "invalid type",
             ),
             (
                 json!({
@@ -127,13 +114,18 @@ mod tests {
         let registration = registration_from_s5r_metadata(
             &json!({
                 "extension_id": "legacy-defaults",
-                "protocol": {"s5r": astrcode_extension_sdk::s5r::S5R_VERSION},
+                "protocol": {
+                    "s5r": astrcode_extension_sdk::s5r::S5R_VERSION,
+                    "future_protocol_field": true
+                },
                 "wire_codec": "json",
+                "future_manifest_field": {"enabled": true},
                 "tools": [
                     {
                         "name": "legacy",
                         "description": "",
-                        "parameters": {"type": "object"}
+                        "parameters": {"type": "object"},
+                        "future_tool_field": "ignored"
                     },
                     {
                         "name": "strict",

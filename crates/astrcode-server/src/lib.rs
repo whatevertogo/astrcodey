@@ -8,11 +8,11 @@ pub mod transport;
 
 pub use child_session::{ChildCleanup, ChildSessionCoordinator};
 pub use config_manager::ConfigManager;
-pub use handler::{
-    CommandHandle, CommandInvocation, CommandList, HandlerError, ManualCompactOutcome,
-    PromptSubmission,
-};
+pub use handler::CommandHandle;
 pub use server_event_bus::ServerEventBus;
+pub use session_command_contract::{
+    CommandInvocation, CommandList, HandlerError, ManualCompactOutcome, PromptSubmission,
+};
 pub use session_manager::{SessionManager, SessionManagerError};
 pub use turn_registry::TurnRegistry;
 pub use turn_scheduler::{
@@ -31,6 +31,7 @@ mod presentation;
 mod protocol_mapping;
 mod queue_drains;
 mod server_event_bus;
+mod session_command_contract;
 mod session_command_service;
 mod session_manager;
 mod session_operations;

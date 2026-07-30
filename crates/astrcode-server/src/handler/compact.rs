@@ -1,12 +1,6 @@
 use astrcode_core::types::SessionId;
 
-use super::{CommandHandler, HandlerError};
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ManualCompactOutcome {
-    Compacted { session_id: SessionId },
-    Skipped { message: String },
-}
+use super::{CommandHandler, HandlerError, ManualCompactOutcome};
 
 impl CommandHandler {
     pub(super) async fn compact_active_session(

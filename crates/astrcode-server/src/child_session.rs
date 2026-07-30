@@ -4,7 +4,10 @@ mod completion;
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -133,8 +136,6 @@ impl ChildRelationUpdate {
     }
 }
 
-const CHILD_SESSION_COMPLETE_CAPACITY: usize = 256;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChildCleanup {
     Recycle,
@@ -160,12 +161,18 @@ struct CompletionGuardPause {
 }
 
 pub(crate) struct ChildTreeShutdown {
-    guards: CompletionGuards,
+    guards: Vec<TreeCompletionClaim>,
+}
+
+struct TreeCompletionClaim {
+    guard: Arc<ChildSessionCompletionGuard>,
+    claim: CompletionClaimLease,
 }
 
 struct ClaimedCompletionGuard {
     guard: Arc<ChildSessionCompletionGuard>,
     operation: SessionOperationGuard,
+    claim: CompletionClaimLease,
 }
 
 struct ClaimedCompletionGuards {
@@ -173,12 +180,71 @@ struct ClaimedCompletionGuards {
     error: Option<TurnScheduleError>,
 }
 
+#[derive(Default)]
+struct CompletionClaims {
+    active: AtomicUsize,
+}
+
+impl CompletionClaims {
+    fn acquire(self: &Arc<Self>, count: usize) -> CompletionClaimLease {
+        self.active.fetch_add(count, Ordering::AcqRel);
+        CompletionClaimLease {
+            claims: Arc::clone(self),
+            count,
+            restore: None,
+        }
+    }
+
+    fn is_idle(&self) -> bool {
+        self.active.load(Ordering::Acquire) == 0
+    }
+}
+
+struct CompletionClaimLease {
+    claims: Arc<CompletionClaims>,
+    count: usize,
+    restore: Option<CompletionClaimRestore>,
+}
+
+struct CompletionClaimRestore {
+    by_parent: Arc<Mutex<HashMap<SessionId, CompletionGuards>>>,
+    completed_tx: mpsc::UnboundedSender<SessionId>,
+    guard: Arc<ChildSessionCompletionGuard>,
+}
+
+impl CompletionClaimLease {
+    fn commit(&mut self) {
+        self.restore = None;
+    }
+}
+
+impl Drop for CompletionClaimLease {
+    fn drop(&mut self) {
+        if let Some(restore) = self.restore.take() {
+            let parent_session_id = restore.guard.parent_session_id().clone();
+            restore
+                .by_parent
+                .lock()
+                .entry(parent_session_id.clone())
+                .or_default()
+                .push(restore.guard);
+            let _ = restore.completed_tx.send(parent_session_id);
+        }
+        if self.count > 0 {
+            self.claims
+                .active
+                .fetch_sub(self.count, Ordering::AcqRel);
+        }
+    }
+}
+
 /// 子 agent session 完成、turn 提交与回收的 server 侧协调者。
 pub struct ChildSessionCoordinator {
     session_manager: Arc<SessionManager>,
-    by_parent: Mutex<HashMap<SessionId, CompletionGuards>>,
-    completed_tx: mpsc::Sender<SessionId>,
-    completed_rx: Mutex<Option<mpsc::Receiver<SessionId>>>,
+    by_parent: Arc<Mutex<HashMap<SessionId, CompletionGuards>>>,
+    completion_claims: Arc<CompletionClaims>,
+    completed_tx: mpsc::UnboundedSender<SessionId>,
+    completed_rx: Mutex<Option<mpsc::UnboundedReceiver<SessionId>>>,
     watcher_shutdown: CancellationToken,
     watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
     #[cfg(any(test, feature = "testing"))]
@@ -191,10 +257,11 @@ pub struct ChildSessionCoordinator {
 
 impl ChildSessionCoordinator {
     pub fn new(session_manager: Arc<SessionManager>) -> Self {
-        let (completed_tx, completed_rx) = mpsc::channel(CHILD_SESSION_COMPLETE_CAPACITY);
+        let (completed_tx, completed_rx) = mpsc::unbounded_channel();
         Self {
             session_manager,
-            by_parent: Mutex::new(HashMap::new()),
+            by_parent: Arc::new(Mutex::new(HashMap::new())),
+            completion_claims: Arc::new(CompletionClaims::default()),
             completed_tx,
             completed_rx: Mutex::new(Some(completed_rx)),
             watcher_shutdown: CancellationToken::new(),
@@ -218,6 +285,7 @@ impl ChildSessionCoordinator {
         };
         let coordinator = Arc::clone(self);
         let shutdown = self.watcher_shutdown.clone();
+        let watcher_scheduler = Arc::clone(&scheduler);
         let watcher = match scheduler.spawn_owned_named("child_completion_watcher", async move {
             loop {
                 tokio::select! {
@@ -226,13 +294,13 @@ impl ChildSessionCoordinator {
                             break;
                         };
                         coordinator
-                            .drain_completed(scheduler.as_ref(), &parent_sid)
+                            .drain_completed(watcher_scheduler.as_ref(), &parent_sid)
                             .await;
                     },
                     _ = shutdown.cancelled() => {
                         while let Ok(parent_sid) = rx.try_recv() {
                             coordinator
-                                .drain_completed(scheduler.as_ref(), &parent_sid)
+                                .drain_completed(watcher_scheduler.as_ref(), &parent_sid)
                                 .await;
                         }
                         break;
@@ -261,18 +329,22 @@ impl ChildSessionCoordinator {
 
     pub(crate) async fn drain_completion_guards_for_shutdown(&self, scheduler: &TurnScheduler) {
         loop {
-            let parent_ids: Vec<_> = self.by_parent.lock().keys().cloned().collect();
-            if parent_ids.is_empty() {
-                return;
-            }
+            let parent_ids: Vec<_> = {
+                let by_parent = self.by_parent.lock();
+                if by_parent.is_empty() && self.completion_claims.is_idle() {
+                    return;
+                }
+                by_parent.keys().cloned().collect()
+            };
             for parent_id in parent_ids {
                 self.drain_completed(scheduler, &parent_id).await;
             }
-            if self.by_parent.lock().is_empty() {
-                return;
-            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+    }
+
+    pub(crate) fn has_completion_owners(&self) -> bool {
+        !self.by_parent.lock().is_empty() || !self.completion_claims.is_idle()
     }
 
     pub async fn verify_access(
@@ -622,7 +694,8 @@ impl ChildSessionCoordinator {
                     continue;
                 },
             };
-            let Some(guard) = self.claim_completion_guard(parent_sid, &candidate) else {
+            let Some((guard, mut claim)) = self.claim_completion_guard(parent_sid, &candidate)
+            else {
                 drop(operation);
                 continue;
             };
@@ -655,8 +728,11 @@ impl ChildSessionCoordinator {
                             }
                         } else {
                             let superseded = self.completion_was_superseded_by_close(&guard).await;
-                            if !superseded {
+                            if superseded {
+                                claim.commit();
+                            } else {
                                 self.restore_completion_guard(Arc::clone(&guard));
+                                claim.commit();
                             }
                             guard.finish_terminal(Err(format!(
                                 "completion ownership was lost for session {}, turn {}",
@@ -675,8 +751,11 @@ impl ChildSessionCoordinator {
                     },
                     Err(error) => {
                         let superseded = self.completion_was_superseded_by_close(&guard).await;
-                        if !superseded {
+                        if superseded {
+                            claim.commit();
+                        } else {
                             self.restore_completion_guard(Arc::clone(&guard));
+                            claim.commit();
                         }
                         guard.finish_terminal(Err(error.to_string()));
                         drop(operation);
@@ -694,8 +773,11 @@ impl ChildSessionCoordinator {
 
             if let Err(error) = self.write_terminal_for_guard(&guard, &completion).await {
                 let conflict = matches!(&error, TurnScheduleError::ChildRelationConflict { .. });
-                if !conflict {
+                if conflict {
+                    claim.commit();
+                } else {
                     self.restore_completion_guard(Arc::clone(&guard));
+                    claim.commit();
                 }
                 guard.finish_terminal(Err(error.to_string()));
                 drop(operation);
@@ -715,6 +797,7 @@ impl ChildSessionCoordinator {
                 {
                     guard.force_recycle_on_completion();
                     self.restore_completion_guard(Arc::clone(&guard));
+                    claim.commit();
                     guard.finish_terminal(Err(error.to_string()));
                     tracing::warn!(
                         parent_session_id = %guard.parent_session_id(),
@@ -734,6 +817,7 @@ impl ChildSessionCoordinator {
                     },
                     Err(error) => {
                         self.restore_completion_guard(Arc::clone(&guard));
+                        claim.commit();
                         guard.finish_terminal(Err(error.to_string()));
                         tracing::warn!(
                             parent_session_id = %guard.parent_session_id(),
@@ -765,6 +849,7 @@ impl ChildSessionCoordinator {
                     );
                 }
             }
+            claim.commit();
         }
     }
 
@@ -917,7 +1002,7 @@ impl ChildSessionCoordinator {
         &self,
         parent_sid: &SessionId,
         expected: &Arc<ChildSessionCompletionGuard>,
-    ) -> Option<Arc<ChildSessionCompletionGuard>> {
+    ) -> Option<(Arc<ChildSessionCompletionGuard>, CompletionClaimLease)> {
         let mut by_parent = self.by_parent.lock();
         let (guard, remove_parent) = {
             let guards = by_parent.get_mut(parent_sid)?;
@@ -930,7 +1015,21 @@ impl ChildSessionCoordinator {
         if remove_parent {
             by_parent.remove(parent_sid);
         }
-        Some(guard)
+        let claim = self.completion_claim_for_guard(&guard);
+        Some((guard, claim))
+    }
+
+    fn completion_claim_for_guard(
+        &self,
+        guard: &Arc<ChildSessionCompletionGuard>,
+    ) -> CompletionClaimLease {
+        let mut claim = self.completion_claims.acquire(1);
+        claim.restore = Some(CompletionClaimRestore {
+            by_parent: Arc::clone(&self.by_parent),
+            completed_tx: self.completed_tx.clone(),
+            guard: Arc::clone(guard),
+        });
+        claim
     }
 
     fn restore_completion_guard(&self, guard: Arc<ChildSessionCompletionGuard>) {
@@ -954,7 +1053,7 @@ impl ChildSessionCoordinator {
             .spawn_named("child_completion_retry", async move {
                 tokio::select! {
                     _ = tokio::time::sleep(delay) => {
-                        let _ = completed_tx.send(parent_session_id).await;
+                        let _ = completed_tx.send(parent_session_id);
                     },
                     _ = shutdown.cancelled() => {},
                 }
@@ -966,8 +1065,9 @@ impl ChildSessionCoordinator {
     }
 
     fn restore_claimed_guards(&self, guards: Vec<ClaimedCompletionGuard>) {
-        for claimed in guards {
-            self.restore_completion_guard(claimed.guard);
+        for mut claimed in guards {
+            self.restore_completion_guard(Arc::clone(&claimed.guard));
+            claimed.claim.commit();
         }
     }
 
@@ -1015,21 +1115,29 @@ impl ChildSessionCoordinator {
                 by_parent.insert(parent_id, remaining);
             }
         }
+        let selected: Vec<_> = selected
+            .into_iter()
+            .map(|guard| TreeCompletionClaim {
+                claim: self.completion_claim_for_guard(&guard),
+                guard,
+            })
+            .collect();
         drop(by_parent);
 
-        for guard in &selected {
-            guard.request_shutdown();
+        for claimed in &selected {
+            claimed.guard.request_shutdown();
         }
         ChildTreeShutdown { guards: selected }
     }
 
     pub(crate) async fn finish_tree_shutdown(
         &self,
-        shutdown: ChildTreeShutdown,
+        mut shutdown: ChildTreeShutdown,
         settled_sessions: &HashSet<SessionId>,
     ) -> Result<HashSet<SessionId>, TurnScheduleError> {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        for guard in shutdown.guards.iter().rev() {
+        for claimed in shutdown.guards.iter().rev() {
+            let guard = &claimed.guard;
             if tokio::time::timeout_at(deadline, guard.outcome())
                 .await
                 .is_err()
@@ -1045,10 +1153,11 @@ impl ChildSessionCoordinator {
         let guarded_children: HashSet<_> = shutdown
             .guards
             .iter()
-            .map(|guard| guard.child_session_id().clone())
+            .map(|claimed| claimed.guard.child_session_id().clone())
             .collect();
         let mut first_error = None;
-        for guard in shutdown.guards.iter().rev() {
+        for claimed in shutdown.guards.iter_mut().rev() {
+            let guard = &claimed.guard;
             if settled_sessions.contains(guard.child_session_id()) {
                 guard.mark_child_settled();
             }
@@ -1062,6 +1171,7 @@ impl ChildSessionCoordinator {
                 };
                 guard.finish_terminal(Err(error.to_string()));
                 self.restore_completion_guard(Arc::clone(guard));
+                claimed.claim.commit();
                 if first_error.is_none() {
                     first_error = Some(error);
                 } else {
@@ -1077,6 +1187,7 @@ impl ChildSessionCoordinator {
             if let Err(error) = self.write_terminal_for_guard(guard, &completion).await {
                 guard.finish_terminal(Err(error.to_string()));
                 self.restore_completion_guard(Arc::clone(guard));
+                claimed.claim.commit();
                 if first_error.is_none() {
                     first_error = Some(error);
                 } else {
@@ -1089,6 +1200,7 @@ impl ChildSessionCoordinator {
                 }
             } else {
                 guard.finish_terminal(Ok(()));
+                claimed.claim.commit();
             }
         }
         if let Some(error) = first_error {
@@ -1142,7 +1254,7 @@ impl ChildSessionCoordinator {
         }
     }
 
-    pub(crate) async fn completion_turn_is_durably_settled(
+    async fn completion_turn_is_durably_settled(
         &self,
         guard: &ChildSessionCompletionGuard,
     ) -> bool {
@@ -1194,12 +1306,16 @@ impl ChildSessionCoordinator {
                         continue;
                     },
                 };
-                let Some(guard) = self.claim_completion_guard(&sid, &candidate) else {
+                let Some((guard, claim)) = self.claim_completion_guard(&sid, &candidate) else {
                     drop(operation);
                     continue;
                 };
                 guard.force_recycle_on_completion();
-                claimed.push(ClaimedCompletionGuard { guard, operation });
+                claimed.push(ClaimedCompletionGuard {
+                    guard,
+                    operation,
+                    claim,
+                });
             }
         }
 
@@ -1230,7 +1346,11 @@ impl ChildSessionCoordinator {
         mut guards: Vec<ClaimedCompletionGuard>,
     ) -> Result<(), TurnScheduleError> {
         while let Some(claimed) = guards.pop() {
-            let ClaimedCompletionGuard { guard, operation } = claimed;
+            let ClaimedCompletionGuard {
+                guard,
+                operation,
+                mut claim,
+            } = claimed;
             let child_sid = guard.child_session_id();
             let parent_sid = guard.parent_session_id();
             let completion = guard.completion().await;
@@ -1250,13 +1370,15 @@ impl ChildSessionCoordinator {
                             turn_id: guard.turn_id().clone(),
                         };
                         guard.finish_terminal(Err(error.to_string()));
-                        self.restore_completion_guard(guard);
+                        self.restore_completion_guard(Arc::clone(&guard));
+                        claim.commit();
                         self.restore_claimed_guards(guards);
                         return Err(error);
                     },
                     Err(error) => {
                         guard.finish_terminal(Err(error.to_string()));
-                        self.restore_completion_guard(guard);
+                        self.restore_completion_guard(Arc::clone(&guard));
+                        claim.commit();
                         self.restore_claimed_guards(guards);
                         return Err(error);
                     },
@@ -1272,7 +1394,8 @@ impl ChildSessionCoordinator {
                 .await
             {
                 guard.finish_terminal(Err(error.to_string()));
-                self.restore_completion_guard(guard);
+                self.restore_completion_guard(Arc::clone(&guard));
+                claim.commit();
                 self.restore_claimed_guards(guards);
                 return Err(error);
             }
@@ -1282,11 +1405,13 @@ impl ChildSessionCoordinator {
             {
                 guard.force_recycle_on_completion();
                 guard.finish_terminal(Err(error.to_string()));
-                self.restore_completion_guard(guard);
+                self.restore_completion_guard(Arc::clone(&guard));
+                claim.commit();
                 self.restore_claimed_guards(guards);
                 return Err(error);
             }
             guard.finish_terminal(Ok(()));
+            claim.commit();
         }
         Ok(())
     }

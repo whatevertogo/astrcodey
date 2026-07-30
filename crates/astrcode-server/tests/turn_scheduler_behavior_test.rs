@@ -784,23 +784,73 @@ async fn owned_task_tracking_releases_finished_tasks() {
         .await
         .unwrap();
     for _ in 0..50 {
-        if scheduler.owned_task_count() == 0 {
+        if scheduler.owned_task_count() == 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(scheduler.owned_task_count(), 0);
+    assert_eq!(
+        scheduler.owned_task_count(),
+        1,
+        "only the persistent child completion watcher should remain"
+    );
 
     scheduler
         .deliver_input(sid, "second".into(), InputDelivery::StartNew)
         .await
         .unwrap();
     for _ in 0..50 {
-        if scheduler.owned_task_count() == 0 {
+        if scheduler.owned_task_count() == 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    assert_eq!(scheduler.owned_task_count(), 1);
+}
+
+#[tokio::test]
+async fn shutdown_rejects_new_turns_and_durably_settles_active_owners() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = Arc::new(build_scheduler_with_llm(
+        Arc::clone(&store),
+        Arc::new(PendingLlm),
+    ));
+    let active_session = seed_session(&store).await;
+    let rejected_session = seed_session(&store).await;
+
+    scheduler
+        .deliver_input(
+            active_session.clone(),
+            "active".into(),
+            InputDelivery::StartNew,
+        )
+        .await
+        .unwrap();
+
+    let shutdown_scheduler = Arc::clone(&scheduler);
+    let shutdown = tokio::spawn(async move {
+        shutdown_scheduler.shutdown_background_tasks().await;
+    });
+    while scheduler.accepts_owned_tasks() {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(matches!(
+        scheduler
+            .deliver_input(rejected_session, "too late".into(), InputDelivery::StartNew,)
+            .await,
+        Err(TurnScheduleError::BackgroundTasksClosed)
+    ));
+    tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .expect("shutdown should force and settle the pending turn")
+        .unwrap();
+
+    assert!(!scheduler.registry().has_active(&active_session));
+    assert_eq!(
+        turn_completed_reasons(&store.replay_events(&active_session).await.unwrap()),
+        vec!["aborted"]
+    );
     assert_eq!(scheduler.owned_task_count(), 0);
 }
 

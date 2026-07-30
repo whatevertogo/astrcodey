@@ -3,10 +3,13 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::extension::{ContinueAfterStopLimit, ExtensionHttpRoute};
+use crate::extension::{
+    ContinueAfterStopLimit, DEFAULT_EXTENSION_EVENT_DURABLE,
+    DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES, DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION,
+    ExtensionEventDecl, ExtensionHttpRoute,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InitializeManifest {
     pub extension_id: String,
     #[serde(default)]
@@ -29,13 +32,11 @@ pub struct InitializeManifest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct InitializeManifestProtocol {
     pub s5r: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ManifestTool {
     pub name: String,
     pub description: String,
@@ -51,7 +52,6 @@ fn sequential_mode() -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ManifestCommand {
     pub name: String,
     #[serde(default)]
@@ -59,7 +59,6 @@ pub struct ManifestCommand {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ManifestHook {
     pub on: String,
     pub mode: String,
@@ -68,7 +67,6 @@ pub struct ManifestHook {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ManifestHookOptions {
     #[serde(default)]
     pub max_per_turn: Option<ContinueAfterStopLimit>,
@@ -81,14 +79,12 @@ impl ManifestHookOptions {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ManifestHttpRoute {
     pub route: ExtensionHttpRoute,
     pub handler_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ManifestExtensionEvent {
     pub event_type: String,
     #[serde(default = "default_schema_version")]
@@ -100,13 +96,35 @@ pub struct ManifestExtensionEvent {
 }
 
 const fn default_schema_version() -> u32 {
-    1
+    DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION
 }
 
 const fn default_durable() -> bool {
-    true
+    DEFAULT_EXTENSION_EVENT_DURABLE
 }
 
 const fn default_max_payload() -> usize {
-    64 * 1024
+    DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES
+}
+
+impl From<ManifestExtensionEvent> for ExtensionEventDecl {
+    fn from(event: ManifestExtensionEvent) -> Self {
+        Self {
+            event_type: event.event_type,
+            schema_version: event.schema_version,
+            durable: event.durable,
+            max_payload_bytes: event.max_payload_bytes,
+        }
+    }
+}
+
+impl From<&ExtensionEventDecl> for ManifestExtensionEvent {
+    fn from(event: &ExtensionEventDecl) -> Self {
+        Self {
+            event_type: event.event_type.clone(),
+            schema_version: event.schema_version,
+            durable: event.durable,
+            max_payload_bytes: event.max_payload_bytes,
+        }
+    }
 }

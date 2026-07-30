@@ -116,13 +116,6 @@ pub struct MessageDto {
     pub is_compact_summary: Option<bool>,
 }
 
-impl MessageDto {
-    pub fn compact_summary_semantics(&self) -> bool {
-        self.is_compact_summary
-            .unwrap_or_else(|| self.content.trim_start().starts_with("<compact_summary>"))
-    }
-}
-
 /// 插件注册的斜杠命令信息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExtensionCommandInfoDto {

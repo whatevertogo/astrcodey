@@ -1,16 +1,18 @@
 //! Internal domain and extension types mapped at the server protocol boundary.
 
+use astrcode_context::is_compact_summary_message;
+use astrcode_core::llm::{LlmContent, LlmMessage};
 use astrcode_extension_sdk::extension::{
     ExtensionCapability, ExtensionEventDecl, ExtensionHttpMethod, Keybinding, SlashCommand,
     StatusItem,
 };
 use astrcode_protocol::{
     agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto},
-    events::{KeybindingDto, StatusItemInfoDto},
+    events::{KeybindingDto, MessageDto, SessionSnapshot, StatusItemInfoDto},
     http::{ExtensionEventDeclDto, ExtensionSlashCommandDto, StatusItemDto},
-    wire::{ExtensionCapabilityDto, ExtensionHttpMethodDto},
+    wire::{ExtensionCapabilityDto, ExtensionHttpMethodDto, MessageRoleDto},
 };
-use astrcode_session_projection::{AgentSessionLinkView, AgentSessionStatus};
+use astrcode_session_projection::{AgentSessionLinkView, AgentSessionStatus, SessionReadModel};
 
 pub(crate) fn agent_session_link_to_dto(link: &AgentSessionLinkView) -> AgentSessionLinkDto {
     AgentSessionLinkDto {
@@ -24,6 +26,61 @@ pub(crate) fn agent_session_link_to_dto(link: &AgentSessionLinkView) -> AgentSes
         error: link.error.clone(),
         phase: None,
         current_tool: None,
+    }
+}
+
+pub(crate) fn session_snapshot(state: &SessionReadModel) -> SessionSnapshot {
+    SessionSnapshot {
+        session_id: state.identity.session_id.to_string(),
+        cursor: state.cursor(),
+        messages: state
+            .transcript
+            .messages
+            .iter()
+            .map(|message| message_to_dto(&message.message))
+            .collect(),
+        model_id: state.identity.model_id.clone(),
+        working_dir: state.identity.working_dir.clone(),
+        agent_sessions: state
+            .agent_sessions
+            .iter()
+            .map(agent_session_link_to_dto)
+            .collect(),
+    }
+}
+
+/// Compact summaries are synthetic user messages internally, but system
+/// messages on the client-facing protocol.
+pub(crate) fn message_to_dto(message: &LlmMessage) -> MessageDto {
+    let content = message
+        .content
+        .iter()
+        .map(content_display_text)
+        .collect::<String>();
+    let is_compact_summary = is_compact_summary_message(message);
+    let role = if is_compact_summary {
+        MessageRoleDto::System
+    } else {
+        message.role.into()
+    };
+
+    MessageDto {
+        role,
+        content,
+        is_compact_summary: Some(is_compact_summary),
+    }
+}
+
+fn content_display_text(content: &LlmContent) -> String {
+    match content {
+        LlmContent::ToolCall {
+            name, arguments, ..
+        } if name == "upsertSessionPlan" => arguments
+            .get("content")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        other => other.to_display_text(),
     }
 }
 
@@ -121,7 +178,11 @@ pub(crate) fn extension_event_decl_to_dto(event: ExtensionEventDecl) -> Extensio
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::types::{SessionId, ToolCallId};
+    use astrcode_context::is_compact_summary_text;
+    use astrcode_core::{
+        llm::{LlmContent, LlmMessage, LlmRole},
+        types::{SessionId, ToolCallId},
+    };
 
     use super::*;
 
@@ -146,5 +207,54 @@ mod tests {
         assert_eq!(dto.final_session_id.as_deref(), Some("child-final"));
         assert_eq!(dto.summary.as_deref(), Some("done"));
         assert!(dto.phase.is_none());
+    }
+
+    #[test]
+    fn message_mapping_preserves_wire_shape_and_compact_summary_semantics() {
+        let regular = simple_text_message("Hello, how are you?");
+        let regular = message_to_dto(&regular);
+        assert_eq!(regular.role, MessageRoleDto::User);
+        assert_eq!(regular.content, "Hello, how are you?");
+        assert_eq!(regular.is_compact_summary, Some(false));
+        assert_eq!(
+            serde_json::to_value(&regular).unwrap(),
+            serde_json::json!({
+                "role": "user",
+                "content": "Hello, how are you?",
+                "is_compact_summary": false
+            })
+        );
+
+        let compact =
+            simple_text_message("<compact_summary>\nSummary:\nTest summary\n</compact_summary>");
+        let compact = message_to_dto(&compact);
+        assert_eq!(compact.role, MessageRoleDto::System);
+        assert!(compact.content.contains("<compact_summary>"));
+        assert_eq!(compact.is_compact_summary, Some(true));
+        assert_eq!(
+            serde_json::to_value(&compact).unwrap(),
+            serde_json::json!({
+                "role": "system",
+                "content": "<compact_summary>\nSummary:\nTest summary\n</compact_summary>",
+                "is_compact_summary": true
+            })
+        );
+
+        let legacy: MessageDto = serde_json::from_value(serde_json::json!({
+            "role": "system",
+            "content": "Legacy system message"
+        }))
+        .unwrap();
+        assert_eq!(legacy.is_compact_summary, None);
+        assert!(!is_compact_summary_text(&legacy.content));
+    }
+
+    fn simple_text_message(text: &str) -> LlmMessage {
+        LlmMessage {
+            role: LlmRole::User,
+            content: vec![LlmContent::Text { text: text.into() }],
+            name: None,
+            reasoning_content: None,
+        }
     }
 }

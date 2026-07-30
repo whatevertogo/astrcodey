@@ -238,6 +238,7 @@ version = "0.3.12"
 dependencies = [
  "arboard",
  "astrcode-client",
+ "astrcode-context",
  "astrcode-core",
  "astrcode-eval",
  "astrcode-log",

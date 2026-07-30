@@ -348,6 +348,16 @@ impl SessionManager {
             .map_err(SessionManagerError::from)
     }
 
+    pub(crate) async fn read_recycled_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<SessionReadModel>, SessionManagerError> {
+        self.event_store
+            .recycled_session_read_model(session_id)
+            .await
+            .map_err(SessionManagerError::from)
+    }
+
     pub(crate) async fn has_durable_turn_completion(
         &self,
         session_id: &SessionId,
@@ -455,7 +465,7 @@ impl SessionManager {
         session_id: &SessionId,
         action: CloseSessionAction,
     ) -> Result<(), SessionManagerError> {
-        let closing = self.begin_session_close(session_id).await;
+        let closing = self.begin_session_transition(session_id).await;
         self.emit_session_shutdown(session_id).await?;
         let event_store = Arc::clone(&self.event_store);
         let event_bus = Arc::clone(&self.event_bus);
@@ -492,7 +502,10 @@ impl SessionManager {
         .map_err(|error| SessionManagerError::CloseTask(error.to_string()))?
     }
 
-    async fn begin_session_close(&self, session_id: &SessionId) -> SessionTransitionGuard {
+    pub(crate) async fn begin_session_transition(
+        &self,
+        session_id: &SessionId,
+    ) -> SessionTransitionGuard {
         loop {
             match self.transitions.begin_close(session_id) {
                 TransitionStart::Waiting(pending) => pending.wait().await,
@@ -512,8 +525,16 @@ impl SessionManager {
         &self,
         session_id: &SessionId,
     ) -> Result<(), SessionManagerError> {
+        let transition = self.begin_session_transition(session_id).await;
+        self.restore_session_in_transition(&transition).await
+    }
+
+    pub(crate) async fn restore_session_in_transition(
+        &self,
+        transition: &SessionTransitionGuard,
+    ) -> Result<(), SessionManagerError> {
         self.event_store
-            .restore_session(session_id)
+            .restore_session(transition.session_id())
             .await
             .map_err(SessionManagerError::from)
     }
@@ -778,7 +799,7 @@ impl SessionManager {
     }
 
     async fn discard_failed_creation(&self, session_id: &SessionId) -> Result<(), String> {
-        let closing = self.begin_session_close(session_id).await;
+        let closing = self.begin_session_transition(session_id).await;
         let release_result = self
             .event_sink
             .release(self.event_store.as_ref(), session_id)
@@ -880,7 +901,7 @@ impl SessionTransitions {
     }
 }
 
-struct SessionTransitionGuard {
+pub(crate) struct SessionTransitionGuard {
     transitions: Arc<SessionTransitions>,
     session_id: SessionId,
     pending: Arc<PendingSessionTransition>,
@@ -904,6 +925,10 @@ impl SessionTransitionGuard {
     fn complete(mut self) {
         self.transitions.complete(&self.session_id, &self.pending);
         self.completed = true;
+    }
+
+    fn session_id(&self) -> &SessionId {
+        &self.session_id
     }
 }
 

@@ -13,11 +13,12 @@ use astrcode_protocol::commands::ClientCommand;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    CommandHandler, CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission,
-    TurnCompletion, session_command::CommandList,
+    CommandHandler, CommandInvocation, CommandList, HandlerError, ManualCompactOutcome,
+    PromptSubmission, TurnCompletion,
 };
 use crate::{
     bootstrap::ServerRuntime,
+    session_command_contract::ParsedSlashCommand,
     turn_scheduler::{TurnCompletionEvent, TurnScheduler},
 };
 
@@ -503,7 +504,7 @@ impl CommandHandler {
                 arguments,
                 reply,
             } => {
-                let command = super::slash::ParsedSlashCommand {
+                let command = ParsedSlashCommand {
                     name: command_name,
                     arguments,
                 };

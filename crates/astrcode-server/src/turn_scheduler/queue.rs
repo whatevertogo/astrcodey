@@ -2,8 +2,8 @@ use astrcode_core::{event::DurableEventPayload, types::SessionId, user_input::Us
 use astrcode_session_projection::PendingInput;
 
 use super::{
-    MAX_PENDING_INPUTS_PER_SESSION, ReservedExecution, StartedExecution, TurnScheduleError,
-    TurnScheduler, validate_user_input,
+    CompletionWatch, MAX_PENDING_INPUTS_PER_SESSION, ReservedExecution, StartedExecution,
+    TurnScheduleError, TurnScheduler, validate_user_input,
 };
 use crate::{delivery_gates::SessionOperationGuard, queue_drains::QueueDrainRetry};
 
@@ -130,7 +130,17 @@ impl TurnScheduler {
         let session_id = reserved.session_id.clone();
         let StartedExecution { turn_id, handle } =
             self.start_reserved_pending(reserved, entry).await?;
-        self.watch_owned_turn(admission, session_id, turn_id, handle, source, None, None);
+        self.watch_owned_turn(
+            admission,
+            session_id,
+            turn_id,
+            handle,
+            CompletionWatch {
+                source,
+                completion_tx: None,
+                output_tx: None,
+            },
+        );
         Ok(())
     }
 

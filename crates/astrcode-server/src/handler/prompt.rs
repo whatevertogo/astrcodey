@@ -5,6 +5,7 @@ use astrcode_core::{
 };
 
 use super::{CommandHandler, HandlerError, PromptSubmission, slash};
+use crate::session_command_contract::{ParsedSlashCommand, parse_slash_command};
 
 impl CommandHandler {
     pub(super) async fn submit_prompt(
@@ -66,8 +67,7 @@ impl CommandHandler {
         sid: SessionId,
         input: UserInput,
     ) -> Result<PromptSubmission, HandlerError> {
-        if let Some(command) =
-            slash::parse_slash_command(&input.text).filter(slash::ParsedSlashCommand::has_name)
+        if let Some(command) = parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
         {
             if command.name == "model" {
                 return self.execute_command_for_session(sid, command).await;

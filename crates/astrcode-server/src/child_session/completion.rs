@@ -73,7 +73,7 @@ impl ChildSessionCompletionGuard {
         &self,
         admission: OwnedTaskAdmission,
         handle: TurnHandle,
-        completed_tx: mpsc::Sender<SessionId>,
+        completed_tx: mpsc::UnboundedSender<SessionId>,
     ) {
         let completion_tx = self.completion_tx.clone();
         let shutdown_handle = self.shutdown_handle.clone();
@@ -103,7 +103,7 @@ impl ChildSessionCompletionGuard {
                 },
             };
             try_set_completion(&completion_tx, completion);
-            let _ = completed_tx.send(parent_session_id).await;
+            let _ = completed_tx.send(parent_session_id);
         });
     }
 

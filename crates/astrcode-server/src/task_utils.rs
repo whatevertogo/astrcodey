@@ -76,6 +76,8 @@ impl OwnedTaskSet {
     pub(crate) async fn wait_for_admissions(&self) {
         loop {
             let notified = self.admissions_drained.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
             if *self.active_admissions.lock() == 0 {
                 break;
             }
@@ -97,6 +99,11 @@ impl OwnedTaskSet {
     #[cfg(any(test, feature = "testing"))]
     pub(crate) fn task_count(&self) -> usize {
         self.tracker.len()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn is_accepting(&self) -> bool {
+        self.accepting.load(Ordering::Acquire)
     }
 }
 
@@ -140,7 +147,7 @@ impl Drop for OwnedTaskAdmission {
 
 #[cfg(test)]
 mod tests {
-    use std::future;
+    use std::{future, sync::Arc};
 
     use tokio::sync::oneshot;
 

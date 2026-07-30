@@ -26,8 +26,10 @@ use super::super::{
     projection::{session_title_from_working_dir, snapshot::conversation_to_dto},
 };
 use crate::{
-    handler::{CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission},
     protocol_mapping::{keybinding_to_dto, status_item_to_dto},
+    session_command_contract::{
+        CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission,
+    },
 };
 
 #[derive(Debug, Deserialize)]

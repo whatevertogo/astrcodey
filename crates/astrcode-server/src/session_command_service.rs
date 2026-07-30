@@ -27,13 +27,12 @@ use astrcode_session::compaction::{
 use crate::{
     bootstrap::ServerRuntime,
     delivery_gates::SessionOperationGuard,
-    handler::{
-        CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission,
-        session_command::CommandList,
-        slash::{self, ParsedSlashCommand},
-        snapshot::session_snapshot,
-    },
+    protocol_mapping::session_snapshot,
     server_event_bus::ServerEventBus,
+    session_command_contract::{
+        CommandInvocation, CommandList, HandlerError, ManualCompactOutcome, ParsedSlashCommand,
+        PromptSubmission, parse_slash_command,
+    },
     turn_scheduler::{DeliveryOutcome, InputDelivery, TurnCompletion, TurnScheduler},
 };
 
@@ -92,7 +91,7 @@ impl SessionCommandService {
         let operation = self.scheduler.begin_session_operation(&session_id).await?;
         if !self.scheduler.registry().has_active(&session_id) {
             if let Some(command) =
-                slash::parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
+                parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
             {
                 match self.prepare_command_in_operation(&operation, command).await {
                     Err(HandlerError::UnknownCommand(_)) => {},

@@ -18,8 +18,8 @@
 //!
 //! - **Abort**（用户/API）：[`Self::abort`] 表达「停止当前 turn」；先协作式 shutdown， grace period
 //!   后 force kill，必要时跑 stale repair。
-//! - **Shutdown**（机制）：[`Self::request_turn_shutdown`] 仅对本 session 发协作式停止信号。
-//! - **Force kill**（机制）：[`Self::schedule_force_kill`] 在 grace 超时后硬杀 task 并写终态。
+//! - **Shutdown**（机制）：shutdown 先停止新 task 接纳，再协作停止所有活跃 turn。
+//! - **Force kill**（机制）：abort / shutdown 在 grace 超时后硬杀 task 并写终态。
 //! - **finish_reason**：`aborted` = 用户停止；`interrupted` = repair / 进程恢复。
 //!
 //! 对外只应使用 [`Self::deliver_input`] 与 [`Self::start_with_completion`]。启动路径先在
@@ -31,10 +31,11 @@ mod delivery;
 mod lifecycle;
 mod queue;
 
-use std::{future::Future, sync::Arc};
+use std::{future::Future, panic::AssertUnwindSafe, sync::Arc};
 
 use astrcode_core::{event::Phase, types::*, user_input::UserInput};
 use astrcode_session::{SessionError, TurnFinalization, TurnHandle};
+use futures_util::FutureExt;
 use thiserror::Error;
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -136,13 +137,13 @@ pub struct StartedExecution {
     pub handle: TurnHandle,
 }
 
-pub(crate) struct OwnedExecution {
+pub struct OwnedExecution {
     turn_id: TurnId,
     handle: TurnHandle,
     admission: OwnedTaskAdmission,
 }
 
-pub(crate) enum FinishOutcome {
+pub enum FinishOutcome {
     Settled(Option<OwnedExecution>),
     Stale,
 }
@@ -160,6 +161,12 @@ struct StartExecutionFailure {
     error: TurnScheduleError,
     _reservation: Option<TurnReservation>,
     _start_lease: SessionStartLease,
+}
+
+struct CompletionWatch {
+    source: &'static str,
+    completion_tx: Option<oneshot::Sender<TurnCompletion>>,
+    output_tx: Option<oneshot::Sender<Result<String, TurnScheduleError>>>,
 }
 
 /// Turn 完成结果，供等待请求完成的传输层与空闲 recap 监听器使用。
@@ -258,7 +265,11 @@ impl TurnScheduler {
         name: &'static str,
         task: impl Future<Output = ()> + Send + 'static,
     ) -> Result<tokio::task::JoinHandle<()>, TurnScheduleError> {
-        Ok(self.admit_owned()?.spawn_named(name, task))
+        self.spawn_owned(async move {
+            if AssertUnwindSafe(task).catch_unwind().await.is_err() {
+                tracing::error!(task = name, "owned background task panicked");
+            }
+        })
     }
 
     pub(crate) fn stop_task_admission(&self) {
@@ -288,6 +299,11 @@ impl TurnScheduler {
             .await;
         self.child_sessions.shutdown_completion_watcher().await;
         self.close_and_wait().await;
+        if !self.registry.active_session_ids().is_empty()
+            || self.child_sessions.has_completion_owners()
+        {
+            tracing::error!("shutdown completed with unfinished session owners");
+        }
     }
 
     fn request_all_turn_shutdowns(&self) {
@@ -318,6 +334,11 @@ impl TurnScheduler {
     #[cfg(feature = "testing")]
     pub fn owned_task_count(&self) -> usize {
         self.owned_tasks.task_count()
+    }
+
+    #[cfg(feature = "testing")]
+    pub fn accepts_owned_tasks(&self) -> bool {
+        self.owned_tasks.is_accepting()
     }
 
     pub fn registry(&self) -> &Arc<TurnRegistry> {
@@ -413,9 +434,11 @@ impl TurnScheduler {
             session_id,
             turn_id.clone(),
             handle,
-            "tracked",
-            Some(completion_tx),
-            None,
+            CompletionWatch {
+                source: "tracked",
+                completion_tx: Some(completion_tx),
+                output_tx: None,
+            },
         );
         Ok((turn_id, completion_rx))
     }
@@ -437,9 +460,11 @@ impl TurnScheduler {
             session_id,
             turn_id.clone(),
             handle,
-            "tracked-output",
-            None,
-            Some(output_tx),
+            CompletionWatch {
+                source: "tracked-output",
+                completion_tx: None,
+                output_tx: Some(output_tx),
+            },
         );
         Ok((turn_id, output_rx))
     }
@@ -595,7 +620,17 @@ impl TurnScheduler {
         else {
             return;
         };
-        self.watch_owned_turn(admission, session_id, turn_id, handle, "queued", None, None);
+        self.watch_owned_turn(
+            admission,
+            session_id,
+            turn_id,
+            handle,
+            CompletionWatch {
+                source: "queued",
+                completion_tx: None,
+                output_tx: None,
+            },
+        );
     }
 
     fn watch_owned_turn(
@@ -604,21 +639,12 @@ impl TurnScheduler {
         session_id: SessionId,
         turn_id: TurnId,
         handle: TurnHandle,
-        source: &'static str,
-        completion_tx: Option<oneshot::Sender<TurnCompletion>>,
-        output_tx: Option<oneshot::Sender<Result<String, TurnScheduleError>>>,
+        watch: CompletionWatch,
     ) {
         let scheduler = self.clone();
-        admission.spawn_named(source, async move {
+        admission.spawn_named(watch.source, async move {
             scheduler
-                .run_detached_completion_watcher(
-                    session_id,
-                    turn_id,
-                    handle,
-                    source,
-                    completion_tx,
-                    output_tx,
-                )
+                .run_detached_completion_watcher(session_id, turn_id, handle, watch)
                 .await;
         });
     }
@@ -628,9 +654,7 @@ impl TurnScheduler {
         session_id: SessionId,
         mut turn_id: TurnId,
         mut handle: TurnHandle,
-        source: &'static str,
-        mut completion_tx: Option<oneshot::Sender<TurnCompletion>>,
-        mut output_tx: Option<oneshot::Sender<Result<String, TurnScheduleError>>>,
+        mut watch: CompletionWatch,
     ) {
         loop {
             let (completion, finalization, tracked_output) = match handle.wait().await {
@@ -639,12 +663,14 @@ impl TurnScheduler {
                     let (completion, tracked_output) = match result.output {
                         Ok(output) => {
                             let finish_reason = output.finish_reason;
-                            let tracked_output = output_tx.is_some().then_some(Ok(output.text));
+                            let tracked_output =
+                                watch.output_tx.is_some().then_some(Ok(output.text));
                             (TurnCompletion::Completed { finish_reason }, tracked_output)
                         },
                         Err(error) => {
                             let message = error.to_string();
-                            let tracked_output = output_tx
+                            let tracked_output = watch
+                                .output_tx
                                 .is_some()
                                 .then_some(Err(TurnScheduleError::Turn(error)));
                             (TurnCompletion::Failed { error: message }, tracked_output)
@@ -656,10 +682,10 @@ impl TurnScheduler {
                     tracing::warn!(
                         session_id = %session_id,
                         turn_id = %turn_id,
-                        source,
+                        source = watch.source,
                         "detached turn task ended without completion"
                     );
-                    let tracked_output = output_tx.is_some().then_some(Err(
+                    let tracked_output = watch.output_tx.is_some().then_some(Err(
                         TurnScheduleError::CompletionOwnershipLost {
                             session_id: session_id.clone(),
                             turn_id: turn_id.clone(),
@@ -706,10 +732,10 @@ impl TurnScheduler {
                 }
             };
 
-            if let (Some(tx), Some(output)) = (output_tx.take(), tracked_output) {
+            if let (Some(tx), Some(output)) = (watch.output_tx.take(), tracked_output) {
                 let _ = tx.send(output);
             }
-            if let Some(tx) = completion_tx.take() {
+            if let Some(tx) = watch.completion_tx.take() {
                 let _ = tx.send(completion.clone());
             }
             let _ = self.completion_events.send(TurnCompletionEvent {

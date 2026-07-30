@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    event::{DurableEvent, DurableEventPayload, Phase},
+    event::{DurableEvent, DurableEventPayload, ParentSessionRef, Phase},
     types::{SessionId, TurnId},
 };
 use tempfile::tempdir;
@@ -40,6 +40,62 @@ async fn filesystem_repository_rebuilds_grouped_projection_and_snapshot_tail() {
     assert_eq!(model.stats.event_count, 3);
     assert_eq!(model.transcript.messages.len(), 2);
     assert_eq!(reopened.replay_events(&session_id).await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn recycled_read_model_is_read_only_and_preserves_child_identity() {
+    let dir = tempdir().unwrap();
+    let parent_id = SessionId::new("session-parent");
+    let child_id = SessionId::new("session-child");
+    let repo = FileSystemSessionRepository::with_projects_base(dir.path().into());
+
+    repo.create_session(started_event(&parent_id))
+        .await
+        .unwrap();
+    let mut child_started = started_event(&child_id);
+    let DurableEventPayload::SessionStarted(started) = &mut child_started.payload else {
+        unreachable!("test fixture must contain SessionStarted");
+    };
+    started.parent = Some(ParentSessionRef {
+        session_id: parent_id.clone(),
+    });
+    started.source_extension = Some("test".into());
+    repo.create_session(child_started).await.unwrap();
+    repo.append_event(user_event(&child_id, "preserved"))
+        .await
+        .unwrap();
+    repo.sync_durable_events(&child_id).await.unwrap();
+
+    repo.recycle_session(&child_id).await.unwrap();
+    assert!(matches!(
+        repo.session_read_model(&child_id).await,
+        Err(StorageError::NotFound(_))
+    ));
+
+    let recycled = repo.recycled_session_read_model(&child_id).await.unwrap();
+    assert_eq!(
+        recycled
+            .identity
+            .parent
+            .as_ref()
+            .map(|parent| &parent.session_id),
+        Some(&parent_id)
+    );
+    assert_eq!(recycled.first_user_message(), Some("preserved"));
+    assert!(matches!(
+        repo.session_read_model(&child_id).await,
+        Err(StorageError::NotFound(_))
+    ));
+
+    repo.restore_session(&child_id).await.unwrap();
+    assert_eq!(
+        repo.session_read_model(&child_id)
+            .await
+            .unwrap()
+            .identity
+            .session_id,
+        child_id
+    );
 }
 
 #[tokio::test]

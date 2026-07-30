@@ -21,10 +21,8 @@ use tokio::sync::broadcast;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::{
-    bootstrap::ServerApp,
-    handler::{HandlerError, TurnCompletion},
-    server_event_bus::ServerEventBus,
-    session_command_service::SessionCommandService,
+    bootstrap::ServerApp, server_event_bus::ServerEventBus, session_command_contract::HandlerError,
+    session_command_service::SessionCommandService, turn_scheduler::TurnCompletion,
 };
 
 /// Run the ACP server, reading from stdin and writing to stdout.

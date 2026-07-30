@@ -88,6 +88,10 @@ pub fn lifecycle_event_allows_blocking(event: &ExtensionEvent) -> bool {
 ///
 /// 声明是 emit 时校验的依据：未声明的事件类型会被拒绝，payload 超限也会被拒绝。
 /// `extension_id` 不在声明中——它由 runtime 在构造 [`ExtensionEventSink`] 时注入。
+pub const DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION: u32 = 1;
+pub const DEFAULT_EXTENSION_EVENT_DURABLE: bool = true;
+pub const DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtensionEventDecl {
@@ -101,15 +105,15 @@ pub struct ExtensionEventDecl {
 }
 
 const fn default_extension_event_schema_version() -> u32 {
-    1
+    DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION
 }
 
 const fn default_extension_event_durable() -> bool {
-    true
+    DEFAULT_EXTENSION_EVENT_DURABLE
 }
 
 const fn default_extension_event_max_payload_bytes() -> usize {
-    64 * 1024
+    DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES
 }
 
 /// [`Registrar::extension_event`] 返回的构建器。
@@ -126,9 +130,9 @@ impl<'a> ExtensionEventDeclBuilder<'a> {
         Self {
             registrar,
             event_type: event_type.to_owned(),
-            schema_version: 1,
-            durable: true,
-            max_payload_bytes: 64 * 1024,
+            schema_version: DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION,
+            durable: DEFAULT_EXTENSION_EVENT_DURABLE,
+            max_payload_bytes: DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES,
         }
     }
 
