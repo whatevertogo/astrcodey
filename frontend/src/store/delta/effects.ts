@@ -30,6 +30,7 @@ export function applyConversationDeltaEffects(
   }
   if (refreshExtensions) {
     void get().refreshExtensionData()
+    void get().refreshCommands()
   }
 
   if (continuation) {

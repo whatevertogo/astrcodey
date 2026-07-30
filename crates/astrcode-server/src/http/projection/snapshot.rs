@@ -4,8 +4,7 @@ use std::collections::BTreeMap;
 
 use astrcode_core::types::ToolCallId;
 use astrcode_protocol::http::{
-    AgentSessionLinkDto, ConversationBlockDto, ConversationCursorDto,
-    ConversationSnapshotResponseDto, ToolApprovalDto,
+    ConversationBlockDto, ConversationCursorDto, ConversationSnapshotResponseDto, ToolApprovalDto,
 };
 use astrcode_session_projection::{PendingToolApprovalView, SessionReadModel};
 
@@ -16,7 +15,7 @@ use super::{
     live::control_from_phase,
     session_title_from_working_dir,
 };
-use crate::server_event_bus::StreamingSnapshot;
+use crate::{protocol_mapping::agent_session_link_to_dto, server_event_bus::StreamingSnapshot};
 
 pub(in crate::http) fn conversation_to_dto(
     session: &SessionReadModel,
@@ -64,7 +63,7 @@ pub(in crate::http) fn conversation_to_dto(
         agent_sessions: session
             .agent_sessions
             .iter()
-            .map(AgentSessionLinkDto::from_view)
+            .map(agent_session_link_to_dto)
             .collect(),
     }
 }

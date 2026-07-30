@@ -95,6 +95,10 @@ impl SessionOperationGuard {
         }
     }
 
+    pub(crate) async fn wait_for_starts(&self) {
+        self.gate.wait_for_starts().await;
+    }
+
     fn mark_closing(mut self) -> Arc<SessionDeliveryGate> {
         *self.state = SessionDeliveryState::Closing;
         Arc::clone(&self.gate)

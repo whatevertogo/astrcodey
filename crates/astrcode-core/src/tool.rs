@@ -16,9 +16,8 @@
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 
-use crate::{event::EventPayload, types::SessionId};
+use crate::types::SessionId;
 
 pub mod access;
 pub mod read_image;
@@ -816,7 +815,7 @@ pub struct ToolCallScope {
     /// 当前工具调用 ID，用于工具发出隶属于自身调用的进度事件。
     pub tool_call_id: Option<String>,
     /// 当前回合事件发送器，用于工具发出非持久化进度事件。
-    pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+    pub event_tx: Option<crate::event::EventSender>,
 }
 
 /// 每次工具调用时传递的上下文。
@@ -835,7 +834,7 @@ impl ToolExecutionContext {
         session_id: SessionId,
         working_dir: impl Into<String>,
         tool_call_id: Option<String>,
-        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+        event_tx: Option<crate::event::EventSender>,
         capabilities: ToolCapabilities,
     ) -> Self {
         Self {

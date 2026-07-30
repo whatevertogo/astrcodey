@@ -3,9 +3,11 @@
 use astrcode_context::is_compact_summary_message;
 use astrcode_core::llm::{LlmContent, LlmMessage};
 use astrcode_protocol::{
-    events::{AgentSessionLinkDto, MessageDto, SessionSnapshot},
+    events::{MessageDto, SessionSnapshot},
     wire::MessageRoleDto,
 };
+
+use crate::protocol_mapping::agent_session_link_to_dto;
 
 /// 构建会话快照 DTO，用于客户端同步。
 pub(crate) fn session_snapshot(
@@ -25,7 +27,7 @@ pub(crate) fn session_snapshot(
         agent_sessions: state
             .agent_sessions
             .iter()
-            .map(AgentSessionLinkDto::from_view)
+            .map(agent_session_link_to_dto)
             .collect(),
     }
 }
@@ -40,15 +42,20 @@ pub(crate) fn message_to_dto(message: &LlmMessage) -> MessageDto {
         .iter()
         .map(content_display_text)
         .collect::<String>();
+    let is_compact_summary = is_compact_summary_message(message);
 
     // Compact summary 消息是 synthetic user message，但在客户端应显示为系统消息。
-    let role = if is_compact_summary_message(message) {
+    let role = if is_compact_summary {
         MessageRoleDto::System
     } else {
         message.role.into()
     };
 
-    MessageDto { role, content }
+    MessageDto {
+        role,
+        content,
+        is_compact_summary: Some(is_compact_summary),
+    }
 }
 
 /// 单块内容的展示文本：`upsertSessionPlan` 提取 plan 正文，其余走契约层的
@@ -72,7 +79,6 @@ mod tests {
 
     use super::*;
 
-    /// 辅助函数：创建简单的文本消息
     fn simple_text_message(text: &str) -> LlmMessage {
         LlmMessage {
             role: LlmRole::User,
@@ -83,35 +89,41 @@ mod tests {
     }
 
     #[test]
-    fn compact_summary_message_converts_to_system_role() {
-        let compact_msg =
+    fn message_dto_preserves_wire_shape_and_compact_summary_semantics() {
+        let regular = message_to_dto(&simple_text_message("Hello, how are you?"));
+        assert_eq!(regular.role, MessageRoleDto::User);
+        assert_eq!(regular.content, "Hello, how are you?");
+        assert_eq!(regular.is_compact_summary, Some(false));
+        assert_eq!(
+            serde_json::to_value(&regular).unwrap(),
+            serde_json::json!({
+                "role": "user",
+                "content": "Hello, how are you?",
+                "is_compact_summary": false
+            })
+        );
+
+        let compact =
             simple_text_message("<compact_summary>\nSummary:\nTest summary\n</compact_summary>");
-
-        let dto = message_to_dto(&compact_msg);
-
-        assert_eq!(dto.role, MessageRoleDto::System);
-        assert!(dto.content.contains("<compact_summary>"));
-    }
-
-    #[test]
-    fn regular_user_message_preserves_user_role() {
-        let user_msg = simple_text_message("Hello, how are you?");
-
-        let dto = message_to_dto(&user_msg);
-
-        assert_eq!(dto.role, MessageRoleDto::User);
-        assert_eq!(dto.content, "Hello, how are you?");
-    }
-
-    #[test]
-    fn is_compact_summary_message_detects_marker() {
+        let compact = message_to_dto(&compact);
+        assert_eq!(compact.role, MessageRoleDto::System);
+        assert!(compact.content.contains("<compact_summary>"));
+        assert_eq!(compact.is_compact_summary, Some(true));
         assert_eq!(
-            message_to_dto(&simple_text_message("  <compact_summary>\nContent")).role,
-            MessageRoleDto::System
+            serde_json::to_value(&compact).unwrap(),
+            serde_json::json!({
+                "role": "system",
+                "content": "<compact_summary>\nSummary:\nTest summary\n</compact_summary>",
+                "is_compact_summary": true
+            })
         );
-        assert_eq!(
-            message_to_dto(&simple_text_message("Regular message")).role,
-            MessageRoleDto::User
-        );
+
+        let legacy: MessageDto = serde_json::from_value(serde_json::json!({
+            "role": "system",
+            "content": "Legacy system message"
+        }))
+        .unwrap();
+        assert_eq!(legacy.is_compact_summary, None);
+        assert!(!legacy.compact_summary_semantics());
     }
 }

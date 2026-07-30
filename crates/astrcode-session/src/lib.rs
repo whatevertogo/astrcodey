@@ -43,15 +43,17 @@ pub use payload::{
 pub use session::{
     InterruptedToolOutcome, Session, SessionCreateParams, SessionError,
     emit_interrupted_tool_results, emit_lifecycle_for_read_model, emit_turn_aborted_context,
+    finalize_aborted_turn, finalize_turn,
 };
 pub use session_event_sink::{SessionEventObserver, SessionEventPublishError, SessionEventSink};
 pub use session_extension_ports::SessionExtensionPorts;
 pub use session_resource_store::SessionResourceStore;
 pub use session_runtime::{
-    SessionRuntimeState, ToolApprovalRegistrationError, ToolApprovalResolveError,
+    SessionCreationFailed, SessionCreationGuard, SessionRuntimeState,
+    ToolApprovalRegistrationError, ToolApprovalResolveError,
 };
 pub use session_runtime_services::SessionRuntimeServices;
 pub use tool_registry::{ToolRegistry, ToolRegistryError};
 pub use turn_context::{TurnError, TurnEventTx};
 pub use turn_handle::{TurnHandle, TurnShutdownHandle};
-pub use turn_runner::{RunTurnResult, TurnOutput};
+pub use turn_runner::{RunTurnResult, TurnFinalization, TurnOutput};

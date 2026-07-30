@@ -9,27 +9,42 @@
 //!
 //! `Session::submit` 返回 [`TurnHandle`]；handle 所有权由调用方持有，析构即放弃。
 
+use std::sync::Arc;
+
 use astrcode_core::types::TurnId;
+use parking_lot::Mutex;
 use tokio::{
     sync::oneshot,
     task::{AbortHandle, JoinHandle},
 };
 use tokio_util::sync::CancellationToken;
 
-use crate::turn_runner::RunTurnResult;
+use crate::turn_runner::{RunTurnResult, TurnFinalization};
+
+pub(crate) type SharedTurnFinalization = Arc<Mutex<Option<TurnFinalization>>>;
 
 /// Turn 停止控制句柄（协作式 shutdown + 可选 force kill）。
 #[derive(Clone)]
 pub struct TurnShutdownHandle {
     cancellation: CancellationToken,
     abort_handle: AbortHandle,
+    finalization: SharedTurnFinalization,
 }
 
 impl TurnShutdownHandle {
     pub fn new(cancellation: CancellationToken, abort_handle: AbortHandle) -> Self {
+        Self::with_finalization(cancellation, abort_handle, Arc::new(Mutex::new(None)))
+    }
+
+    pub(crate) fn with_finalization(
+        cancellation: CancellationToken,
+        abort_handle: AbortHandle,
+        finalization: SharedTurnFinalization,
+    ) -> Self {
         Self {
             cancellation,
             abort_handle,
+            finalization,
         }
     }
 
@@ -47,6 +62,10 @@ impl TurnShutdownHandle {
     pub fn is_finished(&self) -> bool {
         self.abort_handle.is_finished()
     }
+
+    pub fn finalization(&self) -> Option<TurnFinalization> {
+        self.finalization.lock().clone()
+    }
 }
 
 /// 一次 turn 的运行时句柄。
@@ -63,8 +82,10 @@ impl TurnHandle {
         join: JoinHandle<()>,
         cancellation: CancellationToken,
         completion_rx: oneshot::Receiver<RunTurnResult>,
+        finalization: SharedTurnFinalization,
     ) -> Self {
-        let shutdown_handle = TurnShutdownHandle::new(cancellation, join.abort_handle());
+        let shutdown_handle =
+            TurnShutdownHandle::with_finalization(cancellation, join.abort_handle(), finalization);
         Self {
             turn_id,
             join,

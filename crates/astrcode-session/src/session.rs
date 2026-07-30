@@ -1,12 +1,13 @@
 //! Session 句柄 — 带存储能力的会话操作入口。
 
-use std::{collections::HashSet, sync::Arc};
+use std::{collections::HashSet, panic::AssertUnwindSafe, sync::Arc};
 
 use astrcode_core::{
     event::{
         DurableEvent, DurableEventPayload, LiveEvent, LiveEventPayload, ParentSessionRef,
-        PersistedSystemPrompt, SessionStarted, StoredEvent, SystemPromptSource,
+        PersistedSystemPrompt, Phase, SessionStarted, StoredEvent, SystemPromptSource,
     },
+    llm::TURN_ABORTED_SOURCE,
     tool::{
         SessionToolSelection, ToolResultArtifactError, ToolResultArtifactReader,
         ToolResultArtifactSlice,
@@ -20,10 +21,11 @@ use astrcode_extension_sdk::{
     },
     runtime_ports::{RuntimeSnapshotState, ToolCatalogScope},
 };
-use astrcode_session_projection::SessionReadModel;
+use astrcode_session_projection::{AgentSessionStatus, SessionReadModel};
 use astrcode_storage::{
     CompactSnapshotInput, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
 };
+use futures_util::FutureExt;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
@@ -39,8 +41,8 @@ use crate::{
     session_state::SessionStateSource,
     session_tools::{BaseToolRegistryKey, ToolCacheLookup},
     turn_context::{SharedTurnContext, TurnError},
-    turn_handle::TurnHandle,
-    turn_runner::{RunTurnResult, TurnLoop, run_turn},
+    turn_handle::{SharedTurnFinalization, TurnHandle},
+    turn_runner::{RunTurnResult, TurnFinalization, TurnLoop, run_turn},
 };
 
 // ── Session struct & lifecycle ──
@@ -134,7 +136,6 @@ impl Session {
             .event_sink()
             .create(session.runtime.store().clone(), started)
             .await?;
-        session.runtime.mark_lifecycle_initialized();
         Ok(session)
     }
 
@@ -217,6 +218,8 @@ pub enum SessionError {
     RuntimeUnstable { attempts: usize },
     #[error("session parent chain contains a cycle at {session_id}")]
     ParentCycle { session_id: SessionId },
+    #[error("session creation task failed: {0}")]
+    CreationTask(String),
 }
 
 async fn resolve_initial_tool_selection(
@@ -343,6 +346,14 @@ impl Session {
             .event_sink()
             .append(self.runtime.store().clone(), event)
             .await?)
+    }
+
+    async fn sync_durable_events(&self) -> Result<(), SessionError> {
+        self.runtime
+            .event_sink()
+            .sync(self.runtime.store().clone(), self.id())
+            .await?;
+        Ok(())
     }
 
     pub async fn emit_lifecycle(&self, event: ExtensionEvent) -> Result<(), SessionError> {
@@ -732,6 +743,18 @@ impl Session {
 // spawn_child 与 AgentSessionSpawned 事件。
 // 完成等待、终态写入、回收与通知由 `astrcode-server::child_session` 编排。
 
+struct ChildCreationInput {
+    session_id: SessionId,
+    working_dir: String,
+    model_id: String,
+    agent_name: String,
+    task: String,
+    extra_system_prompt: Option<String>,
+    tool_selection: Option<SessionToolSelection>,
+    source_extension: Option<String>,
+    tool_call_id: ToolCallId,
+}
+
 impl Session {
     #[allow(clippy::too_many_arguments)]
     pub async fn spawn_child(
@@ -751,7 +774,59 @@ impl Session {
             tool_selection.as_ref(),
         )
         .await?;
-        let child_sid = new_session_id();
+        let input = ChildCreationInput {
+            session_id: new_session_id(),
+            working_dir: working_dir.to_owned(),
+            model_id: model_id.to_owned(),
+            agent_name,
+            task,
+            extra_system_prompt,
+            tool_selection,
+            source_extension: source_extension.map(str::to_owned),
+            tool_call_id,
+        };
+        let child_session_id = input.session_id.clone();
+        match AssertUnwindSafe(self.create_child_transaction(input))
+            .catch_unwind()
+            .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                let cause = SessionError::CreationTask(
+                    "child session creation transaction panicked".into(),
+                );
+                let compensation = AssertUnwindSafe(
+                    self.compensate_panicked_child_creation(&child_session_id, &cause),
+                )
+                .catch_unwind()
+                .await;
+                if compensation.is_err() {
+                    tracing::warn!(
+                        parent_session_id = %self.id(),
+                        child_session_id = %child_session_id,
+                        "child creation panic compensation panicked"
+                    );
+                }
+                Err(cause)
+            },
+        }
+    }
+
+    async fn create_child_transaction(
+        &self,
+        input: ChildCreationInput,
+    ) -> Result<Self, SessionError> {
+        let ChildCreationInput {
+            session_id: child_sid,
+            working_dir,
+            model_id,
+            agent_name,
+            task,
+            extra_system_prompt,
+            tool_selection,
+            source_extension,
+            tool_call_id,
+        } = input;
         let child_store = self.runtime.store().clone();
         let child_runtime =
             self.runtime_services
@@ -763,34 +838,233 @@ impl Session {
                         self.runtime.event_sink_arc(),
                     ))
                 });
-        let child = Session::create_persisted(
+        let creation = child_runtime.begin_creation();
+        let child = match Session::create_persisted(
             SessionCreateParams {
-                working_dir: working_dir.to_owned(),
-                model_id: model_id.to_owned(),
+                working_dir,
+                model_id,
                 parent_session_id: Some(self.id().clone()),
                 tool_selection: tool_selection.clone(),
-                source_extension: source_extension.map(str::to_owned),
+                source_extension,
                 extra_system_prompt,
                 initial_system_prompt: None,
-                runtime: child_runtime,
+                runtime: Arc::clone(&child_runtime),
                 runtime_services: Arc::clone(&self.runtime_services),
             },
             self.state_source.clone(),
         )
-        .await?;
-
-        self.emit_durable(
-            None,
-            DurableEventPayload::AgentSessionSpawned {
-                child_session_id: child_sid,
-                agent_name,
-                task,
-                tool_selection,
-                tool_call_id,
+        .await
+        {
+            Ok(child) => child,
+            Err(error) => {
+                if matches!(&error, SessionError::EventPublish(_)) {
+                    if let Err(compensation_error) =
+                        self.discard_failed_child_runtime(&child_runtime).await
+                    {
+                        tracing::warn!(
+                            parent_session_id = %self.id(),
+                            child_session_id = %child_sid,
+                            error = %error,
+                            compensation_error = %compensation_error,
+                            "failed to fully compensate child session creation"
+                        );
+                    }
+                } else {
+                    self.runtime_services
+                        .session_resources()
+                        .cleanup(&child_sid);
+                }
+                return Err(error);
             },
-        )
-        .await?;
+        };
+
+        // 父链接是 child 进入父投影的持久可见边界；初始化失败时不能留下 Running 链接。
+        if let Err(error) = child
+            .ensure_lifecycle_initialized(ExtensionEvent::SessionStart)
+            .await
+        {
+            self.compensate_failed_child_creation(&child, &child_sid, &error, false)
+                .await;
+            return Err(error);
+        }
+
+        if let Err(error) = child.sync_durable_events().await {
+            self.compensate_failed_child_creation(&child, &child_sid, &error, false)
+                .await;
+            return Err(error);
+        }
+
+        if let Err(error) = self
+            .emit_durable(
+                None,
+                DurableEventPayload::AgentSessionSpawned {
+                    child_session_id: child_sid.clone(),
+                    agent_name,
+                    task,
+                    tool_selection,
+                    tool_call_id,
+                },
+            )
+            .await
+        {
+            self.compensate_failed_child_creation(&child, &child_sid, &error, false)
+                .await;
+            return Err(error);
+        }
+        if let Err(error) = self.sync_durable_events().await {
+            self.compensate_failed_child_creation(&child, &child_sid, &error, true)
+                .await;
+            return Err(error);
+        }
+        creation.commit();
         Ok(child)
+    }
+
+    async fn compensate_panicked_child_creation(
+        &self,
+        child_session_id: &SessionId,
+        cause: &SessionError,
+    ) {
+        let child_runtime =
+            self.runtime_services
+                .session_resources()
+                .resources_for(child_session_id, || {
+                    Arc::new(SessionRuntimeState::new_with_event_sink(
+                        child_session_id.clone(),
+                        self.runtime.store().clone(),
+                        self.runtime.event_sink_arc(),
+                    ))
+                });
+        let child = match Session::open(
+            Arc::clone(&child_runtime),
+            Arc::clone(&self.runtime_services),
+        )
+        .await
+        {
+            Ok(child) => child,
+            Err(_) => {
+                if let Err(error) = self.discard_failed_child_runtime(&child_runtime).await {
+                    tracing::warn!(
+                        parent_session_id = %self.id(),
+                        child_session_id = %child_session_id,
+                        error = %cause,
+                        compensation_error = %error,
+                        "failed to fully compensate panicked child session creation"
+                    );
+                }
+                return;
+            },
+        };
+        let parent_linked = match self.read_model().await {
+            Ok(parent) => parent.agent_sessions.iter().any(|link| {
+                link.child_session_id == *child_session_id
+                    && link.status == AgentSessionStatus::Running
+            }),
+            Err(error) => {
+                tracing::warn!(
+                    parent_session_id = %self.id(),
+                    child_session_id = %child_session_id,
+                    error = %error,
+                    "could not inspect parent link during child creation compensation"
+                );
+                true
+            },
+        };
+        self.compensate_failed_child_creation(&child, child_session_id, cause, parent_linked)
+            .await;
+    }
+
+    async fn compensate_failed_child_creation(
+        &self,
+        child: &Self,
+        child_session_id: &SessionId,
+        cause: &SessionError,
+        parent_linked: bool,
+    ) {
+        let mut compensation_errors = Vec::new();
+        let mut parent_link_settled = !parent_linked;
+        if parent_linked {
+            let terminal = match self
+                .emit_durable(
+                    None,
+                    crate::payload::agent_session_failed_payload(
+                        child_session_id.clone(),
+                        format!("child creation did not commit: {cause}"),
+                    ),
+                )
+                .await
+            {
+                Ok(_) => self.sync_durable_events().await,
+                Err(error) => Err(error),
+            };
+            match terminal {
+                Ok(()) => parent_link_settled = true,
+                Err(error) => {
+                    compensation_errors.push(format!("settle parent child link: {error}"));
+                },
+            }
+        }
+        match AssertUnwindSafe(child.emit_lifecycle(ExtensionEvent::SessionShutdown))
+            .catch_unwind()
+            .await
+        {
+            Ok(Ok(())) => {},
+            Ok(Err(error)) => {
+                compensation_errors.push(format!("run child shutdown hooks: {error}"));
+            },
+            Err(_) => compensation_errors.push("child shutdown hooks panicked".into()),
+        }
+        if parent_link_settled {
+            if let Err(error) = child.discard_failed_creation().await {
+                compensation_errors.push(error);
+            }
+        }
+
+        if !compensation_errors.is_empty() {
+            tracing::warn!(
+                parent_session_id = %self.id(),
+                child_session_id = %child_session_id,
+                error = %cause,
+                compensation_error = %compensation_errors.join("; "),
+                "failed to fully compensate child session creation"
+            );
+        }
+    }
+
+    async fn discard_failed_creation(&self) -> Result<(), String> {
+        self.discard_failed_child_runtime(&self.runtime).await
+    }
+
+    async fn discard_failed_child_runtime(
+        &self,
+        child_runtime: &SessionRuntimeState,
+    ) -> Result<(), String> {
+        let release_result = child_runtime
+            .event_sink()
+            .release(child_runtime.store().as_ref(), child_runtime.session_id())
+            .await;
+        let delete_result = child_runtime
+            .store()
+            .delete_session(child_runtime.session_id())
+            .await;
+        if delete_result.is_ok() {
+            self.runtime_services
+                .session_resources()
+                .cleanup(child_runtime.session_id());
+        }
+
+        let mut errors = Vec::new();
+        if let Err(error) = release_result {
+            errors.push(format!("release event lane: {error}"));
+        }
+        if let Err(error) = delete_result {
+            errors.push(format!("delete persisted session: {error}"));
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors.join("; "))
+        }
     }
 }
 
@@ -925,59 +1199,23 @@ impl Session {
         turn_id: TurnId,
         cancellation_token: CancellationToken,
         completion_tx: oneshot::Sender<RunTurnResult>,
+        finalization_state: SharedTurnFinalization,
     ) {
-        let result = run_turn(&mut agent, &text, &turn_id).await;
-        let finish_reason = match &result.output {
-            Ok(out) => out.finish_reason.clone(),
-            Err(TurnError::Aborted) => TURN_FINISH_ABORTED.into(),
-            Err(_) => "error".into(),
-        };
-        let pending_error = match (&result.output, result.emitted_error) {
-            (Err(TurnError::Aborted), _) => None,
-            (Err(e), false) => Some(e.to_string()),
-            _ => None,
-        };
-        let aborted = matches!(result.output, Err(TurnError::Aborted));
-
-        if aborted {
-            emit_aborted_turn_context(&session, &turn_id).await;
-        }
-        if let Some(error_msg) = pending_error {
-            if let Err(e) = session
-                .emit_durable(
-                    Some(&turn_id),
-                    DurableEventPayload::ErrorOccurred {
-                        code: -32603,
-                        message: error_msg,
-                        recoverable: false,
-                    },
-                )
-                .await
-            {
+        let mut result = run_turn(&mut agent, &text, &turn_id).await;
+        match finalize_turn(&session, &turn_id, &result.finalization).await {
+            Ok(()) => result.finalization.terminal_persisted = true,
+            Err(error) => {
                 tracing::error!(
                     session_id = %session.id(),
                     turn_id = %turn_id,
-                    error = %e,
-                    "CRITICAL: failed to persist ErrorOccurred; session may need stale repair on restart"
+                    %error,
+                    finish_reason = %result.finalization.finish_reason,
+                    "failed to persist turn finalization; registry must retain ownership for retry"
                 );
-            }
+            },
         }
-        if let Err(e) = session
-            .emit_durable(
-                Some(&turn_id),
-                turn_completed_payload(finish_reason.clone()),
-            )
-            .await
-        {
-            tracing::error!(
-                session_id = %session.id(),
-                turn_id = %turn_id,
-                error = %e,
-                "CRITICAL: failed to persist TurnCompleted; session may need stale repair on restart"
-            );
-        }
-        session.emit_live(Some(&turn_id), agent_run_completed_payload(finish_reason));
         cancellation_token.cancel();
+        *finalization_state.lock() = Some(result.finalization.clone());
         let _ = completion_tx.send(result);
     }
 
@@ -1005,6 +1243,8 @@ impl Session {
         let turn_id_for_task = turn_id.clone();
         let session_for_completion = self.clone();
         let cancellation_for_task = cancellation_token.clone();
+        let finalization_state = Arc::new(parking_lot::Mutex::new(None));
+        let finalization_for_task = Arc::clone(&finalization_state);
         let join = tokio::spawn(async move {
             Self::run_and_finalize_turn(
                 session_for_completion,
@@ -1013,6 +1253,7 @@ impl Session {
                 turn_id_for_task,
                 cancellation_for_task,
                 completion_tx,
+                finalization_for_task,
             )
             .await;
         });
@@ -1022,6 +1263,7 @@ impl Session {
             join,
             cancellation_token,
             completion_rx,
+            finalization_state,
         ))
     }
 
@@ -1059,43 +1301,78 @@ impl Session {
     }
 }
 
-async fn emit_aborted_turn_context(session: &Session, turn_id: &TurnId) {
-    match session.read_model().await {
-        Ok(state) => {
-            if let Err(e) = emit_interrupted_tool_results(
-                session,
-                &state,
-                Some(turn_id),
-                InterruptedToolOutcome::Cancelled,
-            )
-            .await
-            {
-                tracing::warn!(
-                    session_id = %session.id(),
-                    turn_id = %turn_id,
-                    error = %e,
-                    "failed to settle pending tool calls after abort"
-                );
-            }
-        },
-        Err(e) => {
-            tracing::warn!(
-                session_id = %session.id(),
-                turn_id = %turn_id,
-                error = %e,
-                "failed to read session state after abort"
-            );
-        },
+pub async fn finalize_aborted_turn(
+    session: &Session,
+    turn_id: &TurnId,
+) -> Result<(), SessionError> {
+    let state = session.read_model().await?;
+    if state.execution.phase == Phase::Idle {
+        return Ok(());
+    }
+    emit_interrupted_tool_results(
+        session,
+        &state,
+        Some(turn_id),
+        InterruptedToolOutcome::Cancelled,
+    )
+    .await?;
+    let has_aborted_context = state
+        .transcript
+        .messages
+        .last()
+        .and_then(|message| message.source.as_deref())
+        == Some(TURN_ABORTED_SOURCE);
+    if !has_aborted_context {
+        emit_turn_aborted_context(session, Some(turn_id)).await?;
+    }
+    session
+        .emit_durable(Some(turn_id), turn_completed_payload(TURN_FINISH_ABORTED))
+        .await?;
+    session.emit_live(
+        Some(turn_id),
+        agent_run_completed_payload(TURN_FINISH_ABORTED),
+    );
+    Ok(())
+}
+
+pub async fn finalize_turn(
+    session: &Session,
+    turn_id: &TurnId,
+    finalization: &TurnFinalization,
+) -> Result<(), SessionError> {
+    if finalization.aborted {
+        return finalize_aborted_turn(session, turn_id).await;
     }
 
-    if let Err(e) = emit_turn_aborted_context(session, Some(turn_id)).await {
-        tracing::warn!(
-            session_id = %session.id(),
-            turn_id = %turn_id,
-            error = %e,
-            "failed to write turn-aborted provider context"
-        );
+    let state = session.read_model().await?;
+    if state.execution.phase == Phase::Idle {
+        return Ok(());
     }
+    if let Some(message) = &finalization.pending_error {
+        if state.execution.phase != Phase::Error {
+            session
+                .emit_durable(
+                    Some(turn_id),
+                    DurableEventPayload::ErrorOccurred {
+                        code: -32603,
+                        message: message.clone(),
+                        recoverable: false,
+                    },
+                )
+                .await?;
+        }
+    }
+    session
+        .emit_durable(
+            Some(turn_id),
+            turn_completed_payload(finalization.finish_reason.clone()),
+        )
+        .await?;
+    session.emit_live(
+        Some(turn_id),
+        agent_run_completed_payload(finalization.finish_reason.clone()),
+    );
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

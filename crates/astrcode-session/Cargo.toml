@@ -13,7 +13,7 @@ astrcode-storage = { path = "../astrcode-storage" }
 astrcode-session-projection = { path = "../astrcode-session-projection" }
 arc-swap = { workspace = true }
 async-trait = { workspace = true }
-chrono = { workspace = true }
+futures-util = { workspace = true }
 parking_lot = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

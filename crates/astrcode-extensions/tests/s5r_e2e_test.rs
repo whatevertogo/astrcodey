@@ -491,7 +491,7 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
         tool_input: serde_json::json!({}),
         approval_mode: astrcode_core::permission::ApprovalMode::Manual,
         available_tools: vec![],
-        event_tx: Some(tx),
+        event_tx: Some(tx.into()),
         extension_event_sink: None,
         session_store_dir: None,
     };

@@ -14,7 +14,7 @@ mod workspace;
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_core::{
-    event::{DurableEventPayload, EventPayload, ExtensionEventData, LiveEventPayload},
+    event::{DurableEventPayload, EventPayload, EventSender, ExtensionEventData, LiveEventPayload},
     llm::LlmProvider,
     tool::SessionOperations,
 };
@@ -28,7 +28,6 @@ use astrcode_extension_sdk::{
 };
 use astrcode_storage::{EventReader, SessionReader, SessionStore};
 use serde_json::Value;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use self::{
@@ -119,7 +118,7 @@ pub struct InvokeContext {
     pub session_id: Option<String>,
     pub session_store_dir: Option<PathBuf>,
     pub session_ops: Option<Arc<dyn SessionOperations>>,
-    pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+    pub event_tx: Option<EventSender>,
     pub working_dir: Option<String>,
     pub cancel_token: Option<CancellationToken>,
     pub event_declarations: HashMap<String, ExtensionEventDecl>,
@@ -355,7 +354,7 @@ impl HostRouter {
 pub fn emit_for_sink(
     extension_id: &str,
     declarations: &HashMap<String, ExtensionEventDecl>,
-    event_tx: &mpsc::UnboundedSender<EventPayload>,
+    event_tx: &EventSender,
     event_type: &str,
     schema_version: u32,
     payload: Value,

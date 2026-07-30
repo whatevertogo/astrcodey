@@ -1,6 +1,9 @@
 //! Session 跨实例恢复时 extra_system_prompt 不丢失。
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use astrcode_core::{
     event::{PersistedSystemPrompt, SystemPromptSource},
@@ -12,10 +15,12 @@ use astrcode_core::{
     types::{SessionId, ToolCallId, new_session_id},
 };
 use astrcode_extension_sdk::{
-    extension::{ExtensionError, PromptBuildContext, PromptContributions},
+    extension::{
+        ExtensionError, ExtensionEvent, LifecycleContext, PromptBuildContext, PromptContributions,
+    },
     runtime_ports::{
         NoopRuntimePorts, PromptContributor, ToolCatalogProvider, ToolCatalogScope,
-        ToolCatalogSnapshot,
+        ToolCatalogSnapshot, TurnHooks,
     },
 };
 use astrcode_session::{
@@ -33,6 +38,21 @@ struct FailingPromptContributor;
 
 struct ReadWriteToolCatalog;
 struct NamedTool(&'static str);
+struct RecordingLifecycleHooks(AtomicUsize);
+
+#[async_trait::async_trait]
+impl TurnHooks for RecordingLifecycleHooks {
+    async fn emit_lifecycle(
+        &self,
+        event: ExtensionEvent,
+        _ctx: LifecycleContext,
+    ) -> Result<(), ExtensionError> {
+        if event == ExtensionEvent::SessionStart {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(())
+    }
+}
 
 #[async_trait::async_trait]
 impl ToolCatalogProvider for ReadWriteToolCatalog {
@@ -266,6 +286,60 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
         effective_registry.list_definitions().is_empty(),
         "a reopened child must not retain tools removed from its parent boundary",
     );
+}
+
+#[tokio::test]
+async fn parent_and_spawned_child_each_emit_session_start_once() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+    let hooks = Arc::new(RecordingLifecycleHooks(AtomicUsize::new(0)));
+    let noop = Arc::new(NoopRuntimePorts);
+    let caps = common::test_runtime_services_with_extensions(
+        llm,
+        SessionExtensionPorts::from_immutable_ports(noop.clone(), hooks.clone(), noop),
+    );
+    let parent_id = new_session_id();
+    let parent = Session::create_with_params(SessionCreateParams {
+        working_dir: ".".into(),
+        model_id: "mock-model".into(),
+        parent_session_id: None,
+        tool_selection: None,
+        source_extension: None,
+        extra_system_prompt: None,
+        initial_system_prompt: None,
+        runtime: runtime(parent_id, &store, &caps),
+        runtime_services: Arc::clone(&caps),
+    })
+    .await
+    .unwrap();
+
+    parent
+        .ensure_lifecycle_initialized(ExtensionEvent::SessionStart)
+        .await
+        .unwrap();
+    parent
+        .ensure_lifecycle_initialized(ExtensionEvent::SessionResume)
+        .await
+        .unwrap();
+    let child = parent
+        .spawn_child(
+            ".",
+            "mock-model",
+            "worker".into(),
+            "verify lifecycle".into(),
+            None,
+            None,
+            None,
+            ToolCallId::new("call-lifecycle"),
+        )
+        .await
+        .unwrap();
+    child
+        .ensure_lifecycle_initialized(ExtensionEvent::SessionResume)
+        .await
+        .unwrap();
+
+    assert_eq!(hooks.0.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]

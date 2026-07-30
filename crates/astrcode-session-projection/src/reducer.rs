@@ -598,12 +598,6 @@ fn apply_execution_event(event: &StoredEvent, execution: &mut SessionExecutionSt
             execution.pending_tool_calls.clear();
             execution.pending_tool_approvals.clear();
         },
-        DurableEventPayload::TranscriptRewritten {
-            reason: TranscriptRewriteReason::Compaction(details),
-            ..
-        } if details.trigger != "auto_threshold" => {
-            execution.phase = Phase::Idle;
-        },
         DurableEventPayload::SessionForked { .. } => {
             execution.phase = Phase::Idle;
             execution.unsettled_turn_id = None;

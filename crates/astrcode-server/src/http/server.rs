@@ -4,6 +4,7 @@ use std::{path::Path, sync::Arc};
 
 #[cfg(feature = "testing")]
 use astrcode_protocol::events::ClientNotification;
+use astrcode_protocol::http::RunInfoDto;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
@@ -233,11 +234,14 @@ fn write_run_info(port: u16, auth_token: &str) {
 }
 
 fn write_run_info_at(path: &Path, port: u16, auth_token: &str) {
-    let content = serde_json::json!({
-        "port": port,
-        "authToken": auth_token,
-    })
-    .to_string();
+    let run_info = RunInfoDto {
+        port,
+        auth_token: auth_token.into(),
+    };
+    let Ok(content) = serde_json::to_string(&run_info) else {
+        tracing::error!("failed to serialize run.json");
+        return;
+    };
     if let Err(e) = std::fs::write(path, &content) {
         tracing::warn!(path = %path.display(), error = %e, "failed to write run.json");
     }
@@ -262,12 +266,10 @@ fn remove_run_info_if_current_at(path: &Path, port: u16, auth_token: &str) {
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+    let Ok(run_info) = serde_json::from_str::<RunInfoDto>(&content) else {
         return;
     };
-    let matches_current = value.get("port").and_then(serde_json::Value::as_u64)
-        == Some(u64::from(port))
-        && value.get("authToken").and_then(serde_json::Value::as_str) == Some(auth_token);
+    let matches_current = run_info.port == port && run_info.auth_token == auth_token;
     if matches_current {
         let _ = std::fs::remove_file(path);
     }
@@ -314,6 +316,11 @@ mod tests {
         remove_run_info_if_current_at(&path, 1111, "old-token");
         assert!(path.exists());
 
+        fs::write(
+            &path,
+            r#"{"port":2222,"authToken":"new-token","schemaVersion":2}"#,
+        )
+        .unwrap();
         remove_run_info_if_current_at(&path, 2222, "new-token");
         assert!(!path.exists());
 

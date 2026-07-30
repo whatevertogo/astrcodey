@@ -3,7 +3,6 @@ import type { AgentSessionLinkDto } from "./AgentSessionLinkDto";
 import type { ApprovalDecisionDto } from "./ApprovalDecisionDto";
 import type { ConversationBlockDto } from "./ConversationBlockDto";
 import type { ConversationControlStateDto } from "./ConversationControlStateDto";
-import type { ConversationCursorDto } from "./ConversationCursorDto";
 import type { ToolApprovalDto } from "./ToolApprovalDto";
 import type { ToolOutputStreamDto } from "./ToolOutputStreamDto";
 import type { JsonValue } from "./serde_json/JsonValue";
@@ -11,7 +10,7 @@ import type { JsonValue } from "./serde_json/JsonValue";
 /**
  * SSE conversation 增量。
  */
-export type ConversationDeltaDto = { "kind": "appendBlock", block: ConversationBlockDto, } | { "kind": "patchBlock", blockId: string, textDelta: string, } | { "kind": "finalizeBlock", block: ConversationBlockDto, } | { "kind": "updateControlState", control: ConversationControlStateDto, } | { "kind": "rehydrateRequired" } | { "kind": "sessionContinued", parentSessionId: string, newSessionId: string, parentCursor: ConversationCursorDto, } | { "kind": "patchArguments", blockId: string, arguments: string,
+export type ConversationDeltaDto = { "kind": "appendBlock", block: ConversationBlockDto, } | { "kind": "patchBlock", blockId: string, textDelta: string, } | { "kind": "finalizeBlock", block: ConversationBlockDto, } | { "kind": "updateControlState", control: ConversationControlStateDto, } | { "kind": "rehydrateRequired" } | { "kind": "patchArguments", blockId: string, arguments: string,
 /**
  * 原始 JSON 参数，供前端结构化解析（如 agent 工具的 task/agent 提取）。
  */

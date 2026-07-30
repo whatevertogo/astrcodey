@@ -47,6 +47,7 @@ export interface AppState {
   modelRefreshKey: number
   agentSessions: AgentSessionLink[]
   statusItems: Record<string, string>
+  statusItemRevisions: Record<string, number>
   keybindings: KeybindingInfo[]
   slashCommands: SlashCommandInfo[]
   extensions: ExtensionStateView[]

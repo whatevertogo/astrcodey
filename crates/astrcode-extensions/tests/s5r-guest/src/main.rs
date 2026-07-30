@@ -7,7 +7,9 @@ use std::{
 
 use astrcode_extension_sdk::{
     builder::tool,
-    extension::{ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute},
+    extension::{
+        ExtensionEventDecl, ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute,
+    },
     s5r::{
         ErrorPayload,
         effects::{CallContinuation, HandlerResult},
@@ -67,12 +69,12 @@ async fn run() -> Result<(), ErrorPayload> {
         .capability("public_http")
         .capability("public_http_dispatch")
         .capability("tool_intercept")
-        .extension_event(json!({
-            "event_type": "s5r_guest.probe",
-            "schema_version": 1,
-            "durable": true,
-            "max_payload_bytes": 4096
-        }));
+        .extension_event_decl(ExtensionEventDecl {
+            event_type: "s5r_guest.probe".into(),
+            schema_version: 1,
+            durable: true,
+            max_payload_bytes: 4096,
+        });
 
     worker.tool(
         tool("ping")

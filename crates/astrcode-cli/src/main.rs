@@ -187,8 +187,12 @@ enum Commands {
         /// 保留临时工作目录
         #[arg(long)]
         keep_workdir: bool,
-        /// 存储根目录（eval 数据隔离，默认 tempdir）
-        #[arg(long)]
+        /// 已运行 server 的 Astrcode 数据目录（用于定位 run.json）
+        #[arg(
+            long,
+            conflicts_with = "server_addr",
+            conflicts_with = "swe_instance_solver_binary"
+        )]
         storage: Option<std::path::PathBuf>,
         /// 服务器地址（若已有运行中的 server）
         #[arg(long)]

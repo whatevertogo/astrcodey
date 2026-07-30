@@ -32,7 +32,19 @@ assert.equal(finalize.delta.block.kind, 'assistant')
 assert.equal(finalize.delta.block.text, 'complete answer')
 assert.equal(finalize.delta.block.status, 'complete')
 
-const continued = decodeConversationStreamEnvelope(fixture[2])
+const rehydrate = decodeConversationStreamEnvelope(fixture[2])
+assert.equal(rehydrate.delta.kind, 'rehydrateRequired')
+
+const continued = decodeConversationStreamEnvelope({
+  sessionId: 'parent-session',
+  cursor: { value: '7' },
+  delta: {
+    kind: 'sessionContinued',
+    parentSessionId: 'parent-session',
+    newSessionId: 'child-session',
+    parentCursor: { value: '7' },
+  },
+})
 assert.equal(continued.delta.kind, 'sessionContinued')
 assert.equal(continued.delta.parentSessionId, 'parent-session')
 assert.equal(continued.delta.newSessionId, 'child-session')

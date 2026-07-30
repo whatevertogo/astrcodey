@@ -82,7 +82,7 @@ pub async fn recycle_completed_session_for_test(
     turn_id: &astrcode_core::types::TurnId,
 ) -> Result<bool, TurnScheduleError> {
     scheduler
-        .recycle_completed_session(session_id, turn_id)
+        .recycle_completed_session(session_id, turn_id, None)
         .await
         .map(|outcome| {
             matches!(
@@ -90,4 +90,73 @@ pub async fn recycle_completed_session_for_test(
                 crate::turn_scheduler::CompletedRecycleOutcome::Recycled
             )
         })
+}
+
+pub async fn finish_and_watch_next_for_test(
+    scheduler: &TurnScheduler,
+    session_id: &astrcode_core::types::SessionId,
+    turn_id: &astrcode_core::types::TurnId,
+    finalization: Option<&astrcode_session::TurnFinalization>,
+) -> Result<bool, TurnScheduleError> {
+    match scheduler
+        .finish_and_maybe_start_next(session_id, turn_id, finalization)
+        .await?
+    {
+        crate::turn_scheduler::FinishOutcome::Settled(next) => {
+            scheduler.watch_queued_if_any(session_id.clone(), next);
+            Ok(true)
+        },
+        crate::turn_scheduler::FinishOutcome::Stale => Ok(false),
+    }
+}
+
+pub async fn start_with_completion_and_hold_operation_for_test(
+    scheduler: &TurnScheduler,
+    session_id: astrcode_core::types::SessionId,
+    input: astrcode_core::user_input::UserInput,
+    started: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+) -> Result<StartedExecution, TurnScheduleError> {
+    let operation = scheduler.begin_session_operation(&session_id).await?;
+    let execution = scheduler
+        .start_with_completion_in_operation(&operation, input)
+        .await?;
+    let _ = started.send(());
+    let _ = release.await;
+    drop(operation);
+    Ok(execution)
+}
+
+pub fn pause_next_completion_guard_registration_for_test(
+    coordinator: &ChildSessionCoordinator,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    coordinator.pause_next_registration()
+}
+
+pub fn pause_next_completion_guard_claim_for_test(
+    coordinator: &ChildSessionCoordinator,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    coordinator.pause_next_claim()
+}
+
+pub fn pause_next_sync_completion_settled_for_test(
+    coordinator: &ChildSessionCoordinator,
+) -> (
+    tokio::sync::oneshot::Receiver<()>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    coordinator.pause_next_sync_settled()
+}
+
+pub fn registered_completion_guard_count_for_test(
+    coordinator: &ChildSessionCoordinator,
+    parent_session_id: &astrcode_core::types::SessionId,
+) -> usize {
+    coordinator.registered_guard_count(parent_session_id)
 }

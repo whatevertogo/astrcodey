@@ -1,26 +1,31 @@
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use astrcode_core::types::{SessionId, TurnId};
 use astrcode_session::{TurnError, TurnHandle, TurnShutdownHandle};
-use tokio::sync::{mpsc, watch};
+use parking_lot::Mutex;
+use tokio::sync::{mpsc, oneshot, watch};
 
-use super::{ChildCleanup, ChildOutcome, ChildSessionCompletionConfig};
-use crate::session_manager::SessionManager;
+use super::{ChildCleanup, ChildCompletion, ChildOutcome, ChildSessionCompletionConfig};
+use crate::task_utils::OwnedTaskAdmission;
 
 const AGENT_NOTIFICATION_OUTPUT_MAX_BYTES: usize = 16 * 1024;
 
 /// 只等待 `TurnHandle` 并记录 outcome；不写父 session 事件。
 pub(super) struct ChildSessionCompletionGuard {
     config: ChildSessionCompletionConfig,
-    outcome_tx: watch::Sender<Option<ChildOutcome>>,
-    outcome_rx: watch::Receiver<Option<ChildOutcome>>,
-    shutdown_handle: TurnShutdownHandle,
+    completion_tx: watch::Sender<Option<ChildCompletion>>,
+    completion_rx: watch::Receiver<Option<ChildCompletion>>,
+    shutdown_handle: Option<TurnShutdownHandle>,
+    child_settled: AtomicBool,
+    force_recycle: AtomicBool,
+    retry_attempt: AtomicU32,
+    terminal_tx: Mutex<Option<oneshot::Sender<Result<(), String>>>>,
 }
 
-fn try_set_outcome(tx: &watch::Sender<Option<ChildOutcome>>, outcome: ChildOutcome) {
+fn try_set_completion(tx: &watch::Sender<Option<ChildCompletion>>, completion: ChildCompletion) {
     let _ = tx.send_if_modified(|current| {
         if current.is_none() {
-            *current = Some(outcome);
+            *current = Some(completion);
             true
         } else {
             false
@@ -29,66 +34,160 @@ fn try_set_outcome(tx: &watch::Sender<Option<ChildOutcome>>, outcome: ChildOutco
 }
 
 impl ChildSessionCompletionGuard {
-    pub(super) fn spawn(
-        handle: TurnHandle,
-        config: ChildSessionCompletionConfig,
-        completed_tx: mpsc::Sender<SessionId>,
-    ) -> Self {
-        let (outcome_tx, outcome_rx) = watch::channel(None);
-        let outcome_tx_for_task = outcome_tx.clone();
-        let shutdown_handle = handle.shutdown_handle();
-        let parent_session_id = config.parent_session_id.clone();
+    pub(super) fn new(handle: &TurnHandle, config: ChildSessionCompletionConfig) -> Self {
+        Self::with_terminal_sender(handle, config, None)
+    }
 
-        crate::task_utils::spawn_traced("child_session_completion_guard", async move {
-            let result = handle.wait().await;
-            let outcome = match result {
-                Some(result) => match result.output {
-                    Ok(output) => ChildOutcome::Completed {
-                        output: output.text,
-                    },
-                    Err(TurnError::Aborted) => ChildOutcome::Aborted,
-                    Err(error) => ChildOutcome::Failed {
-                        error: error.to_string(),
-                    },
-                },
-                None => ChildOutcome::Aborted,
-            };
-            try_set_outcome(&outcome_tx_for_task, outcome);
-            let _ = completed_tx.send(parent_session_id).await;
-        });
+    pub(super) fn new_sync(
+        handle: &TurnHandle,
+        config: ChildSessionCompletionConfig,
+    ) -> (Self, oneshot::Receiver<Result<(), String>>) {
+        let (terminal_tx, terminal_rx) = oneshot::channel();
+        (
+            Self::with_terminal_sender(handle, config, Some(terminal_tx)),
+            terminal_rx,
+        )
+    }
+
+    fn with_terminal_sender(
+        handle: &TurnHandle,
+        config: ChildSessionCompletionConfig,
+        terminal_tx: Option<oneshot::Sender<Result<(), String>>>,
+    ) -> Self {
+        let (completion_tx, completion_rx) = watch::channel(None);
+        let shutdown_handle = handle.shutdown_handle();
 
         Self {
             config,
-            outcome_tx,
-            outcome_rx,
-            shutdown_handle,
+            completion_tx,
+            completion_rx,
+            shutdown_handle: Some(shutdown_handle),
+            child_settled: AtomicBool::new(false),
+            force_recycle: AtomicBool::new(false),
+            retry_attempt: AtomicU32::new(0),
+            terminal_tx: Mutex::new(terminal_tx),
         }
+    }
+
+    pub(super) fn start(
+        &self,
+        admission: OwnedTaskAdmission,
+        handle: TurnHandle,
+        completed_tx: mpsc::Sender<SessionId>,
+    ) {
+        let completion_tx = self.completion_tx.clone();
+        let shutdown_handle = self.shutdown_handle.clone();
+        let parent_session_id = self.config.parent_session_id.clone();
+
+        admission.spawn_named("child_session_completion_guard", async move {
+            let result = handle.wait().await;
+            let completion = match result {
+                Some(result) => {
+                    let outcome = match result.output {
+                        Ok(output) => ChildOutcome::Completed {
+                            output: output.text,
+                        },
+                        Err(TurnError::Aborted) => ChildOutcome::Aborted,
+                        Err(error) => ChildOutcome::Failed {
+                            error: error.to_string(),
+                        },
+                    };
+                    ChildCompletion {
+                        outcome,
+                        finalization: Some(result.finalization),
+                    }
+                },
+                None => ChildCompletion {
+                    outcome: ChildOutcome::Aborted,
+                    finalization: shutdown_handle.and_then(|handle| handle.finalization()),
+                },
+            };
+            try_set_completion(&completion_tx, completion);
+            let _ = completed_tx.send(parent_session_id).await;
+        });
+    }
+
+    pub(super) async fn completion(&self) -> ChildCompletion {
+        let current = self.completion_rx.borrow().clone();
+        if let Some(completion) = current {
+            return completion;
+        }
+        let mut receiver = self.completion_rx.clone();
+        let completion = match receiver.wait_for(Option::is_some).await {
+            Ok(completion) => completion.clone().unwrap_or(ChildCompletion {
+                outcome: ChildOutcome::Aborted,
+                finalization: self
+                    .shutdown_handle
+                    .as_ref()
+                    .and_then(TurnShutdownHandle::finalization),
+            }),
+            Err(_) => ChildCompletion {
+                outcome: ChildOutcome::Aborted,
+                finalization: self
+                    .shutdown_handle
+                    .as_ref()
+                    .and_then(TurnShutdownHandle::finalization),
+            },
+        };
+        completion
     }
 
     pub(super) async fn outcome(&self) -> ChildOutcome {
-        let current = self.outcome_rx.borrow().clone();
-        if let Some(outcome) = current {
-            return outcome;
-        }
-        let mut receiver = self.outcome_rx.clone();
-        let outcome = match receiver.wait_for(Option::is_some).await {
-            Ok(outcome) => outcome.clone().unwrap_or(ChildOutcome::Aborted),
-            Err(_) => ChildOutcome::Aborted,
-        };
-        outcome
+        self.completion().await.outcome
     }
 
     pub(super) fn is_complete(&self) -> bool {
-        self.outcome_rx.borrow().is_some()
+        self.completion_rx.borrow().is_some()
     }
 
     pub(super) fn request_shutdown(&self) {
-        self.shutdown_handle.request_shutdown();
+        if let Some(handle) = &self.shutdown_handle {
+            handle.request_shutdown();
+        }
+    }
+
+    pub(super) fn child_is_settled(&self) -> bool {
+        self.child_settled.load(Ordering::Acquire)
+    }
+
+    pub(super) fn mark_child_settled(&self) {
+        self.child_settled.store(true, Ordering::Release);
+    }
+
+    pub(super) fn force_recycle_on_completion(&self) {
+        self.force_recycle.store(true, Ordering::Release);
+    }
+
+    pub(super) fn retry_delay_ms(&self) -> u64 {
+        let attempt = self.retry_attempt.fetch_add(1, Ordering::AcqRel).min(5);
+        50_u64 << attempt
+    }
+
+    pub(super) fn finish_terminal(&self, result: Result<(), String>) {
+        if let Some(tx) = self.terminal_tx.lock().take() {
+            let _ = tx.send(result);
+        }
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(super) fn has_terminal_waiter(&self) -> bool {
+        self.terminal_tx.lock().is_some()
     }
 
     pub(super) fn force_timeout(&self) {
-        self.shutdown_handle.force_kill();
-        try_set_outcome(&self.outcome_tx, ChildOutcome::TimedOut);
+        if let Some(handle) = &self.shutdown_handle {
+            handle.force_kill();
+        }
+        try_set_completion(
+            &self.completion_tx,
+            ChildCompletion {
+                outcome: ChildOutcome::TimedOut,
+                finalization: self
+                    .shutdown_handle
+                    .as_ref()
+                    .and_then(TurnShutdownHandle::finalization),
+            },
+        );
     }
 
     pub(super) fn child_session_id(&self) -> &SessionId {
@@ -104,7 +203,11 @@ impl ChildSessionCompletionGuard {
     }
 
     pub(super) fn cleanup_policy(&self) -> ChildCleanup {
-        self.config.cleanup
+        if self.force_recycle.load(Ordering::Acquire) {
+            ChildCleanup::Recycle
+        } else {
+            self.config.cleanup
+        }
     }
 
     pub(super) fn notify_text(&self) -> Option<&str> {
@@ -121,67 +224,6 @@ impl ChildSessionCompletionGuard {
             .as_deref()
             .filter(|summary| !summary.trim().is_empty())
     }
-}
-
-async fn append_parent_agent_event(
-    session_manager: &Arc<SessionManager>,
-    parent_session_id: &SessionId,
-    child_session_id: &SessionId,
-    payload: astrcode_core::event::DurableEventPayload,
-    failure_log: &'static str,
-) {
-    if let Ok(parent_session) = session_manager.open(parent_session_id.clone()).await {
-        if let Err(error) = parent_session.emit_durable(None, payload).await {
-            tracing::warn!(
-                parent_session_id = %parent_session_id,
-                child_session_id = %child_session_id,
-                error = %error,
-                "{failure_log}"
-            );
-        }
-    }
-}
-
-pub(super) async fn write_agent_completed(
-    session_manager: &Arc<SessionManager>,
-    parent_session_id: &SessionId,
-    child_session_id: &SessionId,
-    summary: &str,
-) {
-    append_parent_agent_event(
-        session_manager,
-        parent_session_id,
-        child_session_id,
-        astrcode_session::payload::agent_session_completed_payload(
-            child_session_id.clone(),
-            one_line_summary(summary),
-        ),
-        "failed to append AgentSessionCompleted event",
-    )
-    .await;
-}
-
-pub(super) async fn write_agent_failed(
-    session_manager: &Arc<SessionManager>,
-    parent_session_id: &SessionId,
-    child_session_id: &SessionId,
-    error: &str,
-) {
-    append_parent_agent_event(
-        session_manager,
-        parent_session_id,
-        child_session_id,
-        astrcode_session::payload::agent_session_failed_payload(
-            child_session_id.clone(),
-            error.to_string(),
-        ),
-        "failed to append AgentSessionFailed event",
-    )
-    .await;
-}
-
-fn one_line_summary(text: &str) -> String {
-    crate::presentation::inline_preview(text, 159)
 }
 
 pub(super) async fn build_background_agent_notification(
@@ -299,22 +341,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn outcome_is_first_write_wins() {
+    fn completion_is_first_write_wins() {
         let (tx, rx) = watch::channel(None);
-        try_set_outcome(
+        try_set_completion(
             &tx,
-            ChildOutcome::Completed {
-                output: "first".into(),
+            ChildCompletion {
+                outcome: ChildOutcome::Completed {
+                    output: "first".into(),
+                },
+                finalization: None,
             },
         );
-        try_set_outcome(
+        try_set_completion(
             &tx,
-            ChildOutcome::Failed {
-                error: "second".into(),
+            ChildCompletion {
+                outcome: ChildOutcome::Failed {
+                    error: "second".into(),
+                },
+                finalization: None,
             },
         );
         assert_eq!(
-            rx.borrow().clone(),
+            rx.borrow()
+                .as_ref()
+                .map(|completion| completion.outcome.clone()),
             Some(ChildOutcome::Completed {
                 output: "first".into(),
             })

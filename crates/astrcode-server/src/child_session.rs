@@ -13,19 +13,17 @@ use astrcode_core::{
     tool::{CreateSessionRequest, SessionApiError},
     types::{SessionId, TurnId},
 };
-use astrcode_session::TurnHandle;
-use astrcode_session_projection::AgentSessionStatus;
+use astrcode_session::{TurnError, TurnFinalization, TurnHandle};
+use astrcode_session_projection::{AgentSessionLinkView, AgentSessionStatus};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use self::completion::{
-    ChildSessionCompletionGuard, build_background_agent_notification, write_agent_completed,
-    write_agent_failed,
-};
+use self::completion::{ChildSessionCompletionGuard, build_background_agent_notification};
 use crate::{
-    session_manager::SessionManager,
-    turn_scheduler::{CompletedRecycleOutcome, InputDelivery, TurnScheduler},
+    delivery_gates::SessionOperationGuard,
+    session_manager::{SessionManager, SessionManagerError},
+    turn_scheduler::{InputDelivery, TurnScheduleError, TurnScheduler},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +32,105 @@ enum ChildOutcome {
     Failed { error: String },
     Aborted,
     TimedOut,
+}
+
+#[derive(Debug, Clone)]
+struct ChildCompletion {
+    outcome: ChildOutcome,
+    finalization: Option<TurnFinalization>,
+}
+
+enum ChildRelationUpdate {
+    Completed {
+        child_session_id: SessionId,
+        summary: String,
+    },
+    Failed {
+        child_session_id: SessionId,
+        error: String,
+    },
+    Recycled {
+        child_session_id: SessionId,
+    },
+}
+
+impl ChildRelationUpdate {
+    fn child_session_id(&self) -> &SessionId {
+        match self {
+            Self::Completed {
+                child_session_id, ..
+            }
+            | Self::Failed {
+                child_session_id, ..
+            }
+            | Self::Recycled { child_session_id } => child_session_id,
+        }
+    }
+
+    fn expected(&self) -> &'static str {
+        match self {
+            Self::Completed { .. } => "completed",
+            Self::Failed { .. } => "failed",
+            Self::Recycled { .. } => "recycled",
+        }
+    }
+
+    fn is_applied(&self, link: Option<&AgentSessionLinkView>) -> bool {
+        match (self, link) {
+            (
+                Self::Completed {
+                    child_session_id,
+                    summary,
+                },
+                Some(link),
+            ) => {
+                link.status == AgentSessionStatus::Completed
+                    && link.final_session_id.as_ref() == Some(child_session_id)
+                    && link.summary.as_ref() == Some(summary)
+            },
+            (
+                Self::Failed {
+                    child_session_id,
+                    error,
+                },
+                Some(link),
+            ) => {
+                link.status == AgentSessionStatus::Failed
+                    && link.final_session_id.as_ref() == Some(child_session_id)
+                    && link.error.as_ref() == Some(error)
+            },
+            (Self::Recycled { .. }, None) => true,
+            _ => false,
+        }
+    }
+
+    fn can_apply(&self, link: Option<&AgentSessionLinkView>) -> bool {
+        match self {
+            Self::Completed { .. } | Self::Failed { .. } => {
+                link.is_some_and(|link| link.status == AgentSessionStatus::Running)
+            },
+            Self::Recycled { .. } => link.is_some(),
+        }
+    }
+
+    fn into_payload(self) -> DurableEventPayload {
+        match self {
+            Self::Completed {
+                child_session_id,
+                summary,
+            } => astrcode_session::payload::agent_session_completed_payload(
+                child_session_id,
+                summary,
+            ),
+            Self::Failed {
+                child_session_id,
+                error,
+            } => astrcode_session::payload::agent_session_failed_payload(child_session_id, error),
+            Self::Recycled { child_session_id } => {
+                DurableEventPayload::AgentSessionRecycled { child_session_id }
+            },
+        }
+    }
 }
 
 const CHILD_SESSION_COMPLETE_CAPACITY: usize = 256;
@@ -56,6 +153,26 @@ struct ChildSessionCompletionConfig {
 
 type CompletionGuards = Vec<Arc<ChildSessionCompletionGuard>>;
 
+#[cfg(any(test, feature = "testing"))]
+struct CompletionGuardPause {
+    reached: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+pub(crate) struct ChildTreeShutdown {
+    guards: CompletionGuards,
+}
+
+struct ClaimedCompletionGuard {
+    guard: Arc<ChildSessionCompletionGuard>,
+    operation: SessionOperationGuard,
+}
+
+struct ClaimedCompletionGuards {
+    guards: Vec<ClaimedCompletionGuard>,
+    error: Option<TurnScheduleError>,
+}
+
 /// 子 agent session 完成、turn 提交与回收的 server 侧协调者。
 pub struct ChildSessionCoordinator {
     session_manager: Arc<SessionManager>,
@@ -64,6 +181,12 @@ pub struct ChildSessionCoordinator {
     completed_rx: Mutex<Option<mpsc::Receiver<SessionId>>>,
     watcher_shutdown: CancellationToken,
     watcher: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    #[cfg(any(test, feature = "testing"))]
+    registration_pause: Mutex<Option<CompletionGuardPause>>,
+    #[cfg(any(test, feature = "testing"))]
+    claim_pause: Mutex<Option<CompletionGuardPause>>,
+    #[cfg(any(test, feature = "testing"))]
+    sync_settled_pause: Mutex<Option<CompletionGuardPause>>,
 }
 
 impl ChildSessionCoordinator {
@@ -76,6 +199,12 @@ impl ChildSessionCoordinator {
             completed_rx: Mutex::new(Some(completed_rx)),
             watcher_shutdown: CancellationToken::new(),
             watcher: Mutex::new(None),
+            #[cfg(any(test, feature = "testing"))]
+            registration_pause: Mutex::new(None),
+            #[cfg(any(test, feature = "testing"))]
+            claim_pause: Mutex::new(None),
+            #[cfg(any(test, feature = "testing"))]
+            sync_settled_pause: Mutex::new(None),
         }
     }
 
@@ -89,7 +218,7 @@ impl ChildSessionCoordinator {
         };
         let coordinator = Arc::clone(self);
         let shutdown = self.watcher_shutdown.clone();
-        let watcher = tokio::spawn(async move {
+        let watcher = match scheduler.spawn_owned_named("child_completion_watcher", async move {
             loop {
                 tokio::select! {
                     parent_sid = rx.recv() => {
@@ -110,7 +239,13 @@ impl ChildSessionCoordinator {
                     },
                 }
             }
-        });
+        }) {
+            Ok(watcher) => watcher,
+            Err(error) => {
+                tracing::warn!(%error, "child completion watcher rejected");
+                return;
+            },
+        };
         *self.watcher.lock() = Some(watcher);
     }
 
@@ -124,6 +259,22 @@ impl ChildSessionCoordinator {
         }
     }
 
+    pub(crate) async fn drain_completion_guards_for_shutdown(&self, scheduler: &TurnScheduler) {
+        loop {
+            let parent_ids: Vec<_> = self.by_parent.lock().keys().cloned().collect();
+            if parent_ids.is_empty() {
+                return;
+            }
+            for parent_id in parent_ids {
+                self.drain_completed(scheduler, &parent_id).await;
+            }
+            if self.by_parent.lock().is_empty() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     pub async fn verify_access(
         &self,
         caller: &SessionId,
@@ -133,7 +284,14 @@ impl ChildSessionCoordinator {
             return Ok(());
         }
         let mut current = target.clone();
+        let mut visited = HashSet::new();
+        let mut caller_is_ancestor = false;
         loop {
+            if !visited.insert(current.clone()) {
+                return Err(SessionApiError::internal_msg(format!(
+                    "session parent chain contains a cycle at {current}"
+                )));
+            }
             let model = self
                 .session_manager
                 .read_model(&current)
@@ -142,14 +300,18 @@ impl ChildSessionCoordinator {
             match &model.identity.parent {
                 Some(parent) => {
                     if &parent.session_id == caller {
-                        return Ok(());
+                        caller_is_ancestor = true;
                     }
                     current = parent.session_id.clone();
                 },
                 None => {
-                    return Err(SessionApiError::PermissionDenied(format!(
-                        "session {target} is not a descendant of {caller}"
-                    )));
+                    return if caller_is_ancestor {
+                        Ok(())
+                    } else {
+                        Err(SessionApiError::PermissionDenied(format!(
+                            "session {target} is not a descendant of {caller}"
+                        )))
+                    };
                 },
             }
         }
@@ -158,7 +320,13 @@ impl ChildSessionCoordinator {
     pub async fn session_depth(&self, session_id: &SessionId) -> Result<usize, SessionApiError> {
         let mut depth = 0;
         let mut current = session_id.clone();
+        let mut visited = HashSet::new();
         loop {
+            if !visited.insert(current.clone()) {
+                return Err(SessionApiError::internal_msg(format!(
+                    "session parent chain contains a cycle at {current}"
+                )));
+            }
             let model = self
                 .session_manager
                 .read_model(&current)
@@ -175,18 +343,19 @@ impl ChildSessionCoordinator {
         Ok(depth)
     }
 
-    pub async fn spawn_child(
+    pub(crate) async fn spawn_child(
         &self,
-        parent_session_id: &SessionId,
+        parent_operation: SessionOperationGuard,
         request: CreateSessionRequest,
     ) -> Result<astrcode_session::Session, SessionApiError> {
+        let parent_session_id = parent_operation.session_id().clone();
         let parent_session = self
             .session_manager
             .open(parent_session_id.clone())
             .await
             .map_err(|e| SessionApiError::NotFound(format!("parent: {e}")))?;
 
-        let depth = self.session_depth(parent_session_id).await?;
+        let depth = self.session_depth(&parent_session_id).await?;
         let max_depth = self.session_manager.max_agent_depth();
         if depth >= max_depth {
             return Err(SessionApiError::MaxDepthExceeded {
@@ -207,70 +376,89 @@ impl ChildSessionCoordinator {
             .model_preference
             .filter(|m| m != "inherit" && !m.is_empty())
             .unwrap_or_else(|| parent_model.identity.model_id.clone());
-
-        let child = parent_session
-            .spawn_child(
-                &working_dir,
-                &model_id,
-                request.name,
-                String::new(),
-                request.system_prompt,
-                request.tool_selection,
-                request.source_extension.as_deref(),
-                request.tool_call_id.into(),
-            )
-            .await
+        let task = self
+            .session_manager
+            .spawn_creation_task(async move {
+                let result = parent_session
+                    .spawn_child(
+                        &working_dir,
+                        &model_id,
+                        request.name,
+                        String::new(),
+                        request.system_prompt,
+                        request.tool_selection,
+                        request.source_extension.as_deref(),
+                        request.tool_call_id.into(),
+                    )
+                    .await;
+                drop(parent_operation);
+                result
+            })
             .map_err(SessionApiError::internal)?;
-
-        Ok(child)
+        task.await
+            .map_err(|error| {
+                SessionApiError::internal_msg(format!(
+                    "child session creation transaction stopped: {error}"
+                ))
+            })?
+            .map_err(SessionApiError::internal)
     }
 
-    /// 同步等待 turn 结束，写终态并 drain 父 session 上已完成的 child guard。
+    /// 启动独立 completion owner；请求只等待结果，取消请求不会丢失 turn 收口所有权。
     pub async fn submit_turn_sync(
-        &self,
-        scheduler: &TurnScheduler,
+        self: &Arc<Self>,
+        scheduler: Arc<TurnScheduler>,
         caller_sid: &SessionId,
         target_sid: &SessionId,
         user_prompt: String,
     ) -> Result<String, SessionApiError> {
         self.prepare_turn_target(target_sid).await?;
+        let guard_admission = scheduler.admit_owned().map_err(SessionApiError::internal)?;
+        let owner_admission = scheduler.admit_owned().map_err(SessionApiError::internal)?;
+        let operation = scheduler
+            .begin_session_operation(target_sid)
+            .await
+            .map_err(SessionApiError::internal)?;
         let started = scheduler
-            .start_with_completion(
-                target_sid.clone(),
+            .start_with_completion_in_operation(
+                &operation,
                 astrcode_core::user_input::UserInput::text_only(user_prompt),
             )
             .await
             .map_err(SessionApiError::internal)?;
-
-        let turn_id = started.turn_id;
-        let result = started.handle.wait().await;
-        let next = scheduler
-            .finish_and_maybe_start_next(target_sid, &turn_id)
-            .await;
-        scheduler.watch_queued_if_any(target_sid.clone(), next);
-
-        let content = match result {
-            Some(r) => match r.output {
-                Ok(out) => {
-                    self.record_completed(caller_sid, target_sid, &out.text)
-                        .await;
-                    out.text
-                },
-                Err(e) => {
-                    self.record_failed(caller_sid, target_sid, &e.to_string())
-                        .await;
-                    return Err(SessionApiError::internal(e));
-                },
-            },
-            None => {
-                self.record_failed(caller_sid, target_sid, "turn task panicked")
-                    .await;
-                return Err(SessionApiError::internal_msg("turn task panicked"));
-            },
+        let config = ChildSessionCompletionConfig {
+            child_session_id: target_sid.clone(),
+            parent_session_id: caller_sid.clone(),
+            turn_id: started.turn_id.clone(),
+            cleanup: ChildCleanup::Keep,
+            notify_on_complete: None,
+            tool_call_id: None,
         };
-
-        self.drain_completed(scheduler, caller_sid).await;
-        Ok(content)
+        let (guard, terminal_rx) =
+            self.register_sync_completion_guard(guard_admission, started.handle, config);
+        let coordinator = Arc::clone(self);
+        let owner_scheduler = Arc::clone(&scheduler);
+        let owner_guard = Arc::clone(&guard);
+        let parent_sid = caller_sid.clone();
+        owner_admission.spawn_named("child_sync_completion_owner", async move {
+            let _ = owner_guard.completion().await;
+            coordinator
+                .drain_completed(owner_scheduler.as_ref(), &parent_sid)
+                .await;
+        });
+        drop(operation);
+        self.drain_completed(scheduler.as_ref(), caller_sid).await;
+        let completion = guard.completion().await;
+        terminal_rx
+            .await
+            .map_err(SessionApiError::internal)?
+            .map_err(SessionApiError::internal_msg)?;
+        match completion.outcome {
+            ChildOutcome::Completed { output } => Ok(output),
+            ChildOutcome::Failed { error } => Err(SessionApiError::internal_msg(error)),
+            ChildOutcome::Aborted => Err(SessionApiError::internal(TurnError::Aborted)),
+            ChildOutcome::TimedOut => Err(SessionApiError::internal_msg("turn timed out")),
+        }
     }
 
     /// 后台 turn：注册 completion guard，并 drain 父 session 上已完成的 child。
@@ -286,9 +474,14 @@ impl ChildSessionCoordinator {
         tool_call_id: Option<String>,
     ) -> Result<(TurnId, SessionId), SessionApiError> {
         self.prepare_turn_target(target_sid).await?;
+        let guard_admission = scheduler.admit_owned().map_err(SessionApiError::internal)?;
+        let operation = scheduler
+            .begin_session_operation(target_sid)
+            .await
+            .map_err(SessionApiError::internal)?;
         let started = scheduler
-            .start_with_completion(
-                target_sid.clone(),
+            .start_with_completion_in_operation(
+                &operation,
                 astrcode_core::user_input::UserInput::text_only(user_prompt),
             )
             .await
@@ -303,111 +496,257 @@ impl ChildSessionCoordinator {
             notify_on_complete,
             tool_call_id,
         };
-        self.register_completion_guard(started.handle, config);
+        self.register_completion_guard(guard_admission, started.handle, config)
+            .await;
+        drop(operation);
         self.drain_completed(scheduler, caller_sid).await;
         Ok((turn_id, target_sid.clone()))
     }
 
-    async fn record_completed(&self, parent_sid: &SessionId, child_sid: &SessionId, summary: &str) {
-        write_agent_completed(&self.session_manager, parent_sid, child_sid, summary).await;
-    }
-
-    async fn record_failed(&self, parent_sid: &SessionId, child_sid: &SessionId, error: &str) {
-        write_agent_failed(&self.session_manager, parent_sid, child_sid, error).await;
-    }
-
-    pub async fn recycle_child(
+    async fn record_completed(
         &self,
-        scheduler: &TurnScheduler,
         parent_sid: &SessionId,
         child_sid: &SessionId,
-    ) {
-        let result = scheduler.recycle_session(child_sid).await;
-        self.record_child_recycled(parent_sid, child_sid, result)
-            .await;
+        summary: &str,
+    ) -> Result<(), TurnScheduleError> {
+        self.record_child_relation(
+            parent_sid,
+            ChildRelationUpdate::Completed {
+                child_session_id: child_sid.clone(),
+                summary: crate::presentation::inline_preview(summary, 159),
+            },
+        )
+        .await
     }
 
-    async fn recycle_completed_child(
+    async fn record_failed(
         &self,
-        scheduler: &TurnScheduler,
         parent_sid: &SessionId,
         child_sid: &SessionId,
-        turn_id: &TurnId,
-    ) {
-        match scheduler
-            .recycle_completed_session(child_sid, turn_id)
+        error: &str,
+    ) -> Result<(), TurnScheduleError> {
+        self.record_child_relation(
+            parent_sid,
+            ChildRelationUpdate::Failed {
+                child_session_id: child_sid.clone(),
+                error: error.to_string(),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn record_child_deleted(
+        &self,
+        parent_sid: &SessionId,
+        child_sid: &SessionId,
+    ) -> Result<(), TurnScheduleError> {
+        self.record_failed(parent_sid, child_sid, "deleted").await
+    }
+
+    pub(crate) async fn record_child_recycled(
+        &self,
+        parent_sid: &SessionId,
+        child_sid: &SessionId,
+    ) -> Result<(), TurnScheduleError> {
+        self.record_child_relation(
+            parent_sid,
+            ChildRelationUpdate::Recycled {
+                child_session_id: child_sid.clone(),
+            },
+        )
+        .await
+    }
+
+    async fn record_child_relation(
+        &self,
+        parent_sid: &SessionId,
+        update: ChildRelationUpdate,
+    ) -> Result<(), TurnScheduleError> {
+        let parent_session = self
+            .session_manager
+            .open(parent_sid.clone())
             .await
-        {
-            Ok(CompletedRecycleOutcome::Recycled) => {
-                self.record_child_recycled(parent_sid, child_sid, Ok(()))
-                    .await;
-            },
-            Ok(CompletedRecycleOutcome::StaleCompletion) => {
-                tracing::debug!(
-                    session_id = %child_sid,
-                    turn_id = %turn_id,
-                    "ignored stale child completion during recycle"
-                );
-            },
-            Err(error) => {
-                self.record_child_recycled(parent_sid, child_sid, Err(error))
-                    .await;
-            },
-        }
-    }
-
-    async fn record_child_recycled(
-        &self,
-        parent_sid: &SessionId,
-        child_sid: &SessionId,
-        result: Result<(), crate::turn_scheduler::TurnScheduleError>,
-    ) {
-        if let Err(e) = result {
-            tracing::warn!(
-                session_id = %child_sid,
-                error = %e,
-                "failed to recycle session"
-            );
-            return;
-        }
-        if let Ok(parent_session) = self.session_manager.open(parent_sid.clone()).await {
-            if let Err(e) = parent_session
-                .emit_durable(
-                    None,
-                    DurableEventPayload::AgentSessionRecycled {
-                        child_session_id: child_sid.clone(),
-                    },
-                )
+            .map_err(TurnScheduleError::from)?;
+        let parent_model = parent_session
+            .read_model()
+            .await
+            .map_err(TurnScheduleError::Session)?;
+        let child_session_id = update.child_session_id();
+        let link = parent_model
+            .agent_sessions
+            .iter()
+            .find(|link| &link.child_session_id == child_session_id);
+        if update.is_applied(link) {
+            self.session_manager
+                .sync_durable_events_required(parent_sid)
                 .await
-            {
-                tracing::warn!(
-                    parent_session_id = %parent_sid,
-                    child_session_id = %child_sid,
-                    error = %e,
-                    "failed to append AgentSessionRecycled event"
-                );
-            }
-            self.session_manager.sync_durable_events(parent_sid).await;
+                .map_err(TurnScheduleError::SessionManager)?;
+            return Ok(());
         }
+        if !update.can_apply(link) {
+            return Err(TurnScheduleError::ChildRelationConflict {
+                parent_session_id: parent_sid.clone(),
+                child_session_id: child_session_id.clone(),
+                expected: update.expected().into(),
+                actual: link
+                    .map(|link| format!("{:?}", link.status).to_lowercase())
+                    .unwrap_or_else(|| "missing".into()),
+            });
+        }
+        parent_session
+            .emit_durable(None, update.into_payload())
+            .await
+            .map_err(TurnScheduleError::EventEmit)?;
+        self.session_manager
+            .sync_durable_events_required(parent_sid)
+            .await
+            .map_err(TurnScheduleError::SessionManager)?;
+        Ok(())
     }
 
     pub async fn drain_completed(&self, scheduler: &TurnScheduler, parent_sid: &SessionId) {
-        let completed = self.drain_completed_guards(parent_sid);
-        for guard in completed {
-            self.write_terminal_for_guard(&guard).await;
-            if guard.cleanup_policy() == ChildCleanup::Recycle {
-                self.recycle_completed_child(
-                    scheduler,
-                    guard.parent_session_id(),
-                    guard.child_session_id(),
-                    guard.turn_id(),
-                )
-                .await;
-            } else {
-                scheduler
-                    .release_completed_execution(guard.child_session_id(), guard.turn_id())
+        let completed = self.completed_guard_candidates(parent_sid);
+        for candidate in completed {
+            let operation = match scheduler
+                .begin_session_operation(candidate.child_session_id())
+                .await
+            {
+                Ok(operation) => operation,
+                Err(error) => {
+                    self.schedule_completion_retry(&candidate);
+                    tracing::debug!(
+                        child_session_id = %candidate.child_session_id(),
+                        %error,
+                        "child completion operation unavailable; retry scheduled"
+                    );
+                    continue;
+                },
+            };
+            let Some(guard) = self.claim_completion_guard(parent_sid, &candidate) else {
+                drop(operation);
+                continue;
+            };
+            #[cfg(any(test, feature = "testing"))]
+            self.pause_after_claim_for_test().await;
+
+            let completion = guard.completion().await;
+            if !guard.child_is_settled() {
+                let settled = scheduler
+                    .release_completed_execution_in_operation(
+                        &operation,
+                        guard.turn_id(),
+                        completion.finalization.as_ref(),
+                    )
                     .await;
+                match settled {
+                    Ok(true) => {
+                        guard.mark_child_settled();
+                        #[cfg(any(test, feature = "testing"))]
+                        if guard.has_terminal_waiter() {
+                            self.pause_sync_settled_for_test().await;
+                        }
+                    },
+                    Ok(false) => {
+                        if self.completion_turn_is_durably_settled(&guard).await {
+                            guard.mark_child_settled();
+                            #[cfg(any(test, feature = "testing"))]
+                            if guard.has_terminal_waiter() {
+                                self.pause_sync_settled_for_test().await;
+                            }
+                        } else {
+                            let superseded = self.completion_was_superseded_by_close(&guard).await;
+                            if !superseded {
+                                self.restore_completion_guard(Arc::clone(&guard));
+                            }
+                            guard.finish_terminal(Err(format!(
+                                "completion ownership was lost for session {}, turn {}",
+                                guard.child_session_id(),
+                                guard.turn_id()
+                            )));
+                            drop(operation);
+                            tracing::warn!(
+                                child_session_id = %guard.child_session_id(),
+                                turn_id = %guard.turn_id(),
+                                superseded,
+                                "child completion lost registry ownership"
+                            );
+                            continue;
+                        }
+                    },
+                    Err(error) => {
+                        let superseded = self.completion_was_superseded_by_close(&guard).await;
+                        if !superseded {
+                            self.restore_completion_guard(Arc::clone(&guard));
+                        }
+                        guard.finish_terminal(Err(error.to_string()));
+                        drop(operation);
+                        tracing::error!(
+                            child_session_id = %guard.child_session_id(),
+                            turn_id = %guard.turn_id(),
+                            %error,
+                            superseded,
+                            "failed to settle child completion"
+                        );
+                        continue;
+                    },
+                }
             }
+
+            if let Err(error) = self.write_terminal_for_guard(&guard, &completion).await {
+                let conflict = matches!(&error, TurnScheduleError::ChildRelationConflict { .. });
+                if !conflict {
+                    self.restore_completion_guard(Arc::clone(&guard));
+                }
+                guard.finish_terminal(Err(error.to_string()));
+                drop(operation);
+                tracing::warn!(
+                    parent_session_id = %guard.parent_session_id(),
+                    child_session_id = %guard.child_session_id(),
+                    %error,
+                    conflict,
+                    "failed to persist child terminal"
+                );
+                continue;
+            }
+            if guard.cleanup_policy() == ChildCleanup::Recycle {
+                if let Err(error) = scheduler
+                    .recycle_settled_session_in_operation(operation)
+                    .await
+                {
+                    guard.force_recycle_on_completion();
+                    self.restore_completion_guard(Arc::clone(&guard));
+                    guard.finish_terminal(Err(error.to_string()));
+                    tracing::warn!(
+                        parent_session_id = %guard.parent_session_id(),
+                        session_id = %guard.child_session_id(),
+                        %error,
+                        "failed to recycle settled child session; guard ownership retained"
+                    );
+                    continue;
+                }
+            } else {
+                match scheduler
+                    .start_next_after_settle_in_operation(operation)
+                    .await
+                {
+                    Ok(next) => {
+                        scheduler.watch_queued_if_any(guard.child_session_id().clone(), next);
+                    },
+                    Err(error) => {
+                        self.restore_completion_guard(Arc::clone(&guard));
+                        guard.finish_terminal(Err(error.to_string()));
+                        tracing::warn!(
+                            parent_session_id = %guard.parent_session_id(),
+                            child_session_id = %guard.child_session_id(),
+                            %error,
+                            "failed to start queued child input; guard ownership retained"
+                        );
+                        continue;
+                    },
+                }
+            }
+            guard.finish_terminal(Ok(()));
+
             if guard.notify_text().is_some() {
                 let message = build_background_agent_notification(&guard).await;
                 if let Err(e) = scheduler
@@ -429,29 +768,333 @@ impl ChildSessionCoordinator {
         }
     }
 
-    fn register_completion_guard(&self, handle: TurnHandle, config: ChildSessionCompletionConfig) {
+    async fn register_completion_guard(
+        &self,
+        admission: crate::task_utils::OwnedTaskAdmission,
+        handle: TurnHandle,
+        config: ChildSessionCompletionConfig,
+    ) {
         let parent_sid = config.parent_session_id.clone();
-        let guard = ChildSessionCompletionGuard::spawn(handle, config, self.completed_tx.clone());
+        let guard = Arc::new(ChildSessionCompletionGuard::new(&handle, config));
         self.by_parent
             .lock()
             .entry(parent_sid)
             .or_default()
-            .push(Arc::new(guard));
+            .push(Arc::clone(&guard));
+        #[cfg(any(test, feature = "testing"))]
+        self.pause_registration_for_test().await;
+        guard.start(admission, handle, self.completed_tx.clone());
     }
 
-    pub async fn cascade_abort_children(&self, scheduler: &TurnScheduler, parent_sid: &SessionId) {
-        let guards = self
-            .collect_guards_deep(parent_sid, Duration::from_secs(10))
-            .await;
-        if !guards.is_empty() {
-            self.finalize_aborted_children(scheduler, &guards).await;
+    fn register_sync_completion_guard(
+        &self,
+        admission: crate::task_utils::OwnedTaskAdmission,
+        handle: TurnHandle,
+        config: ChildSessionCompletionConfig,
+    ) -> (
+        Arc<ChildSessionCompletionGuard>,
+        tokio::sync::oneshot::Receiver<Result<(), String>>,
+    ) {
+        let parent_sid = config.parent_session_id.clone();
+        let (guard, terminal_rx) = ChildSessionCompletionGuard::new_sync(&handle, config);
+        let guard = Arc::new(guard);
+        self.by_parent
+            .lock()
+            .entry(parent_sid)
+            .or_default()
+            .push(Arc::clone(&guard));
+        guard.start(admission, handle, self.completed_tx.clone());
+        (guard, terminal_rx)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn pause_next_registration(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        Self::install_pause(&self.registration_pause)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn pause_next_claim(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        Self::install_pause(&self.claim_pause)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn pause_next_sync_settled(
+        &self,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        Self::install_pause(&self.sync_settled_pause)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn registered_guard_count(&self, parent_sid: &SessionId) -> usize {
+        self.by_parent.lock().get(parent_sid).map_or(0, Vec::len)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    fn install_pause(
+        target: &Mutex<Option<CompletionGuardPause>>,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *target.lock() = Some(CompletionGuardPause {
+            reached: reached_tx,
+            release: release_rx,
+        });
+        (reached_rx, release_tx)
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    async fn pause_registration_for_test(&self) {
+        Self::wait_for_pause(&self.registration_pause).await;
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    async fn pause_after_claim_for_test(&self) {
+        Self::wait_for_pause(&self.claim_pause).await;
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    async fn pause_sync_settled_for_test(&self) {
+        Self::wait_for_pause(&self.sync_settled_pause).await;
+    }
+
+    #[cfg(any(test, feature = "testing"))]
+    async fn wait_for_pause(target: &Mutex<Option<CompletionGuardPause>>) {
+        let Some(pause) = target.lock().take() else {
+            return;
+        };
+        let _ = pause.reached.send(());
+        let _ = pause.release.await;
+    }
+
+    fn completed_guard_candidates(&self, parent_sid: &SessionId) -> CompletionGuards {
+        self.by_parent
+            .lock()
+            .get(parent_sid)
+            .map(|guards| {
+                guards
+                    .iter()
+                    .filter(|guard| guard.is_complete())
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn guard_candidates(&self, parent_sid: &SessionId) -> CompletionGuards {
+        self.by_parent
+            .lock()
+            .get(parent_sid)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    fn registered_child_ids(&self) -> HashSet<SessionId> {
+        self.by_parent
+            .lock()
+            .values()
+            .flatten()
+            .map(|guard| guard.child_session_id().clone())
+            .collect()
+    }
+
+    fn claim_completion_guard(
+        &self,
+        parent_sid: &SessionId,
+        expected: &Arc<ChildSessionCompletionGuard>,
+    ) -> Option<Arc<ChildSessionCompletionGuard>> {
+        let mut by_parent = self.by_parent.lock();
+        let (guard, remove_parent) = {
+            let guards = by_parent.get_mut(parent_sid)?;
+            let index = guards
+                .iter()
+                .position(|guard| Arc::ptr_eq(guard, expected))?;
+            let guard = guards.remove(index);
+            (guard, guards.is_empty())
+        };
+        if remove_parent {
+            by_parent.remove(parent_sid);
         }
-        let guarded_children: HashSet<SessionId> = guards
+        Some(guard)
+    }
+
+    fn restore_completion_guard(&self, guard: Arc<ChildSessionCompletionGuard>) {
+        let parent_session_id = guard.parent_session_id().clone();
+        self.by_parent
+            .lock()
+            .entry(parent_session_id)
+            .or_default()
+            .push(Arc::clone(&guard));
+        self.schedule_completion_retry(&guard);
+    }
+
+    fn schedule_completion_retry(&self, guard: &ChildSessionCompletionGuard) {
+        let delay = Duration::from_millis(guard.retry_delay_ms());
+        let parent_session_id = guard.parent_session_id().clone();
+        let completed_tx = self.completed_tx.clone();
+        let shutdown = self.watcher_shutdown.clone();
+        if self
+            .session_manager
+            .owned_tasks()
+            .spawn_named("child_completion_retry", async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(delay) => {
+                        let _ = completed_tx.send(parent_session_id).await;
+                    },
+                    _ = shutdown.cancelled() => {},
+                }
+            })
+            .is_err()
+        {
+            tracing::debug!("child completion retry rejected during shutdown");
+        }
+    }
+
+    fn restore_claimed_guards(&self, guards: Vec<ClaimedCompletionGuard>) {
+        for claimed in guards {
+            self.restore_completion_guard(claimed.guard);
+        }
+    }
+
+    pub async fn cascade_abort_children(
+        &self,
+        scheduler: &TurnScheduler,
+        parent_sid: &SessionId,
+    ) -> Result<(), TurnScheduleError> {
+        let claimed = self
+            .claim_guards_deep(scheduler, parent_sid, Duration::from_secs(10))
+            .await;
+        let mut guarded_children: HashSet<SessionId> = claimed
+            .guards
+            .iter()
+            .map(|claimed| claimed.guard.child_session_id().clone())
+            .collect();
+        if let Some(error) = claimed.error {
+            self.restore_claimed_guards(claimed.guards);
+            return Err(error);
+        }
+        if !claimed.guards.is_empty() {
+            self.finalize_aborted_children(scheduler, claimed.guards)
+                .await?;
+        }
+        guarded_children.extend(self.registered_child_ids());
+        self.abort_unguarded_running_children(scheduler, parent_sid, &guarded_children)
+            .await
+    }
+
+    pub(crate) fn begin_tree_shutdown(&self, session_ids: &[SessionId]) -> ChildTreeShutdown {
+        let closing_sessions: HashSet<_> = session_ids.iter().cloned().collect();
+        let mut selected = Vec::new();
+        let mut by_parent = self.by_parent.lock();
+        let parent_ids: Vec<_> = by_parent.keys().cloned().collect();
+
+        for parent_id in parent_ids {
+            let guards = by_parent.remove(&parent_id).unwrap_or_default();
+            let (mut closing, remaining): (CompletionGuards, CompletionGuards) =
+                guards.into_iter().partition(|guard| {
+                    closing_sessions.contains(&parent_id)
+                        || closing_sessions.contains(guard.child_session_id())
+                });
+            selected.append(&mut closing);
+            if !remaining.is_empty() {
+                by_parent.insert(parent_id, remaining);
+            }
+        }
+        drop(by_parent);
+
+        for guard in &selected {
+            guard.request_shutdown();
+        }
+        ChildTreeShutdown { guards: selected }
+    }
+
+    pub(crate) async fn finish_tree_shutdown(
+        &self,
+        shutdown: ChildTreeShutdown,
+        settled_sessions: &HashSet<SessionId>,
+    ) -> Result<HashSet<SessionId>, TurnScheduleError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        for guard in shutdown.guards.iter().rev() {
+            if tokio::time::timeout_at(deadline, guard.outcome())
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    child_session_id = %guard.child_session_id(),
+                    "session tree shutdown: child session timed out"
+                );
+                guard.force_timeout();
+            }
+        }
+
+        let guarded_children: HashSet<_> = shutdown
+            .guards
             .iter()
             .map(|guard| guard.child_session_id().clone())
             .collect();
-        self.abort_unguarded_running_children(scheduler, parent_sid, &guarded_children)
-            .await;
+        let mut first_error = None;
+        for guard in shutdown.guards.iter().rev() {
+            if settled_sessions.contains(guard.child_session_id()) {
+                guard.mark_child_settled();
+            }
+            if !guard.child_is_settled() && self.completion_turn_is_durably_settled(guard).await {
+                guard.mark_child_settled();
+            }
+            if !guard.child_is_settled() {
+                let error = TurnScheduleError::CompletionOwnershipLost {
+                    session_id: guard.child_session_id().clone(),
+                    turn_id: guard.turn_id().clone(),
+                };
+                guard.finish_terminal(Err(error.to_string()));
+                self.restore_completion_guard(Arc::clone(guard));
+                if first_error.is_none() {
+                    first_error = Some(error);
+                } else {
+                    tracing::warn!(
+                        child_session_id = %guard.child_session_id(),
+                        turn_id = %guard.turn_id(),
+                        "additional session tree completion ownership failure"
+                    );
+                }
+                continue;
+            }
+            let completion = guard.completion().await;
+            if let Err(error) = self.write_terminal_for_guard(guard, &completion).await {
+                guard.finish_terminal(Err(error.to_string()));
+                self.restore_completion_guard(Arc::clone(guard));
+                if first_error.is_none() {
+                    first_error = Some(error);
+                } else {
+                    tracing::warn!(
+                        parent_session_id = %guard.parent_session_id(),
+                        child_session_id = %guard.child_session_id(),
+                        %error,
+                        "additional child terminal persistence failure"
+                    );
+                }
+            } else {
+                guard.finish_terminal(Ok(()));
+            }
+        }
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        Ok(guarded_children)
     }
 
     async fn prepare_turn_target(&self, target_sid: &SessionId) -> Result<(), SessionApiError> {
@@ -462,116 +1105,199 @@ impl ChildSessionCoordinator {
         Ok(())
     }
 
-    fn drain_completed_guards(&self, parent_sid: &SessionId) -> CompletionGuards {
-        let mut by_parent = self.by_parent.lock();
-        let Some((parent_key, guards)) = by_parent.remove_entry(parent_sid) else {
-            return Vec::new();
-        };
-        let (completed, pending): (CompletionGuards, CompletionGuards) =
-            guards.into_iter().partition(|guard| guard.is_complete());
-        if !pending.is_empty() {
-            by_parent.insert(parent_key, pending);
-        }
-        completed
-    }
-
-    fn abort_all_direct(&self, parent_sid: &SessionId) -> CompletionGuards {
-        let guards = self.by_parent.lock().remove(parent_sid).unwrap_or_default();
-        for guard in &guards {
-            guard.request_shutdown();
-        }
-        guards
-    }
-
-    async fn write_terminal_for_guard(&self, guard: &ChildSessionCompletionGuard) {
+    async fn write_terminal_for_guard(
+        &self,
+        guard: &ChildSessionCompletionGuard,
+        completion: &ChildCompletion,
+    ) -> Result<(), TurnScheduleError> {
         let parent_sid = guard.parent_session_id();
         let child_sid = guard.child_session_id();
-        match guard.outcome().await {
+        match &completion.outcome {
             ChildOutcome::Completed { output } => {
-                self.record_completed(parent_sid, child_sid, &output).await;
+                self.record_completed(parent_sid, child_sid, output).await
             },
             ChildOutcome::Failed { error } => {
-                self.record_failed(parent_sid, child_sid, &error).await;
+                self.record_failed(parent_sid, child_sid, error).await
             },
-            ChildOutcome::Aborted => {
-                self.record_failed(parent_sid, child_sid, "aborted").await;
-            },
-            ChildOutcome::TimedOut => {
-                self.record_failed(parent_sid, child_sid, "timed out").await;
-            },
+            ChildOutcome::Aborted => self.record_failed(parent_sid, child_sid, "aborted").await,
+            ChildOutcome::TimedOut => self.record_failed(parent_sid, child_sid, "timed out").await,
         }
     }
 
-    async fn collect_guards_deep(
+    async fn completion_was_superseded_by_close(
         &self,
+        guard: &ChildSessionCompletionGuard,
+    ) -> bool {
+        match self
+            .session_manager
+            .read_model(guard.parent_session_id())
+            .await
+        {
+            Ok(model) => !model.agent_sessions.iter().any(|link| {
+                link.child_session_id == *guard.child_session_id()
+                    && link.status == AgentSessionStatus::Running
+            }),
+            Err(SessionManagerError::Storage(astrcode_storage::StorageError::NotFound(_))) => true,
+            Err(_) => false,
+        }
+    }
+
+    pub(crate) async fn completion_turn_is_durably_settled(
+        &self,
+        guard: &ChildSessionCompletionGuard,
+    ) -> bool {
+        self.session_manager
+            .has_durable_turn_completion(guard.child_session_id(), guard.turn_id())
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn claim_guards_deep(
+        &self,
+        scheduler: &TurnScheduler,
         root_sid: &SessionId,
         timeout: Duration,
-    ) -> Vec<Arc<ChildSessionCompletionGuard>> {
+    ) -> ClaimedCompletionGuards {
         let deadline = tokio::time::Instant::now() + timeout;
-        let mut all_guards: Vec<Arc<ChildSessionCompletionGuard>> = Vec::new();
+        let mut claimed = Vec::new();
+        let mut first_error = None;
         let mut stack: Vec<SessionId> = vec![root_sid.clone()];
+        let mut visited = HashSet::from([root_sid.clone()]);
 
         while let Some(sid) = stack.pop() {
-            let guards = self.abort_all_direct(&sid);
-            if guards.is_empty() {
-                continue;
+            for candidate in self.guard_candidates(&sid) {
+                let child_session_id = candidate.child_session_id().clone();
+                candidate.request_shutdown();
+                if visited.insert(child_session_id.clone()) {
+                    stack.push(child_session_id.clone());
+                }
+                let operation = match tokio::time::timeout_at(
+                    deadline,
+                    scheduler.begin_session_operation(&child_session_id),
+                )
+                .await
+                {
+                    Ok(Ok(operation)) => operation,
+                    Ok(Err(error)) => {
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                        continue;
+                    },
+                    Err(_) => {
+                        if first_error.is_none() {
+                            first_error = Some(TurnScheduleError::CompletionOwnershipLost {
+                                session_id: child_session_id,
+                                turn_id: candidate.turn_id().clone(),
+                            });
+                        }
+                        continue;
+                    },
+                };
+                let Some(guard) = self.claim_completion_guard(&sid, &candidate) else {
+                    drop(operation);
+                    continue;
+                };
+                guard.force_recycle_on_completion();
+                claimed.push(ClaimedCompletionGuard { guard, operation });
             }
-            for guard in &guards {
-                stack.push(guard.child_session_id().clone());
-            }
-            all_guards.extend(guards);
         }
 
         // 反向迭代：子 session 先于父 session 被等待，避免父节点提前结束而子节点仍悬挂。
-        for guard in all_guards.iter().rev() {
-            if tokio::time::timeout_at(deadline, guard.outcome())
+        for claimed_guard in claimed.iter().rev() {
+            if tokio::time::timeout_at(deadline, claimed_guard.guard.outcome())
                 .await
                 .is_err()
             {
                 tracing::warn!(
-                    child_session_id = %guard.child_session_id(),
+                    child_session_id = %claimed_guard.guard.child_session_id(),
                     timeout_ms = timeout.as_millis(),
                     "cascade abort: child session timed out"
                 );
-                guard.force_timeout();
+                claimed_guard.guard.force_timeout();
             }
         }
 
-        all_guards
+        ClaimedCompletionGuards {
+            guards: claimed,
+            error: first_error,
+        }
     }
 
     async fn finalize_aborted_children(
         &self,
         scheduler: &TurnScheduler,
-        guards: &[Arc<ChildSessionCompletionGuard>],
-    ) {
-        for guard in guards.iter().rev() {
+        mut guards: Vec<ClaimedCompletionGuard>,
+    ) -> Result<(), TurnScheduleError> {
+        while let Some(claimed) = guards.pop() {
+            let ClaimedCompletionGuard { guard, operation } = claimed;
             let child_sid = guard.child_session_id();
             let parent_sid = guard.parent_session_id();
-            let outcome = guard.outcome().await;
-            let timed_out = outcome == ChildOutcome::TimedOut;
-            let error = if timed_out {
+            let completion = guard.completion().await;
+            if !guard.child_is_settled() {
+                match scheduler
+                    .release_completed_execution_in_operation(
+                        &operation,
+                        guard.turn_id(),
+                        completion.finalization.as_ref(),
+                    )
+                    .await
+                {
+                    Ok(true) => guard.mark_child_settled(),
+                    Ok(false) => {
+                        let error = TurnScheduleError::CompletionOwnershipLost {
+                            session_id: child_sid.clone(),
+                            turn_id: guard.turn_id().clone(),
+                        };
+                        guard.finish_terminal(Err(error.to_string()));
+                        self.restore_completion_guard(guard);
+                        self.restore_claimed_guards(guards);
+                        return Err(error);
+                    },
+                    Err(error) => {
+                        guard.finish_terminal(Err(error.to_string()));
+                        self.restore_completion_guard(guard);
+                        self.restore_claimed_guards(guards);
+                        return Err(error);
+                    },
+                }
+            }
+            let terminal_error = if completion.outcome == ChildOutcome::TimedOut {
                 "abort timed out"
             } else {
                 "aborted"
             };
-            self.record_failed(parent_sid, child_sid, error).await;
-            if timed_out {
-                self.recycle_child(scheduler, parent_sid, child_sid).await;
-            } else {
-                self.recycle_completed_child(scheduler, parent_sid, child_sid, guard.turn_id())
-                    .await;
+            if let Err(error) = self
+                .record_failed(parent_sid, child_sid, terminal_error)
+                .await
+            {
+                guard.finish_terminal(Err(error.to_string()));
+                self.restore_completion_guard(guard);
+                self.restore_claimed_guards(guards);
+                return Err(error);
             }
+            if let Err(error) = scheduler
+                .recycle_settled_session_in_operation(operation)
+                .await
+            {
+                guard.force_recycle_on_completion();
+                guard.finish_terminal(Err(error.to_string()));
+                self.restore_completion_guard(guard);
+                self.restore_claimed_guards(guards);
+                return Err(error);
+            }
+            guard.finish_terminal(Ok(()));
         }
+        Ok(())
     }
 
-    /// 同步子 agent（`submit_turn_sync`）不注册 completion guard，需按 session 树投影中止。
+    /// 处理没有 completion guard 的 running child（例如恢复的旧状态）。
     async fn abort_unguarded_running_children(
         &self,
         scheduler: &TurnScheduler,
         root_sid: &SessionId,
         guarded_children: &HashSet<SessionId>,
-    ) {
+    ) -> Result<(), TurnScheduleError> {
         let mut pending: Vec<(SessionId, SessionId)> = Vec::new();
         let mut stack = vec![root_sid.clone()];
 
@@ -595,9 +1321,31 @@ impl ChildSessionCoordinator {
         }
 
         for (parent_sid, child_sid) in pending.into_iter().rev() {
-            self.record_failed(&parent_sid, &child_sid, "aborted").await;
-            self.recycle_child(scheduler, &parent_sid, &child_sid).await;
+            let operation = match scheduler.begin_session_operation(&child_sid).await {
+                Ok(operation) => operation,
+                Err(_) => continue,
+            };
+            if guarded_children.contains(&child_sid)
+                || self.registered_child_ids().contains(&child_sid)
+            {
+                drop(operation);
+                continue;
+            }
+            let parent_model = self.session_manager.read_model(&parent_sid).await?;
+            if !parent_model.agent_sessions.iter().any(|link| {
+                link.child_session_id == child_sid && link.status == AgentSessionStatus::Running
+            }) {
+                drop(operation);
+                continue;
+            }
+            scheduler.abort_current_in_operation(&child_sid).await?;
+            self.record_failed(&parent_sid, &child_sid, "aborted")
+                .await?;
+            scheduler
+                .recycle_settled_session_in_operation(operation)
+                .await?;
         }
+        Ok(())
     }
 }
 

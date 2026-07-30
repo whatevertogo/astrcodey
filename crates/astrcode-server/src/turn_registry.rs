@@ -9,7 +9,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::types::{SessionId, TurnId};
-use astrcode_session::{Session, TurnShutdownHandle};
+use astrcode_session::{Session, TurnFinalization, TurnShutdownHandle};
 use parking_lot::Mutex;
 
 struct TurnEntry {
@@ -199,6 +199,28 @@ impl TurnRegistry {
         Some((entry.turn_id, session))
     }
 
+    /// 强制终止匹配的运行中 turn，但保留 registry ownership，直到 durable 收尾成功。
+    pub fn force_kill_if_running(
+        &self,
+        session_id: &SessionId,
+        expected_turn_id: &TurnId,
+    ) -> Option<(TurnId, Arc<Session>)> {
+        let entries = self.entries.lock();
+        let entry = entries.get(session_id)?;
+        let TurnEntryState::Running {
+            shutdown_handle,
+            session,
+        } = &entry.state
+        else {
+            return None;
+        };
+        if &entry.turn_id != expected_turn_id || shutdown_handle.is_finished() {
+            return None;
+        }
+        shutdown_handle.force_kill();
+        Some((entry.turn_id.clone(), Arc::clone(session)))
+    }
+
     pub fn active_is_finished(&self, session_id: &SessionId) -> bool {
         self.entries.lock().get(session_id).is_some_and(|entry| {
             matches!(
@@ -209,6 +231,18 @@ impl TurnRegistry {
                 } if shutdown_handle.is_finished()
             )
         })
+    }
+
+    pub fn active_finalization(&self, session_id: &SessionId) -> Option<TurnFinalization> {
+        self.entries
+            .lock()
+            .get(session_id)
+            .and_then(|entry| match &entry.state {
+                TurnEntryState::Reserved => None,
+                TurnEntryState::Running {
+                    shutdown_handle, ..
+                } => shutdown_handle.finalization(),
+            })
     }
 
     /// 测试和强制清理用：强制 kill 当前活跃 turn，不校验 turn_id。

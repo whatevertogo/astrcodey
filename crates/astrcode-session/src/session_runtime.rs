@@ -8,6 +8,7 @@ use astrcode_core::{
 use astrcode_storage::SessionStore;
 use parking_lot::Mutex;
 use tokio::sync::{OnceCell, oneshot};
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     compaction::CompactCircuitBreaker,
@@ -140,8 +141,74 @@ pub struct SessionRuntimeState {
     tools: ToolResources,
     approvals: ApprovalRuntime,
     compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
+    creation: Mutex<SessionCreationState>,
     lifecycle_initialized: OnceCell<()>,
 }
+
+#[derive(Default)]
+enum SessionCreationState {
+    #[default]
+    Ready,
+    Pending(Arc<PendingSessionCreation>),
+    Failed,
+}
+
+#[derive(Default)]
+struct PendingSessionCreation(CancellationToken);
+
+impl PendingSessionCreation {
+    async fn wait(&self) {
+        self.0.cancelled().await;
+    }
+
+    fn finish(&self) {
+        self.0.cancel();
+    }
+}
+
+/// Keeps concurrent openers behind the new-session initialization boundary.
+#[must_use = "the creation guard must be held until initialization commits or is compensated"]
+pub struct SessionCreationGuard {
+    runtime: Arc<SessionRuntimeState>,
+    pending: Arc<PendingSessionCreation>,
+    committed: bool,
+}
+
+impl SessionCreationGuard {
+    pub fn commit(mut self) {
+        let mut creation = self.runtime.creation.lock();
+        if matches!(
+            &*creation,
+            SessionCreationState::Pending(current) if Arc::ptr_eq(current, &self.pending)
+        ) {
+            *creation = SessionCreationState::Ready;
+            drop(creation);
+            self.pending.finish();
+        }
+        self.committed = true;
+    }
+}
+
+impl Drop for SessionCreationGuard {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        let mut creation = self.runtime.creation.lock();
+        if matches!(
+            &*creation,
+            SessionCreationState::Pending(current) if Arc::ptr_eq(current, &self.pending)
+        ) {
+            *creation = SessionCreationState::Failed;
+            drop(creation);
+            self.pending.finish();
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("session creation failed before lifecycle initialization committed")]
+pub struct SessionCreationFailed;
 
 impl SessionRuntimeState {
     pub fn new(session_id: SessionId, store: Arc<dyn SessionStore>) -> Self {
@@ -167,6 +234,7 @@ impl SessionRuntimeState {
                 3,
                 Duration::from_secs(60),
             )),
+            creation: Mutex::new(SessionCreationState::Ready),
             lifecycle_initialized: OnceCell::new(),
         }
     }
@@ -209,8 +277,32 @@ impl SessionRuntimeState {
         Arc::clone(&self.approvals.history)
     }
 
-    pub(crate) fn mark_lifecycle_initialized(&self) {
-        let _ = self.lifecycle_initialized.set(());
+    /// Blocks [`Self::wait_for_creation`] until the returned guard commits or fails.
+    pub fn begin_creation(self: &Arc<Self>) -> SessionCreationGuard {
+        let mut creation = self.creation.lock();
+        debug_assert!(
+            matches!(*creation, SessionCreationState::Ready),
+            "session creation must have one owner"
+        );
+        let pending = Arc::new(PendingSessionCreation::default());
+        *creation = SessionCreationState::Pending(Arc::clone(&pending));
+        SessionCreationGuard {
+            runtime: Arc::clone(self),
+            pending,
+            committed: false,
+        }
+    }
+
+    /// Waits only when this process is currently creating the session.
+    pub async fn wait_for_creation(&self) -> Result<(), SessionCreationFailed> {
+        loop {
+            let pending = match &*self.creation.lock() {
+                SessionCreationState::Ready => return Ok(()),
+                SessionCreationState::Failed => return Err(SessionCreationFailed),
+                SessionCreationState::Pending(pending) => Arc::clone(pending),
+            };
+            pending.wait().await;
+        }
     }
 
     pub(crate) async fn ensure_lifecycle_initialized<E, F, Fut>(

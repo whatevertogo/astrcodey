@@ -96,6 +96,65 @@ fn accepted_input_stays_pending_until_matching_user_message() {
 }
 
 #[test]
+fn transcript_rewrite_does_not_change_active_execution_state() {
+    let session_id = SessionId::new("session-active-compaction");
+    let turn_id = TurnId::new("turn-active");
+    let cases = [
+        ("auto_threshold", CompactStrategy::Auto),
+        (
+            "manual_command",
+            CompactStrategy::Manual {
+                keep_recent_turns: None,
+            },
+        ),
+        (
+            "reactive_prompt_too_long",
+            CompactStrategy::ReactivePromptTooLong,
+        ),
+    ];
+
+    for (trigger, strategy) in cases {
+        let mut model = replay(
+            session_id.clone(),
+            &[
+                started(0, &session_id),
+                turn_event(1, &session_id, &turn_id, DurableEventPayload::TurnStarted),
+            ],
+        )
+        .unwrap();
+
+        reduce(
+            &turn_event(
+                2,
+                &session_id,
+                &turn_id,
+                DurableEventPayload::TranscriptRewritten {
+                    source_seq: 1,
+                    messages: vec![LlmMessage::user("summary")],
+                    reason: TranscriptRewriteReason::Compaction(CompactionDetails {
+                        trigger: trigger.into(),
+                        pre_tokens: 100,
+                        post_tokens: 10,
+                        summary: "summary".into(),
+                        transcript_path: None,
+                        strategy,
+                    }),
+                },
+            ),
+            &mut model,
+        )
+        .unwrap();
+
+        assert_eq!(model.execution.phase, Phase::Thinking, "{trigger}");
+        assert_eq!(
+            model.execution.unsettled_turn_id.as_ref(),
+            Some(&turn_id),
+            "{trigger}"
+        );
+    }
+}
+
+#[test]
 fn projection_builds_complete_grouped_state_and_evolves_transcript() {
     let session_id = SessionId::new("session-1");
     let call_id = ToolCallId::new("call-1");

@@ -7,28 +7,36 @@ use astrcode_extension_sdk::{
         HookResult, PostToolUseResult, PreToolUseResult, PromptContributions, ProviderResult,
         SlashCommand,
     },
-    s5r::{effects::HandlerResult, event_from_name, mode_from_name},
+    s5r::{effects::HandlerResult, event_from_name, manifest::ManifestHook, mode_from_name},
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::extension_manifest::{ExtensionRegistration, manifest_types::ManifestHook};
+use crate::extension_manifest::ExtensionRegistration;
 
 pub fn validate_registration(reg: &ExtensionRegistration) -> Result<(), String> {
     if reg.extension_id.trim().is_empty() {
         return Err("extension id is empty".into());
     }
+    for tool in &reg.tools {
+        if !matches!(tool.mode.as_str(), "parallel" | "sequential") {
+            return Err(format!(
+                "unknown tool execution mode in manifest: {}",
+                tool.mode
+            ));
+        }
+    }
     for hook in &reg.hooks {
-        if let Some(event) = event_from_name(&hook.on) {
-            let mode = mode_from_name(&hook.mode)
-                .ok_or_else(|| format!("unknown hook mode in manifest: {}", hook.mode))?;
-            if s5r_unsupported_typed_hook(&event) {
-                return Err(format!("{} is not supported by s5r manifest", hook.on));
-            }
-            if event == ExtensionEvent::ContinueAfterStop && mode != HookMode::Blocking {
-                return Err(format!("{} is a blocking-only hook", hook.on));
-            }
+        let event = event_from_name(&hook.on)
+            .ok_or_else(|| format!("unknown hook event in manifest: {}", hook.on))?;
+        let mode = mode_from_name(&hook.mode)
+            .ok_or_else(|| format!("unknown hook mode in manifest: {}", hook.mode))?;
+        if s5r_unsupported_typed_hook(&event) {
+            return Err(format!("{} is not supported by s5r manifest", hook.on));
+        }
+        if event == ExtensionEvent::ContinueAfterStop && mode != HookMode::Blocking {
+            return Err(format!("{} is a blocking-only hook", hook.on));
         }
     }
     for entry in &reg.http_routes {
@@ -286,8 +294,9 @@ pub fn parse_lifecycle_result(resp: &HandlerResult) -> Result<HookResult, Extens
 
 #[cfg(test)]
 mod tests {
+    use astrcode_extension_sdk::s5r::manifest::{ManifestHook, ManifestHookOptions, ManifestTool};
+
     use super::*;
-    use crate::extension_manifest::manifest_types::{ManifestHook, ManifestHookOptions};
 
     fn registration_with_hook(on: &str, mode: &str) -> ExtensionRegistration {
         ExtensionRegistration {
@@ -321,5 +330,29 @@ mod tests {
         let err = validate_registration(&reg).unwrap_err();
 
         assert!(err.contains("not supported by s5r manifest"));
+    }
+
+    #[test]
+    fn validate_registration_rejects_unknown_hook_and_tool_modes() {
+        let unknown_hook = registration_with_hook("typo_hook", "blocking");
+        assert!(
+            validate_registration(&unknown_hook)
+                .unwrap_err()
+                .contains("unknown hook event")
+        );
+
+        let mut unknown_mode = registration_with_hook("turn_end", "advisory");
+        unknown_mode.tools.push(ManifestTool {
+            name: "bad-tool".into(),
+            description: String::new(),
+            parameters: serde_json::json!({"type": "object"}),
+            strict: false,
+            mode: "concurrent-ish".into(),
+        });
+        assert!(
+            validate_registration(&unknown_mode)
+                .unwrap_err()
+                .contains("unknown tool execution mode")
+        );
     }
 }

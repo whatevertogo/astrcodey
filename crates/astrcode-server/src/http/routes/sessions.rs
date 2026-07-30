@@ -25,7 +25,10 @@ use super::super::{
     not_found_response,
     projection::{session_title_from_working_dir, snapshot::conversation_to_dto},
 };
-use crate::handler::{CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission};
+use crate::{
+    handler::{CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission},
+    protocol_mapping::{keybinding_to_dto, status_item_to_dto},
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -356,22 +359,21 @@ pub(in crate::http) async fn list_commands(
         .await
     {
         Ok(command_list) => {
-            use astrcode_protocol::http::{KeybindingDto, StatusItemDto};
-            let keybindings: Vec<KeybindingDto> = state
+            let keybindings = state
                 .app
                 .runtime()
                 .extension_runner()
                 .collect_keybindings()
                 .into_iter()
-                .map(Into::into)
+                .map(keybinding_to_dto)
                 .collect();
-            let status_items: Vec<StatusItemDto> = state
+            let status_items = state
                 .app
                 .runtime()
                 .extension_runner()
                 .collect_status_items()
                 .into_iter()
-                .map(Into::into)
+                .map(status_item_to_dto)
                 .collect();
             Json(SlashCommandListResponseDto {
                 commands: command_list.commands.into_iter().map(Into::into).collect(),

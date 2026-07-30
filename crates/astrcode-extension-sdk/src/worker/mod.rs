@@ -70,8 +70,14 @@ impl Worker {
         self
     }
 
-    /// 声明可发射的扩展事件 schema。
+    /// 声明可发射的扩展事件 schema（兼容旧版 JSON authoring API）。
     pub fn extension_event(mut self, event: Value) -> Self {
+        self.registry.declare_legacy_extension_event(event);
+        self
+    }
+
+    /// 使用强类型契约声明可发射的扩展事件 schema。
+    pub fn extension_event_decl(mut self, event: crate::extension::ExtensionEventDecl) -> Self {
         self.registry.declare_extension_event(event);
         self
     }
@@ -163,7 +169,13 @@ impl Worker {
         };
         peer.set_invoke_handler(invoke_handler);
 
-        let metadata = registration_metadata(&self.extension_id, &self.version, registry.catalog());
+        let metadata = registration_metadata(&self.extension_id, &self.version, registry.catalog())
+            .map_err(|error| {
+                ErrorPayload::new(
+                    "manifest_serialize_failed",
+                    format!("failed to serialize initialize manifest: {error}"),
+                )
+            })?;
         let handlers = build_handler_descriptors(registry.catalog(), &self.extension_id);
         peer.initialize(handlers, metadata)
             .await

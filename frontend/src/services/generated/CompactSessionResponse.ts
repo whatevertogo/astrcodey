@@ -3,8 +3,4 @@
 /**
  * 手动 compact 响应。
  */
-export type CompactSessionResponse = { accepted: boolean, deferred: boolean,
-/**
- * compact continuation 创建的子会话 ID。
- */
-newSessionId?: string | null, message: string, };
+export type CompactSessionResponse = { accepted: boolean, deferred: boolean, sessionId?: string | null, message: string, };

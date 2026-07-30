@@ -11,8 +11,6 @@ use astrcode_core::{
     permission::{ApprovalDecision, ApprovalMode},
     tool::{ExecutionMode, ToolOrigin},
 };
-use astrcode_extension_sdk::extension::{ExtensionCapability, ExtensionHttpMethod};
-use astrcode_session_projection::AgentSessionStatus;
 use serde::{Deserialize, Serialize};
 
 macro_rules! impl_wire_values {
@@ -118,7 +116,7 @@ pub enum ExtensionHttpMethodDto {
     Delete,
 }
 
-impl_domain_to_wire_conversion!(ExtensionHttpMethod => ExtensionHttpMethodDto {
+impl_wire_values!(ExtensionHttpMethodDto {
     Get,
     Post,
     Put,
@@ -294,7 +292,7 @@ pub enum AgentSessionStatusDto {
     Failed,
 }
 
-impl_bidirectional_wire_conversion!(AgentSessionStatus => AgentSessionStatusDto {
+impl_wire_values!(AgentSessionStatusDto {
     Running,
     Completed,
     Failed,
@@ -325,7 +323,7 @@ pub enum ExtensionCapabilityDto {
     LiveConversation,
 }
 
-impl_bidirectional_wire_conversion!(ExtensionCapability => ExtensionCapabilityDto {
+impl_wire_values!(ExtensionCapabilityDto {
     SessionControl,
     SessionInspect,
     PublicHttp,

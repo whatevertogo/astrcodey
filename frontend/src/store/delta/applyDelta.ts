@@ -26,6 +26,7 @@ export type ConversationRenderState = Pick<
   | 'compactSubmitting'
   | 'agentSessions'
   | 'statusItems'
+  | 'statusItemRevisions'
   | 'pendingAskUserQuestions'
   | 'resolvedAskUserCallIds'
   | 'askUserEventRevision'
@@ -127,6 +128,7 @@ export function reduceConversationDeltas(
   let phase = current.phase
   let agentSessions = current.agentSessions
   let statusItems = current.statusItems
+  let statusItemRevisions = current.statusItemRevisions
   let pendingAskUserQuestions = current.pendingAskUserQuestions
   let resolvedAskUserCallIds = current.resolvedAskUserCallIds
   let askUserEventRevision = current.askUserEventRevision
@@ -199,19 +201,22 @@ export function reduceConversationDeltas(
       }
 
       case 'statusItemUpdate': {
-        if (
-          (delta.text && statusItems[delta.id] === delta.text) ||
-          (!delta.text && statusItems[delta.id] === undefined)
-        ) {
-          break
+        const valueChanged = delta.text
+          ? statusItems[delta.id] !== delta.text
+          : statusItems[delta.id] !== undefined
+        if (valueChanged) {
+          const next = { ...statusItems }
+          if (delta.text) {
+            next[delta.id] = delta.text
+          } else {
+            delete next[delta.id]
+          }
+          statusItems = next
         }
-        const next = { ...statusItems }
-        if (delta.text) {
-          next[delta.id] = delta.text
-        } else {
-          delete next[delta.id]
+        statusItemRevisions = {
+          ...statusItemRevisions,
+          [delta.id]: (statusItemRevisions[delta.id] ?? 0) + 1,
         }
-        statusItems = next
         break
       }
 
@@ -299,6 +304,9 @@ export function reduceConversationDeltas(
     patch.agentSessions = agentSessions
   }
   if (statusItems !== current.statusItems) patch.statusItems = statusItems
+  if (statusItemRevisions !== current.statusItemRevisions) {
+    patch.statusItemRevisions = statusItemRevisions
+  }
   if (pendingAskUserQuestions !== current.pendingAskUserQuestions) {
     patch.pendingAskUserQuestions = pendingAskUserQuestions
   }

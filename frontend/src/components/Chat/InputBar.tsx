@@ -23,10 +23,13 @@ import {
   readImageFiles,
   revokeAttachmentPreviews,
 } from '../../lib/composerAttachments'
-import type { ConfigView, PromptAttachment } from '../../services/types'
+import type {
+  ConfigView,
+  PromptAttachment,
+  SlashCommandInfo,
+} from '../../services/types'
 import { Icon } from '../ui'
 import * as api from '../../services/api'
-import type { SlashCommandInfo } from '../../services/types'
 import { canInjectMidTurn, isExecutionPhase } from '../../store/phaseHelpers'
 
 interface InputBarProps {
@@ -48,6 +51,8 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   const bumpModelRefreshKey = useAppStore((s) => s.bumpModelRefreshKey)
   const compactSubmitting = useAppStore((s) => s.compactSubmitting)
   const statusItems = useAppStore((s) => s.statusItems)
+  const slashCommands = useAppStore((s) => s.slashCommands)
+  const refreshCommands = useAppStore((s) => s.refreshCommands)
   const pendingMessages = useAppStore((s) => s.pendingMessages)
   const composerDeliveryMode = useAppStore((s) => s.composerDeliveryMode)
   const toggleComposerDeliveryMode = useAppStore(
@@ -84,11 +89,9 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   // ── slash command panel state ──
   const [slashTriggerVisible, setSlashTriggerVisible] = useState(false)
   const [slashQuery, setSlashQuery] = useState('')
-  const [slashOptions, setSlashOptions] = useState<SlashCommandInfo[]>([])
   const [slashLoading, setSlashLoading] = useState(false)
   const slashTriggerStartRef = useRef(0)
   const slashTriggerEndRef = useRef(0)
-  const slashAbortRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
     return () => revokeAttachmentPreviews(attachmentsRef.current)
@@ -112,10 +115,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   const closeSlashTrigger = useCallback(() => {
     setSlashTriggerVisible(false)
     setSlashQuery('')
-    setSlashOptions([])
     setSlashLoading(false)
-    slashAbortRef.current?.abort()
-    slashAbortRef.current = null
   }, [])
 
   /** 在当前行找到光标位置的 `/` 触发上下文 */
@@ -171,36 +171,15 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   useEffect(() => {
     if (!slashTriggerVisible || !activeSessionId) return
 
-    slashAbortRef.current?.abort()
-    const controller = new AbortController()
-    slashAbortRef.current = controller
-
-    api
-      .listCommands(activeSessionId)
-      .then((res) => {
-        if (controller.signal.aborted) return
-        setSlashOptions(res.commands)
-        setSlashLoading(false)
-        // 初始化状态栏项到 store
-        if (res.statusItems.length > 0) {
-          const items: Record<string, string> = {}
-          for (const item of res.statusItems) {
-            items[item.id] = item.text
-          }
-          useAppStore.setState({ statusItems: items })
-        }
-      })
-      .catch((err) => {
-        if (controller.signal.aborted) return
-        console.error('[CommandSelector] 获取命令列表失败:', err)
-        setSlashOptions([])
-        setSlashLoading(false)
-      })
+    let active = true
+    void refreshCommands().finally(() => {
+      if (active) setSlashLoading(false)
+    })
 
     return () => {
-      controller.abort()
+      active = false
     }
-  }, [activeSessionId, slashTriggerVisible])
+  }, [activeSessionId, refreshCommands, slashTriggerVisible])
 
   const handleSlashCommandSelect = useCallback(
     (option: SlashCommandInfo) => {
@@ -612,7 +591,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
             <CommandSelector
               key={`${activeSessionId}:${slashQuery}`}
               visible={slashTriggerVisible}
-              options={slashOptions}
+              options={slashCommands}
               loading={slashLoading}
               query={slashQuery}
               onSelect={handleSlashCommandSelect}

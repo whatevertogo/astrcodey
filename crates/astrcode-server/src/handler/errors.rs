@@ -17,6 +17,12 @@ impl From<TurnScheduleError> for HandlerError {
                 Self::Session(error)
             },
             TurnScheduleError::Turn(error) => Self::Turn(error),
+            error @ (TurnScheduleError::RecycleRelationRollbackFailed { .. }
+            | TurnScheduleError::DeleteRelationUpdateFailed { .. }
+            | TurnScheduleError::ChildRelationConflict { .. }
+            | TurnScheduleError::CompletionOwnershipLost { .. }) => {
+                Self::SessionClose(error.to_string())
+            },
         }
     }
 }

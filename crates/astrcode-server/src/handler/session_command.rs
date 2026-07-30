@@ -2,9 +2,10 @@
 
 use astrcode_core::types::SessionId;
 use astrcode_extension_sdk::extension::CommandCompletions;
-use astrcode_protocol::events::{ClientNotification, ExtensionCommandInfoDto, StatusItemInfoDto};
+use astrcode_protocol::events::{ClientNotification, ExtensionCommandInfoDto};
 
 use super::{CommandHandler, CommandInvocation, HandlerError, PromptSubmission, slash};
+use crate::protocol_mapping::{keybinding_to_dto, status_item_to_info_dto};
 
 pub struct CommandList {
     pub commands: Vec<ExtensionCommandInfoDto>,
@@ -23,17 +24,19 @@ impl CommandHandler {
             .command_list_for_working_dir(&working_dir)
             .await
             .commands;
-        let keybindings = self.runtime.extension_runner().collect_keybindings();
+        let keybindings = self
+            .runtime
+            .extension_runner()
+            .collect_keybindings()
+            .into_iter()
+            .map(keybinding_to_dto)
+            .collect();
         let status_items = self
             .runtime
             .extension_runner()
             .collect_status_items()
             .into_iter()
-            .map(|item| StatusItemInfoDto {
-                id: item.id,
-                text: item.text,
-                priority: item.priority,
-            })
+            .map(status_item_to_info_dto)
             .collect();
         self.event_bus
             .send_notification(ClientNotification::ExtensionCommandList {

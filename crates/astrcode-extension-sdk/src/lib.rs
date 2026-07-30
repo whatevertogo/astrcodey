@@ -33,7 +33,7 @@ pub mod llm {
 }
 
 pub mod event {
-    pub use astrcode_core::event::{Event, EventPayload};
+    pub use astrcode_core::event::{Event, EventPayload, EventSendError, EventSender};
 }
 
 pub mod session_query;

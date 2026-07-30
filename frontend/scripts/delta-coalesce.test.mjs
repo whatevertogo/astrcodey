@@ -107,6 +107,7 @@ const frameState = {
     },
   ],
   statusItems: {},
+  statusItemRevisions: {},
   pendingAskUserQuestions: {},
   resolvedAskUserCallIds: {},
   askUserEventRevision: 0,
@@ -144,11 +145,27 @@ assert.equal(framePatch.blocks?.[0].text, 'hello world')
 assert.equal(framePatch.phase, 'streaming')
 assert.equal(framePatch.cursor, '6')
 assert.deepEqual(framePatch.statusItems, { branch: 'main' })
+assert.deepEqual(framePatch.statusItemRevisions, { branch: 1 })
 assert.equal(
   'agentSessions' in framePatch,
   false,
   'duplicate child-agent projections should not notify subscribers'
 )
+
+const statusAbaPatch = reduceConversationDeltas(frameState, [
+  { kind: 'statusItemUpdate', id: 'branch', text: 'main' },
+  { kind: 'statusItemUpdate', id: 'branch', text: 'main' },
+  { kind: 'statusItemUpdate', id: 'branch', text: 'feature' },
+  { kind: 'statusItemUpdate', id: 'branch', text: 'main' },
+  { kind: 'statusItemUpdate', id: 'transient', text: 'visible' },
+  { kind: 'statusItemUpdate', id: 'transient', text: '' },
+  { kind: 'statusItemUpdate', id: 'transient', text: '' },
+])
+assert.deepEqual(statusAbaPatch.statusItems, { branch: 'main' })
+assert.deepEqual(statusAbaPatch.statusItemRevisions, {
+  branch: 4,
+  transient: 3,
+})
 
 const approvalState = {
   ...frameState,
@@ -369,6 +386,7 @@ const reducerInitialState = {
   compactSubmitting: false,
   agentSessions: [],
   statusItems: {},
+  statusItemRevisions: {},
   pendingAskUserQuestions: {},
   resolvedAskUserCallIds: {},
   askUserEventRevision: 0,
@@ -384,6 +402,7 @@ assert.deepEqual(
     ...reducerInitialState,
     ...reducerPatch,
     compactSubmitting: undefined,
+    statusItemRevisions: undefined,
     pendingAskUserQuestions: undefined,
     resolvedAskUserCallIds: undefined,
     askUserEventRevision: undefined,
@@ -392,6 +411,7 @@ assert.deepEqual(
   {
     ...reducerFixture.expected,
     compactSubmitting: undefined,
+    statusItemRevisions: undefined,
     pendingAskUserQuestions: undefined,
     resolvedAskUserCallIds: undefined,
     askUserEventRevision: undefined,

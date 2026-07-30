@@ -56,6 +56,37 @@ impl ServerSessionOperations {
         self.session_manager.sync_durable_events(&target_sid).await;
         Ok(delivery_outcome(outcome))
     }
+
+    async fn submit_same_session_turn(
+        &self,
+        session_id: SessionId,
+        user_prompt: String,
+        wait_for_result: bool,
+    ) -> Result<SubmitTurnResult, SessionApiError> {
+        let input = astrcode_core::user_input::UserInput::text_only(user_prompt);
+        if !wait_for_result {
+            let (turn_id, _completion) = self
+                .scheduler
+                .start_tracked_with_completion(session_id.clone(), input)
+                .await
+                .map_err(SessionApiError::internal)?;
+            return Ok(SubmitTurnResult::Backgrounded {
+                task_id: turn_id.into_string(),
+                session_id: session_id.into_string(),
+            });
+        }
+
+        let (_turn_id, output) = self
+            .scheduler
+            .start_tracked_with_output(session_id, input)
+            .await
+            .map_err(SessionApiError::internal)?;
+        let content = output
+            .await
+            .map_err(SessionApiError::internal)?
+            .map_err(SessionApiError::internal)?;
+        Ok(SubmitTurnResult::Completed { content })
+    }
 }
 
 #[async_trait::async_trait]
@@ -81,10 +112,12 @@ impl SessionOperations for ServerSessionOperations {
         request: CreateSessionRequest,
     ) -> Result<SessionHandle, SessionApiError> {
         let parent_sid = SessionId::from(parent_session_id);
-        let child = self
-            .child_sessions
-            .spawn_child(&parent_sid, request)
-            .await?;
+        let operation = self
+            .scheduler
+            .begin_session_operation(&parent_sid)
+            .await
+            .map_err(SessionApiError::internal)?;
+        let child = self.child_sessions.spawn_child(operation, request).await?;
 
         Ok(SessionHandle {
             session_id: child.id().clone().into_string(),
@@ -161,11 +194,22 @@ impl SessionOperations for ServerSessionOperations {
             .verified_session_ids(request.access.as_access())
             .await?;
 
+        if caller_sid == target_sid {
+            if request.notify_parent_on_complete.is_some() || request.recycle_on_complete {
+                return Err(SessionApiError::Unsupported(
+                    "same-session turns cannot notify a parent or recycle themselves".into(),
+                ));
+            }
+            return self
+                .submit_same_session_turn(target_sid, request.user_prompt, request.wait_for_result)
+                .await;
+        }
+
         if request.wait_for_result {
             let content = self
                 .child_sessions
                 .submit_turn_sync(
-                    self.scheduler.as_ref(),
+                    Arc::clone(&self.scheduler),
                     &caller_sid,
                     &target_sid,
                     request.user_prompt,
@@ -218,21 +262,17 @@ impl SessionOperations for ServerSessionOperations {
     }
 
     async fn recycle_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
-        let (caller_sid, target_sid) = self.verified_session_ids(access).await?;
+        let (_, target_sid) = self.verified_session_ids(access).await?;
 
-        self.child_sessions
-            .recycle_child(self.scheduler.as_ref(), &caller_sid, &target_sid)
-            .await;
-
-        Ok(())
+        self.scheduler
+            .recycle_session(&target_sid)
+            .await
+            .map_err(SessionApiError::internal)
     }
 
     async fn delete_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
         let (_, target_sid) = self.verified_session_ids(access).await?;
 
-        if let Err(e) = self.scheduler.abort(&target_sid).await {
-            tracing::warn!(%target_sid, error = %e, "abort failed before session delete");
-        }
         self.scheduler
             .delete_session(&target_sid)
             .await

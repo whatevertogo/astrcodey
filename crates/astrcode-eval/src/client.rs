@@ -2,6 +2,15 @@
 
 use std::time::Duration;
 
+use astrcode_protocol::{
+    http::{
+        ConversationSnapshotResponseDto, CreateSessionRequest, CreateSessionResponseDto,
+        PromptRequest, PromptSubmitResponse,
+    },
+    wire::PhaseDto,
+};
+use serde::de::DeserializeOwned;
+
 use crate::EvalError;
 
 /// Eval 专用 HTTP 客户端。
@@ -33,55 +42,46 @@ impl EvalClient {
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(|error| EvalError::Server(format!("health check request: {error}")))?;
-        if response.status().is_success() {
-            Ok(())
-        } else {
-            Err(EvalError::Server(format!(
-                "server health check failed: {}",
-                response.status()
-            )))
-        }
+            .map_err(|error| EvalError::Client(format!("health check request: {error}")))?;
+        ensure_success(response, "health check").await?;
+        Ok(())
     }
 
     /// 创建 session，返回 session_id。
     pub async fn create_session(&self, working_dir: &str) -> Result<String, EvalError> {
-        let resp = self
+        let response = self
             .http
             .post(format!("{}/api/sessions", self.base_url))
             .bearer_auth(&self.token)
-            .json(&serde_json::json!({ "workingDir": working_dir }))
+            .json(&CreateSessionRequest {
+                working_dir: working_dir.to_string(),
+                tool_selection: None,
+            })
             .send()
             .await
-            .map_err(|e| EvalError::Client(format!("create_session: {e}")))?;
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| EvalError::Client(format!("create_session body: {e}")))?;
-        body["sessionId"]
-            .as_str()
-            .map(|s| s.to_string())
-            .ok_or_else(|| EvalError::Client("missing sessionId in response".into()))
+            .map_err(|error| EvalError::Client(format!("create session request: {error}")))?;
+        let body: CreateSessionResponseDto =
+            decode_json_response(response, "create session").await?;
+        Ok(body.session_id)
     }
 
     /// 提交 prompt。
     pub async fn submit_prompt(&self, session_id: &str, text: &str) -> Result<(), EvalError> {
-        let resp = self
+        let response = self
             .http
             .post(format!(
                 "{}/api/sessions/{}/prompt",
                 self.base_url, session_id
             ))
             .bearer_auth(&self.token)
-            .json(&serde_json::json!({ "text": text }))
+            .json(&PromptRequest {
+                text: text.to_string(),
+                attachments: Vec::new(),
+            })
             .send()
             .await
-            .map_err(|e| EvalError::Client(format!("submit_prompt: {e}")))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(EvalError::Client(format!("submit_prompt {status}: {body}")));
-        }
+            .map_err(|error| EvalError::Client(format!("submit prompt request: {error}")))?;
+        let _: PromptSubmitResponse = decode_json_response(response, "submit prompt").await?;
         Ok(())
     }
 
@@ -98,13 +98,17 @@ impl EvalClient {
         let mut consecutive_errors = 0;
         loop {
             if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-                self.abort(session_id).await.ok();
+                if let Err(error) = self.abort(session_id).await {
+                    return Err(EvalError::Client(format!(
+                        "timeout; aborting session {session_id} also failed: {error}"
+                    )));
+                }
                 return Err(EvalError::Client("timeout".into()));
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
             match self.get_phase(session_id).await {
-                Ok(phase) if phase == "idle" => return Ok(()),
-                Ok(phase) if phase == "error" => {
+                Ok(PhaseDto::Idle) => return Ok(()),
+                Ok(PhaseDto::Error) => {
                     return Err(EvalError::Client("session entered error phase".into()));
                 },
                 Ok(_) => consecutive_errors = 0,
@@ -123,7 +127,8 @@ impl EvalClient {
 
     /// 中止 session。
     pub async fn abort(&self, session_id: &str) -> Result<(), EvalError> {
-        self.http
+        let response = self
+            .http
             .post(format!(
                 "{}/api/sessions/{}/abort",
                 self.base_url, session_id
@@ -131,13 +136,14 @@ impl EvalClient {
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(|e| EvalError::Client(format!("abort: {e}")))?;
+            .map_err(|error| EvalError::Client(format!("abort session request: {error}")))?;
+        ensure_success(response, "abort session").await?;
         Ok(())
     }
 
     /// 获取当前 phase。
-    async fn get_phase(&self, session_id: &str) -> Result<String, EvalError> {
-        let resp = self
+    async fn get_phase(&self, session_id: &str) -> Result<PhaseDto, EvalError> {
+        let response = self
             .http
             .get(format!(
                 "{}/api/sessions/{}/conversation",
@@ -146,14 +152,94 @@ impl EvalClient {
             .bearer_auth(&self.token)
             .send()
             .await
-            .map_err(|e| EvalError::Client(format!("get_phase: {e}")))?;
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| EvalError::Client(format!("get_phase body: {e}")))?;
-        body["phase"]
-            .as_str()
-            .map(str::to_string)
-            .ok_or_else(|| EvalError::Client("conversation response is missing phase".into()))
+            .map_err(|error| {
+                EvalError::Client(format!("get conversation phase request: {error}"))
+            })?;
+        let body: ConversationSnapshotResponseDto =
+            decode_json_response(response, "get conversation phase").await?;
+        Ok(body.phase)
+    }
+}
+
+async fn decode_json_response<T>(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<T, EvalError>
+where
+    T: DeserializeOwned,
+{
+    ensure_success(response, operation)
+        .await?
+        .json()
+        .await
+        .map_err(|error| {
+            EvalError::Client(format!(
+                "{operation} returned an invalid response body: {error}"
+            ))
+        })
+}
+
+async fn ensure_success(
+    response: reqwest::Response,
+    operation: &str,
+) -> Result<reqwest::Response, EvalError> {
+    let status = response.status();
+    if status.is_success() {
+        return Ok(response);
+    }
+
+    let body = response.text().await.map_err(|error| {
+        EvalError::Client(format!(
+            "{operation} failed with HTTP {status}; response body could not be read: {error}"
+        ))
+    })?;
+    let detail = if body.trim().is_empty() {
+        "empty response body"
+    } else {
+        body.trim()
+    };
+    Err(EvalError::Client(format!(
+        "{operation} failed with HTTP {status}: {detail}"
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+    };
+
+    use super::*;
+
+    #[tokio::test]
+    async fn abort_reports_unsuccessful_status_and_server_detail() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            let size = stream.read(&mut request).unwrap();
+            let request = std::str::from_utf8(&request[..size]).unwrap();
+            assert!(request.starts_with("POST /api/sessions/session-1/abort HTTP/1.1"));
+
+            let body = r#"{"code":"abort_failed","message":"no active turn"}"#;
+            write!(
+                stream,
+                "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: \
+                 {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+
+        let client = EvalClient::new(&format!("http://{address}"), "token").unwrap();
+        let error = client.abort("session-1").await.unwrap_err().to_string();
+
+        assert!(error.contains("abort session"));
+        assert!(error.contains("409 Conflict"));
+        assert!(error.contains("no active turn"));
+        server.join().unwrap();
     }
 }

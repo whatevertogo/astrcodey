@@ -28,6 +28,7 @@ mod config_manager;
 mod delivery_gates;
 mod handler;
 mod presentation;
+mod protocol_mapping;
 mod queue_drains;
 mod server_event_bus;
 mod session_command_service;

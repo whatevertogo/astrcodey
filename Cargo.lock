@@ -208,7 +208,6 @@ dependencies = [
  "futures-util",
  "getrandom 0.3.4",
  "reqwest 0.12.28",
- "serde",
  "serde_json",
  "tokio",
  "tracing",
@@ -231,7 +230,6 @@ dependencies = [
  "astrcode-extension-web-tools",
  "astrcode-extensions",
  "async-trait",
- "tracing",
 ]
 
 [[package]]
@@ -240,10 +238,8 @@ version = "0.3.12"
 dependencies = [
  "arboard",
  "astrcode-client",
- "astrcode-context",
  "astrcode-core",
  "astrcode-eval",
- "astrcode-extension-sdk",
  "astrcode-log",
  "astrcode-protocol",
  "astrcode-server",
@@ -258,7 +254,6 @@ dependencies = [
  "parking_lot",
  "ratatui",
  "ratatui-crossterm",
- "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -275,7 +270,6 @@ dependencies = [
  "astrcode-protocol",
  "async-trait",
  "parking_lot",
- "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
@@ -303,7 +297,6 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -335,8 +328,7 @@ name = "astrcode-eval"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
- "async-trait",
- "chrono",
+ "astrcode-protocol",
  "futures-util",
  "parquet",
  "reqwest 0.12.28",
@@ -445,7 +437,6 @@ dependencies = [
  "async-trait",
  "serde",
  "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -454,6 +445,7 @@ version = "0.3.12"
 dependencies = [
  "astrcode-core",
  "async-trait",
+ "futures-util",
  "parking_lot",
  "serde",
  "serde_json",
@@ -500,7 +492,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
- "tokio",
  "url",
 ]
 
@@ -547,8 +538,6 @@ name = "astrcode-protocol"
 version = "0.3.12"
 dependencies = [
  "astrcode-core",
- "astrcode-extension-sdk",
- "astrcode-session-projection",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -576,9 +565,7 @@ dependencies = [
  "astrcode-tools",
  "async-trait",
  "axum",
- "chrono",
  "futures-util",
- "getrandom 0.3.4",
  "http-body-util",
  "parking_lot",
  "serde",
@@ -604,7 +591,7 @@ dependencies = [
  "astrcode-session-projection",
  "astrcode-storage",
  "async-trait",
- "chrono",
+ "futures-util",
  "globset",
  "parking_lot",
  "serde",
@@ -6165,6 +6152,7 @@ dependencies = [
  "futures-core",
  "futures-io",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

@@ -14,6 +14,7 @@ impl TurnScheduler {
         input: UserInput,
         delivery: InputDelivery,
     ) -> Result<DeliveryOutcome, TurnScheduleError> {
+        let _admission = self.admit_owned()?;
         let operation = self.begin_session_operation(&session_id).await?;
         self.deliver_input_in_operation(operation, input, delivery)
             .await
@@ -61,7 +62,8 @@ impl TurnScheduler {
                 self.queue_if_running_else_start(operation, input).await
             },
             InputDelivery::InterruptAndStart => {
-                self.abort_in_operation(&session_id, true).await?;
+                operation.wait_for_starts().await;
+                self.abort_in_operation(&session_id).await?;
                 self.start_detached_in_operation(operation, input, "deliver_input:interrupt")
                     .await
             },
@@ -74,30 +76,9 @@ impl TurnScheduler {
         input: UserInput,
     ) -> Result<DeliveryOutcome, TurnScheduleError> {
         let session_id = operation.session_id().clone();
-        if let Some(finished_turn_id) = self.registry.remove_if_finished(&session_id) {
-            tracing::debug!(
-                session_id = %session_id,
-                turn_id = %finished_turn_id,
-                "finished active turn was still registered; starting injected input as a new turn"
-            );
-            self.sync_durable_events(&session_id).await;
-            if self.pending_input_count(&session_id).await? > 0 {
-                let queue_len = self
-                    .enqueue_behind_pending_and_start_head(
-                        operation,
-                        input,
-                        "deliver_input:inject-after-finished",
-                    )
-                    .await?;
-                return Ok(DeliveryOutcome::Queued { queue_len });
-            }
-            return self
-                .start_detached_in_operation(
-                    operation,
-                    input,
-                    "deliver_input:inject-after-finished",
-                )
-                .await;
+        if self.registry.active_is_finished(&session_id) {
+            let queue_len = self.accept_pending_input(&session_id, input).await?;
+            return Ok(DeliveryOutcome::Queued { queue_len });
         }
         if let Some((turn_id, session)) = self.registry.active_execution(&session_id) {
             self.inject_internal(&turn_id, &session, input).await?;
@@ -166,12 +147,21 @@ impl TurnScheduler {
         reserved: ReservedExecution,
         source: &'static str,
     ) -> Result<DeliveryOutcome, TurnScheduleError> {
+        let admission = self.admit_owned()?;
         let session_id = reserved.session_id.clone();
         let StartedExecution { turn_id, handle } = self
             .start_reserved_execution(reserved)
             .await
             .map_err(|failure| failure.error)?;
-        self.watch_detached_turn(session_id, turn_id.clone(), handle, source, None);
+        self.watch_owned_turn(
+            admission,
+            session_id,
+            turn_id.clone(),
+            handle,
+            source,
+            None,
+            None,
+        );
         Ok(DeliveryOutcome::Started { turn_id })
     }
 }

@@ -28,7 +28,6 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
- "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -39,6 +38,7 @@ version = "0.3.12"
 dependencies = [
  "astrcode-core",
  "async-trait",
+ "futures-util",
  "parking_lot",
  "serde",
  "serde_json",

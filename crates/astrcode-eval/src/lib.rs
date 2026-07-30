@@ -41,12 +41,10 @@ pub struct EvalConfig {
     pub checkpoint_path: Option<PathBuf>,
     /// 从已有 checkpoint 恢复，跳过已经完成的 case。
     pub resume_checkpoint: bool,
-    /// 存储根目录（eval session 数据隔离）。
+    /// 已运行 server 的 Astrcode 数据目录。
     ///
-    /// 指定后通过 `ASTRCODE_TEST_HOME` 环境变量注入，server 使用此目录
-    /// 代替 `~/.astrcode/` 存放 session 数据。
-    /// - `None`：使用自动创建的 tempdir（默认，最安全的隔离）
-    /// - `Some(path)`：使用指定路径（可累积历史结果）
+    /// 未显式指定 `server_addr` 时，从该目录的 `run.json` 读取连接信息；
+    /// `None` 使用进程默认的 Astrcode 数据目录。该选项不会修改 server 的存储位置。
     pub storage_root: Option<PathBuf>,
     /// 在官方 SWE-bench instance image 中逐例启动求解服务。
     pub swe_bench_instance: Option<SweBenchInstanceConfig>,
@@ -123,9 +121,6 @@ impl Default for EvalConfig {
 
 /// 执行评测并返回报告。
 pub async fn run_eval(config: EvalConfig) -> Result<EvalReport, EvalError> {
-    // 设置存储隔离：通过 ASTRCODE_TEST_HOME 注入 eval 专用存储目录
-    let _storage_dir = setup_storage_isolation(&config)?;
-
     let mut cases = match &config.source {
         EvalSource::TomlDir => case::load_case_set(&config.cases_dir)?,
         EvalSource::SweBench(path) => SweBenchAdapter.load_cases(path)?,
@@ -144,30 +139,6 @@ pub async fn run_eval(config: EvalConfig) -> Result<EvalReport, EvalError> {
     let runner = EvalRunner::start(&config).await?;
     let report = runner.run_all(cases).await?;
     Ok(report)
-}
-
-/// 设置存储隔离，返回实际使用的目录路径（需要保持存活防止 tempdir 被清理）。
-fn setup_storage_isolation(config: &EvalConfig) -> Result<PathBuf, EvalError> {
-    let storage_path = match &config.storage_root {
-        Some(path) => {
-            std::fs::create_dir_all(path)
-                .map_err(|e| EvalError::Setup(format!("create storage dir: {e}")))?;
-            path.clone()
-        },
-        None => {
-            // 默认使用 tempdir 完全隔离
-            let dir = tempfile::tempdir()
-                .map_err(|e| EvalError::Setup(format!("create storage tempdir: {e}")))?;
-            let path = dir.path().to_path_buf();
-            std::mem::forget(dir); // 保持存活，eval 完成后由 OS 在进程退出时清理
-            path
-        },
-    };
-    // 注入环境变量，server 启动时 config::defaults::user_home_dir() 会读取
-    // FIXME：是进程级副作用，多线程并发调用不安全（但当前 eval 是单进程入口，暂时可接受）
-    std::env::set_var("ASTRCODE_TEST_HOME", &storage_path);
-    tracing::info!(storage = %storage_path.display(), "eval storage isolated");
-    Ok(storage_path)
 }
 
 /// Eval 框架错误类型。

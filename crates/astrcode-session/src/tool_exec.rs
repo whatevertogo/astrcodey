@@ -256,7 +256,7 @@ async fn execute_tool_call_blocking(
         capabilities,
     );
 
-    let outcome = tokio::select! {
+    let mut outcome = tokio::select! {
         _ = cancellation_token.cancelled() => ToolExecutionOutcome::cancelled(
             "tool execution cancelled",
             Some(started_at.elapsed().as_millis() as u64),
@@ -274,7 +274,9 @@ async fn execute_tool_call_blocking(
     };
     drop(tool_ctx);
     if let Some(sender) = turn.shared.turn_event_sender.as_ref() {
-        sender.flush().await;
+        if let Err(error) = sender.flush().await {
+            outcome = ToolExecutionOutcome::failed(error.to_string());
+        }
     }
 
     match &outcome {

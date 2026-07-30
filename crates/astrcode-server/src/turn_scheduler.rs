@@ -31,17 +31,12 @@ mod delivery;
 mod lifecycle;
 mod queue;
 
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use astrcode_core::{event::Phase, types::*, user_input::UserInput};
-use astrcode_session::{SessionError, TurnHandle};
-use futures_util::FutureExt;
-use parking_lot::Mutex;
+use astrcode_session::{SessionError, TurnFinalization, TurnHandle};
 use thiserror::Error;
-use tokio::{
-    sync::{broadcast, oneshot},
-    task::JoinHandle,
-};
+use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -49,6 +44,7 @@ use crate::{
     delivery_gates::{SessionDeliveryGates, SessionOperationGuard, SessionStartLease},
     queue_drains::QueueDrainTracker,
     session_manager::SessionManager,
+    task_utils::{OwnedTaskAdmission, OwnedTaskSet},
     turn_registry::{TurnRegistry, TurnReservation},
 };
 
@@ -75,6 +71,41 @@ pub enum TurnScheduleError {
     Turn(#[from] astrcode_session::TurnError),
     #[error("event emit failed")]
     EventEmit(#[source] SessionError),
+    #[error(
+        "session {session_id} was recycled, but updating its parent relation failed \
+         ({relation_error}) and restoring the session also failed ({restore_error})"
+    )]
+    RecycleRelationRollbackFailed {
+        session_id: SessionId,
+        relation_error: String,
+        restore_error: String,
+    },
+    #[error(
+        "session {session_id} was deleted, but updating its parent {parent_session_id} failed: \
+         {relation_error}"
+    )]
+    DeleteRelationUpdateFailed {
+        session_id: SessionId,
+        parent_session_id: SessionId,
+        relation_error: String,
+    },
+    #[error(
+        "parent session {parent_session_id} has a conflicting relation for child \
+         {child_session_id}: expected {expected}, found {actual}"
+    )]
+    ChildRelationConflict {
+        parent_session_id: SessionId,
+        child_session_id: SessionId,
+        expected: String,
+        actual: String,
+    },
+    #[error("completion ownership was lost for session {session_id}, turn {turn_id}")]
+    CompletionOwnershipLost {
+        session_id: SessionId,
+        turn_id: TurnId,
+    },
+    #[error("server background tasks are shutting down")]
+    BackgroundTasksClosed,
 }
 
 /// 输入投递策略（见模块文档「输入投递」表）。
@@ -103,6 +134,17 @@ pub enum DeliveryOutcome {
 pub struct StartedExecution {
     pub turn_id: TurnId,
     pub handle: TurnHandle,
+}
+
+pub(crate) struct OwnedExecution {
+    turn_id: TurnId,
+    handle: TurnHandle,
+    admission: OwnedTaskAdmission,
+}
+
+pub(crate) enum FinishOutcome {
+    Settled(Option<OwnedExecution>),
+    Stale,
 }
 
 struct ReservedExecution {
@@ -154,6 +196,8 @@ pub const MAX_PROMPT_TEXT_BYTES: usize = 1024 * 1024;
 const FORCE_KILL_GRACE_MS: u64 = 1500;
 const ABORT_WAIT_POLL_MS: u64 = 50;
 const ABORT_WAIT_EXTRA_MS: u64 = 500;
+const FINALIZATION_RETRY_INITIAL_MS: u64 = 100;
+const FINALIZATION_RETRY_MAX_MS: u64 = 5_000;
 pub(crate) enum CompletedRecycleOutcome {
     Recycled,
     StaleCompletion,
@@ -166,7 +210,7 @@ pub struct TurnScheduler {
     child_sessions: Arc<ChildSessionCoordinator>,
     queue_drains: Arc<QueueDrainTracker>,
     delivery_gates: Arc<SessionDeliveryGates>,
-    detached_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    owned_tasks: Arc<OwnedTaskSet>,
     background_shutdown: CancellationToken,
     completion_events: broadcast::Sender<TurnCompletionEvent>,
 }
@@ -179,78 +223,101 @@ impl TurnScheduler {
     ) -> Self {
         let (completion_events, _) = broadcast::channel(256);
         Self {
+            owned_tasks: Arc::clone(session_manager.owned_tasks()),
             session_manager,
             registry,
             child_sessions,
             queue_drains: Arc::new(QueueDrainTracker::default()),
             delivery_gates: Arc::new(SessionDeliveryGates::default()),
-            detached_tasks: Arc::new(Mutex::new(Vec::new())),
             background_shutdown: CancellationToken::new(),
             completion_events,
         }
     }
 
-    fn track_detached_task(&self, handle: JoinHandle<()>) {
-        let mut tasks = self.detached_tasks.lock();
-        let mut active = Vec::with_capacity(tasks.len() + 1);
-        let mut finished = Vec::new();
-        for task in tasks.drain(..) {
-            if task.is_finished() {
-                finished.push(task);
-            } else {
-                active.push(task);
-            }
-        }
-        active.push(handle);
-        *tasks = active;
-        drop(tasks);
-
-        for task in finished {
-            if let Some(Err(error)) = task.now_or_never() {
-                tracing::warn!(%error, "turn scheduler background task failed");
-            }
-        }
+    pub(crate) fn admit_owned(&self) -> Result<OwnedTaskAdmission, TurnScheduleError> {
+        self.owned_tasks
+            .admit()
+            .map_err(|_| TurnScheduleError::BackgroundTasksClosed)
     }
 
-    /// 等待所有 detached completion / force-kill 任务结束（进程退出前调用）。
-    pub async fn drain_detached_tasks(&self) {
-        self.background_shutdown.cancel();
-        loop {
-            let handles: Vec<JoinHandle<()>> = self.detached_tasks.lock().drain(..).collect();
-            if handles.is_empty() {
-                break;
-            }
-            for handle in handles {
-                if let Err(error) = handle.await {
-                    tracing::warn!(%error, "turn scheduler background task failed");
-                }
-            }
-        }
+    pub(crate) fn spawn_owned<F>(
+        &self,
+        task: F,
+    ) -> Result<tokio::task::JoinHandle<F::Output>, TurnScheduleError>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.owned_tasks
+            .spawn(task)
+            .map_err(|_| TurnScheduleError::BackgroundTasksClosed)
+    }
+
+    pub(crate) fn spawn_owned_named(
+        &self,
+        name: &'static str,
+        task: impl Future<Output = ()> + Send + 'static,
+    ) -> Result<tokio::task::JoinHandle<()>, TurnScheduleError> {
+        Ok(self.admit_owned()?.spawn_named(name, task))
+    }
+
+    pub(crate) fn stop_task_admission(&self) {
+        self.owned_tasks.stop_accepting();
+    }
+
+    pub(crate) async fn wait_for_task_admissions(&self) {
+        self.owned_tasks.wait_for_admissions().await;
+    }
+
+    pub(crate) async fn close_and_wait(&self) {
+        self.owned_tasks.close_and_wait().await;
     }
 
     pub async fn shutdown_background_tasks(&self) {
+        self.stop_task_admission();
+        self.background_shutdown.cancel();
+        self.request_all_turn_shutdowns();
+
+        self.wait_for_task_admissions().await;
+        self.request_all_turn_shutdowns();
+        tokio::time::sleep(std::time::Duration::from_millis(FORCE_KILL_GRACE_MS)).await;
+        self.settle_all_active_turns_for_shutdown().await;
+
+        self.child_sessions
+            .drain_completion_guards_for_shutdown(self)
+            .await;
         self.child_sessions.shutdown_completion_watcher().await;
-        let session_ids = self.registry.active_session_ids();
-        for session_id in &session_ids {
-            let gate = self.delivery_gates.mark_closing(session_id).await;
-            gate.wait_for_starts().await;
-            self.request_turn_shutdown(session_id);
+        self.close_and_wait().await;
+    }
+
+    fn request_all_turn_shutdowns(&self) {
+        for session_id in self.registry.active_session_ids() {
+            self.registry.request_shutdown(&session_id);
         }
-        self.drain_detached_tasks().await;
+    }
+
+    async fn settle_all_active_turns_for_shutdown(&self) {
+        while !self.registry.active_session_ids().is_empty() {
+            for session_id in self.registry.active_session_ids() {
+                let operation = self.delivery_gates.lock(&session_id).await;
+                operation.wait_for_starts().await;
+                if let Err(error) = self.cleanup_execution_locked(&session_id).await {
+                    tracing::warn!(
+                        %session_id,
+                        %error,
+                        "failed to settle turn during shutdown; retrying"
+                    );
+                }
+            }
+            if !self.registry.active_session_ids().is_empty() {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
     }
 
     #[cfg(feature = "testing")]
-    pub fn tracked_detached_task_count(&self) -> usize {
-        self.detached_tasks
-            .lock()
-            .iter()
-            .filter(|task| !task.is_finished())
-            .count()
-    }
-
-    #[cfg(feature = "testing")]
-    pub fn tracked_detached_task_slots(&self) -> usize {
-        self.detached_tasks.lock().len()
+    pub fn owned_task_count(&self) -> usize {
+        self.owned_tasks.task_count()
     }
 
     pub fn registry(&self) -> &Arc<TurnRegistry> {
@@ -261,8 +328,14 @@ impl TurnScheduler {
         self.completion_events.subscribe()
     }
 
-    pub(crate) async fn sync_durable_events(&self, session_id: &SessionId) {
-        self.session_manager.sync_durable_events(session_id).await;
+    pub(crate) async fn sync_durable_events_required(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), TurnScheduleError> {
+        self.session_manager
+            .sync_durable_events_required(session_id)
+            .await
+            .map_err(TurnScheduleError::SessionManager)
     }
 
     /// 统一的 execution 状态查询。
@@ -291,14 +364,37 @@ impl TurnScheduler {
         session_id: SessionId,
         input: UserInput,
     ) -> Result<StartedExecution, TurnScheduleError> {
-        validate_user_input(&input)?;
+        let _admission = self.admit_owned()?;
         let operation = self.begin_session_operation(&session_id).await?;
-        self.ensure_no_pending_inputs(&session_id).await?;
-        let reserved = self.reserve_execution(&operation, input, None)?;
+        let reserved = self.reserve_new_execution(&operation, input).await?;
         drop(operation);
         self.start_reserved_execution(reserved)
             .await
             .map_err(|failure| failure.error)
+    }
+
+    /// 供需要在 turn 启动后继续登记外部 owner 的调用方使用；调用方决定何时释放 gate。
+    pub(crate) async fn start_with_completion_in_operation(
+        &self,
+        operation: &SessionOperationGuard,
+        input: UserInput,
+    ) -> Result<StartedExecution, TurnScheduleError> {
+        let _admission = self.admit_owned()?;
+        let reserved = self.reserve_new_execution(operation, input).await?;
+        self.start_reserved_execution(reserved)
+            .await
+            .map_err(|failure| failure.error)
+    }
+
+    async fn reserve_new_execution(
+        &self,
+        operation: &SessionOperationGuard,
+        input: UserInput,
+    ) -> Result<ReservedExecution, TurnScheduleError> {
+        validate_user_input(&input)?;
+        let session_id = operation.session_id();
+        self.ensure_no_pending_inputs(session_id).await?;
+        self.reserve_execution(operation, input, None)
     }
 
     /// 启动由 scheduler 持有 completion watcher 的 turn，并返回首轮完成通知。
@@ -307,18 +403,45 @@ impl TurnScheduler {
         session_id: SessionId,
         input: UserInput,
     ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), TurnScheduleError> {
+        let admission = self.admit_owned()?;
         let StartedExecution { turn_id, handle } = self
             .start_with_completion(session_id.clone(), input)
             .await?;
         let (completion_tx, completion_rx) = oneshot::channel();
-        self.watch_detached_turn(
+        self.watch_owned_turn(
+            admission,
             session_id,
             turn_id.clone(),
             handle,
             "tracked",
             Some(completion_tx),
+            None,
         );
         Ok((turn_id, completion_rx))
+    }
+
+    /// 启动由 scheduler 持有 completion owner 的 turn，并在 durable 收口后返回文本输出。
+    pub(crate) async fn start_tracked_with_output(
+        &self,
+        session_id: SessionId,
+        input: UserInput,
+    ) -> Result<(TurnId, oneshot::Receiver<Result<String, TurnScheduleError>>), TurnScheduleError>
+    {
+        let admission = self.admit_owned()?;
+        let StartedExecution { turn_id, handle } = self
+            .start_with_completion(session_id.clone(), input)
+            .await?;
+        let (output_tx, output_rx) = oneshot::channel();
+        self.watch_owned_turn(
+            admission,
+            session_id,
+            turn_id.clone(),
+            handle,
+            "tracked-output",
+            None,
+            Some(output_tx),
+        );
+        Ok((turn_id, output_rx))
     }
 
     fn reserve_execution(
@@ -408,58 +531,96 @@ impl TurnScheduler {
         &self,
         session_id: &SessionId,
         turn_id: &TurnId,
-    ) -> Option<StartedExecution> {
-        self.sync_durable_events(session_id).await;
+        finalization: Option<&TurnFinalization>,
+    ) -> Result<FinishOutcome, TurnScheduleError> {
+        self.sync_durable_events_required(session_id).await?;
         self.child_sessions.drain_completed(self, session_id).await;
 
         let operation = self.delivery_gates.lock(session_id).await;
-        self.registry.remove_if_matches(session_id, turn_id);
-        if operation.is_closing() {
-            return None;
+        let settled = self
+            .settle_finished_execution_locked(session_id, turn_id, finalization)
+            .await?;
+        if !settled {
+            return Ok(FinishOutcome::Stale);
         }
-        if self.registry.has_active(session_id) {
-            return None;
+        Ok(FinishOutcome::Settled(
+            self.start_next_after_settle_in_operation(operation).await?,
+        ))
+    }
+
+    pub(crate) async fn start_next_after_settle_in_operation(
+        &self,
+        operation: SessionOperationGuard,
+    ) -> Result<Option<OwnedExecution>, TurnScheduleError> {
+        let session_id = operation.session_id().clone();
+        if operation.is_closing() || self.background_shutdown.is_cancelled() {
+            return Ok(None);
+        }
+        let admission = match self.admit_owned() {
+            Ok(admission) => admission,
+            Err(TurnScheduleError::BackgroundTasksClosed) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        if self.registry.has_active(&session_id) {
+            return Ok(None);
         }
         let (reserved, entry) = match self.reserve_next_pending(&operation).await {
             Ok(Some(next)) => next,
-            Ok(None) => return None,
+            Ok(None) => return Ok(None),
             Err(error) => {
                 tracing::warn!(session_id = %session_id, %error, "failed to reserve queued input");
-                return None;
+                return Err(error);
             },
         };
         drop(operation);
-        self.start_reserved_pending(reserved, entry).await.ok()
+        Ok(self
+            .start_reserved_pending(reserved, entry)
+            .await
+            .ok()
+            .map(|started| OwnedExecution {
+                turn_id: started.turn_id,
+                handle: started.handle,
+                admission,
+            }))
     }
 
     /// 若 [`Self::finish_and_maybe_start_next`] 已启动队列中的下一条 execution，挂上 detached
     /// watcher。
-    pub(crate) fn watch_queued_if_any(
-        &self,
-        session_id: SessionId,
-        next: Option<StartedExecution>,
-    ) {
-        let Some(StartedExecution { turn_id, handle }) = next else {
+    pub(crate) fn watch_queued_if_any(&self, session_id: SessionId, next: Option<OwnedExecution>) {
+        let Some(OwnedExecution {
+            turn_id,
+            handle,
+            admission,
+        }) = next
+        else {
             return;
         };
-        self.watch_detached_turn(session_id, turn_id, handle, "queued", None);
+        self.watch_owned_turn(admission, session_id, turn_id, handle, "queued", None, None);
     }
 
-    fn watch_detached_turn(
+    fn watch_owned_turn(
         &self,
+        admission: OwnedTaskAdmission,
         session_id: SessionId,
         turn_id: TurnId,
         handle: TurnHandle,
         source: &'static str,
         completion_tx: Option<oneshot::Sender<TurnCompletion>>,
+        output_tx: Option<oneshot::Sender<Result<String, TurnScheduleError>>>,
     ) {
         let scheduler = self.clone();
-        let handle = tokio::spawn(async move {
+        admission.spawn_named(source, async move {
             scheduler
-                .run_detached_completion_watcher(session_id, turn_id, handle, source, completion_tx)
+                .run_detached_completion_watcher(
+                    session_id,
+                    turn_id,
+                    handle,
+                    source,
+                    completion_tx,
+                    output_tx,
+                )
                 .await;
         });
-        self.track_detached_task(handle);
     }
 
     async fn run_detached_completion_watcher(
@@ -469,16 +630,27 @@ impl TurnScheduler {
         mut handle: TurnHandle,
         source: &'static str,
         mut completion_tx: Option<oneshot::Sender<TurnCompletion>>,
+        mut output_tx: Option<oneshot::Sender<Result<String, TurnScheduleError>>>,
     ) {
         loop {
-            let completion = match handle.wait().await {
-                Some(result) => match result.output {
-                    Ok(output) => TurnCompletion::Completed {
-                        finish_reason: output.finish_reason,
-                    },
-                    Err(error) => TurnCompletion::Failed {
-                        error: error.to_string(),
-                    },
+            let (completion, finalization, tracked_output) = match handle.wait().await {
+                Some(result) => {
+                    let finalization = result.finalization.clone();
+                    let (completion, tracked_output) = match result.output {
+                        Ok(output) => {
+                            let finish_reason = output.finish_reason;
+                            let tracked_output = output_tx.is_some().then_some(Ok(output.text));
+                            (TurnCompletion::Completed { finish_reason }, tracked_output)
+                        },
+                        Err(error) => {
+                            let message = error.to_string();
+                            let tracked_output = output_tx
+                                .is_some()
+                                .then_some(Err(TurnScheduleError::Turn(error)));
+                            (TurnCompletion::Failed { error: message }, tracked_output)
+                        },
+                    };
+                    (completion, Some(finalization), tracked_output)
                 },
                 None => {
                     tracing::warn!(
@@ -487,14 +659,56 @@ impl TurnScheduler {
                         source,
                         "detached turn task ended without completion"
                     );
-                    TurnCompletion::Dropped
+                    let tracked_output = output_tx.is_some().then_some(Err(
+                        TurnScheduleError::CompletionOwnershipLost {
+                            session_id: session_id.clone(),
+                            turn_id: turn_id.clone(),
+                        },
+                    ));
+                    (TurnCompletion::Dropped, None, tracked_output)
                 },
             };
 
-            let next = self
-                .finish_and_maybe_start_next(&session_id, &turn_id)
-                .await;
+            let mut retry_attempt = 0u32;
+            let mut retry_delay_ms = FINALIZATION_RETRY_INITIAL_MS;
+            let next = loop {
+                match self
+                    .finish_and_maybe_start_next(&session_id, &turn_id, finalization.as_ref())
+                    .await
+                {
+                    Ok(FinishOutcome::Settled(next)) => break next,
+                    Ok(FinishOutcome::Stale) => return,
+                    Err(error) => {
+                        retry_attempt += 1;
+                        if retry_attempt == 1 || retry_attempt.is_power_of_two() {
+                            tracing::warn!(
+                                %session_id,
+                                %turn_id,
+                                %error,
+                                retry_attempt,
+                                retry_delay_ms,
+                                "turn finalization is not durable yet; retrying before publishing completion"
+                            );
+                        } else {
+                            tracing::debug!(
+                                %session_id,
+                                %turn_id,
+                                %error,
+                                retry_attempt,
+                                retry_delay_ms,
+                                "turn finalization retry failed"
+                            );
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(retry_delay_ms)).await;
+                        retry_delay_ms =
+                            (retry_delay_ms.saturating_mul(2)).min(FINALIZATION_RETRY_MAX_MS);
+                    },
+                }
+            };
 
+            if let (Some(tx), Some(output)) = (output_tx.take(), tracked_output) {
+                let _ = tx.send(output);
+            }
             if let Some(tx) = completion_tx.take() {
                 let _ = tx.send(completion.clone());
             }
@@ -504,15 +718,17 @@ impl TurnScheduler {
                 completion,
             });
 
-            let Some(StartedExecution {
+            let Some(OwnedExecution {
                 turn_id: next_turn_id,
                 handle: next_handle,
+                admission,
             }) = next
             else {
                 break;
             };
             turn_id = next_turn_id;
             handle = next_handle;
+            drop(admission);
         }
     }
 }

@@ -261,7 +261,7 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 - `state`：`session_data_dir`，给扩展规范 session-local 数据目录。
 - `prelude`、`worker_prelude`：分别面向进程内扩展和 s5r worker 的便捷导入集合。
 
-依赖边界：只依赖 workspace 内的 `astrcode-core`。`ExtensionHostServices` 只在 `trusted-bundled` feature 下通过 `trusted` 模块暴露给可信进程内扩展；磁盘/IPC 扩展必须走 capability-gated host API。
+依赖边界：只依赖 workspace 内的 `astrcode-core`。`trusted` 模块只是进程内 host service 的命名入口，不构成安全边界；磁盘/IPC 扩展的隔离由进程边界和 capability-gated host API 保证。
 
 测试线索：`worker/*`、`builder.rs`、`manifest.rs`、`runtime/*` 有单元测试。修改 SDK 类型等同修改扩展 ABI，需要同步内置扩展和 s5r 测试。
 
@@ -656,7 +656,7 @@ Feature：
 
 - `dev-mode`：启用可选依赖 `astrcode-eval`。
 
-依赖边界：依赖 client、server、protocol、context、core、extension-sdk、log 等。CLI 同时可作为前端和本地 server 的启动入口。
+依赖边界：依赖 client、server、protocol、core、log，并可选依赖 eval。CLI 同时可作为前端和本地 server 的启动入口；扩展作者契约由 server 在协议边界映射，TUI 不直接依赖 extension-sdk 或 context。
 
 测试线索：`tests/end_to_end.rs` 覆盖端到端行为；TUI 子模块有较多单元测试，尤其是 viewport、render spec、streaming chunking、session picker、child agent store。
 

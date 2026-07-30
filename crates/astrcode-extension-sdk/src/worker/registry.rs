@@ -6,15 +6,15 @@ use serde_json::Value;
 
 use crate::{
     extension::{
-        ContinueAfterStopOptions, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        extension_http_route_patterns_conflict,
+        ContinueAfterStopOptions, ExtensionEventDecl, ExtensionHttpRequest, ExtensionHttpResponse,
+        ExtensionHttpRoute, extension_http_route_patterns_conflict,
     },
     runtime::CancelToken,
-    s5r::{CAP_HANDLER_INVOKE, ErrorPayload, HandlerResult, InvokeMsg},
-    worker::manifest::{
-        CommandManifestEntry, HookManifestEntry, HookManifestOptions, HttpRouteManifestEntry,
-        ManifestCatalog,
+    s5r::{
+        CAP_HANDLER_INVOKE, ErrorPayload, HandlerResult, InvokeMsg,
+        manifest::{ManifestCommand, ManifestHook, ManifestHookOptions, ManifestHttpRoute},
     },
+    worker::manifest::ManifestCatalog,
 };
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -81,8 +81,12 @@ impl HandlerRegistry {
         self.catalog.capabilities.push(cap.into());
     }
 
-    pub(crate) fn declare_extension_event(&mut self, event: Value) {
+    pub(crate) fn declare_extension_event(&mut self, event: ExtensionEventDecl) {
         self.catalog.extension_events.push(event);
+    }
+
+    pub(crate) fn declare_legacy_extension_event(&mut self, event: Value) {
+        self.catalog.push_legacy_extension_event(event);
     }
 
     pub(crate) fn register_tool(
@@ -115,10 +119,10 @@ impl HandlerRegistry {
                 format!("duplicate hook registration: {on}"),
             ));
         }
-        self.catalog.hooks.push(HookManifestEntry {
+        self.catalog.hooks.push(ManifestHook {
             on: on.clone(),
             mode: mode.into(),
-            options: HookManifestOptions::default(),
+            options: ManifestHookOptions::default(),
         });
         self.hooks.insert(on, handler);
         Ok(())
@@ -136,10 +140,10 @@ impl HandlerRegistry {
                 format!("duplicate hook registration: {on}"),
             ));
         }
-        self.catalog.hooks.push(HookManifestEntry {
+        self.catalog.hooks.push(ManifestHook {
             on: on.clone(),
             mode: "blocking".into(),
-            options: HookManifestOptions {
+            options: ManifestHookOptions {
                 max_per_turn: Some(options.max_per_turn),
             },
         });
@@ -160,7 +164,7 @@ impl HandlerRegistry {
                 format!("duplicate command registration: {name}"),
             ));
         }
-        self.catalog.commands.push(CommandManifestEntry {
+        self.catalog.commands.push(ManifestCommand {
             name: name.clone(),
             description: description.into(),
         });
@@ -189,7 +193,7 @@ impl HandlerRegistry {
         let handler_id = self.handler_id_for("http", &handler_name);
         self.catalog
             .http_routes
-            .push(HttpRouteManifestEntry { route, handler_id });
+            .push(ManifestHttpRoute { route, handler_id });
         self.http_routes.insert(handler_name, handler);
         Ok(())
     }
@@ -301,10 +305,10 @@ impl HandlerRegistry {
     }
 }
 
-pub fn registration_metadata(
+pub(crate) fn registration_metadata(
     extension_id: &str,
     version: &str,
     catalog: &ManifestCatalog,
-) -> Value {
+) -> Result<Value, String> {
     catalog.to_metadata_value(extension_id, version)
 }

@@ -4,16 +4,27 @@
 //! storage 不依赖也不返回这些 DTO。
 
 use astrcode_core::{message_attachment::MessageAttachment, tool::SessionToolSelection};
-use astrcode_extension_sdk::extension::{ExtensionEventDecl, Keybinding, SlashCommand, StatusItem};
 use serde::{Deserialize, Serialize};
 
-pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
 use crate::wire::{
     ApprovalDecisionDto, ApprovalModeDto, CommandSourceDto, ExecutionModeDto,
     ExtensionCapabilityDto, ExtensionHttpMethodDto, ExtensionSourceDto, ExtensionStageStatusDto,
     PhaseDto, ProviderAuthSchemeDto, ProviderWireFormatDto, ThinkingCapabilityDto, ToolOriginDto,
     ToolOutputStreamDto, impl_wire_values,
 };
+pub use crate::{
+    agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto},
+    events::KeybindingDto,
+};
+
+/// 本机运行中 server 的发现文件（`run.json`）。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunInfoDto {
+    pub port: u16,
+    pub auth_token: String,
+}
 
 /// 新建会话请求。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -250,33 +261,6 @@ pub struct SlashCommandListResponseDto {
     pub status_items: Vec<StatusItemDto>,
 }
 
-/// 快捷键绑定 DTO。
-#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeybindingDto {
-    /// 快捷键描述（如 "shift+tab"）。
-    pub key: String,
-    /// 触发的命令名（不含 `/`）。
-    pub command: String,
-    /// 命令参数。
-    #[serde(default)]
-    pub arguments: String,
-    /// 人类可读描述。
-    pub description: String,
-}
-
-impl From<Keybinding> for KeybindingDto {
-    fn from(binding: Keybinding) -> Self {
-        Self {
-            key: binding.key,
-            command: binding.command,
-            arguments: binding.arguments,
-            description: binding.description,
-        }
-    }
-}
-
 /// 状态栏项 DTO。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -291,17 +275,6 @@ pub struct StatusItemDto {
     pub priority: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tooltip: Option<String>,
-}
-
-impl From<StatusItem> for StatusItemDto {
-    fn from(item: StatusItem) -> Self {
-        Self {
-            id: item.id,
-            text: item.text,
-            priority: item.priority,
-            tooltip: item.tooltip,
-        }
-    }
 }
 
 /// 可执行斜杠命令信息。
@@ -669,19 +642,6 @@ pub struct ExtensionSlashCommandDto {
     pub priority: i32,
 }
 
-impl From<SlashCommand> for ExtensionSlashCommandDto {
-    fn from(command: SlashCommand) -> Self {
-        Self {
-            name: command.name,
-            description: command.description,
-            args_schema: command.args_schema,
-            requires_idle: command.requires_idle,
-            argument_completions: command.argument_completions,
-            priority: command.priority,
-        }
-    }
-}
-
 /// 扩展可发射事件的声明。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -691,17 +651,6 @@ pub struct ExtensionEventDeclDto {
     pub schema_version: u32,
     pub durable: bool,
     pub max_payload_bytes: usize,
-}
-
-impl From<ExtensionEventDecl> for ExtensionEventDeclDto {
-    fn from(event: ExtensionEventDecl) -> Self {
-        Self {
-            event_type: event.event_type,
-            schema_version: event.schema_version,
-            durable: event.durable,
-            max_payload_bytes: event.max_payload_bytes,
-        }
-    }
 }
 
 /// 扩展声明的完整描述。

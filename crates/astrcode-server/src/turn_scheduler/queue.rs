@@ -126,10 +126,11 @@ impl TurnScheduler {
         entry: PendingInput,
         source: &'static str,
     ) -> Result<(), TurnScheduleError> {
+        let admission = self.admit_owned()?;
         let session_id = reserved.session_id.clone();
         let StartedExecution { turn_id, handle } =
             self.start_reserved_pending(reserved, entry).await?;
-        self.watch_detached_turn(session_id, turn_id, handle, source, None);
+        self.watch_owned_turn(admission, session_id, turn_id, handle, source, None, None);
         Ok(())
     }
 
@@ -143,10 +144,11 @@ impl TurnScheduler {
             return;
         };
         let scheduler = self.clone();
-        let handle = tokio::spawn(async move {
+        if let Err(spawn_error) = self.spawn_owned_named("queue_retry", async move {
             scheduler.run_queue_retry(session_id, retry).await;
-        });
-        self.track_detached_task(handle);
+        }) {
+            tracing::debug!(%spawn_error, "queue retry rejected during shutdown");
+        }
     }
 
     async fn run_queue_retry(&self, session_id: SessionId, retry: QueueDrainRetry) {

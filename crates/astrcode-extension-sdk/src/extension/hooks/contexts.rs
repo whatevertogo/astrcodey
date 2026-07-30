@@ -47,7 +47,7 @@ pub struct PreToolUseContext {
     pub tool_input: serde_json::Value,
     pub approval_mode: crate::permission::ApprovalMode,
     pub available_tools: Vec<ToolDefinition>,
-    pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::EventPayload>>,
+    pub event_tx: Option<crate::event::EventSender>,
     pub extension_event_sink: Option<Arc<dyn ExtensionEventSink>>,
     pub session_store_dir: Option<PathBuf>,
 }
@@ -76,7 +76,7 @@ pub struct PostToolUseContext {
     pub tool_name: String,
     pub tool_input: serde_json::Value,
     pub tool_result: ToolResult,
-    pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::EventPayload>>,
+    pub event_tx: Option<crate::event::EventSender>,
     pub extension_event_sink: Option<Arc<dyn ExtensionEventSink>>,
     pub session_store_dir: Option<PathBuf>,
 }
@@ -137,7 +137,7 @@ pub struct LifecycleContext {
     pub session_id: String,
     pub working_dir: String,
     pub model: ModelSelection,
-    pub event_tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::EventPayload>>,
+    pub event_tx: Option<crate::event::EventSender>,
     pub extension_event_sink: Option<Arc<dyn ExtensionEventSink>>,
     pub last_exchange: Option<ExchangeSummary>,
     pub mid_turn_user_messages_synced: u32,

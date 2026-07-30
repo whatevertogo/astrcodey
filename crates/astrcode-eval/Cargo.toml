@@ -7,15 +7,14 @@ description = "Agent task evaluation framework: benchmark runner, scoring judge,
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
+astrcode-protocol = { path = "../astrcode-protocol" }
 tokio = { workspace = true, features = ["sync", "time", "process", "rt-multi-thread", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
-chrono = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
-async-trait = { workspace = true }
 tempfile = { workspace = true }
 walkdir = { workspace = true }
 futures-util = { workspace = true }

@@ -258,10 +258,11 @@ async fn idle_submit_emits_turn_started_and_user_message() {
         .start_with_completion(sid.clone(), "hello".into())
         .await
         .unwrap();
-    let _ = started.handle.wait().await;
+    let result = started.handle.wait().await.unwrap();
     scheduler
-        .finish_and_maybe_start_next(&sid, &started.turn_id)
-        .await;
+        .finish_and_maybe_start_next(&sid, &started.turn_id, Some(&result.finalization))
+        .await
+        .unwrap();
 
     let events = store.replay_events(&sid).await.unwrap();
     assert!(
@@ -659,9 +660,11 @@ async fn release_completed_execution_is_non_destructive() {
         .await
         .unwrap();
     let turn_id = started.turn_id;
-    let _ = started.handle.wait().await;
+    let result = started.handle.wait().await.unwrap();
 
-    scheduler.release_completed_execution(&sid, &turn_id).await;
+    scheduler
+        .release_completed_execution(&sid, &turn_id, Some(&result.finalization))
+        .await;
 
     assert_eq!(
         turn_completed_reasons(&store.replay_events(&sid).await.unwrap()),
@@ -681,17 +684,16 @@ async fn stale_completion_does_not_recycle_newer_turn() {
         .await
         .unwrap();
     let first_turn_id = first.turn_id;
-    let _ = first.handle.wait().await;
-
-    let outcome = scheduler
-        .deliver_input(
-            sid.clone(),
-            "second".into(),
-            InputDelivery::InjectIfRunningElseStart,
-        )
+    let first_result = first.handle.wait().await.unwrap();
+    scheduler
+        .finish_and_maybe_start_next(&sid, &first_turn_id, Some(&first_result.finalization))
         .await
         .unwrap();
-    assert!(matches!(outcome, DeliveryOutcome::Started { .. }));
+
+    let second = scheduler
+        .start_with_completion(sid.clone(), "second".into())
+        .await
+        .unwrap();
 
     assert!(
         !recycle_completed_session_for_test(&scheduler, &sid, &first_turn_id)
@@ -699,6 +701,12 @@ async fn stale_completion_does_not_recycle_newer_turn() {
             .unwrap()
     );
     assert!(store.list_sessions().await.unwrap().contains(&sid));
+
+    let second_result = second.handle.wait().await.unwrap();
+    scheduler
+        .finish_and_maybe_start_next(&sid, &second.turn_id, Some(&second_result.finalization))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -748,12 +756,11 @@ async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish(
         .start_with_completion(sid.clone(), "run".into())
         .await
         .unwrap();
-    let turn_id = started.turn_id.clone();
 
     scheduler.abort(&sid).await.unwrap();
     assert!(
-        scheduler.registry().has_active(&sid),
-        "cooperative abort keeps the registry entry until the runner exits"
+        !scheduler.registry().has_active(&sid),
+        "abort must not return before durable finalization releases ownership"
     );
 
     let result = started.handle.wait().await.expect("turn result");
@@ -762,15 +769,12 @@ async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish(
         Err(astrcode_session::TurnError::Aborted)
     ));
 
-    scheduler.finish_and_maybe_start_next(&sid, &turn_id).await;
-    assert!(!scheduler.registry().has_active(&sid));
-
     let reasons = turn_completed_reasons(&store.replay_events(&sid).await.unwrap());
     assert_eq!(reasons, vec!["aborted"]);
 }
 
 #[tokio::test]
-async fn detached_task_tracking_prunes_finished_handles() {
+async fn owned_task_tracking_releases_finished_tasks() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
@@ -780,25 +784,24 @@ async fn detached_task_tracking_prunes_finished_handles() {
         .await
         .unwrap();
     for _ in 0..50 {
-        if scheduler.tracked_detached_task_count() == 0
-            && scheduler.tracked_detached_task_slots() == 1
-        {
+        if scheduler.owned_task_count() == 0 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(scheduler.tracked_detached_task_count(), 0);
-    assert_eq!(scheduler.tracked_detached_task_slots(), 1);
+    assert_eq!(scheduler.owned_task_count(), 0);
 
     scheduler
         .deliver_input(sid, "second".into(), InputDelivery::StartNew)
         .await
         .unwrap();
-    assert_eq!(
-        scheduler.tracked_detached_task_slots(),
-        1,
-        "tracking a new detached task should prune finished handles first"
-    );
+    for _ in 0..50 {
+        if scheduler.owned_task_count() == 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(scheduler.owned_task_count(), 0);
 }
 
 #[tokio::test]

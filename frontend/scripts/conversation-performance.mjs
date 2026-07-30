@@ -33,6 +33,7 @@ const state = {
   compactSubmitting: false,
   agentSessions: [],
   statusItems: {},
+  statusItemRevisions: {},
   transientHint: null,
 }
 

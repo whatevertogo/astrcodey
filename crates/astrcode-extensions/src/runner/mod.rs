@@ -84,7 +84,7 @@ struct HostBindings {
     /// 会话原子操作能力（在 bind_session_ops() 调用前为 None）。
     session_ops: Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>>,
     /// 扩展 `start()` 阶段取得的进程级事件通道。
-    startup_event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+    startup_event_tx: Option<astrcode_core::event::EventSender>,
     /// 统一注入给 bundled extension 的宿主运行态服务。
     host_services: Option<Arc<ExtensionHostServices>>,
 }
@@ -181,13 +181,13 @@ impl Drop for DeferredTaskActivation {
 struct BoundExtensionEventSink {
     extension_id: String,
     declarations: HashMap<String, ExtensionEventDecl>,
-    event_tx: mpsc::UnboundedSender<EventPayload>,
+    event_tx: astrcode_core::event::EventSender,
 }
 
 fn bind_extension_event_sink(
     extension_id: &str,
     declarations: &[ExtensionEventDecl],
-    event_tx: mpsc::UnboundedSender<EventPayload>,
+    event_tx: astrcode_core::event::EventSender,
 ) -> Option<Arc<dyn ExtensionEventSink>> {
     if declarations.is_empty() {
         return None;
@@ -206,7 +206,7 @@ fn bind_extension_event_sink(
 fn attach_extension_event_sink(
     index: &HandlerIndex,
     extension_id: &str,
-    event_tx: &Option<mpsc::UnboundedSender<EventPayload>>,
+    event_tx: &Option<astrcode_core::event::EventSender>,
 ) -> Option<Arc<dyn ExtensionEventSink>> {
     if !index.allows(extension_id, ExtensionCapability::EmitEvents) {
         return None;
@@ -684,7 +684,7 @@ impl ExtensionRunner {
     ///
     /// 该通道不属于某个 session；宿主负责决定如何消费这些进程级事件。
     pub fn bind_startup_event_channel(&self, event_tx: mpsc::UnboundedSender<EventPayload>) {
-        self.bindings.write().startup_event_tx = Some(event_tx);
+        self.bindings.write().startup_event_tx = Some(event_tx.into());
     }
 
     async fn spawn_extension_task<F>(&self, extension_id: &str, task_name: &'static str, fut: F)
@@ -1168,7 +1168,7 @@ impl ExtensionRunner {
     ) -> Option<Arc<dyn ExtensionEventSink>> {
         let index = self.load_index();
         let decls = index.extension_event_decls.get(extension_id)?;
-        bind_extension_event_sink(extension_id, decls, event_tx)
+        bind_extension_event_sink(extension_id, decls, event_tx.into())
     }
 }
 

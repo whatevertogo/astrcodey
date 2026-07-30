@@ -17,14 +17,14 @@ use astrcode_extension_sdk::{
         PromptBuildContext, PromptBuildHandler, PromptContributions, ProviderContext,
         ProviderHandler, ProviderResult, Registrar, SlashCommand, StopReason, ToolHandler,
     },
-    s5r::event_to_name,
+    s5r::{event_to_name, manifest::ManifestHttpRoute},
     tool::ToolDefinition,
 };
 pub use protocol::S5R_PROTOCOL_VERSION;
 use serde_json::{Value, json};
 
 use crate::{
-    extension_manifest::{ExtensionRegistration, manifest_types::ManifestHttpRoute},
+    extension_manifest::ExtensionRegistration,
     host_router::{HostRouter, InvokeContext},
     remote_manifest::{
         build_commands, build_subscriptions, build_tools, handler_id, parse_command_result,
@@ -328,7 +328,7 @@ fn hook_invoke_ctx(
     session_id: Option<String>,
     working_dir: Option<String>,
     session_store_dir: Option<std::path::PathBuf>,
-    event_tx: Option<tokio::sync::mpsc::UnboundedSender<astrcode_core::event::EventPayload>>,
+    event_tx: Option<astrcode_core::event::EventSender>,
     session_ops: Option<Arc<dyn astrcode_core::tool::SessionOperations>>,
 ) -> InvokeContext {
     InvokeContext {

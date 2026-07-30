@@ -31,6 +31,10 @@ use super::{
     },
     ConfigRequestError, reload_extension_registry, update_config,
 };
+use crate::protocol_mapping::{
+    extension_capability_to_dto, extension_event_decl_to_dto, extension_http_method_to_dto,
+    extension_slash_command_to_dto, keybinding_to_dto, status_item_to_dto,
+};
 
 pub(in crate::http) async fn list_extensions(State(state): State<HttpState>) -> Response {
     Json(ExtensionListResponseDto {
@@ -227,23 +231,31 @@ fn extension_declaration_dto(
         capabilities: declaration
             .capabilities
             .into_iter()
-            .map(Into::into)
+            .map(extension_capability_to_dto)
             .collect(),
         tools: declaration.tools.into_iter().map(Into::into).collect(),
         dynamic_tools: declaration.dynamic_tools,
-        commands: declaration.commands.into_iter().map(Into::into).collect(),
+        commands: declaration
+            .commands
+            .into_iter()
+            .map(extension_slash_command_to_dto)
+            .collect(),
         dynamic_commands: declaration.dynamic_commands,
         keybindings: declaration
             .keybindings
             .into_iter()
-            .map(Into::into)
+            .map(keybinding_to_dto)
             .collect(),
         status_items: declaration
             .status_items
             .into_iter()
-            .map(Into::into)
+            .map(status_item_to_dto)
             .collect(),
-        events: declaration.events.into_iter().map(Into::into).collect(),
+        events: declaration
+            .events
+            .into_iter()
+            .map(extension_event_decl_to_dto)
+            .collect(),
         http_routes: declaration
             .http_routes
             .into_iter()
@@ -256,7 +268,7 @@ fn extension_http_route_dto(
     route: astrcode_extension_sdk::extension::ExtensionHttpRoute,
 ) -> ExtensionHttpRouteDto {
     ExtensionHttpRouteDto {
-        method: route.method.into(),
+        method: extension_http_method_to_dto(route.method),
         path: route.path,
         authenticated: route.access == ExtensionHttpAccess::Authenticated,
         description: route.description,

@@ -1,6 +1,6 @@
 //! Turn 基础设施 — 事件通道、共享上下文、错误类型。
 
-use astrcode_core::{config::ModelSelection, event::EventPayload, llm::LlmMessage, types::*};
+use astrcode_core::{config::ModelSelection, llm::LlmMessage, types::*};
 use astrcode_extension_sdk::{
     extension::{
         ExchangeSummary, ExtensionError, ExtensionEvent, LifecycleContext, ProviderContext,
@@ -8,12 +8,10 @@ use astrcode_extension_sdk::{
     runtime_ports::TurnHooks,
 };
 use astrcode_session_projection::SessionReadModel;
-use tokio::sync::mpsc;
-
 // ─── Turn event channel ──────────────────────────────────────────────────
 
 /// Turn 内扩展/工具 → event bridge 的入口（unbounded，不丢事件、durable 由单 worker 保序）。
-pub type TurnEventTx = mpsc::UnboundedSender<EventPayload>;
+pub type TurnEventTx = astrcode_core::event::EventSender;
 
 /// StepEnd 生命周期钩子：失败只记录 warn，不中断 turn。
 pub(crate) async fn on_step_end_best_effort(
@@ -163,4 +161,6 @@ pub enum TurnError {
     TaskJoin(#[from] tokio::task::JoinError),
     #[error("turn model cache not populated")]
     ModelCacheEmpty,
+    #[error("turn event ingress failed: {0}")]
+    EventIngress(String),
 }

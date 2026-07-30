@@ -5,9 +5,14 @@ import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 import babel from '@rolldown/plugin-babel'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
+import type { RunInfoDto } from './src/services/generated/RunInfoDto'
 
-function resolveRunInfo(): { port: number; authToken: string } | undefined {
-  const runInfoPath = path.join(os.homedir(), '.astrcode', 'run.json')
+function resolveRunInfo(): RunInfoDto | undefined {
+  const astrcodeHome =
+    process.env.ASTRCODE_TEST_HOME ??
+    process.env.ASTRCODE_HOME_DIR ??
+    os.homedir()
+  const runInfoPath = path.join(astrcodeHome, '.astrcode', 'run.json')
   try {
     const raw = fs.readFileSync(runInfoPath, 'utf8')
     const info = JSON.parse(raw)

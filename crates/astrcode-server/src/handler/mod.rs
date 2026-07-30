@@ -94,6 +94,8 @@ pub enum HandlerError {
     Llm(#[source] astrcode_core::llm::LlmError),
     #[error(transparent)]
     Extension(astrcode_extension_sdk::extension::ExtensionError),
+    #[error("Session close failed: {0}")]
+    SessionClose(String),
     /// Command actor 通道已关闭，服务不可用。
     #[error("Command actor is unavailable")]
     ActorUnavailable,

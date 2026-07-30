@@ -4,7 +4,8 @@ use astrcode_core::event::{
     DurableEventPayload, Event, EventPayload, ExtensionEventData, LiveEventPayload,
 };
 use astrcode_protocol::events::{
-    ClientNotification, ExtensionCommandInfoDto, SessionListItemDto, SessionSnapshot, UiRequestKind,
+    ClientNotification, ExtensionCommandInfoDto, KeybindingDto, SessionListItemDto,
+    SessionSnapshot, UiRequestKind,
 };
 
 use super::App;
@@ -671,8 +672,7 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
             astrcode_protocol::wire::MessageRoleDto::Tool => MessageRole::Tool,
         };
 
-        // Compact summary 消息使用特殊标签
-        let label = if astrcode_context::compaction::is_compact_summary_text(&message.content) {
+        let label = if message.compact_summary_semantics() {
             "Compacted"
         } else {
             match &role {
@@ -742,7 +742,7 @@ fn apply_ui_request(
 fn apply_extension_command_list(
     app: &mut App,
     commands: &[ExtensionCommandInfoDto],
-    keybindings: &[astrcode_extension_sdk::extension::Keybinding],
+    keybindings: &[KeybindingDto],
     status_items: &[astrcode_protocol::events::StatusItemInfoDto],
 ) {
     app.extension_commands = commands
@@ -885,6 +885,7 @@ mod tests {
         },
         tool::ToolResult,
     };
+    use astrcode_protocol::{events::MessageDto, wire::MessageRoleDto};
 
     use super::*;
     use crate::tui::store::transcript::{MessageRole, ScrollbackEntry};
@@ -1056,6 +1057,41 @@ mod tests {
 
         app.history_next();
         assert!(app.input_text().is_empty());
+    }
+
+    #[test]
+    fn resumed_snapshot_uses_explicit_compact_summary_semantics() {
+        let mut app = make_app();
+        let snapshot = SessionSnapshot {
+            session_id: "session".into(),
+            cursor: "1".into(),
+            messages: vec![
+                MessageDto {
+                    role: MessageRoleDto::System,
+                    content: "<compact_summary>legacy-looking text</compact_summary>".into(),
+                    is_compact_summary: Some(false),
+                },
+                MessageDto {
+                    role: MessageRoleDto::System,
+                    content: "summary without a marker".into(),
+                    is_compact_summary: Some(true),
+                },
+                MessageDto {
+                    role: MessageRoleDto::System,
+                    content: "<compact_summary>legacy summary</compact_summary>".into(),
+                    is_compact_summary: None,
+                },
+            ],
+            model_id: "model".into(),
+            working_dir: "/workspace".into(),
+            agent_sessions: Vec::new(),
+        };
+
+        apply_session_resumed(&mut app, "session", &snapshot);
+
+        assert_eq!(app.messages[0].label, "System");
+        assert_eq!(app.messages[1].label, "Compacted");
+        assert_eq!(app.messages[2].label, "Compacted");
     }
 
     #[test]

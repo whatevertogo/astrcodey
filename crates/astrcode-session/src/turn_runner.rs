@@ -131,8 +131,19 @@ impl TurnLoop {
         if result.is_err() {
             self.finalize_turn_on_error(extension_runner.as_ref()).await;
         }
-        event_bridge.shutdown(self.tools.shared_mut()).await;
-        result
+        let ingress_result = event_bridge.shutdown(self.tools.shared_mut()).await;
+        match (result, ingress_result) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(ingress_error)) => {
+                tracing::warn!(
+                    error = %ingress_error,
+                    "turn event ingress also failed while the turn was failing"
+                );
+                Err(error)
+            },
+        }
     }
 
     /// Turn 失败时统一补发 `TurnEnd`，避免 `?` 旁路错误漏掉扩展生命周期钩子。
@@ -795,9 +806,17 @@ pub struct TurnOutput {
     pub tool_results: Vec<astrcode_core::tool::ToolResult>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TurnFinalization {
+    pub finish_reason: String,
+    pub pending_error: Option<String>,
+    pub aborted: bool,
+    pub terminal_persisted: bool,
+}
+
 pub struct RunTurnResult {
     pub output: Result<TurnOutput, TurnError>,
-    pub emitted_error: bool,
+    pub finalization: TurnFinalization,
 }
 
 pub(crate) async fn run_turn(
@@ -806,9 +825,24 @@ pub(crate) async fn run_turn(
     turn_id: &TurnId,
 ) -> RunTurnResult {
     let (output, emitted_error) = drive_agent(agent, user_text, turn_id).await;
+    let aborted = matches!(output, Err(TurnError::Aborted));
+    let finish_reason = match &output {
+        Ok(output) => output.finish_reason.clone(),
+        Err(TurnError::Aborted) => crate::payload::TURN_FINISH_ABORTED.into(),
+        Err(_) => "error".into(),
+    };
+    let pending_error = match (&output, emitted_error) {
+        (Err(TurnError::Aborted), _) | (_, true) | (Ok(_), false) => None,
+        (Err(error), false) => Some(error.to_string()),
+    };
 
     RunTurnResult {
         output,
-        emitted_error,
+        finalization: TurnFinalization {
+            finish_reason,
+            pending_error,
+            aborted,
+            terminal_persisted: false,
+        },
     }
 }

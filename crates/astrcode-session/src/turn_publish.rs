@@ -19,6 +19,7 @@ use astrcode_core::{
 };
 use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::StorageError;
+use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
@@ -35,6 +36,7 @@ pub(crate) struct TurnEvents {
     session: Session,
     turn_id: TurnId,
     emitted_durable_error: AtomicBool,
+    ingress_error: Mutex<Option<String>>,
 }
 
 impl TurnEvents {
@@ -43,11 +45,26 @@ impl TurnEvents {
             session,
             turn_id,
             emitted_durable_error: AtomicBool::new(false),
+            ingress_error: Mutex::new(None),
         }
     }
 
     pub(crate) fn emitted_error(&self) -> bool {
         self.emitted_durable_error.load(Ordering::Relaxed)
+    }
+
+    fn record_ingress_error(&self, error: &TurnError) {
+        let mut ingress_error = self.ingress_error.lock();
+        if ingress_error.is_none() {
+            *ingress_error = Some(error.to_string());
+        }
+    }
+
+    fn ingress_result(&self) -> Result<(), TurnError> {
+        match self.ingress_error.lock().clone() {
+            Some(error) => Err(TurnError::EventIngress(error)),
+            None => Ok(()),
+        }
     }
 
     /// 返回 storage 当前 projection 的快照。
@@ -104,12 +121,15 @@ impl TurnEvents {
     }
 }
 
-async fn durable_with_retry(publisher: &TurnEvents, payload: DurableEventPayload) {
+async fn durable_with_retry(
+    publisher: &TurnEvents,
+    payload: DurableEventPayload,
+) -> Result<(), TurnError> {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
         match publisher.persist_durable(payload.clone()).await {
-            Ok(()) => break,
+            Ok(()) => return Ok(()),
             Err(error)
                 if attempt < DURABLE_PUBLISH_MAX_ATTEMPTS
                     && durable_publish_error_is_retryable(&error) =>
@@ -132,7 +152,7 @@ async fn durable_with_retry(publisher: &TurnEvents, payload: DurableEventPayload
                     "turn event ingress durable publish failed"
                 );
                 publisher.live_error(-32603, error.to_string(), false);
-                break;
+                return Err(error);
             },
         }
     }
@@ -156,92 +176,116 @@ fn durable_publish_error_is_retryable(error: &TurnError) -> bool {
     )
 }
 
-async fn dispatch_payload(publisher: &TurnEvents, payload: EventPayload) {
+async fn dispatch_payload(publisher: &TurnEvents, payload: EventPayload) -> Result<(), TurnError> {
     match payload {
         EventPayload::Durable(payload) => durable_with_retry(publisher, payload).await,
-        EventPayload::Live(payload) => publisher.live(payload),
+        EventPayload::Live(payload) => {
+            publisher.live(payload);
+            Ok(())
+        },
     }
 }
 
 /// Turn 内 hook / 工具侧的事件入口：clone 后非阻塞 `send`，需要落盘时 `flush`。
 #[derive(Clone)]
 pub(crate) struct TurnEventSender {
-    publish_tx: TurnEventTx,
-    flush_tx: mpsc::UnboundedSender<oneshot::Sender<()>>,
+    command_tx: mpsc::UnboundedSender<IngressCommand>,
+    event_tx: TurnEventTx,
+    publisher: Arc<TurnEvents>,
 }
 
 impl TurnEventSender {
     pub(crate) fn event_tx(&self) -> TurnEventTx {
-        self.publish_tx.clone()
+        self.event_tx.clone()
     }
 
     /// 等待 ingress 队列中、本调用之前入队的 publish 全部处理完毕。
-    pub(crate) async fn flush(&self) {
+    pub(crate) async fn flush(&self) -> Result<(), TurnError> {
         let (ack_tx, ack_rx) = oneshot::channel();
-        if self.flush_tx.send(ack_tx).is_err() {
-            return;
+        if self.command_tx.send(IngressCommand::Flush(ack_tx)).is_err() {
+            return Err(TurnError::EventIngress(
+                "turn event ingress is closed".into(),
+            ));
         }
-        let _ = ack_rx.await;
+        ack_rx
+            .await
+            .map_err(|_| TurnError::EventIngress("turn event flush was dropped".into()))?;
+        self.publisher.ingress_result()
     }
+}
+
+enum IngressCommand {
+    Publish(EventPayload),
+    Flush(oneshot::Sender<()>),
+    Shutdown(oneshot::Sender<()>),
 }
 
 /// 单 FIFO worker：turn 内唯一的 hook/工具事件 ingress。
 pub(crate) struct TurnEventIngress {
-    shutdown_tx: oneshot::Sender<()>,
+    command_tx: mpsc::UnboundedSender<IngressCommand>,
     worker: tokio::task::JoinHandle<()>,
+    publisher: Arc<TurnEvents>,
 }
 
 impl TurnEventIngress {
     pub(crate) fn start(publisher: Arc<TurnEvents>) -> (TurnEventSender, Self) {
-        let (publish_tx, mut publish_rx) = mpsc::unbounded_channel::<EventPayload>();
-        let (flush_tx, mut flush_rx) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
-        let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let event_commands = command_tx.clone();
+        let event_tx = TurnEventTx::new(move |payload| {
+            event_commands
+                .send(IngressCommand::Publish(payload))
+                .map_err(|_| astrcode_core::event::EventSendError)
+        });
         let sender = TurnEventSender {
-            publish_tx,
-            flush_tx,
+            command_tx: command_tx.clone(),
+            event_tx,
+            publisher: Arc::clone(&publisher),
         };
+        let publisher_for_worker = Arc::clone(&publisher);
         let worker = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = &mut shutdown_rx => {
-                        publish_rx.close();
-                        flush_rx.close();
-                        while let Some(payload) = publish_rx.recv().await {
-                            dispatch_payload(&publisher, payload).await;
+            let mut shutdown_ack = None;
+            while let Some(command) = command_rx.recv().await {
+                match command {
+                    IngressCommand::Publish(payload) => {
+                        if let Err(error) = dispatch_payload(&publisher_for_worker, payload).await {
+                            publisher_for_worker.record_ingress_error(&error);
                         }
-                        while let Some(ack) = flush_rx.recv().await {
-                            let _ = ack.send(());
-                        }
-                        break;
-                    }
-                    Some(payload) = publish_rx.recv() => {
-                        dispatch_payload(&publisher, payload).await;
-                    }
-                    Some(ack) = flush_rx.recv() => {
-                        while let Ok(payload) = publish_rx.try_recv() {
-                            dispatch_payload(&publisher, payload).await;
-                        }
+                    },
+                    IngressCommand::Flush(ack) => {
                         let _ = ack.send(());
-                    }
-                    else => break,
+                    },
+                    IngressCommand::Shutdown(ack) => {
+                        command_rx.close();
+                        shutdown_ack = Some(ack);
+                    },
                 }
+            }
+            if let Some(ack) = shutdown_ack {
+                let _ = ack.send(());
             }
         });
         (
             sender,
             Self {
-                shutdown_tx,
+                command_tx,
                 worker,
+                publisher,
             },
         )
     }
 
-    pub(crate) async fn shutdown(self) {
-        let _ = self.shutdown_tx.send(());
-        if let Err(error) = self.worker.await {
-            tracing::error!(panic = %error, "turn event ingress worker panicked");
-        }
+    pub(crate) async fn shutdown(self) -> Result<(), TurnError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.command_tx
+            .send(IngressCommand::Shutdown(ack_tx))
+            .map_err(|_| TurnError::EventIngress("turn event ingress is closed".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| TurnError::EventIngress("turn event shutdown was dropped".into()))?;
+        self.worker
+            .await
+            .map_err(|error| TurnError::EventIngress(format!("worker panicked: {error}")))?;
+        self.publisher.ingress_result()
     }
 }
 
@@ -260,9 +304,12 @@ impl ExtensionEvents {
         Self { ingress }
     }
 
-    pub(crate) async fn shutdown(self, shared: &mut crate::turn_context::SharedTurnContext) {
+    pub(crate) async fn shutdown(
+        self,
+        shared: &mut crate::turn_context::SharedTurnContext,
+    ) -> Result<(), TurnError> {
         shared.turn_event_sender = None;
-        self.ingress.shutdown().await;
+        self.ingress.shutdown().await
     }
 }
 
@@ -283,6 +330,7 @@ mod tests {
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         tool::ToolDefinition,
         types::{new_session_id, new_turn_id},
+        user_input::UserInput,
     };
     use astrcode_extension_sdk::{
         extension::{
@@ -490,8 +538,15 @@ mod tests {
             .unwrap()
             .event
             .payload;
-        let publisher = TurnEvents::new(session.clone(), new_turn_id());
-        durable_with_retry(&publisher, duplicate_session_started).await;
+        let publisher = Arc::new(TurnEvents::new(session.clone(), new_turn_id()));
+        let (sender, ingress) = TurnEventIngress::start(publisher);
+        sender
+            .event_tx()
+            .send(EventPayload::Durable(duplicate_session_started))
+            .unwrap();
+        assert!(sender.flush().await.is_err());
+        drop(sender);
+        assert!(ingress.shutdown().await.is_err());
         session
             .runtime
             .event_sink()
@@ -536,6 +591,55 @@ mod tests {
                     )
                 })
         }));
+    }
+
+    #[tokio::test]
+    async fn aborted_turn_does_not_complete_when_tool_settlement_fails() {
+        let session = test_session().await;
+        let turn_id = new_turn_id();
+        session
+            .emit_durable(Some(&turn_id), DurableEventPayload::TurnStarted)
+            .await
+            .unwrap();
+        session
+            .emit_durable(
+                Some(&turn_id),
+                DurableEventPayload::ToolCallRequested {
+                    call_id: astrcode_core::types::ToolCallId::new("call-abort"),
+                    tool_name: "read".into(),
+                    arguments: serde_json::json!({"path": "README.md"}),
+                    raw_arguments: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let store = session.runtime.store().clone();
+        session
+            .runtime
+            .event_sink()
+            .release(store.as_ref(), session.id())
+            .await
+            .unwrap();
+        assert!(
+            crate::finalize_aborted_turn(&session, &turn_id)
+                .await
+                .is_err()
+        );
+
+        let events = store.replay_events(session.id()).await.unwrap();
+        assert!(
+            events.iter().any(|event| matches!(
+                event.payload,
+                DurableEventPayload::ToolCallRequested { .. }
+            ))
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event.payload,
+            DurableEventPayload::ToolCallCancelled { .. }
+                | DurableEventPayload::TurnAbortedContext
+                | DurableEventPayload::TurnCompleted { .. }
+        )));
     }
 
     struct EmitEventRuntime;
@@ -616,6 +720,38 @@ mod tests {
         }
     }
 
+    struct FailTurnStartAndEmitOnEnd;
+
+    #[async_trait::async_trait]
+    impl TurnHooks for FailTurnStartAndEmitOnEnd {
+        async fn emit_lifecycle(
+            &self,
+            event: ExtensionEvent,
+            ctx: LifecycleContext,
+        ) -> Result<(), ExtensionError> {
+            match event {
+                ExtensionEvent::TurnStart => Err(ExtensionError::Internal(
+                    "injected turn start failure".into(),
+                )),
+                ExtensionEvent::TurnEnd => {
+                    let tx = ctx
+                        .event_tx
+                        .ok_or_else(|| ExtensionError::Internal("no turn event sender".into()))?;
+                    tx.send(EventPayload::Durable(DurableEventPayload::ExtensionEvent(
+                        ExtensionEventData {
+                            extension_id: "turn-end-probe".into(),
+                            event_type: "turn.end.error".into(),
+                            schema_version: 1,
+                            payload: serde_json::json!({}),
+                        },
+                    )))
+                    .map_err(|_| ExtensionError::Internal("turn event sender closed".into()))
+                },
+                _ => Ok(()),
+            }
+        }
+    }
+
     #[tokio::test]
     async fn extension_event_bridge_delivers_hook_emit_to_store() {
         let session = test_session_with_runtime_services(test_runtime_services_with_hooks(
@@ -650,7 +786,7 @@ mod tests {
             .await
             .unwrap();
 
-        bridge.shutdown(&mut shared).await;
+        bridge.shutdown(&mut shared).await.unwrap();
 
         let events = session
             .runtime
@@ -670,6 +806,37 @@ mod tests {
             &e.payload,
             DurableEventPayload::ExtensionEvent(ExtensionEventData { event_type, .. })
                 if event_type == "emit.live"
+        )));
+    }
+
+    #[tokio::test]
+    async fn failed_turn_end_hook_can_publish_before_event_bridge_shutdown() {
+        let session = test_session_with_runtime_services(test_runtime_services_with_hooks(
+            Arc::new(FailTurnStartAndEmitOnEnd),
+        ))
+        .await;
+        let turn_id = new_turn_id();
+
+        let handle = session
+            .submit(UserInput::text_only("trigger failure"), turn_id, None)
+            .await
+            .unwrap();
+        let result = handle.wait().await.unwrap();
+        assert!(result.output.is_err());
+
+        let events = session
+            .runtime
+            .store()
+            .replay_events(session.id())
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            &event.payload,
+            DurableEventPayload::ExtensionEvent(ExtensionEventData {
+                extension_id,
+                event_type,
+                ..
+            }) if extension_id == "turn-end-probe" && event_type == "turn.end.error"
         )));
     }
 
@@ -698,13 +865,18 @@ mod tests {
                     accepted_seq: None,
                 }))
                 .unwrap();
-                sender.flush().await;
+                sender.flush().await.unwrap();
             }));
         }
 
         for worker in workers {
             worker.await.unwrap();
         }
+        let (shutdown_ack_tx, shutdown_ack_rx) = oneshot::channel();
+        ingress
+            .command_tx
+            .send(IngressCommand::Shutdown(shutdown_ack_tx))
+            .unwrap();
         retained_tx
             .send(EventPayload::Durable(DurableEventPayload::UserMessage {
                 message_id: new_message_id(),
@@ -714,9 +886,12 @@ mod tests {
             }))
             .unwrap();
         drop(sender);
-        tokio::time::timeout(Duration::from_secs(5), ingress.shutdown())
+        tokio::time::timeout(Duration::from_secs(5), shutdown_ack_rx)
             .await
-            .expect("parallel ingress flush timed out");
+            .expect("parallel ingress flush timed out")
+            .unwrap();
+        ingress.worker.await.unwrap();
+        ingress.publisher.ingress_result().unwrap();
         assert!(
             retained_tx
                 .send(EventPayload::Live(LiveEventPayload::AgentRunStarted))

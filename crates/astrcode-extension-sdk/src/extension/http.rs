@@ -59,7 +59,7 @@ pub enum ExtensionHttpAccess {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct ExtensionHttpRoute {
     pub method: ExtensionHttpMethod,
     pub path: String,

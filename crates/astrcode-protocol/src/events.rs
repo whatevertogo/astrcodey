@@ -4,7 +4,6 @@
 //! 包括运行时事件、会话列表、UI 交互请求和错误信息。
 
 use astrcode_core::event::Event;
-use astrcode_extension_sdk::extension::Keybinding;
 use serde::{Deserialize, Serialize};
 
 pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
@@ -49,7 +48,7 @@ pub enum ClientNotification {
         commands: Vec<ExtensionCommandInfoDto>,
         /// 插件注册的快捷键绑定。
         #[serde(default)]
-        keybindings: Vec<Keybinding>,
+        keybindings: Vec<KeybindingDto>,
         /// 插件注册的状态栏项（含初始值）。
         #[serde(default)]
         status_items: Vec<StatusItemInfoDto>,
@@ -113,6 +112,15 @@ pub struct SessionSnapshot {
 pub struct MessageDto {
     pub role: MessageRoleDto,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub is_compact_summary: Option<bool>,
+}
+
+impl MessageDto {
+    pub fn compact_summary_semantics(&self) -> bool {
+        self.is_compact_summary
+            .unwrap_or_else(|| self.content.trim_start().starts_with("<compact_summary>"))
+    }
 }
 
 /// 插件注册的斜杠命令信息。
@@ -128,6 +136,22 @@ pub struct ExtensionCommandInfoDto {
     pub source: CommandSourceDto,
 }
 
+/// 插件注册的快捷键绑定。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KeybindingDto {
+    /// 快捷键描述（如 "shift+tab"）。
+    pub key: String,
+    /// 触发的命令名（不含 `/`）。
+    pub command: String,
+    /// 命令参数。
+    #[serde(default)]
+    pub arguments: String,
+    /// 人类可读描述。
+    pub description: String,
+}
+
 /// 状态栏项信息 DTO（通过 ExtensionCommandList 下发到客户端）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusItemInfoDto {
@@ -138,4 +162,44 @@ pub struct StatusItemInfoDto {
     /// 排序优先级（越小越靠左）。
     #[serde(default)]
     pub priority: i32,
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn extension_command_keybinding_wire_shape_is_stable() {
+        let notification = ClientNotification::ExtensionCommandList {
+            commands: Vec::new(),
+            keybindings: vec![KeybindingDto {
+                key: "shift+tab".into(),
+                command: "mode".into(),
+                arguments: "plan".into(),
+                description: "Switch mode".into(),
+            }],
+            status_items: Vec::new(),
+        };
+
+        let value = serde_json::to_value(&notification).unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "event": "extension_command_list",
+                "data": {
+                    "commands": [],
+                    "keybindings": [{
+                        "key": "shift+tab",
+                        "command": "mode",
+                        "arguments": "plan",
+                        "description": "Switch mode"
+                    }],
+                    "status_items": []
+                }
+            })
+        );
+    }
 }

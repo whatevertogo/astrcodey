@@ -41,6 +41,7 @@ impl EvalRunner {
     ///
     /// 如果 config 指定了 server_addr，直接使用；否则需要外部确保 server 已启动。
     pub async fn start(config: &EvalConfig) -> Result<Self, EvalError> {
+        validate_connection_options(config)?;
         let resumed_results = match config.checkpoint_path.as_deref() {
             Some(path) if config.resume_checkpoint => load_checkpoint(path.to_path_buf()).await?,
             Some(path) => {
@@ -78,8 +79,7 @@ impl EvalRunner {
                 ));
             },
             (None, None) => {
-                // 尝试从 ~/.astrcode/run.json 读取
-                let run_info = read_run_info()?;
+                let run_info = read_run_info(config.storage_root.as_deref())?;
                 (
                     format!("http://127.0.0.1:{}", run_info.port),
                     run_info.auth_token,
@@ -219,6 +219,22 @@ impl EvalRunner {
             .collect();
         Ok(EvalReport::from_results(results))
     }
+}
+
+fn validate_connection_options(config: &EvalConfig) -> Result<(), EvalError> {
+    if config.storage_root.is_some() && config.server_addr.is_some() {
+        return Err(EvalError::Setup(
+            "storage_root cannot be combined with server_addr; it only locates run.json".into(),
+        ));
+    }
+    if config.storage_root.is_some() && config.swe_bench_instance.is_some() {
+        return Err(EvalError::Setup(
+            "storage_root cannot be combined with swe_bench_instance; instance storage is managed \
+             inside the solver container"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn enforce_patch_budget(result: &mut EvalResult, retained_bytes: &mut usize) {
@@ -465,29 +481,69 @@ fn read_swe_bench_prediction(work_dir: &std::path::Path) -> Option<SweBenchPredi
     serde_json::from_str(&content).ok()
 }
 
-/// 从 ~/.astrcode/run.json 读取 server 连接信息。
-fn read_run_info() -> Result<RunInfo, EvalError> {
-    let path = std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_default()
-        .join(".astrcode")
-        .join("run.json");
+/// 从显式或进程默认的 Astrcode 数据目录读取 server 连接信息。
+fn read_run_info(
+    storage_root: Option<&std::path::Path>,
+) -> Result<astrcode_protocol::http::RunInfoDto, EvalError> {
+    let path = storage_root
+        .map(|root| root.join("run.json"))
+        .unwrap_or_else(|| astrcode_core::config::defaults::astrcode_dir().join("run.json"));
     let content = std::fs::read_to_string(&path)
         .map_err(|e| EvalError::Server(format!("cannot read {}: {e}", path.display())))?;
-    serde_json::from_str(&content).map_err(|e| EvalError::Server(format!("invalid run.json: {e}")))
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct RunInfo {
-    port: u16,
-    auth_token: String,
+    serde_json::from_str(&content)
+        .map_err(|e| EvalError::Server(format!("invalid {}: {e}", path.display())))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::case::Setup;
+
+    #[test]
+    fn storage_root_locates_run_info_and_rejects_ignored_combinations() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("run.json"),
+            r#"{"port":4312,"authToken":"test-token","schemaVersion":2}"#,
+        )
+        .unwrap();
+
+        let run_info = read_run_info(Some(directory.path())).unwrap();
+        assert_eq!(run_info.port, 4312);
+        assert_eq!(run_info.auth_token, "test-token");
+
+        let mut config = EvalConfig {
+            storage_root: Some(directory.path().to_path_buf()),
+            server_addr: Some("http://127.0.0.1:4312".to_string()),
+            ..EvalConfig::default()
+        };
+        assert!(
+            validate_connection_options(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("server_addr")
+        );
+
+        config.server_addr = None;
+        config.swe_bench_instance = Some(crate::SweBenchInstanceConfig {
+            solver_binary: "solver".into(),
+            server_config: "config.toml".into(),
+            image_namespace: "swebench".into(),
+            control_network: "control".into(),
+            provider_gateway_container: "gateway".into(),
+            proxy_url: "http://proxy".into(),
+            control_relay_image: "relay".into(),
+            audit_dir: "audit".into(),
+            container_prefix: "eval".into(),
+            streaming_harness: None,
+        });
+        assert!(
+            validate_connection_options(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("swe_bench_instance")
+        );
+    }
 
     #[tokio::test]
     async fn checkpoint_appends_jsonl_results_and_refuses_to_overwrite() {

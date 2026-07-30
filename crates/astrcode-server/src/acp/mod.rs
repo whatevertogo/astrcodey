@@ -301,7 +301,8 @@ fn handler_error_to_acp(error: HandlerError) -> Error {
         | HandlerError::Llm(_)
         | HandlerError::Extension(_)
         | HandlerError::ActorUnavailable
-        | HandlerError::InvalidRequest(_) => Error::internal_error().data(error.to_string()),
+        | HandlerError::InvalidRequest(_)
+        | HandlerError::SessionClose(_) => Error::internal_error().data(error.to_string()),
     }
 }
 
