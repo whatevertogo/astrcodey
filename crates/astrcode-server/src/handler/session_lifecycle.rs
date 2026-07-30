@@ -1,12 +1,35 @@
 //! 会话创建、恢复与 fork。
 
 use astrcode_core::{tool::SessionToolSelection, types::SessionId};
-use astrcode_protocol::events::ClientNotification;
+use astrcode_protocol::events::{ClientNotification, SessionListItemDto};
 
 use super::{CommandHandler, HandlerError, snapshot::session_snapshot};
 
 impl CommandHandler {
-    pub(super) async fn send_current_state(&mut self) {
+    pub(super) async fn send_session_list(&self) -> Result<(), HandlerError> {
+        let summaries = match self.runtime.session_manager().list_summaries().await {
+            Ok(summaries) => summaries,
+            Err(error) => {
+                self.send_error(-32603, &error.to_string());
+                return Err(HandlerError::SessionManager(error));
+            },
+        };
+        let sessions = summaries
+            .into_iter()
+            .map(|summary| SessionListItemDto {
+                session_id: summary.session_id.into_string(),
+                last_active_at: summary.updated_at,
+                working_dir: summary.working_dir,
+                parent_session_id: summary.parent_session_id.map(SessionId::into_string),
+                title: summary.first_user_message,
+            })
+            .collect();
+        self.event_bus
+            .send_notification(ClientNotification::SessionList { sessions });
+        Ok(())
+    }
+
+    pub(super) async fn send_current_state(&self) {
         let Some(session_id) = self.focused_session_id.as_ref() else {
             self.send_error(40400, "No active session");
             return;
@@ -29,12 +52,15 @@ impl CommandHandler {
         }
     }
 
-    pub async fn create_session(&mut self, working_dir: String) -> Result<SessionId, HandlerError> {
+    pub(crate) async fn create_session(
+        &mut self,
+        working_dir: String,
+    ) -> Result<SessionId, HandlerError> {
         self.create_session_with_tool_selection(working_dir, None)
             .await
     }
 
-    pub async fn create_session_with_tool_selection(
+    pub(crate) async fn create_session_with_tool_selection(
         &mut self,
         working_dir: String,
         tool_selection: Option<SessionToolSelection>,

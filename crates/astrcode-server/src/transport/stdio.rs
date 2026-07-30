@@ -52,9 +52,8 @@ impl StdioTransport {
             let stdin = std::io::stdin();
             let reader = BufReader::new(stdin);
             for line in reader.lines() {
-                let line = match line {
-                    Ok(l) => l,
-                    Err(_) => break,
+                let Ok(line) = line else {
+                    break;
                 };
                 if line.is_empty() {
                     continue;

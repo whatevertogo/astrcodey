@@ -65,7 +65,8 @@ impl QueueDrainTracker {
     }
 
     pub(crate) fn clear_session(&self, session_id: &SessionId) {
-        if let Some(state) = self.sessions.lock().remove(session_id) {
+        let state = self.sessions.lock().remove(session_id);
+        if let Some(state) = state {
             if let Some(retry) = state.scheduled_retry {
                 retry.cancel();
             }

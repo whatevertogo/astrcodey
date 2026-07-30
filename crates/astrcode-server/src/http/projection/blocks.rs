@@ -318,7 +318,7 @@ fn push_tool_result_block(
                 ..
             }) = blocks.get_mut(*block_index)
             {
-                *text = content.clone();
+                text.clone_from(content);
                 *block_status = status;
                 pushed_result = true;
                 continue;
@@ -398,8 +398,7 @@ fn visible_message_text(message: &LlmMessage) -> String {
             LlmContent::ToolCall { .. } | LlmContent::Image { .. } => None,
             other => Some(other.to_display_text()),
         })
-        .collect::<Vec<_>>()
-        .join("")
+        .collect()
 }
 
 #[cfg(test)]

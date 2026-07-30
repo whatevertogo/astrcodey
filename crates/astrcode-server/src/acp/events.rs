@@ -8,7 +8,7 @@ use astrcode_core::event::{DurableEventPayload, EventPayload, LiveEventPayload, 
 
 /// Convert an astrcode `EventPayload` into an ACP `SessionNotification`
 /// for the given session. Returns `None` if the event has no ACP equivalent.
-pub fn to_session_notification(
+pub(super) fn to_session_notification(
     session_id: &str,
     payload: &EventPayload,
 ) -> Option<SessionNotification> {

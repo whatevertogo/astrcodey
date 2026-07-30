@@ -129,16 +129,19 @@ impl TurnRegistry {
 
     /// 请求活跃 turn 协作式 shutdown，不移除 registry。
     pub fn request_shutdown(&self, session_id: &SessionId) -> Option<TurnId> {
-        let entries = self.entries.lock();
-        let entry = entries.get(session_id)?;
-        let TurnEntryState::Running {
-            shutdown_handle, ..
-        } = &entry.state
-        else {
-            return None;
+        let (turn_id, shutdown_handle) = {
+            let entries = self.entries.lock();
+            let entry = entries.get(session_id)?;
+            let TurnEntryState::Running {
+                shutdown_handle, ..
+            } = &entry.state
+            else {
+                return None;
+            };
+            (entry.turn_id.clone(), shutdown_handle.clone())
         };
         shutdown_handle.request_shutdown();
-        Some(entry.turn_id.clone())
+        Some(turn_id)
     }
 
     /// 强制 kill 并移除活跃 turn，返回 turn_id 和 session 用于兜底写终态事件。
@@ -162,6 +165,7 @@ impl TurnRegistry {
         else {
             return None;
         };
+        drop(entries);
         shutdown_handle.force_kill();
         Some((entry.turn_id, session))
     }
@@ -190,6 +194,7 @@ impl TurnRegistry {
         else {
             return None;
         };
+        drop(entries);
         shutdown_handle.force_kill();
         Some((entry.turn_id, session))
     }

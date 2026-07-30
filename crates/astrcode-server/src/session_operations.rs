@@ -8,7 +8,7 @@ use astrcode_core::{
         SessionDeliveryOutcome, SessionExecutionView, SessionHandle, SessionOperations,
         SessionStatus, SessionToolSelection, SubmitTurnRequest, SubmitTurnResult,
     },
-    types::SessionId,
+    types::{SessionId, TurnId},
 };
 
 use crate::{
@@ -129,7 +129,7 @@ impl SessionOperations for ServerSessionOperations {
             .map_err(SessionApiError::internal)?;
         Ok(SessionExecutionView {
             phase: view.phase,
-            active_turn_id: view.active_turn_id.map(|turn_id| turn_id.into_string()),
+            active_turn_id: view.active_turn_id.map(TurnId::into_string),
             queued_inputs: view.queued_inputs,
         })
     }

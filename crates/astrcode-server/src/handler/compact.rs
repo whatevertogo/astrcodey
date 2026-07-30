@@ -10,7 +10,7 @@ pub enum ManualCompactOutcome {
 
 impl CommandHandler {
     pub(super) async fn compact_active_session(
-        &mut self,
+        &self,
         keep_recent_turns: Option<usize>,
     ) -> Result<(), HandlerError> {
         let Some(session_id) = self.focused_session_id.clone() else {
@@ -27,7 +27,7 @@ impl CommandHandler {
         }
     }
 
-    pub async fn compact_session(
+    pub(crate) async fn compact_session(
         &self,
         session_id: &SessionId,
         keep_recent_turns: Option<usize>,

@@ -34,6 +34,7 @@ pub(in crate::handler) mod turn;
 pub use actor::CommandHandle;
 pub use compact::ManualCompactOutcome;
 use model_selection::ModelSelectionController;
+pub use session_command::CommandList;
 /// 用户输入提交结果：被接受进入 Turn，或被斜杠命令处理。
 #[derive(Debug)]
 pub enum PromptSubmission {
@@ -46,6 +47,22 @@ pub enum CommandInvocation {
     Display { content: String, is_error: bool },
     Handled { message: String },
     Started { turn_id: TurnId },
+}
+
+impl CommandInvocation {
+    pub(crate) fn into_prompt_submission(self) -> PromptSubmission {
+        match self {
+            Self::Display { content, is_error } => PromptSubmission::Handled {
+                message: if is_error {
+                    format!("Error: {content}")
+                } else {
+                    content
+                },
+            },
+            Self::Handled { message } => PromptSubmission::Handled { message },
+            Self::Started { turn_id } => PromptSubmission::Accepted { turn_id },
+        }
+    }
 }
 
 /// Handler 错误类型，替代原来的字符串匹配。
@@ -115,7 +132,7 @@ impl CommandHandler {
     ///
     /// 新 session 继承源 session fork 点之前的完整消息前缀和 system prompt，
     /// 保证 provider 侧 KV 缓存命中。
-    pub async fn fork_session(
+    pub(crate) async fn fork_session(
         &mut self,
         source_id: SessionId,
         at_cursor: Option<String>,
@@ -129,7 +146,7 @@ impl CommandHandler {
     }
 
     /// 删除指定工作目录下的所有会话，返回删除数量。
-    pub async fn delete_project(&mut self, working_dir: String) -> Result<usize, HandlerError> {
+    pub(crate) async fn delete_project(&self, working_dir: String) -> Result<usize, HandlerError> {
         self.session_commands.delete_project(&working_dir).await
     }
 
@@ -160,7 +177,7 @@ impl CommandHandler {
     }
 
     /// 设置当前会话使用的主模型，格式为 `profile/model`。
-    async fn set_model(&mut self, model_id: String) -> Result<(), HandlerError> {
+    async fn set_model(&self, model_id: String) -> Result<(), HandlerError> {
         let notification = match self.model_selection.set_main_model(&model_id).await {
             Ok(notification) => notification,
             Err(HandlerError::InvalidRequest(message))
@@ -182,10 +199,9 @@ impl CommandHandler {
     }
 
     /// 启动交互式模型选择流程。
-    pub(in crate::handler) async fn start_model_selection(&mut self) -> Result<(), HandlerError> {
+    pub(in crate::handler) fn start_model_selection(&mut self) {
         let notification = self.model_selection.start();
         self.event_bus.send_notification(notification);
-        Ok(())
     }
 
     /// 处理 UI 响应，推进模型选择流程。

@@ -54,7 +54,7 @@ pub enum HttpServerError {
 /// Returns `(Router, auth_token)` — the token must be passed to the frontend
 /// so it can include it in `Authorization: Bearer <token>` headers.
 pub fn router(server_app: Arc<ServerApp>) -> Result<(Router, String), HttpServerError> {
-    let (router, auth_token, _) = router_parts(server_app)?;
+    let (router, auth_token, _) = router_parts(server_app);
     Ok((router, auth_token))
 }
 
@@ -62,11 +62,11 @@ pub fn router(server_app: Arc<ServerApp>) -> Result<(Router, String), HttpServer
 pub fn router_with_event_publisher(
     server_app: Arc<ServerApp>,
 ) -> Result<(Router, String, TestEventPublisher), HttpServerError> {
-    let (router, auth_token, event_bus) = router_parts(server_app)?;
+    let (router, auth_token, event_bus) = router_parts(server_app);
     Ok((router, auth_token, TestEventPublisher { event_bus }))
 }
 
-fn router_parts(server_app: Arc<ServerApp>) -> Result<RouterParts, HttpServerError> {
+fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
     let auth_token = configured_auth_token();
     let event_bus = Arc::clone(server_app.event_bus());
     let state = HttpState { app: server_app };
@@ -186,7 +186,7 @@ fn router_parts(server_app: Arc<ServerApp>) -> Result<RouterParts, HttpServerErr
         .layer(cors)
         .with_state(state);
 
-    Ok((app, auth_token, event_bus))
+    (app, auth_token, event_bus)
 }
 
 /// Convenience wrapper: build router and run until graceful shutdown.
@@ -266,7 +266,7 @@ fn remove_run_info_if_current_at(path: &Path, port: u16, auth_token: &str) {
         return;
     };
     let matches_current = value.get("port").and_then(serde_json::Value::as_u64)
-        == Some(port as u64)
+        == Some(u64::from(port))
         && value.get("authToken").and_then(serde_json::Value::as_str) == Some(auth_token);
     if matches_current {
         let _ = std::fs::remove_file(path);

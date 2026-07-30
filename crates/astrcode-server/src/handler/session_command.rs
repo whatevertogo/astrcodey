@@ -2,7 +2,7 @@
 
 use astrcode_core::types::SessionId;
 use astrcode_extension_sdk::extension::CommandCompletions;
-use astrcode_protocol::events::ExtensionCommandInfoDto;
+use astrcode_protocol::events::{ClientNotification, ExtensionCommandInfoDto, StatusItemInfoDto};
 
 use super::{CommandHandler, CommandInvocation, HandlerError, PromptSubmission, slash};
 
@@ -11,13 +11,61 @@ pub struct CommandList {
 }
 
 impl CommandHandler {
+    pub(super) async fn send_extension_command_list(&self) {
+        let working_dir = match self.active_session_working_dir().await {
+            Ok(working_dir) => working_dir,
+            Err(error) => {
+                self.send_error(40400, &error);
+                return;
+            },
+        };
+        let commands = self
+            .command_list_for_working_dir(&working_dir)
+            .await
+            .commands;
+        let keybindings = self.runtime.extension_runner().collect_keybindings();
+        let status_items = self
+            .runtime
+            .extension_runner()
+            .collect_status_items()
+            .into_iter()
+            .map(|item| StatusItemInfoDto {
+                id: item.id,
+                text: item.text,
+                priority: item.priority,
+            })
+            .collect();
+        self.event_bus
+            .send_notification(ClientNotification::ExtensionCommandList {
+                commands,
+                keybindings,
+                status_items,
+            });
+    }
+
+    pub(super) async fn execute_extension_command(
+        &mut self,
+        command_name: String,
+        arguments: String,
+    ) -> Result<(), HandlerError> {
+        let session_id = self.ensure_session().await?;
+        let command = slash::ParsedSlashCommand {
+            name: command_name,
+            arguments,
+        };
+        if let Err(error) = self.invoke_command_for_session(session_id, command).await {
+            self.send_error(slash::command_error_code(&error), &error.to_string());
+        }
+        Ok(())
+    }
+
     pub(in crate::handler) async fn invoke_command_for_session(
         &mut self,
         session_id: SessionId,
         command: slash::ParsedSlashCommand,
     ) -> Result<CommandInvocation, HandlerError> {
         if command.name.trim().trim_start_matches('/') == "model" {
-            self.start_model_selection().await?;
+            self.start_model_selection();
             return Ok(CommandInvocation::Handled {
                 message: "model selection started".into(),
             });
@@ -32,19 +80,10 @@ impl CommandHandler {
         session_id: SessionId,
         command: slash::ParsedSlashCommand,
     ) -> Result<PromptSubmission, HandlerError> {
-        Ok(
-            match self.invoke_command_for_session(session_id, command).await? {
-                CommandInvocation::Display { content, is_error } => PromptSubmission::Handled {
-                    message: if is_error {
-                        format!("Error: {content}")
-                    } else {
-                        content
-                    },
-                },
-                CommandInvocation::Handled { message } => PromptSubmission::Handled { message },
-                CommandInvocation::Started { turn_id } => PromptSubmission::Accepted { turn_id },
-            },
-        )
+        Ok(self
+            .invoke_command_for_session(session_id, command)
+            .await?
+            .into_prompt_submission())
     }
 
     pub(in crate::handler) async fn complete_command_for_session(

@@ -53,7 +53,7 @@ impl CommandHandler {
 
     /// Mid-turn 注入：要求当前 session 有活跃 turn，经 [`InputDelivery::InjectOnly`]
     /// 写入 durable `UserMessage`，由 `TurnRunner` 在下一 agent step 并入 LLM 上下文。
-    pub async fn inject_input_for_session(
+    pub(crate) async fn inject_input_for_session(
         &self,
         sid: SessionId,
         text: String,
@@ -61,13 +61,13 @@ impl CommandHandler {
         self.session_commands.inject_input(sid, text).await
     }
 
-    pub async fn submit_input_for_session(
+    pub(crate) async fn submit_input_for_session(
         &mut self,
         sid: SessionId,
         input: UserInput,
     ) -> Result<PromptSubmission, HandlerError> {
         if let Some(command) =
-            slash::parse_slash_command(&input.text).filter(|command| command.has_name())
+            slash::parse_slash_command(&input.text).filter(slash::ParsedSlashCommand::has_name)
         {
             if command.name == "model" {
                 return self.execute_command_for_session(sid, command).await;

@@ -58,18 +58,21 @@ pub(in crate::handler) struct ModelSelectionController {
 }
 
 impl ModelSelectionController {
-    pub fn is_idle(&self) -> bool {
+    pub(super) fn is_idle(&self) -> bool {
         self.pending.is_none()
     }
 
-    pub fn new(config_manager: Arc<ConfigManager>) -> Self {
+    pub(super) fn new(config_manager: Arc<ConfigManager>) -> Self {
         Self {
             flow: ModelSelectionFlow::new(config_manager),
             pending: None,
         }
     }
 
-    pub async fn set_main_model(&self, model_id: &str) -> Result<ClientNotification, HandlerError> {
+    pub(super) async fn set_main_model(
+        &self,
+        model_id: &str,
+    ) -> Result<ClientNotification, HandlerError> {
         let (profile, model) = parse_model_option(model_id)?;
         self.flow
             .apply_selection(ModelTarget::Main, &profile, &model)
@@ -81,12 +84,12 @@ impl ModelSelectionController {
         ))
     }
 
-    pub fn start(&mut self) -> ClientNotification {
+    pub(super) fn start(&mut self) -> ClientNotification {
         self.pending = Some(ModelSelectionStep::Target);
         ModelSelectionFlow::target_request()
     }
 
-    pub async fn handle_response(
+    pub(super) async fn handle_response(
         &mut self,
         request_id: String,
         value: UiResponseValue,
@@ -141,7 +144,7 @@ impl ModelSelectionFlow {
                 })
             },
             ModelSelectionStep::Model { target } => {
-                let selected = parse_select(response)?;
+                let selected = selected_value(response);
                 let (profile, model) = parse_model_option(&selected)?;
                 self.apply_selection(target, &profile, &model).await?;
                 Ok(ModelSelectionTransition {
@@ -265,7 +268,7 @@ fn parse_model_option(selected: &str) -> Result<(String, String), HandlerError> 
 }
 
 fn parse_target(response: UiResponseValue) -> Result<ModelTarget, HandlerError> {
-    match parse_select(response)?.as_str() {
+    match selected_value(response).as_str() {
         MAIN_OPTION => Ok(ModelTarget::Main),
         SMALL_OPTION => Ok(ModelTarget::Small),
         selected => Err(HandlerError::InvalidRequest(format!(
@@ -274,9 +277,9 @@ fn parse_target(response: UiResponseValue) -> Result<ModelTarget, HandlerError> 
     }
 }
 
-fn parse_select(response: UiResponseValue) -> Result<String, HandlerError> {
+fn selected_value(response: UiResponseValue) -> String {
     let UiResponseValue::Select { selected } = response;
-    Ok(selected)
+    selected
 }
 
 fn validate_profile_model(

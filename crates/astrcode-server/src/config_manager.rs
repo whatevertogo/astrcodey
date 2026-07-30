@@ -201,11 +201,6 @@ impl ConfigManager {
         &self.config_store
     }
 
-    #[cfg(test)]
-    pub fn set_llm_provider(&self, provider: Arc<dyn LlmProvider>) {
-        self.runtime_services.swap_llm(provider);
-    }
-
     pub(crate) async fn update_and_save<T, E>(
         &self,
         update: impl FnOnce(&mut Config) -> Result<T, E>,

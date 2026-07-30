@@ -1,5 +1,7 @@
 //! 子 agent session 的 server 侧 owner：spawn、turn 提交、completion guard、终态与回收。
 
+mod completion;
+
 use std::{
     collections::{HashMap, HashSet},
     sync::Arc,
@@ -11,12 +13,16 @@ use astrcode_core::{
     tool::{CreateSessionRequest, SessionApiError},
     types::{SessionId, TurnId},
 };
-use astrcode_session::{TurnError, TurnHandle, TurnShutdownHandle};
+use astrcode_session::TurnHandle;
 use astrcode_session_projection::AgentSessionStatus;
 use parking_lot::Mutex;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use self::completion::{
+    ChildSessionCompletionGuard, build_background_agent_notification, write_agent_completed,
+    write_agent_failed,
+};
 use crate::{
     session_manager::SessionManager,
     turn_scheduler::{CompletedRecycleOutcome, InputDelivery, TurnScheduler},
@@ -30,8 +36,6 @@ enum ChildOutcome {
     TimedOut,
 }
 
-/// 完成通知内嵌的输出上限（字节）。
-const AGENT_NOTIFICATION_OUTPUT_MAX_BYTES: usize = 16 * 1024;
 const CHILD_SESSION_COMPLETE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -463,9 +467,8 @@ impl ChildSessionCoordinator {
         let Some((parent_key, guards)) = by_parent.remove_entry(parent_sid) else {
             return Vec::new();
         };
-        let (completed, pending): (CompletionGuards, CompletionGuards) = guards
-            .into_iter()
-            .partition(|guard| guard.outcome_rx.borrow().is_some());
+        let (completed, pending): (CompletionGuards, CompletionGuards) =
+            guards.into_iter().partition(|guard| guard.is_complete());
         if !pending.is_empty() {
             by_parent.insert(parent_key, pending);
         }
@@ -598,306 +601,9 @@ impl ChildSessionCoordinator {
     }
 }
 
-/// 只等待 `TurnHandle` 并记录 outcome；不写父 session 事件。
-struct ChildSessionCompletionGuard {
-    config: ChildSessionCompletionConfig,
-    outcome_tx: watch::Sender<Option<ChildOutcome>>,
-    outcome_rx: watch::Receiver<Option<ChildOutcome>>,
-    shutdown_handle: TurnShutdownHandle,
-}
-
-fn try_set_outcome(tx: &watch::Sender<Option<ChildOutcome>>, outcome: ChildOutcome) {
-    let _ = tx.send_if_modified(|cur| {
-        if cur.is_none() {
-            *cur = Some(outcome);
-            true
-        } else {
-            false
-        }
-    });
-}
-
-impl ChildSessionCompletionGuard {
-    fn spawn(
-        handle: TurnHandle,
-        config: ChildSessionCompletionConfig,
-        completed_tx: mpsc::Sender<SessionId>,
-    ) -> Self {
-        let (outcome_tx, outcome_rx) = watch::channel(None);
-        let outcome_tx_for_task = outcome_tx.clone();
-        let shutdown_handle = handle.shutdown_handle();
-        let parent_sid = config.parent_session_id.clone();
-
-        crate::task_utils::spawn_traced("child_session_completion_guard", async move {
-            let result = handle.wait().await;
-            let outcome = match result {
-                Some(r) => match r.output {
-                    Ok(out) => ChildOutcome::Completed { output: out.text },
-                    Err(TurnError::Aborted) => ChildOutcome::Aborted,
-                    Err(e) => ChildOutcome::Failed {
-                        error: e.to_string(),
-                    },
-                },
-                None => ChildOutcome::Aborted,
-            };
-            try_set_outcome(&outcome_tx_for_task, outcome);
-            let _ = completed_tx.send(parent_sid).await;
-        });
-
-        Self {
-            config,
-            outcome_tx,
-            outcome_rx,
-            shutdown_handle,
-        }
-    }
-
-    async fn outcome(&self) -> ChildOutcome {
-        if let Some(outcome) = self.outcome_rx.borrow().clone() {
-            return outcome;
-        }
-        let mut rx = self.outcome_rx.clone();
-        let result = rx.wait_for(|v| v.is_some()).await;
-        match result {
-            Ok(ref_val) => {
-                let val: &Option<ChildOutcome> = &ref_val;
-                val.clone().unwrap_or(ChildOutcome::Aborted)
-            },
-            Err(_) => ChildOutcome::Aborted,
-        }
-    }
-
-    fn request_shutdown(&self) {
-        self.shutdown_handle.request_shutdown();
-    }
-
-    fn force_timeout(&self) {
-        self.shutdown_handle.force_kill();
-        try_set_outcome(&self.outcome_tx, ChildOutcome::TimedOut);
-    }
-
-    fn child_session_id(&self) -> &SessionId {
-        &self.config.child_session_id
-    }
-
-    fn parent_session_id(&self) -> &SessionId {
-        &self.config.parent_session_id
-    }
-
-    fn turn_id(&self) -> &TurnId {
-        &self.config.turn_id
-    }
-
-    fn cleanup_policy(&self) -> ChildCleanup {
-        self.config.cleanup
-    }
-
-    fn notify_text(&self) -> Option<&str> {
-        self.config.notify_on_complete.as_deref()
-    }
-
-    fn tool_call_id(&self) -> Option<&str> {
-        self.config.tool_call_id.as_deref()
-    }
-
-    fn summary_hint(&self) -> Option<&str> {
-        self.config
-            .notify_on_complete
-            .as_deref()
-            .filter(|s| !s.trim().is_empty())
-    }
-}
-
-async fn append_parent_agent_event(
-    session_manager: &Arc<SessionManager>,
-    parent_sid: &SessionId,
-    child_sid: &SessionId,
-    payload: astrcode_core::event::DurableEventPayload,
-    failure_log: &'static str,
-) {
-    if let Ok(parent_session) = session_manager.open(parent_sid.clone()).await {
-        if let Err(e) = parent_session.emit_durable(None, payload).await {
-            tracing::warn!(
-                parent_session_id = %parent_sid,
-                child_session_id = %child_sid,
-                error = %e,
-                "{failure_log}"
-            );
-        }
-    }
-}
-
-async fn write_agent_completed(
-    session_manager: &Arc<SessionManager>,
-    parent_sid: &SessionId,
-    child_sid: &SessionId,
-    summary: &str,
-) {
-    append_parent_agent_event(
-        session_manager,
-        parent_sid,
-        child_sid,
-        astrcode_session::payload::agent_session_completed_payload(
-            child_sid.clone(),
-            one_line_summary(summary),
-        ),
-        "failed to append AgentSessionCompleted event",
-    )
-    .await;
-}
-
-async fn write_agent_failed(
-    session_manager: &Arc<SessionManager>,
-    parent_sid: &SessionId,
-    child_sid: &SessionId,
-    error: &str,
-) {
-    append_parent_agent_event(
-        session_manager,
-        parent_sid,
-        child_sid,
-        astrcode_session::payload::agent_session_failed_payload(
-            child_sid.clone(),
-            error.to_string(),
-        ),
-        "failed to append AgentSessionFailed event",
-    )
-    .await;
-}
-
-fn one_line_summary(text: &str) -> String {
-    crate::presentation::inline_preview(text, 159)
-}
-
-async fn build_background_agent_notification(guard: &ChildSessionCompletionGuard) -> String {
-    let outcome = guard.outcome().await;
-    let (status, error, output_body, output_truncated) = match &outcome {
-        ChildOutcome::Completed { output } => {
-            let (body, truncated) = truncate_notification_output(output);
-            ("completed", None, body, truncated)
-        },
-        ChildOutcome::Failed { error } => ("failed", Some(error.as_str()), String::new(), false),
-        ChildOutcome::Aborted => ("aborted", Some("aborted"), String::new(), false),
-        ChildOutcome::TimedOut => ("timed_out", Some("timed out"), String::new(), false),
-    };
-    format_background_agent_notification(
-        guard.child_session_id().as_str(),
-        guard.tool_call_id(),
-        status,
-        error,
-        guard.summary_hint(),
-        &output_body,
-        output_truncated,
-    )
-}
-
-fn format_background_agent_notification(
-    child_session_id: &str,
-    tool_call_id: Option<&str>,
-    status: &str,
-    error: Option<&str>,
-    summary_hint: Option<&str>,
-    output_body: &str,
-    output_truncated: bool,
-) -> String {
-    let tool_call_line = tool_call_id
-        .map(|id| format!("\n<tool-call-id>{id}</tool-call-id>"))
-        .unwrap_or_default();
-    let error_line = error
-        .map(|e| format!("\n<error>{e}</error>"))
-        .unwrap_or_default();
-    let output_truncated_line = if output_truncated {
-        format!(
-            "\n<output-truncated>Showing last {AGENT_NOTIFICATION_OUTPUT_MAX_BYTES} bytes; child \
-             session transcript may contain more.</output-truncated>"
-        )
-    } else {
-        String::new()
-    };
-    let output_section = if output_body.trim().is_empty() {
-        String::new()
-    } else {
-        format!(
-            "\n<output>{cdata}</output>{output_truncated_line}",
-            cdata = wrap_agent_output_cdata(output_body),
-        )
-    };
-    let summary = summary_hint
-        .filter(|s| !s.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("Background agent task {status}"));
-    format!(
-        "<background-agent-notification>\n<child-session-id>{child_session_id}</\
-         child-session-id>{tool_call_line}\n<status>{status}</status>{error_line}{output_section}\\
-         \
-         n<summary>{summary}</summary>\n</background-agent-notification>"
-    )
-}
-
-fn truncate_notification_output(text: &str) -> (String, bool) {
-    let bytes = text.as_bytes();
-    let truncated = bytes.len() > AGENT_NOTIFICATION_OUTPUT_MAX_BYTES;
-    let start = bytes
-        .len()
-        .saturating_sub(AGENT_NOTIFICATION_OUTPUT_MAX_BYTES);
-    (
-        String::from_utf8_lossy(&bytes[start..]).into_owned(),
-        truncated,
-    )
-}
-
-fn wrap_agent_output_cdata(text: &str) -> String {
-    if !text.contains("]]>") {
-        return format!("<![CDATA[\n{text}\n]]>");
-    }
-    let escaped = text.replace("]]>", "]]]]><![CDATA[>");
-    format!("<![CDATA[\n{escaped}\n]]>")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn try_set_outcome_is_first_write_wins() {
-        let (tx, rx) = watch::channel(None);
-        try_set_outcome(
-            &tx,
-            ChildOutcome::Completed {
-                output: "first".into(),
-            },
-        );
-        try_set_outcome(
-            &tx,
-            ChildOutcome::Failed {
-                error: "second".into(),
-            },
-        );
-        assert_eq!(
-            rx.borrow().clone(),
-            Some(ChildOutcome::Completed {
-                output: "first".into(),
-            })
-        );
-    }
-
-    #[test]
-    fn format_background_agent_notification_includes_output() {
-        let msg = format_background_agent_notification(
-            "child-1",
-            Some("call-9"),
-            "completed",
-            None,
-            Some("explore task"),
-            "findings here",
-            false,
-        );
-        assert!(msg.contains("<child-session-id>child-1</child-session-id>"));
-        assert!(msg.contains("<tool-call-id>call-9</tool-call-id>"));
-        assert!(msg.contains("<status>completed</status>"));
-        assert!(msg.contains("findings here"));
-        assert!(msg.contains("<summary>explore task</summary>"));
-    }
 
     #[test]
     fn terminal_payload_uses_matching_child_and_final_session_ids() {

@@ -344,7 +344,7 @@ impl CommandHandler {
     }
 
     /// 启动 Actor 任务，返回外部访问句柄。
-    pub fn spawn_actor(
+    pub(crate) fn spawn_actor(
         runtime: Arc<ServerRuntime>,
         scheduler: Arc<TurnScheduler>,
         event_bus: Arc<crate::server_event_bus::ServerEventBus>,

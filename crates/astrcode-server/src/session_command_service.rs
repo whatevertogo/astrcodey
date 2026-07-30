@@ -101,7 +101,7 @@ impl SessionCommandService {
                         return self
                             .execute_command_operation(operation, command)
                             .await
-                            .map(invocation_to_submission);
+                            .map(CommandInvocation::into_prompt_submission);
                     },
                 }
             }
@@ -318,36 +318,12 @@ impl SessionCommandService {
         command: ParsedSlashCommand,
     ) -> Result<CommandOperation, HandlerError> {
         let command = normalize_command(command)?;
-        let session_id = operation.session_id().clone();
+        let session_id = operation.session_id();
 
         if command.name == "compact" {
-            if self.session_is_busy(&session_id).await {
-                return Err(HandlerError::TurnAlreadyRunning);
-            }
-            let keep_recent_turns = if command.arguments.trim().is_empty() {
-                None
-            } else {
-                Some(command.arguments.trim().parse::<usize>().map_err(|_| {
-                    HandlerError::InvalidRequest(
-                        "compact expects an optional non-negative integer".into(),
-                    )
-                })?)
-            };
-            return match self
-                .compact_session_in_operation(operation, keep_recent_turns)
-                .await?
-            {
-                ManualCompactOutcome::Compacted { .. } => {
-                    Ok(CommandOperation::Complete(CommandInvocation::Handled {
-                        message: "compact accepted".into(),
-                    }))
-                },
-                ManualCompactOutcome::Skipped { message } => {
-                    Ok(CommandOperation::Complete(CommandInvocation::Handled {
-                        message,
-                    }))
-                },
-            };
+            return self
+                .prepare_compact_command(operation, &command.arguments)
+                .await;
         }
 
         if command.name == "model" {
@@ -356,7 +332,46 @@ impl SessionCommandService {
             ));
         }
 
-        let (working_dir, context) = self.command_context(&session_id).await?;
+        self.prepare_extension_command(session_id, command).await
+    }
+
+    async fn prepare_compact_command(
+        &self,
+        operation: &SessionOperationGuard,
+        arguments: &str,
+    ) -> Result<CommandOperation, HandlerError> {
+        let session_id = operation.session_id();
+        if self.session_is_busy(session_id).await {
+            return Err(HandlerError::TurnAlreadyRunning);
+        }
+        let arguments = arguments.trim();
+        let keep_recent_turns = if arguments.is_empty() {
+            None
+        } else {
+            Some(arguments.parse::<usize>().map_err(|_| {
+                HandlerError::InvalidRequest(
+                    "compact expects an optional non-negative integer".into(),
+                )
+            })?)
+        };
+        let invocation = match self
+            .compact_session_in_operation(operation, keep_recent_turns)
+            .await?
+        {
+            ManualCompactOutcome::Compacted { .. } => CommandInvocation::Handled {
+                message: "compact accepted".into(),
+            },
+            ManualCompactOutcome::Skipped { message } => CommandInvocation::Handled { message },
+        };
+        Ok(CommandOperation::Complete(invocation))
+    }
+
+    async fn prepare_extension_command(
+        &self,
+        session_id: &SessionId,
+        command: ParsedSlashCommand,
+    ) -> Result<CommandOperation, HandlerError> {
+        let (working_dir, context) = self.command_context(session_id).await?;
         let resolved = self
             .runtime
             .extension_runner()
@@ -366,7 +381,7 @@ impl SessionCommandService {
             .find(|resolved| resolved.command.name == command.name)
             .ok_or_else(|| HandlerError::UnknownCommand(command.name.clone()))?;
 
-        if resolved.command.requires_idle && self.session_is_busy(&session_id).await {
+        if resolved.command.requires_idle && self.session_is_busy(session_id).await {
             return Err(HandlerError::TurnAlreadyRunning);
         }
 
@@ -592,20 +607,6 @@ fn delivery_to_submission(outcome: DeliveryOutcome) -> PromptSubmission {
         DeliveryOutcome::Injected { .. } => PromptSubmission::Handled {
             message: "injected into active turn".into(),
         },
-    }
-}
-
-fn invocation_to_submission(invocation: CommandInvocation) -> PromptSubmission {
-    match invocation {
-        CommandInvocation::Display { content, is_error } => PromptSubmission::Handled {
-            message: if is_error {
-                format!("Error: {content}")
-            } else {
-                content
-            },
-        },
-        CommandInvocation::Handled { message } => PromptSubmission::Handled { message },
-        CommandInvocation::Started { turn_id } => PromptSubmission::Accepted { turn_id },
     }
 }
 

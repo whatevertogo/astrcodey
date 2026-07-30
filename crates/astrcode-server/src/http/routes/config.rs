@@ -161,8 +161,8 @@ pub(in crate::http) async fn apply_provider_preset(
         }
         let previous_profile = candidate.active_profile.clone();
         let previous_model = candidate.active_model.clone();
-        candidate.active_profile = profile_name.clone();
-        candidate.active_model = model_id.clone();
+        candidate.active_profile.clone_from(&profile_name);
+        candidate.active_model.clone_from(&model_id);
         match candidate.clone().into_effective() {
             Ok(_) => Ok((true, None)),
             Err(error) => {
@@ -329,7 +329,7 @@ pub(in crate::http) async fn update_active_selection(
     .await;
     if let Err(error) = update_result {
         return error.into_response();
-    };
+    }
 
     Json(UpdateActiveSelectionResponseDto {
         success: true,
@@ -436,9 +436,8 @@ fn apply_model_options_update(
                                 return Err(ConfigRequestError::new(
                                     "invalid_budget_tokens",
                                     format!(
-                                        "budget_tokens ({}) must be less than model max_tokens \
-                                         ({})",
-                                        budget, max_tokens
+                                        "budget_tokens ({budget}) must be less than model \
+                                         max_tokens ({max_tokens})"
                                     ),
                                 ));
                             }

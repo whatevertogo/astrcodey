@@ -161,7 +161,7 @@ async fn handle_prompt(
             completion = &mut completion_rx => {
                 flush_queued_events(
                     &mut event_rx,
-                    &mut accepted_sessions,
+                    &accepted_sessions,
                     &turn_id,
                     &acp_session_id,
                     cx,
@@ -186,7 +186,7 @@ async fn handle_prompt(
 /// Uses `try_recv` to drain without blocking.
 fn flush_queued_events(
     event_rx: &mut broadcast::Receiver<Arc<Event>>,
-    accepted_sessions: &mut HashSet<SessionId>,
+    accepted_sessions: &HashSet<SessionId>,
     turn_id: &astrcode_core::types::TurnId,
     acp_session_id: &SessionId,
     cx: &ConnectionTo<Client>,
