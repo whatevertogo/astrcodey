@@ -6,7 +6,7 @@ use astrcode_protocol::events::ClientNotification;
 
 use super::{CommandHandler, CommandInvocation, HandlerError, PromptSubmission, slash};
 use crate::{
-    protocol_mapping::{keybinding_to_dto, status_item_to_info_dto},
+    protocol_mapping::{command_info_to_stdio_dto, keybinding_to_dto, status_item_to_info_dto},
     session_command_contract::{CommandList, ParsedSlashCommand},
 };
 
@@ -22,7 +22,10 @@ impl CommandHandler {
         let commands = self
             .command_list_for_working_dir(&working_dir)
             .await
-            .commands;
+            .commands
+            .into_iter()
+            .map(command_info_to_stdio_dto)
+            .collect();
         let keybindings = self
             .runtime
             .extension_runner()

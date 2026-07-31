@@ -31,7 +31,7 @@ use astrcode_server::test_support::{
     registered_completion_guard_count_for_test, session_started_event_for_test,
     start_with_completion_and_hold_operation_for_test, start_with_completion_for_test,
 };
-use astrcode_session_projection::{AgentSessionStatus, SessionReadModel, SessionSummary};
+use astrcode_session_projection::{AgentSessionStatus, SessionReadModel, SessionSummary, replay};
 use astrcode_storage::{
     EventReader, SessionEventJournal, SessionPathResolver, SessionReader, SessionStore,
     StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
@@ -119,6 +119,7 @@ struct BlockingChildCreateStore {
     block_next_child: AtomicBool,
     block_next_delete: AtomicBool,
     block_next_recycle: AtomicBool,
+    block_next_restore: AtomicBool,
     fail_next_delete: AtomicBool,
     fail_next_deleted_event: AtomicBool,
     fail_next_recycled_event: AtomicBool,
@@ -128,6 +129,9 @@ struct BlockingChildCreateStore {
     release_delete: Semaphore,
     recycle_started: Semaphore,
     release_recycle: Semaphore,
+    restore_started: Semaphore,
+    release_restore: Semaphore,
+    restore_finished: Semaphore,
     recycled: AsyncMutex<HashMap<SessionId, Vec<StoredEvent>>>,
     fail_sync_session: AsyncMutex<Option<SessionId>>,
 }
@@ -139,6 +143,7 @@ impl BlockingChildCreateStore {
             block_next_child: AtomicBool::new(false),
             block_next_delete: AtomicBool::new(false),
             block_next_recycle: AtomicBool::new(false),
+            block_next_restore: AtomicBool::new(false),
             fail_next_delete: AtomicBool::new(false),
             fail_next_deleted_event: AtomicBool::new(false),
             fail_next_recycled_event: AtomicBool::new(false),
@@ -148,6 +153,9 @@ impl BlockingChildCreateStore {
             release_delete: Semaphore::new(0),
             recycle_started: Semaphore::new(0),
             release_recycle: Semaphore::new(0),
+            restore_started: Semaphore::new(0),
+            release_restore: Semaphore::new(0),
+            restore_finished: Semaphore::new(0),
             recycled: AsyncMutex::new(HashMap::new()),
             fail_sync_session: AsyncMutex::new(None),
         }
@@ -195,6 +203,22 @@ impl BlockingChildCreateStore {
 
     fn release_recycle(&self) {
         self.release_recycle.add_permits(1);
+    }
+
+    fn block_next_restore(&self) {
+        self.block_next_restore.store(true, Ordering::Release);
+    }
+
+    async fn wait_for_restore(&self) {
+        self.restore_started.acquire().await.unwrap().forget();
+    }
+
+    fn release_restore(&self) {
+        self.release_restore.add_permits(1);
+    }
+
+    async fn wait_for_restore_finished(&self) {
+        self.restore_finished.acquire().await.unwrap().forget();
     }
 
     fn fail_next_deleted_event(&self) {
@@ -380,6 +404,11 @@ impl SessionStore for BlockingChildCreateStore {
     }
 
     async fn restore_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        let was_blocked = self.block_next_restore.swap(false, Ordering::AcqRel);
+        if was_blocked {
+            self.restore_started.add_permits(1);
+            self.release_restore.acquire().await.unwrap().forget();
+        }
         let events = self
             .recycled
             .lock()
@@ -396,7 +425,26 @@ impl SessionStore for BlockingChildCreateStore {
             self.inner.append_event(event.event).await?;
         }
         self.recycled.lock().await.remove(session_id);
+        if was_blocked {
+            self.restore_finished.add_permits(1);
+        }
         Ok(())
+    }
+
+    async fn recycled_session_read_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<SessionReadModel>, StorageError> {
+        let events = self
+            .recycled
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        replay(session_id.clone(), &events)
+            .map(Arc::new)
+            .map_err(|error| StorageError::CorruptLog(error.to_string()))
     }
 }
 
@@ -491,6 +539,120 @@ fn build_test_ops(
     llm_text: &'static str,
 ) -> Arc<ServerSessionOperations> {
     build_test_ops_with_llm(store, Arc::new(StaticTextLlm { text: llm_text }))
+}
+
+#[tokio::test]
+async fn restore_authorizes_against_recycled_ancestor_chain_before_mutation() {
+    let blocking_store = Arc::new(BlockingChildCreateStore::new());
+    let store: Arc<dyn SessionStore> = blocking_store.clone();
+    let root_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(root_id.clone(), ".", "mock"))
+        .await
+        .unwrap();
+    let ops = build_test_ops(Arc::clone(&store), "unused");
+
+    let child = ops
+        .create_session(
+            root_id.as_str(),
+            CreateSessionRequest {
+                name: "recycled-parent".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let child_id = SessionId::from(child.session_id);
+    let grandchild = ops
+        .create_session(
+            child_id.as_str(),
+            CreateSessionRequest {
+                name: "recycled-target".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let grandchild_id = SessionId::from(grandchild.session_id);
+    let sibling = ops
+        .create_session(
+            root_id.as_str(),
+            CreateSessionRequest {
+                name: "unauthorized-sibling".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let sibling_id = SessionId::from(sibling.session_id);
+
+    ops.recycle_session(SessionAccess::new(root_id.as_str(), child_id.as_str()))
+        .await
+        .unwrap();
+    assert!(store.session_read_model(&child_id).await.is_err());
+    assert!(store.session_read_model(&grandchild_id).await.is_err());
+
+    let denied = ops
+        .restore_session(SessionAccess::new(
+            sibling_id.as_str(),
+            grandchild_id.as_str(),
+        ))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(
+            denied,
+            astrcode_core::tool::SessionApiError::PermissionDenied(_)
+        ),
+        "a sibling must not restore a recycled target: {denied}"
+    );
+    assert!(
+        store.session_read_model(&grandchild_id).await.is_err(),
+        "authorization must complete before storage is restored"
+    );
+
+    blocking_store.block_next_restore();
+    let restore_ops = Arc::clone(&ops);
+    let restore_root_id = root_id.clone();
+    let restore_grandchild_id = grandchild_id.clone();
+    let restore_request = tokio::spawn(async move {
+        restore_ops
+            .restore_session(SessionAccess::new(
+                restore_root_id.as_str(),
+                restore_grandchild_id.as_str(),
+            ))
+            .await
+    });
+    blocking_store.wait_for_restore().await;
+    restore_request.abort();
+    assert!(restore_request.await.unwrap_err().is_cancelled());
+    blocking_store.release_restore();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        blocking_store.wait_for_restore_finished(),
+    )
+    .await
+    .unwrap();
+    let restored_grandchild = store.session_read_model(&grandchild_id).await.unwrap();
+    assert_eq!(
+        restored_grandchild
+            .identity
+            .parent
+            .as_ref()
+            .map(|parent| &parent.session_id),
+        Some(&child_id),
+        "restore must preserve the durable parent identity"
+    );
+
+    ops.restore_session(SessionAccess::new(root_id.as_str(), child_id.as_str()))
+        .await
+        .unwrap();
+    ops.query_session(SessionAccess::new(root_id.as_str(), grandchild_id.as_str()))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -1740,8 +1902,8 @@ async fn inject_message_after_turn_task_finished_starts_new_turn() {
         session_id.clone(),
         "initial".into(),
     )
-        .await
-        .unwrap();
+    .await
+    .unwrap();
     let first_turn_id = started.turn_id.clone();
     let result = started.handle.wait().await.unwrap();
     assert!(result.output.is_ok(), "{:?}", result.output);

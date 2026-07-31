@@ -282,14 +282,38 @@ impl SessionOperations for ServerSessionOperations {
     }
 
     async fn restore_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
-        let (_, target_sid) = self.verified_session_ids(access).await?;
-
-        self.session_manager
-            .restore_session(&target_sid)
-            .await
+        let caller_sid = SessionId::from(access.caller_session_id);
+        let target_sid = SessionId::from(access.target_session_id);
+        let admission = self
+            .scheduler
+            .admit_owned()
             .map_err(SessionApiError::internal)?;
+        let scheduler = Arc::clone(&self.scheduler);
+        let session_manager = Arc::clone(&self.session_manager);
+        let child_sessions = Arc::clone(&self.child_sessions);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        Ok(())
+        admission.spawn_named("session_restore_owner", async move {
+            let result = async {
+                let _operation = scheduler
+                    .begin_session_operation(&target_sid)
+                    .await
+                    .map_err(SessionApiError::internal)?;
+                let transition = session_manager.begin_session_transition(&target_sid).await;
+
+                child_sessions
+                    .verify_restore_access(&caller_sid, &target_sid)
+                    .await?;
+                session_manager
+                    .restore_session_in_transition(&transition)
+                    .await
+                    .map_err(map_restore_error)
+            }
+            .await;
+            let _ = result_tx.send(result);
+        });
+
+        result_rx.await.map_err(SessionApiError::internal)?
     }
 
     async fn resolve_tool_approval(
@@ -315,6 +339,18 @@ impl SessionOperations for ServerSessionOperations {
                     SessionApiError::SessionBusy(error.to_string())
                 },
             })
+    }
+}
+
+fn map_restore_error(error: crate::session_manager::SessionManagerError) -> SessionApiError {
+    match error {
+        crate::session_manager::SessionManagerError::Storage(
+            astrcode_storage::StorageError::NotFound(_),
+        ) => SessionApiError::NotFound(error.to_string()),
+        crate::session_manager::SessionManagerError::Storage(
+            astrcode_storage::StorageError::Unsupported(reason),
+        ) => SessionApiError::Unsupported(reason),
+        error => SessionApiError::internal(error),
     }
 }
 

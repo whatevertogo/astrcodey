@@ -8,11 +8,15 @@ use astrcode_extension_sdk::extension::{
 };
 use astrcode_protocol::{
     agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto},
-    events::{KeybindingDto, MessageDto, SessionSnapshot, StatusItemInfoDto},
-    http::{ExtensionEventDeclDto, ExtensionSlashCommandDto, StatusItemDto},
-    wire::{ExtensionCapabilityDto, ExtensionHttpMethodDto, MessageRoleDto},
+    events::{
+        ExtensionCommandInfoDto, KeybindingDto, MessageDto, SessionSnapshot, StatusItemInfoDto,
+    },
+    http::{ExtensionEventDeclDto, ExtensionSlashCommandDto, SlashCommandInfoDto, StatusItemDto},
+    wire::{CommandSourceDto, ExtensionCapabilityDto, ExtensionHttpMethodDto, MessageRoleDto},
 };
 use astrcode_session_projection::{AgentSessionLinkView, AgentSessionStatus, SessionReadModel};
+
+use crate::session_command_contract::{CommandInfo, CommandSource};
 
 pub(crate) fn agent_session_link_to_dto(link: &AgentSessionLinkView) -> AgentSessionLinkDto {
     AgentSessionLinkDto {
@@ -156,6 +160,38 @@ pub(crate) fn status_item_to_info_dto(item: StatusItem) -> StatusItemInfoDto {
     }
 }
 
+pub(crate) fn command_info_to_stdio_dto(command: CommandInfo) -> ExtensionCommandInfoDto {
+    ExtensionCommandInfoDto {
+        name: command.name,
+        description: command.description,
+        needs_argument: command.needs_argument,
+        requires_idle: command.requires_idle,
+        argument_completions: command.argument_completions,
+        priority: command.priority,
+        source: command_source_to_dto(command.source),
+    }
+}
+
+pub(crate) fn command_info_to_http_dto(command: CommandInfo) -> SlashCommandInfoDto {
+    SlashCommandInfoDto {
+        name: command.name,
+        description: command.description,
+        needs_argument: command.needs_argument,
+        requires_idle: command.requires_idle,
+        argument_completions: command.argument_completions,
+        priority: command.priority,
+        source: command_source_to_dto(command.source),
+    }
+}
+
+fn command_source_to_dto(source: CommandSource) -> CommandSourceDto {
+    match source {
+        CommandSource::Builtin => CommandSourceDto::Builtin,
+        CommandSource::Extension => CommandSourceDto::Extension,
+        CommandSource::Skill => CommandSourceDto::Skill,
+    }
+}
+
 pub(crate) fn extension_slash_command_to_dto(command: SlashCommand) -> ExtensionSlashCommandDto {
     ExtensionSlashCommandDto {
         name: command.name,
@@ -247,6 +283,40 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.is_compact_summary, None);
         assert!(!is_compact_summary_text(&legacy.content));
+    }
+
+    #[test]
+    fn command_mapping_preserves_sources_at_each_transport_boundary() {
+        let cases = [
+            (CommandSource::Builtin, CommandSourceDto::Builtin),
+            (CommandSource::Extension, CommandSourceDto::Extension),
+            (CommandSource::Skill, CommandSourceDto::Skill),
+        ];
+
+        for (source, expected_source) in cases {
+            let command = CommandInfo {
+                name: "review".into(),
+                description: "Review the current changes".into(),
+                needs_argument: true,
+                requires_idle: true,
+                argument_completions: true,
+                priority: 7,
+                source,
+            };
+
+            let stdio = command_info_to_stdio_dto(command.clone());
+            assert_eq!(stdio.name, command.name);
+            assert_eq!(stdio.source, expected_source);
+
+            let http = command_info_to_http_dto(command);
+            assert_eq!(http.name, stdio.name);
+            assert_eq!(http.description, stdio.description);
+            assert_eq!(http.needs_argument, stdio.needs_argument);
+            assert_eq!(http.requires_idle, stdio.requires_idle);
+            assert_eq!(http.argument_completions, stdio.argument_completions);
+            assert_eq!(http.priority, stdio.priority);
+            assert_eq!(http.source, expected_source);
+        }
     }
 
     fn simple_text_message(text: &str) -> LlmMessage {

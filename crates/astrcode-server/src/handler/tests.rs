@@ -27,15 +27,14 @@ use astrcode_extension_sdk::extension::{
     LifecycleContext, Registrar, SlashCommand,
 };
 use astrcode_extensions::Extension;
-use astrcode_protocol::{
-    commands::ClientCommand, events::ClientNotification, wire::CommandSourceDto,
-};
+use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 use astrcode_session::transcript_rewritten_payload;
 use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::{broadcast, mpsc};
 
 use super::*;
+use crate::session_command_contract::CommandSource;
 
 trait ProviderMessages {
     fn provider_messages(&self) -> Vec<LlmMessage>;
@@ -2272,12 +2271,12 @@ async fn command_list_keeps_reserved_and_extension_priority_over_skills() {
         .filter(|command| command.name == "compact")
         .collect::<Vec<_>>();
     assert_eq!(compact_commands.len(), 1);
-    assert_eq!(compact_commands[0].source, CommandSourceDto::Builtin);
+    assert_eq!(compact_commands[0].source, CommandSource::Builtin);
     let reviewnow = commands
         .iter()
         .find(|command| command.name == "reviewnow")
         .expect("reviewnow command");
-    assert_eq!(reviewnow.source, CommandSourceDto::Extension);
+    assert_eq!(reviewnow.source, CommandSource::Extension);
     let _ = fs::remove_dir_all(workspace);
 }
 

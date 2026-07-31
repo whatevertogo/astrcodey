@@ -17,20 +17,20 @@ use astrcode_extension_sdk::{
         PromptBuildContext, PromptBuildHandler, PromptContributions, ProviderContext,
         ProviderHandler, ProviderResult, Registrar, SlashCommand, StopReason, ToolHandler,
     },
-    s5r::{event_to_name, manifest::ManifestHttpRoute},
+    s5r::event_to_name,
     tool::ToolDefinition,
 };
 pub use protocol::S5R_PROTOCOL_VERSION;
 use serde_json::{Value, json};
 
 use crate::{
-    extension_manifest::ExtensionRegistration,
+    extension_manifest::{ExtensionRegistration, RegisteredHttpRoute},
     host_router::{HostRouter, InvokeContext},
     remote_manifest::{
-        build_commands, build_subscriptions, build_tools, handler_id, parse_command_result,
-        parse_compact_result, parse_continue_after_stop_result, parse_http_response,
-        parse_lifecycle_result, parse_post_tool_use_result, parse_pre_tool_use_result,
-        parse_prompt_build_result, parse_provider_result, parse_tool_result, validate_registration,
+        handler_id, parse_command_result, parse_compact_result, parse_continue_after_stop_result,
+        parse_http_response, parse_lifecycle_result, parse_post_tool_use_result,
+        parse_pre_tool_use_result, parse_prompt_build_result, parse_provider_result,
+        parse_tool_result,
     },
     s5r_ext::session::S5rSession,
 };
@@ -43,7 +43,7 @@ pub struct S5rExtension {
     tools: Vec<ToolDefinition>,
     commands: Vec<SlashCommand>,
     subscriptions: Vec<(ExtensionEvent, HookMode, ContinueAfterStopOptions)>,
-    http_routes: Vec<ManifestHttpRoute>,
+    http_routes: Vec<RegisteredHttpRoute>,
 }
 
 impl S5rExtension {
@@ -60,31 +60,20 @@ impl S5rExtension {
         let reg = session
             .registration()
             .ok_or("s5r extension did not complete initialize handshake")?;
-        validate_registration(&reg)?;
         Ok(build_extension(session, reg))
     }
 }
 
 fn build_extension(session: Arc<S5rSession>, reg: ExtensionRegistration) -> Arc<S5rExtension> {
-    let tools = build_tools(&reg);
-    let commands = build_commands(&reg);
-    let subscriptions = build_subscriptions(&reg);
-    let ExtensionRegistration {
-        extension_id,
-        capabilities,
-        extension_events,
-        http_routes,
-        ..
-    } = reg;
     Arc::new(S5rExtension {
-        id: extension_id,
-        capabilities,
+        id: reg.extension_id().to_owned(),
+        capabilities: reg.capabilities().to_vec(),
         session,
-        event_decls: extension_events,
-        tools,
-        commands,
-        subscriptions,
-        http_routes,
+        event_decls: reg.extension_events().to_vec(),
+        tools: reg.tools().to_vec(),
+        commands: reg.commands().to_vec(),
+        subscriptions: reg.subscriptions().to_vec(),
+        http_routes: reg.http_routes().to_vec(),
     })
 }
 

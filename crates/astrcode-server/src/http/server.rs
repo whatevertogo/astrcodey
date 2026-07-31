@@ -1,6 +1,10 @@
 //! 服务器组装：路由注册、TCP 启动、`run.json` 写入。
 
-use std::{path::Path, sync::Arc};
+use std::{
+    io::{self, Write},
+    path::Path,
+    sync::Arc,
+};
 
 #[cfg(feature = "testing")]
 use astrcode_protocol::events::ClientNotification;
@@ -28,6 +32,7 @@ const MAX_PROMPT_HTTP_BODY_BYTES: usize = crate::turn_scheduler::MAX_PROMPT_TEXT
     + astrcode_core::message_attachment::MAX_ATTACHMENTS
         * astrcode_core::message_attachment::MAX_ATTACHMENT_CONTENT_BYTES
     + 64 * 1024;
+const RUN_INFO_TEMPFILE_PREFIX: &str = ".run.json.";
 
 #[cfg(feature = "testing")]
 #[derive(Clone)]
@@ -242,18 +247,33 @@ fn write_run_info_at(path: &Path, port: u16, auth_token: &str) {
         tracing::error!("failed to serialize run.json");
         return;
     };
-    if let Err(e) = std::fs::write(path, &content) {
+    if let Err(e) = replace_run_info(path, content.as_bytes()) {
         tracing::warn!(path = %path.display(), error = %e, "failed to write run.json");
     }
-    // 防止同机用户通过 `~/.astrcode/run.json` 读取到该进程的 auth token
+}
+
+fn replace_run_info(path: &Path, content: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "run.json path must have a parent directory",
+        )
+    })?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(RUN_INFO_TEMPFILE_PREFIX);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        if let Err(e) = std::fs::set_permissions(path, perms) {
-            tracing::warn!(path = %path.display(), error = %e, "failed to chmod 600 run.json");
-        }
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
     }
+
+    let mut temporary = builder.tempfile_in(parent)?;
+    temporary.write_all(content)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map(|_| ())
+        .map_err(|error| error.error)
 }
 
 /// 退出时清理 `run.json`。
@@ -289,7 +309,12 @@ fn masked_token(token: &str) -> String {
 mod tests {
     use std::fs;
 
-    use super::{masked_token, remove_run_info_if_current_at, write_run_info_at};
+    use astrcode_protocol::http::RunInfoDto;
+
+    use super::{
+        RUN_INFO_TEMPFILE_PREFIX, masked_token, remove_run_info_if_current_at, replace_run_info,
+        write_run_info_at,
+    };
 
     #[test]
     fn masked_token_handles_short_env_tokens() {
@@ -299,31 +324,48 @@ mod tests {
     }
 
     #[test]
-    fn remove_run_info_only_removes_matching_server() {
-        let root = std::env::temp_dir().join(format!(
-            "astrcode-run-info-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("run.json");
+    fn run_info_is_replaced_completely_and_removed_only_by_current_server() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("run.json");
+        fs::write(&path, vec![b'x'; 4096]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
 
-        write_run_info_at(&path, 1111, "old-token");
         write_run_info_at(&path, 2222, "new-token");
+        let content = fs::read_to_string(&path).unwrap();
+        let run_info: RunInfoDto = serde_json::from_str(&content).unwrap();
+        assert_eq!(run_info.port, 2222);
+        assert_eq!(run_info.auth_token, "new-token");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let blocked_path = root.path().join("occupied");
+        fs::create_dir(&blocked_path).unwrap();
+        fs::write(blocked_path.join("old"), "old").unwrap();
+        assert!(replace_run_info(&blocked_path, b"new").is_err());
+        assert_eq!(fs::read_to_string(blocked_path.join("old")).unwrap(), "old");
+        assert!(fs::read_dir(root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(RUN_INFO_TEMPFILE_PREFIX)
+        }));
 
         remove_run_info_if_current_at(&path, 1111, "old-token");
         assert!(path.exists());
 
-        fs::write(
-            &path,
-            r#"{"port":2222,"authToken":"new-token","schemaVersion":2}"#,
-        )
-        .unwrap();
         remove_run_info_if_current_at(&path, 2222, "new-token");
         assert!(!path.exists());
-
-        let _ = fs::remove_dir_all(root);
     }
 }

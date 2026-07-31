@@ -17,7 +17,7 @@ use astrcode_core::{
     types::{SessionId, TurnId},
 };
 use astrcode_session::{TurnError, TurnFinalization, TurnHandle};
-use astrcode_session_projection::{AgentSessionLinkView, AgentSessionStatus};
+use astrcode_session_projection::{AgentSessionLinkView, AgentSessionStatus, SessionReadModel};
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -55,6 +55,12 @@ enum ChildRelationUpdate {
     Recycled {
         child_session_id: SessionId,
     },
+}
+
+#[derive(Clone, Copy)]
+enum SessionAccessScope {
+    Active,
+    ActiveOrRecycled,
 }
 
 impl ChildRelationUpdate {
@@ -350,6 +356,25 @@ impl ChildSessionCoordinator {
         caller: &SessionId,
         target: &SessionId,
     ) -> Result<(), SessionApiError> {
+        self.verify_access_in_scope(caller, target, SessionAccessScope::Active)
+            .await
+    }
+
+    pub(crate) async fn verify_restore_access(
+        &self,
+        caller: &SessionId,
+        target: &SessionId,
+    ) -> Result<(), SessionApiError> {
+        self.verify_access_in_scope(caller, target, SessionAccessScope::ActiveOrRecycled)
+            .await
+    }
+
+    async fn verify_access_in_scope(
+        &self,
+        caller: &SessionId,
+        target: &SessionId,
+        scope: SessionAccessScope,
+    ) -> Result<(), SessionApiError> {
         if caller == target {
             return Ok(());
         }
@@ -362,11 +387,7 @@ impl ChildSessionCoordinator {
                     "session parent chain contains a cycle at {current}"
                 )));
             }
-            let model = self
-                .session_manager
-                .read_model(&current)
-                .await
-                .map_err(|e| SessionApiError::NotFound(e.to_string()))?;
+            let model = self.read_access_model(&current, scope).await?;
             match &model.identity.parent {
                 Some(parent) => {
                     if &parent.session_id == caller {
@@ -384,6 +405,25 @@ impl ChildSessionCoordinator {
                     };
                 },
             }
+        }
+    }
+
+    async fn read_access_model(
+        &self,
+        session_id: &SessionId,
+        scope: SessionAccessScope,
+    ) -> Result<Arc<SessionReadModel>, SessionApiError> {
+        match self.session_manager.read_model(session_id).await {
+            Ok(model) => Ok(model),
+            Err(error) if matches!(scope, SessionAccessScope::Active) => {
+                Err(SessionApiError::NotFound(error.to_string()))
+            },
+            Err(SessionManagerError::Storage(astrcode_storage::StorageError::NotFound(_))) => self
+                .session_manager
+                .read_recycled_model(session_id)
+                .await
+                .map_err(map_recycled_access_error),
+            Err(error) => Err(SessionApiError::internal(error)),
         }
     }
 
@@ -482,9 +522,9 @@ impl ChildSessionCoordinator {
         target_sid: &SessionId,
         user_prompt: String,
     ) -> Result<String, SessionApiError> {
-        self.prepare_turn_target(target_sid).await?;
         let guard_admission = scheduler.admit_owned().map_err(SessionApiError::internal)?;
         let owner_admission = scheduler.admit_owned().map_err(SessionApiError::internal)?;
+        self.prepare_turn_target(target_sid).await?;
         let operation = scheduler
             .begin_session_operation(target_sid)
             .await
@@ -543,8 +583,8 @@ impl ChildSessionCoordinator {
         notify_on_complete: Option<String>,
         tool_call_id: Option<String>,
     ) -> Result<(TurnId, SessionId), SessionApiError> {
-        self.prepare_turn_target(target_sid).await?;
         let guard_admission = scheduler.admit_owned().map_err(SessionApiError::internal)?;
+        self.prepare_turn_target(target_sid).await?;
         let operation = scheduler
             .begin_session_operation(target_sid)
             .await
@@ -1469,6 +1509,18 @@ impl ChildSessionCoordinator {
                 .await?;
         }
         Ok(())
+    }
+}
+
+fn map_recycled_access_error(error: SessionManagerError) -> SessionApiError {
+    match error {
+        SessionManagerError::Storage(astrcode_storage::StorageError::NotFound(_)) => {
+            SessionApiError::NotFound(error.to_string())
+        },
+        SessionManagerError::Storage(astrcode_storage::StorageError::Unsupported(reason)) => {
+            SessionApiError::Unsupported(reason)
+        },
+        error => SessionApiError::internal(error),
     }
 }
 

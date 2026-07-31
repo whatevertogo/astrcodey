@@ -205,6 +205,7 @@ const ABORT_WAIT_POLL_MS: u64 = 50;
 const ABORT_WAIT_EXTRA_MS: u64 = 500;
 const FINALIZATION_RETRY_INITIAL_MS: u64 = 100;
 const FINALIZATION_RETRY_MAX_MS: u64 = 5_000;
+#[cfg(any(test, feature = "testing"))]
 pub(crate) enum CompletedRecycleOutcome {
     Recycled,
     StaleCompletion,
@@ -380,6 +381,7 @@ impl TurnScheduler {
     }
 
     /// 启动新 turn 并返回 handle（需要等待结果时用 [`Self::start_with_completion`]）。
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) async fn start_with_completion(
         &self,
         session_id: SessionId,
@@ -403,6 +405,7 @@ impl TurnScheduler {
     }
 
     /// 供需要在 turn 启动后继续登记外部 owner 的调用方使用；调用方决定何时释放 gate。
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) async fn start_with_completion_in_operation(
         &self,
         operation: &SessionOperationGuard,

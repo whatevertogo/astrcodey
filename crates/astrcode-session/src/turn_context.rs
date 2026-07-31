@@ -147,6 +147,8 @@ pub enum TurnError {
     Projection(#[from] astrcode_session_projection::ProjectionError),
     #[error("tool approval registration error: {0}")]
     ApprovalRegistration(#[from] crate::ToolApprovalRegistrationError),
+    #[error("approval history error: {0}")]
+    ApprovalHistory(String),
     #[error("prompt is still too long after reactive compaction")]
     CompactExhausted,
     #[error("LLM stream ended unexpectedly")]

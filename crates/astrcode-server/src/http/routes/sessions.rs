@@ -26,7 +26,7 @@ use super::super::{
     projection::{session_title_from_working_dir, snapshot::conversation_to_dto},
 };
 use crate::{
-    protocol_mapping::{keybinding_to_dto, status_item_to_dto},
+    protocol_mapping::{command_info_to_http_dto, keybinding_to_dto, status_item_to_dto},
     session_command_contract::{
         CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission,
     },
@@ -378,7 +378,11 @@ pub(in crate::http) async fn list_commands(
                 .map(status_item_to_dto)
                 .collect();
             Json(SlashCommandListResponseDto {
-                commands: command_list.commands.into_iter().map(Into::into).collect(),
+                commands: command_list
+                    .commands
+                    .into_iter()
+                    .map(command_info_to_http_dto)
+                    .collect(),
                 keybindings,
                 status_items,
             })

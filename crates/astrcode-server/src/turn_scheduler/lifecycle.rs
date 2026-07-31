@@ -13,9 +13,10 @@ use astrcode_session::{
 use astrcode_session_projection::{AgentSessionStatus, SessionReadModel};
 use astrcode_storage::StorageError;
 
+#[cfg(any(test, feature = "testing"))]
+use super::CompletedRecycleOutcome;
 use super::{
-    ABORT_WAIT_EXTRA_MS, ABORT_WAIT_POLL_MS, CompletedRecycleOutcome, FORCE_KILL_GRACE_MS,
-    TurnScheduleError, TurnScheduler,
+    ABORT_WAIT_EXTRA_MS, ABORT_WAIT_POLL_MS, FORCE_KILL_GRACE_MS, TurnScheduleError, TurnScheduler,
 };
 use crate::{
     delivery_gates::{SessionClosure, SessionOperationGuard},
@@ -278,6 +279,7 @@ impl TurnScheduler {
             .await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) async fn recycle_completed_session(
         &self,
         session_id: &SessionId,
@@ -289,6 +291,7 @@ impl TurnScheduler {
             .await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub(crate) async fn recycle_completed_session_in_operation(
         &self,
         operation: SessionOperationGuard,

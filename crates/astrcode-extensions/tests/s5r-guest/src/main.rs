@@ -19,7 +19,8 @@ use astrcode_extension_sdk::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-static PIPELINE_STEPS: AtomicU32 = AtomicU32::new(0);
+static PIPELINE_STEP_1_CALLS: AtomicU32 = AtomicU32::new(0);
+static PIPELINE_STEP_2_CALLS: AtomicU32 = AtomicU32::new(0);
 static PIPELINE_LLM_OK: AtomicBool = AtomicBool::new(false);
 
 const EXT_ID: &str = "s5r-guest-demo";
@@ -158,9 +159,15 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(json!({ "type": "object" }))
             .build(),
         tool_handler(|_ctx| async move {
-            let steps = PIPELINE_STEPS.load(Ordering::SeqCst);
+            let step_1_calls = PIPELINE_STEP_1_CALLS.load(Ordering::SeqCst);
+            let step_2_calls = PIPELINE_STEP_2_CALLS.load(Ordering::SeqCst);
             let llm_ok = PIPELINE_LLM_OK.load(Ordering::SeqCst);
-            Ok(tool_text(format!("steps={steps} llm_ok={llm_ok}"), false))
+            Ok(tool_text(
+                format!(
+                    "step_1_calls={step_1_calls} step_2_calls={step_2_calls} llm_ok={llm_ok}"
+                ),
+                false,
+            ))
         }),
     )?;
 
@@ -283,13 +290,12 @@ async fn run() -> Result<(), ErrorPayload> {
         }),
     )?;
 
-    worker.hook(
+    worker.continuation_hook_handler(
         "pipeline_step",
-        "non_blocking",
         hook_handler_args(|input: PipelineStepInput, _ctx| async move {
             match input.step {
                 1 => {
-                    PIPELINE_STEPS.store(1, Ordering::SeqCst);
+                    PIPELINE_STEP_1_CALLS.fetch_add(1, Ordering::SeqCst);
                     Ok(HandlerResult {
                         ok: true,
                         effect: Some("ok".into()),
@@ -302,7 +308,7 @@ async fn run() -> Result<(), ErrorPayload> {
                     })
                 }
                 2 => {
-                    PIPELINE_STEPS.store(2, Ordering::SeqCst);
+                    PIPELINE_STEP_2_CALLS.fetch_add(1, Ordering::SeqCst);
                     let _ = HostClient::call_stream(
                         "astrcode.llm.small_chat",
                         json!({ "messages": [{ "role": "user", "content": "continuation pipeline" }] }),

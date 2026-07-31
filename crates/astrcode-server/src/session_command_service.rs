@@ -15,11 +15,7 @@ use astrcode_core::{
 use astrcode_extension_sdk::extension::{
     CommandCompletions, ExtensionCommandResult, ExtensionError,
 };
-use astrcode_extensions::runner::CommandSource;
-use astrcode_protocol::{
-    events::{ClientNotification, ExtensionCommandInfoDto},
-    wire::CommandSourceDto,
-};
+use astrcode_extensions::runner::CommandSource as ExtensionCommandSource;
 use astrcode_session::compaction::{
     IdleCompactionError, IdleCompactionOutcome, compact_idle_session,
 };
@@ -27,11 +23,10 @@ use astrcode_session::compaction::{
 use crate::{
     bootstrap::ServerRuntime,
     delivery_gates::SessionOperationGuard,
-    protocol_mapping::session_snapshot,
     server_event_bus::ServerEventBus,
     session_command_contract::{
-        CommandInvocation, CommandList, HandlerError, ManualCompactOutcome, ParsedSlashCommand,
-        PromptSubmission, parse_slash_command,
+        CommandInfo, CommandInvocation, CommandList, CommandSource, HandlerError,
+        ManualCompactOutcome, ParsedSlashCommand, PromptSubmission, parse_slash_command,
     },
     turn_scheduler::{DeliveryOutcome, InputDelivery, TurnCompletion, TurnScheduler},
 };
@@ -74,8 +69,7 @@ impl SessionCommandService {
             .await
             .map_err(HandlerError::SessionManager)?;
         let session_id = created.session.id().clone();
-        self.event_bus
-            .send_notification(ClientNotification::Event(created.start_event));
+        self.event_bus.publish_event(Arc::new(created.start_event));
         tracing::info!(%session_id, "session fully initialized");
         Ok(session_id)
     }
@@ -193,11 +187,7 @@ impl SessionCommandService {
             Ok(IdleCompactionOutcome::Compacted { messages_removed }) => {
                 match session.read_model().await.map_err(HandlerError::Session) {
                     Ok(state) => {
-                        self.event_bus
-                            .send_notification(ClientNotification::SessionResumed {
-                                session_id: session_id.clone().into_string(),
-                                snapshot: session_snapshot(&state),
-                            });
+                        self.event_bus.send_session_resumed(&state);
                         (
                             Ok(ManualCompactOutcome::Compacted {
                                 session_id: session_id.clone(),
@@ -286,11 +276,7 @@ impl SessionCommandService {
             .read_model(&new_session_id)
             .await
             .map_err(HandlerError::SessionManager)?;
-        self.event_bus
-            .send_notification(ClientNotification::SessionResumed {
-                session_id: new_session_id.clone().into_string(),
-                snapshot: session_snapshot(&state),
-            });
+        self.event_bus.send_session_resumed(&state);
         tracing::info!(
             source_session_id = %source_id,
             %new_session_id,
@@ -397,17 +383,13 @@ impl SessionCommandService {
             }) => {
                 if let Some(update) = status_update {
                     self.event_bus
-                        .send_notification(ClientNotification::StatusItemUpdate {
-                            id: update.id,
-                            text: update.text,
-                        });
+                        .send_status_item_update(update.id, update.text);
                 }
-                self.event_bus
-                    .send_notification(ClientNotification::ExtensionCommandResult {
-                        command_name: command.name,
-                        content: content.clone(),
-                        is_error,
-                    });
+                self.event_bus.send_extension_command_result(
+                    command.name,
+                    content.clone(),
+                    is_error,
+                );
                 Ok(CommandOperation::Complete(CommandInvocation::Display {
                     content,
                     is_error,
@@ -542,14 +524,14 @@ impl SessionCommandService {
             {
                 continue;
             }
-            commands.push(ExtensionCommandInfoDto {
+            commands.push(CommandInfo {
                 name: resolved.command.name,
                 description: resolved.command.description,
                 needs_argument: resolved.command.args_schema.is_some(),
                 requires_idle: resolved.command.requires_idle,
                 argument_completions: resolved.command.argument_completions,
                 priority: resolved.command.priority,
-                source: command_source_dto(resolved.source),
+                source: command_source(resolved.source),
             });
         }
         CommandList { commands }
@@ -631,32 +613,32 @@ fn visible_command_text(command: &ParsedSlashCommand) -> String {
     }
 }
 
-fn command_source_dto(source: CommandSource) -> CommandSourceDto {
+fn command_source(source: ExtensionCommandSource) -> CommandSource {
     match source {
-        CommandSource::Extension => CommandSourceDto::Extension,
-        CommandSource::Skill => CommandSourceDto::Skill,
+        ExtensionCommandSource::Extension => CommandSource::Extension,
+        ExtensionCommandSource::Skill => CommandSource::Skill,
     }
 }
 
-fn builtin_commands(include_interactive: bool) -> Vec<ExtensionCommandInfoDto> {
-    let mut commands = vec![ExtensionCommandInfoDto {
+fn builtin_commands(include_interactive: bool) -> Vec<CommandInfo> {
+    let mut commands = vec![CommandInfo {
         name: "compact".into(),
         description: "Compact the current session context".into(),
         needs_argument: false,
         requires_idle: true,
         argument_completions: false,
         priority: 0,
-        source: CommandSourceDto::Builtin,
+        source: CommandSource::Builtin,
     }];
     if include_interactive {
-        commands.push(ExtensionCommandInfoDto {
+        commands.push(CommandInfo {
             name: "model".into(),
             description: "Select the active AI model".into(),
             needs_argument: false,
             requires_idle: false,
             argument_completions: false,
             priority: 0,
-            source: CommandSourceDto::Builtin,
+            source: CommandSource::Builtin,
         });
     }
     commands

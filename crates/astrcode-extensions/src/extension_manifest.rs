@@ -1,30 +1,71 @@
 //! s5r 扩展握手 manifest 类型与解析。
 
 use astrcode_extension_sdk::{
-    extension::{ExtensionCapability, ExtensionEventDecl},
+    extension::{
+        ContinueAfterStopOptions, ExtensionCapability, ExtensionEvent, ExtensionEventDecl,
+        ExtensionHttpRoute, HookMode, SlashCommand,
+    },
     s5r::{
-        capability_from_wire,
+        capability_from_wire, event_from_name,
         manifest::{
             InitializeManifest, ManifestCommand, ManifestHook, ManifestHttpRoute, ManifestTool,
         },
+        mode_from_name,
     },
+    tool::{ExecutionMode, ToolDefinition, ToolOrigin},
 };
 use serde_json::Value;
 
 /// `Initialize.metadata` 解析出的注册信息。
 #[derive(Debug, Clone)]
-pub struct ExtensionRegistration {
-    pub extension_id: String,
-    pub capabilities: Vec<ExtensionCapability>,
-    pub tools: Vec<ManifestTool>,
-    pub commands: Vec<ManifestCommand>,
-    pub hooks: Vec<ManifestHook>,
-    pub http_routes: Vec<ManifestHttpRoute>,
-    pub extension_events: Vec<ExtensionEventDecl>,
+pub(crate) struct ExtensionRegistration {
+    extension_id: String,
+    capabilities: Vec<ExtensionCapability>,
+    tools: Vec<ToolDefinition>,
+    commands: Vec<SlashCommand>,
+    subscriptions: Vec<(ExtensionEvent, HookMode, ContinueAfterStopOptions)>,
+    http_routes: Vec<RegisteredHttpRoute>,
+    extension_events: Vec<ExtensionEventDecl>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RegisteredHttpRoute {
+    pub(crate) route: ExtensionHttpRoute,
+    pub(crate) handler_id: String,
+}
+
+impl ExtensionRegistration {
+    pub(crate) fn extension_id(&self) -> &str {
+        &self.extension_id
+    }
+
+    pub(crate) fn capabilities(&self) -> &[ExtensionCapability] {
+        &self.capabilities
+    }
+
+    pub(crate) fn tools(&self) -> &[ToolDefinition] {
+        &self.tools
+    }
+
+    pub(crate) fn commands(&self) -> &[SlashCommand] {
+        &self.commands
+    }
+
+    pub(crate) fn subscriptions(&self) -> &[(ExtensionEvent, HookMode, ContinueAfterStopOptions)] {
+        &self.subscriptions
+    }
+
+    pub(crate) fn http_routes(&self) -> &[RegisteredHttpRoute] {
+        &self.http_routes
+    }
+
+    pub(crate) fn extension_events(&self) -> &[ExtensionEventDecl] {
+        &self.extension_events
+    }
 }
 
 /// 从 s5r `InitializeMessage.metadata` 解析注册信息。
-pub fn registration_from_s5r_metadata(
+pub(crate) fn registration_from_s5r_metadata(
     metadata: &Value,
     expected_s5r_version: &str,
 ) -> Result<ExtensionRegistration, String> {
@@ -56,6 +97,26 @@ fn registration_from_manifest(
         })
         .collect::<Result<_, _>>()?;
 
+    let tools = manifest
+        .tools
+        .into_iter()
+        .map(normalize_tool)
+        .collect::<Result<_, _>>()?;
+    let commands = manifest
+        .commands
+        .into_iter()
+        .map(normalize_command)
+        .collect();
+    let subscriptions = manifest
+        .hooks
+        .into_iter()
+        .map(normalize_hook)
+        .collect::<Result<_, _>>()?;
+    let http_routes = manifest
+        .http_routes
+        .into_iter()
+        .map(normalize_http_route)
+        .collect::<Result<_, _>>()?;
     let extension_events = manifest
         .extension_events
         .into_iter()
@@ -65,16 +126,92 @@ fn registration_from_manifest(
     Ok(ExtensionRegistration {
         extension_id,
         capabilities,
-        tools: manifest.tools,
-        commands: manifest.commands,
-        hooks: manifest.hooks,
-        http_routes: manifest.http_routes,
+        tools,
+        commands,
+        subscriptions,
+        http_routes,
         extension_events,
     })
 }
 
+fn normalize_tool(tool: ManifestTool) -> Result<ToolDefinition, String> {
+    let execution_mode = match tool.mode.as_str() {
+        "parallel" => ExecutionMode::Parallel,
+        "sequential" => ExecutionMode::Sequential,
+        _ => {
+            return Err(format!(
+                "unknown tool execution mode in manifest: {}",
+                tool.mode
+            ));
+        },
+    };
+    Ok(ToolDefinition {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.parameters,
+        strict: tool.strict,
+        origin: ToolOrigin::Extension,
+        execution_mode,
+    })
+}
+
+fn normalize_command(command: ManifestCommand) -> SlashCommand {
+    SlashCommand {
+        name: command.name,
+        description: command.description,
+        args_schema: None,
+        requires_idle: false,
+        argument_completions: false,
+        priority: 0,
+    }
+}
+
+fn normalize_hook(
+    hook: ManifestHook,
+) -> Result<(ExtensionEvent, HookMode, ContinueAfterStopOptions), String> {
+    let event = event_from_name(&hook.on)
+        .ok_or_else(|| format!("unknown hook event in manifest: {}", hook.on))?;
+    let mode = mode_from_name(&hook.mode)
+        .ok_or_else(|| format!("unknown hook mode in manifest: {}", hook.mode))?;
+    if s5r_unsupported_typed_hook(&event) {
+        return Err(format!("{} is not supported by s5r manifest", hook.on));
+    }
+    if event == ExtensionEvent::ContinueAfterStop && mode != HookMode::Blocking {
+        return Err(format!("{} is a blocking-only hook", hook.on));
+    }
+    Ok((
+        event,
+        mode,
+        ContinueAfterStopOptions {
+            max_per_turn: hook
+                .options
+                .max_per_turn
+                .unwrap_or(ContinueAfterStopOptions::default().max_per_turn),
+        },
+    ))
+}
+
+fn normalize_http_route(route: ManifestHttpRoute) -> Result<RegisteredHttpRoute, String> {
+    route.route.validate()?;
+    if route.handler_id.trim().is_empty() {
+        return Err(format!(
+            "HTTP route {} is missing handler_id",
+            route.route.path
+        ));
+    }
+    Ok(RegisteredHttpRoute {
+        route: route.route,
+        handler_id: route.handler_id,
+    })
+}
+
+fn s5r_unsupported_typed_hook(event: &ExtensionEvent) -> bool {
+    matches!(event, ExtensionEvent::UserMessageEnvelope)
+}
+
 #[cfg(test)]
 mod tests {
+    use astrcode_extension_sdk::tool::ExecutionMode;
     use serde_json::json;
 
     use super::*;
@@ -142,17 +279,23 @@ mod tests {
         )
         .expect("manifest should parse");
 
-        assert!(!registration.tools[0].strict);
-        assert_eq!(registration.tools[0].mode, "sequential");
-        assert!(registration.tools[1].strict);
-        assert!(registration.capabilities.is_empty());
-        assert!(registration.http_routes.is_empty());
-        assert_eq!(registration.commands[0].description, "");
-        assert!(registration.hooks[0].options.max_per_turn.is_none());
-        assert_eq!(registration.extension_events[0].schema_version, 1);
-        assert!(registration.extension_events[0].durable);
+        assert!(!registration.tools()[0].strict);
         assert_eq!(
-            registration.extension_events[0].max_payload_bytes,
+            registration.tools()[0].execution_mode,
+            ExecutionMode::Sequential
+        );
+        assert!(registration.tools()[1].strict);
+        assert!(registration.capabilities().is_empty());
+        assert!(registration.http_routes().is_empty());
+        assert_eq!(registration.commands()[0].description, "");
+        assert_eq!(
+            registration.subscriptions()[0].2,
+            ContinueAfterStopOptions::default()
+        );
+        assert_eq!(registration.extension_events()[0].schema_version, 1);
+        assert!(registration.extension_events()[0].durable);
+        assert_eq!(
+            registration.extension_events()[0].max_payload_bytes,
             64 * 1024
         );
     }

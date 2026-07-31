@@ -1132,6 +1132,21 @@ impl Session {
     }
 
     async fn prepare_turn_runner(&self) -> Result<TurnLoop, TurnError> {
+        let session_store_dir = self
+            .runtime
+            .store()
+            .session_store_dir(self.id())
+            .await
+            .map_err(SessionError::from)?;
+        let approval_history = self.runtime.approval_history();
+        let approval_history_path = session_store_dir
+            .as_deref()
+            .map(crate::permission::approval_history_path);
+        approval_history
+            .ensure_loaded(approval_history_path.as_deref())
+            .await
+            .map_err(|error| TurnError::ApprovalHistory(error.to_string()))?;
+
         let mut pre_state = self.read_model().await?;
         let model_id = if pre_state.identity.parent.is_some() {
             pre_state.identity.model_id.clone()
@@ -1179,7 +1194,6 @@ impl Session {
         } else {
             pre_state
         };
-        let session_store_dir = self.session_store_dir().await;
         let cancellation_token = CancellationToken::new();
         TurnLoop::new_with_llm(
             self.clone(),

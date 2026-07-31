@@ -697,7 +697,9 @@ Feature：
 - `report`：`EvalResult`、`EvalReport`、`EvalSummary`。
 - `adapter`：`BenchmarkAdapter` trait，用于接入不同 benchmark。
 
-依赖边界：只依赖 `astrcode-core` 和通用库。`astrcode-cli` 通过 `dev-mode` feature 可选依赖它。
+依赖边界：依赖 `astrcode-core` 的领域类型和 `astrcode-protocol` 的 typed wire
+契约；它是协议消费者，不定义或复制服务端 DTO。`astrcode-cli` 通过 `dev-mode`
+feature 可选依赖它。
 
 测试线索：评测 fixture 位于 `eval-tasks/fixtures/*`，包含 `buggy-rust`、`implement-trie` 等独立项目。
 

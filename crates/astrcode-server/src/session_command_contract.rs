@@ -1,10 +1,28 @@
 use astrcode_core::types::{SessionId, TurnId};
-use astrcode_protocol::events::ExtensionCommandInfoDto;
 
 use crate::{session_manager::SessionManagerError, turn_scheduler::TurnScheduleError};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandInfo {
+    pub name: String,
+    pub description: String,
+    pub needs_argument: bool,
+    pub requires_idle: bool,
+    pub argument_completions: bool,
+    pub priority: i32,
+    pub source: CommandSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandSource {
+    Builtin,
+    Extension,
+    Skill,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandList {
-    pub commands: Vec<ExtensionCommandInfoDto>,
+    pub commands: Vec<CommandInfo>,
 }
 
 /// 用户输入提交结果：被接受进入 Turn，或被斜杠命令处理。

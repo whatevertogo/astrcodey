@@ -3,12 +3,13 @@
 
 Layer hierarchy:
   L0 Foundation:   astrcode-core, astrcode-desktop
-  L1 Primitives:   astrcode-session-projection, astrcode-eval
+  L1 Primitives:   astrcode-session-projection
   L2 Services:     astrcode-extension-sdk, astrcode-ai, astrcode-context,
                    astrcode-log, astrcode-storage
   L3 Integration:  astrcode-protocol, astrcode-tools, astrcode-extensions,
                    astrcode-extension-*
-  L4 Runtime:      astrcode-session, astrcode-client, astrcode-bundled-extensions
+  L4 Runtime:      astrcode-session, astrcode-client, astrcode-bundled-extensions,
+                   astrcode-eval
   L5 Server:       astrcode-server
   L6 CLI:          astrcode-cli
 
@@ -29,7 +30,6 @@ LAYERS: dict[str, int] = {
     "astrcode-core": 0,
     "astrcode-desktop": 0,
     # L1 – Primitive contracts
-    "astrcode-eval": 1,
     "astrcode-session-projection": 1,
     # L2 – Services
     "astrcode-extension-sdk": 2,
@@ -54,6 +54,7 @@ LAYERS: dict[str, int] = {
     # L4 – Runtime and composition
     "astrcode-client": 4,
     "astrcode-bundled-extensions": 4,
+    "astrcode-eval": 4,
     "astrcode-session": 4,
     # L5 – Server
     "astrcode-server": 5,

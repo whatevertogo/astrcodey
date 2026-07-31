@@ -35,13 +35,6 @@ impl TurnToolContext {
         let runtime_services = session.runtime_services();
         let effective = runtime_services.read_effective();
         let approval_history = session.runtime().approval_history();
-        if let Some(dir) = session_store_dir.as_deref() {
-            let path = crate::permission::approval_history_path(dir);
-            if path.exists() {
-                approval_history
-                    .replace_from(&crate::permission::ApprovalHistoryStore::load_from(&path));
-            }
-        }
         let permission_chain =
             crate::permission::build_default_chain(&effective, Arc::clone(&approval_history));
         let shared = crate::turn_context::SharedTurnContext {

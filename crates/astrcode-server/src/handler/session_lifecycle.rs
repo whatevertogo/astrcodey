@@ -4,7 +4,6 @@ use astrcode_core::{tool::SessionToolSelection, types::SessionId};
 use astrcode_protocol::events::{ClientNotification, SessionListItemDto};
 
 use super::{CommandHandler, HandlerError};
-use crate::protocol_mapping::session_snapshot;
 
 impl CommandHandler {
     pub(super) async fn send_session_list(&self) -> Result<(), HandlerError> {
@@ -41,14 +40,7 @@ impl CommandHandler {
             .session_read_model(session_id)
             .await
         {
-            Ok(state) => {
-                let snapshot = session_snapshot(&state);
-                self.event_bus
-                    .send_notification(ClientNotification::SessionResumed {
-                        session_id: session_id.to_string(),
-                        snapshot,
-                    });
-            },
+            Ok(state) => self.event_bus.send_session_resumed(&state),
             Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
         }
     }
@@ -116,14 +108,9 @@ impl CommandHandler {
                         return;
                     },
                 };
-                let snapshot = session_snapshot(&state);
 
                 self.focused_session_id = Some(session_id.clone());
-                self.event_bus
-                    .send_notification(ClientNotification::SessionResumed {
-                        session_id: session_id.into_string(),
-                        snapshot,
-                    });
+                self.event_bus.send_session_resumed(&state);
             },
             Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
         }

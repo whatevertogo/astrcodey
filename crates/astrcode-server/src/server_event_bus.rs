@@ -10,8 +10,11 @@ use astrcode_core::{
 };
 use astrcode_protocol::events::ClientNotification;
 use astrcode_session::SessionEventObserver;
+use astrcode_session_projection::SessionReadModel;
 use parking_lot::Mutex;
 use tokio::sync::broadcast;
+
+use crate::protocol_mapping::session_snapshot;
 
 pub(crate) struct StreamingSnapshot {
     pub message_id: String,
@@ -103,6 +106,30 @@ impl ServerEventBus {
             routes.insert(initial_child_id.clone(), route.clone());
             routes.insert(leaf_child_id.clone(), route);
         }
+    }
+
+    pub(crate) fn send_session_resumed(&self, state: &SessionReadModel) {
+        self.send_notification(ClientNotification::SessionResumed {
+            session_id: state.identity.session_id.to_string(),
+            snapshot: session_snapshot(state),
+        });
+    }
+
+    pub(crate) fn send_status_item_update(&self, id: String, text: String) {
+        self.send_notification(ClientNotification::StatusItemUpdate { id, text });
+    }
+
+    pub(crate) fn send_extension_command_result(
+        &self,
+        command_name: String,
+        content: String,
+        is_error: bool,
+    ) {
+        self.send_notification(ClientNotification::ExtensionCommandResult {
+            command_name,
+            content,
+            is_error,
+        });
     }
 
     pub fn send_notification(&self, notification: ClientNotification) {
@@ -313,9 +340,14 @@ fn update_streaming(state: &StreamingState, payload: &EventPayload) {
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
-        event::{DurableEvent, LiveEvent, StoredEvent},
+        event::{
+            DurableEvent, LiveEvent, PersistedSystemPrompt, SessionStarted, StoredEvent,
+            SystemPromptSource,
+        },
+        tool::SessionToolSelection,
         types::{SessionId, ToolCallId},
     };
+    use astrcode_session_projection::replay;
     use tokio::sync::broadcast::error::TryRecvError;
 
     use super::*;
@@ -330,6 +362,33 @@ mod tests {
 
     fn turn_started(session_id: &SessionId) -> Arc<Event> {
         durable(session_id.clone(), DurableEventPayload::TurnStarted)
+    }
+
+    fn session_read_model(session_id: &str) -> SessionReadModel {
+        let session_id = SessionId::new(session_id);
+        replay(
+            session_id.clone(),
+            &[StoredEvent::new(
+                0,
+                DurableEvent::session(
+                    session_id,
+                    DurableEventPayload::SessionStarted(SessionStarted {
+                        working_dir: "/workspace".into(),
+                        model_id: "model".into(),
+                        parent: None,
+                        tool_selection: SessionToolSelection::default(),
+                        source_extension: None,
+                        initial_system_prompt: PersistedSystemPrompt {
+                            text: "system".into(),
+                            fingerprint: "fingerprint".into(),
+                            extra_system_prompt: None,
+                            source: SystemPromptSource::Native,
+                        },
+                    }),
+                ),
+            )],
+        )
+        .expect("session read model")
     }
 
     #[test]
@@ -372,6 +431,47 @@ mod tests {
             all_rx.recv().await,
             Ok(ClientNotification::ExtensionRegistryChanged)
         ));
+    }
+
+    #[tokio::test]
+    async fn semantic_notifications_preserve_transport_wire_shape() {
+        let bus = ServerEventBus::new();
+        let mut rx = bus.subscribe_global_notifications();
+
+        bus.send_session_resumed(&session_read_model("session-1"));
+        bus.send_status_item_update("mode".into(), "plan".into());
+        bus.send_extension_command_result("review".into(), "done".into(), false);
+
+        let resumed = serde_json::to_value(rx.recv().await.expect("session resumed")).unwrap();
+        assert_eq!(resumed["event"], "session_resumed");
+        assert_eq!(resumed["data"]["session_id"], "session-1");
+        assert_eq!(resumed["data"]["snapshot"]["session_id"], "session-1");
+        assert_eq!(resumed["data"]["snapshot"]["working_dir"], "/workspace");
+
+        let status = serde_json::to_value(rx.recv().await.expect("status update")).unwrap();
+        assert_eq!(
+            status,
+            serde_json::json!({
+                "event": "status_item_update",
+                "data": {
+                    "id": "mode",
+                    "text": "plan"
+                }
+            })
+        );
+
+        let result = serde_json::to_value(rx.recv().await.expect("command result")).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "event": "extension_command_result",
+                "data": {
+                    "command_name": "review",
+                    "content": "done",
+                    "is_error": false
+                }
+            })
+        );
     }
 
     #[tokio::test]

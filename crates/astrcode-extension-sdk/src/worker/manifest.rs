@@ -15,6 +15,7 @@ use crate::{
 pub(crate) struct ManifestCatalog {
     pub tools: Vec<ToolDefinition>,
     pub hooks: Vec<ManifestHook>,
+    pub continuation_hooks: Vec<String>,
     pub commands: Vec<ManifestCommand>,
     pub http_routes: Vec<ManifestHttpRoute>,
     pub capabilities: Vec<String>,

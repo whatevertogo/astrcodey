@@ -11,7 +11,8 @@ pub use config_manager::ConfigManager;
 pub use handler::CommandHandle;
 pub use server_event_bus::ServerEventBus;
 pub use session_command_contract::{
-    CommandInvocation, CommandList, HandlerError, ManualCompactOutcome, PromptSubmission,
+    CommandInfo, CommandInvocation, CommandList, CommandSource, HandlerError, ManualCompactOutcome,
+    PromptSubmission,
 };
 pub use session_manager::{SessionManager, SessionManagerError};
 pub use turn_registry::TurnRegistry;

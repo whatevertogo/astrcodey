@@ -600,16 +600,7 @@ async fn s5r_turn_end_continuations_and_pipeline() {
         .await
         .unwrap();
 
-    assert!(
-        result.content.contains("steps=2"),
-        "got: {}",
-        result.content
-    );
-    assert!(
-        result.content.contains("llm_ok=true"),
-        "got: {}",
-        result.content
-    );
+    assert_eq!(result.content, "step_1_calls=1 step_2_calls=1 llm_ok=true");
 }
 
 #[tokio::test]

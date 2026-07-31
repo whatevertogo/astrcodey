@@ -307,11 +307,9 @@ impl ToolCalls {
             self.turn
                 .shared
                 .approval_history
-                .record_decision(rule_key.as_deref(), decision);
-            if let Some(dir) = self.turn.shared.session_store_dir.as_deref() {
-                let path = crate::permission::approval_history_path(dir);
-                let _ = self.turn.shared.approval_history.persist_to(&path);
-            }
+                .record_decision(rule_key.as_deref(), decision)
+                .await
+                .map_err(|error| TurnError::ApprovalHistory(error.to_string()))?;
         }
         if decision.allows() {
             return Ok(self.execute_single_tool(call.to_executable(), tools).await);

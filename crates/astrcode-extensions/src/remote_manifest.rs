@@ -2,54 +2,15 @@
 
 use astrcode_extension_sdk::{
     extension::{
-        CompactContributions, CompactResult, ContinueAfterStopOptions, ContinueAfterStopResult,
-        ExtensionCommandResult, ExtensionError, ExtensionEvent, ExtensionHttpResponse, HookMode,
-        HookResult, PostToolUseResult, PreToolUseResult, PromptContributions, ProviderResult,
-        SlashCommand,
+        CompactContributions, CompactResult, ContinueAfterStopResult, ExtensionCommandResult,
+        ExtensionError, ExtensionHttpResponse, HookResult, PostToolUseResult, PreToolUseResult,
+        PromptContributions, ProviderResult,
     },
-    s5r::{effects::HandlerResult, event_from_name, manifest::ManifestHook, mode_from_name},
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
+    s5r::effects::HandlerResult,
+    tool::ToolResult,
 };
 use serde::Deserialize;
 use serde_json::json;
-
-use crate::extension_manifest::ExtensionRegistration;
-
-pub fn validate_registration(reg: &ExtensionRegistration) -> Result<(), String> {
-    if reg.extension_id.trim().is_empty() {
-        return Err("extension id is empty".into());
-    }
-    for tool in &reg.tools {
-        if !matches!(tool.mode.as_str(), "parallel" | "sequential") {
-            return Err(format!(
-                "unknown tool execution mode in manifest: {}",
-                tool.mode
-            ));
-        }
-    }
-    for hook in &reg.hooks {
-        let event = event_from_name(&hook.on)
-            .ok_or_else(|| format!("unknown hook event in manifest: {}", hook.on))?;
-        let mode = mode_from_name(&hook.mode)
-            .ok_or_else(|| format!("unknown hook mode in manifest: {}", hook.mode))?;
-        if s5r_unsupported_typed_hook(&event) {
-            return Err(format!("{} is not supported by s5r manifest", hook.on));
-        }
-        if event == ExtensionEvent::ContinueAfterStop && mode != HookMode::Blocking {
-            return Err(format!("{} is a blocking-only hook", hook.on));
-        }
-    }
-    for entry in &reg.http_routes {
-        entry.route.validate()?;
-        if entry.handler_id.trim().is_empty() {
-            return Err(format!(
-                "HTTP route {} is missing handler_id",
-                entry.route.path
-            ));
-        }
-    }
-    Ok(())
-}
 
 pub fn parse_http_response(resp: &HandlerResult) -> Result<ExtensionHttpResponse, ExtensionError> {
     if !resp.ok {
@@ -65,67 +26,6 @@ pub fn parse_http_response(resp: &HandlerResult) -> Result<ExtensionHttpResponse
     }
     serde_json::from_value(resp.data.clone().unwrap_or_default())
         .map_err(|error| ExtensionError::Internal(format!("parse HTTP response: {error}")))
-}
-
-pub fn build_tools(reg: &ExtensionRegistration) -> Vec<ToolDefinition> {
-    reg.tools
-        .iter()
-        .map(|t| ToolDefinition {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            parameters: t.parameters.clone(),
-            strict: t.strict,
-            origin: ToolOrigin::Extension,
-            execution_mode: if t.mode == "parallel" {
-                ExecutionMode::Parallel
-            } else {
-                ExecutionMode::Sequential
-            },
-        })
-        .collect()
-}
-
-pub fn build_commands(reg: &ExtensionRegistration) -> Vec<SlashCommand> {
-    reg.commands
-        .iter()
-        .map(|c| SlashCommand {
-            name: c.name.clone(),
-            description: c.description.clone(),
-            args_schema: None,
-            requires_idle: false,
-            argument_completions: false,
-            priority: 0,
-        })
-        .collect()
-}
-
-pub fn build_subscriptions(
-    reg: &ExtensionRegistration,
-) -> Vec<(ExtensionEvent, HookMode, ContinueAfterStopOptions)> {
-    reg.hooks
-        .iter()
-        .filter_map(|h: &ManifestHook| {
-            let event = event_from_name(&h.on)?;
-            if s5r_unsupported_typed_hook(&event) {
-                return None;
-            }
-            let mode = mode_from_name(&h.mode)?;
-            Some((
-                event,
-                mode,
-                ContinueAfterStopOptions {
-                    max_per_turn: h
-                        .options
-                        .max_per_turn
-                        .unwrap_or(ContinueAfterStopOptions::default().max_per_turn),
-                },
-            ))
-        })
-        .collect()
-}
-
-fn s5r_unsupported_typed_hook(event: &ExtensionEvent) -> bool {
-    matches!(event, ExtensionEvent::UserMessageEnvelope)
 }
 
 pub fn handler_id(extension_id: &str, kind: &str, name: &str) -> String {
@@ -289,70 +189,5 @@ pub fn parse_lifecycle_result(resp: &HandlerResult) -> Result<HookResult, Extens
             reason: resp.data_str("reason").to_string(),
         }),
         _ => Ok(HookResult::Allow),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use astrcode_extension_sdk::s5r::manifest::{ManifestHook, ManifestHookOptions, ManifestTool};
-
-    use super::*;
-
-    fn registration_with_hook(on: &str, mode: &str) -> ExtensionRegistration {
-        ExtensionRegistration {
-            extension_id: "test-extension".into(),
-            capabilities: Vec::new(),
-            tools: Vec::new(),
-            commands: Vec::new(),
-            hooks: vec![ManifestHook {
-                on: on.into(),
-                mode: mode.into(),
-                options: ManifestHookOptions::default(),
-            }],
-            http_routes: Vec::new(),
-            extension_events: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn validate_registration_rejects_non_blocking_continue_after_stop() {
-        let reg = registration_with_hook("continue_after_stop", "non_blocking");
-
-        let err = validate_registration(&reg).unwrap_err();
-
-        assert!(err.contains("blocking-only"));
-    }
-
-    #[test]
-    fn validate_registration_rejects_s5r_internal_typed_hook() {
-        let reg = registration_with_hook("user_message_envelope", "blocking");
-
-        let err = validate_registration(&reg).unwrap_err();
-
-        assert!(err.contains("not supported by s5r manifest"));
-    }
-
-    #[test]
-    fn validate_registration_rejects_unknown_hook_and_tool_modes() {
-        let unknown_hook = registration_with_hook("typo_hook", "blocking");
-        assert!(
-            validate_registration(&unknown_hook)
-                .unwrap_err()
-                .contains("unknown hook event")
-        );
-
-        let mut unknown_mode = registration_with_hook("turn_end", "advisory");
-        unknown_mode.tools.push(ManifestTool {
-            name: "bad-tool".into(),
-            description: String::new(),
-            parameters: serde_json::json!({"type": "object"}),
-            strict: false,
-            mode: "concurrent-ish".into(),
-        });
-        assert!(
-            validate_registration(&unknown_mode)
-                .unwrap_err()
-                .contains("unknown tool execution mode")
-        );
     }
 }
