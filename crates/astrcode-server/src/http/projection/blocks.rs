@@ -6,6 +6,7 @@ use astrcode_context::is_synthetic_context_message;
 use astrcode_core::{
     event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, TranscriptRewriteReason},
     llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, attachments_from_user_message},
+    types::ToolCallId,
 };
 use astrcode_protocol::http::{
     ConversationBlockDto, ConversationBlockStatusDto, ToolCallStatusDto,
@@ -71,7 +72,7 @@ pub(in crate::http) fn streaming_tool_call_block(
     }
 }
 
-/// 为产生单个可见 block 的 payload 构建共享投影。
+/// 为单个可见 block 的 payload 构建共享投影。
 pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationBlockDto> {
     let payload = match &event.payload {
         EventPayload::Durable(payload) => payload,
@@ -112,20 +113,15 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             arguments,
             arguments_json,
             ..
-        } => Some(ConversationBlockDto::ToolCall {
-            id: call_id.to_string(),
-            name: tool_name.clone(),
-            arguments: arguments.clone(),
-            text: result.content.clone(),
-            status: if result.is_error {
-                ToolCallStatusDto::Error
-            } else {
-                ToolCallStatusDto::Complete
-            },
-            metadata: tool_terminal_metadata(&result.metadata, result.duration_ms),
-            approval: None,
-            arguments_json: arguments_json.clone(),
-        }),
+        } => Some(tool_call_terminal_block(
+            call_id,
+            tool_name,
+            arguments,
+            arguments_json.as_ref(),
+            result.content.clone(),
+            tool_result_status(result.is_error),
+            tool_terminal_metadata(&result.metadata, result.duration_ms),
+        )),
         DurableEventPayload::ToolCallFailed {
             call_id,
             tool_name,
@@ -134,16 +130,15 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             duration_ms,
             arguments,
             arguments_json,
-        } => Some(ConversationBlockDto::ToolCall {
-            id: call_id.to_string(),
-            name: tool_name.clone(),
-            arguments: arguments.clone(),
-            text: error.clone(),
-            status: ToolCallStatusDto::Failed,
-            metadata: tool_terminal_metadata(metadata, *duration_ms),
-            approval: None,
-            arguments_json: arguments_json.clone(),
-        }),
+        } => Some(tool_call_terminal_block(
+            call_id,
+            tool_name,
+            arguments,
+            arguments_json.as_ref(),
+            error.clone(),
+            ToolCallStatusDto::Failed,
+            tool_terminal_metadata(metadata, *duration_ms),
+        )),
         DurableEventPayload::ToolCallCancelled {
             call_id,
             tool_name,
@@ -151,16 +146,15 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             duration_ms,
             arguments,
             arguments_json,
-        } => Some(ConversationBlockDto::ToolCall {
-            id: call_id.to_string(),
-            name: tool_name.clone(),
-            arguments: arguments.clone(),
-            text: format!("Tool cancelled: {reason}"),
-            status: ToolCallStatusDto::Cancelled,
-            metadata: tool_terminal_metadata(&BTreeMap::new(), *duration_ms),
-            approval: None,
-            arguments_json: arguments_json.clone(),
-        }),
+        } => Some(tool_call_terminal_block(
+            call_id,
+            tool_name,
+            arguments,
+            arguments_json.as_ref(),
+            format!("Tool cancelled: {reason}"),
+            ToolCallStatusDto::Cancelled,
+            tool_terminal_metadata(&BTreeMap::new(), *duration_ms),
+        )),
         DurableEventPayload::ErrorOccurred { message, .. } => Some(ConversationBlockDto::Error {
             id: event.id.to_string(),
             message: message.clone(),
@@ -182,6 +176,28 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             source: source.clone(),
         }),
         _ => None,
+    }
+}
+
+/// 构造工具终态（completed/failed/cancelled）的 ToolCall block。
+fn tool_call_terminal_block(
+    call_id: &ToolCallId,
+    tool_name: &str,
+    arguments: &str,
+    arguments_json: Option<&serde_json::Value>,
+    text: String,
+    status: ToolCallStatusDto,
+    metadata: Option<serde_json::Value>,
+) -> ConversationBlockDto {
+    ConversationBlockDto::ToolCall {
+        id: call_id.to_string(),
+        name: tool_name.to_owned(),
+        arguments: arguments.to_owned(),
+        text,
+        status,
+        metadata,
+        approval: None,
+        arguments_json: arguments_json.cloned(),
     }
 }
 
@@ -219,7 +235,7 @@ fn sequenced_message_blocks(messages: &[SequencedLlmMessage]) -> Vec<SequencedCo
                 seq: seq_msg.updated_seq,
                 block: ConversationBlockDto::User {
                     id,
-                    text: visible_message_text(message),
+                    text: visible_ui_text(message),
                     attachments: attachments_from_user_message(message)
                         .into_iter()
                         .map(Into::into)
@@ -228,7 +244,7 @@ fn sequenced_message_blocks(messages: &[SequencedLlmMessage]) -> Vec<SequencedCo
                 },
             }),
             LlmRole::Assistant => {
-                let text = visible_message_text(message);
+                let text = visible_ui_text(message);
                 if !text.trim().is_empty() || message.reasoning_content.is_some() {
                     blocks.push(SequencedConversationBlock {
                         seq: seq_msg.updated_seq,
@@ -276,7 +292,7 @@ fn sequenced_message_blocks(messages: &[SequencedLlmMessage]) -> Vec<SequencedCo
                 seq: seq_msg.updated_seq,
                 block: ConversationBlockDto::SystemNote {
                     id,
-                    text: visible_message_text(message),
+                    text: visible_ui_text(message),
                 },
             }),
         }
@@ -346,7 +362,7 @@ fn push_tool_result_block(
                 id: fallback_id,
                 name: fallback_name,
                 arguments: String::new(),
-                text: visible_message_text(message),
+                text: visible_ui_text(message),
                 status: tool_status_from_message(false, source),
                 metadata: None,
                 approval: None,
@@ -356,13 +372,21 @@ fn push_tool_result_block(
     }
 }
 
+/// 工具执行完成（非 failed/cancelled）的状态判定：结果含错误则为 Error。
+fn tool_result_status(is_error: bool) -> ToolCallStatusDto {
+    if is_error {
+        ToolCallStatusDto::Error
+    } else {
+        ToolCallStatusDto::Complete
+    }
+}
+
 fn tool_status_from_message(is_error: bool, source: Option<&str>) -> ToolCallStatusDto {
     match source {
         Some(TOOL_CALL_FAILED_SOURCE) => ToolCallStatusDto::Failed,
         Some(TOOL_CALL_CANCELLED_SOURCE) => ToolCallStatusDto::Cancelled,
         // ToolCallCompleted 的 error 结果（执行成功但结果含错误）不带 source 标记。
-        _ if is_error => ToolCallStatusDto::Error,
-        _ => ToolCallStatusDto::Complete,
+        _ => tool_result_status(is_error),
     }
 }
 
@@ -390,7 +414,9 @@ fn transcript_artifact_block(artifact: &TranscriptArtifactView) -> ConversationB
     }
 }
 
-fn visible_message_text(message: &LlmMessage) -> String {
+/// 提取 UI 可展示的文本：跳过 ToolCall/Image（与 compaction 用的
+/// `visible_message_text` 不同——后者会把工具调用渲染成文本给摘要模型读）。
+fn visible_ui_text(message: &LlmMessage) -> String {
     message
         .content
         .iter()

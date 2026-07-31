@@ -215,6 +215,11 @@ async fn shell_captures_stdout_and_stderr_without_live_events() {
         .expect("shell should execute");
 
     assert!(!result.is_error, "{result:?}");
+    assert!(
+        result
+            .content
+            .starts_with("Process exited with code 0\nOutput:\n")
+    );
     assert!(result.content.contains("out"));
     assert!(result.content.contains("err"));
     assert_eq!(result.metadata["streamed"], serde_json::json!(false));
@@ -243,6 +248,7 @@ async fn shell_timeout_returns_partial_output() {
         .expect("shell should return a structured timeout result");
 
     assert!(result.is_error);
+    assert!(result.content.starts_with("Process timed out\nOutput:\n"));
     assert!(result.content.contains("before"));
     assert!(
         !result.content.lines().any(|line| line.trim() == "after"),
@@ -341,6 +347,13 @@ async fn shell_nonzero_exit_code_is_error() {
         serde_json::json!("failed")
     );
     let exit_code = result.metadata["exitCode"].as_i64().expect("exitCode");
+    assert!(
+        result
+            .content
+            .starts_with(&format!("Process exited with code {exit_code}\nOutput:\n")),
+        "process status must be visible to the model: {}",
+        result.content
+    );
     assert_ne!(
         exit_code, 0,
         "exit code should be non-zero, got {exit_code}"

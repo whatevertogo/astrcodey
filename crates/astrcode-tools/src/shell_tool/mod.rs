@@ -393,7 +393,7 @@ impl ShellTool {
             Some(timeout_msg)
         } else if let Some(diagnostic) = diagnostic {
             Some(diagnostic.message().to_string())
-        } else if let Some(wait_error) = wait_error {
+        } else if let Some(wait_error) = wait_error.as_deref() {
             let message = format!("failed to wait for shell process: {wait_error}");
             if output == "(no output)" {
                 output = message.clone();
@@ -411,6 +411,19 @@ impl ShellTool {
                 (None, None) => "shell process failed without an exit code".into(),
             })
         };
+
+        let process_status = if timed_out {
+            "Process timed out".to_string()
+        } else if wait_error.is_some() {
+            "Process exited without a status".to_string()
+        } else {
+            match (exit_code, signal) {
+                (Some(code), _) => format!("Process exited with code {code}"),
+                (None, Some(signal)) => format!("Process terminated by signal {signal}"),
+                (None, None) => "Process exited without a status".to_string(),
+            }
+        };
+        output = format!("{process_status}\nOutput:\n{output}");
 
         Ok(ToolResult {
             content: output,
