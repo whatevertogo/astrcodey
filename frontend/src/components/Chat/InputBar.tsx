@@ -333,7 +333,15 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
         }
       }
 
-      if (event.key === 'Enter' && !event.shiftKey && !isComposing) {
+      if (
+        event.key === 'Enter' &&
+        !event.shiftKey &&
+        !isComposing &&
+        // WebKit(macOS Tauri = WKWebView)会在 compositionend 之后补发一次
+        // keydown(Enter, keyCode 229)，此时 React 状态已复位，必须靠原生标志/键码拦截
+        !event.nativeEvent.isComposing &&
+        event.keyCode !== 229
+      ) {
         event.preventDefault()
         submit().catch((err) => console.error('submit failed:', err))
       }
