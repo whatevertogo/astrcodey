@@ -1,19 +1,20 @@
-use astrcode_core::permission::{
-    ApprovalMode, PermissionContext, PermissionDecision, PermissionPolicy, PermissionRule,
-};
+use astrcode_core::permission::{ApprovalMode, PermissionRule};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-use super::paths::{extract_tool_paths, path_for_matching};
+use super::{
+    PermissionContext, PermissionDecision, PermissionPolicy,
+    paths::{extract_tool_paths, path_for_matching},
+};
 
-pub struct ConfiguredDenyPolicy {
+pub(super) struct ConfiguredDenyPolicy {
     rules: Vec<CompiledRule>,
 }
 
-pub struct ConfiguredAllowPolicy {
+pub(super) struct ConfiguredAllowPolicy {
     rules: Vec<CompiledRule>,
 }
 
-pub struct ConfiguredAskPolicy {
+pub(super) struct ConfiguredAskPolicy {
     rules: Vec<CompiledRule>,
 }
 
@@ -24,7 +25,7 @@ struct CompiledRule {
 }
 
 impl ConfiguredDenyPolicy {
-    pub fn new(rules: &[PermissionRule]) -> Self {
+    pub(super) fn new(rules: &[PermissionRule]) -> Self {
         Self {
             rules: compile_rules(rules),
         }
@@ -32,7 +33,7 @@ impl ConfiguredDenyPolicy {
 }
 
 impl ConfiguredAllowPolicy {
-    pub fn new(rules: &[PermissionRule]) -> Self {
+    pub(super) fn new(rules: &[PermissionRule]) -> Self {
         Self {
             rules: compile_rules(rules),
         }
@@ -40,7 +41,7 @@ impl ConfiguredAllowPolicy {
 }
 
 impl ConfiguredAskPolicy {
-    pub fn new(rules: &[PermissionRule]) -> Self {
+    pub(super) fn new(rules: &[PermissionRule]) -> Self {
         Self {
             rules: compile_rules(rules),
         }

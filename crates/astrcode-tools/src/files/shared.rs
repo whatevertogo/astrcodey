@@ -7,10 +7,10 @@ use std::{
 };
 
 use astrcode_core::{
-    message_attachment::MAX_ATTACHMENT_CONTENT_BYTES, read_tool_image::ReadToolInlinePayload,
-    tool::*,
+    message_attachment::MAX_ATTACHMENT_CONTENT_BYTES,
+    tool::{read_image::ReadToolInlinePayload, *},
 };
-use astrcode_support::hostpaths::resolve_path;
+use astrcode_extension_sdk::hostpaths::resolve_path;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use globset::{GlobBuilder, GlobSet, GlobSetBuilder};
 use ignore::{DirEntry, WalkBuilder};
@@ -247,7 +247,6 @@ pub(super) fn image_media_type(path: &Path) -> Option<&'static str> {
 }
 
 pub(super) fn read_image_file_result(
-    call_id: String,
     started_at: Instant,
     path: &Path,
     media_type: &str,
@@ -270,8 +269,7 @@ pub(super) fn read_image_file_result(
             "maxBase64Bytes".into(),
             serde_json::json!(MAX_INLINE_IMAGE_BASE64_BYTES),
         );
-        return Ok(error_result_with_call_id(
-            call_id,
+        return Ok(error_result(
             started_at,
             format!(
                 "image payload would expand to about {estimated_base64_bytes} bytes after base64 \
@@ -285,7 +283,6 @@ pub(super) fn read_image_file_result(
         .to_content_string()
         .map_err(|error| ToolError::Execution(format!("read: serialize image payload: {error}")))?;
     Ok(ToolResult {
-        call_id,
         content,
         is_error: false,
         error: None,
@@ -313,18 +310,12 @@ pub(super) fn read_lines_segment(
     Ok((collected, total_lines))
 }
 
-pub(crate) fn tool_call_id(ctx: &ToolExecutionContext) -> String {
-    ctx.tool_call_id.clone().unwrap_or_default()
-}
-
-pub(super) fn error_result_with_call_id(
-    call_id: String,
+pub(super) fn error_result(
     started_at: Instant,
     error: String,
     metadata: BTreeMap<String, Value>,
 ) -> ToolResult {
     ToolResult {
-        call_id,
         content: error.clone(),
         is_error: true,
         error: Some(error),
@@ -439,9 +430,8 @@ pub(super) fn find_unique_occurrence(
 }
 
 /// 构造"文件未找到"的工具返回结果。
-pub(super) fn not_found_result(call_id: String, started_at: Instant, p: &Path) -> ToolResult {
+pub(super) fn not_found_result(started_at: Instant, p: &Path) -> ToolResult {
     ToolResult {
-        call_id,
         content: format!("Not found: {}", p.display()),
         is_error: false,
         error: None,
@@ -454,9 +444,8 @@ pub(super) fn not_found_result(call_id: String, started_at: Instant, p: &Path) -
 }
 
 /// 构造"路径是目录"的工具返回结果。
-pub(super) fn directory_result(call_id: String, started_at: Instant, p: &Path) -> ToolResult {
+pub(super) fn directory_result(started_at: Instant, p: &Path) -> ToolResult {
     ToolResult {
-        call_id,
         content: format!("Is a directory: {} — use find or shell ls", p.display()),
         is_error: false,
         error: None,
@@ -469,9 +458,8 @@ pub(super) fn directory_result(call_id: String, started_at: Instant, p: &Path) -
 }
 
 /// 构造"二进制文件"的工具返回结果。
-pub(super) fn binary_result(call_id: String, started_at: Instant, p: &Path) -> ToolResult {
+pub(super) fn binary_result(started_at: Instant, p: &Path) -> ToolResult {
     ToolResult {
-        call_id,
         content: format!("Binary file: {}", p.display()),
         is_error: false,
         error: None,
@@ -556,7 +544,6 @@ pub(super) fn remember_file_observation_with_store(
 /// 检查文件是否在上次观察后被外部修改。
 pub(super) fn stale_file_guard_with_store(
     store: Option<&std::sync::Arc<dyn FileObservationStore>>,
-    call_id: String,
     path: &Path,
     started_at: Instant,
 ) -> Result<Option<ToolResult>, ToolError> {
@@ -573,7 +560,6 @@ pub(super) fn stale_file_guard_with_store(
     }
 
     Ok(Some(ToolResult {
-        call_id,
         content: format!(
             "File changed on disk after the last read in this session. Call read on '{}' first, \
              then retry edit.",

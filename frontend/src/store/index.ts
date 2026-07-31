@@ -2,7 +2,10 @@ import { create } from 'zustand'
 import * as api from '../services/api'
 import { resolveHostBridge } from '../lib/hostBridge'
 import type { ConversationDelta } from '../services/types'
-import { applyDeltaToState } from './delta/applyDelta'
+import {
+  applyDeltaToState,
+  mergePendingAskUserSnapshot,
+} from './delta/applyDelta'
 import { isRegisteredSlashCommand } from '../lib/keybindings'
 import {
   commandNoteBlock,
@@ -17,6 +20,11 @@ import {
   syncProjectFolderOrder,
 } from '../components/Sidebar/projectFolderOrder'
 import type { AppState } from './types'
+
+let commandRefreshGeneration = 0
+let sessionSwitchGeneration = 0
+let conversationRefreshGeneration = 0
+let pendingAskRefreshGeneration = 0
 
 function resetSessionView(): Partial<AppState> {
   return {
@@ -33,10 +41,15 @@ function resetSessionView(): Partial<AppState> {
     workingDir: null,
     agentSessions: [],
     pendingMessages: [],
+    pendingAskUserQuestions: {},
+    resolvedAskUserCallIds: {},
+    askUserEventRevision: 0,
     composerDeliveryMode: 'queued',
     slashCommands: [],
     keybindings: [],
     statusItems: {},
+    statusItemRevisions: {},
+    transientHint: null,
   }
 }
 
@@ -59,11 +72,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   modelRefreshKey: 0,
   agentSessions: [],
   statusItems: {},
+  statusItemRevisions: {},
   keybindings: [],
   slashCommands: [],
   extensions: [],
   transientHint: null,
   pendingMessages: [],
+  pendingAskUserQuestions: {},
+  resolvedAskUserCallIds: {},
+  askUserEventRevision: 0,
   composerDeliveryMode: 'queued',
   projectFolderOrder: [],
 
@@ -167,31 +184,25 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   switchSession: async (sessionId: string) => {
+    const switchGeneration = ++sessionSwitchGeneration
+    commandRefreshGeneration += 1
     const state = get()
     state.sessionStream?.stop()
 
     set({
+      ...resetSessionView(),
       activeSessionId: sessionId,
-      blocks: [],
-      control: null,
-      cursor: null,
-      phase: 'idle',
-      compactSubmitting: false,
-      agentSessions: [],
-      transientHint: null,
-      pendingMessages: [],
-      composerDeliveryMode: 'queued',
-      slashCommands: [],
-      keybindings: [],
-      statusItems: {},
-      sessionStream: null,
       sessionStreamStatus: 'connecting',
-      sessionStreamError: null,
     })
 
     try {
       const snapshot = await api.getConversation(sessionId)
-      if (get().activeSessionId !== sessionId) return
+      if (
+        get().activeSessionId !== sessionId ||
+        switchGeneration !== sessionSwitchGeneration
+      ) {
+        return
+      }
       const sessions = get().sessions
       const sessionItem = sessions.find((s) => s.sessionId === sessionId)
 
@@ -211,7 +222,10 @@ export const useAppStore = create<AppState>((set, get) => ({
         get,
         set
       )
-      if (get().activeSessionId !== sessionId) {
+      if (
+        get().activeSessionId !== sessionId ||
+        switchGeneration !== sessionSwitchGeneration
+      ) {
         sessionStream.stop()
         return
       }
@@ -219,7 +233,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       void get().refreshCommands()
     } catch (err) {
       console.error('Failed to switch session:', err)
-      if (get().activeSessionId !== sessionId) return
+      if (
+        get().activeSessionId !== sessionId ||
+        switchGeneration !== sessionSwitchGeneration
+      ) {
+        return
+      }
       set({
         sessionStreamStatus: 'degraded',
         sessionStreamError: err instanceof Error ? err.message : String(err),
@@ -232,10 +251,18 @@ export const useAppStore = create<AppState>((set, get) => ({
   refreshConversationSnapshot: async () => {
     const { activeSessionId } = get()
     if (!activeSessionId) return null
+    const switchGeneration = sessionSwitchGeneration
+    const refreshGeneration = ++conversationRefreshGeneration
 
     try {
       const snapshot = await api.getConversation(activeSessionId)
-      if (get().activeSessionId !== activeSessionId) return null
+      if (
+        get().activeSessionId !== activeSessionId ||
+        switchGeneration !== sessionSwitchGeneration ||
+        refreshGeneration !== conversationRefreshGeneration
+      ) {
+        return null
+      }
       set({
         blocks: snapshot.blocks,
         control: snapshot.control,
@@ -247,11 +274,49 @@ export const useAppStore = create<AppState>((set, get) => ({
       return snapshot.cursor.value
     } catch (err) {
       console.error('Failed to refresh conversation snapshot:', err)
-      if (get().activeSessionId !== activeSessionId) return null
+      if (
+        get().activeSessionId !== activeSessionId ||
+        switchGeneration !== sessionSwitchGeneration ||
+        refreshGeneration !== conversationRefreshGeneration
+      ) {
+        return null
+      }
       set({
         transientHint: err instanceof Error ? err.message : '刷新会话快照失败',
       })
       return null
+    }
+  },
+
+  refreshPendingAskUserQuestions: async () => {
+    const sessionId = get().activeSessionId
+    if (!sessionId) return
+    const switchGeneration = sessionSwitchGeneration
+    const refreshGeneration = ++pendingAskRefreshGeneration
+    const pendingAtStart = new Set(Object.keys(get().pendingAskUserQuestions))
+    const revisionAtStart = get().askUserEventRevision
+
+    try {
+      const response = await api.listPendingAskUserQuestions(sessionId)
+      if (
+        get().activeSessionId !== sessionId ||
+        switchGeneration !== sessionSwitchGeneration ||
+        refreshGeneration !== pendingAskRefreshGeneration
+      ) {
+        return
+      }
+      set((current) => {
+        return mergePendingAskUserSnapshot(
+          current.pendingAskUserQuestions,
+          current.resolvedAskUserCallIds,
+          response.questions,
+          sessionId,
+          pendingAtStart,
+          current.askUserEventRevision !== revisionAtStart
+        )
+      })
+    } catch (error) {
+      console.debug('Failed to refresh pending ask-user questions:', error)
     }
   },
 
@@ -297,19 +362,50 @@ export const useAppStore = create<AppState>((set, get) => ({
   refreshCommands: async () => {
     const { activeSessionId } = get()
     if (!activeSessionId) return
+    const generation = ++commandRefreshGeneration
+    const statusItemRevisionsAtStart = get().statusItemRevisions
 
     try {
       const response = await api.listCommands(activeSessionId)
+      if (
+        get().activeSessionId !== activeSessionId ||
+        generation !== commandRefreshGeneration
+      ) {
+        return
+      }
       const statusItems: Record<string, string> = {}
       for (const item of response.statusItems) {
         statusItems[item.id] = item.text
       }
-      set({
-        slashCommands: response.commands,
-        keybindings: response.keybindings,
-        statusItems,
+      set((current) => {
+        for (const id of new Set([
+          ...Object.keys(statusItems),
+          ...Object.keys(statusItemRevisionsAtStart),
+          ...Object.keys(current.statusItemRevisions),
+        ])) {
+          if (
+            current.statusItemRevisions[id] !== statusItemRevisionsAtStart[id]
+          ) {
+            if (current.statusItems[id] === undefined) {
+              delete statusItems[id]
+            } else {
+              statusItems[id] = current.statusItems[id]
+            }
+          }
+        }
+        return {
+          slashCommands: response.commands,
+          keybindings: response.keybindings,
+          statusItems,
+        }
       })
     } catch (err) {
+      if (
+        get().activeSessionId !== activeSessionId ||
+        generation !== commandRefreshGeneration
+      ) {
+        return
+      }
       console.error('Failed to refresh commands:', err)
       set({
         transientHint: err instanceof Error ? err.message : '刷新命令列表失败',
@@ -466,6 +562,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     }))
   },
 
+  resendPendingMessage: async (id: string) => {
+    const state = get()
+    const message = state.pendingMessages.find((item) => item.id === id)
+    if (!message || !state.activeSessionId) return
+    set((current) => ({
+      pendingMessages: current.pendingMessages.filter((item) => item.id !== id),
+    }))
+    try {
+      await api.submitPrompt(state.activeSessionId, message.text)
+    } catch (err) {
+      console.error('resendPendingMessage failed:', err)
+      set((current) => ({
+        pendingMessages: [...current.pendingMessages, message],
+        transientHint: err instanceof Error ? err.message : '重发失败，请重试',
+      }))
+    }
+  },
+
   restorePendingMessage: (id: string) => {
     const state = get()
     const message = state.pendingMessages.find((item) => item.id === id)
@@ -500,7 +614,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           transientHint:
             err instanceof Error ? err.message : '排队消息发送失败',
         }))
-        break
+        // 单条失败不阻塞整批：其余消息继续提交，失败的消息保留在 pending 面板供重试
       }
     }
   },

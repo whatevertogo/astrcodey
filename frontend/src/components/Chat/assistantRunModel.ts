@@ -1,6 +1,8 @@
-import type { ConversationBlock } from '../../services/types'
-import { readGateApproval } from '../../tool-ui/components/gateApprovalMeta'
-import { readToolUi, readToolUiPhase } from '../../tool-ui/wire'
+import {
+  toolCallHasError,
+  toolCallIsTerminal,
+  type ConversationBlock,
+} from '../../services/types'
 import { extractThinkingBlocks } from './thinkingExtraction'
 import {
   boolValue,
@@ -288,13 +290,8 @@ export function finalReplyBlockFor(
 }
 
 function toolHasAttention(block: ToolBlock): boolean {
-  if (readGateApproval(block.metadata)?.pending === true) return true
-
-  const meta = toolMeta(block)
-  const toolUi = readToolUi(meta)
-  if (toolUi?.approval && readToolUiPhase(meta) !== 'result') return true
-
-  return false
+  if (toolCallIsTerminal(block.status)) return false
+  return block.approval != null || block.name === 'askUser'
 }
 
 export function buildAssistantRunModel(
@@ -305,7 +302,11 @@ export function buildAssistantRunModel(
   const processEntries = segments.flatMap((segment) =>
     segment.type === 'process' ? segment.entries : []
   )
-  const status = blocks.some((block) => block.status === 'error')
+  const status = blocks.some((block) =>
+    block.kind === 'toolCall'
+      ? toolCallHasError(block.status)
+      : block.status === 'error'
+  )
     ? 'error'
     : blocks.some((block) => block.status === 'streaming')
       ? 'streaming'

@@ -1,6 +1,6 @@
 //! Axum HTTP/SSE 入口。
 //!
-//! 这层只做 wire 适配：命令统一进入 [`crate::handler::CommandHandler`]，读接口从
+//! 这层只做 wire 适配：显式 session 命令进入并发安全的 session 服务，读接口从
 //! storage read model 映射到 `astrcode_protocol::http` DTO。
 
 use std::sync::Arc;
@@ -12,7 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::{bootstrap::ServerRuntime, handler::HandlerError};
+use crate::{bootstrap::ServerApp, session_command_contract::HandlerError};
 
 mod auth;
 mod projection;
@@ -20,17 +20,14 @@ mod routes;
 mod server;
 mod stream;
 
-pub use auth::ASTRCODE_HTTP_TOKEN_ENV;
 #[cfg(feature = "testing")]
 pub use server::router_with_event_publisher;
-pub use server::{HttpServerError, remove_run_info, router, run_http_server, write_run_info};
+pub use server::{HttpServerError, router, run_http_server};
 
 /// HTTP router shared state.
 #[derive(Clone)]
 pub(crate) struct HttpState {
-    pub(crate) runtime: Arc<ServerRuntime>,
-    pub(crate) handler: crate::handler::CommandHandle,
-    pub(crate) event_bus: Arc<crate::server_event_bus::ServerEventBus>,
+    pub(crate) app: Arc<ServerApp>,
 }
 
 pub(crate) fn error_response(

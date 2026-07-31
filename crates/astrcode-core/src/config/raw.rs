@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    llm::{PromptCacheRetention, ThinkingLevel},
+use crate::llm::{
+    PromptCacheRetention, ThinkingLevel,
     thinking::{ThinkingCapability, ThinkingConfig},
 };
 
@@ -288,17 +288,6 @@ pub struct ConfigOverlay {
 
 // ─── Selection Types ─────────────────────────────────────────────────────
 
-/// 当前激活的配置选择结果，包含可能的警告信息。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActiveSelection {
-    /// 激活的配置文件名。
-    pub active_profile: String,
-    /// 激活的模型标识。
-    pub active_model: String,
-    /// 可选的警告信息（如模型不存在时的提示）。
-    pub warning: Option<String>,
-}
-
 /// 模型选择信息，描述当前选择的完整模型上下文。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelSelection {
@@ -350,7 +339,7 @@ mod tests {
 
     #[test]
     fn thinking_config_uses_documented_camel_case_contract() {
-        let thinking: crate::thinking::ThinkingConfig = serde_json::from_str(
+        let thinking: crate::llm::thinking::ThinkingConfig = serde_json::from_str(
             r#"
 {
   "enabled": true,
@@ -364,7 +353,7 @@ mod tests {
         assert_eq!(thinking.effort.as_deref(), Some("high"));
         assert_eq!(thinking.budget_tokens, Some(4096));
 
-        let capability: crate::thinking::ThinkingCapability = serde_json::from_str(
+        let capability: crate::llm::thinking::ThinkingCapability = serde_json::from_str(
             r#"
 {
   "wireMapping": "open_ai_chat",
@@ -378,7 +367,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             capability.wire_mapping,
-            crate::thinking::ThinkingWireMapping::OpenAiChat
+            crate::llm::thinking::ThinkingWireMapping::OpenAiChat
         );
         assert_eq!(capability.allowed_effort, Some(Vec::new()));
         assert_eq!(capability.budget_min, Some(1024));
@@ -386,7 +375,7 @@ mod tests {
         assert!(!capability.can_disable);
 
         assert!(
-            serde_json::from_str::<crate::thinking::ThinkingConfig>(
+            serde_json::from_str::<crate::llm::thinking::ThinkingConfig>(
                 r#"{"enabled":true,"budget_tokens":4096}"#
             )
             .is_err()

@@ -23,35 +23,36 @@ pub struct ExtensionDeclarationSnapshot {
 
 impl ExtensionRunner {
     pub async fn registry_snapshot(&self) -> ExtensionRegistrySnapshot {
-        let records = self.records.read().await;
-        let extensions = records
+        let hosted_extensions = self.registry.extensions.read().await;
+        let extensions = hosted_extensions
             .iter()
-            .map(|record| ExtensionDeclarationSnapshot {
-                id: record.id.clone(),
-                capabilities: record.capabilities.clone(),
-                tools: record
-                    .reg
-                    .tools()
-                    .iter()
-                    .map(|(definition, _)| definition.clone())
-                    .collect(),
-                dynamic_tools: !record.reg.tool_discoveries().is_empty(),
-                commands: record
-                    .reg
-                    .commands()
-                    .iter()
-                    .map(|(command, _)| command.clone())
-                    .collect(),
-                dynamic_commands: !record.reg.command_discoveries().is_empty(),
-                keybindings: record.reg.keybindings().to_vec(),
-                status_items: record.reg.status_items().to_vec(),
-                events: record.reg.extension_event_decls().to_vec(),
-                http_routes: record
-                    .reg
-                    .http_routes()
-                    .iter()
-                    .map(|registration| registration.route.clone())
-                    .collect(),
+            .map(|hosted| {
+                let manifest = &hosted.manifest;
+                let registrations = &manifest.registrations;
+                ExtensionDeclarationSnapshot {
+                    id: manifest.id.clone(),
+                    capabilities: manifest.capabilities.clone(),
+                    tools: registrations
+                        .tools()
+                        .iter()
+                        .map(|(definition, _)| definition.clone())
+                        .collect(),
+                    dynamic_tools: !registrations.tool_discoveries().is_empty(),
+                    commands: registrations
+                        .commands()
+                        .iter()
+                        .map(|(command, _)| command.clone())
+                        .collect(),
+                    dynamic_commands: !registrations.command_discoveries().is_empty(),
+                    keybindings: registrations.keybindings().to_vec(),
+                    status_items: registrations.status_items().to_vec(),
+                    events: registrations.extension_event_decls().to_vec(),
+                    http_routes: registrations
+                        .http_routes()
+                        .iter()
+                        .map(|registration| registration.route.clone())
+                        .collect(),
+                }
             })
             .collect();
         ExtensionRegistrySnapshot { extensions }

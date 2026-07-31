@@ -1,15 +1,15 @@
 //! s5r 扩展 E2E guest — 使用 Worker SDK（manifest 与 handler 一体注册）。
 
 use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
-    },
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
     time::Duration,
 };
 
 use astrcode_extension_sdk::{
     builder::tool,
-    extension::{ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute},
+    extension::{
+        ExtensionEventDecl, ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute,
+    },
     s5r::{
         ErrorPayload,
         effects::{CallContinuation, HandlerResult},
@@ -19,7 +19,8 @@ use astrcode_extension_sdk::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-static PIPELINE_STEPS: AtomicU32 = AtomicU32::new(0);
+static PIPELINE_STEP_1_CALLS: AtomicU32 = AtomicU32::new(0);
+static PIPELINE_STEP_2_CALLS: AtomicU32 = AtomicU32::new(0);
 static PIPELINE_LLM_OK: AtomicBool = AtomicBool::new(false);
 
 const EXT_ID: &str = "s5r-guest-demo";
@@ -68,12 +69,13 @@ async fn run() -> Result<(), ErrorPayload> {
         .capability("session_inspect")
         .capability("public_http")
         .capability("public_http_dispatch")
-        .extension_event(json!({
-            "event_type": "s5r_guest.probe",
-            "schema_version": 1,
-            "durable": true,
-            "max_payload_bytes": 4096
-        }));
+        .capability("tool_intercept")
+        .extension_event_decl(ExtensionEventDecl {
+            event_type: "s5r_guest.probe".into(),
+            schema_version: 1,
+            durable: true,
+            max_payload_bytes: 4096,
+        });
 
     worker.tool(
         tool("ping")
@@ -124,7 +126,10 @@ async fn run() -> Result<(), ErrorPayload> {
             }))
             .build(),
         tool_handler_args(|args: AddArgs, _ctx| async move {
-            Ok(tool_text(format!("{} + {} = {}", args.a, args.b, args.a + args.b), false))
+            Ok(tool_text(
+                format!("{} + {} = {}", args.a, args.b, args.a + args.b),
+                false,
+            ))
         }),
     )?;
 
@@ -154,9 +159,15 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(json!({ "type": "object" }))
             .build(),
         tool_handler(|_ctx| async move {
-            let steps = PIPELINE_STEPS.load(Ordering::SeqCst);
+            let step_1_calls = PIPELINE_STEP_1_CALLS.load(Ordering::SeqCst);
+            let step_2_calls = PIPELINE_STEP_2_CALLS.load(Ordering::SeqCst);
             let llm_ok = PIPELINE_LLM_OK.load(Ordering::SeqCst);
-            Ok(tool_text(format!("steps={steps} llm_ok={llm_ok}"), false))
+            Ok(tool_text(
+                format!(
+                    "step_1_calls={step_1_calls} step_2_calls={step_2_calls} llm_ok={llm_ok}"
+                ),
+                false,
+            ))
         }),
     )?;
 
@@ -166,11 +177,8 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(json!({ "type": "object" }))
             .build(),
         tool_handler(|_ctx| async move {
-            let out = HostClient::call(
-                "astrcode.workspace.read",
-                json!({ "path": "probe.txt" }),
-            )
-            .await?;
+            let out =
+                HostClient::call("astrcode.workspace.read", json!({ "path": "probe.txt" })).await?;
             let content = out["content"].as_str().unwrap_or("");
             Ok(tool_text(format!("read probe.txt: {content}"), false))
         }),
@@ -282,13 +290,12 @@ async fn run() -> Result<(), ErrorPayload> {
         }),
     )?;
 
-    worker.hook(
+    worker.continuation_hook_handler(
         "pipeline_step",
-        "non_blocking",
         hook_handler_args(|input: PipelineStepInput, _ctx| async move {
             match input.step {
                 1 => {
-                    PIPELINE_STEPS.store(1, Ordering::SeqCst);
+                    PIPELINE_STEP_1_CALLS.fetch_add(1, Ordering::SeqCst);
                     Ok(HandlerResult {
                         ok: true,
                         effect: Some("ok".into()),
@@ -301,7 +308,7 @@ async fn run() -> Result<(), ErrorPayload> {
                     })
                 }
                 2 => {
-                    PIPELINE_STEPS.store(2, Ordering::SeqCst);
+                    PIPELINE_STEP_2_CALLS.fetch_add(1, Ordering::SeqCst);
                     let _ = HostClient::call_stream(
                         "astrcode.llm.small_chat",
                         json!({ "messages": [{ "role": "user", "content": "continuation pipeline" }] }),

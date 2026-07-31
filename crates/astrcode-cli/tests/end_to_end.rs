@@ -6,7 +6,7 @@
 //! 默认 `#[ignore]`；运行：`ASTRCODE_RUN_STDIO_E2E=1 cargo test -p astrcode-cli -- --ignored`
 
 use astrcode_client::{client::AstrcodeClient, transport::StdioClientTransport};
-use astrcode_core::event::EventPayload;
+use astrcode_core::event::{DurableEventPayload, EventPayload, LiveEventPayload};
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 
 /// 获取服务器二进制文件路径。
@@ -69,7 +69,10 @@ async fn test_e2e_create_session_and_prompt() {
 
     let session_id = match stream.recv().await.unwrap() {
         ClientNotification::Event(event)
-            if matches!(event.payload, EventPayload::SessionStarted { .. }) =>
+            if matches!(
+                event.payload,
+                EventPayload::Durable(DurableEventPayload::SessionStarted(_))
+            ) =>
         {
             event.session_id
         },
@@ -92,17 +95,18 @@ async fn test_e2e_create_session_and_prompt() {
     for _ in 0..100 {
         match stream.recv().await {
             Ok(ClientNotification::Event(event)) => match event.payload {
-                EventPayload::TurnStarted => {
+                EventPayload::Durable(DurableEventPayload::TurnStarted) => {
                     got_turn_start = true;
                 },
-                EventPayload::AssistantTextDelta { .. } => {
+                EventPayload::Live(LiveEventPayload::AssistantTextDelta { .. }) => {
                     got_message = true;
                 },
-                EventPayload::TurnCompleted { .. } => {
+                EventPayload::Durable(DurableEventPayload::TurnCompleted { .. }) => {
                     got_turn_end = true;
                     break;
                 },
-                EventPayload::ErrorOccurred { message, .. } => {
+                EventPayload::Durable(DurableEventPayload::ErrorOccurred { message, .. })
+                | EventPayload::Live(LiveEventPayload::ErrorOccurred { message, .. }) => {
                     panic!("server error event: {message}");
                 },
                 _ => {},

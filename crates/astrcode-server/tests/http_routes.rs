@@ -14,21 +14,17 @@ use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
-    event::{Event, EventPayload},
-    extension::{
-        Extension, ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
-        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        MAX_EXTENSION_HTTP_BODY_BYTES, Registrar, SessionToolSelection,
-    },
+    event::{DurableEvent, DurableEventPayload, LiveEvent, LiveEventPayload, StoredEvent},
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    storage::{
-        EventReader, EventStore, SessionReadModel, SessionSummary, StorageError,
-        ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
-    },
-    tool::{ToolDefinition, ToolResult},
+    tool::{SessionToolSelection, ToolDefinition, ToolResult, ToolResultArtifactSlice},
     types::{Cursor, SessionId, new_message_id},
 };
-use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_extension_sdk::extension::{
+    ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
+    ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, MAX_EXTENSION_HTTP_BODY_BYTES,
+    Registrar,
+};
+use astrcode_extensions::{Extension, runner::ExtensionRunner};
 use astrcode_protocol::{
     events::ClientNotification,
     http::{
@@ -41,15 +37,19 @@ use astrcode_protocol::{
     wire::{CommandSourceDto, ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
 use astrcode_server::{
-    bootstrap::ServerRuntime,
-    http::{router, router_with_event_publisher},
+    bootstrap::{ServerApp, ServerRuntime},
+    http::{router as app_router, router_with_event_publisher},
     test_support::{
         ChildSessionCoordinator, ConfigManager, MAX_PROMPT_TEXT_BYTES, SessionManager,
         TurnRegistry, TurnScheduler,
     },
 };
-use astrcode_storage::in_memory::InMemoryEventStore;
-use astrcode_support::event_fanout::EventFanout;
+use astrcode_session_projection::{SessionReadModel, SessionSummary};
+use astrcode_storage::{
+    EventReader, SessionEventJournal, SessionPathResolver, SessionReader, SessionStore,
+    StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
+    in_memory::InMemoryEventStore,
+};
 use axum::{
     Router,
     body::{Body, to_bytes},
@@ -58,6 +58,12 @@ use axum::{
 use http_body_util::BodyExt;
 use tokio::sync::mpsc;
 use tower::ServiceExt;
+
+fn router(
+    runtime: Arc<ServerRuntime>,
+) -> Result<(Router, String), astrcode_server::http::HttpServerError> {
+    app_router(ServerApp::new(runtime))
+}
 
 struct ImmediateLlm;
 
@@ -89,12 +95,19 @@ impl Extension for HttpRoutesExtension {
     }
 
     fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::PublicHttp]
+        &[
+            ExtensionCapability::PublicHttp,
+            ExtensionCapability::AuthenticatedHttp,
+        ]
     }
 
     fn register(&self, registrar: &mut Registrar) {
         registrar.http_route(
             ExtensionHttpRoute::public(ExtensionHttpMethod::Post, "/plugin-probe/{id}"),
+            Arc::new(HttpRoutesHandler),
+        );
+        registrar.http_route(
+            ExtensionHttpRoute::authenticated(ExtensionHttpMethod::Post, "/protected-probe/{id}"),
             Arc::new(HttpRoutesHandler),
         );
     }
@@ -203,8 +216,7 @@ impl LlmProvider for SummaryLlm {
 #[tokio::test]
 async fn http_routes_require_bearer_token() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     let unauthorized = app
         .clone()
@@ -236,8 +248,7 @@ async fn http_routes_require_bearer_token() {
 #[tokio::test]
 async fn cors_allows_supported_tauri_origins_only() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, _token) = router(runtime, event_tx).unwrap();
+    let (app, _token) = router(runtime).unwrap();
 
     for origin in [
         "tauri://localhost",
@@ -298,8 +309,7 @@ async fn cors_allows_supported_tauri_origins_only() {
 #[tokio::test]
 async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let created = post_json_owned(
         app.clone(),
         "/api/sessions",
@@ -317,10 +327,10 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
         .await
         .unwrap();
     assert_eq!(
-        initial_model.tool_selection,
-        Some(SessionToolSelection::All {
+        initial_model.identity.tool_selection,
+        SessionToolSelection::All {
             except: vec!["shell".into()]
-        })
+        }
     );
 
     let uri = format!("/api/sessions/{session_id}/tools");
@@ -363,10 +373,10 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
         .await
         .unwrap();
     assert_eq!(
-        read_model.tool_selection,
-        Some(SessionToolSelection::Only {
+        read_model.identity.tool_selection,
+        SessionToolSelection::Only {
             names: vec!["read".into(), "write".into()]
-        })
+        }
     );
 
     let invalid = app
@@ -392,8 +402,7 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
         .register(Arc::new(HttpRoutesExtension))
         .await
         .unwrap();
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, _token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     let public = app
         .clone()
@@ -408,6 +417,35 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
         .await
         .unwrap();
     assert_eq!(public.status(), StatusCode::CREATED);
+
+    let protected_path = "/api/extensions/http-routes-test/protected-probe/8";
+    let unauthorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(protected_path)
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+
+    let authorized = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(protected_path)
+                .header("authorization", format!("Bearer {token}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"source":"authenticated"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(authorized.status(), StatusCode::CREATED);
 
     let invalid_json = app
         .clone()
@@ -451,8 +489,7 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
 #[tokio::test]
 async fn provider_catalog_route_returns_endpoint_presets() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     let catalog =
         get_json::<ProviderCatalogResponseDto>(app, "/api/config/provider-catalog", &token).await;
@@ -501,8 +538,7 @@ async fn provider_catalog_route_returns_endpoint_presets() {
 #[tokio::test]
 async fn active_selection_rejects_unknown_approval_mode_with_structured_error() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(runtime, event_tx).unwrap();
+    let (app, token) = router(runtime).unwrap();
 
     let response = post_json(
         app,
@@ -521,8 +557,7 @@ async fn active_selection_rejects_unknown_approval_mode_with_structured_error() 
 #[tokio::test]
 async fn provider_preset_apply_persists_profile_from_catalog() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "providerId": "qwen",
         "endpointId": "dashscope-compatible",
@@ -565,10 +600,55 @@ async fn provider_preset_apply_persists_profile_from_catalog() {
 }
 
 #[tokio::test]
+async fn concurrent_config_updates_preserve_both_profiles() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let first = post_json_owned(
+        app.clone(),
+        "/api/config/provider-preset/apply",
+        serde_json::json!({
+            "providerId": "qwen",
+            "endpointId": "dashscope-compatible",
+            "profileName": "concurrent-qwen",
+            "activate": false
+        })
+        .to_string(),
+        &token,
+    );
+    let second = post_json_owned(
+        app,
+        "/api/config/provider-preset/apply",
+        serde_json::json!({
+            "providerId": "openai-compatible",
+            "baseUrl": "https://concurrent.example.test/v1",
+            "profileName": "concurrent-compatible",
+            "modelId": "test-model",
+            "activate": false
+        })
+        .to_string(),
+        &token,
+    );
+
+    let (first, second) = tokio::join!(first, second);
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(second.status(), StatusCode::OK);
+
+    let config = runtime.config_manager().raw_config_snapshot();
+    for expected in ["concurrent-qwen", "concurrent-compatible"] {
+        assert!(
+            config
+                .profiles
+                .iter()
+                .any(|profile| profile.name == expected),
+            "missing profile {expected}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn provider_preset_apply_uses_submitted_api_key() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "providerId": "openai-compatible",
         "baseUrl": "https://api.example.test/v1",
@@ -650,8 +730,7 @@ async fn provider_preset_apply_uses_submitted_api_key() {
 #[tokio::test]
 async fn model_options_rejects_unknown_profile() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let body = serde_json::json!({
         "profileName": "nonexistent",
         "modelId": "test",
@@ -670,8 +749,7 @@ async fn model_options_rejects_unknown_profile() {
 #[tokio::test]
 async fn model_options_rejects_unknown_model() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     // First create a profile via provider preset
     let body = serde_json::json!({
@@ -708,8 +786,7 @@ async fn model_options_rejects_unknown_model() {
 #[tokio::test]
 async fn model_options_rejects_thinking_without_capability() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     // openai-compatible has no built-in thinking capability
     let body = serde_json::json!({
@@ -746,8 +823,7 @@ async fn model_options_rejects_thinking_without_capability() {
 #[tokio::test]
 async fn model_options_persists_and_clears_legacy_fields() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     // deepseek has built-in thinking capability (OpenAiChat, toggle-only)
     let body = serde_json::json!({
@@ -804,8 +880,7 @@ async fn model_options_persists_and_clears_legacy_fields() {
 #[tokio::test]
 async fn model_options_can_disable_thinking() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     // Use deepseek which has a built-in thinking capability
     let body = serde_json::json!({
@@ -898,8 +973,7 @@ async fn model_options_can_disable_thinking() {
 #[tokio::test]
 async fn model_options_null_thinking_restores_model_default() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     let body = serde_json::json!({
         "providerId": "deepseek",
@@ -944,8 +1018,7 @@ async fn model_options_null_thinking_restores_model_default() {
 #[tokio::test]
 async fn get_config_exposes_thinking_and_capability() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     // deepseek has built-in thinking capability (OpenAiChat mapping)
     let body = serde_json::json!({
@@ -993,14 +1066,18 @@ async fn get_config_exposes_thinking_and_capability() {
 
     // thinking_capability should be present (deepseek has built-in capability)
     let cap = &model["thinkingCapability"];
-    assert_eq!(cap["wireMapping"], "open_ai_chat");
+    assert_eq!(cap["allowedEffort"], serde_json::json!([]));
+    assert_eq!(cap["canDisable"], true);
+    assert!(
+        cap.get("wireMapping").is_none(),
+        "provider wire encoding must stay out of the UI contract"
+    );
 }
 
 #[tokio::test]
 async fn concurrent_prompt_accepts_one_and_queues_one() {
     let runtime = runtime(Arc::new(PendingLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let prompt_uri = format!("/api/sessions/{session_id}/prompt");
 
@@ -1045,8 +1122,7 @@ async fn concurrent_prompt_accepts_one_and_queues_one() {
 #[tokio::test]
 async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let attachment_session_id = create_session(app.clone(), &token).await;
     let attachment_prompt_uri = format!("/api/sessions/{attachment_session_id}/prompt");
     let valid_attachment_body = serde_json::json!({
@@ -1083,8 +1159,7 @@ async fn prompt_route_accepts_valid_attachments_and_rejects_oversized_text() {
 #[tokio::test]
 async fn inject_route_writes_mid_turn_user_message() {
     let runtime = runtime(Arc::new(PendingLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let prompt_uri = format!("/api/sessions/{session_id}/prompt");
@@ -1104,8 +1179,7 @@ async fn inject_route_writes_mid_turn_user_message() {
 #[tokio::test]
 async fn inject_route_without_active_turn_returns_client_error() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let inject_uri = format!("/api/sessions/{session_id}/inject");
 
@@ -1116,8 +1190,7 @@ async fn inject_route_without_active_turn_returns_client_error() {
 #[tokio::test]
 async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let snapshot = get_json::<ConversationSnapshotResponseDto>(
@@ -1127,7 +1200,7 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     )
     .await;
     assert_eq!(snapshot.session_id, session_id);
-    assert_eq!(snapshot.cursor.value, "1");
+    assert_eq!(snapshot.cursor.value, "0");
     assert!(snapshot.blocks.is_empty());
 
     let stream_response = app
@@ -1143,6 +1216,17 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
         .await
         .unwrap();
 
+    let mut stream_body = stream_response.into_body();
+    let connected = tokio::time::timeout(Duration::from_secs(1), stream_body.frame())
+        .await
+        .expect("SSE connection comment should be immediate")
+        .expect("SSE body should stay open")
+        .unwrap();
+    assert_eq!(
+        connected.data_ref().map(|data| data.as_ref()),
+        Some(&b": connected\n\n"[..])
+    );
+
     let accepted = post_json(
         app,
         &format!("/api/sessions/{session_id}/prompt"),
@@ -1152,13 +1236,13 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
     .await;
     assert_eq!(accepted.status(), StatusCode::OK);
 
-    let body = read_sse_until(stream_response.into_body(), "finalizeBlock").await;
+    let body = read_sse_until(stream_body, "finalizeBlock").await;
     assert!(body.contains("conversation"));
     assert!(body.contains("hello"));
     assert!(body.contains("hello from http"));
     assert!(body.contains(r#""status":"complete""#));
 
-    let (after_app, after_token) = router(runtime, Arc::new(EventFanout::new(1024))).unwrap();
+    let (after_app, after_token) = router(runtime).unwrap();
     let after = get_json::<ConversationSnapshotResponseDto>(
         after_app,
         &format!("/api/sessions/{session_id}/conversation"),
@@ -1171,8 +1255,7 @@ async fn create_snapshot_then_stream_receives_live_prompt_delta() {
 #[tokio::test]
 async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let stream_response = app
@@ -1205,20 +1288,20 @@ async fn prompt_stream_returns_control_to_idle_when_turn_finishes() {
 #[tokio::test]
 async fn stream_preserves_global_updates_during_replay_drain() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), Arc::clone(&event_tx)).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid,
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: "missed-message".into(),
                 text: "missed while reconnecting".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ))
         .await
@@ -1230,7 +1313,7 @@ async fn stream_preserves_global_updates_during_replay_drain() {
             Request::builder()
                 .method(Method::GET)
                 .header("authorization", format!("Bearer {token}"))
-                .uri(format!("/api/sessions/{session_id}/stream?cursor=1"))
+                .uri(format!("/api/sessions/{session_id}/stream?cursor=0"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -1248,20 +1331,20 @@ async fn stream_preserves_global_updates_during_replay_drain() {
 #[tokio::test]
 async fn stream_replays_events_after_snapshot_cursor() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), Arc::clone(&event_tx)).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: "snapshot-message".into(),
                 text: "already in snapshot".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ))
         .await
@@ -1277,23 +1360,24 @@ async fn stream_replays_events_after_snapshot_cursor() {
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid,
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: "missed-message".into(),
                 text: "missed while connecting stream".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ))
         .await
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             SessionId::from(session_id.clone()),
             None,
-            EventPayload::AssistantMessageCompleted {
+            DurableEventPayload::AssistantMessageCompleted {
                 message_id: "missed-assistant".into(),
                 text: "completed response after snapshot".into(),
                 reasoning_content: None,
@@ -1326,20 +1410,20 @@ async fn stream_replays_events_after_snapshot_cursor() {
 #[tokio::test]
 async fn snapshot_and_replay_preserve_durable_errors() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: "before-failure".into(),
                 text: "before failure".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ))
         .await
@@ -1353,10 +1437,10 @@ async fn snapshot_and_replay_preserve_durable_errors() {
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::ErrorOccurred {
+            DurableEventPayload::ErrorOccurred {
                 code: -32603,
                 message: "provider rejected the selected model".into(),
                 recoverable: false,
@@ -1366,23 +1450,24 @@ async fn snapshot_and_replay_preserve_durable_errors() {
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::UserMessage {
+            DurableEventPayload::UserMessage {
                 message_id: "after-failure".into(),
                 text: "retry after failure".into(),
                 attachments: vec![],
+                accepted_seq: None,
             },
         ))
         .await
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid,
             None,
-            EventPayload::TurnCompleted {
+            DurableEventPayload::TurnCompleted {
                 finish_reason: "error".into(),
             },
         ))
@@ -1435,8 +1520,7 @@ async fn snapshot_and_replay_preserve_durable_errors() {
 #[tokio::test]
 async fn stream_invalid_cursors_request_rehydrate_and_close() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     for cursor in ["invalid", "999999"] {
@@ -1468,15 +1552,18 @@ async fn stream_invalid_cursors_request_rehydrate_and_close() {
 #[tokio::test]
 async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
     for _ in 0..=1_000 {
         runtime
             .event_store()
-            .append_event(Event::new(sid.clone(), None, EventPayload::TurnStarted))
+            .append_event(DurableEvent::new(
+                sid.clone(),
+                None,
+                DurableEventPayload::TurnStarted,
+            ))
             .await
             .unwrap();
     }
@@ -1507,8 +1594,7 @@ async fn stream_replay_over_limit_requests_rehydrate_and_closes() {
 #[tokio::test]
 async fn stream_ignores_events_from_other_sessions() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_a = create_session(app.clone(), &token).await;
     let session_b = create_session(app.clone(), &token).await;
 
@@ -1551,8 +1637,8 @@ async fn stream_ignores_events_from_other_sessions() {
 #[tokio::test]
 async fn stream_projects_tracked_child_events_to_parent_stream() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token, events) = router_with_event_publisher(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token, events) =
+        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let parent_sid = SessionId::from(session_id.clone());
     let child_sid = SessionId::from(format!("{session_id}-child"));
@@ -1560,10 +1646,10 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             parent_sid,
             None,
-            EventPayload::AgentSessionSpawned {
+            DurableEventPayload::AgentSessionSpawned {
                 child_session_id: child_sid.clone(),
                 agent_name: "worker".into(),
                 task: "check fanout routing".into(),
@@ -1586,16 +1672,27 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
         .await
         .unwrap();
 
-    let mut child_event = Event::new(
-        child_sid.clone(),
-        None,
-        EventPayload::AssistantTextDelta {
-            message_id: "child-message".into(),
-            delta: "child live text must not leak".into(),
-        },
-    );
-    child_event.seq = Some(99);
-    events.send_notification(ClientNotification::Event(child_event));
+    events.send_notification(ClientNotification::Event(
+        LiveEvent::new(
+            child_sid.clone(),
+            None,
+            LiveEventPayload::AssistantMessageStarted {
+                message_id: "child-message".into(),
+            },
+        )
+        .into(),
+    ));
+    events.send_notification(ClientNotification::Event(
+        LiveEvent::new(
+            child_sid,
+            None,
+            LiveEventPayload::AssistantTextDelta {
+                message_id: "child-message".into(),
+                delta: "child live text must not leak".into(),
+            },
+        )
+        .into(),
+    ));
 
     let body = read_sse_until(response.into_body(), "agentSessionUpdated").await;
     assert!(body.contains("agentSessionUpdated"));
@@ -1606,8 +1703,7 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
 #[tokio::test]
 async fn command_list_route_exposes_backend_slash_commands() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let body = get_json::<SlashCommandListResponseDto>(
@@ -1626,7 +1722,6 @@ async fn command_list_route_exposes_backend_slash_commands() {
     assert!(!compact.needs_argument);
     assert!(compact.requires_idle);
     assert!(!compact.argument_completions);
-    assert!(body.shadowed_commands.is_empty());
 
     let mode_cmd = body
         .commands
@@ -1646,8 +1741,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
 #[tokio::test]
 async fn invoke_command_route_toggles_mode() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let http_response = post_json(
@@ -1672,8 +1766,7 @@ async fn invoke_command_route_toggles_mode() {
 #[tokio::test]
 async fn command_completion_route_returns_empty_for_commands_without_completion() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let http_response = post_json(
@@ -1692,33 +1785,33 @@ async fn command_completion_route_returns_empty_for_commands_without_completion(
 }
 
 #[tokio::test]
-async fn prompt_route_compact_returns_handled_and_streams_continuation() {
+async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
     let runtime = runtime(Arc::new(SummaryLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
     for text in ["one", "two", "three"] {
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 sid.clone(),
                 None,
-                EventPayload::UserMessage {
+                DurableEventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: text.into(),
                     attachments: vec![],
+                    accepted_seq: None,
                 },
             ))
             .await
             .unwrap();
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 sid.clone(),
                 None,
-                EventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessageCompleted {
                     message_id: new_message_id(),
                     text: format!("answer {text}"),
                     reasoning_content: None,
@@ -1727,19 +1820,6 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
             .await
             .unwrap();
     }
-
-    let stream_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
-                .uri(format!("/api/sessions/{session_id}/stream"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
 
     let response = post_json(
         app.clone(),
@@ -1752,26 +1832,27 @@ async fn prompt_route_compact_returns_handled_and_streams_continuation() {
     let body: PromptSubmitResponse = serde_json::from_slice(&body_bytes(response).await).unwrap();
     assert!(matches!(body, PromptSubmitResponse::Handled { .. }));
 
-    let sse = read_sse_until(stream_response.into_body(), "sessionContinued").await;
-    assert!(sse.contains("sessionContinued"));
-    assert!(
-        !runtime
-            .event_store()
-            .session_read_model(&sid)
-            .await
-            .unwrap()
-            .messages
+    let state = runtime
+        .event_store()
+        .session_read_model(&sid)
+        .await
+        .unwrap();
+    assert!(state.compactions.iter().any(|compaction| {
+        compaction.trigger == "manual_command" && !compaction.summary.is_empty()
+    }));
+    assert!(!state.transcript.messages.iter().any(|message| {
+        message
+            .message
+            .content
             .iter()
-            .flat_map(|message| message.message.content.iter())
             .any(|content| matches!(content, LlmContent::Text { text } if text == "/compact"))
-    );
+    }));
 }
 
 #[tokio::test]
 async fn compact_route_returns_same_session_and_hydrates_post_compact_context() {
     let runtime = runtime(Arc::new(SummaryLlm)).await;
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let (app, token) = router(Arc::clone(&runtime), event_tx).unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
     let read_fixture = "target/post-compact-read-fixture.txt";
@@ -1780,10 +1861,10 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
 
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::ToolCallRequested {
+            DurableEventPayload::ToolCallRequested {
                 call_id: "read-call-1".into(),
                 tool_name: "read".into(),
                 arguments: serde_json::json!({ "path": read_fixture }),
@@ -1794,14 +1875,13 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
         .unwrap();
     runtime
         .event_store()
-        .append_event(Event::new(
+        .append_event(DurableEvent::new(
             sid.clone(),
             None,
-            EventPayload::ToolCallCompleted {
+            DurableEventPayload::ToolCallCompleted {
                 call_id: "read-call-1".into(),
                 tool_name: "read".into(),
                 result: ToolResult {
-                    call_id: "read-call-1".into(),
                     content: "pub fn compact_restore_fixture() {}".into(),
                     is_error: false,
                     error: None,
@@ -1818,23 +1898,24 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
     for text in ["one", "two", "three"] {
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 sid.clone(),
                 None,
-                EventPayload::UserMessage {
+                DurableEventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: text.into(),
                     attachments: vec![],
+                    accepted_seq: None,
                 },
             ))
             .await
             .unwrap();
         runtime
             .event_store()
-            .append_event(Event::new(
+            .append_event(DurableEvent::new(
                 sid.clone(),
                 None,
-                EventPayload::AssistantMessageCompleted {
+                DurableEventPayload::AssistantMessageCompleted {
                     message_id: new_message_id(),
                     text: format!("answer {text}"),
                     reasoning_content: None,
@@ -1843,19 +1924,6 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
             .await
             .unwrap();
     }
-
-    let stream_response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
-                .uri(format!("/api/sessions/{session_id}/stream"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
 
     let response = post_json(
         app.clone(),
@@ -1866,22 +1934,18 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body: CompactSessionResponse = serde_json::from_slice(&body_bytes(response).await).unwrap();
-    let returned_session_id = body
-        .new_session_id
-        .expect("compact should return session_id");
+    let returned_session_id = body.session_id.expect("compact should return session_id");
     assert_eq!(returned_session_id, session_id, "same-session compact");
-    let sse = read_sse_until(stream_response.into_body(), "sessionContinued").await;
-    assert!(sse.contains(&session_id));
 
     let state = runtime
         .event_store()
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert!(!state.context_messages.is_empty());
     let restored_context = astrcode_core::llm::LlmContent::join_text(
         state
-            .context_messages
+            .transcript
+            .messages
             .iter()
             .flat_map(|message| &message.message.content),
         "\n",
@@ -2011,26 +2075,11 @@ impl TestEventStore {
 
 #[async_trait::async_trait]
 impl EventReader for TestEventStore {
-    async fn replay_events(&self, session_id: &SessionId) -> Result<Vec<Event>, StorageError> {
+    async fn replay_events(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
         self.inner.replay_events(session_id).await
-    }
-
-    async fn session_read_model(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError> {
-        self.inner.session_read_model(session_id).await
-    }
-
-    async fn session_system_prompt(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<String>, StorageError> {
-        self.inner.session_system_prompt(session_id).await
-    }
-
-    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
-        self.inner.list_session_summaries().await
     }
 
     async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
@@ -2041,14 +2090,31 @@ impl EventReader for TestEventStore {
         &self,
         session_id: &SessionId,
         cursor: &Cursor,
-    ) -> Result<Vec<Event>, StorageError> {
+    ) -> Result<Vec<StoredEvent>, StorageError> {
         self.inner.replay_from(session_id, cursor).await
     }
 
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
         self.inner.list_sessions().await
     }
+}
 
+#[async_trait::async_trait]
+impl SessionReader for TestEventStore {
+    async fn session_read_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<SessionReadModel>, StorageError> {
+        self.inner.session_read_model(session_id).await
+    }
+
+    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
+        self.inner.list_session_summaries().await
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolResultArtifactStore for TestEventStore {
     async fn read_tool_result_artifact_by_path(
         &self,
         session_id: &SessionId,
@@ -2061,55 +2127,6 @@ impl EventReader for TestEventStore {
             .await
     }
 
-    async fn session_store_dir(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<PathBuf>, StorageError> {
-        // Verify the session exists, then return a subdirectory in temp.
-        self.inner.session_read_model(session_id).await?;
-        Ok(Some(self.temp_dir.join(session_id.as_str())))
-    }
-}
-
-#[async_trait::async_trait]
-impl EventStore for TestEventStore {
-    async fn create_session(
-        &self,
-        session_id: &SessionId,
-        working_dir: &str,
-        model_id: &str,
-        parent_session_id: Option<&SessionId>,
-        tool_selection: Option<&SessionToolSelection>,
-        source_extension: Option<&str>,
-    ) -> Result<Event, StorageError> {
-        self.inner
-            .create_session(
-                session_id,
-                working_dir,
-                model_id,
-                parent_session_id,
-                tool_selection,
-                source_extension,
-            )
-            .await
-    }
-
-    async fn append_event(&self, event: Event) -> Result<Event, StorageError> {
-        self.inner.append_event(event).await
-    }
-
-    async fn checkpoint(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<(), StorageError> {
-        self.inner.checkpoint(session_id, cursor).await
-    }
-
-    async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
-        self.inner.delete_session(session_id).await
-    }
-
     async fn write_tool_result_artifact(
         &self,
         session_id: &SessionId,
@@ -2118,6 +2135,53 @@ impl EventStore for TestEventStore {
         self.inner
             .write_tool_result_artifact(session_id, artifact)
             .await
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionPathResolver for TestEventStore {
+    async fn session_store_dir(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Option<PathBuf>, StorageError> {
+        // Verify the session exists, then return a subdirectory in temp.
+        self.inner.session_read_model(session_id).await?;
+        Ok(Some(self.temp_dir.join(session_id.as_str())))
+    }
+
+    async fn planned_session_store_dir(
+        &self,
+        session_id: &SessionId,
+        _working_dir: &str,
+        _parent_session_id: Option<&SessionId>,
+        _source_extension: Option<&str>,
+    ) -> Result<Option<PathBuf>, StorageError> {
+        Ok(Some(self.temp_dir.join(session_id.as_str())))
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionEventJournal for TestEventStore {
+    async fn create_session(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
+        self.inner.create_session(event).await
+    }
+
+    async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
+        self.inner.append_event(event).await
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionStore for TestEventStore {
+    async fn checkpoint(
+        &self,
+        session_id: &SessionId,
+        cursor: &Cursor,
+    ) -> Result<(), StorageError> {
+        self.inner.checkpoint(session_id, cursor).await
+    }
+    async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        self.inner.delete_session(session_id).await
     }
 }
 
@@ -2189,7 +2253,7 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
-    let event_store = Arc::new(TestEventStore::new()) as Arc<dyn EventStore>;
+    let event_store = Arc::new(TestEventStore::new()) as Arc<dyn SessionStore>;
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
     extension_runner
         .register(astrcode_extension_mode::extension())
@@ -2197,16 +2261,14 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         .unwrap();
     let context_assembler = Arc::new(LlmContextAssembler::new(ContextSettings::default()));
     let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
-    let capabilities = Arc::new(astrcode_session::SessionRuntimeServices::new(
+    let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         llm_provider.clone(),
         llm_provider,
         effective,
-        astrcode_server::default_host::first_party_host_services(
-            extension_runner.clone(),
-            context_assembler.clone(),
-            std::sync::Arc::clone(&shell_timeout_secs),
-        ),
-    ));
+        extension_runner.clone(),
+        context_assembler.clone(),
+        std::sync::Arc::clone(&shell_timeout_secs),
+    );
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
             std::path::PathBuf::from(format!(
@@ -2221,7 +2283,6 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     ));
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
-        Arc::clone(&config),
         Arc::clone(&capabilities),
         vec![],
     ));
@@ -2235,7 +2296,6 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
     Arc::new(ServerRuntime::assemble_for_test(
         event_store,
         config,
-        context_assembler,
         session_manager,
         scheduler,
         extension_runner,

@@ -6,15 +6,15 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::{tool::*, tool_access::ResourceAccess};
-use astrcode_support::hostpaths::resolve_path;
+use astrcode_core::tool::{access::ResourceAccess, *};
+use astrcode_extension_sdk::hostpaths::resolve_path;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
 use grep_searcher::{
     BinaryDetection, Searcher, SearcherBuilder, Sink, SinkContext, SinkContextKind, SinkMatch,
 };
 use serde::Deserialize;
 
-use super::shared::{collect_grep_files, run_blocking, tool_call_id, trunc};
+use super::shared::{collect_grep_files, run_blocking, trunc};
 // ─── grep ────────────────────────────────────────────────────────────────
 
 /// 内容搜索工具，使用正则或字面量在文件内容中搜索匹配。
@@ -134,14 +134,15 @@ impl Tool for GrepTool {
     async fn execute(
         &self,
         args: serde_json::Value,
-        ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+        _ctx: &ToolExecutionContext,
+    ) -> Result<ToolExecutionResult, ToolError> {
         let started_at = Instant::now();
         let args: GrepArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid grep args: {e}")))?;
-        let call_id = tool_call_id(ctx);
         let working_dir = self.working_dir.clone();
-        run_blocking(move || execute_grep_sync(working_dir, args, call_id, started_at)).await
+        run_blocking(move || execute_grep_sync(working_dir, args, started_at))
+            .await
+            .map(Into::into)
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
@@ -152,7 +153,6 @@ impl Tool for GrepTool {
 fn execute_grep_sync(
     working_dir: PathBuf,
     args: GrepArgs,
-    call_id: String,
     started_at: Instant,
 ) -> Result<ToolResult, ToolError> {
     let mut matcher_builder = RegexMatcherBuilder::new();
@@ -239,7 +239,6 @@ fn execute_grep_sync(
         matches.join("\n")
     };
     Ok(ToolResult {
-        call_id,
         content,
         is_error: false,
         error: None,

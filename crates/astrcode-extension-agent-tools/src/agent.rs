@@ -57,7 +57,7 @@ pub fn discover_agents(working_dir: Option<&str>) -> Vec<AgentConfig> {
 
     // 扫描用户主目录下的 Agent
     {
-        let home = hostpaths::resolve_home_dir();
+        let home = hostpaths::user_home_dir();
         for d in &[
             home.join(".claude").join("agents"),
             home.join(".astrcode").join("agents"),
@@ -212,31 +212,34 @@ fn mapping_string_list(
     let Some(value) = mapping.get(serde_yaml::Value::String(key.into())) else {
         return Ok(None);
     };
-    match value {
+    let tools = match value {
         serde_yaml::Value::Null => return Ok(None),
-        serde_yaml::Value::String(value) => validate_tool_list_entry(value, key)?,
+        serde_yaml::Value::String(value) => parse_tool_names(value, key)?,
         serde_yaml::Value::Sequence(values) => {
+            let mut tools = Vec::new();
             for value in values {
                 let value = value
                     .as_str()
                     .ok_or_else(|| format!("{key} must contain only strings"))?;
-                validate_tool_list_entry(value, key)?;
+                tools.extend(parse_tool_names(value, key)?);
             }
+            tools
         },
         _ => {
             return Err(format!(
                 "{key} must be a comma-separated string or string list"
             ));
         },
-    }
-    Ok(Some(frontmatter::yaml_parse_tools_list(Some(value))))
+    };
+    Ok(Some(tools))
 }
 
-fn validate_tool_list_entry(value: &str, key: &str) -> Result<(), String> {
-    if value.split(',').any(|name| name.trim().is_empty()) {
+fn parse_tool_names(value: &str, key: &str) -> Result<Vec<String>, String> {
+    let tools = value.split(',').map(str::trim).collect::<Vec<_>>();
+    if tools.iter().any(|name| name.is_empty()) {
         return Err(format!("{key} must contain non-empty tool names"));
     }
-    Ok(())
+    Ok(tools.into_iter().map(str::to_owned).collect())
 }
 
 fn build_tool_selection(

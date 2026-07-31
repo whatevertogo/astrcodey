@@ -8,9 +8,7 @@ description = "Client SDK for connecting to astrcode server"
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
 astrcode-protocol = { path = "../astrcode-protocol" }
-astrcode-support = { path = "../astrcode-support" }
 tokio = { workspace = true, features = ["sync", "rt-multi-thread", "macros"] }
-serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }

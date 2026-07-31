@@ -12,7 +12,7 @@
 
 A Rust-built AI coding agent platform.
 
-AstrCode is a full-stack AI coding assistant built from scratch in ~104.4k lines of Rust across 25 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~12.4k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic and OpenAI-compatible providers), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), built-in web search and URL fetch tools, context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
+AstrCode is a full-stack AI coding assistant built from scratch in ~104.4k lines of Rust across 26 crates under `crates/` (plus a Tauri desktop shell), and a React + TypeScript web frontend (~12.4k lines). It features an agent loop with tool execution, a streaming SSE-based multi-provider LLM layer (Anthropic and OpenAI-compatible providers), an SDK-based extension/hook system with disk IPC subprocess extensions, background pre-warm, health checks, and a startup event channel, a persistent MCP process pool (reusing long-lived connections across turns), built-in web search and URL fetch tools, context window management with auto-compaction, an eval framework for automated benchmarking, and multiple interfaces: a terminal TUI, Web frontend, Tauri desktop app, HTTP/SSE API, and ACP (Agent Client Protocol) adapter.
 
 ## Table of Contents
 
@@ -330,14 +330,14 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
                    └────────────────────────────┘
         ┌─────────────────────────────────────┐
         │              Shared layer            │
-        │ core · protocol · storage · support  │
-        │ log · client                         │
+        │ core · protocol · storage · log      │
+        │ client                               │
         └─────────────────────────────────────┘
 ```
 
 ## Crates
 
-The Cargo workspace under [`crates/`](crates/) contains **25 crates**, plus [`src-tauri/`](src-tauri/) as the desktop shell (**26 workspace members** total). Crates are grouped by architectural layer (details in [Architecture](docs/architecture.md)).
+The Cargo workspace under [`crates/`](crates/) contains **26 crates**, plus [`src-tauri/`](src-tauri/) as the desktop shell (**27 workspace members** total). Crates are grouped by architectural layer (details in [Architecture](docs/architecture.md)).
 
 ### Layer 0: Foundation Contracts
 
@@ -345,7 +345,6 @@ The Cargo workspace under [`crates/`](crates/) contains **25 crates**, plus [`sr
 |---|---|---|
 | [`astrcode-core`](crates/astrcode-core) | 9.5k | Shared domain types, traits, config system, extension contracts, prompt composition |
 | [`astrcode-protocol`](crates/astrcode-protocol) | 1.9k | JSON-RPC 2.0 wire types, commands, events, HTTP/UI DTOs |
-| [`astrcode-support`](crates/astrcode-support) | 1.3k | Host utilities: path resolution, shell detection, tool result persistence |
 
 ### Layer 1: Core Implementations
 
@@ -400,7 +399,7 @@ The Cargo workspace under [`crates/`](crates/) contains **25 crates**, plus [`sr
 |---|---|---|
 | [`astrcode-eval`](crates/astrcode-eval) | 2.0k | Benchmark runner: HTTP server control, event-log metrics, structured reports |
 
-**Totals:** ~104.4k lines of Rust (25 crates + Tauri; 26 workspace members), **326** `.rs` files; ~12.4k lines of TypeScript in `frontend/` (~**116.8k** lines overall).
+**Totals:** ~104.4k lines of Rust (26 crates + Tauri; 27 workspace members), **326** `.rs` files; ~12.4k lines of TypeScript in `frontend/` (~**116.8k** lines overall).
 
 ## Key Design Decisions
 
@@ -445,7 +444,7 @@ Tools run in parallel batches (up to 5 concurrent). The pipeline:
 
 1. **Prepare** — parse JSON args (with repair for malformed LLM output), check visibility, dispatch `PreToolUse` hooks
 2. **Execute** — parallel batch via `JoinSet`, sequential tools flush the batch first
-3. **Commit** — dispatch `PostToolUse` / `PostToolUseFailure` hooks, persist large results, enforce message budget, emit events
+3. **Commit** — dispatch `PostToolUse` for completed executions, persist large results, enforce message budget, and emit distinct completed / failed / cancelled events
 
 Large tool results are automatically persisted to disk and replaced with preview summaries to stay within the message character budget. Each tool declares an `ExecutionMode`: read-only tools (glob/grep/read) are marked Parallel, writing tools (edit/write/shell) are marked Sequential.
 
@@ -457,12 +456,12 @@ The extension system (`astrcode-extensions`) is a core architectural pillar, not
 - **Extension SDK** — bundled extensions and extension authors depend on `astrcode-extension-sdk` rather than coupling to host-internal `astrcode-core`
 - **Capability declarations** — bundled extensions use `Extension::capabilities()`; disk IPC extensions declare `capabilities` during `extension/initialize`; the runtime authorizes `astrcode.*` invokes via `HostRouter`
 - **Namespaced session state** — session-scoped extension state is stored under `<session>/extension_data/<extension-id>/`, keeping the session root owned by the host
-- **Hook modes** — `Blocking` (can modify input/output), `NonBlocking` (fire-and-forget), `Advisory` (observe-only)
+- **Hook modes** — `Blocking` (can modify input/output), `NonBlocking` (fire-and-forget), `Advisory` (observe-only); lifecycle Blocking is limited to turn-entry gates
 - **Keybinding registration** — extensions register keyboard shortcuts (e.g. `Shift+Tab` for mode toggle) via `Registrar::keybinding()`
 - **Status bar items** — extensions contribute status bar entries (e.g. current mode indicator) with runtime updates via `StatusItemUpdate` notifications
 - **Disk s5r extensions** — stdio length-prefixed frames + JSON `WireMessage` (`protocol.s5r` + `command` in `extension.json`); worker `Initialize`, `handler.invoke`, and capability-scoped `astrcode.*` invoke. See [docs/extension-system.md](docs/extension-system.md)
 - **Extension runtime** — session spawning with depth limits, tool registration queue, priority-based dispatch
-- **Lifecycle hooks** — `SessionStart` / `SessionResume` / `SessionShutdown`, `TurnStart` / `TurnEnd` / `TurnAborted`, `PreToolUse` / `PostToolUse` / `PostToolUseFailure`, `BeforeProviderRequest` / `AfterProviderResponse`, `PreCompact` / `PostCompact`, `PromptBuild`, `UserPromptSubmit`
+- **Lifecycle hooks** — `SessionStart` / `SessionResume` / `SessionShutdown`, `TurnStart` / `TurnEnd` / `TurnAborted`, `PreToolUse` / `PostToolUse`, `BeforeProviderRequest` / `AfterProviderResponse`, `PreCompact` / `PostCompact`, `PromptBuild`, `UserPromptSubmit`
 - **Extension runtime APIs** — `Extension::start()` (receives `ExtensionCtx` with `startup_working_dir`, `event_sink`, and capability-scoped host services), `Extension::stop()` (with `StopReason`), `Extension::health()` (health probe), `Extension::on_config_changed()` (hot config reload)
 - **Active health checks** — `ExtensionRunner::check_health()` provides an on-demand sampling API; polling strategy is decided by the host
 - **Startup event channel** — `bind_startup_event_channel()` binds a process-level event channel so extensions can emit custom events during `start()`

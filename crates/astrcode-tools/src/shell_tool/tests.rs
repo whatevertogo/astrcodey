@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use astrcode_core::tool::{Tool, ToolCapabilities, ToolExecutionContext, ToolResult};
-use astrcode_support::shell::{ShellFamily, ShellInfo, resolve_shell};
+use astrcode_extension_sdk::shell::{ShellFamily, ShellInfo, resolve_shell};
 
 use super::{
     MAX_CAPTURE_BYTES_PER_STREAM, ShellTool, apply_pipeline_policy, capture_stream, command_args,
@@ -36,7 +36,7 @@ async fn poll_background_shell_to_terminal(
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
         let mut polls = Vec::new();
         loop {
-            let poll = tool
+            let (poll, discovered) = tool
                 .execute(
                     serde_json::json!({
                         "shellId": shell_id,
@@ -45,7 +45,9 @@ async fn poll_background_shell_to_terminal(
                     ctx,
                 )
                 .await
-                .expect("background shell poll should succeed");
+                .expect("background shell poll should succeed")
+                .into_parts();
+            assert!(discovered.is_empty());
             let running = poll.metadata["running"] == serde_json::json!(true);
             polls.push(poll);
             if !running {
@@ -199,7 +201,7 @@ async fn shell_captures_stdout_and_stderr_without_live_events() {
         timeout_secs: 30,
     };
     let mut ctx = empty_ctx();
-    ctx.tool_call_id = Some("shell-capture".into());
+    ctx.scope.tool_call_id = Some("shell-capture".into());
 
     let result = tool
         .execute(
@@ -212,7 +214,6 @@ async fn shell_captures_stdout_and_stderr_without_live_events() {
         .await
         .expect("shell should execute");
 
-    assert_eq!(result.call_id, "shell-capture");
     assert!(!result.is_error, "{result:?}");
     assert!(result.content.contains("out"));
     assert!(result.content.contains("err"));
@@ -526,10 +527,9 @@ async fn shell_run_in_background_returns_shell_id() {
     assert!(!shell_id.is_empty());
     assert!(result.content.contains(shell_id));
 
-    let status =
-        super::execute_background_shell_wait(shell_id, 0, None, Instant::now(), &empty_ctx())
-            .await
-            .expect("status query");
+    let status = super::execute_background_shell_wait(shell_id, 0, None, Instant::now())
+        .await
+        .expect("status query");
     assert_eq!(status.metadata["running"], serde_json::json!(true));
 }
 

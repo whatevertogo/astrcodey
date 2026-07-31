@@ -1,8 +1,8 @@
 //! ACP (Agent Client Protocol) server adapter.
 //!
-//! Bridges the ACP JSON-RPC protocol (over stdio) to astrcode's internal
-//! CommandHandle / broadcast event architecture. This module is purely a
-//! DTO-mapping boundary — no session-runtime types leak through.
+//! Bridges the ACP JSON-RPC protocol (over stdio) to astrcode's session command
+//! service and event bus. This module is purely a DTO-mapping boundary — no
+//! session-runtime types leak through.
 
 mod events;
 
@@ -17,23 +17,22 @@ use agent_client_protocol::{
     },
 };
 use astrcode_core::{event::Event, types::SessionId};
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 use tokio_util::compat::{TokioAsyncReadCompatExt, TokioAsyncWriteCompatExt};
 
 use crate::{
-    bootstrap::ServerRuntime,
-    handler::{CommandHandle, HandlerError, TurnCompletion},
-    server_event_bus::ServerEventBus,
+    bootstrap::ServerApp, server_event_bus::ServerEventBus, session_command_contract::HandlerError,
+    session_command_service::SessionCommandService, turn_scheduler::TurnCompletion,
 };
 
 /// Run the ACP server, reading from stdin and writing to stdout.
 ///
 /// This function blocks until the connection is closed or an unrecoverable
 /// error occurs.
-pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protocol::Result<()> {
-    let server_system = crate::bootstrap::spawn_server_system_without_legacy(&runtime);
-    let event_bus = server_system.event_bus;
-    let command_handle = server_system.handler;
+pub async fn run_acp_server(server_app: Arc<ServerApp>) -> agent_client_protocol::Result<()> {
+    server_app.initialize().await;
+    let event_bus = Arc::clone(server_app.event_bus());
+    let session_commands = server_app.session_commands().clone();
 
     let result = Agent
         .builder()
@@ -58,13 +57,13 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
         )
         .on_receive_request(
             {
-                let command_handle = command_handle.clone();
+                let session_commands = session_commands.clone();
 
                 async move |req: NewSessionRequest,
                             responder: Responder<NewSessionResponse>,
                             _cx: ConnectionTo<Client>| {
                     let working_dir = req.cwd.to_string_lossy().to_string();
-                    match command_handle.create_session(working_dir).await {
+                    match session_commands.create_session(working_dir, None).await {
                         Ok(session_id) => {
                             let acp_sid = AcpSessionId::new(session_id.to_string());
                             responder.respond(NewSessionResponse::new(acp_sid))
@@ -77,13 +76,13 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
         )
         .on_receive_request(
             {
-                let command_handle = command_handle.clone();
+                let session_commands = session_commands.clone();
                 let event_bus = Arc::clone(&event_bus);
 
                 async move |req: PromptRequest,
                             responder: Responder<PromptResponse>,
                             cx: ConnectionTo<Client>| {
-                    match handle_prompt(req, &command_handle, &event_bus, &cx).await {
+                    match handle_prompt(req, &session_commands, &event_bus, &cx).await {
                         Ok(stop_reason) => responder.respond(PromptResponse::new(stop_reason)),
                         Err(error) => responder.respond_with_error(error),
                     }
@@ -93,11 +92,11 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
         )
         .on_receive_notification(
             {
-                let command_handle = command_handle.clone();
+                let session_commands = session_commands.clone();
 
                 async move |notif: CancelNotification, _cx: ConnectionTo<Client>| {
                     let sid = SessionId::from(notif.session_id.to_string());
-                    let _ = command_handle.abort_session(sid).await;
+                    let _ = session_commands.abort_session(&sid).await;
                     Ok(())
                 }
             },
@@ -117,14 +116,13 @@ pub async fn run_acp_server(runtime: Arc<ServerRuntime>) -> agent_client_protoco
             tokio::io::stdin().compat(),
         ))
         .await;
-    runtime.scheduler().drain_detached_tasks().await;
-    runtime.shutdown_extensions().await;
+    server_app.shutdown().await;
     result
 }
 
 async fn handle_prompt(
     req: PromptRequest,
-    command_handle: &CommandHandle,
+    session_commands: &SessionCommandService,
     event_bus: &Arc<ServerEventBus>,
     cx: &ConnectionTo<Client>,
 ) -> Result<StopReason, Error> {
@@ -132,10 +130,10 @@ async fn handle_prompt(
     let text = prompt_to_text(&req.prompt)?;
     let mut event_rx = event_bus.subscribe_conversation_events(&session_id);
 
-    let (turn_id, mut completion_rx) = command_handle
-        .submit_prompt_with_completion(
+    let (turn_id, mut completion_rx) = session_commands
+        .submit_input_with_completion(
             session_id.clone(),
-            crate::turn_scheduler::PromptInput::text_only(text),
+            astrcode_core::user_input::UserInput::text_only(text),
         )
         .await
         .map_err(handler_error_to_acp)?;
@@ -144,43 +142,55 @@ async fn handle_prompt(
     accepted_sessions.insert(session_id.clone());
     let acp_session_id = session_id;
 
+    let completion = wait_for_turn_completion(&mut event_rx, &mut completion_rx, |event| {
+        if event_belongs_to_prompt(&event, &accepted_sessions, &turn_id) {
+            forward_event(&event, &acp_session_id, cx);
+        }
+    })
+    .await;
+    flush_queued_events(
+        &mut event_rx,
+        &accepted_sessions,
+        &turn_id,
+        &acp_session_id,
+        cx,
+    );
+    match completion {
+        Ok(TurnCompletion::Completed { finish_reason }) => {
+            Ok(stop_reason_from_finish_reason(&finish_reason))
+        },
+        Ok(TurnCompletion::Failed { error }) => {
+            tracing::warn!(error, "ACP prompt turn failed");
+            Ok(StopReason::Cancelled)
+        },
+        Ok(TurnCompletion::Dropped) => Ok(StopReason::Cancelled),
+        Err(_) => Ok(StopReason::EndTurn),
+    }
+}
+
+async fn wait_for_turn_completion(
+    event_rx: &mut broadcast::Receiver<Arc<Event>>,
+    completion_rx: &mut tokio::sync::oneshot::Receiver<TurnCompletion>,
+    mut forward: impl FnMut(Arc<Event>),
+) -> Result<TurnCompletion, tokio::sync::oneshot::error::RecvError> {
+    let mut receive_events = true;
     loop {
         tokio::select! {
-            result = event_rx.recv() => {
+            result = event_rx.recv(), if receive_events => {
                 match result {
-                    Some(event) => {
-                        if event_belongs_to_prompt(&event, &accepted_sessions, &turn_id) {
-                            if let astrcode_core::event::EventPayload::CompactBoundaryCreated { continued_session_id, .. } = &event.payload {
-                                accepted_sessions.insert(continued_session_id.clone());
-                            }
-                            forward_event(&event, &acp_session_id, cx);
-                        }
+                    Ok(event) => forward(event),
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            skipped,
+                            "ACP event receiver lagged; waiting for turn completion"
+                        );
                     },
-                    None => {
-                        return Ok(StopReason::EndTurn);
+                    Err(broadcast::error::RecvError::Closed) => {
+                        receive_events = false;
                     },
                 }
             },
-            completion = &mut completion_rx => {
-                flush_queued_events(
-                    &mut event_rx,
-                    &mut accepted_sessions,
-                    &turn_id,
-                    &acp_session_id,
-                    cx,
-                );
-                return match completion {
-                    Ok(TurnCompletion::Completed { finish_reason }) => {
-                        Ok(stop_reason_from_finish_reason(&finish_reason))
-                    },
-                    Ok(TurnCompletion::Failed { error }) => {
-                        tracing::warn!(error, "ACP prompt turn failed");
-                        Ok(StopReason::Cancelled)
-                    },
-                    Ok(TurnCompletion::Dropped) => Ok(StopReason::Cancelled),
-                    Err(_) => Ok(StopReason::EndTurn),
-                };
-            },
+            completion = &mut *completion_rx => return completion,
         }
     }
 }
@@ -188,21 +198,14 @@ async fn handle_prompt(
 /// Deterministic flush of queued events after completion signal.
 /// Uses `try_recv` to drain without blocking.
 fn flush_queued_events(
-    event_rx: &mut mpsc::Receiver<Arc<Event>>,
-    accepted_sessions: &mut HashSet<SessionId>,
+    event_rx: &mut broadcast::Receiver<Arc<Event>>,
+    accepted_sessions: &HashSet<SessionId>,
     turn_id: &astrcode_core::types::TurnId,
     acp_session_id: &SessionId,
     cx: &ConnectionTo<Client>,
 ) {
     while let Ok(event) = event_rx.try_recv() {
         if event_belongs_to_prompt(&event, accepted_sessions, turn_id) {
-            if let astrcode_core::event::EventPayload::CompactBoundaryCreated {
-                continued_session_id,
-                ..
-            } = &event.payload
-            {
-                accepted_sessions.insert(continued_session_id.clone());
-            }
             forward_event(&event, acp_session_id, cx);
         }
     }
@@ -311,19 +314,40 @@ fn handler_error_to_acp(error: HandlerError) -> Error {
         | HandlerError::Llm(_)
         | HandlerError::Extension(_)
         | HandlerError::ActorUnavailable
-        | HandlerError::InvalidRequest(_) => Error::internal_error().data(error.to_string()),
+        | HandlerError::InvalidRequest(_)
+        | HandlerError::SessionClose(_) => Error::internal_error().data(error.to_string()),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use agent_client_protocol::schema::{ContentBlock, ResourceLink, TextContent};
     use astrcode_core::{
-        event::{Event, EventPayload},
+        event::{
+            DurableEvent, DurableEventPayload, Event, LiveEvent, LiveEventPayload, StoredEvent,
+        },
         types::{SessionId, TurnId},
     };
 
     use super::*;
+
+    fn durable_event(
+        session_id: SessionId,
+        turn_id: Option<TurnId>,
+        payload: DurableEventPayload,
+    ) -> Event {
+        StoredEvent::new(1, DurableEvent::new(session_id, turn_id, payload)).into()
+    }
+
+    fn live_event(
+        session_id: SessionId,
+        turn_id: Option<TurnId>,
+        payload: LiveEventPayload,
+    ) -> Event {
+        LiveEvent::new(session_id, turn_id, payload).into()
+    }
 
     #[test]
     fn prompt_to_text_keeps_text_and_resource_links() {
@@ -366,10 +390,10 @@ mod tests {
         let session_id = SessionId::from("session-1");
         let turn_id = TurnId::from("turn-1");
         let other_turn = TurnId::from("turn-2");
-        let event = Event::new(
+        let event = durable_event(
             session_id.clone(),
             Some(other_turn),
-            EventPayload::TurnCompleted {
+            DurableEventPayload::TurnCompleted {
                 finish_reason: "stop".into(),
             },
         );
@@ -380,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn event_filter_accepts_child_session_after_compact_boundary() {
+    fn event_filter_accepts_an_explicitly_registered_child_session() {
         let parent_session = SessionId::from("parent-1");
         let child_session = SessionId::from("child-1");
         let turn_id = TurnId::from("turn-1");
@@ -388,29 +412,26 @@ mod tests {
         let mut accepted = HashSet::new();
         accepted.insert(parent_session.clone());
 
-        // Parent session event passes
-        let parent_event = Event::new(
+        let parent_event = live_event(
             parent_session,
             Some(turn_id.clone()),
-            EventPayload::AssistantTextDelta {
+            LiveEventPayload::AssistantTextDelta {
                 message_id: "msg-1".into(),
                 delta: "hello".into(),
             },
         );
         assert!(event_belongs_to_prompt(&parent_event, &accepted, &turn_id));
 
-        // Child session event is rejected before boundary
-        let child_event = Event::new(
+        let child_event = live_event(
             child_session.clone(),
             Some(turn_id.clone()),
-            EventPayload::AssistantTextDelta {
+            LiveEventPayload::AssistantTextDelta {
                 message_id: "msg-2".into(),
                 delta: "world".into(),
             },
         );
         assert!(!event_belongs_to_prompt(&child_event, &accepted, &turn_id));
 
-        // After learning compact boundary, child events pass
         accepted.insert(child_session);
         assert!(event_belongs_to_prompt(&child_event, &accepted, &turn_id));
     }
@@ -425,7 +446,68 @@ mod tests {
         accepted.insert(session_id);
 
         // Event from unrelated session with None turn_id should be rejected
-        let event = Event::new(unrelated_session, None, EventPayload::TurnStarted);
+        let event = durable_event(unrelated_session, None, DurableEventPayload::TurnStarted);
         assert!(!event_belongs_to_prompt(&event, &accepted, &turn_id));
+    }
+
+    #[tokio::test]
+    async fn event_stream_failures_do_not_complete_the_prompt() {
+        let session_id = SessionId::from("session-1");
+        let turn_id = TurnId::from("turn-1");
+        let (events_tx, mut event_rx) = broadcast::channel(1);
+        events_tx
+            .send(Arc::new(live_event(
+                session_id.clone(),
+                Some(turn_id.clone()),
+                LiveEventPayload::AgentRunStarted,
+            )))
+            .unwrap();
+        events_tx
+            .send(Arc::new(live_event(
+                session_id,
+                Some(turn_id),
+                LiveEventPayload::AgentRunCompleted {
+                    reason: "stop".into(),
+                },
+            )))
+            .unwrap();
+        let event_forwarded = Arc::new(tokio::sync::Notify::new());
+        let completion_after_event = Arc::clone(&event_forwarded);
+        let (completion_tx, mut completion_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            completion_after_event.notified().await;
+            let _ = completion_tx.send(TurnCompletion::Completed {
+                finish_reason: "stop".into(),
+            });
+        });
+
+        let forwarded = Arc::new(AtomicUsize::new(0));
+        let forwarded_by_callback = Arc::clone(&forwarded);
+        let event_forwarded_by_callback = Arc::clone(&event_forwarded);
+        let completion = wait_for_turn_completion(&mut event_rx, &mut completion_rx, move |_| {
+            forwarded_by_callback.fetch_add(1, Ordering::Relaxed);
+            event_forwarded_by_callback.notify_one();
+        })
+        .await
+        .unwrap();
+        assert!(matches!(completion, TurnCompletion::Completed { .. }));
+        assert_eq!(
+            forwarded.load(Ordering::Relaxed),
+            1,
+            "latest event should be consumed after lag"
+        );
+
+        let (closed_tx, mut closed_rx) = broadcast::channel(1);
+        drop(closed_tx);
+        let (completion_tx, mut completion_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = completion_tx.send(TurnCompletion::Dropped);
+        });
+
+        let completion = wait_for_turn_completion(&mut closed_rx, &mut completion_rx, |_| {})
+            .await
+            .unwrap();
+        assert!(matches!(completion, TurnCompletion::Dropped));
     }
 }

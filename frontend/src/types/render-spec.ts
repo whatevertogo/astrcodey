@@ -1,14 +1,4 @@
-/**
- * RenderSpec — structured UI rendering protocol.
- *
- * Mirrors `astrcode-core::render::RenderSpec` (Rust).
- * Serialized via `#[serde(tag = "type", rename_all = "snake_case")]`,
- * so each variant has a `"type"` discriminator field.
- *
- * Tools place a `RenderSpec` in `ToolResult.metadata["ui_render"]`.
- * The frontend reads this key to decide how to render the tool result,
- * instead of hardcoding per-tool display logic.
- */
+/** Frontend-local render tree used by built-in tool renderers. */
 
 // ── RenderTone ────────────────────────────────────────────────────────────
 
@@ -108,57 +98,9 @@ export interface RenderSpecRawAnsi {
   tone?: RenderTone
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-const RENDER_SPEC_TYPES = new Set([
-  'text',
-  'markdown',
-  'box',
-  'list',
-  'key_value',
-  'progress',
-  'diff',
-  'code',
-  'image_ref',
-  'raw_ansi_limited',
-])
-
-/** Metadata key where tools embed RenderSpec. */
-export const UI_RENDER_METADATA_KEY = 'ui_render'
-
-/** Metadata key where tools can provide a compact summary line. */
-export const UI_SUMMARY_METADATA_KEY = 'ui_summary'
-
-/** Type guard: check if a value looks like a RenderSpec. */
-export function isRenderSpec(value: unknown): value is RenderSpec {
-  if (typeof value !== 'object' || value === null) return false
-  const obj = value as Record<string, unknown>
-  return typeof obj.type === 'string' && RENDER_SPEC_TYPES.has(obj.type)
-}
-
 /**
- * Extract RenderSpec from tool metadata.
- * Returns `undefined` if not present or malformed.
- */
-export function extractRenderSpec(
-  metadata?: Record<string, unknown>
-): RenderSpec | undefined {
-  if (!metadata) return undefined
-  const raw = metadata[UI_RENDER_METADATA_KEY]
-  return isRenderSpec(raw) ? raw : undefined
-}
-
-export function extractRenderSummary(
-  metadata?: Record<string, unknown>
-): string | undefined {
-  if (!metadata) return undefined
-  const raw = metadata[UI_SUMMARY_METADATA_KEY]
-  return typeof raw === 'string' && raw.trim() ? raw : undefined
-}
-
-/**
- * Plain-text fallback for RenderSpec (mirrors Rust `plain_text_fallback()`).
- * Useful for accessibility, copy-to-clipboard, or when rich rendering is unavailable.
+ * Plain-text fallback for accessibility, copy-to-clipboard, or clients without
+ * rich rendering.
  */
 export function renderSpecToPlainText(spec: RenderSpec): string {
   switch (spec.type) {

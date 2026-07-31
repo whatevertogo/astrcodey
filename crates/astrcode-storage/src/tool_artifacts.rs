@@ -6,19 +6,17 @@ use std::{
     path::Path,
 };
 
-use astrcode_core::storage::{
-    ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
-};
+use astrcode_core::tool::ToolResultArtifactSlice;
 
-/// 生成 artifact 文件名。
-pub fn tool_result_file_name(tool_name: &str, call_id: &str) -> String {
+use crate::{ToolResultArtifactInput, ToolResultArtifactRef};
+
+pub(crate) fn tool_result_file_name(tool_name: &str, call_id: &str) -> String {
     let safe_tool = sanitize_for_filename(tool_name);
     let safe_call = sanitize_for_filename(call_id);
     format!("{safe_tool}-{safe_call}.txt")
 }
 
-/// 写入工具结果 artifact 正文。
-pub fn write_tool_result_file(
+pub(crate) fn write_tool_result_file(
     dir: &Path,
     input: &ToolResultArtifactInput,
 ) -> std::io::Result<ToolResultArtifactRef> {
@@ -51,8 +49,7 @@ pub fn write_tool_result_file(
     ))
 }
 
-/// 从 artifact 正文中读取一段字符切片。
-pub fn slice_tool_result(
+pub(crate) fn slice_tool_result(
     path: &str,
     content: &str,
     char_offset: usize,
@@ -86,7 +83,11 @@ fn sanitize_for_filename(input: &str) -> String {
     }
 }
 
-fn tool_result_file_name_with_suffix(tool_name: &str, call_id: &str, suffix: usize) -> String {
+pub(crate) fn tool_result_file_name_with_suffix(
+    tool_name: &str,
+    call_id: &str,
+    suffix: usize,
+) -> String {
     let base = tool_result_file_name(tool_name, call_id);
     if suffix == 0 {
         return base;

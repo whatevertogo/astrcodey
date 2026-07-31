@@ -3,17 +3,17 @@
 
 Layer hierarchy:
   L0 Foundation:   astrcode-core, astrcode-desktop
-  L1 Infrastructure: astrcode-support, astrcode-protocol, astrcode-ai
-  L2 Domain:       astrcode-log, astrcode-storage, astrcode-context,
-                   astrcode-tools, astrcode-extensions, astrcode-client
-  L3 Extensions:   astrcode-extension-*, astrcode-bundled-extensions
-  L4 Session:      astrcode-session
+  L1 Primitives:   astrcode-session-projection
+  L2 Services:     astrcode-extension-sdk, astrcode-ai, astrcode-context,
+                   astrcode-log, astrcode-storage
+  L3 Integration:  astrcode-protocol, astrcode-tools, astrcode-extensions,
+                   astrcode-extension-*
+  L4 Runtime:      astrcode-session, astrcode-client, astrcode-bundled-extensions,
+                   astrcode-eval
   L5 Server:       astrcode-server
   L6 CLI:          astrcode-cli
 
 Rule: a crate may only depend on crates at a strictly lower layer.
-Exception: astrcode-bundled-extensions (L3) may depend on same-layer
-           astrcode-extension-* crates (aggregation).
 """
 
 from __future__ import annotations
@@ -29,31 +29,32 @@ LAYERS: dict[str, int] = {
     # L0 – Foundation
     "astrcode-core": 0,
     "astrcode-desktop": 0,
-    # L1 – Infrastructure
-    "astrcode-support": 1,
-    "astrcode-protocol": 1,
-    "astrcode-ai": 1,
-    "astrcode-eval": 1,
-    "astrcode-extension-sdk": 1,
-    # L2 – Domain Services
+    # L1 – Primitive contracts
+    "astrcode-session-projection": 1,
+    # L2 – Services
+    "astrcode-extension-sdk": 2,
+    "astrcode-ai": 2,
+    "astrcode-context": 2,
     "astrcode-log": 2,
     "astrcode-storage": 2,
-    "astrcode-context": 2,
-    "astrcode-tools": 2,
-    "astrcode-extensions": 2,
-    "astrcode-client": 2,
-    # L3 – Extensions
+    # L3 – Integration and extension implementations
+    "astrcode-protocol": 3,
+    "astrcode-tools": 3,
+    "astrcode-extensions": 3,
     "astrcode-extension-goal": 3,
     "astrcode-extension-agent-tools": 3,
     "astrcode-extension-mcp": 3,
     "astrcode-extension-skill": 3,
     "astrcode-extension-todo-tool": 3,
     "astrcode-extension-mode": 3,
+    "astrcode-extension-ask-user": 3,
     "astrcode-extension-memory": 3,
     "astrcode-extension-channels": 3,
     "astrcode-extension-web-tools": 3,
-    "astrcode-bundled-extensions": 3,
-    # L4 – Session
+    # L4 – Runtime and composition
+    "astrcode-client": 4,
+    "astrcode-bundled-extensions": 4,
+    "astrcode-eval": 4,
     "astrcode-session": 4,
     # L5 – Server
     "astrcode-server": 5,
@@ -63,41 +64,20 @@ LAYERS: dict[str, int] = {
 
 LAYER_NAMES: dict[int, str] = {
     0: "Foundation",
-    1: "Infrastructure",
-    2: "Domain",
-    3: "Extensions",
-    4: "Session",
+    1: "Primitives",
+    2: "Services",
+    3: "Integration",
+    4: "Runtime",
     5: "Server",
     6: "CLI",
 }
 
-ALLOWED_SAME_LAYER: set[tuple[str, str]] = {
-    # L3: bundled-extensions aggregates same-layer extension crates.
-    (dep, ext)
-    for ext in (
-        "astrcode-extension-goal",
-        "astrcode-extension-agent-tools",
-        "astrcode-extension-mcp",
-        "astrcode-extension-skill",
-        "astrcode-extension-todo-tool",
-        "astrcode-extension-mode",
-        "astrcode-extension-memory",
-        "astrcode-extension-channels",
-        "astrcode-extension-web-tools",
-    )
-    for dep in ("astrcode-bundled-extensions",)
-} | {
-    # L1: extension-sdk is a facade that re-exports from other L1 crates.
-    ("astrcode-extension-sdk", "astrcode-protocol"),
-    ("astrcode-extension-sdk", "astrcode-support"),
-}
+ALLOWED_SAME_LAYER: set[tuple[str, str]] = set()
 
 FORBIDDEN_DEPS: dict[str, set[str]] = {
-    # Session is the embeddable runtime kernel. It must not depend on the
-    # first-party default implementations, including in tests, so alternate
-    # hosts can reuse it without inheriting AstrCode's built-in profile.
+    # Session owns prompt lifecycle and intentionally depends on context's
+    # concrete prompt implementation. It must not depend on higher layers.
     "astrcode-session": {
-        "astrcode-context",
         "astrcode-tools",
         "astrcode-extensions",
         "astrcode-bundled-extensions",

@@ -2,7 +2,9 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_core::{render::RenderSpec, tool::ToolResult};
+use astrcode_core::tool::ToolResult;
+
+use crate::tui::render::RenderSpec;
 
 /// Per-call render context passed to [`ToolRenderer::render_result`].
 pub struct ToolRenderCtx<'a> {

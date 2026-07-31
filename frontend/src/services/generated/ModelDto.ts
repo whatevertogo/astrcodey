@@ -6,7 +6,7 @@ import type { ThinkingConfigDto } from "./ThinkingConfigDto";
 /**
  * Profile 中的模型信息。
  */
-export type ModelDto = { id: string, maxTokens: number | null, contextLimit: number | null, modelOptions?: ModelOptionsDto | null,
+export type ModelDto = { id: string, modelOptions?: ModelOptionsDto | null,
 /**
  * 当前模型的标准化 thinking 配置（归一化后）。
  */

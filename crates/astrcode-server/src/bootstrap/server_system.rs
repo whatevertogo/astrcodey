@@ -1,58 +1,138 @@
-//! Server 核心系统组装 — 事件总线 + scheduler + handler actor。
+//! Complete server application ownership.
 
 use std::sync::Arc;
 
-use astrcode_protocol::events::ClientNotification;
-use astrcode_support::event_fanout::EventFanout;
+use tokio::sync::OnceCell;
 
 use super::ServerRuntime;
 use crate::{
-    handler::CommandHandle, server_event_bus::ServerEventBus, turn_scheduler::TurnScheduler,
+    handler::{CommandHandle, CommandHandler},
+    server_event_bus::ServerEventBus,
+    session_command_service::SessionCommandService,
+    session_manager::SessionManagerError,
+    turn_scheduler::TurnScheduler,
 };
 
-pub struct ServerSystem {
-    pub event_tx: Option<Arc<EventFanout<ClientNotification>>>,
-    pub event_bus: Arc<ServerEventBus>,
-    pub handler: CommandHandle,
-    pub scheduler: Arc<TurnScheduler>,
+/// Fully initialized server application shared by all transports.
+///
+/// A [`ServerRuntime`] owns durable services. `ServerApp` adds the single
+/// process-wide event bus, command controller, and shutdown lifecycle. Build it
+/// once, then pass the same instance to HTTP, ACP, or an in-process transport.
+pub struct ServerApp {
+    runtime: Arc<ServerRuntime>,
+    event_bus: Arc<ServerEventBus>,
+    session_commands: SessionCommandService,
+    command_handle: CommandHandle,
+    initialized: OnceCell<()>,
+    shutdown: OnceCell<()>,
 }
 
-pub fn spawn_server_system(
-    runtime: &Arc<ServerRuntime>,
-    event_tx: Arc<EventFanout<ClientNotification>>,
-) -> ServerSystem {
-    spawn_server_system_with_legacy(runtime, Some(event_tx))
-}
+impl ServerApp {
+    pub fn new(runtime: Arc<ServerRuntime>) -> Arc<Self> {
+        let event_bus = Arc::clone(runtime.session_manager().event_bus());
+        let session_commands = SessionCommandService::new(
+            Arc::clone(&runtime),
+            Arc::clone(runtime.scheduler()),
+            Arc::clone(&event_bus),
+        );
+        let command_handle = CommandHandler::spawn_actor(
+            Arc::clone(&runtime),
+            Arc::clone(runtime.scheduler()),
+            Arc::clone(&event_bus),
+            session_commands.clone(),
+        );
+        Arc::new(Self {
+            runtime,
+            event_bus,
+            session_commands,
+            command_handle,
+            initialized: OnceCell::new(),
+            shutdown: OnceCell::new(),
+        })
+    }
 
-pub fn spawn_server_system_without_legacy(runtime: &Arc<ServerRuntime>) -> ServerSystem {
-    spawn_server_system_with_legacy(runtime, None)
-}
+    pub fn runtime(&self) -> &Arc<ServerRuntime> {
+        &self.runtime
+    }
 
-fn spawn_server_system_with_legacy(
-    runtime: &Arc<ServerRuntime>,
-    event_tx: Option<Arc<EventFanout<ClientNotification>>>,
-) -> ServerSystem {
-    let scheduler = Arc::clone(runtime.scheduler());
+    pub fn event_bus(&self) -> &Arc<ServerEventBus> {
+        &self.event_bus
+    }
 
-    let event_bus = match &event_tx {
-        Some(event_tx) => Arc::new(ServerEventBus::with_legacy_tx(Arc::clone(event_tx))),
-        None => Arc::new(ServerEventBus::new()),
-    };
+    pub fn command_handle(&self) -> &CommandHandle {
+        &self.command_handle
+    }
 
-    runtime
-        .session_manager()
-        .bind_event_bus(Arc::clone(&event_bus));
+    pub(crate) fn session_commands(&self) -> &SessionCommandService {
+        &self.session_commands
+    }
 
-    let handler = CommandHandle::spawn(
-        Arc::clone(runtime),
-        Arc::clone(&scheduler),
-        Arc::clone(&event_bus),
-    );
+    pub fn scheduler(&self) -> &Arc<TurnScheduler> {
+        self.runtime.scheduler()
+    }
 
-    ServerSystem {
-        event_tx,
-        event_bus,
-        handler,
-        scheduler,
+    pub fn request_shutdown(&self) {
+        self.runtime.shutdown_token().cancel();
+    }
+
+    /// Repair durable turn phases left behind by a previous process before any
+    /// transport starts serving requests.
+    pub async fn initialize(&self) {
+        if let Err(error) = self
+            .initialized
+            .get_or_try_init(|| async {
+                let summaries = self.runtime.session_manager().list_summaries().await?;
+                for summary in summaries {
+                    let state = match self
+                        .runtime
+                        .session_manager()
+                        .read_model(&summary.session_id)
+                        .await
+                    {
+                        Ok(state) => state,
+                        Err(error) => {
+                            tracing::warn!(
+                                session_id = %summary.session_id,
+                                %error,
+                                "failed to inspect session during startup repair"
+                            );
+                            continue;
+                        },
+                    };
+                    if !TurnScheduler::needs_stale_repair(&state) {
+                        continue;
+                    }
+                    if let Err(error) = self
+                        .session_commands
+                        .repair_stale_session(&summary.session_id)
+                        .await
+                    {
+                        tracing::warn!(
+                            session_id = %summary.session_id,
+                            %error,
+                            "failed to repair stale session during startup"
+                        );
+                    }
+                }
+                Ok::<(), SessionManagerError>(())
+            })
+            .await
+        {
+            tracing::warn!(%error, "failed to enumerate sessions during startup repair");
+        }
+    }
+
+    /// Stop the application exactly once; concurrent callers wait for the same
+    /// shutdown sequence.
+    pub async fn shutdown(&self) {
+        self.shutdown
+            .get_or_init(|| async {
+                self.request_shutdown();
+                self.command_handle.shutdown().await;
+                self.scheduler().shutdown_background_tasks().await;
+                self.runtime.shutdown_extensions().await;
+                self.runtime.session_manager().shutdown_event_sink().await;
+            })
+            .await;
     }
 }

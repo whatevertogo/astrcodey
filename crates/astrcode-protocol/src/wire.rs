@@ -7,10 +7,8 @@
 use astrcode_core::{
     config::{ProviderAuthScheme, ProviderWireFormat},
     event::{Phase, ToolOutputStream},
-    extension::{ExtensionCapability, ExtensionHttpMethod},
     llm::{LlmRole, ThinkingLevel},
     permission::{ApprovalDecision, ApprovalMode},
-    storage::AgentSessionStatus,
     tool::{ExecutionMode, ToolOrigin},
 };
 use serde::{Deserialize, Serialize};
@@ -22,6 +20,8 @@ macro_rules! impl_wire_values {
         }
     };
 }
+
+pub(crate) use impl_wire_values;
 
 macro_rules! impl_domain_to_wire_conversion {
     ($domain:ty => $wire:ty { $($variant:ident),+ $(,)? }) => {
@@ -116,7 +116,7 @@ pub enum ExtensionHttpMethodDto {
     Delete,
 }
 
-impl_domain_to_wire_conversion!(ExtensionHttpMethod => ExtensionHttpMethodDto {
+impl_wire_values!(ExtensionHttpMethodDto {
     Get,
     Post,
     Put,
@@ -256,45 +256,12 @@ pub enum ThinkingLevelDto {
 
 impl_bidirectional_wire_conversion!(ThinkingLevel => ThinkingLevelDto { Low, Medium, High });
 
-// ── Thinking Wire Mapping DTO ────────────────────────────────────────────
-
-/// Wire-mapping DTO that shadows the core enum without exposing it directly.
-#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ThinkingWireMappingDto {
-    OpenAiResponses,
-    AnthropicAdaptive,
-    AnthropicBudget,
-    OpenAiChat,
-}
-
-impl_wire_values!(ThinkingWireMappingDto {
-    OpenAiResponses,
-    AnthropicAdaptive,
-    AnthropicBudget,
-    OpenAiChat,
-});
-
-impl From<astrcode_core::thinking::ThinkingWireMapping> for ThinkingWireMappingDto {
-    fn from(value: astrcode_core::thinking::ThinkingWireMapping) -> Self {
-        match value {
-            astrcode_core::thinking::ThinkingWireMapping::OpenAiResponses => Self::OpenAiResponses,
-            astrcode_core::thinking::ThinkingWireMapping::AnthropicAdaptive => {
-                Self::AnthropicAdaptive
-            },
-            astrcode_core::thinking::ThinkingWireMapping::AnthropicBudget => Self::AnthropicBudget,
-            astrcode_core::thinking::ThinkingWireMapping::OpenAiChat => Self::OpenAiChat,
-        }
-    }
-}
-
-/// DTO for thinking capability, using the DTO wire-mapping enum.
+/// User-facing thinking capability. Provider wire encoding remains an internal
+/// config/provider concern and is intentionally omitted from this DTO.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThinkingCapabilityDto {
-    pub wire_mapping: ThinkingWireMappingDto,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_effort: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -304,10 +271,9 @@ pub struct ThinkingCapabilityDto {
     pub can_disable: bool,
 }
 
-impl From<astrcode_core::thinking::ThinkingCapability> for ThinkingCapabilityDto {
-    fn from(value: astrcode_core::thinking::ThinkingCapability) -> Self {
+impl From<astrcode_core::llm::thinking::ThinkingCapability> for ThinkingCapabilityDto {
+    fn from(value: astrcode_core::llm::thinking::ThinkingCapability) -> Self {
         Self {
-            wire_mapping: value.wire_mapping.into(),
             allowed_effort: value.allowed_effort,
             budget_min: value.budget_min,
             budget_max: value.budget_max,
@@ -326,7 +292,7 @@ pub enum AgentSessionStatusDto {
     Failed,
 }
 
-impl_bidirectional_wire_conversion!(AgentSessionStatus => AgentSessionStatusDto {
+impl_wire_values!(AgentSessionStatusDto {
     Running,
     Completed,
     Failed,
@@ -339,6 +305,7 @@ pub enum ExtensionCapabilityDto {
     SessionControl,
     SessionInspect,
     PublicHttp,
+    AuthenticatedHttp,
     PublicHttpDispatch,
     MainModel,
     SmallModel,
@@ -356,10 +323,11 @@ pub enum ExtensionCapabilityDto {
     LiveConversation,
 }
 
-impl_bidirectional_wire_conversion!(ExtensionCapability => ExtensionCapabilityDto {
+impl_wire_values!(ExtensionCapabilityDto {
     SessionControl,
     SessionInspect,
     PublicHttp,
+    AuthenticatedHttp,
     PublicHttpDispatch,
     MainModel,
     SmallModel,
@@ -465,15 +433,6 @@ mod tests {
         assert_wire_values(ProviderAuthSchemeDto::ALL, &["none", "bearer", "x_api_key"]);
         assert_wire_values(ThinkingLevelDto::ALL, &["low", "medium", "high"]);
         assert_wire_values(
-            ThinkingWireMappingDto::ALL,
-            &[
-                "open_ai_responses",
-                "anthropic_adaptive",
-                "anthropic_budget",
-                "open_ai_chat",
-            ],
-        );
-        assert_wire_values(
             AgentSessionStatusDto::ALL,
             &["running", "completed", "failed"],
         );
@@ -488,6 +447,7 @@ mod tests {
                 "session_control",
                 "session_inspect",
                 "public_http",
+                "authenticated_http",
                 "public_http_dispatch",
                 "main_model",
                 "small_model",

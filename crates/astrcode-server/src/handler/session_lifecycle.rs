@@ -1,12 +1,35 @@
 //! 会话创建、恢复与 fork。
 
-use astrcode_core::{extension::SessionToolSelection, types::SessionId};
-use astrcode_protocol::events::ClientNotification;
+use astrcode_core::{tool::SessionToolSelection, types::SessionId};
+use astrcode_protocol::events::{ClientNotification, SessionListItemDto};
 
-use super::{CommandHandler, HandlerError, snapshot::session_snapshot};
+use super::{CommandHandler, HandlerError};
 
 impl CommandHandler {
-    pub(super) async fn send_current_state(&mut self) {
+    pub(super) async fn send_session_list(&self) -> Result<(), HandlerError> {
+        let summaries = match self.runtime.session_manager().list_summaries().await {
+            Ok(summaries) => summaries,
+            Err(error) => {
+                self.send_error(-32603, &error.to_string());
+                return Err(HandlerError::SessionManager(error));
+            },
+        };
+        let sessions = summaries
+            .into_iter()
+            .map(|summary| SessionListItemDto {
+                session_id: summary.session_id.into_string(),
+                last_active_at: summary.updated_at,
+                working_dir: summary.working_dir,
+                parent_session_id: summary.parent_session_id.map(SessionId::into_string),
+                title: summary.first_user_message,
+            })
+            .collect();
+        self.event_bus
+            .send_notification(ClientNotification::SessionList { sessions });
+        Ok(())
+    }
+
+    pub(super) async fn send_current_state(&self) {
         let Some(session_id) = self.focused_session_id.as_ref() else {
             self.send_error(40400, "No active session");
             return;
@@ -17,57 +40,36 @@ impl CommandHandler {
             .session_read_model(session_id)
             .await
         {
-            Ok(state) => {
-                let snapshot = session_snapshot(&state);
-                self.event_bus
-                    .send_notification(ClientNotification::SessionResumed {
-                        session_id: session_id.to_string(),
-                        snapshot,
-                    });
-            },
+            Ok(state) => self.event_bus.send_session_resumed(&state),
             Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
         }
     }
 
-    pub async fn create_session(&mut self, working_dir: String) -> Result<SessionId, HandlerError> {
+    pub(crate) async fn create_session(
+        &mut self,
+        working_dir: String,
+    ) -> Result<SessionId, HandlerError> {
         self.create_session_with_tool_selection(working_dir, None)
             .await
     }
 
-    pub async fn create_session_with_tool_selection(
+    pub(crate) async fn create_session_with_tool_selection(
         &mut self,
         working_dir: String,
         tool_selection: Option<SessionToolSelection>,
     ) -> Result<SessionId, HandlerError> {
-        tracing::info!(working_dir = %working_dir, "creating session");
-        let created = match self
-            .runtime
-            .session_manager()
-            .create_with_tool_selection(&working_dir, tool_selection.as_ref())
+        match self
+            .session_commands
+            .create_session(working_dir, tool_selection)
             .await
         {
-            Ok(created) => created,
+            Ok(session_id) => {
+                self.focused_session_id = Some(session_id.clone());
+                Ok(session_id)
+            },
             Err(error) => {
-                tracing::error!(working_dir = %working_dir, error = %error, "create session failed");
                 self.send_error(-32603, &error.to_string());
-                return Err(HandlerError::SessionManager(error));
-            },
-        };
-        let sid = created.session.id().clone();
-        self.focused_session_id = Some(sid.clone());
-
-        tracing::info!(session_id = %sid, "session created, dispatching SessionStart");
-        self.broadcast_event(created.start_event);
-
-        match created.session.initialize_runtime(&working_dir).await {
-            Ok(()) => {
-                tracing::info!(session_id = %sid, "session fully initialized");
-                Ok(sid)
-            },
-            Err(e) => {
-                tracing::error!(session_id = %sid, error = %e, "session prompt init failed");
-                self.send_error(-32603, &e.to_string());
-                Err(HandlerError::Session(e))
+                Err(error)
             },
         }
     }
@@ -83,7 +85,7 @@ impl CommandHandler {
             .session_manager()
             .read_model(sid)
             .await
-            .map(|state| state.working_dir)
+            .map(|state| state.identity.working_dir.clone())
             .map_err(|e| format!("read session {sid}: {e}"))
     }
 
@@ -94,7 +96,7 @@ impl CommandHandler {
             .open(session_id.clone())
             .await
         {
-            Ok(session) => {
+            Ok(_) => {
                 if let Err(e) = self.repair_stale_session(&session_id).await {
                     self.send_error(-32603, &e.to_string());
                     return;
@@ -106,18 +108,9 @@ impl CommandHandler {
                         return;
                     },
                 };
-                let snapshot = session_snapshot(&state);
 
-                if let Err(e) = session.ensure_runtime_ready().await {
-                    self.send_error(-32603, &e.to_string());
-                    return;
-                }
                 self.focused_session_id = Some(session_id.clone());
-                self.event_bus
-                    .send_notification(ClientNotification::SessionResumed {
-                        session_id: session_id.into_string(),
-                        snapshot,
-                    });
+                self.event_bus.send_session_resumed(&state);
             },
             Err(e) => self.send_error(40401, &format!("Session not found: {e}")),
         }

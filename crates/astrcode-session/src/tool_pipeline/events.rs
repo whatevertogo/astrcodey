@@ -1,7 +1,7 @@
-use astrcode_core::{event::EventPayload, tool::ToolResult};
+use astrcode_core::{event::DurableEventPayload, tool::ToolResult};
 
 use crate::{
-    tool_types::{DeclaredToolBatch, PreparedToolBatch, PreparedToolInvocation},
+    tool_types::{PreparedToolInvocation, ToolBatch, ToolExecutionOutcome},
     turn_context::TurnError,
     turn_publish::TurnEvents,
 };
@@ -10,15 +10,12 @@ use crate::{
 
 pub(super) async fn declare_tool_batch(
     publisher: &TurnEvents,
-    batch: PreparedToolBatch,
-) -> Result<DeclaredToolBatch, TurnError> {
-    for call in &batch.prepared {
+    batch: &ToolBatch,
+) -> Result<(), TurnError> {
+    for call in &batch.calls {
         declare_tool_call(publisher, call).await?;
     }
-    Ok(DeclaredToolBatch {
-        prepared: batch.prepared,
-        pre_executed: batch.pre_executed,
-    })
+    Ok(())
 }
 
 async fn declare_tool_call(
@@ -26,7 +23,7 @@ async fn declare_tool_call(
     call: &PreparedToolInvocation,
 ) -> Result<(), TurnError> {
     publisher
-        .durable(EventPayload::ToolCallRequested {
+        .durable(DurableEventPayload::ToolCallRequested {
             call_id: call.call_id.clone().into(),
             tool_name: call.name.clone(),
             arguments: call.tool_input.clone(),
@@ -35,44 +32,67 @@ async fn declare_tool_call(
         .await
 }
 
-pub(super) async fn complete_tool_call(
+pub(super) async fn finish_tool_call(
     publisher: &TurnEvents,
     call_id: &str,
     tool_name: String,
-    result: ToolResult,
+    outcome: &ToolExecutionOutcome,
     arguments: String,
     arguments_json: Option<serde_json::Value>,
 ) -> Result<(), TurnError> {
-    publisher
-        .durable(EventPayload::ToolCallCompleted {
+    let payload = match outcome {
+        ToolExecutionOutcome::Completed(result) => DurableEventPayload::ToolCallCompleted {
             call_id: call_id.into(),
             tool_name,
-            result,
+            result: result.result.clone(),
             arguments,
             arguments_json,
-        })
-        .await
+        },
+        ToolExecutionOutcome::Failed {
+            error,
+            metadata,
+            duration_ms,
+        } => DurableEventPayload::ToolCallFailed {
+            call_id: call_id.into(),
+            tool_name,
+            error: error.clone(),
+            metadata: metadata.clone(),
+            duration_ms: *duration_ms,
+            arguments,
+            arguments_json,
+        },
+        ToolExecutionOutcome::Cancelled {
+            reason,
+            duration_ms,
+        } => DurableEventPayload::ToolCallCancelled {
+            call_id: call_id.into(),
+            tool_name,
+            reason: reason.clone(),
+            duration_ms: *duration_ms,
+            arguments,
+            arguments_json,
+        },
+    };
+    publisher.durable(payload).await
 }
 
-pub(super) fn missing_tool_result(call: &PreparedToolInvocation) -> ToolResult {
-    let message = format!("Tool '{}' did not produce a result", call.name);
-    ToolResult {
-        call_id: call.call_id.clone(),
-        content: message.clone(),
-        is_error: true,
-        error: Some(message),
-        metadata: Default::default(),
-        duration_ms: None,
+pub(super) fn tool_result_for_output(outcome: &ToolExecutionOutcome) -> ToolResult {
+    match outcome {
+        ToolExecutionOutcome::Completed(result) => result.result.clone(),
+        ToolExecutionOutcome::Failed {
+            error,
+            metadata,
+            duration_ms,
+        } => ToolResult::error(error.clone())
+            .with_metadata(metadata.clone())
+            .with_duration_ms(*duration_ms),
+        ToolExecutionOutcome::Cancelled {
+            reason,
+            duration_ms,
+        } => ToolResult::error(format!("Tool cancelled: {reason}")).with_duration_ms(*duration_ms),
     }
 }
 
-pub(super) fn tool_ui_response_error_result(call_id: &str, message: &str) -> ToolResult {
-    ToolResult {
-        call_id: call_id.to_string(),
-        content: message.to_string(),
-        is_error: true,
-        error: Some(message.to_string()),
-        metadata: Default::default(),
-        duration_ms: None,
-    }
+pub(super) fn missing_tool_outcome(call: &PreparedToolInvocation) -> ToolExecutionOutcome {
+    ToolExecutionOutcome::failed(format!("Tool '{}' did not produce an outcome", call.name))
 }

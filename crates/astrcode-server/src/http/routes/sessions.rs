@@ -2,18 +2,16 @@
 
 use std::collections::BTreeSet;
 
-use astrcode_core::{extension::SessionToolSelection, storage::SessionSummary, types::SessionId};
-use astrcode_protocol::{
-    commands::ClientCommand,
-    http::{
-        CommandCompletionItemDto, CommandCompletionRequest, CommandCompletionResponse,
-        CommandInvokeRequest, CommandInvokeResponse, CompactSessionRequest, CompactSessionResponse,
-        ConfigureSessionToolsRequest, ConfigureSessionToolsResponse, CreateSessionRequest,
-        CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest, PromptSubmitResponse,
-        SessionListItemDto, SessionListResponseDto, SlashCommandListResponseDto,
-        ToolApprovalRequest, ToolSelectionDto, ToolUiRespondRequest, ToolUiRespondResponse,
-    },
+use astrcode_core::{tool::SessionToolSelection, types::SessionId};
+use astrcode_protocol::http::{
+    CommandCompletionItemDto, CommandCompletionRequest, CommandCompletionResponse,
+    CommandInvokeRequest, CommandInvokeResponse, CompactSessionRequest, CompactSessionResponse,
+    ConfigureSessionToolsRequest, ConfigureSessionToolsResponse, CreateSessionRequest,
+    CreateSessionResponseDto, DeleteProjectResponseDto, PromptRequest, PromptSubmitResponse,
+    SessionListItemDto, SessionListResponseDto, SlashCommandListResponseDto, ToolApprovalRequest,
+    ToolSelectionDto,
 };
+use astrcode_session_projection::SessionSummary;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -27,7 +25,12 @@ use super::super::{
     not_found_response,
     projection::{session_title_from_working_dir, snapshot::conversation_to_dto},
 };
-use crate::handler::{CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission};
+use crate::{
+    protocol_mapping::{command_info_to_http_dto, keybinding_to_dto, status_item_to_dto},
+    session_command_contract::{
+        CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission,
+    },
+};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -45,8 +48,9 @@ pub(in crate::http) async fn create_session(
     };
     tracing::info!(working_dir = %request.working_dir, "POST /api/sessions — create_session");
     match state
-        .handler
-        .create_session_with_tool_selection(request.working_dir, tool_selection)
+        .app
+        .session_commands()
+        .create_session(request.working_dir, tool_selection)
         .await
     {
         Ok(session_id) => {
@@ -74,7 +78,8 @@ pub(in crate::http) async fn configure_session_tools(
     };
     let session_id = SessionId::from(session_id);
     let session = match state
-        .runtime
+        .app
+        .runtime()
         .session_manager()
         .open(session_id.clone())
         .await
@@ -84,7 +89,8 @@ pub(in crate::http) async fn configure_session_tools(
     };
 
     match state
-        .runtime
+        .app
+        .runtime()
         .session_manager()
         .configure_session_tools(&session, selection)
         .await
@@ -124,7 +130,7 @@ fn normalized_tool_names(names: Vec<String>) -> Result<Vec<String>, String> {
 }
 
 pub(in crate::http) async fn list_sessions(State(state): State<HttpState>) -> Response {
-    match state.runtime.session_manager().list_summaries().await {
+    match state.app.runtime().session_manager().list_summaries().await {
         Ok(summaries) => Json(SessionListResponseDto {
             sessions: summaries.into_iter().map(summary_to_dto).collect(),
         })
@@ -138,22 +144,16 @@ pub(in crate::http) async fn conversation_snapshot(
     Path(session_id): Path<String>,
 ) -> Response {
     let session_id = SessionId::from(session_id);
-    // 主动修复进程重启后残留的过期 turn phase（如 CallingTool / Thinking），
-    // 使前端打开 session 时就能看到正确的 Idle 状态。
-    if let Err(e) = state.handler.repair_stale_turn(session_id.clone()).await {
-        if !matches!(e, HandlerError::NoActiveTurn) {
-            tracing::warn!(session_id = %session_id, error = %e, "stale turn repair failed in snapshot");
-        }
-    }
     match state
-        .runtime
+        .app
+        .runtime()
         .session_manager()
         .read_model(&session_id)
         .await
     {
         Ok(snapshot) => {
-            let streaming = state.event_bus.streaming_snapshot(&session_id);
-            Json(conversation_to_dto(snapshot, streaming.as_ref())).into_response()
+            let streaming = state.app.event_bus().streaming_snapshot(&session_id);
+            Json(conversation_to_dto(&snapshot, streaming.as_ref())).into_response()
         },
         Err(error) => not_found_response("session_not_found", error),
     }
@@ -171,8 +171,9 @@ pub(in crate::http) async fn inject_message(
     );
     let session_id = SessionId::from(session_id);
     match state
-        .handler
-        .inject_input_for_session(session_id.clone(), request.text)
+        .app
+        .session_commands()
+        .inject_input(session_id.clone(), request.text)
         .await
     {
         Ok(PromptSubmission::Handled { message }) => Json(PromptSubmitResponse::Handled {
@@ -205,7 +206,7 @@ pub(in crate::http) async fn resolve_tool_approval(
     Json(request): Json<ToolApprovalRequest>,
 ) -> Response {
     let session_id_str = session_id.clone();
-    let Some(ops) = state.runtime.runtime_services().session_ops() else {
+    let Some(ops) = state.app.runtime().runtime_services().session_ops() else {
         return internal_error_response(
             "session_ops_unavailable",
             "session operations unavailable",
@@ -219,36 +220,6 @@ pub(in crate::http) async fn resolve_tool_approval(
         Err(error) => handler_error_response(
             HandlerError::SessionNotFound(error.to_string()),
             "approval_failed",
-        ),
-    }
-}
-
-pub(in crate::http) async fn submit_tool_ui_respond(
-    State(state): State<HttpState>,
-    Path((session_id, call_id)): Path<(String, String)>,
-    Json(request): Json<ToolUiRespondRequest>,
-) -> Response {
-    let session_id_str = session_id.clone();
-    let Some(ops) = state.runtime.runtime_services().session_ops() else {
-        return internal_error_response(
-            "session_ops_unavailable",
-            "session operations unavailable",
-        );
-    };
-    if request.answers.is_empty() {
-        return handler_error_response(
-            HandlerError::InvalidRequest("answers must not be empty".into()),
-            "tool_ui_respond_failed",
-        );
-    }
-    match ops
-        .resolve_tool_ui_response(&session_id_str, &call_id, request.answers)
-        .await
-    {
-        Ok(()) => Json(ToolUiRespondResponse { accepted: true }).into_response(),
-        Err(error) => handler_error_response(
-            HandlerError::SessionNotFound(error.to_string()),
-            "tool_ui_respond_failed",
         ),
     }
 }
@@ -273,10 +244,11 @@ pub(in crate::http) async fn submit_prompt(
     );
     let session_id = SessionId::from(session_id);
     let result = state
-        .handler
-        .submit_input_for_session(
+        .app
+        .session_commands()
+        .submit_input(
             session_id.clone(),
-            crate::turn_scheduler::PromptInput {
+            astrcode_core::user_input::UserInput {
                 text: request.text,
                 attachments,
             },
@@ -318,8 +290,9 @@ pub(in crate::http) async fn invoke_command(
 ) -> Response {
     let session_id = SessionId::from(session_id);
     match state
-        .handler
-        .invoke_command_for_session(session_id.clone(), name, request.arguments)
+        .app
+        .session_commands()
+        .invoke_named_command(session_id.clone(), name, request.arguments)
         .await
     {
         Ok(CommandInvocation::Display { content, is_error }) => {
@@ -354,8 +327,9 @@ pub(in crate::http) async fn complete_command(
 ) -> Response {
     let session_id = SessionId::from(session_id);
     match state
-        .handler
-        .complete_command_for_session(session_id, name, request.argument, request.cursor)
+        .app
+        .session_commands()
+        .complete_command(session_id, name, request.argument, request.cursor)
         .await
     {
         Ok(completions) => Json(CommandCompletionResponse {
@@ -380,26 +354,35 @@ pub(in crate::http) async fn list_commands(
     Path(session_id): Path<String>,
 ) -> Response {
     let session_id = SessionId::from(session_id);
-    match state.handler.command_list_for_session(session_id).await {
+    match state
+        .app
+        .session_commands()
+        .command_list(&session_id, false)
+        .await
+    {
         Ok(command_list) => {
-            use astrcode_protocol::http::{KeybindingDto, StatusItemDto};
-            let keybindings: Vec<KeybindingDto> = state
-                .runtime
+            let keybindings = state
+                .app
+                .runtime()
                 .extension_runner()
                 .collect_keybindings()
                 .into_iter()
-                .map(Into::into)
+                .map(keybinding_to_dto)
                 .collect();
-            let status_items: Vec<StatusItemDto> = state
-                .runtime
+            let status_items = state
+                .app
+                .runtime()
                 .extension_runner()
                 .collect_status_items()
                 .into_iter()
-                .map(Into::into)
+                .map(status_item_to_dto)
                 .collect();
             Json(SlashCommandListResponseDto {
-                commands: command_list.commands.into_iter().map(Into::into).collect(),
-                shadowed_commands: command_list.shadowed_commands,
+                commands: command_list
+                    .commands
+                    .into_iter()
+                    .map(command_info_to_http_dto)
+                    .collect(),
                 keybindings,
                 status_items,
             })
@@ -416,21 +399,22 @@ pub(in crate::http) async fn compact_session(
 ) -> Response {
     let session_id = SessionId::from(session_id);
     match state
-        .handler
-        .compact_session(session_id, request.keep_recent_turns)
+        .app
+        .session_commands()
+        .compact_session(&session_id, request.keep_recent_turns)
         .await
     {
         Ok(ManualCompactOutcome::Compacted { session_id }) => Json(CompactSessionResponse {
             accepted: true,
             deferred: false,
-            new_session_id: Some(session_id.into_string()),
+            session_id: Some(session_id.into_string()),
             message: "compact accepted".into(),
         })
         .into_response(),
         Ok(ManualCompactOutcome::Skipped { message }) => Json(CompactSessionResponse {
             accepted: false,
             deferred: false,
-            new_session_id: None,
+            session_id: None,
             message,
         })
         .into_response(),
@@ -443,7 +427,12 @@ pub(in crate::http) async fn abort_session(
     Path(session_id): Path<String>,
 ) -> Response {
     let session_id = SessionId::from(session_id);
-    match state.handler.abort_session(session_id).await {
+    match state
+        .app
+        .session_commands()
+        .abort_session(&session_id)
+        .await
+    {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => handler_error_response(error, "abort_failed"),
     }
@@ -453,9 +442,11 @@ pub(in crate::http) async fn delete_session(
     State(state): State<HttpState>,
     Path(session_id): Path<String>,
 ) -> Response {
+    let session_id = SessionId::from(session_id);
     match state
-        .handler
-        .handle(ClientCommand::DeleteSession { session_id })
+        .app
+        .session_commands()
+        .delete_session(&session_id)
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -474,7 +465,12 @@ pub(in crate::http) async fn fork_session(
         .storage_seq
         .map(|seq| seq.to_string())
         .or(request.turn_id);
-    match state.handler.fork_session(source_id, at_cursor).await {
+    match state
+        .app
+        .session_commands()
+        .fork_session(source_id, at_cursor)
+        .await
+    {
         Ok(new_session_id) => Json(CreateSessionResponseDto {
             session_id: new_session_id.into_string(),
         })
@@ -490,7 +486,12 @@ pub(in crate::http) async fn delete_project(
     State(state): State<HttpState>,
     Query(params): Query<DeleteProjectParams>,
 ) -> Response {
-    match state.handler.delete_project(params.working_dir).await {
+    match state
+        .app
+        .session_commands()
+        .delete_project(&params.working_dir)
+        .await
+    {
         Ok(deleted_count) => Json(DeleteProjectResponseDto { deleted_count }).into_response(),
         Err(error) => internal_error_response("delete_failed", error),
     }
@@ -504,13 +505,10 @@ fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
     SessionListItemDto {
         session_id: summary.session_id.into_string(),
         working_dir: summary.working_dir,
-        display_name: title.clone(),
         title,
         created_at: summary.created_at,
         updated_at: summary.updated_at,
-        parent_session_id: summary.parent_session_id.map(SessionId::into_string),
         phase: summary.phase.into(),
         first_user_message: summary.first_user_message,
-        source_extension: summary.source_extension,
     }
 }

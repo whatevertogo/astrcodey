@@ -6,7 +6,6 @@ pub mod handle_event;
 
 use std::collections::BTreeMap;
 
-use astrcode_core::render::RenderSpec;
 use astrcode_protocol::events::ClientNotification;
 
 use crate::tui::{
@@ -15,6 +14,7 @@ use crate::tui::{
     ext::{
         builtin::register_builtin, message::MessageRendererRegistry, tool::ToolRendererRegistry,
     },
+    render::RenderSpec,
     store::transcript::{Message, MessageBody, MessageRole, ScrollbackEntry},
     theme::Theme,
 };

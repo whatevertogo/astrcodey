@@ -1,15 +1,20 @@
 //! 服务器组装：路由注册、TCP 启动、`run.json` 写入。
 
-use std::{path::Path, sync::Arc};
+use std::{
+    io::{self, Write},
+    path::Path,
+    sync::Arc,
+};
 
+#[cfg(feature = "testing")]
 use astrcode_protocol::events::ClientNotification;
-use astrcode_support::event_fanout::EventFanout;
+use astrcode_protocol::http::RunInfoDto;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
     http::{Method, header},
     middleware,
-    routing::{delete, get, post, put},
+    routing::{any, delete, get, post, put},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
@@ -19,7 +24,7 @@ use super::{
     routes::{config, extensions, lifecycle, models, sessions},
     stream,
 };
-use crate::{bootstrap::ServerRuntime, server_event_bus::ServerEventBus};
+use crate::{bootstrap::ServerApp, server_event_bus::ServerEventBus};
 
 type RouterParts = (Router, String, Arc<ServerEventBus>);
 
@@ -27,6 +32,7 @@ const MAX_PROMPT_HTTP_BODY_BYTES: usize = crate::turn_scheduler::MAX_PROMPT_TEXT
     + astrcode_core::message_attachment::MAX_ATTACHMENTS
         * astrcode_core::message_attachment::MAX_ATTACHMENT_CONTENT_BYTES
     + 64 * 1024;
+const RUN_INFO_TEMPFILE_PREFIX: &str = ".run.json.";
 
 #[cfg(feature = "testing")]
 #[derive(Clone)]
@@ -53,35 +59,23 @@ pub enum HttpServerError {
 ///
 /// Returns `(Router, auth_token)` — the token must be passed to the frontend
 /// so it can include it in `Authorization: Bearer <token>` headers.
-pub fn router(
-    runtime: Arc<ServerRuntime>,
-    event_tx: Arc<EventFanout<ClientNotification>>,
-) -> Result<(Router, String), HttpServerError> {
-    let (app, auth_token, _) = router_parts(runtime, event_tx)?;
-    Ok((app, auth_token))
+pub fn router(server_app: Arc<ServerApp>) -> Result<(Router, String), HttpServerError> {
+    let (router, auth_token, _) = router_parts(server_app);
+    Ok((router, auth_token))
 }
 
 #[cfg(feature = "testing")]
 pub fn router_with_event_publisher(
-    runtime: Arc<ServerRuntime>,
-    event_tx: Arc<EventFanout<ClientNotification>>,
+    server_app: Arc<ServerApp>,
 ) -> Result<(Router, String, TestEventPublisher), HttpServerError> {
-    let (app, auth_token, event_bus) = router_parts(runtime, event_tx)?;
-    Ok((app, auth_token, TestEventPublisher { event_bus }))
+    let (router, auth_token, event_bus) = router_parts(server_app);
+    Ok((router, auth_token, TestEventPublisher { event_bus }))
 }
 
-fn router_parts(
-    runtime: Arc<ServerRuntime>,
-    _event_tx: Arc<EventFanout<ClientNotification>>,
-) -> Result<RouterParts, HttpServerError> {
+fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
     let auth_token = configured_auth_token();
-    let server_system = crate::bootstrap::spawn_server_system_without_legacy(&runtime);
-    let event_bus = Arc::clone(&server_system.event_bus);
-    let state = HttpState {
-        runtime,
-        handler: server_system.handler,
-        event_bus: server_system.event_bus,
-    };
+    let event_bus = Arc::clone(server_app.event_bus());
+    let state = HttpState { app: server_app };
     let expected_bearer = format!("Bearer {auth_token}");
 
     let allowed_origins = collect_allowed_origins();
@@ -123,10 +117,6 @@ fn router_parts(
         .route(
             "/api/sessions/{id}/approve",
             post(sessions::resolve_tool_approval),
-        )
-        .route(
-            "/api/sessions/{id}/tool-calls/{call_id}/tool-ui/respond",
-            post(sessions::submit_tool_ui_respond),
         )
         .route("/api/sessions/{id}/commands", get(sessions::list_commands))
         .route(
@@ -173,6 +163,10 @@ fn router_parts(
             post(extensions::reload_extensions),
         )
         .route("/api/extensions/set-enabled", post(extensions::set_enabled))
+        .route(
+            "/api/extensions/{extension_id}/{*path}",
+            any(extensions::dispatch_authenticated_http),
+        )
         .route("/api/models/current", get(models::get_current_model))
         .route("/api/models", get(models::list_models))
         .route("/api/models/test", post(models::test_model))
@@ -190,7 +184,7 @@ fn router_parts(
     let public_extension_http = Router::new()
         .fallback(extensions::dispatch_public_http)
         .layer(DefaultBodyLimit::max(
-            astrcode_core::extension::MAX_EXTENSION_HTTP_BODY_BYTES,
+            astrcode_extension_sdk::extension::MAX_EXTENSION_HTTP_BODY_BYTES,
         ));
     let app = Router::new()
         .merge(protected_api)
@@ -198,18 +192,17 @@ fn router_parts(
         .layer(cors)
         .with_state(state);
 
-    Ok((app, auth_token, event_bus))
+    (app, auth_token, event_bus)
 }
 
 /// Convenience wrapper: build router and run until graceful shutdown.
 pub async fn run_http_server(
-    runtime: Arc<ServerRuntime>,
+    server_app: Arc<ServerApp>,
     addr: std::net::SocketAddr,
 ) -> Result<(), HttpServerError> {
-    let event_tx = Arc::new(EventFanout::new(1024));
-    let shutdown_token = runtime.shutdown_token().clone();
-    let runtime_for_shutdown = Arc::clone(&runtime);
-    let (app, auth_token) = router(Arc::clone(&runtime), event_tx)?;
+    server_app.initialize().await;
+    let shutdown_token = server_app.runtime().shutdown_token().clone();
+    let (app, auth_token) = router(Arc::clone(&server_app))?;
     tracing::info!("Auth token: {}", masked_token(&auth_token));
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
@@ -224,13 +217,9 @@ pub async fn run_http_server(
         .with_graceful_shutdown(async move {
             shutdown_token.cancelled().await;
             tracing::info!("graceful shutdown triggered");
-            runtime_for_shutdown
-                .scheduler()
-                .drain_detached_tasks()
-                .await;
-            runtime_for_shutdown.shutdown_extensions().await;
         })
         .await;
+    server_app.shutdown().await;
     remove_run_info_if_current(local_port, &auth_token);
     result?;
     Ok(())
@@ -239,8 +228,8 @@ pub async fn run_http_server(
 /// 将运行时端口写入 `~/.astrcode/run.json`，供前端 dev server 发现后端地址。
 ///
 /// 文件权限设为 600（仅属主可读写），因为其中含 auth token。
-pub fn write_run_info(port: u16, auth_token: &str) {
-    let dir = astrcode_support::hostpaths::astrcode_dir();
+fn write_run_info(port: u16, auth_token: &str) {
+    let dir = astrcode_core::config::defaults::astrcode_dir();
     if let Err(e) = std::fs::create_dir_all(&dir) {
         tracing::warn!(path = %dir.display(), error = %e, "failed to create astrcode dir for run.json");
         return;
@@ -250,33 +239,46 @@ pub fn write_run_info(port: u16, auth_token: &str) {
 }
 
 fn write_run_info_at(path: &Path, port: u16, auth_token: &str) {
-    let content = serde_json::json!({
-        "port": port,
-        "authToken": auth_token,
-    })
-    .to_string();
-    if let Err(e) = std::fs::write(path, &content) {
+    let run_info = RunInfoDto {
+        port,
+        auth_token: auth_token.into(),
+    };
+    let Ok(content) = serde_json::to_string(&run_info) else {
+        tracing::error!("failed to serialize run.json");
+        return;
+    };
+    if let Err(e) = replace_run_info(path, content.as_bytes()) {
         tracing::warn!(path = %path.display(), error = %e, "failed to write run.json");
     }
-    // 防止同机用户通过 `~/.astrcode/run.json` 读取到该进程的 auth token
+}
+
+fn replace_run_info(path: &Path, content: &[u8]) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "run.json path must have a parent directory",
+        )
+    })?;
+    let mut builder = tempfile::Builder::new();
+    builder.prefix(RUN_INFO_TEMPFILE_PREFIX);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        if let Err(e) = std::fs::set_permissions(path, perms) {
-            tracing::warn!(path = %path.display(), error = %e, "failed to chmod 600 run.json");
-        }
+        builder.permissions(std::fs::Permissions::from_mode(0o600));
     }
+
+    let mut temporary = builder.tempfile_in(parent)?;
+    temporary.write_all(content)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map(|_| ())
+        .map_err(|error| error.error)
 }
 
 /// 退出时清理 `run.json`。
-pub fn remove_run_info() {
-    let path = astrcode_support::hostpaths::astrcode_dir().join("run.json");
-    let _ = std::fs::remove_file(path);
-}
-
 fn remove_run_info_if_current(port: u16, auth_token: &str) {
-    let path = astrcode_support::hostpaths::astrcode_dir().join("run.json");
+    let path = astrcode_core::config::defaults::astrcode_dir().join("run.json");
     remove_run_info_if_current_at(&path, port, auth_token);
 }
 
@@ -284,12 +286,10 @@ fn remove_run_info_if_current_at(path: &Path, port: u16, auth_token: &str) {
     let Ok(content) = std::fs::read_to_string(path) else {
         return;
     };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+    let Ok(run_info) = serde_json::from_str::<RunInfoDto>(&content) else {
         return;
     };
-    let matches_current = value.get("port").and_then(serde_json::Value::as_u64)
-        == Some(port as u64)
-        && value.get("authToken").and_then(serde_json::Value::as_str) == Some(auth_token);
+    let matches_current = run_info.port == port && run_info.auth_token == auth_token;
     if matches_current {
         let _ = std::fs::remove_file(path);
     }
@@ -309,7 +309,12 @@ fn masked_token(token: &str) -> String {
 mod tests {
     use std::fs;
 
-    use super::{masked_token, remove_run_info_if_current_at, write_run_info_at};
+    use astrcode_protocol::http::RunInfoDto;
+
+    use super::{
+        RUN_INFO_TEMPFILE_PREFIX, masked_token, remove_run_info_if_current_at, replace_run_info,
+        write_run_info_at,
+    };
 
     #[test]
     fn masked_token_handles_short_env_tokens() {
@@ -319,26 +324,48 @@ mod tests {
     }
 
     #[test]
-    fn remove_run_info_only_removes_matching_server() {
-        let root = std::env::temp_dir().join(format!(
-            "astrcode-run-info-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("run.json");
+    fn run_info_is_replaced_completely_and_removed_only_by_current_server() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("run.json");
+        fs::write(&path, vec![b'x'; 4096]).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        }
 
-        write_run_info_at(&path, 1111, "old-token");
         write_run_info_at(&path, 2222, "new-token");
+        let content = fs::read_to_string(&path).unwrap();
+        let run_info: RunInfoDto = serde_json::from_str(&content).unwrap();
+        assert_eq!(run_info.port, 2222);
+        assert_eq!(run_info.auth_token, "new-token");
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        let blocked_path = root.path().join("occupied");
+        fs::create_dir(&blocked_path).unwrap();
+        fs::write(blocked_path.join("old"), "old").unwrap();
+        assert!(replace_run_info(&blocked_path, b"new").is_err());
+        assert_eq!(fs::read_to_string(blocked_path.join("old")).unwrap(), "old");
+        assert!(fs::read_dir(root.path()).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(RUN_INFO_TEMPFILE_PREFIX)
+        }));
 
         remove_run_info_if_current_at(&path, 1111, "old-token");
         assert!(path.exists());
 
         remove_run_info_if_current_at(&path, 2222, "new-token");
         assert!(!path.exists());
-
-        let _ = fs::remove_dir_all(root);
     }
 }

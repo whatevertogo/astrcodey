@@ -94,6 +94,19 @@ assert.equal(streamingRun.status, 'streaming')
 assert.equal(streamingRun.hasStreamingWork, true)
 assert.equal(processSummaryTitle(streamingRun.segments[0]), '处理中')
 
+for (const [status, expectedRunStatus] of [
+  ['error', 'error'],
+  ['failed', 'error'],
+  ['cancelled', 'complete'],
+]) {
+  const terminalRun = buildAssistantRunModel([
+    tool(`terminal-${status}`, 'shell', status),
+  ])
+  assert.equal(terminalRun.status, expectedRunStatus)
+  assert.equal(terminalRun.hasStreamingWork, false)
+  assert.equal(terminalRun.hasAttention, false)
+}
+
 const messageItems = buildMessageListItems([
   { kind: 'user', id: 'u1', text: 'hi' },
   assistant('a4', 'thinking', 'complete'),

@@ -1,32 +1,27 @@
-//! JSON 参数修复。
+//! Best-effort repair of tool-call argument JSON.
 //!
-//! 某些 LLM 提供者可能生成格式不正确的 JSON。
-//! 本模块提供解析和修复常见问题的工具函数。
+//! Some LLM providers emit JSON that is almost valid, especially when a stream
+//! ends mid-value. This module repairs a small, deterministic set of mistakes
+//! while ensuring unsupported malformed input never reaches a tool.
 
-use std::borrow::Cow;
+use serde_json::Value;
 
-/// 解析并尝试修复 JSON 参数。
+/// Parse tool-call arguments and repair common provider mistakes.
 ///
-/// 某些 LLM 提供者（如 glm-5.1）可能生成格式不正确的 JSON。
-/// 此函数尝试修复常见问题，如：
-/// - 字符串值内包含原始控制字符（如真实换行符而非 `\n`）
-/// - 末尾缺少闭合括号
-/// - 末尾有多余的逗号
-/// - 引号不匹配
+/// The normal path parses without allocating. If parsing fails, one scan:
 ///
-/// 无法安全修复时返回原始解析错误。调用方必须拒绝执行，而不是把坏参数
-/// 静默替换成 `{}`，否则既会丢失 provider 原始输出，也可能误执行无参工具。
-pub(crate) fn parse_and_repair_json(
-    arguments: &str,
-    tool_name: &str,
-) -> serde_json::Result<serde_json::Value> {
-    // 首先尝试直接解析
-    let original_error = match serde_json::from_str::<serde_json::Value>(arguments) {
+/// - escapes raw control characters inside strings;
+/// - removes a comma before a closing bracket or after a complete root value;
+/// - closes a string or nested container truncated at the end.
+///
+/// If the repaired candidate is still invalid, the original parse error is
+/// returned so the caller can reject the call and preserve the provider output.
+pub(crate) fn parse_and_repair_json(arguments: &str, tool_name: &str) -> serde_json::Result<Value> {
+    let original_error = match serde_json::from_str::<Value>(arguments) {
         Ok(value) => return Ok(value),
         Err(error) => error,
     };
 
-    // 记录原始错误信息
     tracing::warn!(
         tool = %tool_name,
         arguments_preview = %arguments.chars().take(200).collect::<String>(),
@@ -34,196 +29,170 @@ pub(crate) fn parse_and_repair_json(
         "Failed to parse tool call arguments, attempting repair"
     );
 
-    let trimmed = arguments.trim();
+    let Some(repaired) = repair_tool_arguments(arguments.trim()) else {
+        log_repair_failure(tool_name, arguments, &original_error);
+        return Err(original_error);
+    };
 
-    // 尝试修复策略 1：去除末尾的逗号
-    if let Some(repaired) = trimmed.strip_suffix(',') {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(repaired) {
-            tracing::debug!(
-                tool = %tool_name,
-                "Successfully repaired JSON by removing trailing comma"
-            );
-            return Ok(value);
+    match serde_json::from_str::<Value>(&repaired) {
+        Ok(value) => {
+            tracing::debug!(tool = %tool_name, "Successfully repaired tool call arguments");
+            Ok(value)
+        },
+        Err(_) => {
+            log_repair_failure(tool_name, arguments, &original_error);
+            Err(original_error)
+        },
+    }
+}
+
+/// Produce one repaired candidate, or `None` when the input was unchanged.
+fn repair_tool_arguments(arguments: &str) -> Option<String> {
+    let mut repaired = String::with_capacity(arguments.len());
+    let mut open_containers = Vec::new();
+    let mut comma_pending = false;
+    let mut whitespace_after_comma = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut changed = false;
+
+    for ch in arguments.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                if ch.is_control() {
+                    changed = true;
+                    push_escaped_control_char(&mut repaired, ch, false);
+                } else {
+                    repaired.push(ch);
+                }
+                continue;
+            }
+
+            match ch {
+                '\\' => {
+                    escaped = true;
+                    repaired.push(ch);
+                },
+                '"' => {
+                    in_string = false;
+                    repaired.push(ch);
+                },
+                control if control.is_control() => {
+                    changed = true;
+                    push_escaped_control_char(&mut repaired, control, true);
+                },
+                _ => repaired.push(ch),
+            }
+            continue;
+        }
+
+        if comma_pending {
+            if ch.is_whitespace() {
+                whitespace_after_comma.push(ch);
+                continue;
+            }
+
+            if matches!(ch, '}' | ']') {
+                repaired.push_str(&whitespace_after_comma);
+                changed = true;
+            } else {
+                repaired.push(',');
+                repaired.push_str(&whitespace_after_comma);
+            }
+            comma_pending = false;
+            whitespace_after_comma.clear();
+        }
+
+        match ch {
+            '"' => {
+                in_string = true;
+                repaired.push(ch);
+            },
+            '{' => {
+                open_containers.push(OpenContainer::Object);
+                repaired.push(ch);
+            },
+            '[' => {
+                open_containers.push(OpenContainer::Array);
+                repaired.push(ch);
+            },
+            '}' if open_containers.last() == Some(&OpenContainer::Object) => {
+                open_containers.pop();
+                repaired.push(ch);
+            },
+            ']' if open_containers.last() == Some(&OpenContainer::Array) => {
+                open_containers.pop();
+                repaired.push(ch);
+            },
+            ',' => comma_pending = true,
+            _ => repaired.push(ch),
         }
     }
 
-    // 尝试修复策略 2：转义字符串值内的原始控制字符
-    // 某些 LLM（如 glm-5.1）会在 JSON 字符串内直接输出换行、制表符等，
-    // 这不符合 JSON 规范（控制字符必须转义）。
-    let escaped = escape_control_chars_in_json_strings(trimmed);
-    if escaped.as_ref() != trimmed {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(escaped.as_ref()) {
-            tracing::debug!(
-                tool = %tool_name,
-                "Successfully repaired JSON by escaping control characters in strings"
-            );
-            return Ok(value);
+    if comma_pending {
+        if open_containers.is_empty() {
+            changed = true;
+        } else {
+            repaired.push(',');
+            repaired.push_str(&whitespace_after_comma);
         }
     }
 
-    // 尝试修复策略 3：转义控制字符 + 关闭截断的字符串并补全缺失的闭合括号
-    let repaired = close_truncated_json(escaped.as_ref());
-    if repaired != escaped.as_ref() {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&repaired) {
-            tracing::debug!(
-                tool = %tool_name,
-                "Successfully repaired JSON by escaping control chars and closing truncated content"
-            );
-            return Ok(value);
-        }
+    if escaped {
+        repaired.pop();
+        changed = true;
+    }
+    if in_string {
+        repaired.push('"');
+        changed = true;
     }
 
-    // 尝试修复策略 4：仅关闭截断（不转义控制字符）
-    let repaired = close_truncated_json(trimmed);
-    if repaired != trimmed {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(&repaired) {
-            tracing::debug!(
-                tool = %tool_name,
-                "Successfully repaired JSON by closing truncated content"
-            );
-            return Ok(value);
-        }
+    while let Some(opening) = open_containers.pop() {
+        repaired.push(match opening {
+            OpenContainer::Object => '}',
+            OpenContainer::Array => ']',
+        });
+        changed = true;
     }
 
-    // 所有修复尝试都失败，保留原始错误供调用方生成可观测的配对失败。
+    changed.then_some(repaired)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OpenContainer {
+    Object,
+    Array,
+}
+
+fn push_escaped_control_char(output: &mut String, ch: char, include_backslash: bool) {
+    if include_backslash {
+        output.push('\\');
+    }
+    match ch {
+        '\n' => output.push('n'),
+        '\r' => output.push('r'),
+        '\t' => output.push('t'),
+        '\u{0008}' => output.push('b'),
+        '\u{000C}' => output.push('f'),
+        other => {
+            const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
+            let value = other as usize;
+            output.push('u');
+            for shift in [12, 8, 4, 0] {
+                output.push(HEX_DIGITS[(value >> shift) & 0x0f] as char);
+            }
+        },
+    }
+}
+
+fn log_repair_failure(tool_name: &str, arguments: &str, error: &serde_json::Error) {
     tracing::error!(
         tool = %tool_name,
         arguments_preview = %arguments.chars().take(500).collect::<String>(),
-        error = %original_error,
+        error = %error,
         "All JSON repair attempts failed"
     );
-    Err(original_error)
-}
-
-/// 将 JSON 字符串值内的原始控制字符转义为 JSON 合法形式。
-///
-/// 扫描输入，在 JSON 字符串值（双引号内）遇到未转义的控制字符时，
-/// 将其替换为对应的 JSON 转义序列（`\n`、`\r`、`\t`、`\uXXXX`）。
-/// 不在字符串内的内容（键名、括号、数字等）保持不变。
-fn escape_control_chars_in_json_strings(s: &str) -> Cow<'_, str> {
-    let mut result = String::with_capacity(s.len());
-    let mut in_string = false;
-    let mut escape_next = false;
-    let mut has_changes = false;
-
-    for ch in s.chars() {
-        if escape_next {
-            escape_next = false;
-            // 如果反斜杠后面跟的是控制字符，需要转义它
-            // 例如 LLM 输出 \ 后跟真实换行 → 变成 \\n
-            if ch.is_control() {
-                has_changes = true;
-                match ch {
-                    '\n' => result.push('n'),
-                    '\r' => result.push('r'),
-                    '\t' => result.push('t'),
-                    '\u{0008}' => result.push('b'),
-                    '\u{000C}' => result.push('f'),
-                    c => {
-                        // 已经有一个 \ 前缀，追加 uXXXX
-                        result.push_str(&format!("u{:04x}", c as u32));
-                    },
-                }
-            } else {
-                result.push(ch);
-            }
-            continue;
-        }
-        if ch == '\\' {
-            escape_next = true;
-            result.push(ch);
-            continue;
-        }
-        if ch == '"' {
-            in_string = !in_string;
-            result.push(ch);
-            continue;
-        }
-        if in_string && ch.is_control() {
-            has_changes = true;
-            match ch {
-                '\n' => result.push_str("\\n"),
-                '\r' => result.push_str("\\r"),
-                '\t' => result.push_str("\\t"),
-                '\u{0008}' => result.push_str("\\b"),
-                '\u{000C}' => result.push_str("\\f"),
-                c => {
-                    // 其他控制字符用 \uXXXX 表示
-                    result.push_str(&format!("\\u{:04x}", c as u32));
-                },
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-
-    // 快速路径：没有控制字符需要转义，直接返回原字符串
-    if !has_changes {
-        return Cow::Borrowed(s);
-    }
-    Cow::Owned(result)
-}
-
-/// 关闭截断的 JSON：补上未闭合的字符串引号和缺失的括号。
-///
-/// 常见场景：LLM 流式响应被中断，导致工具调用参数 JSON 被截断，
-/// 如 `{"todos": [{"status": "com` → `{"todos": [{"status": "com"}]}`。
-fn close_truncated_json(s: &str) -> String {
-    let mut result = s.to_string();
-
-    // 用栈跟踪嵌套层级，确保按正确逆序关闭括号
-    let mut in_string = false;
-    let mut escape_next = false;
-    let mut bracket_stack: Vec<char> = Vec::new();
-
-    for ch in result.chars() {
-        if escape_next {
-            escape_next = false;
-            continue;
-        }
-        if ch == '\\' {
-            escape_next = true;
-            continue;
-        }
-        if ch == '"' {
-            in_string = !in_string;
-            continue;
-        }
-        if !in_string {
-            match ch {
-                '{' | '[' => bracket_stack.push(ch),
-                '}' if bracket_stack.last() == Some(&'{') => {
-                    bracket_stack.pop();
-                },
-                ']' if bracket_stack.last() == Some(&'[') => {
-                    bracket_stack.pop();
-                },
-                _ => {},
-            }
-        }
-    }
-
-    // 如果末尾有未完成的转义序列（如截断在 \ 后），先移除尾部的 \
-    // 否则后续补的 " 会被 \" 转义掉，导致字符串未真正闭合
-    if escape_next && result.ends_with('\\') {
-        result.pop();
-    }
-
-    // 补上缺失的闭合引号
-    if in_string {
-        result.push('"');
-    }
-
-    // 按嵌套逆序关闭剩余未闭合的括号
-    while let Some(opening) = bracket_stack.pop() {
-        match opening {
-            '{' => result.push('}'),
-            '[' => result.push(']'),
-            _ => {},
-        }
-    }
-
-    result
 }
 
 #[cfg(test)]
@@ -231,133 +200,68 @@ mod tests {
     use super::*;
 
     #[test]
-    fn close_truncated_json_closes_open_string() {
-        let result = close_truncated_json(r#"{"todos": [{"status": "com"#);
-        assert_eq!(result, r#"{"todos": [{"status": "com"}]}"#);
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["todos"][0]["status"], "com");
+    fn repairs_common_provider_mistakes() {
+        let cases = [
+            (
+                "valid input",
+                r#"{"detail":true}"#,
+                serde_json::json!({"detail": true}),
+            ),
+            (
+                "comma after root",
+                r#"{"detail":true},"#,
+                serde_json::json!({"detail": true}),
+            ),
+            (
+                "trailing commas",
+                "{\"items\":[1,2, \n],\"nested\":{\"ready\":true, },}",
+                serde_json::json!({"items": [1, 2], "nested": {"ready": true}}),
+            ),
+            (
+                "truncated containers",
+                r#"{"todos":[{"status":"com"#,
+                serde_json::json!({"todos": [{"status": "com"}]}),
+            ),
+            (
+                "raw control characters",
+                "{\"text\":\"line1\ncol1\tcol2\rline2\u{0001}\"}",
+                serde_json::json!({"text": "line1\ncol1\tcol2\rline2\u{0001}"}),
+            ),
+            (
+                "backslash before raw newline",
+                "{\"text\":\"line1\\\nline2\"}",
+                serde_json::json!({"text": "line1\nline2"}),
+            ),
+            (
+                "truncated after backslash",
+                r#"{"text":"abc\"#,
+                serde_json::json!({"text": "abc"}),
+            ),
+            (
+                "raw newline and truncation",
+                "{\"text\":\"line1\nline2",
+                serde_json::json!({"text": "line1\nline2"}),
+            ),
+        ];
+
+        for (case, input, expected) in cases {
+            let actual = parse_and_repair_json(input, "testTool")
+                .unwrap_or_else(|error| panic!("{case} was not repaired: {error}"));
+            assert_eq!(actual, expected, "{case}");
+        }
     }
 
     #[test]
-    fn close_truncated_json_handles_escaped_quotes() {
-        let result = close_truncated_json(r#"{"text": "say \"hello"#);
-        assert_eq!(result, r#"{"text": "say \"hello"}"#);
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["text"], r#"say "hello"#);
-    }
-
-    #[test]
-    fn close_truncated_json_adds_brackets_without_string() {
-        let result = close_truncated_json(r#"{"key": {"nested": [1, 2"#);
-        assert_eq!(result, r#"{"key": {"nested": [1, 2]}}"#);
-        let _: serde_json::Value = serde_json::from_str(&result).unwrap();
-    }
-
-    #[test]
-    fn close_truncated_json_no_change_for_valid_json() {
-        let input = r#"{"todos": []}"#;
-        assert_eq!(close_truncated_json(input), input);
-    }
-
-    #[test]
-    fn parse_and_repair_json_handles_truncated_string() {
-        let result = parse_and_repair_json(r#"{"todos": [{"status": "com"#, "testTool").unwrap();
-        assert_eq!(result["todos"][0]["status"], "com");
-    }
-
-    #[test]
-    fn parse_and_repair_json_reports_original_error_on_garbage() {
-        let error = parse_and_repair_json(
+    fn reports_original_error_for_unsupported_malformed_json() {
+        let cases = [
             r#"{"segments":[{"emotion":"NORMAL","text">"news"}]}"#,
-            "interact",
-        )
-        .unwrap_err();
+            r#"{"items":[1,2,"#,
+        ];
 
-        assert!(error.to_string().contains("expected `:`"));
-    }
-
-    #[test]
-    fn escape_control_chars_escapes_raw_newlines() {
-        let input = "{\"text\": \"line1\nline2\"}";
-        let result = escape_control_chars_in_json_strings(input);
-        assert_eq!(result, r#"{"text": "line1\nline2"}"#);
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["text"], "line1\nline2");
-    }
-
-    #[test]
-    fn escape_control_chars_escapes_tab_and_carriage_return() {
-        let input = "{\"text\": \"col1\tcol2\r\nend\"}";
-        let result = escape_control_chars_in_json_strings(input);
-        assert_eq!(result, r#"{"text": "col1\tcol2\r\nend"}"#);
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["text"], "col1\tcol2\r\nend");
-    }
-
-    #[test]
-    fn escape_control_chars_no_change_for_valid_json() {
-        let input = r#"{"text": "already\\nescaped"}"#;
-        assert_eq!(escape_control_chars_in_json_strings(input), input);
-    }
-
-    #[test]
-    fn parse_and_repair_json_handles_raw_newlines_in_string() {
-        // Simulates what weak LLMs produce: real newlines inside JSON string values
-        let input = "{\"newStr\": \"use std::sync::Arc;\n\nuse agent::AgentConfig;\"}";
-        let result = parse_and_repair_json(input, "edit").unwrap();
-        assert_eq!(
-            result["newStr"],
-            "use std::sync::Arc;\n\nuse agent::AgentConfig;"
-        );
-    }
-
-    #[test]
-    fn parse_and_repair_json_handles_raw_newlines_and_truncation() {
-        // Both raw newlines AND truncation
-        let input = "{\"newStr\": \"line1\nline2";
-        let result = parse_and_repair_json(input, "edit").unwrap();
-        assert_eq!(result["newStr"], "line1\nline2");
-    }
-
-    #[test]
-    fn escape_control_chars_preserves_non_string_content() {
-        // Control chars outside strings should NOT be escaped
-        let input = "{\n  \"key\": \"value\"\n}";
-        // The \n between { and "key" are outside strings — should be preserved as-is
-        let result = escape_control_chars_in_json_strings(input);
-        assert_eq!(result, input);
-    }
-
-    #[test]
-    fn escape_control_chars_handles_backslash_before_control_char() {
-        // LLM outputs \ followed by real newline inside string → should become \n
-        let input = "{\"text\": \"line1\\\nline2\"}";
-        let result = escape_control_chars_in_json_strings(input);
-        assert_eq!(result, r#"{"text": "line1\nline2"}"#);
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["text"], "line1\nline2");
-    }
-
-    #[test]
-    fn parse_and_repair_json_handles_backslash_before_newline_in_large_edit() {
-        // Simulates the actual failure scenario from logs:
-        // LLM generates large edit JSON with \+real-newline in string values
-        let input = "{\"edits\": [{\"newStr\": \"use std::sync::Arc;\\\n\\\nuse \
-                     agent::AgentConfig;\", \"oldStr\": \"use std::sync::Arc;\"}]}";
-        let result = parse_and_repair_json(input, "edit").unwrap();
-        assert_eq!(
-            result["edits"][0]["newStr"],
-            "use std::sync::Arc;\n\nuse agent::AgentConfig;"
-        );
-        assert_eq!(result["edits"][0]["oldStr"], "use std::sync::Arc;");
-    }
-
-    #[test]
-    fn close_truncated_json_handles_trailing_backslash() {
-        // Truncated right after a backslash inside a string
-        let result = close_truncated_json(r#"{"text": "abc\"#);
-        assert_eq!(result, r#"{"text": "abc"}"#);
-        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-        assert_eq!(parsed["text"], "abc");
+        for input in cases {
+            let original_error = serde_json::from_str::<Value>(input).unwrap_err();
+            let repaired_error = parse_and_repair_json(input, "interact").unwrap_err();
+            assert_eq!(repaired_error.to_string(), original_error.to_string());
+        }
     }
 }

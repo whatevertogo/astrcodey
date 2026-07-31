@@ -2,8 +2,9 @@
 
 use std::collections::HashMap;
 
-use astrcode_core::tool::ToolResult;
 use tokio::sync::watch;
+
+use crate::tool_types::ToolExecutionOutcome;
 
 /// 同 step 内 `check_same_step` 的判定结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,9 +17,9 @@ pub(crate) enum SameStepCheck {
 
 struct SameStepInFlight {
     primary_call_id: String,
-    result_tx: watch::Sender<Option<ToolResult>>,
+    outcome_tx: watch::Sender<Option<ToolExecutionOutcome>>,
     /// 保持至少一个 receiver 存活，确保 `send` 能写入最新结果。
-    _result_rx: watch::Receiver<Option<ToolResult>>,
+    _outcome_rx: watch::Receiver<Option<ToolExecutionOutcome>>,
 }
 
 /// 防止模型对相同 `(toolName, args)` 陷入死循环。
@@ -68,11 +69,11 @@ impl ToolCallDeduplicator {
         if let std::collections::hash_map::Entry::Vacant(entry) =
             self.same_step_in_flight.entry(key)
         {
-            let (result_tx, result_rx) = watch::channel(None);
+            let (outcome_tx, outcome_rx) = watch::channel(None);
             entry.insert(SameStepInFlight {
                 primary_call_id: call_id.to_string(),
-                result_tx,
-                _result_rx: result_rx,
+                outcome_tx,
+                _outcome_rx: outcome_rx,
             });
             SameStepCheck::Primary
         } else {
@@ -82,14 +83,14 @@ impl ToolCallDeduplicator {
     }
 
     /// 在 `commit_tool_results` 完成后调用；释放同 step 等待者并记录跨 step 统计。
-    pub(crate) fn finalize_result(&mut self, call_id: &str, result: &ToolResult) {
+    pub(crate) fn finalize_outcome(&mut self, call_id: &str, outcome: &ToolExecutionOutcome) {
         let Some(key) = self.call_key_by_call_id.get(call_id).cloned() else {
             return;
         };
 
         if let Some(entry) = self.same_step_in_flight.get(&key) {
             if entry.primary_call_id == call_id
-                && entry.result_tx.send(Some(result.clone())).is_err()
+                && entry.outcome_tx.send(Some(outcome.clone())).is_err()
             {
                 tracing::warn!(
                     call_id,
@@ -102,7 +103,10 @@ impl ToolCallDeduplicator {
     }
 
     /// 同 step 重复调用等待 Primary 的最终结果（含 PostToolUse 处理后的内容）。
-    pub(crate) async fn await_same_step_result(&self, duplicate_call_id: &str) -> ToolResult {
+    pub(crate) async fn await_same_step_outcome(
+        &self,
+        duplicate_call_id: &str,
+    ) -> ToolExecutionOutcome {
         let Some(key) = self.call_key_by_call_id.get(duplicate_call_id) else {
             return deduplication_error(
                 duplicate_call_id,
@@ -117,12 +121,10 @@ impl ToolCallDeduplicator {
             );
         };
 
-        let mut rx = entry.result_tx.subscribe();
+        let mut rx = entry.outcome_tx.subscribe();
         loop {
-            if let Some(result) = rx.borrow().clone() {
-                let mut duplicate = result;
-                duplicate.call_id = duplicate_call_id.to_string();
-                return duplicate;
+            if let Some(outcome) = rx.borrow().clone() {
+                return outcome;
             }
             if rx.changed().await.is_err() {
                 break;
@@ -175,15 +177,8 @@ impl ToolCallDeduplicator {
     }
 }
 
-fn deduplication_error(call_id: &str, reason: &str) -> ToolResult {
-    ToolResult {
-        call_id: call_id.to_string(),
-        content: format!("Tool deduplication failed: {reason}"),
-        is_error: true,
-        error: Some("same-step deduplication primary missing".into()),
-        metadata: Default::default(),
-        duration_ms: None,
-    }
+fn deduplication_error(_call_id: &str, reason: &str) -> ToolExecutionOutcome {
+    ToolExecutionOutcome::failed(format!("Tool deduplication failed: {reason}"))
 }
 
 fn make_call_key(tool_name: &str, args: &serde_json::Value) -> String {
@@ -214,10 +209,18 @@ fn parse_call_key(key: &str) -> (&str, &str) {
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::tool::ToolResult;
+
     use super::*;
 
     fn sample_args() -> serde_json::Value {
         serde_json::json!({"path": "/tmp/a.rs", "pattern": "fn main"})
+    }
+
+    fn completed(content: &str) -> ToolExecutionOutcome {
+        ToolExecutionOutcome::Completed(crate::tool_types::ToolResultCommit::completed(
+            ToolResult::success(content),
+        ))
     }
 
     #[test]
@@ -250,33 +253,13 @@ mod tests {
 
         dedup.begin_step();
         dedup.check_same_step("c1", "Grep", &args);
-        dedup.finalize_result(
-            "c1",
-            &ToolResult {
-                call_id: "c1".into(),
-                content: "ok".into(),
-                is_error: false,
-                error: None,
-                metadata: Default::default(),
-                duration_ms: None,
-            },
-        );
+        dedup.finalize_outcome("c1", &completed("ok"));
         dedup.end_step();
         assert_eq!(dedup.consecutive_count(), 1);
 
         dedup.begin_step();
         dedup.check_same_step("c2", "Grep", &args);
-        dedup.finalize_result(
-            "c2",
-            &ToolResult {
-                call_id: "c2".into(),
-                content: "ok".into(),
-                is_error: false,
-                error: None,
-                metadata: Default::default(),
-                duration_ms: None,
-            },
-        );
+        dedup.finalize_outcome("c2", &completed("ok"));
         dedup.end_step();
         assert_eq!(dedup.consecutive_count(), 2);
     }
@@ -289,32 +272,12 @@ mod tests {
 
         dedup.begin_step();
         dedup.check_same_step("c1", "Grep", &args_a);
-        dedup.finalize_result(
-            "c1",
-            &ToolResult {
-                call_id: "c1".into(),
-                content: "ok".into(),
-                is_error: false,
-                error: None,
-                metadata: Default::default(),
-                duration_ms: None,
-            },
-        );
+        dedup.finalize_outcome("c1", &completed("ok"));
         dedup.end_step();
 
         dedup.begin_step();
         dedup.check_same_step("c2", "Read", &args_b);
-        dedup.finalize_result(
-            "c2",
-            &ToolResult {
-                call_id: "c2".into(),
-                content: "ok".into(),
-                is_error: false,
-                error: None,
-                metadata: Default::default(),
-                duration_ms: None,
-            },
-        );
+        dedup.finalize_outcome("c2", &completed("ok"));
         dedup.end_step();
 
         assert_eq!(dedup.consecutive_count(), 1);
@@ -328,17 +291,7 @@ mod tests {
         for step in 1..=8 {
             dedup.begin_step();
             dedup.check_same_step(&format!("c{step}"), "Grep", &args);
-            dedup.finalize_result(
-                &format!("c{step}"),
-                &ToolResult {
-                    call_id: format!("c{step}"),
-                    content: "ok".into(),
-                    is_error: false,
-                    error: None,
-                    metadata: Default::default(),
-                    duration_ms: None,
-                },
-            );
+            dedup.finalize_outcome(&format!("c{step}"), &completed("ok"));
             dedup.end_step();
 
             let reminder = dedup.check_reminder();
@@ -357,20 +310,18 @@ mod tests {
         dedup.check_same_step("primary", "Read", &args);
         dedup.check_same_step("duplicate", "Read", &args);
 
-        dedup.finalize_result(
+        dedup.finalize_outcome(
             "primary",
-            &ToolResult {
-                call_id: "primary".into(),
-                content: "file contents".into(),
-                is_error: false,
-                error: None,
-                metadata: Default::default(),
-                duration_ms: Some(12),
-            },
+            &ToolExecutionOutcome::Completed(crate::tool_types::ToolResultCommit::completed(
+                ToolResult::success("file contents").with_duration_ms(Some(12)),
+            )),
         );
 
-        let duplicate = dedup.await_same_step_result("duplicate").await;
-        assert_eq!(duplicate.call_id, "duplicate");
+        let ToolExecutionOutcome::Completed(duplicate) =
+            dedup.await_same_step_outcome("duplicate").await
+        else {
+            panic!("duplicate should reuse the completed result");
+        };
         assert_eq!(duplicate.content, "file contents");
         assert_eq!(duplicate.duration_ms, Some(12));
     }
@@ -379,9 +330,12 @@ mod tests {
     async fn missing_duplicate_state_returns_error_result() {
         let dedup = ToolCallDeduplicator::new();
 
-        let result = dedup.await_same_step_result("missing").await;
+        let ToolExecutionOutcome::Failed { error, .. } =
+            dedup.await_same_step_outcome("missing").await
+        else {
+            panic!("missing duplicate state should fail");
+        };
 
-        assert!(result.is_error);
-        assert!(result.content.contains("was not registered"));
+        assert!(error.contains("was not registered"));
     }
 }

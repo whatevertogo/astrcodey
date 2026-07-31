@@ -4,46 +4,21 @@
 //! host's internal crates. The runtime remains responsible for adapting these
 //! contracts to session, storage, and provider implementations.
 
-pub mod extension {
-    pub use astrcode_core::extension::{
-        AfterToolResult, AfterToolResultsContext, AfterToolResultsHandler,
-        AfterToolResultsRegistration, AfterToolResultsResult, CommandCompletionItem,
-        CommandCompletions, CommandContext, CommandDiscoveryHandler, CommandHandler,
-        CompactContext, CompactContributions, CompactEvent, CompactHandler, CompactResult,
-        CompactStrategy, CompactTrigger, ContinueAfterStopContext, ContinueAfterStopHandler,
-        ContinueAfterStopLimit, ContinueAfterStopOptions, ContinueAfterStopRegistration,
-        ContinueAfterStopResult, DEFAULT_EXTENSION_HTTP_BODY_BYTES, DiscoveredTool,
-        EXTENSION_TOOL_OUTCOME_KEY, ExchangeSummary, Extension, ExtensionCapability,
-        ExtensionCommandResult, ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionEvent,
-        ExtensionEventDecl, ExtensionEventDeclBuilder, ExtensionEventSink, ExtensionHttpHandler,
-        ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        ExtensionHttpRouteRegistration, ExtensionManifest, ExtensionTasks, ExtensionToolOutcome,
-        HookMode, HookResult, Keybinding, LifecycleContext, LifecycleHandler,
-        MAX_EXTENSION_HTTP_BODY_BYTES, PostToolUseContext, PostToolUseFailureContext,
-        PostToolUseFailureHandler, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
-        PreToolUseHandler, PreToolUseResult, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
-        Registrar, SessionToolSelection, SlashCommand, StatusItem, StatusItemUpdatePayload,
-        StopReason, ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
-        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
-        UserMessageEnvelopeResult, extension_http_route_patterns_conflict,
-        match_extension_http_route,
-    };
-}
+pub mod extension;
+pub mod frontmatter;
+pub mod hostpaths;
+pub mod shell;
 
 /// Typed access to the host's single restricted outbound-network service.
 pub mod network {
-    pub use astrcode_core::extension::{
+    pub use crate::extension::{
         NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkErrorKind,
         OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
     };
 }
 
-#[cfg(feature = "trusted-bundled")]
 pub mod trusted {
-    /// Host services are only for trusted bundled extensions started in-process.
-    /// Disk/IPC extensions must use the capability-gated host API instead.
-    pub use astrcode_core::extension::ExtensionHostServices;
+    pub use crate::authoring_runtime::ExtensionHostServices;
 }
 
 pub mod config {
@@ -57,63 +32,41 @@ pub mod llm {
     };
 }
 
-pub mod render {
-    pub use astrcode_core::render::*;
-}
-
 pub mod event {
-    pub use astrcode_core::event::{Event, EventPayload};
+    pub use astrcode_core::event::{Event, EventPayload, EventSendError, EventSender};
 }
 
-pub mod storage {
-    pub use astrcode_core::storage::{EventReader, SessionReadModel, SessionSummary};
-}
+pub mod session_query;
 
 pub mod tool {
-    pub use astrcode_core::{
-        tool::{
-            CreateRootSessionRequest, CreateSessionRequest, DEFERRED_TOOLS_METADATA_KEY,
-            ExecutionMode, SessionAccess, SessionAccessPair, SessionApiError,
-            SessionDeliveryOutcome, SessionHandle, SessionOperations, SessionStatus,
-            SubmitTurnRequest, SubmitTurnResult, Tool, ToolCallScope, ToolCapabilities,
-            ToolDefinition, ToolError, ToolExecutionContext, ToolFileServices, ToolHostServices,
-            ToolModelAccess, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
-            ToolSessionControl, ToolSessionPaths, tool_metadata,
-        },
-        tool_ui::{
-            TOOL_UI_METADATA_KEY, TOOL_UI_PHASE_METADATA_KEY, ToolApprovalUiWire, ToolInputUiWire,
-            ToolResultUiWire, ToolUiWire,
-        },
+    pub use astrcode_core::tool::{
+        CreateRootSessionRequest, CreateSessionRequest, ExecutionMode, LlmModelIds, SessionAccess,
+        SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionHandle,
+        SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult, Tool, ToolCallScope,
+        ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionResult,
+        ToolFileServices, ToolHostServices, ToolModelAccess, ToolOrigin, ToolPromptMetadata,
+        ToolPromptTag, ToolResult, ToolSessionControl, ToolSessionPaths, tool_metadata,
     };
+
+    pub use crate::extension::ExtensionToolContext;
 }
 
 pub mod types {
     pub use astrcode_core::types::{SessionId, project_key_from_path};
 }
 
-/// Host path utilities usable by extensions.
-pub mod hostpaths {
-    pub use astrcode_support::hostpaths::*;
-}
-
-/// Frontmatter parsing helpers usable by extensions.
-pub mod frontmatter {
-    pub use astrcode_support::frontmatter::*;
-}
-
-/// Text formatting helpers usable by extensions.
-pub mod text {
-    pub use astrcode_support::text::*;
-}
-
-/// Shell detection helpers usable by extensions.
-pub mod shell {
-    pub use astrcode_support::shell::*;
-}
-
 /// Protocol types needed by extensions.
 pub mod protocol {
-    pub use astrcode_protocol::framing::JsonRpcError;
+    use serde::{Deserialize, Serialize};
+
+    /// S5R JSON-RPC 边界使用的错误对象。
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    pub struct JsonRpcError {
+        pub code: i32,
+        pub message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub data: Option<serde_json::Value>,
+    }
 }
 
 /// Tool Gate 权限类型（扩展只读 `PreToolUseContext::approval_mode`）。
@@ -121,6 +74,7 @@ pub mod permission {
     pub use astrcode_core::permission::{ApprovalDecision, ApprovalMode};
 }
 
+mod authoring_runtime;
 pub mod builder;
 pub mod manifest;
 pub mod runtime;
@@ -128,7 +82,6 @@ pub mod runtime_ports;
 pub mod s5r;
 pub mod session;
 pub mod session_inspect;
-pub mod tool_pack;
 pub mod worker;
 
 /// Namespaced persistence locations for session-scoped extension data.
@@ -146,20 +99,18 @@ pub mod prelude {
     pub use crate::{
         builder::{continue_after_stop_handler_fn, handler_fn, tool},
         extension::{
-            AfterToolResult, AfterToolResultsContext, AfterToolResultsHandler,
-            AfterToolResultsResult, CommandContext, CommandHandler, CompactContext,
-            CompactContributions, CompactEvent, CompactHandler, CompactResult,
-            ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopLimit,
-            ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCapability,
-            ExtensionCommandResult, ExtensionConfig, ExtensionCtx, ExtensionError, ExtensionEvent,
-            ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
-            ExtensionHttpRoute, ExtensionManifest, HookMode, HookResult, LifecycleContext,
-            LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
-            PreToolUseContext, PreToolUseHandler, PreToolUseResult, PromptBuildContext,
-            PromptBuildHandler, PromptContributions, ProviderContext, ProviderEvent,
-            ProviderHandler, ProviderResult, Registrar, SlashCommand, StatusItemUpdatePayload,
-            StopReason, ToolHandler, UserMessageEnvelopeContext, UserMessageEnvelopeHandler,
-            UserMessageEnvelopeResult,
+            CommandContext, CommandHandler, CompactContext, CompactContributions, CompactEvent,
+            CompactHandler, CompactResult, ContinueAfterStopContext, ContinueAfterStopHandler,
+            ContinueAfterStopLimit, ContinueAfterStopOptions, ContinueAfterStopResult, Extension,
+            ExtensionCapability, ExtensionCommandResult, ExtensionConfig, ExtensionCtx,
+            ExtensionError, ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod,
+            ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
+            HookMode, HookResult, LifecycleContext, LifecycleHandler, PostToolUseContext,
+            PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
+            PreToolUseResult, PromptBuildContext, PromptBuildHandler, PromptContributions,
+            ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar,
+            SlashCommand, StatusItemUpdatePayload, StopReason, ToolHandler,
+            UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
         },
         manifest::validate_manifest,
         s5r::effects::HandlerResult,
@@ -170,7 +121,7 @@ pub mod prelude {
             SessionInspectSnapshotOutput,
         },
         tool::{
-            ExecutionMode, ToolCallScope, ToolCapabilities, ToolDefinition, ToolExecutionContext,
+            ExecutionMode, ExtensionToolContext, ToolCallScope, ToolCapabilities, ToolDefinition,
             ToolResult,
         },
         worker::{

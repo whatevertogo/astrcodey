@@ -15,6 +15,17 @@ const REQUEST_PADDING_DENOMINATOR: usize = 3;
 pub fn estimate_request_tokens(messages: &[LlmMessage], system_prompt: Option<&str>) -> usize {
     let system_tokens = system_prompt.map_or(0, estimate_text_tokens);
     let raw_total = system_tokens + messages.iter().map(estimate_message_tokens).sum::<usize>();
+    apply_request_padding(raw_total)
+}
+
+/// 估算一组已经按 provider 线缆形状构造好的消息。
+pub fn estimate_provider_message_tokens<'a>(
+    messages: impl IntoIterator<Item = &'a LlmMessage>,
+) -> usize {
+    apply_request_padding(messages.into_iter().map(estimate_message_tokens).sum())
+}
+
+fn apply_request_padding(raw_total: usize) -> usize {
     raw_total
         .saturating_mul(REQUEST_PADDING_NUMERATOR)
         .div_ceil(REQUEST_PADDING_DENOMINATOR)

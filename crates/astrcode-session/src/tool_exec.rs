@@ -2,18 +2,17 @@
 
 use std::{sync::Arc, time::Instant};
 
-use astrcode_core::{
-    storage::ToolResultArtifactReader,
-    tool::{
-        FileObservation, FileObservationStore, LlmModelIds, ToolCapabilities, ToolDefinition,
-        ToolError, ToolExecutionContext, ToolResult,
-    },
+use astrcode_core::tool::{
+    FileObservation, FileObservationStore, LlmModelIds, ToolCapabilities, ToolDefinition,
+    ToolError, ToolExecutionContext, ToolResultArtifactReader,
 };
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    deferred_tools::suggest_tool_alias, session::Session, tool_types::ExecutableToolInvocation,
+    deferred_tools::suggest_tool_alias,
+    session::Session,
+    tool_types::{ExecutableToolInvocation, ToolExecutionOutcome, ToolResultCommit},
 };
 use crate::ToolRegistry;
 
@@ -29,29 +28,23 @@ pub(crate) struct TurnToolContext {
 impl TurnToolContext {
     pub(crate) fn for_turn(
         session: &Session,
-        session_state: &astrcode_core::storage::SessionReadModel,
+        session_state: &astrcode_session_projection::SessionReadModel,
+        tool_selection: astrcode_core::tool::SessionToolSelection,
         session_store_dir: Option<std::path::PathBuf>,
     ) -> Self {
         let runtime_services = session.runtime_services();
         let effective = runtime_services.read_effective();
         let approval_history = session.runtime().approval_history();
-        if let Some(dir) = session_store_dir.as_deref() {
-            let path = crate::permission::approval_history_path(dir);
-            if path.exists() {
-                approval_history
-                    .replace_from(&crate::permission::ApprovalHistoryStore::load_from(&path));
-            }
-        }
         let permission_chain =
             crate::permission::build_default_chain(&effective, Arc::clone(&approval_history));
         let shared = crate::turn_context::SharedTurnContext {
             session_id: session.id().clone(),
-            working_dir: session_state.working_dir.clone(),
-            model_id: session_state.model_id.clone(),
+            working_dir: session_state.identity.working_dir.clone(),
+            model_id: session_state.identity.model_id.clone(),
             session_store_dir,
             turn_event_sender: None,
             approval_mode: effective.agent.approval_mode,
-            tool_selection: session_state.tool_selection.clone(),
+            tool_selection: Some(tool_selection),
             permission_chain,
             approval_history,
         };
@@ -70,10 +63,6 @@ pub(crate) struct ToolRuntimeCapabilities {
     pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
     /// 会话原子操作能力，供 agent 工具使用。
     pub session_ops: Option<Arc<dyn astrcode_core::tool::SessionOperations>>,
-    /// 主模型 ID，供声明 `main_model` 的插件使用。
-    pub main_model_id: Option<String>,
-    /// 小模型 ID，供子 agent / 声明 `small_model` 的插件使用。
-    pub small_model_id: Option<String>,
     /// 分档模型 id（注入 ToolCapabilities 前由 runner 按能力裁剪）。
     pub llm_models: LlmModelIds,
     /// session 在存储层的真实目录路径。
@@ -85,17 +74,13 @@ impl ToolRuntimeCapabilities {
         let runtime = Arc::clone(&session.runtime);
         let runtime_services = session.runtime_services();
         let effective = runtime_services.read_effective();
-        let main_model_id = shared.model_id.clone();
-        let small_model_id = effective.small_llm.model_id.clone();
         Self {
             file_observation_store: Some(runtime.file_observation_store()),
             session_ops: runtime_services.session_ops(),
-            small_model_id: Some(small_model_id.clone()),
             session_store_dir: shared.session_store_dir.clone(),
-            main_model_id: Some(main_model_id.clone()),
             llm_models: LlmModelIds {
-                main: Some(main_model_id),
-                small: Some(small_model_id),
+                main: Some(shared.model_id.clone()),
+                small: Some(effective.small_llm.model_id.clone()),
             },
         }
     }
@@ -109,12 +94,11 @@ pub(crate) struct ToolCallRuntimeContext {
     pub cancellation_token: CancellationToken,
 }
 
-fn error_tool_result(
-    call_id: String,
+fn tool_failure_outcome(
     tool_name: &str,
     err: ToolError,
     duration: std::time::Duration,
-) -> ToolResult {
+) -> ToolExecutionOutcome {
     use astrcode_core::tool::tool_metadata;
 
     let (message, suggestion): (String, String) = match &err {
@@ -178,41 +162,23 @@ fn error_tool_result(
         metadata.insert("timeoutMs".into(), serde_json::json!(ms));
     }
 
-    let error = Some(llm_visible.clone());
-    ToolResult {
-        call_id,
-        content: llm_visible,
-        is_error: true,
-        error,
+    ToolExecutionOutcome::Failed {
+        error: llm_visible,
         metadata,
         duration_ms: Some(duration.as_millis() as u64),
     }
 }
 
-/// 工具在执行完成前被中断（取消、abort、协议修复）时的统一错误结果。
-pub fn interrupted_tool_result(
-    call_id: String,
-    tool_name: &str,
-    duration: std::time::Duration,
-) -> ToolResult {
-    error_tool_result(
-        call_id,
-        tool_name,
-        ToolError::Execution("tool execution interrupted before completion".into()),
-        duration,
-    )
-}
-
-/// 执行单个工具调用，并把异常统一转成工具错误结果。
-pub async fn execute_tool_call(
+/// 执行单个工具调用并保留完成、失败、取消三种终态。
+pub(crate) async fn execute_tool_call(
     tool_registry: Arc<ToolRegistry>,
     runtime: ToolCallRuntimeContext,
     call: ExecutableToolInvocation,
-) -> (usize, ToolResult) {
+) -> (usize, ToolExecutionOutcome) {
     if runtime.cancellation_token.is_cancelled() {
         return (
             call.index,
-            interrupted_tool_result(call.call_id.clone(), &call.name, std::time::Duration::ZERO),
+            ToolExecutionOutcome::cancelled("tool execution cancelled", Some(0)),
         );
     }
     execute_tool_call_blocking(tool_registry, runtime, call).await
@@ -230,9 +196,6 @@ fn tool_capabilities_from_runtime(
     let capabilities = &turn.capabilities;
     ToolCapabilities {
         models: ToolModelAccess {
-            model_id: Some(turn.shared.model_id.clone()),
-            main: capabilities.main_model_id.clone(),
-            small: capabilities.small_model_id.clone(),
             tiers: capabilities.llm_models.clone(),
         },
         paths: ToolSessionPaths {
@@ -247,7 +210,6 @@ fn tool_capabilities_from_runtime(
         host: ToolHostServices {
             result_reader: tool_result_reader,
             available_tools: Some(tools.as_ref().to_vec()),
-            extension_event_sink: None,
         },
     }
 }
@@ -257,9 +219,10 @@ async fn execute_tool_call_blocking(
     tool_registry: Arc<ToolRegistry>,
     runtime: ToolCallRuntimeContext,
     call: ExecutableToolInvocation,
-) -> (usize, ToolResult) {
+) -> (usize, ToolExecutionOutcome) {
     let started_at = Instant::now();
     let tool_name = call.name;
+    let call_id = call.call_id;
     let ToolCallRuntimeContext {
         turn,
         tools,
@@ -271,47 +234,78 @@ async fn execute_tool_call_blocking(
     let tool_ctx = ToolExecutionContext::new(
         turn.shared.session_id.clone(),
         turn.shared.working_dir.clone(),
-        Some(call.call_id.clone()),
+        Some(call_id.clone()),
         turn.shared.turn_event_tx(),
         capabilities,
     );
 
-    let result = match tokio::select! {
-        _ = cancellation_token.cancelled() => {
-            Err(ToolError::Execution("tool execution interrupted before completion".into()))
+    let mut outcome = tokio::select! {
+        _ = cancellation_token.cancelled() => ToolExecutionOutcome::cancelled(
+            "tool execution cancelled",
+            Some(started_at.elapsed().as_millis() as u64),
+        ),
+        result = tool_registry.execute(&tool_name, call.tool_input, &tool_ctx) => {
+            match result {
+                Ok(mut result) => {
+                    result.result_mut().duration_ms =
+                        Some(started_at.elapsed().as_millis() as u64);
+                    ToolExecutionOutcome::Completed(ToolResultCommit::from_execution_result(result))
+                },
+                Err(error) => tool_failure_outcome(&tool_name, error, started_at.elapsed()),
+            }
         },
-        result = tool_registry.execute(&tool_name, call.tool_input, &tool_ctx) => result,
-    } {
-        Ok(mut result) => {
-            result.call_id = call.call_id;
-            result.duration_ms = Some(started_at.elapsed().as_millis() as u64);
-            result
-        },
-        Err(e) => error_tool_result(call.call_id, &tool_name, e, started_at.elapsed()),
     };
     drop(tool_ctx);
     if let Some(sender) = turn.shared.turn_event_sender.as_ref() {
-        sender.flush().await;
+        if let Err(error) = sender.flush().await {
+            outcome = ToolExecutionOutcome::failed(error.to_string());
+        }
     }
 
-    if result.is_error {
-        tracing::warn!(
-            tool_name,
-            call_id = %result.call_id,
-            duration_ms = result.duration_ms.unwrap_or_default(),
-            error = result.error.as_deref().unwrap_or("unknown error"),
-            "tool execution completed with error"
-        );
-    } else {
-        tracing::debug!(
-            tool_name,
-            call_id = %result.call_id,
-            duration_ms = result.duration_ms.unwrap_or_default(),
-            "tool execution completed"
-        );
+    match &outcome {
+        ToolExecutionOutcome::Completed(result) if result.is_error => {
+            tracing::warn!(
+                tool_name,
+                call_id,
+                duration_ms = result.duration_ms.unwrap_or_default(),
+                error = result.error.as_deref().unwrap_or("unknown error"),
+                "tool execution completed with error result"
+            );
+        },
+        ToolExecutionOutcome::Completed(result) => {
+            tracing::debug!(
+                tool_name,
+                call_id,
+                duration_ms = result.duration_ms.unwrap_or_default(),
+                "tool execution completed"
+            );
+        },
+        ToolExecutionOutcome::Failed {
+            error, duration_ms, ..
+        } => {
+            tracing::warn!(
+                tool_name,
+                call_id,
+                duration_ms = duration_ms.unwrap_or_default(),
+                error,
+                "tool execution failed"
+            );
+        },
+        ToolExecutionOutcome::Cancelled {
+            reason,
+            duration_ms,
+        } => {
+            tracing::debug!(
+                tool_name,
+                call_id,
+                duration_ms = duration_ms.unwrap_or_default(),
+                reason,
+                "tool execution cancelled"
+            );
+        },
     }
 
-    (call.index, result)
+    (call.index, outcome)
 }
 
 // ─── File observation store ──────────────────────────────────────────────────
@@ -321,7 +315,7 @@ async fn execute_tool_call_blocking(
 /// 以规范化路径为 key 记录最近一次 `read` 或成功 `edit` 后的文件快照。
 /// 生命周期与 session 一致（由 `TurnRunner` 创建，随 `TurnRunner` 销毁）。
 #[derive(Default)]
-pub struct InMemoryFileObservationStore {
+pub(crate) struct InMemoryFileObservationStore {
     observations: Mutex<std::collections::HashMap<String, FileObservation>>,
 }
 
@@ -344,53 +338,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn error_tool_result_not_found() {
-        let result = error_tool_result(
-            "call-1".into(),
-            "my_tool",
-            ToolError::NotFound("missing".into()),
-            std::time::Duration::from_millis(50),
-        );
-        assert_eq!(result.call_id, "call-1");
-        assert!(result.is_error);
-        assert!(result.content.contains("missing"));
-        assert!(result.content.contains("Suggestion"));
-    }
+    fn tool_failures_preserve_guidance_and_metadata() {
+        let cases: [(&str, ToolError, &[&str], Option<u64>); 4] = [
+            (
+                "my_tool",
+                ToolError::NotFound("missing".into()),
+                &["missing", "Suggestion"],
+                None,
+            ),
+            ("find", ToolError::NotFound("find".into()), &["glob"], None),
+            ("shell", ToolError::Timeout(5000), &["5000ms"], Some(5000)),
+            (
+                "shell",
+                ToolError::Blocked {
+                    reason: "policy reason".into(),
+                },
+                &["blocked", "policy reason"],
+                None,
+            ),
+        ];
 
-    #[test]
-    fn error_tool_result_not_found_suggests_glob_for_legacy_find() {
-        let result = error_tool_result(
-            "call-2".into(),
-            "find",
-            ToolError::NotFound("find".into()),
-            std::time::Duration::from_millis(10),
-        );
-        assert!(result.content.contains("glob"));
-    }
-
-    #[test]
-    fn error_tool_result_timeout_includes_ms() {
-        let result = error_tool_result(
-            "call-2".into(),
-            "shell",
-            ToolError::Timeout(5000),
-            std::time::Duration::from_millis(5000),
-        );
-        assert!(result.content.contains("5000ms"));
-        assert_eq!(result.metadata["timeoutMs"], serde_json::json!(5000));
-    }
-
-    #[test]
-    fn error_tool_result_blocked() {
-        let result = error_tool_result(
-            "call-3".into(),
-            "shell",
-            ToolError::Blocked {
-                reason: "policy reason".into(),
-            },
-            std::time::Duration::from_millis(10),
-        );
-        assert!(result.content.contains("blocked"));
-        assert!(result.content.contains("policy reason"));
+        for (tool_name, tool_error, expected_fragments, expected_timeout_ms) in cases {
+            let outcome =
+                tool_failure_outcome(tool_name, tool_error, std::time::Duration::from_millis(50));
+            let ToolExecutionOutcome::Failed {
+                error, metadata, ..
+            } = outcome
+            else {
+                panic!("tool errors must produce a failed outcome");
+            };
+            for fragment in expected_fragments {
+                assert!(
+                    error.contains(fragment),
+                    "expected {error:?} to contain {fragment:?}"
+                );
+            }
+            assert_eq!(
+                metadata
+                    .get("timeoutMs")
+                    .and_then(serde_json::Value::as_u64),
+                expected_timeout_ms
+            );
+        }
     }
 }

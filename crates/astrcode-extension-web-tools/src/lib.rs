@@ -20,11 +20,8 @@ use astrcode_extension_sdk::{
     },
     llm::LlmProvider,
     network::OutboundNetworkService,
-    render::{
-        RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY, UI_SUMMARY_METADATA_KEY,
-    },
     tool::{
-        ExecutionMode, ToolDefinition, ToolExecutionContext, ToolOrigin, ToolResult, tool_metadata,
+        ExecutionMode, ExtensionToolContext, ToolDefinition, ToolOrigin, ToolResult, tool_metadata,
     },
 };
 use parking_lot::{Mutex, RwLock};
@@ -166,8 +163,8 @@ impl ToolHandler for WebSearchToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         _working_dir: &str,
-        _ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        _ctx: &ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != config::WEB_SEARCH_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -192,8 +189,6 @@ impl ToolHandler for WebSearchToolHandler {
         match run_web_search(&config, network, args).await {
             Ok(outcome) => {
                 let content = render_search_results(&outcome);
-                let ui_render = build_search_render_spec(&outcome);
-                let ui_summary = build_search_summary(&outcome);
                 Ok(ToolResult::text(
                     content,
                     false,
@@ -201,16 +196,16 @@ impl ToolHandler for WebSearchToolHandler {
                         ("query", json!(query)),
                         ("results", json!(outcome.hits)),
                         ("durationMs", json!(outcome.duration_ms)),
-                        (UI_RENDER_METADATA_KEY, json!(ui_render)),
-                        (UI_SUMMARY_METADATA_KEY, json!(ui_summary)),
                     ]),
-                ))
+                )
+                .into())
             },
             Err(error) => Ok(ToolResult::text(
                 error.to_string(),
                 true,
                 tool_metadata([("query", json!(query)), ("error", json!(error.to_string()))]),
-            )),
+            )
+            .into()),
         }
     }
 }
@@ -226,8 +221,8 @@ impl ToolHandler for FetchUrlToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         _working_dir: &str,
-        _ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        _ctx: &ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != config::FETCH_URL_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -255,8 +250,6 @@ impl ToolHandler for FetchUrlToolHandler {
         match run_fetch_url(&config, &cache, network, small_llm, args).await {
             Ok(FetchUrlResult::Content(outcome)) => {
                 let content = render_fetch_content(&outcome);
-                let ui_render = build_fetch_render_spec(&outcome);
-                let ui_summary = build_fetch_summary(&outcome);
                 Ok(ToolResult::text(
                     content,
                     false,
@@ -268,10 +261,9 @@ impl ToolHandler for FetchUrlToolHandler {
                         ("durationMs", json!(outcome.duration_ms)),
                         ("cached", json!(outcome.cached)),
                         ("prompt", json!(prompt)),
-                        (UI_RENDER_METADATA_KEY, json!(ui_render)),
-                        (UI_SUMMARY_METADATA_KEY, json!(ui_summary)),
                     ]),
-                ))
+                )
+                .into())
             },
             Ok(FetchUrlResult::Redirect(outcome)) => Ok(ToolResult::text(
                 render_fetch_redirect(&outcome),
@@ -283,7 +275,8 @@ impl ToolHandler for FetchUrlToolHandler {
                     ("durationMs", json!(outcome.duration_ms)),
                     ("prompt", json!(prompt)),
                 ]),
-            )),
+            )
+            .into()),
             Err(error) => Ok(ToolResult::text(
                 error.to_string(),
                 true,
@@ -292,7 +285,8 @@ impl ToolHandler for FetchUrlToolHandler {
                     ("prompt", json!(prompt)),
                     ("error", json!(error.to_string())),
                 ]),
-            )),
+            )
+            .into()),
         }
     }
 }
@@ -358,106 +352,4 @@ fn fetch_url_tool_definition() -> ToolDefinition {
         origin: ToolOrigin::Bundled,
         execution_mode: ExecutionMode::Parallel,
     }
-}
-
-fn build_search_render_spec(outcome: &web_search::WebSearchOutcome) -> RenderSpec {
-    RenderSpec::Box {
-        title: Some("Web Search".into()),
-        tone: RenderTone::Default,
-        children: vec![
-            RenderSpec::KeyValue {
-                entries: vec![
-                    RenderKeyValue {
-                        key: "Query".into(),
-                        value: outcome.query.clone(),
-                        tone: RenderTone::Default,
-                    },
-                    RenderKeyValue {
-                        key: "Results".into(),
-                        value: outcome.hits.len().to_string(),
-                        tone: RenderTone::Default,
-                    },
-                    RenderKeyValue {
-                        key: "Duration".into(),
-                        value: format!("{}ms", outcome.duration_ms),
-                        tone: RenderTone::Default,
-                    },
-                ],
-                tone: RenderTone::Default,
-            },
-            RenderSpec::List {
-                ordered: true,
-                items: outcome
-                    .hits
-                    .iter()
-                    .map(|hit| RenderSpec::Text {
-                        text: format!("{}\n{}", hit.title, hit.url),
-                        tone: RenderTone::Default,
-                    })
-                    .collect(),
-                tone: RenderTone::Default,
-            },
-        ],
-    }
-}
-
-fn build_search_summary(outcome: &web_search::WebSearchOutcome) -> String {
-    format!(
-        "web-search · {} results · {}ms · {}",
-        outcome.hits.len(),
-        outcome.duration_ms,
-        outcome.query
-    )
-}
-
-fn build_fetch_render_spec(outcome: &fetch_url::FetchUrlOutcome) -> RenderSpec {
-    RenderSpec::Box {
-        title: Some("Fetch URL".into()),
-        tone: RenderTone::Default,
-        children: vec![
-            RenderSpec::KeyValue {
-                entries: vec![
-                    RenderKeyValue {
-                        key: "URL".into(),
-                        value: outcome.final_url.clone(),
-                        tone: RenderTone::Default,
-                    },
-                    RenderKeyValue {
-                        key: "Status".into(),
-                        value: outcome.status_code.to_string(),
-                        tone: if outcome.status_code >= 400 {
-                            RenderTone::Error
-                        } else {
-                            RenderTone::Success
-                        },
-                    },
-                    RenderKeyValue {
-                        key: "Bytes".into(),
-                        value: outcome.bytes.to_string(),
-                        tone: RenderTone::Default,
-                    },
-                    RenderKeyValue {
-                        key: "Duration".into(),
-                        value: format!("{}ms", outcome.duration_ms),
-                        tone: RenderTone::Default,
-                    },
-                ],
-                tone: RenderTone::Default,
-            },
-            RenderSpec::Text {
-                text: outcome.result.clone(),
-                tone: RenderTone::Muted,
-            },
-        ],
-    }
-}
-
-fn build_fetch_summary(outcome: &fetch_url::FetchUrlOutcome) -> String {
-    format!(
-        "fetch-url · HTTP {} · {} bytes · {}ms{}",
-        outcome.status_code,
-        outcome.bytes,
-        outcome.duration_ms,
-        if outcome.cached { " · cache" } else { "" }
-    )
 }

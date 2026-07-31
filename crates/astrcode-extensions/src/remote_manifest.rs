@@ -1,49 +1,16 @@
 //! 远程扩展（IPC）共用的 manifest 构建与 HandlerResult 解析。
 
-use std::collections::HashMap;
-
-use astrcode_core::extension::{
-    CompactContributions, CompactResult, ContinueAfterStopOptions, ContinueAfterStopResult,
-    EXTENSION_TOOL_OUTCOME_KEY, ExtensionCommandResult, ExtensionError, ExtensionEvent,
-    ExtensionEventDecl, ExtensionHttpResponse, ExtensionToolOutcome, HookMode, HookResult,
-    PostToolUseResult, PreToolUseResult, PromptContributions, ProviderResult,
-};
 use astrcode_extension_sdk::{
-    extension::SlashCommand,
-    s5r::{effects::HandlerResult, event_from_name, mode_from_name},
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
+    extension::{
+        CompactContributions, CompactResult, ContinueAfterStopResult, ExtensionCommandResult,
+        ExtensionError, ExtensionHttpResponse, HookResult, PostToolUseResult, PreToolUseResult,
+        PromptContributions, ProviderResult,
+    },
+    s5r::effects::HandlerResult,
+    tool::ToolResult,
 };
+use serde::Deserialize;
 use serde_json::json;
-
-use crate::extension_manifest::{ExtensionRegistration, manifest_types::ManifestHook};
-
-pub fn validate_registration(reg: &ExtensionRegistration) -> Result<(), String> {
-    if reg.extension_id.trim().is_empty() {
-        return Err("extension id is empty".into());
-    }
-    for hook in &reg.hooks {
-        if let Some(event) = event_from_name(&hook.on) {
-            let mode = mode_from_name(&hook.mode)
-                .ok_or_else(|| format!("unknown hook mode in manifest: {}", hook.mode))?;
-            if s5r_unsupported_typed_hook(&event) {
-                return Err(format!("{} is not supported by s5r manifest", hook.on));
-            }
-            if event == ExtensionEvent::ContinueAfterStop && mode != HookMode::Blocking {
-                return Err(format!("{} is a blocking-only hook", hook.on));
-            }
-        }
-    }
-    for entry in &reg.http_routes {
-        entry.route.validate()?;
-        if entry.handler_id.trim().is_empty() {
-            return Err(format!(
-                "HTTP route {} is missing handler_id",
-                entry.route.path
-            ));
-        }
-    }
-    Ok(())
-}
 
 pub fn parse_http_response(resp: &HandlerResult) -> Result<ExtensionHttpResponse, ExtensionError> {
     if !resp.ok {
@@ -61,70 +28,6 @@ pub fn parse_http_response(resp: &HandlerResult) -> Result<ExtensionHttpResponse
         .map_err(|error| ExtensionError::Internal(format!("parse HTTP response: {error}")))
 }
 
-pub fn build_tools(reg: &ExtensionRegistration) -> Vec<ToolDefinition> {
-    reg.tools
-        .iter()
-        .map(|t| ToolDefinition {
-            name: t.name.clone(),
-            description: t.description.clone(),
-            parameters: t.parameters.clone(),
-            strict: t.strict,
-            origin: ToolOrigin::Extension,
-            execution_mode: if t.mode == "parallel" {
-                ExecutionMode::Parallel
-            } else {
-                ExecutionMode::Sequential
-            },
-        })
-        .collect()
-}
-
-pub fn build_commands(reg: &ExtensionRegistration) -> Vec<SlashCommand> {
-    reg.commands
-        .iter()
-        .map(|c| SlashCommand {
-            name: c.name.clone(),
-            description: c.description.clone(),
-            args_schema: None,
-            requires_idle: false,
-            argument_completions: false,
-            priority: 0,
-        })
-        .collect()
-}
-
-pub fn build_subscriptions(
-    reg: &ExtensionRegistration,
-) -> Vec<(ExtensionEvent, HookMode, ContinueAfterStopOptions)> {
-    reg.hooks
-        .iter()
-        .filter_map(|h: &ManifestHook| {
-            let event = event_from_name(&h.on)?;
-            if s5r_unsupported_typed_hook(&event) {
-                return None;
-            }
-            let mode = mode_from_name(&h.mode)?;
-            Some((
-                event,
-                mode,
-                ContinueAfterStopOptions {
-                    max_per_turn: h
-                        .options
-                        .max_per_turn
-                        .unwrap_or(ContinueAfterStopOptions::default().max_per_turn),
-                },
-            ))
-        })
-        .collect()
-}
-
-fn s5r_unsupported_typed_hook(event: &ExtensionEvent) -> bool {
-    matches!(
-        event,
-        ExtensionEvent::AfterToolResults | ExtensionEvent::UserMessageEnvelope
-    )
-}
-
 pub fn handler_id(extension_id: &str, kind: &str, name: &str) -> String {
     format!("{extension_id}:{kind}:{name}")
 }
@@ -140,15 +43,13 @@ pub fn parse_tool_result(resp: &HandlerResult) -> Result<ToolResult, ExtensionEr
                 .data_value("outcome")
                 .cloned()
                 .unwrap_or(serde_json::Value::Null);
-            let outcome: ExtensionToolOutcome = serde_json::from_value(raw)
+            let outcome: ExtensionToolOutput = serde_json::from_value(raw)
                 .map_err(|e| ExtensionError::Internal(format!("parse tool_outcome: {e}")))?;
-            let outcome_json = serde_json::to_value(&outcome)
-                .map_err(|e| ExtensionError::Internal(format!("serialize outcome: {e}")))?;
-            Ok(ToolResult::text(
-                String::new(),
-                false,
-                tool_metadata([(EXTENSION_TOOL_OUTCOME_KEY, outcome_json)]),
-            ))
+            match outcome {
+                ExtensionToolOutput::Text { content, is_error } => {
+                    Ok(ToolResult::text(content, is_error, Default::default()))
+                },
+            }
         },
         _ => {
             let content = resp
@@ -159,6 +60,12 @@ pub fn parse_tool_result(resp: &HandlerResult) -> Result<ToolResult, ExtensionEr
             Ok(ToolResult::text(content, false, Default::default()))
         },
     }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ExtensionToolOutput {
+    Text { content: String, is_error: bool },
 }
 
 pub fn parse_command_result(
@@ -282,52 +189,5 @@ pub fn parse_lifecycle_result(resp: &HandlerResult) -> Result<HookResult, Extens
             reason: resp.data_str("reason").to_string(),
         }),
         _ => Ok(HookResult::Allow),
-    }
-}
-
-pub fn event_decls_map(reg: &ExtensionRegistration) -> HashMap<String, ExtensionEventDecl> {
-    crate::host_router::decls_to_map(&reg.extension_events)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::extension_manifest::manifest_types::{ManifestHook, ManifestHookOptions};
-
-    fn registration_with_hook(on: &str, mode: &str) -> ExtensionRegistration {
-        ExtensionRegistration {
-            extension_id: "test-extension".into(),
-            version: "0.0.0".into(),
-            capabilities: Vec::new(),
-            tools: Vec::new(),
-            commands: Vec::new(),
-            hooks: vec![ManifestHook {
-                on: on.into(),
-                mode: mode.into(),
-                options: ManifestHookOptions::default(),
-            }],
-            http_routes: Vec::new(),
-            extension_events: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn validate_registration_rejects_non_blocking_continue_after_stop() {
-        let reg = registration_with_hook("continue_after_stop", "non_blocking");
-
-        let err = validate_registration(&reg).unwrap_err();
-
-        assert!(err.contains("blocking-only"));
-    }
-
-    #[test]
-    fn validate_registration_rejects_s5r_internal_typed_hooks() {
-        for hook in ["user_message_envelope", "after_tool_results"] {
-            let reg = registration_with_hook(hook, "blocking");
-
-            let err = validate_registration(&reg).unwrap_err();
-
-            assert!(err.contains("not supported by s5r manifest"));
-        }
     }
 }

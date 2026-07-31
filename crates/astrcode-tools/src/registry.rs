@@ -1,4 +1,4 @@
-//! Built-in tool pack implementation.
+//! Built-in tool catalog implementation.
 
 use std::{
     path::PathBuf,
@@ -8,29 +8,29 @@ use std::{
     },
 };
 
-use astrcode_core::{
-    config::defaults::DEFAULT_SHELL_TIMEOUT_SECS,
-    tool::Tool,
-    tool_pack::{ToolPack, ToolPackScope},
+use astrcode_core::{config::defaults::DEFAULT_SHELL_TIMEOUT_SECS, tool::Tool};
+use astrcode_extension_sdk::{
+    extension::ExtensionError,
+    runtime_ports::{ToolCatalogProvider, ToolCatalogScope, ToolCatalogSnapshot},
 };
 
-/// First-party file, shell, and terminal tools.
-pub struct BuiltinToolPack {
+/// First-party file, shell, and terminal tool catalog.
+pub struct BuiltinToolCatalog {
     shell_timeout_secs: Arc<AtomicU64>,
-    observed_config: Mutex<ObservedToolPackConfig>,
+    observed_config: Mutex<ObservedToolCatalogConfig>,
 }
 
 #[derive(Clone, Copy)]
-struct ObservedToolPackConfig {
+struct ObservedToolCatalogConfig {
     shell_timeout_secs: u64,
     version: u64,
 }
 
-impl BuiltinToolPack {
+impl BuiltinToolCatalog {
     pub fn new(shell_timeout_secs: u64) -> Self {
         Self {
             shell_timeout_secs: Arc::new(AtomicU64::new(shell_timeout_secs)),
-            observed_config: Mutex::new(ObservedToolPackConfig {
+            observed_config: Mutex::new(ObservedToolCatalogConfig {
                 shell_timeout_secs,
                 version: 0,
             }),
@@ -41,7 +41,7 @@ impl BuiltinToolPack {
         let initial_timeout = shell_timeout_secs.load(Ordering::Acquire);
         Self {
             shell_timeout_secs,
-            observed_config: Mutex::new(ObservedToolPackConfig {
+            observed_config: Mutex::new(ObservedToolCatalogConfig {
                 shell_timeout_secs: initial_timeout,
                 version: 0,
             }),
@@ -53,7 +53,7 @@ impl BuiltinToolPack {
             .store(shell_timeout_secs, Ordering::Release);
     }
 
-    fn observe_config(&self) -> ObservedToolPackConfig {
+    fn observe_config(&self) -> ObservedToolCatalogConfig {
         let mut observed = self
             .observed_config
             .lock()
@@ -67,20 +67,27 @@ impl BuiltinToolPack {
     }
 }
 
-impl Default for BuiltinToolPack {
+impl Default for BuiltinToolCatalog {
     fn default() -> Self {
         Self::new(DEFAULT_SHELL_TIMEOUT_SECS)
     }
 }
 
-impl ToolPack for BuiltinToolPack {
-    fn snapshot_version(&self) -> u64 {
+#[async_trait::async_trait]
+impl ToolCatalogProvider for BuiltinToolCatalog {
+    fn revision(&self) -> u64 {
         self.observe_config().version
     }
 
-    fn tools(&self, scope: &ToolPackScope<'_>) -> Vec<Arc<dyn Tool>> {
+    async fn tool_catalog(
+        &self,
+        scope: &ToolCatalogScope,
+    ) -> Result<ToolCatalogSnapshot, ExtensionError> {
         let config = self.observe_config();
-        builtin_tools(PathBuf::from(scope.working_dir), config.shell_timeout_secs)
+        Ok(ToolCatalogSnapshot::complete(
+            config.version,
+            builtin_tools(PathBuf::from(&scope.working_dir), config.shell_timeout_secs),
+        ))
     }
 }
 
@@ -113,35 +120,35 @@ pub fn builtin_tools(working_dir: PathBuf, timeout_secs: u64) -> Vec<Arc<dyn Too
     ]
 }
 
-pub fn default_tool_packs() -> Vec<Arc<dyn ToolPack>> {
-    vec![Arc::new(BuiltinToolPack::default())]
+pub fn default_tool_catalog() -> Arc<dyn ToolCatalogProvider> {
+    Arc::new(BuiltinToolCatalog::default())
 }
 
-pub fn default_tool_packs_with_shell_timeout_source(
+pub fn default_tool_catalog_with_shell_timeout_source(
     shell_timeout_secs: Arc<AtomicU64>,
-) -> Vec<Arc<dyn ToolPack>> {
-    vec![Arc::new(BuiltinToolPack::with_shell_timeout_source(
+) -> Arc<dyn ToolCatalogProvider> {
+    Arc::new(BuiltinToolCatalog::with_shell_timeout_source(
         shell_timeout_secs,
-    ))]
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use std::{collections::BTreeMap, path::Path};
 
-    use astrcode_core::{
-        tool::ExecutionMode,
-        tool_access::{FileOperation, ResourceAccess},
+    use astrcode_core::tool::{
+        ExecutionMode,
+        access::{FileOperation, ResourceAccess},
     };
 
     use super::*;
 
     #[test]
     fn builtins_expose_expected_contract() {
-        let pack = BuiltinToolPack::new(30);
-        let initial_version = pack.snapshot_version();
-        pack.set_shell_timeout_secs(60);
-        assert!(pack.snapshot_version() > initial_version);
+        let catalog = BuiltinToolCatalog::new(30);
+        let initial_revision = catalog.revision();
+        catalog.set_shell_timeout_secs(60);
+        assert!(catalog.revision() > initial_revision);
 
         let tools = builtin_tools(PathBuf::from("."), 30);
         let definitions = tools

@@ -1,10 +1,16 @@
 use std::{path::Path, sync::Arc};
 
-use astrcode_core::tool_access::ResourceAccess;
+use astrcode_core::tool::access::ResourceAccess;
 use astrcode_extension_sdk::{
     extension::*,
-    runtime_ports::{ToolCatalogCompleteness, ToolCatalogDiagnostic, ToolCatalogSnapshot},
-    tool::{ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolResult},
+    runtime_ports::{
+        ToolCatalogCompleteness, ToolCatalogDiagnostic, ToolCatalogProvider, ToolCatalogScope,
+        ToolCatalogSnapshot,
+    },
+    tool::{
+        ExecutionMode, ExtensionToolContext, Tool, ToolDefinition, ToolError, ToolExecutionContext,
+        ToolExecutionResult, ToolResult,
+    },
 };
 
 use super::{ExtensionRunner, bind_extension_event_sink};
@@ -12,6 +18,20 @@ use super::{ExtensionRunner, bind_extension_event_sink};
 impl ExtensionRunner {
     /// 从 HandlerIndex 缓存收集工具适配器。
     pub async fn tool_catalog_snapshot_typed(&self, working_dir: &str) -> ToolCatalogSnapshot {
+        let scope = ToolCatalogScope {
+            working_dir: working_dir.to_owned(),
+            session_store_dir: None,
+        };
+        self.tool_catalog_snapshot_for_scope(&scope, self.revision())
+            .await
+    }
+
+    pub(super) async fn tool_catalog_snapshot_for_scope(
+        &self,
+        scope: &ToolCatalogScope,
+        revision: u64,
+    ) -> ToolCatalogSnapshot {
+        let working_dir = &scope.working_dir;
         let index = self.load_index();
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut diagnostics = Vec::new();
@@ -32,7 +52,9 @@ impl ExtensionRunner {
             }));
         }
         for (ext_id, discovery, capabilities) in &index.tool_discoveries {
-            match tokio::time::timeout(self.timeout, discovery.discover(working_dir)).await {
+            match tokio::time::timeout(self.operation_timeout, discovery.discover(working_dir))
+                .await
+            {
                 Ok(discovered) => {
                     for discovered_tool in discovered {
                         tools.push(Arc::new(HandlerTool {
@@ -53,17 +75,18 @@ impl ExtensionRunner {
                 Err(_) => {
                     let message = format!(
                         "tool discovery timed out after {} ms",
-                        self.timeout.as_millis()
+                        self.operation_timeout.as_millis()
                     );
                     tracing::warn!(extension_id = %ext_id, error = %message);
                     diagnostics.push(ToolCatalogDiagnostic {
-                        extension_id: ext_id.clone(),
+                        source: ext_id.clone(),
                         message,
                     });
                 },
             }
         }
         ToolCatalogSnapshot {
+            revision,
             tools,
             completeness: if diagnostics.is_empty() {
                 ToolCatalogCompleteness::Complete
@@ -156,7 +179,8 @@ impl Tool for HandlerTool {
         _working_dir: &Path,
     ) -> Result<Vec<ResourceAccess>, ToolError> {
         // SessionControl 工具（如 agent）在父 turn 内只编排子 session，不直接碰文件；
-        // 若声明 ResourceAccess::All，冲突图会把同批 agent 调用串行化。
+        // Session-control tools coordinate through their own runtime state and
+        // do not touch file resources.
         if self
             .capabilities
             .contains(&ExtensionCapability::SessionControl)
@@ -170,7 +194,7 @@ impl Tool for HandlerTool {
         &self,
         mut arguments: serde_json::Value,
         ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<ToolExecutionResult, ToolError> {
         let normalized_booleans =
             normalize_stringified_booleans(&mut arguments, &self.definition.parameters);
         if normalized_booleans > 0 {
@@ -189,52 +213,29 @@ impl Tool for HandlerTool {
             ctx.capabilities.session.ops = None;
         }
         if !self.capabilities.contains(&ExtensionCapability::MainModel) {
-            ctx.capabilities.models.main = None;
             ctx.capabilities.models.tiers.main = None;
         }
         if !self.capabilities.contains(&ExtensionCapability::SmallModel) {
-            ctx.capabilities.models.small = None;
             ctx.capabilities.models.tiers.small = None;
         }
-        ctx.capabilities.host.extension_event_sink = if self
-            .capabilities
-            .contains(&ExtensionCapability::EmitEvents)
-        {
-            ctx.event_tx.clone().and_then(|event_tx| {
+        let event_sink = if self.capabilities.contains(&ExtensionCapability::EmitEvents) {
+            ctx.scope.event_tx.clone().and_then(|event_tx| {
                 bind_extension_event_sink(&self.extension_id, &self.event_declarations, event_tx)
             })
         } else {
             None
         };
-        let mut result = match self
+        let ctx = ExtensionToolContext::new(ctx, event_sink);
+        let result = match self
             .handler
             .execute(&self.definition.name, arguments, &self.working_dir, &ctx)
             .await
         {
             Ok(result) => result,
             Err(err) => {
-                return Ok(extension_error_result(
-                    &self.definition.name,
-                    "handler",
-                    err,
-                ));
+                return Ok(extension_error_result(&self.definition.name, "handler", err).into());
             },
         };
-
-        if let Some(outcome_value) = result
-            .metadata
-            .remove(astrcode_extension_sdk::extension::EXTENSION_TOOL_OUTCOME_KEY)
-        {
-            match serde_json::from_value::<ExtensionToolOutcome>(outcome_value) {
-                Ok(ExtensionToolOutcome::Text { content, is_error }) => {
-                    result.content = content;
-                    result.is_error = is_error;
-                },
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to parse ExtensionToolOutcome, treating as plain result");
-                },
-            }
-        }
 
         Ok(result)
     }
@@ -263,6 +264,10 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
             format!("Tool `{tool_name}` failed: {message}"),
             "Try different arguments or use a builtin tool as an alternative. Do not retry the \
              identical call.",
+        ),
+        registration_error => (
+            format!("Tool `{tool_name}` failed: {registration_error}"),
+            "The extension is misconfigured. Disable or update it before retrying this tool.",
         ),
     };
 

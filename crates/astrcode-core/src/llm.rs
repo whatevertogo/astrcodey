@@ -6,16 +6,18 @@
 //! - [`LlmProvider`] trait：所有 LLM 后端的统一接口
 //! - [`LlmClientConfig`]：LLM 客户端配置
 //! - [`LlmError`]：LLM 操作错误类型
+//!
+//! 本模块不含具体 provider 实现与 HTTP/重试逻辑（位于 `astrcode-ai`），也不含
+//! 具体工具的展示特判（属于 server 投影层）。
 
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    message_attachment::MessageAttachment,
-    thinking::{ThinkingCapability, ThinkingConfig},
-    tool::ToolDefinition,
-};
+use crate::{message_attachment::MessageAttachment, tool::ToolDefinition};
 
+pub mod thinking;
 pub mod token_estimate;
+
+use thinking::{ThinkingCapability, ThinkingConfig};
 
 /// LLM 对话消息中的角色。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,22 +110,13 @@ impl LlmContent {
     /// 这是有损转换——不可能完全还原原始渲染效果。
     /// - `Text` / `ToolResult`：原样输出。
     /// - `Image`：返回占位符 `[image]`。
-    /// - `ToolCall`：大多数工具调用只输出工具名；`upsertSessionPlan` 额外提取 arguments.content
-    ///   中的 plan 正文。
+    /// - `ToolCall`：只输出工具名；具体工具的展示特判属于投影层（如 server 对 `upsertSessionPlan`
+    ///   提取 plan 正文），不在契约层硬编码。
     pub fn to_display_text(&self) -> String {
         match self {
             LlmContent::Text { text } => text.clone(),
             LlmContent::Image { .. } => "[image]".into(),
-            LlmContent::ToolCall {
-                name, arguments, ..
-            } => match name.as_str() {
-                "upsertSessionPlan" => arguments
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_default(),
-                _ => format!("tool call: {name}"),
-            },
+            LlmContent::ToolCall { name, .. } => format!("tool call: {name}"),
             LlmContent::ToolResult { content, .. } => content.clone(),
         }
     }
@@ -155,9 +148,44 @@ impl LlmMessage {
         }
     }
 
-    /// 由文本与附件构建用户消息（图片走 [`LlmContent::Image`]）。
+    /// 由文本与附件组装用户消息（图片走 [`LlmContent::Image`]，
+    /// 非图片附件用 XML 分隔符包装为文本块）。
     pub fn user_with_attachments(text: &str, attachments: &[MessageAttachment]) -> Self {
-        user_message_with_attachments(text, attachments)
+        let mut content = Vec::new();
+        for att in attachments {
+            if att.is_image() {
+                content.push(LlmContent::Image {
+                    base64: att.content.clone(),
+                    media_type: att.media_type.clone(),
+                    filename: Some(att.filename.clone()),
+                });
+            } else {
+                content.push(LlmContent::Text {
+                    text: format!(
+                        "<attachment filename=\"{}\" media_type=\"{}\">\n{}\n</attachment>",
+                        xml_escape_attr(&att.filename),
+                        xml_escape_attr(&att.media_type),
+                        att.content
+                    ),
+                });
+            }
+        }
+        if !text.is_empty() {
+            content.push(LlmContent::Text {
+                text: text.to_string(),
+            });
+        }
+        if content.is_empty() {
+            content.push(LlmContent::Text {
+                text: String::new(),
+            });
+        }
+        Self {
+            role: LlmRole::User,
+            content,
+            name: None,
+            reasoning_content: None,
+        }
     }
 
     /// 创建一条助手文本消息。
@@ -204,11 +232,6 @@ impl LlmMessage {
         }
     }
 
-    /// 返回 provider 可见版本，保留需要回传给 provider 的字段（如 reasoning_content）。
-    pub fn provider_visible(self) -> Self {
-        self
-    }
-
     /// 将各 content 块经 [`LlmContent::to_display_text`] 转换后用 `separator` 拼接。
     pub fn joined_display_text(&self, separator: &str) -> String {
         self.content
@@ -243,7 +266,7 @@ fn xml_escape_attr(value: &str) -> String {
     value.replace('&', "&amp;").replace('"', "&quot;")
 }
 
-/// 从用户 LLM 消息中提取附件（与 [`user_message_with_attachments`] 对称）。
+/// 从用户 LLM 消息中提取附件（与 [`LlmMessage::user_with_attachments`] 对称）。
 pub fn attachments_from_user_message(message: &LlmMessage) -> Vec<MessageAttachment> {
     message
         .content
@@ -266,47 +289,8 @@ pub fn attachments_from_user_message(message: &LlmMessage) -> Vec<MessageAttachm
         .collect()
 }
 
-/// 将用户文本与附件组装为 LLM 用户消息。
-pub fn user_message_with_attachments(text: &str, attachments: &[MessageAttachment]) -> LlmMessage {
-    let mut content = Vec::new();
-    for att in attachments {
-        if att.is_image() {
-            content.push(LlmContent::Image {
-                base64: att.content.clone(),
-                media_type: att.media_type.clone(),
-                filename: Some(att.filename.clone()),
-            });
-        } else {
-            content.push(LlmContent::Text {
-                text: format!(
-                    "<attachment filename=\"{}\" media_type=\"{}\">\n{}\n</attachment>",
-                    xml_escape_attr(&att.filename),
-                    xml_escape_attr(&att.media_type),
-                    att.content
-                ),
-            });
-        }
-    }
-    if !text.is_empty() {
-        content.push(LlmContent::Text {
-            text: text.to_string(),
-        });
-    }
-    if content.is_empty() {
-        content.push(LlmContent::Text {
-            text: String::new(),
-        });
-    }
-    LlmMessage {
-        role: LlmRole::User,
-        content,
-        name: None,
-        reasoning_content: None,
-    }
-}
-
 pub const TURN_ABORTED_SOURCE: &str = "turn_aborted";
-pub const TURN_ABORTED_GUIDANCE: &str = concat!(
+const TURN_ABORTED_GUIDANCE: &str = concat!(
     "The user interrupted the previous turn on purpose. ",
     "Any running tools/commands may still be running in the background. ",
     "If any tools/commands were aborted, they may have partially executed."
@@ -327,7 +311,6 @@ pub fn turn_aborted_context_message() -> LlmMessage {
 pub fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
     let mut messages = messages
         .into_iter()
-        .map(LlmMessage::provider_visible)
         .filter(LlmMessage::has_provider_visible_content)
         .collect::<Vec<_>>();
     normalize_tool_call_messages(&mut messages);
@@ -506,52 +489,96 @@ pub enum LlmEvent {
     Error { message: String },
 }
 
-/// LLM 调用的完整输出结果。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmOutput {
-    /// 累积的文本内容。
-    pub text: String,
-    /// LLM 请求的工具调用列表（如有）。
-    pub tool_calls: Vec<ParsedToolCall>,
-    /// 提供者返回的完成原因。
-    pub finish_reason: String,
-}
-
-/// 从 LLM 响应中解析出的工具调用。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ParsedToolCall {
-    /// 工具调用的唯一标识。
-    pub call_id: String,
-    /// 要调用的工具名称。
-    pub name: String,
-    /// 工具调用参数（JSON 值）。
-    pub arguments: serde_json::Value,
-}
-
 /// LLM 提供者操作产生的错误。
-#[derive(Debug, thiserror::Error)]
+///
+/// 跨 provider 的统一错误分类。HTTP 状态码与响应体在边界(`astrcode-ai` 的
+/// `classify_error`)归一化为这些变体;[`LlmError::is_retryable`] 是连接期
+/// 是否重试的唯一事实来源。同时实现 serde,以便将来作为结构化错误跨边界传输。
+#[derive(Debug, thiserror::Error, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LlmError {
+    /// API key 无效或缺失(401/403)。
+    #[error("invalid api key ({status}): {message}")]
+    InvalidApiKey { status: u16, message: String },
+    /// 模型不存在(404)。
+    #[error("model not found ({status}): {message}")]
+    ModelNotFound { status: u16, message: String },
+    /// 请求参数无效(400/422)。
+    #[error("invalid parameter ({status}): {message}")]
+    InvalidParameter { status: u16, message: String },
+    /// 配额/计费耗尽(402,或 429 的配额类响应)。
+    #[error("quota exceeded ({status}): {message}")]
+    QuotaExceeded { status: u16, message: String },
     /// 提示词超出模型上下文长度限制。
-    #[error("Prompt too long: {0}")]
-    PromptTooLong(String),
-    /// 客户端错误（4xx 状态码）。
-    #[error("Client error ({status}): {message}")]
+    #[error("context window exceeded: {message}")]
+    ContextWindowExceeded { message: String },
+    /// 被限流(429)。`retry_after_ms` 来自 `Retry-After` 响应头(若提供)。
+    #[error("rate limited ({status}): {message}")]
+    RateLimited {
+        status: u16,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_after_ms: Option<u64>,
+        message: String,
+    },
+    /// 其他客户端错误(4xx)。
+    #[error("client error ({status}): {message}")]
     ClientError { status: u16, message: String },
-    /// 服务端错误（5xx 状态码）。
-    #[error("Server error ({status}): {message}")]
+    /// 服务端错误(5xx,含 408 超时)。
+    #[error("server error ({status}): {message}")]
     ServerError { status: u16, message: String },
-    /// 网络传输错误。
-    #[error("Transport error: {0}")]
-    Transport(String),
-    /// 请求被中断（用户取消）。
-    #[error("Request interrupted")]
-    Interrupted,
+    /// 网络传输错误(连接、TLS、DNS 等)。
+    #[error("transport error: {message}")]
+    Transport { message: String },
+    /// 流式响应意外断开。
+    #[error("stream disconnected: {message}")]
+    StreamDisconnected { message: String },
     /// 流式响应解析错误。
-    #[error("Stream parse error: {0}")]
-    StreamParse(String),
-    /// 当前 provider 不支持该操作。
-    #[error("Unsupported LLM operation: {0}")]
-    Unsupported(String),
+    #[error("stream parse error: {message}")]
+    StreamParse { message: String },
+    /// 响应被内容安全策略过滤。
+    #[error("content filtered: {message}")]
+    ContentFilter { message: String },
+    /// 输出 token 超出限制。
+    #[error("output token limit: {message}")]
+    TokenLimit { message: String },
+    /// 模型返回空响应。
+    #[error("empty response")]
+    EmptyResponse,
+    /// 请求被中断(用户取消)。
+    #[error("request interrupted")]
+    Interrupted,
+    /// 当前 provider 不支持该操作(能力缺口,非 HTTP 错误分类)。
+    #[error("unsupported LLM operation: {message}")]
+    Unsupported { message: String },
+}
+
+impl LlmError {
+    /// 便捷构造传输错误。
+    pub fn transport(message: impl Into<String>) -> Self {
+        Self::Transport {
+            message: message.into(),
+        }
+    }
+
+    /// 便捷构造流解析错误。
+    pub fn stream_parse(message: impl Into<String>) -> Self {
+        Self::StreamParse {
+            message: message.into(),
+        }
+    }
+
+    /// 连接期重试是否值得;流内失败按设计不重试(无中途恢复)。
+    ///
+    /// 与 `astrcode-ai::retry::RetryPolicy::should_retry` 的状态码集合一致
+    /// (429→`RateLimited`、5xx/408→`ServerError`);重试发生在 HTTP 层、在错误分类之前,
+    /// 因此两处状态码清单需同步维护。
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::RateLimited { .. } | Self::Transport { .. } => true,
+            Self::ServerError { status, .. } => matches!(status, 408 | 500 | 502 | 503 | 504),
+            _ => false,
+        }
+    }
 }
 
 /// OpenAI prompt cache retention 声明。
@@ -563,16 +590,6 @@ pub enum PromptCacheRetention {
     /// 请求保留更长的 24 小时缓存。
     #[serde(rename = "24h")]
     TwentyFourHours,
-}
-
-impl PromptCacheRetention {
-    /// 返回 OpenAI 兼容请求体中的 wire 值。
-    pub fn as_wire_value(self) -> &'static str {
-        match self {
-            Self::InMemory => "in_memory",
-            Self::TwentyFourHours => "24h",
-        }
-    }
 }
 
 /// 推理强度级别（跨模型选项的标准化抽象）。
@@ -652,7 +669,39 @@ pub struct LlmClientConfig {
 }
 
 impl LlmClientConfig {
-    pub fn openai_extras(&self) -> Option<&OpenAiProviderExtras> {
+    /// 从解析后的 [`LlmSettings`](crate::config::LlmSettings) 构造客户端配置。
+    ///
+    /// 两个结构都在本 crate，由本函数集中完成边界映射；调用方不再逐字段拷贝。
+    /// `extra_headers` 目前无配置来源，保留为空。
+    pub fn from_llm_settings(settings: &crate::config::LlmSettings) -> Self {
+        let extras = if settings.wire_format.is_openai_compatible() {
+            ProviderExtras::OpenAi(OpenAiProviderExtras {
+                supports_prompt_cache_key: settings.supports_prompt_cache_key,
+                supports_stream_usage: settings.supports_stream_usage,
+                prompt_cache_retention: settings.prompt_cache_retention,
+            })
+        } else {
+            ProviderExtras::None
+        };
+        Self {
+            base_url: settings.base_url.clone(),
+            api_key: settings.api_key.clone(),
+            auth_scheme: settings.auth_scheme,
+            connect_timeout_secs: settings.connect_timeout_secs,
+            read_timeout_secs: settings.read_timeout_secs,
+            max_retries: settings.max_retries,
+            retry_base_delay_ms: settings.retry_base_delay_ms,
+            reasoning: settings.reasoning,
+            supports_strict_tool_use: settings.supports_strict_tool_use,
+            extras,
+            extra_headers: std::collections::HashMap::new(),
+            thinking: settings.thinking.clone(),
+            thinking_capability: settings.thinking_capability.clone(),
+            thinking_configured: settings.thinking_configured,
+        }
+    }
+
+    fn openai_extras(&self) -> Option<&OpenAiProviderExtras> {
         match &self.extras {
             ProviderExtras::OpenAi(extras) => Some(extras),
             ProviderExtras::None => None,
@@ -671,13 +720,6 @@ impl LlmClientConfig {
 
     pub fn prompt_cache_retention(&self) -> Option<PromptCacheRetention> {
         self.openai_extras().and_then(|e| e.prompt_cache_retention)
-    }
-
-    pub fn thinking_level(&self) -> Option<ThinkingLevel> {
-        self.thinking
-            .effort
-            .as_deref()
-            .and_then(crate::thinking::effort_to_thinking_level)
     }
 }
 
@@ -724,9 +766,9 @@ pub trait LlmProvider: Send + Sync {
         _messages: Vec<LlmMessage>,
         _tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
-        Err(LlmError::Unsupported(
-            "input token counting is not supported by this provider".into(),
-        ))
+        Err(LlmError::Unsupported {
+            message: "input token counting is not supported by this provider".into(),
+        })
     }
 
     /// 返回模型的上下文窗口限制。
@@ -753,7 +795,7 @@ pub async fn collect_stream_text(
         match event {
             LlmEvent::ContentDelta { delta } => text.push_str(&delta),
             LlmEvent::Done { .. } => break,
-            LlmEvent::Error { message } => return Err(LlmError::StreamParse(message)),
+            LlmEvent::Error { message } => return Err(LlmError::stream_parse(message)),
             _ => {},
         }
     }
@@ -809,9 +851,24 @@ mod tests {
     }
 
     #[test]
+    fn provider_visible_filters_empty_system_messages() {
+        let messages = vec![LlmMessage::user("hello"), LlmMessage::system("")];
+        let visible = provider_visible_messages(messages);
+        assert_eq!(visible.len(), 1);
+        assert!(matches!(visible[0].role, LlmRole::User));
+    }
+
+    #[test]
+    fn provider_visible_keeps_non_empty() {
+        let messages = vec![LlmMessage::user("hello"), LlmMessage::assistant("world")];
+        let visible = provider_visible_messages(messages);
+        assert_eq!(visible.len(), 2);
+    }
+
+    #[test]
     fn attachments_round_trip_preserves_image_filename() {
         let attachments = vec![MessageAttachment::image_png("screenshot.png", "abc123")];
-        let message = user_message_with_attachments("hello", &attachments);
+        let message = LlmMessage::user_with_attachments("hello", &attachments);
         let round_trip = attachments_from_user_message(&message);
         assert_eq!(round_trip, attachments);
     }
@@ -823,7 +880,7 @@ mod tests {
             content: "body".into(),
             media_type: "text/plain".into(),
         }];
-        let message = user_message_with_attachments("", &attachments);
+        let message = LlmMessage::user_with_attachments("", &attachments);
         let text = message
             .content
             .iter()
@@ -831,5 +888,179 @@ mod tests {
             .expect("text attachment");
         assert!(text.starts_with("<attachment filename=\"note.txt\" media_type=\"text/plain\">"));
         assert!(text.ends_with("</attachment>"));
+    }
+
+    #[test]
+    fn transport_and_stream_parse_helpers_build_matching_variants() {
+        assert!(matches!(
+            LlmError::transport("boom"),
+            LlmError::Transport { message } if message == "boom"
+        ));
+        assert!(matches!(
+            LlmError::stream_parse("bad json"),
+            LlmError::StreamParse { message } if message == "bad json"
+        ));
+    }
+
+    #[test]
+    fn is_retryable_classifies_correctly() {
+        // 恒可重试
+        assert!(
+            LlmError::Transport {
+                message: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            LlmError::RateLimited {
+                status: 429,
+                retry_after_ms: None,
+                message: "x".into(),
+            }
+            .is_retryable()
+        );
+
+        // ServerError 仅 408/500/502/503/504 可重试
+        for retryable in [408, 500, 502, 503, 504] {
+            assert!(
+                LlmError::ServerError {
+                    status: retryable,
+                    message: "x".into(),
+                }
+                .is_retryable(),
+                "{retryable} should be retryable"
+            );
+        }
+        assert!(
+            !LlmError::ServerError {
+                status: 501,
+                message: "x".into(),
+            }
+            .is_retryable()
+        );
+
+        // 其余变体不可重试
+        assert!(
+            !LlmError::InvalidApiKey {
+                status: 401,
+                message: "x".into(),
+            }
+            .is_retryable()
+        );
+        assert!(
+            !LlmError::ContextWindowExceeded {
+                message: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(
+            !LlmError::Unsupported {
+                message: "x".into()
+            }
+            .is_retryable()
+        );
+        assert!(!LlmError::Interrupted.is_retryable());
+    }
+
+    #[test]
+    fn llm_error_serializes_with_snake_case_kind_tag() {
+        // 内部 tag = "kind",变体名 snake_case;struct 字段内联。
+        let json = serde_json::to_value(LlmError::ContextWindowExceeded {
+            message: "too big".into(),
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "context_window_exceeded");
+        assert_eq!(json["message"], "too big");
+
+        // RateLimited 省略 None 的 retry_after_ms
+        let json = serde_json::to_value(LlmError::RateLimited {
+            status: 429,
+            retry_after_ms: None,
+            message: "slow down".into(),
+        })
+        .unwrap();
+        assert_eq!(json["kind"], "rate_limited");
+        assert_eq!(json["status"], 429);
+        assert!(json.get("retry_after_ms").is_none());
+
+        // retry_after_ms 有值时序列化
+        let json = serde_json::to_value(LlmError::RateLimited {
+            status: 429,
+            retry_after_ms: Some(1500),
+            message: "slow down".into(),
+        })
+        .unwrap();
+        assert_eq!(json["retry_after_ms"], 1500);
+
+        // unit 变体只带 tag
+        let json = serde_json::to_value(LlmError::Interrupted).unwrap();
+        assert_eq!(json, serde_json::json!({"kind": "interrupted"}));
+    }
+
+    #[test]
+    fn llm_error_round_trips_through_serde() {
+        let cases: Vec<LlmError> = vec![
+            LlmError::InvalidApiKey {
+                status: 401,
+                message: "bad key".into(),
+            },
+            LlmError::ModelNotFound {
+                status: 404,
+                message: "no model".into(),
+            },
+            LlmError::InvalidParameter {
+                status: 400,
+                message: "bad param".into(),
+            },
+            LlmError::QuotaExceeded {
+                status: 402,
+                message: "no funds".into(),
+            },
+            LlmError::ContextWindowExceeded {
+                message: "too long".into(),
+            },
+            LlmError::RateLimited {
+                status: 429,
+                retry_after_ms: Some(2000),
+                message: "rl".into(),
+            },
+            LlmError::ClientError {
+                status: 418,
+                message: "teapot".into(),
+            },
+            LlmError::ServerError {
+                status: 503,
+                message: "down".into(),
+            },
+            LlmError::Transport {
+                message: "t".into(),
+            },
+            LlmError::StreamDisconnected {
+                message: "d".into(),
+            },
+            LlmError::StreamParse {
+                message: "p".into(),
+            },
+            LlmError::ContentFilter {
+                message: "c".into(),
+            },
+            LlmError::TokenLimit {
+                message: "l".into(),
+            },
+            LlmError::EmptyResponse,
+            LlmError::Interrupted,
+            LlmError::Unsupported {
+                message: "u".into(),
+            },
+        ];
+        for original in cases {
+            let json = serde_json::to_string(&original).unwrap();
+            let back: LlmError = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                serde_json::to_string(&back).unwrap(),
+                json,
+                "round-trip mismatch for {original:?}"
+            );
+        }
     }
 }

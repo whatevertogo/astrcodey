@@ -7,13 +7,13 @@ description = "Stable authoring surface for AstrCode extensions"
 
 [features]
 default = []
+# Compatibility-only: trusted host access is a naming convention, not a Cargo feature boundary.
 trusted-bundled = []
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
-astrcode-protocol = { path = "../astrcode-protocol" }
-astrcode-support = { path = "../astrcode-support" }
 async-trait = { workspace = true }
+futures-util = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

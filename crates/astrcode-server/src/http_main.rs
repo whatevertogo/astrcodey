@@ -12,8 +12,8 @@ async fn main() {
     let _guard = astrcode_log::init();
     tracing::info!("astrcode-http-server starting");
 
-    let runtime = match astrcode_server::bootstrap::bootstrap().await {
-        Ok(rt) => Arc::new(rt),
+    let server_app = match astrcode_server::bootstrap::bootstrap().await {
+        Ok(runtime) => astrcode_server::bootstrap::ServerApp::new(Arc::new(runtime)),
         Err(error) => {
             tracing::error!("Bootstrap failed: {error}");
             std::process::exit(1);
@@ -28,7 +28,7 @@ async fn main() {
             std::process::exit(1);
         });
 
-    if let Err(error) = astrcode_server::http::run_http_server(runtime, addr).await {
+    if let Err(error) = astrcode_server::http::run_http_server(server_app, addr).await {
         tracing::error!("HTTP server failed: {error}");
         std::process::exit(1);
     }

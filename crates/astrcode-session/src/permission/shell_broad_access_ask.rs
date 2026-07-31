@@ -1,8 +1,8 @@
-use astrcode_core::permission::{
-    ApprovalMode, PermissionContext, PermissionDecision, PermissionPolicy,
-};
+use astrcode_core::permission::ApprovalMode;
 
-pub struct ShellBroadAccessAskPolicy;
+use super::{PermissionContext, PermissionDecision, PermissionPolicy};
+
+pub(super) struct ShellBroadAccessAskPolicy;
 
 impl PermissionPolicy for ShellBroadAccessAskPolicy {
     fn priority(&self) -> u32 {
@@ -31,8 +31,6 @@ impl PermissionPolicy for ShellBroadAccessAskPolicy {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::permission::PermissionContext;
-
     use super::*;
 
     #[test]
@@ -44,7 +42,6 @@ mod tests {
             working_dir: std::path::Path::new("/tmp"),
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
-            session_id: "s",
             tool_selection: None,
         };
         assert!(matches!(

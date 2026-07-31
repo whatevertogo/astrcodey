@@ -2,13 +2,9 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
-use astrcode_core::{
-    extension::SessionToolSelection,
-    storage::EventReader,
-    tool::{
-        CreateSessionRequest, SessionAccessPair, SessionDeliveryOutcome, SessionOperations,
-        SubmitTurnRequest,
-    },
+use astrcode_core::tool::{
+    CreateSessionRequest, SessionAccessPair, SessionDeliveryOutcome, SessionOperations,
+    SessionToolSelection, SubmitTurnRequest,
 };
 use astrcode_extension_sdk::{
     s5r::ErrorPayload,
@@ -17,6 +13,7 @@ use astrcode_extension_sdk::{
         HostSubmitTurnRequest, SessionToolSelectionDto,
     },
 };
+use astrcode_storage::{EventReader, SessionReader};
 use serde_json::{Value, json};
 
 use super::{InvokeContext, block_on_async, capability::SessionCapability, session_inspect};
@@ -24,12 +21,19 @@ use super::{InvokeContext, block_on_async, capability::SessionCapability, sessio
 const MAX_READ_EVENTS_LIMIT: usize = 500;
 
 pub(super) struct SessionGroup {
-    reader: Option<Arc<dyn EventReader>>,
+    event_reader: Option<Arc<dyn EventReader>>,
+    session_reader: Option<Arc<dyn SessionReader>>,
 }
 
 impl SessionGroup {
-    pub(super) fn new(reader: Option<Arc<dyn EventReader>>) -> Self {
-        Self { reader }
+    pub(super) fn new(
+        event_reader: Option<Arc<dyn EventReader>>,
+        session_reader: Option<Arc<dyn SessionReader>>,
+    ) -> Self {
+        Self {
+            event_reader,
+            session_reader,
+        }
     }
 
     pub(super) fn invoke(
@@ -56,7 +60,7 @@ impl SessionGroup {
     }
 
     fn read_events(&self, input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-        let reader = self.reader.as_ref().ok_or_else(|| {
+        let reader = self.event_reader.as_ref().ok_or_else(|| {
             ErrorPayload::new("backend_unavailable", "session_read not configured")
         })?;
         let target_session_id = input["session_id"]
@@ -100,27 +104,27 @@ impl SessionGroup {
     }
 
     fn inspect_list(&self) -> Result<Value, ErrorPayload> {
-        let reader = self.reader()?;
+        let reader = self.session_reader()?;
         block_on_async(async move { session_inspect::list(reader).await })?
     }
 
     fn inspect_snapshot(&self, input: Value) -> Result<Value, ErrorPayload> {
-        let reader = self.reader()?;
+        let reader = self.session_reader()?;
         block_on_async(async move { session_inspect::snapshot(reader, input).await })?
     }
 
     fn inspect_read_model(&self, input: Value) -> Result<Value, ErrorPayload> {
-        let reader = self.reader()?;
+        let reader = self.session_reader()?;
         block_on_async(async move { session_inspect::read_model(reader, input).await })?
     }
 
     fn inspect_provider_messages(&self, input: Value) -> Result<Value, ErrorPayload> {
-        let reader = self.reader()?;
+        let reader = self.session_reader()?;
         block_on_async(async move { session_inspect::provider_messages(reader, input).await })?
     }
 
-    fn reader(&self) -> Result<Arc<dyn EventReader>, ErrorPayload> {
-        self.reader
+    fn session_reader(&self) -> Result<Arc<dyn SessionReader>, ErrorPayload> {
+        self.session_reader
             .as_ref()
             .map(Arc::clone)
             .ok_or_else(|| ErrorPayload::new("backend_unavailable", "session_read not configured"))

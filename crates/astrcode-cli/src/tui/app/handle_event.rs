@@ -1,15 +1,19 @@
 //! Apply ClientNotification to App state.
 
-use astrcode_core::event::{Event, EventPayload};
-use astrcode_protocol::events::{
-    ClientNotification, ExtensionCommandInfo, SessionListItem, SessionSnapshot, UiRequestKind,
+use astrcode_context::is_compact_summary_text;
+use astrcode_core::event::{
+    DurableEventPayload, Event, EventPayload, ExtensionEventData, LiveEventPayload,
 };
-use astrcode_support::text::truncate_first_line;
+use astrcode_protocol::events::{
+    ClientNotification, ExtensionCommandInfoDto, KeybindingDto, SessionListItemDto,
+    SessionSnapshot, UiRequestKind,
+};
 
 use super::App;
 use crate::tui::{
     command::slash::SlashCommandSpec,
     ext::tool::ToolRenderCtx,
+    render::inline_preview,
     store::transcript::{Message, MessageBody, MessageRole, ScrollbackEntry},
     streaming::controller::StreamController,
     tool_vocab::tool_display_name,
@@ -80,7 +84,10 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
 fn apply_event(app: &mut App, event: &Event) {
     // 只处理当前活跃 session 的事件；子 session 的事件通过直接路由到 child_agent tracker。
     // SessionStarted 例外：它设置 active_session_id。
-    if !matches!(&event.payload, EventPayload::SessionStarted { .. }) {
+    if !matches!(
+        &event.payload,
+        EventPayload::Durable(DurableEventPayload::SessionStarted(_))
+    ) {
         if let Some(active) = &app.active_session_id {
             if event.session_id.as_str() != active.as_str() {
                 // 检查是否是已跟踪的子 session 事件
@@ -96,14 +103,10 @@ fn apply_event(app: &mut App, event: &Event) {
         }
     }
     match &event.payload {
-        EventPayload::SessionStarted {
-            working_dir,
-            model_id,
-            ..
-        } => {
+        EventPayload::Durable(DurableEventPayload::SessionStarted(started)) => {
             app.active_session_id = Some(event.session_id.to_string());
-            app.working_dir = working_dir.clone();
-            app.model_name = model_id.clone();
+            app.working_dir = started.working_dir.clone();
+            app.model_name = started.model_id.clone();
             app.stream_states.clear();
             app.push_message(
                 MessageRole::System,
@@ -114,31 +117,27 @@ fn apply_event(app: &mut App, event: &Event) {
             );
             app.status_text = "Ready".into();
         },
-        EventPayload::SessionDeleted => {
-            app.active_session_id = None;
-            app.status_text = "Session deleted".into();
-        },
-        EventPayload::TurnStarted => {
+        EventPayload::Durable(DurableEventPayload::TurnStarted) => {
             app.is_streaming = true;
             app.error = None;
             app.status_text = "Working".into();
         },
-        EventPayload::TurnCompleted { finish_reason } => {
+        EventPayload::Durable(DurableEventPayload::TurnCompleted { finish_reason }) => {
             app.is_streaming = false;
             app.status_text = ready_status(finish_reason);
         },
-        EventPayload::AgentRunStarted => {
+        EventPayload::Live(LiveEventPayload::AgentRunStarted) => {
             app.is_streaming = true;
             app.status_text = "Agent running".into();
         },
-        EventPayload::AgentRunCompleted { reason } => {
+        EventPayload::Live(LiveEventPayload::AgentRunCompleted { reason }) => {
             app.is_streaming = false;
             app.status_text = ready_status(reason);
         },
-        EventPayload::UserMessage { .. } => {
+        EventPayload::Durable(DurableEventPayload::UserMessage { .. }) => {
             // Optimistically pushed on Enter; skip.
         },
-        EventPayload::AssistantMessageStarted { message_id } => {
+        EventPayload::Live(LiveEventPayload::AssistantMessageStarted { message_id }) => {
             let width = app.content_width;
             app.stream_states
                 .insert(message_id.to_string(), StreamController::new(Some(width)));
@@ -154,7 +153,7 @@ fn apply_event(app: &mut App, event: &Event) {
             app.status_text = "Thinking".into();
             tracing::debug!(message_id = %message_id, "stream_open");
         },
-        EventPayload::AssistantTextDelta { message_id, delta } => {
+        EventPayload::Live(LiveEventPayload::AssistantTextDelta { message_id, delta }) => {
             // 第一次收到 text delta 时写入 StreamHeader
             let is_first_delta = app
                 .find_message_mut(message_id.as_str())
@@ -174,9 +173,11 @@ fn apply_event(app: &mut App, event: &Event) {
             }
             tracing::debug!(message_id = %message_id, len = delta.len(), "stream_chunk");
         },
-        EventPayload::AssistantMessageCompleted {
-            message_id, text, ..
-        } => {
+        EventPayload::Durable(DurableEventPayload::AssistantMessageCompleted {
+            message_id,
+            text,
+            ..
+        }) => {
             let theme = app.theme.clone();
             let lines = if let Some(ctrl) = app.stream_states.remove(message_id.as_str()) {
                 let mut ctrl = ctrl;
@@ -202,10 +203,10 @@ fn apply_event(app: &mut App, event: &Event) {
             }
             tracing::debug!(message_id = %message_id, "stream_close");
         },
-        EventPayload::ThinkingDelta { delta, .. } => {
+        EventPayload::Live(LiveEventPayload::ThinkingDelta { delta, .. }) => {
             app.status_text = format!("Thinking · {}", delta);
         },
-        EventPayload::ToolCallStarted { call_id, tool_name } => {
+        EventPayload::Live(LiveEventPayload::ToolCallStarted { call_id, tool_name }) => {
             // Codex style: only update status bar. Don't push to scrollback yet.
             // We track the tool internally for later completion display.
             app.status_text = format!("● {}", tool_call_summary(tool_name, None));
@@ -233,12 +234,12 @@ fn apply_event(app: &mut App, event: &Event) {
             }
             tracing::debug!(call_id = %call_id, tool = %tool_name, "tool_open");
         },
-        EventPayload::ToolApprovalRequested {
+        EventPayload::Durable(DurableEventPayload::ToolApprovalRequested {
             call_id,
             tool_name,
             prompt,
             ..
-        } => {
+        }) => {
             app.pending_tool_approval = Some(crate::tui::app::ToolApprovalPrompt {
                 call_id: call_id.to_string(),
                 tool_name: tool_name.clone(),
@@ -255,7 +256,7 @@ fn apply_event(app: &mut App, event: &Event) {
                 None,
             );
         },
-        EventPayload::ToolApprovalResolved { call_id, .. } => {
+        EventPayload::Durable(DurableEventPayload::ToolApprovalResolved { call_id, .. }) => {
             if app
                 .pending_tool_approval
                 .as_ref()
@@ -264,45 +265,31 @@ fn apply_event(app: &mut App, event: &Event) {
                 app.pending_tool_approval = None;
             }
         },
-        EventPayload::ToolCallRequested {
+        EventPayload::Durable(DurableEventPayload::ToolCallRequested {
             call_id: _,
             tool_name,
             arguments,
             ..
-        } => {
+        }) => {
             // Update status with argument summary.
             app.status_text = format!("● {}", tool_call_summary(tool_name, Some(arguments)));
         },
-        EventPayload::ToolOutputDelta { .. } => {
+        EventPayload::Live(LiveEventPayload::ToolOutputDelta { .. }) => {
             // 父 session 的非 agent 工具输出——更新 status bar 即可。
             // 子 agent 的工具进度由 apply_child_session_event 直接处理。
             app.status_text = "● Receiving output".to_string();
         },
-        EventPayload::ToolCallCompleted {
+        EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
             call_id,
             tool_name,
             result,
             ..
-        } => {
+        }) => {
             // Codex style: show one compact line in scrollback for the completed tool.
             // Format: "● Ran <command>" or "✗ <error>" or "● Task completed"
-
-            // Remove the streaming placeholder from messages.
-            if let Some(idx) = app
-                .messages
-                .iter()
-                .rposition(|m| m.key.as_deref() == Some(call_id.as_str()))
-            {
-                app.messages.remove(idx);
-            }
+            close_tool_call_state(app, call_id.as_str());
 
             if tool_name == "agent" {
-                // Sub-agent: flush tracker output and show summary.
-                if let Some(mut tracker) = app.child_agents.remove(call_id.as_str()) {
-                    tracker.flush_on_completion(&mut app.scrollback_queue);
-                }
-                // 清理 child_session_map 中引用该 call_id 的条目
-                app.child_session_map.retain(|_, v| v != call_id.as_str());
                 let summary = if result.is_error {
                     format!(
                         "✗ Task failed: {}",
@@ -374,7 +361,41 @@ fn apply_event(app: &mut App, event: &Event) {
             app.status_text = "Ready".into();
             tracing::debug!(call_id = %call_id, tool = %tool_name, is_error = result.is_error, "tool_close");
         },
-        EventPayload::CompactionStarted => {
+        EventPayload::Durable(DurableEventPayload::ToolCallFailed {
+            call_id,
+            tool_name,
+            error,
+            ..
+        }) => {
+            close_tool_call_state(app, call_id.as_str());
+            app.push_message(
+                MessageRole::Error,
+                tool_display_name(tool_name).to_string(),
+                format!("✗ Execution failed: {}", truncate_first_line(error, 100)),
+                false,
+                None,
+            );
+            app.status_text = "Ready".into();
+            tracing::debug!(call_id = %call_id, tool = %tool_name, "tool_failed");
+        },
+        EventPayload::Durable(DurableEventPayload::ToolCallCancelled {
+            call_id,
+            tool_name,
+            reason,
+            ..
+        }) => {
+            close_tool_call_state(app, call_id.as_str());
+            app.push_message(
+                MessageRole::Tool,
+                tool_display_name(tool_name).to_string(),
+                format!("○ Cancelled: {}", truncate_first_line(reason, 100)),
+                false,
+                None,
+            );
+            app.status_text = "Ready".into();
+            tracing::debug!(call_id = %call_id, tool = %tool_name, "tool_cancelled");
+        },
+        EventPayload::Live(LiveEventPayload::CompactionStarted) => {
             app.is_compacting = true;
             app.push_message(
                 MessageRole::System,
@@ -385,7 +406,7 @@ fn apply_event(app: &mut App, event: &Event) {
             );
             app.status_text = "Compacting...".into();
         },
-        EventPayload::CompactionCompleted { messages_removed } => {
+        EventPayload::Live(LiveEventPayload::CompactionCompleted { messages_removed }) => {
             app.is_compacting = false;
 
             // 更新 streaming 消息为完成状态
@@ -406,10 +427,11 @@ fn apply_event(app: &mut App, event: &Event) {
             );
             app.status_text = "Ready".into();
         },
-        EventPayload::ErrorOccurred { message, .. } => {
+        EventPayload::Durable(DurableEventPayload::ErrorOccurred { message, .. })
+        | EventPayload::Live(LiveEventPayload::ErrorOccurred { message, .. }) => {
             app.show_error(message);
         },
-        EventPayload::RecapGenerated { text, .. } => {
+        EventPayload::Durable(DurableEventPayload::RecapGenerated { text, .. }) => {
             app.push_message(
                 MessageRole::System,
                 "Recap".into(),
@@ -419,16 +441,16 @@ fn apply_event(app: &mut App, event: &Event) {
             );
             app.status_text = "Ready".into();
         },
-        EventPayload::ModelIdChanged { model_id } => {
+        EventPayload::Durable(DurableEventPayload::ModelIdChanged { model_id }) => {
             app.model_name = model_id.clone();
         },
-        EventPayload::AgentSessionSpawned {
+        EventPayload::Durable(DurableEventPayload::AgentSessionSpawned {
             child_session_id,
             agent_name,
             task,
             tool_call_id,
             ..
-        } => {
+        }) => {
             let short_task = truncate_first_line(task, 60);
             app.push_message(
                 MessageRole::System,
@@ -443,11 +465,11 @@ fn apply_event(app: &mut App, event: &Event) {
             app.child_session_map
                 .insert(child_session_id.to_string(), tool_call_id.to_string());
         },
-        EventPayload::AgentSessionCompleted {
+        EventPayload::Durable(DurableEventPayload::AgentSessionCompleted {
             child_session_id,
             summary,
             ..
-        } => {
+        }) => {
             let was_tracked_child = is_tracked_child(app, child_session_id.as_str());
             let short_summary = truncate_first_line(summary, 60);
             if !was_tracked_child {
@@ -462,11 +484,11 @@ fn apply_event(app: &mut App, event: &Event) {
             app.child_session_map.remove(child_session_id.as_str());
             app.status_text = "Ready".into();
         },
-        EventPayload::AgentSessionFailed {
+        EventPayload::Durable(DurableEventPayload::AgentSessionFailed {
             child_session_id,
             error,
             ..
-        } => {
+        }) => {
             let was_tracked_child = is_tracked_child(app, child_session_id.as_str());
             if !was_tracked_child {
                 app.push_message(
@@ -479,28 +501,27 @@ fn apply_event(app: &mut App, event: &Event) {
             }
             app.child_session_map.remove(child_session_id.as_str());
         },
-        EventPayload::Custom { name, data } => {
-            // 将自定义事件作为带 custom_type 的消息推入 scrollback。
-            // 如果 MessageRendererRegistry 中有匹配的渲染器，渲染时会分发给它；
-            // 否则降级为纯文本（名称 + JSON 预览）。
-            let fallback = format!(
-                "[{name}] {}",
-                astrcode_support::text::compact_inline(&data.to_string(), 80)
-            );
-            let body = MessageBody::with_custom(name.clone(), data.clone(), fallback);
-            let msg = Message {
-                role: MessageRole::System,
-                label: name.clone(),
-                body,
-                is_streaming: false,
-                key: None,
-            };
-            app.scrollback_queue
-                .push(ScrollbackEntry::Message(msg.clone()));
-            app.messages.push(msg);
+        EventPayload::Durable(DurableEventPayload::ExtensionEvent(extension))
+        | EventPayload::Live(LiveEventPayload::ExtensionEvent(extension)) => {
+            apply_extension_event(app, extension);
         },
         _ => {},
     }
+}
+
+fn close_tool_call_state(app: &mut App, call_id: &str) {
+    if let Some(index) = app
+        .messages
+        .iter()
+        .rposition(|message| message.key.as_deref() == Some(call_id))
+    {
+        app.messages.remove(index);
+    }
+    if let Some(mut tracker) = app.child_agents.remove(call_id) {
+        tracker.flush_on_completion(&mut app.scrollback_queue);
+    }
+    app.child_session_map
+        .retain(|_, mapped_call_id| mapped_call_id != call_id);
 }
 
 fn is_tracked_child(app: &App, child_session_id: &str) -> bool {
@@ -509,18 +530,37 @@ fn is_tracked_child(app: &App, child_session_id: &str) -> bool {
         .is_some_and(|call_id| app.child_agents.contains_key(call_id))
 }
 
+fn apply_extension_event(app: &mut App, extension: &ExtensionEventData) {
+    let name = &extension.event_type;
+    let fallback = format!(
+        "[{name}] {}",
+        inline_preview(&extension.payload.to_string(), 80)
+    );
+    let body = MessageBody::with_custom(name.clone(), extension.payload.clone(), fallback);
+    let message = Message {
+        role: MessageRole::System,
+        label: name.clone(),
+        body,
+        is_streaming: false,
+        key: None,
+    };
+    app.scrollback_queue
+        .push(ScrollbackEntry::Message(message.clone()));
+    app.messages.push(message);
+}
+
 /// 处理来自子 session 的事件，将工具调用进度路由到对应的 ChildAgentTracker。
 fn apply_child_session_event(app: &mut App, call_id: &str, event: &Event) {
     match &event.payload {
-        EventPayload::ToolCallStarted { tool_name, .. } => {
+        EventPayload::Live(LiveEventPayload::ToolCallStarted { tool_name, .. }) => {
             if let Some(tracker) = app.child_agents.get_mut(call_id) {
                 tracker.on_tool_started(tool_name);
                 app.status_text = format!("● Task → {tool_name}");
             }
         },
-        EventPayload::ToolCallCompleted {
+        EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
             tool_name, result, ..
-        } => {
+        }) => {
             if let Some(tracker) = app.child_agents.get_mut(call_id) {
                 let summary = child_tool_summary(tool_name, result);
                 tracker.on_tool_completed(
@@ -532,7 +572,36 @@ fn apply_child_session_event(app: &mut App, call_id: &str, event: &Event) {
                 app.status_text = format!("● Agent: {tool_name} done");
             }
         },
-        EventPayload::ErrorOccurred { message, .. } if app.child_agents.contains_key(call_id) => {
+        EventPayload::Durable(DurableEventPayload::ToolCallFailed {
+            tool_name, error, ..
+        }) => {
+            if let Some(tracker) = app.child_agents.get_mut(call_id) {
+                tracker.on_tool_completed(
+                    tool_name,
+                    &truncate_first_line(error, 60),
+                    true,
+                    &mut app.scrollback_queue,
+                );
+                app.status_text = format!("● Agent: {tool_name} failed");
+            }
+        },
+        EventPayload::Durable(DurableEventPayload::ToolCallCancelled {
+            tool_name, reason, ..
+        }) => {
+            if let Some(tracker) = app.child_agents.get_mut(call_id) {
+                tracker.on_tool_completed(
+                    tool_name,
+                    &format!("cancelled: {}", truncate_first_line(reason, 50)),
+                    true,
+                    &mut app.scrollback_queue,
+                );
+                app.status_text = format!("● Agent: {tool_name} cancelled");
+            }
+        },
+        EventPayload::Durable(DurableEventPayload::ErrorOccurred { message, .. })
+        | EventPayload::Live(LiveEventPayload::ErrorOccurred { message, .. })
+            if app.child_agents.contains_key(call_id) =>
+        {
             app.scrollback_queue.push(ScrollbackEntry::StreamText {
                 role: MessageRole::Tool,
                 text: format!("  ! {}", truncate_first_line(message, 80)),
@@ -604,8 +673,10 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
             astrcode_protocol::wire::MessageRoleDto::Tool => MessageRole::Tool,
         };
 
-        // Compact summary 消息使用特殊标签
-        let label = if astrcode_context::compaction::is_compact_summary_text(&message.content) {
+        let is_compact_summary = message
+            .is_compact_summary
+            .unwrap_or_else(|| is_compact_summary_text(&message.content));
+        let label = if is_compact_summary {
             "Compacted"
         } else {
             match &role {
@@ -623,7 +694,7 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
     tracing::debug!(session_id = %session_id, messages = snapshot.messages.len(), "resume_snapshot");
 }
 
-fn apply_session_list(app: &mut App, sessions: &[SessionListItem]) {
+fn apply_session_list(app: &mut App, sessions: &[SessionListItemDto]) {
     use crate::tui::app::SessionEntry;
     app.available_sessions = sessions
         .iter()
@@ -632,7 +703,7 @@ fn apply_session_list(app: &mut App, sessions: &[SessionListItem]) {
                 .title
                 .as_deref()
                 .filter(|t| !t.trim().is_empty())
-                .map(|t| astrcode_support::text::compact_inline(t, 60))
+                .map(|text| inline_preview(text, 60))
                 .unwrap_or_else(|| short_id(&s.session_id).to_string());
             SessionEntry {
                 session_id: s.session_id.clone(),
@@ -674,8 +745,8 @@ fn apply_ui_request(
 
 fn apply_extension_command_list(
     app: &mut App,
-    commands: &[ExtensionCommandInfo],
-    keybindings: &[astrcode_core::extension::Keybinding],
+    commands: &[ExtensionCommandInfoDto],
+    keybindings: &[KeybindingDto],
     status_items: &[astrcode_protocol::events::StatusItemInfoDto],
 ) {
     app.extension_commands = commands
@@ -710,6 +781,17 @@ fn apply_extension_command_list(
 
 fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
+}
+
+fn truncate_first_line(text: &str, max_chars: usize) -> String {
+    let first_line = text.lines().next().unwrap_or(text);
+    if first_line.chars().count() <= max_chars {
+        return first_line.to_owned();
+    }
+
+    let mut truncated = first_line.chars().take(max_chars).collect::<String>();
+    truncated.push('…');
+    truncated
 }
 
 fn ready_status(reason: &str) -> String {
@@ -801,9 +883,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     use astrcode_core::{
-        event::{Event, EventPayload},
+        event::{
+            DurableEvent, DurableEventPayload, EventPayload, LiveEvent, LiveEventPayload,
+            StoredEvent,
+        },
         tool::ToolResult,
     };
+    use astrcode_protocol::{events::MessageDto, wire::MessageRoleDto};
 
     use super::*;
     use crate::tui::store::transcript::{MessageRole, ScrollbackEntry};
@@ -813,13 +899,21 @@ mod tests {
     }
 
     fn apply_payload(app: &mut App, payload: EventPayload) {
-        let event = Event::new("session".into(), Some("turn".into()), payload);
+        let event = match payload {
+            EventPayload::Durable(payload) => StoredEvent::new(
+                1,
+                DurableEvent::turn("session".into(), "turn".into(), payload),
+            )
+            .into(),
+            EventPayload::Live(payload) => {
+                LiveEvent::turn("session".into(), "turn".into(), payload).into()
+            },
+        };
         apply_event(app, &event);
     }
 
     fn tool_result(content: &str, is_error: bool) -> ToolResult {
         ToolResult {
-            call_id: "call-1".into(),
             content: content.into(),
             is_error,
             error: None,
@@ -829,28 +923,41 @@ mod tests {
     }
 
     #[test]
+    fn first_line_preview_preserves_content_and_limits_characters() {
+        for (text, max_chars, expected) in [
+            ("hello", 10, "hello"),
+            ("first\nsecond", 80, "first"),
+            ("0123456789abcdef", 8, "01234567…"),
+            ("你好世界abcd", 8, "你好世界abcd"),
+            ("hello   world", 80, "hello   world"),
+        ] {
+            assert_eq!(truncate_first_line(text, max_chars), expected);
+        }
+    }
+
+    #[test]
     fn assistant_deltas_enter_scrollback_incrementally() {
         let mut app = make_app();
         apply_payload(
             &mut app,
-            EventPayload::AssistantMessageStarted {
+            EventPayload::Live(LiveEventPayload::AssistantMessageStarted {
                 message_id: "msg-1".into(),
-            },
+            }),
         );
         apply_payload(
             &mut app,
-            EventPayload::AssistantTextDelta {
+            EventPayload::Live(LiveEventPayload::AssistantTextDelta {
                 message_id: "msg-1".into(),
                 delta: "first line\nsecond".into(),
-            },
+            }),
         );
         apply_payload(
             &mut app,
-            EventPayload::AssistantMessageCompleted {
+            EventPayload::Durable(DurableEventPayload::AssistantMessageCompleted {
                 message_id: "msg-1".into(),
                 text: "first line\nsecond".into(),
                 reasoning_content: None,
-            },
+            }),
         );
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].body.plain_text(), "first line\nsecond");
@@ -873,24 +980,24 @@ mod tests {
         let mut app = make_app();
         apply_payload(
             &mut app,
-            EventPayload::AssistantMessageStarted {
+            EventPayload::Live(LiveEventPayload::AssistantMessageStarted {
                 message_id: "msg-1".into(),
-            },
+            }),
         );
         apply_payload(
             &mut app,
-            EventPayload::AssistantTextDelta {
+            EventPayload::Live(LiveEventPayload::AssistantTextDelta {
                 message_id: "msg-1".into(),
                 delta: "# Title\n- item".into(),
-            },
+            }),
         );
         apply_payload(
             &mut app,
-            EventPayload::AssistantMessageCompleted {
+            EventPayload::Durable(DurableEventPayload::AssistantMessageCompleted {
                 message_id: "msg-1".into(),
                 text: "# Title\n- item".into(),
                 reasoning_content: None,
-            },
+            }),
         );
         assert!(!app.scrollback_queue.iter().any(|e| {
             matches!(e, ScrollbackEntry::Message(m) if m.role == MessageRole::Assistant)
@@ -900,16 +1007,19 @@ mod tests {
     #[test]
     fn completion_statuses_preserve_actionable_reasons_without_scrollback() {
         let mut app = make_app();
-        apply_payload(&mut app, EventPayload::AgentRunStarted);
+        apply_payload(
+            &mut app,
+            EventPayload::Live(LiveEventPayload::AgentRunStarted),
+        );
         assert!(app.is_streaming);
         assert_eq!(app.status_text, "Agent running");
         assert!(app.scrollback_queue.is_empty());
 
         apply_payload(
             &mut app,
-            EventPayload::AgentRunCompleted {
+            EventPayload::Live(LiveEventPayload::AgentRunCompleted {
                 reason: "done".into(),
-            },
+            }),
         );
         assert!(!app.is_streaming);
         assert!(app.scrollback_queue.is_empty());
@@ -917,17 +1027,17 @@ mod tests {
 
         apply_payload(
             &mut app,
-            EventPayload::TurnCompleted {
+            EventPayload::Durable(DurableEventPayload::TurnCompleted {
                 finish_reason: "stop".into(),
-            },
+            }),
         );
         assert_eq!(app.status_text, "Ready");
 
         apply_payload(
             &mut app,
-            EventPayload::AgentRunCompleted {
+            EventPayload::Live(LiveEventPayload::AgentRunCompleted {
                 reason: "aborted".into(),
-            },
+            }),
         );
         assert_eq!(app.status_text, "Ready · aborted");
     }
@@ -954,27 +1064,80 @@ mod tests {
     }
 
     #[test]
-    fn tool_completion_shows_compact_summary() {
+    fn resumed_snapshot_prefers_explicit_compact_summary_semantics() {
+        let mut app = make_app();
+        let snapshot = SessionSnapshot {
+            session_id: "session".into(),
+            cursor: "1".into(),
+            messages: vec![
+                MessageDto {
+                    role: MessageRoleDto::System,
+                    content: "<compact_summary>legacy-looking text</compact_summary>".into(),
+                    is_compact_summary: Some(false),
+                },
+                MessageDto {
+                    role: MessageRoleDto::System,
+                    content: "summary without a marker".into(),
+                    is_compact_summary: Some(true),
+                },
+                MessageDto {
+                    role: MessageRoleDto::System,
+                    content: "  <compact_summary>legacy summary</compact_summary>".into(),
+                    is_compact_summary: None,
+                },
+            ],
+            model_id: "model".into(),
+            working_dir: "/workspace".into(),
+            agent_sessions: Vec::new(),
+        };
+
+        apply_session_resumed(&mut app, "session", &snapshot);
+
+        assert_eq!(app.messages[0].label, "System");
+        assert_eq!(app.messages[1].label, "Compacted");
+        assert_eq!(app.messages[2].label, "Compacted");
+    }
+
+    #[test]
+    fn tool_completion_uses_builtin_and_unknown_fallbacks() {
         let mut app = make_app();
         apply_payload(
             &mut app,
-            EventPayload::ToolCallStarted {
+            EventPayload::Live(LiveEventPayload::ToolCallStarted {
                 call_id: "call-1".into(),
                 tool_name: "grep".into(),
-            },
+            }),
         );
         apply_payload(
             &mut app,
-            EventPayload::ToolCallCompleted {
+            EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
                 call_id: "call-1".into(),
                 tool_name: "grep".into(),
                 result: tool_result("match1\nmatch2\nmatch3", false),
                 arguments: String::new(),
                 arguments_json: None,
-            },
+            }),
         );
         assert_eq!(app.messages.len(), 1);
         assert!(app.messages[0].body.plain_text().contains("● 3 match"));
+
+        apply_payload(
+            &mut app,
+            EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
+                call_id: "call-extension".into(),
+                tool_name: "thirdPartyTool".into(),
+                result: tool_result("plain extension output", false),
+                arguments: String::new(),
+                arguments_json: None,
+            }),
+        );
+        assert_eq!(app.messages.len(), 2);
+        assert!(
+            app.messages[1]
+                .body
+                .plain_text()
+                .contains("plain extension output")
+        );
     }
 
     #[test]
@@ -982,20 +1145,20 @@ mod tests {
         let mut app = make_app();
         apply_payload(
             &mut app,
-            EventPayload::ToolCallStarted {
+            EventPayload::Live(LiveEventPayload::ToolCallStarted {
                 call_id: "call-1".into(),
                 tool_name: "shell".into(),
-            },
+            }),
         );
         apply_payload(
             &mut app,
-            EventPayload::ToolCallCompleted {
+            EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
                 call_id: "call-1".into(),
                 tool_name: "shell".into(),
                 result: tool_result("permission denied", true),
                 arguments: String::new(),
                 arguments_json: None,
-            },
+            }),
         );
         assert_eq!(app.messages.len(), 1);
         assert_eq!(app.messages[0].role, MessageRole::Error);
@@ -1003,24 +1166,63 @@ mod tests {
     }
 
     #[test]
+    fn tool_execution_terminal_states_are_distinct() {
+        let cases = [
+            (
+                EventPayload::Durable(DurableEventPayload::ToolCallFailed {
+                    call_id: "failed".into(),
+                    tool_name: "shell".into(),
+                    error: "process spawn failed".into(),
+                    metadata: Default::default(),
+                    duration_ms: None,
+                    arguments: String::new(),
+                    arguments_json: None,
+                }),
+                MessageRole::Error,
+                "Execution failed",
+            ),
+            (
+                EventPayload::Durable(DurableEventPayload::ToolCallCancelled {
+                    call_id: "cancelled".into(),
+                    tool_name: "shell".into(),
+                    reason: "turn aborted".into(),
+                    duration_ms: None,
+                    arguments: String::new(),
+                    arguments_json: None,
+                }),
+                MessageRole::Tool,
+                "Cancelled",
+            ),
+        ];
+
+        for (payload, expected_role, expected_text) in cases {
+            let mut app = make_app();
+            apply_payload(&mut app, payload);
+            assert_eq!(app.messages.len(), 1);
+            assert_eq!(app.messages[0].role, expected_role);
+            assert!(app.messages[0].body.plain_text().contains(expected_text));
+        }
+    }
+
+    #[test]
     fn agent_tool_shows_compact_task_summary() {
         let mut app = make_app();
         apply_payload(
             &mut app,
-            EventPayload::ToolCallStarted {
+            EventPayload::Live(LiveEventPayload::ToolCallStarted {
                 call_id: "call-agent".into(),
                 tool_name: "agent".into(),
-            },
+            }),
         );
         apply_payload(
             &mut app,
-            EventPayload::ToolCallCompleted {
+            EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
                 call_id: "call-agent".into(),
                 tool_name: "agent".into(),
                 result: tool_result("Found 3 relevant files", false),
                 arguments: String::new(),
                 arguments_json: None,
-            },
+            }),
         );
         assert_eq!(app.messages.len(), 1);
         assert!(
@@ -1036,19 +1238,19 @@ mod tests {
         let mut app = make_app();
         apply_payload(
             &mut app,
-            EventPayload::ToolCallStarted {
+            EventPayload::Live(LiveEventPayload::ToolCallStarted {
                 call_id: "call-1".into(),
                 tool_name: "shell".into(),
-            },
+            }),
         );
         app.scrollback_queue.clear();
         apply_payload(
             &mut app,
-            EventPayload::ToolOutputDelta {
+            EventPayload::Live(LiveEventPayload::ToolOutputDelta {
                 call_id: "call-1".into(),
                 stream: astrcode_core::event::ToolOutputStream::Stdout,
                 delta: "lots of output\n".into(),
-            },
+            }),
         );
         assert!(app.scrollback_queue.is_empty());
         assert!(app.status_text.contains("Receiving"));

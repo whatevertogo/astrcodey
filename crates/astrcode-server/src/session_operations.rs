@@ -3,13 +3,12 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    extension::SessionToolSelection,
     tool::{
         CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
         SessionDeliveryOutcome, SessionExecutionView, SessionHandle, SessionOperations,
-        SessionStatus, SubmitTurnRequest, SubmitTurnResult,
+        SessionStatus, SessionToolSelection, SubmitTurnRequest, SubmitTurnResult,
     },
-    types::SessionId,
+    types::{SessionId, TurnId},
 };
 
 use crate::{
@@ -48,7 +47,7 @@ impl ServerSessionOperations {
             .scheduler
             .deliver_input(
                 target_sid.clone(),
-                crate::turn_scheduler::PromptInput::text_only(content),
+                astrcode_core::user_input::UserInput::text_only(content),
                 delivery,
             )
             .await
@@ -56,6 +55,37 @@ impl ServerSessionOperations {
 
         self.session_manager.sync_durable_events(&target_sid).await;
         Ok(delivery_outcome(outcome))
+    }
+
+    async fn submit_same_session_turn(
+        &self,
+        session_id: SessionId,
+        user_prompt: String,
+        wait_for_result: bool,
+    ) -> Result<SubmitTurnResult, SessionApiError> {
+        let input = astrcode_core::user_input::UserInput::text_only(user_prompt);
+        if !wait_for_result {
+            let (turn_id, _completion) = self
+                .scheduler
+                .start_tracked_with_completion(session_id.clone(), input)
+                .await
+                .map_err(SessionApiError::internal)?;
+            return Ok(SubmitTurnResult::Backgrounded {
+                task_id: turn_id.into_string(),
+                session_id: session_id.into_string(),
+            });
+        }
+
+        let (_turn_id, output) = self
+            .scheduler
+            .start_tracked_with_output(session_id, input)
+            .await
+            .map_err(SessionApiError::internal)?;
+        let content = output
+            .await
+            .map_err(SessionApiError::internal)?
+            .map_err(SessionApiError::internal)?;
+        Ok(SubmitTurnResult::Completed { content })
     }
 }
 
@@ -65,14 +95,14 @@ impl SessionOperations for ServerSessionOperations {
         &self,
         request: CreateRootSessionRequest,
     ) -> Result<SessionHandle, SessionApiError> {
-        let created = self
+        let session = self
             .session_manager
             .create(&request.working_dir)
             .await
             .map_err(SessionApiError::internal)?;
 
         Ok(SessionHandle {
-            session_id: created.session.id().clone().into_string(),
+            session_id: session.id().clone().into_string(),
         })
     }
 
@@ -82,10 +112,12 @@ impl SessionOperations for ServerSessionOperations {
         request: CreateSessionRequest,
     ) -> Result<SessionHandle, SessionApiError> {
         let parent_sid = SessionId::from(parent_session_id);
-        let child = self
-            .child_sessions
-            .spawn_child(&parent_sid, request)
-            .await?;
+        let operation = self
+            .scheduler
+            .begin_session_operation(&parent_sid)
+            .await
+            .map_err(SessionApiError::internal)?;
+        let child = self.child_sessions.spawn_child(operation, request).await?;
 
         Ok(SessionHandle {
             session_id: child.id().clone().into_string(),
@@ -130,7 +162,7 @@ impl SessionOperations for ServerSessionOperations {
             .map_err(SessionApiError::internal)?;
         Ok(SessionExecutionView {
             phase: view.phase,
-            active_turn_id: view.active_turn_id.map(|turn_id| turn_id.into_string()),
+            active_turn_id: view.active_turn_id.map(TurnId::into_string),
             queued_inputs: view.queued_inputs,
         })
     }
@@ -162,11 +194,22 @@ impl SessionOperations for ServerSessionOperations {
             .verified_session_ids(request.access.as_access())
             .await?;
 
+        if caller_sid == target_sid {
+            if request.notify_parent_on_complete.is_some() || request.recycle_on_complete {
+                return Err(SessionApiError::Unsupported(
+                    "same-session turns cannot notify a parent or recycle themselves".into(),
+                ));
+            }
+            return self
+                .submit_same_session_turn(target_sid, request.user_prompt, request.wait_for_result)
+                .await;
+        }
+
         if request.wait_for_result {
             let content = self
                 .child_sessions
                 .submit_turn_sync(
-                    self.scheduler.as_ref(),
+                    Arc::clone(&self.scheduler),
                     &caller_sid,
                     &target_sid,
                     request.user_prompt,
@@ -219,21 +262,17 @@ impl SessionOperations for ServerSessionOperations {
     }
 
     async fn recycle_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
-        let (caller_sid, target_sid) = self.verified_session_ids(access).await?;
+        let (_, target_sid) = self.verified_session_ids(access).await?;
 
-        self.child_sessions
-            .recycle_child(self.scheduler.as_ref(), &caller_sid, &target_sid)
-            .await;
-
-        Ok(())
+        self.scheduler
+            .recycle_session(&target_sid)
+            .await
+            .map_err(SessionApiError::internal)
     }
 
     async fn delete_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
         let (_, target_sid) = self.verified_session_ids(access).await?;
 
-        if let Err(e) = self.scheduler.abort(&target_sid).await {
-            tracing::warn!(%target_sid, error = %e, "abort failed before session delete");
-        }
         self.scheduler
             .delete_session(&target_sid)
             .await
@@ -243,14 +282,38 @@ impl SessionOperations for ServerSessionOperations {
     }
 
     async fn restore_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
-        let (_, target_sid) = self.verified_session_ids(access).await?;
-
-        self.session_manager
-            .restore_session(&target_sid)
-            .await
+        let caller_sid = SessionId::from(access.caller_session_id);
+        let target_sid = SessionId::from(access.target_session_id);
+        let admission = self
+            .scheduler
+            .admit_owned()
             .map_err(SessionApiError::internal)?;
+        let scheduler = Arc::clone(&self.scheduler);
+        let session_manager = Arc::clone(&self.session_manager);
+        let child_sessions = Arc::clone(&self.child_sessions);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
 
-        Ok(())
+        admission.spawn_named("session_restore_owner", async move {
+            let result = async {
+                let _operation = scheduler
+                    .begin_session_operation(&target_sid)
+                    .await
+                    .map_err(SessionApiError::internal)?;
+                let transition = session_manager.begin_session_transition(&target_sid).await;
+
+                child_sessions
+                    .verify_restore_access(&caller_sid, &target_sid)
+                    .await?;
+                session_manager
+                    .restore_session_in_transition(&transition)
+                    .await
+                    .map_err(map_restore_error)
+            }
+            .await;
+            let _ = result_tx.send(result);
+        });
+
+        result_rx.await.map_err(SessionApiError::internal)?
     }
 
     async fn resolve_tool_approval(
@@ -277,30 +340,17 @@ impl SessionOperations for ServerSessionOperations {
                 },
             })
     }
+}
 
-    async fn resolve_tool_ui_response(
-        &self,
-        target_session_id: &str,
-        call_id: &str,
-        answers: std::collections::BTreeMap<String, String>,
-    ) -> Result<(), SessionApiError> {
-        let target_sid = SessionId::from(target_session_id);
-        let session = self
-            .session_manager
-            .open(target_sid.clone())
-            .await
-            .map_err(|_| SessionApiError::NotFound("session not found".into()))?;
-        session
-            .runtime()
-            .resolve_tool_ui_response(&astrcode_core::types::ToolCallId::from(call_id), answers)
-            .map_err(|error| match error {
-                astrcode_session::ToolUiResponseResolveError::NotPending { .. } => {
-                    SessionApiError::NotFound(error.to_string())
-                },
-                astrcode_session::ToolUiResponseResolveError::ReceiverDropped { .. } => {
-                    SessionApiError::SessionBusy(error.to_string())
-                },
-            })
+fn map_restore_error(error: crate::session_manager::SessionManagerError) -> SessionApiError {
+    match error {
+        crate::session_manager::SessionManagerError::Storage(
+            astrcode_storage::StorageError::NotFound(_),
+        ) => SessionApiError::NotFound(error.to_string()),
+        crate::session_manager::SessionManagerError::Storage(
+            astrcode_storage::StorageError::Unsupported(reason),
+        ) => SessionApiError::Unsupported(reason),
+        error => SessionApiError::internal(error),
     }
 }
 

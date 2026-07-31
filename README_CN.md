@@ -12,7 +12,7 @@
 
 用 Rust 从零构建的 AI 编程助手平台。
 
-AstrCode 是一个全栈 AI 编程助手，在 `crates/` 下包含 25 个 Rust crate（另加 Tauri 桌面壳），合计约 10.44 万行 Rust，外加 React + TypeScript 前端（约 1.24 万行）。包含带工具执行的 Agent 循环、基于 SSE 流式传输的多 Provider LLM 层（Anthropic 与 OpenAI 兼容 Provider）、基于 SDK 与 IPC 子进程的扩展/钩子系统（后台预热、健康检查、启动阶段事件通道）、MCP 常驻进程池（跨 turn 复用长连接）、内置 Web 搜索与 URL 抓取工具、带自动压缩的上下文窗口管理、评测框架，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
+AstrCode 是一个全栈 AI 编程助手，在 `crates/` 下包含 26 个 Rust crate（另加 Tauri 桌面壳），合计约 10.44 万行 Rust，外加 React + TypeScript 前端（约 1.24 万行）。包含带工具执行的 Agent 循环、基于 SSE 流式传输的多 Provider LLM 层（Anthropic 与 OpenAI 兼容 Provider）、基于 SDK 与 IPC 子进程的扩展/钩子系统（后台预热、健康检查、启动阶段事件通道）、MCP 常驻进程池（跨 turn 复用长连接）、内置 Web 搜索与 URL 抓取工具、带自动压缩的上下文窗口管理、评测框架，以及多种交互方式：终端 TUI、Web 前端、Tauri 桌面应用、HTTP/SSE API 和 ACP（Agent Client Protocol）适配器。
 
 ## 目录
 
@@ -330,14 +330,14 @@ AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。旧�
                    └────────────────────────────┘
         ┌─────────────────────────────────────┐
         │              共享基础层               │
-        │ core · protocol · storage · support │
-        │ log · client                        │
+        │ core · protocol · storage · log     │
+        │ client                              │
         └─────────────────────────────────────┘
 ```
 
 ## Crate 一览
 
-Cargo workspace 在 [`crates/`](crates/) 下包含 **25 个 crate**，另有 [`src-tauri/`](src-tauri/) 作为桌面壳（workspace 共 **26 个成员**）。按架构分层如下（详见[架构设计](docs/architecture.md)）。
+Cargo workspace 在 [`crates/`](crates/) 下包含 **26 个 crate**，另有 [`src-tauri/`](src-tauri/) 作为桌面壳（workspace 共 **27 个成员**）。按架构分层如下（详见[架构设计](docs/architecture.md)）。
 
 ### Layer 0：基础契约层
 
@@ -345,7 +345,6 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **25 个 crate**，另有 [`s
 |---|---|---|
 | [`astrcode-core`](crates/astrcode-core) | 9.5k | 共享领域类型、trait、配置系统、扩展契约、提示词组合 |
 | [`astrcode-protocol`](crates/astrcode-protocol) | 1.9k | JSON-RPC 2.0 线协议类型、命令、事件、HTTP/UI DTO |
-| [`astrcode-support`](crates/astrcode-support) | 1.3k | 宿主工具：路径解析、Shell 检测、工具结果持久化 |
 
 ### Layer 1：基础能力实现层
 
@@ -400,7 +399,7 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **25 个 crate**，另有 [`s
 |---|---|---|
 | [`astrcode-eval`](crates/astrcode-eval) | 2.0k | 评测运行器：HTTP 服务器控制、事件日志指标、结构化报告 |
 
-**合计：** Rust 约 10.44 万行（25 个 crate + Tauri，共 26 个 workspace 成员），**326** 个 `.rs` 文件；`frontend/` 约 1.24 万行 TypeScript（整体约 **11.68 万行**）。
+**合计：** Rust 约 10.44 万行（26 个 crate + Tauri，共 27 个 workspace 成员），**326** 个 `.rs` 文件；`frontend/` 约 1.24 万行 TypeScript（整体约 **11.68 万行**）。
 
 ## 核心设计
 
@@ -445,7 +444,7 @@ Agent 支持运行模式切换（Code / Plan）。Plan 模式下只暴露只读�
 
 1. **预处理** — 解析 JSON 参数（支持修复格式不正确的 LLM 输出）、检查可见性、分发 `PreToolUse` 钩子
 2. **执行** — 通过 `JoinSet` 并行批量执行，串行工具会先刷新当前批次
-3. **提交** — 分发 `PostToolUse` / `PostToolUseFailure` 钩子、持久化大结果、执行消息字符预算、发射事件
+3. **提交** — 对已完成执行分发 `PostToolUse` 钩子、持久化大结果、执行消息字符预算，并分别发射完成 / 失败 / 取消事件
 
 大型工具结果自动持久化到磁盘，替换为预览摘要以保持在消息字符预算内。每个工具声明执行模式：只读工具（glob/grep/read）标记为 Parallel，写入工具（edit/write/shell）标记为 Sequential。
 
@@ -462,7 +461,7 @@ Agent 支持运行模式切换（Code / Plan）。Plan 模式下只暴露只读�
 - **状态栏项** — 扩展贡献状态栏条目（如当前模式指示器），通过 `StatusItemUpdate` 通知动态更新
 - **磁盘 s5r 扩展** — stdio 长度前缀帧 + JSON `WireMessage`（`extension.json` 中 `protocol.s5r` + `command`）；Worker 发 `Initialize`、`handler.invoke` 与按能力裁剪的 `astrcode.*` invoke。规范见 [docs/extension-system.md](docs/extension-system.md)
 - **扩展运行时** — 带深度限制的会话派生、工具注册队列、优先级分派
-- **生命周期钩子** — `SessionStart` / `SessionResume` / `SessionShutdown`、`TurnStart` / `TurnEnd` / `TurnAborted`、`PreToolUse` / `PostToolUse` / `PostToolUseFailure`、`BeforeProviderRequest` / `AfterProviderResponse`、`PreCompact` / `PostCompact`、`PromptBuild`、`UserPromptSubmit`
+- **生命周期钩子** — `SessionStart` / `SessionResume` / `SessionShutdown`、`TurnStart` / `TurnEnd` / `TurnAborted`、`PreToolUse` / `PostToolUse`、`BeforeProviderRequest` / `AfterProviderResponse`、`PreCompact` / `PostCompact`、`PromptBuild`、`UserPromptSubmit`
 - **扩展运行时 API** — `Extension::start()`（携带 `ExtensionCtx`，含 `startup_working_dir`、`event_sink` 和按能力裁剪的宿主服务）、`Extension::stop()`（携带 `StopReason`）、`Extension::health()`（健康探测）、`Extension::on_config_changed()`（热更新配置）
 - **主动健康检查** — `ExtensionRunner::check_health()` 提供采样 API，宿主决定轮询策略
 - **启动阶段事件** — `bind_startup_event_channel()` 绑定进程级事件通道，扩展在 `start()` 阶段即可 emit 自定义事件

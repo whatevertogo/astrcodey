@@ -1,13 +1,13 @@
 //! 工具调用参数 → 折叠摘要文本格式化。
 
-use astrcode_support::text::compact_inline;
+use crate::presentation::inline_preview;
 
 const MAX_ARGUMENT_SUMMARY_CHARS: usize = 140;
 
 /// 将工具调用参数 JSON 格式化为单行摘要文本。
 pub(in crate::http) fn format_args_inline(tool_name: &str, args: &serde_json::Value) -> String {
     if let Some(summary) = tool_argument_summary(tool_name, args) {
-        return compact_inline(&summary, MAX_ARGUMENT_SUMMARY_CHARS);
+        return inline_preview(&summary, MAX_ARGUMENT_SUMMARY_CHARS);
     }
 
     match args {
@@ -19,15 +19,15 @@ pub(in crate::http) fn format_args_inline(tool_name: &str, args: &serde_json::Va
                 .iter()
                 .take(4)
                 .map(|(key, value)| {
-                    format!("{key}={}", compact_inline(&json_value_inline(value), 48))
+                    format!("{key}={}", inline_preview(&json_value_inline(value), 48))
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            compact_inline(&pairs, MAX_ARGUMENT_SUMMARY_CHARS)
+            inline_preview(&pairs, MAX_ARGUMENT_SUMMARY_CHARS)
         },
-        serde_json::Value::String(s) => compact_inline(s, MAX_ARGUMENT_SUMMARY_CHARS),
+        serde_json::Value::String(s) => inline_preview(s, MAX_ARGUMENT_SUMMARY_CHARS),
         serde_json::Value::Null => String::new(),
-        other => compact_inline(&other.to_string(), MAX_ARGUMENT_SUMMARY_CHARS),
+        other => inline_preview(&other.to_string(), MAX_ARGUMENT_SUMMARY_CHARS),
     }
 }
 

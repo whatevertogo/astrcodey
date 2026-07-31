@@ -16,33 +16,41 @@ Default session context/API, no manifest capability required:
 | `astrcode.session.state.read` | Reads state namespaced by current session and extension id. |
 | `astrcode.session.state.write` | Writes state namespaced by current session and extension id. |
 
-Sensitive APIs still require capabilities: `session_control`, `session_history`,
-`main_model`, `small_model`, `emit_events`, `workspace_read`, `process_spawn`,
+Sensitive APIs and registrations still require capabilities: `session_control`,
+`session_history`, `main_model`, `small_model`, `emit_events`, `provider_request`,
+`tool_intercept`, `turn_continuation_control`, `workspace_read`, `process_spawn`,
 and `network_client`.
+
+The runner rejects privileged registrations that omit their capability:
+
+| Registration | Required capability |
+| --- | --- |
+| Extension event declaration | `emit_events` |
+| Compact hook | `session_history` |
+| Before/after provider hook or user message envelope | `provider_request` |
+| Blocking pre/post tool hook | `tool_intercept` |
+| Continue after stop | `turn_continuation_control` |
 
 ## Hook Families
 
 | Hook | Registration API | Runtime entry | Result semantics |
 | --- | --- | --- | --- |
-| Lifecycle | `on_event(event, mode, priority, handler)` | `emit_lifecycle` | Blocking handlers may return `Block`; the call site decides whether that aborts flow. Advisory/nonblocking are notifications. |
+| Lifecycle | `on_event(event, mode, priority, handler)` | `emit_lifecycle` | Only `TurnStart` and `UserPromptSubmit` may be Blocking. Other lifecycle events are observe-only and reject Blocking registration. |
 | Prompt build | `on_prompt_build(priority, handler)` | `collect_prompt_contributions` | Contributions merge by priority. |
 | Pre tool use | `on_pre_tool_use*` | `emit_pre_tool_use` | Blocking handlers may modify input, ask, or block. Advisory/nonblocking do not change flow. |
-| Post tool use | `on_post_tool_use*` | `emit_post_tool_use` | Blocking handlers may modify or block result. Advisory/nonblocking do not change flow. |
-| Post tool use failure | `on_post_tool_use_failure(priority, handler)` | `emit_post_tool_use_failure` | Notification only. |
+| Post tool use | `on_post_tool_use*` | `emit_post_tool_use` | Runs only after a tool returns a completed result (including semantic error results). Blocking handlers may modify or block that result. Advisory/nonblocking do not change flow. |
 | Before provider request | `on_before_provider_request(mode, priority, handler)` | `emit_provider(BeforeRequest, ...)` | Blocking handlers may replace/append messages or block only the current provider call. |
 | After provider response | `on_after_provider_response(priority, handler)` | `emit_provider(AfterResponse, ...)` | Observation only; results cannot block or rewrite flow. |
 | Compact | `on_compact(event, priority, handler)` | `emit_compact` | Pre-compact may block or contribute instructions; post-compact is notification/contribution collection. |
 | Continue after stop | `on_continue_after_stop(priority, options, handler)` | `emit_continue_after_stop` | Blocking-only decision hook. First `ContinueOneStep` wins; `options.max_per_turn` may limit a handler, default is unlimited. |
 | User message envelope | `on_user_message_envelope(priority, handler)` | `emit_user_message_envelope` | Blocking-only typed hook before the user message is written to durable transcript. Handlers may replace, append, or block. |
-| After tool results | `on_after_tool_results(priority, handler)` | `emit_after_tool_results` | Blocking-only typed hook after a committed tool-result batch. First `EndTurn` wins; otherwise the turn continues. |
 | Tool discovery | `tool_discovery(handler)` | `collect_tool_adapters` | Contributes dynamic tools for one collection pass. |
 
 ## Decision Hooks
 
 Decision hooks do not accept `HookMode`; their registration API encodes that the
-host must await them before it can make progress. Today AstrCode has three typed
-decision hooks: `continue_after_stop`, `user_message_envelope`, and
-`after_tool_results`.
+host must await them before it can make progress. Today AstrCode has two typed
+decision hooks: `continue_after_stop` and `user_message_envelope`.
 
 `continue_after_stop` is also the only hook with a per-turn continuation budget:
 `ContinueAfterStopOptions::limited(n)` asks the host to skip that handler after
@@ -62,5 +70,5 @@ use `before_provider_request` for non-durable hidden request context.
 Process-internal Rust extensions can register all typed hooks through
 `Registrar`. S5R currently supports generic hook events plus the typed
 `continue_after_stop` manifest entry with `options.max_per_turn`.
-`user_message_envelope` and `after_tool_results` are rejected in S5R manifests
-until the wire protocol grows typed input/output adapters for them.
+`user_message_envelope` is rejected in S5R manifests until the wire protocol
+grows a typed input/output adapter for it.

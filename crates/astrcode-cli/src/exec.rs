@@ -6,7 +6,7 @@
 use std::io::Write;
 
 use astrcode_client::{client::AstrcodeClient, error::ClientError};
-use astrcode_core::event::EventPayload;
+use astrcode_core::event::{DurableEventPayload, EventPayload, LiveEventPayload};
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 use thiserror::Error;
 
@@ -91,15 +91,16 @@ fn render_notification(
 
     match notification {
         ClientNotification::Event(core_event) => match &core_event.payload {
-            EventPayload::AssistantTextDelta { delta, .. } => {
+            EventPayload::Live(LiveEventPayload::AssistantTextDelta { delta, .. }) => {
                 write!(out, "{delta}")?;
                 Ok(NotificationAction::Continue)
             },
-            EventPayload::TurnCompleted { .. } => {
+            EventPayload::Durable(DurableEventPayload::TurnCompleted { .. }) => {
                 writeln!(out)?;
                 Ok(NotificationAction::Finish)
             },
-            EventPayload::ErrorOccurred { message, .. } => {
+            EventPayload::Durable(DurableEventPayload::ErrorOccurred { message, .. })
+            | EventPayload::Live(LiveEventPayload::ErrorOccurred { message, .. }) => {
                 writeln!(err, "Error: {message}")?;
                 Ok(NotificationAction::Finish)
             },
@@ -122,7 +123,11 @@ fn write_jsonl(notification: &ClientNotification, out: &mut impl Write) -> Resul
 fn notification_action(notification: &ClientNotification) -> NotificationAction {
     match notification {
         ClientNotification::Event(core_event) => match core_event.payload {
-            EventPayload::TurnCompleted { .. } | EventPayload::ErrorOccurred { .. } => {
+            EventPayload::Durable(
+                DurableEventPayload::TurnCompleted { .. }
+                | DurableEventPayload::ErrorOccurred { .. },
+            )
+            | EventPayload::Live(LiveEventPayload::ErrorOccurred { .. }) => {
                 NotificationAction::Finish
             },
             _ => NotificationAction::Continue,
@@ -135,22 +140,35 @@ fn notification_action(notification: &ClientNotification) -> NotificationAction 
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
-        event::{Event, EventPayload},
+        event::{
+            DurableEvent, DurableEventPayload, EventPayload, LiveEvent, LiveEventPayload,
+            StoredEvent,
+        },
         types::SessionId,
     };
 
     use super::*;
 
     fn notification(payload: EventPayload) -> ClientNotification {
-        ClientNotification::Event(Event::new(SessionId::from("session-1"), None, payload))
+        let event = match payload {
+            EventPayload::Durable(payload) => StoredEvent::new(
+                1,
+                DurableEvent::session(SessionId::from("session-1"), payload),
+            )
+            .into(),
+            EventPayload::Live(payload) => {
+                LiveEvent::session(SessionId::from("session-1"), payload).into()
+            },
+        };
+        ClientNotification::Event(event)
     }
 
     #[test]
     fn jsonl_output_includes_streaming_delta() {
-        let notification = notification(EventPayload::AssistantTextDelta {
+        let notification = notification(EventPayload::Live(LiveEventPayload::AssistantTextDelta {
             message_id: "message-1".into(),
             delta: "hello".into(),
-        });
+        }));
         let mut out = Vec::new();
         let mut err = Vec::new();
 
@@ -166,9 +184,10 @@ mod tests {
 
     #[test]
     fn jsonl_output_includes_turn_completion_before_finishing() {
-        let notification = notification(EventPayload::TurnCompleted {
-            finish_reason: "stop".into(),
-        });
+        let notification =
+            notification(EventPayload::Durable(DurableEventPayload::TurnCompleted {
+                finish_reason: "stop".into(),
+            }));
         let mut out = Vec::new();
         let mut err = Vec::new();
 
@@ -182,10 +201,10 @@ mod tests {
 
     #[test]
     fn text_output_keeps_plain_transcript_behavior() {
-        let notification = notification(EventPayload::AssistantTextDelta {
+        let notification = notification(EventPayload::Live(LiveEventPayload::AssistantTextDelta {
             message_id: "message-1".into(),
             delta: "hello".into(),
-        });
+        }));
         let mut out = Vec::new();
         let mut err = Vec::new();
 

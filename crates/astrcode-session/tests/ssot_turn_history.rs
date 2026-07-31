@@ -1,4 +1,4 @@
-//! SSOT Route A 行为回归：turn 历史仅来自 EventStore projection。
+//! SSOT Route A 行为回归：turn 历史仅来自 EventLog projection。
 
 use std::{
     sync::{
@@ -9,20 +9,36 @@ use std::{
 };
 
 use astrcode_core::{
-    event::EventPayload,
+    event::DurableEventPayload,
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, LlmTokenUsage,
         LlmTokenUsageSource, ModelLimits, ProviderInputTokenCount,
     },
-    storage::EventStore,
     tool::ToolDefinition,
     types::{new_message_id, new_session_id, new_turn_id},
 };
 use astrcode_session::{Session, SessionCreateParams, SessionRuntimeServices, SessionRuntimeState};
-use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_session_projection::SessionReadModel;
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::mpsc;
 
 mod common;
+
+trait ProviderMessages {
+    fn provider_messages(&self) -> Vec<LlmMessage>;
+}
+
+impl ProviderMessages for SessionReadModel {
+    fn provider_messages(&self) -> Vec<LlmMessage> {
+        astrcode_core::llm::provider_visible_messages(
+            self.transcript
+                .messages
+                .iter()
+                .map(|message| message.message.clone())
+                .collect(),
+        )
+    }
+}
 
 fn test_caps(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeServices> {
     common::test_runtime_services(llm)
@@ -37,33 +53,41 @@ async fn spawn_session_with_store(
     llm: Arc<dyn LlmProvider>,
 ) -> (
     Session,
-    Arc<dyn EventStore>,
+    Arc<dyn SessionStore>,
     astrcode_core::types::SessionId,
 ) {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let (session, store, session_id, _) = spawn_session_with_services(llm).await;
+    (session, store, session_id)
+}
+
+async fn spawn_session_with_services(
+    llm: Arc<dyn LlmProvider>,
+) -> (
+    Session,
+    Arc<dyn SessionStore>,
+    astrcode_core::types::SessionId,
+    Arc<SessionRuntimeServices>,
+) {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let caps = test_caps(llm);
     let sid = new_session_id();
-    let runtime = Arc::new(SessionRuntimeState::new(
-        caps.llm(),
-        caps.small_llm(),
-        "mock-model".into(),
-    ));
+    let runtime = Arc::new(SessionRuntimeState::new(sid.clone(), store.clone()));
     let working_dir = std::env::temp_dir().join(sid.as_str());
     std::fs::create_dir_all(&working_dir).unwrap();
     let session = Session::create_with_params(SessionCreateParams {
-        store: Arc::clone(&store),
-        session_id: sid.clone(),
         working_dir: working_dir.to_string_lossy().into_owned(),
         model_id: "mock-model".into(),
         parent_session_id: None,
         tool_selection: None,
         source_extension: None,
+        extra_system_prompt: None,
+        initial_system_prompt: None,
         runtime,
-        runtime_services: caps,
+        runtime_services: Arc::clone(&caps),
     })
     .await
     .unwrap();
-    (session, store, sid)
+    (session, store, sid, caps)
 }
 
 struct ToolLoopLlm {
@@ -120,7 +144,7 @@ async fn ssot_tool_loop_projection_matches_provider_messages() {
     let session = spawn_session(llm).await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("run tools".into(), vec![], turn_id)
+        .submit("run tools".into(), turn_id, None)
         .await
         .unwrap();
     let result = handle.wait().await.unwrap();
@@ -177,7 +201,7 @@ async fn provider_start_error_is_persisted_as_durable_error() {
     let (session, store, sid) = spawn_session_with_store(Arc::new(FailingGenerateLlm)).await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("trigger provider error".into(), vec![], turn_id)
+        .submit("trigger provider error".into(), turn_id, None)
         .await
         .unwrap();
 
@@ -188,7 +212,7 @@ async fn provider_start_error_is_persisted_as_durable_error() {
     let errors = events
         .iter()
         .filter_map(|event| match &event.payload {
-            EventPayload::ErrorOccurred { message, .. } => Some(message.as_str()),
+            DurableEventPayload::ErrorOccurred { message, .. } => Some(message.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -231,11 +255,38 @@ impl LlmProvider for UsageLlm {
 }
 
 #[tokio::test]
+async fn top_level_turn_persists_the_current_main_model_before_running() {
+    let (session, store, sid, services) = spawn_session_with_services(Arc::new(UsageLlm)).await;
+    let mut effective = services.read_effective().as_ref().clone();
+    effective.llm.model_id = "new-main-model".into();
+    services.update_effective(effective);
+
+    let handle = session
+        .submit("use current model".into(), new_turn_id(), None)
+        .await
+        .unwrap();
+    assert!(handle.wait().await.unwrap().output.is_ok());
+
+    assert_eq!(
+        session.read_model().await.unwrap().identity.model_id,
+        "new-main-model"
+    );
+    let model_changes = store
+        .replay_events(&sid)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|event| matches!(event.payload, DurableEventPayload::ModelIdChanged { .. }))
+        .count();
+    assert_eq!(model_changes, 1);
+}
+
+#[tokio::test]
 async fn token_usage_is_persisted_as_durable_event() {
     let (session, store, sid) = spawn_session_with_store(Arc::new(UsageLlm)).await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("record usage".into(), vec![], turn_id)
+        .submit("record usage".into(), turn_id, None)
         .await
         .unwrap();
     let result = handle.wait().await.unwrap();
@@ -247,13 +298,18 @@ async fn token_usage_is_persisted_as_durable_event() {
         .position(|event| {
             matches!(
                 event.payload,
-                EventPayload::AssistantMessageCompleted { .. }
+                DurableEventPayload::AssistantMessageCompleted { .. }
             )
         })
         .expect("expected AssistantMessageCompleted event");
     let token_usage_index = events
         .iter()
-        .position(|event| matches!(event.payload, EventPayload::TokenUsageRecorded { .. }))
+        .position(|event| {
+            matches!(
+                event.payload,
+                DurableEventPayload::TokenUsageRecorded { .. }
+            )
+        })
         .expect("expected TokenUsageRecorded event");
     assert!(
         token_usage_index > assistant_completed_index,
@@ -261,7 +317,7 @@ async fn token_usage_is_persisted_as_durable_event() {
     );
 
     let token_usage = match &events[token_usage_index].payload {
-        EventPayload::TokenUsageRecorded {
+        DurableEventPayload::TokenUsageRecorded {
             usage,
             model_context_window,
         } => Some((usage, model_context_window)),
@@ -317,7 +373,7 @@ async fn token_usage_missing_stream_usage_records_provider_count_fallback() {
     let (session, store, sid) = spawn_session_with_store(Arc::new(NoUsageCountingLlm)).await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("record fallback usage".into(), vec![], turn_id)
+        .submit("record fallback usage".into(), turn_id, None)
         .await
         .unwrap();
     let result = handle.wait().await.unwrap();
@@ -327,7 +383,7 @@ async fn token_usage_missing_stream_usage_records_provider_count_fallback() {
     let usage = events
         .iter()
         .find_map(|event| match &event.payload {
-            EventPayload::TokenUsageRecorded { usage, .. } => Some(usage),
+            DurableEventPayload::TokenUsageRecorded { usage, .. } => Some(usage),
             _ => None,
         })
         .expect("expected fallback TokenUsageRecorded event");
@@ -394,7 +450,7 @@ async fn ssot_thinking_and_tools_merge_in_projection() {
     .await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("think then tool".into(), vec![], turn_id)
+        .submit("think then tool".into(), turn_id, None)
         .await
         .unwrap();
     let _ = handle.wait().await.unwrap();
@@ -513,14 +569,14 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
     .await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("tool only".into(), vec![], turn_id)
+        .submit("tool only".into(), turn_id, None)
         .await
         .unwrap();
     let _ = handle.wait().await.unwrap();
 
-    let messages = session.read_model().await.unwrap().messages;
+    let model = session.read_model().await.unwrap();
     assert!(
-        messages.iter().any(|message| {
+        model.transcript.messages.iter().any(|message| {
             message.message.role == LlmRole::Assistant
                 && message.message.content.iter().any(|content| {
                     matches!(
@@ -542,7 +598,7 @@ async fn ssot_early_tool_completion_persists_request_after_assistant_message() {
     .await;
     let turn_id = new_turn_id();
     let handle = session
-        .submit("trigger early tool".into(), vec![], turn_id)
+        .submit("trigger early tool".into(), turn_id, None)
         .await
         .unwrap();
     let _ = handle.wait().await.unwrap();
@@ -553,13 +609,13 @@ async fn ssot_early_tool_completion_persists_request_after_assistant_message() {
         .position(|event| {
             matches!(
                 event.payload,
-                EventPayload::AssistantMessageCompleted { .. }
+                DurableEventPayload::AssistantMessageCompleted { .. }
             )
         })
         .expect("assistant message should be durable before tool request");
     let tool_requested_index = events
         .iter()
-        .position(|event| matches!(event.payload, EventPayload::ToolCallRequested { .. }))
+        .position(|event| matches!(event.payload, DurableEventPayload::ToolCallRequested { .. }))
         .expect("tool request should be durable");
     assert!(
         assistant_completed_index < tool_requested_index,
@@ -608,25 +664,23 @@ async fn ssot_mid_turn_inject_visible_on_next_prepare() {
         let _ = session_for_inject
             .emit_durable(
                 Some(&inject_turn),
-                EventPayload::UserMessage {
+                DurableEventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: "mid-turn inject".into(),
                     attachments: vec![],
+                    accepted_seq: None,
                 },
             )
             .await;
     });
 
-    let handle = session
-        .submit("start".into(), vec![], turn_id)
-        .await
-        .unwrap();
+    let handle = session.submit("start".into(), turn_id, None).await.unwrap();
     let _ = handle.wait().await.unwrap();
     inject.await.unwrap();
 
     let model = session.read_model().await.unwrap();
     assert!(
-        model.messages.iter().any(|message| {
+        model.transcript.messages.iter().any(|message| {
             message.message.role == LlmRole::User
                 && message.message.content.iter().any(|content| {
                     matches!(

@@ -2,6 +2,7 @@
 
 pub mod capabilities;
 pub mod effects;
+pub mod manifest;
 pub mod messages;
 
 pub use capabilities::{

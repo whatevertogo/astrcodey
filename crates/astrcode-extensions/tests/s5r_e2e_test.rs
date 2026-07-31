@@ -7,22 +7,26 @@ use std::{
 };
 
 use astrcode_core::{
-    event::EventPayload,
-    extension::{
-        CommandContext, Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
-        ExtensionEvent, ExtensionHostServices, ExtensionHttpHandler, ExtensionHttpMethod,
-        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, HookMode,
-        LifecycleContext, PreToolUseContext, PreToolUseResult, Registrar, StopReason,
-    },
+    event::{DurableEventPayload, EventPayload, ExtensionEventData},
     llm::{LlmEvent, LlmMessage, LlmProvider},
     tool::{ToolDefinition, ToolExecutionContext},
 };
-use astrcode_extension_sdk::config::ModelSelection;
-use astrcode_extensions::{
-    build_host_router, build_host_router_with_public_http_dispatcher, loader::ExtensionLoader,
-    runner::ExtensionRunner, s5r_ext::S5rExtension,
+use astrcode_extension_sdk::{
+    config::ModelSelection,
+    extension::{
+        CommandContext, Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
+        ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest,
+        ExtensionHttpResponse, ExtensionHttpRoute, HookMode, LifecycleContext, PreToolUseContext,
+        PreToolUseResult, Registrar, StopReason,
+    },
+    tool::ExtensionToolContext,
+    trusted::ExtensionHostServices,
 };
-use astrcode_storage::in_memory::InMemoryEventStore;
+use astrcode_extensions::{
+    StorageSessionQueryFactory, build_host_router, build_host_router_with_public_http_dispatcher,
+    loader::ExtensionLoader, runner::ExtensionRunner, s5r_ext::S5rExtension,
+};
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use async_trait::async_trait;
 
 fn guest_binary_path() -> std::path::PathBuf {
@@ -74,9 +78,14 @@ fn ensure_guest_built() -> std::path::PathBuf {
 }
 
 fn minimal_router() -> Arc<astrcode_extensions::HostRouter> {
-    let store: Arc<dyn astrcode_core::storage::EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     build_host_router(
-        Arc::new(ExtensionHostServices::new(store, None, None)),
+        Arc::new(ExtensionHostServices::new(
+            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
+            None,
+            None,
+        )),
+        store,
         None,
     )
 }
@@ -150,13 +159,14 @@ impl LlmProvider for MockLlm {
 }
 
 fn mock_router() -> Arc<astrcode_extensions::HostRouter> {
-    let store: Arc<dyn astrcode_core::storage::EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     build_host_router(
         Arc::new(ExtensionHostServices::new(
-            store,
+            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
             Some(Arc::new(MockLlm)),
             Some(Arc::new(MockLlm)),
         )),
+        store,
         None,
     )
 }
@@ -183,13 +193,16 @@ async fn load_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<S5rExtens
         .expect("load s5r extension")
 }
 
-fn tool_ctx(working_dir: &str) -> ToolExecutionContext {
-    ToolExecutionContext::new(
-        "e2e-session".into(),
-        working_dir,
+fn tool_ctx(working_dir: &str) -> ExtensionToolContext {
+    ExtensionToolContext::new(
+        ToolExecutionContext::new(
+            "e2e-session".into(),
+            working_dir,
+            None,
+            None,
+            Default::default(),
+        ),
         None,
-        None,
-        Default::default(),
     )
 }
 
@@ -198,6 +211,7 @@ fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> PreToolUs
         session_id: "e2e-session".into(),
         working_dir: "/tmp".into(),
         model: ModelSelection::simple("test"),
+        call_id: "call-1".into(),
         tool_name: tool_name.into(),
         tool_input,
         approval_mode: astrcode_core::permission::ApprovalMode::Manual,
@@ -212,14 +226,15 @@ fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> PreToolUs
 async fn s5r_manifest_registers_tools_hooks_and_capabilities() {
     let ext = load_s5r(minimal_router()).await;
     assert_eq!(ext.id(), "s5r-guest-demo");
-    assert!(
-        ext.capabilities()
-            .iter()
-            .any(|c| { matches!(c, astrcode_core::extension::ExtensionCapability::SmallModel) })
-    );
+    assert!(ext.capabilities().iter().any(|c| {
+        matches!(
+            c,
+            astrcode_extension_sdk::extension::ExtensionCapability::SmallModel
+        )
+    }));
     assert!(ext.capabilities().iter().any(|capability| matches!(
         capability,
-        astrcode_core::extension::ExtensionCapability::SessionInspect
+        astrcode_extension_sdk::extension::ExtensionCapability::SessionInspect
     )));
 
     let mut reg = Registrar::new();
@@ -230,7 +245,7 @@ async fn s5r_manifest_registers_tools_hooks_and_capabilities() {
     assert_eq!(reg.pre_tool_use()[0].mode, HookMode::Blocking);
     assert!(matches!(
         reg.pre_tool_use()[0].target,
-        astrcode_core::extension::ToolHookTarget::All
+        astrcode_extension_sdk::extension::ToolHookTarget::All
     ));
     assert_eq!(reg.commands().len(), 1);
     assert_eq!(reg.http_routes().len(), 1);
@@ -274,9 +289,14 @@ async fn s5r_host_client_dispatches_to_another_extensions_public_route() {
         .register(Arc::new(DispatchTargetExtension))
         .await
         .unwrap();
-    let store: Arc<dyn astrcode_core::storage::EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let router = build_host_router_with_public_http_dispatcher(
-        Arc::new(ExtensionHostServices::new(store, None, None)),
+        Arc::new(ExtensionHostServices::new(
+            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
+            None,
+            None,
+        )),
+        store,
         None,
         runner.clone(),
     );
@@ -466,11 +486,12 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
         session_id: "e2e-session".into(),
         working_dir: "/tmp".into(),
         model: ModelSelection::simple("test"),
+        call_id: "call-1".into(),
         tool_name: "emit_hook_probe".into(),
         tool_input: serde_json::json!({}),
         approval_mode: astrcode_core::permission::ApprovalMode::Manual,
         available_tools: vec![],
-        event_tx: Some(tx),
+        event_tx: Some(tx.into()),
         extension_event_sink: None,
         session_store_dir: None,
     };
@@ -482,12 +503,12 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
         .expect("timeout")
         .expect("channel closed");
     match payload {
-        EventPayload::ExtensionEvent {
+        EventPayload::Durable(DurableEventPayload::ExtensionEvent(ExtensionEventData {
             extension_id,
             event_type,
             payload,
             ..
-        } => {
+        })) => {
             assert_eq!(extension_id, "s5r-guest-demo");
             assert_eq!(event_type, "s5r_guest.probe");
             assert_eq!(payload["from"], "pre_tool_use");
@@ -579,16 +600,7 @@ async fn s5r_turn_end_continuations_and_pipeline() {
         .await
         .unwrap();
 
-    assert!(
-        result.content.contains("steps=2"),
-        "got: {}",
-        result.content
-    );
-    assert!(
-        result.content.contains("llm_ok=true"),
-        "got: {}",
-        result.content
-    );
+    assert_eq!(result.content, "step_1_calls=1 step_2_calls=1 llm_ok=true");
 }
 
 #[tokio::test]

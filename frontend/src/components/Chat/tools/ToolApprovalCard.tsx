@@ -1,0 +1,137 @@
+import { useState } from 'react'
+import { cn } from '../../../lib/utils'
+import {
+  submitToolGateApproval,
+  type ToolGateApprovalDecision,
+} from '../../../services/api'
+import type { ToolApproval } from '../../../services/types'
+import { useAppStore } from '../../../store/conversation'
+import { stringValue, type JsonRecord } from './helpers'
+
+function commandFromPrompt(prompt?: string): string | undefined {
+  if (!prompt) return undefined
+  const lines = prompt.split('\n')
+  if (lines.length <= 1) return undefined
+  const body = lines.slice(1).join('\n').trim()
+  return body || undefined
+}
+
+function approvalHeadline(toolName: string, prompt?: string): string {
+  const firstLine = prompt?.split('\n')[0]?.trim()
+  if (firstLine === 'Run shell command?') return '执行 Shell 命令需要你的确认'
+  if (firstLine?.endsWith('?')) return firstLine
+  return `${toolName} 需要你的确认`
+}
+
+function resolveCommand(args: JsonRecord, prompt?: string): string | undefined {
+  const fromArgs = stringValue(args, 'command')
+  if (fromArgs) return fromArgs
+  return commandFromPrompt(prompt)
+}
+
+function resolveIntent(args: JsonRecord): string | undefined {
+  const intent = stringValue(args, 'intent')
+  return intent || undefined
+}
+
+const primaryButton =
+  'rounded-lg bg-btn-primary-bg px-3 py-1.5 text-[12px] font-medium text-btn-primary-fg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40'
+const secondaryButton =
+  'rounded-lg border border-border bg-surface px-3 py-1.5 text-[12px] font-medium text-text-secondary transition-colors hover:border-border-strong hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-40'
+const dangerButton =
+  'rounded-lg border border-danger/20 bg-surface px-3 py-1.5 text-[12px] font-medium text-danger transition-colors hover:border-danger/40 hover:bg-danger-soft/30 disabled:cursor-not-allowed disabled:opacity-40'
+
+export function ToolApprovalCard({
+  sessionId,
+  toolName,
+  approval,
+  args = {},
+}: {
+  sessionId: string
+  toolName: string
+  approval: ToolApproval
+  args?: JsonRecord
+}) {
+  const refreshConversationSnapshot = useAppStore(
+    (state) => state.refreshConversationSnapshot
+  )
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const command = resolveCommand(args, approval.prompt)
+  const intent = resolveIntent(args)
+  const headline = approvalHeadline(toolName, approval.prompt)
+
+  async function decide(decision: ToolGateApprovalDecision) {
+    setBusy(true)
+    setError(null)
+    try {
+      await submitToolGateApproval(sessionId, approval.callId, decision)
+      await refreshConversationSnapshot()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-2">
+        <span className="inline-block rounded-md border border-warning/30 bg-warning-soft px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wider text-warning">
+          待审批
+        </span>
+        <p className="text-[14px] font-medium text-text-primary">{headline}</p>
+        {intent ? (
+          <p className="text-[12px] text-text-muted">{intent}</p>
+        ) : null}
+      </div>
+
+      {command ? (
+        <pre className="overflow-x-auto rounded-lg border border-border bg-code-surface px-3 py-2.5 font-mono text-[12.5px] leading-relaxed text-code-text">
+          <span className="select-none text-text-muted">$ </span>
+          <span className="wrap-break-word">{command}</span>
+        </pre>
+      ) : approval.prompt ? (
+        <p className="text-[13px] text-text-secondary">{approval.prompt}</p>
+      ) : null}
+
+      {error ? <p className={cn('text-[12px] text-danger')}>{error}</p> : null}
+
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          disabled={busy}
+          className={primaryButton}
+          onClick={() => void decide('allow_once')}
+        >
+          允许一次
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          className={secondaryButton}
+          onClick={() => void decide('allow_always')}
+        >
+          始终允许
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          className={dangerButton}
+          onClick={() => void decide('deny_once')}
+        >
+          拒绝一次
+        </button>
+        <button
+          type="button"
+          disabled={busy}
+          className={dangerButton}
+          onClick={() => void decide('deny_always')}
+        >
+          始终拒绝
+        </button>
+      </div>
+    </div>
+  )
+}

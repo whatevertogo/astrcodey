@@ -1,26 +1,17 @@
 //! Turn 基础设施 — 事件通道、共享上下文、错误类型。
 
-use astrcode_core::{
-    config::ModelSelection,
-    event::EventPayload,
-    extension::{ExchangeSummary, ExtensionEvent, LifecycleContext, ProviderContext},
-    llm::LlmMessage,
-    storage::SessionReadModel,
-    types::*,
+use astrcode_core::{config::ModelSelection, llm::LlmMessage, types::*};
+use astrcode_extension_sdk::{
+    extension::{
+        ExchangeSummary, ExtensionError, ExtensionEvent, LifecycleContext, ProviderContext,
+    },
+    runtime_ports::TurnHooks,
 };
-use astrcode_extension_sdk::runtime_ports::TurnHooks;
-use tokio::sync::mpsc;
-
+use astrcode_session_projection::SessionReadModel;
 // ─── Turn event channel ──────────────────────────────────────────────────
 
 /// Turn 内扩展/工具 → event bridge 的入口（unbounded，不丢事件、durable 由单 worker 保序）。
-pub type TurnEventTx = mpsc::UnboundedSender<EventPayload>;
-
-pub(crate) fn send_event(event_tx: Option<&TurnEventTx>, payload: EventPayload) {
-    if let Some(tx) = event_tx {
-        let _ = tx.send(payload);
-    }
-}
+pub type TurnEventTx = astrcode_core::event::EventSender;
 
 /// StepEnd 生命周期钩子：失败只记录 warn，不中断 turn。
 pub(crate) async fn on_step_end_best_effort(
@@ -58,27 +49,25 @@ pub(crate) struct SharedTurnContext {
     pub(crate) model_id: String,
     pub(crate) session_store_dir: Option<std::path::PathBuf>,
     /// 当前 turn 的事件 ingress（`ExtensionEvents` 在 `process_prompt` 期间注入）。
-    pub(crate) turn_event_sender: Option<std::sync::Arc<crate::turn_publish::TurnEventSender>>,
+    pub(crate) turn_event_sender: Option<crate::turn_publish::TurnEventSender>,
     pub(crate) approval_mode: astrcode_core::permission::ApprovalMode,
-    pub(crate) tool_selection: Option<astrcode_core::extension::SessionToolSelection>,
-    pub(crate) permission_chain: std::sync::Arc<astrcode_core::permission::PermissionChain>,
+    pub(crate) tool_selection: Option<astrcode_core::tool::SessionToolSelection>,
+    pub(crate) permission_chain: std::sync::Arc<crate::permission::PermissionChain>,
     pub(crate) approval_history: std::sync::Arc<crate::permission::ApprovalHistoryStore>,
 }
 
 impl SharedTurnContext {
     /// 从 session 读模型构造共享上下文（不含 session_store_dir）。
-    pub fn from_read_model(session_id: &SessionId, model: &SessionReadModel) -> Self {
+    pub(crate) fn from_read_model(session_id: &SessionId, model: &SessionReadModel) -> Self {
         Self {
             session_id: session_id.clone(),
-            working_dir: model.working_dir.clone(),
-            model_id: model.model_id.clone(),
+            working_dir: model.identity.working_dir.clone(),
+            model_id: model.identity.model_id.clone(),
             session_store_dir: None,
             turn_event_sender: None,
             approval_mode: astrcode_core::permission::ApprovalMode::default(),
-            tool_selection: model.tool_selection.clone(),
-            permission_chain: std::sync::Arc::new(astrcode_core::permission::PermissionChain::new(
-                vec![],
-            )),
+            tool_selection: Some(model.identity.tool_selection.clone()),
+            permission_chain: std::sync::Arc::new(crate::permission::PermissionChain::new(vec![])),
             approval_history: std::sync::Arc::new(
                 crate::permission::ApprovalHistoryStore::default(),
             ),
@@ -93,7 +82,7 @@ impl SharedTurnContext {
     }
 
     /// 构造扩展 lifecycle hook 的 ctx。
-    pub fn lifecycle_ctx(&self) -> LifecycleContext {
+    pub(crate) fn lifecycle_ctx(&self) -> LifecycleContext {
         LifecycleContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
@@ -106,7 +95,7 @@ impl SharedTurnContext {
     }
 
     /// 构造带当轮消息摘要的 lifecycle hook ctx（用于 TurnEnd）。
-    pub fn lifecycle_ctx_with_exchange(
+    pub(crate) fn lifecycle_ctx_with_exchange(
         &self,
         user_message: String,
         assistant_message: String,
@@ -126,7 +115,7 @@ impl SharedTurnContext {
     }
 
     /// 构造 provider hook 的 ctx，附带本次 LLM 请求的 messages。
-    pub fn provider_ctx(&self, messages: Vec<LlmMessage>) -> ProviderContext {
+    pub(crate) fn provider_ctx(&self, messages: Vec<LlmMessage>) -> ProviderContext {
         ProviderContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
@@ -137,7 +126,7 @@ impl SharedTurnContext {
     }
 
     /// 构造各 tool hook ctx 共用的 `ModelSelection`。
-    pub fn model_selection(&self) -> ModelSelection {
+    pub(crate) fn model_selection(&self) -> ModelSelection {
         ModelSelection::simple(self.model_id.clone())
     }
 }
@@ -151,9 +140,15 @@ pub enum TurnError {
     #[error("Tool error: {0}")]
     Tool(#[from] astrcode_core::tool::ToolError),
     #[error("Extension error: {0}")]
-    Extension(#[from] astrcode_core::extension::ExtensionError),
+    Extension(#[from] ExtensionError),
     #[error("{0}")]
     Session(#[from] crate::session::SessionError),
+    #[error("session projection error: {0}")]
+    Projection(#[from] astrcode_session_projection::ProjectionError),
+    #[error("tool approval registration error: {0}")]
+    ApprovalRegistration(#[from] crate::ToolApprovalRegistrationError),
+    #[error("approval history error: {0}")]
+    ApprovalHistory(String),
     #[error("prompt is still too long after reactive compaction")]
     CompactExhausted,
     #[error("LLM stream ended unexpectedly")]
@@ -168,4 +163,6 @@ pub enum TurnError {
     TaskJoin(#[from] tokio::task::JoinError),
     #[error("turn model cache not populated")]
     ModelCacheEmpty,
+    #[error("turn event ingress failed: {0}")]
+    EventIngress(String),
 }

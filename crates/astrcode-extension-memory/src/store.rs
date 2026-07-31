@@ -11,7 +11,7 @@ use std::{
     time::SystemTime,
 };
 
-use astrcode_extension_sdk::hostpaths::{self, ensure_dir};
+use astrcode_extension_sdk::hostpaths;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
@@ -273,11 +273,14 @@ impl MemoryStore {
     }
 
     fn new_user() -> std::io::Result<Self> {
-        Self::new(hostpaths::memory_dir(), MemoryStoreScope::User)
+        Self::new(
+            hostpaths::astrcode_dir().join("memory"),
+            MemoryStoreScope::User,
+        )
     }
 
     fn new(dir: PathBuf, scope: MemoryStoreScope) -> std::io::Result<Self> {
-        ensure_dir(&dir)?;
+        std::fs::create_dir_all(&dir)?;
         let store = Self {
             dir,
             write_lock: Mutex::new(()),
@@ -672,7 +675,7 @@ impl MemoryStore {
         // 写入 context 文件
         if !context_files.is_empty() {
             let dir = self.contexts_dir();
-            ensure_dir(&dir)?;
+            std::fs::create_dir_all(&dir)?;
             for (filename, content) in context_files {
                 atomic_write(&dir.join(filename), content)?;
             }

@@ -5,12 +5,14 @@
 
 use std::{cmp::Reverse, path::PathBuf};
 
-use astrcode_core::storage::{SessionReadModel, StorageError};
+use astrcode_session_projection::SessionReadModel;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-const SNAPSHOT_VERSION: u32 = 2;
+use crate::StorageError;
+
+const SNAPSHOT_VERSION: u32 = 4;
 
 /// 保留的最大快照数量。创建新快照后自动清理超出数量的旧快照。
 const MAX_SNAPSHOTS: usize = 4;
@@ -26,17 +28,11 @@ pub(crate) struct SessionProjectionSnapshot {
     pub(crate) model: SessionReadModel,
 }
 
-impl SessionProjectionSnapshot {
-    pub(crate) fn model(&self) -> &SessionReadModel {
-        &self.model
-    }
-}
-
-/// 快照管理器，负责创建和列出会话恢复点。
+/// 快照管理器，负责创建和读取会话恢复点。
 ///
 /// 快照文件存储在会话目录的 `snapshots/` 子目录中，
 /// 文件名格式为 `snapshot-<cursor>.json`。
-pub struct SnapshotManager {
+pub(crate) struct SnapshotManager {
     /// 快照存储目录
     dir: PathBuf,
 }
@@ -46,12 +42,15 @@ impl SnapshotManager {
     ///
     /// # 参数
     /// - `dir`: 快照存储目录路径
-    pub fn new(dir: PathBuf) -> Self {
+    pub(crate) fn new(dir: PathBuf) -> Self {
         Self { dir }
     }
 
     /// 为当前会话读模型创建 projection 快照。
-    pub async fn create_snapshot(&self, model: &SessionReadModel) -> Result<(), StorageError> {
+    pub(crate) async fn create_snapshot(
+        &self,
+        model: SessionReadModel,
+    ) -> Result<(), StorageError> {
         tokio::fs::create_dir_all(&self.dir).await?;
         let cursor = model.cursor();
         let path = self.dir.join(format!("snapshot-{}.json", cursor));
@@ -61,7 +60,7 @@ impl SnapshotManager {
         let snapshot = SessionProjectionSnapshot {
             version: SNAPSHOT_VERSION,
             created_at: Utc::now().to_rfc3339(),
-            model: model.clone(),
+            model,
         };
         let content = serde_json::to_vec_pretty(&snapshot)?;
         tokio::fs::write(&temp_path, content).await?;
@@ -98,24 +97,6 @@ impl SnapshotManager {
         }
 
         Ok(None)
-    }
-
-    /// 列出所有可用的快照文件名，按名称排序。
-    pub async fn list_snapshots(&self) -> Result<Vec<String>, StorageError> {
-        if !self.dir.exists() {
-            return Ok(vec![]);
-        }
-        let mut snapshots = Vec::new();
-        let mut entries = tokio::fs::read_dir(&self.dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            if entry.file_type().await?.is_file() {
-                if let Some(name) = entry.file_name().to_str() {
-                    snapshots.push(name.to_string());
-                }
-            }
-        }
-        snapshots.sort();
-        Ok(snapshots)
     }
 
     /// 清理旧快照，只保留最新的 [`MAX_SNAPSHOTS`] 个。

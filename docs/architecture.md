@@ -1,8 +1,8 @@
 # AstrCode 架构设计
 
-Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k），`crates/` 下 25 个 crate + Tauri 桌面壳（共 26 个 workspace 成员），支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
+Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k），`crates/` 下 26 个 crate + Tauri 桌面壳（共 27 个 workspace 成员），支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
-核心判断：**EventLog 是事实，Session 是投影，Agent 是无状态运行时。**
+核心判断：**EventLog 是事实，SessionReadModel 是投影，Agent 是无状态运行时。**
 
 ---
 
@@ -14,12 +14,13 @@ Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k�
 - 工具结果超过阈值时持久化到 artifact 文件，日志只留引用，保持轻量
 - 会话恢复 = 从 EventLog 重新投影，fork = 从某个 seq 开始重放
 
-### Session — 投影层 + 进程内运行时
+### Session — 应用句柄 + 进程内运行时
 
-- `Session` 是系统唯一的持久事实来源，同时持有进程内瞬态资源
-- 持久层：`EventStore` 负责 JSONL 事件日志，`SessionReadModel` 是投影结果
-- 瞬态层：`SessionRuntimeState` 持有 file observation store、审批状态和 session 级 broadcast channel；工具表由每个 Turn 显式持有不可变快照
-- 同一 sid 的所有 `Session` 实例共享同一份 `SessionRuntimeState`（由 `SessionManager` 的 `runtime_states` HashMap 保证），订阅者通过 `Session::subscribe()` 接收该 session 的所有事件
+- `Session` 是持久事实的应用句柄；EventLog 才是唯一事实来源
+- 持久层：`SessionEventJournal` 负责 durable 写入，storage 持有 EventLog 的唯一
+  `SessionReadModel` 实例
+- 瞬态层：`SessionRuntimeState` 持有有序 publisher、file observation store、审批状态和 session 级 broadcast channel；工具表由每个 Turn 显式持有不可变快照
+- 同一 sid 的所有 `Session` 实例共享同一份 `SessionRuntimeState`（由 `SessionManager` 的 `SessionRuntimeRegistry` 保证），订阅者通过 `Session::subscribe()` 接收该 session 的所有事件
 - 不需要"保存 session"——事件已经写回了
 
 ### Agent — 无状态运行时
@@ -31,30 +32,39 @@ Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k�
 
 ### 事件流路径
 
+Session 持久化、projection 所有权、文件 lease 以及读写应用端口的当前设计见
+[Session 持久化与有序事件管线](architecture/session-persistence-and-event-pipeline.md)。
+
 ```
-Session::emit / Session::append_event
-  → EventStore（持久化）
-  → SessionRuntimeState::fanout（broadcast）
+Session::emit_durable / Session::emit_live
+  → SessionEventPublisher（同一 session 的 bounded FIFO）
+    → durable: SessionEventJournal → projection → fan-out
+    → live: 跳过 storage/projection → fan-out
     → ServerEventBus forwarder（attach 后订阅）
       → ClientNotification broadcast
         → SSE / ACP 客户端
 ```
 
-`ServerEventBus` 不写 EventStore，只做"session broadcast → 客户端通知"的桥接。
+`ServerEventBus` 不写 EventLog，只做"session broadcast → 客户端通知"的桥接。
 broadcast 发生 lag 时，forwarder 主动推送 `SessionResumed` 快照触发客户端 rehydrate。
+
+Conversation snapshot、cursor、SSE replay、前端逐帧归并和虚拟化渲染的完整契约见
+[Conversation stream contract](architecture/conversation-stream.md)。
 
 ### 事件日志格式
 
 每行一个 JSON 对象（JSONL）。顶层是事件信封，领域事实位于 `payload` 子对象：
 
 ```jsonl
-{"seq":0,"id":"evt0","session_id":"abc123","timestamp":"...","payload":{"type":"session_started","working_dir":"/project","model_id":"deepseek-chat"}}
-{"seq":1,"id":"evt1","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"user_message","message_id":"msg1","text":"explain main.rs"}}
-{"seq":2,"id":"evt2","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"turn_started"}}
-{"seq":3,"id":"evt3","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"assistant_message_started","message_id":"msg2"}}
-{"seq":4,"id":"evt4","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"assistant_message_completed","message_id":"msg2","text":"..."}}
-{"seq":5,"id":"evt5","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"turn_completed","finish_reason":"stop"}}
+{"seq":0,"id":"evt0","session_id":"abc123","timestamp":"...","payload":{"type":"session_started","working_dir":"/project","model_id":"deepseek-chat","tool_selection":{"mode":"all","except":[]},"initial_system_prompt":{"text":"...","fingerprint":"..."}}}
+{"seq":1,"id":"evt1","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"turn_started"}}
+{"seq":2,"id":"evt2","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"user_message","message_id":"msg1","text":"explain main.rs","attachments":[]}}
+{"seq":3,"id":"evt3","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"assistant_message_completed","message_id":"msg2","text":"..."}}
+{"seq":4,"id":"evt4","session_id":"abc123","turn_id":"turn1","timestamp":"...","payload":{"type":"turn_completed","finish_reason":"stop"}}
 ```
+
+`AssistantTextDelta`、`ToolCallStarted` 等 live 事件只进入进程内和客户端事件流，
+不带 `seq`，也不会出现在 JSONL 中。
 
 ### Session 树与快照恢复
 
@@ -77,7 +87,7 @@ session-A (root)
 
 | 层 | 位置 | 含义 |
 |---|---|---|
-| Durable | `EventStore` / session `phase` | 持久化、可重放、进程重启后仍成立 |
+| Durable | `EventLog` / `SessionReadModel` | 持久化、可重放、进程重启后仍成立 |
 | 进程 | `TurnRegistry` | 当前是否有活跃 turn 任务（优化索引，需 `repair_stale` 对齐） |
 | 传输 | `CommandHandler.active_session_id` | stdio/ACP 的「当前会话」；HTTP 在 path 中带 `session_id` |
 
@@ -102,7 +112,7 @@ bootstrap_with → ChildSessionCoordinator + TurnScheduler + TurnRegistry
               → ServerEventBus::new(fanout)
               → SessionEventReactor::new(scheduler)
               → SessionManager::bind_event_bus + bind_event_reactor
-              → CommandHandle::spawn
+              → CommandHandler::spawn_actor
 ```
 
 ### 命令路径
@@ -167,13 +177,14 @@ Identity → System → Task Guidelines → Communication → Environment
 → User Rules → Project Rules → Tool Summary → Extension → Additional
 ```
 
-稳定部分（Identity、System、Task Guidelines）排在前面，易变部分（Environment、date）排在后面，配合 prompt cache 利用前缀匹配。
+稳定部分（Identity、System、Task Guidelines、Communication）排在前面；Environment、用户/项目规则、工具和扩展贡献作为动态后缀，配合 prompt cache 利用前缀匹配。普通 turn 和 compact 使用同一套 provider message 分组。
 
 ### 用户定制
 
 - `~/.astrcode/IDENTITY.md` 覆盖默认身份
 - 项目目录下 `AGENTS.md` 作为 project rules（从 working_dir 向上查找，深层覆盖浅层）
 - 扩展通过 `PromptBuild` 事件注入 Skills、Agents、PlatformInstructions 等 section
+- 新 session 在写入第一条事件前完成工具快照和 prompt 组装，`SessionStarted` 携带初始 prompt；构建失败不会留下半初始化日志
 
 ### 设计取舍
 
@@ -219,7 +230,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 ### 生命周期钩子
 
-扩展订阅 agent 生命周期事件，可拦截、修改或阻止操作：
+扩展订阅 agent 生命周期事件；控制型 hook 可以拦截或修改操作，通知型 hook 只观察：
 
 - `PreToolUse` / `PostToolUse` — 检查、修改或阻止工具执行
 - `BeforeProviderRequest` / `AfterProviderResponse` — 修改消息或阻止 LLM 调用
@@ -232,6 +243,9 @@ Identity → System → Task Guidelines → Communication → Environment
 - **Blocking**：同步执行，可返回 Block / ModifiedInput / ModifiedResult
 - **NonBlocking**：即发即弃，使用快照上下文，不阻塞主流程
 - **Advisory**：结果仅记录日志，不强制执行
+
+通用生命周期事件中只有 `TurnStart` 和 `UserPromptSubmit` 允许 Blocking。
+Session、Step 和结束类事件已发生或正在收尾，注册为 Blocking 会被宿主拒绝。
 
 ### 快捷键与状态栏注册
 
@@ -270,6 +284,8 @@ Mode 扩展已从内置逻辑迁移为完整插件：通过 `Registrar` 注册 `
 - 路由：sessions CRUD、prompt 提交、compact、abort、fork、SSE 事件流
 - SSE 流携带 `cursor`（event seq），客户端断连后可从 cursor 恢复
 - broadcast channel 溢出时发送 `RehydrateRequired` delta，通知客户端重新拉取 snapshot
+- 前端在动画帧边界无损归并流式 delta；缓冲达到数量或文本预算时提前 flush，不丢事件
+- Settings、Plugins 和 Markdown parser 按行为边界延迟加载，聊天主路径保持轻量
 
 ### 传输层
 
@@ -317,16 +333,6 @@ Session 是唯一的持久事实来源。所有状态变化都以不可变事件
 ### 工具-First 而非 extension-First
 
 工具是运行时基础能力，extension、SDK、MCP 都只是 tool source。所有工具走同一条执行路径，确保可观测性和统一调度。
-
-### Session 嵌入边界
-
-`astrcode-session` 只依赖 `astrcode-core` / `astrcode-extension-sdk` / storage/support 等内核契约，
-不直接依赖 first-party 的 context、tools、extensions 或 server 默认实现。嵌入宿主通过
-`SessionHostServices` 注入 context、prompt、窄 extension ports、post-compact enrichment 和 tool packs。
-每个 turn 固定持有同一份不可变 `ToolRegistry`；session 只按 extension runtime 代次、
-工作目录、子会话工具策略和 tool-pack 配置版本缓存快照，无需 server 广播失效。
-
-最小嵌入方式与可替换能力清单见 [session-embedding.md](session-embedding.md)。
 
 ### 前后端分离
 

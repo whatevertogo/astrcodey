@@ -22,13 +22,13 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::{tool::*, tool_access::ResourceAccess};
+use astrcode_core::tool::{access::ResourceAccess, *};
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::files::{run_blocking, tool_call_id};
+use crate::files::run_blocking;
 
 const MAX_BUFFER_BYTES: usize = 1_024 * 1_024; // 1 MB
 const DEFAULT_READ_WAIT_MS: u64 = 100;
@@ -272,7 +272,7 @@ impl Tool for TerminalTool {
         &self,
         args: serde_json::Value,
         ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<ToolExecutionResult, ToolError> {
         let started_at = std::time::Instant::now();
         let args: TerminalArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid terminal args: {e}")))?;
@@ -280,13 +280,13 @@ impl Tool for TerminalTool {
         let result = match args.action.as_str() {
             "start" => {
                 let tool = self.working_dir.clone();
-                let session_id = ctx.session_id.as_str().to_string();
+                let session_id = ctx.scope.session_id.as_str().to_string();
                 run_blocking(move || action_start(&tool, args, &session_id)).await?
             },
             "send" => action_send(args)?,
             "read" => action_read(args).await?,
             "close" => action_close(args)?,
-            "list" => action_list(ctx.session_id.as_str())?,
+            "list" => action_list(ctx.scope.session_id.as_str())?,
             other => {
                 return Err(ToolError::InvalidArguments(format!(
                     "unknown action '{other}', expected start / send / read / close / list"
@@ -297,13 +297,13 @@ impl Tool for TerminalTool {
         let (content, metadata, is_error) = result;
 
         Ok(ToolResult {
-            call_id: tool_call_id(ctx),
             content,
             is_error,
             error: None,
             metadata,
             duration_ms: Some(started_at.elapsed().as_millis() as u64),
-        })
+        }
+        .into())
     }
 }
 

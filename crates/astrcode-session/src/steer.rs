@@ -4,11 +4,20 @@
 //! 本模块在每个 step 开始前统计读模型中的 user 条数；增量写入
 //! [`LifecycleContext::mid_turn_user_messages_synced`] 并随 [`ExtensionEvent::StepStart`] 派发。
 
-use astrcode_core::storage::SessionReadModel;
+use astrcode_context::is_synthetic_context_message;
+use astrcode_core::llm::LlmRole;
+use astrcode_session_projection::SessionReadModel;
 
 /// 统计读模型中 provider 可见的非合成 user 消息条数。
 pub(crate) fn count_visible_user_messages(model: &SessionReadModel) -> usize {
-    model.visible_user_message_count()
+    model
+        .transcript
+        .messages
+        .iter()
+        .filter(|entry| {
+            entry.message.role == LlmRole::User && !is_synthetic_context_message(&entry.message)
+        })
+        .count()
 }
 
 /// 是否存在尚未并入 LLM 上下文的 mid-turn user 消息。
@@ -21,13 +30,15 @@ pub(crate) fn has_pending_mid_turn_user_messages(
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::{llm::LlmMessage, storage::SequencedLlmMessage, types::SessionId};
+    use astrcode_core::{llm::LlmMessage, types::SessionId};
+    use astrcode_session_projection::SequencedLlmMessage;
 
     use super::*;
+    use crate::test_support::read_model;
 
     fn model_with_messages(messages: Vec<LlmMessage>) -> SessionReadModel {
-        let mut model = SessionReadModel::empty(SessionId::new("s-test"));
-        model.messages = messages
+        let mut model = read_model(SessionId::new("s-test"));
+        model.transcript.messages = messages
             .into_iter()
             .enumerate()
             .map(|(updated_seq, message)| SequencedLlmMessage {

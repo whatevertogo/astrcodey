@@ -1,0 +1,15 @@
+[package]
+name = "astrcode-session-projection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Pure session read-model projection derived from AstrCode events"
+
+[dependencies]
+astrcode-core = { path = "../astrcode-core" }
+chrono = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

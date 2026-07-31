@@ -8,7 +8,7 @@ use astrcode_protocol::{
 };
 
 use super::HandlerError;
-use crate::config_manager::ConfigManager;
+use crate::config_manager::{ConfigManager, ConfigUpdateError};
 
 const TARGET_REQUEST_ID: &str = "model.target";
 const MODEL_REQUEST_ID: &str = "model.model";
@@ -58,18 +58,21 @@ pub(in crate::handler) struct ModelSelectionController {
 }
 
 impl ModelSelectionController {
-    pub fn is_idle(&self) -> bool {
+    pub(super) fn is_idle(&self) -> bool {
         self.pending.is_none()
     }
 
-    pub fn new(config_manager: Arc<ConfigManager>) -> Self {
+    pub(super) fn new(config_manager: Arc<ConfigManager>) -> Self {
         Self {
             flow: ModelSelectionFlow::new(config_manager),
             pending: None,
         }
     }
 
-    pub async fn set_main_model(&self, model_id: &str) -> Result<ClientNotification, HandlerError> {
+    pub(super) async fn set_main_model(
+        &self,
+        model_id: &str,
+    ) -> Result<ClientNotification, HandlerError> {
         let (profile, model) = parse_model_option(model_id)?;
         self.flow
             .apply_selection(ModelTarget::Main, &profile, &model)
@@ -81,12 +84,12 @@ impl ModelSelectionController {
         ))
     }
 
-    pub fn start(&mut self) -> ClientNotification {
+    pub(super) fn start(&mut self) -> ClientNotification {
         self.pending = Some(ModelSelectionStep::Target);
         ModelSelectionFlow::target_request()
     }
 
-    pub async fn handle_response(
+    pub(super) async fn handle_response(
         &mut self,
         request_id: String,
         value: UiResponseValue,
@@ -141,7 +144,7 @@ impl ModelSelectionFlow {
                 })
             },
             ModelSelectionStep::Model { target } => {
-                let selected = parse_select(response)?;
+                let selected = selected_value(response);
                 let (profile, model) = parse_model_option(&selected)?;
                 self.apply_selection(target, &profile, &model).await?;
                 Ok(ModelSelectionTransition {
@@ -158,43 +161,34 @@ impl ModelSelectionFlow {
         profile: &str,
         model: &str,
     ) -> Result<(), HandlerError> {
-        let mut candidate = self.config_manager.raw_config_snapshot();
-        validate_profile_model(&candidate, profile, model)?;
-
-        match target {
-            ModelTarget::Main => {
-                candidate.active_profile = profile.to_string();
-                candidate.active_model = model.to_string();
-            },
-            ModelTarget::Small => {
-                candidate.active_small_profile = Some(profile.to_string());
-                candidate.active_small_model = Some(model.to_string());
-            },
-        }
-
-        candidate.clone().into_effective().map_err(|error| {
-            HandlerError::InvalidRequest(format!("Invalid model selection: {error}"))
-        })?;
-
-        // 先应用到内存，再持久化到磁盘。
-        // 如果 save 失败，内存配置已经更新，下次进程启动会回退到磁盘旧值。
-        // 这种不对称比 save 成功后 apply 失败更可取：
-        // 前者只是新配置没落盘（用户下次重选即可），后者会导致内存和磁盘配置不一致。
         self.config_manager
-            .apply_raw_config_and_rebuild(candidate.clone())
-            .map_err(|error| {
-                HandlerError::InvalidRequest(format!("Failed to apply config: {error}"))
-            })?;
-
-        self.config_manager
-            .config_store()
-            .save(&candidate)
+            .update_and_save(|candidate| {
+                validate_profile_model(candidate, profile, model)?;
+                match target {
+                    ModelTarget::Main => {
+                        candidate.active_profile = profile.to_string();
+                        candidate.active_model = model.to_string();
+                    },
+                    ModelTarget::Small => {
+                        candidate.active_small_profile = Some(profile.to_string());
+                        candidate.active_small_model = Some(model.to_string());
+                    },
+                }
+                Ok(())
+            })
             .await
-            .map_err(|error| {
-                HandlerError::InvalidRequest(format!("Failed to write config: {error}"))
-            })?;
-
-        Ok(())
+            .map_err(|error| match error {
+                ConfigUpdateError::Mutation(error) => error,
+                ConfigUpdateError::Resolve(error) => {
+                    HandlerError::InvalidRequest(format!("Invalid model selection: {error}"))
+                },
+                ConfigUpdateError::Provider(error) => {
+                    HandlerError::InvalidRequest(format!("Failed to build model provider: {error}"))
+                },
+                ConfigUpdateError::Store(error) => {
+                    HandlerError::InvalidRequest(format!("Failed to write config: {error}"))
+                },
+            })
     }
 
     fn success_notification(target: ModelTarget, profile: &str, model: &str) -> ClientNotification {
@@ -274,7 +268,7 @@ fn parse_model_option(selected: &str) -> Result<(String, String), HandlerError> 
 }
 
 fn parse_target(response: UiResponseValue) -> Result<ModelTarget, HandlerError> {
-    match parse_select(response)?.as_str() {
+    match selected_value(response).as_str() {
         MAIN_OPTION => Ok(ModelTarget::Main),
         SMALL_OPTION => Ok(ModelTarget::Small),
         selected => Err(HandlerError::InvalidRequest(format!(
@@ -283,13 +277,9 @@ fn parse_target(response: UiResponseValue) -> Result<ModelTarget, HandlerError> 
     }
 }
 
-fn parse_select(response: UiResponseValue) -> Result<String, HandlerError> {
-    match response {
-        UiResponseValue::Select { selected } => Ok(selected),
-        _ => Err(HandlerError::InvalidRequest(
-            "Expected select response".into(),
-        )),
-    }
+fn selected_value(response: UiResponseValue) -> String {
+    let UiResponseValue::Select { selected } = response;
+    selected
 }
 
 fn validate_profile_model(

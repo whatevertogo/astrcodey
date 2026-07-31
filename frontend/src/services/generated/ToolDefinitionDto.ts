@@ -3,4 +3,10 @@ import type { ExecutionModeDto } from "./ExecutionModeDto";
 import type { ToolOriginDto } from "./ToolOriginDto";
 import type { JsonValue } from "./serde_json/JsonValue";
 
+/**
+ * 扩展注册的工具定义。
+ *
+ * 字段保留既有 snake_case 嵌套 wire 形状（冻结形状），
+ * 嵌套在 camelCase 的 [`ExtensionDeclarationDto`] 中是有意偏离。
+ */
 export type ToolDefinitionDto = { name: string, description: string, parameters: JsonValue, strict: boolean, origin: ToolOriginDto, execution_mode: ExecutionModeDto, };

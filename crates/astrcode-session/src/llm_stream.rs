@@ -2,9 +2,9 @@
 
 use std::collections::HashSet;
 
+use astrcode_context::is_prompt_too_long_message;
 use astrcode_core::{
-    context::is_prompt_too_long_message,
-    event::EventPayload,
+    event::LiveEventPayload,
     llm::{LlmError, LlmEvent, LlmTokenUsage},
     types::*,
 };
@@ -26,7 +26,7 @@ const MAX_TOOL_CALLS_PER_RESPONSE: usize = 64;
 const MAX_TOOL_CALL_ARGUMENTS_BYTES: usize = 4 * 1024 * 1024;
 
 fn stream_parse_limit_error(message: impl Into<String>) -> TurnError {
-    TurnError::Llm(LlmError::StreamParse(message.into()))
+    TurnError::Llm(LlmError::stream_parse(message.into()))
 }
 
 fn ensure_tool_call_args_limit(size: usize) -> Result<(), TurnError> {
@@ -40,7 +40,7 @@ fn ensure_tool_call_args_limit(size: usize) -> Result<(), TurnError> {
 
 // ─── StreamOutcome ───────────────────────────────────────────────────────
 
-pub enum StreamOutcome {
+pub(crate) enum StreamOutcome {
     Complete {
         text: String,
         reasoning_content: String,
@@ -80,7 +80,7 @@ pub(crate) struct EarlyExecContext<'a> {
 ///
 /// 当 `early_exec` 为 `Some` 时，在 `ToolCallCompleted` 事件到达时即准备和
 /// 调度工具执行，不等整个 LLM 响应流结束。
-pub async fn consume_llm_stream(
+pub(crate) async fn consume_llm_stream(
     mut rx: mpsc::UnboundedReceiver<LlmEvent>,
     publisher: &TurnEvents,
     message_id: MessageId,
@@ -114,9 +114,9 @@ pub async fn consume_llm_stream(
                         return Err(TurnError::Aborted);
                     }
                     completed = poll_early_tool(&mut scheduler), if scheduler.as_ref().is_some_and(EarlyToolScheduler::has_pending) => {
-                        if let Some((index, result)) = completed? {
+                        if let Some((index, outcome)) = completed? {
                             if let Some(ref mut scheduler) = scheduler {
-                                scheduler.record_result(index, result);
+                                scheduler.record_outcome(index, outcome);
                             }
                         }
                         continue;
@@ -130,26 +130,20 @@ pub async fn consume_llm_stream(
         };
         match event {
             LlmEvent::ContentDelta { delta } => {
-                ensure_assistant_message_started(publisher, &message_id, &mut message_started)
-                    .await;
+                ensure_assistant_message_started(publisher, &message_id, &mut message_started);
                 current_text.push_str(&delta);
-                publisher
-                    .live(EventPayload::AssistantTextDelta {
-                        message_id: message_id.clone(),
-                        delta,
-                    })
-                    .await;
+                publisher.live(LiveEventPayload::AssistantTextDelta {
+                    message_id: message_id.clone(),
+                    delta,
+                });
             },
             LlmEvent::ThinkingDelta { delta } => {
-                ensure_assistant_message_started(publisher, &message_id, &mut message_started)
-                    .await;
+                ensure_assistant_message_started(publisher, &message_id, &mut message_started);
                 reasoning_content.push_str(&delta);
-                publisher
-                    .live(EventPayload::ThinkingDelta {
-                        message_id: message_id.clone(),
-                        delta,
-                    })
-                    .await;
+                publisher.live(LiveEventPayload::ThinkingDelta {
+                    message_id: message_id.clone(),
+                    delta,
+                });
             },
             LlmEvent::ToolCallStart {
                 call_id,
@@ -172,19 +166,15 @@ pub async fn consume_llm_stream(
                         )));
                     }
                     ensure_tool_call_args_limit(arguments.len())?;
-                    publisher
-                        .live(EventPayload::ToolCallStarted {
-                            call_id: call_id.clone().into(),
-                            tool_name: name.clone(),
-                        })
-                        .await;
+                    publisher.live(LiveEventPayload::ToolCallStarted {
+                        call_id: call_id.clone().into(),
+                        tool_name: name.clone(),
+                    });
                     if !arguments.is_empty() {
-                        publisher
-                            .live(EventPayload::ToolCallArgumentsDelta {
-                                call_id: call_id.clone().into(),
-                                delta: arguments.clone(),
-                            })
-                            .await;
+                        publisher.live(LiveEventPayload::ToolCallArgumentsDelta {
+                            call_id: call_id.clone().into(),
+                            delta: arguments.clone(),
+                        });
                     }
                     tool_calls.push(StreamedToolCall {
                         call_id,
@@ -198,12 +188,10 @@ pub async fn consume_llm_stream(
                     ensure_tool_call_args_limit(tc.arguments.len().saturating_add(delta.len()))?;
                     tc.arguments.push_str(&delta);
                 }
-                publisher
-                    .live(EventPayload::ToolCallArgumentsDelta {
-                        call_id: call_id.into(),
-                        delta,
-                    })
-                    .await;
+                publisher.live(LiveEventPayload::ToolCallArgumentsDelta {
+                    call_id: call_id.into(),
+                    delta,
+                });
             },
             LlmEvent::Usage { usage } => {
                 captured_usage = Some(usage);
@@ -244,13 +232,13 @@ pub async fn consume_llm_stream(
             LlmEvent::Error { message } => {
                 let recoverable = is_prompt_too_long_message(&message);
                 if recoverable {
-                    publisher.live_error(-32603, message.clone(), true).await;
-                    return Err(TurnError::Llm(LlmError::PromptTooLong(message)));
+                    publisher.live_error(-32603, message.clone(), true);
+                    return Err(TurnError::Llm(LlmError::ContextWindowExceeded { message }));
                 }
                 publisher
                     .durable_error(-32603, message.clone(), false)
                     .await?;
-                return Err(TurnError::Llm(LlmError::StreamParse(message)));
+                return Err(TurnError::Llm(LlmError::stream_parse(message)));
             },
             LlmEvent::ToolCallCompleted { call_id } => {
                 if scheduled_tool_call_ids.contains(&call_id) {
@@ -284,14 +272,14 @@ pub async fn consume_llm_stream(
 
 async fn poll_early_tool(
     scheduler: &mut Option<EarlyToolScheduler>,
-) -> Result<Option<(usize, astrcode_core::tool::ToolResult)>, TurnError> {
+) -> Result<Option<(usize, crate::tool_types::ToolExecutionOutcome)>, TurnError> {
     let Some(scheduler) = scheduler else {
         return Ok(None);
     };
     scheduler.poll_completed().await
 }
 
-async fn ensure_assistant_message_started(
+fn ensure_assistant_message_started(
     publisher: &TurnEvents,
     message_id: &MessageId,
     message_started: &mut bool,
@@ -299,15 +287,13 @@ async fn ensure_assistant_message_started(
     if *message_started {
         return;
     }
-    publisher
-        .live(EventPayload::AssistantMessageStarted {
-            message_id: message_id.clone(),
-        })
-        .await;
+    publisher.live(LiveEventPayload::AssistantMessageStarted {
+        message_id: message_id.clone(),
+    });
     *message_started = true;
 }
 
-pub fn non_empty_reasoning_content(reasoning_content: String) -> Option<String> {
+pub(crate) fn non_empty_reasoning_content(reasoning_content: String) -> Option<String> {
     if reasoning_content.is_empty() {
         None
     } else {
@@ -317,8 +303,6 @@ pub fn non_empty_reasoning_content(reasoning_content: String) -> Option<String> 
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::llm::{LlmMessage, provider_visible_messages};
-
     use super::*;
 
     #[test]
@@ -332,20 +316,5 @@ mod tests {
     #[test]
     fn non_empty_reasoning_empty_returns_none() {
         assert_eq!(non_empty_reasoning_content(String::new()), None);
-    }
-
-    #[test]
-    fn provider_visible_filters_empty_system_messages() {
-        let messages = vec![LlmMessage::user("hello"), LlmMessage::system("")];
-        let visible = provider_visible_messages(messages);
-        assert_eq!(visible.len(), 1);
-        assert!(matches!(visible[0].role, astrcode_core::llm::LlmRole::User));
-    }
-
-    #[test]
-    fn provider_visible_keeps_non_empty() {
-        let messages = vec![LlmMessage::user("hello"), LlmMessage::assistant("world")];
-        let visible = provider_visible_messages(messages);
-        assert_eq!(visible.len(), 2);
     }
 }

@@ -36,6 +36,8 @@ export function mergeBlock(
   }
 
   if (current.kind === 'toolCall' && incoming.kind === 'toolCall') {
+    const metadata = incoming.metadata ?? current.metadata
+    const argumentsJson = incoming.argumentsJson ?? current.argumentsJson
     return {
       ...incoming,
       name: incoming.name.trim() ? incoming.name : current.name,
@@ -43,8 +45,8 @@ export function mergeBlock(
         ? incoming.arguments
         : current.arguments,
       text: incoming.text.trim() ? incoming.text : current.text,
-      metadata: incoming.metadata ?? current.metadata,
-      argumentsJson: incoming.argumentsJson ?? current.argumentsJson,
+      ...(metadata ? { metadata } : {}),
+      ...(argumentsJson ? { argumentsJson } : {}),
     }
   }
 

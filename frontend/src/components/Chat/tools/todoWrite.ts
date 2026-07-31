@@ -1,8 +1,4 @@
 import type { RenderSpec } from '../../../types/render-spec'
-import {
-  extractRenderSpec,
-  extractRenderSummary,
-} from '../../../types/render-spec'
 import { arrayValue, compactLine, type JsonRecord } from './helpers'
 
 type TodoStatus = 'pending' | 'in_progress' | 'completed'
@@ -150,7 +146,7 @@ export function todoWriteRenderSpec(
   args: JsonRecord,
   meta: JsonRecord
 ): RenderSpec | undefined {
-  return extractRenderSpec(meta) ?? buildTodoRenderSpecFromContext(args, meta)
+  return buildTodoRenderSpecFromContext(args, meta)
 }
 
 export function buildTodoRenderSpecFromContext(
@@ -166,9 +162,6 @@ export function todoWriteSummaryLine(
   args: JsonRecord,
   meta: JsonRecord
 ): string | undefined {
-  const fromMeta = extractRenderSummary(meta)
-  if (fromMeta) return compactLine(fromMeta)
-
   const items = todoItemsFromContext(args, meta)
   if (items.length === 0) return undefined
   return compactLine(buildTodoSummary(items))

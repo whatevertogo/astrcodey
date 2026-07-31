@@ -5,7 +5,12 @@
 pub use astrcode_core::llm::token_estimate::{
     estimate_message_tokens, estimate_request_tokens, estimate_text_tokens,
 };
-use astrcode_core::llm::{LlmMessage, ModelLimits, token_estimate::estimate_char_budget};
+use astrcode_core::llm::{
+    LlmMessage, ModelLimits,
+    token_estimate::{estimate_char_budget, estimate_provider_message_tokens},
+};
+
+use crate::prompt_engine::system_messages_from_prompt;
 
 /// 一次 provider 请求的 token 快照。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,13 +34,23 @@ pub fn build_prompt_snapshot(
     limits: ModelLimits,
     threshold_percent: f32,
 ) -> PromptTokenSnapshot {
-    let context_tokens = estimate_request_tokens(messages, system_prompt);
+    let context_tokens = estimate_request_tokens_with_prompt(messages, system_prompt);
     PromptTokenSnapshot {
         context_tokens,
         threshold_tokens: compact_threshold_tokens(limits.max_input_tokens, threshold_percent),
         max_input_tokens: limits.max_input_tokens,
         reserved_output_tokens: limits.max_output_tokens,
     }
+}
+
+pub(crate) fn estimate_request_tokens_with_prompt(
+    messages: &[LlmMessage],
+    system_prompt: Option<&str>,
+) -> usize {
+    let system_messages = system_prompt
+        .map(system_messages_from_prompt)
+        .unwrap_or_default();
+    estimate_provider_message_tokens(system_messages.iter().chain(messages))
 }
 
 /// 根据模型输入窗口和百分比阈值计算 compact 触发 token。

@@ -1,4 +1,4 @@
-//! 基于文件系统的会话仓库，实现 EventStore trait。
+//! 基于文件系统的会话仓库。
 //!
 //! 管理按项目组织的会话事件日志，目录结构为：
 //! `~/.astrcode/projects/<project>/sessions/<session>/`
@@ -11,29 +11,40 @@ use std::{
 };
 
 use astrcode_core::{
-    event::{Event, EventPayload},
-    storage::{
-        CompactSnapshotInput, EventReader, EventStore, SessionReadModel, SessionSummary,
-        StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactSlice,
-    },
+    config::defaults::astrcode_dir,
+    event::{DurableEvent, DurableEventPayload, StoredEvent},
+    tool::ToolResultArtifactSlice,
     types::{Cursor, SessionId, project_key_from_path, validate_session_id},
 };
-use astrcode_support::{hostpaths, perf_snapshot};
+use astrcode_session_projection::{
+    AgentSessionLinkView, ProjectionError, SessionReadModel, SessionSummary, reduce, replay,
+    validate_next_event,
+};
 use chrono::Utc;
 use fs2::FileExt;
 use parking_lot::Mutex;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 use uuid::Uuid;
 
 use crate::{
+    CompactSnapshotInput, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
+    SessionStore, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
+    ToolResultArtifactStore,
     event_log::EventLog,
-    projection,
     snapshot::SnapshotManager,
     tool_artifacts::{slice_tool_result, write_tool_result_file},
 };
 
 fn validate_storage_session_id(id: &SessionId) -> Result<(), StorageError> {
     validate_session_id(id.as_str()).map_err(|error| StorageError::InvalidId(error.to_string()))
+}
+
+fn invalid_event(error: ProjectionError) -> StorageError {
+    StorageError::InvalidEvent(error.to_string())
+}
+
+fn corrupt_projection(error: ProjectionError) -> StorageError {
+    StorageError::CorruptLog(error.to_string())
 }
 
 async fn directory_exists(path: &Path) -> bool {
@@ -73,56 +84,110 @@ fn source_extension_dir_component(source_extension: &str) -> Result<String, Stor
 ///
 /// 内存中缓存已打开的会话元数据，避免频繁的磁盘 I/O。
 pub struct FileSystemSessionRepository {
+    owner: Arc<()>,
     /// 已打开的会话元数据缓存，按会话 ID 索引
     sessions: Arc<RwLock<HashMap<SessionId, Arc<SessionMeta>>>>,
     /// 所有项目目录的父目录：`~/.astrcode/projects/`
     projects_base: PathBuf,
 }
 
-static SESSION_OWNER_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<SessionOwnerLockInner>>>> =
+static SESSION_OWNER_LEASES: OnceLock<Mutex<HashMap<PathBuf, Weak<SessionOwnerLeaseInner>>>> =
     OnceLock::new();
 
-fn session_owner_locks() -> &'static Mutex<HashMap<PathBuf, Weak<SessionOwnerLockInner>>> {
-    SESSION_OWNER_LOCKS.get_or_init(|| Mutex::new(HashMap::new()))
+fn session_owner_leases() -> &'static Mutex<HashMap<PathBuf, Weak<SessionOwnerLeaseInner>>> {
+    SESSION_OWNER_LEASES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// 会话的内部元数据，持有事件日志和快照管理器。
 struct SessionMeta {
-    /// 本进程对该 session 目录的所有权锁。
+    /// 本进程对该 session 目录的所有权租约。
     ///
-    /// 当前文件系统仓库刻意采用单 server owner 模型：同一进程可复用已持有的
-    /// owner lock，另一个 server 进程若尝试打开同一 session 会收到明确错误。
-    _owner_lock: SessionOwnerLock,
+    /// 当前文件系统仓库刻意采用单 repository owner 模型：同一 repository 可复用
+    /// 已持有的 owner lease，其他 repository 或进程会收到明确错误。
+    _owner_lease: SessionOwnerLease,
     /// 事件日志实例，负责追加式写入和重放
-    log: Arc<EventLog>,
+    log: EventLog,
     /// 快照管理器，负责创建和列出恢复点
     snapshot_mgr: SnapshotManager,
     /// 当前会话所在目录。
     dir: PathBuf,
-    /// 从事件日志同步维护的内部读模型（本进程内由 `append_event` 增量更新）。
+    /// 从事件日志同步维护的 projection 实例（本进程内由 `append_event` 增量更新）。
     ///
-    /// 文件系统仓库不支持多个 server 进程同时拥有同一个 session 目录。`_owner_lock`
-    /// 会在打开/创建 session 时阻止第二个进程进入，避免投影缓存和 JSONL writer
-    /// 出现跨进程失效问题。
-    projection: RwLock<SessionReadModel>,
+    /// reducer 规则归 `astrcode-session-projection`；storage 只拥有这个可重建缓存的实例。
+    projection: SessionProjection,
+    /// 串行化 journal commit 与 projection 更新。
+    ///
+    /// 这是进程内 storage 一致性边界；OS owner lease 只处理跨进程目录所有权。
+    commit_lane: Semaphore,
 }
 
-struct SessionOwnerLock {
-    _inner: Arc<SessionOwnerLockInner>,
+struct SessionProjection {
+    model: RwLock<Arc<SessionReadModel>>,
 }
 
-struct SessionOwnerLockInner {
+impl SessionProjection {
+    fn new(model: SessionReadModel) -> Self {
+        Self {
+            model: RwLock::new(Arc::new(model)),
+        }
+    }
+
+    async fn snapshot(&self) -> Arc<SessionReadModel> {
+        let model = self.model.read().await;
+        Arc::clone(&model)
+    }
+
+    async fn validate(&self, event: &DurableEvent) -> Result<u64, StorageError> {
+        let model = self.model.read().await;
+        let seq =
+            model.stats.last_seq.checked_add(1).ok_or_else(|| {
+                StorageError::CorruptLog("session event sequence overflow".into())
+            })?;
+        validate_next_event(seq, event, &model).map_err(invalid_event)?;
+        Ok(seq)
+    }
+
+    async fn apply(&self, event: &StoredEvent) -> Result<(), StorageError> {
+        let mut model = self.model.write().await;
+        reduce(event, Arc::make_mut(&mut model)).map_err(corrupt_projection)
+    }
+}
+
+struct SessionOwnerLease {
+    _inner: Arc<SessionOwnerLeaseInner>,
+}
+
+struct SessionOwnerLeaseInner {
     path: PathBuf,
+    owner: Arc<()>,
     _file: File,
 }
 
-impl SessionOwnerLock {
-    fn acquire(session_dir: &Path) -> Result<Self, StorageError> {
-        let key = std::fs::canonicalize(session_dir).unwrap_or_else(|_| session_dir.to_path_buf());
-        let mut locks = session_owner_locks().lock();
+impl SessionOwnerLease {
+    async fn acquire(session_dir: &Path, owner: &Arc<()>) -> Result<Self, StorageError> {
+        let session_dir = session_dir.to_path_buf();
+        let owner = Arc::clone(owner);
+        tokio::task::spawn_blocking(move || Self::acquire_blocking(&session_dir, &owner))
+            .await
+            .map_err(|error| {
+                StorageError::Io(std::io::Error::other(format!(
+                    "session owner lease task failed: {error}"
+                )))
+            })?
+    }
 
-        if let Some(inner) = locks.get(&key).and_then(Weak::upgrade) {
-            return Ok(Self { _inner: inner });
+    fn acquire_blocking(session_dir: &Path, owner: &Arc<()>) -> Result<Self, StorageError> {
+        let key = std::fs::canonicalize(session_dir).map_err(StorageError::Io)?;
+        let mut leases = session_owner_leases().lock();
+
+        if let Some(inner) = leases.get(&key).and_then(Weak::upgrade) {
+            if Arc::ptr_eq(&inner.owner, owner) {
+                return Ok(Self { _inner: inner });
+            }
+            return Err(StorageError::LockError(format!(
+                "session directory {} is already owned by another AstrCode repository",
+                key.display()
+            )));
         }
 
         let lock_path = key.join(".astrcode-session-owner.lock");
@@ -137,8 +202,8 @@ impl SessionOwnerLock {
         file.try_lock_exclusive().map_err(|error| {
             if error.kind() == std::io::ErrorKind::WouldBlock {
                 StorageError::LockError(format!(
-                    "session directory {} is already owned by another AstrCode server process; \
-                     stop that process before opening this session here",
+                    "session directory {} is already owned by another AstrCode repository; stop \
+                     that server before opening this session here",
                     key.display()
                 ))
             } else {
@@ -146,23 +211,24 @@ impl SessionOwnerLock {
             }
         })?;
 
-        let inner = Arc::new(SessionOwnerLockInner {
+        let inner = Arc::new(SessionOwnerLeaseInner {
             path: key.clone(),
+            owner: Arc::clone(owner),
             _file: file,
         });
-        locks.insert(key, Arc::downgrade(&inner));
+        leases.insert(key, Arc::downgrade(&inner));
         Ok(Self { _inner: inner })
     }
 }
 
-impl Drop for SessionOwnerLockInner {
+impl Drop for SessionOwnerLeaseInner {
     fn drop(&mut self) {
-        let mut locks = session_owner_locks().lock();
-        if locks
+        let mut leases = session_owner_leases().lock();
+        if leases
             .get(&self.path)
-            .is_some_and(|existing| existing.strong_count() == 0)
+            .is_some_and(|lease| lease.strong_count() == 0)
         {
-            locks.remove(&self.path);
+            leases.remove(&self.path);
         }
     }
 }
@@ -178,7 +244,7 @@ impl FileSystemSessionRepository {
     ///
     /// 会话按 `working_dir` 动态分发到对应的项目目录，不再绑定启动时的 cwd。
     pub fn new() -> Self {
-        Self::with_projects_base(hostpaths::projects_dir())
+        Self::with_projects_base(astrcode_dir().join("projects"))
     }
 
     fn with_projects_base(projects_base: PathBuf) -> Self {
@@ -189,6 +255,7 @@ impl FileSystemSessionRepository {
             );
         }
         Self {
+            owner: Arc::new(()),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             projects_base,
         }
@@ -276,6 +343,32 @@ impl FileSystemSessionRepository {
             .ok_or_else(|| StorageError::NotFound(id.clone()))
     }
 
+    async fn new_session_dir(
+        &self,
+        session_id: &SessionId,
+        working_dir: &str,
+        parent_session_id: Option<&SessionId>,
+        source_extension: Option<&str>,
+    ) -> Result<PathBuf, StorageError> {
+        match parent_session_id {
+            Some(parent_id) => {
+                let extension = source_extension.ok_or_else(|| {
+                    StorageError::InvalidId(
+                        "child session requires source_extension to choose subagents directory"
+                            .into(),
+                    )
+                })?;
+                let parent_dir = self.existing_session_dir(parent_id).await?;
+                let extension_dir = source_extension_dir_component(extension)?;
+                Ok(parent_dir
+                    .join("subagents")
+                    .join(extension_dir)
+                    .join(session_id.as_str()))
+            },
+            None => Ok(self.session_dir_from_working_dir(working_dir, session_id)),
+        }
+    }
+
     /// 获取指定会话的事件日志文件路径。
     fn event_log_path(session_dir: &Path, id: &SessionId) -> PathBuf {
         session_dir.join(format!("session-{id}.jsonl"))
@@ -300,18 +393,19 @@ impl FileSystemSessionRepository {
         // 否则会阻塞同实例上的 append/checkpoint，并在 Windows 上与未释放的
         // EventLog 句柄争用同一 JSONL 文件。
         let dir = self.existing_session_dir(session_id).await?;
-        let owner_lock = SessionOwnerLock::acquire(&dir)?;
-        let log = Arc::new(EventLog::open(Self::event_log_path(&dir, session_id)).await?);
+        let owner_lease = SessionOwnerLease::acquire(&dir, &self.owner).await?;
+        let log = EventLog::open(Self::event_log_path(&dir, session_id)).await?;
         let snapshot_mgr = SnapshotManager::new(dir.join("snapshots"));
         let projection = self
             .restore_projection(session_id, &log, &snapshot_mgr)
             .await?;
         let opened = Arc::new(SessionMeta {
-            _owner_lock: owner_lock,
+            _owner_lease: owner_lease,
             log,
             snapshot_mgr,
             dir,
-            projection: RwLock::new(projection),
+            projection: SessionProjection::new(projection),
+            commit_lane: Semaphore::new(1),
         });
 
         let mut sessions = self.sessions.write().await;
@@ -331,7 +425,7 @@ impl FileSystemSessionRepository {
     ) -> Result<SessionReadModel, StorageError> {
         // Snapshot first because it's faster than replaying the full event log.
         if let Some(snapshot) = snapshot_mgr.latest_snapshot().await? {
-            match restore_from_snapshot(log, snapshot).await {
+            match restore_from_snapshot(session_id, log, snapshot).await {
                 Ok(model) => return Ok(model),
                 Err(error) => {
                     tracing::warn!(
@@ -343,21 +437,22 @@ impl FileSystemSessionRepository {
         }
 
         let events = log.replay_all().await?;
-        Ok(projection::replay(session_id.clone(), &events))
+        replay(session_id.clone(), &events).map_err(corrupt_projection)
     }
 }
 
 async fn restore_from_snapshot(
+    expected_session_id: &SessionId,
     log: &EventLog,
     snapshot: crate::snapshot::SessionProjectionSnapshot,
 ) -> Result<SessionReadModel, StorageError> {
-    // For v2 snapshots, `latest_seq` is derived from the embedded model.
-    // For v1 snapshots, it's duplicated in the payload and validated by snapshot.rs.
-    let Some(latest_seq) = snapshot.model().latest_seq else {
-        return Err(StorageError::InvalidId(
-            "snapshot model.latest_seq is missing".into(),
-        ));
-    };
+    if snapshot.model.identity.session_id != *expected_session_id {
+        return Err(StorageError::CorruptLog(format!(
+            "projection snapshot belongs to session {}, expected {}",
+            snapshot.model.identity.session_id, expected_session_id
+        )));
+    }
+    let latest_seq = snapshot.model.stats.last_seq;
 
     // `count()` returns the next seq to assign (= number of persisted events).
     let next_seq = log.count().await? as u64;
@@ -367,111 +462,36 @@ async fn restore_from_snapshot(
         )));
     }
 
-    let mut model = snapshot.model().clone();
+    let mut model = snapshot.model;
     // Reapply only the events that occurred after the snapshot. The snapshot
     // serves as a recovery checkpoint, not as an authoritative source of truth.
     for event in log.replay_after(latest_seq).await? {
-        projection::reduce(&event, &mut model);
+        reduce(&event, &mut model).map_err(corrupt_projection)?;
     }
     Ok(model)
 }
 
 #[async_trait::async_trait]
 impl EventReader for FileSystemSessionRepository {
-    async fn replay_events(&self, session_id: &SessionId) -> Result<Vec<Event>, StorageError> {
+    async fn replay_events(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
         meta.log.replay_all().await
     }
 
-    async fn session_read_model(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<SessionReadModel, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let model = meta.projection.read().await.clone();
-        Ok(model)
-    }
-
-    async fn session_provider_messages(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Vec<astrcode_core::llm::LlmMessage>, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let messages = meta.projection.read().await.provider_messages();
-        Ok(messages)
-    }
-
-    async fn session_system_prompt(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Option<String>, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let prompt = meta.projection.read().await.system_prompt.clone();
-        Ok(prompt)
-    }
-
-    async fn session_has_messages(&self, session_id: &SessionId) -> Result<bool, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let has_messages = meta.projection.read().await.has_messages();
-        Ok(has_messages)
-    }
-
-    async fn session_agent_sessions(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Vec<astrcode_core::storage::AgentSessionLinkView>, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let agent_sessions = meta.projection.read().await.agent_sessions.clone();
-        Ok(agent_sessions)
-    }
-
-    async fn session_visible_user_message_count(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<usize, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let count = meta.projection.read().await.visible_user_message_count();
-        Ok(count)
-    }
-
-    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
-        let session_ids = self.list_session_dirs().await?;
-        let sessions = self.sessions.read().await.clone();
-        let mut summaries = Vec::new();
-
-        for session_id in session_ids {
-            if let Some(meta) = sessions.get(&session_id) {
-                // 已打开的会话直接使用内存中的投影
-                summaries.push(meta.projection.read().await.to_summary());
-            } else {
-                // 未打开的会话只读首行事件（SessionStarted）构造轻量摘要
-                if let Some(summary) = self.read_summary_from_first_event(&session_id).await? {
-                    summaries.push(summary);
-                }
-            }
-        }
-
-        summaries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
-        Ok(summaries)
-    }
-
     async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        let cursor = meta
-            .projection
-            .read()
-            .await
-            .latest_seq
-            .map(|seq| seq.to_string());
-        Ok(cursor)
+        let cursor = meta.projection.snapshot().await.cursor();
+        Ok(Some(cursor))
     }
 
     async fn replay_from(
         &self,
         session_id: &SessionId,
         cursor: &Cursor,
-    ) -> Result<Vec<Event>, StorageError> {
-        // session_id 验证由 get_or_open_meta 统一守卫
+    ) -> Result<Vec<StoredEvent>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
         let seq = parse_cursor(cursor)?;
         meta.log.replay_after(seq).await
@@ -482,7 +502,7 @@ impl EventReader for FileSystemSessionRepository {
         session_id: &SessionId,
         cursor: &Cursor,
         max_events: usize,
-    ) -> Result<Vec<Event>, StorageError> {
+    ) -> Result<Vec<StoredEvent>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
         let seq = parse_cursor(cursor)?;
         meta.log.replay_after_limited(seq, max_events).await
@@ -491,7 +511,57 @@ impl EventReader for FileSystemSessionRepository {
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
         self.list_session_dirs().await
     }
+}
 
+#[async_trait::async_trait]
+impl SessionReader for FileSystemSessionRepository {
+    async fn session_read_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<SessionReadModel>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        Ok(meta.projection.snapshot().await)
+    }
+
+    async fn session_has_messages(&self, session_id: &SessionId) -> Result<bool, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let has_messages = meta.projection.snapshot().await.has_messages();
+        Ok(has_messages)
+    }
+
+    async fn session_agent_sessions(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<AgentSessionLinkView>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let agent_sessions = meta.projection.snapshot().await.agent_sessions.clone();
+        Ok(agent_sessions)
+    }
+
+    async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
+        let session_ids = self.list_session_dirs().await?;
+        let sessions = self.sessions.read().await.clone();
+        let mut summaries = Vec::new();
+
+        for session_id in session_ids {
+            if let Some(meta) = sessions.get(&session_id) {
+                // 已打开的会话直接使用内存中的投影
+                summaries.push(meta.projection.snapshot().await.to_summary());
+            } else {
+                // 未打开的会话从事件流构造轻量摘要，不加载完整 transcript。
+                if let Some(summary) = self.read_summary_from_event_log(&session_id).await? {
+                    summaries.push(summary);
+                }
+            }
+        }
+
+        summaries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        Ok(summaries)
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolResultArtifactStore for FileSystemSessionRepository {
     async fn read_tool_result_artifact_by_path(
         &self,
         session_id: &SessionId,
@@ -503,15 +573,18 @@ impl EventReader for FileSystemSessionRepository {
 
         let path = PathBuf::from(path);
         let artifact_dir = meta.dir.join("tool-results");
-        if !hostpaths::is_path_within(&path, &artifact_dir) {
+        if !path.exists() {
+            return Err(StorageError::NotFound(session_id.clone()));
+        }
+        let session_dir = tokio::fs::canonicalize(&meta.dir).await?;
+        let artifact_dir = tokio::fs::canonicalize(artifact_dir).await?;
+        let canonical_path = tokio::fs::canonicalize(&path).await?;
+        if !artifact_dir.starts_with(&session_dir) || !canonical_path.starts_with(&artifact_dir) {
             return Err(StorageError::InvalidId(
                 "tool result path is outside this session artifact directory".into(),
             ));
         }
-        if !path.exists() {
-            return Err(StorageError::NotFound(session_id.clone()));
-        }
-        let content = tokio::fs::read_to_string(&path).await?;
+        let content = tokio::fs::read_to_string(canonical_path).await?;
         Ok(slice_tool_result(
             &path.to_string_lossy(),
             &content,
@@ -520,96 +593,130 @@ impl EventReader for FileSystemSessionRepository {
         ))
     }
 
+    async fn write_tool_result_artifact(
+        &self,
+        session_id: &SessionId,
+        artifact: ToolResultArtifactInput,
+    ) -> Result<ToolResultArtifactRef, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let dir = meta.dir.join("tool-results");
+        Ok(write_tool_result_file(&dir, &artifact)?)
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionPathResolver for FileSystemSessionRepository {
     async fn session_store_dir(
         &self,
         session_id: &SessionId,
     ) -> Result<Option<std::path::PathBuf>, StorageError> {
         Ok(self.find_session_dir(session_id).await)
     }
-}
 
-#[async_trait::async_trait]
-impl EventStore for FileSystemSessionRepository {
-    async fn create_session(
+    async fn planned_session_store_dir(
         &self,
         session_id: &SessionId,
         working_dir: &str,
-        model_id: &str,
         parent_session_id: Option<&SessionId>,
-        tool_selection: Option<&astrcode_core::extension::SessionToolSelection>,
         source_extension: Option<&str>,
-    ) -> Result<Event, StorageError> {
+    ) -> Result<Option<PathBuf>, StorageError> {
         validate_storage_session_id(session_id)?;
+        self.new_session_dir(session_id, working_dir, parent_session_id, source_extension)
+            .await
+            .map(Some)
+    }
+}
 
-        let dir = match parent_session_id {
-            Some(parent_id) => {
-                let extension = source_extension.ok_or_else(|| {
-                    StorageError::InvalidId(
-                        "child session requires source_extension to choose subagents directory"
-                            .into(),
-                    )
-                })?;
-                let parent_dir = self.existing_session_dir(parent_id).await?;
-                let extension_dir = source_extension_dir_component(extension)?;
-                parent_dir
-                    .join("subagents")
-                    .join(extension_dir)
-                    .join(session_id.as_str())
-            },
-            None => self.session_dir_from_working_dir(working_dir, session_id),
+#[async_trait::async_trait]
+impl SessionEventJournal for FileSystemSessionRepository {
+    async fn create_session(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
+        validate_storage_session_id(&event.session_id)?;
+        if event.turn_id.is_some() {
+            return Err(StorageError::InvalidId(
+                "SessionStarted must be a session-level event".into(),
+            ));
+        }
+        let DurableEventPayload::SessionStarted(started) = &event.payload else {
+            return Err(StorageError::InvalidId(
+                "create_session requires SessionStarted".into(),
+            ));
         };
-        tokio::fs::create_dir_all(&dir).await?;
-        let owner_lock = SessionOwnerLock::acquire(&dir)?;
+        let session_id = event.session_id.clone();
+        let parent_session_id = started.parent.as_ref().map(|parent| &parent.session_id);
 
-        let start_event = Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::SessionStarted {
-                working_dir: working_dir.into(),
-                model_id: model_id.into(),
-                parent_session_id: parent_session_id.cloned(),
-                tool_selection: tool_selection.cloned(),
-                source_extension: source_extension.map(String::from),
-            },
-        );
+        let dir = self
+            .new_session_dir(
+                &session_id,
+                &started.working_dir,
+                parent_session_id,
+                started.source_extension.as_deref(),
+            )
+            .await?;
+        tokio::fs::create_dir_all(&dir).await?;
+        let owner_lease = SessionOwnerLease::acquire(&dir, &self.owner).await?;
 
         let (log, stored_event) =
-            EventLog::create(Self::event_log_path(&dir, session_id), start_event).await?;
+            EventLog::create(Self::event_log_path(&dir, &session_id), event).await?;
 
-        let mut projection = SessionReadModel::empty(session_id.clone());
-        projection::reduce(&stored_event, &mut projection);
+        let projection = replay(session_id.clone(), std::slice::from_ref(&stored_event))
+            .map_err(invalid_event)?;
 
         self.sessions.write().await.insert(
-            session_id.clone(),
+            session_id,
             Arc::new(SessionMeta {
-                _owner_lock: owner_lock,
-                log: Arc::new(log),
+                _owner_lease: owner_lease,
+                log,
                 snapshot_mgr: SnapshotManager::new(dir.join("snapshots")),
                 dir,
-                projection: RwLock::new(projection),
+                projection: SessionProjection::new(projection),
+                commit_lane: Semaphore::new(1),
             }),
         );
-
-        perf_snapshot::capture_event("storage.create_session", &stored_event);
 
         Ok(stored_event)
     }
 
-    async fn append_event(&self, event: Event) -> Result<Event, StorageError> {
+    async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         let session_id = event.session_id.clone();
         let meta = self.get_or_open_meta(&session_id).await?;
+        let _permit =
+            meta.commit_lane.acquire().await.map_err(|_| {
+                StorageError::Io(std::io::Error::other("session commit lane closed"))
+            })?;
+        let expected_seq = meta.projection.validate(&event).await?;
+        let log_next_seq = meta.log.count().await? as u64;
+        if log_next_seq != expected_seq {
+            return Err(StorageError::CorruptLog(format!(
+                "event log next seq {log_next_seq} does not match projection next seq \
+                 {expected_seq}"
+            )));
+        }
         let stored = meta.log.append(event).await?;
-        projection::reduce(&stored, &mut *meta.projection.write().await);
+        if stored.seq != expected_seq {
+            return Err(StorageError::CorruptLog(format!(
+                "event log assigned seq {}, expected {expected_seq}",
+                stored.seq
+            )));
+        }
+        meta.projection.apply(&stored).await?;
         Ok(stored)
     }
 
+    async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        meta.log.force_sync().await
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionStore for FileSystemSessionRepository {
     async fn checkpoint(
         &self,
         session_id: &SessionId,
         cursor: &Cursor,
     ) -> Result<(), StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        let model = meta.projection.read().await.clone();
+        let model = meta.projection.snapshot().await;
         let latest_cursor = model.cursor();
         // Checkpoints are only written when the cursor matches the current
         // recovered projection state. This prevents stale or out-of-order
@@ -619,7 +726,7 @@ impl EventStore for FileSystemSessionRepository {
                 "checkpoint cursor {cursor} does not match latest cursor {latest_cursor}"
             )));
         }
-        meta.snapshot_mgr.create_snapshot(&model).await?;
+        meta.snapshot_mgr.create_snapshot((*model).clone()).await?;
         Ok(())
     }
 
@@ -719,6 +826,21 @@ impl EventStore for FileSystemSessionRepository {
         Ok(())
     }
 
+    async fn recycled_session_read_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<SessionReadModel>, StorageError> {
+        validate_storage_session_id(session_id)?;
+        let recycled_dir = self
+            .find_recycled_session_dir(session_id)
+            .await
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        let events =
+            EventLog::replay_read_only(Self::event_log_path(&recycled_dir, session_id)).await?;
+        let model = replay(session_id.clone(), &events).map_err(corrupt_projection)?;
+        Ok(Arc::new(model))
+    }
+
     async fn write_compact_snapshot(
         &self,
         session_id: &SessionId,
@@ -767,28 +889,20 @@ impl EventStore for FileSystemSessionRepository {
 
         Ok(Some(path.to_string_lossy().to_string()))
     }
-
-    async fn write_tool_result_artifact(
-        &self,
-        session_id: &SessionId,
-        artifact: ToolResultArtifactInput,
-    ) -> Result<ToolResultArtifactRef, StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-
-        let dir = meta.dir.join("tool-results");
-        Ok(write_tool_result_file(&dir, &artifact)?)
-    }
-
-    async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        meta.log.force_sync().await
-    }
 }
 
 /// 判断目录是否位于 subagents 子树下。
 fn is_subagent_dir(dir: &Path) -> bool {
     dir.ancestors()
         .any(|a| a.file_name().is_some_and(|n| n == "subagents"))
+}
+
+/// 会话目录内由存储层维护的元数据目录，扫描会话目录时必须跳过。
+fn is_session_metadata_dir(name: &str) -> bool {
+    matches!(
+        name,
+        ".recycled" | "subagents" | "snapshots" | "compact-snapshots" | "tool-results"
+    )
 }
 
 impl FileSystemSessionRepository {
@@ -818,12 +932,7 @@ impl FileSystemSessionRepository {
                     continue;
                 }
                 let name = entry.file_name();
-                let name_str = name.to_string_lossy();
-                if name_str == ".recycled"
-                    || name_str == "snapshots"
-                    || name_str == "compact-snapshots"
-                    || name_str == "tool-results"
-                {
+                if is_session_metadata_dir(&name.to_string_lossy()) {
                     continue;
                 }
                 let session_dir = entry.path();
@@ -889,12 +998,7 @@ impl FileSystemSessionRepository {
             }
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str == "subagents"
-                || name_str == "snapshots"
-                || name_str == "compact-snapshots"
-                || name_str == "tool-results"
-                || name_str == ".recycled"
-            {
+            if is_session_metadata_dir(&name_str) {
                 continue;
             }
             let id = SessionId::from(name_str.to_string());
@@ -902,12 +1006,8 @@ impl FileSystemSessionRepository {
         }
     }
 
-    /// 从事件日志的首行和末行事件构造轻量级 SessionSummary。
-    ///
-    /// 单次遍历读取首行获取 SessionStarted 元数据（working_dir, model_id 等），
-    /// 末行获取更准确的 updated_at 和 latest_cursor。
-    /// 避免为未打开的会话重放整个事件日志。
-    async fn read_summary_from_first_event(
+    /// 从事件日志投影轻量级 SessionSummary，不构造完整 transcript。
+    async fn read_summary_from_event_log(
         &self,
         session_id: &SessionId,
     ) -> Result<Option<SessionSummary>, StorageError> {
@@ -915,934 +1015,9 @@ impl FileSystemSessionRepository {
             return Ok(None);
         };
         let log_path = Self::event_log_path(&dir, session_id);
-        let (first_event, last_event, first_user_message) =
-            EventLog::read_first_and_last(&log_path).await?;
-        let Some(first_event) = first_event else {
-            return Ok(None);
-        };
-
-        let Event {
-            timestamp: first_timestamp,
-            payload,
-            ..
-        } = first_event;
-
-        let (working_dir, model_id, parent_session_id, source_extension) = match payload {
-            EventPayload::SessionStarted {
-                working_dir,
-                model_id,
-                parent_session_id,
-                tool_selection: _,
-                source_extension,
-            } => (working_dir, model_id, parent_session_id, source_extension),
-            _ => return Ok(None),
-        };
-
-        let updated_at = last_event
-            .as_ref()
-            .map(|e| e.timestamp.to_rfc3339())
-            .unwrap_or_else(|| first_timestamp.to_rfc3339());
-        let latest_cursor = last_event
-            .and_then(|e| e.seq.map(|s| s.to_string()))
-            .unwrap_or_else(|| "0".into());
-
-        Ok(Some(SessionSummary {
-            session_id: session_id.clone(),
-            working_dir,
-            model_id,
-            parent_session_id,
-            created_at: first_timestamp.to_rfc3339(),
-            updated_at,
-            phase: astrcode_core::event::Phase::default(),
-            latest_cursor,
-            first_user_message,
-            source_extension,
-        }))
+        EventLog::read_summary(&log_path, session_id.clone()).await
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use astrcode_core::{
-        event::EventPayload,
-        llm::{LlmContent, LlmMessage, LlmRole},
-        storage::CompactSnapshotInput,
-        types::{new_message_id, project_key_from_path},
-    };
-
-    use super::*;
-
-    #[test]
-    fn session_owner_lock_reports_existing_owner() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let lock_path = temp_dir.path().join(".astrcode-session-owner.lock");
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .unwrap();
-        file.try_lock_exclusive().unwrap();
-
-        let error = match SessionOwnerLock::acquire(temp_dir.path()) {
-            Ok(_) => panic!("session owner lock should reject an existing owner"),
-            Err(error) => error,
-        };
-
-        assert!(matches!(
-            error,
-            StorageError::LockError(message)
-                if message.contains("already owned by another AstrCode server process")
-        ));
-    }
-
-    #[tokio::test]
-    async fn compact_snapshot_writes_metadata_and_messages() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo = FileSystemSessionRepository {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            projects_base: temp_dir.path().join("projects"),
-        };
-        let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-
-        let path = repo
-            .write_compact_snapshot(
-                &session_id,
-                CompactSnapshotInput {
-                    trigger: "manual_command".into(),
-                    model_id: "mock".into(),
-                    working_dir: ".".into(),
-                    system_prompt: Some("system".into()),
-                    provider_messages: vec![LlmMessage::user("hello")],
-                },
-            )
-            .await
-            .unwrap()
-            .unwrap();
-
-        let content = tokio::fs::read_to_string(&path).await.unwrap();
-        assert!(content.contains("\"type\":\"metadata\""));
-        assert!(content.contains("\"trigger\":\"manual_command\""));
-        assert!(content.contains("\"type\":\"message\""));
-        assert!(path.contains("compact-snapshots"));
-    }
-
-    #[tokio::test]
-    async fn tool_result_artifact_writes_under_session_dir_and_reads_slice() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let projects_base = temp_dir.path().join("projects");
-        let repo = test_repo(projects_base.clone());
-        let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-
-        let reference = repo
-            .write_tool_result_artifact(
-                &session_id,
-                ToolResultArtifactInput {
-                    call_id: "call-1".into(),
-                    tool_name: "shell".into(),
-                    content: "abcdef".into(),
-                },
-            )
-            .await
-            .unwrap();
-
-        let path = reference.path.as_ref().expect("filesystem path");
-        assert!(path.contains("tool-results"));
-        assert!(path.contains("session-test"));
-        let project_key = project_key_from_path(std::path::Path::new("."));
-        assert!(
-            std::path::Path::new(path).starts_with(
-                projects_base
-                    .join(project_key)
-                    .join("sessions")
-                    .join(session_id.as_str())
-            )
-        );
-
-        let slice = repo
-            .read_tool_result_artifact_by_path(&session_id, path, 2, 3)
-            .await
-            .unwrap();
-        assert_eq!(slice.content, "cde");
-        assert_eq!(slice.next_char_offset, Some(5));
-        assert!(slice.has_more);
-    }
-
-    #[tokio::test]
-    async fn tool_result_artifact_reuses_same_content_and_keeps_collisions() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("projects"));
-        let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-
-        let input = ToolResultArtifactInput {
-            call_id: "call-1".into(),
-            tool_name: "shell".into(),
-            content: "abcdef".into(),
-        };
-        let first = repo
-            .write_tool_result_artifact(&session_id, input.clone())
-            .await
-            .unwrap();
-        let second = repo
-            .write_tool_result_artifact(&session_id, input)
-            .await
-            .unwrap();
-        assert_eq!(first.path, second.path);
-
-        let third = repo
-            .write_tool_result_artifact(
-                &session_id,
-                ToolResultArtifactInput {
-                    call_id: "call-1".into(),
-                    tool_name: "shell".into(),
-                    content: "changed".into(),
-                },
-            )
-            .await
-            .unwrap();
-
-        let first_path = first.path.as_ref().expect("first path");
-        let third_path = third.path.as_ref().expect("third path");
-        assert_ne!(first_path, third_path);
-        assert_eq!(
-            tokio::fs::read_to_string(first_path).await.unwrap(),
-            "abcdef"
-        );
-        assert_eq!(
-            tokio::fs::read_to_string(third_path).await.unwrap(),
-            "changed"
-        );
-    }
-
-    #[tokio::test]
-    async fn append_updates_projection_immediately() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("projects"));
-        let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "hello".into(),
-                attachments: vec![],
-            },
-        ))
-        .await
-        .unwrap();
-
-        let model = repo.session_read_model(&session_id).await.unwrap();
-        assert_eq!(model.latest_seq, Some(1));
-        assert_eq!(model.messages.len(), 1);
-        assert_eq!(model.messages[0].message.role, LlmRole::User);
-    }
-
-    #[tokio::test]
-    async fn reopen_rebuilds_projection_from_event_log() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("projects");
-        let session_id = SessionId::from("session-test");
-        let repo = test_repo(base_path.clone());
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::AssistantMessageCompleted {
-                message_id: new_message_id(),
-                text: "answer".into(),
-                reasoning_content: None,
-            },
-        ))
-        .await
-        .unwrap();
-
-        drop(repo);
-        let reopened = test_repo(base_path);
-        let model = reopened.session_read_model(&session_id).await.unwrap();
-
-        assert_eq!(model.latest_seq, Some(1));
-        assert_eq!(model.messages.len(), 1);
-        assert_eq!(model.messages[0].message.role, LlmRole::Assistant);
-    }
-
-    #[tokio::test]
-    async fn checkpoint_writes_projection_snapshot() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("projects");
-        let repo = test_repo(base_path.clone());
-        let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "visible".into(),
-                attachments: vec![],
-            },
-        ))
-        .await
-        .unwrap();
-        repo.checkpoint(&session_id, &"1".into()).await.unwrap();
-
-        let project_key = project_key_from_path(std::path::Path::new("."));
-        let snapshot_path = base_path
-            .join(project_key)
-            .join("sessions")
-            .join(session_id.as_str())
-            .join("snapshots")
-            .join("snapshot-1.json");
-        let snapshot: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(snapshot_path).unwrap()).unwrap();
-        assert_eq!(snapshot["version"], 2);
-        assert_eq!(snapshot["model"]["session_id"], session_id.as_str());
-        assert_eq!(snapshot["model"]["latest_seq"], 1);
-        assert_eq!(snapshot["model"]["messages"].as_array().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn reopen_restores_projection_from_snapshot_and_tail() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("projects");
-        let session_id = SessionId::from("session-test");
-        let repo = test_repo(base_path.clone());
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "hello".into(),
-                attachments: vec![],
-            },
-        ))
-        .await
-        .unwrap();
-        repo.checkpoint(&session_id, &"1".into()).await.unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::AssistantMessageCompleted {
-                message_id: new_message_id(),
-                text: "answer".into(),
-                reasoning_content: None,
-            },
-        ))
-        .await
-        .unwrap();
-
-        let expected = repo.session_read_model(&session_id).await.unwrap();
-        drop(repo);
-        let reopened = test_repo(base_path);
-        let restored = reopened.session_read_model(&session_id).await.unwrap();
-
-        assert_eq!(restored, expected);
-        assert_eq!(restored.latest_seq, Some(2));
-        assert_eq!(restored.messages.len(), 2);
-    }
-
-    #[tokio::test]
-    async fn checkpoint_rejects_stale_cursor() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("projects"));
-        let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "hello".into(),
-                attachments: vec![],
-            },
-        ))
-        .await
-        .unwrap();
-
-        let error = repo.checkpoint(&session_id, &"0".into()).await.unwrap_err();
-
-        assert!(matches!(
-            error,
-            StorageError::InvalidId(message)
-                if message.contains("checkpoint cursor 0 does not match latest cursor 1")
-        ));
-    }
-
-    #[tokio::test]
-    async fn corrupt_snapshot_falls_back_to_full_replay() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("projects");
-        let session_id = SessionId::from("session-test");
-        let repo = test_repo(base_path.clone());
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::AssistantMessageCompleted {
-                message_id: new_message_id(),
-                text: "answer".into(),
-                reasoning_content: None,
-            },
-        ))
-        .await
-        .unwrap();
-        repo.checkpoint(&session_id, &"1".into()).await.unwrap();
-        let expected = repo.session_read_model(&session_id).await.unwrap();
-        let project_key = project_key_from_path(std::path::Path::new("."));
-        std::fs::write(
-            base_path
-                .join(project_key)
-                .join("sessions")
-                .join(session_id.as_str())
-                .join("snapshots")
-                .join("snapshot-1.json"),
-            "not json",
-        )
-        .unwrap();
-
-        drop(repo);
-        let reopened = test_repo(base_path);
-        let restored = reopened.session_read_model(&session_id).await.unwrap();
-
-        assert_eq!(restored, expected);
-    }
-
-    #[tokio::test]
-    async fn list_summaries_reads_unopened_session_projection() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("projects");
-        let session_id = SessionId::from("session-test");
-        let repo = test_repo(base_path.clone());
-        repo.create_session(&session_id, "D:/work/project", "mock", None, None, None)
-            .await
-            .unwrap();
-
-        drop(repo);
-        let reopened = test_repo(base_path);
-        let summaries = reopened.list_session_summaries().await.unwrap();
-
-        assert_eq!(summaries.len(), 1);
-        assert_eq!(summaries[0].session_id, session_id);
-        assert_eq!(summaries[0].working_dir, "D:/work/project");
-        assert_eq!(summaries[0].model_id, "mock");
-        assert_eq!(summaries[0].parent_session_id, None);
-    }
-
-    #[tokio::test]
-    async fn child_session_without_source_extension_is_rejected() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("projects"));
-        let parent_id = SessionId::from("parent");
-        let child_id = SessionId::from("child");
-        repo.create_session(&parent_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-
-        let error = repo
-            .create_session(&child_id, ".", "mock", Some(&parent_id), None, None)
-            .await
-            .unwrap_err();
-
-        assert!(matches!(
-            error,
-            StorageError::InvalidId(message) if message.contains("source_extension")
-        ));
-    }
-
-    #[tokio::test]
-    async fn extension_child_sessions_use_safe_extension_dir_and_can_reopen() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("projects");
-        let parent_id = SessionId::from("parent");
-        let child_id = SessionId::from("child");
-        let repo = test_repo(base_path.clone());
-        repo.create_session(&parent_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-        repo.create_session(
-            &child_id,
-            ".",
-            "mock",
-            Some(&parent_id),
-            None,
-            Some("owner/extension.alpha"),
-        )
-        .await
-        .unwrap();
-
-        let project_key = project_key_from_path(std::path::Path::new("."));
-        assert!(
-            base_path
-                .join(project_key)
-                .join("sessions")
-                .join(parent_id.as_str())
-                .join("subagents")
-                .join("owner%2Fextension%2Ealpha")
-                .join(child_id.as_str())
-                .exists()
-        );
-
-        drop(repo);
-        let reopened = test_repo(base_path);
-        let sessions = reopened.list_sessions().await.unwrap();
-        let child = reopened.session_read_model(&child_id).await.unwrap();
-
-        assert_eq!(sessions, vec![parent_id]);
-        assert_eq!(
-            child.parent_session_id.as_ref(),
-            Some(&SessionId::from("parent"))
-        );
-        assert_eq!(
-            child.source_extension.as_deref(),
-            Some("owner/extension.alpha")
-        );
-    }
-
-    #[tokio::test]
-    async fn delete_parent_session_removes_cached_child_sessions() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("projects"));
-        let parent_id = SessionId::from("parent");
-        let child_id = SessionId::from("child");
-        repo.create_session(&parent_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-        repo.create_session(
-            &child_id,
-            ".",
-            "mock",
-            Some(&parent_id),
-            None,
-            Some("test-extension"),
-        )
-        .await
-        .unwrap();
-        repo.session_read_model(&child_id).await.unwrap();
-
-        repo.delete_session(&parent_id).await.unwrap();
-
-        assert!(repo.list_sessions().await.unwrap().is_empty());
-        assert!(matches!(
-            repo.session_read_model(&child_id).await,
-            Err(StorageError::NotFound(id)) if id == child_id
-        ));
-    }
-
-    #[tokio::test]
-    async fn project_path_repository_writes_readable_dir() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let workspace = temp_dir.path().join("workspace");
-        std::fs::create_dir_all(&workspace).unwrap();
-        let projects_base = temp_dir.path().join("projects");
-        let current_project_dir = projects_base.join(project_key_from_path(&workspace));
-
-        let repo = FileSystemSessionRepository::with_projects_base(projects_base);
-        let current_session = SessionId::from("current-session");
-        repo.create_session(
-            &current_session,
-            workspace.to_str().unwrap(),
-            "mock",
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-
-        let sessions = repo.list_sessions().await.unwrap();
-
-        assert!(current_project_dir.exists());
-        assert_eq!(sessions, vec![current_session]);
-        assert!(
-            current_project_dir
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .contains("workspace")
-        );
-    }
-
-    #[tokio::test]
-    async fn custom_event_does_not_change_projection() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("projects"));
-        let session_id = SessionId::from("session-test");
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "visible".into(),
-                attachments: vec![],
-            },
-        ))
-        .await
-        .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::Custom {
-                name: "extension.note".into(),
-                data: serde_json::json!({
-                    "message": "projection ignores extension-specific payloads"
-                }),
-            },
-        ))
-        .await
-        .unwrap();
-
-        let model = repo.session_read_model(&session_id).await.unwrap();
-
-        assert_eq!(model.messages.len(), 1);
-        assert!(model.context_messages.is_empty());
-    }
-
-    #[tokio::test]
-    async fn same_session_compact_projection_uses_summary_context() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let base_path = temp_dir.path().join("projects");
-        let repo = test_repo(base_path.clone());
-        let session_id = SessionId::from("test-session");
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "old message".into(),
-                attachments: vec![],
-            },
-        ))
-        .await
-        .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::AssistantMessageCompleted {
-                message_id: new_message_id(),
-                text: "old reply".into(),
-                reasoning_content: None,
-            },
-        ))
-        .await
-        .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::CompactBoundaryCreated {
-                trigger: "manual_command".into(),
-                pre_tokens: 100,
-                post_tokens: 20,
-                summary: "summary".into(),
-                transcript_path: Some("compact.jsonl".into()),
-                continued_session_id: session_id.clone(),
-                base_event_seq: 0,
-                strategy: astrcode_core::extension::CompactStrategy::Manual {
-                    keep_recent_turns: None,
-                },
-            },
-        ))
-        .await
-        .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::SessionContinuedFromCompaction {
-                parent_session_id: session_id.clone(),
-                parent_cursor: "2".into(),
-                summary: "summary".into(),
-                transcript_path: Some("compact.jsonl".into()),
-                context_messages: vec![LlmMessage::system("hidden summary")],
-                retained_messages: vec![LlmMessage::user("recent")],
-            },
-        ))
-        .await
-        .unwrap();
-
-        let state = repo.session_read_model(&session_id).await.unwrap();
-        assert_eq!(
-            state
-                .context_messages
-                .iter()
-                .map(|m| m.message.clone())
-                .collect::<Vec<_>>(),
-            vec![LlmMessage::system("hidden summary")]
-        );
-        assert_eq!(
-            state
-                .messages
-                .iter()
-                .map(|m| m.message.clone())
-                .collect::<Vec<_>>(),
-            vec![LlmMessage::user("recent")]
-        );
-        let provider = state.provider_messages();
-        assert_eq!(provider.len(), 2);
-        assert_eq!(provider[0].role, LlmRole::System);
-        assert_eq!(provider[1].role, LlmRole::User);
-
-        // Reopen and verify projection restores from compact boundary.
-        drop(repo);
-        let reopened = test_repo(base_path);
-        let restored = reopened.session_read_model(&session_id).await.unwrap();
-        assert_eq!(
-            restored
-                .context_messages
-                .iter()
-                .map(|m| m.message.clone())
-                .collect::<Vec<_>>(),
-            vec![LlmMessage::system("hidden summary")]
-        );
-        assert_eq!(
-            restored
-                .messages
-                .iter()
-                .map(|m| m.message.clone())
-                .collect::<Vec<_>>(),
-            vec![LlmMessage::user("recent")]
-        );
-        assert_eq!(restored.provider_messages().len(), 2);
-    }
-
-    fn test_repo(projects_base: PathBuf) -> FileSystemSessionRepository {
-        FileSystemSessionRepository {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            projects_base,
-        }
-    }
-
-    #[tokio::test]
-    async fn reasoning_tool_call_events_rebuild_single_assistant_message() {
-        use astrcode_core::types::ToolCallId;
-
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("projects"));
-        let session_id = SessionId::from("session-reasoning-tool");
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "read file".into(),
-                attachments: vec![],
-            },
-        ))
-        .await
-        .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::AssistantMessageCompleted {
-                message_id: new_message_id(),
-                text: "checking".into(),
-                reasoning_content: Some("private reasoning".into()),
-            },
-        ))
-        .await
-        .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::ToolCallRequested {
-                call_id: ToolCallId::from("call_1"),
-                tool_name: "read".into(),
-                arguments: serde_json::json!({"path": "a.rs"}),
-                raw_arguments: None,
-            },
-        ))
-        .await
-        .unwrap();
-
-        let model = repo.session_read_model(&session_id).await.unwrap();
-
-        assert_eq!(model.messages.len(), 2);
-        let assistant = &model.messages[1];
-        assert_eq!(assistant.message.role, LlmRole::Assistant);
-        assert_eq!(
-            assistant.message.reasoning_content.as_deref(),
-            Some("private reasoning")
-        );
-        assert!(matches!(
-            &assistant.message.content[0],
-            LlmContent::Text { text } if text == "checking"
-        ));
-        assert!(
-            assistant
-                .message
-                .content
-                .iter()
-                .any(|content| matches!(content, LlmContent::ToolCall { .. }))
-        );
-    }
-
-    #[tokio::test]
-    async fn parallel_tool_call_requested_events_produce_single_assistant_message() {
-        use astrcode_core::{
-            llm::{LlmContent, LlmRole},
-            types::ToolCallId,
-        };
-
-        let temp_dir = tempfile::tempdir().unwrap();
-        let repo = test_repo(temp_dir.path().join("projects"));
-        let session_id = SessionId::from("session-parallel");
-        repo.create_session(&session_id, ".", "mock", None, None, None)
-            .await
-            .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "read files".into(),
-                attachments: vec![],
-            },
-        ))
-        .await
-        .unwrap();
-
-        // Simulate the event sequence from a parallel tool call batch:
-        // ToolCallStarted + ToolCallRequested for each, then ToolCallCompleted for each.
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::ToolCallStarted {
-                call_id: ToolCallId::from("call_1"),
-                tool_name: "read".into(),
-            },
-        ))
-        .await
-        .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::ToolCallStarted {
-                call_id: ToolCallId::from("call_2"),
-                tool_name: "read".into(),
-            },
-        ))
-        .await
-        .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::ToolCallRequested {
-                call_id: ToolCallId::from("call_1"),
-                tool_name: "read".into(),
-                arguments: serde_json::json!({"path": "a.rs"}),
-                raw_arguments: None,
-            },
-        ))
-        .await
-        .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::ToolCallRequested {
-                call_id: ToolCallId::from("call_2"),
-                tool_name: "read".into(),
-                arguments: serde_json::json!({"path": "b.rs"}),
-                raw_arguments: None,
-            },
-        ))
-        .await
-        .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::ToolCallCompleted {
-                call_id: ToolCallId::from("call_1"),
-                tool_name: "read".into(),
-                result: astrcode_core::tool::ToolResult {
-                    call_id: "call_1".into(),
-                    content: "a".into(),
-                    is_error: false,
-                    error: None,
-                    metadata: Default::default(),
-                    duration_ms: None,
-                },
-                arguments: String::new(),
-                arguments_json: None,
-            },
-        ))
-        .await
-        .unwrap();
-        repo.append_event(Event::new(
-            session_id.clone(),
-            None,
-            EventPayload::ToolCallCompleted {
-                call_id: ToolCallId::from("call_2"),
-                tool_name: "read".into(),
-                result: astrcode_core::tool::ToolResult {
-                    call_id: "call_2".into(),
-                    content: "b".into(),
-                    is_error: false,
-                    error: None,
-                    metadata: Default::default(),
-                    duration_ms: None,
-                },
-                arguments: String::new(),
-                arguments_json: None,
-            },
-        ))
-        .await
-        .unwrap();
-
-        let model = repo.session_read_model(&session_id).await.unwrap();
-
-        // Expected: [user] [assistant(tool_call_1, tool_call_2)] [tool_result_1] [tool_result_2]
-        assert_eq!(model.messages.len(), 4);
-        assert_eq!(model.messages[0].message.role, LlmRole::User);
-        assert_eq!(model.messages[1].message.role, LlmRole::Assistant);
-
-        // The assistant message must contain both tool calls merged into one message.
-        let tool_call_count = model.messages[1]
-            .message
-            .content
-            .iter()
-            .filter(|c| matches!(c, LlmContent::ToolCall { .. }))
-            .count();
-        assert_eq!(
-            tool_call_count, 2,
-            "parallel tool calls must be merged into one assistant message"
-        );
-
-        assert_eq!(model.messages[2].message.role, LlmRole::Tool);
-        assert_eq!(model.messages[3].message.role, LlmRole::Tool);
-
-        // provider_messages should also be well-formed
-        let provider_msgs = model.provider_messages();
-        assert_eq!(provider_msgs.len(), 4);
-    }
-}
+mod tests;

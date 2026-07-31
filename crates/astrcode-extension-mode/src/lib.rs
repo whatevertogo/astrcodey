@@ -11,12 +11,10 @@
 //! Tools:
 //! - `switchMode`: switch between code and plan modes, with exit gate in plan mode
 //! - `upsertSessionPlan`: create or update the session plan artifact (plan mode only)
-//! - `askUser`: structured multiple-choice questions (extension tool; host renders UI)
 //!
 //! Mode state: `<session>/extension_data/astrcode-mode/mode/mode-state.json`
 //! Plan artifact: `<session>/extension_data/astrcode-mode/plan/plan.md`
 
-mod ask_user;
 mod catalog;
 mod prompts;
 mod store;
@@ -24,12 +22,11 @@ mod tools;
 
 use std::{path::PathBuf, sync::Arc};
 
-pub use ask_user::{ASK_USER_TOOL_NAME, ask_user_tool_definition, handle_ask_user};
 use astrcode_extension_sdk::{
     extension::{
-        CommandContext, CommandHandler, Extension, ExtensionCommandResult, ExtensionError,
-        HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext,
-        ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
+        CommandContext, CommandHandler, Extension, ExtensionCapability, ExtensionCommandResult,
+        ExtensionError, HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
+        ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
         StatusItemUpdatePayload, ToolHandler,
     },
     llm::LlmMessage,
@@ -71,6 +68,13 @@ impl Extension for ModeExtension {
         "astrcode-mode"
     }
 
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[
+            ExtensionCapability::ProviderRequest,
+            ExtensionCapability::ToolIntercept,
+        ]
+    }
+
     fn register(&self, reg: &mut Registrar) {
         let catalog = self.catalog.clone();
         reg.tool(
@@ -85,13 +89,6 @@ impl Extension for ModeExtension {
                 catalog: Arc::clone(&catalog),
             }),
         );
-        reg.tool(
-            ask_user_tool_definition(),
-            Arc::new(ModeToolHandler {
-                catalog: Arc::clone(&catalog),
-            }),
-        );
-        reg.tool_ui(crate::ask_user::ask_user_tool_ui_map());
         reg.tool_metadata(mode_tool_metadata());
         reg.on_pre_tool_use(
             HookMode::Blocking,
@@ -148,22 +145,25 @@ impl ToolHandler for ModeToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         _working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let base = require_session_base(&ctx.capabilities.paths.store_dir)?;
         let mode_root = store::mode_dir_from_base(&base);
         let plan_dir = store::plan_dir_from_base(&base);
 
         match tool_name {
-            SWITCH_MODE_TOOL_NAME => Ok(
-                match handle_switch_mode(arguments, &mode_root, &plan_dir, &self.catalog) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let meta = tool_metadata([("error", json!(&error))]);
-                        ToolResult::text(error, true, meta)
-                    },
-                },
-            ),
+            SWITCH_MODE_TOOL_NAME => {
+                Ok(
+                    match handle_switch_mode(arguments, &mode_root, &plan_dir, &self.catalog) {
+                        Ok(result) => result,
+                        Err(error) => {
+                            let meta = tool_metadata([("error", json!(&error))]);
+                            ToolResult::text(error, true, meta)
+                        },
+                    }
+                    .into(),
+                )
+            },
             UPSERT_PLAN_TOOL_NAME => {
                 Ok(match handle_upsert_plan(arguments, &mode_root, &plan_dir) {
                     Ok(result) => result,
@@ -171,17 +171,8 @@ impl ToolHandler for ModeToolHandler {
                         let meta = tool_metadata([("error", json!(&error))]);
                         ToolResult::text(error, true, meta)
                     },
-                })
-            },
-            crate::ask_user::ASK_USER_TOOL_NAME => {
-                let call_id = ctx.scope.tool_call_id.as_deref().unwrap_or("");
-                Ok(match handle_ask_user(arguments, call_id) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        let meta = tool_metadata([("error", json!(&error))]);
-                        ToolResult::text(error, true, meta)
-                    },
-                })
+                }
+                .into())
             },
             _ => Err(ExtensionError::NotFound(tool_name.into())),
         }
@@ -317,11 +308,6 @@ fn mode_tool_metadata()
     );
     map.insert(
         UPSERT_PLAN_TOOL_NAME.to_string(),
-        ToolPromptMetadata::new(String::new())
-            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
-    );
-    map.insert(
-        crate::ask_user::ASK_USER_TOOL_NAME.to_string(),
         ToolPromptMetadata::new(String::new())
             .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
     );

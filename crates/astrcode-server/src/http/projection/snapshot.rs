@@ -2,47 +2,40 @@
 
 use std::collections::BTreeMap;
 
-use astrcode_core::{
-    storage::{PendingToolApprovalView, PendingToolInteractionView, SessionReadModel},
-    types::ToolCallId,
-};
+use astrcode_core::types::ToolCallId;
 use astrcode_protocol::http::{
-    AgentSessionLinkDto, ConversationBlockDto, ConversationBlockStatusDto, ConversationCursorDto,
-    ConversationSnapshotResponseDto,
+    ConversationBlockDto, ConversationCursorDto, ConversationSnapshotResponseDto, ToolApprovalDto,
 };
+use astrcode_session_projection::{PendingToolApprovalView, SessionReadModel};
 
 use super::{
     blocks::{
-        compact_summary_block, latest_compact_boundary, streaming_assistant_block,
-        transcript_blocks,
+        compact_summary_block, latest_compaction, streaming_assistant_block, transcript_blocks,
     },
     live::control_from_phase,
     session_title_from_working_dir,
 };
-use crate::server_event_bus::StreamingSnapshot;
+use crate::{protocol_mapping::agent_session_link_to_dto, server_event_bus::StreamingSnapshot};
 
 pub(in crate::http) fn conversation_to_dto(
-    session: SessionReadModel,
+    session: &SessionReadModel,
     streaming: Option<&StreamingSnapshot>,
 ) -> ConversationSnapshotResponseDto {
     let title = session
         .first_user_message()
-        .unwrap_or_else(|| session_title_from_working_dir(&session.working_dir));
+        .map(str::to_owned)
+        .unwrap_or_else(|| session_title_from_working_dir(&session.identity.working_dir));
 
     // 与 provider_messages 一致：最新 compact 摘要紧挨保留消息之前（被压掉的历史不在 UI 展示）
     let mut blocks: Vec<ConversationBlockDto> = Vec::new();
-    if let Some(boundary) = latest_compact_boundary(&session.compact_boundaries) {
-        blocks.push(compact_summary_block(boundary));
+    if let Some(compaction) = latest_compaction(&session.compactions) {
+        blocks.push(compact_summary_block(compaction));
     }
     blocks.extend(transcript_blocks(
-        &session.messages,
-        &session.transcript_artifacts,
+        &session.transcript.messages,
+        &session.transcript.artifacts,
     ));
-    apply_pending_tool_state(
-        &mut blocks,
-        &session.pending_tool_approvals,
-        &session.pending_tool_interactions,
-    );
+    apply_pending_tool_approvals(&mut blocks, &session.execution.pending_tool_approvals);
 
     // 如果有正在流式传输的 assistant 消息，追加一个 streaming block。
     // durable 投影不含 streaming 消息（`AssistantTextDelta` 是 live 事件），
@@ -56,78 +49,90 @@ pub(in crate::http) fn conversation_to_dto(
     }
 
     ConversationSnapshotResponseDto {
-        session_id: session.session_id.to_string(),
+        session_id: session.identity.session_id.to_string(),
         session_title: title,
         cursor: ConversationCursorDto {
             value: session.cursor(),
         },
-        phase: session.phase.into(),
-        control: control_from_phase(session.phase, !session.messages.is_empty()),
+        phase: session.execution.phase.into(),
+        control: control_from_phase(
+            session.execution.phase,
+            !session.transcript.messages.is_empty(),
+        ),
         blocks,
         agent_sessions: session
             .agent_sessions
             .iter()
-            .map(AgentSessionLinkDto::from_view)
+            .map(agent_session_link_to_dto)
             .collect(),
     }
 }
 
-fn apply_pending_tool_state(
+fn apply_pending_tool_approvals(
     blocks: &mut [ConversationBlockDto],
     approvals: &BTreeMap<ToolCallId, PendingToolApprovalView>,
-    interactions: &BTreeMap<ToolCallId, PendingToolInteractionView>,
 ) {
     for block in blocks {
         let ConversationBlockDto::ToolCall {
             id,
-            text,
-            metadata,
-            status,
+            approval: block_approval,
             ..
         } = block
         else {
             continue;
         };
-        let approval = approvals.get(id.as_str());
-        let interaction = interactions.get(id.as_str());
-        if approval.is_none() && interaction.is_none() {
+        let Some(approval) = approvals.get(id.as_str()) else {
             continue;
-        }
-
-        let mut merged = match metadata.take() {
-            Some(serde_json::Value::Object(metadata)) => metadata,
-            _ => serde_json::Map::new(),
         };
-        if let Some(approval) = approval {
-            merged.insert(
-                "toolGateApproval".into(),
-                serde_json::json!({
-                    "pending": true,
-                    "prompt": &approval.prompt,
-                    "ruleKey": &approval.rule_key,
-                }),
-            );
-        }
-        if let Some(interaction) = interaction {
-            *text = interaction.content.clone();
-            *status = ConversationBlockStatusDto::Streaming;
-            merged.extend(
-                interaction
-                    .metadata
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone())),
-            );
-        }
-        *metadata = (!merged.is_empty()).then_some(serde_json::Value::Object(merged));
+        *block_approval = Some(ToolApprovalDto {
+            call_id: id.clone(),
+            prompt: approval.prompt.clone(),
+            rule_key: approval.rule_key.clone(),
+        });
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
-    use astrcode_protocol::http::ConversationBlockStatusDto;
+    use astrcode_core::{
+        event::{
+            DurableEvent, DurableEventPayload, PersistedSystemPrompt, SessionStarted, StoredEvent,
+            SystemPromptSource,
+        },
+        llm::{LlmContent, LlmMessage, LlmRole},
+        tool::SessionToolSelection,
+    };
+    use astrcode_protocol::http::ToolCallStatusDto;
+    use astrcode_session_projection::replay;
 
     use super::*;
+
+    fn session_read_model(session_id: &str) -> SessionReadModel {
+        let session_id: astrcode_core::types::SessionId = session_id.into();
+        replay(
+            session_id.clone(),
+            &[StoredEvent::new(
+                0,
+                DurableEvent::session(
+                    session_id,
+                    DurableEventPayload::SessionStarted(SessionStarted {
+                        working_dir: "D:/work/project".into(),
+                        model_id: "model".into(),
+                        parent: None,
+                        tool_selection: SessionToolSelection::default(),
+                        source_extension: None,
+                        initial_system_prompt: PersistedSystemPrompt {
+                            text: "system".into(),
+                            fingerprint: "fingerprint".into(),
+                            extra_system_prompt: None,
+                            source: SystemPromptSource::Native,
+                        },
+                    }),
+                ),
+            )],
+        )
+        .unwrap()
+    }
 
     fn session_with_tool_call(
         session_id: &str,
@@ -135,11 +140,11 @@ mod tests {
         name: &str,
         arguments: serde_json::Value,
     ) -> SessionReadModel {
-        let mut session = SessionReadModel::empty(session_id.into());
-        session.working_dir = "D:/work/project".into();
+        let mut session = session_read_model(session_id);
         session
+            .transcript
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage {
                     role: LlmRole::Assistant,
                     content: vec![LlmContent::ToolCall {
@@ -159,18 +164,18 @@ mod tests {
 
     #[test]
     fn conversation_snapshot_cursor_is_full_snapshot_version() {
-        let mut session = SessionReadModel::empty("session-1".into());
-        session.working_dir = "D:/work/project".into();
-        session.latest_seq = Some(9);
+        let mut session = session_read_model("session-1");
+        session.stats.last_seq = 9;
         session
+            .transcript
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::user("hello"),
                 updated_seq: 1,
                 source: None,
             });
 
-        let dto = conversation_to_dto(session, None);
+        let dto = conversation_to_dto(&session, None);
 
         assert_eq!(dto.cursor.value, "9");
         assert_eq!(dto.blocks.len(), 1);
@@ -185,14 +190,15 @@ mod tests {
             serde_json::json!({ "path": "Cargo.toml" }),
         );
         session
+            .transcript
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::tool("read", "tool-1", "file contents", false),
                 updated_seq: 2,
                 source: None,
             });
 
-        let dto = conversation_to_dto(session, None);
+        let dto = conversation_to_dto(&session, None);
 
         assert_eq!(dto.blocks.len(), 1);
         match &dto.blocks[0] {
@@ -208,65 +214,37 @@ mod tests {
                 assert_eq!(name, "read");
                 assert_eq!(arguments, "Cargo.toml");
                 assert_eq!(text, "file contents");
-                assert!(matches!(status, ConversationBlockStatusDto::Complete));
+                assert!(matches!(status, ToolCallStatusDto::Complete));
             },
             other => panic!("unexpected block: {other:?}"),
         }
     }
 
     #[test]
-    fn conversation_snapshot_applies_pending_tool_state() {
+    fn conversation_snapshot_applies_explicit_pending_tool_approval() {
         let mut session = session_with_tool_call(
             "session-approval",
             "tool-approval",
             "shell",
             serde_json::json!({ "command": "git push" }),
         );
-        session.pending_tool_approvals.insert(
+        session.execution.pending_tool_approvals.insert(
             "tool-approval".into(),
-            astrcode_core::storage::PendingToolApprovalView {
+            astrcode_session_projection::PendingToolApprovalView {
                 prompt: "Run shell command?".into(),
                 rule_key: Some("shell:write".into()),
             },
         );
-        session.pending_tool_interactions.insert(
-            "tool-approval".into(),
-            PendingToolInteractionView {
-                content: "awaiting confirmation".into(),
-                metadata: BTreeMap::from([(
-                    "toolUi".into(),
-                    serde_json::json!({ "kind": "confirmation" }),
-                )]),
-            },
-        );
-
-        let dto = conversation_to_dto(session, None);
+        let dto = conversation_to_dto(&session, None);
 
         match &dto.blocks[0] {
             ConversationBlockDto::ToolCall {
-                text,
-                status,
-                metadata: Some(metadata),
+                approval: Some(approval),
                 ..
             } => {
-                assert_eq!(text, "awaiting confirmation");
-                assert!(matches!(status, ConversationBlockStatusDto::Streaming));
-                let approval = metadata
-                    .get("toolGateApproval")
-                    .expect("toolGateApproval metadata");
-                assert_eq!(
-                    approval.get("pending").and_then(|v| v.as_bool()),
-                    Some(true)
-                );
-                assert_eq!(
-                    approval.get("prompt").and_then(|v| v.as_str()),
-                    Some("Run shell command?")
-                );
-                assert_eq!(
-                    approval.get("ruleKey").and_then(|v| v.as_str()),
-                    Some("shell:write")
-                );
-                assert_eq!(metadata["toolUi"]["kind"], "confirmation");
+                assert_eq!(approval.call_id, "tool-approval");
+                assert_eq!(approval.prompt, "Run shell command?");
+                assert_eq!(approval.rule_key.as_deref(), Some("shell:write"));
             },
             other => panic!("unexpected block: {other:?}"),
         }
@@ -274,41 +252,43 @@ mod tests {
 
     #[test]
     fn conversation_snapshot_places_compact_summary_before_retained_messages() {
-        use astrcode_core::{extension::CompactStrategy, storage::CompactBoundaryView};
+        use astrcode_core::compaction::CompactStrategy;
+        use astrcode_session_projection::CompactionView;
 
-        let mut session = SessionReadModel::empty("session-compact".into());
-        session.working_dir = "D:/work/project".into();
-        session.latest_seq = Some(7);
+        let mut session = session_read_model("session-compact");
+        session.stats.last_seq = 7;
         // compact 之后的 retained messages
         session
+            .transcript
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::user("recent user"),
                 updated_seq: 1,
                 source: None,
             });
         session
+            .transcript
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::assistant("recent assistant"),
                 updated_seq: 2,
                 source: None,
             });
-        // compact boundary 元数据
-        session.compact_boundaries.push(CompactBoundaryView {
+        // compact 元数据
+        session.compactions.push(CompactionView {
             trigger: "manual_command".into(),
             pre_tokens: 1000,
             post_tokens: 200,
             summary: "Earlier conversation was compacted".into(),
             transcript_path: None,
             seq: 5,
-            base_event_seq: 4,
+            source_seq: 4,
             strategy: CompactStrategy::Manual {
                 keep_recent_turns: None,
             },
         });
 
-        let dto = conversation_to_dto(session, None);
+        let dto = conversation_to_dto(&session, None);
 
         // 顺序：CompactSummary → User → Assistant
         assert_eq!(dto.blocks.len(), 3);
@@ -325,42 +305,43 @@ mod tests {
 
     #[test]
     fn conversation_snapshot_shows_only_latest_compact_before_retained_messages() {
-        use astrcode_core::{extension::CompactStrategy, storage::CompactBoundaryView};
+        use astrcode_core::compaction::CompactStrategy;
+        use astrcode_session_projection::CompactionView;
 
         use crate::http::projection::blocks::COMPACT_SUMMARY_BLOCK_ID;
 
-        let mut session = SessionReadModel::empty("session-multi-compact".into());
-        session.working_dir = "D:/work/project".into();
-        session.latest_seq = Some(20);
+        let mut session = session_read_model("session-multi-compact");
+        session.stats.last_seq = 20;
         session
+            .transcript
             .messages
-            .push(astrcode_core::storage::SequencedLlmMessage {
+            .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::user("latest user"),
                 updated_seq: 1,
                 source: None,
             });
-        session.compact_boundaries.push(CompactBoundaryView {
+        session.compactions.push(CompactionView {
             trigger: "auto_threshold".into(),
             pre_tokens: 800,
             post_tokens: 100,
             summary: "First compaction".into(),
             transcript_path: None,
             seq: 5,
-            base_event_seq: 4,
+            source_seq: 4,
             strategy: CompactStrategy::Auto,
         });
-        session.compact_boundaries.push(CompactBoundaryView {
+        session.compactions.push(CompactionView {
             trigger: "auto_threshold".into(),
             pre_tokens: 600,
             post_tokens: 80,
             summary: "Second compaction".into(),
             transcript_path: None,
             seq: 12,
-            base_event_seq: 11,
+            source_seq: 11,
             strategy: CompactStrategy::Auto,
         });
 
-        let dto = conversation_to_dto(session, None);
+        let dto = conversation_to_dto(&session, None);
 
         assert_eq!(dto.blocks.len(), 2);
         match &dto.blocks[0] {

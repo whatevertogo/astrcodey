@@ -4,28 +4,29 @@
 //! `Session` 自己的工具边界和事件日志（追加 `SystemPromptConfigured`），把它们搬到
 //! session crate 后能让 Session 真正掌控自己的运行时。
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::OnceLock};
 
+use astrcode_context::prompt_engine::{
+    ExtensionPromptBlock, ExtensionSection, PromptEngine, SystemPromptInput, load_prompt_files,
+};
 use astrcode_core::{
     config::ModelSelection,
-    extension::{ExtensionError, PromptBuildContext},
-    prompt::{
-        ExtensionPromptBlock, ExtensionSection, PromptFileProvider, PromptProvider,
-        SystemPromptInput,
-    },
     tool::{ToolDefinition, ToolPromptMetadata},
-    tool_pack::{ToolPack, ToolPackScope},
 };
-use astrcode_extension_sdk::runtime_ports::{
-    PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider,
+use astrcode_extension_sdk::{
+    extension::{ExtensionError, PromptBuildContext},
+    runtime_ports::{
+        PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider, ToolCatalogScope,
+    },
+    shell::resolve_shell,
 };
-use astrcode_support::{hash::hex_fingerprint, shell::resolve_shell};
 
-use crate::{ToolRegistry, session::normalize_extra_system_prompt};
+use crate::ToolRegistry;
 
 pub(crate) struct BuiltBaseToolRegistry {
     pub registry: ToolRegistry,
     pub completeness: ToolCatalogCompleteness,
+    pub revision: u64,
 }
 
 /// 构建一个工作目录绑定的工具表快照。
@@ -36,43 +37,33 @@ pub(crate) struct BuiltBaseToolRegistry {
 /// 不可变 registry，使工具边界变化不必重新执行动态工具发现。
 pub(crate) async fn build_base_tool_registry(
     tool_catalog: &dyn ToolCatalogProvider,
-    tool_packs: &[std::sync::Arc<dyn ToolPack>],
-    working_dir: &str,
+    scope: &ToolCatalogScope,
 ) -> Result<BuiltBaseToolRegistry, ExtensionError> {
     let mut tool_registry = ToolRegistry::new();
-    let scope = ToolPackScope { working_dir };
-
-    for pack in tool_packs {
-        for tool in pack.tools(&scope) {
-            tool_registry.register(tool);
-        }
-    }
-
-    // Extensions override host tool packs, and earlier registered extensions
-    // keep precedence over later registered extensions with the same tool name.
-    let catalog = tool_catalog.tool_catalog(working_dir).await?;
+    let catalog = tool_catalog.tool_catalog(scope).await?;
     for diagnostic in &catalog.diagnostics {
         tracing::warn!(
-            working_dir,
-            extension_id = diagnostic.extension_id,
-            error = diagnostic.message,
-            "extension tool catalog is partial"
+            working_dir = scope.working_dir,
+            source = diagnostic.source,
+            message = diagnostic.message,
+            "tool catalog diagnostic"
         );
     }
-    for tool in catalog.tools.into_iter().rev() {
-        tool_registry.register(tool);
+    for tool in catalog.tools {
+        tool_registry
+            .register(tool)
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
     }
 
     Ok(BuiltBaseToolRegistry {
         registry: tool_registry,
         completeness: catalog.completeness,
+        revision: catalog.revision,
     })
 }
 
 pub(crate) struct SystemPromptSnapshotInput<'a> {
     pub prompt_contributor: &'a dyn PromptContributor,
-    pub prompt_provider: &'a dyn PromptProvider,
-    pub prompt_file_provider: &'a dyn PromptFileProvider,
     pub session_id: &'a str,
     pub working_dir: &'a str,
     pub model_id: &'a str,
@@ -139,8 +130,6 @@ pub(crate) async fn build_system_prompt_snapshot(
 ) -> Result<(String, String), ExtensionError> {
     let SystemPromptSnapshotInput {
         prompt_contributor,
-        prompt_provider,
-        prompt_file_provider,
         session_id,
         working_dir,
         model_id,
@@ -159,30 +148,48 @@ pub(crate) async fn build_system_prompt_snapshot(
     )
     .await?;
 
-    let extra_instructions = normalize_extra_system_prompt(extra_system_prompt);
-    let prompt_files = prompt_file_provider
-        .load(working_dir, include_agents_rules)
-        .await;
+    let extra_instructions = extra_system_prompt.map(str::to_owned);
+    let prompt_files = load_prompt_files(working_dir, include_agents_rules).await;
 
     let prompt_input = SystemPromptInput {
         working_dir: working_dir.to_string(),
         os: std::env::consts::OS.into(),
         shell: resolve_shell().name,
-        gh_cli_available: astrcode_support::shell::is_gh_cli_available(),
+        gh_cli_available: is_gh_cli_available(),
         identity: prompt_files.identity,
         user_rules: prompt_files.user_rules,
         project_rules: prompt_files.project_rules,
-        tools: tools.to_vec(),
+        tools,
         tool_prompt_metadata,
         extension_blocks,
         extra_instructions,
     };
 
-    let system_prompt = prompt_provider
-        .assemble(prompt_input)
-        .await
-        .system_prompt
-        .unwrap_or_default();
-    let fingerprint = hex_fingerprint(system_prompt.as_bytes());
+    let system_prompt = PromptEngine.assemble(&prompt_input);
+    let fingerprint = system_prompt_fingerprint(&system_prompt);
     Ok((system_prompt, fingerprint))
+}
+
+fn system_prompt_fingerprint(system_prompt: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for &byte in system_prompt.as_bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn is_gh_cli_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        let names: &[&str] = if cfg!(windows) {
+            &["gh.exe", "gh"]
+        } else {
+            &["gh"]
+        };
+        std::env::var_os("PATH").is_some_and(|path| {
+            std::env::split_paths(&path)
+                .any(|dir| names.iter().any(|name| dir.join(name).is_file()))
+        })
+    })
 }

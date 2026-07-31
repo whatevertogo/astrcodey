@@ -1,10 +1,11 @@
-use astrcode_core::permission::{
-    ApprovalMode, PermissionContext, PermissionDecision, PermissionPolicy,
+use astrcode_core::permission::ApprovalMode;
+
+use super::{
+    PermissionContext, PermissionDecision, PermissionPolicy,
+    paths::{extract_tool_paths, path_for_matching},
 };
 
-use super::paths::{extract_tool_paths, path_for_matching};
-
-pub struct GitPathAskPolicy;
+pub(super) struct GitPathAskPolicy;
 
 impl PermissionPolicy for GitPathAskPolicy {
     fn priority(&self) -> u32 {

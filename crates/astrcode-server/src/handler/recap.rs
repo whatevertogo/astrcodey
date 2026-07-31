@@ -1,10 +1,8 @@
 //! Recap 生成逻辑 — `/recap` 命令的服务端实现。
 
-use astrcode_core::{
-    event::EventPayload,
-    extension::ExtensionEvent,
-    llm::{self, LlmMessage},
-};
+use astrcode_context::ContextSnapshot;
+use astrcode_core::{event::DurableEventPayload, llm};
+use astrcode_extension_sdk::extension::ExtensionEvent;
 
 use super::{CommandHandler, HandlerError};
 
@@ -36,18 +34,24 @@ impl CommandHandler {
 
         let state = session.read_model().await.map_err(HandlerError::Session)?;
 
-        if state.messages.is_empty() {
+        if state.transcript.messages.is_empty() {
             self.send_error(40400, "Nothing to recap yet");
             return Ok(());
         }
 
-        // 构造 LLM 请求：system + 历史 + recap prompt
-        let mut messages = Vec::new();
-        if let Some(ref sp) = state.system_prompt {
-            messages.push(LlmMessage::system(sp));
-        }
-        messages.extend(state.provider_messages());
-        messages.push(LlmMessage::user(RECAP_PROMPT));
+        let snapshot = ContextSnapshot::new(
+            state.stats.last_seq,
+            state.system_prompt.text.clone(),
+            state
+                .transcript
+                .messages
+                .iter()
+                .map(|message| message.message.clone())
+                .collect(),
+        );
+        let mut transcript = snapshot.messages.clone();
+        transcript.push(astrcode_core::llm::LlmMessage::user(RECAP_PROMPT));
+        let messages = snapshot.request_messages(transcript);
 
         // 单次调用，无 tools
         let llm = self.runtime.runtime_services().llm();
@@ -65,7 +69,7 @@ impl CommandHandler {
         session
             .emit_durable(
                 None,
-                EventPayload::RecapGenerated {
+                DurableEventPayload::RecapGenerated {
                     text: text.clone(),
                     source: "manual".into(),
                 },
@@ -74,10 +78,10 @@ impl CommandHandler {
             .map_err(HandlerError::Session)?;
 
         // PostRecap hook (non-blocking)
-        let lifecycle_ctx = astrcode_core::extension::LifecycleContext {
+        let lifecycle_ctx = astrcode_extension_sdk::extension::LifecycleContext {
             session_id: sid.to_string(),
-            working_dir: state.working_dir.clone(),
-            model: astrcode_core::config::ModelSelection::simple(state.model_id.clone()),
+            working_dir: state.identity.working_dir.clone(),
+            model: astrcode_core::config::ModelSelection::simple(state.identity.model_id.clone()),
             event_tx: None,
             extension_event_sink: None,
             last_exchange: None,

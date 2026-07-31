@@ -48,7 +48,7 @@ const DEFAULT_RETENTION: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// Default log directory: `~/.astrcode/logs/`.
 pub fn default_log_dir() -> PathBuf {
-    astrcode_support::hostpaths::logs_dir()
+    astrcode_core::config::defaults::astrcode_dir().join("logs")
 }
 
 /// Options that control logging initialisation.

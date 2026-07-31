@@ -7,13 +7,12 @@ use std::{
 
 use astrcode_core::{
     config::ContextSettings,
-    context::{CompactResult, PostCompactEnrichInput, PostCompactEnricher},
     llm::LlmMessage,
     tool::{ToolDefinition, ToolOrigin},
 };
-use astrcode_support::hostpaths::{is_path_within, resolve_path};
 
 use crate::{
+    CompactResult, PostCompactEnrichInput, PostCompactEnricher,
     compaction::{
         PostCompactFile, PostCompactNote, agent_status_note, append_post_compact_context,
         recent_read_paths,
@@ -125,18 +124,24 @@ fn fresh_recent_read_files(
     working_dir: &Path,
     settings: &ContextSettings,
 ) -> Vec<PostCompactFile> {
+    let Ok(working_dir) = working_dir.canonicalize() else {
+        return Vec::new();
+    };
     recent_read_paths(source_messages, retained_messages, settings)
         .into_iter()
-        .filter_map(|path| fresh_read_file(working_dir, &path))
+        .filter_map(|path| fresh_read_file(&working_dir, &path))
         .collect()
 }
 
 fn fresh_read_file(working_dir: &Path, requested_path: &str) -> Option<PostCompactFile> {
-    let resolved = resolve_path(working_dir, &PathBuf::from(requested_path));
-    if !is_path_within(&resolved, working_dir) || !resolved.is_file() {
-        return None;
-    }
-    let content = fs::read_to_string(&resolved).ok()?;
+    let requested = Path::new(requested_path);
+    let path = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        working_dir.join(requested)
+    };
+    let path = canonical_file_within(working_dir, &path)?;
+    let content = fs::read_to_string(path).ok()?;
     Some(PostCompactFile {
         path: requested_path.to_string(),
         content,
@@ -149,16 +154,14 @@ fn latest_plan_note(session_store_dir: Option<&Path>) -> Option<PostCompactNote>
         .join("extension_data")
         .join("astrcode-mode")
         .join("plan");
+    let plans_dir = plans_dir.canonicalize().ok()?;
     let latest_plan = fs::read_dir(&plans_dir)
         .ok()?
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
         .filter_map(|entry| {
-            let path = entry.path();
-            if !is_path_within(&path, &plans_dir) || !path.is_file() {
-                return None;
-            }
-            let modified = entry.metadata().ok()?.modified().ok()?;
+            let path = canonical_file_within(&plans_dir, &entry.path())?;
+            let modified = path.metadata().ok()?.modified().ok()?;
             Some((modified, path))
         })
         .max_by_key(|entry| entry.0)?;
@@ -172,6 +175,11 @@ fn latest_plan_note(session_store_dir: Option<&Path>) -> Option<PostCompactNote>
             truncate_chars(&content, PLAN_NOTE_MAX_CHARS)
         ),
     })
+}
+
+fn canonical_file_within(canonical_root: &Path, path: &Path) -> Option<PathBuf> {
+    let path = path.canonicalize().ok()?;
+    (path.starts_with(canonical_root) && path.is_file()).then_some(path)
 }
 
 fn skills_note(system_prompt: Option<&str>) -> Option<PostCompactNote> {
@@ -275,14 +283,13 @@ mod tests {
     };
 
     use astrcode_core::{
-        context::PostCompactEnricher,
         llm::{LlmContent, LlmRole},
         tool::ToolOrigin,
     };
     use serde_json::json;
 
     use super::*;
-    use crate::token_budget::estimate_text_tokens;
+    use crate::{PostCompactEnricher, token_budget::estimate_text_tokens};
 
     fn read_call(call_id: &str, path: &str) -> LlmMessage {
         LlmMessage {
@@ -305,14 +312,22 @@ mod tests {
     #[tokio::test]
     async fn post_compact_rereads_recent_files_from_disk() {
         let temp = tempfile_dir("post-compact-reread");
-        fs::write(temp.join("source.rs"), "fresh disk content").unwrap();
-        let messages = vec![read_call("read-1", "source.rs"), read_result("read-1")];
+        let working_dir = temp.join("workspace");
+        fs::create_dir_all(&working_dir).unwrap();
+        fs::write(working_dir.join("source.rs"), "fresh disk content").unwrap();
+        fs::write(temp.join("outside.rs"), "outside content").unwrap();
+        let messages = vec![
+            read_call("read-1", "source.rs"),
+            read_result("read-1"),
+            read_call("read-2", "../outside.rs"),
+            read_result("read-2"),
+        ];
         let mut compaction = CompactResult {
             pre_tokens: 100,
             post_tokens: 10,
             summary: "summary".into(),
             messages_removed: 2,
-            context_messages: vec![LlmMessage::user("summary")],
+            summary_messages: vec![LlmMessage::user("summary")],
             retained_messages: Vec::new(),
             transcript_path: None,
         };
@@ -324,7 +339,7 @@ mod tests {
                 PostCompactEnrichInput {
                     session_id: "session-post-compact-reread",
                     source_messages: &messages,
-                    working_dir: temp.to_str().unwrap(),
+                    working_dir: working_dir.to_str().unwrap(),
                     system_prompt: None,
                     tools: &[],
                     settings: &settings,
@@ -334,13 +349,14 @@ mod tests {
             .await;
 
         let restored = compaction
-            .context_messages
+            .summary_messages
             .last()
             .unwrap()
             .joined_display_text("\n");
         assert!(restored.contains("source.rs"));
         assert!(restored.contains("fresh disk content"));
         assert!(!restored.contains("old content"));
+        assert!(!restored.contains("outside content"));
     }
 
     #[test]
@@ -384,7 +400,7 @@ mod tests {
             post_tokens: 10,
             summary: "summary".into(),
             messages_removed: 2,
-            context_messages: vec![LlmMessage::user("summary")],
+            summary_messages: vec![LlmMessage::user("summary")],
             retained_messages: Vec::new(),
             transcript_path: None,
         };
@@ -404,7 +420,7 @@ mod tests {
         std::env::remove_var("ASTRCODE_TEST_HOME");
 
         let restored = compaction
-            .context_messages
+            .summary_messages
             .last()
             .unwrap()
             .joined_display_text("\n");

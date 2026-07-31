@@ -8,24 +8,29 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::{config::ModelSelection, event::EventPayload, tool_access::ResourceAccess};
+use astrcode_core::{
+    config::ModelSelection,
+    event::{DurableEventPayload, EventPayload, ExtensionEventData},
+    tool::access::ResourceAccess,
+};
 use astrcode_extension_sdk::{
     extension::{
-        AfterToolResult, AfterToolResultsContext, AfterToolResultsHandler, AfterToolResultsResult,
-        CommandCompletionItem, CommandCompletions, CommandContext, CommandHandler,
-        ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
-        ContinueAfterStopResult, DiscoveredTool, Extension, ExtensionCapability,
-        ExtensionCommandResult, ExtensionConfig, ExtensionCtx, ExtensionError,
-        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
-        ExtensionHttpRoute, HookMode, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
-        ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand,
-        StatusItem, StopReason, ToolDiscoveryHandler, ToolHandler, ToolHookTarget,
-        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+        CommandCompletionItem, CommandCompletions, CommandContext, CommandHandler, CompactContext,
+        CompactEvent, CompactHandler, CompactResult, ContinueAfterStopContext,
+        ContinueAfterStopHandler, ContinueAfterStopOptions, ContinueAfterStopResult,
+        DiscoveredTool, Extension, ExtensionCapability, ExtensionCommandResult, ExtensionConfig,
+        ExtensionCtx, ExtensionError, ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, HookMode, HookResult,
+        LifecycleContext, LifecycleHandler, PostToolUseContext, PostToolUseHandler,
+        PostToolUseResult, PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext,
+        ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand, StatusItem,
+        StopReason, ToolDiscoveryHandler, ToolHandler, ToolHookTarget, UserMessageEnvelopeContext,
+        UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
     },
     runtime_ports::{RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness},
     tool::{
-        ExecutionMode, ToolCapabilities, ToolDefinition, ToolExecutionContext, ToolOrigin,
-        ToolResult,
+        ExecutionMode, ExtensionToolContext, ToolCapabilities, ToolDefinition,
+        ToolExecutionContext, ToolOrigin, ToolResult,
     },
 };
 use serde_json::json;
@@ -39,6 +44,10 @@ struct ManagedTaskExtension {
     stopped: Arc<AtomicUsize>,
     task_stopped: Arc<AtomicBool>,
     expected_reason: StopReason,
+}
+
+struct DeferredTaskExtension {
+    task_started: Arc<AtomicBool>,
 }
 
 struct StartupDirectoryExtension {
@@ -128,13 +137,17 @@ struct CountingPreHook {
 struct StartFailingExtension;
 
 struct StartupTimeoutExtension {
-    task_stopped: Arc<AtomicBool>,
+    task_started: Arc<AtomicBool>,
     stop_reason: Arc<Mutex<Option<StopReason>>>,
 }
 
 struct BlockingProviderResponseExtension;
 
 struct BlockingProviderHook;
+
+struct OperationTimeoutExtension;
+
+struct PendingProviderHook;
 
 struct ContinueAfterStopProbeExtension {
     id: &'static str,
@@ -158,24 +171,35 @@ struct UserMessageEnvelopeProbe {
     calls: Arc<AtomicUsize>,
 }
 
-struct AfterToolResultsProbeExtension {
-    id: &'static str,
-    priority: i32,
-    result: AfterToolResultsResult,
-    calls: Arc<AtomicUsize>,
-}
-
-struct AfterToolResultsProbe {
-    result: AfterToolResultsResult,
-    calls: Arc<AtomicUsize>,
-}
-
 struct CommandProbeExtension {
     id: &'static str,
     command_name: &'static str,
     priority: i32,
     argument_completions: bool,
 }
+
+#[derive(Clone, Copy, Debug)]
+enum CapabilityRegistration {
+    Event,
+    Compact,
+    UserMessageEnvelope,
+    BeforeProvider,
+    AfterProvider,
+    BlockingPreTool,
+    BlockingPostTool,
+    ContinueAfterStop,
+}
+
+struct RegistrationProbeExtension {
+    capabilities: Vec<ExtensionCapability>,
+    registration: CapabilityRegistration,
+}
+
+struct LifecycleModeProbeExtension {
+    event: ExtensionEvent,
+}
+
+struct RegistrationProbeHandler;
 
 struct CommandProbe {
     label: &'static str,
@@ -246,13 +270,14 @@ impl ToolHandler for StateProbeTool {
         _tool_name: &str,
         _arguments: serde_json::Value,
         _working_dir: &str,
-        ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        ctx: &ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         Ok(ToolResult::text(
             ctx.capabilities.paths.store_dir.is_some().to_string(),
             false,
             Default::default(),
-        ))
+        )
+        .into())
     }
 }
 
@@ -372,13 +397,14 @@ impl ToolHandler for SmallModelProbeTool {
         _tool_name: &str,
         _arguments: serde_json::Value,
         _working_dir: &str,
-        ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        ctx: &ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         Ok(ToolResult::text(
-            ctx.capabilities.models.small.is_some().to_string(),
+            ctx.capabilities.models.tiers.small.is_some().to_string(),
             false,
             Default::default(),
-        ))
+        )
+        .into())
     }
 }
 
@@ -386,6 +412,10 @@ impl ToolHandler for SmallModelProbeTool {
 impl Extension for TargetedPreHookExtension {
     fn id(&self) -> &str {
         "targeted-pre-hook"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::ToolIntercept]
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -429,10 +459,10 @@ impl Extension for StartupTimeoutExtension {
 
     async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
         let shutdown = ctx.shutdown();
-        let task_stopped = Arc::clone(&self.task_stopped);
+        let task_started = Arc::clone(&self.task_started);
         ctx.tasks().spawn("startup-task", async move {
+            task_started.store(true, Ordering::SeqCst);
             shutdown.cancelled().await;
-            task_stopped.store(true, Ordering::SeqCst);
         });
         std::future::pending().await
     }
@@ -447,6 +477,10 @@ impl Extension for StartupTimeoutExtension {
 impl Extension for BlockingProviderResponseExtension {
     fn id(&self) -> &str {
         "provider-response-observer"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::ProviderRequest]
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -469,9 +503,39 @@ impl ProviderHandler for BlockingProviderHook {
 }
 
 #[async_trait::async_trait]
+impl Extension for OperationTimeoutExtension {
+    fn id(&self) -> &str {
+        "operation-timeout"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::ProviderRequest]
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.on_after_provider_response(0, Arc::new(PendingProviderHook));
+    }
+
+    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+        std::future::pending().await
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderHandler for PendingProviderHook {
+    async fn handle(&self, _ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
+        std::future::pending().await
+    }
+}
+
+#[async_trait::async_trait]
 impl Extension for ContinueAfterStopProbeExtension {
     fn id(&self) -> &str {
         self.id
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::TurnContinuationControl]
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -502,6 +566,10 @@ impl Extension for UserMessageEnvelopeProbeExtension {
         self.id
     }
 
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::ProviderRequest]
+    }
+
     fn register(&self, reg: &mut Registrar) {
         reg.on_user_message_envelope(
             self.priority,
@@ -525,30 +593,125 @@ impl UserMessageEnvelopeHandler for UserMessageEnvelopeProbe {
 }
 
 #[async_trait::async_trait]
-impl Extension for AfterToolResultsProbeExtension {
+impl Extension for RegistrationProbeExtension {
     fn id(&self) -> &str {
-        self.id
+        "registration-probe"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &self.capabilities
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.on_after_tool_results(
-            self.priority,
-            Arc::new(AfterToolResultsProbe {
-                result: self.result.clone(),
-                calls: Arc::clone(&self.calls),
-            }),
-        );
+        match self.registration {
+            CapabilityRegistration::Event => {
+                reg.extension_event("probe").register();
+            },
+            CapabilityRegistration::Compact => {
+                reg.on_compact(
+                    CompactEvent::PreCompact,
+                    0,
+                    Arc::new(RegistrationProbeHandler),
+                );
+            },
+            CapabilityRegistration::UserMessageEnvelope => {
+                reg.on_user_message_envelope(0, Arc::new(RegistrationProbeHandler));
+            },
+            CapabilityRegistration::BeforeProvider => {
+                reg.on_before_provider_request(
+                    HookMode::Advisory,
+                    0,
+                    Arc::new(RegistrationProbeHandler),
+                );
+            },
+            CapabilityRegistration::AfterProvider => {
+                reg.on_after_provider_response(0, Arc::new(RegistrationProbeHandler));
+            },
+            CapabilityRegistration::BlockingPreTool => {
+                reg.on_pre_tool_use(HookMode::Blocking, 0, Arc::new(RegistrationProbeHandler));
+            },
+            CapabilityRegistration::BlockingPostTool => {
+                reg.on_post_tool_use(HookMode::Blocking, 0, Arc::new(RegistrationProbeHandler));
+            },
+            CapabilityRegistration::ContinueAfterStop => {
+                reg.on_continue_after_stop(
+                    0,
+                    ContinueAfterStopOptions::default(),
+                    Arc::new(RegistrationProbeHandler),
+                );
+            },
+        }
     }
 }
 
 #[async_trait::async_trait]
-impl AfterToolResultsHandler for AfterToolResultsProbe {
+impl CompactHandler for RegistrationProbeHandler {
+    async fn handle(&self, _ctx: CompactContext) -> Result<CompactResult, ExtensionError> {
+        Ok(CompactResult::Allow)
+    }
+}
+
+#[async_trait::async_trait]
+impl UserMessageEnvelopeHandler for RegistrationProbeHandler {
     async fn handle(
         &self,
-        _ctx: AfterToolResultsContext,
-    ) -> Result<AfterToolResultsResult, ExtensionError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(self.result.clone())
+        _ctx: UserMessageEnvelopeContext,
+    ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
+        Ok(UserMessageEnvelopeResult::Allow)
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderHandler for RegistrationProbeHandler {
+    async fn handle(&self, _ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
+        Ok(ProviderResult::Allow)
+    }
+}
+
+#[async_trait::async_trait]
+impl PreToolUseHandler for RegistrationProbeHandler {
+    async fn handle(&self, _ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
+        Ok(PreToolUseResult::Allow)
+    }
+}
+
+#[async_trait::async_trait]
+impl PostToolUseHandler for RegistrationProbeHandler {
+    async fn handle(&self, _ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
+        Ok(PostToolUseResult::Allow)
+    }
+}
+
+#[async_trait::async_trait]
+impl ContinueAfterStopHandler for RegistrationProbeHandler {
+    async fn handle(
+        &self,
+        _ctx: ContinueAfterStopContext,
+    ) -> Result<ContinueAfterStopResult, ExtensionError> {
+        Ok(ContinueAfterStopResult::EndTurn)
+    }
+}
+
+#[async_trait::async_trait]
+impl LifecycleHandler for RegistrationProbeHandler {
+    async fn handle(&self, _ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
+        Ok(HookResult::Allow)
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for LifecycleModeProbeExtension {
+    fn id(&self) -> &str {
+        "lifecycle-mode-probe"
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.on_event(
+            self.event.clone(),
+            HookMode::Blocking,
+            0,
+            Arc::new(RegistrationProbeHandler),
+        );
     }
 }
 
@@ -575,21 +738,6 @@ fn user_message_envelope_ctx(text: &str) -> UserMessageEnvelopeContext {
     }
 }
 
-fn after_tool_results_ctx() -> AfterToolResultsContext {
-    AfterToolResultsContext {
-        session_id: "session".into(),
-        working_dir: "D:/workspace".into(),
-        model: ModelSelection::simple("model"),
-        tool_results: vec![AfterToolResult {
-            call_id: "call-1".into(),
-            tool_name: "probeTool".into(),
-            tool_input: json!({"value": 1}),
-            tool_result: ToolResult::text("ok".into(), false, Default::default()),
-        }],
-        session_store_dir: None,
-    }
-}
-
 #[async_trait::async_trait]
 impl Extension for StartupDirectoryExtension {
     fn id(&self) -> &str {
@@ -608,6 +756,10 @@ impl Extension for StartupEventExtension {
         "startup-event"
     }
 
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::EmitEvents]
+    }
+
     fn register(&self, reg: &mut Registrar) {
         reg.extension_event("startup_ready").register();
     }
@@ -616,7 +768,7 @@ impl Extension for StartupEventExtension {
         let sink = ctx
             .event_sink()
             .ok_or_else(|| ExtensionError::Internal("missing startup event sink".into()))?;
-        sink.emit("startup_ready", 1, json!({"ready": true})).await
+        sink.emit("startup_ready", 1, json!({"ready": true}))
     }
 }
 
@@ -658,6 +810,127 @@ impl Extension for ManagedTaskExtension {
     }
 }
 
+#[async_trait::async_trait]
+impl Extension for DeferredTaskExtension {
+    fn id(&self) -> &str {
+        "deferred-task"
+    }
+
+    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+        let task_started = Arc::clone(&self.task_started);
+        ctx.tasks().spawn("deferred", async move {
+            task_started.store(true, Ordering::SeqCst);
+        });
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn privileged_registrations_require_their_declared_capabilities() {
+    let cases = [
+        (
+            CapabilityRegistration::Event,
+            "event",
+            ExtensionCapability::EmitEvents,
+        ),
+        (
+            CapabilityRegistration::Compact,
+            "compact",
+            ExtensionCapability::SessionHistory,
+        ),
+        (
+            CapabilityRegistration::UserMessageEnvelope,
+            "user_message_envelope",
+            ExtensionCapability::ProviderRequest,
+        ),
+        (
+            CapabilityRegistration::BeforeProvider,
+            "before_provider_request",
+            ExtensionCapability::ProviderRequest,
+        ),
+        (
+            CapabilityRegistration::AfterProvider,
+            "after_provider_response",
+            ExtensionCapability::ProviderRequest,
+        ),
+        (
+            CapabilityRegistration::BlockingPreTool,
+            "pre_tool_use",
+            ExtensionCapability::ToolIntercept,
+        ),
+        (
+            CapabilityRegistration::BlockingPostTool,
+            "post_tool_use",
+            ExtensionCapability::ToolIntercept,
+        ),
+        (
+            CapabilityRegistration::ContinueAfterStop,
+            "continue_after_stop",
+            ExtensionCapability::TurnContinuationControl,
+        ),
+    ];
+
+    for (registration, hook, capability) in cases {
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        let error = runner
+            .register(Arc::new(RegistrationProbeExtension {
+                capabilities: Vec::new(),
+                registration,
+            }))
+            .await
+            .expect_err("privileged registration must declare its capability");
+        assert!(matches!(
+            error,
+            ExtensionError::MissingCapability {
+                hook: actual_hook,
+                capability: actual_capability,
+                ..
+            } if actual_hook == hook && actual_capability == capability
+        ));
+
+        let runner = ExtensionRunner::new(Duration::from_secs(1));
+        runner
+            .register(Arc::new(RegistrationProbeExtension {
+                capabilities: vec![capability],
+                registration,
+            }))
+            .await
+            .expect("declared capability must allow registration");
+    }
+}
+
+#[tokio::test]
+async fn only_turn_entry_lifecycle_events_may_block() {
+    for event in [ExtensionEvent::TurnStart, ExtensionEvent::UserPromptSubmit] {
+        ExtensionRunner::new(Duration::from_secs(1))
+            .register(Arc::new(LifecycleModeProbeExtension { event }))
+            .await
+            .expect("turn-entry lifecycle event may block");
+    }
+
+    for event in [
+        ExtensionEvent::SessionStart,
+        ExtensionEvent::SessionResume,
+        ExtensionEvent::TurnEnd,
+        ExtensionEvent::StepEnd,
+        ExtensionEvent::SessionShutdown,
+    ] {
+        let error = ExtensionRunner::new(Duration::from_secs(1))
+            .register(Arc::new(LifecycleModeProbeExtension {
+                event: event.clone(),
+            }))
+            .await
+            .expect_err("observe-only lifecycle event must reject blocking mode");
+        assert!(matches!(
+            error,
+            ExtensionError::InvalidLifecycleMode {
+                event: actual_event,
+                ..
+            } if actual_event == event
+        ));
+    }
+}
+
 #[tokio::test]
 async fn unregister_stops_extension_and_managed_tasks() {
     let started = Arc::new(AtomicUsize::new(0));
@@ -684,6 +957,40 @@ async fn unregister_stops_extension_and_managed_tasks() {
     assert_eq!(started.load(Ordering::SeqCst), 1);
     assert_eq!(stopped.load(Ordering::SeqCst), 1);
     assert!(task_stopped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn deferred_task_handle_activates_published_registration_on_drop() {
+    let task_started = Arc::new(AtomicBool::new(false));
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    let activation = runner
+        .register_deferred(
+            Arc::new(DeferredTaskExtension {
+                task_started: Arc::clone(&task_started),
+            }),
+            None,
+            "test:deferred-task".into(),
+            "v1".into(),
+        )
+        .await
+        .unwrap()
+        .expect("new registration should return an activation handle");
+
+    assert_eq!(
+        runner.registered_extension_ids().await,
+        vec!["deferred-task"]
+    );
+    tokio::task::yield_now().await;
+    assert!(!task_started.load(Ordering::SeqCst));
+
+    drop(activation);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !task_started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 }
 
 #[tokio::test]
@@ -743,12 +1050,12 @@ async fn start_can_emit_declared_event_through_bound_startup_channel() {
     let event = event_rx.recv().await.unwrap();
     assert!(matches!(
         event,
-        EventPayload::ExtensionEvent {
+        EventPayload::Durable(DurableEventPayload::ExtensionEvent(ExtensionEventData {
             extension_id,
             event_type,
             schema_version: 1,
             payload,
-        } if extension_id == "startup-event"
+        })) if extension_id == "startup-event"
             && event_type == "startup_ready"
             && payload == json!({"ready": true})
     ));
@@ -825,7 +1132,7 @@ async fn timed_out_discovery_returns_partial_catalog_with_static_tools() {
             .any(|tool| tool.definition().name == "stateProbe")
     );
     assert_eq!(snapshot.diagnostics.len(), 1);
-    assert_eq!(snapshot.diagnostics[0].extension_id, "slow-discovery");
+    assert_eq!(snapshot.diagnostics[0].source, "slow-discovery");
 }
 
 #[tokio::test]
@@ -857,7 +1164,10 @@ async fn extension_tool_receives_small_model_only_when_declared() {
             None,
             ToolCapabilities {
                 models: astrcode_core::tool::ToolModelAccess {
-                    small: Some("small-model".into()),
+                    tiers: astrcode_core::tool::LlmModelIds {
+                        small: Some("small-model".into()),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 ..Default::default()
@@ -884,6 +1194,7 @@ async fn targeted_pre_tool_hook_only_runs_for_matching_tool() {
         session_id: "session".into(),
         working_dir: "D:/workspace".into(),
         model: astrcode_core::config::ModelSelection::simple("model"),
+        call_id: "call-1".into(),
         tool_name: tool_name.into(),
         tool_input: json!({}),
         approval_mode: astrcode_core::permission::ApprovalMode::Manual,
@@ -1036,12 +1347,12 @@ async fn config_notifications_are_ordered_idempotent_and_retry_failures() {
 }
 
 #[tokio::test]
-async fn recorded_blocking_hook_tracks_error_and_timeout() {
+async fn recorded_hook_tracks_error_and_timeout() {
     let runner = ExtensionRunner::new(Duration::from_millis(10));
 
     assert!(
         runner
-            .run_recorded_blocking_hook::<()>("probe", "pre_tool_use", async {
+            .run_recorded_hook::<()>("probe", "pre_tool_use", async {
                 Err(ExtensionError::Internal("injected failure".into()))
             })
             .await
@@ -1049,7 +1360,7 @@ async fn recorded_blocking_hook_tracks_error_and_timeout() {
     );
     assert!(matches!(
         runner
-            .run_recorded_blocking_hook(
+            .run_recorded_hook(
                 "probe",
                 "pre_tool_use",
                 std::future::pending::<Result<(), ExtensionError>>(),
@@ -1071,21 +1382,58 @@ async fn recorded_blocking_hook_tracks_error_and_timeout() {
 }
 
 #[tokio::test]
-async fn startup_timeout_cleans_tasks_and_rolls_back_partial_start() {
-    let task_stopped = Arc::new(AtomicBool::new(false));
+async fn operation_timeout_bounds_advisory_hooks_and_stop() {
+    let runner = ExtensionRunner::new(Duration::from_millis(10));
+    runner
+        .register(Arc::new(OperationTimeoutExtension))
+        .await
+        .unwrap();
+
+    let result = runner
+        .emit_provider(
+            ProviderEvent::AfterResponse,
+            ProviderContext {
+                session_id: "session".into(),
+                working_dir: "D:/workspace".into(),
+                model: astrcode_core::config::ModelSelection::simple("model"),
+                messages: Vec::new(),
+                session_store_dir: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result, ProviderResult::Allow));
+
+    let diagnostics = runner.diagnostics_snapshot();
+    let diagnostics = diagnostics.get("operation-timeout").unwrap();
+    assert_eq!(diagnostics.hook_calls, 1);
+    assert_eq!(diagnostics.hook_timeouts, 1);
+
+    assert!(matches!(
+        runner
+            .unregister("operation-timeout", StopReason::Disabled)
+            .await,
+        Err(ExtensionError::Timeout(10))
+    ));
+    assert_eq!(runner.count().await, 0);
+}
+
+#[tokio::test]
+async fn startup_timeout_drops_suspended_tasks_and_rolls_back_partial_start() {
+    let task_started = Arc::new(AtomicBool::new(false));
     let stop_reason = Arc::new(Mutex::new(None));
     let runner = ExtensionRunner::new(Duration::from_millis(20));
 
     let error = runner
         .register(Arc::new(StartupTimeoutExtension {
-            task_stopped: Arc::clone(&task_stopped),
+            task_started: Arc::clone(&task_started),
             stop_reason: Arc::clone(&stop_reason),
         }))
         .await
         .unwrap_err();
 
     assert!(matches!(error, ExtensionError::Timeout(20)));
-    assert!(task_stopped.load(Ordering::SeqCst));
+    assert!(!task_started.load(Ordering::SeqCst));
     assert_eq!(
         *stop_reason.lock().unwrap(),
         Some(StopReason::StartupFailed)
@@ -1294,47 +1642,6 @@ async fn user_message_envelope_block_short_circuits_later_handlers() {
 }
 
 #[tokio::test]
-async fn after_tool_results_end_turn_short_circuits_later_handlers() {
-    let end_calls = Arc::new(AtomicUsize::new(0));
-    let continue_calls = Arc::new(AtomicUsize::new(0));
-    let runner = ExtensionRunner::new(Duration::from_secs(1));
-    runner
-        .register(Arc::new(AfterToolResultsProbeExtension {
-            id: "end-after-tools",
-            priority: 10,
-            result: AfterToolResultsResult::EndTurn {
-                reason: "goal-complete".into(),
-            },
-            calls: Arc::clone(&end_calls),
-        }))
-        .await
-        .unwrap();
-    runner
-        .register(Arc::new(AfterToolResultsProbeExtension {
-            id: "continue-after-end",
-            priority: 0,
-            result: AfterToolResultsResult::Continue,
-            calls: Arc::clone(&continue_calls),
-        }))
-        .await
-        .unwrap();
-
-    let result = runner
-        .emit_after_tool_results(after_tool_results_ctx())
-        .await
-        .unwrap();
-
-    assert_eq!(
-        result,
-        AfterToolResultsResult::EndTurn {
-            reason: "goal-complete".into()
-        }
-    );
-    assert_eq!(end_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(continue_calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
 async fn registry_snapshot_exposes_registered_extension_declarations() {
     let runner = ExtensionRunner::new(Duration::from_secs(1));
     runner
@@ -1510,6 +1817,55 @@ async fn public_http_route_dispatches_with_path_params() {
 }
 
 #[tokio::test]
+async fn authenticated_http_routes_are_capability_checked_and_extension_scoped() {
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    let missing_capability = runner
+        .register(Arc::new(HttpProbeExtension {
+            id: "missing-authenticated-http",
+            capabilities: Vec::new(),
+            route: ExtensionHttpRoute::authenticated(ExtensionHttpMethod::Get, "/status"),
+        }))
+        .await
+        .expect_err("authenticated route must declare its capability");
+    assert!(matches!(
+        missing_capability,
+        ExtensionError::MissingCapability {
+            capability: ExtensionCapability::AuthenticatedHttp,
+            ..
+        }
+    ));
+
+    for id in ["authenticated-one", "authenticated-two"] {
+        runner
+            .register(Arc::new(HttpProbeExtension {
+                id,
+                capabilities: vec![ExtensionCapability::AuthenticatedHttp],
+                route: ExtensionHttpRoute::authenticated(ExtensionHttpMethod::Get, "/items/{id}"),
+            }))
+            .await
+            .expect("same authenticated path is isolated by extension id");
+    }
+
+    let request = ExtensionHttpRequest::new(ExtensionHttpMethod::Get, "/items/item-1");
+    let result = runner
+        .dispatch_authenticated_http_route("authenticated-two", request.clone(), &[])
+        .await
+        .expect("dispatch authenticated route");
+    let ExtensionHttpDispatchResult::Response(response) = result else {
+        panic!("expected authenticated response");
+    };
+    assert_eq!(response.body["pathParams"]["id"], "item-1");
+
+    assert!(matches!(
+        runner
+            .dispatch_public_http_route(request, &[])
+            .await
+            .expect("public lookup"),
+        ExtensionHttpDispatchResult::NotFound
+    ));
+}
+
+#[tokio::test]
 async fn http_route_registration_requires_public_http_capability() {
     let runner = ExtensionRunner::new(Duration::from_secs(1));
     let error = runner
@@ -1521,7 +1877,13 @@ async fn http_route_registration_requires_public_http_capability() {
         .await
         .expect_err("route without public_http must fail");
 
-    assert!(error.to_string().contains("public_http"));
+    assert!(matches!(
+        error,
+        ExtensionError::MissingCapability {
+            capability: ExtensionCapability::PublicHttp,
+            ..
+        }
+    ));
     assert_eq!(runner.count().await, 0);
 }
 

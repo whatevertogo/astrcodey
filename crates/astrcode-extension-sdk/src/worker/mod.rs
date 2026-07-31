@@ -41,8 +41,6 @@ use crate::{
     },
 };
 
-const MAX_CONTINUATION_DEPTH: u32 = 16;
-
 pub struct Worker {
     extension_id: String,
     version: String,
@@ -70,8 +68,14 @@ impl Worker {
         self
     }
 
-    /// 声明可发射的扩展事件 schema。
+    /// 声明可发射的扩展事件 schema（兼容旧版 JSON authoring API）。
     pub fn extension_event(mut self, event: Value) -> Self {
+        self.registry.declare_legacy_extension_event(event);
+        self
+    }
+
+    /// 使用强类型契约声明可发射的扩展事件 schema。
+    pub fn extension_event_decl(mut self, event: crate::extension::ExtensionEventDecl) -> Self {
         self.registry.declare_extension_event(event);
         self
     }
@@ -94,6 +98,19 @@ impl Worker {
         handler: HookHandlerFn,
     ) -> Result<&mut Self, ErrorPayload> {
         self.registry.register_hook(on, mode, handler)?;
+        Ok(self)
+    }
+
+    /// 注册仅由 [`CallContinuation::Hook`](crate::s5r::CallContinuation::Hook) 调用的 handler。
+    ///
+    /// 该 handler 不会声明为宿主事件订阅；需要订阅宿主事件时使用 [`Self::hook`]。
+    pub fn continuation_hook_handler(
+        &mut self,
+        on: impl Into<String>,
+        handler: HookHandlerFn,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_continuation_hook_handler(on, handler)?;
         Ok(self)
     }
 
@@ -163,7 +180,13 @@ impl Worker {
         };
         peer.set_invoke_handler(invoke_handler);
 
-        let metadata = registration_metadata(&self.extension_id, &self.version, registry.catalog());
+        let metadata = registration_metadata(&self.extension_id, &self.version, registry.catalog())
+            .map_err(|error| {
+                ErrorPayload::new(
+                    "manifest_serialize_failed",
+                    format!("failed to serialize initialize manifest: {error}"),
+                )
+            })?;
         let handlers = build_handler_descriptors(registry.catalog(), &self.extension_id);
         peer.initialize(handlers, metadata)
             .await
@@ -182,42 +205,14 @@ async fn handle_worker_invoke(
     invoke: crate::s5r::InvokeMsg,
     token: CancelToken,
 ) -> Result<InvokeReply, ErrorPayload> {
-    let mut stack = vec![(
-        invoke
-            .input
-            .get("handler_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        invoke.input.get("event").cloned().unwrap_or(Value::Null),
-        0u32,
-    )];
-    let mut first: Option<HandlerResult> = None;
-    while let Some((hid, ev, depth)) = stack.pop() {
-        if depth > MAX_CONTINUATION_DEPTH {
-            return Err(ErrorPayload::new(
-                "continuation_depth_exceeded",
-                format!("continuation depth exceeded (max {MAX_CONTINUATION_DEPTH})"),
-            ));
-        }
-        let fake_invoke = crate::s5r::InvokeMsg {
-            id: invoke.id.clone(),
-            capability: crate::s5r::CAP_HANDLER_INVOKE.into(),
-            input: json!({ "handler_id": hid, "event": ev }),
-            stream: false,
-            caller_extension_id: invoke.caller_extension_id.clone(),
-        };
-        let resp = registry.dispatch_invoke(fake_invoke, token.clone()).await?;
-        if first.is_none() {
-            first = Some(resp.clone());
-        }
-        registry.push_continuation_stack(&resp.continuations, &mut stack, depth);
-    }
-    let result =
-        first.ok_or_else(|| ErrorPayload::new("empty_handler_chain", "empty handler chain"))?;
-    Ok(InvokeReply::Value(
-        serde_json::to_value(result).unwrap_or(Value::Null),
-    ))
+    let result = registry.dispatch_invoke(invoke, token).await?;
+    let output = serde_json::to_value(result).map_err(|error| {
+        ErrorPayload::new(
+            "serialization_failed",
+            format!("serialize handler result: {error}"),
+        )
+    })?;
+    Ok(InvokeReply::Value(output))
 }
 
 fn build_handler_descriptors(
@@ -237,6 +232,13 @@ fn build_handler_descriptors(
         out.push(HandlerDescriptor {
             handler_id: registry.handler_id_for("hook", &hook.on),
             description: format!("hook {}", hook.on),
+            input_schema: json!({"type":"object"}),
+        });
+    }
+    for hook in &catalog.continuation_hooks {
+        out.push(HandlerDescriptor {
+            handler_id: registry.handler_id_for("hook", hook),
+            description: format!("continuation hook {hook}"),
             input_schema: json!({"type":"object"}),
         });
     }

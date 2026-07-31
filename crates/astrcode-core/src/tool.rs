@@ -9,16 +9,22 @@
 //! - [`ToolResult`]：工具执行结果
 //! - [`ToolExecutionContext`]：每次工具调用的上下文
 //! - [`ToolPromptMetadata`]：结构化工具提示词元数据
+//!
+//! 本模块不含具体工具实现与调度逻辑（注册表、并行调度、权限门禁位于
+//! `astrcode-session` / 各工具 crate）。
 
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 
-use crate::{
-    event::EventPayload, storage::ToolResultArtifactReader, tool_access::ResourceAccess,
-    types::SessionId,
-};
+use crate::types::SessionId;
+
+pub mod access;
+pub mod read_image;
+pub mod selection;
+
+use access::ResourceAccess;
+pub use selection::SessionToolSelection;
 
 /// 工具来源分类，影响诊断日志和策略优先级，不改变执行路径。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,7 +32,7 @@ use crate::{
 pub enum ToolOrigin {
     /// First-party core tools required by the coding runtime.
     Builtin,
-    /// First-party tool packs shipped with the server but not fundamental to the tool trait.
+    /// First-party tools shipped with the server but not fundamental to the tool trait.
     Bundled,
     /// Tools contributed by user or project extensions.
     Extension,
@@ -167,13 +173,9 @@ impl ToolPromptMetadata {
     }
 }
 
-pub const DEFERRED_TOOLS_METADATA_KEY: &str = "deferredTools";
-
 /// 工具执行结果。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
-    /// 此结果对应的工具调用 ID。
-    pub call_id: String,
     /// 工具输出的内容文本。
     pub content: String,
     /// 此结果是否表示错误。
@@ -186,6 +188,154 @@ pub struct ToolResult {
     /// 工具执行耗时（毫秒），由调用方测量。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolResultArtifactSlice {
+    pub path: String,
+    pub bytes: usize,
+    pub char_offset: usize,
+    pub returned_chars: usize,
+    pub next_char_offset: Option<usize>,
+    pub has_more: bool,
+    pub content: String,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ToolResultArtifactError {
+    #[error("invalid tool result artifact path: {0}")]
+    InvalidPath(String),
+    #[error("tool result artifact not found: {0}")]
+    NotFound(String),
+    #[error("tool result artifact reading is unsupported: {0}")]
+    Unsupported(String),
+    #[error("tool result artifact read failed: {0}")]
+    Read(String),
+}
+
+#[async_trait::async_trait]
+pub trait ToolResultArtifactReader: Send + Sync {
+    async fn read_tool_result_artifact_by_path(
+        &self,
+        session_id: &SessionId,
+        path: &str,
+        char_offset: usize,
+        max_chars: usize,
+    ) -> Result<ToolResultArtifactSlice, ToolResultArtifactError>;
+}
+
+impl ToolResult {
+    /// 构造成功的文本结果。
+    pub fn success(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: false,
+            error: None,
+            metadata: BTreeMap::new(),
+            duration_ms: None,
+        }
+    }
+
+    /// 构造已正常返回的错误结果。
+    ///
+    /// 这表示工具执行完成，但业务结果为错误；执行基础设施失败由 session
+    /// 的终态模型单独表达。
+    pub fn error(content: impl Into<String>) -> Self {
+        let content = content.into();
+        Self {
+            error: Some(content.clone()),
+            content,
+            is_error: true,
+            metadata: BTreeMap::new(),
+            duration_ms: None,
+        }
+    }
+
+    /// 构造带元数据的文本结果。
+    ///
+    /// `is_error` 为 `true` 时，同时填充结构化错误文本。
+    pub fn text(
+        content: String,
+        is_error: bool,
+        metadata: BTreeMap<String, serde_json::Value>,
+    ) -> Self {
+        let error = is_error.then(|| content.clone());
+        Self {
+            content,
+            is_error,
+            error,
+            metadata,
+            duration_ms: None,
+        }
+    }
+
+    pub fn with_metadata(mut self, metadata: BTreeMap<String, serde_json::Value>) -> Self {
+        self.metadata = metadata;
+        self
+    }
+
+    pub fn with_duration_ms(mut self, duration_ms: Option<u64>) -> Self {
+        self.duration_ms = duration_ms;
+        self
+    }
+}
+
+/// 工具执行的显式终态。
+///
+/// 工具发现是唯一会改变当前 turn 工具可见性的执行结果。普通 metadata
+/// 只用于展示和诊断，运行时不得据此改变控制流。
+#[derive(Debug, Clone, PartialEq)]
+pub enum ToolExecutionResult {
+    Completed(ToolResult),
+    CompletedWithDiscoveredTools {
+        result: ToolResult,
+        tool_names: Vec<String>,
+    },
+}
+
+impl ToolExecutionResult {
+    pub fn completed(result: ToolResult) -> Self {
+        Self::Completed(result)
+    }
+
+    pub fn completed_with_discovered_tools(result: ToolResult, tool_names: Vec<String>) -> Self {
+        Self::CompletedWithDiscoveredTools { result, tool_names }
+    }
+
+    pub fn result_mut(&mut self) -> &mut ToolResult {
+        match self {
+            Self::Completed(result) | Self::CompletedWithDiscoveredTools { result, .. } => result,
+        }
+    }
+
+    pub fn into_parts(self) -> (ToolResult, Vec<String>) {
+        match self {
+            Self::Completed(result) => (result, Vec::new()),
+            Self::CompletedWithDiscoveredTools { result, tool_names } => (result, tool_names),
+        }
+    }
+}
+
+impl From<ToolResult> for ToolExecutionResult {
+    fn from(result: ToolResult) -> Self {
+        Self::Completed(result)
+    }
+}
+
+impl std::ops::Deref for ToolExecutionResult {
+    type Target = ToolResult;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Completed(result) | Self::CompletedWithDiscoveredTools { result, .. } => result,
+        }
+    }
+}
+
+impl std::ops::DerefMut for ToolExecutionResult {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.result_mut()
+    }
 }
 
 /// 工具执行过程中可能发生的错误。
@@ -311,8 +461,8 @@ pub trait SessionOperations: Send + Sync {
     async fn configure_tools(
         &self,
         _access: SessionAccess<'_>,
-        _selection: crate::extension::SessionToolSelection,
-    ) -> Result<crate::extension::SessionToolSelection, SessionApiError> {
+        _selection: SessionToolSelection,
+    ) -> Result<SessionToolSelection, SessionApiError> {
         Err(SessionApiError::Unsupported(
             "session tool configuration is not supported by this host".into(),
         ))
@@ -348,14 +498,6 @@ pub trait SessionOperations: Send + Sync {
         call_id: &str,
         decision: crate::permission::ApprovalDecision,
     ) -> Result<(), SessionApiError>;
-
-    /// 提交 Tool Approval UI 的用户回答（如 askUser 问卷）。
-    async fn resolve_tool_ui_response(
-        &self,
-        target_session_id: &str,
-        call_id: &str,
-        answers: std::collections::BTreeMap<String, String>,
-    ) -> Result<(), SessionApiError>;
 }
 
 /// 创建顶层会话请求。
@@ -379,7 +521,7 @@ pub struct CreateSessionRequest {
     /// 模型偏好。`None` 表示继承父 session。
     pub model_preference: Option<String>,
     /// 子会话工具集策略。
-    pub tool_selection: Option<crate::extension::SessionToolSelection>,
+    pub tool_selection: Option<SessionToolSelection>,
     /// 创建该子 session 的扩展 ID。
     pub source_extension: Option<String>,
     /// 一次性子 session，首个 turn 完成后自动回收。
@@ -608,14 +750,11 @@ pub struct LlmModelIds {
 }
 
 /// 模型档位访问（须在扩展 manifest 声明对应能力后才有值）。
-#[derive(Clone, Default)]
+///
+/// 主/小模型 id 由 [`LlmModelIds`] 统一承载，避免同一模型 id 在两处重复存储、
+/// 需要手动保持同步。
+#[derive(Clone, Debug, Default)]
 pub struct ToolModelAccess {
-    /// 与 [`Self::main`] 相同；保留供既有调用方。
-    pub model_id: Option<String>,
-    /// 主模型 id（`main_model` 能力）。
-    pub main: Option<String>,
-    /// 小模型 id（`small_model` 能力）。
-    pub small: Option<String>,
     /// 分档模型 id 快照（未声明对应能力时，各档可能为 `None`）。
     pub tiers: LlmModelIds,
 }
@@ -644,15 +783,13 @@ pub struct ToolFileServices {
     pub observation_store: Option<Arc<dyn FileObservationStore>>,
 }
 
-/// 宿主侧服务：artifact 读取、FFI 工具目录、扩展事件。
+/// 宿主侧服务：artifact 读取与 FFI 工具目录。
 #[derive(Clone, Default)]
 pub struct ToolHostServices {
     /// 当前 session 的工具结果 artifact 读取能力（仅 `read` 工具需要）。
     pub result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
     /// 当前可用的工具定义列表（仅 FFI bridge 需要）。
     pub available_tools: Option<Vec<ToolDefinition>>,
-    /// 插件事件发射器（仅声明 `emit_events` 的扩展工具会有值）。
-    pub extension_event_sink: Option<Arc<dyn crate::extension::ExtensionEventSink>>,
 }
 
 /// 工具调用时按需注入的能力集合。
@@ -677,7 +814,7 @@ pub struct ToolCallScope {
     /// 当前工具调用 ID，用于工具发出隶属于自身调用的进度事件。
     pub tool_call_id: Option<String>,
     /// 当前回合事件发送器，用于工具发出非持久化进度事件。
-    pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+    pub event_tx: Option<crate::event::EventSender>,
 }
 
 /// 每次工具调用时传递的上下文。
@@ -696,7 +833,7 @@ impl ToolExecutionContext {
         session_id: SessionId,
         working_dir: impl Into<String>,
         tool_call_id: Option<String>,
-        event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+        event_tx: Option<crate::event::EventSender>,
         capabilities: ToolCapabilities,
     ) -> Self {
         Self {
@@ -711,20 +848,6 @@ impl ToolExecutionContext {
     }
 }
 
-impl std::ops::Deref for ToolExecutionContext {
-    type Target = ToolCallScope;
-
-    fn deref(&self) -> &Self::Target {
-        &self.scope
-    }
-}
-
-impl std::ops::DerefMut for ToolExecutionContext {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.scope
-    }
-}
-
 /// Build a metadata map from key-value pairs.
 pub fn tool_metadata<const N: usize>(
     entries: [(&str, serde_json::Value); N],
@@ -733,27 +856,6 @@ pub fn tool_metadata<const N: usize>(
         .into_iter()
         .map(|(key, value)| (key.to_string(), value))
         .collect()
-}
-
-impl ToolResult {
-    /// Convenience constructor for a text ToolResult.
-    ///
-    /// When `is_error` is true, `error` is automatically set to a clone of `content`.
-    pub fn text(
-        content: String,
-        is_error: bool,
-        metadata: BTreeMap<String, serde_json::Value>,
-    ) -> Self {
-        let error = is_error.then(|| content.clone());
-        Self {
-            call_id: String::new(),
-            content,
-            is_error,
-            error,
-            metadata,
-            duration_ms: None,
-        }
-    }
 }
 
 impl std::fmt::Debug for ToolCallScope {
@@ -807,17 +909,6 @@ impl std::fmt::Debug for ToolFileServices {
     }
 }
 
-impl std::fmt::Debug for ToolModelAccess {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ToolModelAccess")
-            .field("model_id", &self.model_id)
-            .field("main", &self.main)
-            .field("small", &self.small)
-            .field("tiers", &self.tiers)
-            .finish()
-    }
-}
-
 impl std::fmt::Debug for ToolHostServices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolHostServices")
@@ -848,7 +939,7 @@ pub trait Tool: Send + Sync {
         self.definition().execution_mode
     }
 
-    /// 声明本次调用将访问的资源，供冲突图调度器判定并行性。
+    /// 声明本次调用将访问的资源，供权限策略判断。
     ///
     /// 默认保守返回 [`ResourceAccess::All`]。内置工具应基于参数动态解析路径。
     fn resource_accesses(
@@ -874,12 +965,10 @@ pub trait Tool: Send + Sync {
 
     /// 使用给定参数和调用上下文执行工具。
     ///
-    /// 内置工具通常忽略 `ctx`。扩展工具通过它访问会话状态，
-    /// 并可通过 [`crate::extension::ExtensionToolOutcome::RunSession`]
-    /// 请求创建子会话。
+    /// 内置工具通常只使用自己声明过的窄能力。
     async fn execute(
         &self,
         arguments: serde_json::Value,
         ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError>;
+    ) -> Result<ToolExecutionResult, ToolError>;
 }

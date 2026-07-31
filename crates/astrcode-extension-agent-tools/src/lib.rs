@@ -15,8 +15,6 @@ use astrcode_extension_sdk::{
         Extension, ExtensionCapability, ExtensionError, PromptBuildContext, PromptBuildHandler,
         PromptContributions, Registrar, ToolHandler,
     },
-    render::{RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
-    text::compact_inline,
     tool::{
         CreateSessionRequest, ExecutionMode, SessionAccess, SubmitTurnRequest, ToolDefinition,
         ToolOrigin, ToolResult, tool_metadata,
@@ -139,51 +137,6 @@ const fn default_wait_for_result() -> bool {
     true
 }
 
-fn agent_run_render_spec(args: &AgentArgs, agent_name: &str, resolved_model: &str) -> RenderSpec {
-    let model = resolved_model;
-    let mode_label = if args.wait_for_result {
-        "sync"
-    } else {
-        "async"
-    };
-
-    RenderSpec::Box {
-        title: None,
-        tone: RenderTone::Default,
-        children: vec![
-            RenderSpec::KeyValue {
-                entries: vec![
-                    RenderKeyValue {
-                        key: "task".into(),
-                        value: args.description.clone(),
-                        tone: RenderTone::Accent,
-                    },
-                    RenderKeyValue {
-                        key: "agent".into(),
-                        value: agent_name.into(),
-                        tone: RenderTone::Accent,
-                    },
-                    RenderKeyValue {
-                        key: "model".into(),
-                        value: model.into(),
-                        tone: RenderTone::Muted,
-                    },
-                    RenderKeyValue {
-                        key: "mode".into(),
-                        value: mode_label.into(),
-                        tone: RenderTone::Muted,
-                    },
-                ],
-                tone: RenderTone::Default,
-            },
-            RenderSpec::Text {
-                text: format!("prompt: {}", compact_inline(&args.prompt, 180)),
-                tone: RenderTone::Muted,
-            },
-        ],
-    }
-}
-
 struct AgentToolHandler {
     shared: Arc<AgentShared>,
 }
@@ -195,8 +148,8 @@ impl ToolHandler for AgentToolHandler {
         tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != "agent" {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -227,12 +180,7 @@ impl ToolHandler for AgentToolHandler {
         };
 
         let model_preference = resolve_child_small_model(&ctx.capabilities)?;
-        let model_label = model_preference.as_str();
-
-        // 构造 UI 渲染元数据
-        let render = agent_run_render_spec(&args, &matched.name, model_label);
-        let render_json = serde_json::to_value(&render)
-            .map_err(|e| ExtensionError::Internal(format!("serialize render: {e}")))?;
+        let model_label = model_preference.as_str().to_owned();
 
         // 获取 session_ops
         let session_ops =
@@ -243,7 +191,7 @@ impl ToolHandler for AgentToolHandler {
         // 1. 创建子会话
         let handle = session_ops
             .create_session(
-                ctx.session_id.as_str(),
+                ctx.scope.session_id.as_str(),
                 CreateSessionRequest {
                     name: matched.name.clone(),
                     working_dir: None,
@@ -252,18 +200,19 @@ impl ToolHandler for AgentToolHandler {
                     tool_selection: matched.tool_selection.clone(),
                     source_extension: Some("astrcode-agent-tools".into()),
                     ephemeral: true,
-                    tool_call_id: ctx.tool_call_id.clone().unwrap_or_default(),
+                    tool_call_id: ctx.scope.tool_call_id.clone().unwrap_or_default(),
                 },
             )
             .await
             .map_err(|e| ExtensionError::Internal(format!("create_session: {e}")))?;
 
         // 2. 提交 turn
-        let child_access = SessionAccess::new(ctx.session_id.as_str(), handle.session_id.as_str());
+        let child_access =
+            SessionAccess::new(ctx.scope.session_id.as_str(), handle.session_id.as_str());
         let submit = session_ops
             .submit_turn(
                 SubmitTurnRequest::for_child(
-                    ctx.session_id.as_str(),
+                    ctx.scope.session_id.as_str(),
                     handle.session_id.as_str(),
                     args.prompt,
                 )
@@ -277,7 +226,7 @@ impl ToolHandler for AgentToolHandler {
                     ))
                 })
                 .recycle_on_complete(!args.wait_for_result)
-                .tool_call_id(ctx.tool_call_id.clone()),
+                .tool_call_id(ctx.scope.tool_call_id.clone()),
             )
             .await;
         if let Err(ref e) = submit {
@@ -293,8 +242,10 @@ impl ToolHandler for AgentToolHandler {
 
         // 3. 构造 ToolResult
         let mut metadata = tool_metadata([
-            (UI_RENDER_METADATA_KEY, render_json),
             ("child_session_id", serde_json::json!(handle.session_id)),
+            ("agent_name", serde_json::json!(matched.name)),
+            ("model", serde_json::json!(model_label)),
+            ("wait_for_result", serde_json::json!(args.wait_for_result)),
         ]);
 
         match result {
@@ -308,13 +259,13 @@ impl ToolHandler for AgentToolHandler {
                     );
                 }
                 Ok(ToolResult {
-                    call_id: String::new(),
                     content,
                     is_error: false,
                     error: None,
                     metadata,
                     duration_ms: None,
-                })
+                }
+                .into())
             },
             astrcode_extension_sdk::tool::SubmitTurnResult::Backgrounded {
                 task_id,
@@ -323,7 +274,6 @@ impl ToolHandler for AgentToolHandler {
                 metadata.insert("backgrounded".into(), serde_json::json!(true));
                 metadata.insert("task_id".into(), serde_json::json!(task_id));
                 Ok(ToolResult {
-                    call_id: String::new(),
                     content: format!(
                         "task_id: {task_id}\nstatus: running\nchild_session_id: \
                          {session_id}\nautomatic_notification: true\n\ndescription: \
@@ -336,7 +286,8 @@ impl ToolHandler for AgentToolHandler {
                     error: None,
                     metadata,
                     duration_ms: None,
-                })
+                }
+                .into())
             },
         }
     }
@@ -398,18 +349,13 @@ fn agent_tool_metadata()
 fn resolve_child_small_model(
     caps: &astrcode_extension_sdk::tool::ToolCapabilities,
 ) -> Result<String, ExtensionError> {
-    caps.models
-        .tiers
-        .small
-        .clone()
-        .or_else(|| caps.models.small.clone())
-        .ok_or_else(|| {
-            ExtensionError::Internal(
-                "子 Agent 需要已配置的小模型（activeSmallProfile + \
-                 activeSmallModel）。请在设置中配置 Small LLM 后重试。"
-                    .into(),
-            )
-        })
+    caps.models.tiers.small.clone().ok_or_else(|| {
+        ExtensionError::Internal(
+            "子 Agent 需要已配置的小模型（activeSmallProfile + activeSmallModel）。请在设置中配置 \
+             Small LLM 后重试。"
+                .into(),
+        )
+    })
 }
 
 /// 为子 agent 的 body 追加共享增强内容：环境信息 + 行为规范。
@@ -573,7 +519,10 @@ mod tests {
     fn resolve_child_small_model_always_uses_configured_small_llm() {
         let caps = astrcode_extension_sdk::tool::ToolCapabilities {
             models: astrcode_extension_sdk::tool::ToolModelAccess {
-                small: Some("haiku".into()),
+                tiers: astrcode_extension_sdk::tool::LlmModelIds {
+                    small: Some("haiku".into()),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()

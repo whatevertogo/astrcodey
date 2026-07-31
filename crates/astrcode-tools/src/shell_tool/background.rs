@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
 use astrcode_core::tool::{ToolError, ToolExecutionContext, ToolResult};
-use astrcode_support::{
+use astrcode_extension_sdk::{
     hostpaths::resolve_path,
     shell::{ShellInfo, resolve_shell},
 };
@@ -11,13 +11,10 @@ use super::{
     ShellTool, apply_pipeline_policy, detect_shell_output_diagnostic, insert_pipeline_metadata,
     preprocess_shell_command,
 };
-use crate::{
-    background_shell::{
-        AdoptBackgroundShellParams, BackgroundShellSpawnParams, DEFAULT_STATUS_OUTPUT_MAX_TOKENS,
-        adopt_running_shell, prepare_background_shell_output, spawn_background_shell,
-        wait_background_shell,
-    },
-    files::tool_call_id,
+use crate::background_shell::{
+    AdoptBackgroundShellParams, BackgroundShellSpawnParams, DEFAULT_STATUS_OUTPUT_MAX_TOKENS,
+    adopt_running_shell, prepare_background_shell_output, spawn_background_shell,
+    wait_background_shell,
 };
 
 impl ShellTool {
@@ -62,7 +59,7 @@ impl ShellTool {
 
         let adopted = adopt_running_shell(
             AdoptBackgroundShellParams {
-                session_id: ctx.session_id.to_string(),
+                session_id: ctx.scope.session_id.to_string(),
                 timeout_secs: remaining_timeout,
                 shell_id: shell_id.clone(),
                 output_path: output_path.clone(),
@@ -115,7 +112,6 @@ impl ShellTool {
             meta.insert("intent".into(), serde_json::json!(intent));
         }
         Ok(ToolResult {
-            call_id: tool_call_id(ctx),
             content,
             is_error: false,
             error: None,
@@ -147,7 +143,7 @@ impl ShellTool {
         let (command, pipeline_semantics) =
             apply_pipeline_policy(&shell, &command).map_err(ToolError::InvalidArguments)?;
         let spawned = spawn_background_shell(BackgroundShellSpawnParams {
-            session_id: ctx.session_id.to_string(),
+            session_id: ctx.scope.session_id.to_string(),
             command,
             intent: args.intent.clone(),
             cwd,
@@ -176,7 +172,6 @@ impl ShellTool {
             meta.insert("intent".into(), serde_json::json!(intent));
         }
         Ok(ToolResult {
-            call_id: tool_call_id(ctx),
             content,
             is_error: false,
             error: None,
@@ -191,14 +186,11 @@ pub(super) async fn execute_background_shell_wait(
     block_until_ms: u64,
     max_output_tokens: Option<usize>,
     started_at: Instant,
-    ctx: &ToolExecutionContext,
 ) -> Result<ToolResult, ToolError> {
     let status = match wait_background_shell(shell_id, block_until_ms, max_output_tokens).await {
         Ok(status) => status,
         Err(ToolError::InvalidArguments(message)) if is_unknown_background_shell(&message) => {
-            return Ok(stale_background_shell_result(
-                shell_id, message, started_at, ctx,
-            ));
+            return Ok(stale_background_shell_result(shell_id, message, started_at));
         },
         Err(error) => return Err(error),
     };
@@ -308,7 +300,6 @@ pub(super) async fn execute_background_shell_wait(
         );
     }
     Ok(ToolResult {
-        call_id: tool_call_id(ctx),
         content,
         is_error,
         error: if let Some(diagnostic) = diagnostic {
@@ -329,7 +320,6 @@ fn stale_background_shell_result(
     shell_id: &str,
     message: String,
     started_at: Instant,
-    ctx: &ToolExecutionContext,
 ) -> ToolResult {
     let content = format!(
         "Shell {shell_id} is not active in this server process.\nStatus: \
@@ -358,7 +348,6 @@ fn stale_background_shell_result(
     meta.insert("staleShellId".into(), serde_json::json!(true));
     meta.insert("diagnostic".into(), serde_json::json!(message));
     ToolResult {
-        call_id: tool_call_id(ctx),
         content,
         is_error: false,
         error: None,

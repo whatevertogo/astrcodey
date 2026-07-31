@@ -1,7 +1,7 @@
 //! Host capability 的类型化标识与单一元数据注册表。
 
-use astrcode_core::extension::ExtensionCapability;
 use astrcode_extension_sdk::{
+    extension::ExtensionCapability,
     s5r::{CapabilityDescriptor, ErrorPayload},
     session::{
         HostCreateSessionOutput, HostCreateSessionRequest, HostSubmitTurnOutput,

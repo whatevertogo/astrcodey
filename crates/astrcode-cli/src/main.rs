@@ -16,7 +16,7 @@ use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 
 use astrcode_core::permission::ApprovalMode;
 use astrcode_protocol::framing::PROTOCOL_VERSION;
-use astrcode_server::bootstrap::{BootstrapOptions, ServerRuntime};
+use astrcode_server::bootstrap::{BootstrapOptions, ServerApp};
 use clap::{Parser, Subcommand};
 
 fn cli_approval_bootstrap_opts(yolo: bool, manual: bool) -> BootstrapOptions {
@@ -30,6 +30,7 @@ fn cli_approval_bootstrap_opts(yolo: bool, manual: bool) -> BootstrapOptions {
     BootstrapOptions {
         default_approval_mode_if_unset: Some(ApprovalMode::Yolo),
         approval_mode_override,
+        disabled_extension_ids: std::collections::BTreeSet::from(["astrcode-ask-user".into()]),
         ..Default::default()
     }
 }
@@ -187,8 +188,12 @@ enum Commands {
         /// 保留临时工作目录
         #[arg(long)]
         keep_workdir: bool,
-        /// 存储根目录（eval 数据隔离，默认 tempdir）
-        #[arg(long)]
+        /// 已运行 server 的 Astrcode 数据目录（用于定位 run.json）
+        #[arg(
+            long,
+            conflicts_with = "server_addr",
+            conflicts_with = "swe_instance_solver_binary"
+        )]
         storage: Option<std::path::PathBuf>,
         /// 服务器地址（若已有运行中的 server）
         #[arg(long)]
@@ -253,9 +258,13 @@ enum Commands {
 }
 
 /// 程序入口：解析命令行参数并分发到对应子命令处理函数。
-async fn bootstrap_runtime() -> Arc<ServerRuntime> {
+async fn bootstrap_server_app() -> Arc<ServerApp> {
     match astrcode_server::bootstrap::bootstrap().await {
-        Ok(rt) => Arc::new(rt),
+        Ok(runtime) => {
+            let app = ServerApp::new(Arc::new(runtime));
+            app.initialize().await;
+            app
+        },
         Err(e) => {
             tracing::error!("Bootstrap failed: {e}");
             std::process::exit(1);
@@ -324,15 +333,15 @@ async fn main() -> ExitCode {
             }
         },
         Commands::Server { addr } => {
-            let runtime = bootstrap_runtime().await;
-            if let Err(e) = astrcode_server::http::run_http_server(runtime, addr).await {
+            let server_app = bootstrap_server_app().await;
+            if let Err(e) = astrcode_server::http::run_http_server(server_app, addr).await {
                 tracing::error!("Server failed: {e}");
                 return ExitCode::from(1);
             }
         },
         Commands::Acp => {
-            let runtime = bootstrap_runtime().await;
-            if let Err(e) = astrcode_server::acp::run_acp_server(runtime).await {
+            let server_app = bootstrap_server_app().await;
+            if let Err(e) = astrcode_server::acp::run_acp_server(server_app).await {
                 tracing::error!("ACP server failed: {e}");
                 return ExitCode::from(1);
             }

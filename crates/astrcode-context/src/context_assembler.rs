@@ -1,201 +1,56 @@
-use std::future::Future;
-
-use astrcode_core::{
-    context::{
-        CompactError, CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
-        CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput, PrepareMessagesOptions,
-        PreparedCompaction, PreparedContext,
-    },
-    llm::{LlmMessage, ModelLimits},
-};
+use astrcode_core::llm::{LlmMessage, ModelLimits, provider_visible_messages};
 
 use crate::{
     ContextSettings,
-    compaction::{
-        CompactExecution, CompactSkipReason, compact_messages_deterministic,
-        compact_messages_with_fallback,
-    },
     token_budget::{
-        build_prompt_snapshot, estimate_turn_growth, should_compact, should_compact_predictive,
+        PromptTokenSnapshot, build_prompt_snapshot, estimate_turn_growth, should_compact,
+        should_compact_predictive,
     },
 };
 
-/// LLM 上下文组装门面。
+/// 一次 provider request 的上下文准备输入。
 ///
-/// 它负责 token gate 与 compact pipeline；不持有 provider/model limits，
-/// 避免模型切换后沿用旧窗口。
+/// `model_limits` 由调用方按请求传入，避免切换模型后沿用旧窗口。
+#[derive(Debug, Clone)]
+pub struct ContextPrepareInput<'a> {
+    /// 不包含 system prompt 的可见对话消息。
+    pub messages: Vec<LlmMessage>,
+    /// 已组装好的 system prompt，仅参与 token 估算。
+    pub system_prompt: Option<&'a str>,
+    pub model_limits: ModelLimits,
+    /// provider 返回的 input token 统计；缺失时回退本地估算。
+    pub provider_input_tokens: Option<usize>,
+}
+
+/// 经过 provider 协议归一化的可见消息及其 token 快照。
+#[derive(Debug, Clone)]
+pub struct PreparedContext {
+    pub messages: Vec<LlmMessage>,
+    pub token_snapshot: PromptTokenSnapshot,
+}
+
+/// provider-ready 上下文组装边界。
+///
+/// Compact 是独立的 transcript 重写事务，不属于普通 request prepare。
+pub trait ContextAssembler: Send + Sync {
+    fn settings(&self) -> &ContextSettings;
+
+    fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext;
+
+    fn should_auto_compact(&self, input: &ContextPrepareInput<'_>) -> bool;
+
+    fn auto_compact_enabled(&self) -> bool {
+        self.settings().auto_compact_enabled
+    }
+}
+
 pub struct LlmContextAssembler {
     settings: ContextSettings,
 }
 
 impl LlmContextAssembler {
-    /// 创建上下文组装器；settings 是稳定策略，模型窗口由每次 request 输入提供。
     pub fn new(settings: ContextSettings) -> Self {
         Self { settings }
-    }
-
-    /// 在需要时执行 compact，返回新的可见消息窗口。
-    pub async fn compact_if_needed<F, Fut>(
-        &self,
-        messages: Vec<LlmMessage>,
-        system_prompt: Option<&str>,
-        custom_instructions: &[String],
-        render_options: CompactSummaryRenderOptions,
-        options: CompactMessagesOptions,
-        request_text: F,
-    ) -> CompactIfNeededOutcome
-    where
-        F: FnMut(Vec<LlmMessage>) -> Fut,
-        Fut: Future<Output = Result<String, CompactError>>,
-    {
-        if !options.run {
-            return CompactIfNeededOutcome::NotRun { messages };
-        }
-
-        let keep_recent_turns = options
-            .keep_recent_turns
-            .or(self.settings.compact_keep_recent_turns);
-
-        let execution = if options.use_llm {
-            compact_messages_with_fallback(
-                &messages,
-                system_prompt,
-                &self.settings,
-                custom_instructions,
-                &render_options,
-                keep_recent_turns,
-                request_text,
-            )
-            .await
-        } else {
-            compact_messages_deterministic(
-                &messages,
-                system_prompt,
-                &render_options,
-                keep_recent_turns,
-            )
-        };
-
-        match execution {
-            Ok(compaction) => {
-                let PreparedCompaction {
-                    result,
-                    llm_api_failed,
-                } = prepared_compaction_from_execution(compaction);
-                let messages = [
-                    result.context_messages.clone(),
-                    result.retained_messages.clone(),
-                ]
-                .concat();
-                CompactIfNeededOutcome::Applied {
-                    messages,
-                    compaction: PreparedCompaction {
-                        result,
-                        llm_api_failed,
-                    },
-                }
-            },
-            Err(CompactSkipReason::Empty | CompactSkipReason::NothingToCompact) => {
-                CompactIfNeededOutcome::Skipped { messages }
-            },
-        }
-    }
-
-    /// 准备 provider 可见消息；达到阈值时先尝试 LLM compact，失败降级到 deterministic。
-    pub async fn prepare_messages_with_llm<F, Fut>(
-        &self,
-        input: ContextPrepareInput<'_>,
-        options: PrepareMessagesOptions,
-        request_text: F,
-    ) -> PreparedContext
-    where
-        F: FnMut(Vec<LlmMessage>) -> Fut,
-        Fut: Future<Output = Result<String, CompactError>>,
-    {
-        let snapshot = self.snapshot(
-            &input.messages,
-            input.system_prompt,
-            input.model_limits.clone(),
-            input.provider_input_tokens,
-        );
-        let threshold_met = should_compact(snapshot)
-            || (self.settings.predictive_compact_enabled
-                && should_compact_predictive(
-                    snapshot,
-                    estimate_turn_growth(
-                        &input.messages,
-                        self.settings.predictive_compact_baseline_growth_tokens,
-                    ),
-                    input.model_limits.clone(),
-                ));
-        let render_options = CompactSummaryRenderOptions {
-            custom_instructions: input.custom_instructions.clone(),
-            ..Default::default()
-        };
-        let compact_options = CompactMessagesOptions {
-            run: options.force_compact || (options.run_compact && threshold_met),
-            use_llm: options.use_llm_for_compact,
-            keep_recent_turns: options.keep_recent_turns,
-        };
-
-        match self
-            .compact_if_needed(
-                input.messages,
-                input.system_prompt,
-                &input.custom_instructions,
-                render_options,
-                compact_options,
-                request_text,
-            )
-            .await
-        {
-            CompactIfNeededOutcome::NotRun { messages }
-            | CompactIfNeededOutcome::Skipped { messages } => PreparedContext {
-                messages,
-                compaction: None,
-            },
-            CompactIfNeededOutcome::Applied {
-                messages,
-                compaction,
-            } => PreparedContext {
-                messages,
-                compaction: Some(compaction),
-            },
-        }
-    }
-
-    pub fn auto_compact_enabled(&self) -> bool {
-        self.settings.auto_compact_enabled
-    }
-
-    pub fn settings(&self) -> &ContextSettings {
-        &self.settings
-    }
-
-    pub fn prompt_snapshot(
-        &self,
-        input: &ContextPrepareInput<'_>,
-    ) -> crate::token_budget::PromptTokenSnapshot {
-        self.snapshot(
-            &input.messages,
-            input.system_prompt,
-            input.model_limits.clone(),
-            input.provider_input_tokens,
-        )
-    }
-
-    pub fn should_auto_compact(&self, input: &ContextPrepareInput<'_>) -> bool {
-        let snapshot = self.prompt_snapshot(input);
-        should_compact(snapshot)
-            || (self.settings.predictive_compact_enabled
-                && should_compact_predictive(
-                    snapshot,
-                    estimate_turn_growth(
-                        &input.messages,
-                        self.settings.predictive_compact_baseline_growth_tokens,
-                    ),
-                    input.model_limits.clone(),
-                ))
     }
 
     fn snapshot(
@@ -204,7 +59,7 @@ impl LlmContextAssembler {
         system_prompt: Option<&str>,
         model_limits: ModelLimits,
         provider_input_tokens: Option<usize>,
-    ) -> crate::token_budget::PromptTokenSnapshot {
+    ) -> PromptTokenSnapshot {
         let mut snapshot = build_prompt_snapshot(
             messages,
             system_prompt,
@@ -218,164 +73,98 @@ impl LlmContextAssembler {
     }
 }
 
-#[async_trait::async_trait]
 impl ContextAssembler for LlmContextAssembler {
     fn settings(&self) -> &ContextSettings {
-        self.settings()
+        &self.settings
+    }
+
+    fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
+        let messages = provider_visible_messages(input.messages);
+        let token_snapshot = self.snapshot(
+            &messages,
+            input.system_prompt,
+            input.model_limits,
+            input.provider_input_tokens,
+        );
+        PreparedContext {
+            messages,
+            token_snapshot,
+        }
     }
 
     fn should_auto_compact(&self, input: &ContextPrepareInput<'_>) -> bool {
-        self.should_auto_compact(input)
-    }
-
-    async fn compact_if_needed(
-        &self,
-        messages: Vec<LlmMessage>,
-        system_prompt: Option<&str>,
-        custom_instructions: &[String],
-        render_options: CompactSummaryRenderOptions,
-        options: CompactMessagesOptions,
-        request_text: CompactRequestFn,
-    ) -> CompactIfNeededOutcome {
-        LlmContextAssembler::compact_if_needed(
-            self,
-            messages,
-            system_prompt,
-            custom_instructions,
-            render_options,
-            options,
-            request_text,
-        )
-        .await
-    }
-}
-
-fn prepared_compaction_from_execution(compaction: CompactExecution) -> PreparedCompaction {
-    PreparedCompaction {
-        result: compaction.result,
-        llm_api_failed: compaction.llm_api_failed,
+        let snapshot = self.snapshot(
+            &input.messages,
+            input.system_prompt,
+            input.model_limits.clone(),
+            input.provider_input_tokens,
+        );
+        should_compact(snapshot)
+            || (self.settings.predictive_compact_enabled
+                && should_compact_predictive(
+                    snapshot,
+                    estimate_turn_growth(
+                        &input.messages,
+                        self.settings.predictive_compact_baseline_growth_tokens,
+                    ),
+                    input.model_limits.clone(),
+                ))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::llm::LlmRole;
+    use astrcode_core::llm::{LlmRole, ModelLimits};
 
     use super::*;
 
-    #[tokio::test]
-    async fn prepare_messages_with_llm_uses_current_model_limits_each_call() {
+    #[test]
+    fn prepares_provider_messages_and_uses_current_token_source() {
         let assembler = LlmContextAssembler::new(ContextSettings::default());
-        let messages = vec![
-            LlmMessage::user("old user ".repeat(400)),
-            LlmMessage::assistant("old answer ".repeat(400)),
-            LlmMessage::user("current"),
-        ];
+        let input = ContextPrepareInput {
+            messages: vec![
+                LlmMessage::system("stale"),
+                LlmMessage::user("hello"),
+                LlmMessage::assistant("world"),
+            ],
+            system_prompt: Some("current system"),
+            model_limits: ModelLimits {
+                max_input_tokens: 10_000,
+                max_output_tokens: 1_024,
+            },
+            provider_input_tokens: Some(4_200),
+        };
 
-        let large_window = assembler
-            .prepare_messages_with_llm(
-                ContextPrepareInput {
-                    messages: messages.clone(),
-                    system_prompt: None,
-                    model_limits: ModelLimits {
-                        max_input_tokens: 200_000,
-                        max_output_tokens: 1024,
-                    },
-                    provider_input_tokens: None,
-                    custom_instructions: Vec::new(),
-                },
-                PrepareMessagesOptions {
-                    run_compact: true,
-                    use_llm_for_compact: true,
-                    force_compact: false,
-                    keep_recent_turns: None,
-                },
-                |_msgs| async {
-                    Err(CompactError::Llm(astrcode_core::llm::LlmError::Transport(
-                        "test".into(),
-                    )))
-                },
-            )
-            .await;
-        let small_window = assembler
-            .prepare_messages_with_llm(
-                ContextPrepareInput {
-                    messages,
-                    system_prompt: None,
-                    model_limits: ModelLimits {
-                        max_input_tokens: 100,
-                        max_output_tokens: 1024,
-                    },
-                    provider_input_tokens: None,
-                    custom_instructions: Vec::new(),
-                },
-                PrepareMessagesOptions {
-                    run_compact: true,
-                    use_llm_for_compact: true,
-                    force_compact: false,
-                    keep_recent_turns: None,
-                },
-                |_msgs| async {
-                    Err(CompactError::Llm(astrcode_core::llm::LlmError::Transport(
-                        "test".into(),
-                    )))
-                },
-            )
-            .await;
+        let prepared = assembler.prepare_messages(input);
 
-        assert!(large_window.compaction.is_none());
-        assert!(small_window.compaction.is_some());
-        assert!(small_window.messages.first().is_some_and(|message| {
-            message.role == LlmRole::User
-                && message
-                    .content
-                    .iter()
-                    .filter_map(astrcode_core::llm::LlmContent::as_text)
-                    .any(|text| text.contains("<compact_summary>"))
-        }));
+        assert_eq!(prepared.token_snapshot.context_tokens, 4_200);
+        assert!(
+            prepared
+                .messages
+                .iter()
+                .any(|message| message.role == LlmRole::User)
+        );
     }
 
     #[test]
-    fn prompt_snapshot_uses_provider_input_tokens_when_available() {
-        let assembler = LlmContextAssembler::new(ContextSettings::default());
-        let snapshot = assembler.prompt_snapshot(&ContextPrepareInput {
-            messages: vec![LlmMessage::user("short")],
-            system_prompt: None,
-            model_limits: ModelLimits {
-                max_input_tokens: 10_000,
-                max_output_tokens: 1024,
-            },
-            provider_input_tokens: Some(4_200),
-            custom_instructions: Vec::new(),
-        });
-
-        assert_eq!(snapshot.context_tokens, 4_200);
-    }
-
-    #[tokio::test]
-    async fn compact_if_needed_runs_deterministic_when_llm_disabled() {
+    fn auto_compact_uses_limits_from_each_request() {
         let assembler = LlmContextAssembler::new(ContextSettings::default());
         let messages = vec![
             LlmMessage::user("old user ".repeat(400)),
             LlmMessage::assistant("old answer ".repeat(400)),
             LlmMessage::user("current"),
         ];
+        let input = |max_input_tokens| ContextPrepareInput {
+            messages: messages.clone(),
+            system_prompt: None,
+            model_limits: ModelLimits {
+                max_input_tokens,
+                max_output_tokens: 1_024,
+            },
+            provider_input_tokens: None,
+        };
 
-        let outcome = assembler
-            .compact_if_needed(
-                messages,
-                None,
-                &[],
-                CompactSummaryRenderOptions::default(),
-                CompactMessagesOptions {
-                    run: true,
-                    use_llm: false,
-                    keep_recent_turns: None,
-                },
-                |_msgs| async { panic!("deterministic compact must not call LLM request_fn") },
-            )
-            .await;
-
-        assert!(matches!(outcome, CompactIfNeededOutcome::Applied { .. }));
+        assert!(!assembler.should_auto_compact(&input(200_000)));
+        assert!(assembler.should_auto_compact(&input(100)));
     }
 }

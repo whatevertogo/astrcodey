@@ -1,10 +1,10 @@
 use std::path::Path;
 
-use astrcode_core::permission::{PermissionContext, PermissionDecision, PermissionPolicy};
+use astrcode_extension_sdk::hostpaths::is_path_within;
 
-use super::paths::extract_tool_paths;
+use super::{PermissionContext, PermissionDecision, PermissionPolicy, paths::extract_tool_paths};
 
-pub struct GitCwdWriteApprovePolicy;
+pub(super) struct GitCwdWriteApprovePolicy;
 
 impl PermissionPolicy for GitCwdWriteApprovePolicy {
     fn priority(&self) -> u32 {
@@ -21,7 +21,7 @@ impl PermissionPolicy for GitCwdWriteApprovePolicy {
         }
         let all_in_cwd = paths.iter().all(|p| {
             let resolved = resolve_relative(ctx.working_dir, p);
-            is_within(resolved.as_path(), ctx.working_dir)
+            is_path_within(&resolved, ctx.working_dir)
         });
         if all_in_cwd {
             PermissionDecision::Allow
@@ -39,13 +39,9 @@ fn resolve_relative(working_dir: &Path, raw: &Path) -> std::path::PathBuf {
     }
 }
 
-fn is_within(path: &Path, working_dir: &Path) -> bool {
-    astrcode_support::hostpaths::is_path_within(path, working_dir)
-}
-
 #[cfg(test)]
 mod tests {
-    use astrcode_core::permission::{ApprovalMode, PermissionContext};
+    use astrcode_core::permission::ApprovalMode;
 
     use super::*;
 
@@ -58,7 +54,6 @@ mod tests {
             working_dir: std::path::Path::new("/project"),
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
-            session_id: "s",
             tool_selection: None,
         };
         assert_eq!(

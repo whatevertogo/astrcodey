@@ -3,7 +3,7 @@ name = "astrcode-storage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Session persistence: JSONL event log, snapshots, file locking, config storage"
+description = "Session persistence: JSONL event log, snapshots, config storage"
 
 [features]
 # 启用纯内存事件存储实现，用于集成测试和测试辅助启动路径。
@@ -12,13 +12,13 @@ testing = []
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
-astrcode-support = { path = "../astrcode-support" }
+astrcode-session-projection = { path = "../astrcode-session-projection" }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+thiserror = { workspace = true }
 toml = { workspace = true }
 async-trait = { workspace = true }
-thiserror = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }

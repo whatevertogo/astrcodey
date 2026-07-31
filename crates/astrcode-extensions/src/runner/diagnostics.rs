@@ -60,10 +60,21 @@ impl ExtensionHealthReport {
 impl ExtensionRunner {
     /// 主动采样已运行扩展的健康状态，不创建后台轮询任务。
     pub async fn check_health(&self) -> Vec<ExtensionHealthReport> {
-        let extensions = self.extensions.read().await.clone();
+        let extensions = self
+            .registry
+            .extensions
+            .read()
+            .await
+            .iter()
+            .map(|hosted| {
+                (
+                    hosted.manifest.id.clone(),
+                    std::sync::Arc::clone(&hosted.extension),
+                )
+            })
+            .collect::<Vec<_>>();
         let mut reports = Vec::with_capacity(extensions.len());
-        for extension in extensions {
-            let extension_id = extension.id().to_string();
+        for (extension_id, extension) in extensions {
             let error = self
                 .run_with_timeout(extension.health())
                 .await

@@ -8,12 +8,9 @@ use std::{
 
 use astrcode_extension_sdk::{
     extension::{
-        Extension, ExtensionError, HookMode, PostToolUseContext, PostToolUseHandler,
-        PostToolUseResult, ProviderContext, ProviderEvent, ProviderHandler, ProviderResult,
-        Registrar, ToolHandler,
-    },
-    render::{
-        RenderKeyValue, RenderSpec, RenderTone, UI_RENDER_METADATA_KEY, UI_SUMMARY_METADATA_KEY,
+        Extension, ExtensionCapability, ExtensionError, HookMode, PostToolUseContext,
+        PostToolUseHandler, PostToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
+        ProviderResult, Registrar, ToolHandler,
     },
     state,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
@@ -55,6 +52,13 @@ impl Extension for TodoToolExtension {
         "astrcode-todo-tool"
     }
 
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[
+            ExtensionCapability::ProviderRequest,
+            ExtensionCapability::ToolIntercept,
+        ]
+    }
+
     fn register(&self, reg: &mut Registrar) {
         reg.tool(todo_write_tool_definition(), Arc::new(TodoWriteToolHandler));
         reg.tool_metadata(todo_write_metadata());
@@ -77,8 +81,8 @@ impl ToolHandler for TodoWriteToolHandler {
         tool_name: &str,
         arguments: Value,
         _working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != TODO_WRITE_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -96,7 +100,8 @@ impl ToolHandler for TodoWriteToolHandler {
                 let meta = tool_metadata([("error", json!(&error))]);
                 ToolResult::text(error, true, meta)
             },
-        })
+        }
+        .into())
     }
 }
 
@@ -406,9 +411,6 @@ fn handle_todo_write(arguments: Value, store: &ProgressListStore) -> Result<Tool
         );
     }
 
-    let ui_render = build_todo_render_spec(&outcome.new_todos);
-    let ui_summary = build_todo_summary(&outcome.new_todos);
-
     Ok(ToolResult::text(
         content,
         false,
@@ -419,106 +421,8 @@ fn handle_todo_write(arguments: Value, store: &ProgressListStore) -> Result<Tool
                 "verificationNudgeNeeded",
                 json!(outcome.verification_nudge_needed),
             ),
-            (UI_RENDER_METADATA_KEY, json!(ui_render)),
-            (UI_SUMMARY_METADATA_KEY, json!(ui_summary)),
         ]),
     ))
-}
-
-/// Build a structured [`RenderSpec`] for the current todo list.
-fn build_todo_render_spec(items: &[ProgressItem]) -> RenderSpec {
-    let mut pending = 0u32;
-    let mut in_progress = 0u32;
-    let mut completed = 0u32;
-    for item in items {
-        match item.status {
-            ProgressStatus::Pending => pending += 1,
-            ProgressStatus::InProgress => in_progress += 1,
-            ProgressStatus::Completed => completed += 1,
-        }
-    }
-
-    let progress_items: Vec<RenderSpec> = items
-        .iter()
-        .map(|item| {
-            let (tone, value, status_text) = match item.status {
-                ProgressStatus::Completed => (RenderTone::Success, 1.0_f32, "已完成"),
-                ProgressStatus::InProgress => (RenderTone::Accent, 0.5, "进行中"),
-                ProgressStatus::Pending => (RenderTone::Muted, 0.0, "待处理"),
-            };
-            RenderSpec::Progress {
-                label: item.content.clone(),
-                status: Some(status_text.to_string()),
-                value: Some(value),
-                tone,
-            }
-        })
-        .collect();
-
-    RenderSpec::Box {
-        title: Some("Todo List".into()),
-        tone: RenderTone::Default,
-        children: vec![
-            RenderSpec::KeyValue {
-                entries: vec![
-                    RenderKeyValue {
-                        key: "总计".into(),
-                        value: items.len().to_string(),
-                        tone: RenderTone::Default,
-                    },
-                    RenderKeyValue {
-                        key: "待处理".into(),
-                        value: pending.to_string(),
-                        tone: RenderTone::Default,
-                    },
-                    RenderKeyValue {
-                        key: "进行中".into(),
-                        value: in_progress.to_string(),
-                        tone: RenderTone::Accent,
-                    },
-                    RenderKeyValue {
-                        key: "已完成".into(),
-                        value: completed.to_string(),
-                        tone: RenderTone::Success,
-                    },
-                ],
-                tone: RenderTone::Default,
-            },
-            RenderSpec::List {
-                ordered: false,
-                items: progress_items,
-                tone: RenderTone::Default,
-            },
-        ],
-    }
-}
-
-/// Build a compact summary line for the collapsed tool call display.
-fn build_todo_summary(items: &[ProgressItem]) -> String {
-    if items.is_empty() {
-        return "todoWrite · no items".into();
-    }
-    let mut pending = 0u32;
-    let mut in_progress = 0u32;
-    let mut completed = 0u32;
-    for item in items {
-        match item.status {
-            ProgressStatus::Pending => pending += 1,
-            ProgressStatus::InProgress => in_progress += 1,
-            ProgressStatus::Completed => completed += 1,
-        }
-    }
-    let mut parts = vec!["todoWrite".to_string()];
-    if pending > 0 {
-        parts.push(format!("{} pending", pending));
-    }
-    if in_progress > 0 {
-        parts.push(format!("{} in-progress", in_progress));
-    }
-    if completed > 0 {
-        parts.push(format!("{} done", completed));
-    }
-    parts.join(" · ")
 }
 
 fn validate_items(items: &[ProgressItem]) -> Result<(), String> {

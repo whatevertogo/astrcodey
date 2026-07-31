@@ -2,20 +2,19 @@
 //!
 //! Session 事件按 conversation 分发，非事件通知走全局通道。
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
-    event::{Event, EventPayload},
+    event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase},
     types::{MessageId, SessionId},
 };
 use astrcode_protocol::events::ClientNotification;
-use astrcode_session::Session;
-use astrcode_support::event_fanout::EventFanout;
+use astrcode_session::SessionEventObserver;
+use astrcode_session_projection::SessionReadModel;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
+
+use crate::protocol_mapping::session_snapshot;
 
 pub(crate) struct StreamingSnapshot {
     pub message_id: String,
@@ -25,45 +24,67 @@ pub(crate) struct StreamingSnapshot {
 
 type StreamingState = parking_lot::Mutex<Option<(MessageId, String, String)>>;
 
+#[derive(Clone)]
+enum SessionRoute {
+    Conversation(SessionId),
+    AgentChild(SessionId),
+}
+
+impl SessionRoute {
+    fn root_session_id(&self) -> &SessionId {
+        match self {
+            Self::Conversation(session_id) | Self::AgentChild(session_id) => session_id,
+        }
+    }
+
+    fn forwards_to_root(&self, payload: &EventPayload) -> bool {
+        match self {
+            Self::Conversation(_) => true,
+            Self::AgentChild(_) => agent_session_progress(payload).is_some(),
+        }
+    }
+}
+
 pub struct ServerEventBus {
-    legacy_tx: Option<Arc<EventFanout<ClientNotification>>>,
-    global_notifications: Arc<EventFanout<ClientNotification>>,
-    conversation_events: Mutex<HashMap<SessionId, Arc<EventFanout<Arc<Event>>>>>,
-    session_roots: Mutex<HashMap<SessionId, SessionId>>,
-    attached: Mutex<HashSet<SessionId>>,
+    all_notifications: broadcast::Sender<ClientNotification>,
+    global_notifications: broadcast::Sender<ClientNotification>,
+    conversation_events: Mutex<HashMap<SessionId, broadcast::Sender<Arc<Event>>>>,
+    session_routes: Mutex<HashMap<SessionId, SessionRoute>>,
     streaming: Mutex<HashMap<SessionId, Arc<StreamingState>>>,
 }
 
 impl ServerEventBus {
-    const EVENT_FANOUT_CAPACITY: usize = 1024;
+    const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
     pub fn new() -> Self {
-        Self::new_with_legacy_tx(None)
-    }
-
-    pub fn with_legacy_tx(legacy_tx: Arc<EventFanout<ClientNotification>>) -> Self {
-        Self::new_with_legacy_tx(Some(legacy_tx))
-    }
-
-    fn new_with_legacy_tx(legacy_tx: Option<Arc<EventFanout<ClientNotification>>>) -> Self {
+        let (all_notifications, _) = broadcast::channel(Self::EVENT_CHANNEL_CAPACITY);
+        let (global_notifications, _) = broadcast::channel(Self::EVENT_CHANNEL_CAPACITY);
         Self {
-            legacy_tx,
-            global_notifications: Arc::new(EventFanout::new(Self::EVENT_FANOUT_CAPACITY)),
+            all_notifications,
+            global_notifications,
             conversation_events: Mutex::new(HashMap::new()),
-            session_roots: Mutex::new(HashMap::new()),
-            attached: Mutex::new(HashSet::new()),
+            session_routes: Mutex::new(HashMap::new()),
             streaming: Mutex::new(HashMap::new()),
         }
     }
 
-    pub fn subscribe_global_notifications(&self) -> mpsc::Receiver<ClientNotification> {
+    /// Subscribe to the complete transport-facing notification stream.
+    ///
+    /// Unlike [`Self::subscribe_global_notifications`], this includes session
+    /// events and is intended for transports such as stdio/TUI that expose one
+    /// process-wide notification channel.
+    pub fn subscribe_all_notifications(&self) -> broadcast::Receiver<ClientNotification> {
+        self.all_notifications.subscribe()
+    }
+
+    pub fn subscribe_global_notifications(&self) -> broadcast::Receiver<ClientNotification> {
         self.global_notifications.subscribe()
     }
 
     pub fn subscribe_conversation_events(
         &self,
         session_id: &SessionId,
-    ) -> mpsc::Receiver<Arc<Event>> {
+    ) -> broadcast::Receiver<Arc<Event>> {
         self.conversation_fanout(session_id).subscribe()
     }
 
@@ -76,75 +97,74 @@ impl ServerEventBus {
             return;
         }
 
-        let mut roots = self.session_roots.lock();
-        roots
+        let mut routes = self.session_routes.lock();
+        routes
             .entry(conversation_session_id.clone())
-            .or_insert_with(|| conversation_session_id.clone());
+            .or_insert_with(|| SessionRoute::Conversation(conversation_session_id.clone()));
         for (initial_child_id, leaf_child_id) in child_sessions {
-            roots.insert(initial_child_id.clone(), conversation_session_id.clone());
-            roots.insert(leaf_child_id.clone(), conversation_session_id.clone());
+            let route = SessionRoute::AgentChild(conversation_session_id.clone());
+            routes.insert(initial_child_id.clone(), route.clone());
+            routes.insert(leaf_child_id.clone(), route);
         }
+    }
+
+    pub(crate) fn send_session_resumed(&self, state: &SessionReadModel) {
+        self.send_notification(ClientNotification::SessionResumed {
+            session_id: state.identity.session_id.to_string(),
+            snapshot: session_snapshot(state),
+        });
+    }
+
+    pub(crate) fn send_status_item_update(&self, id: String, text: String) {
+        self.send_notification(ClientNotification::StatusItemUpdate { id, text });
+    }
+
+    pub(crate) fn send_extension_command_result(
+        &self,
+        command_name: String,
+        content: String,
+        is_error: bool,
+    ) {
+        self.send_notification(ClientNotification::ExtensionCommandResult {
+            command_name,
+            content,
+            is_error,
+        });
     }
 
     pub fn send_notification(&self, notification: ClientNotification) {
         match notification {
             ClientNotification::Event(event) => self.publish_event(Arc::new(event)),
             notification => {
-                self.global_notifications.send(notification.clone());
-                if let Some(legacy_tx) = &self.legacy_tx {
-                    legacy_tx.send(notification);
-                }
+                let _ = self.global_notifications.send(notification.clone());
+                let _ = self.all_notifications.send(notification);
             },
         }
     }
 
     pub fn publish_event(&self, event: Arc<Event>) {
-        let session_deleted = matches!(event.payload, EventPayload::SessionDeleted);
-        let root_session_id = self.conversation_root_for_event(&event);
-        self.remember_event_routes(&event, &root_session_id);
+        let route = self.route_for_event(&event);
+        self.remember_event_route(&event, &route);
         self.update_streaming_snapshot(&event);
         self.send_to_existing_conversation_fanout(&event.session_id, Arc::clone(&event));
-        if root_session_id != event.session_id {
-            self.send_to_existing_conversation_fanout(&root_session_id, Arc::clone(&event));
+        if route.root_session_id() != &event.session_id && route.forwards_to_root(&event.payload) {
+            self.send_to_existing_conversation_fanout(route.root_session_id(), Arc::clone(&event));
         }
-        if let Some(legacy_tx) = &self.legacy_tx {
-            legacy_tx.send(ClientNotification::Event((*event).clone()));
-        }
-        if session_deleted {
-            self.attached.lock().remove(&event.session_id);
-            self.forget_session_routes(&event.session_id);
-        }
-    }
-
-    pub fn attach(self: &Arc<Self>, session: &Session) {
-        self.attach_client_fanout(session);
-    }
-
-    fn attach_client_fanout(self: &Arc<Self>, session: &Session) {
-        let session_id = session.id().clone();
-        if !self.attached.lock().insert(session_id) {
-            return;
-        }
-        let mut rx = session.subscribe();
-        let event_bus = Arc::clone(self);
-        crate::task_utils::spawn_traced("server_event_bus_fanout", async move {
-            while let Some(event) = rx.recv().await {
-                event_bus.publish_event(event);
-            }
-        });
+        let _ = self
+            .all_notifications
+            .send(ClientNotification::Event((*event).clone()));
     }
 
     pub fn detach(&self, session_id: &SessionId) {
-        self.attached.lock().remove(session_id);
         self.forget_session_routes(session_id);
     }
 
     fn forget_session_routes(&self, session_id: &SessionId) {
         self.streaming.lock().remove(session_id);
         self.conversation_events.lock().remove(session_id);
-        self.session_roots
-            .lock()
-            .retain(|session, root| session != session_id && root != session_id);
+        self.session_routes.lock().retain(|session, route| {
+            session != session_id && route.root_session_id() != session_id
+        });
     }
 
     pub(crate) fn streaming_snapshot(&self, session_id: &SessionId) -> Option<StreamingSnapshot> {
@@ -164,75 +184,78 @@ impl ServerEventBus {
         })
     }
 
-    fn conversation_fanout(&self, session_id: &SessionId) -> Arc<EventFanout<Arc<Event>>> {
-        Arc::clone(
-            self.conversation_events
-                .lock()
-                .entry(session_id.clone())
-                .or_insert_with(|| Arc::new(EventFanout::new(Self::EVENT_FANOUT_CAPACITY))),
-        )
+    fn conversation_fanout(&self, session_id: &SessionId) -> broadcast::Sender<Arc<Event>> {
+        self.conversation_events
+            .lock()
+            .entry(session_id.clone())
+            .or_insert_with(|| broadcast::channel(Self::EVENT_CHANNEL_CAPACITY).0)
+            .clone()
     }
 
     fn existing_conversation_fanout(
         &self,
         session_id: &SessionId,
-    ) -> Option<Arc<EventFanout<Arc<Event>>>> {
-        self.conversation_events
-            .lock()
-            .get(session_id)
-            .map(Arc::clone)
+    ) -> Option<broadcast::Sender<Arc<Event>>> {
+        self.conversation_events.lock().get(session_id).cloned()
     }
 
     fn send_to_existing_conversation_fanout(&self, session_id: &SessionId, event: Arc<Event>) {
         if let Some(fanout) = self.existing_conversation_fanout(session_id) {
-            fanout.send(event);
+            let _ = fanout.send(event);
         }
     }
 
-    fn conversation_root_for_event(&self, event: &Event) -> SessionId {
+    fn route_for_event(&self, event: &Event) -> SessionRoute {
         match &event.payload {
-            EventPayload::SessionStarted {
-                parent_session_id: Some(parent_session_id),
-                ..
-            }
-            | EventPayload::SessionContinuedFromCompaction {
-                parent_session_id, ..
-            } => self.session_root(parent_session_id),
-            _ => self.session_root(&event.session_id),
+            EventPayload::Durable(DurableEventPayload::SessionStarted(started)) => {
+                let Some(parent) = &started.parent else {
+                    return self.route_for_session(&event.session_id);
+                };
+                SessionRoute::AgentChild(
+                    self.route_for_session(&parent.session_id)
+                        .root_session_id()
+                        .clone(),
+                )
+            },
+            _ => self.route_for_session(&event.session_id),
         }
     }
 
-    fn session_root(&self, session_id: &SessionId) -> SessionId {
-        self.session_roots
+    fn route_for_session(&self, session_id: &SessionId) -> SessionRoute {
+        self.session_routes
             .lock()
             .get(session_id)
             .cloned()
-            .unwrap_or_else(|| session_id.clone())
+            .unwrap_or_else(|| SessionRoute::Conversation(session_id.clone()))
     }
 
-    fn remember_event_routes(&self, event: &Event, root_session_id: &SessionId) {
-        let mut roots = self.session_roots.lock();
-        roots
+    fn remember_event_route(&self, event: &Event, route: &SessionRoute) {
+        let mut routes = self.session_routes.lock();
+        routes
             .entry(event.session_id.clone())
-            .or_insert_with(|| root_session_id.clone());
+            .or_insert_with(|| route.clone());
         match &event.payload {
-            EventPayload::SessionStarted {
-                parent_session_id: None,
-                ..
-            } => {
-                roots.insert(event.session_id.clone(), event.session_id.clone());
+            EventPayload::Durable(DurableEventPayload::SessionStarted(started))
+                if started.parent.is_none() =>
+            {
+                routes.insert(
+                    event.session_id.clone(),
+                    SessionRoute::Conversation(event.session_id.clone()),
+                );
             },
-            EventPayload::SessionStarted {
-                parent_session_id: Some(_),
-                ..
-            }
-            | EventPayload::SessionContinuedFromCompaction { .. } => {
-                roots.insert(event.session_id.clone(), root_session_id.clone());
+            EventPayload::Durable(DurableEventPayload::SessionStarted(started))
+                if started.parent.is_some() =>
+            {
+                routes.insert(event.session_id.clone(), route.clone());
             },
-            EventPayload::AgentSessionSpawned {
-                child_session_id, ..
-            } => {
-                roots.insert(child_session_id.clone(), root_session_id.clone());
+            EventPayload::Durable(DurableEventPayload::AgentSessionSpawned {
+                child_session_id,
+                ..
+            }) => {
+                routes.insert(
+                    child_session_id.clone(),
+                    SessionRoute::AgentChild(route.root_session_id().clone()),
+                );
             },
             _ => {},
         }
@@ -249,6 +272,39 @@ impl ServerEventBus {
     }
 }
 
+impl SessionEventObserver for ServerEventBus {
+    fn publish(&self, event: Arc<Event>) {
+        self.publish_event(event);
+    }
+}
+
+pub(crate) fn agent_session_progress(payload: &EventPayload) -> Option<(Phase, Option<String>)> {
+    match payload {
+        EventPayload::Durable(payload) => match payload {
+            DurableEventPayload::TurnStarted => Some((Phase::Thinking, None)),
+            DurableEventPayload::ToolCallRequested { tool_name, .. } => {
+                Some((Phase::CallingTool, Some(tool_name.clone())))
+            },
+            DurableEventPayload::ToolCallCompleted { .. }
+            | DurableEventPayload::ToolCallFailed { .. }
+            | DurableEventPayload::ToolCallCancelled { .. } => Some((Phase::Thinking, None)),
+            DurableEventPayload::TurnCompleted { .. } => Some((Phase::Idle, None)),
+            DurableEventPayload::ErrorOccurred { .. } => Some((Phase::Error, None)),
+            _ => None,
+        },
+        EventPayload::Live(payload) => match payload {
+            LiveEventPayload::AgentRunStarted => Some((Phase::Thinking, None)),
+            LiveEventPayload::AssistantMessageStarted { .. } => Some((Phase::Streaming, None)),
+            LiveEventPayload::ToolCallStarted { tool_name, .. } => {
+                Some((Phase::CallingTool, Some(tool_name.clone())))
+            },
+            LiveEventPayload::AgentRunCompleted { .. } => Some((Phase::Idle, None)),
+            LiveEventPayload::ErrorOccurred { .. } => Some((Phase::Error, None)),
+            _ => None,
+        },
+    }
+}
+
 impl Default for ServerEventBus {
     fn default() -> Self {
         Self::new()
@@ -258,20 +314,23 @@ impl Default for ServerEventBus {
 fn update_streaming(state: &StreamingState, payload: &EventPayload) {
     let mut guard = state.lock();
     match payload {
-        EventPayload::AssistantMessageStarted { message_id } => {
+        EventPayload::Live(LiveEventPayload::AssistantMessageStarted { message_id }) => {
             *guard = Some((message_id.clone(), String::new(), String::new()));
         },
-        EventPayload::AssistantTextDelta { delta, .. } => {
+        EventPayload::Live(LiveEventPayload::AssistantTextDelta { delta, .. }) => {
             if let Some((_, text, _)) = guard.as_mut() {
                 text.push_str(delta);
             }
         },
-        EventPayload::ThinkingDelta { delta, .. } => {
+        EventPayload::Live(LiveEventPayload::ThinkingDelta { delta, .. }) => {
             if let Some((_, _, reasoning)) = guard.as_mut() {
                 reasoning.push_str(delta);
             }
         },
-        EventPayload::AssistantMessageCompleted { .. } | EventPayload::TurnCompleted { .. } => {
+        EventPayload::Durable(
+            DurableEventPayload::AssistantMessageCompleted { .. }
+            | DurableEventPayload::TurnCompleted { .. },
+        ) => {
             *guard = None;
         },
         _ => {},
@@ -280,15 +339,56 @@ fn update_streaming(state: &StreamingState, payload: &EventPayload) {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::{event::EventPayload, types::SessionId};
+    use astrcode_core::{
+        event::{
+            DurableEvent, LiveEvent, PersistedSystemPrompt, SessionStarted, StoredEvent,
+            SystemPromptSource,
+        },
+        tool::SessionToolSelection,
+        types::{SessionId, ToolCallId},
+    };
+    use astrcode_session_projection::replay;
+    use tokio::sync::broadcast::error::TryRecvError;
 
     use super::*;
 
+    fn durable(session_id: SessionId, payload: DurableEventPayload) -> Arc<Event> {
+        Arc::new(StoredEvent::new(1, DurableEvent::session(session_id, payload)).into())
+    }
+
+    fn live(session_id: SessionId, payload: LiveEventPayload) -> Arc<Event> {
+        Arc::new(LiveEvent::session(session_id, payload).into())
+    }
+
     fn turn_started(session_id: &SessionId) -> Arc<Event> {
-        Arc::new(Event::session(
+        durable(session_id.clone(), DurableEventPayload::TurnStarted)
+    }
+
+    fn session_read_model(session_id: &str) -> SessionReadModel {
+        let session_id = SessionId::new(session_id);
+        replay(
             session_id.clone(),
-            EventPayload::TurnStarted,
-        ))
+            &[StoredEvent::new(
+                0,
+                DurableEvent::session(
+                    session_id,
+                    DurableEventPayload::SessionStarted(SessionStarted {
+                        working_dir: "/workspace".into(),
+                        model_id: "model".into(),
+                        parent: None,
+                        tool_selection: SessionToolSelection::default(),
+                        source_extension: None,
+                        initial_system_prompt: PersistedSystemPrompt {
+                            text: "system".into(),
+                            fingerprint: "fingerprint".into(),
+                            extra_system_prompt: None,
+                            source: SystemPromptSource::Native,
+                        },
+                    }),
+                ),
+            )],
+        )
+        .expect("session read model")
     }
 
     #[test]
@@ -314,18 +414,109 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_event_broadcast_is_only_sent_when_enabled() {
-        let legacy_tx = Arc::new(EventFanout::new(8));
-        let bus = ServerEventBus::with_legacy_tx(Arc::clone(&legacy_tx));
+    async fn all_notifications_include_events_and_global_notifications() {
+        let bus = ServerEventBus::new();
         let session_id = SessionId::new("session-1");
-        let mut legacy_rx = legacy_tx.subscribe();
+        let mut all_rx = bus.subscribe_all_notifications();
 
         bus.publish_event(turn_started(&session_id));
+        bus.send_notification(ClientNotification::ExtensionRegistryChanged);
 
-        let notification = legacy_rx.recv().await.expect("legacy event");
+        let notification = all_rx.recv().await.expect("event notification");
         match notification {
             ClientNotification::Event(event) => assert_eq!(event.session_id, session_id),
             other => panic!("expected event notification, got {other:?}"),
         }
+        assert!(matches!(
+            all_rx.recv().await,
+            Ok(ClientNotification::ExtensionRegistryChanged)
+        ));
+    }
+
+    #[tokio::test]
+    async fn semantic_notifications_preserve_transport_wire_shape() {
+        let bus = ServerEventBus::new();
+        let mut rx = bus.subscribe_global_notifications();
+
+        bus.send_session_resumed(&session_read_model("session-1"));
+        bus.send_status_item_update("mode".into(), "plan".into());
+        bus.send_extension_command_result("review".into(), "done".into(), false);
+
+        let resumed = serde_json::to_value(rx.recv().await.expect("session resumed")).unwrap();
+        assert_eq!(resumed["event"], "session_resumed");
+        assert_eq!(resumed["data"]["session_id"], "session-1");
+        assert_eq!(resumed["data"]["snapshot"]["session_id"], "session-1");
+        assert_eq!(resumed["data"]["snapshot"]["working_dir"], "/workspace");
+
+        let status = serde_json::to_value(rx.recv().await.expect("status update")).unwrap();
+        assert_eq!(
+            status,
+            serde_json::json!({
+                "event": "status_item_update",
+                "data": {
+                    "id": "mode",
+                    "text": "plan"
+                }
+            })
+        );
+
+        let result = serde_json::to_value(rx.recv().await.expect("command result")).unwrap();
+        assert_eq!(
+            result,
+            serde_json::json!({
+                "event": "extension_command_result",
+                "data": {
+                    "command_name": "review",
+                    "content": "done",
+                    "is_error": false
+                }
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn conversation_routes_filter_agent_noise_and_forward_progress() {
+        let bus = ServerEventBus::new();
+        let parent = SessionId::new("parent");
+        let child = SessionId::new("child");
+        let mut parent_rx = bus.subscribe_conversation_events(&parent);
+
+        bus.publish_event(durable(
+            parent.clone(),
+            DurableEventPayload::AgentSessionSpawned {
+                child_session_id: child.clone(),
+                agent_name: "explore".into(),
+                task: "inspect".into(),
+                tool_selection: None,
+                tool_call_id: ToolCallId::new("agent-call"),
+            },
+        ));
+        assert!(matches!(
+            parent_rx.recv().await,
+            Ok(event) if event.session_id == parent
+        ));
+
+        for _ in 0..=ServerEventBus::EVENT_CHANNEL_CAPACITY {
+            bus.publish_event(live(
+                child.clone(),
+                LiveEventPayload::AssistantTextDelta {
+                    message_id: "message-1".into(),
+                    delta: "token".into(),
+                },
+            ));
+        }
+        assert!(matches!(parent_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        bus.publish_event(live(
+            child.clone(),
+            LiveEventPayload::ToolCallStarted {
+                call_id: "tool-1".into(),
+                tool_name: "read".into(),
+            },
+        ));
+        assert!(matches!(
+            parent_rx.recv().await,
+            Ok(event) if event.session_id == child
+        ));
     }
 }

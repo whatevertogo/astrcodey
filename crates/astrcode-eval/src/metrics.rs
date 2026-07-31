@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use astrcode_core::event::{Event, EventPayload};
+use astrcode_core::event::{DurableEventPayload, StoredEvent};
 use serde::{Deserialize, Serialize};
 
 /// 从 session event log 自动提取的统计指标。
@@ -24,30 +24,37 @@ pub struct Metrics {
 
 impl Metrics {
     /// 纯函数：从事件列表提取指标。
-    pub fn from_events(events: &[Event]) -> Self {
+    pub fn from_events(events: &[StoredEvent]) -> Self {
         let mut metrics = Self::default();
         let mut first_turn_ts = None;
         let mut last_turn_ts = None;
 
         for event in events {
             match &event.payload {
-                EventPayload::TurnStarted => {
+                DurableEventPayload::TurnStarted => {
                     metrics.total_turns += 1;
                     if first_turn_ts.is_none() {
                         first_turn_ts = Some(event.timestamp);
                     }
                 },
-                EventPayload::TurnCompleted { finish_reason } => {
+                DurableEventPayload::TurnCompleted { finish_reason } => {
                     last_turn_ts = Some(event.timestamp);
                     metrics.finish_reason = finish_reason.clone();
                 },
-                EventPayload::ToolCallCompleted { tool_name, .. } => {
+                DurableEventPayload::ToolCallCompleted { tool_name, .. } => {
                     *metrics.tool_calls.entry(tool_name.clone()).or_default() += 1;
                 },
-                EventPayload::ErrorOccurred { .. } => {
+                DurableEventPayload::ToolCallFailed { tool_name, .. } => {
+                    *metrics.tool_calls.entry(tool_name.clone()).or_default() += 1;
                     metrics.errors += 1;
                 },
-                EventPayload::CompactBoundaryCreated { .. } => {
+                DurableEventPayload::ToolCallCancelled { tool_name, .. } => {
+                    *metrics.tool_calls.entry(tool_name.clone()).or_default() += 1;
+                },
+                DurableEventPayload::ErrorOccurred { .. } => {
+                    metrics.errors += 1;
+                },
+                DurableEventPayload::TranscriptRewritten { .. } => {
                     metrics.compactions += 1;
                 },
                 _ => {},

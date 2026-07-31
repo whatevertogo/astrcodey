@@ -3,6 +3,7 @@
 
 import type {
   AgentSessionStatusDto,
+  ApprovalDecisionDto,
   ApprovalModeDto,
   ApplyProviderPresetRequest,
   ApplyProviderPresetResponseDto,
@@ -44,23 +45,39 @@ import type {
   SlashCommandInfoDto,
   SlashCommandListResponseDto,
   StatusItemDto,
+  ToolCallStatusDto,
+  ToolApprovalDto,
   ToolOutputStreamDto,
 } from './generated'
 
 export {
   AGENT_SESSION_STATUSES,
+  APPROVAL_DECISIONS,
   APPROVAL_MODES,
   BLOCK_STATUSES,
   PHASES,
   PROVIDER_AUTH_SCHEMES,
   PROVIDER_WIRE_FORMATS,
+  TOOL_CALL_STATUSES,
   TOOL_OUTPUT_STREAMS,
 } from './generated'
 
 export type Phase = PhaseDto
 export type ToolOutputStream = ToolOutputStreamDto
 export type BlockStatus = ConversationBlockStatusDto
+export type ToolCallStatus = ToolCallStatusDto
 export type ApprovalMode = ApprovalModeDto
+export type ApprovalDecision = ApprovalDecisionDto
+export type ToolApproval = ToolApprovalDto
+
+export function toolCallHasError(status: ToolCallStatus): boolean {
+  return status === 'error' || status === 'failed'
+}
+
+export function toolCallIsTerminal(status: ToolCallStatus): boolean {
+  return status !== 'streaming'
+}
+
 export type {
   ApplyProviderPresetRequest,
   CommandInvokeResponse,
@@ -158,8 +175,9 @@ export type ConversationBlock =
       arguments: string
       argumentsJson?: Record<string, unknown>
       text: string
-      status: BlockStatus
+      status: ToolCallStatus
       metadata?: Record<string, unknown>
+      approval?: ToolApproval
     }
   | { kind: 'error'; id: string; message: string }
   | { kind: 'systemNote'; id: string; text: string }
@@ -189,6 +207,30 @@ export interface ConversationStreamEnvelope {
   sessionId: string
   cursor: ConversationCursor
   delta: ConversationDelta
+}
+
+export interface AskUserOption {
+  label: string
+  description: string
+  preview?: string
+}
+
+export interface AskUserQuestion {
+  question: string
+  header: string
+  options: AskUserOption[]
+  multiSelect?: boolean
+}
+
+export interface PendingAskUserQuestion {
+  sessionId: string
+  callId: string
+  questions: AskUserQuestion[]
+  metadata?: { source?: string }
+}
+
+export interface PendingAskUserQuestionsResponse {
+  questions: PendingAskUserQuestion[]
 }
 
 export type ConversationDelta =
@@ -221,15 +263,20 @@ export type ConversationDelta =
   | { kind: 'statusItemUpdate'; id: string; text: string }
   | { kind: 'extensionRegistryChanged' }
   | {
-      kind: 'patchToolMetadata'
-      blockId: string
-      metadata: Record<string, unknown>
+      kind: 'extensionEvent'
+      extensionId: string
+      eventType: string
+      schemaVersion: number
+      payload: unknown
     }
   | {
-      kind: 'patchToolCall'
-      blockId: string
-      text: string
-      metadata?: Record<string, unknown>
+      kind: 'toolApprovalRequested'
+      approval: ToolApproval
+    }
+  | {
+      kind: 'toolApprovalResolved'
+      callId: string
+      decision: ApprovalDecision
     }
 
 // ── App State ──

@@ -1,6 +1,9 @@
 import { getHostBridge } from '../lib/hostBridge'
 import { isTauriEnvironment } from '../lib/tauri'
-import { decodeConversationSnapshot } from './protocol'
+import {
+  decodeConversationSnapshot,
+  decodePendingAskUserQuestionsResponse,
+} from './protocol'
 import type {
   ConfigReloadResponseDto,
   DeleteProjectResponseDto,
@@ -9,7 +12,6 @@ import type {
   ModelListResponseDto,
   SetExtensionEnabledResponseDto,
   ToolApprovalRequest,
-  ToolUiRespondResponse,
   UpdateActiveSelectionRequest,
   UpdateActiveSelectionResponseDto,
   UpdateModelOptionsRequest,
@@ -138,6 +140,41 @@ export async function getConversation(
     await request<unknown>(
       `/api/sessions/${encodeURIComponent(sessionId)}/conversation`
     )
+  )
+}
+
+export async function listPendingAskUserQuestions(sessionId: string) {
+  return decodePendingAskUserQuestionsResponse(
+    await request<unknown>(
+      `/api/extensions/astrcode-ask-user/sessions/${encodeURIComponent(sessionId)}/questions`
+    )
+  )
+}
+
+export async function respondAskUserQuestion(
+  sessionId: string,
+  callId: string,
+  answers: Record<string, string>
+): Promise<void> {
+  await request<unknown>(
+    `/api/extensions/astrcode-ask-user/sessions/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(callId)}/respond`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ answers }),
+    }
+  )
+}
+
+export async function rejectAskUserQuestion(
+  sessionId: string,
+  callId: string
+): Promise<void> {
+  await request<unknown>(
+    `/api/extensions/astrcode-ask-user/sessions/${encodeURIComponent(sessionId)}/questions/${encodeURIComponent(callId)}/reject`,
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }
   )
 }
 
@@ -362,46 +399,6 @@ export async function setExtensionEnabled(
     method: 'POST',
     body: JSON.stringify({ extensionId, enabled }),
   })
-}
-
-/** Tool Approval UI 提交（如 askUser 问卷）。 */
-export async function submitToolUiRespond(
-  sessionId: string,
-  callId: string,
-  toolName: string,
-  answers: Record<string, string>
-): Promise<ToolUiRespondResponse> {
-  const response = await (
-    await resolveFetch()
-  )(
-    `${baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/tool-calls/${encodeURIComponent(callId)}/tool-ui/respond`,
-    {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...authHeaders(),
-      },
-      body: JSON.stringify({ toolName, answers }),
-    }
-  )
-
-  if (response.status === 501) {
-    throw new Error(
-      'Tool UI 提交接口尚未实现（POST …/tool-ui/respond）。见 docs/tool-ui-architecture.md'
-    )
-  }
-
-  if (!response.ok) {
-    const body = await response.text()
-    if (response.status === 404 && !body.trim()) {
-      throw new Error(
-        'Tool UI 提交接口尚未实现（POST …/tool-ui/respond）。见 docs/tool-ui-architecture.md'
-      )
-    }
-    throw new Error(await formatRequestError(response, body))
-  }
-
-  return (await response.json()) as ToolUiRespondResponse
 }
 
 export type ToolGateApprovalDecision = ToolApprovalRequest['decision']

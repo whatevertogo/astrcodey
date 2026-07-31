@@ -7,32 +7,35 @@
 use std::{sync::Arc, time::Duration};
 
 use astrcode_core::{
-    event::EventPayload,
-    extension::{
-        AfterToolResultsContext, AfterToolResultsResult, ContinueAfterStopContext,
-        ContinueAfterStopResult, ExtensionEvent, ProviderEvent, ProviderResult,
-    },
+    event::{DurableEventPayload, LiveEventPayload},
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, LlmTokenUsage, LlmTokenUsageSource,
         provider_visible_messages, token_estimate,
     },
-    storage::SessionReadModel,
     tool::ToolDefinition,
     types::*,
 };
+use astrcode_extension_sdk::extension::{
+    ContinueAfterStopContext, ContinueAfterStopResult, ExtensionEvent, ProviderEvent,
+    ProviderResult,
+};
+use astrcode_session_projection::SessionReadModel;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    compaction_coordinator::{Compaction, CompactionHost, PreparedContextMessages},
-    llm_request_history::build_llm_request_messages,
+    compaction::{
+        CompactionHost, PreparedProviderHistory, plan_auto_compaction, prepare_provider_history,
+        run_reactive_compaction,
+    },
     llm_stream::{StreamOutcome, consume_llm_stream, non_empty_reasoning_content},
+    projection_context::context_snapshot,
     session::Session,
     steer::{count_visible_user_messages, has_pending_mid_turn_user_messages},
     tool_deduplicator::ToolCallDeduplicator,
     tool_exec::TurnToolContext,
     tool_pipeline::ToolCalls,
-    tool_types::ExecuteDeclaredToolBatch,
+    tool_types::ExecuteToolBatch,
     turn_context::{
         SharedTurnContext, TurnError, end_turn_with_error_typed, on_step_end_best_effort,
     },
@@ -46,37 +49,17 @@ pub(crate) async fn drive_agent(
     user_text: &str,
     turn_id: &TurnId,
 ) -> (Result<TurnOutput, TurnError>, bool) {
-    let publisher = Arc::new(TurnEvents::new(
-        agent.session().clone(),
-        turn_id.clone(),
-        None,
-    ));
+    let publisher = Arc::new(TurnEvents::new(agent.session().clone(), turn_id.clone()));
     let output = agent.process_prompt(user_text, turn_id, &publisher).await;
     (output, publisher.emitted_error())
 }
 
-/// AgentTurn — 一个临时的回合处理器。
-///
-/// **演进注记**：当前结构体同时持有 `session` / `llm` / `tools` / `compaction`
-/// 五个领域，"每一项 `process_prompt_inner` 都会用到"。如果**以下需求同时出现**，
-/// 需要拆分为独立阶段（`PrepareStage` / `LlmStage` / `ToolStage` / `CompactStage`）
-/// 并由 `TurnLoop` 以 **Trait 对象** 或 **泛型参数** 组合：
-///
-/// 1. 同一 session 并行多回合（sub-agent / tree-of-thought）；
-/// 2. 中途回滚到上一 checkpoint（需要动 `compaction` 与 `llm_stage` 边界）；
-/// 3. 多 provider 轮换（需要替换 `Arc<dyn LlmProvider>` 以外的依赖）。
-///
-/// TODO: 更好的做法是**先拆 `TurnState`**（当前 `TurnLoop` 内部状态载体）为独立阶段的状态载体，
-/// **当前不拆**：`process_prompt_inner` 三个阶段之间的状态转移
-/// （`state.tool_deduplicator_mut()` / `state.append_final_text`）
-/// 与 `compaction` 强耦合，拆为独立阶段需先拆 `TurnState`。
-/// YAGNI：在明确提出以上需求时再动。参考 issue #TBD。
+/// 一次 turn 的临时执行器；durable projection 是跨 turn 状态。
 pub(crate) struct TurnLoop {
     session: Session,
     llm: Arc<dyn astrcode_core::llm::LlmProvider>,
     cancellation_token: CancellationToken,
     tools: ToolCalls,
-    compaction: Compaction,
 }
 
 impl TurnLoop {
@@ -97,10 +80,6 @@ impl TurnLoop {
             .max(1)
     }
 
-    pub(crate) fn system_prompt(&self) -> &str {
-        self.compaction.system_prompt()
-    }
-
     fn shared(&self) -> &SharedTurnContext {
         self.tools.shared()
     }
@@ -108,15 +87,16 @@ impl TurnLoop {
     pub(crate) fn new_with_llm(
         session: Session,
         session_state: &SessionReadModel,
+        tool_selection: astrcode_core::tool::SessionToolSelection,
         session_store_dir: Option<std::path::PathBuf>,
         llm: Arc<dyn astrcode_core::llm::LlmProvider>,
         tool_registry: Arc<crate::ToolRegistry>,
         cancellation_token: CancellationToken,
     ) -> Result<Self, TurnError> {
-        let system_prompt = session_state.system_prompt.clone().unwrap_or_default();
         let runtime = session.runtime();
         let runtime_services = session.runtime_services();
-        let turn = TurnToolContext::for_turn(&session, session_state, session_store_dir);
+        let turn =
+            TurnToolContext::for_turn(&session, session_state, tool_selection, session_store_dir);
         let tools = ToolCalls::new(
             turn,
             tool_registry,
@@ -134,7 +114,6 @@ impl TurnLoop {
             llm,
             cancellation_token,
             tools,
-            compaction: Compaction::new(system_prompt, session_state.extra_system_prompt.clone()),
         })
     }
 
@@ -152,8 +131,19 @@ impl TurnLoop {
         if result.is_err() {
             self.finalize_turn_on_error(extension_runner.as_ref()).await;
         }
-        event_bridge.shutdown(self.tools.shared_mut()).await;
-        result
+        let ingress_result = event_bridge.shutdown(self.tools.shared_mut()).await;
+        match (result, ingress_result) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Ok(_), Err(error)) => Err(error),
+            (Err(error), Ok(())) => Err(error),
+            (Err(error), Err(ingress_error)) => {
+                tracing::warn!(
+                    error = %ingress_error,
+                    "turn event ingress also failed while the turn was failing"
+                );
+                Err(error)
+            },
+        }
     }
 
     /// Turn 失败时统一补发 `TurnEnd`，避免 `?` 旁路错误漏掉扩展生命周期钩子。
@@ -190,8 +180,8 @@ impl TurnLoop {
         }
 
         let mut state = TurnState::new(all_tools);
-        if let Ok(count) = publisher.visible_user_message_count().await {
-            state.set_tracked_user_message_count(count);
+        if let Ok(model) = publisher.snapshot_model().await {
+            state.set_tracked_user_message_count(count_visible_user_messages(&model));
         }
 
         // Step
@@ -227,7 +217,7 @@ impl TurnLoop {
                 .await
             {
                 Ok(outcome) => outcome,
-                Err(TurnError::Llm(LlmError::PromptTooLong(_)))
+                Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. }))
                     if !state.reactive_compact_used() =>
                 {
                     state.mark_reactive_compact_used();
@@ -238,16 +228,12 @@ impl TurnLoop {
                         shared: &shared,
                         extension_runner: extension_runner.as_ref(),
                     };
-                    if !self
-                        .compaction
-                        .run_reactive_compaction(&host, &state, turn_id, publisher)
-                        .await?
-                    {
+                    if !run_reactive_compaction(&host, &state, turn_id, publisher).await? {
                         return end_turn_with_error_typed(TurnError::CompactExhausted);
                     }
                     continue;
                 },
-                Err(TurnError::Llm(LlmError::PromptTooLong(_))) => {
+                Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
                     return end_turn_with_error_typed(TurnError::CompactExhausted);
                 },
                 Err(error) => return Err(error),
@@ -267,7 +253,7 @@ impl TurnLoop {
                     state.record_assistant_text(&text, reasoning_content.clone());
                     if (!text.is_empty() || reasoning_content.is_some()) && message_started {
                         publisher
-                            .durable(EventPayload::AssistantMessageCompleted {
+                            .durable(DurableEventPayload::AssistantMessageCompleted {
                                 message_id,
                                 text,
                                 reasoning_content,
@@ -276,7 +262,7 @@ impl TurnLoop {
                     }
                     if let Some(usage) = usage {
                         publisher
-                            .durable(EventPayload::TokenUsageRecorded {
+                            .durable(DurableEventPayload::TokenUsageRecorded {
                                 usage,
                                 model_context_window,
                             })
@@ -335,14 +321,12 @@ impl TurnLoop {
                     );
                     if !tool_calls.is_empty() || message_started {
                         if !message_started {
-                            publisher
-                                .live(EventPayload::AssistantMessageStarted {
-                                    message_id: message_id.clone(),
-                                })
-                                .await;
+                            publisher.live(LiveEventPayload::AssistantMessageStarted {
+                                message_id: message_id.clone(),
+                            });
                         }
                         publisher
-                            .durable(EventPayload::AssistantMessageCompleted {
+                            .durable(DurableEventPayload::AssistantMessageCompleted {
                                 message_id,
                                 text: visible_text.to_string(),
                                 reasoning_content,
@@ -351,7 +335,7 @@ impl TurnLoop {
                     }
                     if let Some(usage) = usage {
                         publisher
-                            .durable(EventPayload::TokenUsageRecorded {
+                            .durable(DurableEventPayload::TokenUsageRecorded {
                                 usage,
                                 model_context_window,
                             })
@@ -359,36 +343,18 @@ impl TurnLoop {
                     }
 
                     let hook_messages = state.provider_response_messages(request_messages);
-                    let tool_decision = self
-                        .tools_stage(
-                            extension_runner.as_ref(),
-                            &mut state,
-                            &tool_calls,
-                            early_results,
-                            publisher,
-                            hook_messages,
-                        )
-                        .await?;
+                    self.tools_stage(
+                        extension_runner.as_ref(),
+                        &mut state,
+                        &tool_calls,
+                        early_results,
+                        publisher,
+                        hook_messages,
+                    )
+                    .await?;
 
                     state.tool_deduplicator_mut().end_step();
                     on_step_end_best_effort(extension_runner.as_ref(), &lifecycle_ctx).await;
-                    if let ToolStageDecision::EndTurn { reason } = tool_decision {
-                        extension_runner
-                            .emit_lifecycle(
-                                ExtensionEvent::TurnEnd,
-                                self.shared().lifecycle_ctx_with_exchange(
-                                    _user_text.to_string(),
-                                    state.final_text().to_string(),
-                                ),
-                            )
-                            .await?;
-                        let (text, tool_results) = state.take_output_parts();
-                        return Ok(TurnOutput {
-                            text,
-                            finish_reason: reason,
-                            tool_results,
-                        });
-                    }
                 },
             }
         }
@@ -408,28 +374,17 @@ impl TurnLoop {
             shared: &shared,
             extension_runner,
         };
-        self.compaction
-            .refresh_system_prompt(host.session, host.shared)
-            .await?;
-
         let model = publisher.snapshot_model().await?;
+        let snapshot = context_snapshot(&model);
         let llm = Arc::clone(host.llm);
         let visible_tools = state.visible_tools();
-        let compaction_request = self
-            .compaction
-            .build_auto_compaction_request(&host, &model, &visible_tools)
-            .await?;
+        let compaction_plan = plan_auto_compaction(&host, &snapshot, &visible_tools).await;
 
-        let PreparedContextMessages {
-            context_messages,
-            compaction_applied: _,
-        } = self
-            .compaction
-            .prepare_context_messages(&host, state, &model, turn_id, compaction_request, publisher)
-            .await?;
+        let PreparedProviderHistory { snapshot, messages } =
+            prepare_provider_history(&host, state, snapshot, turn_id, compaction_plan, publisher)
+                .await?;
 
-        let messages = build_llm_request_messages(self.system_prompt(), context_messages);
-        let mut messages = messages;
+        let mut messages = snapshot.request_messages(messages);
         if let Some(reminder) = state.tool_deduplicator().check_reminder() {
             tracing::debug!("injecting tool deduplication system-reminder");
             messages.push(LlmMessage::user(reminder));
@@ -477,7 +432,7 @@ impl TurnLoop {
             Ok(outcome) => Ok(self
                 .with_usage_fallback(outcome, &prepared.llm, request_messages, tools)
                 .await),
-            Err(e @ TurnError::Llm(LlmError::PromptTooLong(_))) => Err(e),
+            Err(e @ TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => Err(e),
             Err(error) => end_turn_with_error_typed(error),
         }
     }
@@ -544,7 +499,7 @@ impl TurnLoop {
         tools: &[ToolDefinition],
     ) -> Option<LlmTokenUsage> {
         let effective = self.session.runtime_services().read_effective();
-        match llm
+        let (input_tokens, source) = match llm
             .count_input_tokens(request_messages.clone(), tools.to_vec())
             .await
         {
@@ -555,15 +510,10 @@ impl TurnLoop {
                     stage = "turn_usage",
                     "provider stream did not include usage; recording provider count fallback"
                 );
-                Some(LlmTokenUsage {
-                    input_tokens: Some(count.input_tokens),
-                    cached_input_tokens: None,
-                    cache_creation_input_tokens: None,
-                    output_tokens: None,
-                    reasoning_output_tokens: None,
-                    total_tokens: None,
-                    source: Some(LlmTokenUsageSource::ProviderCountFallback),
-                })
+                (
+                    Some(count.input_tokens),
+                    LlmTokenUsageSource::ProviderCountFallback,
+                )
             },
             Err(error) => {
                 tracing::warn!(
@@ -574,20 +524,21 @@ impl TurnLoop {
                     "provider stream did not include usage and provider count failed; recording \
                      local estimate fallback"
                 );
-                Some(LlmTokenUsage {
-                    input_tokens: Some(token_estimate::estimate_request_tokens(
-                        &request_messages,
-                        None,
-                    ) as u64),
-                    cached_input_tokens: None,
-                    cache_creation_input_tokens: None,
-                    output_tokens: None,
-                    reasoning_output_tokens: None,
-                    total_tokens: None,
-                    source: Some(LlmTokenUsageSource::LocalEstimateFallback),
-                })
+                (
+                    Some(token_estimate::estimate_request_tokens(&request_messages, None) as u64),
+                    LlmTokenUsageSource::LocalEstimateFallback,
+                )
             },
-        }
+        };
+        Some(LlmTokenUsage {
+            input_tokens,
+            cached_input_tokens: None,
+            cache_creation_input_tokens: None,
+            output_tokens: None,
+            reasoning_output_tokens: None,
+            total_tokens: None,
+            source: Some(source),
+        })
     }
 
     async fn tools_stage(
@@ -598,7 +549,7 @@ impl TurnLoop {
         early_results: Vec<crate::early_tool_scheduler::EarlyExecutionEntry>,
         publisher: &Arc<TurnEvents>,
         hook_messages: Vec<LlmMessage>,
-    ) -> Result<ToolStageDecision, TurnError> {
+    ) -> Result<(), TurnError> {
         self.dispatch_after_provider_response(extension_runner, hook_messages, state)
             .await?;
 
@@ -608,12 +559,12 @@ impl TurnLoop {
             .tools
             .prepare_tool_batch(tool_calls, early_results, &visible_tools, state)
             .await?;
-        let declared = self.tools.declare_tool_batch(plan, publisher).await?;
+        self.tools.declare_tool_batch(&plan, publisher).await?;
 
-        let committed = match self
+        let discovered_tools = match self
             .tools
-            .execute_and_commit(ExecuteDeclaredToolBatch {
-                declared,
+            .execute_and_commit(ExecuteToolBatch {
+                batch: plan,
                 tools: &visible_tools,
                 state,
                 publisher: Arc::clone(publisher),
@@ -625,23 +576,8 @@ impl TurnLoop {
                 return end_turn_with_error_typed(error);
             },
         };
-        state.activate_deferred_tools(committed.discovered_tools);
-        if committed.tool_results.is_empty() {
-            return Ok(ToolStageDecision::Continue);
-        }
-        let decision = extension_runner
-            .emit_after_tool_results(AfterToolResultsContext {
-                session_id: self.shared().session_id.to_string(),
-                working_dir: self.shared().working_dir.clone(),
-                model: self.shared().model_selection(),
-                tool_results: committed.tool_results,
-                session_store_dir: self.shared().session_store_dir.clone(),
-            })
-            .await?;
-        Ok(match decision {
-            AfterToolResultsResult::Continue => ToolStageDecision::Continue,
-            AfterToolResultsResult::EndTurn { reason } => ToolStageDecision::EndTurn { reason },
-        })
+        state.activate_deferred_tools(discovered_tools);
+        Ok(())
     }
 
     async fn postprocess_complete_stage(
@@ -674,7 +610,7 @@ impl TurnLoop {
     /// 不入事件日志；仅对本次 LLM 调用生效。
     ///
     /// **性能注记**：`send_messages.clone()` 不可消除。
-    /// `ProviderContext` 在 `astrcode-core::extension::ProviderContext` 上
+    /// `ProviderContext` 在 `astrcode-extension-sdk::extension::ProviderContext` 上
     /// 定义为持有 `Vec<LlmMessage>` **所有权**，`emit_provider` 又需
     /// `&self` 借用；caller 必须 clone 才能让 hook 看到消息。`AppendMessages`
     /// 分支看似可避免 clone（`send_messages` 走 move），但为了在同一
@@ -736,8 +672,8 @@ impl TurnLoop {
         };
         match result {
             Ok(rx) => Ok(rx),
-            Err(LlmError::PromptTooLong(message)) => {
-                Err(TurnError::Llm(LlmError::PromptTooLong(message)))
+            Err(LlmError::ContextWindowExceeded { message }) => {
+                Err(TurnError::Llm(LlmError::ContextWindowExceeded { message }))
             },
             Err(e) => {
                 publisher
@@ -798,7 +734,6 @@ impl TurnLoop {
         publisher: &Arc<TurnEvents>,
         state: &mut TurnState,
     ) -> Result<u32, TurnError> {
-        publisher.invalidate_model_cache().await;
         let model = publisher.snapshot_model().await?;
         let current = count_visible_user_messages(&model);
         let previous = state.tracked_user_message_count();
@@ -820,7 +755,6 @@ impl TurnLoop {
         publisher: &Arc<TurnEvents>,
         state: &TurnState,
     ) -> Result<bool, TurnError> {
-        publisher.invalidate_model_cache().await;
         let model = publisher.snapshot_model().await?;
         Ok(has_pending_mid_turn_user_messages(
             &model,
@@ -865,11 +799,6 @@ fn extract_text_from_messages(messages: &[LlmMessage]) -> String {
     LlmContent::join_text(messages.iter().flat_map(|message| &message.content), "")
 }
 
-enum ToolStageDecision {
-    Continue,
-    EndTurn { reason: String },
-}
-
 #[derive(Debug)]
 pub struct TurnOutput {
     pub text: String,
@@ -877,9 +806,17 @@ pub struct TurnOutput {
     pub tool_results: Vec<astrcode_core::tool::ToolResult>,
 }
 
+#[derive(Debug, Clone)]
+pub struct TurnFinalization {
+    pub finish_reason: String,
+    pub pending_error: Option<String>,
+    pub aborted: bool,
+    pub terminal_persisted: bool,
+}
+
 pub struct RunTurnResult {
     pub output: Result<TurnOutput, TurnError>,
-    pub emitted_error: bool,
+    pub finalization: TurnFinalization,
 }
 
 pub(crate) async fn run_turn(
@@ -888,9 +825,24 @@ pub(crate) async fn run_turn(
     turn_id: &TurnId,
 ) -> RunTurnResult {
     let (output, emitted_error) = drive_agent(agent, user_text, turn_id).await;
+    let aborted = matches!(output, Err(TurnError::Aborted));
+    let finish_reason = match &output {
+        Ok(output) => output.finish_reason.clone(),
+        Err(TurnError::Aborted) => crate::payload::TURN_FINISH_ABORTED.into(),
+        Err(_) => "error".into(),
+    };
+    let pending_error = match (&output, emitted_error) {
+        (Err(TurnError::Aborted), _) | (_, true) | (Ok(_), false) => None,
+        (Err(error), false) => Some(error.to_string()),
+    };
 
     RunTurnResult {
         output,
-        emitted_error,
+        finalization: TurnFinalization {
+            finish_reason,
+            pending_error,
+            aborted,
+            terminal_persisted: false,
+        },
     }
 }

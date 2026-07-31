@@ -248,6 +248,14 @@ fn debug_utf8_bytes(bytes: &[u8], valid_up_to: usize, invalid_len: Option<usize>
 
 /// 清理 JSON 片段，去除控制字符但保留所有可打印字符（包括 Unicode）。
 pub(crate) fn clean_json_fragment(fragment: &str) -> String {
+    // 工具参数增量几乎总是干净文本（刚从 JSON 字符串解码），仅少数兼容厂商夹带控制字符。
+    // 无控制字符时直接拷贝，避免逐字符 filter + collect 的二次分配。
+    if !fragment
+        .chars()
+        .any(|c| c.is_control() && !c.is_whitespace())
+    {
+        return fragment.to_owned();
+    }
     fragment
         .chars()
         .filter(|&c| !c.is_control() || c.is_whitespace())

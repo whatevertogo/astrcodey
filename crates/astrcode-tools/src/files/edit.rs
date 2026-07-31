@@ -5,13 +5,13 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::{tool::*, tool_access::ResourceAccess};
-use astrcode_support::hostpaths::resolve_path;
+use astrcode_core::tool::{access::ResourceAccess, *};
+use astrcode_extension_sdk::hostpaths::resolve_path;
 use serde::Deserialize;
 
 use super::shared::{
     clean_quotes, compute_unified_diff, edit_match_candidates, find_unique_occurrence,
-    remember_file_observation_with_store, run_blocking, stale_file_guard_with_store, tool_call_id,
+    remember_file_observation_with_store, run_blocking, stale_file_guard_with_store,
 };
 // ─── edit ────────────────────────────────────────────────────────────────
 
@@ -80,13 +80,12 @@ impl Tool for EditFileTool {
         &self,
         args: serde_json::Value,
         ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<ToolExecutionResult, ToolError> {
         let started_at = Instant::now();
         let args: EditFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid edit args: {e}")))?;
         let path_raw = args.path.clone();
         let operations = normalize_edit_operations(args)?;
-        let call_id = tool_call_id(ctx);
         let file_observation_store = ctx.capabilities.files.observation_store.clone();
         let working_dir = self.working_dir.clone();
         run_blocking(move || {
@@ -94,12 +93,12 @@ impl Tool for EditFileTool {
                 working_dir,
                 path_raw,
                 operations,
-                call_id,
                 file_observation_store,
                 started_at,
             )
         })
         .await
+        .map(Into::into)
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
@@ -111,18 +110,14 @@ fn execute_edit_sync(
     working_dir: PathBuf,
     path_raw: PathBuf,
     operations: Vec<EditOperation>,
-    call_id: String,
     file_observation_store: Option<std::sync::Arc<dyn FileObservationStore>>,
     started_at: Instant,
 ) -> Result<ToolResult, ToolError> {
     let path = resolve_path(&working_dir, &path_raw);
 
-    if let Some(stale_result) = stale_file_guard_with_store(
-        file_observation_store.as_ref(),
-        call_id.clone(),
-        &path,
-        started_at,
-    )? {
+    if let Some(stale_result) =
+        stale_file_guard_with_store(file_observation_store.as_ref(), &path, started_at)?
+    {
         return Ok(stale_result);
     }
 
@@ -149,7 +144,6 @@ fn execute_edit_sync(
         metadata.insert("deletions".into(), serde_json::json!(del));
     }
     Ok(ToolResult {
-        call_id,
         content: format!("Edited {}", path.display()),
         is_error: false,
         error: None,

@@ -1,30 +1,69 @@
 //! Session / Turn 行为矩阵回归测试（Phase 0）。
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
-    event::EventPayload,
+    event::{DurableEventPayload, StoredEvent},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    storage::EventStore,
     tool::ToolDefinition,
     types::{SessionId, new_session_id},
 };
+use astrcode_extension_sdk::extension::{
+    Extension, ExtensionCapability, ExtensionError, Registrar, UserMessageEnvelopeContext,
+    UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+};
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
-    ChildSessionCoordinator, ConfigManager, DeliveryOutcome, InputDelivery,
-    MAX_PENDING_INPUTS_PER_SESSION, MAX_PROMPT_TEXT_BYTES, SessionManager, TurnRegistry,
-    TurnScheduleError, TurnScheduler, recycle_completed_session_for_test,
+    ChildSessionCoordinator, DeliveryOutcome, InputDelivery, MAX_PENDING_INPUTS_PER_SESSION,
+    MAX_PROMPT_TEXT_BYTES, SessionManager, TurnRegistry, TurnScheduleError, TurnScheduler,
+    recycle_completed_session_for_test, session_started_event_for_test,
+    start_with_completion_for_test,
 };
-use astrcode_session::SessionRuntimeServices;
-use astrcode_storage::in_memory::InMemoryEventStore;
-use tokio::sync::mpsc;
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
+use tokio::sync::{Semaphore, mpsc};
+
+#[async_trait::async_trait]
+trait UntrackedStartForTest {
+    async fn start_with_completion(
+        &self,
+        session_id: SessionId,
+        input: astrcode_core::user_input::UserInput,
+    ) -> Result<astrcode_server::StartedExecution, TurnScheduleError>;
+}
+
+#[async_trait::async_trait]
+impl UntrackedStartForTest for TurnScheduler {
+    async fn start_with_completion(
+        &self,
+        session_id: SessionId,
+        input: astrcode_core::user_input::UserInput,
+    ) -> Result<astrcode_server::StartedExecution, TurnScheduleError> {
+        start_with_completion_for_test(self, session_id, input).await
+    }
+}
 
 struct StaticTextLlm;
 struct PendingLlm;
+struct GateFirstLlm {
+    calls: AtomicUsize,
+    release: Arc<Semaphore>,
+}
+struct FailSecondEnvelope {
+    calls: Arc<AtomicUsize>,
+}
+struct FailSecondEnvelopeHandler {
+    calls: Arc<AtomicUsize>,
+}
 
 #[async_trait::async_trait]
 impl LlmProvider for StaticTextLlm {
@@ -67,24 +106,92 @@ impl LlmProvider for PendingLlm {
     }
 }
 
-async fn seed_session(store: &Arc<dyn EventStore>) -> SessionId {
+#[async_trait::async_trait]
+impl LlmProvider for GateFirstLlm {
+    async fn generate(
+        &self,
+        _messages: Vec<LlmMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
+            self.release.acquire().await.unwrap().forget();
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        let _ = tx.send(LlmEvent::Done {
+            finish_reason: "stop".into(),
+        });
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 200000,
+            max_output_tokens: 1024,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for FailSecondEnvelope {
+    fn id(&self) -> &str {
+        "fail-second-envelope"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::ProviderRequest]
+    }
+
+    fn register(&self, registrar: &mut Registrar) {
+        registrar.on_user_message_envelope(
+            0,
+            Arc::new(FailSecondEnvelopeHandler {
+                calls: Arc::clone(&self.calls),
+            }),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl UserMessageEnvelopeHandler for FailSecondEnvelopeHandler {
+    async fn handle(
+        &self,
+        _ctx: UserMessageEnvelopeContext,
+    ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
+        if self.calls.fetch_add(1, Ordering::AcqRel) == 1 {
+            return Ok(UserMessageEnvelopeResult::Block {
+                reason: "transient test failure".into(),
+            });
+        }
+        Ok(UserMessageEnvelopeResult::Allow)
+    }
+}
+
+async fn seed_session(store: &Arc<dyn SessionStore>) -> SessionId {
     let sid = new_session_id();
     store
-        .create_session(&sid, ".", "mock", None, None, None)
+        .create_session(session_started_event_for_test(sid.clone(), ".", "mock"))
         .await
         .unwrap();
     sid
 }
 
-fn build_scheduler(store: Arc<dyn EventStore>) -> TurnScheduler {
+fn build_scheduler(store: Arc<dyn SessionStore>) -> TurnScheduler {
     build_scheduler_with_llm(store, Arc::new(StaticTextLlm))
 }
 
 fn build_scheduler_with_llm(
-    store: Arc<dyn EventStore>,
+    store: Arc<dyn SessionStore>,
     llm: Arc<dyn LlmProvider>,
 ) -> TurnScheduler {
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    build_scheduler_with_runtime(store, llm, extension_runner)
+}
+
+fn build_scheduler_with_runtime(
+    store: Arc<dyn SessionStore>,
+    llm: Arc<dyn LlmProvider>,
+    extension_runner: Arc<ExtensionRunner>,
+) -> TurnScheduler {
     let context_assembler = Arc::new(LlmContextAssembler::new(Default::default()));
     let effective = EffectiveConfig {
         llm: LlmSettings {
@@ -139,28 +246,16 @@ fn build_scheduler_with_llm(
         extensions: ExtensionSettings::default(),
     };
     let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
-    let capabilities = Arc::new(SessionRuntimeServices::new(
+    let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         Arc::clone(&llm),
         llm,
         effective,
-        astrcode_server::default_host::first_party_host_services(
-            extension_runner.clone(),
-            context_assembler,
-            std::sync::Arc::clone(&shell_timeout_secs),
-        ),
-    ));
-    let config = Arc::new(ConfigManager::new(
-        Arc::new(astrcode_storage::config_store::FileConfigStore::new(
-            std::path::PathBuf::from("target/turn-behavior-config.toml"),
-        )),
-        Default::default(),
-        Arc::clone(&extension_runner),
-        shell_timeout_secs,
-        Arc::clone(&capabilities),
-    ));
+        extension_runner.clone(),
+        context_assembler,
+        std::sync::Arc::clone(&shell_timeout_secs),
+    );
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&store),
-        config,
         capabilities,
         vec![],
     ));
@@ -176,7 +271,7 @@ fn build_scheduler_with_llm(
 
 #[tokio::test]
 async fn idle_submit_emits_turn_started_and_user_message() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -184,26 +279,27 @@ async fn idle_submit_emits_turn_started_and_user_message() {
         .start_with_completion(sid.clone(), "hello".into())
         .await
         .unwrap();
-    let _ = started.handle.wait().await;
+    let result = started.handle.wait().await.unwrap();
     scheduler
-        .finish_and_maybe_start_next(&sid, &started.turn_id)
-        .await;
+        .finish_and_maybe_start_next(&sid, &started.turn_id, Some(&result.finalization))
+        .await
+        .unwrap();
 
     let events = store.replay_events(&sid).await.unwrap();
     assert!(
         events
             .iter()
-            .any(|e| matches!(e.payload, EventPayload::TurnStarted))
+            .any(|e| matches!(e.payload, DurableEventPayload::TurnStarted))
     );
     assert!(events.iter().any(|e| matches!(
         &e.payload,
-        EventPayload::UserMessage { text, .. } if text == "hello"
+        DurableEventPayload::UserMessage { text, .. } if text == "hello"
     )));
 }
 
 #[tokio::test]
 async fn running_submit_returns_busy() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -220,7 +316,7 @@ async fn running_submit_returns_busy() {
 
 #[tokio::test]
 async fn concurrent_start_with_completion_accepts_only_one_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
     let sid = seed_session(&store).await;
 
@@ -254,14 +350,14 @@ async fn concurrent_start_with_completion_accepts_only_one_turn() {
     let events = store.replay_events(&sid).await.unwrap();
     let user_messages = events
         .iter()
-        .filter(|event| matches!(event.payload, EventPayload::UserMessage { .. }))
+        .filter(|event| matches!(event.payload, DurableEventPayload::UserMessage { .. }))
         .count();
     assert_eq!(user_messages, 1);
 }
 
 #[tokio::test]
 async fn running_inject_writes_user_message_under_active_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -291,7 +387,7 @@ async fn running_inject_writes_user_message_under_active_turn() {
         .find(|e| {
             matches!(
                 &e.payload,
-                EventPayload::UserMessage { text, .. } if text == "inject me"
+                DurableEventPayload::UserMessage { text, .. } if text == "inject me"
             )
         })
         .expect("injected message");
@@ -300,7 +396,7 @@ async fn running_inject_writes_user_message_under_active_turn() {
 
 #[tokio::test]
 async fn running_queue_does_not_start_second_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -321,8 +417,181 @@ async fn running_queue_does_not_start_second_turn() {
 }
 
 #[tokio::test]
+async fn durable_queue_recovers_fifo_after_scheduler_restart() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
+    let sid = seed_session(&store).await;
+
+    let first = scheduler
+        .start_with_completion(sid.clone(), "first".into())
+        .await
+        .unwrap();
+    for text in ["queued one", "queued two"] {
+        scheduler
+            .deliver_input(
+                sid.clone(),
+                text.into(),
+                InputDelivery::QueueIfRunningElseStart,
+            )
+            .await
+            .unwrap();
+    }
+
+    let queued = store.session_read_model(&sid).await.unwrap();
+    assert_eq!(queued.execution.pending_inputs.len(), 2);
+    assert_eq!(queued.transcript.messages.len(), 1);
+
+    first.handle.force_kill();
+    drop(first.handle);
+    drop(scheduler);
+
+    let restarted = build_scheduler(Arc::clone(&store));
+    restarted.repair_stale(&sid).await.unwrap();
+    for _ in 0..100 {
+        let state = store.session_read_model(&sid).await.unwrap();
+        if !restarted.registry().has_active(&sid) && state.execution.pending_inputs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let state = store.session_read_model(&sid).await.unwrap();
+    assert!(state.execution.pending_inputs.is_empty());
+    let user_messages = store
+        .replay_events(&sid)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match &event.payload {
+            DurableEventPayload::UserMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages, ["first", "queued one", "queued two"]);
+}
+
+#[tokio::test]
+async fn queued_input_retries_after_a_transient_start_failure() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let release = Arc::new(Semaphore::new(0));
+    let envelope_calls = Arc::new(AtomicUsize::new(0));
+    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    extension_runner
+        .register(Arc::new(FailSecondEnvelope {
+            calls: Arc::clone(&envelope_calls),
+        }))
+        .await
+        .unwrap();
+    let scheduler = build_scheduler_with_runtime(
+        Arc::clone(&store),
+        Arc::new(GateFirstLlm {
+            calls: AtomicUsize::new(0),
+            release: Arc::clone(&release),
+        }),
+        extension_runner,
+    );
+    let sid = seed_session(&store).await;
+
+    scheduler
+        .deliver_input(sid.clone(), "first".into(), InputDelivery::StartNew)
+        .await
+        .unwrap();
+    scheduler
+        .deliver_input(
+            sid.clone(),
+            "queued".into(),
+            InputDelivery::QueueIfRunningElseStart,
+        )
+        .await
+        .unwrap();
+    release.add_permits(1);
+
+    for _ in 0..100 {
+        let state = store.session_read_model(&sid).await.unwrap();
+        if !scheduler.registry().has_active(&sid) && state.execution.pending_inputs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let state = store.session_read_model(&sid).await.unwrap();
+    assert!(state.execution.pending_inputs.is_empty());
+    assert_eq!(
+        state
+            .transcript
+            .messages
+            .iter()
+            .filter(|message| message.message.role == astrcode_core::llm::LlmRole::User)
+            .filter_map(|message| match message.message.content.as_slice() {
+                [astrcode_core::llm::LlmContent::Text { text }] => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        ["first", "queued"]
+    );
+    assert_eq!(envelope_calls.load(Ordering::Acquire), 3);
+}
+
+#[tokio::test]
+async fn completion_handoff_never_overtakes_an_older_queued_input() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let release = Arc::new(Semaphore::new(0));
+    let scheduler = build_scheduler_with_llm(
+        Arc::clone(&store),
+        Arc::new(GateFirstLlm {
+            calls: AtomicUsize::new(0),
+            release: Arc::clone(&release),
+        }),
+    );
+    let sid = seed_session(&store).await;
+
+    scheduler
+        .deliver_input(sid.clone(), "first".into(), InputDelivery::StartNew)
+        .await
+        .unwrap();
+    scheduler
+        .deliver_input(
+            sid.clone(),
+            "older queued".into(),
+            InputDelivery::QueueIfRunningElseStart,
+        )
+        .await
+        .unwrap();
+
+    release.add_permits(1);
+    scheduler
+        .deliver_input(
+            sid.clone(),
+            "new arrival".into(),
+            InputDelivery::QueueIfRunningElseStart,
+        )
+        .await
+        .unwrap();
+
+    for _ in 0..100 {
+        let state = store.session_read_model(&sid).await.unwrap();
+        if !scheduler.registry().has_active(&sid) && state.execution.pending_inputs.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let user_messages = store
+        .replay_events(&sid)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match &event.payload {
+            DurableEventPayload::UserMessage { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(user_messages, ["first", "older queued", "new arrival"]);
+}
+
+#[tokio::test]
 async fn running_queue_rejects_when_pending_limit_is_reached() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
     let sid = seed_session(&store).await;
 
@@ -363,7 +632,7 @@ async fn running_queue_rejects_when_pending_limit_is_reached() {
 
 #[tokio::test]
 async fn oversized_prompt_is_rejected_before_turn_starts() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -387,15 +656,15 @@ async fn oversized_prompt_is_rejected_before_turn_starts() {
     assert!(
         !events
             .iter()
-            .any(|event| matches!(event.payload, EventPayload::TurnStarted))
+            .any(|event| matches!(event.payload, DurableEventPayload::TurnStarted))
     );
 }
 
-fn turn_completed_reasons(events: &[astrcode_core::event::Event]) -> Vec<String> {
+fn turn_completed_reasons(events: &[StoredEvent]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match &e.payload {
-            EventPayload::TurnCompleted { finish_reason } => Some(finish_reason.clone()),
+            DurableEventPayload::TurnCompleted { finish_reason } => Some(finish_reason.clone()),
             _ => None,
         })
         .collect()
@@ -403,7 +672,7 @@ fn turn_completed_reasons(events: &[astrcode_core::event::Event]) -> Vec<String>
 
 #[tokio::test]
 async fn release_completed_execution_is_non_destructive() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -412,9 +681,11 @@ async fn release_completed_execution_is_non_destructive() {
         .await
         .unwrap();
     let turn_id = started.turn_id;
-    let _ = started.handle.wait().await;
+    let result = started.handle.wait().await.unwrap();
 
-    scheduler.release_completed_execution(&sid, &turn_id).await;
+    scheduler
+        .release_completed_execution(&sid, &turn_id, Some(&result.finalization))
+        .await;
 
     assert_eq!(
         turn_completed_reasons(&store.replay_events(&sid).await.unwrap()),
@@ -425,7 +696,7 @@ async fn release_completed_execution_is_non_destructive() {
 
 #[tokio::test]
 async fn stale_completion_does_not_recycle_newer_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -434,17 +705,16 @@ async fn stale_completion_does_not_recycle_newer_turn() {
         .await
         .unwrap();
     let first_turn_id = first.turn_id;
-    let _ = first.handle.wait().await;
-
-    let outcome = scheduler
-        .deliver_input(
-            sid.clone(),
-            "second".into(),
-            InputDelivery::InjectIfRunningElseStart,
-        )
+    let first_result = first.handle.wait().await.unwrap();
+    scheduler
+        .finish_and_maybe_start_next(&sid, &first_turn_id, Some(&first_result.finalization))
         .await
         .unwrap();
-    assert!(matches!(outcome, DeliveryOutcome::Started { .. }));
+
+    let second = scheduler
+        .start_with_completion(sid.clone(), "second".into())
+        .await
+        .unwrap();
 
     assert!(
         !recycle_completed_session_for_test(&scheduler, &sid, &first_turn_id)
@@ -452,11 +722,17 @@ async fn stale_completion_does_not_recycle_newer_turn() {
             .unwrap()
     );
     assert!(store.list_sessions().await.unwrap().contains(&sid));
+
+    let second_result = second.handle.wait().await.unwrap();
+    scheduler
+        .finish_and_maybe_start_next(&sid, &second.turn_id, Some(&second_result.finalization))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
 async fn cleanup_after_finished_registry_entry_does_not_emit_duplicate_terminal() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -478,7 +754,7 @@ async fn cleanup_after_finished_registry_entry_does_not_emit_duplicate_terminal(
 
 #[tokio::test]
 async fn execution_view_uses_registry_for_active_turn() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -493,7 +769,7 @@ async fn execution_view_uses_registry_for_active_turn() {
 
 #[tokio::test]
 async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
     let sid = seed_session(&store).await;
 
@@ -501,12 +777,11 @@ async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish(
         .start_with_completion(sid.clone(), "run".into())
         .await
         .unwrap();
-    let turn_id = started.turn_id.clone();
 
     scheduler.abort(&sid).await.unwrap();
     assert!(
-        scheduler.registry().has_active(&sid),
-        "cooperative abort keeps the registry entry until the runner exits"
+        !scheduler.registry().has_active(&sid),
+        "abort must not return before durable finalization releases ownership"
     );
 
     let result = started.handle.wait().await.expect("turn result");
@@ -515,16 +790,13 @@ async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish(
         Err(astrcode_session::TurnError::Aborted)
     ));
 
-    scheduler.finish_and_maybe_start_next(&sid, &turn_id).await;
-    assert!(!scheduler.registry().has_active(&sid));
-
     let reasons = turn_completed_reasons(&store.replay_events(&sid).await.unwrap());
     assert_eq!(reasons, vec!["aborted"]);
 }
 
 #[tokio::test]
-async fn detached_task_tracking_prunes_finished_handles() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+async fn owned_task_tracking_releases_finished_tasks() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler(Arc::clone(&store));
     let sid = seed_session(&store).await;
 
@@ -533,30 +805,79 @@ async fn detached_task_tracking_prunes_finished_handles() {
         .await
         .unwrap();
     for _ in 0..50 {
-        if scheduler.tracked_detached_task_count() == 0
-            && scheduler.tracked_detached_task_slots() == 1
-        {
+        if scheduler.owned_task_count() == 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert_eq!(scheduler.tracked_detached_task_count(), 0);
-    assert_eq!(scheduler.tracked_detached_task_slots(), 1);
+    assert_eq!(
+        scheduler.owned_task_count(),
+        1,
+        "only the persistent child completion watcher should remain"
+    );
 
     scheduler
         .deliver_input(sid, "second".into(), InputDelivery::StartNew)
         .await
         .unwrap();
+    for _ in 0..50 {
+        if scheduler.owned_task_count() == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(scheduler.owned_task_count(), 1);
+}
+
+#[tokio::test]
+async fn shutdown_rejects_new_turns_and_durably_settles_active_owners() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = Arc::new(build_scheduler_with_llm(
+        Arc::clone(&store),
+        Arc::new(PendingLlm),
+    ));
+    let active_session = seed_session(&store).await;
+    let rejected_session = seed_session(&store).await;
+
+    scheduler
+        .deliver_input(
+            active_session.clone(),
+            "active".into(),
+            InputDelivery::StartNew,
+        )
+        .await
+        .unwrap();
+
+    let shutdown_scheduler = Arc::clone(&scheduler);
+    let shutdown = tokio::spawn(async move {
+        shutdown_scheduler.shutdown_background_tasks().await;
+    });
+    while scheduler.accepts_owned_tasks() {
+        tokio::task::yield_now().await;
+    }
+
+    assert!(matches!(
+        scheduler
+            .deliver_input(rejected_session, "too late".into(), InputDelivery::StartNew,)
+            .await,
+        Err(TurnScheduleError::BackgroundTasksClosed)
+    ));
+    tokio::time::timeout(Duration::from_secs(5), shutdown)
+        .await
+        .expect("shutdown should force and settle the pending turn")
+        .unwrap();
+
+    assert!(!scheduler.registry().has_active(&active_session));
     assert_eq!(
-        scheduler.tracked_detached_task_slots(),
-        1,
-        "tracking a new detached task should prune finished handles first"
+        turn_completed_reasons(&store.replay_events(&active_session).await.unwrap()),
+        vec!["aborted"]
     );
+    assert_eq!(scheduler.owned_task_count(), 0);
 }
 
 #[tokio::test]
 async fn interrupt_and_start_replaces_active_turn_under_delivery_gate() {
-    let store: Arc<dyn EventStore> = Arc::new(InMemoryEventStore::new());
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let scheduler = build_scheduler_with_llm(Arc::clone(&store), Arc::new(PendingLlm));
     let sid = seed_session(&store).await;
 
@@ -595,4 +916,63 @@ async fn interrupt_and_start_replaces_active_turn_under_delivery_gate() {
     );
 
     scheduler.abort(&sid).await.unwrap();
+}
+
+#[tokio::test]
+async fn queue_drains_turn_finished_but_not_settled() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler(Arc::clone(&store));
+    let sid = seed_session(&store).await;
+
+    // 启动第一个 turn 并等它 durable 完成，但**不**执行完成收尾：
+    // 这精确复现“回复已完成、registry 尚未 settle”的窗口（真实场景中完成
+    // watcher 可能还卡在 sync/child-drain 或收尾重试中）。
+    let started = scheduler
+        .start_with_completion(sid.clone(), "first".into())
+        .await
+        .unwrap();
+    started.handle.wait().await.expect("first turn must finish");
+    assert!(scheduler.registry().active_is_finished(&sid));
+    assert!(scheduler.registry().has_active(&sid));
+    assert!(scheduler.registry().active_is_finished(&sid));
+    assert!(scheduler.registry().has_active(&sid));
+
+    // 窗口内投递：投递路径应自行收尾 finished turn 并立即启动队首，
+    // 而不是把输入留在队列里依赖（可能永远不来的）watcher drain。
+    let outcome = scheduler
+        .deliver_input(
+            sid.clone(),
+            "second".into(),
+            InputDelivery::QueueIfRunningElseStart,
+        )
+        .await
+        .expect("deliver must not fail");
+    assert!(matches!(outcome, DeliveryOutcome::Queued { .. }));
+
+    // 第二个 turn 被立即启动（StaticTextLlm 立即完成），随后被投递路径
+    // spawn 的 watcher 收尾；最终无活跃 turn、无 pending 输入。
+    for _ in 0..100 {
+        if !scheduler.registry().has_active(&sid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !scheduler.registry().has_active(&sid),
+        "second turn must be started and settled, not stuck in queue"
+    );
+    let model = store.session_read_model(&sid).await.unwrap();
+    assert!(
+        model.execution.pending_inputs.is_empty(),
+        "queued input must be drained into a new turn"
+    );
+    let events = store.replay_events(&sid).await.unwrap();
+    let user_messages = events
+        .iter()
+        .filter(|e| matches!(e.payload, DurableEventPayload::UserMessage { .. }))
+        .count();
+    assert_eq!(
+        user_messages, 2,
+        "second input must be consumed into a new turn"
+    );
 }

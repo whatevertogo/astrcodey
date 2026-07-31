@@ -39,7 +39,6 @@ pub struct SessionInspectSnapshot {
     pub parent_session_id: Option<String>,
     pub source_extension: Option<String>,
     pub message_count: usize,
-    pub context_message_count: usize,
     pub pending_tool_call_ids: Vec<String>,
     pub agent_session_count: usize,
 }
@@ -101,13 +100,6 @@ pub struct SessionInspectPendingApproval {
     pub rule_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct SessionInspectPendingInteraction {
-    pub content: String,
-    pub metadata: BTreeMap<String, Value>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInspectAgentSession {
@@ -125,14 +117,14 @@ pub struct SessionInspectAgentSession {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
-pub struct SessionInspectCompactBoundary {
+pub struct SessionInspectCompaction {
     pub trigger: String,
     pub pre_tokens: usize,
     pub post_tokens: usize,
     pub summary: String,
     pub transcript_path: Option<String>,
     pub seq: u64,
-    pub base_event_seq: u64,
+    pub source_seq: u64,
     pub strategy: String,
     pub keep_recent_turns: Option<usize>,
 }
@@ -142,7 +134,6 @@ pub struct SessionInspectCompactBoundary {
 pub struct SessionInspectReadModel {
     pub session_id: String,
     pub messages: Vec<SessionInspectSequencedMessage>,
-    pub context_messages: Vec<SessionInspectSequencedMessage>,
     pub working_dir: String,
     pub model_id: String,
     pub phase: String,
@@ -151,14 +142,13 @@ pub struct SessionInspectReadModel {
     pub system_prompt_fingerprint: Option<String>,
     pub pending_tool_call_ids: Vec<String>,
     pub pending_tool_approvals: BTreeMap<String, SessionInspectPendingApproval>,
-    pub pending_tool_interactions: BTreeMap<String, SessionInspectPendingInteraction>,
     pub created_at: String,
     pub updated_at: String,
     pub parent_session_id: Option<String>,
     pub tool_selection: Option<SessionToolSelectionDto>,
     pub source_extension: Option<String>,
     pub agent_sessions: Vec<SessionInspectAgentSession>,
-    pub compact_boundaries: Vec<SessionInspectCompactBoundary>,
+    pub compactions: Vec<SessionInspectCompaction>,
     pub latest_seq: Option<u64>,
 }
 

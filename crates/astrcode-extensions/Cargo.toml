@@ -7,15 +7,17 @@ description = "Extension/hook system: lifecycle events, hook modes, extension lo
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
-astrcode-extension-sdk = { path = "../astrcode-extension-sdk", features = ["trusted-bundled"] }
-astrcode-support = { path = "../astrcode-support" }
+astrcode-context = { path = "../astrcode-context" }
+astrcode-session-projection = { path = "../astrcode-session-projection" }
+astrcode-storage = { path = "../astrcode-storage" }
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt-multi-thread", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
+arc-swap = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-dirs = { workspace = true }
 parking_lot = { workspace = true }
 tokio-util = { workspace = true }
 reqwest = { workspace = true, features = ["stream"] }
@@ -23,6 +25,7 @@ futures-util = { workspace = true }
 globset = { workspace = true }
 regex = { workspace = true }
 walkdir = { workspace = true }
+sha2 = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

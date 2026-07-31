@@ -1,7 +1,9 @@
 import {
   AGENT_SESSION_STATUSES,
+  APPROVAL_DECISIONS,
   BLOCK_STATUSES,
   PHASES,
+  TOOL_CALL_STATUSES,
   TOOL_OUTPUT_STREAMS,
 } from './types'
 import type {
@@ -12,7 +14,10 @@ import type {
   ConversationDelta,
   ConversationSnapshot,
   ConversationStreamEnvelope,
+  PendingAskUserQuestion,
+  PendingAskUserQuestionsResponse,
   PromptAttachmentWire,
+  ToolApproval,
 } from './types'
 
 type JsonObject = Record<string, unknown>
@@ -84,6 +89,14 @@ function optionalNumber(source: JsonObject, name: string): number | undefined {
   return value
 }
 
+function requiredNumber(source: JsonObject, name: string): number {
+  const value = source[name]
+  if (typeof value !== 'number') {
+    throw new ProtocolDecodeError(`expected number ${name}`)
+  }
+  return value
+}
+
 function decodeObject(value: unknown, context: string): JsonObject {
   if (!isObject(value))
     throw new ProtocolDecodeError(`expected object ${context}`)
@@ -107,6 +120,10 @@ function stringEnumDecoder<const Values extends readonly string[]>(
 
 const decodePhase = stringEnumDecoder('phase', PHASES)
 const decodeBlockStatus = stringEnumDecoder('block status', BLOCK_STATUSES)
+const decodeToolCallStatus = stringEnumDecoder(
+  'tool call status',
+  TOOL_CALL_STATUSES
+)
 const decodeToolOutputStream = stringEnumDecoder(
   'tool output stream',
   TOOL_OUTPUT_STREAMS
@@ -116,6 +133,20 @@ const decodeAgentSessionStatus = stringEnumDecoder(
   AGENT_SESSION_STATUSES,
   'running'
 )
+const decodeApprovalDecision = stringEnumDecoder(
+  'approval decision',
+  APPROVAL_DECISIONS
+)
+
+function decodeToolApproval(value: unknown): ToolApproval {
+  const object = decodeObject(value, 'tool approval')
+  return {
+    callId: requiredString(object, 'callId'),
+    prompt: requiredString(object, 'prompt'),
+    ruleKey: optionalString(object, 'ruleKey'),
+  }
+}
+
 export function decodeConversationCursor(value: unknown): ConversationCursor {
   const object = decodeObject(value, 'cursor')
   return { value: requiredString(object, 'value') }
@@ -158,20 +189,25 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
         reasoningContent: optionalString(object, 'reasoningContent'),
         status: decodeBlockStatus(object.status),
       }
-    case 'toolCall':
+    case 'toolCall': {
+      const metadata = optionalObject(object, 'metadata')
+      const approval =
+        object.approval == null
+          ? undefined
+          : decodeToolApproval(object.approval)
+      const argumentsJson = optionalObject(object, 'argumentsJson')
       return {
         kind,
         id,
         name: requiredString(object, 'name'),
         arguments: requiredString(object, 'arguments'),
         text: requiredString(object, 'text'),
-        status: decodeBlockStatus(object.status),
-        metadata: optionalObject(object, 'metadata'),
-        argumentsJson:
-          object.argumentsJson && typeof object.argumentsJson === 'object'
-            ? (object.argumentsJson as Record<string, unknown>)
-            : undefined,
+        status: decodeToolCallStatus(object.status),
+        ...(metadata ? { metadata } : {}),
+        ...(approval ? { approval } : {}),
+        ...(argumentsJson ? { argumentsJson } : {}),
       }
+    }
     case 'error':
       return { kind, id, message: requiredString(object, 'message') }
     case 'systemNote':
@@ -272,21 +308,75 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
       }
     case 'extensionRegistryChanged':
       return { kind }
-    case 'patchToolMetadata':
+    case 'extensionEvent':
       return {
         kind,
-        blockId: requiredString(object, 'blockId'),
-        metadata: optionalObject(object, 'metadata') ?? {},
+        extensionId: requiredString(object, 'extensionId'),
+        eventType: requiredString(object, 'eventType'),
+        schemaVersion: requiredNumber(object, 'schemaVersion'),
+        payload: object.payload,
       }
-    case 'patchToolCall':
+    case 'toolApprovalRequested':
       return {
         kind,
-        blockId: requiredString(object, 'blockId'),
-        text: requiredString(object, 'text'),
-        metadata: optionalObject(object, 'metadata'),
+        approval: decodeToolApproval(object.approval),
+      }
+    case 'toolApprovalResolved':
+      return {
+        kind,
+        callId: requiredString(object, 'callId'),
+        decision: decodeApprovalDecision(object.decision),
       }
     default:
       throw new ProtocolDecodeError(`invalid delta kind ${kind}`)
+  }
+}
+
+function decodeAskUserOption(value: unknown) {
+  const object = decodeObject(value, 'ask-user option')
+  return {
+    label: requiredString(object, 'label'),
+    description: requiredString(object, 'description'),
+    preview: optionalString(object, 'preview'),
+  }
+}
+
+function decodeAskUserQuestion(value: unknown) {
+  const object = decodeObject(value, 'ask-user question')
+  return {
+    question: requiredString(object, 'question'),
+    header: requiredString(object, 'header'),
+    options: arrayField(object, 'options').map(decodeAskUserOption),
+    multiSelect:
+      object.multiSelect === undefined
+        ? undefined
+        : requiredBoolean(object, 'multiSelect'),
+  }
+}
+
+export function decodePendingAskUserQuestion(
+  value: unknown
+): PendingAskUserQuestion {
+  const object = decodeObject(value, 'pending ask-user question')
+  const metadata = optionalObject(object, 'metadata')
+  return {
+    sessionId: requiredString(object, 'sessionId'),
+    callId: requiredString(object, 'callId'),
+    questions: arrayField(object, 'questions').map(decodeAskUserQuestion),
+    metadata: metadata
+      ? { source: optionalString(metadata, 'source') }
+      : undefined,
+  }
+}
+
+export function decodePendingAskUserQuestionsResponse(
+  value: unknown
+): PendingAskUserQuestionsResponse {
+  const object = decodeObject(value, 'pending ask-user questions response')
+  return {
+    questions: arrayField(object, 'questions').map(
+      decodePendingAskUserQuestion
+    ),
   }
 }
 

@@ -106,8 +106,8 @@ impl ToolHandler for SkillToolHandler {
         tool_name: &str,
         arguments: Value,
         working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         if tool_name != SKILL_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -115,9 +115,10 @@ impl ToolHandler for SkillToolHandler {
         Ok(handle_skill_tool(
             arguments,
             working_dir,
-            ctx.session_id.as_str(),
+            ctx.scope.session_id.as_str(),
             &self.shared,
-        ))
+        )
+        .into())
     }
 }
 
@@ -283,9 +284,9 @@ struct SkillRoot {
 
 #[derive(Debug, Default, Deserialize)]
 struct RawSkillFrontmatter {
-    name: Option<serde_yaml::Value>,
-    description: Option<serde_yaml::Value>,
-    when_to_use: Option<serde_yaml::Value>,
+    name: Option<String>,
+    description: Option<String>,
+    when_to_use: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -338,7 +339,6 @@ fn handle_skill_tool(
         Err(error) => {
             let msg = format!("invalid Skill input: {error}");
             return ToolResult {
-                call_id: String::new(),
                 // content 必须非空,LLM 只读 content,不读 error 字段。
                 content: msg.clone(),
                 is_error: true,
@@ -365,7 +365,6 @@ fn handle_skill_tool(
             available
         );
         return ToolResult {
-            call_id: String::new(),
             content: msg.clone(),
             is_error: true,
             error: Some(msg),
@@ -385,7 +384,7 @@ fn handle_skill_tool(
 }
 
 fn discover_skills(working_dir: &str) -> Vec<SkillDefinition> {
-    let home_dir = hostpaths::resolve_home_dir();
+    let home_dir = hostpaths::user_home_dir();
     discover_skills_with_home(Path::new(working_dir), Some(&home_dir))
 }
 
@@ -492,20 +491,25 @@ fn parse_skill_md(
         return None;
     }
 
-    let description = frontmatter::yaml_string_value(raw.description.as_ref())
-        .filter(|text| !text.trim().is_empty())
-        .or_else(|| extract_description_from_markdown(&guide))?;
+    let description =
+        trimmed_nonempty(raw.description).or_else(|| extract_description_from_markdown(&guide))?;
 
     Some(SkillDefinition {
         id: id.to_string(),
-        display_name: frontmatter::yaml_string_value(raw.name.as_ref()).filter(|name| name != id),
+        display_name: trimmed_nonempty(raw.name).filter(|name| name != id),
         description,
-        when_to_use: frontmatter::yaml_string_value(raw.when_to_use.as_ref()),
+        when_to_use: trimmed_nonempty(raw.when_to_use),
         guide,
         asset_files: collect_asset_files(&skill_root),
         skill_root,
         source,
     })
+}
+
+fn trimmed_nonempty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn normalize_skill_content(content: &str) -> String {
@@ -671,7 +675,7 @@ mod tests {
     use astrcode_extension_sdk::{
         config::ModelSelection,
         extension::CommandContext,
-        tool::{ToolCapabilities, ToolExecutionContext},
+        tool::{ExtensionToolContext, ToolCapabilities, ToolExecutionContext},
     };
 
     use super::*;
@@ -840,13 +844,16 @@ mod tests {
     }
 
 
-    fn tool_ctx(working_dir: &Path) -> ToolExecutionContext {
-        ToolExecutionContext::new(
-            "session".into(),
-            working_dir.to_string_lossy().into_owned(),
+    fn tool_ctx(working_dir: &Path) -> ExtensionToolContext {
+        ExtensionToolContext::new(
+            ToolExecutionContext::new(
+                "session".into(),
+                working_dir.to_string_lossy().into_owned(),
+                None,
+                None,
+                ToolCapabilities::default(),
+            ),
             None,
-            None,
-            ToolCapabilities::default(),
         )
     }
 

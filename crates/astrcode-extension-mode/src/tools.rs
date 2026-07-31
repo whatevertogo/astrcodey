@@ -4,9 +4,8 @@ use std::path::Path;
 #[cfg(test)]
 use std::path::PathBuf;
 
-use astrcode_extension_sdk::{
-    render::{RenderSpec, RenderTone, UI_RENDER_METADATA_KEY},
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
+use astrcode_extension_sdk::tool::{
+    ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -233,15 +232,6 @@ pub fn handle_upsert_plan(
     let path = store::save_plan(plan_dir, &args.content)?;
 
     let operation = if is_create { "create" } else { "update" };
-    let ui_render = RenderSpec::Box {
-        title: Some(format!("Plan {operation}")),
-        tone: RenderTone::Success,
-        children: vec![RenderSpec::Markdown {
-            text: args.content.clone(),
-            tone: RenderTone::Default,
-        }],
-    };
-
     Ok(ToolResult::text(
         if is_create {
             format!("Plan artifact created at {}.", path)
@@ -253,10 +243,6 @@ pub fn handle_upsert_plan(
             ("path", json!(path)),
             ("operation", json!(operation)),
             ("planContent", json!(args.content)),
-            (
-                UI_RENDER_METADATA_KEY,
-                serde_json::to_value(&ui_render).unwrap_or_default(),
-            ),
         ]),
     ))
 }

@@ -18,7 +18,6 @@ import {
   // Capability, no current thinking → default
   const result = deriveThinkingFormValue(
     {
-      wireMapping: 'anthropic_adaptive',
       allowedEffort: ['low', 'medium', 'high'],
       budgetMin: null,
       budgetMax: null,
@@ -32,7 +31,6 @@ import {
   // Capability, thinking null → default
   const result = deriveThinkingFormValue(
     {
-      wireMapping: 'anthropic_adaptive',
       allowedEffort: ['low', 'medium', 'high'],
       budgetMin: null,
       budgetMax: null,
@@ -46,7 +44,6 @@ import {
   // Capability, thinking enabled → enabled with effort and budgetTokens
   const result = deriveThinkingFormValue(
     {
-      wireMapping: 'anthropic_adaptive',
       allowedEffort: ['low', 'medium', 'high'],
       budgetMin: null,
       budgetMax: null,
@@ -64,7 +61,6 @@ import {
   // Capability, thinking enabled, no effort/budget → enabled with empty strings
   const result = deriveThinkingFormValue(
     {
-      wireMapping: 'anthropic_adaptive',
       allowedEffort: null,
       budgetMin: null,
       budgetMax: null,
@@ -78,7 +74,6 @@ import {
   // Capability, thinking disabled → disabled
   const result = deriveThinkingFormValue(
     {
-      wireMapping: 'anthropic_adaptive',
       allowedEffort: null,
       budgetMin: null,
       budgetMax: null,
@@ -89,10 +84,9 @@ import {
 }
 
 {
-  // A capability without an explicit disabled wire state falls back to model default.
+  // A capability that cannot be disabled falls back to the model default.
   const result = deriveThinkingFormValue(
     {
-      wireMapping: 'open_ai_responses',
       allowedEffort: ['low', 'medium', 'high'],
       budgetMin: null,
       budgetMax: null,
@@ -326,7 +320,6 @@ import {
   // Has effort → not toggle-only
   assert.equal(
     isToggleOnlyThinking({
-      wireMapping: 'anthropic_adaptive',
       allowedEffort: ['low'],
       budgetMin: null,
       budgetMax: null,
@@ -339,7 +332,6 @@ import {
   // Has budget → not toggle-only
   assert.equal(
     isToggleOnlyThinking({
-      wireMapping: 'anthropic_adaptive',
       allowedEffort: null,
       budgetMin: 1024,
       budgetMax: null,
@@ -352,7 +344,6 @@ import {
   // Omitted allowedEffort means provider-specific effort values are accepted.
   assert.equal(
     isToggleOnlyThinking({
-      wireMapping: 'open_ai_chat',
       allowedEffort: null,
       budgetMin: null,
       budgetMax: null,
@@ -365,7 +356,6 @@ import {
   // Empty array for allowedEffort, no budget → toggle-only
   assert.equal(
     isToggleOnlyThinking({
-      wireMapping: 'open_ai_chat',
       allowedEffort: [],
       budgetMin: null,
       budgetMax: null,

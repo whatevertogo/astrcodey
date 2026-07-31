@@ -3,7 +3,9 @@ import type {
   ConversationBlock,
   ConversationControlState,
   ConversationDelta,
+  PendingAskUserQuestion,
 } from '../../services/types'
+import { decodePendingAskUserQuestion } from '../../services/protocol'
 import type { AppState } from '../types'
 import { mergeAgentSession, resolvePhase, upsertBlock } from './blockHelpers'
 import {
@@ -11,6 +13,7 @@ import {
   coalesceDeltas,
   type CoalescedDelta,
 } from './coalesce'
+import { applyConversationDeltaEffects } from './effects'
 
 type BlockDelta = Exclude<CoalescedDelta, { kind: 'other' }>
 
@@ -23,10 +26,52 @@ export type ConversationRenderState = Pick<
   | 'compactSubmitting'
   | 'agentSessions'
   | 'statusItems'
+  | 'statusItemRevisions'
+  | 'pendingAskUserQuestions'
+  | 'resolvedAskUserCallIds'
+  | 'askUserEventRevision'
   | 'transientHint'
 >
 
 type ConversationRenderPatch = Partial<ConversationRenderState>
+
+export function mergePendingAskUserSnapshot(
+  currentPending: Record<string, PendingAskUserQuestion>,
+  resolvedCallIds: Record<string, true>,
+  snapshot: PendingAskUserQuestion[],
+  sessionId: string,
+  pendingAtStart: ReadonlySet<string>,
+  eventsArrivedDuringRequest: boolean
+): Pick<
+  ConversationRenderState,
+  'pendingAskUserQuestions' | 'resolvedAskUserCallIds'
+> {
+  const pending = Object.fromEntries(
+    snapshot
+      .filter(
+        (question) =>
+          question.sessionId === sessionId &&
+          (!eventsArrivedDuringRequest || !resolvedCallIds[question.callId])
+      )
+      .map((question) => [question.callId, question])
+  )
+  if (eventsArrivedDuringRequest) {
+    for (const [callId, question] of Object.entries(currentPending)) {
+      if (!pendingAtStart.has(callId) && !resolvedCallIds[callId]) {
+        pending[callId] = question
+      }
+    }
+  }
+
+  const nextResolved = { ...resolvedCallIds }
+  for (const callId of Object.keys(pending)) {
+    delete nextResolved[callId]
+  }
+  return {
+    pendingAskUserQuestions: pending,
+    resolvedAskUserCallIds: nextResolved,
+  }
+}
 
 function sameControlState(
   left: ConversationControlState | null,
@@ -95,12 +140,16 @@ export function reduceConversationDeltas(
   let phase = current.phase
   let agentSessions = current.agentSessions
   let statusItems = current.statusItems
+  let statusItemRevisions = current.statusItemRevisions
+  let pendingAskUserQuestions = current.pendingAskUserQuestions
+  let resolvedAskUserCallIds = current.resolvedAskUserCallIds
+  let askUserEventRevision = current.askUserEventRevision
   let transientHint = current.transientHint
   let pendingBlockDeltas: BlockDelta[] = []
 
   const flushBlockDeltas = () => {
     if (pendingBlockDeltas.length === 0) return
-    blocks = applyCoalescedDeltas(blocks, pendingBlockDeltas).blocks
+    blocks = applyCoalescedDeltas(blocks, pendingBlockDeltas)
     pendingBlockDeltas = []
   }
 
@@ -164,19 +213,22 @@ export function reduceConversationDeltas(
       }
 
       case 'statusItemUpdate': {
-        if (
-          (delta.text && statusItems[delta.id] === delta.text) ||
-          (!delta.text && statusItems[delta.id] === undefined)
-        ) {
-          break
+        const valueChanged = delta.text
+          ? statusItems[delta.id] !== delta.text
+          : statusItems[delta.id] !== undefined
+        if (valueChanged) {
+          const next = { ...statusItems }
+          if (delta.text) {
+            next[delta.id] = delta.text
+          } else {
+            delete next[delta.id]
+          }
+          statusItems = next
         }
-        const next = { ...statusItems }
-        if (delta.text) {
-          next[delta.id] = delta.text
-        } else {
-          delete next[delta.id]
+        statusItemRevisions = {
+          ...statusItemRevisions,
+          [delta.id]: (statusItemRevisions[delta.id] ?? 0) + 1,
         }
-        statusItems = next
         break
       }
 
@@ -184,37 +236,69 @@ export function reduceConversationDeltas(
         transientHint = '扩展已更新'
         break
 
-      case 'patchToolMetadata':
-        blocks = updateToolCall(blocks, delta.blockId, (block) => ({
+      case 'extensionEvent': {
+        if (delta.extensionId !== 'astrcode-ask-user') break
+        if (delta.eventType === 'ask_user.pending') {
+          try {
+            const pending = decodePendingAskUserQuestion(delta.payload)
+            if (pendingAskUserQuestions[pending.callId]) {
+              break
+            }
+            if (resolvedAskUserCallIds[pending.callId]) {
+              const nextResolved = { ...resolvedAskUserCallIds }
+              delete nextResolved[pending.callId]
+              resolvedAskUserCallIds = nextResolved
+            }
+            pendingAskUserQuestions = {
+              ...pendingAskUserQuestions,
+              [pending.callId]: pending,
+            }
+            askUserEventRevision += 1
+          } catch (error) {
+            console.warn('Ignoring invalid ask-user pending event', error)
+          }
+          break
+        }
+        if (delta.eventType === 'ask_user.resolved') {
+          if (
+            typeof delta.payload !== 'object' ||
+            delta.payload === null ||
+            Array.isArray(delta.payload)
+          ) {
+            break
+          }
+          const callId = (delta.payload as Record<string, unknown>).callId
+          if (typeof callId !== 'string') break
+          if (
+            resolvedAskUserCallIds[callId] &&
+            !pendingAskUserQuestions[callId]
+          ) {
+            break
+          }
+          const nextPending = { ...pendingAskUserQuestions }
+          delete nextPending[callId]
+          pendingAskUserQuestions = nextPending
+          resolvedAskUserCallIds = {
+            ...resolvedAskUserCallIds,
+            [callId]: true,
+          }
+          askUserEventRevision += 1
+        }
+        break
+      }
+
+      case 'toolApprovalRequested':
+        blocks = updateToolCall(blocks, delta.approval.callId, (block) => ({
           ...block,
-          metadata: {
-            ...(block.metadata ?? {}),
-            ...delta.metadata,
-            toolGateApproval: {
-              ...((block.metadata?.toolGateApproval as
-                | Record<string, unknown>
-                | undefined) ?? {}),
-              ...((delta.metadata.toolGateApproval as
-                | Record<string, unknown>
-                | undefined) ?? {}),
-            },
-          },
+          approval: delta.approval,
         }))
         break
 
-      case 'patchToolCall':
-        blocks = updateToolCall(blocks, delta.blockId, (block) => {
-          const metadata = delta.metadata
-            ? {
-                ...(block.metadata ?? {}),
-                ...delta.metadata,
-              }
-            : block.metadata
-          return {
-            ...block,
-            text: delta.text,
-            ...(metadata ? { metadata } : {}),
-          }
+      case 'toolApprovalResolved':
+        blocks = updateToolCall(blocks, delta.callId, (block) => {
+          const next = { ...block }
+          delete next.approval
+          return next
         })
         break
 
@@ -241,6 +325,18 @@ export function reduceConversationDeltas(
     patch.agentSessions = agentSessions
   }
   if (statusItems !== current.statusItems) patch.statusItems = statusItems
+  if (statusItemRevisions !== current.statusItemRevisions) {
+    patch.statusItemRevisions = statusItemRevisions
+  }
+  if (pendingAskUserQuestions !== current.pendingAskUserQuestions) {
+    patch.pendingAskUserQuestions = pendingAskUserQuestions
+  }
+  if (resolvedAskUserCallIds !== current.resolvedAskUserCallIds) {
+    patch.resolvedAskUserCallIds = resolvedAskUserCallIds
+  }
+  if (askUserEventRevision !== current.askUserEventRevision) {
+    patch.askUserEventRevision = askUserEventRevision
+  }
   if (transientHint !== current.transientHint) {
     patch.transientHint = transientHint
   }
@@ -248,51 +344,6 @@ export function reduceConversationDeltas(
     patch.cursor = cursor
   }
   return patch
-}
-
-function runDeltaEffects(
-  deltas: ConversationDelta[],
-  get: () => AppState
-): void {
-  let shouldRefreshSessions = false
-  let shouldRefreshExtensions = false
-  let shouldRehydrate = false
-  let continuation:
-    | Extract<ConversationDelta, { kind: 'sessionContinued' }>
-    | undefined
-
-  for (const delta of deltas) {
-    if (delta.kind === 'appendBlock' && delta.block.kind === 'user') {
-      shouldRefreshSessions = true
-    } else if (delta.kind === 'sessionContinued') {
-      shouldRefreshSessions = true
-      continuation = delta
-    } else if (delta.kind === 'rehydrateRequired') {
-      shouldRehydrate = true
-    } else if (delta.kind === 'extensionRegistryChanged') {
-      shouldRefreshExtensions = true
-    }
-  }
-
-  if (shouldRefreshSessions) {
-    void get().refreshSessions()
-  }
-  if (shouldRefreshExtensions) {
-    void get().refreshExtensionData()
-  }
-
-  if (continuation) {
-    if (continuation.newSessionId === continuation.parentSessionId) {
-      void get().refreshConversationSnapshot()
-    } else {
-      void get().switchSession(continuation.newSessionId)
-    }
-  } else if (shouldRehydrate) {
-    const sessionId = get().activeSessionId
-    if (sessionId) {
-      void get().switchSession(sessionId)
-    }
-  }
 }
 
 export function applyDeltasToState(
@@ -309,7 +360,7 @@ export function applyDeltasToState(
     const patch = reduceConversationDeltas(current, deltas, cursor)
     return Object.keys(patch).length > 0 ? patch : current
   })
-  runDeltaEffects(deltas, get)
+  applyConversationDeltaEffects(deltas, get)
 }
 
 export function applyDeltaToState(

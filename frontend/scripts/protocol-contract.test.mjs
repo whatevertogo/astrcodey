@@ -32,7 +32,19 @@ assert.equal(finalize.delta.block.kind, 'assistant')
 assert.equal(finalize.delta.block.text, 'complete answer')
 assert.equal(finalize.delta.block.status, 'complete')
 
-const continued = decodeConversationStreamEnvelope(fixture[2])
+const rehydrate = decodeConversationStreamEnvelope(fixture[2])
+assert.equal(rehydrate.delta.kind, 'rehydrateRequired')
+
+const continued = decodeConversationStreamEnvelope({
+  sessionId: 'parent-session',
+  cursor: { value: '7' },
+  delta: {
+    kind: 'sessionContinued',
+    parentSessionId: 'parent-session',
+    newSessionId: 'child-session',
+    parentCursor: { value: '7' },
+  },
+})
 assert.equal(continued.delta.kind, 'sessionContinued')
 assert.equal(continued.delta.parentSessionId, 'parent-session')
 assert.equal(continued.delta.newSessionId, 'child-session')
@@ -93,6 +105,62 @@ assert.equal(sparseAgentSession.delta.agentSession.agentName, undefined)
 assert.equal(sparseAgentSession.delta.agentSession.task, undefined)
 assert.equal(sparseAgentSession.delta.agentSession.currentTool, undefined)
 
+const extensionEvent = decodeConversationStreamEnvelope({
+  sessionId: 'session-1',
+  cursor: { value: '10' },
+  delta: {
+    kind: 'extensionEvent',
+    extensionId: 'astrcode-ask-user',
+    eventType: 'ask_user.pending',
+    schemaVersion: 1,
+    payload: { sessionId: 'session-1', callId: 'call-1', questions: [] },
+  },
+})
+assert.equal(extensionEvent.delta.kind, 'extensionEvent')
+assert.equal(extensionEvent.delta.extensionId, 'astrcode-ask-user')
+assert.equal(extensionEvent.delta.payload.callId, 'call-1')
+
+const scalarExtensionEvent = decodeConversationStreamEnvelope({
+  sessionId: 'session-1',
+  cursor: { value: '10' },
+  delta: {
+    kind: 'extensionEvent',
+    extensionId: 'extension',
+    eventType: 'scalar',
+    schemaVersion: 1,
+    payload: ['valid', 'json'],
+  },
+})
+assert.deepEqual(scalarExtensionEvent.delta.payload, ['valid', 'json'])
+
+const approvalRequested = decodeConversationStreamEnvelope({
+  sessionId: 'session-1',
+  cursor: { value: '11' },
+  delta: {
+    kind: 'toolApprovalRequested',
+    approval: {
+      callId: 'tool-approval',
+      prompt: 'Run shell command?',
+      ruleKey: 'shell:write',
+    },
+  },
+})
+assert.equal(approvalRequested.delta.kind, 'toolApprovalRequested')
+assert.equal(approvalRequested.delta.approval.callId, 'tool-approval')
+assert.equal(approvalRequested.delta.approval.ruleKey, 'shell:write')
+
+const approvalResolved = decodeConversationStreamEnvelope({
+  sessionId: 'session-1',
+  cursor: { value: '12' },
+  delta: {
+    kind: 'toolApprovalResolved',
+    callId: 'tool-approval',
+    decision: 'allow_once',
+  },
+})
+assert.equal(approvalResolved.delta.kind, 'toolApprovalResolved')
+assert.equal(approvalResolved.delta.decision, 'allow_once')
+
 assert.throws(
   () =>
     decodeConversationStreamEnvelope({
@@ -147,6 +215,46 @@ const userWithoutAttachments = decodeConversationBlock({
 assert.equal(userWithoutAttachments.kind, 'user')
 assert.equal(userWithoutAttachments.text, 'hello')
 assert.equal(userWithoutAttachments.attachments, undefined)
+
+for (const status of ['error', 'failed', 'cancelled']) {
+  const toolBlock = decodeConversationBlock({
+    kind: 'toolCall',
+    id: `tool-${status}`,
+    name: 'probe',
+    arguments: '{}',
+    text: status,
+    status,
+  })
+  assert.equal(toolBlock.kind, 'toolCall')
+  assert.equal(toolBlock.status, status)
+}
+
+const toolWithApproval = decodeConversationBlock({
+  kind: 'toolCall',
+  id: 'tool-approval',
+  name: 'shell',
+  arguments: 'git push',
+  text: '',
+  status: 'streaming',
+  approval: {
+    callId: 'tool-approval',
+    prompt: 'Run shell command?',
+    ruleKey: 'shell:write',
+  },
+})
+assert.equal(toolWithApproval.kind, 'toolCall')
+assert.equal(toolWithApproval.approval?.prompt, 'Run shell command?')
+
+assert.throws(
+  () =>
+    decodeConversationBlock({
+      kind: 'assistant',
+      id: 'assistant-invalid-status',
+      text: '',
+      status: 'failed',
+    }),
+  ProtocolDecodeError
+)
 
 const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
   sessionId: 's-1',

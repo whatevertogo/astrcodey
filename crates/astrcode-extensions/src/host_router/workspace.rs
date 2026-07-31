@@ -7,13 +7,12 @@ use std::{
 };
 
 use astrcode_extension_sdk::s5r::ErrorPayload;
-use astrcode_support::hostpaths::resolve_under_workspace_root;
 use globset::Glob;
 use regex::Regex;
 use serde_json::{Value, json};
 use walkdir::{DirEntry, WalkDir};
 
-use super::{capability::WorkspaceCapability, run_blocking_io};
+use super::{capability::WorkspaceCapability, path::canonicalize_workspace_path, run_blocking_io};
 
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_WALK_ENTRIES: usize = 5_000;
@@ -403,9 +402,7 @@ fn resolve_existing_path(
 ) -> Result<PathBuf, ErrorPayload> {
     let canonical_root = canonical_root(root)?;
     reject_symlink_components(&canonical_root, Path::new(relative_path), capability)?;
-    let path = resolve_under_workspace_root(root, relative_path)
-        .map_err(|error| ErrorPayload::new(error.code, error.message))?;
-    Ok(path)
+    canonicalize_workspace_path(root, relative_path)
 }
 
 fn resolve_write_target(

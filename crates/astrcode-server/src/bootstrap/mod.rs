@@ -3,25 +3,30 @@
 //! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
 //! 会话管理器、扩展运行器和上下文窗口设置。
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
-use astrcode_core::{
-    config::ConfigStore, extension::ExtensionHostServices, lifecycle::SessionResourceCleanup,
-    storage::EventStore, tool::SessionOperations,
-};
+use astrcode_core::{config::ConfigStore, tool::SessionOperations};
 use astrcode_extensions::{
+    ExtensionHostServices, StorageSessionQueryFactory,
     build_host_router_with_public_http_dispatcher,
     loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime},
     runner::ExtensionRunner,
 };
 use astrcode_session::SessionRuntimeServices;
-use astrcode_storage::config_store::FileConfigStore;
+use astrcode_storage::{SessionStore, config_store::FileConfigStore};
+
+use crate::session_resource_cleanup::SessionResourceCleanup;
 
 mod config_resolve;
 mod server_system;
 
-pub use server_system::{ServerSystem, spawn_server_system, spawn_server_system_without_legacy};
+pub use server_system::ServerApp;
 
 fn apply_approval_mode_bootstrap_options(
     config: &mut astrcode_core::config::Config,
@@ -52,6 +57,15 @@ pub(crate) async fn load_merged_config(
         config = astrcode_core::config::merge_overlay(config, overlay);
     }
     apply_approval_mode_bootstrap_options(&mut config, opts);
+    if !opts.disabled_extension_ids.is_empty() {
+        let states = config
+            .runtime
+            .extension_states
+            .get_or_insert_with(BTreeMap::new);
+        for extension_id in &opts.disabled_extension_ids {
+            states.insert(extension_id.clone(), false);
+        }
+    }
     Ok(config)
 }
 
@@ -69,9 +83,8 @@ use crate::{
 /// 这是服务器运行时的核心容器，持有所有共享服务的引用。
 /// 各组件通过 `Arc` 共享，支持并发访问。
 pub struct ServerRuntime {
-    pub(crate) event_store: Arc<dyn EventStore>,
+    pub(crate) event_store: Arc<dyn SessionStore>,
     pub(crate) config_manager: Arc<ConfigManager>,
-    pub(crate) context_assembler: Arc<LlmContextAssembler>,
     pub(crate) session_manager: Arc<SessionManager>,
     pub(crate) scheduler: Arc<TurnScheduler>,
     pub(crate) extension_runner: Arc<ExtensionRunner>,
@@ -81,16 +94,12 @@ pub struct ServerRuntime {
 }
 
 impl ServerRuntime {
-    pub fn event_store(&self) -> &Arc<dyn EventStore> {
+    pub fn event_store(&self) -> &Arc<dyn SessionStore> {
         &self.event_store
     }
 
     pub fn config_manager(&self) -> &Arc<ConfigManager> {
         &self.config_manager
-    }
-
-    pub fn context_assembler(&self) -> &Arc<LlmContextAssembler> {
-        &self.context_assembler
     }
 
     pub fn session_manager(&self) -> &Arc<SessionManager> {
@@ -116,11 +125,6 @@ impl ServerRuntime {
     pub fn shutdown_token(&self) -> &tokio_util::sync::CancellationToken {
         &self.shutdown_token
     }
-
-    /// 配置热更新后同步所有 session runtime 的 LLM binding。
-    pub fn sync_session_model_bindings(&self) {
-        self.session_manager.sync_all_model_bindings_from_config();
-    }
 }
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
@@ -136,6 +140,8 @@ pub struct BootstrapOptions {
     pub default_approval_mode_if_unset: Option<astrcode_core::permission::ApprovalMode>,
     /// 强制覆盖 `runtime.approvalMode`（如 CLI `--yolo` / `--manual`）。
     pub approval_mode_override: Option<astrcode_core::permission::ApprovalMode>,
+    /// 当前 transport 无法完成交互契约时强制禁用的扩展。
+    pub disabled_extension_ids: BTreeSet<String>,
 }
 
 /// 使用默认选项引导服务器运行时。
@@ -151,8 +157,8 @@ pub async fn bootstrap() -> Result<ServerRuntime, BootstrapError> {
 ///
 /// 启动顺序：
 /// 1. 加载并解析配置
-/// 2. 构建提示词组装器
-/// 3. 确定启动工作目录
+/// 2. 确定启动工作目录
+/// 3. 构建提示词组装器
 /// 4. 初始化存储后端
 /// 5. 创建空的扩展运行器
 /// 6. 组装 ConfigManager（内部构建 providers）
@@ -188,13 +194,13 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     // 测试启动（config_path.is_some()）使用内存存储，避免污染真实会话目录；
     // 正常启动按项目路径选择文件系统会话仓库。
     #[cfg(feature = "testing")]
-    let store: Arc<dyn astrcode_core::storage::EventStore> = if opts.config_path.is_some() {
+    let store: Arc<dyn SessionStore> = if opts.config_path.is_some() {
         Arc::new(astrcode_storage::in_memory::InMemoryEventStore::new())
     } else {
         Arc::new(astrcode_storage::session_repo::FileSystemSessionRepository::new())
     };
     #[cfg(not(feature = "testing"))]
-    let store: Arc<dyn astrcode_core::storage::EventStore> =
+    let store: Arc<dyn SessionStore> =
         Arc::new(astrcode_storage::session_repo::FileSystemSessionRepository::new());
     let event_store = store;
 
@@ -218,9 +224,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         )?;
     let config_manager = Arc::new(config_manager);
 
+    // 7. 创建 session manager、turn scheduler 与 session ops。
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
-        Arc::clone(&config_manager),
         Arc::clone(&runtime_services),
         vec![Arc::new(TerminalCleanup), Arc::new(BackgroundShellCleanup)],
     ));
@@ -239,15 +245,15 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     });
     extension_runner.bind_session_ops(Arc::clone(&session_ops));
 
-    // 7. 加载扩展。
+    // 8. 加载扩展。
     //
     // HostServices 从 runtime services 获取 LLM，并携带 session ops 给声明了
     // SessionControl 的 trusted bundled extension。不传给磁盘 IPC 扩展。
     let host_services = Arc::new(
         ExtensionHostServices::new(
-            Arc::clone(&event_store),
-            Some(runtime_services.llm()),
-            Some(runtime_services.small_llm()),
+            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&event_store))),
+            Some(runtime_services.live_llm()),
+            Some(runtime_services.live_small_llm()),
         )
         .with_session_ops(session_ops)
         .with_outbound_network(
@@ -255,9 +261,14 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         ),
     );
     extension_runner.bind_host_services(Arc::clone(&host_services));
-    let load_errors =
-        load_extensions_into_runner(&extension_runner, &runtime_services, &host_services, &cwd)
-            .await;
+    let load_errors = load_extensions_into_runner(
+        &extension_runner,
+        &runtime_services,
+        &host_services,
+        Arc::clone(&event_store),
+        &cwd,
+    )
+    .await;
     for err in &load_errors {
         tracing::warn!("Extension load error: {err}");
     }
@@ -266,7 +277,6 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     Ok(ServerRuntime {
         event_store,
         config_manager,
-        context_assembler,
         session_manager,
         scheduler,
         extension_runner,
@@ -290,9 +300,8 @@ impl ServerRuntime {
     /// 集成测试用：从已组装的部件构造运行时（避免测试直接访问私有字段）。
     #[allow(clippy::too_many_arguments)] // 字段与 `ServerRuntime` 一一对应，拆 struct 无收益
     pub fn assemble_for_test(
-        event_store: Arc<dyn EventStore>,
+        event_store: Arc<dyn SessionStore>,
         config_manager: Arc<ConfigManager>,
-        context_assembler: Arc<LlmContextAssembler>,
         session_manager: Arc<SessionManager>,
         scheduler: Arc<TurnScheduler>,
         extension_runner: Arc<ExtensionRunner>,
@@ -302,7 +311,6 @@ impl ServerRuntime {
         Self {
             event_store,
             config_manager,
-            context_assembler,
             session_manager,
             scheduler,
             extension_runner,
@@ -325,9 +333,11 @@ impl ServerRuntime {
     pub async fn reload_extensions(&self) -> Vec<String> {
         let runtime_services = self.runtime_services();
         let mut host_services = ExtensionHostServices::new(
-            Arc::clone(self.event_store()),
-            Some(runtime_services.llm()),
-            Some(runtime_services.small_llm()),
+            Arc::new(StorageSessionQueryFactory::new(Arc::clone(
+                self.event_store(),
+            ))),
+            Some(runtime_services.live_llm()),
+            Some(runtime_services.live_small_llm()),
         );
         if let Some(session_ops) = runtime_services.session_ops() {
             host_services = host_services.with_session_ops(session_ops);
@@ -344,6 +354,7 @@ impl ServerRuntime {
             self.extension_runner(),
             self.runtime_services(),
             &host_services,
+            Arc::clone(self.event_store()),
             self.startup_working_dir(),
         )
         .await;
@@ -356,6 +367,7 @@ async fn load_extensions_into_runner(
     runner: &Arc<ExtensionRunner>,
     runtime_services: &SessionRuntimeServices,
     host_services: &Arc<ExtensionHostServices>,
+    session_store: Arc<dyn SessionStore>,
     cwd: &std::path::Path,
 ) -> Vec<String> {
     let effective = runtime_services.read_effective();
@@ -379,6 +391,7 @@ async fn load_extensions_into_runner(
             working_dir: Some(cwd.to_string_lossy().to_string()),
             host_router: Some(build_host_router_with_public_http_dispatcher(
                 Arc::clone(host_services),
+                session_store,
                 Some(cwd.to_string_lossy().to_string()),
                 runner.clone(),
             )),
@@ -469,6 +482,7 @@ id = "overlay-model"
         let store = FileConfigStore::new(config_path);
         let opts = BootstrapOptions {
             working_dir: Some(workspace),
+            disabled_extension_ids: BTreeSet::from(["astrcode-ask-user".into()]),
             ..BootstrapOptions::default()
         };
 
@@ -477,6 +491,7 @@ id = "overlay-model"
         assert_eq!(config.active_profile, "overlay");
         assert_eq!(config.active_model, "overlay-model");
         assert_eq!(config.profiles[0].name, "overlay");
+        assert!(!config.runtime.extension_states.as_ref().unwrap()["astrcode-ask-user"]);
 
         std::fs::remove_dir_all(root).unwrap();
     }

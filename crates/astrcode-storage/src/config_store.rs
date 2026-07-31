@@ -2,8 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
-use astrcode_core::config::{Config, ConfigOverlay, ConfigStore, ConfigStoreError};
-use astrcode_support::hostpaths;
+use astrcode_core::config::{
+    Config, ConfigOverlay, ConfigStore, ConfigStoreError, defaults::astrcode_dir,
+};
 use serde::{Serialize, de::DeserializeOwned};
 
 /// File-system implementation of ConfigStore.
@@ -19,7 +20,7 @@ impl FileConfigStore {
     /// Create a new store with the default config path.
     pub fn default_path() -> Self {
         Self {
-            path: hostpaths::astrcode_dir().join("config.toml"),
+            path: astrcode_dir().join("config.toml"),
         }
     }
 
@@ -38,17 +39,12 @@ impl FileConfigStore {
     pub async fn save_last_known_good(&self, config: &Config) -> Result<(), ConfigStoreError> {
         let path = self.last_known_good_path();
         let data = serialize_config_value(config, &path)?;
-        tokio::task::spawn_blocking(move || {
-            write_atomic(&path, &data)?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
+        run_blocking_io(move || Ok(write_atomic(&path, &data)?)).await
     }
 
     pub async fn load_last_known_good(&self) -> Result<Option<Config>, ConfigStoreError> {
         let path = self.last_known_good_path();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_io(move || {
             let Some(loaded_path) = first_existing_path(&path) else {
                 return Ok(None);
             };
@@ -57,8 +53,17 @@ impl FileConfigStore {
             Ok(Some(config))
         })
         .await
-        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
     }
+}
+
+async fn run_blocking_io<F, T>(f: F) -> Result<T, ConfigStoreError>
+where
+    F: FnOnce() -> Result<T, ConfigStoreError> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e)))?
 }
 
 #[derive(Clone, Copy)]
@@ -163,7 +168,7 @@ fn backfill_primary_config<T: Serialize>(value: &T, loaded_path: &Path, primary_
 impl ConfigStore for FileConfigStore {
     async fn load(&self) -> Result<Config, ConfigStoreError> {
         let path = self.path.clone();
-        tokio::task::spawn_blocking(move || {
+        run_blocking_io(move || {
             let Some(loaded_path) = first_existing_path(&path) else {
                 let config = Config::default();
                 if let Ok(data) = serialize_config_value(&config, &path) {
@@ -177,18 +182,12 @@ impl ConfigStore for FileConfigStore {
             Ok(config)
         })
         .await
-        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
     }
 
     async fn save(&self, config: &Config) -> Result<(), ConfigStoreError> {
         let path = self.path.clone();
         let data = serialize_config_value(config, &path)?;
-        tokio::task::spawn_blocking(move || {
-            write_atomic(&path, &data)?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
+        run_blocking_io(move || Ok(write_atomic(&path, &data)?)).await
     }
 
     fn path(&self) -> PathBuf {
@@ -207,7 +206,7 @@ impl ConfigStore for FileConfigStore {
         {
             return Ok(None);
         }
-        tokio::task::spawn_blocking(move || {
+        run_blocking_io(move || {
             let Some(loaded_path) = first_existing_path(&overlay_path) else {
                 return Ok(None);
             };
@@ -216,7 +215,6 @@ impl ConfigStore for FileConfigStore {
             Ok(Some(overlay))
         })
         .await
-        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
     }
 
     async fn save_overlay(
@@ -227,12 +225,7 @@ impl ConfigStore for FileConfigStore {
         let overlay_dir = PathBuf::from(working_dir).join(".astrcode");
         let overlay_path = overlay_dir.join("config.toml");
         let data = serialize_config_value(overlay, &overlay_path)?;
-        tokio::task::spawn_blocking(move || {
-            write_atomic(&overlay_path, &data)?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e.to_string())))?
+        run_blocking_io(move || Ok(write_atomic(&overlay_path, &data)?)).await
     }
 }
 

@@ -130,7 +130,7 @@ pub enum IdError {
 
 /// 验证会话 ID 是否可安全用于文件系统操作。
 ///
-/// 仅允许字母数字、连字符、下划线和 'T' 字符。
+/// 仅允许 ASCII 字母数字、连字符和下划线。
 /// 拒绝 `.` 和 `:` 以防止路径遍历攻击。
 pub fn validate_session_id(id: &str) -> Result<(), IdError> {
     if id.is_empty() {
@@ -142,7 +142,7 @@ pub fn validate_session_id(id: &str) -> Result<(), IdError> {
     }
     // 逐字符检查，仅允许安全字符
     for ch in id.chars() {
-        if !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_' && ch != 'T' {
+        if !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_' {
             return Err(IdError::InvalidCharacters(format!(
                 "character '{}' not allowed in ID",
                 ch
@@ -158,7 +158,7 @@ pub fn new_session_id() -> SessionId {
 }
 
 /// 生成新的唯一事件 ID（基于 UUID v4）。
-pub fn new_event_id() -> EventId {
+pub(crate) fn new_event_id() -> EventId {
     EventId::new(uuid::Uuid::new_v4().to_string())
 }
 

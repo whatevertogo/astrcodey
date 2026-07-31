@@ -3,22 +3,13 @@ import {
   useElapsedSeconds,
   runningElapsedLabel,
 } from '../../hooks/useElapsedSeconds'
-import type { AgentSessionLink, ConversationBlock } from '../../services/types'
+import {
+  toolCallHasError,
+  type AgentSessionLink,
+  type ConversationBlock,
+} from '../../services/types'
 import { useAppStore } from '../../store/conversation'
 import { cn } from '../../lib/utils'
-import {
-  extractRenderSpec,
-  extractRenderSummary,
-} from '../../types/render-spec'
-import {
-  renderToolApprovalUi,
-  toolApprovalShouldAutoExpand,
-  toolApprovalSummary,
-  toolApprovalPending,
-  type ToolUiContext,
-} from '../../tool-ui'
-import { GateApprovalCard } from '../../tool-ui/components/GateApprovalCard'
-import { readGateApproval } from '../../tool-ui/components/gateApprovalMeta'
 import { toolPanelScrollViewport } from '../../lib/styles'
 import { RenderSpecViewer } from './RenderSpecViewer'
 import './tools/builtinRenderers'
@@ -30,12 +21,16 @@ import {
 import {
   compactPreviewLine,
   numberValue,
+  statusLabel,
   toolArgs,
   toolMeta,
 } from './tools/helpers'
 import { DefaultToolDetails } from './tools/shared'
 import { buildStreamingAgentSpec } from './tools/agentSpec'
 import { AgentChildSessionPanel } from './tools/AgentChildSessionPanel'
+import { AskUserCard } from './tools/AskUserCard'
+import { askUserSummary, isPendingAskUser } from './tools/askUser'
+import { ToolApprovalCard } from './tools/ToolApprovalCard'
 import { Icon, type IconName } from '../ui/Icon'
 
 interface ToolCallBlockProps {
@@ -58,14 +53,6 @@ function ToolDetails({
   renderer?: ToolRenderer
   agentChildUi?: ReactNode | null
 }) {
-  if (toolContext.renderSpec) {
-    return (
-      <div className="space-y-3">
-        <RenderSpecViewer spec={toolContext.renderSpec} />
-        {agentChildUi}
-      </div>
-    )
-  }
   if (toolContext.agentSpec) {
     return (
       <div className="space-y-3">
@@ -144,7 +131,8 @@ function durationFromMetadata(meta: Record<string, unknown>): string {
 
 function ToolCallDetailsPanel({
   context,
-  toolUiContext,
+  sessionId,
+  approvalUi,
   renderer,
   linkedAgent,
   onOpenChild,
@@ -152,7 +140,8 @@ function ToolCallDetailsPanel({
   gatePending,
 }: {
   context: ToolRendererContext
-  toolUiContext: ToolUiContext
+  sessionId: string | null
+  approvalUi: ReactNode | null
   renderer?: ToolRenderer
   linkedAgent?: AgentSessionLink
   onOpenChild: (childSessionId: string) => void
@@ -161,7 +150,6 @@ function ToolCallDetailsPanel({
 }) {
   const { block, args } = context
   const detailArgs = formatArgs(args, block.arguments)
-  const approvalUi = renderToolApprovalUi(toolUiContext)
   const agentChildUi =
     linkedAgent && block.status === 'streaming' ? (
       <AgentChildSessionPanel agent={linkedAgent} onOpenChild={onOpenChild} />
@@ -189,12 +177,11 @@ function ToolCallDetailsPanel({
               <DetailValue>{summaryLine}</DetailValue>
             </DetailRow>
           ) : null}
-          {gatePending && toolUiContext.sessionId ? (
-            <GateApprovalCard
-              sessionId={toolUiContext.sessionId}
-              callId={block.id}
+          {gatePending && sessionId && block.approval ? (
+            <ToolApprovalCard
+              sessionId={sessionId}
               toolName={block.name}
-              metadata={block.metadata}
+              approval={block.approval}
               args={args}
             />
           ) : (
@@ -202,8 +189,10 @@ function ToolCallDetailsPanel({
               <div
                 className={cn(
                   'min-w-0 rounded-lg border border-border bg-surface-soft px-3 py-2',
-                  block.status === 'error' &&
-                    'border-danger/25 bg-danger-soft/40'
+                  toolCallHasError(block.status) &&
+                    'border-danger/25 bg-danger-soft/40',
+                  block.status === 'cancelled' &&
+                    'border-warning/25 bg-warning-soft/30'
                 )}
               >
                 <ToolDetails
@@ -228,19 +217,17 @@ function toolIconName(name: string): IconName {
   return 'plug'
 }
 
-function statusText({
+function streamingStatusText({
   gatePending,
   questionnairePending,
   linkedAgentCurrentTool,
   linkedAgentRunning,
-  streaming,
   elapsed,
 }: {
   gatePending: boolean
   questionnairePending: boolean
   linkedAgentCurrentTool?: string
   linkedAgentRunning: boolean
-  streaming: boolean
   elapsed: number
 }): string {
   if (gatePending) return '待审批'
@@ -250,8 +237,7 @@ function statusText({
       ? `子Agent · ${linkedAgentCurrentTool}`
       : '子Agent运行中'
   }
-  if (streaming) return runningElapsedLabel(elapsed, 'zh')
-  return '完成'
+  return runningElapsedLabel(elapsed, 'zh')
 }
 
 function ToolCallBlock({
@@ -272,28 +258,22 @@ function ToolCallBlock({
   const args = toolArgs(block)
   const meta = toolMeta(block)
 
-  const renderSpec = extractRenderSpec(block.metadata)
   const agentSpec =
-    block.name === 'agent' && block.argumentsJson && !renderSpec
+    block.name === 'agent' && block.argumentsJson
       ? buildStreamingAgentSpec(block.argumentsJson)
       : undefined
-
-  const toolUiCtx: ToolUiContext = {
-    block,
-    sessionId,
-    args,
-    meta,
-    renderSpec,
-  }
 
   const context: ToolRendererContext = {
     block,
     args,
     meta,
-    renderSpec,
     agentSpec,
   }
   const renderer = getToolRenderer(context)
+  const approvalUi =
+    block.name === 'askUser' ? (
+      <AskUserCard block={block} sessionId={sessionId} args={args} />
+    ) : null
 
   const streaming = block.status === 'streaming'
   const elapsed = useElapsedSeconds(streaming)
@@ -303,8 +283,7 @@ function ToolCallBlock({
       : null
 
   const summarySource =
-    extractRenderSummary(block.metadata) ||
-    toolApprovalSummary(toolUiCtx) ||
+    askUserSummary(block, args) ||
     renderer?.summary?.(context) ||
     block.arguments ||
     block.text ||
@@ -312,26 +291,21 @@ function ToolCallBlock({
     (streaming ? runningElapsedLabel(elapsed, 'zh') : '(无输出)')
   const summaryLine = compactPreviewLine(summarySource)
 
-  const gateApproval = readGateApproval(block.metadata)
-  const gatePending = gateApproval?.pending === true
-  const questionnairePending = toolApprovalPending(toolUiCtx)
-  const autoExpand = toolApprovalShouldAutoExpand(toolUiCtx) || gatePending
+  const gatePending = block.status === 'streaming' && block.approval != null
+  const questionnairePending = isPendingAskUser(block)
+  const autoExpand = questionnairePending || gatePending
   const forceOpen = autoExpand
   const open = forceOpen || isOpen
 
-  const displayStatus =
-    block.status === 'error'
-      ? '失败'
-      : statusText({
-          gatePending,
-          questionnairePending,
-          linkedAgentCurrentTool: linkedAgent?.currentTool,
-          linkedAgentRunning: Boolean(
-            linkedAgent && block.status === 'streaming'
-          ),
-          streaming,
-          elapsed,
-        })
+  const displayStatus = streaming
+    ? streamingStatusText({
+        gatePending,
+        questionnairePending,
+        linkedAgentCurrentTool: linkedAgent?.currentTool,
+        linkedAgentRunning: Boolean(linkedAgent && streaming),
+        elapsed,
+      })
+    : statusLabel(block.status)
   const durationLabel = durationFromMetadata(meta)
   const toolName = block.name || 'tool'
   const summaryIcon = summaryIconName ?? toolIconName(toolName)
@@ -374,9 +348,9 @@ function ToolCallBlock({
           </span>
         )}
         <span className="shrink-0 text-[13px] text-text-muted">
-          {block.status === 'error'
-            ? displayStatus
-            : durationLabel || displayStatus}
+          {block.status === 'complete'
+            ? durationLabel || displayStatus
+            : displayStatus}
         </span>
         <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-text-muted transition-transform duration-150 ease-out group-open:rotate-90">
           <Icon name="chevron-right" size={16} />
@@ -385,7 +359,8 @@ function ToolCallBlock({
       {open ? (
         <ToolCallDetailsPanel
           context={context}
-          toolUiContext={toolUiCtx}
+          sessionId={sessionId}
+          approvalUi={approvalUi}
           renderer={renderer}
           linkedAgent={linkedAgent}
           onOpenChild={(childSessionId) => void switchSession(childSessionId)}

@@ -5,6 +5,7 @@ mod context;
 mod extension_http;
 mod llm;
 mod network;
+mod path;
 mod process;
 mod session;
 mod session_inspect;
@@ -13,19 +14,20 @@ mod workspace;
 use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_core::{
-    event::EventPayload,
-    extension::{
-        ExtensionCapability, ExtensionError, ExtensionEventDecl, ExtensionHostServices,
-        ExtensionHttpRequest, ExtensionHttpResponse, OutboundNetworkService,
-    },
+    event::{DurableEventPayload, EventPayload, EventSender, ExtensionEventData, LiveEventPayload},
     llm::LlmProvider,
     tool::SessionOperations,
 };
-use astrcode_extension_sdk::s5r::{
-    CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage,
+use astrcode_extension_sdk::{
+    extension::{
+        ExtensionCapability, ExtensionError, ExtensionEventDecl, ExtensionHttpRequest,
+        ExtensionHttpResponse, OutboundNetworkService,
+    },
+    s5r::{CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage},
+    trusted::ExtensionHostServices,
 };
+use astrcode_storage::{EventReader, SessionReader, SessionStore};
 use serde_json::Value;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use self::{
@@ -116,7 +118,7 @@ pub struct InvokeContext {
     pub session_id: Option<String>,
     pub session_store_dir: Option<PathBuf>,
     pub session_ops: Option<Arc<dyn SessionOperations>>,
-    pub event_tx: Option<mpsc::UnboundedSender<EventPayload>>,
+    pub event_tx: Option<EventSender>,
     pub working_dir: Option<String>,
     pub cancel_token: Option<CancellationToken>,
     pub event_declarations: HashMap<String, ExtensionEventDecl>,
@@ -130,7 +132,8 @@ pub struct InvokeContext {
 pub struct HostBackends {
     pub main_llm: Option<Arc<dyn LlmProvider>>,
     pub small_llm: Option<Arc<dyn LlmProvider>>,
-    pub session_read: Option<Arc<dyn astrcode_core::storage::EventReader>>,
+    pub event_reader: Option<Arc<dyn EventReader>>,
+    pub session_reader: Option<Arc<dyn SessionReader>>,
     pub default_working_dir: Option<String>,
     pub public_http_dispatcher: Option<Arc<dyn PublicHttpDispatcher>>,
     pub outbound_network: Option<Arc<dyn OutboundNetworkService>>,
@@ -157,11 +160,18 @@ pub struct HostRouter {
 }
 
 impl HostRouter {
-    pub fn new(host_services: &ExtensionHostServices, default_working_dir: Option<String>) -> Self {
+    pub fn new(
+        host_services: &ExtensionHostServices,
+        session_store: Arc<dyn SessionStore>,
+        default_working_dir: Option<String>,
+    ) -> Self {
+        let event_reader: Arc<dyn EventReader> = session_store.clone();
+        let session_reader: Arc<dyn SessionReader> = session_store;
         Self::from_backends(HostBackends {
             main_llm: host_services.main_llm.clone(),
             small_llm: host_services.small_llm.clone(),
-            session_read: host_services.session_read.clone(),
+            event_reader: Some(event_reader),
+            session_reader: Some(session_reader),
             default_working_dir,
             public_http_dispatcher: None,
             outbound_network: host_services.outbound_network.clone(),
@@ -172,14 +182,15 @@ impl HostRouter {
         let HostBackends {
             main_llm,
             small_llm,
-            session_read,
+            event_reader,
+            session_reader,
             default_working_dir,
             public_http_dispatcher,
             outbound_network,
         } = backends;
         Self {
             llm: LlmGroup::new(main_llm, small_llm),
-            session: SessionGroup::new(session_read),
+            session: SessionGroup::new(event_reader, session_reader),
             context: ContextGroup,
             workspace: WorkspaceGroup::new(default_working_dir.clone()),
             process: ProcessGroup::new(default_working_dir),
@@ -343,19 +354,31 @@ impl HostRouter {
 pub fn emit_for_sink(
     extension_id: &str,
     declarations: &HashMap<String, ExtensionEventDecl>,
-    event_tx: &mpsc::UnboundedSender<EventPayload>,
+    event_tx: &EventSender,
     event_type: &str,
     schema_version: u32,
     payload: Value,
 ) -> Result<(), ExtensionError> {
     validate_emit(declarations, event_type, schema_version, &payload)?;
+    let durable = declarations
+        .get(event_type)
+        .map(|declaration| declaration.durable)
+        .ok_or_else(|| {
+            ExtensionError::Internal(format!("undeclared extension event type: {event_type}"))
+        })?;
+    let event = ExtensionEventData {
+        extension_id: extension_id.to_owned(),
+        event_type: event_type.to_owned(),
+        schema_version,
+        payload,
+    };
+    let payload = if durable {
+        EventPayload::Durable(DurableEventPayload::ExtensionEvent(event))
+    } else {
+        EventPayload::Live(LiveEventPayload::ExtensionEvent(event))
+    };
     event_tx
-        .send(EventPayload::ExtensionEvent {
-            extension_id: extension_id.to_owned(),
-            event_type: event_type.to_owned(),
-            schema_version,
-            payload,
-        })
+        .send(payload)
         .map_err(|_| ExtensionError::Internal("event channel closed".into()))
 }
 
@@ -395,9 +418,14 @@ pub fn decls_to_map(decls: &[ExtensionEventDecl]) -> HashMap<String, ExtensionEv
 /// 从 [`ExtensionHostServices`] 构造共享 [`HostRouter`]。
 pub fn build_host_router(
     host_services: Arc<ExtensionHostServices>,
+    session_store: Arc<dyn SessionStore>,
     default_working_dir: Option<String>,
 ) -> Arc<HostRouter> {
-    Arc::new(HostRouter::new(&host_services, default_working_dir))
+    Arc::new(HostRouter::new(
+        &host_services,
+        session_store,
+        default_working_dir,
+    ))
 }
 
 /// 构造 trusted bundled extensions 与 worker 共用的受限出站网络服务。
@@ -407,11 +435,12 @@ pub fn default_outbound_network_service() -> Arc<dyn OutboundNetworkService> {
 
 pub fn build_host_router_with_public_http_dispatcher(
     host_services: Arc<ExtensionHostServices>,
+    session_store: Arc<dyn SessionStore>,
     default_working_dir: Option<String>,
     dispatcher: Arc<dyn PublicHttpDispatcher>,
 ) -> Arc<HostRouter> {
     Arc::new(
-        HostRouter::new(&host_services, default_working_dir)
+        HostRouter::new(&host_services, session_store, default_working_dir)
             .with_public_http_dispatcher(dispatcher),
     )
 }
@@ -427,16 +456,20 @@ mod tests {
     };
 
     use astrcode_core::{
-        extension::SessionToolSelection,
+        event::{
+            DurableEvent, DurableEventPayload, PersistedSystemPrompt, SessionStarted,
+            SystemPromptSource,
+        },
         permission::ApprovalDecision,
-        storage::{EventReader, EventStore},
         tool::{
             CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
-            SessionDeliveryOutcome, SessionHandle, SessionStatus, SubmitTurnRequest,
-            SubmitTurnResult,
+            SessionDeliveryOutcome, SessionHandle, SessionStatus, SessionToolSelection,
+            SubmitTurnRequest, SubmitTurnResult,
         },
     };
-    use astrcode_storage::in_memory::InMemoryEventStore;
+    use astrcode_storage::{
+        EventReader, SessionEventJournal, SessionReader, in_memory::InMemoryEventStore,
+    };
     use serde_json::json;
 
     use super::*;
@@ -480,12 +513,29 @@ mod tests {
         let store = Arc::new(InMemoryEventStore::new());
         let session_id = astrcode_core::types::SessionId::new("inspect-session");
         store
-            .create_session(&session_id, "/workspace", "test-model", None, None, None)
+            .create_session(DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::SessionStarted(SessionStarted {
+                    working_dir: "/workspace".into(),
+                    model_id: "test-model".into(),
+                    parent: None,
+                    tool_selection: SessionToolSelection::default(),
+                    source_extension: None,
+                    initial_system_prompt: PersistedSystemPrompt {
+                        text: "system".into(),
+                        fingerprint: "fingerprint".into(),
+                        extra_system_prompt: None,
+                        source: SystemPromptSource::Native,
+                    },
+                }),
+            ))
             .await
             .expect("create session");
-        let reader: Arc<dyn EventReader> = store;
+        let event_reader: Arc<dyn EventReader> = store.clone();
+        let session_reader: Arc<dyn SessionReader> = store;
         let router = HostRouter::from_backends(HostBackends {
-            session_read: Some(reader),
+            event_reader: Some(event_reader),
+            session_reader: Some(session_reader),
             ..Default::default()
         });
         let ctx = InvokeContext {
@@ -882,15 +932,15 @@ mod tests {
     impl OutboundNetworkService for FakeOutboundNetwork {
         async fn request(
             &self,
-            request: astrcode_core::extension::OutboundNetworkRequest,
+            request: astrcode_extension_sdk::extension::OutboundNetworkRequest,
             _cancellation: Option<CancellationToken>,
         ) -> Result<
-            astrcode_core::extension::OutboundNetworkResponse,
-            astrcode_core::extension::OutboundNetworkError,
+            astrcode_extension_sdk::extension::OutboundNetworkResponse,
+            astrcode_extension_sdk::extension::OutboundNetworkError,
         > {
             self.calls.fetch_add(1, Ordering::SeqCst);
             assert_eq!(request.url, "https://example.com/start");
-            Ok(astrcode_core::extension::OutboundNetworkResponse {
+            Ok(astrcode_extension_sdk::extension::OutboundNetworkResponse {
                 final_url: "https://example.com/final".into(),
                 status: 200,
                 headers: BTreeMap::new(),
@@ -993,15 +1043,6 @@ mod tests {
             _target_session_id: &str,
             _call_id: &str,
             _decision: ApprovalDecision,
-        ) -> Result<(), SessionApiError> {
-            Ok(())
-        }
-
-        async fn resolve_tool_ui_response(
-            &self,
-            _target_session_id: &str,
-            _call_id: &str,
-            _answers: std::collections::BTreeMap<String, String>,
         ) -> Result<(), SessionApiError> {
             Ok(())
         }

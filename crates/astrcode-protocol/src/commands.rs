@@ -21,9 +21,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::wire::ApprovalDecisionDto;
 
-/// 提示中附带的文件/图片（与 core [`MessageAttachment`] 同型）。
-pub type Attachment = MessageAttachment;
-
 /// 客户端可发送给服务器的命令枚举。
 ///
 /// 每个变体代表一种具体的客户端操作请求。命令通过 JSON-RPC 风格序列化，
@@ -33,15 +30,9 @@ pub type Attachment = MessageAttachment;
 pub enum ClientCommand {
     // ---- 会话管理 ----
     /// 创建新会话。
-    ///
-    /// # 参数
-    /// - `working_dir`: 工作目录路径，用于设置会话的上下文环境
     CreateSession { working_dir: String },
 
     /// 恢复指定会话。
-    ///
-    /// # 参数
-    /// - `session_id`: 要恢复的会话唯一标识符
     ResumeSession { session_id: String },
 
     /// 从现有会话分叉创建新会话。
@@ -56,18 +47,12 @@ pub enum ClientCommand {
     },
 
     /// 删除指定会话。
-    ///
-    /// # 参数
-    /// - `session_id`: 要删除的会话唯一标识符
     DeleteSession { session_id: String },
 
     /// 列出所有可用会话。
     ListSessions,
 
     /// 切换到指定会话。
-    ///
-    /// # 参数
-    /// - `session_id`: 目标会话的唯一标识符
     SwitchSession { session_id: String },
 
     // ---- 提示与交互 ----
@@ -79,7 +64,7 @@ pub enum ClientCommand {
     SubmitPrompt {
         text: String,
         #[serde(default)]
-        attachments: Vec<Attachment>,
+        attachments: Vec<MessageAttachment>,
     },
 
     /// 向正在执行的 turn 注入中途消息（steer）。
@@ -102,9 +87,6 @@ pub enum ClientCommand {
 
     // ---- 配置变更 ----
     /// 设置当前会话使用的 AI 模型。
-    ///
-    /// # 参数
-    /// - `model_id`: 模型标识符（如 "gpt-4"、"claude-3" 等）
     SetModel { model_id: String },
 
     /// 压缩当前会话上下文。
@@ -135,10 +117,6 @@ pub enum ClientCommand {
 
     // ---- UI 响应 ----
     /// 响应服务器发起的 UI 请求。
-    ///
-    /// # 参数
-    /// - `request_id`: 对应的 UI 请求标识符
-    /// - `value`: 用户响应的具体值
     UiResponse {
         request_id: String,
         value: UiResponseValue,
@@ -153,30 +131,16 @@ pub enum ClientCommand {
 
 /// 对服务器 UI 请求的响应值。
 ///
-/// 用于 `UiResponse` 命令，封装用户对各种 UI 提示的响应结果。
+/// 用于 `UiResponse` 命令，封装用户对 UI 提示的响应结果。
 /// 采用 `untagged` 序列化方式，根据字段自动推断变体类型。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum UiResponseValue {
-    /// 确认/取消类型的响应。
-    ///
-    /// # 字段
-    /// - `accepted`: `true` 表示用户接受，`false` 表示拒绝
-    Confirm { accepted: bool },
     /// 单选/多选类型的响应。
     ///
     /// # 字段
     /// - `selected`: 用户选择的选项值
     Select { selected: String },
-    /// 文本输入类型的响应。
-    ///
-    /// # 字段
-    /// - `text`: 用户输入的文本内容
-    Input { text: String },
-    /// 通知确认响应（无返回值）。
-    ///
-    /// 用于仅需要确认收到通知的场景。
-    NotifyAck,
 }
 
 #[cfg(test)]
@@ -194,7 +158,7 @@ mod tests {
     fn submit_prompt_roundtrip() {
         let cmd = ClientCommand::SubmitPrompt {
             text: "hello".into(),
-            attachments: vec![Attachment {
+            attachments: vec![MessageAttachment {
                 filename: "test.rs".into(),
                 content: "fn main() {}".into(),
                 media_type: "text/x-rust".into(),
@@ -254,21 +218,6 @@ mod tests {
     }
 
     #[test]
-    fn ui_response_confirm_roundtrip() {
-        let cmd = ClientCommand::UiResponse {
-            request_id: "r1".into(),
-            value: UiResponseValue::Confirm { accepted: true },
-        };
-        let parsed = roundtrip(&cmd);
-        if let ClientCommand::UiResponse { request_id, value } = parsed {
-            assert_eq!(request_id, "r1");
-            assert!(matches!(value, UiResponseValue::Confirm { accepted: true }));
-        } else {
-            panic!("wrong variant");
-        }
-    }
-
-    #[test]
     fn ui_response_select_roundtrip() {
         let value = UiResponseValue::Select {
             selected: "option_a".into(),
@@ -276,16 +225,6 @@ mod tests {
         let json = serde_json::to_string(&value).unwrap();
         let parsed: UiResponseValue = serde_json::from_str(&json).unwrap();
         assert!(matches!(parsed, UiResponseValue::Select { .. }));
-    }
-
-    #[test]
-    fn ui_response_input_roundtrip() {
-        let value = UiResponseValue::Input {
-            text: "some input".into(),
-        };
-        let json = serde_json::to_string(&value).unwrap();
-        let parsed: UiResponseValue = serde_json::from_str(&json).unwrap();
-        assert!(matches!(parsed, UiResponseValue::Input { .. }));
     }
 
     #[test]

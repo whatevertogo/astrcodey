@@ -1,28 +1,31 @@
-//! Turn 内事件发布 — durable 同步写入 store，live 直发 fanout。
+//! Turn 内事件组装与扩展 ingress。
 //!
-//! 已打开 session 的 `read_model()` 克隆内存投影（非全量 replay）。本模块在 turn 内
-//! 用 [`astrcode_storage::projection::reduce`] 增量更新缓存，避免每步 tool commit / prepare
-//! 重复克隆整份 [`SessionReadModel`]。
+//! durable/live 最终都进入 session 级有序发布管线；projection 始终从 storage 的唯一
+//! 实例读取，不在 turn 内维护第二份可变副本。
 //!
 //! ## 事件 ingress
 //!
-//! Hook / 工具侧通过 [`TurnEventSender`] 非阻塞 `send`；单 FIFO worker 串行处理 durable，
-//! 避免并行工具各自 `spawn` bridge 时争用 [`TurnEvents::model_cache`] 或在 sender/await
-//! 上自挂。工具执行结束后 [`TurnEventSender::flush`] 即可保证此前入队事件已落盘/广播，
-//! 无需 per-tool bridge 与 drop 顺序协议。
+//! Hook / 工具侧通过 [`TurnEventSender`] 非阻塞 `send`；单 FIFO worker 串行桥接到 async
+//! publisher。工具执行结束后 [`TurnEventSender::flush`] 保证此前入队事件已处理。
 
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
 };
 
-use astrcode_core::{event::EventPayload, storage::SessionReadModel, types::TurnId};
-use astrcode_storage::projection;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use astrcode_core::{
+    event::{DurableEventPayload, EventPayload, LiveEventPayload},
+    types::TurnId,
+};
+use astrcode_session_projection::SessionReadModel;
+use astrcode_storage::StorageError;
+use parking_lot::Mutex;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    session::Session,
-    turn_context::{TurnError, TurnEventTx, send_event},
+    session::{Session, SessionError},
+    session_event_sink::SessionEventPublishError,
+    turn_context::{TurnError, TurnEventTx},
 };
 
 const DURABLE_PUBLISH_MAX_ATTEMPTS: u32 = 3;
@@ -32,19 +35,17 @@ const DURABLE_PUBLISH_RETRY_BASE_MS: u64 = 50;
 pub(crate) struct TurnEvents {
     session: Session,
     turn_id: TurnId,
-    live_tx: Option<TurnEventTx>,
-    emitted_durable_error: Arc<AtomicBool>,
-    model_cache: Mutex<Option<SessionReadModel>>,
+    emitted_durable_error: AtomicBool,
+    ingress_error: Mutex<Option<String>>,
 }
 
 impl TurnEvents {
-    pub(crate) fn new(session: Session, turn_id: TurnId, live_tx: Option<TurnEventTx>) -> Self {
+    pub(crate) fn new(session: Session, turn_id: TurnId) -> Self {
         Self {
             session,
             turn_id,
-            live_tx,
-            emitted_durable_error: Arc::new(AtomicBool::new(false)),
-            model_cache: Mutex::new(None),
+            emitted_durable_error: AtomicBool::new(false),
+            ingress_error: Mutex::new(None),
         }
     }
 
@@ -52,92 +53,51 @@ impl TurnEvents {
         self.emitted_durable_error.load(Ordering::Relaxed)
     }
 
-    /// 丢弃 turn 内缓存（每轮 agent step 开始时调用，以吸收 mid-turn inject 等外部 durable）。
-    pub(crate) async fn invalidate_model_cache(&self) {
-        *self.model_cache.lock().await = None;
-    }
-
-    /// 在 bypass 本 publisher 的 durable 写入后（如 compaction persist）从 store 重载投影。
-    pub(crate) async fn reload_model_cache(&self) -> Result<(), TurnError> {
-        let model = self.session.read_model().await?;
-        *self.model_cache.lock().await = Some(model);
-        Ok(())
-    }
-
-    /// 返回当前投影快照；优先使用 turn 内缓存，否则从 store 加载一次。
-    pub(crate) async fn snapshot_model(&self) -> Result<SessionReadModel, TurnError> {
-        let cached = {
-            let guard = self.model_cache.lock().await;
-            guard.as_ref().cloned()
-        };
-        if let Some(model) = cached {
-            return Ok(model);
+    fn record_ingress_error(&self, error: &TurnError) {
+        let mut ingress_error = self.ingress_error.lock();
+        if ingress_error.is_none() {
+            *ingress_error = Some(error.to_string());
         }
-        let model = self.session.read_model().await?;
-        let mut cache = self.model_cache.lock().await;
-        if let Some(cached) = cache.as_ref() {
-            return Ok(cached.clone());
-        }
-        *cache = Some(model.clone());
-        Ok(model)
     }
 
-    /// 统计 provider 可见的非合成 user 消息条数；优先读 turn 内 cache，避免 clone 整份读模型。
-    ///
-    /// cache 命中时假定计数已与投影一致：要么 turn 入口时 cache 为空（走 store），
-    /// 要么本 turn 内 durable 事件已通过 [`projection::reduce`] 同步到 cache。
-    /// 外部 bypass 写入后须先 [`Self::invalidate_model_cache`] 或 [`Self::reload_model_cache`]。
-    pub(crate) async fn visible_user_message_count(&self) -> Result<usize, TurnError> {
-        let cached_count = {
-            let guard = self.model_cache.lock().await;
-            guard
-                .as_ref()
-                .map(SessionReadModel::visible_user_message_count)
-        };
-        if let Some(count) = cached_count {
-            return Ok(count);
+    fn ingress_result(&self) -> Result<(), TurnError> {
+        match self.ingress_error.lock().clone() {
+            Some(error) => Err(TurnError::EventIngress(error)),
+            None => Ok(()),
         }
-        Ok(self.session.visible_user_message_count().await?)
     }
 
-    pub(crate) async fn durable(&self, payload: EventPayload) -> Result<(), TurnError> {
-        let stored = match self
-            .session
-            .emit_durable(Some(&self.turn_id), payload)
-            .await
-        {
-            Ok(event) => event,
+    /// 返回 storage 当前 projection 的快照。
+    pub(crate) async fn snapshot_model(&self) -> Result<Arc<SessionReadModel>, TurnError> {
+        self.session.read_model().await.map_err(TurnError::from)
+    }
+
+    pub(crate) async fn durable(&self, payload: DurableEventPayload) -> Result<(), TurnError> {
+        match self.persist_durable(payload).await {
+            Ok(()) => Ok(()),
             Err(error) => {
-                self.live_error(-32603, error.to_string(), false).await;
-                return Err(error.into());
+                self.live_error(-32603, error.to_string(), false);
+                Err(error)
             },
-        };
-        let should_reduce = {
-            let cache = self.model_cache.lock().await;
-            cache.is_some()
-        };
-        if should_reduce {
-            let mut cache = self.model_cache.lock().await;
-            if let Some(model) = cache.as_mut() {
-                projection::reduce(&stored, model);
-            }
-            return Ok(());
         }
-        let model = self.session.read_model().await?;
-        let mut cache = self.model_cache.lock().await;
-        match cache.as_mut() {
-            Some(cached) => projection::reduce(&stored, cached),
-            None => *cache = Some(model),
-        }
+    }
+
+    async fn persist_durable(&self, payload: DurableEventPayload) -> Result<(), TurnError> {
+        self.session
+            .emit_durable(Some(&self.turn_id), payload)
+            .await?;
         Ok(())
     }
 
-    pub(crate) async fn live(&self, payload: EventPayload) {
-        if let Some(tx) = self.live_tx.as_ref() {
-            send_event(Some(tx), payload);
-        } else {
-            self.session.emit_live(Some(&self.turn_id), payload).await;
-        }
+    pub(crate) fn live(&self, payload: LiveEventPayload) {
+        self.session.emit_live(Some(&self.turn_id), payload);
+    }
+
+    async fn live_required(&self, payload: LiveEventPayload) -> Result<(), TurnError> {
+        self.session
+            .emit_live_required(Some(&self.turn_id), payload)
+            .await?;
+        Ok(())
     }
 
     /// 持久化错误事件，并标记 `emitted_error`（供 `drive_agent` 避免重复持久化）。
@@ -147,7 +107,7 @@ impl TurnEvents {
         message: String,
         recoverable: bool,
     ) -> Result<(), TurnError> {
-        self.durable(EventPayload::ErrorOccurred {
+        self.durable(DurableEventPayload::ErrorOccurred {
             code,
             message,
             recoverable,
@@ -159,23 +119,28 @@ impl TurnEvents {
 
     /// 发送 live 错误事件。live 事件不会出现在后续 conversation snapshot 中，因此不能
     /// 标记 `emitted_error`，否则 turn finalizer 会跳过 durable ErrorOccurred。
-    pub(crate) async fn live_error(&self, code: i32, message: String, recoverable: bool) {
-        self.live(EventPayload::ErrorOccurred {
+    pub(crate) fn live_error(&self, code: i32, message: String, recoverable: bool) {
+        self.live(LiveEventPayload::ErrorOccurred {
             code,
             message,
             recoverable,
-        })
-        .await;
+        });
     }
 }
 
-async fn durable_with_retry(publisher: &TurnEvents, payload: EventPayload) {
+async fn durable_with_retry(
+    publisher: &TurnEvents,
+    payload: DurableEventPayload,
+) -> Result<(), TurnError> {
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        match publisher.durable(payload.clone()).await {
-            Ok(()) => break,
-            Err(error) if attempt < DURABLE_PUBLISH_MAX_ATTEMPTS => {
+        match publisher.persist_durable(payload.clone()).await {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt < DURABLE_PUBLISH_MAX_ATTEMPTS
+                    && durable_publish_error_is_retryable(&error) =>
+            {
                 tracing::warn!(
                     error = %error,
                     attempt,
@@ -191,94 +156,152 @@ async fn durable_with_retry(publisher: &TurnEvents, payload: EventPayload) {
                 tracing::error!(
                     error = %error,
                     attempt,
-                    "turn event ingress durable publish failed after retries"
+                    "turn event ingress durable publish failed"
                 );
-                if let Err(reload_error) = publisher.reload_model_cache().await {
-                    tracing::warn!(
-                        error = %reload_error,
-                        "failed to reload model cache after durable publish failure"
-                    );
-                }
-                break;
+                publisher.live_error(-32603, error.to_string(), false);
+                return Err(error);
             },
         }
     }
 }
 
-async fn dispatch_payload(publisher: &TurnEvents, payload: EventPayload) {
-    if payload.is_durable() {
-        durable_with_retry(publisher, payload).await;
-    } else {
-        publisher.live(payload).await;
+fn durable_publish_error_is_retryable(error: &TurnError) -> bool {
+    let TurnError::Session(SessionError::EventPublish(SessionEventPublishError::Storage(
+        StorageError::Io(error),
+    ))) = error
+    else {
+        return false;
+    };
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
+    )
+}
+
+async fn dispatch_payload(publisher: &TurnEvents, payload: EventPayload) -> Result<(), TurnError> {
+    match payload {
+        EventPayload::Durable(payload) => durable_with_retry(publisher, payload).await,
+        EventPayload::Live(payload @ LiveEventPayload::ExtensionEvent(_)) => {
+            publisher.live_required(payload).await
+        },
+        EventPayload::Live(payload) => {
+            publisher.live(payload);
+            Ok(())
+        },
     }
 }
 
 /// Turn 内 hook / 工具侧的事件入口：clone 后非阻塞 `send`，需要落盘时 `flush`。
 #[derive(Clone)]
 pub(crate) struct TurnEventSender {
-    publish_tx: TurnEventTx,
-    flush_tx: mpsc::UnboundedSender<oneshot::Sender<()>>,
+    command_tx: mpsc::UnboundedSender<IngressCommand>,
+    event_tx: TurnEventTx,
+    publisher: Arc<TurnEvents>,
 }
 
 impl TurnEventSender {
     pub(crate) fn event_tx(&self) -> TurnEventTx {
-        self.publish_tx.clone()
+        self.event_tx.clone()
     }
 
     /// 等待 ingress 队列中、本调用之前入队的 publish 全部处理完毕。
-    pub(crate) async fn flush(&self) {
+    pub(crate) async fn flush(&self) -> Result<(), TurnError> {
         let (ack_tx, ack_rx) = oneshot::channel();
-        if self.flush_tx.send(ack_tx).is_err() {
-            return;
+        if self.command_tx.send(IngressCommand::Flush(ack_tx)).is_err() {
+            return Err(TurnError::EventIngress(
+                "turn event ingress is closed".into(),
+            ));
         }
-        let _ = ack_rx.await;
+        ack_rx
+            .await
+            .map_err(|_| TurnError::EventIngress("turn event flush was dropped".into()))?;
+        self.publisher.ingress_result()
     }
+}
+
+enum IngressCommand {
+    Publish(EventPayload),
+    Flush(oneshot::Sender<()>),
+    Shutdown(oneshot::Sender<()>),
 }
 
 /// 单 FIFO worker：turn 内唯一的 hook/工具事件 ingress。
 pub(crate) struct TurnEventIngress {
+    command_tx: mpsc::UnboundedSender<IngressCommand>,
     worker: tokio::task::JoinHandle<()>,
+    publisher: Arc<TurnEvents>,
 }
 
 impl TurnEventIngress {
     pub(crate) fn start(publisher: Arc<TurnEvents>) -> (TurnEventSender, Self) {
-        let (publish_tx, mut publish_rx) = mpsc::unbounded_channel::<EventPayload>();
-        let (flush_tx, mut flush_rx) = mpsc::unbounded_channel::<oneshot::Sender<()>>();
+        let (command_tx, mut command_rx) = mpsc::unbounded_channel();
+        let event_commands = command_tx.clone();
+        let event_tx = TurnEventTx::new(move |payload| {
+            event_commands
+                .send(IngressCommand::Publish(payload))
+                .map_err(|_| astrcode_core::event::EventSendError)
+        });
         let sender = TurnEventSender {
-            publish_tx,
-            flush_tx,
+            command_tx: command_tx.clone(),
+            event_tx,
+            publisher: Arc::clone(&publisher),
         };
+        let publisher_for_worker = Arc::clone(&publisher);
         let worker = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    Some(payload) = publish_rx.recv() => {
-                        dispatch_payload(&publisher, payload).await;
-                    }
-                    Some(ack) = flush_rx.recv() => {
-                        while let Ok(payload) = publish_rx.try_recv() {
-                            dispatch_payload(&publisher, payload).await;
+            let mut shutdown_ack = None;
+            while let Some(command) = command_rx.recv().await {
+                match command {
+                    IngressCommand::Publish(payload) => {
+                        if let Err(error) = dispatch_payload(&publisher_for_worker, payload).await {
+                            publisher_for_worker.record_ingress_error(&error);
                         }
+                    },
+                    IngressCommand::Flush(ack) => {
                         let _ = ack.send(());
-                    }
-                    else => break,
+                    },
+                    IngressCommand::Shutdown(ack) => {
+                        command_rx.close();
+                        shutdown_ack = Some(ack);
+                    },
                 }
             }
+            if let Some(ack) = shutdown_ack {
+                let _ = ack.send(());
+            }
         });
-        (sender, Self { worker })
+        (
+            sender,
+            Self {
+                command_tx,
+                worker,
+                publisher,
+            },
+        )
     }
 
-    pub(crate) async fn shutdown(self) {
-        if let Err(error) = self.worker.await {
-            tracing::error!(panic = %error, "turn event ingress worker panicked");
-        }
+    pub(crate) async fn shutdown(self) -> Result<(), TurnError> {
+        let (ack_tx, ack_rx) = oneshot::channel();
+        self.command_tx
+            .send(IngressCommand::Shutdown(ack_tx))
+            .map_err(|_| TurnError::EventIngress("turn event ingress is closed".into()))?;
+        ack_rx
+            .await
+            .map_err(|_| TurnError::EventIngress("turn event shutdown was dropped".into()))?;
+        self.worker
+            .await
+            .map_err(|error| TurnError::EventIngress(format!("worker panicked: {error}")))?;
+        self.publisher.ingress_result()
     }
 }
 
 /// Turn 级扩展事件 ingress：在 `process_prompt` 期间为 hook / 工具提供 `event_tx`。
 pub(crate) struct ExtensionEvents {
     ingress: TurnEventIngress,
-    sender: Arc<TurnEventSender>,
 }
 
 impl ExtensionEvents {
@@ -287,15 +310,16 @@ impl ExtensionEvents {
         shared: &mut crate::turn_context::SharedTurnContext,
     ) -> Self {
         let (sender, ingress) = TurnEventIngress::start(publisher);
-        let sender = Arc::new(sender);
-        shared.turn_event_sender = Some(Arc::clone(&sender));
-        Self { ingress, sender }
+        shared.turn_event_sender = Some(sender);
+        Self { ingress }
     }
 
-    pub(crate) async fn shutdown(self, shared: &mut crate::turn_context::SharedTurnContext) {
+    pub(crate) async fn shutdown(
+        self,
+        shared: &mut crate::turn_context::SharedTurnContext,
+    ) -> Result<(), TurnError> {
         shared.turn_event_sender = None;
-        drop(self.sender);
-        self.ingress.shutdown().await;
+        self.ingress.shutdown().await
     }
 }
 
@@ -303,29 +327,31 @@ impl ExtensionEvents {
 mod tests {
     use std::sync::Arc;
 
+    use astrcode_context::{
+        ContextAssembler, ContextPrepareInput, NoopPostCompactEnricher, PreparedContext,
+        context_assembler::LlmContextAssembler,
+    };
     use astrcode_core::{
         config::{
             ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme,
             ProviderWireFormat,
         },
-        context::{
-            CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn,
-            CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
-        },
-        event::EventPayload,
-        extension::{
-            AfterToolResultsContext, AfterToolResultsResult, CompactContext, CompactEvent,
-            CompactResult, ContinueAfterStopContext, ContinueAfterStopResult, ExtensionError,
-            ExtensionEvent, LifecycleContext, PostToolUseContext, PostToolUseFailureContext,
-            PostToolUseResult, PreToolUseContext, PreToolUseResult, ProviderContext, ProviderEvent,
-            ProviderResult, UserMessageEnvelopeContext, UserMessageEnvelopeResult,
-        },
+        event::{DurableEventPayload, Event, EventPayload, ExtensionEventData, LiveEventPayload},
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        prompt::{PromptFileProvider, PromptFiles, PromptPlan, PromptProvider, SystemPromptInput},
         tool::ToolDefinition,
         types::{new_session_id, new_turn_id},
+        user_input::UserInput,
     };
-    use astrcode_extension_sdk::runtime_ports::{NoopRuntimePorts, TurnHooks};
+    use astrcode_extension_sdk::{
+        extension::{
+            CompactContext, CompactEvent, CompactResult, ContinueAfterStopContext,
+            ContinueAfterStopResult, ExtensionError, ExtensionEvent, LifecycleContext,
+            PostToolUseContext, PostToolUseResult, PreToolUseContext, PreToolUseResult,
+            ProviderContext, ProviderEvent, ProviderResult, UserMessageEnvelopeContext,
+            UserMessageEnvelopeResult,
+        },
+        runtime_ports::{NoopRuntimePorts, TurnHooks},
+    };
     use astrcode_storage::in_memory::InMemoryEventStore;
     use tokio::sync::mpsc;
 
@@ -333,9 +359,18 @@ mod tests {
     use crate::{
         SessionExtensionPorts,
         session::{Session, SessionCreateParams},
+        session_event_sink::{SessionEventObserver, SessionEventSink},
         session_runtime::SessionRuntimeState,
-        session_runtime_services::{SessionHostServices, SessionRuntimeServices},
+        session_runtime_services::SessionRuntimeServices,
     };
+
+    struct ChannelObserver(mpsc::UnboundedSender<Arc<Event>>);
+
+    impl SessionEventObserver for ChannelObserver {
+        fn publish(&self, event: Arc<Event>) {
+            let _ = self.0.send(event);
+        }
+    }
 
     struct UnusedLlm;
 
@@ -361,7 +396,6 @@ mod tests {
         settings: ContextSettings,
     }
 
-    #[async_trait::async_trait]
     impl ContextAssembler for TestContextAssembler {
         fn settings(&self) -> &ContextSettings {
             &self.settings
@@ -371,37 +405,8 @@ mod tests {
             false
         }
 
-        async fn compact_if_needed(
-            &self,
-            messages: Vec<LlmMessage>,
-            _system_prompt: Option<&str>,
-            _custom_instructions: &[String],
-            _render_options: CompactSummaryRenderOptions,
-            _options: CompactMessagesOptions,
-            _request_text: CompactRequestFn,
-        ) -> CompactIfNeededOutcome {
-            CompactIfNeededOutcome::NotRun { messages }
-        }
-    }
-
-    struct TestPromptProvider;
-
-    #[async_trait::async_trait]
-    impl PromptProvider for TestPromptProvider {
-        async fn assemble(&self, input: SystemPromptInput) -> PromptPlan {
-            PromptPlan::from_system_prompt(format!(
-                "[Identity]\n  test host\n\n[Environment]\n  Working directory: {}",
-                input.working_dir
-            ))
-        }
-    }
-
-    struct TestPromptFileProvider;
-
-    #[async_trait::async_trait]
-    impl PromptFileProvider for TestPromptFileProvider {
-        async fn load(&self, _working_dir: &str, _include_agents_rules: bool) -> PromptFiles {
-            PromptFiles::default()
+        fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
+            LlmContextAssembler::new(self.settings.clone()).prepare_messages(input)
         }
     }
 
@@ -472,12 +477,10 @@ mod tests {
             llm.clone(),
             llm,
             effective,
-            SessionHostServices::embedded(
-                context_assembler,
-                Arc::new(TestPromptProvider),
-                Arc::new(TestPromptFileProvider),
-            )
-            .with_extension_ports(SessionExtensionPorts::with_turn_hooks(turn_hooks)),
+            SessionExtensionPorts::with_turn_hooks(turn_hooks),
+            context_assembler,
+            Arc::new(NoopPostCompactEnricher),
+            Arc::new(NoopRuntimePorts),
         ))
     }
 
@@ -488,22 +491,24 @@ mod tests {
     async fn test_session_with_runtime_services(
         runtime_services: Arc<SessionRuntimeServices>,
     ) -> Session {
-        let store: Arc<dyn astrcode_core::storage::EventStore> =
-            Arc::new(InMemoryEventStore::new());
+        let store: Arc<dyn astrcode_storage::SessionStore> = Arc::new(InMemoryEventStore::new());
         let session_id = new_session_id();
-        let runtime = Arc::new(SessionRuntimeState::new(
-            runtime_services.llm(),
-            runtime_services.small_llm(),
-            "mock-model".into(),
-        ));
+        let runtime = Arc::new(SessionRuntimeState::new(session_id, store));
+        test_session_with_runtime(runtime_services, runtime).await
+    }
+
+    async fn test_session_with_runtime(
+        runtime_services: Arc<SessionRuntimeServices>,
+        runtime: Arc<SessionRuntimeState>,
+    ) -> Session {
         let session = Session::create_with_params(SessionCreateParams {
-            store,
-            session_id,
             working_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             model_id: "mock-model".into(),
             parent_session_id: None,
             tool_selection: None,
             source_extension: None,
+            extra_system_prompt: None,
+            initial_system_prompt: None,
             runtime,
             runtime_services,
         })
@@ -513,49 +518,81 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn snapshot_model_uses_incremental_cache_after_durable() {
-        let session = test_session().await;
-        let turn_id = new_turn_id();
-        let publisher = TurnEvents::new(session.clone(), turn_id, None);
-        publisher
-            .durable(EventPayload::UserMessage {
-                message_id: astrcode_core::types::new_message_id(),
-                text: "first".into(),
-                attachments: vec![],
-            })
-            .await
-            .unwrap();
-        let snap = publisher.snapshot_model().await.unwrap();
-        assert_eq!(snap.messages.len(), 1);
+    async fn durable_ingress_notifies_once_for_non_retryable_failure() {
+        let retryable_error = TurnError::Session(SessionError::EventPublish(
+            SessionEventPublishError::Storage(StorageError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "injected timeout",
+            ))),
+        ));
+        assert!(durable_publish_error_is_retryable(&retryable_error));
 
-        publisher
-            .durable(EventPayload::UserMessage {
-                message_id: astrcode_core::types::new_message_id(),
-                text: "second".into(),
-                attachments: vec![],
-            })
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let store = Arc::new(InMemoryEventStore::new());
+        let runtime = Arc::new(SessionRuntimeState::new_with_event_sink(
+            new_session_id(),
+            store.clone(),
+            Arc::new(SessionEventSink::new(Arc::new(ChannelObserver(events_tx)))),
+        ));
+        let session = test_session_with_runtime(test_runtime_services(), runtime).await;
+        while events_rx.try_recv().is_ok() {}
+
+        let duplicate_session_started = session
+            .runtime
+            .store()
+            .replay_events(session.id())
+            .await
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap()
+            .event
+            .payload;
+        let publisher = Arc::new(TurnEvents::new(session.clone(), new_turn_id()));
+        let (sender, ingress) = TurnEventIngress::start(publisher);
+        sender
+            .event_tx()
+            .send(EventPayload::Durable(duplicate_session_started))
+            .unwrap();
+        assert!(sender.flush().await.is_err());
+        drop(sender);
+        assert!(ingress.shutdown().await.is_err());
+        session
+            .runtime
+            .event_sink()
+            .sync(store, session.id())
             .await
             .unwrap();
-        let snap = publisher.snapshot_model().await.unwrap();
-        assert_eq!(snap.messages.len(), 2);
+
+        let mut live_error_count = 0;
+        while let Ok(event) = events_rx.try_recv() {
+            if matches!(
+                event.payload,
+                EventPayload::Live(LiveEventPayload::ErrorOccurred { .. })
+            ) {
+                live_error_count += 1;
+            }
+        }
+        assert_eq!(live_error_count, 1);
     }
 
     #[tokio::test]
     async fn durable_emit_updates_read_model() {
         let session = test_session().await;
         let turn_id = new_turn_id();
-        let publisher = TurnEvents::new(session.clone(), turn_id.clone(), None);
+        let publisher = TurnEvents::new(session.clone(), turn_id.clone());
         publisher
-            .durable(EventPayload::UserMessage {
+            .durable(DurableEventPayload::UserMessage {
                 message_id: astrcode_core::types::new_message_id(),
                 text: "injected".into(),
                 attachments: vec![],
+                accepted_seq: None,
             })
             .await
             .unwrap();
 
         let model = session.read_model().await.unwrap();
-        assert!(model.messages.iter().any(|message| {
+        assert!(model.transcript.messages.iter().any(|message| {
             message.message.role == astrcode_core::llm::LlmRole::User
                 && message.message.content.iter().any(|content| {
                     matches!(
@@ -566,6 +603,55 @@ mod tests {
         }));
     }
 
+    #[tokio::test]
+    async fn aborted_turn_does_not_complete_when_tool_settlement_fails() {
+        let session = test_session().await;
+        let turn_id = new_turn_id();
+        session
+            .emit_durable(Some(&turn_id), DurableEventPayload::TurnStarted)
+            .await
+            .unwrap();
+        session
+            .emit_durable(
+                Some(&turn_id),
+                DurableEventPayload::ToolCallRequested {
+                    call_id: astrcode_core::types::ToolCallId::new("call-abort"),
+                    tool_name: "read".into(),
+                    arguments: serde_json::json!({"path": "README.md"}),
+                    raw_arguments: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let store = session.runtime.store().clone();
+        session
+            .runtime
+            .event_sink()
+            .release(store.as_ref(), session.id())
+            .await
+            .unwrap();
+        assert!(
+            crate::finalize_aborted_turn(&session, &turn_id)
+                .await
+                .is_err()
+        );
+
+        let events = store.replay_events(session.id()).await.unwrap();
+        assert!(
+            events.iter().any(|event| matches!(
+                event.payload,
+                DurableEventPayload::ToolCallRequested { .. }
+            ))
+        );
+        assert!(!events.iter().any(|event| matches!(
+            event.payload,
+            DurableEventPayload::ToolCallCancelled { .. }
+                | DurableEventPayload::TurnAbortedContext
+                | DurableEventPayload::TurnCompleted { .. }
+        )));
+    }
+
     struct EmitEventRuntime;
 
     #[async_trait::async_trait]
@@ -573,16 +659,27 @@ mod tests {
         async fn emit_pre_tool_use(
             &self,
             ctx: PreToolUseContext,
-        ) -> Result<PreToolUseResult, astrcode_core::extension::ExtensionError> {
+        ) -> Result<PreToolUseResult, ExtensionError> {
             let tx = ctx
                 .event_tx
                 .ok_or_else(|| ExtensionError::Internal("no turn event sender".into()))?;
-            tx.send(EventPayload::ExtensionEvent {
-                extension_id: "emit-probe".into(),
-                event_type: "emit.probe".into(),
-                schema_version: 1,
-                payload: serde_json::json!({ "probe": true }),
-            })
+            tx.send(EventPayload::Durable(DurableEventPayload::ExtensionEvent(
+                ExtensionEventData {
+                    extension_id: "emit-probe".into(),
+                    event_type: "emit.probe".into(),
+                    schema_version: 1,
+                    payload: serde_json::json!({ "probe": true }),
+                },
+            )))
+            .map_err(|_| ExtensionError::Internal("turn event sender closed".into()))?;
+            tx.send(EventPayload::Live(LiveEventPayload::ExtensionEvent(
+                ExtensionEventData {
+                    extension_id: "emit-probe".into(),
+                    event_type: "emit.live".into(),
+                    schema_version: 1,
+                    payload: serde_json::json!({ "probe": true }),
+                },
+            )))
             .map_err(|_| ExtensionError::Internal("turn event sender closed".into()))?;
             Ok(PreToolUseResult::Allow)
         }
@@ -610,8 +707,6 @@ mod tests {
             Ok(CompactResult::Allow)
         }
 
-        async fn emit_post_tool_use_failure(&self, _ctx: PostToolUseFailureContext) {}
-
         async fn emit_continue_after_stop(
             &self,
             _ctx: ContinueAfterStopContext,
@@ -626,19 +721,44 @@ mod tests {
             Ok(UserMessageEnvelopeResult::Allow)
         }
 
-        async fn emit_after_tool_results(
-            &self,
-            _ctx: AfterToolResultsContext,
-        ) -> Result<AfterToolResultsResult, ExtensionError> {
-            Ok(AfterToolResultsResult::Continue)
-        }
-
         async fn emit_lifecycle(
             &self,
             _event: ExtensionEvent,
             _ctx: LifecycleContext,
         ) -> Result<(), ExtensionError> {
             Ok(())
+        }
+    }
+
+    struct FailTurnStartAndEmitOnEnd;
+
+    #[async_trait::async_trait]
+    impl TurnHooks for FailTurnStartAndEmitOnEnd {
+        async fn emit_lifecycle(
+            &self,
+            event: ExtensionEvent,
+            ctx: LifecycleContext,
+        ) -> Result<(), ExtensionError> {
+            match event {
+                ExtensionEvent::TurnStart => Err(ExtensionError::Internal(
+                    "injected turn start failure".into(),
+                )),
+                ExtensionEvent::TurnEnd => {
+                    let tx = ctx
+                        .event_tx
+                        .ok_or_else(|| ExtensionError::Internal("no turn event sender".into()))?;
+                    tx.send(EventPayload::Durable(DurableEventPayload::ExtensionEvent(
+                        ExtensionEventData {
+                            extension_id: "turn-end-probe".into(),
+                            event_type: "turn.end.error".into(),
+                            schema_version: 1,
+                            payload: serde_json::json!({}),
+                        },
+                    )))
+                    .map_err(|_| ExtensionError::Internal("turn event sender closed".into()))
+                },
+                _ => Ok(()),
+            }
         }
     }
 
@@ -651,7 +771,7 @@ mod tests {
         let runtime_services = session.runtime_services();
 
         let turn_id = new_turn_id();
-        let publisher = Arc::new(TurnEvents::new(session.clone(), turn_id.clone(), None));
+        let publisher = Arc::new(TurnEvents::new(session.clone(), turn_id.clone()));
         let model = session.read_model().await.unwrap();
         let mut shared =
             crate::turn_context::SharedTurnContext::from_read_model(session.id(), &model);
@@ -661,6 +781,7 @@ mod tests {
             session_id: session.id().to_string(),
             working_dir: shared.working_dir.clone(),
             model: shared.model_selection(),
+            call_id: "call-1".into(),
             tool_name: "any".into(),
             tool_input: serde_json::json!({}),
             approval_mode: shared.approval_mode,
@@ -675,63 +796,132 @@ mod tests {
             .await
             .unwrap();
 
-        bridge.shutdown(&mut shared).await;
+        bridge.shutdown(&mut shared).await.unwrap();
 
-        let events = session.store.replay_events(session.id()).await.unwrap();
+        let events = session
+            .runtime
+            .store()
+            .replay_events(session.id())
+            .await
+            .unwrap();
         assert!(events.iter().any(|e| matches!(
             &e.payload,
-            EventPayload::ExtensionEvent {
+            DurableEventPayload::ExtensionEvent(ExtensionEventData {
                 extension_id,
                 event_type,
                 ..
-            } if extension_id == "emit-probe" && event_type == "emit.probe"
+            }) if extension_id == "emit-probe" && event_type == "emit.probe"
+        )));
+        assert!(!events.iter().any(|e| matches!(
+            &e.payload,
+            DurableEventPayload::ExtensionEvent(ExtensionEventData { event_type, .. })
+                if event_type == "emit.live"
+        )));
+    }
+
+    #[tokio::test]
+    async fn failed_turn_end_hook_can_publish_before_event_bridge_shutdown() {
+        let session = test_session_with_runtime_services(test_runtime_services_with_hooks(
+            Arc::new(FailTurnStartAndEmitOnEnd),
+        ))
+        .await;
+        let turn_id = new_turn_id();
+
+        let handle = session
+            .submit(UserInput::text_only("trigger failure"), turn_id, None)
+            .await
+            .unwrap();
+        let result = handle.wait().await.unwrap();
+        assert!(result.output.is_err());
+
+        let events = session
+            .runtime
+            .store()
+            .replay_events(session.id())
+            .await
+            .unwrap();
+        assert!(events.iter().any(|event| matches!(
+            &event.payload,
+            DurableEventPayload::ExtensionEvent(ExtensionEventData {
+                extension_id,
+                event_type,
+                ..
+            }) if extension_id == "turn-end-probe" && event_type == "turn.end.error"
         )));
     }
 
     /// 模拟并行工具经同一 ingress 发 durable 并 flush。
     #[tokio::test]
-    async fn parallel_tool_senders_flush_through_single_ingress_without_deadlock() {
+    async fn parallel_tool_senders_flush_and_shutdown_with_retained_tx() {
         use std::time::Duration;
 
         use astrcode_core::types::new_message_id;
 
         let session = test_session().await;
-        let publisher = Arc::new(TurnEvents::new(session.clone(), new_turn_id(), None));
-        publisher.invalidate_model_cache().await;
+        let publisher = Arc::new(TurnEvents::new(session.clone(), new_turn_id()));
 
         let (sender, ingress) = TurnEventIngress::start(Arc::clone(&publisher));
-        let sender = Arc::new(sender);
+        let retained_tx = sender.event_tx();
 
         let mut workers = Vec::new();
         for index in 0..8 {
-            let sender = Arc::clone(&sender);
+            let sender = sender.clone();
             workers.push(tokio::spawn(async move {
                 let tx = sender.event_tx();
-                tx.send(EventPayload::UserMessage {
+                tx.send(EventPayload::Durable(DurableEventPayload::UserMessage {
                     message_id: new_message_id(),
                     text: format!("parallel-{index}"),
                     attachments: vec![],
-                })
+                    accepted_seq: None,
+                }))
                 .unwrap();
-                sender.flush().await;
+                sender.flush().await.unwrap();
             }));
         }
 
         for worker in workers {
             worker.await.unwrap();
         }
+        let (shutdown_ack_tx, shutdown_ack_rx) = oneshot::channel();
+        ingress
+            .command_tx
+            .send(IngressCommand::Shutdown(shutdown_ack_tx))
+            .unwrap();
+        retained_tx
+            .send(EventPayload::Durable(DurableEventPayload::UserMessage {
+                message_id: new_message_id(),
+                text: "shutdown-drain".into(),
+                attachments: vec![],
+                accepted_seq: None,
+            }))
+            .unwrap();
         drop(sender);
-        tokio::time::timeout(Duration::from_secs(5), ingress.shutdown())
+        tokio::time::timeout(Duration::from_secs(5), shutdown_ack_rx)
             .await
-            .expect("parallel ingress flush timed out (possible model_cache deadlock)");
+            .expect("parallel ingress flush timed out")
+            .unwrap();
+        ingress.worker.await.unwrap();
+        ingress.publisher.ingress_result().unwrap();
+        assert!(
+            retained_tx
+                .send(EventPayload::Live(LiveEventPayload::AgentRunStarted))
+                .is_err()
+        );
 
-        let events = session.store.replay_events(session.id()).await.unwrap();
+        let events = session
+            .runtime
+            .store()
+            .replay_events(session.id())
+            .await
+            .unwrap();
         assert_eq!(
             events
                 .iter()
-                .filter(|event| matches!(event.payload, EventPayload::UserMessage { .. }))
+                .filter(|event| {
+                    matches!(event.payload, DurableEventPayload::UserMessage { .. })
+                })
                 .count(),
-            8
+            9
         );
     }
 }

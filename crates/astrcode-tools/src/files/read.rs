@@ -5,15 +5,15 @@ use std::{
     time::Instant,
 };
 
-use astrcode_core::{storage::StorageError, tool::*, tool_access::ResourceAccess};
-use astrcode_support::hostpaths::resolve_path;
+use astrcode_core::tool::{ToolResultArtifactError, access::ResourceAccess, *};
+use astrcode_extension_sdk::hostpaths::resolve_path;
 use serde::Deserialize;
 
 use super::shared::{
     DEFAULT_MAX_CHARS, MAX_UNPAGINATED_READ_BYTES, binary_result, char_pagination_footer,
-    directory_result, error_result_with_call_id, image_media_type, is_binary,
-    is_tool_result_artifact_path, not_found_result, read_image_file_result, read_lines_segment,
-    remember_file_observation_with_store, run_blocking, slice_chars, tool_call_id,
+    directory_result, error_result, image_media_type, is_binary, is_tool_result_artifact_path,
+    not_found_result, read_image_file_result, read_lines_segment,
+    remember_file_observation_with_store, run_blocking, slice_chars,
 };
 
 const MAX_TOOL_RESULT_READ_CHARS: usize = 60_000;
@@ -70,7 +70,7 @@ impl Tool for ReadFileTool {
         &self,
         args: serde_json::Value,
         ctx: &ToolExecutionContext,
-    ) -> Result<ToolResult, ToolError> {
+    ) -> Result<ToolExecutionResult, ToolError> {
         let started_at = Instant::now();
         let args: ReadFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid read args: {e}")))?;
@@ -79,31 +79,25 @@ impl Tool for ReadFileTool {
             if let Some(result) =
                 read_persisted_tool_result_path(ctx, started_at, &path, &args).await?
             {
-                return Ok(result);
+                return Ok(result.into());
             }
         }
         if !path.exists() {
             if let Some(result) =
                 read_persisted_tool_result_path(ctx, started_at, &path, &args).await?
             {
-                return Ok(result);
+                return Ok(result.into());
             }
-            return Ok(not_found_result(tool_call_id(ctx), started_at, &path));
+            return Ok(not_found_result(started_at, &path).into());
         }
 
-        let call_id = tool_call_id(ctx);
         let file_observation_store = ctx.capabilities.files.observation_store.clone();
         let working_dir = self.working_dir.clone();
         run_blocking(move || {
-            read_existing_file_sync(
-                working_dir,
-                args,
-                call_id,
-                file_observation_store,
-                started_at,
-            )
+            read_existing_file_sync(working_dir, args, file_observation_store, started_at)
         })
         .await
+        .map(Into::into)
     }
 
     fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
@@ -114,19 +108,18 @@ impl Tool for ReadFileTool {
 fn read_existing_file_sync(
     working_dir: PathBuf,
     args: ReadFileArgs,
-    call_id: String,
     file_observation_store: Option<std::sync::Arc<dyn FileObservationStore>>,
     started_at: Instant,
 ) -> Result<ToolResult, ToolError> {
     let path = resolve_path(&working_dir, &args.path);
     if path.is_dir() {
-        return Ok(directory_result(call_id, started_at, &path));
+        return Ok(directory_result(started_at, &path));
     }
     if let Some(media_type) = image_media_type(&path) {
-        return read_image_file_result(call_id, started_at, &path, media_type);
+        return read_image_file_result(started_at, &path, media_type);
     }
     if is_binary(&path) {
-        return Ok(binary_result(call_id, started_at, &path));
+        return Ok(binary_result(started_at, &path));
     }
 
     let offset = args.offset.unwrap_or(0);
@@ -139,8 +132,7 @@ fn read_existing_file_sync(
         .map_err(|e| ToolError::Execution(format!("stat: {e}")))?
         .len();
     if !use_line_pagination && file_len > MAX_UNPAGINATED_READ_BYTES {
-        return Ok(error_result_with_call_id(
-            call_id,
+        return Ok(error_result(
             started_at,
             format!(
                 "file is {file_len} bytes; use offset/limit to paginate reads over \
@@ -220,7 +212,6 @@ fn read_existing_file_sync(
     }
 
     Ok(ToolResult {
-        call_id,
         content: rendered.text,
         is_error: false,
         error: None,
@@ -300,14 +291,15 @@ async fn read_persisted_tool_result_path(
         .min(MAX_TOOL_RESULT_READ_CHARS);
     let path = path.display().to_string();
     let slice = match reader
-        .read_tool_result_artifact_by_path(&ctx.session_id, &path, char_offset, max_chars)
+        .read_tool_result_artifact_by_path(&ctx.scope.session_id, &path, char_offset, max_chars)
         .await
     {
         Ok(slice) => slice,
-        Err(StorageError::InvalidId(_) | StorageError::Unsupported(_)) => return Ok(None),
-        Err(StorageError::NotFound(_)) => {
-            return Ok(Some(error_result_with_call_id(
-                tool_call_id(ctx),
+        Err(ToolResultArtifactError::InvalidPath(_) | ToolResultArtifactError::Unsupported(_)) => {
+            return Ok(None);
+        },
+        Err(ToolResultArtifactError::NotFound(_)) => {
+            return Ok(Some(error_result(
                 started_at,
                 format!("tool result path not found: {path}"),
                 BTreeMap::from([
@@ -343,7 +335,6 @@ async fn read_persisted_tool_result_path(
     }
 
     Ok(Some(ToolResult {
-        call_id: tool_call_id(ctx),
         content,
         is_error: false,
         error: None,

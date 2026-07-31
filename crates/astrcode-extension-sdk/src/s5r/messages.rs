@@ -214,11 +214,9 @@ pub fn event_from_name(name: &str) -> Option<ExtensionEvent> {
         "step_end" => Some(ExtensionEvent::StepEnd),
         "pre_tool_use" => Some(ExtensionEvent::PreToolUse),
         "post_tool_use" => Some(ExtensionEvent::PostToolUse),
-        "post_tool_use_failure" => Some(ExtensionEvent::PostToolUseFailure),
         "before_provider_request" => Some(ExtensionEvent::BeforeProviderRequest),
         "after_provider_response" => Some(ExtensionEvent::AfterProviderResponse),
         "continue_after_stop" => Some(ExtensionEvent::ContinueAfterStop),
-        "after_tool_results" => Some(ExtensionEvent::AfterToolResults),
         "user_prompt_submit" => Some(ExtensionEvent::UserPromptSubmit),
         "user_message_envelope" => Some(ExtensionEvent::UserMessageEnvelope),
         "prompt_build" => Some(ExtensionEvent::PromptBuild),
@@ -250,11 +248,9 @@ pub fn event_to_name(event: &ExtensionEvent) -> &'static str {
         ExtensionEvent::StepEnd => "step_end",
         ExtensionEvent::PreToolUse => "pre_tool_use",
         ExtensionEvent::PostToolUse => "post_tool_use",
-        ExtensionEvent::PostToolUseFailure => "post_tool_use_failure",
         ExtensionEvent::BeforeProviderRequest => "before_provider_request",
         ExtensionEvent::AfterProviderResponse => "after_provider_response",
         ExtensionEvent::ContinueAfterStop => "continue_after_stop",
-        ExtensionEvent::AfterToolResults => "after_tool_results",
         ExtensionEvent::UserPromptSubmit => "user_prompt_submit",
         ExtensionEvent::UserMessageEnvelope => "user_message_envelope",
         ExtensionEvent::PromptBuild => "prompt_build",
@@ -266,9 +262,8 @@ pub fn event_to_name(event: &ExtensionEvent) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::extension::LifecycleContext;
-
     use super::*;
+    use crate::extension::LifecycleContext;
 
     #[test]
     fn lifecycle_context_for_step_start_carries_sync_count() {

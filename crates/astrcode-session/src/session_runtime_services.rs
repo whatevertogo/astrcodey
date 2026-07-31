@@ -4,102 +4,71 @@
 //! 以及当前生效的配置。Session 创建时持有 `Arc<SessionRuntimeServices>`，运行 turn 时按需读取。
 //!
 //! `llm` 与 `effective_config` 支持热替换：server 端配置变更时通过 `swap_llm` /
-//! `update_effective` 原子更新，正在运行的 turn 在下一轮 LLM 调用前看到新值。
+//! `update_effective` 原子更新，后续 turn 会读取新值。
 //! 快路径读取使用 `ArcSwap`，避免每个 turn 为获取 provider / config 快照进入读锁。
 
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use astrcode_context::{ContextAssembler, PostCompactEnricher};
 use astrcode_core::{
     config::EffectiveConfig,
-    context::{ContextAssembler, NoopPostCompactEnricher, PostCompactEnricher},
-    llm::LlmProvider,
-    prompt::{PromptFileProvider, PromptProvider},
-    tool_pack::ToolPack,
+    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits, ProviderInputTokenCount},
+    tool::ToolDefinition,
 };
 use astrcode_extension_sdk::runtime_ports::{
-    PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState, SessionOperationsProvider,
-    ToolCatalogProvider, TurnHooks,
+    PromptContributor, RuntimeSnapshotState, ToolCatalogProvider, TurnHooks,
 };
 
-use crate::SessionExtensionPorts;
+use crate::{SessionExtensionPorts, SessionResourceStore};
 
 pub struct SessionRuntimeServices {
-    llm: ArcSwap<ProviderSlot>,
+    llm: Arc<ArcSwap<ProviderSlot>>,
     /// 小模型 provider slot。未配置小模型时与主模型相同。
-    small_llm: ArcSwap<ProviderSlot>,
+    small_llm: Arc<ArcSwap<ProviderSlot>>,
     extension_ports: SessionExtensionPorts,
     context_assembler: Arc<dyn ContextAssembler>,
     post_compact_enricher: Arc<dyn PostCompactEnricher>,
-    prompt_provider: Arc<dyn PromptProvider>,
-    prompt_file_provider: Arc<dyn PromptFileProvider>,
     effective_config: ArcSwap<EffectiveConfig>,
-    tool_packs: Arc<[Arc<dyn ToolPack>]>,
-}
-
-pub struct SessionHostServices {
-    extension_ports: SessionExtensionPorts,
-    context_assembler: Arc<dyn ContextAssembler>,
-    post_compact_enricher: Arc<dyn PostCompactEnricher>,
-    prompt_provider: Arc<dyn PromptProvider>,
-    prompt_file_provider: Arc<dyn PromptFileProvider>,
-    tool_packs: Vec<Arc<dyn ToolPack>>,
-}
-
-impl SessionHostServices {
-    /// Build a minimal embeddable host surface from the required core services.
-    ///
-    /// Extension runtime, post-compact enrichment, and tool packs default to
-    /// no-op/empty implementations so alternate hosts can opt in explicitly.
-    pub fn embedded(
-        context_assembler: Arc<dyn ContextAssembler>,
-        prompt_provider: Arc<dyn PromptProvider>,
-        prompt_file_provider: Arc<dyn PromptFileProvider>,
-    ) -> Self {
-        Self {
-            extension_ports: SessionExtensionPorts::default(),
-            context_assembler,
-            post_compact_enricher: Arc::new(NoopPostCompactEnricher),
-            prompt_provider,
-            prompt_file_provider,
-            tool_packs: Vec::new(),
-        }
-    }
-
-    pub fn with_extension_adapter<T>(mut self, adapter: Arc<T>) -> Self
-    where
-        T: ToolCatalogProvider
-            + PromptContributor
-            + RuntimeSnapshotProvider
-            + TurnHooks
-            + SessionOperationsProvider
-            + 'static,
-    {
-        self.extension_ports = SessionExtensionPorts::from_adapter(adapter);
-        self
-    }
-
-    pub fn with_extension_ports(mut self, extension_ports: SessionExtensionPorts) -> Self {
-        self.extension_ports = extension_ports;
-        self
-    }
-
-    pub fn with_post_compact_enricher(
-        mut self,
-        post_compact_enricher: Arc<dyn PostCompactEnricher>,
-    ) -> Self {
-        self.post_compact_enricher = post_compact_enricher;
-        self
-    }
-
-    pub fn with_tool_packs(mut self, tool_packs: Vec<Arc<dyn ToolPack>>) -> Self {
-        self.tool_packs = tool_packs;
-        self
-    }
+    tool_catalog: Arc<dyn ToolCatalogProvider>,
+    session_resources: SessionResourceStore,
 }
 
 struct ProviderSlot {
     provider: Arc<dyn LlmProvider>,
+}
+
+struct LiveLlmProvider {
+    source: Arc<ArcSwap<ProviderSlot>>,
+}
+
+impl LiveLlmProvider {
+    fn current(&self) -> Arc<dyn LlmProvider> {
+        Arc::clone(&self.source.load_full().provider)
+    }
+}
+
+#[async_trait::async_trait]
+impl LlmProvider for LiveLlmProvider {
+    async fn generate(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        self.current().generate(messages, tools).await
+    }
+
+    async fn count_input_tokens(
+        &self,
+        messages: Vec<LlmMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ProviderInputTokenCount, LlmError> {
+        self.current().count_input_tokens(messages, tools).await
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        self.current().model_limits()
+    }
 }
 
 impl SessionRuntimeServices {
@@ -107,20 +76,22 @@ impl SessionRuntimeServices {
         llm: Arc<dyn LlmProvider>,
         small_llm: Arc<dyn LlmProvider>,
         effective_config: EffectiveConfig,
-        host_services: SessionHostServices,
+        extension_ports: SessionExtensionPorts,
+        context_assembler: Arc<dyn ContextAssembler>,
+        post_compact_enricher: Arc<dyn PostCompactEnricher>,
+        tool_catalog: Arc<dyn ToolCatalogProvider>,
     ) -> Self {
         Self {
-            llm: ArcSwap::from_pointee(ProviderSlot { provider: llm }),
-            small_llm: ArcSwap::from_pointee(ProviderSlot {
+            llm: Arc::new(ArcSwap::from_pointee(ProviderSlot { provider: llm })),
+            small_llm: Arc::new(ArcSwap::from_pointee(ProviderSlot {
                 provider: small_llm,
-            }),
-            extension_ports: host_services.extension_ports,
-            context_assembler: host_services.context_assembler,
-            post_compact_enricher: host_services.post_compact_enricher,
-            prompt_provider: host_services.prompt_provider,
-            prompt_file_provider: host_services.prompt_file_provider,
+            })),
+            extension_ports,
+            context_assembler,
+            post_compact_enricher,
             effective_config: ArcSwap::from_pointee(effective_config),
-            tool_packs: Arc::from(host_services.tool_packs),
+            tool_catalog,
+            session_resources: SessionResourceStore::default(),
         }
     }
 
@@ -132,11 +103,27 @@ impl SessionRuntimeServices {
         self.llm.store(Arc::new(ProviderSlot { provider: new }));
     }
 
+    /// 返回始终转发到当前主模型 provider 的稳定句柄。
+    pub fn live_llm(&self) -> Arc<dyn LlmProvider> {
+        Arc::new(LiveLlmProvider {
+            source: Arc::clone(&self.llm),
+        })
+    }
+
     /// 返回小模型 provider。
     ///
     /// 未配置小模型时返回的与主模型相同。
     pub fn small_llm(&self) -> Arc<dyn LlmProvider> {
         Arc::clone(&self.small_llm.load_full().provider)
+    }
+
+    pub fn llm_for_model_id(&self, model_id: &str) -> Arc<dyn LlmProvider> {
+        let effective = self.read_effective();
+        if model_id == effective.small_llm.model_id && model_id != effective.llm.model_id {
+            self.small_llm()
+        } else {
+            self.llm()
+        }
     }
 
     /// 热替换小模型 provider。
@@ -145,8 +132,15 @@ impl SessionRuntimeServices {
             .store(Arc::new(ProviderSlot { provider: new }));
     }
 
+    /// 返回始终转发到当前小模型 provider 的稳定句柄。
+    pub fn live_small_llm(&self) -> Arc<dyn LlmProvider> {
+        Arc::new(LiveLlmProvider {
+            source: Arc::clone(&self.small_llm),
+        })
+    }
+
     pub(crate) fn tool_catalog(&self) -> &dyn ToolCatalogProvider {
-        self.extension_ports.tool_catalog()
+        self.tool_catalog.as_ref()
     }
 
     pub(crate) fn runtime_snapshot_state(&self) -> RuntimeSnapshotState {
@@ -177,25 +171,6 @@ impl SessionRuntimeServices {
         self.post_compact_enricher.as_ref()
     }
 
-    pub(crate) fn prompt_provider(&self) -> &dyn PromptProvider {
-        self.prompt_provider.as_ref()
-    }
-
-    pub(crate) fn prompt_file_provider(&self) -> &dyn PromptFileProvider {
-        self.prompt_file_provider.as_ref()
-    }
-
-    pub(crate) fn tool_packs(&self) -> &[Arc<dyn ToolPack>] {
-        &self.tool_packs
-    }
-
-    pub(crate) fn tool_pack_versions(&self) -> Vec<u64> {
-        self.tool_packs
-            .iter()
-            .map(|pack| pack.snapshot_version())
-            .collect()
-    }
-
     pub fn read_effective(&self) -> Arc<EffectiveConfig> {
         self.effective_config.load_full()
     }
@@ -208,24 +183,27 @@ impl SessionRuntimeServices {
     pub fn session_ops(&self) -> Option<Arc<dyn astrcode_core::tool::SessionOperations>> {
         self.extension_ports.session_operations().session_ops()
     }
+
+    pub fn session_resources(&self) -> &SessionResourceStore {
+        &self.session_resources
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use astrcode_context::{
+        CompactResult, ContextAssembler, ContextPrepareInput, PostCompactEnrichInput,
+        PostCompactEnricher, PreparedContext, context_assembler::LlmContextAssembler,
+    };
     use astrcode_core::{
         config::{
             AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
             ProviderAuthScheme, ProviderWireFormat,
         },
-        context::{
-            CompactIfNeededOutcome, CompactMessagesOptions, CompactRequestFn, CompactResult,
-            CompactSummaryRenderOptions, ContextAssembler, ContextPrepareInput,
-            PostCompactEnrichInput, PostCompactEnricher,
-        },
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        prompt::{PromptFiles, PromptPlan, SystemPromptInput},
         tool::ToolDefinition,
     };
+    use astrcode_extension_sdk::runtime_ports::NoopRuntimePorts;
     use tokio::sync::mpsc;
 
     use super::*;
@@ -250,11 +228,32 @@ mod tests {
         }
     }
 
+    struct TaggedLlm {
+        max_input_tokens: usize,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for TaggedLlm {
+        async fn generate(
+            &self,
+            _messages: Vec<LlmMessage>,
+            _tools: Vec<ToolDefinition>,
+        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+            unreachable!("live provider test only reads model limits")
+        }
+
+        fn model_limits(&self) -> ModelLimits {
+            ModelLimits {
+                max_input_tokens: self.max_input_tokens,
+                max_output_tokens: 1024,
+            }
+        }
+    }
+
     struct CustomContextAssembler {
         settings: ContextSettings,
     }
 
-    #[async_trait::async_trait]
     impl ContextAssembler for CustomContextAssembler {
         fn settings(&self) -> &ContextSettings {
             &self.settings
@@ -264,38 +263,8 @@ mod tests {
             false
         }
 
-        async fn compact_if_needed(
-            &self,
-            messages: Vec<LlmMessage>,
-            _system_prompt: Option<&str>,
-            _custom_instructions: &[String],
-            _render_options: CompactSummaryRenderOptions,
-            _options: CompactMessagesOptions,
-            _request_text: CompactRequestFn,
-        ) -> CompactIfNeededOutcome {
-            CompactIfNeededOutcome::NotRun { messages }
-        }
-    }
-
-    struct CustomPromptProvider;
-
-    #[async_trait::async_trait]
-    impl PromptProvider for CustomPromptProvider {
-        async fn assemble(&self, _input: SystemPromptInput) -> PromptPlan {
-            PromptPlan::from_system_prompt("custom prompt".into())
-        }
-    }
-
-    struct CustomPromptFileProvider;
-
-    #[async_trait::async_trait]
-    impl PromptFileProvider for CustomPromptFileProvider {
-        async fn load(&self, _working_dir: &str, include_agents_rules: bool) -> PromptFiles {
-            PromptFiles {
-                identity: Some("custom identity".into()),
-                user_rules: include_agents_rules.then(|| "custom user rules".into()),
-                project_rules: None,
-            }
+        fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
+            LlmContextAssembler::new(self.settings.clone()).prepare_messages(input)
         }
     }
 
@@ -309,7 +278,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_custom_context_and_prompt_services() {
+    async fn accepts_custom_context_services() {
         let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
         let context = ContextSettings {
             auto_compact_enabled: false,
@@ -323,29 +292,19 @@ mod tests {
             llm.clone(),
             llm,
             effective_config(context),
-            SessionHostServices::embedded(
-                Arc::clone(&context_assembler),
-                Arc::new(CustomPromptProvider),
-                Arc::new(CustomPromptFileProvider),
-            )
-            .with_post_compact_enricher(Arc::new(CountingPostCompactEnricher)),
+            SessionExtensionPorts::default(),
+            Arc::clone(&context_assembler),
+            Arc::new(CountingPostCompactEnricher),
+            Arc::new(NoopRuntimePorts),
         );
 
         assert!(!services.context_assembler().auto_compact_enabled());
-        let plan = services
-            .prompt_provider()
-            .assemble(system_prompt_input())
-            .await;
-        assert_eq!(plan.system_prompt.as_deref(), Some("custom prompt"));
-        let files = services.prompt_file_provider().load(".", true).await;
-        assert_eq!(files.identity.as_deref(), Some("custom identity"));
-        assert_eq!(files.user_rules.as_deref(), Some("custom user rules"));
         let mut compaction = CompactResult {
             pre_tokens: 1,
             post_tokens: 1,
             summary: "compact".into(),
             messages_removed: 0,
-            context_messages: Vec::new(),
+            summary_messages: Vec::new(),
             retained_messages: Vec::new(),
             transcript_path: None,
         };
@@ -367,20 +326,39 @@ mod tests {
         assert_eq!(compaction.summary, "compact enriched");
     }
 
-    fn system_prompt_input() -> SystemPromptInput {
-        SystemPromptInput {
-            working_dir: ".".into(),
-            os: "test".into(),
-            shell: "test".into(),
-            gh_cli_available: false,
-            identity: None,
-            user_rules: None,
-            project_rules: None,
-            tools: Vec::new(),
-            tool_prompt_metadata: Default::default(),
-            extension_blocks: Vec::new(),
-            extra_instructions: None,
-        }
+    #[test]
+    fn live_llm_handles_follow_main_and_small_provider_swaps() {
+        let context = ContextSettings::default();
+        let context_assembler: Arc<dyn ContextAssembler> =
+            Arc::new(LlmContextAssembler::new(context.clone()));
+        let services = SessionRuntimeServices::new(
+            Arc::new(TaggedLlm {
+                max_input_tokens: 1,
+            }),
+            Arc::new(TaggedLlm {
+                max_input_tokens: 2,
+            }),
+            effective_config(context),
+            SessionExtensionPorts::default(),
+            context_assembler,
+            Arc::new(CountingPostCompactEnricher),
+            Arc::new(NoopRuntimePorts),
+        );
+        let live_main = services.live_llm();
+        let live_small = services.live_small_llm();
+
+        assert_eq!(live_main.model_limits().max_input_tokens, 1);
+        assert_eq!(live_small.model_limits().max_input_tokens, 2);
+
+        services.swap_llm(Arc::new(TaggedLlm {
+            max_input_tokens: 3,
+        }));
+        services.swap_small_llm(Arc::new(TaggedLlm {
+            max_input_tokens: 4,
+        }));
+
+        assert_eq!(live_main.model_limits().max_input_tokens, 3);
+        assert_eq!(live_small.model_limits().max_input_tokens, 4);
     }
 
     fn effective_config(context: ContextSettings) -> EffectiveConfig {

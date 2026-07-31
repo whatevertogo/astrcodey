@@ -9,8 +9,8 @@ use std::{
     },
 };
 
-use astrcode_core::extension::{ExtensionCapability, ExtensionError, ExtensionEventDecl};
 use astrcode_extension_sdk::{
+    extension::{ExtensionCapability, ExtensionError, ExtensionEventDecl},
     runtime::{
         CancelToken, InitializeHandler, InvokeHandler, InvokeReply, OutboundInvokeControl, Peer,
         StdioFrameTransport,
@@ -178,7 +178,7 @@ impl S5rSession {
         self.registration
             .read()
             .as_ref()
-            .map(|r| r.extension_id.clone())
+            .map(|r| r.extension_id().to_owned())
             .unwrap_or_default()
     }
 
@@ -186,7 +186,7 @@ impl S5rSession {
         self.registration
             .read()
             .as_ref()
-            .map(|r| r.capabilities.clone())
+            .map(|r| r.capabilities().to_vec())
             .unwrap_or_default()
     }
 
@@ -194,7 +194,7 @@ impl S5rSession {
         self.registration
             .read()
             .as_ref()
-            .map(|r| decls_to_map(&r.extension_events))
+            .map(|r| decls_to_map(r.extension_events()))
             .unwrap_or_default()
     }
 
@@ -338,7 +338,7 @@ fn handle_initialize(
         S5R_PROTOCOL_VERSION,
     )
     .map_err(|e| ErrorPayload::new("invalid_manifest", e))?;
-    let caps = HostRouter::catalog_for_grants(&reg.capabilities);
+    let caps = HostRouter::catalog_for_grants(reg.capabilities());
     *registration.write() = Some(reg);
     Ok(InitializeOutput {
         peer: PeerInfo {
@@ -390,9 +390,9 @@ async fn handle_host_invoke(
     if ctx.working_dir.is_none() {
         ctx.working_dir = default_working_dir.read().clone();
     }
-    ctx.extension_id = reg.extension_id.clone();
-    ctx.declared_capabilities = reg.capabilities.clone();
-    ctx.event_declarations = decls_to_map(&reg.extension_events);
+    ctx.extension_id = reg.extension_id().to_owned();
+    ctx.declared_capabilities = reg.capabilities().to_vec();
+    ctx.event_declarations = decls_to_map(reg.extension_events());
     ctx.on_peer_io_thread = true;
     ctx.cancel_token = Some(token.cancellation_token());
 
@@ -444,4 +444,126 @@ async fn drain_stderr(stderr: tokio::process::ChildStderr) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let mut reader = BufReader::new(stderr).lines();
     while let Ok(Some(_line)) = reader.next_line().await {}
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_extension_sdk::s5r::capability_to_wire;
+    use serde_json::json;
+
+    use super::*;
+
+    fn initialize_message(metadata: Value) -> InitializeMsg {
+        InitializeMsg {
+            id: "initialize-1".into(),
+            protocol_version: S5R_VERSION.into(),
+            peer: PeerInfo {
+                name: "test-extension".into(),
+                role: "extension".into(),
+                version: None,
+            },
+            handlers: Vec::new(),
+            provided_capabilities: Vec::new(),
+            metadata,
+        }
+    }
+
+    #[test]
+    fn initialize_only_publishes_valid_normalized_registration_and_grants() {
+        let invalid_metadata = [
+            json!({
+                "extension_id": "invalid-tool",
+                "protocol": {"s5r": S5R_PROTOCOL_VERSION},
+                "capabilities": [
+                    capability_to_wire(ExtensionCapability::SessionControl)
+                ],
+                "tools": [{
+                    "name": "tool",
+                    "description": "",
+                    "parameters": {"type": "object"},
+                    "mode": "concurrent-ish"
+                }]
+            }),
+            json!({
+                "extension_id": "invalid-hook",
+                "protocol": {"s5r": S5R_PROTOCOL_VERSION},
+                "capabilities": [
+                    capability_to_wire(ExtensionCapability::SessionControl)
+                ],
+                "hooks": [{"on": "continue_after_stop", "mode": "non_blocking"}]
+            }),
+            json!({
+                "extension_id": "invalid-hook-mode",
+                "protocol": {"s5r": S5R_PROTOCOL_VERSION},
+                "hooks": [{"on": "turn_end", "mode": "sometimes"}]
+            }),
+            json!({
+                "extension_id": "unknown-hook",
+                "protocol": {"s5r": S5R_PROTOCOL_VERSION},
+                "hooks": [{"on": "typo_hook", "mode": "blocking"}]
+            }),
+            json!({
+                "extension_id": "unsupported-hook",
+                "protocol": {"s5r": S5R_PROTOCOL_VERSION},
+                "hooks": [{"on": "user_message_envelope", "mode": "blocking"}]
+            }),
+            json!({
+                "extension_id": "invalid-route",
+                "protocol": {"s5r": S5R_PROTOCOL_VERSION},
+                "capabilities": [
+                    capability_to_wire(ExtensionCapability::SessionControl)
+                ],
+                "http_routes": [{
+                    "route": {"method": "GET", "path": "../escape"},
+                    "handler_id": "route-handler"
+                }]
+            }),
+        ];
+
+        for metadata in invalid_metadata {
+            let registration = Arc::new(RwLock::new(None));
+            let error = handle_initialize(initialize_message(metadata), &registration).unwrap_err();
+
+            assert_eq!(error.code, "invalid_manifest");
+            assert!(registration.read().is_none());
+        }
+
+        let registration = Arc::new(RwLock::new(None));
+        let output = handle_initialize(
+            initialize_message(json!({
+                "extension_id": "valid-extension",
+                "protocol": {"s5r": S5R_PROTOCOL_VERSION},
+                "capabilities": [
+                    capability_to_wire(ExtensionCapability::SessionControl)
+                ],
+                "tools": [{
+                    "name": "tool",
+                    "description": "",
+                    "parameters": {"type": "object"}
+                }],
+                "hooks": [{"on": "turn_end", "mode": "non_blocking"}],
+                "http_routes": [{
+                    "route": {"method": "GET", "path": "/status"},
+                    "handler_id": "status"
+                }],
+                "future_manifest_field": true
+            })),
+            &registration,
+        )
+        .expect("valid metadata should initialize");
+
+        assert!(
+            output
+                .capabilities
+                .iter()
+                .any(|capability| capability.name == "astrcode.session.control.create")
+        );
+        let stored = registration.read();
+        let stored = stored.as_ref().expect("registration should be published");
+        assert_eq!(stored.extension_id(), "valid-extension");
+        assert_eq!(
+            stored.tools()[0].execution_mode,
+            astrcode_extension_sdk::tool::ExecutionMode::Sequential
+        );
+    }
 }

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::error_response;
 
-pub const ASTRCODE_HTTP_TOKEN_ENV: &str = "ASTRCODE_HTTP_TOKEN";
+pub(super) const ASTRCODE_HTTP_TOKEN_ENV: &str = "ASTRCODE_HTTP_TOKEN";
 
 pub(super) async fn auth_middleware(
     State(expected_bearer): State<String>,

@@ -2,6 +2,12 @@
 
 > 与 `astrcode-extension-sdk` 中 `s5r::messages` 及 `runtime::Peer` 对齐。
 
+## 命名由来
+
+**s5r** 是 **S.O.U.L.T.E.R Protocol** 的紧凑写法：保留首尾字母 `S`、`R`，
+并以 `5` 代表中间的五个字母 `OULTE`。这个名字致敬传奇 AstrBot 作者
+**Soulter**。
+
 ## 传输
 
 - **传输层**：子进程 **stdio**，长度前缀帧：`{payload_len}\n` + UTF-8 JSON body
@@ -39,8 +45,8 @@
 `continue_after_stop` 是 typed decision hook，必须为 `blocking`，可通过
 `options.max_per_turn` 声明每 turn 自动续跑上限；缺省与 `-1` 都表示不限制，非负数表示限制次数。
 
-`user_message_envelope` 与 `after_tool_results` 目前只支持进程内 Rust 扩展的
-`Registrar` typed API，不支持 s5r manifest 声明。
+`user_message_envelope` 目前只支持进程内 Rust 扩展的 `Registrar` typed API，
+不支持 s5r manifest 声明。
 
 ## extension.json（发现阶段）
 

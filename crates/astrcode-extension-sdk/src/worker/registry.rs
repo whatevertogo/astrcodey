@@ -6,15 +6,15 @@ use serde_json::Value;
 
 use crate::{
     extension::{
-        ContinueAfterStopOptions, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        extension_http_route_patterns_conflict,
+        ContinueAfterStopOptions, ExtensionEventDecl, ExtensionHttpRequest, ExtensionHttpResponse,
+        ExtensionHttpRoute, extension_http_route_patterns_conflict,
     },
     runtime::CancelToken,
-    s5r::{CAP_HANDLER_INVOKE, ErrorPayload, HandlerResult, InvokeMsg},
-    worker::manifest::{
-        CommandManifestEntry, HookManifestEntry, HookManifestOptions, HttpRouteManifestEntry,
-        ManifestCatalog,
+    s5r::{
+        CAP_HANDLER_INVOKE, ErrorPayload, HandlerResult, InvokeMsg,
+        manifest::{ManifestCommand, ManifestHook, ManifestHookOptions, ManifestHttpRoute},
     },
+    worker::manifest::ManifestCatalog,
 };
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -81,8 +81,12 @@ impl HandlerRegistry {
         self.catalog.capabilities.push(cap.into());
     }
 
-    pub(crate) fn declare_extension_event(&mut self, event: Value) {
+    pub(crate) fn declare_extension_event(&mut self, event: ExtensionEventDecl) {
         self.catalog.extension_events.push(event);
+    }
+
+    pub(crate) fn declare_legacy_extension_event(&mut self, event: Value) {
+        self.catalog.push_legacy_extension_event(event);
     }
 
     pub(crate) fn register_tool(
@@ -109,18 +113,23 @@ impl HandlerRegistry {
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
         let on = on.into();
-        if self.hooks.contains_key(&on) {
-            return Err(ErrorPayload::new(
-                "duplicate_registration",
-                format!("duplicate hook registration: {on}"),
-            ));
-        }
-        self.catalog.hooks.push(HookManifestEntry {
-            on: on.clone(),
+        self.insert_hook_handler(on.clone(), handler)?;
+        self.catalog.hooks.push(ManifestHook {
+            on,
             mode: mode.into(),
-            options: HookManifestOptions::default(),
+            options: ManifestHookOptions::default(),
         });
-        self.hooks.insert(on, handler);
+        Ok(())
+    }
+
+    pub(crate) fn register_continuation_hook_handler(
+        &mut self,
+        on: impl Into<String>,
+        handler: HookHandlerFn,
+    ) -> Result<(), ErrorPayload> {
+        let on = on.into();
+        self.insert_hook_handler(on.clone(), handler)?;
+        self.catalog.continuation_hooks.push(on);
         Ok(())
     }
 
@@ -130,19 +139,28 @@ impl HandlerRegistry {
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
         let on = "continue_after_stop".to_string();
+        self.insert_hook_handler(on.clone(), handler)?;
+        self.catalog.hooks.push(ManifestHook {
+            on,
+            mode: "blocking".into(),
+            options: ManifestHookOptions {
+                max_per_turn: Some(options.max_per_turn),
+            },
+        });
+        Ok(())
+    }
+
+    fn insert_hook_handler(
+        &mut self,
+        on: String,
+        handler: HookHandlerFn,
+    ) -> Result<(), ErrorPayload> {
         if self.hooks.contains_key(&on) {
             return Err(ErrorPayload::new(
                 "duplicate_registration",
                 format!("duplicate hook registration: {on}"),
             ));
         }
-        self.catalog.hooks.push(HookManifestEntry {
-            on: on.clone(),
-            mode: "blocking".into(),
-            options: HookManifestOptions {
-                max_per_turn: Some(options.max_per_turn),
-            },
-        });
         self.hooks.insert(on, handler);
         Ok(())
     }
@@ -160,7 +178,7 @@ impl HandlerRegistry {
                 format!("duplicate command registration: {name}"),
             ));
         }
-        self.catalog.commands.push(CommandManifestEntry {
+        self.catalog.commands.push(ManifestCommand {
             name: name.clone(),
             description: description.into(),
         });
@@ -189,7 +207,7 @@ impl HandlerRegistry {
         let handler_id = self.handler_id_for("http", &handler_name);
         self.catalog
             .http_routes
-            .push(HttpRouteManifestEntry { route, handler_id });
+            .push(ManifestHttpRoute { route, handler_id });
         self.http_routes.insert(handler_name, handler);
         Ok(())
     }
@@ -287,24 +305,56 @@ impl HandlerRegistry {
         }?;
         Ok(result)
     }
-
-    pub fn push_continuation_stack(
-        &self,
-        continuations: &[crate::s5r::CallContinuation],
-        stack: &mut Vec<(String, Value, u32)>,
-        depth: u32,
-    ) {
-        for cont in continuations.iter().rev() {
-            let (hid, ev) = cont.handler_id_for_extension(&self.extension_id);
-            stack.push((hid, ev, depth + 1));
-        }
-    }
 }
 
-pub fn registration_metadata(
+pub(crate) fn registration_metadata(
     extension_id: &str,
     version: &str,
     catalog: &ManifestCatalog,
-) -> Value {
+) -> Result<Value, String> {
     catalog.to_metadata_value(extension_id, version)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn continuation_hook_handler_dispatches_without_manifest_subscription() {
+        let mut registry = HandlerRegistry::new("test-extension");
+        registry
+            .register_continuation_hook_handler(
+                "pipeline_step",
+                crate::worker::hook_handler(|_| async {
+                    Ok(HandlerResult::effect("ok", json!({"step": 1})))
+                }),
+            )
+            .unwrap();
+
+        let metadata =
+            registration_metadata("test-extension", "0.1.0", registry.catalog()).unwrap();
+        assert_eq!(metadata["hooks"], json!([]));
+
+        let result = registry
+            .dispatch_invoke(
+                InvokeMsg {
+                    id: "invoke-1".into(),
+                    capability: CAP_HANDLER_INVOKE.into(),
+                    input: json!({
+                        "handler_id": "test-extension:hook:pipeline_step",
+                        "event": {}
+                    }),
+                    stream: false,
+                    caller_extension_id: None,
+                },
+                CancelToken::default(),
+            )
+            .await
+            .unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.data_value("step"), Some(&json!(1)));
+    }
 }

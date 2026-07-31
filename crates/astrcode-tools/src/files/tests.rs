@@ -4,9 +4,10 @@ use std::{
 };
 
 use astrcode_core::{
-    read_tool_image::ReadToolInlinePayload,
-    storage::{StorageError, ToolResultArtifactReader, ToolResultArtifactSlice},
-    tool::*,
+    tool::{
+        ToolResultArtifactError, ToolResultArtifactReader, ToolResultArtifactSlice,
+        read_image::ReadToolInlinePayload, *,
+    },
     types::SessionId,
 };
 
@@ -24,7 +25,7 @@ fn empty_ctx() -> ToolExecutionContext {
 
 fn ctx_with_call_id(call_id: &str) -> ToolExecutionContext {
     let mut ctx = empty_ctx();
-    ctx.tool_call_id = Some(call_id.into());
+    ctx.scope.tool_call_id = Some(call_id.into());
     ctx
 }
 
@@ -40,7 +41,7 @@ impl ToolResultArtifactReader for FixedToolResultReader {
         path: &str,
         char_offset: usize,
         max_chars: usize,
-    ) -> Result<ToolResultArtifactSlice, StorageError> {
+    ) -> Result<ToolResultArtifactSlice, ToolResultArtifactError> {
         assert_eq!(session_id.as_str(), "session-1");
         assert_eq!(path, self.path);
         assert_eq!(char_offset, 2);
@@ -181,7 +182,6 @@ async fn read_file_reports_text_pagination_metadata() {
         .await
         .expect("read should execute");
 
-    assert_eq!(result.call_id, "read-page");
     assert!(!result.is_error, "{result:?}");
     assert_eq!(result.metadata["totalLines"], serde_json::json!(3));
     assert_eq!(result.metadata["shownLines"], serde_json::json!(1));
@@ -205,8 +205,8 @@ async fn read_file_reads_persisted_tool_result_path() {
         working_dir: PathBuf::from("."),
     };
     let mut ctx = empty_ctx();
-    ctx.session_id = "session-1".into();
-    ctx.tool_call_id = Some("read-result".into());
+    ctx.scope.session_id = "session-1".into();
+    ctx.scope.tool_call_id = Some("read-result".into());
     ctx.capabilities.host.result_reader = Some(Arc::new(FixedToolResultReader {
         path: artifact_path.clone(),
     }));
@@ -223,7 +223,6 @@ async fn read_file_reads_persisted_tool_result_path() {
         .await
         .expect("read should read persisted result");
 
-    assert_eq!(result.call_id, "read-result");
     assert!(result.content.starts_with("cde"));
     assert!(result.content.contains("charOffset=5"));
     assert_eq!(result.metadata["path"], serde_json::json!(artifact_path));

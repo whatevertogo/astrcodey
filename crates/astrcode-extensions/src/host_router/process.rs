@@ -3,7 +3,6 @@
 use std::{future::Future, process::Stdio, sync::Arc, time::Duration};
 
 use astrcode_extension_sdk::s5r::ErrorPayload;
-use astrcode_support::hostpaths::resolve_under_workspace_root;
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -12,7 +11,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{block_on_async, capability::ProcessCapability};
+use super::{block_on_async, capability::ProcessCapability, path::canonicalize_workspace_path};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_TIMEOUT: Duration = Duration::from_secs(120);
@@ -328,8 +327,7 @@ fn resolve_cwd(
 ) -> Result<std::path::PathBuf, ErrorPayload> {
     let root = working_dir
         .ok_or_else(|| ErrorPayload::new("backend_unavailable", "working_dir not set"))?;
-    let path = resolve_under_workspace_root(root, relative_cwd.unwrap_or("."))
-        .map_err(|error| ErrorPayload::new(error.code, error.message))?;
+    let path = canonicalize_workspace_path(root, relative_cwd.unwrap_or("."))?;
     if !path.is_dir() {
         return Err(ErrorPayload::new(
             "invalid_input",

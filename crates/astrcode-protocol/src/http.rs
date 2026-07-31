@@ -3,19 +3,28 @@
 //! 这些类型只描述外部协议形状；server 负责把 storage read model 映射到这里，
 //! storage 不依赖也不返回这些 DTO。
 
-use astrcode_core::{
-    extension::{ExtensionEventDecl, Keybinding, SessionToolSelection, SlashCommand, StatusItem},
-    message_attachment::MessageAttachment,
-};
+use astrcode_core::{message_attachment::MessageAttachment, tool::SessionToolSelection};
 use serde::{Deserialize, Serialize};
 
-pub use crate::agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto};
 use crate::wire::{
     ApprovalDecisionDto, ApprovalModeDto, CommandSourceDto, ExecutionModeDto,
     ExtensionCapabilityDto, ExtensionHttpMethodDto, ExtensionSourceDto, ExtensionStageStatusDto,
-    PhaseDto, ProviderAuthSchemeDto, ProviderWireFormatDto, ThinkingCapabilityDto,
-    ThinkingLevelDto, ToolOriginDto, ToolOutputStreamDto,
+    PhaseDto, ProviderAuthSchemeDto, ProviderWireFormatDto, ThinkingCapabilityDto, ToolOriginDto,
+    ToolOutputStreamDto, impl_wire_values,
 };
+pub use crate::{
+    agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto},
+    events::KeybindingDto,
+};
+
+/// 本机运行中 server 的发现文件（`run.json`）。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RunInfoDto {
+    pub port: u16,
+    pub auth_token: String,
+}
 
 /// 新建会话请求。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -97,16 +106,6 @@ impl From<MessageAttachment> for PromptAttachmentDto {
     }
 }
 
-impl From<&MessageAttachment> for PromptAttachmentDto {
-    fn from(attachment: &MessageAttachment) -> Self {
-        Self {
-            filename: attachment.filename.clone(),
-            content: attachment.content.clone(),
-            media_type: attachment.media_type.clone(),
-        }
-    }
-}
-
 impl From<PromptAttachmentDto> for MessageAttachment {
     fn from(attachment: PromptAttachmentDto) -> Self {
         Self {
@@ -136,21 +135,15 @@ pub struct ToolApprovalRequest {
     pub decision: ApprovalDecisionDto,
 }
 
-/// Tool Approval UI 提交（如 askUser 问卷答案）。
+/// 当前挂起的核心工具审批。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ToolUiRespondRequest {
-    pub tool_name: String,
-    pub answers: std::collections::BTreeMap<String, String>,
-}
-
-/// Tool Approval UI 提交响应。
-#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ToolUiRespondResponse {
-    pub accepted: bool,
+pub struct ToolApprovalDto {
+    pub call_id: String,
+    pub prompt: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_key: Option<String>,
 }
 
 /// prompt 提交结果。
@@ -185,9 +178,8 @@ pub struct CompactSessionRequest {
 pub struct CompactSessionResponse {
     pub accepted: bool,
     pub deferred: bool,
-    /// compact continuation 创建的子会话 ID。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub new_session_id: Option<String>,
+    pub session_id: Option<String>,
     pub message: String,
 }
 
@@ -261,42 +253,12 @@ pub struct CommandCompletionItemDto {
 #[serde(rename_all = "camelCase")]
 pub struct SlashCommandListResponseDto {
     pub commands: Vec<SlashCommandInfoDto>,
-    /// 被更高优先级命令遮蔽的同名命令诊断。
-    #[serde(default)]
-    pub shadowed_commands: Vec<ShadowedSlashCommandDto>,
     /// 插件注册的快捷键绑定。
     #[serde(default)]
     pub keybindings: Vec<KeybindingDto>,
     /// 插件注册的状态栏项（含初始值）。
     #[serde(default)]
     pub status_items: Vec<StatusItemDto>,
-}
-
-/// 快捷键绑定 DTO。
-#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KeybindingDto {
-    /// 快捷键描述（如 "shift+tab"）。
-    pub key: String,
-    /// 触发的命令名（不含 `/`）。
-    pub command: String,
-    /// 命令参数。
-    #[serde(default)]
-    pub arguments: String,
-    /// 人类可读描述。
-    pub description: String,
-}
-
-impl From<Keybinding> for KeybindingDto {
-    fn from(binding: Keybinding) -> Self {
-        Self {
-            key: binding.key,
-            command: binding.command,
-            arguments: binding.arguments,
-            description: binding.description,
-        }
-    }
 }
 
 /// 状态栏项 DTO。
@@ -315,17 +277,6 @@ pub struct StatusItemDto {
     pub tooltip: Option<String>,
 }
 
-impl From<StatusItem> for StatusItemDto {
-    fn from(item: StatusItem) -> Self {
-        Self {
-            id: item.id,
-            text: item.text,
-            priority: item.priority,
-            tooltip: item.tooltip,
-        }
-    }
-}
-
 /// 可执行斜杠命令信息。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -341,8 +292,8 @@ pub struct SlashCommandInfoDto {
     pub source: CommandSourceDto,
 }
 
-impl From<crate::events::ExtensionCommandInfo> for SlashCommandInfoDto {
-    fn from(cmd: crate::events::ExtensionCommandInfo) -> Self {
+impl From<crate::events::ExtensionCommandInfoDto> for SlashCommandInfoDto {
+    fn from(cmd: crate::events::ExtensionCommandInfoDto) -> Self {
         Self {
             name: cmd.name,
             description: cmd.description,
@@ -387,19 +338,13 @@ pub struct ForkSessionRequest {
 pub struct SessionListItemDto {
     pub session_id: String,
     pub working_dir: String,
-    pub display_name: String,
     pub title: String,
     pub created_at: String,
     pub updated_at: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parent_session_id: Option<String>,
     pub phase: PhaseDto,
     /// 首条用户消息内容，无消息时为 None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub first_user_message: Option<String>,
-    /// 创建该子 session 的扩展 ID。
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub source_extension: Option<String>,
 }
 
 /// 会话列表响应。
@@ -479,10 +424,13 @@ pub enum ConversationBlockDto {
         arguments: String,
         /// 工具执行结果（展开后显示）。
         text: String,
-        status: ConversationBlockStatusDto,
+        status: ToolCallStatusDto,
         /// 工具元数据（如 planContent、path 等），不进入 LLM 上下文。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         metadata: Option<serde_json::Value>,
+        /// 当前挂起的核心工具审批。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        approval: Option<ToolApprovalDto>,
         /// 原始 JSON 参数，供前端结构化解析（如 agent 工具的 task/agent 提取）。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         arguments_json: Option<serde_json::Value>,
@@ -508,7 +456,7 @@ pub enum ConversationBlockDto {
 
 /// conversation 块状态。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ConversationBlockStatusDto {
     Streaming,
@@ -516,8 +464,33 @@ pub enum ConversationBlockStatusDto {
     Error,
 }
 
-impl ConversationBlockStatusDto {
-    pub const ALL: &'static [Self] = &[Self::Streaming, Self::Complete, Self::Error];
+impl_wire_values!(ConversationBlockStatusDto {
+    Streaming,
+    Complete,
+    Error,
+});
+
+/// 工具调用状态。`Error` 表示工具正常返回了语义错误，
+/// `Failed` 表示执行基础设施失败，`Cancelled` 表示调用被取消。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ToolCallStatusDto {
+    Streaming,
+    Complete,
+    Error,
+    Failed,
+    Cancelled,
+}
+
+impl ToolCallStatusDto {
+    pub const ALL: &'static [Self] = &[
+        Self::Streaming,
+        Self::Complete,
+        Self::Error,
+        Self::Failed,
+        Self::Cancelled,
+    ];
 }
 
 /// SSE 信封。
@@ -555,11 +528,6 @@ pub enum ConversationDeltaDto {
     },
     /// 服务端检测到 receiver lag，客户端应重新拉全量 snapshot。
     RehydrateRequired,
-    SessionContinued {
-        parent_session_id: String,
-        new_session_id: String,
-        parent_cursor: ConversationCursorDto,
-    },
     /// 更新 toolCall block 的 arguments 字段（用于折叠摘要行显示参数）。
     PatchArguments {
         block_id: String,
@@ -592,17 +560,19 @@ pub enum ConversationDeltaDto {
     },
     /// 扩展注册表发生变化，客户端应重新拉取命令/快捷键/状态栏快照。
     ExtensionRegistryChanged,
-    /// 合并 toolCall block 的 metadata（如 Tool Gate 审批挂起）。
-    PatchToolMetadata {
-        block_id: String,
-        metadata: serde_json::Value,
+    ToolApprovalRequested {
+        approval: ToolApprovalDto,
     },
-    /// 工具执行中进入交互等待态：同步更新 text 与 metadata（live-only）。
-    PatchToolCall {
-        block_id: String,
-        text: String,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        metadata: Option<serde_json::Value>,
+    ToolApprovalResolved {
+        call_id: String,
+        decision: ApprovalDecisionDto,
+    },
+    /// 扩展发出的实时事件。客户端按 extension/event type 解释 payload。
+    ExtensionEvent {
+        extension_id: String,
+        event_type: String,
+        schema_version: u32,
+        payload: serde_json::Value,
     },
 }
 
@@ -638,8 +608,6 @@ pub struct ConfigViewResponseDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_small_model: Option<String>,
     #[serde(default)]
-    pub extension_states: std::collections::BTreeMap<String, bool>,
-    #[serde(default)]
     pub approval_mode: ApprovalModeDto,
     pub profiles: Vec<ProfileDto>,
     pub warning: Option<String>,
@@ -674,19 +642,6 @@ pub struct ExtensionSlashCommandDto {
     pub priority: i32,
 }
 
-impl From<SlashCommand> for ExtensionSlashCommandDto {
-    fn from(command: SlashCommand) -> Self {
-        Self {
-            name: command.name,
-            description: command.description,
-            args_schema: command.args_schema,
-            requires_idle: command.requires_idle,
-            argument_completions: command.argument_completions,
-            priority: command.priority,
-        }
-    }
-}
-
 /// 扩展可发射事件的声明。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -698,17 +653,10 @@ pub struct ExtensionEventDeclDto {
     pub max_payload_bytes: usize,
 }
 
-impl From<ExtensionEventDecl> for ExtensionEventDeclDto {
-    fn from(event: ExtensionEventDecl) -> Self {
-        Self {
-            event_type: event.event_type,
-            schema_version: event.schema_version,
-            durable: event.durable,
-            max_payload_bytes: event.max_payload_bytes,
-        }
-    }
-}
-
+/// 扩展声明的完整描述。
+///
+/// 定位为开放 API 的自描述契约：除前端外，第三方调用方也可据此
+/// 了解扩展提供的全部能力，因此各声明字段即使前端未消费也保留。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -728,6 +676,10 @@ pub struct ExtensionDeclarationDto {
     pub http_routes: Vec<ExtensionHttpRouteDto>,
 }
 
+/// 扩展注册的工具定义。
+///
+/// 字段保留既有 snake_case 嵌套 wire 形状（冻结形状），
+/// 嵌套在 camelCase 的 [`ExtensionDeclarationDto`] 中是有意偏离。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinitionDto {
@@ -760,6 +712,7 @@ impl From<astrcode_core::tool::ToolDefinition> for ToolDefinitionDto {
 pub struct ExtensionHttpRouteDto {
     pub method: ExtensionHttpMethodDto,
     pub path: String,
+    pub authenticated: bool,
     pub description: String,
     pub max_body_bytes: usize,
 }
@@ -953,7 +906,7 @@ pub struct RemoveProviderPresetResponseDto {
     pub warning: Option<String>,
 }
 
-/// 标准化 thinking 配置 DTO（映射 core::thinking::ThinkingConfig）。
+/// 标准化 thinking 配置 DTO（映射 core::llm::thinking::ThinkingConfig）。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -966,8 +919,8 @@ pub struct ThinkingConfigDto {
     pub budget_tokens: Option<u32>,
 }
 
-impl From<astrcode_core::thinking::ThinkingConfig> for ThinkingConfigDto {
-    fn from(value: astrcode_core::thinking::ThinkingConfig) -> Self {
+impl From<astrcode_core::llm::thinking::ThinkingConfig> for ThinkingConfigDto {
+    fn from(value: astrcode_core::llm::thinking::ThinkingConfig) -> Self {
         Self {
             enabled: value.enabled,
             effort: value.effort,
@@ -976,7 +929,7 @@ impl From<astrcode_core::thinking::ThinkingConfig> for ThinkingConfigDto {
     }
 }
 
-impl From<ThinkingConfigDto> for astrcode_core::thinking::ThinkingConfig {
+impl From<ThinkingConfigDto> for astrcode_core::llm::thinking::ThinkingConfig {
     fn from(value: ThinkingConfigDto) -> Self {
         Self {
             enabled: value.enabled,
@@ -991,9 +944,7 @@ impl From<ThinkingConfigDto> for astrcode_core::thinking::ThinkingConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelOptionsDto {
-    pub reasoning: Option<bool>,
-    pub thinking_level: Option<ThinkingLevelDto>,
-    /// 标准化 thinking 配置（新字段）。
+    /// 标准化 thinking 配置。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking: Option<ThinkingConfigDto>,
 }
@@ -1004,8 +955,6 @@ pub struct ModelOptionsDto {
 #[serde(rename_all = "camelCase")]
 pub struct ModelDto {
     pub id: String,
-    pub max_tokens: Option<u32>,
-    pub context_limit: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_options: Option<ModelOptionsDto>,
     /// 当前模型的标准化 thinking 配置（归一化后）。
@@ -1117,6 +1066,14 @@ pub struct ModelTestResponseDto {
 mod tests {
     use super::*;
 
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ConversationReducerFixture {
+        initial_blocks: Vec<ConversationBlockDto>,
+        envelopes: Vec<ConversationStreamEnvelopeDto>,
+        expected: serde_json::Value,
+    }
+
     #[test]
     fn conversation_stream_fixture_matches_wire_contract() {
         let fixture = include_str!("../fixtures/conversation-stream.json");
@@ -1171,6 +1128,35 @@ mod tests {
         assert!(encoded.contains("\"textDelta\""));
         assert!(!encoded.contains("block_id"));
         assert!(!encoded.contains("text_delta"));
+    }
+
+    #[test]
+    fn conversation_reducer_fixture_matches_wire_contract() {
+        let fixture = include_str!("../fixtures/conversation-reducer.json");
+        let fixture: ConversationReducerFixture =
+            serde_json::from_str(fixture).expect("reducer fixture should deserialize");
+
+        assert_eq!(fixture.initial_blocks.len(), 2);
+        assert_eq!(fixture.envelopes.len(), 12);
+        assert_eq!(
+            fixture
+                .envelopes
+                .last()
+                .map(|envelope| envelope.cursor.value.as_str()),
+            Some("13")
+        );
+        assert!(fixture.expected.get("blocks").is_some());
+
+        let encoded =
+            serde_json::to_value(&fixture.envelopes).expect("fixture envelopes should serialize");
+        assert_eq!(
+            encoded[0]["delta"]["kind"],
+            serde_json::Value::String("patchBlock".into())
+        );
+        assert_eq!(
+            encoded[8]["delta"]["block"]["argumentsJson"]["path"],
+            serde_json::Value::String("Cargo.toml".into())
+        );
     }
 
     #[test]

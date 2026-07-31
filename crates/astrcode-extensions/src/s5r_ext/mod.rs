@@ -5,32 +5,32 @@ mod session;
 
 use std::{path::Path, sync::Arc};
 
-use astrcode_core::extension::{
-    CommandContext, CommandHandler, CompactContext, CompactEvent, CompactHandler, CompactResult,
-    ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
-    ContinueAfterStopResult, Extension, ExtensionCapability, ExtensionCommandResult,
-    ExtensionError, ExtensionEvent, ExtensionEventDecl, ExtensionHttpHandler, ExtensionHttpRequest,
-    ExtensionHttpResponse, HookMode, HookResult, LifecycleContext, LifecycleHandler,
-    PostToolUseContext, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
-    PreToolUseHandler, PreToolUseResult, PromptBuildContext, PromptBuildHandler,
-    PromptContributions, ProviderContext, ProviderHandler, ProviderResult, Registrar, SlashCommand,
-    StopReason, ToolHandler,
-};
 use astrcode_extension_sdk::{
+    extension::{
+        CommandContext, CommandHandler, CompactContext, CompactEvent, CompactHandler,
+        CompactResult, ContinueAfterStopContext, ContinueAfterStopHandler,
+        ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCapability,
+        ExtensionCommandResult, ExtensionError, ExtensionEvent, ExtensionEventDecl,
+        ExtensionHttpHandler, ExtensionHttpRequest, ExtensionHttpResponse, HookMode, HookResult,
+        LifecycleContext, LifecycleHandler, PostToolUseContext, PostToolUseHandler,
+        PostToolUseResult, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
+        PromptBuildContext, PromptBuildHandler, PromptContributions, ProviderContext,
+        ProviderHandler, ProviderResult, Registrar, SlashCommand, StopReason, ToolHandler,
+    },
     s5r::event_to_name,
-    tool::{ToolDefinition, ToolResult},
+    tool::ToolDefinition,
 };
 pub use protocol::S5R_PROTOCOL_VERSION;
 use serde_json::{Value, json};
 
 use crate::{
-    extension_manifest::{ExtensionRegistration, manifest_types::ManifestHttpRoute},
+    extension_manifest::{ExtensionRegistration, RegisteredHttpRoute},
     host_router::{HostRouter, InvokeContext},
     remote_manifest::{
-        build_commands, build_subscriptions, build_tools, handler_id, parse_command_result,
-        parse_compact_result, parse_continue_after_stop_result, parse_http_response,
-        parse_lifecycle_result, parse_post_tool_use_result, parse_pre_tool_use_result,
-        parse_prompt_build_result, parse_provider_result, parse_tool_result, validate_registration,
+        handler_id, parse_command_result, parse_compact_result, parse_continue_after_stop_result,
+        parse_http_response, parse_lifecycle_result, parse_post_tool_use_result,
+        parse_pre_tool_use_result, parse_prompt_build_result, parse_provider_result,
+        parse_tool_result,
     },
     s5r_ext::session::S5rSession,
 };
@@ -43,7 +43,7 @@ pub struct S5rExtension {
     tools: Vec<ToolDefinition>,
     commands: Vec<SlashCommand>,
     subscriptions: Vec<(ExtensionEvent, HookMode, ContinueAfterStopOptions)>,
-    http_routes: Vec<ManifestHttpRoute>,
+    http_routes: Vec<RegisteredHttpRoute>,
 }
 
 impl S5rExtension {
@@ -60,35 +60,27 @@ impl S5rExtension {
         let reg = session
             .registration()
             .ok_or("s5r extension did not complete initialize handshake")?;
-        validate_registration(&reg)?;
         Ok(build_extension(session, reg))
     }
 }
 
 fn build_extension(session: Arc<S5rSession>, reg: ExtensionRegistration) -> Arc<S5rExtension> {
-    let tools = build_tools(&reg);
-    let commands = build_commands(&reg);
-    let subscriptions = build_subscriptions(&reg);
-    let ExtensionRegistration {
-        extension_id,
-        capabilities,
-        extension_events,
-        http_routes,
-        ..
-    } = reg;
     Arc::new(S5rExtension {
-        id: extension_id,
-        capabilities,
+        id: reg.extension_id().to_owned(),
+        capabilities: reg.capabilities().to_vec(),
         session,
-        event_decls: extension_events,
-        tools,
-        commands,
-        subscriptions,
-        http_routes,
+        event_decls: reg.extension_events().to_vec(),
+        tools: reg.tools().to_vec(),
+        commands: reg.commands().to_vec(),
+        subscriptions: reg.subscriptions().to_vec(),
+        http_routes: reg.http_routes().to_vec(),
     })
 }
 
-fn parse_command(manifest: &Value, ext_dir: &Path) -> Result<(String, Vec<String>), String> {
+pub(crate) fn parse_command(
+    manifest: &Value,
+    ext_dir: &Path,
+) -> Result<(String, Vec<String>), String> {
     let cmd = manifest
         .get("command")
         .ok_or("extension.json missing 'command' array for s5r extension")?;
@@ -228,7 +220,7 @@ impl Extension for S5rExtension {
                 ExtensionEvent::PromptBuild => {
                     reg.on_prompt_build(0, Arc::new(S5rPromptBuildHandler { session, ext_id }));
                 },
-                ExtensionEvent::UserMessageEnvelope | ExtensionEvent::AfterToolResults => {
+                ExtensionEvent::UserMessageEnvelope => {
                     tracing::warn!(
                         extension_id = %ext_id,
                         hook = event_to_name(event),
@@ -325,7 +317,7 @@ fn hook_invoke_ctx(
     session_id: Option<String>,
     working_dir: Option<String>,
     session_store_dir: Option<std::path::PathBuf>,
-    event_tx: Option<tokio::sync::mpsc::UnboundedSender<astrcode_core::event::EventPayload>>,
+    event_tx: Option<astrcode_core::event::EventSender>,
     session_ops: Option<Arc<dyn astrcode_core::tool::SessionOperations>>,
 ) -> InvokeContext {
     InvokeContext {
@@ -354,14 +346,14 @@ impl ToolHandler for S5rToolHandler {
         tool_name: &str,
         arguments: Value,
         working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let invoke_ctx = InvokeContext {
             extension_id: self.extension_id.clone(),
-            session_id: Some(ctx.session_id.to_string()),
+            session_id: Some(ctx.scope.session_id.to_string()),
             session_store_dir: ctx.capabilities.paths.store_dir.clone(),
             session_ops: ctx.capabilities.session.ops.clone(),
-            event_tx: ctx.event_tx.clone(),
+            event_tx: ctx.scope.event_tx.clone(),
             working_dir: Some(working_dir.to_string()),
             cancel_token: None,
             event_declarations: self.session.event_decls(),
@@ -375,8 +367,8 @@ impl ToolHandler for S5rToolHandler {
                 "tool_name": tool_name,
                 "arguments": arguments,
                 "working_dir": working_dir,
-                "session_id": ctx.session_id,
-                "tool_call_id": ctx.tool_call_id,
+                "session_id": ctx.scope.session_id,
+                "tool_call_id": ctx.scope.tool_call_id,
             }
         });
         let hid = handler_id(&self.extension_id, "tool", tool_name);
@@ -384,7 +376,7 @@ impl ToolHandler for S5rToolHandler {
             .session
             .invoke_handler_with_continuations(&hid, event, &invoke_ctx)
             .await?;
-        parse_tool_result(&resp)
+        parse_tool_result(&resp).map(Into::into)
     }
 }
 
@@ -452,6 +444,7 @@ impl PreToolUseHandler for S5rPreToolUseHandler {
             "session_id": ctx.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
+            "call_id": ctx.call_id,
             "tool_name": ctx.tool_name,
             "tool_input": ctx.tool_input,
             "available_tools": ctx.available_tools,
@@ -477,6 +470,7 @@ struct S5rPostToolUseHandler {
 #[async_trait::async_trait]
 impl PostToolUseHandler for S5rPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
+        let is_error = ctx.tool_result.is_error;
         let invoke_ctx = hook_invoke_ctx(
             &self.session,
             &self.ext_id,
@@ -490,10 +484,11 @@ impl PostToolUseHandler for S5rPostToolUseHandler {
             "session_id": ctx.session_id,
             "working_dir": ctx.working_dir,
             "model": ctx.model,
+            "call_id": ctx.call_id,
             "tool_name": ctx.tool_name,
             "tool_input": ctx.tool_input,
             "tool_result": ctx.tool_result,
-            "is_error": ctx.is_error,
+            "is_error": is_error,
         });
         let hid = handler_id(&self.ext_id, "hook", "post_tool_use");
         let resp = self

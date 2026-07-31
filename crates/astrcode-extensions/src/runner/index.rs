@@ -1,14 +1,11 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::*,
-    tool::{ToolDefinition, ToolPromptMetadata, ToolUiWire},
+    tool::{ToolDefinition, ToolPromptMetadata},
 };
 
-use super::{ExtensionRecord, ExtensionRunner};
+use super::{ExtensionRunner, HostedExtension};
 
 pub(super) type ExtensionHandler<H> = (String, HookMode, Arc<H>);
 pub(super) type ToolExtensionHandler<H> = (String, HookMode, ToolHookTarget, Arc<H>);
@@ -26,7 +23,7 @@ pub(super) struct HttpRouteEntry {
 
 /// 预排序的 handler 索引。
 ///
-/// 在每次 `register()` 后从所有 records 重建，确保分发时无需遍历+排序。
+/// 在每次 registration 发布后从所有运行时清单重建，确保分发时无需遍历+排序。
 /// 各列表按 priority 降序排列，provider/compact/lifecycle 按 event 分组。
 #[derive(Default)]
 #[allow(clippy::type_complexity)]
@@ -36,15 +33,12 @@ pub(super) struct HandlerIndex {
     pub(super) provider: HashMap<ProviderEvent, Vec<ExtensionHandler<dyn ProviderHandler>>>,
     pub(super) prompt_build: Vec<Arc<dyn PromptBuildHandler>>,
     pub(super) compact: HashMap<CompactEvent, Vec<Arc<dyn CompactHandler>>>,
-    pub(super) post_tool_use_failure: Vec<Arc<dyn PostToolUseFailureHandler>>,
     pub(super) continue_after_stop:
         Vec<ContinueAfterStopExtensionHandler<dyn ContinueAfterStopHandler>>,
     pub(super) user_message_envelope: Vec<SimpleExtensionHandler<dyn UserMessageEnvelopeHandler>>,
-    pub(super) after_tool_results: Vec<SimpleExtensionHandler<dyn AfterToolResultsHandler>>,
     pub(super) lifecycle: HashMap<ExtensionEvent, Vec<ExtensionHandler<dyn LifecycleHandler>>>,
     // 预计算的 collect 缓存
     pub(super) tool_metadata: HashMap<String, ToolPromptMetadata>,
-    pub(super) tool_ui: HashMap<String, ToolUiWire>,
     pub(super) static_tools: Vec<(
         ToolDefinition,
         Arc<dyn ToolHandler>,
@@ -61,7 +55,6 @@ pub(super) struct HandlerIndex {
     pub(super) keybindings: Vec<Keybinding>,
     pub(super) status_items: Vec<StatusItem>,
     pub(super) extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>>,
-    pub(super) extension_data_dir_extensions: HashSet<String>,
     pub(super) capabilities: HashMap<String, Vec<ExtensionCapability>>,
     pub(super) http_routes: Vec<HttpRouteEntry>,
 }
@@ -74,19 +67,16 @@ impl HandlerIndex {
     }
 }
 
-pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
+pub(super) fn build_handler_index(extensions: &[HostedExtension]) -> HandlerIndex {
     let mut pre_tool_use = Vec::new();
     let mut post_tool_use = Vec::new();
     let mut provider = Vec::new();
     let mut prompt_build = Vec::new();
     let mut compact = Vec::new();
-    let mut post_tool_use_failure = Vec::new();
     let mut continue_after_stop = Vec::new();
     let mut user_message_envelope = Vec::new();
-    let mut after_tool_results = Vec::new();
     let mut lifecycle = Vec::new();
     let mut tool_metadata = HashMap::new();
-    let mut tool_ui = HashMap::new();
     let mut static_tools = Vec::new();
     let mut tool_discoveries = Vec::new();
     let mut static_commands = Vec::new();
@@ -94,124 +84,109 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
     let mut keybindings = Vec::new();
     let mut status_items = Vec::new();
     let mut extension_event_decls = HashMap::new();
-    let mut extension_data_dir_extensions = HashSet::new();
     let mut capabilities = HashMap::new();
     let mut http_routes = Vec::new();
 
-    for record in records {
-        capabilities.insert(record.id.clone(), record.capabilities.clone());
-        for registration in record.reg.pre_tool_use() {
+    for hosted in extensions {
+        let manifest = &hosted.manifest;
+        let registrations = &manifest.registrations;
+        capabilities.insert(manifest.id.clone(), manifest.capabilities.clone());
+        for registration in registrations.pre_tool_use() {
             pre_tool_use.push((
                 registration.priority,
                 (
-                    record.id.clone(),
+                    manifest.id.clone(),
                     registration.mode,
                     registration.target.clone(),
                     Arc::clone(&registration.handler),
                 ),
             ));
         }
-        for registration in record.reg.post_tool_use() {
+        for registration in registrations.post_tool_use() {
             post_tool_use.push((
                 registration.priority,
                 (
-                    record.id.clone(),
+                    manifest.id.clone(),
                     registration.mode,
                     registration.target.clone(),
                     Arc::clone(&registration.handler),
                 ),
             ));
         }
-        for (event, mode, priority, handler) in record.reg.provider() {
+        for (event, mode, priority, handler) in registrations.provider() {
             provider.push((
                 *event,
                 *priority,
-                (record.id.clone(), *mode, Arc::clone(handler)),
+                (manifest.id.clone(), *mode, Arc::clone(handler)),
             ));
         }
-        for (priority, handler) in record.reg.prompt_build() {
+        for (priority, handler) in registrations.prompt_build() {
             prompt_build.push((*priority, Arc::clone(handler)));
         }
-        for (event, priority, handler) in record.reg.compact() {
+        for (event, priority, handler) in registrations.compact() {
             compact.push((*event, *priority, Arc::clone(handler)));
         }
-        for (priority, handler) in record.reg.post_tool_use_failure() {
-            post_tool_use_failure.push((*priority, Arc::clone(handler)));
-        }
-        for registration in record.reg.continue_after_stop() {
+        for registration in registrations.continue_after_stop() {
             continue_after_stop.push((
                 registration.priority,
                 (
-                    record.id.clone(),
+                    manifest.id.clone(),
                     registration.options,
                     Arc::clone(&registration.handler),
                 ),
             ));
         }
-        for registration in record.reg.user_message_envelope() {
+        for registration in registrations.user_message_envelope() {
             user_message_envelope.push((
                 registration.priority,
-                (record.id.clone(), Arc::clone(&registration.handler)),
+                (manifest.id.clone(), Arc::clone(&registration.handler)),
             ));
         }
-        for registration in record.reg.after_tool_results() {
-            after_tool_results.push((
-                registration.priority,
-                (record.id.clone(), Arc::clone(&registration.handler)),
-            ));
-        }
-        for (event, mode, priority, handler) in record.reg.lifecycle() {
+        for (event, mode, priority, handler) in registrations.lifecycle() {
             lifecycle.push((
                 event.clone(),
                 *priority,
-                (record.id.clone(), *mode, Arc::clone(handler)),
+                (manifest.id.clone(), *mode, Arc::clone(handler)),
             ));
         }
-        for (name, metadata) in record.reg.all_tool_metadata() {
+        for (name, metadata) in registrations.all_tool_metadata() {
             tool_metadata.insert(name.clone(), metadata.clone());
         }
-        for (name, ui) in record.reg.all_tool_ui() {
-            tool_ui.insert(name.clone(), ui.clone());
-        }
-        for (definition, handler) in record.reg.tools() {
+        for (definition, handler) in registrations.tools() {
             static_tools.push((
                 definition.clone(),
                 Arc::clone(handler),
-                record.id.clone(),
-                record.capabilities.clone(),
+                manifest.id.clone(),
+                manifest.capabilities.clone(),
             ));
         }
-        for discovery in record.reg.tool_discoveries() {
+        for discovery in registrations.tool_discoveries() {
             tool_discoveries.push((
-                record.id.clone(),
+                manifest.id.clone(),
                 Arc::clone(discovery),
-                record.capabilities.clone(),
+                manifest.capabilities.clone(),
             ));
         }
-        for (command, handler) in record.reg.commands() {
-            static_commands.push((record.id.clone(), command.clone(), Arc::clone(handler)));
+        for (command, handler) in registrations.commands() {
+            static_commands.push((manifest.id.clone(), command.clone(), Arc::clone(handler)));
         }
-        for discovery in record.reg.command_discoveries() {
-            command_discoveries.push((record.id.clone(), Arc::clone(discovery)));
+        for discovery in registrations.command_discoveries() {
+            command_discoveries.push((manifest.id.clone(), Arc::clone(discovery)));
         }
-        keybindings.extend_from_slice(record.reg.keybindings());
-        status_items.extend_from_slice(record.reg.status_items());
-        if !record.reg.extension_event_decls().is_empty() {
+        keybindings.extend_from_slice(registrations.keybindings());
+        status_items.extend_from_slice(registrations.status_items());
+        if !registrations.extension_event_decls().is_empty() {
             extension_event_decls.insert(
-                record.id.clone(),
-                record.reg.extension_event_decls().to_vec(),
+                manifest.id.clone(),
+                registrations.extension_event_decls().to_vec(),
             );
         }
-        if record.reg.needs_extension_data_dir() {
-            extension_data_dir_extensions.insert(record.id.clone());
-        }
         http_routes.extend(
-            record
-                .reg
+            registrations
                 .http_routes()
                 .iter()
                 .map(|registration| HttpRouteEntry {
-                    extension_id: record.id.clone(),
+                    extension_id: manifest.id.clone(),
                     route: registration.route.clone(),
                     handler: Arc::clone(&registration.handler),
                 }),
@@ -224,13 +199,10 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         provider: handlers_by_event(provider),
         prompt_build: handlers_by_priority(prompt_build),
         compact: handlers_by_event(compact),
-        post_tool_use_failure: handlers_by_priority(post_tool_use_failure),
         continue_after_stop: handlers_by_priority(continue_after_stop),
         user_message_envelope: handlers_by_priority(user_message_envelope),
-        after_tool_results: handlers_by_priority(after_tool_results),
         lifecycle: handlers_by_event(lifecycle),
         tool_metadata,
-        tool_ui,
         static_tools,
         tool_discoveries,
         static_commands,
@@ -238,68 +210,8 @@ pub(super) fn build_handler_index(records: &[ExtensionRecord]) -> HandlerIndex {
         keybindings,
         status_items,
         extension_event_decls,
-        extension_data_dir_extensions,
         capabilities,
         http_routes,
-    }
-}
-
-pub(super) fn validate_http_route_registrations(
-    extension_id: &str,
-    capabilities: &[ExtensionCapability],
-    routes: &[ExtensionHttpRouteRegistration],
-    existing_records: &[ExtensionRecord],
-) -> Result<(), String> {
-    for (index, registration) in routes.iter().enumerate() {
-        let route = &registration.route;
-        route.validate()?;
-        if !capabilities.contains(&ExtensionCapability::PublicHttp) {
-            return Err(format!(
-                "extension {extension_id} route {} {} requires capability {}",
-                http_method_name(route.method),
-                route.path,
-                astrcode_extension_sdk::s5r::capability_to_wire(ExtensionCapability::PublicHttp),
-            ));
-        }
-        if route.path == "/api" || route.path.starts_with("/api/") {
-            return Err(format!(
-                "extension {extension_id} public route {} uses reserved /api namespace",
-                route.path
-            ));
-        }
-        if routes[..index].iter().any(|existing| {
-            existing.route.method == route.method
-                && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
-        }) {
-            return Err(format!(
-                "extension {extension_id} has conflicting {} routes for {}",
-                http_method_name(route.method),
-                route.path
-            ));
-        }
-        if existing_records.iter().any(|record| {
-            record.reg.http_routes().iter().any(|existing| {
-                existing.route.method == route.method
-                    && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
-            })
-        }) {
-            return Err(format!(
-                "extension {extension_id} public route conflicts with an existing {} route: {}",
-                http_method_name(route.method),
-                route.path
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn http_method_name(method: ExtensionHttpMethod) -> &'static str {
-    match method {
-        ExtensionHttpMethod::Get => "GET",
-        ExtensionHttpMethod::Post => "POST",
-        ExtensionHttpMethod::Put => "PUT",
-        ExtensionHttpMethod::Patch => "PATCH",
-        ExtensionHttpMethod::Delete => "DELETE",
     }
 }
 
@@ -323,9 +235,9 @@ where
 /// 在 debug 级日志里输出每个事件的 handler 调度顺序（按优先级降序，extension_id 标注）。
 ///
 /// 排查「我的 hook 没生效 / 顺序不对」时打开 `RUST_LOG=astrcode_extensions=debug`
-/// 即可看到每次 register 后的最终调度表。同优先级的 hook 顺序由 records 的注册
+/// 即可看到每次 register 后的最终调度表。同优先级的 hook 顺序由扩展的注册
 /// 顺序决定（即 loader 加载顺序），日志按这个顺序原样输出。
-pub(super) fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
+pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
     if !tracing::enabled!(tracing::Level::DEBUG) {
         return;
     }
@@ -337,9 +249,11 @@ pub(super) fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
     let mut compact: Vec<(&str, CompactEvent, i32)> = Vec::new();
     let mut lifecycle: Vec<(&str, ExtensionEvent, i32, HookMode)> = Vec::new();
 
-    for record in records {
-        let id = record.id.as_str();
-        for registration in record.reg.pre_tool_use() {
+    for hosted in extensions {
+        let manifest = &hosted.manifest;
+        let registrations = &manifest.registrations;
+        let id = manifest.id.as_str();
+        for registration in registrations.pre_tool_use() {
             pre.push((
                 id,
                 registration.priority,
@@ -347,7 +261,7 @@ pub(super) fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
                 registration.target.clone(),
             ));
         }
-        for registration in record.reg.post_tool_use() {
+        for registration in registrations.post_tool_use() {
             post.push((
                 id,
                 registration.priority,
@@ -355,16 +269,16 @@ pub(super) fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
                 registration.target.clone(),
             ));
         }
-        for (event, mode, priority, _) in record.reg.provider() {
+        for (event, mode, priority, _) in registrations.provider() {
             provider.push((id, *event, *priority, *mode));
         }
-        for (priority, _) in record.reg.prompt_build() {
+        for (priority, _) in registrations.prompt_build() {
             prompt.push((id, *priority));
         }
-        for (event, priority, _) in record.reg.compact() {
+        for (event, priority, _) in registrations.compact() {
             compact.push((id, *event, *priority));
         }
-        for (event, mode, priority, _) in record.reg.lifecycle() {
+        for (event, mode, priority, _) in registrations.lifecycle() {
             lifecycle.push((id, event.clone(), *priority, *mode));
         }
     }
@@ -398,7 +312,7 @@ pub(super) fn log_handler_dispatch_order(records: &[ExtensionRecord]) {
 
 impl ExtensionRunner {
     pub(super) fn load_index(&self) -> Arc<HandlerIndex> {
-        Arc::clone(&self.index.read())
+        self.registry.index.load_full()
     }
 }
 

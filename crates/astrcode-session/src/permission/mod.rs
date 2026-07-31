@@ -7,6 +7,7 @@ mod fallback_allow;
 mod git_cwd_write_approve;
 mod git_path_ask;
 mod paths;
+mod runtime;
 mod sensitive_file_ask;
 mod session_approval_history;
 mod session_tool_selection;
@@ -15,14 +16,14 @@ mod yolo_mode_approve;
 
 use std::{path::Path, sync::Arc};
 
-use astrcode_core::{
-    config::EffectiveConfig,
-    permission::{PermissionChain, PermissionPolicy},
+use astrcode_core::config::EffectiveConfig;
+pub(crate) use runtime::{
+    PermissionChain, PermissionContext, PermissionDecision, PermissionPolicy,
 };
-pub use session_approval_history::ApprovalHistoryStore;
+pub(crate) use session_approval_history::ApprovalHistoryStore;
 
 /// 根据有效配置与会话审批记忆构建默认权限链。
-pub fn build_default_chain(
+pub(crate) fn build_default_chain(
     effective: &EffectiveConfig,
     history: Arc<ApprovalHistoryStore>,
 ) -> Arc<PermissionChain> {
@@ -54,10 +55,10 @@ pub fn build_default_chain(
 }
 
 /// 审批挂起超时（5 分钟）。
-pub const APPROVAL_TIMEOUT_SECS: u64 = 300;
+pub(crate) const APPROVAL_TIMEOUT_SECS: u64 = 300;
 
 /// 从 session 存储目录解析审批历史文件路径。
-pub fn approval_history_path(session_store_dir: &Path) -> std::path::PathBuf {
+pub(crate) fn approval_history_path(session_store_dir: &Path) -> std::path::PathBuf {
     session_store_dir
         .join("extension_data")
         .join("astrcode-session")
@@ -68,7 +69,7 @@ pub fn approval_history_path(session_store_dir: &Path) -> std::path::PathBuf {
 mod tests {
     use astrcode_core::{
         config::{AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings},
-        permission::{ApprovalMode, PermissionContext, PermissionDecision},
+        permission::ApprovalMode,
     };
 
     use super::*;
@@ -127,7 +128,6 @@ mod tests {
             working_dir: std::path::Path::new("/project"),
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
-            session_id: "s1",
             tool_selection: None,
         };
         let decision = chain.decide(&ctx);
@@ -146,7 +146,6 @@ mod tests {
             working_dir: std::path::Path::new("/project"),
             resource_accesses: &[],
             approval_mode: ApprovalMode::Yolo,
-            session_id: "s1",
             tool_selection: None,
         };
         assert_eq!(chain.decide(&ctx), PermissionDecision::Allow);
@@ -164,7 +163,6 @@ mod tests {
             working_dir: std::path::Path::new("/project"),
             resource_accesses: &[],
             approval_mode: ApprovalMode::Manual,
-            session_id: "s1",
             tool_selection: None,
         };
         assert_eq!(chain.decide(&ctx), PermissionDecision::Allow);

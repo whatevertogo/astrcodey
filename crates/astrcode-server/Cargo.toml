@@ -20,14 +20,15 @@ testing = ["astrcode-storage/testing"]
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
-astrcode-support = { path = "../astrcode-support" }
 astrcode-protocol = { path = "../astrcode-protocol" }
 astrcode-ai = { path = "../astrcode-ai" }
 astrcode-tools = { path = "../astrcode-tools" }
 astrcode-storage = { path = "../astrcode-storage" }
+astrcode-session-projection = { path = "../astrcode-session-projection" }
 astrcode-context = { path = "../astrcode-context" }
 astrcode-session = { path = "../astrcode-session" }
 astrcode-extensions = { path = "../astrcode-extensions" }
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 astrcode-bundled-extensions = { path = "../astrcode-bundled-extensions" }
 astrcode-log = { path = "../astrcode-log" }
 tokio = { workspace = true, features = ["sync", "time", "fs", "net", "rt-multi-thread", "macros", "process", "io-util"] }
@@ -35,16 +36,15 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 thiserror = { workspace = true }
-chrono = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 axum = { workspace = true }
 futures-util = { workspace = true }
-tokio-util = { workspace = true }
+tokio-util = { workspace = true, features = ["rt"] }
 tower-http = { workspace = true }
-getrandom = { workspace = true }
 uuid = { workspace = true }
 agent-client-protocol = { workspace = true }
+tempfile = { workspace = true }
 
 [[test]]
 name = "http_routes"

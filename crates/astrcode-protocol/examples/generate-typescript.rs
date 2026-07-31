@@ -79,14 +79,14 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
     export!(
         CreateSessionRequest,
         CreateSessionResponseDto,
+        RunInfoDto,
         ToolSelectionDto,
         ConfigureSessionToolsRequest,
         ConfigureSessionToolsResponse,
         PromptAttachmentDto,
         PromptRequest,
         ToolApprovalRequest,
-        ToolUiRespondRequest,
-        ToolUiRespondResponse,
+        ToolApprovalDto,
         PromptSubmitResponse,
         CompactSessionRequest,
         CompactSessionResponse,
@@ -108,6 +108,7 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         ConversationControlStateDto,
         ConversationBlockDto,
         ConversationBlockStatusDto,
+        ToolCallStatusDto,
         ConversationStreamEnvelopeDto,
         ConversationDeltaDto,
         ConversationErrorEnvelopeDto,
@@ -200,11 +201,6 @@ fn write_wire_values(output_dir: &Path) -> Result<(), Box<dyn Error>> {
     push_wire_values(&mut output, "THINKING_LEVELS", ThinkingLevelDto::ALL)?;
     push_wire_values(
         &mut output,
-        "THINKING_WIRE_MAPPINGS",
-        ThinkingWireMappingDto::ALL,
-    )?;
-    push_wire_values(
-        &mut output,
         "AGENT_SESSION_STATUSES",
         AgentSessionStatusDto::ALL,
     )?;
@@ -220,6 +216,7 @@ fn write_wire_values(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         "BLOCK_STATUSES",
         ConversationBlockStatusDto::ALL,
     )?;
+    push_wire_values(&mut output, "TOOL_CALL_STATUSES", ToolCallStatusDto::ALL)?;
     fs::write(output_dir.join("wire-values.ts"), output)?;
     Ok(())
 }

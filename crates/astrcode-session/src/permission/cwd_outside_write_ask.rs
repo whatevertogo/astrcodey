@@ -1,9 +1,8 @@
-use astrcode_core::{
-    permission::{ApprovalMode, PermissionContext, PermissionDecision, PermissionPolicy},
-    tool_access::ResourceAccess,
-};
+use astrcode_core::{permission::ApprovalMode, tool::access::ResourceAccess};
 
-pub struct CwdOutsideWriteAskPolicy;
+use super::{PermissionContext, PermissionDecision, PermissionPolicy};
+
+pub(super) struct CwdOutsideWriteAskPolicy;
 
 impl PermissionPolicy for CwdOutsideWriteAskPolicy {
     fn priority(&self) -> u32 {

@@ -132,8 +132,8 @@ impl ToolHandler for MemorySaveHandler {
         _tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let args: SaveArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let content = args.content;
@@ -154,7 +154,8 @@ impl ToolHandler for MemorySaveHandler {
                     "Memory unchanged (content identical)."
                 }
                 .to_string(),
-            ));
+            )
+            .into());
         }
 
         // 正常新增路径
@@ -174,12 +175,12 @@ impl ToolHandler for MemorySaveHandler {
                             self.store_pool.clone(),
                             &self.services,
                             self.config.clone(),
-                            ctx.session_id.to_string(),
+                            ctx.scope.session_id.to_string(),
                             working_dir.to_string(),
                         );
                     }
                 }
-                Ok(ok_text("Memory saved.".to_string()))
+                Ok(ok_text("Memory saved.".to_string()).into())
             },
             AppendResult::SimilarExists(similar) => Ok(ok_text(format!(
                 "Similar memories exist:\n{}\n\nRetry with replace_match to update in place.",
@@ -188,7 +189,8 @@ impl ToolHandler for MemorySaveHandler {
                     .map(|s| format!("- {s}"))
                     .collect::<Vec<_>>()
                     .join("\n")
-            ))),
+            ))
+            .into()),
         }
     }
 }
@@ -212,12 +214,12 @@ impl ToolHandler for MemoryDeleteHandler {
         _tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let args: DeleteArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         if args.match_pattern.trim().is_empty() {
-            return Ok(ok_text("No pattern provided. Nothing deleted.".to_string()));
+            return Ok(ok_text("No pattern provided. Nothing deleted.".to_string()).into());
         }
         let pattern = args.match_pattern;
         let pattern_for_emit = pattern.clone();
@@ -227,23 +229,24 @@ impl ToolHandler for MemoryDeleteHandler {
         .await?;
 
         if !removed.is_empty() {
-            if let Some(ref sink) = ctx.capabilities.host.extension_event_sink {
+            if let Some(ref sink) = ctx.events {
                 let payload = json!({
                     "match": pattern_for_emit,
                     "deleted_count": removed.len(),
                 });
-                let _ = sink.emit("memory.deleted", 1, payload).await;
+                let _ = sink.emit("memory.deleted", 1, payload);
             }
         }
 
         if removed.is_empty() {
-            Ok(ok_text("No matching memories found to delete.".to_string()))
+            Ok(ok_text("No matching memories found to delete.".to_string()).into())
         } else {
             Ok(ok_text(format!(
                 "Deleted {} entries:\n{}",
                 removed.len(),
                 removed.join("\n")
-            )))
+            ))
+            .into())
         }
     }
 }
@@ -272,8 +275,8 @@ impl ToolHandler for MemoryListHandler {
         _tool_name: &str,
         arguments: serde_json::Value,
         working_dir: &str,
-        _ctx: &astrcode_extension_sdk::tool::ToolExecutionContext,
-    ) -> Result<ToolResult, ExtensionError> {
+        _ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let args: ListArgs = serde_json::from_value(arguments)
             .map_err(|e| ExtensionError::Internal(e.to_string()))?;
         let limit = args.limit.clamp(1, MAX_LIST_ENTRIES);
@@ -291,13 +294,14 @@ impl ToolHandler for MemoryListHandler {
             .await?;
 
         if entries.is_empty() {
-            Ok(ok_text("No memories found.".to_string()))
+            Ok(ok_text("No memories found.".to_string()).into())
         } else {
             Ok(ok_text(format!(
                 "{} entries:\n{}",
                 entries.len(),
                 entries.join("\n")
-            )))
+            ))
+            .into())
         }
     }
 }
@@ -413,7 +417,7 @@ pub(crate) fn spawn_memory_pipeline(
             pipeline.reset();
             return;
         };
-        let session_read = match services.session_read.clone() {
+        let session_query = match services.session_query.clone() {
             Some(r) => r,
             None => {
                 tracing::warn!("memory pipeline: session history unavailable");
@@ -441,7 +445,7 @@ pub(crate) fn spawn_memory_pipeline(
             let cfg = config.read().clone();
             let run = pipeline::run(
                 &scoped,
-                session_read.clone(),
+                session_query.clone(),
                 small_llm.as_ref(),
                 &current_session_id,
                 &cfg,

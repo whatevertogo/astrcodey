@@ -1,9 +1,9 @@
 //! Default fallback ToolRenderer — generic tool summary.
 
-use astrcode_core::{render::RenderSpec, tool::ToolResult};
-use astrcode_support::text::compact_inline;
+use astrcode_core::tool::ToolResult;
 
 use super::tool::{ToolRenderCtx, ToolRenderer};
+use crate::tui::render::{RenderSpec, RenderTone, inline_preview};
 
 /// Default renderer used when no specific ToolRenderer is registered.
 pub struct DefaultToolRenderer;
@@ -18,7 +18,7 @@ impl ToolRenderer for DefaultToolRenderer {
         Some(RenderSpec::Text {
             text: body,
             tone: if result.is_error {
-                astrcode_core::render::RenderTone::Error
+                RenderTone::Error
             } else {
                 Default::default()
             },
@@ -55,7 +55,7 @@ fn prefixed_lines(label: &str, text: &str, max_lines: usize) -> String {
     }
     let mut out = vec![format!("⎿ {label}: {}", lines.len())];
     for line in lines.iter().take(max_lines) {
-        out.push(format!("⎿ {}", compact_inline(line, 180)));
+        out.push(format!("⎿ {}", inline_preview(line, 180)));
     }
     if lines.len() > max_lines {
         out.push(format!("⎿ … {} more", lines.len() - max_lines));

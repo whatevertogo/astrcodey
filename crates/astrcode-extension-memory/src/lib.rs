@@ -79,6 +79,7 @@ impl Extension for MemoryExtension {
             ExtensionCapability::SmallModel,
             ExtensionCapability::SessionHistory,
             ExtensionCapability::EmitEvents,
+            ExtensionCapability::ProviderRequest,
         ]
     }
 
@@ -91,7 +92,7 @@ impl Extension for MemoryExtension {
                 "memory extension requires a configured small model provider".into(),
             ));
         }
-        if services.session_read.is_none() {
+        if services.session_query.is_none() {
             return Err(ExtensionError::Internal(
                 "memory extension requires session history access".into(),
             ));
@@ -118,7 +119,6 @@ impl Extension for MemoryExtension {
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.extension_data_dir();
         reg.extension_event("memory.created").register();
         reg.extension_event("memory.deleted").register();
 

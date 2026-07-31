@@ -5,10 +5,7 @@
 //! 本模块将这一公共骨架提取为泛型函数，各 provider 只需提供
 //! SSE 事件处理和请求体构造。
 
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::time::{Duration, Instant};
 
 use astrcode_core::{
     config::ProviderAuthScheme,
@@ -23,7 +20,7 @@ use crate::{
 };
 
 fn stream_decoder_error(error: StreamDecoderError) -> LlmError {
-    LlmError::StreamParse(error.to_string())
+    LlmError::stream_parse(error.to_string())
 }
 
 pub(crate) fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
@@ -34,10 +31,6 @@ pub(crate) fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
         || usage.reasoning_output_tokens.is_some()
         || usage.total_tokens.is_some()
 }
-
-/// SSE 事件回调类型：接收 (event_type, parsed_json, tx)，返回 false 停止处理。
-type SseCallback =
-    Arc<dyn Fn(&str, &serde_json::Value, &mpsc::UnboundedSender<LlmEvent>) -> bool + Send + Sync>;
 
 /// 根据 `LlmClientConfig` 构建 reqwest client。
 ///
@@ -53,7 +46,7 @@ pub fn build_client(config: &LlmClientConfig) -> Result<reqwest::Client, LlmErro
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Duration::from_secs(30))
         .build()
-        .map_err(|error| LlmError::Transport(format!("failed to create HTTP client: {error}")))
+        .map_err(|error| LlmError::transport(format!("failed to create HTTP client: {error}")))
 }
 
 /// 添加 HTTP 头；若调用方已显式传入同名头（大小写无关）则保留调用方设置。
@@ -92,6 +85,10 @@ pub(crate) fn apply_auth_header(
 ///
 /// 部分兼容 provider（如 glm Anthropic/OpenAI 网关）会在 SSE 中发送**累积全文**而非
 /// 纯增量；若直接 append 会导致前缀重复。本函数同时兼容纯增量与累积两种格式。
+///
+/// 代价：判定累积前缀需 `fragment.starts_with(accumulated)`，单次为 O(accumulated.len())。
+/// 对持续发送累积全文的 provider，长流（尤其长 reasoning）整体为 O(N²)。这是为兼容累积流
+/// 而接受的已知成本；若后续 profiling 表明成为瓶颈，可在确认流为纯增量后跳过前缀检查。
 pub fn stream_text_delta(accumulated: &mut String, fragment: &str) -> Option<String> {
     if fragment.is_empty() {
         return None;
@@ -124,39 +121,6 @@ pub fn send_event(tx: &mpsc::UnboundedSender<LlmEvent>, event: LlmEvent) -> bool
             tracing::debug!("LLM event receiver dropped, stopping stream processing");
             false
         },
-    }
-}
-
-/// 流式响应的 `Done` 事件守卫，保证至多发送一次 `Done`。
-#[derive(Debug, Default)]
-pub struct StreamEventSink {
-    done_sent: bool,
-}
-
-impl StreamEventSink {
-    pub fn done_sent(&self) -> bool {
-        self.done_sent
-    }
-
-    pub fn emit_done(
-        &mut self,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-        finish_reason: impl Into<String>,
-    ) -> bool {
-        if self.done_sent {
-            return true;
-        }
-        self.done_sent = true;
-        send_event(
-            tx,
-            LlmEvent::Done {
-                finish_reason: finish_reason.into(),
-            },
-        )
-    }
-
-    pub fn ensure_done(&mut self, tx: &mpsc::UnboundedSender<LlmEvent>) -> bool {
-        self.emit_done(tx, "stop")
     }
 }
 
@@ -244,7 +208,7 @@ impl HttpPostRequest {
             if status.is_success() {
                 match on_success(response).await {
                     Ok(()) => return Ok(()),
-                    Err(LlmError::Transport(message)) => {
+                    Err(LlmError::Transport { message }) => {
                         if self.retry.should_retry_transport(attempt) {
                             let delay = self.retry.delay(attempt);
                             tracing::warn!(
@@ -256,7 +220,7 @@ impl HttpPostRequest {
                             tokio::time::sleep(delay).await;
                             continue;
                         }
-                        return Err(LlmError::Transport(message));
+                        return Err(LlmError::transport(message));
                     },
                     Err(error) => return Err(error),
                 }
@@ -273,8 +237,9 @@ impl HttpPostRequest {
                 continue;
             }
 
+            let retry_after_ms = parse_retry_after_ms(response.headers());
             let text = read_http_error_body(response, &self.endpoint).await;
-            return Err(classify_error(status.as_u16(), text));
+            return Err(classify_error(status.as_u16(), retry_after_ms, &text));
         }
     }
 
@@ -310,7 +275,7 @@ impl HttpPostRequest {
                     .await
                     .map_err(|error| transport_error("read JSON response", &endpoint, error))?;
                 return serde_json::from_str(&text).map_err(|error| {
-                    LlmError::StreamParse(format!(
+                    LlmError::stream_parse(format!(
                         "failed to parse LLM JSON response from {}: {error}",
                         redacted_endpoint(&endpoint)
                     ))
@@ -329,28 +294,10 @@ impl HttpPostRequest {
                 continue;
             }
 
+            let retry_after_ms = parse_retry_after_ms(response.headers());
             let text = read_http_error_body(response, &self.endpoint).await;
-            return Err(classify_error(status.as_u16(), text));
+            return Err(classify_error(status.as_u16(), retry_after_ms, &text));
         }
-    }
-
-    /// 发起带重试的 SSE 流式请求，支持 `event:` + `data:` 行模式（Anthropic 风格）。
-    ///
-    /// `handle_event` 参数为 `(event_type, parsed_json, tx)`；返回 `false` 表示接收端已关闭。
-    pub async fn stream_typed_events(
-        &self,
-        tx: &mpsc::UnboundedSender<LlmEvent>,
-        handle_event: impl Fn(&str, &serde_json::Value, &mpsc::UnboundedSender<LlmEvent>) -> bool
-        + Send
-        + Sync
-        + 'static,
-    ) -> Result<(), LlmError> {
-        let tx = tx.clone();
-        let handle_event: SseCallback = Arc::new(handle_event);
-        self.run(move |response| {
-            parse_sse_bytes(response, tx.clone(), true, Arc::clone(&handle_event))
-        })
-        .await
     }
 
     async fn send_once(&self) -> Result<reqwest::Response, LlmError> {
@@ -366,34 +313,6 @@ impl HttpPostRequest {
             .await
             .map_err(|error| transport_error("send request", &self.endpoint, error))
     }
-}
-
-// ─── 便捷入口函数 ──────────────────────────────────────────────────────
-
-/// 发起带重试的 SSE 流式请求，支持 `event:` + `data:` 行模式（Anthropic 风格）。
-///
-/// `handle_event` 参数为 `(event_type, data_json)`；返回 `false` 表示接收端已关闭。
-pub async fn stream_with_event_type(
-    client: reqwest::Client,
-    endpoint: String,
-    headers: Vec<(String, String)>,
-    body: serde_json::Value,
-    retry: RetryPolicy,
-    tx: mpsc::UnboundedSender<LlmEvent>,
-    handle_event: impl Fn(&str, &serde_json::Value, &mpsc::UnboundedSender<LlmEvent>) -> bool
-    + Send
-    + Sync
-    + 'static,
-) -> Result<(), LlmError> {
-    HttpPostRequest {
-        client,
-        endpoint,
-        headers,
-        body,
-        retry,
-    }
-    .stream_typed_events(&tx, handle_event)
-    .await
 }
 
 /// 读取非 2xx 响应体；传输失败时记录并返回空串（仍附带 HTTP 状态码）。
@@ -413,55 +332,27 @@ pub async fn read_http_error_body(response: reqwest::Response, endpoint: &str) -
 
 // ─── SSE 字节流解析 ─────────────────────────────────────────────────────
 
-/// 解析 SSE 字节流，提取 `data:` 行并回调处理。
-///
-/// 统一了 data-only 模式（OpenAI）和 event+data 模式（Anthropic）：
-/// - `track_event_type = false`：忽略 `event:` 行，回调的 `event_type` 参数始终为 `""`
-/// - `track_event_type = true`：跟踪 `event:` 行，回调的 `event_type` 参数为实际值
-///
-/// `[DONE]` 标记和空的 `data:` 行被静默跳过。
-/// 如果响应体非空但未包含任何 `data:` 行，返回 `StreamParse` 错误。
-async fn parse_sse_bytes(
-    response: reqwest::Response,
-    tx: mpsc::UnboundedSender<LlmEvent>,
-    track_event_type: bool,
-    on_event: SseCallback,
-) -> Result<(), LlmError> {
-    let mut current_event_type = String::new();
-    let mut has_data_line = false;
-    let Some(summary) = consume_sse_lines(response, &tx, SseBodyPreview::Capture, |line| {
-        process_sse_line(
-            line,
-            &tx,
-            track_event_type,
-            &mut current_event_type,
-            &mut has_data_line,
-            &on_event,
-        )
-    })
-    .await?
-    else {
-        return Ok(());
-    };
-
-    if summary.bytes_read > 0 && !has_data_line {
-        return Err(LlmError::StreamParse(format!(
-            "LLM returned 200 but response is not valid SSE (no data: lines found). Content-Type: \
-             {}, bytes: {}, preview: {}",
-            summary.content_type.as_deref().unwrap_or("<missing>"),
-            summary.bytes_read,
-            truncate_str(&summary.body_preview, 256),
-        )));
-    }
-
-    Ok(())
-}
-
 /// 完整消费一个 SSE 响应后供协议层做收尾校验的传输统计。
 pub(crate) struct SseStreamSummary {
     content_type: Option<String>,
     bytes_read: usize,
     body_preview: String,
+}
+
+impl SseStreamSummary {
+    /// 响应体非空却没有任何 `data:` 行 → 视为非 SSE，返回结构化错误。
+    pub(crate) fn require_data_lines(&self, has_data_line: bool) -> Result<(), LlmError> {
+        if self.bytes_read > 0 && !has_data_line {
+            return Err(LlmError::stream_parse(format!(
+                "LLM returned 200 but response is not valid SSE (no data: lines found). \
+                 Content-Type: {}, bytes: {}, preview: {}",
+                self.content_type.as_deref().unwrap_or("<missing>"),
+                self.bytes_read,
+                &self.body_preview[..self.body_preview.floor_char_boundary(256)],
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -554,78 +445,74 @@ fn consume_decoded_lines(
     Ok(true)
 }
 
-/// 处理单行 SSE 输出。返回 `false` 表示接收端已关闭。
-fn process_sse_line(
-    line: &str,
-    tx: &mpsc::UnboundedSender<LlmEvent>,
-    track_event_type: bool,
-    current_event_type: &mut String,
-    has_data_line: &mut bool,
-    on_event: &SseCallback,
-) -> bool {
-    // event: 行
-    if let Some(ev_type) = line.strip_prefix("event:") {
-        if track_event_type {
-            *current_event_type = ev_type.trim().to_string();
-        }
-        return true;
-    }
-
-    // data: 行
-    let Some(data) = line.strip_prefix("data:") else {
-        return true;
-    };
-    *has_data_line = true;
-    let data = data.trim();
-    if data.is_empty() || data == "[DONE]" {
-        return true;
-    }
-
-    if tx.is_closed() {
-        return false;
-    }
-
-    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-        if !on_event(current_event_type, &event, tx) {
-            return false;
-        }
-        current_event_type.clear();
-    }
-    true
-}
-
 // ─── 错误工具函数 ──────────────────────────────────────────────────────
 
-fn truncate_str(s: &str, max_chars: usize) -> &str {
-    if s.len() <= max_chars {
-        s
-    } else {
-        let mut boundary = max_chars;
-        while !s.is_char_boundary(boundary) {
-            boundary -= 1;
-        }
-        &s[..boundary]
+/// 将 HTTP 状态码与错误响应体归一化为 [`LlmError`]。
+///
+/// 4xx/5xx 的细分(鉴权/模型/参数/配额/限流/上下文溢出/内容过滤)依据状态码与
+/// 错误体关键词,与 vbot 的 provider 分类一致;`retry_after_ms` 来自 `Retry-After`
+/// 响应头(仅 429 限流时携带)。该分类与 [`LlmError::is_retryable`] 共同构成重试决策。
+pub fn classify_error(status: u16, retry_after_ms: Option<u64>, body: &str) -> LlmError {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    let error_value = parsed
+        .as_ref()
+        .and_then(|value| value.get("error"))
+        .or(parsed.as_ref());
+    let field = |key: &str| {
+        error_value
+            .and_then(|error| error.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+    };
+    let message = field("message").unwrap_or_else(|| body.to_string());
+    let code = field("code").or_else(|| field("type")).unwrap_or_default();
+    let haystack = format!("{code} {message}").to_ascii_lowercase();
+
+    match status {
+        401 | 403 => LlmError::InvalidApiKey { status, message },
+        404 => LlmError::ModelNotFound { status, message },
+        400 if haystack.contains("context window")
+            || haystack.contains("context length")
+            || haystack.contains("context_length")
+            || haystack.contains("prompt too long")
+            || haystack.contains("maximum context") =>
+        {
+            LlmError::ContextWindowExceeded { message }
+        },
+        400 | 422 if haystack.contains("content_filter") || haystack.contains("content filter") => {
+            LlmError::ContentFilter { message }
+        },
+        400 | 422 => LlmError::InvalidParameter { status, message },
+        429 if haystack.contains("quota") || haystack.contains("billing") => {
+            LlmError::QuotaExceeded { status, message }
+        },
+        402 => LlmError::QuotaExceeded { status, message },
+        429 => LlmError::RateLimited {
+            status,
+            retry_after_ms,
+            message,
+        },
+        status if (500..600).contains(&status) || status == 408 => {
+            LlmError::ServerError { status, message }
+        },
+        _ => LlmError::ClientError { status, message },
     }
 }
 
-pub fn classify_error(status: u16, text: String) -> LlmError {
-    if status >= 500 {
-        LlmError::ServerError {
-            status,
-            message: text,
-        }
-    } else {
-        LlmError::ClientError {
-            status,
-            message: text,
-        }
-    }
+/// 从 `Retry-After` 响应头解析退避毫秒数。仅支持 delta-seconds 形式(常见于 LLM API)。
+pub fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .and_then(|seconds| seconds.checked_mul(1000))
 }
 
 pub fn transport_error(stage: &str, endpoint: &str, error: reqwest::Error) -> LlmError {
     let source_chain = error_source_chain(&error);
     let endpoint = redacted_endpoint(endpoint);
-    LlmError::Transport(format!(
+    LlmError::transport(format!(
         "{stage} failed for {endpoint}: {error}{source_chain}"
     ))
 }
@@ -640,7 +527,7 @@ pub fn stream_body_error(
 ) -> LlmError {
     let source_chain = error_source_chain(&error);
     let endpoint = redacted_endpoint(endpoint);
-    LlmError::Transport(format!(
+    LlmError::transport(format!(
         "read streaming response body failed for {endpoint}: status={status}, content-type={}, \
          content-encoding={}, bytes-read={bytes_read}: {error}{source_chain}",
         content_type.unwrap_or("<missing>"),
@@ -709,15 +596,6 @@ fn is_sensitive_query_key(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
-
-    use astrcode_core::llm::LlmClientConfig;
-    use tokio::{
-        io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
-        sync::mpsc,
-    };
-
     use super::*;
 
     #[test]
@@ -740,92 +618,110 @@ mod tests {
     }
 
     #[test]
-    fn stream_event_sink_emits_done_once() {
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let mut sink = StreamEventSink::default();
-        assert!(sink.emit_done(&tx, "stop"));
-        assert!(sink.emit_done(&tx, "stop"));
-        assert!(matches!(
-            rx.try_recv().unwrap(),
-            LlmEvent::Done { finish_reason } if finish_reason == "stop"
-        ));
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[tokio::test]
-    async fn typed_sse_event_type_resets_after_each_data_line() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut request = [0_u8; 1024];
-            let _ = socket.read(&mut request).await.unwrap();
-            socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\n\
-                      content-type: text/event-stream\r\n\
-                      connection: close\r\n\
-                      \r\n",
-                )
-                .await
-                .unwrap();
-            socket
-                .write_all(
-                    b"event: ping\n\
-                      data: {\"kind\":\"first\"}\n\
-                      \n\
-                      data: {\"kind\":\"second\"}\n\
-                      \n",
-                )
-                .await
-                .unwrap();
-        });
-
-        let client = build_client(&LlmClientConfig::default()).unwrap();
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        let response = client
-            .get(format!("http://{addr}/stream"))
-            .send()
-            .await
-            .unwrap();
-        let event_types = Arc::new(Mutex::new(Vec::new()));
-        let captured = Arc::clone(&event_types);
-        parse_sse_bytes(
-            response,
-            tx.clone(),
-            true,
-            Arc::new(move |event_type, event, _| {
-                captured.lock().unwrap().push((
-                    event_type.to_string(),
-                    event
-                        .get("kind")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string(),
-                ));
-                true
-            }),
-        )
-        .await
-        .unwrap();
-        drop(tx);
-
-        assert_eq!(
-            event_types.lock().unwrap().clone(),
-            vec![
-                ("ping".into(), "first".into()),
-                (String::new(), "second".into()),
-            ]
-        );
-        assert!(rx.try_recv().is_err());
-    }
-
-    #[test]
     fn transport_errors_redact_sensitive_query_values() {
         let endpoint = redacted_endpoint("https://api.example.com/v1/models/m?alt=sse&key=secret");
 
         assert!(endpoint.contains("alt=sse"));
         assert!(endpoint.contains("key=%3Credacted%3E"));
         assert!(!endpoint.contains("secret"));
+    }
+
+    #[test]
+    fn classify_error_maps_status_and_body_to_typed_variants() {
+        use astrcode_core::llm::LlmError;
+
+        // 鉴权 / 模型 / 参数 / 配额
+        assert!(matches!(
+            classify_error(401, None, r#"{"error":{"message":"bad key"}}"#),
+            LlmError::InvalidApiKey { status: 401, .. }
+        ));
+        assert!(matches!(
+            classify_error(403, None, "forbidden"),
+            LlmError::InvalidApiKey { status: 403, .. }
+        ));
+        assert!(matches!(
+            classify_error(404, None, "no model"),
+            LlmError::ModelNotFound { status: 404, .. }
+        ));
+        assert!(matches!(
+            classify_error(402, None, "no funds"),
+            LlmError::QuotaExceeded { status: 402, .. }
+        ));
+        assert!(matches!(
+            classify_error(400, None, r#"{"error":{"message":"bad shape"}}"#),
+            LlmError::InvalidParameter { status: 400, .. }
+        ));
+
+        // 上下文溢出(关键词命中 → ContextWindowExceeded,触发压缩路径)
+        assert!(matches!(
+            classify_error(
+                400,
+                None,
+                r#"{"error":{"message":"This model's maximum context length is exceeded"}}"#
+            ),
+            LlmError::ContextWindowExceeded { .. }
+        ));
+        assert!(matches!(
+            classify_error(400, None, "prompt too long"),
+            LlmError::ContextWindowExceeded { .. }
+        ));
+
+        // 内容过滤
+        assert!(matches!(
+            classify_error(
+                400,
+                None,
+                r#"{"error":{"code":"content_filter","message":"blocked"}}"#
+            ),
+            LlmError::ContentFilter { .. }
+        ));
+
+        // 配额类 429 vs 限流 429(携带 retry_after)
+        assert!(matches!(
+            classify_error(
+                429,
+                None,
+                r#"{"error":{"message":"billing quota exceeded"}}"#
+            ),
+            LlmError::QuotaExceeded { status: 429, .. }
+        ));
+        assert!(matches!(
+            classify_error(429, Some(1500), r#"{"error":{"message":"slow down"}}"#),
+            LlmError::RateLimited {
+                retry_after_ms: Some(1500),
+                ..
+            }
+        ));
+
+        // 服务端 / 兜底客户端
+        assert!(matches!(
+            classify_error(503, None, "down"),
+            LlmError::ServerError { status: 503, .. }
+        ));
+        assert!(matches!(
+            classify_error(418, None, "teapot"),
+            LlmError::ClientError { status: 418, .. }
+        ));
+    }
+
+    #[test]
+    fn parse_retry_after_ms_reads_delta_seconds_header() {
+        use reqwest::header::{HeaderMap, RETRY_AFTER};
+
+        let mut headers = HeaderMap::new();
+        assert_eq!(parse_retry_after_ms(&headers), None);
+
+        headers.insert(RETRY_AFTER, "2".parse().unwrap());
+        assert_eq!(parse_retry_after_ms(&headers), Some(2000));
+
+        headers.insert(RETRY_AFTER, u64::MAX.to_string().parse().unwrap());
+        assert_eq!(parse_retry_after_ms(&headers), None);
+
+        // 非 delta-seconds(HTTP-date 等)不解析,返回 None 而非猜测。
+        headers.insert(
+            RETRY_AFTER,
+            "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
+        );
+        assert_eq!(parse_retry_after_ms(&headers), None);
     }
 }

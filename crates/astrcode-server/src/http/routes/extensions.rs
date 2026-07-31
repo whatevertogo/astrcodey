@@ -2,7 +2,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use astrcode_core::extension::{ExtensionHttpMethod, ExtensionHttpRequest};
+use astrcode_extension_sdk::extension::{
+    ExtensionHttpAccess, ExtensionHttpMethod, ExtensionHttpRequest,
+};
 use astrcode_extensions::runner::{
     ExtensionHttpDispatchResult, ExtensionStageDiagnostics, ExtensionStageStatus,
 };
@@ -17,7 +19,7 @@ use astrcode_protocol::{
 use axum::{
     Json,
     body::Bytes,
-    extract::{OriginalUri, State},
+    extract::{OriginalUri, Path, State},
     http::{Method, StatusCode},
     response::{IntoResponse, Response},
 };
@@ -27,7 +29,11 @@ use super::{
         HttpState, bad_request_response, error_response, internal_error_response,
         not_found_response,
     },
-    notify_extensions_config_changed, reload_extension_registry,
+    ConfigRequestError, reload_extension_registry, update_config,
+};
+use crate::protocol_mapping::{
+    extension_capability_to_dto, extension_event_decl_to_dto, extension_http_method_to_dto,
+    extension_slash_command_to_dto, keybinding_to_dto, status_item_to_dto,
 };
 
 pub(in crate::http) async fn list_extensions(State(state): State<HttpState>) -> Response {
@@ -46,37 +52,22 @@ pub(in crate::http) async fn set_enabled(
     State(state): State<HttpState>,
     Json(request): Json<SetExtensionEnabledRequest>,
 ) -> Response {
-    let mut candidate = state.runtime.config_manager().raw_config_snapshot();
-    let extension_states = candidate
-        .runtime
-        .extension_states
-        .get_or_insert_with(BTreeMap::new);
-    extension_states.insert(request.extension_id.clone(), request.enabled);
-
-    if let Err(error) = candidate.clone().into_effective() {
-        return bad_request_response("invalid_extension_state", error);
+    let update_result = update_config(&state, |candidate| {
+        candidate
+            .runtime
+            .extension_states
+            .get_or_insert_with(BTreeMap::new)
+            .insert(request.extension_id, request.enabled);
+        candidate
+            .clone()
+            .into_effective()
+            .map_err(|error| ConfigRequestError::new("invalid_extension_state", error))?;
+        Ok(())
+    })
+    .await;
+    if let Err(error) = update_result {
+        return error.into_response();
     }
-
-    if let Err(error) = state
-        .runtime
-        .config_manager
-        .config_store()
-        .save(&candidate)
-        .await
-    {
-        return internal_error_response("save_failed", error);
-    }
-
-    if let Err(error) = state
-        .runtime
-        .config_manager
-        .apply_raw_config_and_rebuild(candidate)
-    {
-        return bad_request_response("invalid_extension_state", error);
-    }
-    state.runtime.sync_session_model_bindings();
-
-    notify_extensions_config_changed(&state).await;
 
     let reload_errors = reload_extension_registry(&state).await;
 
@@ -104,15 +95,42 @@ pub(in crate::http) async fn dispatch_public_http(
         body: serde_json::Value::Null,
     };
     let result = state
-        .runtime
+        .app
+        .runtime()
         .extension_runner()
         .dispatch_public_http_route(request, &body)
         .await;
     extension_http_response(result)
 }
 
+pub(in crate::http) async fn dispatch_authenticated_http(
+    State(state): State<HttpState>,
+    Path((extension_id, path)): Path<(String, String)>,
+    method: Method,
+    OriginalUri(uri): OriginalUri,
+    body: Bytes,
+) -> Response {
+    let Some(method) = extension_http_method(&method) else {
+        return not_found_response("route_not_found", "route not found");
+    };
+    let request = ExtensionHttpRequest {
+        method,
+        path: format!("/{path}"),
+        path_params: BTreeMap::new(),
+        query: uri.query().map(str::to_owned),
+        body: serde_json::Value::Null,
+    };
+    let result = state
+        .app
+        .runtime()
+        .extension_runner()
+        .dispatch_authenticated_http_route(&extension_id, request, &body)
+        .await;
+    extension_http_response(result)
+}
+
 fn extension_http_response(
-    result: Result<ExtensionHttpDispatchResult, astrcode_core::extension::ExtensionError>,
+    result: Result<ExtensionHttpDispatchResult, astrcode_extension_sdk::extension::ExtensionError>,
 ) -> Response {
     match result {
         Ok(ExtensionHttpDispatchResult::Response(response)) => {
@@ -154,8 +172,8 @@ fn extension_http_method(method: &Method) -> Option<ExtensionHttpMethod> {
 }
 
 async fn collect_extensions(state: &HttpState) -> Vec<ExtensionStateDto> {
-    let effective = state.runtime.config_manager().read_effective();
-    let runner = state.runtime.extension_runner();
+    let effective = state.app.runtime().config_manager().read_effective();
+    let runner = state.app.runtime().extension_runner();
     let loaded_ids = runner.registered_extension_ids().await;
     let loaded_set: BTreeSet<_> = loaded_ids.iter().cloned().collect();
     let registry = runner.registry_snapshot().await;
@@ -213,23 +231,31 @@ fn extension_declaration_dto(
         capabilities: declaration
             .capabilities
             .into_iter()
-            .map(Into::into)
+            .map(extension_capability_to_dto)
             .collect(),
         tools: declaration.tools.into_iter().map(Into::into).collect(),
         dynamic_tools: declaration.dynamic_tools,
-        commands: declaration.commands.into_iter().map(Into::into).collect(),
+        commands: declaration
+            .commands
+            .into_iter()
+            .map(extension_slash_command_to_dto)
+            .collect(),
         dynamic_commands: declaration.dynamic_commands,
         keybindings: declaration
             .keybindings
             .into_iter()
-            .map(Into::into)
+            .map(keybinding_to_dto)
             .collect(),
         status_items: declaration
             .status_items
             .into_iter()
-            .map(Into::into)
+            .map(status_item_to_dto)
             .collect(),
-        events: declaration.events.into_iter().map(Into::into).collect(),
+        events: declaration
+            .events
+            .into_iter()
+            .map(extension_event_decl_to_dto)
+            .collect(),
         http_routes: declaration
             .http_routes
             .into_iter()
@@ -239,11 +265,12 @@ fn extension_declaration_dto(
 }
 
 fn extension_http_route_dto(
-    route: astrcode_core::extension::ExtensionHttpRoute,
+    route: astrcode_extension_sdk::extension::ExtensionHttpRoute,
 ) -> ExtensionHttpRouteDto {
     ExtensionHttpRouteDto {
-        method: route.method.into(),
+        method: extension_http_method_to_dto(route.method),
         path: route.path,
+        authenticated: route.access == ExtensionHttpAccess::Authenticated,
         description: route.description,
         max_body_bytes: route.max_body_bytes,
     }

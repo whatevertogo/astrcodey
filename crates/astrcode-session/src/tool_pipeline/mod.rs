@@ -7,7 +7,7 @@ mod prepare;
 
 use std::sync::Arc;
 
-use astrcode_core::{storage::ToolResultArtifactReader, tool::ToolDefinition};
+use astrcode_core::tool::{ToolDefinition, ToolResultArtifactReader};
 use astrcode_extension_sdk::runtime_ports::TurnHooks;
 use tokio_util::sync::CancellationToken;
 
@@ -19,7 +19,7 @@ use crate::{
     turn_context::SharedTurnContext,
 };
 
-pub struct ToolCalls {
+pub(crate) struct ToolCalls {
     turn: TurnToolContext,
     tool_registry: Arc<ToolRegistry>,
     extension_runner: Arc<dyn TurnHooks>,
@@ -28,7 +28,7 @@ pub struct ToolCalls {
 }
 
 impl ToolCalls {
-    pub fn new(
+    pub(crate) fn new(
         turn: TurnToolContext,
         tool_registry: Arc<ToolRegistry>,
         extension_runner: Arc<dyn TurnHooks>,
@@ -44,7 +44,7 @@ impl ToolCalls {
         }
     }
 
-    pub fn list_definitions_with_prompt_metadata(
+    pub(crate) fn list_definitions_with_prompt_metadata(
         &self,
     ) -> Vec<(
         ToolDefinition,

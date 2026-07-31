@@ -20,9 +20,10 @@ use astrcode_protocol::{
     },
     version::{ClientInfo, InitializeRequest, InitializeResponse},
 };
-use astrcode_support::event_fanout::EventFanout;
 use parking_lot::Mutex;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
+
+const EVENT_CHANNEL_CAPACITY: usize = 1024;
 
 /// 客户端与服务端之间的传输层接口。
 ///
@@ -42,14 +43,13 @@ pub trait ClientTransport: Send + Sync {
     async fn execute(&self, command: &ClientCommand) -> Result<ClientNotification, TransportError> {
         let mut rx = self.subscribe().await?;
         self.send(command).await?;
-        match rx.recv().await {
-            Some(event) => Ok(event),
-            None => Err(TransportError::StreamDisconnected),
-        }
+        rx.recv()
+            .await
+            .map_err(|_| TransportError::StreamDisconnected)
     }
 
-    /// 订阅服务端事件流，返回一个 mpsc 接收端。
-    async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError>;
+    /// 订阅服务端事件流，返回一个 broadcast 接收端。
+    async fn subscribe(&self) -> Result<broadcast::Receiver<ClientNotification>, TransportError>;
 }
 
 pub use astrcode_protocol::transport::TransportError;
@@ -63,8 +63,8 @@ pub struct StdioClientTransport {
     stdin: Arc<Mutex<Box<dyn Write + Send>>>,
     /// 下一条 JSON-RPC request id。
     next_id: AtomicU64,
-    /// 事件 fan-out 通道，读取线程通过它将事件分发给所有订阅者。
-    event_tx: Arc<EventFanout<ClientNotification>>,
+    /// 事件广播通道，读取线程通过它将事件分发给所有订阅者。
+    event_tx: broadcast::Sender<ClientNotification>,
     /// 子进程句柄，持有以确保子进程生命周期与传输层一致。
     _child: std::process::Child,
 }
@@ -137,9 +137,8 @@ impl StdioClientTransport {
             )));
         }
 
-        // 创建事件 fan-out 通道，读取线程通过它将事件分发给所有订阅者。
-        let event_tx = Arc::new(EventFanout::new(1024));
-        let tx = Arc::clone(&event_tx);
+        let (event_tx, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+        let tx = event_tx.clone();
 
         // 启动后台读取线程，从子进程 stdout 逐行解析事件并广播。
         std::thread::spawn(move || {
@@ -155,12 +154,12 @@ impl StdioClientTransport {
                     continue;
                 };
                 if let Ok(event) = notification_from_jsonrpc_message(&message) {
-                    tx.send(event);
+                    let _ = tx.send(event);
                     continue;
                 }
                 if let Some(result) = message.result {
                     if let Ok(event) = serde_json::from_value::<ClientNotification>(result) {
-                        tx.send(event);
+                        let _ = tx.send(event);
                     }
                 }
             }
@@ -192,7 +191,7 @@ impl ClientTransport for StdioClientTransport {
         self.write_command(command)
     }
 
-    async fn subscribe(&self) -> Result<mpsc::Receiver<ClientNotification>, TransportError> {
+    async fn subscribe(&self) -> Result<broadcast::Receiver<ClientNotification>, TransportError> {
         Ok(self.event_tx.subscribe())
     }
 }

@@ -2,7 +2,7 @@
 //!
 //! read 工具结果在 session 中仍以 JSON 字符串存储；仅在送模边界解析为图片块。
 
-use astrcode_core::read_tool_image::ReadToolInlinePayload;
+use astrcode_core::tool::read_image::ReadToolInlinePayload;
 
 /// 解析 read 工具的图片结果；非图片或格式无效时返回 `None`。
 pub(crate) fn parse_read_tool_image(content: &str) -> Option<(String, String)> {
@@ -56,7 +56,7 @@ pub(crate) fn openai_chat_tool_result_content(content: &str) -> serde_json::Valu
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::read_tool_image::ReadToolInlinePayload;
+    use astrcode_core::tool::read_image::ReadToolInlinePayload;
 
     use super::*;
 
