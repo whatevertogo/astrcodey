@@ -21,7 +21,14 @@ async fn main() {
     let _guard = astrcode_log::init();
     tracing::info!("astrcode-server starting");
 
-    let runtime = match astrcode_server::bootstrap::bootstrap().await {
+    let runtime = match astrcode_server::bootstrap::bootstrap_with(
+        astrcode_server::bootstrap::BootstrapOptions {
+            disabled_extension_ids: std::collections::BTreeSet::from(["astrcode-ask-user".into()]),
+            ..Default::default()
+        },
+    )
+    .await
+    {
         Ok(rt) => Arc::new(rt),
         Err(e) => {
             tracing::error!("Bootstrap failed: {e}");
@@ -64,7 +71,18 @@ async fn main() {
     // Background task: forward events → stdout
     let mut event_rx = server_app.event_bus().subscribe_all_notifications();
     let stdout_forwarder = tokio::spawn(async move {
-        while let Ok(event) = event_rx.recv().await {
+        loop {
+            let event = match event_rx.recv().await {
+                Ok(event) => event,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        skipped,
+                        "stdio event forwarder lagged; resuming with latest events"
+                    );
+                    continue;
+                },
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            };
             let line = match notification_to_jsonrpc_message(&event)
                 .and_then(|message| to_jsonl_line(&message))
             {

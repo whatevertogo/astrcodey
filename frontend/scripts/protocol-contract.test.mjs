@@ -120,6 +120,19 @@ assert.equal(extensionEvent.delta.kind, 'extensionEvent')
 assert.equal(extensionEvent.delta.extensionId, 'astrcode-ask-user')
 assert.equal(extensionEvent.delta.payload.callId, 'call-1')
 
+const scalarExtensionEvent = decodeConversationStreamEnvelope({
+  sessionId: 'session-1',
+  cursor: { value: '10' },
+  delta: {
+    kind: 'extensionEvent',
+    extensionId: 'extension',
+    eventType: 'scalar',
+    schemaVersion: 1,
+    payload: ['valid', 'json'],
+  },
+})
+assert.deepEqual(scalarExtensionEvent.delta.payload, ['valid', 'json'])
+
 const approvalRequested = decodeConversationStreamEnvelope({
   sessionId: 'session-1',
   cursor: { value: '11' },

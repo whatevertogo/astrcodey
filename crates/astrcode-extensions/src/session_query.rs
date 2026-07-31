@@ -70,6 +70,7 @@ impl SessionQuery for StorageSessionQuery {
                 .transcript
                 .messages
                 .iter()
+                .filter(|message| extension_visible_message(&message.message))
                 .map(|message| SessionTranscriptMessage {
                     message: message.message.clone(),
                     source: message.source.clone(),
@@ -121,6 +122,10 @@ impl SessionQuery for StorageSessionQuery {
     }
 }
 
+fn extension_visible_message(message: &astrcode_core::llm::LlmMessage) -> bool {
+    !astrcode_context::is_compact_summary_message(message)
+}
+
 fn non_cached_token_count(usage: &LlmTokenUsage) -> Option<u64> {
     match (usage.input_tokens, usage.output_tokens) {
         (Some(input), Some(output)) => Some(
@@ -130,7 +135,17 @@ fn non_cached_token_count(usage: &LlmTokenUsage) -> Option<u64> {
         ),
         _ => usage
             .total_tokens
-            .map(|total| total.saturating_sub(usage.reasoning_output_tokens.unwrap_or_default())),
+            .map(|total| total.saturating_sub(usage.reasoning_output_tokens.unwrap_or_default()))
+            .or_else(|| {
+                let input = usage.input_tokens.map(|input| {
+                    input.saturating_sub(usage.cached_input_tokens.unwrap_or_default())
+                });
+                (input.is_some() || usage.output_tokens.is_some()).then(|| {
+                    input
+                        .unwrap_or_default()
+                        .saturating_add(usage.output_tokens.unwrap_or_default())
+                })
+            }),
     }
 }
 
@@ -141,5 +156,43 @@ fn query_error(error: astrcode_storage::StorageError) -> SessionQueryError {
             SessionQueryError::Unsupported(message)
         },
         other => SessionQueryError::Query(other.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::llm::{LlmMessage, LlmTokenUsage};
+
+    use super::*;
+
+    #[test]
+    fn query_filters_synthetic_summaries_and_counts_partial_usage() {
+        assert!(!extension_visible_message(&LlmMessage::user(
+            "<compact_summary>summary</compact_summary>"
+        )));
+        assert!(extension_visible_message(&LlmMessage::user("real input")));
+        assert_eq!(
+            non_cached_token_count(&LlmTokenUsage {
+                input_tokens: Some(120),
+                cached_input_tokens: Some(20),
+                ..Default::default()
+            }),
+            Some(100)
+        );
+        assert_eq!(
+            non_cached_token_count(&LlmTokenUsage {
+                output_tokens: Some(25),
+                ..Default::default()
+            }),
+            Some(25)
+        );
+        assert_eq!(
+            non_cached_token_count(&LlmTokenUsage {
+                total_tokens: Some(80),
+                reasoning_output_tokens: Some(10),
+                ..Default::default()
+            }),
+            Some(70)
+        );
     }
 }

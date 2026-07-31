@@ -314,7 +314,7 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
         extensionId: requiredString(object, 'extensionId'),
         eventType: requiredString(object, 'eventType'),
         schemaVersion: requiredNumber(object, 'schemaVersion'),
-        payload: decodeObject(object.payload, 'extension event payload'),
+        payload: object.payload,
       }
     case 'toolApprovalRequested':
       return {

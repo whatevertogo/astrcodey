@@ -93,6 +93,13 @@ impl TurnEvents {
         self.session.emit_live(Some(&self.turn_id), payload);
     }
 
+    async fn live_required(&self, payload: LiveEventPayload) -> Result<(), TurnError> {
+        self.session
+            .emit_live_required(Some(&self.turn_id), payload)
+            .await?;
+        Ok(())
+    }
+
     /// 持久化错误事件，并标记 `emitted_error`（供 `drive_agent` 避免重复持久化）。
     pub(crate) async fn durable_error(
         &self,
@@ -179,6 +186,9 @@ fn durable_publish_error_is_retryable(error: &TurnError) -> bool {
 async fn dispatch_payload(publisher: &TurnEvents, payload: EventPayload) -> Result<(), TurnError> {
     match payload {
         EventPayload::Durable(payload) => durable_with_retry(publisher, payload).await,
+        EventPayload::Live(payload @ LiveEventPayload::ExtensionEvent(_)) => {
+            publisher.live_required(payload).await
+        },
         EventPayload::Live(payload) => {
             publisher.live(payload);
             Ok(())

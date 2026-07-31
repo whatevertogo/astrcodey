@@ -11,7 +11,7 @@ mod replay;
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
-    event::{DurableEventPayload, Event, EventPayload, Phase},
+    event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase},
     types::SessionId,
 };
 use astrcode_protocol::{
@@ -298,8 +298,15 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
         match state.event_rx.try_recv() {
             Ok(event) => {
                 if event.session_id == state.session_id {
-                    // live-only 事件（无 seq）属于 replay 时段残留，直接丢弃。
+                    // Durable replay 无法覆盖 non-durable extension state。保留它们，
+                    // 让 ask-user 等扩展在 snapshot/replay 竞态下仍能送达挂起状态。
                     let Some(seq) = event.seq else {
+                        if matches!(
+                            event.payload,
+                            EventPayload::Live(LiveEventPayload::ExtensionEvent(_))
+                        ) {
+                            buffered.push(LiveInput::Event(event));
+                        }
                         continue;
                     };
                     // 已被 replay 覆盖的 durable 事件也丢弃。

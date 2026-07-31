@@ -335,6 +335,19 @@ impl Session {
         }
     }
 
+    pub(crate) async fn emit_live_required(
+        &self,
+        turn_id: Option<&TurnId>,
+        payload: LiveEventPayload,
+    ) -> Result<(), SessionError> {
+        let event = LiveEvent::new(self.id().clone(), turn_id.cloned(), payload);
+        self.runtime
+            .event_sink()
+            .publish_live_required(self.runtime.store().clone(), event)
+            .await?;
+        Ok(())
+    }
+
     pub async fn emit_durable(
         &self,
         turn_id: Option<&TurnId>,

@@ -17,8 +17,23 @@ impl SessionResourceStore {
         session_id: &SessionId,
         create: impl FnOnce() -> Arc<SessionRuntimeState>,
     ) -> Arc<SessionRuntimeState> {
+        self.resources_for_with_status(session_id, create).0
+    }
+
+    pub fn resources_for_with_status(
+        &self,
+        session_id: &SessionId,
+        create: impl FnOnce() -> Arc<SessionRuntimeState>,
+    ) -> (Arc<SessionRuntimeState>, bool) {
         let mut entries = self.entries.lock();
-        Arc::clone(entries.entry(session_id.clone()).or_insert_with(create))
+        match entries.entry(session_id.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => (Arc::clone(entry.get()), false),
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                let runtime = create();
+                entry.insert(Arc::clone(&runtime));
+                (runtime, true)
+            },
+        }
     }
 
     pub fn cleanup(&self, session_id: &SessionId) {

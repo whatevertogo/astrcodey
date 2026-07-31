@@ -30,6 +30,7 @@ fn cli_approval_bootstrap_opts(yolo: bool, manual: bool) -> BootstrapOptions {
     BootstrapOptions {
         default_approval_mode_if_unset: Some(ApprovalMode::Yolo),
         approval_mode_override,
+        disabled_extension_ids: std::collections::BTreeSet::from(["astrcode-ask-user".into()]),
         ..Default::default()
     }
 }

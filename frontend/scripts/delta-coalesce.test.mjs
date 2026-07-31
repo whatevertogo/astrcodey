@@ -242,9 +242,20 @@ const askUserPatch = reduceConversationDeltas(frameState, [
     schemaVersion: 1,
     payload: { sessionId: 'session-1', callId: 'call-1' },
   },
+  {
+    kind: 'extensionEvent',
+    extensionId: 'astrcode-ask-user',
+    eventType: 'ask_user.pending',
+    schemaVersion: 1,
+    payload: { ...askUserPending, questions: [...askUserPending.questions] },
+  },
 ])
-assert.deepEqual(askUserPatch.pendingAskUserQuestions, {})
-assert.deepEqual(askUserPatch.resolvedAskUserCallIds, { 'call-1': true })
+assert.equal(askUserPatch.pendingAskUserQuestions['call-1']?.callId, 'call-1')
+assert.equal(
+  askUserPatch.pendingAskUserQuestions['call-1']?.questions.length,
+  1
+)
+assert.deepEqual(askUserPatch.resolvedAskUserCallIds, {})
 
 const pendingDuringSnapshot = {
   ...askUserPending,
@@ -263,10 +274,28 @@ assert.deepEqual(
     true
   ),
   {
-    'call-snapshot': { ...askUserPending, callId: 'call-snapshot' },
-    'call-new': pendingDuringSnapshot,
+    pendingAskUserQuestions: {
+      'call-snapshot': { ...askUserPending, callId: 'call-snapshot' },
+      'call-new': pendingDuringSnapshot,
+    },
+    resolvedAskUserCallIds: { 'call-resolved': true },
   },
   'REST recovery must preserve a pending SSE event that arrived during the request and ignore resolved tombstones'
+)
+assert.deepEqual(
+  mergePendingAskUserSnapshot(
+    {},
+    { 'call-1': true },
+    [askUserPending],
+    'session-1',
+    new Set(),
+    false
+  ),
+  {
+    pendingAskUserQuestions: { 'call-1': askUserPending },
+    resolvedAskUserCallIds: {},
+  },
+  'an authoritative REST snapshot must allow a reused call ID'
 )
 
 const frameBuffer = new ConversationDeltaFrameBuffer({

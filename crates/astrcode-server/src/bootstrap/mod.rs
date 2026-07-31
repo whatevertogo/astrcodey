@@ -3,7 +3,12 @@
 //! 负责在启动时初始化所有核心组件：LLM 提供者、提示词组装器、
 //! 会话管理器、扩展运行器和上下文窗口设置。
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{config::ConfigStore, tool::SessionOperations};
@@ -52,6 +57,15 @@ pub(crate) async fn load_merged_config(
         config = astrcode_core::config::merge_overlay(config, overlay);
     }
     apply_approval_mode_bootstrap_options(&mut config, opts);
+    if !opts.disabled_extension_ids.is_empty() {
+        let states = config
+            .runtime
+            .extension_states
+            .get_or_insert_with(BTreeMap::new);
+        for extension_id in &opts.disabled_extension_ids {
+            states.insert(extension_id.clone(), false);
+        }
+    }
     Ok(config)
 }
 
@@ -126,6 +140,8 @@ pub struct BootstrapOptions {
     pub default_approval_mode_if_unset: Option<astrcode_core::permission::ApprovalMode>,
     /// 强制覆盖 `runtime.approvalMode`（如 CLI `--yolo` / `--manual`）。
     pub approval_mode_override: Option<astrcode_core::permission::ApprovalMode>,
+    /// 当前 transport 无法完成交互契约时强制禁用的扩展。
+    pub disabled_extension_ids: BTreeSet<String>,
 }
 
 /// 使用默认选项引导服务器运行时。
@@ -466,6 +482,7 @@ id = "overlay-model"
         let store = FileConfigStore::new(config_path);
         let opts = BootstrapOptions {
             working_dir: Some(workspace),
+            disabled_extension_ids: BTreeSet::from(["astrcode-ask-user".into()]),
             ..BootstrapOptions::default()
         };
 
@@ -474,6 +491,10 @@ id = "overlay-model"
         assert_eq!(config.active_profile, "overlay");
         assert_eq!(config.active_model, "overlay-model");
         assert_eq!(config.profiles[0].name, "overlay");
+        assert_eq!(
+            config.runtime.extension_states.as_ref().unwrap()["astrcode-ask-user"],
+            false
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }

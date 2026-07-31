@@ -113,6 +113,16 @@ impl SessionEventSink {
         self.lane(&event.session_id, journal)?.publish_live(event)
     }
 
+    pub async fn publish_live_required(
+        &self,
+        journal: Arc<dyn SessionEventJournal>,
+        event: LiveEvent,
+    ) -> Result<(), SessionEventPublishError> {
+        self.lane(&event.session_id, journal)?
+            .publish_live_required(event)
+            .await
+    }
+
     pub async fn sync(
         &self,
         journal: Arc<dyn SessionEventJournal>,
@@ -234,6 +244,16 @@ impl SessionEventLane {
             })
     }
 
+    async fn publish_live_required(
+        &self,
+        event: LiveEvent,
+    ) -> Result<(), SessionEventPublishError> {
+        self.commands
+            .send(PublishCommand::Live(event))
+            .await
+            .map_err(|_| SessionEventPublishError::Closed)
+    }
+
     async fn sync(&self) -> Result<(), SessionEventPublishError> {
         self.request(|reply| PublishCommand::Sync { reply }).await
     }
@@ -317,7 +337,9 @@ mod tests {
         task::Poll,
     };
 
-    use astrcode_core::event::{DurableEventPayload, EventPayload, LiveEventPayload};
+    use astrcode_core::event::{
+        DurableEventPayload, EventPayload, ExtensionEventData, LiveEventPayload,
+    };
     use tokio::sync::{Semaphore, mpsc};
 
     use super::*;
@@ -471,5 +493,86 @@ mod tests {
             sink.activate(&session_id),
             Err(SessionEventPublishError::Closed)
         ));
+    }
+
+    #[tokio::test]
+    async fn required_live_events_wait_for_a_full_publisher_lane() {
+        let session_id = SessionId::new("required-live-session");
+        let journal = Arc::new(ControlledJournal::new());
+        let journal_port: Arc<dyn SessionEventJournal> = journal.clone();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let sink = Arc::new(SessionEventSink::new(Arc::new(ChannelObserver(events_tx))));
+
+        let commit_sink = Arc::clone(&sink);
+        let commit_journal = Arc::clone(&journal_port);
+        let commit_session_id = session_id.clone();
+        let commit = tokio::spawn(async move {
+            commit_sink
+                .append(
+                    commit_journal,
+                    DurableEvent::session(commit_session_id, DurableEventPayload::TurnStarted),
+                )
+                .await
+        });
+        journal.append_started.acquire().await.unwrap().forget();
+
+        for _ in 0..EVENT_PUBLISH_CAPACITY {
+            sink.publish_live(
+                Arc::clone(&journal_port),
+                LiveEvent::session(session_id.clone(), LiveEventPayload::AgentRunStarted),
+            )
+            .unwrap();
+        }
+        assert!(matches!(
+            sink.publish_live(
+                Arc::clone(&journal_port),
+                LiveEvent::session(session_id.clone(), LiveEventPayload::AgentRunStarted),
+            ),
+            Err(SessionEventPublishError::Full { .. })
+        ));
+
+        let required_sink = Arc::clone(&sink);
+        let required_journal = Arc::clone(&journal_port);
+        let required_session_id = session_id.clone();
+        let mut required = tokio::spawn(async move {
+            required_sink
+                .publish_live_required(
+                    required_journal,
+                    LiveEvent::session(
+                        required_session_id,
+                        LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                            extension_id: "ask-user".into(),
+                            event_type: "pending".into(),
+                            schema_version: 1,
+                            payload: serde_json::json!({}),
+                        }),
+                    ),
+                )
+                .await
+        });
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut required)
+                .await
+                .is_err()
+        );
+
+        journal.append_release.add_permits(1);
+        commit.await.unwrap().unwrap();
+        required.await.unwrap().unwrap();
+        sink.shutdown().await;
+
+        let mut saw_required = false;
+        while let Ok(event) = events_rx.try_recv() {
+            if matches!(
+                event.payload,
+                EventPayload::Live(LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                    ref event_type,
+                    ..
+                })) if event_type == "pending"
+            ) {
+                saw_required = true;
+            }
+        }
+        assert!(saw_required);
     }
 }

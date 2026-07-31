@@ -42,23 +42,35 @@ export function mergePendingAskUserSnapshot(
   sessionId: string,
   pendingAtStart: ReadonlySet<string>,
   eventsArrivedDuringRequest: boolean
-): Record<string, PendingAskUserQuestion> {
+): Pick<
+  ConversationRenderState,
+  'pendingAskUserQuestions' | 'resolvedAskUserCallIds'
+> {
   const pending = Object.fromEntries(
     snapshot
       .filter(
         (question) =>
-          question.sessionId === sessionId && !resolvedCallIds[question.callId]
+          question.sessionId === sessionId &&
+          (!eventsArrivedDuringRequest || !resolvedCallIds[question.callId])
       )
       .map((question) => [question.callId, question])
   )
-  if (!eventsArrivedDuringRequest) return pending
-
-  for (const [callId, question] of Object.entries(currentPending)) {
-    if (!pendingAtStart.has(callId) && !resolvedCallIds[callId]) {
-      pending[callId] = question
+  if (eventsArrivedDuringRequest) {
+    for (const [callId, question] of Object.entries(currentPending)) {
+      if (!pendingAtStart.has(callId) && !resolvedCallIds[callId]) {
+        pending[callId] = question
+      }
     }
   }
-  return pending
+
+  const nextResolved = { ...resolvedCallIds }
+  for (const callId of Object.keys(pending)) {
+    delete nextResolved[callId]
+  }
+  return {
+    pendingAskUserQuestions: pending,
+    resolvedAskUserCallIds: nextResolved,
+  }
 }
 
 function sameControlState(
@@ -229,11 +241,13 @@ export function reduceConversationDeltas(
         if (delta.eventType === 'ask_user.pending') {
           try {
             const pending = decodePendingAskUserQuestion(delta.payload)
-            if (
-              resolvedAskUserCallIds[pending.callId] ||
-              pendingAskUserQuestions[pending.callId]
-            ) {
+            if (pendingAskUserQuestions[pending.callId]) {
               break
+            }
+            if (resolvedAskUserCallIds[pending.callId]) {
+              const nextResolved = { ...resolvedAskUserCallIds }
+              delete nextResolved[pending.callId]
+              resolvedAskUserCallIds = nextResolved
             }
             pendingAskUserQuestions = {
               ...pendingAskUserQuestions,
@@ -246,7 +260,14 @@ export function reduceConversationDeltas(
           break
         }
         if (delta.eventType === 'ask_user.resolved') {
-          const callId = delta.payload.callId
+          if (
+            typeof delta.payload !== 'object' ||
+            delta.payload === null ||
+            Array.isArray(delta.payload)
+          ) {
+            break
+          }
+          const callId = (delta.payload as Record<string, unknown>).callId
           if (typeof callId !== 'string') break
           if (
             resolvedAskUserCallIds[callId] &&

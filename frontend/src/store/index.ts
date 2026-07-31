@@ -306,7 +306,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         return
       }
       set((current) => {
-        const pending = mergePendingAskUserSnapshot(
+        return mergePendingAskUserSnapshot(
           current.pendingAskUserQuestions,
           current.resolvedAskUserCallIds,
           response.questions,
@@ -314,7 +314,6 @@ export const useAppStore = create<AppState>((set, get) => ({
           pendingAtStart,
           current.askUserEventRevision !== revisionAtStart
         )
-        return { pendingAskUserQuestions: pending }
       })
     } catch (error) {
       console.debug('Failed to refresh pending ask-user questions:', error)

@@ -414,7 +414,7 @@ fn indent_body(body: &str) -> String {
 mod tests {
     use std::path::Path;
 
-    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
+    use astrcode_core::tool::{ExecutionMode, ToolOrigin, ToolPromptMetadata, ToolPromptTag};
 
     use super::*;
 
@@ -464,6 +464,7 @@ mod tests {
                 "Lookup through a configured extension.",
                 ToolOrigin::Extension,
             ),
+            tool("agent", "Delegate work.", ToolOrigin::Bundled),
         ];
         let input = SystemPromptInput {
             working_dir: "/test".into(),
@@ -493,7 +494,16 @@ mod tests {
                 },
             ],
             extra_instructions: Some("extra body".into()),
-            tool_prompt_metadata: std::collections::HashMap::new(),
+            tool_prompt_metadata: std::collections::HashMap::from([
+                (
+                    "mcp__demo__search".into(),
+                    ToolPromptMetadata::new("").prompt_tag(ToolPromptTag::System),
+                ),
+                (
+                    "agent".into(),
+                    ToolPromptMetadata::new("").prompt_tag(ToolPromptTag::Collaboration),
+                ),
+            ]),
         };
 
         let prompt = build_system_prompt(&input);
@@ -513,6 +523,9 @@ mod tests {
         assert!(prompt.contains("- `read`"));
         assert!(prompt.contains("External MCP Tools"));
         assert!(prompt.contains("- `mcp__demo__search`"));
+        assert!(prompt.contains("Agent Collaboration Tools"));
+        assert_eq!(prompt.matches("- `mcp__demo__search`").count(), 1);
+        assert_eq!(prompt.matches("- `agent`").count(), 1);
         assert!(prompt.contains("Extension Tools"));
         assert!(prompt.contains("- `extension_lookup`"));
         assert!(prompt.contains("[SystemPromptInstruction]\n  extra hint"));

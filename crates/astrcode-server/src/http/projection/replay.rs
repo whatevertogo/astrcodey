@@ -1,7 +1,7 @@
 //! 重放历史事件 → ConversationDeltaDto。
 
 use astrcode_core::event::{DurableEventPayload, Event, Phase};
-use astrcode_protocol::http::ConversationDeltaDto;
+use astrcode_protocol::http::{ConversationDeltaDto, ToolApprovalDto};
 
 use super::{
     blocks::{block_from_payload, streaming_tool_call_block},
@@ -40,12 +40,45 @@ pub(in crate::http) fn event_to_replay_deltas(
             ),
         }];
     }
-    if matches!(payload, DurableEventPayload::TurnCompleted { .. }) {
-        return vec![ConversationDeltaDto::UpdateControlState {
-            control: control_from_phase(Phase::Idle, has_messages),
-        }];
+    match payload {
+        DurableEventPayload::TurnStarted => {
+            vec![ConversationDeltaDto::UpdateControlState {
+                control: control_from_phase(Phase::Thinking, has_messages),
+            }]
+        },
+        DurableEventPayload::TurnCompleted { .. } => {
+            vec![ConversationDeltaDto::UpdateControlState {
+                control: control_from_phase(Phase::Idle, has_messages),
+            }]
+        },
+        DurableEventPayload::ToolApprovalRequested {
+            call_id,
+            prompt,
+            rule_key,
+            ..
+        } => vec![ConversationDeltaDto::ToolApprovalRequested {
+            approval: ToolApprovalDto {
+                call_id: call_id.to_string(),
+                prompt: prompt.clone(),
+                rule_key: rule_key.clone(),
+            },
+        }],
+        DurableEventPayload::ToolApprovalResolved {
+            call_id, decision, ..
+        } => vec![ConversationDeltaDto::ToolApprovalResolved {
+            call_id: call_id.to_string(),
+            decision: (*decision).into(),
+        }],
+        DurableEventPayload::ExtensionEvent(extension) => {
+            vec![ConversationDeltaDto::ExtensionEvent {
+                extension_id: extension.extension_id.clone(),
+                event_type: extension.event_type.clone(),
+                schema_version: extension.schema_version,
+                payload: extension.payload.clone(),
+            }]
+        },
+        _ => Vec::new(),
     }
-    Vec::new()
 }
 
 #[cfg(test)]
@@ -95,6 +128,8 @@ mod tests {
         AppendBlock,
         Rehydrate,
         ControlState,
+        Approval,
+        ExtensionEvent,
         Empty,
     }
 
@@ -109,7 +144,11 @@ mod tests {
         match payload {
             // 结构性改写，无法增量重放 → 客户端必须重拉快照。
             TranscriptRewritten { .. } | SessionForked { .. } => ReplayExpectation::Rehydrate,
-            TurnCompleted { .. } => ReplayExpectation::ControlState,
+            TurnStarted | TurnCompleted { .. } => ReplayExpectation::ControlState,
+            ToolApprovalRequested { .. } | ToolApprovalResolved { .. } => {
+                ReplayExpectation::Approval
+            },
+            ExtensionEvent(_) => ReplayExpectation::ExtensionEvent,
             // 经 block_from_payload 委托，或 ToolCallRequested 的流式 block 分支产出可见 block。
             UserMessage { .. }
             | AssistantMessageCompleted { .. }
@@ -125,17 +164,13 @@ mod tests {
             | ModelIdChanged { .. }
             | SessionToolsConfigured { .. }
             | SystemPromptConfigured { .. }
-            | TurnStarted
             | TurnAbortedContext
             | UserInputAccepted { .. }
             | TokenUsageRecorded { .. }
-            | ToolApprovalRequested { .. }
-            | ToolApprovalResolved { .. }
             | AgentSessionSpawned { .. }
             | AgentSessionCompleted { .. }
             | AgentSessionFailed { .. }
-            | AgentSessionRecycled { .. }
-            | ExtensionEvent(_) => ReplayExpectation::Empty,
+            | AgentSessionRecycled { .. } => ReplayExpectation::Empty,
         }
     }
 
@@ -168,6 +203,26 @@ mod tests {
             DurableEventPayload::TurnCompleted {
                 finish_reason: "stop".into(),
             },
+            DurableEventPayload::TurnStarted,
+            DurableEventPayload::ToolApprovalRequested {
+                call_id: ToolCallId::new("call-approval"),
+                tool_name: "shell".into(),
+                prompt: "Approve shell?".into(),
+                rule_key: Some("shell:pwd".into()),
+                source: astrcode_core::permission::ApprovalSource::Core,
+                arguments: serde_json::json!({"cmd": "pwd"}),
+            },
+            DurableEventPayload::ToolApprovalResolved {
+                call_id: ToolCallId::new("call-approval"),
+                decision: astrcode_core::permission::ApprovalDecision::AllowOnce,
+                detail: None,
+            },
+            DurableEventPayload::ExtensionEvent(astrcode_core::event::ExtensionEventData {
+                extension_id: "extension".into(),
+                event_type: "event".into(),
+                schema_version: 1,
+                payload: serde_json::json!(["scalar-compatible"]),
+            }),
             // 委托 block_from_payload → AppendBlock
             DurableEventPayload::UserMessage {
                 message_id: new_message_id(),
@@ -216,6 +271,18 @@ mod tests {
             ReplayExpectation::ControlState => assert!(
                 matches!(deltas, [ConversationDeltaDto::UpdateControlState { .. }]),
                 "seq {seq}: expected UpdateControlState, got {deltas:?}"
+            ),
+            ReplayExpectation::Approval => assert!(
+                matches!(
+                    deltas,
+                    [ConversationDeltaDto::ToolApprovalRequested { .. }]
+                        | [ConversationDeltaDto::ToolApprovalResolved { .. }]
+                ),
+                "seq {seq}: expected approval delta, got {deltas:?}"
+            ),
+            ReplayExpectation::ExtensionEvent => assert!(
+                matches!(deltas, [ConversationDeltaDto::ExtensionEvent { .. }]),
+                "seq {seq}: expected ExtensionEvent, got {deltas:?}"
             ),
             ReplayExpectation::Empty => assert!(
                 deltas.is_empty(),

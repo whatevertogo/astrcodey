@@ -42,6 +42,7 @@ impl InProcessTransport {
     pub fn start() -> Self {
         Self::start_with(astrcode_server::bootstrap::BootstrapOptions {
             default_approval_mode_if_unset: Some(astrcode_core::permission::ApprovalMode::Yolo),
+            disabled_extension_ids: std::collections::BTreeSet::from(["astrcode-ask-user".into()]),
             ..Default::default()
         })
     }
@@ -76,8 +77,19 @@ impl InProcessTransport {
             let mut notifications = server_app.event_bus().subscribe_all_notifications();
             let event_tx = tx.clone();
             let event_forwarder = tokio::spawn(async move {
-                while let Ok(notification) = notifications.recv().await {
-                    let _ = event_tx.send(notification);
+                loop {
+                    match notifications.recv().await {
+                        Ok(notification) => {
+                            let _ = event_tx.send(notification);
+                        },
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(
+                                skipped,
+                                "in-process event forwarder lagged; resuming with latest events"
+                            );
+                        },
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
                 }
             });
             let _ = ready_tx.send(BootstrapState::Ready);

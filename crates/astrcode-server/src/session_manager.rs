@@ -101,9 +101,13 @@ impl SessionManager {
     }
 
     fn runtime_for(&self, session_id: &SessionId) -> Arc<SessionRuntimeState> {
+        self.runtime_for_with_status(session_id).0
+    }
+
+    fn runtime_for_with_status(&self, session_id: &SessionId) -> (Arc<SessionRuntimeState>, bool) {
         self.runtime_services
             .session_resources()
-            .resources_for(session_id, || {
+            .resources_for_with_status(session_id, || {
                 Arc::new(SessionRuntimeState::new_with_event_sink(
                     session_id.clone(),
                     self.event_store.clone(),
@@ -287,33 +291,42 @@ impl SessionManager {
     }
 
     pub(crate) async fn open(&self, session_id: SessionId) -> Result<Session, SessionManagerError> {
-        let runtime = self.runtime_for(&session_id);
-        runtime.wait_for_creation().await?;
-        loop {
-            match self.transitions.begin_open(&session_id) {
-                TransitionStart::Waiting(pending) => {
-                    pending.wait().await;
-                },
-                TransitionStart::Started(pending) => {
-                    let opening = SessionTransitionGuard::new(
-                        Arc::clone(&self.transitions),
-                        session_id.clone(),
-                        pending,
-                    );
-                    let session =
-                        Session::open(Arc::clone(&runtime), Arc::clone(&self.runtime_services))
+        let (runtime, inserted) = self.runtime_for_with_status(&session_id);
+        let result = async {
+            runtime.wait_for_creation().await?;
+            loop {
+                match self.transitions.begin_open(&session_id) {
+                    TransitionStart::Waiting(pending) => {
+                        pending.wait().await;
+                    },
+                    TransitionStart::Started(pending) => {
+                        let opening = SessionTransitionGuard::new(
+                            Arc::clone(&self.transitions),
+                            session_id.clone(),
+                            pending,
+                        );
+                        let session =
+                            Session::open(Arc::clone(&runtime), Arc::clone(&self.runtime_services))
+                                .await?;
+                        self.event_sink
+                            .activate(&session_id)
+                            .map_err(SessionError::from)?;
+                        session
+                            .ensure_lifecycle_initialized(ExtensionEvent::SessionResume)
                             .await?;
-                    self.event_sink
-                        .activate(&session_id)
-                        .map_err(SessionError::from)?;
-                    session
-                        .ensure_lifecycle_initialized(ExtensionEvent::SessionResume)
-                        .await?;
-                    opening.complete();
-                    return Ok(session);
-                },
+                        opening.complete();
+                        return Ok(session);
+                    },
+                }
             }
         }
+        .await;
+        if inserted && result.is_err() {
+            self.runtime_services
+                .session_resources()
+                .cleanup(&session_id);
+        }
+        result
     }
 
     pub(crate) async fn delete(&self, session_id: &SessionId) -> Result<(), SessionManagerError> {
@@ -1565,6 +1578,21 @@ mod tests {
 
     #[tokio::test]
     async fn failed_creation_steps_discard_session_resources() {
+        let missing_store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+        let missing_services = test_runtime_services();
+        let missing_manager = SessionManager::new(
+            Arc::clone(&missing_store),
+            Arc::clone(&missing_services),
+            Vec::new(),
+        );
+        let missing_id = SessionId::new("missing-session");
+        assert!(missing_manager.open(missing_id.clone()).await.is_err());
+        assert_runtime_was_released(
+            missing_services.as_ref(),
+            Arc::clone(&missing_store),
+            &missing_id,
+        );
+
         assert_root_replay_failure_is_compensated(ReplayFailure::Empty).await;
         assert_root_replay_failure_is_compensated(ReplayFailure::Storage).await;
 

@@ -84,11 +84,12 @@ impl PendingRegistry {
         let key = PendingKey::new(&question.session_id, &question.call_id);
         let (sender, receiver) = oneshot::channel();
         let mut state = self.state.lock();
-        if state.pending.contains_key(&key) || state.resolved.contains(&key) {
+        if state.pending.contains_key(&key) {
             return Err(ExtensionError::Internal(
                 "askUser call id was already used".into(),
             ));
         }
+        state.resolved.remove(&key);
         state.pending.insert(
             key.clone(),
             PendingEntry {

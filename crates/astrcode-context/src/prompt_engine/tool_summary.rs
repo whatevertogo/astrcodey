@@ -17,17 +17,6 @@ pub(super) fn tool_summary(input: &SystemPromptInput<'_>) -> Option<String> {
         return None;
     }
 
-    let mut lines = Vec::new();
-    let mut builtin: Vec<&ToolDefinition> = input
-        .tools
-        .iter()
-        .filter(|tool| {
-            tool.origin == ToolOrigin::Builtin
-                || input.tool_prompt_metadata.contains_key(&tool.name)
-        })
-        .collect();
-    builtin.sort_by_key(|tool| (tool_summary_rank(&tool.name), tool.name.clone()));
-
     let is_collab = |tool: &&ToolDefinition| {
         input
             .tool_prompt_metadata
@@ -35,11 +24,30 @@ pub(super) fn tool_summary(input: &SystemPromptInput<'_>) -> Option<String> {
             .map(|metadata| metadata.has_tag(ToolPromptTag::Collaboration))
             .unwrap_or(false)
     };
-    let (collab, regular): (Vec<_>, Vec<_>) = builtin.into_iter().partition(is_collab);
+    let mut collab = Vec::new();
+    let mut builtin = Vec::new();
+    let mut mcp_tools = Vec::new();
+    let mut extension_tools = Vec::new();
+    for tool in input.tools {
+        if is_collab(&tool) {
+            collab.push(tool);
+        } else if tool.name.starts_with("mcp__") {
+            mcp_tools.push(tool);
+        } else {
+            match tool.origin {
+                ToolOrigin::Builtin => builtin.push(tool),
+                ToolOrigin::Bundled | ToolOrigin::Extension | ToolOrigin::Sdk => {
+                    extension_tools.push(tool);
+                },
+            }
+        }
+    }
+    builtin.sort_by_key(|tool| (tool_summary_rank(&tool.name), tool.name.clone()));
 
-    if !regular.is_empty() {
+    let mut lines = Vec::new();
+    if !builtin.is_empty() {
         lines.push(TOOL_SECTION_BUILTIN.into());
-        push_tool_list_entries(&mut lines, &regular, true);
+        push_tool_list_entries(&mut lines, &builtin, true);
     }
     if !collab.is_empty() {
         push_tool_section(
@@ -50,24 +58,11 @@ pub(super) fn tool_summary(input: &SystemPromptInput<'_>) -> Option<String> {
         push_tool_list_entries(&mut lines, &collab, false);
     }
 
-    let mcp_tools: Vec<_> = input
-        .tools
-        .iter()
-        .filter(|tool| tool.name.starts_with("mcp__"))
-        .collect();
     if !mcp_tools.is_empty() {
         push_tool_section(&mut lines, TOOL_SECTION_EXTERNAL_MCP, None);
         push_tool_list_entries(&mut lines, &mcp_tools, false);
     }
 
-    let extension_tools: Vec<_> = input
-        .tools
-        .iter()
-        .filter(|tool| {
-            tool.origin == ToolOrigin::Extension
-                || (tool.origin == ToolOrigin::Bundled && !tool.name.starts_with("mcp__"))
-        })
-        .collect();
     if !extension_tools.is_empty() {
         push_tool_section(&mut lines, TOOL_SECTION_EXTENSION, None);
         push_tool_list_entries(&mut lines, &extension_tools, false);

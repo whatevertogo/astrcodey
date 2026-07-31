@@ -506,7 +506,7 @@ pub fn parse_retry_after_ms(headers: &reqwest::header::HeaderMap) -> Option<u64>
         .to_str()
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|seconds| seconds * 1000)
+        .and_then(|seconds| seconds.checked_mul(1000))
 }
 
 pub fn transport_error(stage: &str, endpoint: &str, error: reqwest::Error) -> LlmError {
@@ -713,6 +713,9 @@ mod tests {
 
         headers.insert(RETRY_AFTER, "2".parse().unwrap());
         assert_eq!(parse_retry_after_ms(&headers), Some(2000));
+
+        headers.insert(RETRY_AFTER, u64::MAX.to_string().parse().unwrap());
+        assert_eq!(parse_retry_after_ms(&headers), None);
 
         // 非 delta-seconds(HTTP-date 等)不解析,返回 None 而非猜测。
         headers.insert(

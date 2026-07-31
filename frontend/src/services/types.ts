@@ -267,7 +267,7 @@ export type ConversationDelta =
       extensionId: string
       eventType: string
       schemaVersion: number
-      payload: Record<string, unknown>
+      payload: unknown
     }
   | {
       kind: 'toolApprovalRequested'

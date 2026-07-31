@@ -394,6 +394,16 @@ mod tests {
             Err(ResolveError::AlreadyResolved)
         );
 
+        let (reused, mut reused_guard) = registry
+            .register(
+                pending("session-1", "call-1"),
+                Arc::new(RecordingEvents::default()),
+            )
+            .unwrap();
+        registry.reject("session-1", "call-1").unwrap();
+        assert_eq!(reused.await.unwrap(), Resolution::Rejected);
+        reused_guard.disarm();
+
         let event_types = events
             .0
             .lock()
