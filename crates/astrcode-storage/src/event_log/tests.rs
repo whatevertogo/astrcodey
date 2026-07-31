@@ -189,4 +189,19 @@ fn legacy_event_shapes_upgrade_at_the_storage_boundary() {
         &compacted.event.payload,
         DurableEventPayload::TranscriptRewritten { source_seq: 2, .. }
     ));
+
+    let malformed_current = envelope(
+        4,
+        serde_json::json!({
+            "type": "session_started",
+            "working_dir": "/workspace",
+            "model_id": "model",
+            "tool_selection": { "mode": "all", "except": [] },
+            "initial_system_prompt": {
+                "text": 1,
+                "fingerprint": "fingerprint",
+            },
+        }),
+    );
+    assert!(parse_event_line(path, 5, &malformed_current).is_err());
 }

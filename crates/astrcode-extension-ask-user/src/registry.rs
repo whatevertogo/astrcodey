@@ -62,6 +62,7 @@ struct PendingEntry {
     question: PendingQuestion,
     sender: oneshot::Sender<Resolution>,
     events: Arc<dyn ExtensionEventSink>,
+    registration: Arc<()>,
 }
 
 #[derive(Default)]
@@ -83,6 +84,7 @@ impl PendingRegistry {
     ) -> Result<(oneshot::Receiver<Resolution>, PendingGuard), ExtensionError> {
         let key = PendingKey::new(&question.session_id, &question.call_id);
         let (sender, receiver) = oneshot::channel();
+        let registration = Arc::new(());
         let mut state = self.state.lock();
         if state.pending.contains_key(&key) {
             return Err(ExtensionError::Internal(
@@ -96,6 +98,7 @@ impl PendingRegistry {
                 question: question.clone(),
                 sender,
                 events: Arc::clone(&events),
+                registration: Arc::clone(&registration),
             },
         );
         drop(state);
@@ -105,7 +108,7 @@ impl PendingRegistry {
             1,
             serde_json::to_value(&question).unwrap_or_else(|_| json!({})),
         ) {
-            self.abandon(&key);
+            self.abandon_registered(&key, &registration);
             return Err(error);
         }
 
@@ -114,6 +117,7 @@ impl PendingRegistry {
             PendingGuard {
                 registry: Arc::clone(self),
                 key: Some(key),
+                registration,
             },
         ))
     }
@@ -210,8 +214,32 @@ impl PendingRegistry {
         Ok(())
     }
 
-    fn abandon(&self, key: &PendingKey) {
-        self.state.lock().pending.remove(key);
+    fn abandon_registered(&self, key: &PendingKey, registration: &Arc<()>) {
+        let mut state = self.state.lock();
+        let Some(entry) = state.pending.get(key) else {
+            return;
+        };
+        if Arc::ptr_eq(&entry.registration, registration) {
+            state.pending.remove(key);
+        }
+    }
+
+    fn resolve_registered(&self, key: &PendingKey, registration: &Arc<()>, resolution: Resolution) {
+        let entry = {
+            let mut state = self.state.lock();
+            let Some(entry) = state.pending.get(key) else {
+                return;
+            };
+            if !Arc::ptr_eq(&entry.registration, registration) {
+                return;
+            }
+            let Some(entry) = state.pending.remove(key) else {
+                return;
+            };
+            state.resolved.insert(key.clone());
+            entry
+        };
+        finish_entry(key.clone(), entry, resolution);
     }
 }
 
@@ -240,6 +268,7 @@ fn finish_entry(key: PendingKey, entry: PendingEntry, resolution: Resolution) {
 pub struct PendingGuard {
     registry: Arc<PendingRegistry>,
     key: Option<PendingKey>,
+    registration: Arc<()>,
 }
 
 impl PendingGuard {
@@ -253,6 +282,7 @@ impl Drop for PendingGuard {
         let Some(key) = self.key.take() else {
             return;
         };
-        let _ = self.registry.resolve(&key, Resolution::TurnCancelled);
+        self.registry
+            .resolve_registered(&key, &self.registration, Resolution::TurnCancelled);
     }
 }

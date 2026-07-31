@@ -101,13 +101,9 @@ impl SessionManager {
     }
 
     fn runtime_for(&self, session_id: &SessionId) -> Arc<SessionRuntimeState> {
-        self.runtime_for_with_status(session_id).0
-    }
-
-    fn runtime_for_with_status(&self, session_id: &SessionId) -> (Arc<SessionRuntimeState>, bool) {
         self.runtime_services
             .session_resources()
-            .resources_for_with_status(session_id, || {
+            .resources_for(session_id, || {
                 Arc::new(SessionRuntimeState::new_with_event_sink(
                     session_id.clone(),
                     self.event_store.clone(),
@@ -291,9 +287,9 @@ impl SessionManager {
     }
 
     pub(crate) async fn open(&self, session_id: SessionId) -> Result<Session, SessionManagerError> {
-        let (runtime, inserted) = self.runtime_for_with_status(&session_id);
+        let runtime = self.runtime_for(&session_id);
+        runtime.wait_for_creation().await?;
         let result = async {
-            runtime.wait_for_creation().await?;
             loop {
                 match self.transitions.begin_open(&session_id) {
                     TransitionStart::Waiting(pending) => {
@@ -321,10 +317,10 @@ impl SessionManager {
             }
         }
         .await;
-        if inserted && result.is_err() {
+        if result.is_err() {
             self.runtime_services
                 .session_resources()
-                .cleanup(&session_id);
+                .cleanup_if_unshared(&session_id, &runtime);
         }
         result
     }
@@ -1586,6 +1582,13 @@ mod tests {
             Vec::new(),
         );
         let missing_id = SessionId::new("missing-session");
+        let shared_runtime = missing_manager.runtime_for(&missing_id);
+        assert!(missing_manager.open(missing_id.clone()).await.is_err());
+        assert!(Arc::ptr_eq(
+            &shared_runtime,
+            &missing_manager.runtime_for(&missing_id)
+        ));
+        drop(shared_runtime);
         assert!(missing_manager.open(missing_id.clone()).await.is_err());
         assert_runtime_was_released(
             missing_services.as_ref(),

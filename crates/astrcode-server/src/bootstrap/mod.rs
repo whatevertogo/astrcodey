@@ -491,10 +491,7 @@ id = "overlay-model"
         assert_eq!(config.active_profile, "overlay");
         assert_eq!(config.active_model, "overlay-model");
         assert_eq!(config.profiles[0].name, "overlay");
-        assert_eq!(
-            config.runtime.extension_states.as_ref().unwrap()["astrcode-ask-user"],
-            false
-        );
+        assert!(!config.runtime.extension_states.as_ref().unwrap()["astrcode-ask-user"]);
 
         std::fs::remove_dir_all(root).unwrap();
     }

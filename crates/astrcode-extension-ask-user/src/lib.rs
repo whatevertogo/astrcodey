@@ -400,6 +400,8 @@ mod tests {
                 Arc::new(RecordingEvents::default()),
             )
             .unwrap();
+        drop(guard);
+        assert_eq!(registry.list("session-1").len(), 1);
         registry.reject("session-1", "call-1").unwrap();
         assert_eq!(reused.await.unwrap(), Resolution::Rejected);
         reused_guard.disarm();
