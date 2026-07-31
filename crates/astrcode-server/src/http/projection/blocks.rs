@@ -119,7 +119,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             arguments,
             arguments_json.as_ref(),
             result.content.clone(),
-            tool_result_status(result.is_error),
+            ToolCallStatusDto::Complete,
             tool_terminal_metadata(&result.metadata, result.duration_ms),
         )),
         DurableEventPayload::ToolCallFailed {
@@ -316,12 +316,12 @@ fn push_tool_result_block(
         let LlmContent::ToolResult {
             tool_call_id,
             content,
-            is_error,
+            ..
         } = content
         else {
             continue;
         };
-        let status = tool_status_from_message(*is_error, source);
+        let status = tool_status_from_message(source);
         if let Some(block_index) = tool_block_indices.get(tool_call_id) {
             if let Some(SequencedConversationBlock {
                 block:
@@ -363,7 +363,7 @@ fn push_tool_result_block(
                 name: fallback_name,
                 arguments: String::new(),
                 text: visible_ui_text(message),
-                status: tool_status_from_message(false, source),
+                status: tool_status_from_message(source),
                 metadata: None,
                 approval: None,
                 arguments_json: None,
@@ -372,21 +372,12 @@ fn push_tool_result_block(
     }
 }
 
-/// 工具执行完成（非 failed/cancelled）的状态判定：结果含错误则为 Error。
-fn tool_result_status(is_error: bool) -> ToolCallStatusDto {
-    if is_error {
-        ToolCallStatusDto::Error
-    } else {
-        ToolCallStatusDto::Complete
-    }
-}
-
-fn tool_status_from_message(is_error: bool, source: Option<&str>) -> ToolCallStatusDto {
+fn tool_status_from_message(source: Option<&str>) -> ToolCallStatusDto {
     match source {
         Some(TOOL_CALL_FAILED_SOURCE) => ToolCallStatusDto::Failed,
         Some(TOOL_CALL_CANCELLED_SOURCE) => ToolCallStatusDto::Cancelled,
-        // ToolCallCompleted 的 error 结果（执行成功但结果含错误）不带 source 标记。
-        _ => tool_result_status(is_error),
+        // `ToolResult.is_error` describes result semantics, not tool-call lifecycle.
+        _ => ToolCallStatusDto::Complete,
     }
 }
 
@@ -466,7 +457,12 @@ mod tests {
     fn transcript_blocks_restore_tool_terminal_statuses() {
         let cases = [
             ("complete", None, false, ToolCallStatusDto::Complete),
-            ("error", None, true, ToolCallStatusDto::Error),
+            (
+                "completed-error-result",
+                None,
+                true,
+                ToolCallStatusDto::Complete,
+            ),
             (
                 "failed",
                 Some(TOOL_CALL_FAILED_SOURCE),

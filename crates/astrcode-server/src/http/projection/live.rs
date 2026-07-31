@@ -460,7 +460,7 @@ mod tests {
                     arguments: String::new(),
                     arguments_json: None,
                 }),
-                ToolCallStatusDto::Error,
+                ToolCallStatusDto::Complete,
                 "domain error",
                 None,
             ),
