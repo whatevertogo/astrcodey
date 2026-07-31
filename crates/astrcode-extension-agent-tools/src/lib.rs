@@ -523,7 +523,6 @@ mod tests {
                     small: Some("haiku".into()),
                     ..Default::default()
                 },
-                ..Default::default()
             },
             ..Default::default()
         };
