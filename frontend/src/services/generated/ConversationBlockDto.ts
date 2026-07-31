@@ -28,4 +28,4 @@ approval?: ToolApprovalDto | null,
 /**
  * 原始 JSON 参数，供前端结构化解析（如 agent 工具的 task/agent 提取）。
  */
-argumentsJson?: JsonValue | null, } | { "kind": "error", id: string, message: string, } | { "kind": "systemNote", id: string, text: string, } | { "kind": "compactSummary", id: string, summary: string, trigger: string, preTokens: number, postTokens: number, transcriptPath?: string | null, };
+argumentsJson?: JsonValue | null, } | { "kind": "error", id: string, message: string, } | { "kind": "recap", id: string, text: string, source: string, } | { "kind": "systemNote", id: string, text: string, } | { "kind": "compactSummary", id: string, summary: string, trigger: string, preTokens: number, postTokens: number, transcriptPath?: string | null, };

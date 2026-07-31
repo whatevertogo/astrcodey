@@ -279,6 +279,19 @@ export async function deleteSession(sessionId: string): Promise<void> {
   })
 }
 
+/** 从源会话末尾 fork 出新会话；不传 cursor 时后端从最新持久化点分叉。 */
+export async function forkSession(
+  sessionId: string
+): Promise<CreateSessionResponse> {
+  return request<CreateSessionResponse>(
+    `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
+    {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }
+  )
+}
+
 export async function deleteProject(
   workingDir: string
 ): Promise<DeleteProjectResponseDto> {

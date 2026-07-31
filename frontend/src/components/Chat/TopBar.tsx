@@ -85,15 +85,17 @@ export default function TopBar({
           <span
             className={cn(
               'h-[9px] w-[9px] shrink-0 rounded-full opacity-70 shadow-[0_0_0_6px_theme(colors.accent-soft/12%)] transition-[background-color] duration-300 ease-out',
-              isSidebarOpen && 'sr-only',
+              isSidebarOpen && phase === 'idle' && 'sr-only',
               PHASE_BG_CLASS[phase] ?? PHASE_BG_CLASS.idle
             )}
             title={phase}
             aria-hidden="true"
           />
-          <span className="min-w-0 truncate text-[13px] font-semibold text-text-primary">
-            {isSidebarOpen ? '' : activeSessionTitle || 'AstrCode'}
-          </span>
+          {!isSidebarOpen && (
+            <span className="min-w-0 truncate text-[13px] font-semibold text-text-primary">
+              {activeSessionTitle || 'AstrCode'}
+            </span>
+          )}
           {phase !== 'idle' && (
             <span className="shrink-0 text-xs text-text-secondary">
               {PHASE_LABELS[phase] ?? phase}

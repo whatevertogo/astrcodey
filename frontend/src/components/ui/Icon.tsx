@@ -13,12 +13,14 @@ export type IconName =
   | 'users'
   | 'copy'
   | 'retry'
+  | 'recap'
   | 'chevron-down'
   | 'trash'
   | 'plus'
   | 'shield'
   | 'monitor'
   | 'branch'
+  | 'spark'
 
 type IconProps = SVGProps<SVGSVGElement> & {
   name: IconName
@@ -137,6 +139,18 @@ const icons: Record<
       <path d="M5 12h14" strokeWidth="2" />
     </svg>
   ),
+  recap: (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <path
+        d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Z"
+        strokeWidth="2"
+        strokeLinejoin="round"
+      />
+      <path d="M14 2v6h6" strokeWidth="2" strokeLinejoin="round" />
+      <path d="M9 13h6" strokeWidth="2" strokeLinecap="round" />
+      <path d="M9 17h6" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  ),
   shield: (props) => (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
       <path
@@ -159,6 +173,16 @@ const icons: Record<
       <circle cx="18" cy="6" r="3" strokeWidth="2" />
       <path d="M6 15V5" strokeWidth="2" />
       <path d="M6 5h6a6 6 0 0 1 6 6v-2" strokeWidth="2" />
+    </svg>
+  ),
+  spark: (props) => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" {...props}>
+      <path
+        d="M12 3.5c1.7 0 2.6 1.1 3.1 2.3 1.3-.1 2.7.4 3.6 1.6.9 1.2.9 2.7.4 3.9.9.9 1.4 2.3.9 3.7-.5 1.4-1.6 2.3-2.9 2.6-.4 1.2-1.4 2.3-2.9 2.5-1.5.2-2.8-.5-3.5-1.5-1.2.4-2.7.2-3.7-.9-1-1-1.3-2.5-.9-3.7-1.1-.7-1.8-1.9-1.7-3.4.1-1.5 1-2.6 2.1-3.2.2-1.3 1.1-2.5 2.5-3 1.4-.5 2.8 0 3.7.8.4-1 1.5-1.7 2.8-1.7Z"
+        strokeWidth="1.8"
+      />
+      <path d="m9 9 2.8 3L9 15" strokeWidth="1.8" />
+      <path d="M13.5 15H16" strokeWidth="1.8" />
     </svg>
   ),
 }

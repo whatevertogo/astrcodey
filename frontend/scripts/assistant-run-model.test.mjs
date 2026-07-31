@@ -117,7 +117,7 @@ const messageItems = buildMessageListItems([
 
 assert.deepEqual(
   messageItems.map((item) => item.type),
-  ['block', 'assistantRun', 'block']
+  ['block', 'assistantRun', 'block', 'forkRow']
 )
 assert.equal(messageItems[1].id, 'assistant-run:a4')
 

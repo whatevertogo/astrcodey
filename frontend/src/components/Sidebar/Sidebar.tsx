@@ -13,10 +13,7 @@ const NAV_ITEMS: Array<{
   icon: IconName
   label: string
   disabled?: boolean
-}> = [
-  { icon: 'edit', label: '新对话' },
-  { icon: 'plug', label: '插件' },
-]
+}> = [{ icon: 'edit', label: '新对话' }]
 
 const COLLAPSED_PROJECTS_STORAGE_KEY = 'astrcode:collapsedProjectDirs'
 
@@ -36,20 +33,6 @@ type SidebarContextMenu =
 
 function projectNameFromDir(workingDir: string): string {
   return workingDir.split(/[\\/]/).filter(Boolean).pop() ?? workingDir
-}
-
-function formatSessionAge(updatedAt: string): string {
-  const updated = new Date(updatedAt).getTime()
-  if (!Number.isFinite(updated)) return ''
-
-  const diffMs = Date.now() - updated
-  const minute = 60 * 1000
-  const hour = 60 * minute
-  const day = 24 * hour
-
-  if (diffMs < hour) return '刚刚'
-  if (diffMs < day) return `${Math.max(1, Math.floor(diffMs / hour))} 小时`
-  return `${Math.max(1, Math.floor(diffMs / day))} 天`
 }
 
 function sortByUpdatedDesc(sessions: SessionListItem[]): SessionListItem[] {
@@ -98,6 +81,7 @@ export default function Sidebar({
   const switchSession = useAppStore((s) => s.switchSession)
   const deleteSession = useAppStore((s) => s.deleteSession)
   const deleteProject = useAppStore((s) => s.deleteProject)
+  const forkSession = useAppStore((s) => s.forkSession)
 
   const [showNewProject, setShowNewProject] = useState(false)
   const [contextMenu, setContextMenu] = useState<SidebarContextMenu | null>(
@@ -240,18 +224,39 @@ export default function Sidebar({
 
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-sidebar-bg text-text-secondary">
-      <div className="flex h-14 shrink-0 items-center gap-3 px-2">
+      <div className="flex h-15 shrink-0 items-center gap-2 px-4">
+        <div
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-[17px] font-semibold tracking-[-0.015em] text-text-primary"
+          title={`AstrCode · ${phase}`}
+        >
+          <span className="truncate">AstrCode</span>
+        </div>
         <button
           type="button"
-          className="inline-flex h-7 w-24 items-center justify-center rounded-full bg-[#6d58ff] text-white shadow-[0_8px_22px_rgba(109,88,255,0.25)] transition-transform duration-150 active:scale-[0.98]"
-          aria-label="AstrCode"
-          title={`AstrCode ${phase}`}
+          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-muted hover:text-text-primary"
+          onClick={() => setShowNewProject(true)}
+          aria-label="新项目"
+          title="新项目"
         >
-          <Icon name="monitor" size={18} />
+          <Icon name="plus" size={16} />
         </button>
         <button
           type="button"
-          className="ml-auto inline-flex h-8 w-8 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-muted hover:text-text-primary"
+          className={cn(
+            'inline-flex h-8 w-8 items-center justify-center rounded-lg transition-colors hover:bg-surface-muted hover:text-text-primary',
+            activeView === 'plugins'
+              ? 'bg-surface-muted text-text-primary'
+              : 'text-text-muted'
+          )}
+          onClick={onOpenPlugins}
+          aria-label="打开插件"
+          title="插件"
+        >
+          <Icon name="plug" size={16} />
+        </button>
+        <button
+          type="button"
+          className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-muted hover:text-text-primary"
           onClick={onToggleSidebar}
           aria-label="切换边栏"
           title="边栏"
@@ -260,10 +265,9 @@ export default function Sidebar({
         </button>
       </div>
 
-      <div className="shrink-0 px-3 pt-2">
+      <div className="shrink-0 border-b border-border px-3 pb-3 pt-1">
         <div className="space-y-1">
           {NAV_ITEMS.map((item) => {
-            const isPlugins = item.label === '插件'
             const isNewConversation = item.label === '新对话'
             return (
               <button
@@ -271,16 +275,13 @@ export default function Sidebar({
                 type="button"
                 disabled={item.disabled}
                 className={cn(
-                  'flex min-h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-[15px] font-semibold outline-none transition-colors duration-150',
-                  isPlugins && activeView === 'plugins'
-                    ? 'bg-surface-muted text-text-primary'
-                    : 'text-text-primary hover:bg-surface-muted',
+                  'flex min-h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-[14px] font-medium outline-none transition-colors duration-150',
+                  'text-text-primary hover:bg-surface-muted',
                   item.disabled &&
                     'cursor-default opacity-70 hover:bg-transparent'
                 )}
                 onClick={() => {
                   if (isNewConversation) handleCreateConversation()
-                  if (isPlugins) onOpenPlugins()
                 }}
                 title={item.disabled ? '即将支持' : item.label}
               >
@@ -296,19 +297,7 @@ export default function Sidebar({
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-5 pt-8">
-        <div className="mb-3 flex items-center justify-between px-3">
-          <div className="text-[14px] font-semibold text-text-muted">项目</div>
-          <button
-            type="button"
-            className="inline-flex h-7 w-7 items-center justify-center rounded-lg text-text-muted transition-colors hover:bg-surface-muted hover:text-text-primary"
-            onClick={() => setShowNewProject(true)}
-            aria-label="新项目"
-            title="新项目"
-          >
-            <Icon name="plus" size={16} />
-          </button>
-        </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-2.5 pb-5 pt-3">
         <div className="space-y-1">
           {orderedWorkingDirs.map((dir) => {
             const groupSessions = projectGroups.get(dir)
@@ -322,7 +311,7 @@ export default function Sidebar({
               <div key={dir} className="mb-2">
                 <div
                   className={cn(
-                    'group flex min-h-9 w-full items-center rounded-lg text-[15px] font-medium outline-none transition-colors duration-150',
+                    'group flex min-h-9 w-full items-center rounded-[10px] text-[14px] font-medium outline-none transition-colors duration-150',
                     isActive && activeView === 'chat'
                       ? 'bg-surface-muted text-text-primary'
                       : 'text-text-secondary hover:bg-surface-muted hover:text-text-primary'
@@ -333,14 +322,14 @@ export default function Sidebar({
                 >
                   <button
                     type="button"
-                    className="flex min-w-0 flex-1 items-center gap-3 px-3 py-2 text-left outline-none"
+                    className="flex min-w-0 flex-1 items-center gap-2.5 px-2.5 py-2 text-left outline-none"
                     onClick={() => {
                       if (latestSession)
                         handleSelectSession(latestSession.sessionId)
                     }}
                     title={dir}
                   >
-                    <Icon name="project" size={16} className="shrink-0" />
+                    <Icon name="folder" size={16} className="shrink-0" />
                     <span className="truncate">{projectNameFromDir(dir)}</span>
                   </button>
                   <button
@@ -370,7 +359,7 @@ export default function Sidebar({
                 </div>
 
                 {!isCollapsed && (
-                  <div className="mt-1 space-y-0.5 pl-7">
+                  <div className="mt-0.5 space-y-0.5 pl-7">
                     {orderedSessions.map((session) => {
                       const isSessionActive =
                         session.sessionId === activeSessionId
@@ -379,7 +368,7 @@ export default function Sidebar({
                           key={session.sessionId}
                           type="button"
                           className={cn(
-                            'grid min-h-8 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-lg px-2.5 text-left text-[14px] outline-none transition-colors duration-150',
+                            'grid min-h-8 w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-2 rounded-lg px-2.5 text-left text-[13px] outline-none transition-colors duration-150',
                             isSessionActive && activeView === 'chat'
                               ? 'bg-surface-muted text-text-primary'
                               : 'text-text-secondary hover:bg-surface-muted hover:text-text-primary'
@@ -394,13 +383,10 @@ export default function Sidebar({
                             '新对话'
                           }
                         >
-                          <span className="truncate font-medium">
+                          <span className="truncate">
                             {session.firstUserMessage ||
                               session.title ||
                               '新对话'}
-                          </span>
-                          <span className="shrink-0 text-[12px] text-text-muted">
-                            {formatSessionAge(session.updatedAt)}
                           </span>
                         </button>
                       )
@@ -418,11 +404,16 @@ export default function Sidebar({
         </div>
       </div>
 
-      <div className="shrink-0 border-t border-border px-3 py-3">
+      <div className="shrink-0 border-t border-border px-3 py-2.5">
         <div className="flex min-w-0 items-center justify-between gap-3">
-          <span className="truncate px-2 text-[13px] font-medium text-text-muted">
-            AstrCode
-          </span>
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[#a8ad83] text-[9px] font-semibold text-white">
+              AS
+            </span>
+            <span className="truncate text-[13px] font-medium text-text-secondary">
+              AstrCode
+            </span>
+          </div>
           <button
             type="button"
             className={cn(
@@ -491,14 +482,30 @@ export default function Sidebar({
               </div>
             </div>
           ) : (
-            <button
-              type="button"
-              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-text-secondary transition-colors duration-100 hover:bg-danger-soft hover:text-danger"
-              onClick={() => setConfirmDelete(true)}
-            >
-              <Icon name="trash" size={14} />
-              {contextMenu.kind === 'project' ? '删除项目' : '删除会话'}
-            </button>
+            <>
+              {contextMenu.kind === 'session' && (
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-text-secondary transition-colors duration-100 hover:bg-surface-muted hover:text-text-primary"
+                  onClick={() => {
+                    const target = contextMenu
+                    setContextMenu(null)
+                    void forkSession(target.id)
+                  }}
+                >
+                  <Icon name="branch" size={14} />
+                  Fork 会话
+                </button>
+              )}
+              <button
+                type="button"
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-[13px] text-text-secondary transition-colors duration-100 hover:bg-danger-soft hover:text-danger"
+                onClick={() => setConfirmDelete(true)}
+              >
+                <Icon name="trash" size={14} />
+                {contextMenu.kind === 'project' ? '删除项目' : '删除会话'}
+              </button>
+            </>
           )}
         </div>
       )}

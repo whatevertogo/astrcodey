@@ -377,7 +377,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
     approvalMode === 'yolo'
       ? '完全访问'
       : approvalMode === 'manual'
-        ? '手动确认'
+        ? '请求批准'
         : '权限模式'
   const branchLabel =
     statusItems['git-branch'] ?? statusItems.branch ?? statusItems.gitBranch
@@ -397,7 +397,10 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
       <div
         className={cn(
           'w-full translate-x-[var(--chat-assistant-center-shift)]',
-          'mx-auto max-w-[var(--layout-content-max-width)]'
+          'mx-auto',
+          isHero
+            ? 'max-w-[var(--layout-hero-composer-max-width)]'
+            : 'max-w-[var(--layout-content-max-width)]'
         )}
       >
         <PendingMessagesPanel
@@ -414,7 +417,36 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
           }}
         />
         <div className="relative w-full">
-          <div className={composerShell}>
+          <div className="mx-4 flex min-h-12 items-start gap-5 overflow-hidden rounded-t-[22px] bg-surface-muted/75 px-6 pb-3 pt-3 text-[13px] text-text-secondary">
+            {projectName && (
+              <div
+                className="flex min-w-0 max-w-[220px] items-center gap-2"
+                title={workingDir ?? undefined}
+              >
+                <Icon name="folder" size={16} className="shrink-0" />
+                <span className="truncate font-medium">{projectName}</span>
+              </div>
+            )}
+            <div className="flex shrink-0 items-center gap-2">
+              <Icon name="monitor" size={16} />
+              <span>本地</span>
+            </div>
+            {branchLabel && (
+              <div className="flex min-w-0 max-w-[180px] items-center gap-2">
+                <Icon name="branch" size={16} className="shrink-0" />
+                <span className="truncate">{branchLabel}</span>
+              </div>
+            )}
+            {extraStatusItems.map(([id, text]) => (
+              <span
+                key={id}
+                className="hidden min-w-0 max-w-[160px] truncate xl:inline"
+              >
+                {text}
+              </span>
+            ))}
+          </div>
+          <div className={cn(composerShell, 'relative z-10 -mt-2')}>
             <div
               className={cn(
                 'relative',
@@ -435,7 +467,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                     ? 'mb-5 max-h-44 min-h-12 text-[16px] leading-[1.55]'
                     : 'mb-3 max-h-60 min-h-10 text-[15px] leading-[1.6]'
                 )}
-                placeholder={isHero ? '随心输入' : '向 AstrCode 提问...'}
+                placeholder={isHero ? '输入任务或问题…' : '向 AstrCode 提问…'}
                 value={value}
                 rows={1}
                 onChange={handleInput}
@@ -470,7 +502,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                   <button
                     type="button"
                     className={cn(
-                      'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[14px] font-semibold transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-60',
+                      'inline-flex h-9 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-[13px] font-medium transition-colors hover:bg-surface-muted disabled:cursor-not-allowed disabled:opacity-60',
                       approvalMode === 'yolo'
                         ? 'text-accent'
                         : 'text-text-secondary'
@@ -487,31 +519,6 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
                     <Icon name="shield" size={15} />
                     {approvalLabel}
                   </button>
-                  {projectName && (
-                    <div
-                      className="hidden min-w-0 max-w-[180px] items-center gap-1.5 rounded-full px-2 text-[13px] text-text-muted lg:flex"
-                      title={workingDir ?? undefined}
-                    >
-                      <Icon name="project" size={15} className="shrink-0" />
-                      <span className="truncate font-medium">
-                        {projectName}
-                      </span>
-                    </div>
-                  )}
-                  {branchLabel && (
-                    <div className="hidden min-w-0 max-w-[160px] items-center gap-1.5 rounded-full px-2 text-[13px] text-text-muted xl:flex">
-                      <Icon name="branch" size={15} className="shrink-0" />
-                      <span className="truncate">{branchLabel}</span>
-                    </div>
-                  )}
-                  {extraStatusItems.map(([id, text]) => (
-                    <span
-                      key={id}
-                      className="hidden min-w-0 max-w-[140px] truncate rounded-full px-2 text-[13px] text-text-muted 2xl:inline-flex"
-                    >
-                      {text}
-                    </span>
-                  ))}
                 </div>
                 <div className="flex shrink-0 items-center gap-1.5">
                   <ModelSelector

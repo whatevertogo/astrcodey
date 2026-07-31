@@ -176,12 +176,11 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             post_tokens: details.post_tokens,
             transcript_path: details.transcript_path.clone(),
         }),
-        DurableEventPayload::RecapGenerated { text, .. } => {
-            Some(ConversationBlockDto::SystemNote {
-                id: event.id.to_string(),
-                text: text.clone(),
-            })
-        },
+        DurableEventPayload::RecapGenerated { text, source } => Some(ConversationBlockDto::Recap {
+            id: event.id.to_string(),
+            text: text.clone(),
+            source: source.clone(),
+        }),
         _ => None,
     }
 }

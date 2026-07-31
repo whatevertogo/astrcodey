@@ -210,6 +210,13 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
     }
     case 'error':
       return { kind, id, message: requiredString(object, 'message') }
+    case 'recap':
+      return {
+        kind,
+        id,
+        text: requiredString(object, 'text'),
+        source: optionalString(object, 'source'),
+      }
     case 'systemNote':
       return { kind, id, text: requiredString(object, 'text') }
     case 'compactSummary':

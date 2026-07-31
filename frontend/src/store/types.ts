@@ -62,6 +62,7 @@ export interface AppState {
   refreshSessions: () => Promise<void>
   createSession: (workingDir: string) => Promise<void>
   deleteSession: (sessionId: string) => Promise<void>
+  forkSession: (sourceSessionId: string) => Promise<void>
   deleteProject: (workingDir: string) => Promise<void>
   bumpModelRefreshKey: () => void
   switchSession: (sessionId: string) => Promise<void>

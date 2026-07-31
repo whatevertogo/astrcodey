@@ -180,6 +180,7 @@ export type ConversationBlock =
       approval?: ToolApproval
     }
   | { kind: 'error'; id: string; message: string }
+  | { kind: 'recap'; id: string; text: string; source?: string }
   | { kind: 'systemNote'; id: string; text: string }
   | {
       kind: 'compactSummary'

@@ -162,6 +162,20 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().refreshSessions()
   },
 
+  forkSession: async (sourceSessionId: string) => {
+    try {
+      const response = await api.forkSession(sourceSessionId)
+      await get().refreshSessions()
+      await get().switchSession(response.sessionId)
+    } catch (err) {
+      console.error('Failed to fork session:', err)
+      set({
+        transientHint:
+          err instanceof Error ? err.message : 'Fork 会话失败，请重试',
+      })
+    }
+  },
+
   deleteProject: async (workingDir: string) => {
     try {
       await api.deleteProject(workingDir)

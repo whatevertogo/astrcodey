@@ -439,6 +439,11 @@ pub enum ConversationBlockDto {
         id: String,
         message: String,
     },
+    Recap {
+        id: String,
+        text: String,
+        source: String,
+    },
     SystemNote {
         id: String,
         text: String,

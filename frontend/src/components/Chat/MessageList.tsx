@@ -10,16 +10,18 @@ import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import type { ConversationBlock } from '../../services/types'
 import { cn } from '../../lib/utils'
 import { emptyStateSurface } from '../../lib/styles'
-import { Icon } from '../ui/Icon'
+import { useAppStore } from '../../store/conversation'
 import AssistantRunMessage from './AssistantRunMessage'
 import UserMessage from './UserMessage'
 import ErrorBlock from './ErrorBlock'
 import SystemNote from './SystemNote'
 import CompactSummaryCard from './CompactSummaryCard'
+import RecapBlock from './RecapBlock'
 import {
   buildMessageListItems,
   type MessageListItem,
 } from './assistantRunModel'
+import { Icon } from '../ui/Icon'
 
 interface MessageListProps {
   blocks: ConversationBlock[]
@@ -28,6 +30,7 @@ interface MessageListProps {
 
 function sameRenderedItem(left: MessageListItem, right: MessageListItem) {
   if (left.type !== right.type || left.id !== right.id) return false
+  if (left.type === 'forkRow') return true
   if (left.type === 'block' && right.type === 'block') {
     return left.block === right.block
   }
@@ -37,6 +40,26 @@ function sameRenderedItem(left: MessageListItem, right: MessageListItem) {
   return (
     left.blocks.length === right.blocks.length &&
     left.blocks.every((block, index) => block === right.blocks[index])
+  )
+}
+
+function ForkRow({ sessionId }: { sessionId: string | null }) {
+  const forkSession = useAppStore((s) => s.forkSession)
+  if (!sessionId) return null
+  return (
+    <div className="flex items-center gap-3 py-1" aria-hidden={false}>
+      <div className="h-px flex-1 border-t border-dashed border-border" />
+      <button
+        type="button"
+        className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface/60 px-3.5 py-1.5 text-[12px] font-medium text-text-muted transition-colors duration-150 hover:border-accent-strong/40 hover:text-text-primary"
+        onClick={() => void forkSession(sessionId)}
+        title="从当前会话末尾分叉出一个新会话"
+      >
+        <Icon name="branch" size={13} />
+        从此处分叉
+      </button>
+      <div className="h-px flex-1 border-t border-dashed border-border" />
+    </div>
   )
 }
 
@@ -52,6 +75,8 @@ const BlockRenderer = memo(
       <div className="mx-auto w-[min(100%,var(--layout-content-max-width))] min-w-0 px-[var(--layout-content-inset-x)]">
         {item.type === 'assistantRun' ? (
           <AssistantRunMessage blocks={item.blocks} sessionId={sessionId} />
+        ) : item.type === 'forkRow' ? (
+          <ForkRow sessionId={sessionId} />
         ) : item.block.kind === 'user' ? (
           <UserMessage block={item.block} />
         ) : item.block.kind === 'error' ? (
@@ -60,6 +85,8 @@ const BlockRenderer = memo(
           <SystemNote block={item.block} />
         ) : item.block.kind === 'compactSummary' ? (
           <CompactSummaryCard block={item.block} />
+        ) : item.block.kind === 'recap' ? (
+          <RecapBlock block={item.block} />
         ) : null}
       </div>
     )

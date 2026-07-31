@@ -35,6 +35,10 @@ export type MessageListItem =
       block: Exclude<ConversationBlock, AssistantLikeBlock>
       index: number
     }
+  | {
+      type: 'forkRow'
+      id: string
+    }
 
 export type ActivityKind =
   | 'created'
@@ -137,7 +141,26 @@ export function buildMessageListItems(
     index += 1
   }
 
+  if (items.length > 0) {
+    items.push({ type: 'forkRow', id: 'fork-row' })
+  }
+
   return items
+}
+
+export function streamingMessageListItemId(
+  items: MessageListItem[]
+): string | null {
+  // forkRow 恒为最后一项，向前找最后一个真正的消息项。
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]
+    if (item.type === 'forkRow') continue
+    if (item.type !== 'assistantRun') return null
+    return item.blocks.some((block) => block.status === 'streaming')
+      ? item.id
+      : null
+  }
+  return null
 }
 
 export function assistantThinkingBlocks(block: AssistantBlock): string[] {

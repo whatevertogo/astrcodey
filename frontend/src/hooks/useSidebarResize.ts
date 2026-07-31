@@ -1,9 +1,9 @@
 import { useState, useCallback, useRef, useEffect } from 'react'
 
 const STORAGE_KEY = 'astrcode-sidebar-width'
-const DEFAULT_WIDTH = 320
+const DEFAULT_WIDTH = 300
 const MIN_WIDTH = 240
-const MAX_WIDTH = 420
+const MAX_WIDTH = 380
 
 export interface UseSidebarResize {
   width: number
