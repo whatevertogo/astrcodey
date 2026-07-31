@@ -32,7 +32,8 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     SessionEventPublishError, ToolRegistry,
     payload::{
-        TURN_FINISH_ABORTED, agent_run_completed_payload, system_prompt_configured_payload,
+        JSON_RPC_INTERNAL_ERROR, TURN_FINISH_ABORTED, TURN_FINISH_ERROR,
+        agent_run_completed_payload, system_prompt_configured_payload,
         transcript_rewritten_payload, turn_completed_payload,
     },
     runtime_stability::RuntimeStabilityBudget,
@@ -321,6 +322,7 @@ impl Session {
             .event_sink()
             .publish_live(self.runtime.store().clone(), event)
         {
+            // best-effort 事件丢弃是常态；仅按 2 的幂次（1、2、4…）记录，避免刷屏。
             if matches!(
                 &error,
                 SessionEventPublishError::Full { dropped } if !dropped.is_power_of_two()
@@ -558,6 +560,50 @@ impl Session {
         }
     }
 
+    /// 在 runtime 稳定窗口内解析工具表快照并构建 system prompt；runtime 变更时重试。
+    ///
+    /// 返回的 prompt 与 tool_snapshot 来自同一稳定窗口，调用方按需组装各自的返回类型。
+    async fn build_stable_system_prompt(
+        &self,
+        scope: &ToolCatalogScope,
+        model_id: &str,
+        resolved_extra: Option<&str>,
+        is_subagent: bool,
+        tool_selection: Option<&SessionToolSelection>,
+        stability: &mut RuntimeStabilityBudget,
+    ) -> Result<(PreparedSystemPrompt, ResolvedToolRegistrySnapshot), SessionError> {
+        let working_dir = scope.working_dir.as_str();
+        loop {
+            let tool_snapshot = self
+                .resolve_tool_registry_snapshot_for_scope(scope, tool_selection, stability)
+                .await?;
+            let (text, fingerprint) = self
+                .build_system_prompt(
+                    working_dir,
+                    model_id,
+                    resolved_extra,
+                    is_subagent,
+                    tool_snapshot.registry.as_ref(),
+                )
+                .await?;
+            if self.runtime_services.runtime_snapshot_state()
+                == RuntimeSnapshotState::Stable(tool_snapshot.runtime_generation)
+                && self.runtime_services.tool_catalog().revision()
+                    == tool_snapshot.base_key.catalog_revision
+            {
+                return Ok((
+                    PreparedSystemPrompt {
+                        text,
+                        fingerprint,
+                        resolved_extra: resolved_extra.map(str::to_owned),
+                    },
+                    tool_snapshot,
+                ));
+            }
+            retry_runtime_snapshot(stability).await?;
+        }
+    }
+
     async fn prepare_initial_system_prompt(
         &self,
         working_dir: &str,
@@ -578,34 +624,22 @@ impl Session {
         };
         let resolved_extra = normalize_extra_system_prompt(extra_system_prompt);
         let mut stability = RuntimeStabilityBudget::new();
-
-        loop {
-            let tool_snapshot = self
-                .resolve_tool_registry_snapshot_for_scope(&scope, tool_selection, &mut stability)
-                .await?;
-            let (text, fingerprint) = self
-                .build_system_prompt(
-                    working_dir,
-                    model_id,
-                    resolved_extra.as_deref(),
-                    parent_session_id.is_some(),
-                    tool_snapshot.registry.as_ref(),
-                )
-                .await?;
-            if self.runtime_services.runtime_snapshot_state()
-                == RuntimeSnapshotState::Stable(tool_snapshot.runtime_generation)
-                && self.runtime_services.tool_catalog().revision()
-                    == tool_snapshot.base_key.catalog_revision
-            {
-                return Ok(PersistedSystemPrompt {
-                    text,
-                    fingerprint,
-                    extra_system_prompt: resolved_extra,
-                    source: SystemPromptSource::Native,
-                });
-            }
-            retry_runtime_snapshot(&mut stability).await?;
-        }
+        let (prompt, _tool_snapshot) = self
+            .build_stable_system_prompt(
+                &scope,
+                model_id,
+                resolved_extra.as_deref(),
+                parent_session_id.is_some(),
+                tool_selection,
+                &mut stability,
+            )
+            .await?;
+        Ok(PersistedSystemPrompt {
+            text: prompt.text,
+            fingerprint: prompt.fingerprint,
+            extra_system_prompt: prompt.resolved_extra,
+            source: SystemPromptSource::Native,
+        })
     }
 
     fn base_tool_registry_key(&self, scope: &ToolCatalogScope) -> BaseToolRegistryKey {
@@ -622,45 +656,29 @@ impl Session {
         state: &SessionReadModel,
         model_id: &str,
     ) -> Result<PreparedRuntimeSnapshot, SessionError> {
-        let mut stability = RuntimeStabilityBudget::new();
         let resolved_extra = state.system_prompt.extra.clone();
         let is_subagent = state.identity.parent.is_some();
         let tool_selection = self.effective_tool_selection(self.id(), state).await?;
-
-        loop {
-            let tool_snapshot = self
-                .resolve_tool_registry_snapshot(
-                    working_dir,
-                    tool_selection.as_ref(),
-                    &mut stability,
-                )
-                .await?;
-            let (text, fingerprint) = self
-                .build_system_prompt(
-                    working_dir,
-                    model_id,
-                    resolved_extra.as_deref(),
-                    is_subagent,
-                    tool_snapshot.registry.as_ref(),
-                )
-                .await?;
-            if self.runtime_services.runtime_snapshot_state()
-                == RuntimeSnapshotState::Stable(tool_snapshot.runtime_generation)
-                && self.runtime_services.tool_catalog().revision()
-                    == tool_snapshot.base_key.catalog_revision
-            {
-                return Ok(PreparedRuntimeSnapshot {
-                    registry: tool_snapshot.registry,
-                    prompt: PreparedSystemPrompt {
-                        text,
-                        fingerprint,
-                        resolved_extra,
-                    },
-                    tool_selection,
-                });
-            }
-            retry_runtime_snapshot(&mut stability).await?;
-        }
+        let scope = ToolCatalogScope {
+            working_dir: working_dir.to_owned(),
+            session_store_dir: self.session_store_dir().await,
+        };
+        let mut stability = RuntimeStabilityBudget::new();
+        let (prompt, tool_snapshot) = self
+            .build_stable_system_prompt(
+                &scope,
+                model_id,
+                resolved_extra.as_deref(),
+                is_subagent,
+                tool_selection.as_ref(),
+                &mut stability,
+            )
+            .await?;
+        Ok(PreparedRuntimeSnapshot {
+            registry: tool_snapshot.registry,
+            prompt,
+            tool_selection,
+        })
     }
 
     async fn effective_tool_selection(
@@ -756,54 +774,32 @@ impl Session {
 // spawn_child 与 AgentSessionSpawned 事件。
 // 完成等待、终态写入、回收与通知由 `astrcode-server::child_session` 编排。
 
-struct ChildCreationInput {
-    session_id: SessionId,
-    working_dir: String,
-    model_id: String,
-    agent_name: String,
-    task: String,
-    extra_system_prompt: Option<String>,
-    tool_selection: Option<SessionToolSelection>,
-    source_extension: Option<String>,
-    tool_call_id: ToolCallId,
+/// 创建子会话所需的参数。
+pub struct SpawnChildParams {
+    pub working_dir: String,
+    pub model_id: String,
+    pub agent_name: String,
+    pub task: String,
+    pub extra_system_prompt: Option<String>,
+    pub tool_selection: Option<SessionToolSelection>,
+    pub source_extension: Option<String>,
+    pub tool_call_id: ToolCallId,
 }
 
 impl Session {
-    #[allow(clippy::too_many_arguments)]
-    pub async fn spawn_child(
-        &self,
-        working_dir: &str,
-        model_id: &str,
-        agent_name: String,
-        task: String,
-        extra_system_prompt: Option<String>,
-        tool_selection: Option<SessionToolSelection>,
-        source_extension: Option<&str>,
-        tool_call_id: ToolCallId,
-    ) -> Result<Self, SessionError> {
-        let tool_selection = resolve_initial_tool_selection(
+    pub async fn spawn_child(&self, mut params: SpawnChildParams) -> Result<Self, SessionError> {
+        params.tool_selection = resolve_initial_tool_selection(
             &self.state_source,
             Some(self.id()),
-            tool_selection.as_ref(),
+            params.tool_selection.as_ref(),
         )
         .await?;
-        let input = ChildCreationInput {
-            session_id: new_session_id(),
-            working_dir: working_dir.to_owned(),
-            model_id: model_id.to_owned(),
-            agent_name,
-            task,
-            extra_system_prompt,
-            tool_selection,
-            source_extension: source_extension.map(str::to_owned),
-            tool_call_id,
-        };
-        let child_session_id = input.session_id.clone();
+        let child_session_id = new_session_id();
         let publication = self
             .runtime
             .event_sink()
             .defer_publication(child_session_id.clone())?;
-        match AssertUnwindSafe(self.create_child_transaction(input))
+        match AssertUnwindSafe(self.create_child_transaction(params, child_session_id.clone()))
             .catch_unwind()
             .await
         {
@@ -835,10 +831,10 @@ impl Session {
 
     async fn create_child_transaction(
         &self,
-        input: ChildCreationInput,
+        params: SpawnChildParams,
+        child_sid: SessionId,
     ) -> Result<Self, SessionError> {
-        let ChildCreationInput {
-            session_id: child_sid,
+        let SpawnChildParams {
             working_dir,
             model_id,
             agent_name,
@@ -847,7 +843,7 @@ impl Session {
             tool_selection,
             source_extension,
             tool_call_id,
-        } = input;
+        } = params;
         let child_store = self.runtime.store().clone();
         let child_runtime =
             self.runtime_services
@@ -1307,7 +1303,7 @@ impl Session {
             .emit_durable(
                 Some(turn_id),
                 DurableEventPayload::ErrorOccurred {
-                    code: -32603,
+                    code: JSON_RPC_INTERNAL_ERROR,
                     message: error.to_string(),
                     recoverable: false,
                 },
@@ -1322,7 +1318,7 @@ impl Session {
             );
         }
         if let Err(persist_error) = self
-            .emit_durable(Some(turn_id), turn_completed_payload("error"))
+            .emit_durable(Some(turn_id), turn_completed_payload(TURN_FINISH_ERROR))
             .await
         {
             tracing::error!(
@@ -1332,7 +1328,10 @@ impl Session {
                 "failed to complete turn after setup error"
             );
         }
-        self.emit_live(Some(turn_id), agent_run_completed_payload("error"));
+        self.emit_live(
+            Some(turn_id),
+            agent_run_completed_payload(TURN_FINISH_ERROR),
+        );
     }
 }
 
@@ -1360,14 +1359,7 @@ pub async fn finalize_aborted_turn(
     if !has_aborted_context {
         emit_turn_aborted_context(session, Some(turn_id)).await?;
     }
-    session
-        .emit_durable(Some(turn_id), turn_completed_payload(TURN_FINISH_ABORTED))
-        .await?;
-    session.emit_live(
-        Some(turn_id),
-        agent_run_completed_payload(TURN_FINISH_ABORTED),
-    );
-    Ok(())
+    emit_turn_completed(session, turn_id, TURN_FINISH_ABORTED).await
 }
 
 pub async fn finalize_turn(
@@ -1389,7 +1381,7 @@ pub async fn finalize_turn(
                 .emit_durable(
                     Some(turn_id),
                     DurableEventPayload::ErrorOccurred {
-                        code: -32603,
+                        code: JSON_RPC_INTERNAL_ERROR,
                         message: message.clone(),
                         recoverable: false,
                     },
@@ -1397,16 +1389,19 @@ pub async fn finalize_turn(
                 .await?;
         }
     }
+    emit_turn_completed(session, turn_id, &finalization.finish_reason).await
+}
+
+/// 持久化 turn 完成事件并发送对应 live 事件。
+async fn emit_turn_completed(
+    session: &Session,
+    turn_id: &TurnId,
+    finish_reason: &str,
+) -> Result<(), SessionError> {
     session
-        .emit_durable(
-            Some(turn_id),
-            turn_completed_payload(finalization.finish_reason.clone()),
-        )
+        .emit_durable(Some(turn_id), turn_completed_payload(finish_reason))
         .await?;
-    session.emit_live(
-        Some(turn_id),
-        agent_run_completed_payload(finalization.finish_reason.clone()),
-    );
+    session.emit_live(Some(turn_id), agent_run_completed_payload(finish_reason));
     Ok(())
 }
 

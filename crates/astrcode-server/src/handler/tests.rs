@@ -190,7 +190,7 @@ impl LlmProvider for ReactiveCompactLlm {
 
     fn model_limits(&self) -> ModelLimits {
         ModelLimits {
-            max_input_tokens: 100,
+            max_input_tokens: 200_000,
             max_output_tokens: 1024,
         }
     }
@@ -228,7 +228,7 @@ impl LlmProvider for ExhaustedReactiveCompactLlm {
 
     fn model_limits(&self) -> ModelLimits {
         ModelLimits {
-            max_input_tokens: 100,
+            max_input_tokens: 200_000,
             max_output_tokens: 1024,
         }
     }
@@ -722,8 +722,6 @@ fn test_runtime_with_settings(
             supports_stream_usage: false,
             supports_strict_tool_use: false,
             prompt_cache_retention: None,
-            reasoning: false,
-            thinking_level: None,
             thinking: Default::default(),
             thinking_capability: None,
             thinking_configured: false,
@@ -745,8 +743,6 @@ fn test_runtime_with_settings(
             supports_stream_usage: false,
             supports_strict_tool_use: false,
             prompt_cache_retention: None,
-            reasoning: false,
-            thinking_level: None,
             thinking: Default::default(),
             thinking_capability: None,
             thinking_configured: false,

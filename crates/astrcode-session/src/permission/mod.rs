@@ -68,42 +68,18 @@ pub(crate) fn approval_history_path(session_store_dir: &Path) -> std::path::Path
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
-        config::{AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings},
+        config::{AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings},
         permission::ApprovalMode,
     };
 
     use super::*;
-
-    fn test_llm() -> LlmSettings {
-        LlmSettings {
-            provider_kind: "openai".into(),
-            base_url: "http://localhost".into(),
-            api_key: "test".into(),
-            wire_format: astrcode_core::config::ProviderWireFormat::OpenAiChatCompletions,
-            auth_scheme: astrcode_core::config::ProviderAuthScheme::Bearer,
-            model_id: "test".into(),
-            max_tokens: 1024,
-            context_limit: 8192,
-            connect_timeout_secs: 30,
-            read_timeout_secs: 120,
-            max_retries: 3,
-            retry_base_delay_ms: 500,
-            supports_prompt_cache_key: false,
-            supports_stream_usage: false,
-            supports_strict_tool_use: false,
-            prompt_cache_retention: None,
-            reasoning: false,
-            thinking_level: None,
-            thinking: Default::default(),
-            thinking_capability: None,
-            thinking_configured: false,
-        }
-    }
+    use crate::test_support::test_llm_settings;
 
     fn test_effective(approval_mode: ApprovalMode) -> EffectiveConfig {
+        let llm = test_llm_settings();
         EffectiveConfig {
-            llm: test_llm(),
-            small_llm: test_llm(),
+            llm: llm.clone(),
+            small_llm: llm,
             context: ContextSettings::default(),
             agent: AgentSettings {
                 max_depth: 2,

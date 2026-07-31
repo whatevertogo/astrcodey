@@ -13,7 +13,10 @@ use arc_swap::ArcSwap;
 use astrcode_context::{ContextAssembler, PostCompactEnricher};
 use astrcode_core::{
     config::EffectiveConfig,
-    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits, ProviderInputTokenCount},
+    llm::{
+        LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRequest, ModelLimits,
+        ProviderInputTokenCount,
+    },
     tool::ToolDefinition,
 };
 use astrcode_extension_sdk::runtime_ports::{
@@ -58,12 +61,23 @@ impl LlmProvider for LiveLlmProvider {
         self.current().generate(messages, tools).await
     }
 
+    async fn generate_request(
+        &self,
+        request: LlmRequest,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        self.current().generate_request(request).await
+    }
+
     async fn count_input_tokens(
         &self,
         messages: Vec<LlmMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         self.current().count_input_tokens(messages, tools).await
+    }
+
+    fn minimum_output_tokens(&self) -> usize {
+        self.current().minimum_output_tokens()
     }
 
     fn model_limits(&self) -> ModelLimits {
@@ -175,6 +189,13 @@ impl SessionRuntimeServices {
         self.effective_config.load_full()
     }
 
+    /// 单轮允许的并行工具调用上限（至少 1）。
+    ///
+    /// turn 调度与工具批量执行共用同一口径，避免两处各自读取配置。
+    pub fn max_parallel_tool_calls(&self) -> usize {
+        self.read_effective().agent.tool_max_parallel_calls.max(1)
+    }
+
     pub fn update_effective(&self, new: EffectiveConfig) {
         self.effective_config.store(Arc::new(new));
     }
@@ -192,14 +213,11 @@ impl SessionRuntimeServices {
 #[cfg(test)]
 mod tests {
     use astrcode_context::{
-        CompactResult, ContextAssembler, ContextPrepareInput, PostCompactEnrichInput,
-        PostCompactEnricher, PreparedContext, context_assembler::LlmContextAssembler,
+        CompactResult, ContextAssembler, PostCompactEnrichInput,
+        context_assembler::LlmContextAssembler,
     };
     use astrcode_core::{
-        config::{
-            AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
-            ProviderAuthScheme, ProviderWireFormat,
-        },
+        config::ContextSettings,
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         tool::ToolDefinition,
     };
@@ -207,26 +225,9 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-
-    struct UnusedLlm;
-
-    #[async_trait::async_trait]
-    impl LlmProvider for UnusedLlm {
-        async fn generate(
-            &self,
-            _messages: Vec<LlmMessage>,
-            _tools: Vec<ToolDefinition>,
-        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-            unreachable!("runtime services test does not call llm")
-        }
-
-        fn model_limits(&self) -> ModelLimits {
-            ModelLimits {
-                max_input_tokens: 1024,
-                max_output_tokens: 1024,
-            }
-        }
-    }
+    use crate::test_support::{
+        CountingPostCompactEnricher, NoopContextAssembler, UnusedLlm, test_effective_config,
+    };
 
     struct TaggedLlm {
         max_input_tokens: usize,
@@ -250,33 +251,6 @@ mod tests {
         }
     }
 
-    struct CustomContextAssembler {
-        settings: ContextSettings,
-    }
-
-    impl ContextAssembler for CustomContextAssembler {
-        fn settings(&self) -> &ContextSettings {
-            &self.settings
-        }
-
-        fn should_auto_compact(&self, _input: &ContextPrepareInput<'_>) -> bool {
-            false
-        }
-
-        fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
-            LlmContextAssembler::new(self.settings.clone()).prepare_messages(input)
-        }
-    }
-
-    struct CountingPostCompactEnricher;
-
-    #[async_trait::async_trait]
-    impl PostCompactEnricher for CountingPostCompactEnricher {
-        async fn enrich(&self, compaction: &mut CompactResult, _input: PostCompactEnrichInput<'_>) {
-            compaction.summary.push_str(" enriched");
-        }
-    }
-
     #[tokio::test]
     async fn accepts_custom_context_services() {
         let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
@@ -284,14 +258,13 @@ mod tests {
             auto_compact_enabled: false,
             ..ContextSettings::default()
         };
-        let context_assembler: Arc<dyn ContextAssembler> = Arc::new(CustomContextAssembler {
-            settings: context.clone(),
-        });
+        let context_assembler: Arc<dyn ContextAssembler> =
+            Arc::new(NoopContextAssembler::new(context.clone()));
 
         let services = SessionRuntimeServices::new(
             llm.clone(),
             llm,
-            effective_config(context),
+            test_effective_config(context),
             SessionExtensionPorts::default(),
             Arc::clone(&context_assembler),
             Arc::new(CountingPostCompactEnricher),
@@ -338,7 +311,7 @@ mod tests {
             Arc::new(TaggedLlm {
                 max_input_tokens: 2,
             }),
-            effective_config(context),
+            test_effective_config(context),
             SessionExtensionPorts::default(),
             context_assembler,
             Arc::new(CountingPostCompactEnricher),
@@ -359,39 +332,5 @@ mod tests {
 
         assert_eq!(live_main.model_limits().max_input_tokens, 3);
         assert_eq!(live_small.model_limits().max_input_tokens, 4);
-    }
-
-    fn effective_config(context: ContextSettings) -> EffectiveConfig {
-        let llm = LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            wire_format: ProviderWireFormat::OpenAiChatCompletions,
-            auth_scheme: ProviderAuthScheme::Bearer,
-            model_id: "mock-model".into(),
-            max_tokens: 1024,
-            context_limit: 1024,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            supports_stream_usage: false,
-            supports_strict_tool_use: false,
-            prompt_cache_retention: None,
-            reasoning: false,
-            thinking_level: None,
-            thinking: Default::default(),
-            thinking_capability: None,
-            thinking_configured: false,
-        };
-        EffectiveConfig {
-            llm: llm.clone(),
-            small_llm: llm,
-            context,
-            agent: AgentSettings::default(),
-            permissions: Default::default(),
-            extensions: ExtensionSettings::default(),
-        }
     }
 }

@@ -256,6 +256,7 @@ impl TurnState {
 pub(crate) struct PreparedProviderRequest {
     pub(crate) llm: std::sync::Arc<dyn astrcode_core::llm::LlmProvider>,
     pub(crate) messages: Vec<astrcode_core::llm::LlmMessage>,
+    pub(crate) max_output_tokens: usize,
 }
 
 #[cfg(test)]

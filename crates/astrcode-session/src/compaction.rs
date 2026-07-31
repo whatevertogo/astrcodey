@@ -14,7 +14,7 @@ use astrcode_core::{
     compaction::{CompactStrategy, CompactTrigger},
     config::ModelSelection,
     event::LiveEventPayload,
-    llm::{self, LlmMessage, LlmProvider},
+    llm::{self, LlmMessage, LlmProvider, LlmRequest},
     tool::ToolDefinition,
     types::TurnId,
 };
@@ -24,6 +24,7 @@ use astrcode_extension_sdk::{
     },
     runtime_ports::TurnHooks,
 };
+use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::CompactSnapshotInput;
 
 use crate::{
@@ -214,6 +215,7 @@ async fn run_compaction(
         ..Default::default()
     };
     let execution = if plan.use_llm_for_compact {
+        let max_output_tokens = context_assembler.settings().compact_max_output_tokens;
         compact_messages_with_fallback(
             &source_snapshot.messages,
             Some(&source_snapshot.system_prompt),
@@ -221,7 +223,7 @@ async fn run_compaction(
             &custom_instructions,
             &render_options,
             keep_recent_turns,
-            |messages| request_compact_summary(Arc::clone(host.llm), messages),
+            |messages| request_compact_summary(Arc::clone(host.llm), messages, max_output_tokens),
         )
         .await
     } else {
@@ -336,6 +338,21 @@ fn compact_hook_context(
         working_dir: &shared.working_dir,
         model_id: &shared.model_id,
         trigger,
+        message_count,
+    }
+}
+
+/// idle compact 的 Pre/Post hook 上下文（trigger 固定为 ManualCommand）。
+fn idle_manual_hook<'a>(
+    session: &'a Session,
+    state: &'a SessionReadModel,
+    message_count: usize,
+) -> CompactHookContext<'a> {
+    CompactHookContext {
+        session_id: session.id().as_str(),
+        working_dir: &state.identity.working_dir,
+        model_id: &state.identity.model_id,
+        trigger: CompactTrigger::ManualCommand,
         message_count,
     }
 }
@@ -481,9 +498,12 @@ async fn dispatch_post_compact(
 async fn request_compact_summary(
     llm: Arc<dyn LlmProvider>,
     messages: Vec<LlmMessage>,
+    max_output_tokens: usize,
 ) -> Result<String, CompactError> {
     let rx = llm
-        .generate(messages, vec![])
+        .generate_request(
+            LlmRequest::new(messages, vec![]).with_max_output_tokens(max_output_tokens),
+        )
         .await
         .map_err(CompactError::Llm)?;
     llm::collect_stream_text(rx)
@@ -537,26 +557,14 @@ pub async fn compact_idle_session(
     let context_assembler = runtime_services.context_assembler_arc();
 
     let state = session.read_model().await?;
-    let pre_hook = CompactHookContext {
-        session_id: session.id().as_str(),
-        working_dir: &state.identity.working_dir,
-        model_id: &state.identity.model_id,
-        trigger: CompactTrigger::ManualCommand,
-        message_count: state.transcript.messages.len(),
-    };
+    let pre_hook = idle_manual_hook(session, &state, state.transcript.messages.len());
     let custom_instructions =
         collect_compact_instructions(extension_runner.as_ref(), pre_hook).await?;
 
     let state = session.read_model().await?;
     let snapshot = context_snapshot(&state);
     let llm = runtime_services.llm();
-    let post_hook = CompactHookContext {
-        session_id: session.id().as_str(),
-        working_dir: &state.identity.working_dir,
-        model_id: &state.identity.model_id,
-        trigger: CompactTrigger::ManualCommand,
-        message_count: snapshot.messages.len(),
-    };
+    let post_hook = idle_manual_hook(session, &state, snapshot.messages.len());
     let tool_registry = session
         .tool_registry_snapshot(&state.identity.working_dir)
         .await?;
@@ -574,6 +582,7 @@ pub async fn compact_idle_session(
         transcript_path,
         custom_instructions: custom_instructions.clone(),
     };
+    let max_output_tokens = context_assembler.settings().compact_max_output_tokens;
     let compact_execution = compact_messages_with_fallback(
         &snapshot.messages,
         Some(&snapshot.system_prompt),
@@ -581,7 +590,7 @@ pub async fn compact_idle_session(
         &custom_instructions,
         &render_options,
         keep_recent_turns,
-        |messages| request_compact_summary(Arc::clone(&llm), messages),
+        |messages| request_compact_summary(Arc::clone(&llm), messages, max_output_tokens),
     )
     .await;
 

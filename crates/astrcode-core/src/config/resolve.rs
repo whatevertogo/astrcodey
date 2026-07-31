@@ -7,7 +7,7 @@
 
 use std::{collections::BTreeMap, process::Command};
 
-use crate::config::{effective::*, legacy, raw::*};
+use crate::config::{effective::*, raw::*};
 
 /// 环境变量查找函数。注入式解析让纯函数可测，测试无需修改进程环境。
 type EnvLookup<'a> = &'a dyn Fn(&str) -> Option<String>;
@@ -191,15 +191,11 @@ fn resolve_llm_settings(
     )?;
 
     let options = model.model_options.as_ref();
-    let thinking_configured = options.is_some_and(|options| {
-        options.thinking.is_some()
-            || options.reasoning.is_some()
-            || options.thinking_level.is_some()
-    });
+    let thinking_configured = options.is_some_and(|options| options.thinking.is_some());
 
-    // Resolve thinking config: new `thinking` field takes priority over legacy fields
+    // Resolve thinking config from the single `modelOptions.thinking` source
     let thinking = options
-        .and_then(legacy::model_thinking_config)
+        .and_then(|options| options.thinking.clone())
         .unwrap_or_default()
         .normalized();
 
@@ -231,13 +227,6 @@ fn resolve_llm_settings(
         }
     }
 
-    // Derive compatibility fields
-    let resolved_reasoning = thinking.enabled;
-    let resolved_thinking_level = thinking
-        .effort
-        .as_deref()
-        .and_then(legacy::effort_to_thinking_level);
-
     Ok(LlmSettings {
         provider_kind: profile.provider_kind.clone(),
         wire_format: profile.wire_format,
@@ -245,8 +234,12 @@ fn resolve_llm_settings(
         base_url: profile.base_url.clone(),
         api_key,
         model_id: model_name.into(),
-        max_tokens: model.max_tokens.unwrap_or(8192),
-        context_limit: model.context_limit.unwrap_or(65536),
+        max_tokens: model
+            .max_tokens
+            .unwrap_or(super::defaults::DEFAULT_LLM_MAX_TOKENS),
+        context_limit: model
+            .context_limit
+            .unwrap_or(super::defaults::DEFAULT_LLM_CONTEXT_LIMIT),
         connect_timeout_secs: runtime
             .llm_connect_timeout_secs
             .unwrap_or(super::defaults::DEFAULT_LLM_CONNECT_TIMEOUT_SECS),
@@ -269,8 +262,6 @@ fn resolve_llm_settings(
             .supports_strict_tool_use
             .unwrap_or(false),
         prompt_cache_retention: profile.capabilities.prompt_cache_retention,
-        reasoning: resolved_reasoning,
-        thinking_level: resolved_thinking_level,
         thinking,
         thinking_capability: capability,
         thinking_configured,
@@ -863,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn test_model_options_are_resolved_and_override_legacy_fields() {
+    fn test_model_options_are_resolved() {
         let config = Config {
             profiles: vec![Profile {
                 name: "openai".into(),
@@ -878,9 +869,11 @@ mod tests {
                     max_tokens: Some(8192),
                     context_limit: Some(128000),
                     model_options: Some(ModelOptionsConfig {
-                        reasoning: Some(true),
-                        thinking_level: Some(crate::llm::ThinkingLevel::High),
-                        thinking: None,
+                        thinking: Some(crate::llm::thinking::ThinkingConfig {
+                            enabled: true,
+                            effort: Some("high".into()),
+                            budget_tokens: None,
+                        }),
                     }),
                     thinking_capability: None,
                 }],
@@ -891,18 +884,12 @@ mod tests {
         };
 
         let effective = config.into_effective().unwrap();
-        assert!(effective.llm.reasoning);
-        assert_eq!(
-            effective.llm.thinking_level,
-            Some(crate::llm::ThinkingLevel::High)
-        );
-        // New thinking field derived from legacy fields
         assert!(effective.llm.thinking.enabled);
         assert_eq!(effective.llm.thinking.effort.as_deref(), Some("high"));
     }
 
     #[test]
-    fn test_thinking_config_new_field_takes_priority_over_legacy() {
+    fn test_thinking_config_resolves_effort_and_budget() {
         let config = Config {
             profiles: vec![Profile {
                 name: "openai".into(),
@@ -917,8 +904,6 @@ mod tests {
                     max_tokens: Some(8192),
                     context_limit: Some(128000),
                     model_options: Some(ModelOptionsConfig {
-                        reasoning: Some(false),
-                        thinking_level: Some(crate::llm::ThinkingLevel::High),
                         thinking: Some(crate::llm::thinking::ThinkingConfig {
                             enabled: true,
                             effort: Some("max".into()),
@@ -934,11 +919,6 @@ mod tests {
         };
 
         let effective = config.into_effective().unwrap();
-        assert!(effective.llm.reasoning, "derived from thinking.enabled");
-        assert_eq!(
-            effective.llm.thinking_level, None,
-            "legacy thinkingLevel must not leak through an explicit thinking config"
-        );
         assert!(effective.llm.thinking.enabled);
         assert_eq!(effective.llm.thinking.effort.as_deref(), Some("max"));
         assert_eq!(effective.llm.thinking.budget_tokens, Some(4096));
@@ -962,9 +942,11 @@ mod tests {
                     max_tokens: Some(4096),
                     context_limit: Some(65536),
                     model_options: Some(ModelOptionsConfig {
-                        reasoning: Some(true),
-                        thinking_level: Some(crate::llm::ThinkingLevel::Medium),
-                        thinking: None,
+                        thinking: Some(crate::llm::thinking::ThinkingConfig {
+                            enabled: true,
+                            effort: Some("medium".into()),
+                            budget_tokens: None,
+                        }),
                     }),
                     thinking_capability: Some(ThinkingCapability {
                         wire_mapping: ThinkingWireMapping::OpenAiResponses,
@@ -981,11 +963,6 @@ mod tests {
         };
 
         let effective = config.into_effective().unwrap();
-        assert!(effective.llm.reasoning);
-        assert_eq!(
-            effective.llm.thinking_level,
-            Some(crate::llm::ThinkingLevel::Medium)
-        );
         assert!(effective.llm.thinking.enabled);
         assert_eq!(effective.llm.thinking.effort.as_deref(), Some("medium"));
     }

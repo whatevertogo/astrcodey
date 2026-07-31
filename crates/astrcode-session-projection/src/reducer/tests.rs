@@ -4,7 +4,7 @@ use astrcode_core::{
         CompactionDetails, DurableEvent, DurableEventPayload, PersistedSystemPrompt, Phase,
         SessionStarted, StoredEvent, SystemPromptSource, TranscriptRewriteReason,
     },
-    llm::{LlmMessage, LlmRole},
+    llm::{LlmMessage, LlmRole, LlmTokenUsage},
     permission::{ApprovalDecision, ApprovalSource},
     tool::{SessionToolSelection, ToolResult},
     types::{SessionId, ToolCallId, TurnId, new_message_id},
@@ -93,6 +93,79 @@ fn accepted_input_stays_pending_until_matching_user_message() {
 
     assert!(model.execution.pending_inputs.is_empty());
     assert_eq!(model.transcript.messages.len(), 1);
+}
+
+#[test]
+fn provider_usage_anchors_covered_transcript_until_context_identity_changes() {
+    let session_id = SessionId::new("session-context-usage");
+    let mut model = replay(
+        session_id.clone(),
+        &[
+            started(0, &session_id),
+            event(
+                1,
+                &session_id,
+                DurableEventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: "first".into(),
+                    attachments: vec![],
+                    accepted_seq: None,
+                },
+            ),
+            event(
+                2,
+                &session_id,
+                DurableEventPayload::TokenUsageRecorded {
+                    usage: LlmTokenUsage {
+                        total_tokens: Some(655_859),
+                        ..Default::default()
+                    },
+                    model_context_window: 1_000_000,
+                },
+            ),
+        ],
+    )
+    .unwrap();
+
+    let usage = model.context_usage.as_ref().unwrap();
+    assert_eq!(usage.context_tokens, 655_859);
+    assert_eq!(usage.model_context_window, 1_000_000);
+    assert_eq!(usage.covered_message_count, 1);
+
+    reduce(
+        &event(
+            3,
+            &session_id,
+            DurableEventPayload::UserMessage {
+                message_id: new_message_id(),
+                text: "tail".into(),
+                attachments: vec![],
+                accepted_seq: None,
+            },
+        ),
+        &mut model,
+    )
+    .unwrap();
+    assert_eq!(
+        model
+            .context_usage
+            .as_ref()
+            .map(|usage| usage.covered_message_count),
+        Some(1)
+    );
+
+    reduce(
+        &event(
+            4,
+            &session_id,
+            DurableEventPayload::ModelIdChanged {
+                model_id: "model-b".into(),
+            },
+        ),
+        &mut model,
+    )
+    .unwrap();
+    assert!(model.context_usage.is_none());
 }
 
 #[test]

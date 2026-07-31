@@ -449,6 +449,52 @@ impl ProviderInputTokenCount {
     }
 }
 
+impl LlmTokenUsage {
+    /// 返回本次响应结束后占用的完整上下文 token。
+    ///
+    /// Provider 原生 `total_tokens` 优先；Anthropic 等未提供 total 的协议只有在
+    /// input/output 都存在时才可形成可靠锚点。缓存字段在不同 provider 中可能是
+    /// input 的子集或独立分量，缺少 total 时宁可保守相加。
+    pub fn context_tokens_after_response(&self) -> Option<u64> {
+        if let Some(total_tokens) = self.total_tokens.filter(|tokens| *tokens > 0) {
+            return Some(total_tokens);
+        }
+
+        Some(
+            self.input_tokens?
+                .saturating_add(self.cached_input_tokens.unwrap_or(0))
+                .saturating_add(self.cache_creation_input_tokens.unwrap_or(0))
+                .saturating_add(self.output_tokens?),
+        )
+    }
+}
+
+/// 单次 LLM 生成请求。
+///
+/// `max_output_tokens` 是请求级上限；缺失时 provider 使用模型配置上限。该字段必须
+/// 在最终消息和工具确定后计算，避免 input 与固定 output 上限共同挤爆上下文窗口。
+#[derive(Debug, Clone)]
+pub struct LlmRequest {
+    pub messages: Vec<LlmMessage>,
+    pub tools: Vec<ToolDefinition>,
+    pub max_output_tokens: Option<usize>,
+}
+
+impl LlmRequest {
+    pub fn new(messages: Vec<LlmMessage>, tools: Vec<ToolDefinition>) -> Self {
+        Self {
+            messages,
+            tools,
+            max_output_tokens: None,
+        }
+    }
+
+    pub fn with_max_output_tokens(mut self, max_output_tokens: usize) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
+        self
+    }
+}
+
 /// LLM 流式输出过程中的事件。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -601,17 +647,6 @@ pub enum ThinkingLevel {
     High,
 }
 
-impl ThinkingLevel {
-    /// 返回 OpenAI Responses `reasoning.effort` 的 wire 值。
-    pub fn as_wire_value(self) -> &'static str {
-        match self {
-            Self::Low => "low",
-            Self::Medium => "medium",
-            Self::High => "high",
-        }
-    }
-}
-
 /// OpenAI 兼容 API 的 provider 特有选项（prompt cache 等）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct OpenAiProviderExtras {
@@ -649,8 +684,6 @@ pub struct LlmClientConfig {
     pub max_retries: u32,
     /// 指数退避的基础延迟（毫秒）。
     pub retry_base_delay_ms: u64,
-    /// 当前模型是否为 reasoning/thinking 模式。
-    pub reasoning: bool,
     /// 当前 profile 是否允许把工具的 strict 声明发送给 provider。
     pub supports_strict_tool_use: bool,
     /// Provider 特有选项。
@@ -691,7 +724,6 @@ impl LlmClientConfig {
             read_timeout_secs: settings.read_timeout_secs,
             max_retries: settings.max_retries,
             retry_base_delay_ms: settings.retry_base_delay_ms,
-            reasoning: settings.reasoning,
             supports_strict_tool_use: settings.supports_strict_tool_use,
             extras,
             extra_headers: std::collections::HashMap::new(),
@@ -729,11 +761,10 @@ impl Default for LlmClientConfig {
             base_url: "https://api.deepseek.com".into(),
             api_key: String::new(),
             auth_scheme: crate::config::ProviderAuthScheme::Bearer,
-            connect_timeout_secs: 10,
-            read_timeout_secs: 90,
-            max_retries: 2,
-            retry_base_delay_ms: 250,
-            reasoning: false,
+            connect_timeout_secs: crate::config::defaults::DEFAULT_LLM_CONNECT_TIMEOUT_SECS,
+            read_timeout_secs: crate::config::defaults::DEFAULT_LLM_READ_TIMEOUT_SECS,
+            max_retries: crate::config::defaults::DEFAULT_LLM_MAX_RETRIES,
+            retry_base_delay_ms: crate::config::defaults::DEFAULT_LLM_RETRY_BASE_DELAY_MS,
             supports_strict_tool_use: false,
             extras: ProviderExtras::None,
             extra_headers: std::collections::HashMap::new(),
@@ -751,14 +782,21 @@ pub trait LlmProvider: Send + Sync {
     ///
     /// 返回一个通道接收端，按到达顺序产生 [`LlmEvent`] 值。
     /// 当流式输出完成或出错时通道关闭。
-    ///
-    /// - `messages`：对话消息列表
-    /// - `tools`：可供 LLM 调用的工具定义列表
     async fn generate(
         &self,
         messages: Vec<LlmMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError>;
+
+    /// 使用请求级参数生成流式响应。
+    ///
+    /// 旧 provider 默认忽略请求级输出上限；需要支持动态预算的 provider 覆盖此方法。
+    async fn generate_request(
+        &self,
+        request: LlmRequest,
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        self.generate(request.messages, request.tools).await
+    }
 
     /// 统计一次 provider request 的 input token。
     async fn count_input_tokens(
@@ -769,6 +807,11 @@ pub trait LlmProvider: Send + Sync {
         Err(LlmError::Unsupported {
             message: "input token counting is not supported by this provider".into(),
         })
+    }
+
+    /// Provider 能接受的最小输出上限。
+    fn minimum_output_tokens(&self) -> usize {
+        1
     }
 
     /// 返回模型的上下文窗口限制。

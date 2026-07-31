@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     common::{
-        HttpPostRequest, apply_auth_header, build_client, ensure_header, report_stream_error,
+        HttpPostRequest, base_headers, build_client, ensure_header, report_stream_error,
         retry_policy_from_config,
     },
     strict_tools::{StrictToolProvider, prepare_strict_tools},
@@ -26,16 +26,16 @@ impl AnthropicProvider {
     pub fn new(
         config: LlmClientConfig,
         model_id: String,
-        max_tokens: Option<u32>,
-        context_limit: Option<usize>,
+        max_tokens: u32,
+        context_limit: usize,
     ) -> Result<Self, LlmError> {
         let client = build_client(&config)?;
         Ok(Self {
             config,
             model_id,
             model_limits_val: ModelLimits {
-                max_input_tokens: context_limit.unwrap_or(200_000),
-                max_output_tokens: max_tokens.unwrap_or(8192) as usize,
+                max_input_tokens: context_limit,
+                max_output_tokens: max_tokens as usize,
             },
             client,
         })
@@ -49,10 +49,16 @@ impl AnthropicProvider {
         anthropic_wire::count_tokens_endpoint(&self.config.base_url)
     }
 
-    fn wire_config(&self) -> anthropic_wire::AnthropicRequestConfig<'_> {
+    fn wire_config(
+        &self,
+        max_output_tokens: Option<usize>,
+    ) -> anthropic_wire::AnthropicRequestConfig<'_> {
         anthropic_wire::AnthropicRequestConfig {
             model_id: &self.model_id,
-            max_output_tokens: self.model_limits_val.max_output_tokens,
+            max_output_tokens: max_output_tokens
+                .unwrap_or(self.model_limits_val.max_output_tokens)
+                .min(self.model_limits_val.max_output_tokens)
+                .max(1),
             supports_strict_tool_use: self.config.supports_strict_tool_use,
             thinking: &self.config.thinking,
             thinking_capability: self
@@ -67,9 +73,15 @@ impl AnthropicProvider {
         &self,
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
+        max_output_tokens: Option<usize>,
         stream: bool,
     ) -> Result<serde_json::Value, LlmError> {
-        anthropic_wire::build_request_body(self.wire_config(), messages, tools, stream)
+        anthropic_wire::build_request_body(
+            self.wire_config(max_output_tokens),
+            messages,
+            tools,
+            stream,
+        )
     }
 
     fn build_count_tokens_body(
@@ -77,18 +89,12 @@ impl AnthropicProvider {
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
     ) -> serde_json::Value {
-        anthropic_wire::build_count_tokens_body(self.wire_config(), messages, tools)
+        anthropic_wire::build_count_tokens_body(self.wire_config(None), messages, tools)
     }
 
     /// count_tokens（JSON）路径用的基础请求头：用户自定义头 + 鉴权 + Anthropic 版本。
     fn headers(&self) -> Vec<(String, String)> {
-        let mut headers: Vec<(String, String)> = self
-            .config
-            .extra_headers
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        apply_auth_header(&mut headers, self.config.auth_scheme, &self.config.api_key);
+        let mut headers = base_headers(&self.config);
         ensure_header(
             &mut headers,
             "anthropic-version",
@@ -103,29 +109,38 @@ impl LlmProvider for AnthropicProvider {
     async fn generate(
         &self,
         messages: Vec<LlmMessage>,
-        mut tools: Vec<ToolDefinition>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        self.generate_request(LlmRequest::new(messages, tools))
+            .await
+    }
+
+    async fn generate_request(
+        &self,
+        request: LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let LlmRequest {
+            messages,
+            mut tools,
+            max_output_tokens,
+        } = request;
         prepare_strict_tools(
             &mut tools,
             self.config.supports_strict_tool_use,
             StrictToolProvider::Anthropic,
         )?;
-        let request_body = self.build_request_body(&messages, &tools, true)?;
+        let request_body = self.build_request_body(&messages, &tools, max_output_tokens, true)?;
         let endpoint = self.endpoint();
-        let api_key = self.config.api_key.clone();
-        let auth_scheme = self.config.auth_scheme;
-        let extra_headers = self.config.extra_headers.clone();
         let client = self.client.clone();
+        let config = self.config.clone();
         let retry = retry_policy_from_config(&self.config);
 
         tokio::spawn(async move {
             let result = anthropic_wire::transport::stream_request(
                 client,
                 endpoint,
-                api_key,
-                auth_scheme,
-                extra_headers,
+                config,
                 request_body,
                 retry,
                 tx.clone(),
@@ -167,6 +182,27 @@ impl LlmProvider for AnthropicProvider {
         Ok(ProviderInputTokenCount::provider_count(input_tokens))
     }
 
+    fn minimum_output_tokens(&self) -> usize {
+        use astrcode_core::llm::thinking::ThinkingWireMapping;
+
+        let uses_budget_thinking = self.config.thinking.enabled
+            && self
+                .config
+                .thinking_capability
+                .as_ref()
+                .is_some_and(|capability| {
+                    capability.wire_mapping == ThinkingWireMapping::AnthropicBudget
+                });
+        if uses_budget_thinking {
+            return self
+                .config
+                .thinking
+                .budget_tokens
+                .map_or(1, |budget| budget as usize + 1);
+        }
+        1
+    }
+
     fn model_limits(&self) -> ModelLimits {
         self.model_limits_val.clone()
     }
@@ -185,10 +221,15 @@ mod tests {
                 ..LlmClientConfig::default()
             },
             "claude-test".into(),
-            None,
-            None,
+            1024,
+            8192,
         )
         .unwrap();
+        let body = provider
+            .build_request_body(&[LlmMessage::user("hi")], &[], Some(123), true)
+            .unwrap();
+        assert_eq!(body["max_tokens"], 123);
+
         let invalid = ToolDefinition {
             name: "bounded".into(),
             description: String::new(),

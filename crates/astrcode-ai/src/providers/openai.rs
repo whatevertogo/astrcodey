@@ -7,8 +7,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     common::{
-        HttpPostRequest, apply_auth_header, build_client, report_stream_error,
-        retry_policy_from_config,
+        HttpPostRequest, base_headers, build_client, report_stream_error, retry_policy_from_config,
     },
     strict_tools::{StrictToolProvider, prepare_strict_tools},
     wire::openai as openai_wire,
@@ -30,8 +29,8 @@ impl StandardProvider {
         config: LlmClientConfig,
         api_mode: OpenAiApiMode,
         model_id: String,
-        max_tokens: Option<u32>,
-        context_limit: Option<usize>,
+        max_tokens: u32,
+        context_limit: usize,
     ) -> Result<Self, LlmError> {
         let client = build_client(&config)?;
         Ok(Self {
@@ -39,8 +38,8 @@ impl StandardProvider {
             api_mode,
             model_id,
             model_limits_val: ModelLimits {
-                max_input_tokens: context_limit.unwrap_or(65536),
-                max_output_tokens: max_tokens.unwrap_or(8192) as usize,
+                max_input_tokens: context_limit,
+                max_output_tokens: max_tokens as usize,
             },
             client,
         })
@@ -54,11 +53,17 @@ impl StandardProvider {
         openai_wire::input_tokens_endpoint(&self.config.base_url)
     }
 
-    fn wire_config(&self) -> openai_wire::OpenAiRequestConfig<'_> {
+    fn wire_config(
+        &self,
+        max_output_tokens: Option<usize>,
+    ) -> openai_wire::OpenAiRequestConfig<'_> {
         openai_wire::OpenAiRequestConfig {
             api_mode: self.api_mode,
             model_id: &self.model_id,
-            max_output_tokens: self.model_limits_val.max_output_tokens,
+            max_output_tokens: max_output_tokens
+                .unwrap_or(self.model_limits_val.max_output_tokens)
+                .min(self.model_limits_val.max_output_tokens)
+                .max(1),
             supports_stream_usage: self.config.supports_stream_usage(),
             supports_prompt_cache_key: self.config.supports_prompt_cache_key(),
             supports_strict_tool_use: self.config.supports_strict_tool_use,
@@ -76,8 +81,9 @@ impl StandardProvider {
         &self,
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
+        max_output_tokens: Option<usize>,
     ) -> serde_json::Value {
-        openai_wire::build_request_body(self.wire_config(), messages, tools)
+        openai_wire::build_request_body(self.wire_config(max_output_tokens), messages, tools)
     }
 
     fn build_responses_count_body(
@@ -85,7 +91,7 @@ impl StandardProvider {
         messages: &[LlmMessage],
         tools: &[ToolDefinition],
     ) -> serde_json::Value {
-        openai_wire::build_input_token_count_body(self.wire_config(), messages, tools)
+        openai_wire::build_input_token_count_body(self.wire_config(None), messages, tools)
     }
 }
 
@@ -96,31 +102,40 @@ impl LlmProvider for StandardProvider {
     async fn generate(
         &self,
         messages: Vec<LlmMessage>,
-        mut tools: Vec<ToolDefinition>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        self.generate_request(LlmRequest::new(messages, tools))
+            .await
+    }
+
+    async fn generate_request(
+        &self,
+        request: LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
+        let LlmRequest {
+            messages,
+            mut tools,
+            max_output_tokens,
+        } = request;
         prepare_strict_tools(
             &mut tools,
             self.config.supports_strict_tool_use,
             StrictToolProvider::OpenAi,
         )?;
-        let body = self.build_request_body(&messages, &tools);
+        let body = self.build_request_body(&messages, &tools, max_output_tokens);
 
         let endpoint = self.endpoint();
-        let api_key = self.config.api_key.clone();
-        let auth_scheme = self.config.auth_scheme;
-        let extra_headers = self.config.extra_headers.clone();
         let client = self.client.clone();
         let api_mode = self.api_mode;
+        let config = self.config.clone();
         let retry = retry_policy_from_config(&self.config);
 
         tokio::spawn(async move {
             let result = openai_wire::transport::stream_request(
                 client,
                 endpoint,
-                api_key,
-                auth_scheme,
-                extra_headers,
+                config,
                 body,
                 api_mode,
                 retry,
@@ -151,9 +166,7 @@ impl LlmProvider for StandardProvider {
             StrictToolProvider::OpenAi,
         )?;
 
-        let mut headers: Vec<(String, String)> =
-            self.config.extra_headers.clone().into_iter().collect();
-        apply_auth_header(&mut headers, self.config.auth_scheme, &self.config.api_key);
+        let headers = base_headers(&self.config);
         let value = HttpPostRequest {
             client: self.client.clone(),
             endpoint: self.input_tokens_endpoint(),
@@ -212,7 +225,7 @@ mod tests {
             thinking_capability,
             ..LlmClientConfig::default()
         };
-        StandardProvider::new(config, api_mode, "gpt-test".into(), Some(1024), Some(8192)).unwrap()
+        StandardProvider::new(config, api_mode, "gpt-test".into(), 1024, 8192).unwrap()
     }
 
     fn sample_tool() -> ToolDefinition {
@@ -241,6 +254,7 @@ mod tests {
         let body = p.build_request_body(
             &[LlmMessage::system("s"), LlmMessage::user("hi")],
             &[sample_tool()],
+            Some(123),
         );
         assert!(
             body["prompt_cache_key"]
@@ -248,6 +262,7 @@ mod tests {
                 .is_some_and(|k| k.starts_with("astrcode-"))
         );
         assert_eq!(body["prompt_cache_retention"], "24h");
+        assert_eq!(body["max_tokens"], 123);
     }
 
     #[test]
@@ -258,7 +273,7 @@ mod tests {
             ThinkingConfig::default(),
             None,
         );
-        let body = p.build_request_body(&[LlmMessage::user("hi")], &[]);
+        let body = p.build_request_body(&[LlmMessage::user("hi")], &[], None);
         assert_eq!(body["stream_options"]["include_usage"], true);
     }
 
@@ -306,7 +321,11 @@ mod tests {
             ThinkingConfig::default(),
             None,
         );
-        let body = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("hi")], &[]);
+        let body = p.build_request_body(
+            &[LlmMessage::system("s"), LlmMessage::user("hi")],
+            &[],
+            None,
+        );
         assert!(body.get("prompt_cache_key").is_none());
     }
 
@@ -343,7 +362,7 @@ mod tests {
             None,
         );
         let t = vec![sample_tool()];
-        let a = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("a")], &t);
+        let a = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("a")], &t, None);
         let b = p.build_request_body(
             &[
                 LlmMessage::system("s"),
@@ -351,6 +370,7 @@ mod tests {
                 LlmMessage::assistant("hist"),
             ],
             &t,
+            None,
         );
         assert_eq!(a["prompt_cache_key"], b["prompt_cache_key"]);
     }
@@ -367,8 +387,8 @@ mod tests {
         let mut other = sample_tool();
         other.name = "other".into();
 
-        let a = p.build_request_body(&messages, &[sample_tool()]);
-        let b = p.build_request_body(&messages, &[other]);
+        let a = p.build_request_body(&messages, &[sample_tool()], None);
+        let b = p.build_request_body(&messages, &[other], None);
         assert_ne!(a["prompt_cache_key"], b["prompt_cache_key"]);
     }
 
@@ -391,7 +411,11 @@ mod tests {
                 can_disable: false,
             }),
         );
-        let body = p.build_request_body(&[LlmMessage::system("s"), LlmMessage::user("hi")], &[]);
+        let body = p.build_request_body(
+            &[LlmMessage::system("s"), LlmMessage::user("hi")],
+            &[],
+            None,
+        );
         assert_eq!(body["reasoning"]["effort"], "high");
     }
 }

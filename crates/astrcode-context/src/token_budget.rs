@@ -21,8 +21,8 @@ pub struct PromptTokenSnapshot {
     pub threshold_tokens: usize,
     /// 当前模型的输入窗口上限。
     pub max_input_tokens: usize,
-    /// 预留输出 token。
-    pub reserved_output_tokens: usize,
+    /// 模型配置允许的最大输出 token。
+    pub max_output_tokens: usize,
 }
 
 /// 构建 compact gate 使用的 token 快照。
@@ -39,7 +39,7 @@ pub fn build_prompt_snapshot(
         context_tokens,
         threshold_tokens: compact_threshold_tokens(limits.max_input_tokens, threshold_percent),
         max_input_tokens: limits.max_input_tokens,
-        reserved_output_tokens: limits.max_output_tokens,
+        max_output_tokens: limits.max_output_tokens,
     }
 }
 
@@ -68,6 +68,32 @@ pub fn should_compact(snapshot: PromptTokenSnapshot) -> bool {
     snapshot.context_tokens >= snapshot.threshold_tokens
 }
 
+const MAX_REQUEST_SAFETY_TOKENS: usize = 4096;
+const REQUEST_SAFETY_WINDOW_DIVISOR: usize = 16;
+const MIN_REQUEST_OUTPUT_TOKENS: usize = 16;
+
+/// 根据最终 input 动态限制单次请求的最大输出。
+///
+/// 小窗口测试模型按窗口比例缩放安全余量；生产模型最多保留 4096 tokens。返回
+/// `None` 表示连最小输出空间都无法提供，调用方应在发送网络请求前 compact。
+pub fn request_max_output_tokens(
+    snapshot: PromptTokenSnapshot,
+    provider_minimum_output_tokens: usize,
+) -> Option<usize> {
+    let safety_tokens =
+        MAX_REQUEST_SAFETY_TOKENS.min(snapshot.max_input_tokens / REQUEST_SAFETY_WINDOW_DIVISOR);
+    let available_output_tokens = snapshot
+        .max_input_tokens
+        .saturating_sub(snapshot.context_tokens)
+        .saturating_sub(safety_tokens);
+    let max_output_tokens = snapshot.max_output_tokens.min(available_output_tokens);
+    let minimum = snapshot
+        .max_output_tokens
+        .min(MIN_REQUEST_OUTPUT_TOKENS.max(provider_minimum_output_tokens))
+        .max(1);
+    (max_output_tokens >= minimum).then_some(max_output_tokens)
+}
+
 /// 估算下一轮 token 增长（EMA + 最近一轮取最大值，下限为 baseline）。
 pub fn estimate_turn_growth(messages: &[LlmMessage], baseline: usize) -> usize {
     let turns = turn_token_totals(messages);
@@ -86,16 +112,16 @@ pub fn estimate_turn_growth(messages: &[LlmMessage], baseline: usize) -> usize {
 }
 
 /// 预测性判断：
-/// effective_budget = min(threshold, max_input - reserved_output)
+/// effective_budget = min(threshold, max_input - safety_margin)
 /// trigger_if: current_tokens + growth >= effective_budget
 pub fn should_compact_predictive(
     snapshot: PromptTokenSnapshot,
     growth_estimate: usize,
     model_limits: ModelLimits,
 ) -> bool {
-    let hard_budget = model_limits
-        .max_input_tokens
-        .saturating_sub(model_limits.max_output_tokens);
+    let safety_tokens = MAX_REQUEST_SAFETY_TOKENS
+        .min(model_limits.max_input_tokens / REQUEST_SAFETY_WINDOW_DIVISOR);
+    let hard_budget = model_limits.max_input_tokens.saturating_sub(safety_tokens);
     let effective_budget = snapshot.threshold_tokens.min(hard_budget);
     snapshot.context_tokens.saturating_add(growth_estimate) >= effective_budget
 }
@@ -144,7 +170,7 @@ mod tests {
             context_tokens: 16_699,
             threshold_tokens,
             max_input_tokens: 20_000,
-            reserved_output_tokens: 1024,
+            max_output_tokens: 1024,
         };
         assert!(!should_compact(below_threshold));
 
@@ -170,7 +196,7 @@ mod tests {
             context_tokens: 15_000,
             threshold_tokens: 16_000,
             max_input_tokens: 20_000,
-            reserved_output_tokens: 2_000,
+            max_output_tokens: 2_000,
         };
         assert!(should_compact_predictive(
             snapshot,
@@ -180,5 +206,27 @@ mod tests {
                 max_output_tokens: 2_000,
             }
         ));
+    }
+
+    #[test]
+    fn request_output_budget_clamps_large_model_cap_and_rejects_exhausted_context() {
+        let snapshot = PromptTokenSnapshot {
+            context_tokens: 656_158,
+            threshold_tokens: 835_000,
+            max_input_tokens: 1_000_000,
+            max_output_tokens: 393_216,
+        };
+        assert_eq!(request_max_output_tokens(snapshot, 1), Some(339_746));
+        assert_eq!(
+            request_max_output_tokens(
+                PromptTokenSnapshot {
+                    context_tokens: 999_990,
+                    ..snapshot
+                },
+                1
+            ),
+            None
+        );
+        assert_eq!(request_max_output_tokens(snapshot, 340_000), None);
     }
 }

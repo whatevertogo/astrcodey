@@ -175,6 +175,17 @@ pub struct SessionReadModel {
     pub agent_sessions: Vec<AgentSessionLinkView>,
     /// compaction 元数据列表，按 seq 递增排列。
     pub compactions: Vec<CompactionView>,
+    /// 最近一次可作为当前 transcript 前缀锚点的 provider 上下文用量。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<ContextUsageView>,
+}
+
+/// Provider 用量覆盖的 transcript 前缀。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ContextUsageView {
+    pub context_tokens: usize,
+    pub model_context_window: usize,
+    pub covered_message_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -255,6 +266,7 @@ impl SessionReadModel {
             execution: SessionExecutionState::default(),
             agent_sessions: Vec::new(),
             compactions: Vec::new(),
+            context_usage: None,
         }
     }
 

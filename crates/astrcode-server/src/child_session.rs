@@ -490,16 +490,16 @@ impl ChildSessionCoordinator {
             .session_manager
             .spawn_creation_task(async move {
                 let result = parent_session
-                    .spawn_child(
-                        &working_dir,
-                        &model_id,
-                        request.name,
-                        String::new(),
-                        request.system_prompt,
-                        request.tool_selection,
-                        request.source_extension.as_deref(),
-                        request.tool_call_id.into(),
-                    )
+                    .spawn_child(astrcode_session::SpawnChildParams {
+                        working_dir,
+                        model_id,
+                        agent_name: request.name,
+                        task: String::new(),
+                        extra_system_prompt: request.system_prompt,
+                        tool_selection: request.tool_selection,
+                        source_extension: request.source_extension,
+                        tool_call_id: request.tool_call_id.into(),
+                    })
                     .await;
                 drop(parent_operation);
                 result

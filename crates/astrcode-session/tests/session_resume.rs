@@ -229,18 +229,18 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
     );
 
     let child = parent
-        .spawn_child(
-            ".",
-            "mock-model",
-            "worker".into(),
-            "test selection boundary".into(),
-            None,
-            Some(SessionToolSelection::All {
+        .spawn_child(astrcode_session::SpawnChildParams {
+            working_dir: ".".into(),
+            model_id: "mock-model".into(),
+            agent_name: "worker".into(),
+            task: "test selection boundary".into(),
+            extra_system_prompt: None,
+            tool_selection: Some(SessionToolSelection::All {
                 except: vec!["read".into()],
             }),
-            None,
-            ToolCallId::new("call-1"),
-        )
+            source_extension: None,
+            tool_call_id: ToolCallId::new("call-1"),
+        })
         .await
         .unwrap();
     assert_eq!(
@@ -322,16 +322,16 @@ async fn parent_and_spawned_child_each_emit_session_start_once() {
         .await
         .unwrap();
     let child = parent
-        .spawn_child(
-            ".",
-            "mock-model",
-            "worker".into(),
-            "verify lifecycle".into(),
-            None,
-            None,
-            None,
-            ToolCallId::new("call-lifecycle"),
-        )
+        .spawn_child(astrcode_session::SpawnChildParams {
+            working_dir: ".".into(),
+            model_id: "mock-model".into(),
+            agent_name: "worker".into(),
+            task: "verify lifecycle".into(),
+            extra_system_prompt: None,
+            tool_selection: None,
+            source_extension: None,
+            tool_call_id: ToolCallId::new("call-lifecycle"),
+        })
         .await
         .unwrap();
     child

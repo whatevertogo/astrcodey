@@ -225,18 +225,57 @@ enum PromptSectionOrder {
     AdditionalInstructions,
 }
 
+impl PromptSectionOrder {
+    /// 渲染标题与稳定/动态分组的唯一事实来源。
+    const ALL: &'static [(Self, &'static str)] = &[
+        (Self::Identity, "Identity"),
+        (Self::System, "System"),
+        (Self::TaskGuidelines, "Task Guidelines"),
+        (Self::Communication, "Communication"),
+        (Self::Environment, "Environment"),
+        (Self::UserRules, "User Rules"),
+        (Self::ProjectRules, "Project Rules"),
+        (Self::ToolSummary, "Tool Summary"),
+        (Self::SystemPromptInstruction, "SystemPromptInstruction"),
+        (Self::Skills, "Skills"),
+        (Self::Agents, "Agents"),
+        (Self::AdditionalInstructions, "Additional Instructions"),
+    ];
+
+    fn title(self) -> &'static str {
+        Self::ALL
+            .iter()
+            .find(|(order, _)| *order == self)
+            .map(|(_, title)| *title)
+            .expect("every PromptSectionOrder variant has a title")
+    }
+
+    fn from_title(title: &str) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .find(|(_, candidate)| *candidate == title)
+            .map(|(order, _)| *order)
+    }
+
+    /// 静态 section 组成稳定前缀；动态 section 变化时 KV cache 只需失效后半部分。
+    fn is_stable(self) -> bool {
+        matches!(
+            self,
+            Self::Identity | Self::System | Self::TaskGuidelines | Self::Communication
+        )
+    }
+}
+
 #[derive(Debug)]
 struct PromptSection {
     order: PromptSectionOrder,
-    title: &'static str,
     body: String,
 }
 
 impl PromptSection {
-    fn new(order: PromptSectionOrder, title: &'static str, body: impl Into<String>) -> Self {
+    fn new(order: PromptSectionOrder, body: impl Into<String>) -> Self {
         Self {
             order,
-            title,
             body: body.into(),
         }
     }
@@ -244,11 +283,7 @@ impl PromptSection {
 
 fn identity_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
     let identity = input.identity.as_deref().unwrap_or(DEFAULT_IDENTITY).trim();
-    vec![PromptSection::new(
-        PromptSectionOrder::Identity,
-        "Identity",
-        identity,
-    )]
+    vec![PromptSection::new(PromptSectionOrder::Identity, identity)]
 }
 
 fn environment_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
@@ -259,25 +294,16 @@ fn environment_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
     if input.gh_cli_available {
         body.push_str("\nGitHub CLI (gh): available");
     }
-    vec![PromptSection::new(
-        PromptSectionOrder::Environment,
-        "Environment",
-        body,
-    )]
+    vec![PromptSection::new(PromptSectionOrder::Environment, body)]
 }
 
 fn system_sections() -> Vec<PromptSection> {
-    vec![PromptSection::new(
-        PromptSectionOrder::System,
-        "System",
-        SYSTEM_RULES,
-    )]
+    vec![PromptSection::new(PromptSectionOrder::System, SYSTEM_RULES)]
 }
 
 fn task_guidelines_sections() -> Vec<PromptSection> {
     vec![PromptSection::new(
         PromptSectionOrder::TaskGuidelines,
-        "Task Guidelines",
         TASK_GUIDELINES,
     )]
 }
@@ -285,7 +311,6 @@ fn task_guidelines_sections() -> Vec<PromptSection> {
 fn communication_sections() -> Vec<PromptSection> {
     vec![PromptSection::new(
         PromptSectionOrder::Communication,
-        "Communication",
         COMMUNICATION,
     )]
 }
@@ -295,14 +320,12 @@ fn rules_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
     if let Some(rules) = &input.user_rules {
         sections.push(PromptSection::new(
             PromptSectionOrder::UserRules,
-            "User Rules",
             rules.trim(),
         ));
     }
     if let Some(project_rules) = &input.project_rules {
         sections.push(PromptSection::new(
             PromptSectionOrder::ProjectRules,
-            "Project Rules",
             project_rules.trim(),
         ));
     }
@@ -314,7 +337,6 @@ fn tool_summary_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection> {
     if let Some(tool_summary) = tool_summary::tool_summary(input) {
         sections.push(PromptSection::new(
             PromptSectionOrder::ToolSummary,
-            "Tool Summary",
             tool_summary,
         ));
     }
@@ -325,24 +347,15 @@ fn extension_prompt_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSection
     [
         (
             PromptSectionOrder::SystemPromptInstruction,
-            "SystemPromptInstruction",
             ExtensionSection::PlatformInstructions,
         ),
-        (
-            PromptSectionOrder::Skills,
-            "Skills",
-            ExtensionSection::Skills,
-        ),
-        (
-            PromptSectionOrder::Agents,
-            "Agents",
-            ExtensionSection::Agents,
-        ),
+        (PromptSectionOrder::Skills, ExtensionSection::Skills),
+        (PromptSectionOrder::Agents, ExtensionSection::Agents),
     ]
     .into_iter()
-    .filter_map(|(order, title, kind)| {
+    .filter_map(|(order, kind)| {
         extension_section_body(&input.extension_blocks, kind)
-            .map(|body| PromptSection::new(order, title, body))
+            .map(|body| PromptSection::new(order, body))
     })
     .collect()
 }
@@ -370,7 +383,6 @@ fn extra_instruction_sections(input: &SystemPromptInput<'_>) -> Vec<PromptSectio
     } else {
         vec![PromptSection::new(
             PromptSectionOrder::AdditionalInstructions,
-            "Additional Instructions",
             body,
         )]
     }
@@ -392,7 +404,7 @@ fn extension_section_body(
 
 fn render_prompt_section(section: PromptSection) -> String {
     let body = indent_body(section.body.trim());
-    format!("[{}]\n{body}", section.title)
+    format!("[{}]\n{body}", section.order.title())
 }
 
 fn indent_body(body: &str) -> String {

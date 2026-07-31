@@ -4,12 +4,7 @@
 //! `parse_stream` 本地拥有 [`AnthropicStreamState`]，经共享的 [`consume_sse_lines`] 逐行喂数据，
 //! 因此不需要 `Arc<Mutex<…>>` 来跨回调共享状态。
 
-use std::collections::HashMap;
-
-use astrcode_core::{
-    config::ProviderAuthScheme,
-    llm::{LlmError, LlmEvent},
-};
+use astrcode_core::llm::{LlmClientConfig, LlmError, LlmEvent};
 use tokio::sync::mpsc;
 
 use super::{
@@ -17,25 +12,19 @@ use super::{
     parser::{AnthropicStreamState, process_sse_line},
 };
 use crate::{
-    common::{
-        HttpPostRequest, SseBodyPreview, apply_auth_header, consume_sse_lines, ensure_header,
-    },
+    common::{HttpPostRequest, SseBodyPreview, base_headers, consume_sse_lines, ensure_header},
     retry::RetryPolicy,
 };
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_request(
     client: reqwest::Client,
     endpoint: String,
-    api_key: String,
-    auth_scheme: ProviderAuthScheme,
-    extra_headers: HashMap<String, String>,
+    config: LlmClientConfig,
     body: serde_json::Value,
     retry: RetryPolicy,
     tx: mpsc::UnboundedSender<LlmEvent>,
 ) -> Result<(), LlmError> {
-    let mut headers: Vec<(String, String)> = extra_headers.into_iter().collect();
-    apply_auth_header(&mut headers, auth_scheme, &api_key);
+    let mut headers = base_headers(&config);
     ensure_header(&mut headers, "anthropic-version", ANTHROPIC_API_VERSION);
     ensure_header(&mut headers, "Accept", "text/event-stream");
 

@@ -2,7 +2,7 @@
 //!
 //! This module defines the normalized thinking configuration model used throughout
 //! the runtime and the capability description consumed by configuration and provider
-//! boundaries. Built-in provider policy and legacy migration live in [`crate::config`].
+//! boundaries. Built-in provider policy lives in [`crate::config`].
 
 use serde::{Deserialize, Serialize};
 
@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 /// Normalized thinking/reasoning configuration consumed by the runtime.
 ///
-/// This is the single canonical representation after legacy conversion and
-/// capability validation have been applied at the config resolution boundary.
+/// This is the single canonical representation after capability validation has
+/// been applied at the config resolution boundary.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ThinkingConfig {

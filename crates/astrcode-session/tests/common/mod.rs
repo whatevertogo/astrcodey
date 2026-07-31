@@ -114,8 +114,6 @@ fn effective_config(context: ContextSettings) -> EffectiveConfig {
         supports_stream_usage: false,
         supports_strict_tool_use: false,
         prompt_cache_retention: None,
-        reasoning: false,
-        thinking_level: None,
         thinking: Default::default(),
         thinking_capability: None,
         thinking_configured: false,

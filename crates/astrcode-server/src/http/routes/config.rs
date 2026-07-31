@@ -3,7 +3,7 @@
 use astrcode_core::{
     config::{
         Config, ModelConfig, ModelOptionsConfig, Profile, ProviderCapabilities, ProviderSpec,
-        builtin_provider_catalog, model_thinking_config, resolve_thinking_capability,
+        builtin_provider_catalog, resolve_thinking_capability,
     },
     llm::thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping, validate_thinking},
     permission::ApprovalMode,
@@ -61,7 +61,7 @@ pub(in crate::http) async fn get_config(State(state): State<HttpState>) -> Respo
                     thinking: m
                         .model_options
                         .as_ref()
-                        .and_then(model_thinking_config)
+                        .and_then(|o| o.thinking.clone())
                         .map(Into::into),
                     thinking_capability: {
                         let cap = m.thinking_capability.clone().or_else(|| {
@@ -454,8 +454,6 @@ fn apply_model_options_update(
             .model_options
             .get_or_insert_with(ModelOptionsConfig::default);
         opts.thinking = thinking_submitted.then_some(new_thinking);
-        opts.reasoning = None;
-        opts.thinking_level = None;
         if opts.thinking.is_none() {
             model.model_options = None;
         }

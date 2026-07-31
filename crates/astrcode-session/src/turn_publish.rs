@@ -23,6 +23,7 @@ use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
+    payload::JSON_RPC_INTERNAL_ERROR,
     session::{Session, SessionError},
     session_event_sink::SessionEventPublishError,
     turn_context::{TurnError, TurnEventTx},
@@ -76,7 +77,7 @@ impl TurnEvents {
         match self.persist_durable(payload).await {
             Ok(()) => Ok(()),
             Err(error) => {
-                self.live_error(-32603, error.to_string(), false);
+                self.live_error(JSON_RPC_INTERNAL_ERROR, error.to_string(), false);
                 Err(error)
             },
         }
@@ -158,7 +159,7 @@ async fn durable_with_retry(
                     attempt,
                     "turn event ingress durable publish failed"
                 );
-                publisher.live_error(-32603, error.to_string(), false);
+                publisher.live_error(JSON_RPC_INTERNAL_ERROR, error.to_string(), false);
                 return Err(error);
             },
         }
@@ -327,18 +328,8 @@ impl ExtensionEvents {
 mod tests {
     use std::sync::Arc;
 
-    use astrcode_context::{
-        ContextAssembler, ContextPrepareInput, NoopPostCompactEnricher, PreparedContext,
-        context_assembler::LlmContextAssembler,
-    };
     use astrcode_core::{
-        config::{
-            ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme,
-            ProviderWireFormat,
-        },
-        event::{DurableEventPayload, Event, EventPayload, ExtensionEventData, LiveEventPayload},
-        llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        tool::ToolDefinition,
+        event::{DurableEventPayload, EventPayload, ExtensionEventData, LiveEventPayload},
         types::{new_session_id, new_turn_id},
         user_input::UserInput,
     };
@@ -350,139 +341,19 @@ mod tests {
             ProviderContext, ProviderEvent, ProviderResult, UserMessageEnvelopeContext,
             UserMessageEnvelopeResult,
         },
-        runtime_ports::{NoopRuntimePorts, TurnHooks},
+        runtime_ports::TurnHooks,
     };
     use astrcode_storage::in_memory::InMemoryEventStore;
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::{
-        SessionExtensionPorts,
         session::{Session, SessionCreateParams},
-        session_event_sink::{SessionEventObserver, SessionEventSink},
+        session_event_sink::SessionEventSink,
         session_runtime::SessionRuntimeState,
         session_runtime_services::SessionRuntimeServices,
+        test_support::{ChannelObserver, test_runtime_services, test_runtime_services_with_hooks},
     };
-
-    struct ChannelObserver(mpsc::UnboundedSender<Arc<Event>>);
-
-    impl SessionEventObserver for ChannelObserver {
-        fn publish(&self, event: Arc<Event>) {
-            let _ = self.0.send(event);
-        }
-    }
-
-    struct UnusedLlm;
-
-    #[async_trait::async_trait]
-    impl LlmProvider for UnusedLlm {
-        async fn generate(
-            &self,
-            _messages: Vec<LlmMessage>,
-            _tools: Vec<ToolDefinition>,
-        ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-            unreachable!()
-        }
-
-        fn model_limits(&self) -> ModelLimits {
-            ModelLimits {
-                max_input_tokens: 1024,
-                max_output_tokens: 1024,
-            }
-        }
-    }
-
-    struct TestContextAssembler {
-        settings: ContextSettings,
-    }
-
-    impl ContextAssembler for TestContextAssembler {
-        fn settings(&self) -> &ContextSettings {
-            &self.settings
-        }
-
-        fn should_auto_compact(&self, _input: &ContextPrepareInput<'_>) -> bool {
-            false
-        }
-
-        fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
-            LlmContextAssembler::new(self.settings.clone()).prepare_messages(input)
-        }
-    }
-
-    fn test_runtime_services() -> Arc<SessionRuntimeServices> {
-        test_runtime_services_with_hooks(Arc::new(NoopRuntimePorts))
-    }
-
-    fn test_runtime_services_with_hooks(
-        turn_hooks: Arc<dyn TurnHooks>,
-    ) -> Arc<SessionRuntimeServices> {
-        let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
-        let context_assembler = Arc::new(TestContextAssembler {
-            settings: ContextSettings::default(),
-        });
-        let effective = EffectiveConfig {
-            llm: LlmSettings {
-                provider_kind: "mock".into(),
-                base_url: String::new(),
-                api_key: String::new(),
-                wire_format: ProviderWireFormat::OpenAiChatCompletions,
-                auth_scheme: ProviderAuthScheme::Bearer,
-                model_id: "mock-model".into(),
-                max_tokens: 1024,
-                context_limit: 1024,
-                connect_timeout_secs: 1,
-                read_timeout_secs: 1,
-                max_retries: 0,
-                retry_base_delay_ms: 0,
-                supports_prompt_cache_key: false,
-                supports_stream_usage: false,
-                supports_strict_tool_use: false,
-                prompt_cache_retention: None,
-                reasoning: false,
-                thinking_level: None,
-                thinking: Default::default(),
-                thinking_capability: None,
-                thinking_configured: false,
-            },
-            small_llm: LlmSettings {
-                provider_kind: "mock".into(),
-                base_url: String::new(),
-                api_key: String::new(),
-                wire_format: ProviderWireFormat::OpenAiChatCompletions,
-                auth_scheme: ProviderAuthScheme::Bearer,
-                model_id: "mock-model".into(),
-                max_tokens: 1024,
-                context_limit: 1024,
-                connect_timeout_secs: 1,
-                read_timeout_secs: 1,
-                max_retries: 0,
-                retry_base_delay_ms: 0,
-                supports_prompt_cache_key: false,
-                supports_stream_usage: false,
-                supports_strict_tool_use: false,
-                prompt_cache_retention: None,
-                reasoning: false,
-                thinking_level: None,
-                thinking: Default::default(),
-                thinking_capability: None,
-                thinking_configured: false,
-            },
-            context: ContextSettings::default(),
-            agent: astrcode_core::config::AgentSettings::default(),
-            permissions: Default::default(),
-            extensions: ExtensionSettings::default(),
-        };
-        Arc::new(SessionRuntimeServices::new(
-            llm.clone(),
-            llm,
-            effective,
-            SessionExtensionPorts::with_turn_hooks(turn_hooks),
-            context_assembler,
-            Arc::new(NoopPostCompactEnricher),
-            Arc::new(NoopRuntimePorts),
-        ))
-    }
 
     async fn test_session() -> Session {
         test_session_with_runtime_services(test_runtime_services()).await
@@ -532,7 +403,7 @@ mod tests {
         let runtime = Arc::new(SessionRuntimeState::new_with_event_sink(
             new_session_id(),
             store.clone(),
-            Arc::new(SessionEventSink::new(Arc::new(ChannelObserver(events_tx)))),
+            Arc::new(SessionEventSink::new(ChannelObserver::new(events_tx))),
         ));
         let session = test_session_with_runtime(test_runtime_services(), runtime).await;
         while events_rx.try_recv().is_ok() {}

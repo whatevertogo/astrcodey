@@ -2,7 +2,13 @@ use std::path::PathBuf;
 
 use astrcode_core::{
     config::ContextSettings,
-    llm::{LlmContent, LlmError, LlmMessage, LlmRole, provider_visible_messages},
+    llm::{
+        LlmContent, LlmError, LlmMessage, LlmRole, provider_visible_messages,
+        token_estimate::{
+            estimate_provider_message_tokens, estimate_provider_request_tokens,
+            estimate_tool_definition_tokens,
+        },
+    },
     tool::ToolDefinition,
 };
 
@@ -19,6 +25,14 @@ pub struct ContextSnapshot {
     pub source_seq: u64,
     pub system_prompt: String,
     pub messages: Vec<LlmMessage>,
+    input_token_anchor: Option<InputTokenAnchor>,
+}
+
+#[derive(Debug, Clone)]
+struct InputTokenAnchor {
+    context_tokens: usize,
+    model_context_window: usize,
+    covered_message_count: usize,
 }
 
 impl ContextSnapshot {
@@ -29,7 +43,27 @@ impl ContextSnapshot {
             source_seq,
             system_prompt,
             messages,
+            input_token_anchor: None,
         }
+    }
+
+    /// 绑定 provider usage 覆盖的 transcript 前缀。
+    pub fn with_input_token_anchor(
+        mut self,
+        context_tokens: usize,
+        model_context_window: usize,
+        covered_messages: Vec<LlmMessage>,
+    ) -> Self {
+        let covered_message_count = provider_visible_messages(covered_messages)
+            .into_iter()
+            .filter(|message| message.role != LlmRole::System)
+            .count();
+        self.input_token_anchor = Some(InputTokenAnchor {
+            context_tokens,
+            model_context_window,
+            covered_message_count,
+        });
+        self
     }
 
     /// 将可见 transcript 与当前 system prompt 组装为完整 provider 请求。
@@ -38,6 +72,42 @@ impl ContextSnapshot {
         request.extend(system_messages_from_prompt(&self.system_prompt));
         request.extend(messages);
         provider_visible_messages(request)
+    }
+
+    /// 估算最终 provider 请求输入。优先复用最近 provider usage，仅估算新增尾部。
+    pub fn estimate_input_tokens(
+        &self,
+        request_messages: &[LlmMessage],
+        tools: &[ToolDefinition],
+        model_context_window: usize,
+    ) -> usize {
+        let Some(anchor) = &self.input_token_anchor else {
+            return estimate_provider_request_tokens(request_messages, tools);
+        };
+        if anchor.model_context_window != model_context_window {
+            return estimate_provider_request_tokens(request_messages, tools);
+        }
+        let system_messages = system_messages_from_prompt(&self.system_prompt);
+        let Some(covered_messages) = self.messages.get(..anchor.covered_message_count) else {
+            return estimate_provider_request_tokens(request_messages, tools);
+        };
+        let prefix_len = system_messages.len().saturating_add(covered_messages.len());
+        let Some(request_prefix) = request_messages.get(..prefix_len) else {
+            return estimate_provider_request_tokens(request_messages, tools);
+        };
+        if !request_prefix[..system_messages.len()].eq(system_messages.as_slice())
+            || !request_prefix[system_messages.len()..].eq(covered_messages)
+        {
+            return estimate_provider_request_tokens(request_messages, tools);
+        }
+        let trailing_messages = &request_messages[prefix_len..];
+
+        anchor
+            .context_tokens
+            .saturating_add(estimate_provider_message_tokens(trailing_messages))
+            // Provider usage 已包含上一请求的工具；再次计入当前工具是有意的保守上界，
+            // 同时覆盖 turn 中 deferred tool 激活或工具目录热更新。
+            .saturating_add(estimate_tool_definition_tokens(tools))
     }
 }
 
@@ -174,4 +244,47 @@ pub struct NoopPostCompactEnricher;
 #[async_trait::async_trait]
 impl PostCompactEnricher for NoopPostCompactEnricher {
     async fn enrich(&self, _compaction: &mut CompactResult, _input: PostCompactEnrichInput<'_>) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::tool::{ExecutionMode, ToolOrigin};
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn input_estimate_reuses_only_matching_provider_usage_prefix() {
+        let covered_messages = vec![LlmMessage::user("first"), LlmMessage::assistant("response")];
+        let snapshot = ContextSnapshot::new(2, "system".into(), covered_messages.clone())
+            .with_input_token_anchor(655_859, 1_000_000, covered_messages);
+        let request_messages = snapshot.request_messages(vec![
+            LlmMessage::user("first"),
+            LlmMessage::assistant("response"),
+            LlmMessage::user("tail"),
+        ]);
+        let tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "Read a file".into(),
+            parameters: json!({"type": "object"}),
+            strict: false,
+            origin: ToolOrigin::Builtin,
+            execution_mode: ExecutionMode::Sequential,
+        }];
+
+        let anchored = snapshot.estimate_input_tokens(&request_messages, &tools, 1_000_000);
+        let local = estimate_provider_request_tokens(&request_messages, &tools);
+        assert!(anchored > 655_859);
+        assert!(anchored > local);
+        assert_eq!(
+            snapshot.estimate_input_tokens(&request_messages, &tools, 200_000),
+            local
+        );
+
+        let changed_prefix = snapshot.request_messages(vec![LlmMessage::user("changed")]);
+        assert_eq!(
+            snapshot.estimate_input_tokens(&changed_prefix, &tools, 1_000_000),
+            estimate_provider_request_tokens(&changed_prefix, &tools)
+        );
+    }
 }

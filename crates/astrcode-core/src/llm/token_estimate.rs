@@ -4,6 +4,7 @@
 //! provider 返回的真实用量。
 
 use super::{LlmContent, LlmMessage};
+use crate::tool::ToolDefinition;
 
 const MESSAGE_BASE_TOKENS: usize = 6;
 const TOOL_CALL_BASE_TOKENS: usize = 12;
@@ -23,6 +24,29 @@ pub fn estimate_provider_message_tokens<'a>(
     messages: impl IntoIterator<Item = &'a LlmMessage>,
 ) -> usize {
     apply_request_padding(messages.into_iter().map(estimate_message_tokens).sum())
+}
+
+/// 估算 provider 请求中的工具定义 token。
+pub fn estimate_tool_definition_tokens(tools: &[ToolDefinition]) -> usize {
+    let raw_total = tools
+        .iter()
+        .map(|tool| {
+            TOOL_CALL_BASE_TOKENS
+                + estimate_text_tokens(&tool.name)
+                + estimate_text_tokens(&tool.description)
+                + estimate_text_tokens(&tool.parameters.to_string())
+        })
+        .sum();
+    apply_request_padding(raw_total)
+}
+
+/// 估算已经完成 provider 归一化的完整请求（消息 + 工具定义）。
+pub fn estimate_provider_request_tokens(
+    messages: &[LlmMessage],
+    tools: &[ToolDefinition],
+) -> usize {
+    estimate_provider_message_tokens(messages)
+        .saturating_add(estimate_tool_definition_tokens(tools))
 }
 
 fn apply_request_padding(raw_total: usize) -> usize {
@@ -117,6 +141,20 @@ mod tests {
         assert_eq!(estimate_char_budget(2), 8);
         assert_eq!(estimate_char_budget(usize::MAX), usize::MAX);
         assert_eq!(estimate_message_tokens(&message), 26);
-        assert_eq!(estimate_request_tokens(&[message], Some("12345")), 38);
+        assert_eq!(
+            estimate_request_tokens(std::slice::from_ref(&message), Some("12345")),
+            38
+        );
+
+        let tools = vec![ToolDefinition {
+            name: "read".into(),
+            description: "Read a file".into(),
+            parameters: json!({"type": "object"}),
+            strict: false,
+            origin: crate::tool::ToolOrigin::Builtin,
+            execution_mode: crate::tool::ExecutionMode::Sequential,
+        }];
+        assert!(estimate_tool_definition_tokens(&tools) > 0);
+        assert!(estimate_provider_request_tokens(std::slice::from_ref(&message), &tools) > 26);
     }
 }

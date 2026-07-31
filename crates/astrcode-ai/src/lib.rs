@@ -29,8 +29,8 @@ pub fn create_provider(
     wire_format: ProviderWireFormat,
     config: LlmClientConfig,
     model_id: String,
-    max_tokens: Option<u32>,
-    context_limit: Option<usize>,
+    max_tokens: u32,
+    context_limit: usize,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     provider_catalog::build_provider(
         provider_kind,

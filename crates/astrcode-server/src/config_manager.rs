@@ -57,8 +57,8 @@ fn build_provider_from_settings(
         settings.wire_format,
         llm_config,
         settings.model_id.clone(),
-        Some(settings.max_tokens),
-        Some(settings.context_limit),
+        settings.max_tokens,
+        settings.context_limit,
     )
 }
 

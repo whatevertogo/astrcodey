@@ -6,11 +6,14 @@
 
 use std::{sync::Arc, time::Duration};
 
+use astrcode_context::token_budget::{
+    PromptTokenSnapshot, compact_threshold_tokens, request_max_output_tokens,
+};
 use astrcode_core::{
     event::{DurableEventPayload, LiveEventPayload},
     llm::{
-        LlmContent, LlmError, LlmEvent, LlmMessage, LlmRole, LlmTokenUsage, LlmTokenUsageSource,
-        provider_visible_messages, token_estimate,
+        LlmContent, LlmError, LlmEvent, LlmMessage, LlmRequest, LlmRole, LlmTokenUsage,
+        LlmTokenUsageSource, provider_visible_messages, token_estimate,
     },
     tool::ToolDefinition,
     types::*,
@@ -72,16 +75,33 @@ impl TurnLoop {
     }
 
     fn max_parallel_tool_calls(&self) -> usize {
-        self.session
-            .runtime_services()
-            .read_effective()
-            .agent
-            .tool_max_parallel_calls
-            .max(1)
+        self.session.runtime_services().max_parallel_tool_calls()
     }
 
     fn shared(&self) -> &SharedTurnContext {
         self.tools.shared()
+    }
+
+    async fn recover_context_overflow(
+        &self,
+        extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        state: &mut TurnState,
+        turn_id: &TurnId,
+        publisher: &TurnEvents,
+    ) -> Result<bool, TurnError> {
+        if state.reactive_compact_used() {
+            return Ok(false);
+        }
+
+        state.mark_reactive_compact_used();
+        let shared = self.shared().clone();
+        let host = CompactionHost {
+            session: &self.session,
+            llm: &self.llm,
+            shared: &shared,
+            extension_runner,
+        };
+        run_reactive_compaction(&host, state, turn_id, publisher).await
     }
 
     pub(crate) fn new_with_llm(
@@ -197,12 +217,36 @@ impl TurnLoop {
                 .emit_lifecycle(ExtensionEvent::StepStart, step_ctx)
                 .await?;
 
-            let prepared = self
-                .prepare_stage(extension_runner.as_ref(), &state, turn_id, publisher)
-                .await?;
+            let visible_tools = state.visible_tools();
+            let prepared = match self
+                .prepare_stage(
+                    extension_runner.as_ref(),
+                    &state,
+                    &visible_tools,
+                    turn_id,
+                    publisher,
+                )
+                .await
+            {
+                Ok(prepared) => prepared,
+                Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
+                    if self
+                        .recover_context_overflow(
+                            extension_runner.as_ref(),
+                            &mut state,
+                            turn_id,
+                            publisher,
+                        )
+                        .await?
+                    {
+                        continue;
+                    }
+                    return end_turn_with_error_typed(TurnError::CompactExhausted);
+                },
+                Err(error) => return Err(error),
+            };
             let request_messages = prepared.messages.clone();
             let model_context_window = prepared.llm.model_limits().max_input_tokens;
-            let visible_tools = state.visible_tools();
             // 提取 deduplicator 用于流式工具执行；llm_stage 返回后归还。
             // visible_tools 传给 early exec context 供 prepare 使用。
             let dedup_for_early = state.tool_deduplicator_mut();
@@ -217,23 +261,18 @@ impl TurnLoop {
                 .await
             {
                 Ok(outcome) => outcome,
-                Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. }))
-                    if !state.reactive_compact_used() =>
-                {
-                    state.mark_reactive_compact_used();
-                    let shared = self.shared().clone();
-                    let host = CompactionHost {
-                        session: &self.session,
-                        llm: &self.llm,
-                        shared: &shared,
-                        extension_runner: extension_runner.as_ref(),
-                    };
-                    if !run_reactive_compaction(&host, &state, turn_id, publisher).await? {
-                        return end_turn_with_error_typed(TurnError::CompactExhausted);
-                    }
-                    continue;
-                },
                 Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
+                    if self
+                        .recover_context_overflow(
+                            extension_runner.as_ref(),
+                            &mut state,
+                            turn_id,
+                            publisher,
+                        )
+                        .await?
+                    {
+                        continue;
+                    }
                     return end_turn_with_error_typed(TurnError::CompactExhausted);
                 },
                 Err(error) => return Err(error),
@@ -260,14 +299,8 @@ impl TurnLoop {
                             })
                             .await?;
                     }
-                    if let Some(usage) = usage {
-                        publisher
-                            .durable(DurableEventPayload::TokenUsageRecorded {
-                                usage,
-                                model_context_window,
-                            })
-                            .await?;
-                    }
+                    self.persist_token_usage(publisher, usage, model_context_window)
+                        .await?;
                     on_step_end_best_effort(extension_runner.as_ref(), &lifecycle_ctx).await;
 
                     if self
@@ -333,14 +366,8 @@ impl TurnLoop {
                             })
                             .await?;
                     }
-                    if let Some(usage) = usage {
-                        publisher
-                            .durable(DurableEventPayload::TokenUsageRecorded {
-                                usage,
-                                model_context_window,
-                            })
-                            .await?;
-                    }
+                    self.persist_token_usage(publisher, usage, model_context_window)
+                        .await?;
 
                     let hook_messages = state.provider_response_messages(request_messages);
                     self.tools_stage(
@@ -364,6 +391,7 @@ impl TurnLoop {
         &mut self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
         state: &TurnState,
+        visible_tools: &[ToolDefinition],
         turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
     ) -> Result<PreparedProviderRequest, TurnError> {
@@ -377,8 +405,7 @@ impl TurnLoop {
         let model = publisher.snapshot_model().await?;
         let snapshot = context_snapshot(&model);
         let llm = Arc::clone(host.llm);
-        let visible_tools = state.visible_tools();
-        let compaction_plan = plan_auto_compaction(&host, &snapshot, &visible_tools).await;
+        let compaction_plan = plan_auto_compaction(&host, &snapshot, visible_tools).await;
 
         let PreparedProviderHistory { snapshot, messages } =
             prepare_provider_history(&host, state, snapshot, turn_id, compaction_plan, publisher)
@@ -392,7 +419,38 @@ impl TurnLoop {
         let messages = self
             .apply_before_provider_request_hook(extension_runner, messages)
             .await?;
-        Ok(PreparedProviderRequest { llm, messages })
+        let model_limits = llm.model_limits();
+        let model_context_window = model_limits.max_input_tokens;
+        let token_snapshot = PromptTokenSnapshot {
+            context_tokens: snapshot.estimate_input_tokens(
+                &messages,
+                visible_tools,
+                model_context_window,
+            ),
+            threshold_tokens: compact_threshold_tokens(
+                model_context_window,
+                self.session
+                    .runtime_services()
+                    .context_assembler()
+                    .settings()
+                    .compact_threshold_percent,
+            ),
+            max_input_tokens: model_context_window,
+            max_output_tokens: model_limits.max_output_tokens,
+        };
+        let max_output_tokens =
+            request_max_output_tokens(token_snapshot, llm.minimum_output_tokens()).ok_or_else(
+                || {
+                    TurnError::Llm(LlmError::ContextWindowExceeded {
+                        message: "local context budget leaves no output capacity".into(),
+                    })
+                },
+            )?;
+        Ok(PreparedProviderRequest {
+            llm,
+            messages,
+            max_output_tokens,
+        })
     }
 
     async fn llm_stage(
@@ -405,7 +463,13 @@ impl TurnLoop {
     ) -> Result<StreamOutcome, TurnError> {
         let request_messages = prepared.messages.clone();
         let rx = self
-            .start_provider_stream(&prepared.llm, prepared.messages, tools, publisher)
+            .start_provider_stream(
+                &prepared.llm,
+                prepared.messages,
+                tools,
+                prepared.max_output_tokens,
+                publisher,
+            )
             .await?;
         let message_id = new_message_id();
 
@@ -435,6 +499,24 @@ impl TurnLoop {
             Err(e @ TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => Err(e),
             Err(error) => end_turn_with_error_typed(error),
         }
+    }
+
+    /// 持久化 token usage（若 provider 提供了统计）。
+    async fn persist_token_usage(
+        &self,
+        publisher: &TurnEvents,
+        usage: Option<LlmTokenUsage>,
+        model_context_window: usize,
+    ) -> Result<(), TurnError> {
+        if let Some(usage) = usage {
+            publisher
+                .durable(DurableEventPayload::TokenUsageRecorded {
+                    usage,
+                    model_context_window,
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     async fn with_usage_fallback(
@@ -664,11 +746,15 @@ impl TurnLoop {
         llm: &Arc<dyn astrcode_core::llm::LlmProvider>,
         send_messages: Vec<LlmMessage>,
         tools: &[ToolDefinition],
+        max_output_tokens: usize,
         publisher: &TurnEvents,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, TurnError> {
         let result = tokio::select! {
             _ = self.cancellation_token.cancelled() => return Err(TurnError::Aborted),
-            result = llm.generate(send_messages, tools.to_vec()) => result,
+            result = llm.generate_request(
+                LlmRequest::new(send_messages, tools.to_vec())
+                    .with_max_output_tokens(max_output_tokens)
+            ) => result,
         };
         match result {
             Ok(rx) => Ok(rx),
@@ -677,7 +763,11 @@ impl TurnLoop {
             },
             Err(e) => {
                 publisher
-                    .durable_error(-32603, e.to_string(), false)
+                    .durable_error(
+                        crate::payload::JSON_RPC_INTERNAL_ERROR,
+                        e.to_string(),
+                        false,
+                    )
                     .await?;
                 end_turn_with_error_typed(e)
             },
@@ -829,7 +919,7 @@ pub(crate) async fn run_turn(
     let finish_reason = match &output {
         Ok(output) => output.finish_reason.clone(),
         Err(TurnError::Aborted) => crate::payload::TURN_FINISH_ABORTED.into(),
-        Err(_) => "error".into(),
+        Err(_) => crate::payload::TURN_FINISH_ERROR.into(),
     };
     let pending_error = match (&output, emitted_error) {
         (Err(TurnError::Aborted), _) | (_, true) | (Ok(_), false) => None,

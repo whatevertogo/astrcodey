@@ -357,13 +357,7 @@ impl ToolCalls {
         if batch.is_empty() {
             return Ok(());
         }
-        let max_parallel = self
-            .session
-            .runtime_services()
-            .read_effective()
-            .agent
-            .tool_max_parallel_calls
-            .max(1);
+        let max_parallel = self.session.runtime_services().max_parallel_tool_calls();
         let mut pending = std::mem::take(batch).into_iter();
         let mut join_set = JoinSet::new();
 

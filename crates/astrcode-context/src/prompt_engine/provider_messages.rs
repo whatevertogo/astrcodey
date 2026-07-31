@@ -1,22 +1,6 @@
 use astrcode_core::llm::LlmMessage;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PromptSectionGroup {
-    Stable,
-    Dynamic,
-}
-
-const SECTION_GROUPS: &[(&str, PromptSectionGroup)] = &[
-    ("Identity", PromptSectionGroup::Stable),
-    ("System", PromptSectionGroup::Stable),
-    ("Task Guidelines", PromptSectionGroup::Stable),
-    ("Communication", PromptSectionGroup::Stable),
-    ("Environment", PromptSectionGroup::Dynamic),
-    ("User Rules", PromptSectionGroup::Dynamic),
-    ("Project Rules", PromptSectionGroup::Dynamic),
-    ("Tool Summary", PromptSectionGroup::Dynamic),
-    ("Additional Instructions", PromptSectionGroup::Dynamic),
-];
+use super::PromptSectionOrder;
 
 /// 将已渲染的 prompt 拆成 provider 可复用稳定前缀的 system messages。
 ///
@@ -30,17 +14,17 @@ pub fn system_messages_from_prompt(text: &str) -> Vec<LlmMessage> {
         return vec![LlmMessage::system(text)];
     };
 
-    let mut grouped = Vec::<(PromptSectionGroup, String)>::new();
+    let mut grouped = Vec::<(bool, String)>::new();
     for section in sections {
-        let group = section_group(section.title);
-        if let Some((last_group, content)) = grouped.last_mut() {
-            if *last_group == group {
+        let stable = section_group(section.title);
+        if let Some((last_stable, content)) = grouped.last_mut() {
+            if *last_stable == stable {
                 content.push_str("\n\n");
                 content.push_str(section.rendered);
                 continue;
             }
         }
-        grouped.push((group, section.rendered.to_string()));
+        grouped.push((stable, section.rendered.to_string()));
     }
 
     grouped
@@ -79,11 +63,9 @@ fn parse_sections(text: &str) -> Option<Vec<ParsedSection<'_>>> {
     (!sections.is_empty()).then_some(sections)
 }
 
-fn section_group(title: &str) -> PromptSectionGroup {
-    SECTION_GROUPS
-        .iter()
-        .find_map(|(candidate, group)| (*candidate == title).then_some(*group))
-        .unwrap_or(PromptSectionGroup::Dynamic)
+/// section 是否属于稳定前缀；未知标题按动态处理（保持与 `PromptSectionOrder` 一致）。
+fn section_group(title: &str) -> bool {
+    PromptSectionOrder::from_title(title).is_some_and(|order| order.is_stable())
 }
 
 #[cfg(test)]

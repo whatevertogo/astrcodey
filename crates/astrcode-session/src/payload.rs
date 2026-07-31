@@ -12,6 +12,9 @@ use astrcode_core::{
 
 pub const TURN_FINISH_ABORTED: &str = "aborted";
 pub const TURN_FINISH_INTERRUPTED: &str = "interrupted";
+pub const TURN_FINISH_ERROR: &str = "error";
+/// JSON-RPC 内部错误码，用于 ErrorOccurred 载荷。
+pub const JSON_RPC_INTERNAL_ERROR: i32 = -32603;
 
 pub fn turn_completed_payload(reason: impl Into<String>) -> DurableEventPayload {
     DurableEventPayload::TurnCompleted {
@@ -67,45 +70,34 @@ pub fn transcript_rewritten_payload(
     }
 }
 
-/// 子 agent 终态事件里 `child_session_id` / `final_session_id` 的唯一构造点。
+/// 构造写入父 session 的 `AgentSessionCompleted` 载荷。
 ///
-/// **给后续维护者**：compact 只重写同一 session 的 transcript，不改变 session id。
-///
-/// - `child_session_id`：与父 log 中 [`AgentSessionSpawned`] 一致，投影靠它定位 link。
-/// - `final_session_id`：应打开/订阅的 leaf；**仅**在未实现的跨 session continuation
-///   落地后才可能与前者不同。勿手写双字段，统一走 [`agent_session_completed_payload`] /
-///   [`agent_session_failed_payload`]。
+/// `child_session_id` 与父 log 中 [`AgentSessionSpawned`] 一致，投影靠它定位 link；
+/// `final_session_id` 是应打开/订阅的 leaf。当前两者恒等——compact 只重写同一 session
+/// 的 transcript，不改变 session id。若未来落地跨 session continuation 使二者不同，
+/// 再在此处引入区分逻辑。
 ///
 /// [`AgentSessionSpawned`]: astrcode_core::event::DurableEventPayload::AgentSessionSpawned
-fn agent_session_terminal_ids(child_session_id: SessionId) -> (SessionId, SessionId) {
-    let final_session_id = child_session_id.clone();
-    (child_session_id, final_session_id)
-}
-
-/// 构造写入父 session 的 `AgentSessionCompleted` 载荷（双 session id 见
-/// [`agent_session_terminal_ids`]）。
 pub fn agent_session_completed_payload(
     child_session_id: SessionId,
     summary: String,
 ) -> DurableEventPayload {
-    let (child_session_id, final_session_id) = agent_session_terminal_ids(child_session_id);
     DurableEventPayload::AgentSessionCompleted {
+        final_session_id: child_session_id.clone(),
         child_session_id,
-        final_session_id,
         summary,
     }
 }
 
-/// 构造写入父 session 的 `AgentSessionFailed` 载荷（双 session id 见
-/// [`agent_session_terminal_ids`]）。
+/// 构造写入父 session 的 `AgentSessionFailed` 载荷（双 session id 语义见
+/// [`agent_session_completed_payload`]）。
 pub fn agent_session_failed_payload(
     child_session_id: SessionId,
     error: String,
 ) -> DurableEventPayload {
-    let (child_session_id, final_session_id) = agent_session_terminal_ids(child_session_id);
     DurableEventPayload::AgentSessionFailed {
+        final_session_id: child_session_id.clone(),
         child_session_id,
-        final_session_id,
         error,
     }
 }

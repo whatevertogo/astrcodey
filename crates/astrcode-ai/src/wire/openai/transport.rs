@@ -1,35 +1,27 @@
 //! OpenAI-compatible streaming transport.
 
-use std::collections::HashMap;
-
 use astrcode_core::{
-    config::{OpenAiApiMode, ProviderAuthScheme},
-    llm::{LlmError, LlmEvent},
+    config::OpenAiApiMode,
+    llm::{LlmClientConfig, LlmError, LlmEvent},
 };
 use tokio::sync::mpsc;
 
 use super::parser::{StandardAccumulator, emit_done_once, process_sse_line};
 use crate::{
-    common::{
-        HttpPostRequest, SseBodyPreview, apply_auth_header, consume_sse_lines, ensure_header,
-    },
+    common::{HttpPostRequest, SseBodyPreview, base_headers, consume_sse_lines, ensure_header},
     retry::RetryPolicy,
 };
 
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn stream_request(
     client: reqwest::Client,
     endpoint: String,
-    api_key: String,
-    auth_scheme: ProviderAuthScheme,
-    extra_headers: HashMap<String, String>,
+    config: LlmClientConfig,
     body: serde_json::Value,
     api_mode: OpenAiApiMode,
     retry: RetryPolicy,
     tx: mpsc::UnboundedSender<LlmEvent>,
 ) -> Result<(), LlmError> {
-    let mut headers: Vec<(String, String)> = extra_headers.into_iter().collect();
-    apply_auth_header(&mut headers, auth_scheme, &api_key);
+    let mut headers = base_headers(&config);
     ensure_header(&mut headers, "Accept", "text/event-stream");
 
     HttpPostRequest {

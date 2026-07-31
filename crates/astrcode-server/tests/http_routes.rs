@@ -821,7 +821,7 @@ async fn model_options_rejects_thinking_without_capability() {
 }
 
 #[tokio::test]
-async fn model_options_persists_and_clears_legacy_fields() {
+async fn model_options_persists_thinking() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
@@ -872,9 +872,6 @@ async fn model_options_persists_and_clears_legacy_fields() {
         .as_ref()
         .expect("model_options should exist");
     assert_eq!(opts.thinking.as_ref().map(|t| t.enabled), Some(true));
-    // Legacy fields should be cleared
-    assert_eq!(opts.reasoning, None);
-    assert_eq!(opts.thinking_level, None);
 }
 
 #[tokio::test]
@@ -2206,8 +2203,6 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             supports_stream_usage: false,
             supports_strict_tool_use: false,
             prompt_cache_retention: None,
-            reasoning: false,
-            thinking_level: None,
             thinking: Default::default(),
             thinking_capability: None,
             thinking_configured: false,
@@ -2229,8 +2224,6 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
             supports_stream_usage: false,
             supports_strict_tool_use: false,
             prompt_cache_retention: None,
-            reasoning: false,
-            thinking_level: None,
             thinking: Default::default(),
             thinking_capability: None,
             thinking_configured: false,

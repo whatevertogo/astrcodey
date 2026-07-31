@@ -40,13 +40,11 @@
 
 pub mod defaults;
 pub mod effective;
-mod legacy;
 pub mod provider_catalog;
 pub mod raw;
 pub mod resolve;
 
 pub use effective::*;
-pub use legacy::model_thinking_config;
 pub use provider_catalog::*;
 pub use raw::*;
 pub use resolve::{ResolveError, merge_overlay, profile_has_resolvable_api_key, resolve_api_key};

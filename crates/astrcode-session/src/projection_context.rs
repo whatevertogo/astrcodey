@@ -5,7 +5,7 @@ use astrcode_core::llm::{LlmContent, LlmRole};
 use astrcode_session_projection::SessionReadModel;
 
 pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
-    ContextSnapshot::new(
+    let snapshot = ContextSnapshot::new(
         model.stats.last_seq,
         model.system_prompt.text.clone(),
         model
@@ -14,6 +14,21 @@ pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
             .iter()
             .map(|entry| entry.message.clone())
             .collect(),
+    );
+    let Some(usage) = &model.context_usage else {
+        return snapshot;
+    };
+    let covered_messages = model
+        .transcript
+        .messages
+        .iter()
+        .take(usage.covered_message_count)
+        .map(|entry| entry.message.clone())
+        .collect();
+    snapshot.with_input_token_anchor(
+        usage.context_tokens,
+        usage.model_context_window,
+        covered_messages,
     )
 }
 

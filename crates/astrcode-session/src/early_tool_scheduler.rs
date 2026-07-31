@@ -43,7 +43,6 @@ pub(crate) struct EarlyToolScheduler {
     in_flight: usize,
 }
 
-#[allow(dead_code)]
 impl EarlyToolScheduler {
     pub(crate) fn new(
         tool_registry: std::sync::Arc<ToolRegistry>,
@@ -183,7 +182,6 @@ impl EarlyToolScheduler {
 }
 
 /// 流式执行的结果条目。
-#[allow(dead_code)]
 pub(crate) struct EarlyExecutionEntry {
     /// 已准备好的工具调用。
     pub prepared: PreparedToolInvocation,
@@ -252,15 +250,5 @@ mod tests {
         assert!(entries[1].outcome.is_none());
         assert_eq!(entries[2].prepared.call_id, "c");
         assert!(entries[2].outcome.is_some());
-    }
-
-    #[test]
-    fn has_pending_reflects_in_flight_and_queued() {
-        let queued = VecDeque::from([0usize, 1]);
-        let in_flight = 1;
-        assert!(in_flight > 0 || !queued.is_empty());
-
-        let empty_queued: VecDeque<usize> = VecDeque::new();
-        assert!(0 == 0 && empty_queued.is_empty());
     }
 }

@@ -41,7 +41,7 @@ pub use payload::{
     system_prompt_configured_payload, transcript_rewritten_payload,
 };
 pub use session::{
-    InterruptedToolOutcome, Session, SessionCreateParams, SessionError,
+    InterruptedToolOutcome, Session, SessionCreateParams, SessionError, SpawnChildParams,
     emit_interrupted_tool_results, emit_lifecycle_for_read_model, emit_turn_aborted_context,
     finalize_aborted_turn, finalize_turn,
 };

@@ -47,6 +47,10 @@ pub(crate) const DEFAULT_LLM_READ_TIMEOUT_SECS: u64 = 90;
 pub(crate) const DEFAULT_LLM_MAX_RETRIES: u32 = 2;
 /// LLM 重试的指数退避基础延迟（毫秒）。
 pub(crate) const DEFAULT_LLM_RETRY_BASE_DELAY_MS: u64 = 250;
+/// 模型未显式配置 `maxTokens` 时的默认值。
+pub(crate) const DEFAULT_LLM_MAX_TOKENS: u32 = 8192;
+/// 模型未显式配置 `contextLimit` 时的默认值。
+pub(crate) const DEFAULT_LLM_CONTEXT_LIMIT: usize = 65536;
 
 // ── Compact 参数默认值 ──────────────────────────────────────────────────
 

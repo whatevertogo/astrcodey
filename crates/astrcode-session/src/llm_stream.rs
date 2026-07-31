@@ -232,11 +232,19 @@ pub(crate) async fn consume_llm_stream(
             LlmEvent::Error { message } => {
                 let recoverable = is_prompt_too_long_message(&message);
                 if recoverable {
-                    publisher.live_error(-32603, message.clone(), true);
+                    publisher.live_error(
+                        crate::payload::JSON_RPC_INTERNAL_ERROR,
+                        message.clone(),
+                        true,
+                    );
                     return Err(TurnError::Llm(LlmError::ContextWindowExceeded { message }));
                 }
                 publisher
-                    .durable_error(-32603, message.clone(), false)
+                    .durable_error(
+                        crate::payload::JSON_RPC_INTERNAL_ERROR,
+                        message.clone(),
+                        false,
+                    )
                     .await?;
                 return Err(TurnError::Llm(LlmError::stream_parse(message)));
             },

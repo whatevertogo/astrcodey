@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::llm::{
-    PromptCacheRetention, ThinkingLevel,
+    PromptCacheRetention,
     thinking::{ThinkingCapability, ThinkingConfig},
 };
 
@@ -188,12 +188,7 @@ pub struct ModelConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ModelOptionsConfig {
-    /// 是否启用推理模式（如 DeepSeek reasoner）。
-    pub reasoning: Option<bool>,
-    /// 推理强度级别（如 OpenAI Responses reasoning.effort）。
-    pub thinking_level: Option<ThinkingLevel>,
-    /// 标准化 thinking 配置（新字段；与 `reasoning`/`thinkingLevel` 共存，
-    /// 解析时优先使用本字段，回退到遗留字段）。
+    /// 标准化 thinking 配置。
     #[serde(default)]
     pub thinking: Option<ThinkingConfig>,
 }

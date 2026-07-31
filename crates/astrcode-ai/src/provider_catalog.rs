@@ -20,8 +20,8 @@ pub(crate) fn build_provider(
     wire_format: ProviderWireFormat,
     config: LlmClientConfig,
     model_id: String,
-    max_tokens: Option<u32>,
-    context_limit: Option<usize>,
+    max_tokens: u32,
+    context_limit: usize,
 ) -> Result<Arc<dyn LlmProvider>, LlmError> {
     tracing::debug!(
         provider_kind,

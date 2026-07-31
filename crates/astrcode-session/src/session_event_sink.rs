@@ -396,11 +396,7 @@ async fn run_lane(
                 observer.publish(Arc::new(event));
             },
             PublishCommand::Sync { reply } => {
-                let result = journal
-                    .sync_durable_events(&session_id)
-                    .await
-                    .map_err(SessionEventPublishError::from);
-                let _ = reply.send(result);
+                sync_lane(&journal, &session_id, reply).await;
             },
             PublishCommand::Shutdown { reply } => {
                 commands.close();
@@ -409,13 +405,21 @@ async fn run_lane(
         }
     }
     if let Some(reply) = shutdown_reply {
-        let result = journal
-            .sync_durable_events(&session_id)
-            .await
-            .map_err(SessionEventPublishError::from);
-        let _ = reply.send(result);
+        sync_lane(&journal, &session_id, reply).await;
     }
     tracing::debug!(%session_id, "session event lane stopped");
+}
+
+async fn sync_lane(
+    journal: &Arc<dyn SessionEventJournal>,
+    session_id: &SessionId,
+    reply: oneshot::Sender<Result<(), SessionEventPublishError>>,
+) {
+    let result = journal
+        .sync_durable_events(session_id)
+        .await
+        .map_err(SessionEventPublishError::from);
+    let _ = reply.send(result);
 }
 
 fn publish_durable(observer: &dyn SessionEventObserver, kind: DurableCommit, stored: &StoredEvent) {
@@ -442,14 +446,7 @@ mod tests {
     use tokio::sync::{Semaphore, mpsc};
 
     use super::*;
-
-    struct ChannelObserver(mpsc::UnboundedSender<Arc<Event>>);
-
-    impl SessionEventObserver for ChannelObserver {
-        fn publish(&self, event: Arc<Event>) {
-            let _ = self.0.send(event);
-        }
-    }
+    use crate::test_support::ChannelObserver;
 
     struct ControlledJournal {
         next_seq: AtomicU64,
@@ -512,7 +509,7 @@ mod tests {
         let journal = Arc::new(ControlledJournal::new());
         let journal_port: Arc<dyn SessionEventJournal> = journal.clone();
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let sink = Arc::new(SessionEventSink::new(Arc::new(ChannelObserver(events_tx))));
+        let sink = Arc::new(SessionEventSink::new(ChannelObserver::new(events_tx)));
 
         let first_sink = Arc::clone(&sink);
         let first_journal = Arc::clone(&journal_port);
@@ -601,7 +598,7 @@ mod tests {
         journal.append_release.add_permits(1);
         let journal_port: Arc<dyn SessionEventJournal> = journal.clone();
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let sink = SessionEventSink::new(Arc::new(ChannelObserver(events_tx)));
+        let sink = SessionEventSink::new(ChannelObserver::new(events_tx));
 
         let publication = sink.defer_publication(session_id.clone()).unwrap();
         assert!(matches!(
@@ -654,7 +651,7 @@ mod tests {
         let journal = Arc::new(ControlledJournal::new());
         let journal_port: Arc<dyn SessionEventJournal> = journal.clone();
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
-        let sink = Arc::new(SessionEventSink::new(Arc::new(ChannelObserver(events_tx))));
+        let sink = Arc::new(SessionEventSink::new(ChannelObserver::new(events_tx)));
 
         let commit_sink = Arc::clone(&sink);
         let commit_journal = Arc::clone(&journal_port);

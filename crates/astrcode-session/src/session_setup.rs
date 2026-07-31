@@ -94,29 +94,24 @@ async fn collect_extension_prompt_blocks(
         .await?;
 
     let mut extension_blocks = Vec::new();
-    for content in contributions.system_prompts {
-        extension_blocks.push(ExtensionPromptBlock {
-            section: ExtensionSection::PlatformInstructions,
-            content,
-        });
-    }
-    for content in contributions.additional_instructions {
-        extension_blocks.push(ExtensionPromptBlock {
-            section: ExtensionSection::AdditionalInstructions,
-            content,
-        });
-    }
-    for content in contributions.skills {
-        extension_blocks.push(ExtensionPromptBlock {
-            section: ExtensionSection::Skills,
-            content,
-        });
-    }
-    for content in contributions.agents {
-        extension_blocks.push(ExtensionPromptBlock {
-            section: ExtensionSection::Agents,
-            content,
-        });
+    let sections = [
+        (
+            contributions.system_prompts,
+            ExtensionSection::PlatformInstructions,
+        ),
+        (
+            contributions.additional_instructions,
+            ExtensionSection::AdditionalInstructions,
+        ),
+        (contributions.skills, ExtensionSection::Skills),
+        (contributions.agents, ExtensionSection::Agents),
+    ];
+    for (contents, section) in sections {
+        extension_blocks.extend(
+            contents
+                .into_iter()
+                .map(|content| ExtensionPromptBlock { section, content }),
+        );
     }
 
     Ok(extension_blocks)

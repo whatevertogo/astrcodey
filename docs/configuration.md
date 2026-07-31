@@ -193,8 +193,6 @@ union` 的理论容量，因此 `terminal` 会稳定成为溢出项；注册表�
 | `maxTokens` | 最大输出 token（缺省解析为 `8192`） |
 | `contextLimit` | 上下文窗口（缺省 `65536`） |
 | `modelOptions.thinking` | 推荐的统一推理配置：`enabled`、可选 `effort`、可选 `budgetTokens` |
-| `modelOptions.reasoning` | 兼容字段；未设置 `thinking` 时转换为统一推理配置 |
-| `modelOptions.thinkingLevel` | 兼容字段：`low` / `medium` / `high`；未设置 `thinking` 时转换为 `effort` |
 | `thinkingCapability` | 自定义模型的显式能力声明；内置已知模型通常无需填写 |
 
 不写 `modelOptions.thinking` 表示沿用模型默认行为；显式 `{ enabled = false }` 表示要求

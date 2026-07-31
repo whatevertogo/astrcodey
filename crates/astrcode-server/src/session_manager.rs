@@ -938,7 +938,7 @@ mod tests {
         extension::{ExtensionError, ExtensionEvent, LifecycleContext},
         runtime_ports::{NoopRuntimePorts, TurnHooks},
     };
-    use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices};
+    use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices, SpawnChildParams};
     use astrcode_session_projection::{
         AgentSessionLinkView, AgentSessionStatus, SessionReadModel, SessionSummary,
     };
@@ -1579,16 +1579,16 @@ mod tests {
 
         child_store.fail_next_append();
         let child_error = match parent
-            .spawn_child(
-                ".",
-                "mock-model",
-                "worker".into(),
-                "test compensation".into(),
-                None,
-                None,
-                None,
-                ToolCallId::new("call-compensation"),
-            )
+            .spawn_child(SpawnChildParams {
+                working_dir: ".".into(),
+                model_id: "mock-model".into(),
+                agent_name: "worker".into(),
+                task: "test compensation".into(),
+                extra_system_prompt: None,
+                tool_selection: None,
+                source_extension: None,
+                tool_call_id: ToolCallId::new("call-compensation"),
+            })
             .await
         {
             Ok(_) => panic!("parent link append must fail"),
@@ -1609,16 +1609,16 @@ mod tests {
 
         child_store.fail_sync_after(2);
         let child_sync_error = match parent
-            .spawn_child(
-                ".",
-                "mock-model",
-                "worker".into(),
-                "test parent link sync compensation".into(),
-                None,
-                None,
-                None,
-                ToolCallId::new("call-sync-compensation"),
-            )
+            .spawn_child(SpawnChildParams {
+                working_dir: ".".into(),
+                model_id: "mock-model".into(),
+                agent_name: "worker".into(),
+                task: "test parent link sync compensation".into(),
+                extra_system_prompt: None,
+                tool_selection: None,
+                source_extension: None,
+                tool_call_id: ToolCallId::new("call-sync-compensation"),
+            })
             .await
         {
             Ok(_) => panic!("parent link sync must fail"),
@@ -1660,16 +1660,16 @@ mod tests {
         let lifecycle_parent_id = lifecycle_parent.id().clone();
 
         let lifecycle_error = match lifecycle_parent
-            .spawn_child(
-                ".",
-                "mock-model",
-                "worker".into(),
-                "test lifecycle compensation".into(),
-                None,
-                None,
-                None,
-                ToolCallId::new("call-lifecycle-compensation"),
-            )
+            .spawn_child(SpawnChildParams {
+                working_dir: ".".into(),
+                model_id: "mock-model".into(),
+                agent_name: "worker".into(),
+                task: "test lifecycle compensation".into(),
+                extra_system_prompt: None,
+                tool_selection: None,
+                source_extension: None,
+                tool_call_id: ToolCallId::new("call-lifecycle-compensation"),
+            })
             .await
         {
             Ok(_) => panic!("child lifecycle start must fail"),
@@ -1905,16 +1905,16 @@ mod tests {
         let child_owner = child_manager
             .spawn_creation_task(async move {
                 child_parent
-                    .spawn_child(
-                        ".",
-                        "mock-model",
-                        "worker".into(),
-                        "panic during lifecycle initialization".into(),
-                        None,
-                        None,
-                        None,
-                        ToolCallId::new("call-aborted-child"),
-                    )
+                    .spawn_child(SpawnChildParams {
+                        working_dir: ".".into(),
+                        model_id: "mock-model".into(),
+                        agent_name: "worker".into(),
+                        task: "panic during lifecycle initialization".into(),
+                        extra_system_prompt: None,
+                        tool_selection: None,
+                        source_extension: None,
+                        tool_call_id: ToolCallId::new("call-aborted-child"),
+                    })
                     .await
             })
             .unwrap();
@@ -2060,16 +2060,16 @@ mod tests {
         let child_parent = parent.clone();
         let child_task = tokio::spawn(async move {
             child_parent
-                .spawn_child(
-                    ".",
-                    "mock-model",
-                    "worker".into(),
-                    "block lifecycle initialization".into(),
-                    None,
-                    None,
-                    None,
-                    ToolCallId::new("call-blocked-child"),
-                )
+                .spawn_child(SpawnChildParams {
+                    working_dir: ".".into(),
+                    model_id: "mock-model".into(),
+                    agent_name: "worker".into(),
+                    task: "block lifecycle initialization".into(),
+                    extra_system_prompt: None,
+                    tool_selection: None,
+                    source_extension: None,
+                    tool_call_id: ToolCallId::new("call-blocked-child"),
+                })
                 .await
         });
         child_hooks.wait_until_blocked().await;

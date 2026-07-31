@@ -65,7 +65,7 @@ pub(crate) fn ensure_header(
 }
 
 /// 根据 provider 的鉴权方案补齐 API key 请求头。
-pub(crate) fn apply_auth_header(
+fn apply_auth_header(
     headers: &mut Vec<(String, String)>,
     scheme: ProviderAuthScheme,
     api_key: &str,
@@ -79,6 +79,20 @@ pub(crate) fn apply_auth_header(
             ensure_header(headers, "x-api-key", api_key);
         },
     }
+}
+
+/// 构建 provider 基础请求头：用户自定义头 + 鉴权头。
+///
+/// 三个 provider 的流式与 count_tokens 路径共用同一套基础头，各路径再按需追加协议头
+/// （如 `Accept: text/event-stream`、`anthropic-version`）。
+pub(crate) fn base_headers(config: &LlmClientConfig) -> Vec<(String, String)> {
+    let mut headers: Vec<(String, String)> = config
+        .extra_headers
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    apply_auth_header(&mut headers, config.auth_scheme, &config.api_key);
+    headers
 }
 
 /// 从流式片段中提取应向前端发送的增量文本。

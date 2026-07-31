@@ -187,9 +187,11 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
         },
         DurableEventPayload::ModelIdChanged { model_id } => {
             model.identity.model_id = model_id.clone();
+            model.context_usage = None;
         },
         DurableEventPayload::SessionToolsConfigured { selection } => {
             model.identity.tool_selection = selection.clone();
+            model.context_usage = None;
         },
         DurableEventPayload::AgentSessionSpawned {
             child_session_id,
@@ -256,6 +258,7 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
             model.system_prompt.extra = extra_system_prompt.clone();
             model.system_prompt.fingerprint = fingerprint.clone();
             model.system_prompt.source = *source;
+            model.context_usage = None;
         },
         DurableEventPayload::UserInputAccepted { input } => {
             model.execution.pending_inputs.push(crate::PendingInput {
@@ -398,6 +401,7 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
             reason,
         } => {
             apply_transcript_rewrite(model, messages, *source_seq);
+            model.context_usage = None;
             match reason {
                 TranscriptRewriteReason::Compaction(details) => {
                     model.compactions.push(CompactionView {
@@ -433,6 +437,7 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                     source: None,
                 })
                 .collect();
+            model.context_usage = None;
         },
         DurableEventPayload::ErrorOccurred { message, .. } => {
             model
@@ -454,7 +459,21 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                     seq: event_seq,
                 });
         },
-        DurableEventPayload::TokenUsageRecorded { .. } => {},
+        DurableEventPayload::TokenUsageRecorded {
+            usage,
+            model_context_window,
+        } => {
+            if let Some(context_tokens) = usage
+                .context_tokens_after_response()
+                .and_then(|tokens| usize::try_from(tokens).ok())
+            {
+                model.context_usage = Some(crate::ContextUsageView {
+                    context_tokens,
+                    model_context_window: *model_context_window,
+                    covered_message_count: model.transcript.messages.len(),
+                });
+            }
+        },
         DurableEventPayload::ExtensionEvent(_) => {},
     }
     Ok(())
