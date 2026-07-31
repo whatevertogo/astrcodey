@@ -95,14 +95,14 @@ impl SessionOperations for ServerSessionOperations {
         &self,
         request: CreateRootSessionRequest,
     ) -> Result<SessionHandle, SessionApiError> {
-        let created = self
+        let session = self
             .session_manager
             .create(&request.working_dir)
             .await
             .map_err(SessionApiError::internal)?;
 
         Ok(SessionHandle {
-            session_id: created.session.id().clone().into_string(),
+            session_id: session.id().clone().into_string(),
         })
     }
 

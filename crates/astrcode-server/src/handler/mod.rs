@@ -32,12 +32,11 @@ pub(in crate::handler) mod turn;
 pub use actor::CommandHandle;
 use model_selection::ModelSelectionController;
 
-pub(crate) use crate::{
-    session_command_contract::{
-        CommandInvocation, CommandList, HandlerError, ManualCompactOutcome, PromptSubmission,
-    },
-    turn_scheduler::TurnCompletion,
+pub(crate) use crate::session_command_contract::{
+    CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission,
 };
+#[cfg(test)]
+pub(crate) use crate::{session_command_contract::CommandList, turn_scheduler::TurnCompletion};
 
 /// 命令处理器，处理客户端命令并通过广播通道发送通知。
 pub(crate) struct CommandHandler {
@@ -78,11 +77,6 @@ impl CommandHandler {
             .await?;
         self.focused_session_id = Some(session_id.clone());
         Ok(session_id)
-    }
-
-    /// 删除指定工作目录下的所有会话，返回删除数量。
-    pub(crate) async fn delete_project(&self, working_dir: String) -> Result<usize, HandlerError> {
-        self.session_commands.delete_project(&working_dir).await
     }
 
     // ─── 模型选择 ───────────────────────────────────────────────────────

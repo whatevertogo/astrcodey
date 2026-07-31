@@ -30,15 +30,16 @@ pub struct ServerApp {
 impl ServerApp {
     pub fn new(runtime: Arc<ServerRuntime>) -> Arc<Self> {
         let event_bus = Arc::clone(runtime.session_manager().event_bus());
-        let command_handle = CommandHandler::spawn_actor(
-            Arc::clone(&runtime),
-            Arc::clone(runtime.scheduler()),
-            Arc::clone(&event_bus),
-        );
         let session_commands = SessionCommandService::new(
             Arc::clone(&runtime),
             Arc::clone(runtime.scheduler()),
             Arc::clone(&event_bus),
+        );
+        let command_handle = CommandHandler::spawn_actor(
+            Arc::clone(&runtime),
+            Arc::clone(runtime.scheduler()),
+            Arc::clone(&event_bus),
+            session_commands.clone(),
         );
         Arc::new(Self {
             runtime,

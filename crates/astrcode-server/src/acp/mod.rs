@@ -142,40 +142,55 @@ async fn handle_prompt(
     accepted_sessions.insert(session_id.clone());
     let acp_session_id = session_id;
 
+    let completion = wait_for_turn_completion(&mut event_rx, &mut completion_rx, |event| {
+        if event_belongs_to_prompt(&event, &accepted_sessions, &turn_id) {
+            forward_event(&event, &acp_session_id, cx);
+        }
+    })
+    .await;
+    flush_queued_events(
+        &mut event_rx,
+        &accepted_sessions,
+        &turn_id,
+        &acp_session_id,
+        cx,
+    );
+    match completion {
+        Ok(TurnCompletion::Completed { finish_reason }) => {
+            Ok(stop_reason_from_finish_reason(&finish_reason))
+        },
+        Ok(TurnCompletion::Failed { error }) => {
+            tracing::warn!(error, "ACP prompt turn failed");
+            Ok(StopReason::Cancelled)
+        },
+        Ok(TurnCompletion::Dropped) => Ok(StopReason::Cancelled),
+        Err(_) => Ok(StopReason::EndTurn),
+    }
+}
+
+async fn wait_for_turn_completion(
+    event_rx: &mut broadcast::Receiver<Arc<Event>>,
+    completion_rx: &mut tokio::sync::oneshot::Receiver<TurnCompletion>,
+    mut forward: impl FnMut(Arc<Event>),
+) -> Result<TurnCompletion, tokio::sync::oneshot::error::RecvError> {
+    let mut receive_events = true;
     loop {
         tokio::select! {
-            result = event_rx.recv() => {
+            result = event_rx.recv(), if receive_events => {
                 match result {
-                    Ok(event) => {
-                        if event_belongs_to_prompt(&event, &accepted_sessions, &turn_id) {
-                            forward_event(&event, &acp_session_id, cx);
-                        }
+                    Ok(event) => forward(event),
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            skipped,
+                            "ACP event receiver lagged; waiting for turn completion"
+                        );
                     },
-                    Err(_) => {
-                        return Ok(StopReason::EndTurn);
+                    Err(broadcast::error::RecvError::Closed) => {
+                        receive_events = false;
                     },
                 }
             },
-            completion = &mut completion_rx => {
-                flush_queued_events(
-                    &mut event_rx,
-                    &accepted_sessions,
-                    &turn_id,
-                    &acp_session_id,
-                    cx,
-                );
-                return match completion {
-                    Ok(TurnCompletion::Completed { finish_reason }) => {
-                        Ok(stop_reason_from_finish_reason(&finish_reason))
-                    },
-                    Ok(TurnCompletion::Failed { error }) => {
-                        tracing::warn!(error, "ACP prompt turn failed");
-                        Ok(StopReason::Cancelled)
-                    },
-                    Ok(TurnCompletion::Dropped) => Ok(StopReason::Cancelled),
-                    Err(_) => Ok(StopReason::EndTurn),
-                };
-            },
+            completion = &mut *completion_rx => return completion,
         }
     }
 }
@@ -306,6 +321,8 @@ fn handler_error_to_acp(error: HandlerError) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use agent_client_protocol::schema::{ContentBlock, ResourceLink, TextContent};
     use astrcode_core::{
         event::{
@@ -431,5 +448,66 @@ mod tests {
         // Event from unrelated session with None turn_id should be rejected
         let event = durable_event(unrelated_session, None, DurableEventPayload::TurnStarted);
         assert!(!event_belongs_to_prompt(&event, &accepted, &turn_id));
+    }
+
+    #[tokio::test]
+    async fn event_stream_failures_do_not_complete_the_prompt() {
+        let session_id = SessionId::from("session-1");
+        let turn_id = TurnId::from("turn-1");
+        let (events_tx, mut event_rx) = broadcast::channel(1);
+        events_tx
+            .send(Arc::new(live_event(
+                session_id.clone(),
+                Some(turn_id.clone()),
+                LiveEventPayload::AgentRunStarted,
+            )))
+            .unwrap();
+        events_tx
+            .send(Arc::new(live_event(
+                session_id,
+                Some(turn_id),
+                LiveEventPayload::AgentRunCompleted {
+                    reason: "stop".into(),
+                },
+            )))
+            .unwrap();
+        let event_forwarded = Arc::new(tokio::sync::Notify::new());
+        let completion_after_event = Arc::clone(&event_forwarded);
+        let (completion_tx, mut completion_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            completion_after_event.notified().await;
+            let _ = completion_tx.send(TurnCompletion::Completed {
+                finish_reason: "stop".into(),
+            });
+        });
+
+        let forwarded = Arc::new(AtomicUsize::new(0));
+        let forwarded_by_callback = Arc::clone(&forwarded);
+        let event_forwarded_by_callback = Arc::clone(&event_forwarded);
+        let completion = wait_for_turn_completion(&mut event_rx, &mut completion_rx, move |_| {
+            forwarded_by_callback.fetch_add(1, Ordering::Relaxed);
+            event_forwarded_by_callback.notify_one();
+        })
+        .await
+        .unwrap();
+        assert!(matches!(completion, TurnCompletion::Completed { .. }));
+        assert_eq!(
+            forwarded.load(Ordering::Relaxed),
+            1,
+            "latest event should be consumed after lag"
+        );
+
+        let (closed_tx, mut closed_rx) = broadcast::channel(1);
+        drop(closed_tx);
+        let (completion_tx, mut completion_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            let _ = completion_tx.send(TurnCompletion::Dropped);
+        });
+
+        let completion = wait_for_turn_completion(&mut closed_rx, &mut completion_rx, |_| {})
+            .await
+            .unwrap();
+        assert!(matches!(completion, TurnCompletion::Dropped));
     }
 }

@@ -62,14 +62,13 @@ impl SessionCommandService {
         tool_selection: Option<SessionToolSelection>,
     ) -> Result<SessionId, HandlerError> {
         tracing::info!(%working_dir, "creating session");
-        let created = self
+        let session = self
             .runtime
             .session_manager()
             .create_with_tool_selection(&working_dir, tool_selection.as_ref())
             .await
             .map_err(HandlerError::SessionManager)?;
-        let session_id = created.session.id().clone();
-        self.event_bus.publish_event(Arc::new(created.start_event));
+        let session_id = session.id().clone();
         tracing::info!(%session_id, "session fully initialized");
         Ok(session_id)
     }

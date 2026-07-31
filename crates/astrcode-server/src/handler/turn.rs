@@ -1,10 +1,6 @@
 //! 交互式 handler 对 turn 生命周期服务的薄适配。
 
 use astrcode_core::types::SessionId;
-#[cfg(test)]
-use astrcode_core::types::TurnId;
-#[cfg(test)]
-use astrcode_core::user_input::UserInput;
 
 use super::{CommandHandler, HandlerError};
 
@@ -35,22 +31,5 @@ impl CommandHandler {
         session_id: &SessionId,
     ) -> Result<(), HandlerError> {
         self.session_commands.repair_stale_session(session_id).await
-    }
-
-    #[cfg(test)]
-    pub(in crate::handler) async fn submit_input_with_completion(
-        &self,
-        session_id: SessionId,
-        input: UserInput,
-    ) -> Result<
-        (
-            TurnId,
-            tokio::sync::oneshot::Receiver<crate::turn_scheduler::TurnCompletion>,
-        ),
-        HandlerError,
-    > {
-        self.session_commands
-            .submit_input_with_completion(session_id, input)
-            .await
     }
 }

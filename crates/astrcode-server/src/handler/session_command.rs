@@ -1,7 +1,6 @@
 //! 交互式 handler 对 session-scoped command 服务的薄适配。
 
 use astrcode_core::types::SessionId;
-use astrcode_extension_sdk::extension::CommandCompletions;
 use astrcode_protocol::events::ClientNotification;
 
 use super::{CommandHandler, CommandInvocation, HandlerError, PromptSubmission, slash};
@@ -89,25 +88,6 @@ impl CommandHandler {
             .invoke_command_for_session(session_id, command)
             .await?
             .into_prompt_submission())
-    }
-
-    pub(in crate::handler) async fn complete_command_for_session(
-        &self,
-        session_id: SessionId,
-        command_name: String,
-        argument: String,
-        cursor: Option<usize>,
-    ) -> Result<CommandCompletions, HandlerError> {
-        self.session_commands
-            .complete_command(session_id, command_name, argument, cursor)
-            .await
-    }
-
-    pub(in crate::handler) async fn command_list_for_session(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<CommandList, HandlerError> {
-        self.session_commands.command_list(session_id, true).await
     }
 
     pub(in crate::handler) async fn command_list_for_working_dir(

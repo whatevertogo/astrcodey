@@ -799,11 +799,19 @@ impl Session {
             tool_call_id,
         };
         let child_session_id = input.session_id.clone();
+        let publication = self
+            .runtime
+            .event_sink()
+            .defer_publication(child_session_id.clone())?;
         match AssertUnwindSafe(self.create_child_transaction(input))
             .catch_unwind()
             .await
         {
-            Ok(result) => result,
+            Ok(Ok(child)) => {
+                publication.commit();
+                Ok(child)
+            },
+            Ok(Err(error)) => Err(error),
             Err(_) => {
                 let cause = SessionError::CreationTask(
                     "child session creation transaction panicked".into(),

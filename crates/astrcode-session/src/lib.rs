@@ -45,7 +45,9 @@ pub use session::{
     emit_interrupted_tool_results, emit_lifecycle_for_read_model, emit_turn_aborted_context,
     finalize_aborted_turn, finalize_turn,
 };
-pub use session_event_sink::{SessionEventObserver, SessionEventPublishError, SessionEventSink};
+pub use session_event_sink::{
+    SessionEventObserver, SessionEventPublicationGuard, SessionEventPublishError, SessionEventSink,
+};
 pub use session_extension_ports::SessionExtensionPorts;
 pub use session_resource_store::SessionResourceStore;
 pub use session_runtime::{

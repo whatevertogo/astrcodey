@@ -22,11 +22,6 @@ use crate::{
     task_utils::OwnedTaskSet,
 };
 
-pub(crate) struct CreatedSession {
-    pub(crate) session: Session,
-    pub(crate) start_event: Event,
-}
-
 struct ForkCreationInput {
     source_id: SessionId,
     session_id: SessionId,
@@ -50,8 +45,6 @@ pub enum SessionManagerError {
     Projection(#[from] astrcode_session_projection::ProjectionError),
     #[error(transparent)]
     Creation(#[from] SessionCreationFailed),
-    #[error("session created but no events found")]
-    MissingStartEvent,
     #[error("invalid fork cursor: {0}")]
     InvalidCursor(String),
     #[error("session close task failed: {0}")]
@@ -143,10 +136,7 @@ impl SessionManager {
         Ok(effective)
     }
 
-    pub(crate) async fn create(
-        &self,
-        working_dir: &str,
-    ) -> Result<CreatedSession, SessionManagerError> {
+    pub(crate) async fn create(&self, working_dir: &str) -> Result<Session, SessionManagerError> {
         self.create_with_tool_selection(working_dir, None).await
     }
 
@@ -154,7 +144,7 @@ impl SessionManager {
         &self,
         working_dir: &str,
         tool_selection: Option<&SessionToolSelection>,
-    ) -> Result<CreatedSession, SessionManagerError> {
+    ) -> Result<Session, SessionManagerError> {
         let manager = self.clone();
         let working_dir = working_dir.to_owned();
         let tool_selection = tool_selection.cloned();
@@ -191,9 +181,13 @@ impl SessionManager {
         sid: SessionId,
         working_dir: String,
         tool_selection: Option<SessionToolSelection>,
-    ) -> Result<CreatedSession, SessionManagerError> {
+    ) -> Result<Session, SessionManagerError> {
         let runtime = self.runtime_for(&sid);
         let creation = runtime.begin_creation();
+        let publication = self
+            .event_sink
+            .defer_publication(sid.clone())
+            .map_err(SessionError::from)?;
         let session = match Session::create_with_params(SessionCreateParams {
             working_dir,
             model_id: self.runtime_services.read_effective().llm.model_id.clone(),
@@ -225,33 +219,6 @@ impl SessionManager {
             },
         };
 
-        let start_event_result = self
-            .event_store
-            .replay_events(&sid)
-            .await
-            .map_err(SessionManagerError::from)
-            .and_then(|events| {
-                events
-                    .into_iter()
-                    .next()
-                    .map(Event::from)
-                    .ok_or(SessionManagerError::MissingStartEvent)
-            });
-        let start_event = match start_event_result {
-            Ok(event) => event,
-            Err(error) => {
-                if let Err(compensation_error) = self.discard_failed_creation(&sid).await {
-                    tracing::warn!(
-                        session_id = %sid,
-                        error = %error,
-                        compensation_error = %compensation_error,
-                        "failed to fully compensate root session creation"
-                    );
-                }
-                return Err(error);
-            },
-        };
-
         if let Err(error) = session
             .ensure_lifecycle_initialized(ExtensionEvent::SessionStart)
             .await
@@ -280,10 +247,8 @@ impl SessionManager {
         }
 
         creation.commit();
-        Ok(CreatedSession {
-            session,
-            start_event,
-        })
+        publication.commit();
+        Ok(session)
     }
 
     pub(crate) async fn open(&self, session_id: SessionId) -> Result<Session, SessionManagerError> {
@@ -645,6 +610,10 @@ impl SessionManager {
         } = input;
         let runtime = self.runtime_for(&new_sid);
         let creation = runtime.begin_creation();
+        let publication = self
+            .event_sink
+            .defer_publication(new_sid.clone())
+            .map_err(SessionError::from)?;
         let session = match Session::create_with_params(SessionCreateParams {
             working_dir,
             model_id,
@@ -727,6 +696,7 @@ impl SessionManager {
         }
 
         creation.commit();
+        publication.commit();
         Ok(session)
     }
 
@@ -1167,7 +1137,6 @@ mod tests {
         inner: InMemoryEventStore,
         append_count: AtomicUsize,
         fail_append_at: AtomicUsize,
-        replay_failure: AtomicU8,
         sync_count: AtomicUsize,
         fail_sync_at: AtomicUsize,
         fail_next_delete: AtomicBool,
@@ -1185,14 +1154,6 @@ mod tests {
                 self.append_count.load(Ordering::SeqCst) + 1,
                 Ordering::SeqCst,
             );
-        }
-
-        fn return_empty_next_replay(&self) {
-            self.replay_failure.store(1, Ordering::SeqCst);
-        }
-
-        fn fail_next_replay(&self) {
-            self.replay_failure.store(2, Ordering::SeqCst);
         }
 
         fn fail_next_sync(&self) {
@@ -1249,13 +1210,7 @@ mod tests {
             &self,
             session_id: &SessionId,
         ) -> Result<Vec<StoredEvent>, StorageError> {
-            match self.replay_failure.swap(0, Ordering::SeqCst) {
-                1 => Ok(Vec::new()),
-                2 => Err(StorageError::InvalidEvent(
-                    "injected start-event replay failure".into(),
-                )),
-                _ => self.inner.replay_events(session_id).await,
-            }
+            self.inner.replay_events(session_id).await
         }
 
         async fn latest_cursor(
@@ -1475,54 +1430,6 @@ mod tests {
         .unwrap()
     }
 
-    #[derive(Clone, Copy)]
-    enum ReplayFailure {
-        Empty,
-        Storage,
-    }
-
-    async fn assert_root_replay_failure_is_compensated(failure: ReplayFailure) {
-        let store = Arc::new(FailingAppendStore::default());
-        match failure {
-            ReplayFailure::Empty => store.return_empty_next_replay(),
-            ReplayFailure::Storage => store.fail_next_replay(),
-        }
-        let store_port: Arc<dyn SessionStore> = store.clone();
-        let runtime_services = test_runtime_services();
-        let external_cleanup = Arc::new(RecordingCleanup::default());
-        let cleanup_port: Arc<dyn SessionResourceCleanup> = external_cleanup.clone();
-        let manager = SessionManager::new(
-            Arc::clone(&store_port),
-            Arc::clone(&runtime_services),
-            vec![cleanup_port],
-        );
-
-        let error = match manager.create(".").await {
-            Ok(_) => panic!("start-event replay must fail"),
-            Err(error) => error,
-        };
-        match failure {
-            ReplayFailure::Empty => {
-                assert!(matches!(error, SessionManagerError::MissingStartEvent))
-            },
-            ReplayFailure::Storage => {
-                assert!(
-                    error
-                        .to_string()
-                        .contains("injected start-event replay failure")
-                )
-            },
-        }
-        let session_id = store.created_sessions()[0].clone();
-        assert!(store.list_sessions().await.unwrap().is_empty());
-        assert_runtime_was_released(
-            runtime_services.as_ref(),
-            Arc::clone(&store_port),
-            &session_id,
-        );
-        assert_eq!(*external_cleanup.0.lock(), vec![session_id]);
-    }
-
     async fn assert_task_waits_for_creation<T>(task: &mut tokio::task::JoinHandle<T>) {
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(25), &mut *task)
@@ -1596,9 +1503,6 @@ mod tests {
             &missing_id,
         );
 
-        assert_root_replay_failure_is_compensated(ReplayFailure::Empty).await;
-        assert_root_replay_failure_is_compensated(ReplayFailure::Storage).await;
-
         let root_store = Arc::new(FailingAppendStore::default());
         let root_store_port: Arc<dyn SessionStore> = root_store.clone();
         let root_hooks = Arc::new(FailingStartHooks::new(1));
@@ -1611,6 +1515,7 @@ mod tests {
             Arc::clone(&root_services),
             vec![root_cleanup_port],
         );
+        let mut root_events = root_manager.event_bus().subscribe_all_notifications();
 
         let root_error = match root_manager.create(".").await {
             Ok(_) => panic!("root lifecycle start must fail"),
@@ -1625,6 +1530,10 @@ mod tests {
         assert!(root_store.list_sessions().await.unwrap().is_empty());
         assert!(root_hooks.observed(ExtensionEvent::SessionStart, &root_id));
         assert!(root_hooks.observed(ExtensionEvent::SessionShutdown, &root_id));
+        assert!(
+            root_events.try_recv().is_err(),
+            "failed creation must not publish buffered session events"
+        );
         assert_runtime_was_released(
             root_services.as_ref(),
             Arc::clone(&root_store_port),
@@ -1805,7 +1714,7 @@ mod tests {
             Arc::clone(&fork_services),
             vec![cleanup_port],
         );
-        let source = manager.create(".").await.unwrap().session;
+        let source = manager.create(".").await.unwrap();
 
         fork_store.fail_next_append();
         let fork_error = match manager.fork(source.id(), None).await {
@@ -1838,7 +1747,7 @@ mod tests {
             Arc::clone(&fork_lifecycle_services),
             vec![fork_lifecycle_cleanup_port],
         );
-        let lifecycle_source = lifecycle_manager.create(".").await.unwrap().session;
+        let lifecycle_source = lifecycle_manager.create(".").await.unwrap();
 
         let lifecycle_fork_error = match lifecycle_manager.fork(lifecycle_source.id(), None).await {
             Ok(_) => panic!("fork lifecycle start must fail"),
@@ -1874,7 +1783,7 @@ mod tests {
             Arc::clone(&close_services),
             vec![close_cleanup_port],
         );
-        let close_session = close_manager.create(".").await.unwrap().session;
+        let close_session = close_manager.create(".").await.unwrap();
         let close_session_id = close_session.id().clone();
 
         close_store.fail_next_sync();
@@ -1905,7 +1814,7 @@ mod tests {
             test_runtime_services(),
             vec![],
         ));
-        let source_id = manager.create(".").await.unwrap().session.id().clone();
+        let source_id = manager.create(".").await.unwrap().id().clone();
         store.block_next_read();
 
         let fork_manager = Arc::clone(&manager);
@@ -1962,7 +1871,7 @@ mod tests {
             fork_services,
             vec![],
         ));
-        let source = fork_manager.create(".").await.unwrap().session;
+        let source = fork_manager.create(".").await.unwrap();
         let source_id = source.id().clone();
         let caller_manager = Arc::clone(&fork_manager);
         let caller_source_id = source_id.clone();
@@ -2098,7 +2007,7 @@ mod tests {
             Arc::clone(&fork_services),
             vec![],
         ));
-        let source = fork_manager.create(".").await.unwrap().session;
+        let source = fork_manager.create(".").await.unwrap();
         let source_id = source.id().clone();
         let create_fork_manager = Arc::clone(&fork_manager);
         let create_fork_source_id = source_id.clone();

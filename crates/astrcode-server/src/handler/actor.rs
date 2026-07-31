@@ -5,21 +5,14 @@
 
 use std::sync::Arc;
 
-#[cfg(test)]
-use astrcode_core::types::TurnId;
-use astrcode_core::{tool::SessionToolSelection, types::SessionId, user_input::UserInput};
-use astrcode_extension_sdk::extension::CommandCompletions;
 use astrcode_protocol::commands::ClientCommand;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{
-    CommandHandler, CommandInvocation, CommandList, HandlerError, ManualCompactOutcome,
-    PromptSubmission, TurnCompletion,
-};
+use super::{CommandHandler, HandlerError};
 use crate::{
     bootstrap::ServerRuntime,
-    session_command_contract::ParsedSlashCommand,
-    turn_scheduler::{TurnCompletionEvent, TurnScheduler},
+    session_command_service::SessionCommandService,
+    turn_scheduler::{TurnCompletion, TurnCompletionEvent, TurnScheduler},
 };
 
 /// Command actor 队列容量；满时 `send().await` 对调用方施加背压。
@@ -40,167 +33,12 @@ impl CommandHandle {
             .map_err(|_| HandlerError::ActorUnavailable)
     }
 
-    async fn request<T>(
-        &self,
-        message: impl FnOnce(oneshot::Sender<Result<T, HandlerError>>) -> CommandMessage,
-    ) -> Result<T, HandlerError> {
-        let (reply, rx) = oneshot::channel();
-        self.post(message(reply)).await?;
-        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
-    }
-
     /// 发送客户端命令，等待执行完成。
     pub async fn handle(&self, command: ClientCommand) -> Result<(), HandlerError> {
-        self.request(|reply| CommandMessage::ClientCommand { command, reply })
-            .await
-    }
-
-    /// 创建新会话，返回会话 ID。
-    pub async fn create_session(&self, working_dir: String) -> Result<SessionId, HandlerError> {
-        self.create_session_with_tool_selection(working_dir, None)
-            .await
-    }
-
-    pub async fn create_session_with_tool_selection(
-        &self,
-        working_dir: String,
-        tool_selection: Option<SessionToolSelection>,
-    ) -> Result<SessionId, HandlerError> {
-        self.request(|reply| CommandMessage::CreateSession {
-            working_dir,
-            tool_selection,
-            reply,
-        })
-        .await
-    }
-
-    /// 提交提示词，返回 Turn ID 和完成通知接收器。
-    #[cfg(test)]
-    pub(crate) async fn submit_prompt_with_completion(
-        &self,
-        session_id: SessionId,
-        input: UserInput,
-    ) -> Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError> {
-        self.request(|reply| CommandMessage::SubmitInputWithCompletion {
-            session_id,
-            input,
-            reply,
-        })
-        .await
-    }
-
-    /// 向指定会话提交输入。
-    pub async fn submit_input_for_session(
-        &self,
-        session_id: SessionId,
-        input: UserInput,
-    ) -> Result<PromptSubmission, HandlerError> {
-        self.request(|reply| CommandMessage::SubmitInputForSession {
-            session_id,
-            input,
-            reply,
-        })
-        .await
-    }
-
-    /// 向活跃 turn 注入 mid-turn 消息（steer）。
-    pub async fn inject_input_for_session(
-        &self,
-        session_id: SessionId,
-        text: String,
-    ) -> Result<PromptSubmission, HandlerError> {
-        self.request(|reply| CommandMessage::InjectInputForSession {
-            session_id,
-            text,
-            reply,
-        })
-        .await
-    }
-
-    /// 手动压缩指定会话。
-    pub async fn compact_session(
-        &self,
-        session_id: SessionId,
-        keep_recent_turns: Option<usize>,
-    ) -> Result<ManualCompactOutcome, HandlerError> {
-        self.request(|reply| CommandMessage::CompactSession {
-            session_id,
-            keep_recent_turns,
-            reply,
-        })
-        .await
-    }
-
-    /// 中止指定会话的活跃 Turn。
-    pub async fn abort_session(&self, session_id: SessionId) -> Result<(), HandlerError> {
-        self.request(|reply| CommandMessage::AbortSession { session_id, reply })
-            .await
-    }
-
-    /// 获取指定会话的完整命令列表与诊断。
-    pub async fn command_list_for_session(
-        &self,
-        session_id: SessionId,
-    ) -> Result<CommandList, HandlerError> {
-        self.request(|reply| CommandMessage::ListCommandCatalogForSession { session_id, reply })
-            .await
-    }
-
-    /// 执行指定会话的一等 command。
-    pub async fn invoke_command_for_session(
-        &self,
-        session_id: SessionId,
-        command_name: String,
-        arguments: String,
-    ) -> Result<CommandInvocation, HandlerError> {
-        self.request(|reply| CommandMessage::InvokeCommandForSession {
-            session_id,
-            command_name,
-            arguments,
-            reply,
-        })
-        .await
-    }
-
-    /// 请求指定 command 的参数补全。
-    pub async fn complete_command_for_session(
-        &self,
-        session_id: SessionId,
-        command_name: String,
-        argument: String,
-        cursor: Option<usize>,
-    ) -> Result<CommandCompletions, HandlerError> {
-        self.request(|reply| CommandMessage::CompleteCommandForSession {
-            session_id,
-            command_name,
-            argument,
-            cursor,
-            reply,
-        })
-        .await
-    }
-
-    /// 修复进程重启后残留的过期 turn phase。
-    ///
-    /// 如果 session phase 为非 Idle 且无活跃 Turn，写入 `TurnCompleted(interrupted)`
-    /// 将 session 恢复为 Idle。session 已经是 Idle/Error 时静默返回 Ok。
-    pub async fn repair_stale_turn(&self, session_id: SessionId) -> Result<(), HandlerError> {
-        self.request(|reply| CommandMessage::RepairStaleTurn { session_id, reply })
-            .await
-    }
-
-    /// Fork 源会话，返回新 session ID。
-    pub async fn fork_session(
-        &self,
-        source_id: SessionId,
-        at_cursor: Option<String>,
-    ) -> Result<SessionId, HandlerError> {
-        self.request(|reply| CommandMessage::ForkSession {
-            source_id,
-            at_cursor,
-            reply,
-        })
-        .await
+        let (reply, rx) = oneshot::channel();
+        self.post(CommandMessage::ClientCommand { command, reply })
+            .await?;
+        rx.await.map_err(|_| HandlerError::ActorUnavailable)?
     }
 
     /// 停止 actor 主循环并等待任务退出。
@@ -229,95 +67,17 @@ impl CommandHandle {
             }
         }
     }
-
-    /// 删除指定工作目录下的所有会话，返回删除数量。
-    pub async fn delete_project(&self, working_dir: String) -> Result<usize, HandlerError> {
-        self.request(|reply| CommandMessage::DeleteProject { working_dir, reply })
-            .await
-    }
 }
 
-/// Actor 内部消息类型，涵盖所有需要异步处理的操作。
+/// Actor 内部消息只承载需要串行访问交互状态的操作。
 pub(in crate::handler) enum CommandMessage {
-    /// 客户端命令
     ClientCommand {
         command: ClientCommand,
         reply: oneshot::Sender<Result<(), HandlerError>>,
     },
-    /// 创建会话
-    CreateSession {
-        working_dir: String,
-        tool_selection: Option<SessionToolSelection>,
-        reply: oneshot::Sender<Result<SessionId, HandlerError>>,
+    Shutdown {
+        reply: oneshot::Sender<()>,
     },
-    /// 提交输入
-    SubmitInputForSession {
-        session_id: SessionId,
-        input: UserInput,
-        reply: oneshot::Sender<Result<PromptSubmission, HandlerError>>,
-    },
-    /// Mid-turn 注入（steer）
-    InjectInputForSession {
-        session_id: SessionId,
-        text: String,
-        reply: oneshot::Sender<Result<PromptSubmission, HandlerError>>,
-    },
-    /// 手动压缩
-    CompactSession {
-        session_id: SessionId,
-        keep_recent_turns: Option<usize>,
-        reply: oneshot::Sender<Result<ManualCompactOutcome, HandlerError>>,
-    },
-    /// 中止 Turn
-    AbortSession {
-        session_id: SessionId,
-        reply: oneshot::Sender<Result<(), HandlerError>>,
-    },
-    /// 列出命令及诊断
-    ListCommandCatalogForSession {
-        session_id: SessionId,
-        reply: oneshot::Sender<Result<CommandList, HandlerError>>,
-    },
-    /// 执行一等 command
-    InvokeCommandForSession {
-        session_id: SessionId,
-        command_name: String,
-        arguments: String,
-        reply: oneshot::Sender<Result<CommandInvocation, HandlerError>>,
-    },
-    /// command 参数补全
-    CompleteCommandForSession {
-        session_id: SessionId,
-        command_name: String,
-        argument: String,
-        cursor: Option<usize>,
-        reply: oneshot::Sender<Result<CommandCompletions, HandlerError>>,
-    },
-    /// 提交提示词并等待完成通知
-    #[cfg(test)]
-    SubmitInputWithCompletion {
-        session_id: SessionId,
-        input: UserInput,
-        reply: oneshot::Sender<Result<(TurnId, oneshot::Receiver<TurnCompletion>), HandlerError>>,
-    },
-    /// 修复进程重启后残留的过期 turn phase
-    RepairStaleTurn {
-        session_id: SessionId,
-        reply: oneshot::Sender<Result<(), HandlerError>>,
-    },
-    /// Fork 源会话
-    ForkSession {
-        source_id: SessionId,
-        at_cursor: Option<String>,
-        reply: oneshot::Sender<Result<SessionId, HandlerError>>,
-    },
-    /// 删除指定工作目录下的所有会话
-    DeleteProject {
-        working_dir: String,
-        reply: oneshot::Sender<Result<usize, HandlerError>>,
-    },
-    /// 关闭 actor 主循环
-    Shutdown { reply: oneshot::Sender<()> },
 }
 
 impl CommandHandler {
@@ -326,14 +86,10 @@ impl CommandHandler {
         runtime: Arc<ServerRuntime>,
         scheduler: Arc<TurnScheduler>,
         event_bus: Arc<crate::server_event_bus::ServerEventBus>,
+        session_commands: SessionCommandService,
     ) -> Self {
         let model_selection =
             super::model_selection::ModelSelectionController::new(runtime.config_manager().clone());
-        let session_commands = crate::session_command_service::SessionCommandService::new(
-            Arc::clone(&runtime),
-            Arc::clone(&scheduler),
-            Arc::clone(&event_bus),
-        );
         Self {
             runtime,
             focused_session_id: None,
@@ -349,9 +105,10 @@ impl CommandHandler {
         runtime: Arc<ServerRuntime>,
         scheduler: Arc<TurnScheduler>,
         event_bus: Arc<crate::server_event_bus::ServerEventBus>,
+        session_commands: SessionCommandService,
     ) -> CommandHandle {
         let (tx, rx) = mpsc::channel(COMMAND_ACTOR_CAPACITY);
-        let mut handler = Self::new(runtime, scheduler, event_bus);
+        let mut handler = Self::new(runtime, scheduler, event_bus, session_commands);
         let task = tokio::spawn(async move {
             handler.run(rx).await;
         });
@@ -405,7 +162,7 @@ impl CommandHandler {
                         CommandMessage::ClientCommand {
                             command: ClientCommand::SubmitPrompt { .. },
                             ..
-                        } | CommandMessage::SubmitInputForSession { .. }
+                        }
                     ) {
                         recap_deadline = None;
                     }
@@ -458,90 +215,6 @@ impl CommandHandler {
         match message {
             CommandMessage::ClientCommand { command, reply } => {
                 let _ = reply.send(self.handle(command).await);
-            },
-            CommandMessage::CreateSession {
-                working_dir,
-                tool_selection,
-                reply,
-            } => {
-                let _ = reply.send(
-                    self.create_session_with_tool_selection(working_dir, tool_selection)
-                        .await,
-                );
-            },
-            CommandMessage::SubmitInputForSession {
-                session_id,
-                input,
-                reply,
-            } => {
-                let _ = reply.send(self.submit_input_for_session(session_id, input).await);
-            },
-            CommandMessage::InjectInputForSession {
-                session_id,
-                text,
-                reply,
-            } => {
-                let _ = reply.send(self.inject_input_for_session(session_id, text).await);
-            },
-            CommandMessage::CompactSession {
-                session_id,
-                keep_recent_turns,
-                reply,
-            } => {
-                let result = self.compact_session(&session_id, keep_recent_turns).await;
-                let _ = reply.send(result);
-            },
-            CommandMessage::AbortSession { session_id, reply } => {
-                let result = self.abort_session(&session_id).await;
-                let _ = reply.send(result);
-            },
-            CommandMessage::ListCommandCatalogForSession { session_id, reply } => {
-                let _ = reply.send(self.command_list_for_session(&session_id).await);
-            },
-            CommandMessage::InvokeCommandForSession {
-                session_id,
-                command_name,
-                arguments,
-                reply,
-            } => {
-                let command = ParsedSlashCommand {
-                    name: command_name,
-                    arguments,
-                };
-                let _ = reply.send(self.invoke_command_for_session(session_id, command).await);
-            },
-            CommandMessage::CompleteCommandForSession {
-                session_id,
-                command_name,
-                argument,
-                cursor,
-                reply,
-            } => {
-                let _ = reply.send(
-                    self.complete_command_for_session(session_id, command_name, argument, cursor)
-                        .await,
-                );
-            },
-            #[cfg(test)]
-            CommandMessage::SubmitInputWithCompletion {
-                session_id,
-                input,
-                reply,
-            } => {
-                let _ = reply.send(self.submit_input_with_completion(session_id, input).await);
-            },
-            CommandMessage::RepairStaleTurn { session_id, reply } => {
-                let _ = reply.send(self.repair_stale_session(&session_id).await);
-            },
-            CommandMessage::ForkSession {
-                source_id,
-                at_cursor,
-                reply,
-            } => {
-                let _ = reply.send(self.fork_session(source_id, at_cursor).await);
-            },
-            CommandMessage::DeleteProject { working_dir, reply } => {
-                let _ = reply.send(self.delete_project(working_dir).await);
             },
             CommandMessage::Shutdown { reply } => {
                 let _ = reply.send(());

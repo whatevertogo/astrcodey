@@ -889,16 +889,117 @@ fn test_event_bus(
     event_bus
 }
 
+struct TestCommandActor {
+    handle: CommandHandle,
+    session_commands: crate::session_command_service::SessionCommandService,
+    event_bus: Arc<crate::server_event_bus::ServerEventBus>,
+}
+
+impl TestCommandActor {
+    async fn handle(&self, command: ClientCommand) -> Result<(), HandlerError> {
+        self.handle.handle(command).await
+    }
+
+    async fn create_session(&self, working_dir: String) -> Result<SessionId, HandlerError> {
+        let mut events = self.event_bus.subscribe_all_notifications();
+        self.handle
+            .handle(ClientCommand::CreateSession { working_dir })
+            .await?;
+        loop {
+            let notification = tokio::time::timeout(Duration::from_secs(1), events.recv())
+                .await
+                .map_err(|_| HandlerError::ActorUnavailable)?
+                .map_err(|_| HandlerError::ActorUnavailable)?;
+            if let ClientNotification::Event(event) = notification {
+                if matches!(
+                    event.payload,
+                    EventPayload::Durable(DurableEventPayload::SessionStarted(_))
+                ) {
+                    return Ok(event.session_id);
+                }
+            }
+        }
+    }
+
+    async fn submit_prompt_with_completion(
+        &self,
+        session_id: SessionId,
+        input: astrcode_core::user_input::UserInput,
+    ) -> Result<
+        (
+            astrcode_core::types::TurnId,
+            tokio::sync::oneshot::Receiver<TurnCompletion>,
+        ),
+        HandlerError,
+    > {
+        self.session_commands
+            .submit_input_with_completion(session_id, input)
+            .await
+    }
+
+    async fn submit_input_for_session(
+        &self,
+        session_id: SessionId,
+        input: astrcode_core::user_input::UserInput,
+    ) -> Result<PromptSubmission, HandlerError> {
+        self.session_commands.submit_input(session_id, input).await
+    }
+
+    async fn compact_session(
+        &self,
+        session_id: SessionId,
+        keep_recent_turns: Option<usize>,
+    ) -> Result<ManualCompactOutcome, HandlerError> {
+        self.session_commands
+            .compact_session(&session_id, keep_recent_turns)
+            .await
+    }
+
+    async fn abort_session(&self, session_id: SessionId) -> Result<(), HandlerError> {
+        self.session_commands.abort_session(&session_id).await
+    }
+
+    async fn command_list_for_session(
+        &self,
+        session_id: SessionId,
+    ) -> Result<CommandList, HandlerError> {
+        self.session_commands.command_list(&session_id, true).await
+    }
+
+    async fn invoke_command_for_session(
+        &self,
+        session_id: SessionId,
+        command_name: String,
+        arguments: String,
+    ) -> Result<CommandInvocation, HandlerError> {
+        self.session_commands
+            .invoke_named_command(session_id, command_name, arguments)
+            .await
+    }
+}
+
 fn spawn_test_actor(
     runtime: Arc<crate::bootstrap::ServerRuntime>,
     event_tx: broadcast::Sender<ClientNotification>,
-) -> CommandHandle {
+) -> TestCommandActor {
     let scheduler = test_scheduler(&runtime);
-    CommandHandler::spawn_actor(
+    let event_bus = test_event_bus(&runtime, event_tx);
+    let session_commands = crate::session_command_service::SessionCommandService::new(
         Arc::clone(&runtime),
         Arc::clone(&scheduler),
-        test_event_bus(&runtime, event_tx),
-    )
+        Arc::clone(&event_bus),
+    );
+    let handle = CommandHandler::spawn_actor(
+        Arc::clone(&runtime),
+        scheduler,
+        Arc::clone(&event_bus),
+        session_commands.clone(),
+    );
+    TestCommandActor {
+        handle,
+        session_commands,
+        event_bus,
+    }
 }
 
 fn compact_summary_text(current_work: &str) -> String {
@@ -1131,6 +1232,12 @@ async fn create_session_persists_initial_system_prompt() {
     let prompt = started.initial_system_prompt;
     assert!(prompt.text.contains("[Identity]"));
     assert!(!prompt.fingerprint.is_empty());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), event_rx.recv())
+            .await
+            .is_err(),
+        "successful creation should publish SessionStarted exactly once"
+    );
 
     let state = runtime
         .event_store()
@@ -1503,10 +1610,17 @@ async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
 
     let event_tx = event_channel(1024);
     let scheduler = test_scheduler(&runtime);
+    let event_bus = test_event_bus(&runtime, event_tx);
+    let session_commands = crate::session_command_service::SessionCommandService::new(
+        Arc::clone(&runtime),
+        Arc::clone(&scheduler),
+        Arc::clone(&event_bus),
+    );
     let handler = CommandHandler::new(
         Arc::clone(&runtime),
         Arc::clone(&scheduler),
-        test_event_bus(&runtime, event_tx),
+        event_bus,
+        session_commands,
     );
 
     handler.repair_stale_session(&sid).await.unwrap();
@@ -1580,10 +1694,17 @@ async fn repair_stale_runs_marks_child_without_active_execution_interrupted() {
 
     let event_tx = event_channel(1024);
     let scheduler = test_scheduler(&runtime);
+    let event_bus = test_event_bus(&runtime, event_tx);
+    let session_commands = crate::session_command_service::SessionCommandService::new(
+        Arc::clone(&runtime),
+        Arc::clone(&scheduler),
+        Arc::clone(&event_bus),
+    );
     let handler = CommandHandler::new(
         Arc::clone(&runtime),
         Arc::clone(&scheduler),
-        test_event_bus(&runtime, event_tx),
+        event_bus,
+        session_commands,
     );
 
     handler.repair_stale_session(&parent_id).await.unwrap();
@@ -1646,7 +1767,7 @@ async fn queue_input_started_from_idle_is_cleaned_up() {
     let runtime = test_runtime_with_llm(Arc::new(MockLlm));
     let scheduler = test_scheduler(&runtime);
     let created = runtime.session_manager().create(".").await.unwrap();
-    let sid = created.session.id().clone();
+    let sid = created.id().clone();
 
     let outcome = scheduler
         .deliver_input(
@@ -1859,13 +1980,13 @@ async fn server_shutdown_stops_active_turn_before_draining_watchers() {
     let runtime = test_runtime_with_llm(Arc::new(PendingLlm));
     let app = crate::bootstrap::ServerApp::new(runtime);
     let session_id = app
-        .command_handle()
-        .create_session(".".into())
+        .session_commands()
+        .create_session(".".into(), None)
         .await
         .unwrap();
     let submission = app
-        .command_handle()
-        .submit_input_for_session(session_id, "keep running".into())
+        .session_commands()
+        .submit_input(session_id, "keep running".into())
         .await
         .unwrap();
     assert!(matches!(submission, PromptSubmission::Accepted { .. }));
@@ -1924,7 +2045,9 @@ async fn compact_session_rejects_running_turn_without_compaction_started() {
     while event_rx.try_recv().is_ok() {}
 
     let error = handler
-        .compact_session(sid.clone(), None)
+        .handle(ClientCommand::Compact {
+            keep_recent_turns: None,
+        })
         .await
         .unwrap_err();
     assert!(

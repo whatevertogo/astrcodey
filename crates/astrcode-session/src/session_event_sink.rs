@@ -32,13 +32,86 @@ pub enum SessionEventPublishError {
     Full { dropped: u64 },
     #[error("session event publisher task failed: {0}")]
     Task(String),
+    #[error("session event publication is already deferred for {session_id}")]
+    AlreadyDeferred { session_id: SessionId },
     #[error(transparent)]
     Storage(#[from] StorageError),
 }
 
 pub struct SessionEventSink {
-    observer: Arc<dyn SessionEventObserver>,
+    publication: Arc<PublicationState>,
     state: Mutex<SinkState>,
+}
+
+type DeferredEvents = Arc<Mutex<Vec<Arc<Event>>>>;
+
+struct PublicationState {
+    observer: Arc<dyn SessionEventObserver>,
+    deferred: Mutex<HashMap<SessionId, DeferredEvents>>,
+}
+
+impl SessionEventObserver for PublicationState {
+    fn publish(&self, event: Arc<Event>) {
+        let deferred = self.deferred.lock();
+        if let Some(events) = deferred.get(&event.session_id) {
+            events.lock().push(event);
+            return;
+        }
+        drop(deferred);
+        self.observer.publish(event);
+    }
+}
+
+pub struct SessionEventPublicationGuard {
+    publication: Arc<PublicationState>,
+    session_id: SessionId,
+    events: DeferredEvents,
+    finished: bool,
+}
+
+impl SessionEventPublicationGuard {
+    pub fn commit(mut self) {
+        self.publication
+            .finish_deferred(&self.session_id, &self.events, true);
+        self.finished = true;
+    }
+}
+
+impl Drop for SessionEventPublicationGuard {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.publication
+                .finish_deferred(&self.session_id, &self.events, false);
+        }
+    }
+}
+
+impl PublicationState {
+    fn finish_deferred(&self, session_id: &SessionId, events: &DeferredEvents, publish: bool) {
+        loop {
+            let mut deferred = self.deferred.lock();
+            let Some(current) = deferred.get(session_id) else {
+                return;
+            };
+            if !Arc::ptr_eq(current, events) {
+                return;
+            }
+            if !publish {
+                deferred.remove(session_id);
+                return;
+            }
+
+            let pending = std::mem::take(&mut *events.lock());
+            if pending.is_empty() {
+                deferred.remove(session_id);
+                return;
+            }
+            drop(deferred);
+            for event in pending {
+                self.observer.publish(event);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -51,9 +124,34 @@ struct SinkState {
 impl SessionEventSink {
     pub fn new(observer: Arc<dyn SessionEventObserver>) -> Self {
         Self {
-            observer,
+            publication: Arc::new(PublicationState {
+                observer,
+                deferred: Mutex::new(HashMap::new()),
+            }),
             state: Mutex::new(SinkState::default()),
         }
+    }
+
+    pub fn defer_publication(
+        &self,
+        session_id: SessionId,
+    ) -> Result<SessionEventPublicationGuard, SessionEventPublishError> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let mut deferred = self.publication.deferred.lock();
+        match deferred.entry(session_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Arc::clone(&events));
+            },
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(SessionEventPublishError::AlreadyDeferred { session_id });
+            },
+        }
+        Ok(SessionEventPublicationGuard {
+            publication: Arc::clone(&self.publication),
+            session_id,
+            events,
+            finished: false,
+        })
     }
 
     fn lane(
@@ -67,10 +165,11 @@ impl SessionEventSink {
         }
         Ok(Arc::clone(
             state.lanes.entry(session_id.clone()).or_insert_with(|| {
+                let observer: Arc<dyn SessionEventObserver> = self.publication.clone();
                 Arc::new(SessionEventLane::start(
                     session_id.clone(),
                     journal,
-                    Arc::clone(&self.observer),
+                    observer,
                 ))
             }),
         ))
@@ -493,6 +592,60 @@ mod tests {
             sink.activate(&session_id),
             Err(SessionEventPublishError::Closed)
         ));
+    }
+
+    #[tokio::test]
+    async fn deferred_publication_commits_in_order_and_discards_failed_creation_events() {
+        let session_id = SessionId::new("deferred-session");
+        let journal = Arc::new(ControlledJournal::new());
+        journal.append_release.add_permits(1);
+        let journal_port: Arc<dyn SessionEventJournal> = journal.clone();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let sink = SessionEventSink::new(Arc::new(ChannelObserver(events_tx)));
+
+        let publication = sink.defer_publication(session_id.clone()).unwrap();
+        assert!(matches!(
+            sink.defer_publication(session_id.clone()),
+            Err(SessionEventPublishError::AlreadyDeferred { .. })
+        ));
+        sink.append(
+            Arc::clone(&journal_port),
+            DurableEvent::session(session_id.clone(), DurableEventPayload::TurnStarted),
+        )
+        .await
+        .unwrap();
+        sink.publish_live(
+            Arc::clone(&journal_port),
+            LiveEvent::session(session_id.clone(), LiveEventPayload::AgentRunStarted),
+        )
+        .unwrap();
+        sink.sync(Arc::clone(&journal_port), &session_id)
+            .await
+            .unwrap();
+        assert!(events_rx.try_recv().is_err());
+
+        publication.commit();
+        assert_eq!(events_rx.recv().await.unwrap().seq, Some(0));
+        assert!(matches!(
+            events_rx.recv().await.unwrap().payload,
+            EventPayload::Live(_)
+        ));
+
+        let discarded = sink.defer_publication(session_id.clone()).unwrap();
+        sink.append(
+            Arc::clone(&journal_port),
+            DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::TurnCompleted {
+                    finish_reason: "discarded".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        sink.sync(journal_port, &session_id).await.unwrap();
+        drop(discarded);
+        assert!(events_rx.try_recv().is_err());
     }
 
     #[tokio::test]
