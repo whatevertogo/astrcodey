@@ -829,6 +829,20 @@ impl Session {
         }
     }
 
+    /// 子会话 runtime 在 shared resource store 中的唯一实例。
+    fn child_runtime(&self, child_sid: &SessionId) -> Arc<SessionRuntimeState> {
+        let child_store = self.runtime.store().clone();
+        self.runtime_services
+            .session_resources()
+            .resources_for(child_sid, || {
+                Arc::new(SessionRuntimeState::new_with_event_sink(
+                    child_sid.clone(),
+                    child_store,
+                    self.runtime.event_sink_arc(),
+                ))
+            })
+    }
+
     async fn create_child_transaction(
         &self,
         params: SpawnChildParams,
@@ -844,17 +858,7 @@ impl Session {
             source_extension,
             tool_call_id,
         } = params;
-        let child_store = self.runtime.store().clone();
-        let child_runtime =
-            self.runtime_services
-                .session_resources()
-                .resources_for(&child_sid, || {
-                    Arc::new(SessionRuntimeState::new_with_event_sink(
-                        child_sid.clone(),
-                        child_store,
-                        self.runtime.event_sink_arc(),
-                    ))
-                });
+        let child_runtime = self.child_runtime(&child_sid);
         let creation = child_runtime.begin_creation();
         let child = match Session::create_persisted(
             SessionCreateParams {
@@ -942,16 +946,7 @@ impl Session {
         child_session_id: &SessionId,
         cause: &SessionError,
     ) {
-        let child_runtime =
-            self.runtime_services
-                .session_resources()
-                .resources_for(child_session_id, || {
-                    Arc::new(SessionRuntimeState::new_with_event_sink(
-                        child_session_id.clone(),
-                        self.runtime.store().clone(),
-                        self.runtime.event_sink_arc(),
-                    ))
-                });
+        let child_runtime = self.child_runtime(child_session_id);
         let child = match Session::open(
             Arc::clone(&child_runtime),
             Arc::clone(&self.runtime_services),

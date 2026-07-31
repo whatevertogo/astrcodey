@@ -86,15 +86,15 @@ impl TurnTranscript {
         self.tool_results.push(result);
     }
 
-    pub(crate) fn append_output_text(&mut self, text: &str) {
+    pub(crate) fn append_final_text(&mut self, text: &str) {
         self.output_text.push_str(text);
     }
 
-    pub(crate) fn output_text(&self) -> &str {
+    pub(crate) fn final_text(&self) -> &str {
         &self.output_text
     }
 
-    pub(crate) fn set_output_text(&mut self, text: String) {
+    pub(crate) fn set_final_text(&mut self, text: String) {
         self.output_text = text;
     }
 
@@ -182,15 +182,15 @@ impl TurnState {
     }
 
     pub(crate) fn append_final_text(&mut self, text: &str) {
-        self.transcript.append_output_text(text);
+        self.transcript.append_final_text(text);
     }
 
     pub(crate) fn final_text(&self) -> &str {
-        self.transcript.output_text()
+        self.transcript.final_text()
     }
 
     pub(crate) fn set_final_text(&mut self, text: String) {
-        self.transcript.set_output_text(text);
+        self.transcript.set_final_text(text);
     }
 
     pub(crate) fn record_assistant_text(&mut self, text: &str, reasoning_content: Option<String>) {
