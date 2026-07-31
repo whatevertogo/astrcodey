@@ -7,12 +7,13 @@ use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
 use super::assemble::collapse_compaction_whitespace;
 use crate::{
     ContextSettings, POST_COMPACT_CONTEXT_MARKER,
-    token_budget::{estimate_text_tokens, truncate_text_to_tokens},
+    token_budget::{estimate_text_tokens, truncate_chars, truncate_text_to_tokens},
 };
 
 const POST_COMPACT_CONTEXT_END: &str = "</post_compact_context>";
 const TRUNCATION_MARKER: &str = "\n\n[... file content truncated after compaction; use read on \
                                  this path if more detail is needed]";
+pub(crate) const POST_COMPACT_TRUNCATION_MARKER: &str = "\n\n[... post-compact context truncated]";
 
 #[derive(Debug, Clone)]
 pub struct PostCompactFile {
@@ -75,7 +76,7 @@ pub fn agent_status_note(
         };
         entries.push(format!(
             "- {description}: {status}\n{}",
-            truncate_chars(&result.content, 1200)
+            truncate_chars(&result.content, 1200, POST_COMPACT_TRUNCATION_MARKER)
         ));
     }
     if entries.is_empty() {
@@ -84,7 +85,11 @@ pub fn agent_status_note(
     let start = entries.len().saturating_sub(max_entries);
     Some(PostCompactNote {
         title: "Agent Task Status".into(),
-        body: truncate_chars(&entries[start..].join("\n\n"), max_chars),
+        body: truncate_chars(
+            &entries[start..].join("\n\n"),
+            max_chars,
+            POST_COMPACT_TRUNCATION_MARKER,
+        ),
     })
 }
 
@@ -240,15 +245,6 @@ fn scan_tool_messages(messages: &[LlmMessage]) -> ToolMessageIndex {
 
 fn is_agent_tool(name: Option<&str>) -> bool {
     name.is_some_and(|tool_name| tool_name.eq_ignore_ascii_case("agent"))
-}
-
-fn truncate_chars(content: &str, max_chars: usize) -> String {
-    if content.chars().count() <= max_chars {
-        return content.to_string();
-    }
-    let mut truncated = content.chars().take(max_chars).collect::<String>();
-    truncated.push_str("\n\n[... post-compact context truncated]");
-    truncated
 }
 
 fn is_read_tool(name: &str) -> bool {

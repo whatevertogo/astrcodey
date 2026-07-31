@@ -92,13 +92,12 @@ fn extract_xml_block(content: &str, tag: &str) -> Result<Option<String>, Compact
     let Some((open_start, open_end)) = find_opening_tag(content, tag) else {
         return Ok(None);
     };
-    let Some((close_start, close_end)) = find_closing_tag(&content[open_end..], tag) else {
+    let Some((close_start, _close_end)) = find_closing_tag(&content[open_end..], tag) else {
         return Err(CompactParseError::new(format!(
             "compact response missing closing </{tag}> tag"
         )));
     };
     let close_start = open_end + close_start;
-    let _close_end = open_end + close_end;
     if close_start < open_start {
         return Ok(None);
     }

@@ -17,7 +17,7 @@ use crate::{
         PostCompactFile, PostCompactNote, agent_status_note, append_post_compact_context,
         recent_read_paths,
     },
-    token_budget::truncate_text_to_tokens,
+    token_budget::{truncate_chars, truncate_text_to_tokens},
 };
 
 const PLAN_NOTE_MAX_CHARS: usize = 40_000;
@@ -55,18 +55,8 @@ impl PostCompactEnricher for DefaultPostCompactEnricher {
         };
         let settings = collect_input.settings.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let retained_messages = collect_input.retained_messages;
-            let collected = collect_post_compact_context(
-                &collect_input.source_messages,
-                &retained_messages,
-                &collect_input.working_dir,
-                &collect_input.session_id,
-                collect_input.system_prompt.as_deref(),
-                &collect_input.tools,
-                &collect_input.settings,
-                collect_input.session_store_dir,
-            );
-            (retained_messages, collected)
+            let collected = collect_post_compact_context(&collect_input);
+            (collect_input.retained_messages, collected)
         })
         .await;
         let (files, notes) = match result {
@@ -87,31 +77,28 @@ impl PostCompactEnricher for DefaultPostCompactEnricher {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn collect_post_compact_context(
-    source_messages: &[LlmMessage],
-    retained_messages: &[LlmMessage],
-    working_dir: &str,
-    _session_id: &str,
-    system_prompt: Option<&str>,
-    tools: &[ToolDefinition],
-    settings: &ContextSettings,
-    session_store_dir: Option<PathBuf>,
+    input: &PostCompactCollectInput,
 ) -> (Vec<PostCompactFile>, Vec<PostCompactNote>) {
-    let working_dir = PathBuf::from(working_dir);
-    let files = fresh_recent_read_files(source_messages, retained_messages, &working_dir, settings);
+    let working_dir = PathBuf::from(&input.working_dir);
+    let files = fresh_recent_read_files(
+        &input.source_messages,
+        &input.retained_messages,
+        &working_dir,
+        &input.settings,
+    );
     let mut notes = Vec::new();
 
-    if let Some(note) = latest_plan_note(session_store_dir.as_deref()) {
+    if let Some(note) = latest_plan_note(input.session_store_dir.as_deref()) {
         notes.push(note);
     }
-    if let Some(note) = skills_note(system_prompt) {
+    if let Some(note) = skills_note(input.system_prompt.as_deref()) {
         notes.push(note);
     }
-    if let Some(note) = agent_status_note(source_messages, 5, AGENT_NOTE_MAX_CHARS) {
+    if let Some(note) = agent_status_note(&input.source_messages, 5, AGENT_NOTE_MAX_CHARS) {
         notes.push(note);
     }
-    if let Some(note) = tool_delta_note(tools) {
+    if let Some(note) = tool_delta_note(&input.tools) {
         notes.push(note);
     }
 
@@ -172,7 +159,7 @@ fn latest_plan_note(session_store_dir: Option<&Path>) -> Option<PostCompactNote>
         body: format!(
             "Path: {}\n\n{}",
             path.display(),
-            truncate_chars(&content, PLAN_NOTE_MAX_CHARS)
+            truncate_chars(&content, PLAN_NOTE_MAX_CHARS, TOKEN_TRUNCATION_MARKER)
         ),
     })
 }
@@ -203,7 +190,11 @@ fn tool_delta_note(tools: &[ToolDefinition]) -> Option<PostCompactNote> {
 
     Some(PostCompactNote {
         title: "Available Tool Delta".into(),
-        body: truncate_chars(&lines.join("\n"), TOOL_NOTE_MAX_CHARS),
+        body: truncate_chars(
+            &lines.join("\n"),
+            TOOL_NOTE_MAX_CHARS,
+            TOKEN_TRUNCATION_MARKER,
+        ),
     })
 }
 
@@ -256,19 +247,7 @@ fn markdown_lines(content: &str) -> Vec<MarkdownLine<'_>> {
             text: raw.trim_end_matches(['\r', '\n']),
         });
     }
-    if content.is_empty() || content.ends_with('\n') {
-        return lines;
-    }
     lines
-}
-
-fn truncate_chars(content: &str, max_chars: usize) -> String {
-    if content.chars().count() <= max_chars {
-        return content.to_string();
-    }
-    let mut truncated = content.chars().take(max_chars).collect::<String>();
-    truncated.push_str(TOKEN_TRUNCATION_MARKER);
-    truncated
 }
 
 fn truncate_to_tokens(content: &str, max_tokens: usize) -> String {
@@ -406,17 +385,18 @@ mod tests {
         };
 
         let settings = ContextSettings::default();
-        let (files, notes) = collect_post_compact_context(
-            &messages,
-            &compaction.retained_messages,
-            temp.to_str().unwrap(),
-            session_id,
-            Some("# Skills\n\nskill body\n\n# Agents\n\nagent list"),
-            &tools,
-            &settings,
-            Some(session_dir),
-        );
-        append_post_compact_context(&mut compaction, files, notes, &settings);
+        let collect_input = PostCompactCollectInput {
+            source_messages: messages,
+            retained_messages: compaction.retained_messages.clone(),
+            working_dir: temp.to_str().unwrap().to_string(),
+            session_id: session_id.to_string(),
+            system_prompt: Some("# Skills\n\nskill body\n\n# Agents\n\nagent list".to_string()),
+            tools,
+            settings,
+            session_store_dir: Some(session_dir),
+        };
+        let (files, notes) = collect_post_compact_context(&collect_input);
+        append_post_compact_context(&mut compaction, files, notes, &collect_input.settings);
         std::env::remove_var("ASTRCODE_TEST_HOME");
 
         let restored = compaction

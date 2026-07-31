@@ -47,7 +47,6 @@ pub(crate) fn render_compact_contract(
             "{{COMPACT_OUTPUT_TOKEN_CAP}}",
             &settings.compact_max_output_tokens.max(1).to_string(),
         )
-        .replace("{{RECENT_USER_CONTEXT_MESSAGES}}", "(none)")
         .replace("{{RUNTIME_CONTEXT}}", runtime_context.trim_end())
 }
 
