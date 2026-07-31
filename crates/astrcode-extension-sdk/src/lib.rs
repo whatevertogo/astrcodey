@@ -40,7 +40,7 @@ pub mod session_query;
 
 pub mod tool {
     pub use astrcode_core::tool::{
-        CreateRootSessionRequest, CreateSessionRequest, ExecutionMode, SessionAccess,
+        CreateRootSessionRequest, CreateSessionRequest, ExecutionMode, LlmModelIds, SessionAccess,
         SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionHandle,
         SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult, Tool, ToolCallScope,
         ToolCapabilities, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionResult,

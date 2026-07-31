@@ -750,12 +750,11 @@ pub struct LlmModelIds {
 }
 
 /// 模型档位访问（须在扩展 manifest 声明对应能力后才有值）。
+///
+/// 主/小模型 id 由 [`LlmModelIds`] 统一承载，避免同一模型 id 在两处重复存储、
+/// 需要手动保持同步。
 #[derive(Clone, Debug, Default)]
 pub struct ToolModelAccess {
-    /// 主模型 id（`main_model` 能力）。
-    pub main: Option<String>,
-    /// 小模型 id（`small_model` 能力）。
-    pub small: Option<String>,
     /// 分档模型 id 快照（未声明对应能力时，各档可能为 `None`）。
     pub tiers: LlmModelIds,
 }

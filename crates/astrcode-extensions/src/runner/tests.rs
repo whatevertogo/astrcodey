@@ -400,7 +400,7 @@ impl ToolHandler for SmallModelProbeTool {
         ctx: &ExtensionToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         Ok(ToolResult::text(
-            ctx.capabilities.models.small.is_some().to_string(),
+            ctx.capabilities.models.tiers.small.is_some().to_string(),
             false,
             Default::default(),
         )
@@ -1164,7 +1164,10 @@ async fn extension_tool_receives_small_model_only_when_declared() {
             None,
             ToolCapabilities {
                 models: astrcode_core::tool::ToolModelAccess {
-                    small: Some("small-model".into()),
+                    tiers: astrcode_core::tool::LlmModelIds {
+                        small: Some("small-model".into()),
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 ..Default::default()

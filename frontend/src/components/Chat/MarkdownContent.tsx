@@ -1,8 +1,9 @@
 import {
   Component,
+  Suspense,
   lazy,
   memo,
-  Suspense,
+  useDeferredValue,
   useEffect,
   useRef,
   useState,
@@ -51,19 +52,36 @@ class MarkdownBoundary extends Component<
   }
 }
 
+/// ReactMarkdown 同步解析超大文本会阻塞主线程：回复结束瞬间全文一次性渲染时，
+/// 会造成"内容已完但界面卡住/结束状态迟迟更新"的观感。超过该阈值直接降级为
+/// 纯文本（仍走错误边界兜底）。
+const MARKDOWN_TEXT_LIMIT_CHARS = 32_000
+
 export const MarkdownContent = memo(function MarkdownContent({
   text,
 }: {
   text: string
 }) {
+  // deferred value 让 markdown 解析渲染让位于交互（滚动、输入、停止按钮），
+  // 文本稳定后立即收敛，不影响最终结果。
+  const deferredText = useDeferredValue(text)
+  if (deferredText.length > MARKDOWN_TEXT_LIMIT_CHARS) {
+    return (
+      <MarkdownBoundary fallback={deferredText}>
+        <pre className="m-0 whitespace-pre-wrap overflow-wrap-anywhere font-inherit text-inherit">
+          {deferredText}
+        </pre>
+      </MarkdownBoundary>
+    )
+  }
   return (
-    <MarkdownBoundary fallback={text}>
+    <MarkdownBoundary fallback={deferredText}>
       <Suspense
         fallback={
-          <span className="whitespace-pre-wrap break-words">{text}</span>
+          <span className="whitespace-pre-wrap break-words">{deferredText}</span>
         }
       >
-        <MarkdownRenderer text={text} />
+        <MarkdownRenderer text={deferredText} />
       </Suspense>
     </MarkdownBoundary>
   )

@@ -562,6 +562,24 @@ export const useAppStore = create<AppState>((set, get) => ({
     }))
   },
 
+  resendPendingMessage: async (id: string) => {
+    const state = get()
+    const message = state.pendingMessages.find((item) => item.id === id)
+    if (!message || !state.activeSessionId) return
+    set((current) => ({
+      pendingMessages: current.pendingMessages.filter((item) => item.id !== id),
+    }))
+    try {
+      await api.submitPrompt(state.activeSessionId, message.text)
+    } catch (err) {
+      console.error('resendPendingMessage failed:', err)
+      set((current) => ({
+        pendingMessages: [...current.pendingMessages, message],
+        transientHint: err instanceof Error ? err.message : '重发失败，请重试',
+      }))
+    }
+  },
+
   restorePendingMessage: (id: string) => {
     const state = get()
     const message = state.pendingMessages.find((item) => item.id === id)
@@ -596,7 +614,7 @@ export const useAppStore = create<AppState>((set, get) => ({
           transientHint:
             err instanceof Error ? err.message : '排队消息发送失败',
         }))
-        break
+        // 单条失败不阻塞整批：其余消息继续提交，失败的消息保留在 pending 面板供重试
       }
     }
   },

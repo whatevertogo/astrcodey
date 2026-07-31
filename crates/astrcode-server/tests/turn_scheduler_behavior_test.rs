@@ -917,3 +917,62 @@ async fn interrupt_and_start_replaces_active_turn_under_delivery_gate() {
 
     scheduler.abort(&sid).await.unwrap();
 }
+
+#[tokio::test]
+async fn queue_drains_turn_finished_but_not_settled() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let scheduler = build_scheduler(Arc::clone(&store));
+    let sid = seed_session(&store).await;
+
+    // 启动第一个 turn 并等它 durable 完成，但**不**执行完成收尾：
+    // 这精确复现“回复已完成、registry 尚未 settle”的窗口（真实场景中完成
+    // watcher 可能还卡在 sync/child-drain 或收尾重试中）。
+    let started = scheduler
+        .start_with_completion(sid.clone(), "first".into())
+        .await
+        .unwrap();
+    started.handle.wait().await.expect("first turn must finish");
+    assert!(scheduler.registry().active_is_finished(&sid));
+    assert!(scheduler.registry().has_active(&sid));
+    assert!(scheduler.registry().active_is_finished(&sid));
+    assert!(scheduler.registry().has_active(&sid));
+
+    // 窗口内投递：投递路径应自行收尾 finished turn 并立即启动队首，
+    // 而不是把输入留在队列里依赖（可能永远不来的）watcher drain。
+    let outcome = scheduler
+        .deliver_input(
+            sid.clone(),
+            "second".into(),
+            InputDelivery::QueueIfRunningElseStart,
+        )
+        .await
+        .expect("deliver must not fail");
+    assert!(matches!(outcome, DeliveryOutcome::Queued { .. }));
+
+    // 第二个 turn 被立即启动（StaticTextLlm 立即完成），随后被投递路径
+    // spawn 的 watcher 收尾；最终无活跃 turn、无 pending 输入。
+    for _ in 0..100 {
+        if !scheduler.registry().has_active(&sid) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        !scheduler.registry().has_active(&sid),
+        "second turn must be started and settled, not stuck in queue"
+    );
+    let model = store.session_read_model(&sid).await.unwrap();
+    assert!(
+        model.execution.pending_inputs.is_empty(),
+        "queued input must be drained into a new turn"
+    );
+    let events = store.replay_events(&sid).await.unwrap();
+    let user_messages = events
+        .iter()
+        .filter(|e| matches!(e.payload, DurableEventPayload::UserMessage { .. }))
+        .count();
+    assert_eq!(
+        user_messages, 2,
+        "second input must be consumed into a new turn"
+    );
+}

@@ -349,18 +349,13 @@ fn agent_tool_metadata()
 fn resolve_child_small_model(
     caps: &astrcode_extension_sdk::tool::ToolCapabilities,
 ) -> Result<String, ExtensionError> {
-    caps.models
-        .tiers
-        .small
-        .clone()
-        .or_else(|| caps.models.small.clone())
-        .ok_or_else(|| {
-            ExtensionError::Internal(
-                "子 Agent 需要已配置的小模型（activeSmallProfile + \
-                 activeSmallModel）。请在设置中配置 Small LLM 后重试。"
-                    .into(),
-            )
-        })
+    caps.models.tiers.small.clone().ok_or_else(|| {
+        ExtensionError::Internal(
+            "子 Agent 需要已配置的小模型（activeSmallProfile + activeSmallModel）。请在设置中配置 \
+             Small LLM 后重试。"
+                .into(),
+        )
+    })
 }
 
 /// 为子 agent 的 body 追加共享增强内容：环境信息 + 行为规范。
@@ -524,7 +519,10 @@ mod tests {
     fn resolve_child_small_model_always_uses_configured_small_llm() {
         let caps = astrcode_extension_sdk::tool::ToolCapabilities {
             models: astrcode_extension_sdk::tool::ToolModelAccess {
-                small: Some("haiku".into()),
+                tiers: astrcode_extension_sdk::tool::LlmModelIds {
+                    small: Some("haiku".into()),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             ..Default::default()

@@ -16,6 +16,7 @@ export default function PendingMessagesPanel({
 }: PendingMessagesPanelProps) {
   const pendingMessages = useAppStore((s) => s.pendingMessages)
   const injectPendingMessage = useAppStore((s) => s.injectPendingMessage)
+  const resendPendingMessage = useAppStore((s) => s.resendPendingMessage)
   const removePendingMessage = useAppStore((s) => s.removePendingMessage)
   const restorePendingMessage = useAppStore((s) => s.restorePendingMessage)
   const [expanded, setExpanded] = useState(true)
@@ -65,6 +66,13 @@ export default function PendingMessagesPanel({
                     const text = restorePendingMessage(message.id)
                     if (text) onEdit(text)
                   }}
+                />
+                <IconButton
+                  icon="retry"
+                  label="重发"
+                  size={14}
+                  className="rounded-md"
+                  onClick={() => void resendPendingMessage(message.id)}
                 />
                 <button
                   type="button"

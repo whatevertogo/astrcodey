@@ -213,11 +213,9 @@ impl Tool for HandlerTool {
             ctx.capabilities.session.ops = None;
         }
         if !self.capabilities.contains(&ExtensionCapability::MainModel) {
-            ctx.capabilities.models.main = None;
             ctx.capabilities.models.tiers.main = None;
         }
         if !self.capabilities.contains(&ExtensionCapability::SmallModel) {
-            ctx.capabilities.models.small = None;
             ctx.capabilities.models.tiers.small = None;
         }
         let event_sink = if self.capabilities.contains(&ExtensionCapability::EmitEvents) {

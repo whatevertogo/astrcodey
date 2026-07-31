@@ -669,6 +669,38 @@ pub struct LlmClientConfig {
 }
 
 impl LlmClientConfig {
+    /// 从解析后的 [`LlmSettings`](crate::config::LlmSettings) 构造客户端配置。
+    ///
+    /// 两个结构都在本 crate，由本函数集中完成边界映射；调用方不再逐字段拷贝。
+    /// `extra_headers` 目前无配置来源，保留为空。
+    pub fn from_llm_settings(settings: &crate::config::LlmSettings) -> Self {
+        let extras = if settings.wire_format.is_openai_compatible() {
+            ProviderExtras::OpenAi(OpenAiProviderExtras {
+                supports_prompt_cache_key: settings.supports_prompt_cache_key,
+                supports_stream_usage: settings.supports_stream_usage,
+                prompt_cache_retention: settings.prompt_cache_retention,
+            })
+        } else {
+            ProviderExtras::None
+        };
+        Self {
+            base_url: settings.base_url.clone(),
+            api_key: settings.api_key.clone(),
+            auth_scheme: settings.auth_scheme,
+            connect_timeout_secs: settings.connect_timeout_secs,
+            read_timeout_secs: settings.read_timeout_secs,
+            max_retries: settings.max_retries,
+            retry_base_delay_ms: settings.retry_base_delay_ms,
+            reasoning: settings.reasoning,
+            supports_strict_tool_use: settings.supports_strict_tool_use,
+            extras,
+            extra_headers: std::collections::HashMap::new(),
+            thinking: settings.thinking.clone(),
+            thinking_capability: settings.thinking_capability.clone(),
+            thinking_configured: settings.thinking_configured,
+        }
+    }
+
     fn openai_extras(&self) -> Option<&OpenAiProviderExtras> {
         match &self.extras {
             ProviderExtras::OpenAi(extras) => Some(extras),

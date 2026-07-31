@@ -15,7 +15,7 @@ use astrcode_context::{
 };
 use astrcode_core::{
     config::{Config, ConfigStore, ConfigStoreError, EffectiveConfig, LlmSettings, ResolveError},
-    llm::{LlmClientConfig, LlmProvider, OpenAiProviderExtras, ProviderExtras},
+    llm::{LlmClientConfig, LlmProvider},
 };
 use astrcode_extension_sdk::runtime_ports::{CompositeToolCatalogProvider, ToolCatalogProvider};
 use astrcode_extensions::runner::ExtensionRunner;
@@ -51,31 +51,7 @@ struct PreparedConfig {
 fn build_provider_from_settings(
     settings: &LlmSettings,
 ) -> Result<Arc<dyn LlmProvider>, astrcode_core::llm::LlmError> {
-    let extras = if settings.wire_format.is_openai_compatible() {
-        ProviderExtras::OpenAi(OpenAiProviderExtras {
-            supports_prompt_cache_key: settings.supports_prompt_cache_key,
-            supports_stream_usage: settings.supports_stream_usage,
-            prompt_cache_retention: settings.prompt_cache_retention,
-        })
-    } else {
-        ProviderExtras::None
-    };
-    let llm_config = LlmClientConfig {
-        base_url: settings.base_url.clone(),
-        api_key: settings.api_key.clone(),
-        auth_scheme: settings.auth_scheme,
-        connect_timeout_secs: settings.connect_timeout_secs,
-        read_timeout_secs: settings.read_timeout_secs,
-        max_retries: settings.max_retries,
-        retry_base_delay_ms: settings.retry_base_delay_ms,
-        reasoning: settings.reasoning,
-        supports_strict_tool_use: settings.supports_strict_tool_use,
-        extras,
-        extra_headers: Default::default(),
-        thinking: settings.thinking.clone(),
-        thinking_capability: settings.thinking_capability.clone(),
-        thinking_configured: settings.thinking_configured,
-    };
+    let llm_config = LlmClientConfig::from_llm_settings(settings);
     create_provider(
         &settings.provider_kind,
         settings.wire_format,

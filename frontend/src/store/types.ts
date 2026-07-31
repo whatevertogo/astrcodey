@@ -83,6 +83,7 @@ export interface AppState {
   toggleComposerDeliveryMode: () => void
   injectPendingMessage: (id: string) => Promise<void>
   removePendingMessage: (id: string) => void
+  resendPendingMessage: (id: string) => Promise<void>
   restorePendingMessage: (id: string) => string | null
   flushPendingQueued: () => Promise<void>
 }

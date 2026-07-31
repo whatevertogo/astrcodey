@@ -109,6 +109,39 @@ impl TurnScheduler {
     ) -> Result<DeliveryOutcome, TurnScheduleError> {
         let session_id = operation.session_id().clone();
         if self.registry.has_active(&session_id) {
+            // turn 已 durable 完成、registry 尚未 settle 的窗口：完成 watcher 可能仍在
+            // 收尾（sync/child-drain）或重试中，此时若仅入队则完全依赖 watcher 的 drain；
+            // watcher 一旦卡住，输入会永久滞留且永远不进入下一次 turn。由投递路径先收尾
+            // finished turn 再入队并立即启动队首，消除该窗口（与 watcher 的 settle 幂等）。
+            if self.registry.active_is_finished(&session_id) {
+                let turn_id = self
+                    .registry
+                    .active_turn_id(&session_id)
+                    .ok_or(TurnScheduleError::NoActiveTurn)?;
+                let finalization = self.registry.active_finalization(&session_id);
+                match self
+                    .settle_finished_execution_locked(&session_id, &turn_id, finalization.as_ref())
+                    .await
+                {
+                    Ok(true) => {
+                        let queue_len = self
+                            .enqueue_behind_pending_and_start_head(
+                                operation,
+                                input,
+                                "deliver_input:finished-drain",
+                            )
+                            .await?;
+                        return Ok(DeliveryOutcome::Queued { queue_len });
+                    },
+                    Ok(false) | Err(_) => {
+                        tracing::debug!(
+                            session_id = %session_id,
+                            %turn_id,
+                            "finished turn settle deferred to completion watcher; queueing input"
+                        );
+                    },
+                }
+            }
             let queue_len = self.accept_pending_input(&session_id, input).await?;
             tracing::info!(
                 session_id = %session_id,

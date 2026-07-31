@@ -63,10 +63,6 @@ pub(crate) struct ToolRuntimeCapabilities {
     pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
     /// 会话原子操作能力，供 agent 工具使用。
     pub session_ops: Option<Arc<dyn astrcode_core::tool::SessionOperations>>,
-    /// 主模型 ID，供声明 `main_model` 的插件使用。
-    pub main_model_id: Option<String>,
-    /// 小模型 ID，供子 agent / 声明 `small_model` 的插件使用。
-    pub small_model_id: Option<String>,
     /// 分档模型 id（注入 ToolCapabilities 前由 runner 按能力裁剪）。
     pub llm_models: LlmModelIds,
     /// session 在存储层的真实目录路径。
@@ -78,17 +74,13 @@ impl ToolRuntimeCapabilities {
         let runtime = Arc::clone(&session.runtime);
         let runtime_services = session.runtime_services();
         let effective = runtime_services.read_effective();
-        let main_model_id = shared.model_id.clone();
-        let small_model_id = effective.small_llm.model_id.clone();
         Self {
             file_observation_store: Some(runtime.file_observation_store()),
             session_ops: runtime_services.session_ops(),
-            small_model_id: Some(small_model_id.clone()),
             session_store_dir: shared.session_store_dir.clone(),
-            main_model_id: Some(main_model_id.clone()),
             llm_models: LlmModelIds {
-                main: Some(main_model_id),
-                small: Some(small_model_id),
+                main: Some(shared.model_id.clone()),
+                small: Some(effective.small_llm.model_id.clone()),
             },
         }
     }
@@ -204,8 +196,6 @@ fn tool_capabilities_from_runtime(
     let capabilities = &turn.capabilities;
     ToolCapabilities {
         models: ToolModelAccess {
-            main: capabilities.main_model_id.clone(),
-            small: capabilities.small_model_id.clone(),
             tiers: capabilities.llm_models.clone(),
         },
         paths: ToolSessionPaths {

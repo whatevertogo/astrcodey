@@ -92,7 +92,4 @@ pub enum ConfigStoreError {
     /// 配置内容无效。
     #[error("Invalid config: {0}")]
     Invalid(String),
-    /// 缺少必需字段。
-    #[error("Missing required field: {0}")]
-    MissingField(String),
 }
