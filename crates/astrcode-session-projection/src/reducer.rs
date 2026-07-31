@@ -283,11 +283,10 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                 if model.transcript.first_user_message.is_none() {
                     model.transcript.first_user_message = Some(text.clone());
                 }
-                model.transcript.messages.push(SequencedLlmMessage {
-                    message: LlmMessage::user_with_attachments(text, attachments),
-                    updated_seq: event_seq,
-                    source: None,
-                });
+                model.transcript.messages.push(SequencedLlmMessage::plain(
+                    LlmMessage::user_with_attachments(text, attachments),
+                    event_seq,
+                ));
             }
         },
         DurableEventPayload::TurnCompleted { .. } => {},
@@ -305,11 +304,10 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
         } => {
             let mut msg = LlmMessage::assistant(text);
             msg.reasoning_content = reasoning_content.clone();
-            model.transcript.messages.push(SequencedLlmMessage {
-                message: msg,
-                updated_seq: event_seq,
-                source: None,
-            });
+            model
+                .transcript
+                .messages
+                .push(SequencedLlmMessage::plain(msg, event_seq));
         },
         DurableEventPayload::ToolCallRequested {
             call_id,
@@ -332,16 +330,15 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                     last.updated_seq = event_seq;
                 },
                 _ => {
-                    model.transcript.messages.push(SequencedLlmMessage {
-                        message: LlmMessage {
+                    model.transcript.messages.push(SequencedLlmMessage::plain(
+                        LlmMessage {
                             role: LlmRole::Assistant,
                             content: vec![tool_call],
                             name: None,
                             reasoning_content: None,
                         },
-                        updated_seq: event_seq,
-                        source: None,
-                    });
+                        event_seq,
+                    ));
                 },
             }
         },
@@ -431,11 +428,7 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
             model.transcript.messages = messages
                 .iter()
                 .cloned()
-                .map(|message| SequencedLlmMessage {
-                    message,
-                    updated_seq: event_seq,
-                    source: None,
-                })
+                .map(|message| SequencedLlmMessage::plain(message, event_seq))
                 .collect();
             model.context_usage = None;
         },

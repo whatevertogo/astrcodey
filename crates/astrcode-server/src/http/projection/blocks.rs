@@ -360,6 +360,7 @@ fn tool_status_from_message(is_error: bool, source: Option<&str>) -> ToolCallSta
     match source {
         Some(TOOL_CALL_FAILED_SOURCE) => ToolCallStatusDto::Failed,
         Some(TOOL_CALL_CANCELLED_SOURCE) => ToolCallStatusDto::Cancelled,
+        // ToolCallCompleted 的 error 结果（执行成功但结果含错误）不带 source 标记。
         _ if is_error => ToolCallStatusDto::Error,
         _ => ToolCallStatusDto::Complete,
     }

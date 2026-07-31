@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use astrcode_core::{
     event::{ParentSessionRef, Phase, SessionStarted, SystemPromptSource},
-    llm::{LlmContent, LlmMessage, LlmRole},
+    llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
     tool::SessionToolSelection,
     types::*,
     user_input::UserInput,
@@ -81,11 +81,6 @@ pub struct ForkSourceRef {
     pub cursor: Cursor,
 }
 
-/// 工具执行失败消息的读模型来源标记。
-pub const TOOL_CALL_FAILED_SOURCE: &str = "tool_call_failed";
-/// 工具调用取消消息的读模型来源标记。
-pub const TOOL_CALL_CANCELLED_SOURCE: &str = "tool_call_cancelled";
-
 /// 会话读模型里带有 durable seq 的消息载体。
 ///
 /// compact 需要按时间边界冻结历史前缀，并将 compact 期间到达的事件归类为尾部增量。
@@ -103,13 +98,29 @@ pub struct SequencedLlmMessage {
     /// 消息来源标记，用于前端区分渲染。
     ///
     /// - `None`：正常消息（用户输入、LLM 回复等）
-    /// - `Some("turn_aborted")`：上一轮中断标记（仅 provider 可见）
-    /// - `Some("tool_call_failed" | "tool_call_cancelled")`：工具异常终态
+    /// - `Some([`TURN_ABORTED_SOURCE`])`：上一轮中断标记（仅 provider 可见）
+    /// - `Some([`TOOL_CALL_FAILED_SOURCE`] | [`TOOL_CALL_CANCELLED_SOURCE`])`：工具异常终态
     ///
     /// `source` 本身不进入 LLM payload；对应 `.message` 会作为 User 消息送入 provider。
     #[serde(default)]
     pub source: Option<String>,
 }
+
+impl SequencedLlmMessage {
+    /// 构造普通消息（无来源标记）。
+    pub(crate) fn plain(message: LlmMessage, updated_seq: u64) -> Self {
+        Self {
+            message,
+            updated_seq,
+            source: None,
+        }
+    }
+}
+
+/// 工具执行失败消息的读模型来源标记。
+pub const TOOL_CALL_FAILED_SOURCE: &str = "tool_call_failed";
+/// 工具调用取消消息的读模型来源标记。
+pub const TOOL_CALL_CANCELLED_SOURCE: &str = "tool_call_cancelled";
 
 /// 不进入 provider 上下文、但需要稳定显示在会话 transcript 中的 durable 记录。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
