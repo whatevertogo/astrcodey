@@ -1168,7 +1168,6 @@ async fn extension_tool_receives_small_model_only_when_declared() {
                         small: Some("small-model".into()),
                         ..Default::default()
                     },
-                    ..Default::default()
                 },
                 ..Default::default()
             },
