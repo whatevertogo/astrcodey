@@ -78,7 +78,9 @@ export const MarkdownContent = memo(function MarkdownContent({
     <MarkdownBoundary fallback={deferredText}>
       <Suspense
         fallback={
-          <span className="whitespace-pre-wrap break-words">{deferredText}</span>
+          <span className="whitespace-pre-wrap break-words">
+            {deferredText}
+          </span>
         }
       >
         <MarkdownRenderer text={deferredText} />
