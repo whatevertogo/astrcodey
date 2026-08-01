@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use globset::GlobSet;
+
 /// 常见工具参数字段名。
 const PATH_KEYS: &[&str] = &["path", "file", "filePath", "target", "directory", "dir"];
 
@@ -53,6 +55,15 @@ pub(super) fn path_for_matching(path: &Path, working_dir: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .replace('\\', "/")
+}
+
+/// 路径命中 glob 的两种形式：相对 working_dir 的 rel，或原始路径字符串。
+///
+/// configured.rs 与 sensitive_file_ask.rs 共用同一匹配语义；git_path_ask 刻意不用
+/// glob（对 rel 做字符串前缀/包含匹配），语义不同，故不收敛到这里。
+pub(super) fn path_matches_glob(path: &Path, working_dir: &Path, globset: &GlobSet) -> bool {
+    let rel = path_for_matching(path, working_dir);
+    globset.is_match(&rel) || globset.is_match(path.to_string_lossy().as_ref())
 }
 
 #[cfg(test)]

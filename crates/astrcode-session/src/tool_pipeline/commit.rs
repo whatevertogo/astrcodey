@@ -40,15 +40,25 @@ impl ToolCalls {
         &self,
         prepared: &[PreparedToolInvocation],
         mut outcomes: HashMap<usize, ToolExecutionOutcome>,
-        pending_declared: &mut HashSet<String>,
+        uncommitted_calls: &mut HashSet<String>,
         state: &mut TurnState,
         publisher: Arc<TurnEvents>,
     ) -> Result<Vec<String>, TurnError> {
         let mut pending = Vec::with_capacity(prepared.len());
         for call in prepared {
-            let mut outcome = outcomes
-                .remove(&call.index)
-                .unwrap_or_else(|| missing_tool_outcome(call));
+            // 不变式：每个 declared call 在 commit 前必有 outcome（execute 阶段保证）。
+            // 缺失说明编排层缺陷——debug 构建直接暴露，release 下兜底为 failed 结果。
+            let mut outcome = match outcomes.remove(&call.index) {
+                Some(outcome) => outcome,
+                None => {
+                    debug_assert!(
+                        false,
+                        "declared tool call `{}` reached commit without an outcome",
+                        call.call_id
+                    );
+                    missing_tool_outcome(call)
+                },
+            };
             self.validate_discovered_tools(call, &mut outcome);
             self.apply_post_tool_use(call, &mut outcome).await?;
 
@@ -79,7 +89,7 @@ impl ToolCalls {
             if let ToolExecutionOutcome::Completed(result) = &item.outcome {
                 discovered_tools.extend(result.discovered_tool_names.clone());
             }
-            let (arguments, arguments_json) = crate::tool_types::tool_call_completion_arguments(
+            let completion = crate::tool_types::tool_call_completion_arguments(
                 item.call.tool_input.clone(),
                 item.call.raw_arguments.clone(),
             );
@@ -88,11 +98,11 @@ impl ToolCalls {
                 &item.call.call_id,
                 item.call.name.clone(),
                 &item.outcome,
-                arguments,
-                arguments_json,
+                completion.arguments,
+                completion.arguments_json,
             )
             .await?;
-            pending_declared.remove(&item.call.call_id);
+            uncommitted_calls.remove(&item.call.call_id);
             state.record_tool_result(tool_result_for_output(&item.outcome));
         }
 

@@ -58,6 +58,10 @@ pub(crate) struct SharedTurnContext {
 
 impl SharedTurnContext {
     /// 从 session 读模型构造共享上下文（不含 session_store_dir）。
+    ///
+    /// **仅用于 lifecycle 事件发射**（`emit_lifecycle_for_read_model`）：本构造产出的
+    /// `permission_chain` 是空链（一切工具全拒）、`approval_history` 是未初始化默认 store，
+    /// 不能用于工具管线或审批决策——那些路径必须经由 `TurnToolContext::for_turn`。
     pub(crate) fn from_read_model(session_id: &SessionId, model: &SessionReadModel) -> Self {
         Self {
             session_id: session_id.clone(),
@@ -84,13 +88,8 @@ impl SharedTurnContext {
     /// 构造扩展 lifecycle hook 的 ctx。
     pub(crate) fn lifecycle_ctx(&self) -> LifecycleContext {
         LifecycleContext {
-            session_id: self.session_id.to_string(),
-            working_dir: self.working_dir.clone(),
-            model: self.model_selection(),
-            event_tx: self.turn_event_tx(),
-            extension_event_sink: None,
             last_exchange: None,
-            mid_turn_user_messages_synced: 0,
+            ..self.base_lifecycle_ctx()
         }
     }
 
@@ -101,15 +100,22 @@ impl SharedTurnContext {
         assistant_message: String,
     ) -> LifecycleContext {
         LifecycleContext {
+            last_exchange: Some(ExchangeSummary {
+                user_message,
+                assistant_message,
+            }),
+            ..self.base_lifecycle_ctx()
+        }
+    }
+
+    fn base_lifecycle_ctx(&self) -> LifecycleContext {
+        LifecycleContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.clone(),
             model: self.model_selection(),
             event_tx: self.turn_event_tx(),
             extension_event_sink: None,
-            last_exchange: Some(ExchangeSummary {
-                user_message,
-                assistant_message,
-            }),
+            last_exchange: None,
             mid_turn_user_messages_synced: 0,
         }
     }

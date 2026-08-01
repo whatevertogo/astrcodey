@@ -31,11 +31,19 @@ pub(crate) struct PreparedToolInvocation {
     pub(crate) disposition: PreparedToolDisposition,
 }
 
+/// 一个 agent step 中已完成预处理、待执行的工具调用集合（prepare 阶段的纯数据产物）。
+///
+/// `calls` 保持 provider 原始顺序；`pre_executed` 携带早期调度器抢先执行完成的结果
+/// （按 index 索引）。该批次被 `execute_and_commit` 消费后即失效。
 pub(crate) struct ToolBatch {
     pub(crate) calls: Vec<PreparedToolInvocation>,
     pub(crate) pre_executed: HashMap<usize, ToolExecutionOutcome>,
 }
 
+/// 执行阶段的批次包装：批数据 + 执行所需的运行期依赖。
+///
+/// 与 [`ToolBatch`] 的区别：`ToolBatch` 只承载数据，`ExecuteToolBatch` 额外附加
+/// 工具定义、turn 状态与事件发布器，生命周期仅限单次 `execute_and_commit` 调用。
 pub(crate) struct ExecuteToolBatch<'a> {
     pub(crate) batch: ToolBatch,
     pub(crate) tools: &'a [ToolDefinition],
@@ -120,6 +128,9 @@ impl std::ops::Deref for ToolResultCommit {
 }
 
 impl std::ops::DerefMut for ToolResultCommit {
+    /// 通过 DerefMut 修改 `result` 会绕过 `artifact_state` 的同步：调用方修改内容后
+    /// 必须自行判断 `artifact_state` 是否仍然成立（例如把已 Persisted 的结果改小
+    /// 仍安全；把 Inline 结果改大到超限则不会自动触发持久化）。
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.result
     }
@@ -150,13 +161,28 @@ pub(crate) struct ExecutableToolInvocation {
     pub(crate) tool_input: serde_json::Value,
 }
 
+/// 工具完成事件所需的参数形状。
+///
+/// 有 provider 原始参数时原样回放（保证 durable 事件与 provider 输出精确一致）；
+/// 否则回退到解析后的 JSON。
+pub(crate) struct ToolCallCompletionArguments {
+    pub(crate) arguments: String,
+    pub(crate) arguments_json: Option<serde_json::Value>,
+}
+
 pub(crate) fn tool_call_completion_arguments(
     tool_input: serde_json::Value,
     raw_arguments: Option<String>,
-) -> (String, Option<serde_json::Value>) {
+) -> ToolCallCompletionArguments {
     match raw_arguments {
-        Some(raw) => (raw, None),
-        None => (tool_input.to_string(), Some(tool_input)),
+        Some(raw) => ToolCallCompletionArguments {
+            arguments: raw,
+            arguments_json: None,
+        },
+        None => ToolCallCompletionArguments {
+            arguments: tool_input.to_string(),
+            arguments_json: Some(tool_input),
+        },
     }
 }
 
@@ -194,9 +220,9 @@ mod tests {
         ];
 
         for (input, raw, expected_text, has_json) in cases {
-            let (text, json) = tool_call_completion_arguments(input, raw);
-            assert_eq!(text, expected_text);
-            assert_eq!(json.is_some(), has_json);
+            let completion = tool_call_completion_arguments(input, raw);
+            assert_eq!(completion.arguments, expected_text);
+            assert_eq!(completion.arguments_json.is_some(), has_json);
         }
     }
 }

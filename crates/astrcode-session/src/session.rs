@@ -720,10 +720,13 @@ impl Session {
         tool_registry: &ToolRegistry,
     ) -> Result<(String, String), SessionError> {
         let tools_with_meta = tool_registry.list_definitions_with_prompt_metadata();
-        let tools: Vec<_> = tools_with_meta.iter().map(|(def, _)| def.clone()).collect();
+        let tools: Vec<_> = tools_with_meta
+            .iter()
+            .map(|tool| tool.definition.clone())
+            .collect();
         let tool_prompt_metadata = tools_with_meta
             .into_iter()
-            .filter_map(|(def, meta)| meta.map(|m| (def.name, m)))
+            .filter_map(|tool| tool.prompt_metadata.map(|m| (tool.definition.name, m)))
             .collect();
         Ok(crate::session_setup::build_system_prompt_snapshot(
             crate::session_setup::SystemPromptSnapshotInput {
@@ -993,6 +996,8 @@ impl Session {
         cause: &SessionError,
         parent_linked: bool,
     ) {
+        // 补偿错误只进日志（下方 join 成一条 warn），不需要结构化错误类型：
+        // String 让各阶段错误可以直接 format 进去，保持补偿链简单。
         let mut compensation_errors = Vec::new();
         let mut parent_link_settled = !parent_linked;
         if parent_linked {
@@ -1016,6 +1021,10 @@ impl Session {
                 },
             }
         }
+        // 第三方 hook 可能 panic（这是跨进程/插件边界的代码）；子会话创建是
+        // "要么全部持久化、要么全部补偿"的事务，即使 shutdown hook panic 也必须
+        // 继续走补偿路径，所以用 catch_unwind 把 panic 折叠成一条记录项，
+        // 而不是让 panic 中断补偿链。
         match AssertUnwindSafe(child.emit_lifecycle(ExtensionEvent::SessionShutdown))
             .catch_unwind()
             .await
@@ -1047,6 +1056,10 @@ impl Session {
         self.discard_failed_child_runtime(&self.runtime).await
     }
 
+    /// 丢弃未提交成功的子会话 runtime（释放事件 lane + 删除持久化会话）。
+    ///
+    /// 错误以 `String` 汇总返回：所有调用方都只把它写进 warn 日志（补偿路径没有
+    /// 重试或结构化处理），String 足以承载各阶段的错误信息。
     async fn discard_failed_child_runtime(
         &self,
         child_runtime: &SessionRuntimeState,
@@ -1229,7 +1242,7 @@ impl Session {
     ) {
         let mut result = run_turn(&mut agent, &text, &turn_id).await;
         match finalize_turn(&session, &turn_id, &result.finalization).await {
-            Ok(()) => result.finalization.terminal_persisted = true,
+            Ok(()) => result.finalization.mark_persisted(),
             Err(error) => {
                 tracing::error!(
                     session_id = %session.id(),

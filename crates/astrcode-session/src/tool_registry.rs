@@ -26,6 +26,12 @@ pub struct ToolRegistry {
     tools: BTreeMap<String, RegisteredTool>,
 }
 
+/// 工具定义与其 prompt 元数据的配对，供 prompt 构建与 turn state 共享同一数据形状。
+pub(crate) struct DefinitionWithPromptMetadata {
+    pub(crate) definition: ToolDefinition,
+    pub(crate) prompt_metadata: Option<ToolPromptMetadata>,
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ToolRegistryError {
     #[error("duplicate tool registered: {0}")]
@@ -65,12 +71,15 @@ impl ToolRegistry {
             .collect()
     }
 
-    pub fn list_definitions_with_prompt_metadata(
+    pub(crate) fn list_definitions_with_prompt_metadata(
         &self,
-    ) -> Vec<(ToolDefinition, Option<ToolPromptMetadata>)> {
+    ) -> Vec<DefinitionWithPromptMetadata> {
         self.tools
             .values()
-            .map(|entry| (entry.definition.clone(), entry.prompt_metadata.clone()))
+            .map(|entry| DefinitionWithPromptMetadata {
+                definition: entry.definition.clone(),
+                prompt_metadata: entry.prompt_metadata.clone(),
+            })
             .collect()
     }
 
@@ -180,9 +189,25 @@ impl ToolRegistry {
 }
 
 fn normalize_strict_arguments(value: &mut Value, schema: &Value, root_schema: &Value) {
-    let schema = resolve_local_schema(schema, root_schema).unwrap_or(schema);
+    // 属性 schema 常以局部 $ref 指向根 schema 中的定义；解析失败（外部引用或指针
+    // 缺失）时回退到原 schema——只影响 null 归一化的覆盖范围，不改变参数本身。
+    let schema = match resolve_local_schema(schema, root_schema) {
+        Some(resolved) => resolved,
+        None => {
+            if schema.get("$ref").is_some() {
+                tracing::warn!(
+                    reference = %schema["$ref"],
+                    "failed to resolve local $ref in strict tool schema; falling back to raw schema"
+                );
+            }
+            schema
+        },
+    };
     match (value, schema) {
         (Value::Object(arguments), Value::Object(schema)) => {
+            // strict 工具通常拒绝 schema 未允许的 null；主流 provider 对省略的可选参数
+            // 常输出显式 null。仅当属性非必填（不在 required 内）且 schema 不允许 null
+            // 时移除该 null，其余情况保留原值并递归归一化。
             let required = schema
                 .get("required")
                 .and_then(Value::as_array)
@@ -211,6 +236,7 @@ fn normalize_strict_arguments(value: &mut Value, schema: &Value, root_schema: &V
             }
         },
         (Value::Array(arguments), Value::Object(schema)) => {
+            // 数组元素按 items schema 递归归一化（元素内的 null 规则与对象属性一致）。
             if let Some(item_schema) = schema.get("items") {
                 for argument in arguments {
                     normalize_strict_arguments(argument, item_schema, root_schema);

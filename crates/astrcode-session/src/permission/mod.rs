@@ -23,24 +23,34 @@ pub(crate) use runtime::{
 pub(crate) use session_approval_history::ApprovalHistoryStore;
 
 /// 根据有效配置与会话审批记忆构建默认权限链。
+///
+/// 链构造约定（工具管线唯一入口，经 `TurnToolContext::for_turn`）：
+/// - Yolo 全覆盖由链保证：`yolo_mode_approve`（priority 50）先于一切 Ask 策略 （65+）恒 Allow，各
+///   Ask 策略不再自行判 Yolo。
+/// - 链以显式兜底策略收尾（`fallback_allow`，priority 999）：链本身不做隐式拒绝；
+///   `PermissionChain::decide` 的全 Pass → Deny 分支仅兜底无终态策略的链 （如 lifecycle 空链）。
+/// - 策略按 priority 升序声明，与 `PermissionChain::new` 的 debug_assert 一致。
 pub(crate) fn build_default_chain(
     effective: &EffectiveConfig,
     history: Arc<ApprovalHistoryStore>,
 ) -> Arc<PermissionChain> {
     let policies: Vec<Box<dyn PermissionPolicy>> = vec![
-        Box::new(configured::ConfiguredDenyPolicy::new(
+        Box::new(configured::ConfiguredPolicy::new(
             &effective.permissions.deny,
+            configured::ConfiguredEffect::Deny,
         )),
         Box::new(session_tool_selection::SessionToolSelectionPolicy),
         Box::new(yolo_mode_approve::YoloModeApprovePolicy),
         Box::new(session_approval_history::SessionApprovalHistoryPolicy::new(
             Arc::clone(&history),
         )),
-        Box::new(configured::ConfiguredAllowPolicy::new(
+        Box::new(configured::ConfiguredPolicy::new(
             &effective.permissions.allow,
+            configured::ConfiguredEffect::Allow,
         )),
-        Box::new(configured::ConfiguredAskPolicy::new(
+        Box::new(configured::ConfiguredPolicy::new(
             &effective.permissions.ask,
+            configured::ConfiguredEffect::Ask,
         )),
         Box::new(sensitive_file_ask::SensitiveFileAskPolicy::new()),
         Box::new(git_path_ask::GitPathAskPolicy),

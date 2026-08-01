@@ -50,6 +50,9 @@ pub(crate) async fn build_base_tool_registry(
         );
     }
     for tool in catalog.tools {
+        // `ToolRegistryError` 只有工具名，不携带扩展来源（catalog 是合并后的基础表，
+        // 此处无法填 ToolConflict/InvalidRegistration 所需的 extension_id），且调用方
+        // 通过 `ExtensionError` 传播——压平为 Internal 是有意的边界转换。
         tool_registry
             .register(tool)
             .map_err(|error| ExtensionError::Internal(error.to_string()))?;
@@ -76,20 +79,19 @@ pub(crate) struct SystemPromptSnapshotInput<'a> {
 /// 收集扩展的 prompt 贡献。
 ///
 /// 纯数据收集函数，不组装 prompt。调用方可自行决定如何与稳定前缀组合。
+/// 参数与 [`SystemPromptSnapshotInput`] 的前 5 个字段完全重叠，直接收整个
+/// 输入结构体，避免两处字段列表各自演变导致不一致。
 async fn collect_extension_prompt_blocks(
-    prompt_contributor: &dyn PromptContributor,
-    session_id: &str,
-    working_dir: &str,
-    model_id: &str,
-    tools: &[ToolDefinition],
+    input: &SystemPromptSnapshotInput<'_>,
 ) -> Result<Vec<ExtensionPromptBlock>, ExtensionError> {
     let prompt_ctx = PromptBuildContext {
-        session_id: session_id.to_string(),
-        working_dir: working_dir.to_string(),
-        model: ModelSelection::simple(model_id),
-        tools: tools.to_vec(),
+        session_id: input.session_id.to_string(),
+        working_dir: input.working_dir.to_string(),
+        model: ModelSelection::simple(input.model_id),
+        tools: input.tools.to_vec(),
     };
-    let contributions = prompt_contributor
+    let contributions = input
+        .prompt_contributor
         .collect_prompt_contributions(prompt_ctx)
         .await?;
 
@@ -123,25 +125,16 @@ async fn collect_extension_prompt_blocks(
 pub(crate) async fn build_system_prompt_snapshot(
     input: SystemPromptSnapshotInput<'_>,
 ) -> Result<(String, String), ExtensionError> {
+    let extension_blocks = collect_extension_prompt_blocks(&input).await?;
+
     let SystemPromptSnapshotInput {
-        prompt_contributor,
-        session_id,
         working_dir,
-        model_id,
         tools,
         extra_system_prompt,
         tool_prompt_metadata,
         include_agents_rules,
+        ..
     } = input;
-
-    let extension_blocks = collect_extension_prompt_blocks(
-        prompt_contributor,
-        session_id,
-        working_dir,
-        model_id,
-        tools,
-    )
-    .await?;
 
     let extra_instructions = extra_system_prompt.map(str::to_owned);
     let prompt_files = load_prompt_files(working_dir, include_agents_rules).await;
@@ -165,6 +158,9 @@ pub(crate) async fn build_system_prompt_snapshot(
     Ok((system_prompt, fingerprint))
 }
 
+/// 手写 FNV-1a（64 位）而非 `std::collections::hash_map::DefaultHasher`：指纹会被
+/// 持久化为 `SystemPromptConfigured` 事件并在后续进程/构建中比较，必须跨进程、
+/// 跨构建稳定；`DefaultHasher` 每次进程启动都随机化 seed，结果不可复现。
 fn system_prompt_fingerprint(system_prompt: &str) -> String {
     let mut hash = 0xcbf29ce484222325u64;
     for &byte in system_prompt.as_bytes() {

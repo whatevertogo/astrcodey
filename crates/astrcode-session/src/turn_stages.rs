@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole, provider_visible_messages},
-    tool::{ToolDefinition, ToolPromptMetadata, ToolResult},
+    tool::{ToolDefinition, ToolResult},
 };
 
 use crate::{
@@ -27,7 +27,7 @@ pub(crate) struct TurnTranscript {
 impl TurnTranscript {
     pub(crate) fn record_assistant_text(&mut self, text: &str, reasoning_content: Option<String>) {
         self.output_text.push_str(text);
-        self.record_assistant_message(
+        self.remember_latest_visible_response(
             vec![LlmContent::Text {
                 text: text.to_string(),
             }],
@@ -63,10 +63,12 @@ impl TurnTranscript {
                 raw_arguments,
             }
         }));
-        self.record_assistant_message(content, reasoning_content);
+        self.remember_latest_visible_response(content, reasoning_content);
     }
 
-    fn record_assistant_message(
+    /// 记录本 step 的 provider 可见 assistant 消息（供 AfterProviderResponse 钩子使用）。
+    /// 只保留"可见"消息：空文本 step 不应覆盖/残留上一 step 的响应。
+    fn remember_latest_visible_response(
         &mut self,
         content: Vec<LlmContent>,
         reasoning_content: Option<String>,
@@ -80,6 +82,12 @@ impl TurnTranscript {
         if message.has_provider_visible_content() {
             self.latest_provider_response = Some(message);
         }
+    }
+
+    /// 每个 agent step 开始时调用，避免上一 step 的响应泄漏到本 step 的
+    /// `AfterProviderResponse` 钩子（历史 bug：不可见输出 step 会重复携带旧消息）。
+    pub(crate) fn reset_latest_provider_response(&mut self) {
+        self.latest_provider_response = None;
     }
 
     pub(crate) fn record_tool_result(&mut self, result: ToolResult) {
@@ -121,8 +129,8 @@ pub(crate) struct TurnState {
     transcript: TurnTranscript,
     reactive_compact_used: bool,
     continue_after_stop_count: u32,
-    /// 已计入上下文的非合成 user 消息数（用于 steer flush 检测）。
-    tracked_user_message_count: usize,
+    /// 已并入 LLM 上下文的非合成 user 消息数（用于 steer flush 检测）。
+    synced_user_message_count: usize,
     active_deferred_tools: HashSet<String>,
     all_tools: Vec<ToolSnapshot>,
     visible_tools: Vec<ToolSnapshot>,
@@ -130,12 +138,12 @@ pub(crate) struct TurnState {
 }
 
 impl TurnState {
-    pub(crate) fn new(all_tools: Vec<(ToolDefinition, Option<ToolPromptMetadata>)>) -> Self {
+    pub(crate) fn new(all_tools: Vec<crate::tool_registry::DefinitionWithPromptMetadata>) -> Self {
         let all_tools = all_tools
             .into_iter()
-            .map(|(definition, prompt_metadata)| ToolSnapshot {
-                definition,
-                prompt_metadata,
+            .map(|tool| ToolSnapshot {
+                definition: tool.definition,
+                prompt_metadata: tool.prompt_metadata,
             })
             .collect::<Vec<_>>();
         let active_deferred_tools = HashSet::new();
@@ -145,12 +153,18 @@ impl TurnState {
             transcript: TurnTranscript::default(),
             reactive_compact_used: false,
             continue_after_stop_count: 0,
-            tracked_user_message_count: 0,
+            synced_user_message_count: 0,
             active_deferred_tools,
             all_tools,
             visible_tools,
             tool_deduplicator: ToolCallDeduplicator::new(),
         }
+    }
+
+    /// 每个 agent step 开始时调用：清空同 step 去重状态并重置 provider 响应快照。
+    pub(crate) fn begin_step(&mut self) {
+        self.transcript.reset_latest_provider_response();
+        self.tool_deduplicator.begin_step();
     }
 
     pub(crate) fn tool_deduplicator(&self) -> &ToolCallDeduplicator {
@@ -169,12 +183,12 @@ impl TurnState {
         self.continue_after_stop_count = self.continue_after_stop_count.saturating_add(1);
     }
 
-    pub(crate) fn tracked_user_message_count(&self) -> usize {
-        self.tracked_user_message_count
+    pub(crate) fn synced_user_message_count(&self) -> usize {
+        self.synced_user_message_count
     }
 
-    pub(crate) fn set_tracked_user_message_count(&mut self, count: usize) {
-        self.tracked_user_message_count = count;
+    pub(crate) fn set_synced_user_message_count(&mut self, count: usize) {
+        self.synced_user_message_count = count;
     }
 
     pub(crate) fn record_tool_result(&mut self, result: ToolResult) {
@@ -239,7 +253,7 @@ impl TurnState {
         &self.active_deferred_tools
     }
 
-    pub(crate) fn activate_deferred_tools(&mut self, discovered_tools: Vec<String>) -> bool {
+    pub(crate) fn activate_deferred_tools(&mut self, discovered_tools: Vec<String>) {
         let changed = activate_deferred_tools(
             &mut self.active_deferred_tools,
             &self.all_tools,
@@ -249,7 +263,6 @@ impl TurnState {
             self.visible_tools =
                 provider_visible_tools(&self.all_tools, &self.active_deferred_tools);
         }
-        changed
     }
 }
 

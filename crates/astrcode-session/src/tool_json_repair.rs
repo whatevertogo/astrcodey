@@ -3,6 +3,11 @@
 //! Some LLM providers emit JSON that is almost valid, especially when a stream
 //! ends mid-value. This module repairs a small, deterministic set of mistakes
 //! while ensuring unsupported malformed input never reaches a tool.
+//!
+//! Repair is a hand-written single-pass state machine rather than regex or
+//! iterative re-parsing: one scan, no backtracking, fully deterministic output
+//! for a given input, and independence from `serde_json`'s own error taxonomy
+//! (when repair fails, the original parse error is returned unchanged).
 
 use serde_json::Value;
 
@@ -88,15 +93,19 @@ fn repair_tool_arguments(arguments: &str) -> Option<String> {
         }
 
         if comma_pending {
+            // 上一个字符是逗号：先缓冲后续空白。只有看到逗号后的第一个非空白字符
+            // 才能判断它是「尾逗号」还是正常分隔——缓冲保证修复后不丢失元素间空白。
             if ch.is_whitespace() {
                 whitespace_after_comma.push(ch);
                 continue;
             }
 
             if matches!(ch, '}' | ']') {
+                // 尾逗号：丢弃逗号本身，仅保留其后的空白（当前 `}`/`]` 交由下方主分支处理）。
                 repaired.push_str(&whitespace_after_comma);
                 changed = true;
             } else {
+                // 正常分隔：把缓冲的逗号和空白写回，再按普通字符处理当前字符。
                 repaired.push(',');
                 repaired.push_str(&whitespace_after_comma);
             }
@@ -130,6 +139,8 @@ fn repair_tool_arguments(arguments: &str) -> Option<String> {
         }
     }
 
+    // 输入结束：根级尾逗号直接丢弃；容器内的尾逗号保留（逗号+空白位于随后补上的
+    // 闭合括号之前，仍是合法 JSON）。
     if comma_pending {
         if open_containers.is_empty() {
             changed = true;
@@ -140,15 +151,18 @@ fn repair_tool_arguments(arguments: &str) -> Option<String> {
     }
 
     if escaped {
+        // 字符串在反斜杠后截断（如 `{"text":"abc\`）：去掉悬空的 `\`。
         repaired.pop();
         changed = true;
     }
     if in_string {
+        // 字符串在流结束时未闭合：补上闭合引号。
         repaired.push('"');
         changed = true;
     }
 
     while let Some(opening) = open_containers.pop() {
+        // 按打开顺序逆序补闭合括号（栈顶即最近打开的容器），修复截断的嵌套结构。
         repaired.push(match opening {
             OpenContainer::Object => '}',
             OpenContainer::Array => ']',

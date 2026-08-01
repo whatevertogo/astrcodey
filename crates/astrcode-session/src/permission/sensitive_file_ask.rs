@@ -1,9 +1,8 @@
-use astrcode_core::permission::ApprovalMode;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use super::{
     PermissionContext, PermissionDecision, PermissionPolicy,
-    paths::{extract_tool_paths, path_for_matching},
+    paths::{extract_tool_paths, path_for_matching, path_matches_glob},
 };
 
 const SENSITIVE_PATTERNS: &[&str] = &[
@@ -54,15 +53,14 @@ impl PermissionPolicy for SensitiveFileAskPolicy {
     }
 
     fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
-        if ctx.approval_mode == ApprovalMode::Yolo {
-            return PermissionDecision::Pass;
-        }
         for path in extract_tool_paths(ctx.tool_input) {
-            let rel = path_for_matching(&path, ctx.working_dir);
-            let is_sensitive = self.globset.as_ref().is_none_or(|globset| {
-                globset.is_match(&rel) || globset.is_match(path.to_string_lossy().as_ref())
-            });
+            // globset 构建失败时退化为全部路径敏感（fail-closed）。
+            let is_sensitive = self
+                .globset
+                .as_ref()
+                .is_none_or(|globset| path_matches_glob(&path, ctx.working_dir, globset));
             if is_sensitive {
+                let rel = path_for_matching(&path, ctx.working_dir);
                 return PermissionDecision::Ask {
                     prompt: if self.globset.is_some() {
                         format!("Access sensitive path `{}`?", path.display())
@@ -72,7 +70,7 @@ impl PermissionPolicy for SensitiveFileAskPolicy {
                             path.display()
                         )
                     },
-                    rule_key: Some(format!("sensitive:{}", rel)),
+                    rule_key: Some(format!("sensitive:{rel}")),
                 };
             }
         }
@@ -82,6 +80,8 @@ impl PermissionPolicy for SensitiveFileAskPolicy {
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::permission::ApprovalMode;
+
     use super::*;
 
     #[test]

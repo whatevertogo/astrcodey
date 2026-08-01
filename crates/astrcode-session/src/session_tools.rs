@@ -142,13 +142,17 @@ impl SessionToolCache {
             return base_registry;
         }
         let mut state = self.state.lock();
-        if let Some(registry) = state.filtered.as_ref().and_then(|cached| {
-            (Arc::ptr_eq(&cached.base_registry, &base_registry) && &cached.selection == selection)
-                .then(|| Arc::clone(&cached.registry))
-        }) {
-            return registry;
+        if let Some(cached) = state.filtered.as_ref() {
+            if Arc::ptr_eq(&cached.base_registry, &base_registry) && &cached.selection == selection
+            {
+                return Arc::clone(&cached.registry);
+            }
         }
 
+        // `filtered` 构建在锁内执行，这是有意的：缓存条目只有在 base 快照仍是
+        // 当前快照时才会写入，持锁构建保证"读 base + 写 filtered"原子，避免为
+        // 已失效的 base 缓存过滤结果；过滤只是内存中的名字筛选，成本可接受。
+        // 若将来筛选变重，需改为锁外构建 + 写入前重验 base。
         let registry = Arc::new(base_registry.filtered(selection));
         if state
             .base

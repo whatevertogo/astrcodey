@@ -47,6 +47,9 @@ use crate::{
 };
 
 /// 运行 agent 的一次 process_prompt；durable 在 turn 内同步写入，live 经 TurnEvents 直发。
+///
+/// 返回的 `emitted_error` 表示 turn 内是否已持久化 durable ErrorOccurred（`TurnEvents`
+/// 内部标志）；它只在 turn 结束后立即读取有效，finalizer 据此避免重复补发错误事件。
 pub(crate) async fn drive_agent(
     agent: &mut TurnLoop,
     user_text: &str,
@@ -181,7 +184,7 @@ impl TurnLoop {
 
     async fn process_prompt_inner(
         &mut self,
-        _user_text: &str,
+        user_text: &str,
         turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
     ) -> Result<TurnOutput, TurnError> {
@@ -200,190 +203,239 @@ impl TurnLoop {
         }
 
         let mut state = TurnState::new(all_tools);
-        if let Ok(model) = publisher.snapshot_model().await {
-            state.set_tracked_user_message_count(count_visible_user_messages(&model));
+        match publisher.snapshot_model().await {
+            Ok(model) => state.set_synced_user_message_count(count_visible_user_messages(&model)),
+            Err(error) => {
+                // 降级为 0 会让首 step 把全部历史 user 消息误判为 mid-turn 新增，必须可观测。
+                tracing::warn!(
+                    error = %error,
+                    "failed to snapshot model for mid-turn user message tracking; \
+                     treating all user messages as unsynced"
+                );
+            },
         }
 
         // Step
         loop {
             self.check_aborted()?;
-            state.tool_deduplicator_mut().begin_step();
-            let mid_turn_synced = self
-                .sync_mid_turn_user_messages_at_step_start(publisher, &mut state)
-                .await?;
-            let step_ctx = lifecycle_ctx.clone().for_step_start(mid_turn_synced);
-
-            extension_runner
-                .emit_lifecycle(ExtensionEvent::StepStart, step_ctx)
-                .await?;
-
-            let visible_tools = state.visible_tools();
-            let prepared = match self
-                .prepare_stage(
+            match self
+                .run_one_step(
+                    &mut state,
                     extension_runner.as_ref(),
-                    &state,
-                    &visible_tools,
+                    &lifecycle_ctx,
                     turn_id,
                     publisher,
+                    user_text,
                 )
-                .await
+                .await?
             {
-                Ok(prepared) => prepared,
-                Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
-                    if self
-                        .recover_context_overflow(
-                            extension_runner.as_ref(),
-                            &mut state,
-                            turn_id,
-                            publisher,
-                        )
-                        .await?
-                    {
-                        continue;
-                    }
-                    return end_turn_with_error_typed(TurnError::CompactExhausted);
-                },
-                Err(error) => return Err(error),
-            };
-            let request_messages = prepared.messages.clone();
-            let model_context_window = prepared.llm.model_limits().max_input_tokens;
-            // 提取 deduplicator 用于流式工具执行；llm_stage 返回后归还。
-            // visible_tools 传给 early exec context 供 prepare 使用。
-            let dedup_for_early = state.tool_deduplicator_mut();
-            let outcome = match self
-                .llm_stage(
-                    prepared,
-                    &visible_tools,
-                    publisher,
-                    Some(dedup_for_early),
-                    visible_tools.clone(),
-                )
-                .await
-            {
-                Ok(outcome) => outcome,
-                Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
-                    if self
-                        .recover_context_overflow(
-                            extension_runner.as_ref(),
-                            &mut state,
-                            turn_id,
-                            publisher,
-                        )
-                        .await?
-                    {
-                        continue;
-                    }
-                    return end_turn_with_error_typed(TurnError::CompactExhausted);
-                },
-                Err(error) => return Err(error),
-            };
+                StepOutcome::Continue => continue,
+                StepOutcome::Finished(output) => return Ok(output),
+            }
+        }
+    }
 
-            match outcome {
-                StreamOutcome::Complete {
-                    text,
-                    reasoning_content,
-                    finish_reason,
-                    message_id,
-                    message_started,
-                    usage,
-                } => {
-                    let reasoning_content = non_empty_reasoning_content(reasoning_content);
-                    let assistant_text_for_continue = text.clone();
-                    state.record_assistant_text(&text, reasoning_content.clone());
-                    if (!text.is_empty() || reasoning_content.is_some()) && message_started {
-                        publisher
-                            .durable(DurableEventPayload::AssistantMessageCompleted {
-                                message_id,
-                                text,
-                                reasoning_content,
-                            })
-                            .await?;
-                    }
-                    self.persist_token_usage(publisher, usage, model_context_window)
+    /// 单个 agent step：begin/end_step 的配对由本函数保证——无论 step 以何种方式结束，
+    /// 已注册的 tool call key 都会进入跨 step 连续重复统计（end_step 对无工具调用的
+    /// step 是 no-op；历史实现只在 ToolCalls 分支收口，早退路径会漏计已执行的 early 工具）。
+    async fn run_one_step(
+        &mut self,
+        state: &mut TurnState,
+        extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        lifecycle_ctx: &astrcode_extension_sdk::extension::LifecycleContext,
+        turn_id: &TurnId,
+        publisher: &Arc<TurnEvents>,
+        user_text: &str,
+    ) -> Result<StepOutcome, TurnError> {
+        state.begin_step();
+        let result = self
+            .step_body(
+                state,
+                extension_runner,
+                lifecycle_ctx,
+                turn_id,
+                publisher,
+                user_text,
+            )
+            .await;
+        state.tool_deduplicator_mut().end_step();
+        result
+    }
+
+    async fn step_body(
+        &mut self,
+        state: &mut TurnState,
+        extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        lifecycle_ctx: &astrcode_extension_sdk::extension::LifecycleContext,
+        turn_id: &TurnId,
+        publisher: &Arc<TurnEvents>,
+        user_text: &str,
+    ) -> Result<StepOutcome, TurnError> {
+        let mid_turn_synced = self.sync_mid_turn_user_messages(publisher, state).await?;
+        let step_ctx = lifecycle_ctx.clone().for_step_start(mid_turn_synced);
+
+        extension_runner
+            .emit_lifecycle(ExtensionEvent::StepStart, step_ctx)
+            .await?;
+
+        let visible_tools = state.visible_tools();
+        let prepared = match self
+            .prepare_stage(extension_runner, state, &visible_tools, turn_id, publisher)
+            .await
+        {
+            Ok(prepared) => prepared,
+            Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
+                return self
+                    .recover_or_fail(extension_runner, state, turn_id, publisher)
+                    .await;
+            },
+            Err(error) => return Err(error),
+        };
+        let request_messages = prepared.messages.clone();
+        let model_context_window = prepared.llm.model_limits().max_input_tokens;
+        // 提取 deduplicator 用于流式工具执行；llm_stage 返回后归还。
+        // visible_tools 传给 early exec context 供 prepare 使用。
+        let dedup_for_early = state.tool_deduplicator_mut();
+        let outcome = match self
+            .llm_stage(
+                prepared,
+                &visible_tools,
+                publisher,
+                Some(dedup_for_early),
+                visible_tools.clone(),
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
+                return self
+                    .recover_or_fail(extension_runner, state, turn_id, publisher)
+                    .await;
+            },
+            Err(error) => return Err(error),
+        };
+        match outcome {
+            StreamOutcome::Complete {
+                text,
+                reasoning_content,
+                finish_reason,
+                message_id,
+                message_started,
+                usage,
+            } => {
+                let reasoning_content = non_empty_reasoning_content(reasoning_content);
+                let assistant_text_for_continue = text.clone();
+                state.record_assistant_text(&text, reasoning_content.clone());
+                if (!text.is_empty() || reasoning_content.is_some()) && message_started {
+                    publisher
+                        .durable(DurableEventPayload::AssistantMessageCompleted {
+                            message_id,
+                            text,
+                            reasoning_content,
+                        })
                         .await?;
-                    on_step_end_best_effort(extension_runner.as_ref(), &lifecycle_ctx).await;
+                }
+                self.persist_token_usage(publisher, usage, model_context_window)
+                    .await?;
+                on_step_end_best_effort(extension_runner, lifecycle_ctx).await;
 
-                    if self
-                        .should_continue_after_stop(
-                            extension_runner.as_ref(),
-                            &assistant_text_for_continue,
-                            &finish_reason,
-                            &mut state,
-                        )
-                        .await?
-                    {
-                        continue;
-                    }
+                if self
+                    .should_continue_after_stop(
+                        extension_runner,
+                        &assistant_text_for_continue,
+                        &finish_reason,
+                        state,
+                    )
+                    .await?
+                {
+                    return Ok(StepOutcome::Continue);
+                }
 
-                    if self
-                        .has_pending_mid_turn_user_messages(publisher, &state)
-                        .await?
-                    {
-                        tracing::debug!(
-                            "pending mid-turn user messages; running one more agent step"
-                        );
-                        continue;
-                    }
+                if self
+                    .has_pending_mid_turn_user_messages(publisher, state)
+                    .await?
+                {
+                    tracing::debug!("pending mid-turn user messages; running one more agent step");
+                    return Ok(StepOutcome::Continue);
+                }
 
-                    let hook_messages = state.provider_response_messages(request_messages);
-                    return self
-                        .postprocess_complete_stage(
-                            extension_runner.as_ref(),
-                            _user_text.to_string(),
-                            &mut state,
-                            finish_reason,
-                            hook_messages,
-                        )
-                        .await;
-                },
-                StreamOutcome::ToolCalls {
-                    text,
-                    reasoning_content,
-                    tool_calls,
-                    early_results,
-                    message_id,
-                    message_started,
-                    usage,
-                } => {
-                    let reasoning_content = non_empty_reasoning_content(reasoning_content);
-                    let visible_text = text.as_deref().unwrap_or_default();
-                    state.record_assistant_tool_calls(
-                        visible_text,
-                        reasoning_content.clone(),
-                        &tool_calls,
-                    );
-                    if !tool_calls.is_empty() || message_started {
-                        if !message_started {
-                            publisher.live(LiveEventPayload::AssistantMessageStarted {
-                                message_id: message_id.clone(),
-                            });
-                        }
-                        publisher
-                            .durable(DurableEventPayload::AssistantMessageCompleted {
-                                message_id,
-                                text: visible_text.to_string(),
-                                reasoning_content,
-                            })
-                            .await?;
-                    }
-                    self.persist_token_usage(publisher, usage, model_context_window)
-                        .await?;
-
-                    let hook_messages = state.provider_response_messages(request_messages);
-                    self.tools_stage(
-                        extension_runner.as_ref(),
-                        &mut state,
-                        &tool_calls,
-                        early_results,
-                        publisher,
+                let hook_messages = state.provider_response_messages(request_messages);
+                let output = self
+                    .postprocess_complete_stage(
+                        extension_runner,
+                        user_text.to_string(),
+                        state,
+                        finish_reason,
                         hook_messages,
                     )
                     .await?;
+                Ok(StepOutcome::Finished(output))
+            },
+            StreamOutcome::ToolCalls {
+                text,
+                reasoning_content,
+                tool_calls,
+                early_results,
+                message_id,
+                message_started,
+                usage,
+            } => {
+                let reasoning_content = non_empty_reasoning_content(reasoning_content);
+                let visible_text = text.as_deref().unwrap_or_default();
+                state.record_assistant_tool_calls(
+                    visible_text,
+                    reasoning_content.clone(),
+                    &tool_calls,
+                );
+                if !tool_calls.is_empty() || message_started {
+                    if !message_started {
+                        publisher.live(LiveEventPayload::AssistantMessageStarted {
+                            message_id: message_id.clone(),
+                        });
+                    }
+                    publisher
+                        .durable(DurableEventPayload::AssistantMessageCompleted {
+                            message_id,
+                            text: visible_text.to_string(),
+                            reasoning_content,
+                        })
+                        .await?;
+                }
+                self.persist_token_usage(publisher, usage, model_context_window)
+                    .await?;
 
-                    state.tool_deduplicator_mut().end_step();
-                    on_step_end_best_effort(extension_runner.as_ref(), &lifecycle_ctx).await;
-                },
-            }
+                let hook_messages = state.provider_response_messages(request_messages);
+                self.tools_stage(
+                    extension_runner,
+                    state,
+                    &tool_calls,
+                    early_results,
+                    publisher,
+                    hook_messages,
+                )
+                .await?;
+
+                on_step_end_best_effort(extension_runner, lifecycle_ctx).await;
+                Ok(StepOutcome::Continue)
+            },
+        }
+    }
+
+    /// 上下文溢出恢复：reactive compaction 成功则继续 step，否则返回 `CompactExhausted`。
+    async fn recover_or_fail(
+        &self,
+        extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        state: &mut TurnState,
+        turn_id: &TurnId,
+        publisher: &TurnEvents,
+    ) -> Result<StepOutcome, TurnError> {
+        if self
+            .recover_context_overflow(extension_runner, state, turn_id, publisher)
+            .await?
+        {
+            Ok(StepOutcome::Continue)
+        } else {
+            Err(TurnError::CompactExhausted)
         }
     }
 
@@ -521,57 +573,21 @@ impl TurnLoop {
 
     async fn with_usage_fallback(
         &self,
-        outcome: StreamOutcome,
+        mut outcome: StreamOutcome,
         llm: &Arc<dyn astrcode_core::llm::LlmProvider>,
         request_messages: Vec<LlmMessage>,
         tools: &[ToolDefinition],
     ) -> StreamOutcome {
-        let needs_usage = match &outcome {
+        match &mut outcome {
             StreamOutcome::Complete { usage, .. } | StreamOutcome::ToolCalls { usage, .. } => {
-                usage.is_none()
-            },
-        };
-        if !needs_usage {
-            return outcome;
-        }
-
-        let usage = self
-            .fallback_token_usage(llm, request_messages, tools)
-            .await;
-        match outcome {
-            StreamOutcome::Complete {
-                text,
-                reasoning_content,
-                finish_reason,
-                message_id,
-                message_started,
-                usage: _,
-            } => StreamOutcome::Complete {
-                text,
-                reasoning_content,
-                finish_reason,
-                message_id,
-                message_started,
-                usage,
-            },
-            StreamOutcome::ToolCalls {
-                text,
-                reasoning_content,
-                tool_calls,
-                early_results,
-                message_id,
-                message_started,
-                usage: _,
-            } => StreamOutcome::ToolCalls {
-                text,
-                reasoning_content,
-                tool_calls,
-                early_results,
-                message_id,
-                message_started,
-                usage,
+                if usage.is_none() {
+                    *usage = self
+                        .fallback_token_usage(llm, request_messages, tools)
+                        .await;
+                }
             },
         }
+        outcome
     }
 
     async fn fallback_token_usage(
@@ -686,26 +702,11 @@ impl TurnLoop {
         })
     }
 
-    /// 运行 `BeforeRequest` 扩展钩子。
+    /// 运行 `BeforeRequest` 扩展钩子。返回值覆盖 LLM 请求的 messages。
     ///
-    /// 返回值覆盖 LLM 请求的 messages。Append 时**不**动会话语义、
-    /// 不入事件日志；仅对本次 LLM 调用生效。
-    ///
-    /// **性能注记**：`send_messages.clone()` 不可消除。
-    /// `ProviderContext` 在 `astrcode-extension-sdk::extension::ProviderContext` 上
-    /// 定义为持有 `Vec<LlmMessage>` **所有权**，`emit_provider` 又需
-    /// `&self` 借用；caller 必须 clone 才能让 hook 看到消息。`AppendMessages`
-    /// 分支看似可避免 clone（`send_messages` 走 move），但为了在同一
-    /// match 里能服侍 `Allow` / `ReplaceMessages` 两个分支不重复构造 ctx，
-    /// 只能在进入前就持有独立副本。
-    ///
-    /// 消除 clone 需要扩展点演进：
-    /// 1. `ProviderContext.messages: Arc<Vec<LlmMessage>>`，caller 共享 所有权 `Arc::clone` 代替
-    ///    `Vec::clone`；
-    /// 2. `TurnHooks::emit_provider` 内部可用 copy-on-write，hook 未改就零拷贝；
-    /// 3. `ProviderEvent::BeforeRequest` hook 保持现状（接受只读快照）。
-    ///
-    /// 是**API 演进**而非 bug——参考 issue #TBD。不优先动。
+    /// `send_messages.clone()` 不可消除：`ProviderContext` 持有 `Vec<LlmMessage>` 所有权，
+    /// 而 `emit_provider` 需 `&self` 借用。消除 clone 是 extension-sdk 的 API 演进
+    /// （`ProviderContext.messages` 改 `Arc<Vec<LlmMessage>>` + copy-on-write），不在本任务范围。
     async fn apply_before_provider_request_hook(
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
@@ -819,14 +820,14 @@ impl TurnLoop {
     }
 
     /// 每个 agent step 开始前：重载读模型，返回自上次 step 以来新增的 durable user 消息条数。
-    async fn sync_mid_turn_user_messages_at_step_start(
+    async fn sync_mid_turn_user_messages(
         &self,
         publisher: &Arc<TurnEvents>,
         state: &mut TurnState,
     ) -> Result<u32, TurnError> {
         let model = publisher.snapshot_model().await?;
         let current = count_visible_user_messages(&model);
-        let previous = state.tracked_user_message_count();
+        let previous = state.synced_user_message_count();
         let synced = current.saturating_sub(previous) as u32;
         if synced > 0 {
             tracing::debug!(
@@ -836,7 +837,7 @@ impl TurnLoop {
                 "mid-turn user messages synced into context for next step"
             );
         }
-        state.set_tracked_user_message_count(current);
+        state.set_synced_user_message_count(current);
         Ok(synced)
     }
 
@@ -848,7 +849,7 @@ impl TurnLoop {
         let model = publisher.snapshot_model().await?;
         Ok(has_pending_mid_turn_user_messages(
             &model,
-            state.tracked_user_message_count(),
+            state.synced_user_message_count(),
         ))
     }
 
@@ -896,12 +897,26 @@ pub struct TurnOutput {
     pub tool_results: Vec<astrcode_core::tool::ToolResult>,
 }
 
+/// 单个 agent step 的结果：`Continue` 进入下一 step，`Finished` 结束 turn。
+enum StepOutcome {
+    Continue,
+    Finished(TurnOutput),
+}
+
 #[derive(Debug, Clone)]
 pub struct TurnFinalization {
     pub finish_reason: String,
     pub pending_error: Option<String>,
     pub aborted: bool,
     pub terminal_persisted: bool,
+}
+
+impl TurnFinalization {
+    /// 由 session 在 turn 终态持久化成功后调用；server 的 registry 依据该标志
+    /// 决定是否保留所有权重试收尾。必须在写入 `SharedTurnFinalization` 之前调用。
+    pub fn mark_persisted(&mut self) {
+        self.terminal_persisted = true;
+    }
 }
 
 pub struct RunTurnResult {
@@ -921,6 +936,10 @@ pub(crate) async fn run_turn(
         Err(TurnError::Aborted) => crate::payload::TURN_FINISH_ABORTED.into(),
         Err(_) => crate::payload::TURN_FINISH_ERROR.into(),
     };
+    // 三种组合都不需要 finalizer 补发 durable ErrorOccurred：
+    // - 用户中止：finalize_aborted_turn 自行处理；
+    // - emitted_error=true：durable error 已由 TurnEvents 发出，补发会重复；
+    // - 成功且无错误：无事可补。
     let pending_error = match (&output, emitted_error) {
         (Err(TurnError::Aborted), _) | (_, true) | (Ok(_), false) => None,
         (Err(error), false) => Some(error.to_string()),

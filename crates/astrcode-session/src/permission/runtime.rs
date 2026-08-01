@@ -43,6 +43,14 @@ pub(crate) struct PermissionChain {
 
 impl PermissionChain {
     pub(crate) fn new(mut policies: Vec<Box<dyn PermissionPolicy>>) -> Self {
+        // 构造方须按 priority 升序声明（见 build_default_chain 链构造约定）；
+        // 排序仅作防御，避免声明顺序与 priority() 漂移成双事实来源。
+        debug_assert!(
+            policies
+                .windows(2)
+                .all(|pair| pair[0].priority() <= pair[1].priority()),
+            "policies must be declared in ascending priority order"
+        );
         policies.sort_by_key(|policy| policy.priority());
         Self { policies }
     }

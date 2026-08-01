@@ -93,6 +93,14 @@ pub(super) fn tool_result_for_output(outcome: &ToolExecutionOutcome) -> ToolResu
     }
 }
 
+/// release 下的兜底：`commit_tool_outcomes` 要求每个 declared call 必有 outcome，
+/// 缺失即编排缺陷（调用方已用 debug_assert 暴露）。保留 failed 结果防止 release
+/// 构建中调用悬挂。
 pub(super) fn missing_tool_outcome(call: &PreparedToolInvocation) -> ToolExecutionOutcome {
+    debug_assert!(
+        false,
+        "declared tool call `{}` reached commit without an outcome",
+        call.call_id
+    );
     ToolExecutionOutcome::failed(format!("Tool '{}' did not produce an outcome", call.name))
 }

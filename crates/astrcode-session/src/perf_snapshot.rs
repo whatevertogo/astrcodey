@@ -3,6 +3,9 @@
 //! This intentionally samples event boundaries instead of spreading tracing spans
 //! through the call graph. A snapshot answers: "what event just happened, and how
 //! long has it been since the previous event for the same session/turn?"
+//!
+//! 新增事件变体时必须同步更新 `payload_type` 与 `payload_details` 两组 match
+//! （及其各自的 durable_*/live_* 分支），否则 dev snapshot 会缺失类型或详情。
 
 #[cfg(debug_assertions)]
 use std::{collections::HashMap, sync::OnceLock, time::Instant};

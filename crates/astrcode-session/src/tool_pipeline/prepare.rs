@@ -95,21 +95,12 @@ impl ToolCalls {
         }
 
         let same_step = deduplicator.check_same_step(&tc.call_id, &tc.name, &tool_input);
-        disposition = match (disposition, same_step) {
-            (_, SameStepCheck::Duplicate) => PreparedToolDisposition::ReuseSameStep,
-            (PreparedToolDisposition::Execute, SameStepCheck::Primary) => {
-                PreparedToolDisposition::Execute
-            },
-            (rejected @ PreparedToolDisposition::Rejected { .. }, SameStepCheck::Primary) => {
-                rejected
-            },
-            (approval @ PreparedToolDisposition::AwaitApproval { .. }, SameStepCheck::Primary) => {
-                approval
-            },
-            (PreparedToolDisposition::ReuseSameStep, SameStepCheck::Primary) => {
-                PreparedToolDisposition::ReuseSameStep
-            },
-        };
+        // 同 step 内相同 (toolName, args) 的调用只有一种结果，重复调用一律复用 Primary
+        // 的最终结果——即使本调用已被拒绝或待审批（同一输入下其拒绝/审批结果与
+        // Primary 一致），避免对同一调用重复发出拒绝/审批事件。这是刻意的去重语义。
+        if same_step == SameStepCheck::Duplicate {
+            disposition = PreparedToolDisposition::ReuseSameStep;
+        }
 
         let mode = match &disposition {
             PreparedToolDisposition::Execute => self.tool_registry.execution_mode(&tc.name),
@@ -202,7 +193,9 @@ impl ToolCalls {
                 tracing::debug!(
                     tool_name,
                     error = %error,
-                    "resource_accesses parse failed during permission check; treating as exclusive lock"
+                    "resource_accesses parse failed during permission check; declaring \
+                     unrestricted access so the permission chain applies its strictest \
+                     policy (fail-closed)"
                 );
                 vec![ResourceAccess::all()]
             });

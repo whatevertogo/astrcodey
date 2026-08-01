@@ -64,7 +64,7 @@ impl LlmProvider for UnusedLlm {
     }
 }
 
-/// 统一的 mock LlmSettings，避免各测试重复 18 字段字面量。
+/// 统一的 mock LlmSettings，避免各测试重复完整字段字面量。
 pub(crate) fn test_llm_settings() -> LlmSettings {
     LlmSettings {
         provider_kind: "mock".into(),

@@ -31,12 +31,11 @@ pub(crate) struct ToolResultPreview {
     pub has_more: bool,
 }
 
-/// 判断工具结果是否应该持久化为 artifact。
-pub(crate) fn should_persist_tool_result(content: &str, inline_limit: usize) -> bool {
-    content.len() > inline_limit
-}
-
 /// 返回指定工具的内联阈值；`None` 表示永不自动持久化。
+///
+/// 按工具名硬编码阈值是刻意的产品策略：不同工具的输出特征差异显著
+/// （shell 易爆量、grep 可重新分页查询、read 由 maxChars 截断且读回会形成
+/// 循环），因此阈值跟随工具名而非统一参数；新增高流量工具时应在此显式评估。
 pub(crate) fn tool_result_inline_limit(tool_name: &str) -> Option<usize> {
     match tool_name {
         "read" => READ_TOOL_RESULT_INLINE_LIMIT,
@@ -53,7 +52,7 @@ pub(crate) fn should_auto_persist_tool_result(tool_name: &str, result: &ToolResu
     let Some(inline_limit) = tool_result_inline_limit(tool_name) else {
         return false;
     };
-    should_persist_tool_result(&result.content, inline_limit)
+    result.content.len() > inline_limit
 }
 
 /// 为大工具结果生成摘要预览。
@@ -95,16 +94,6 @@ pub(crate) fn persisted_tool_result_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn small_result_stays_inline() {
-        assert!(!should_persist_tool_result("hello", 100));
-    }
-
-    #[test]
-    fn large_result_crosses_inline_limit() {
-        assert!(should_persist_tool_result(&"a".repeat(101), 100));
-    }
 
     #[test]
     fn tool_inline_limits_match_high_volume_tools() {

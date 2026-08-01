@@ -72,7 +72,7 @@ pub struct SessionEventPublicationGuard {
 impl SessionEventPublicationGuard {
     pub fn commit(mut self) {
         self.publication
-            .finish_deferred(&self.session_id, &self.events, true);
+            .commit_deferred(&self.session_id, &self.events);
         self.finished = true;
     }
 }
@@ -81,23 +81,25 @@ impl Drop for SessionEventPublicationGuard {
     fn drop(&mut self) {
         if !self.finished {
             self.publication
-                .finish_deferred(&self.session_id, &self.events, false);
+                .discard_deferred(&self.session_id, &self.events);
         }
     }
 }
 
 impl PublicationState {
-    fn finish_deferred(&self, session_id: &SessionId, events: &DeferredEvents, publish: bool) {
+    /// 提交 defer 期间收集的事件，按入队顺序发布。
+    ///
+    /// 竞态说明：发布循环在**释放 `deferred` 锁**之后才向 observer 派发事件，期间
+    /// 同一 session 的新事件可能再次被 `publish` 路由进 defer 表（`deferred.get` 命中），
+    /// 因此必须回环重取，直到表中不再是本 guard 的 `events`（新的 defer 抢占）或取空移除。
+    /// 任何"只取一次"的简化都会在并发下丢事件或乱序。
+    fn commit_deferred(&self, session_id: &SessionId, events: &DeferredEvents) {
         loop {
             let mut deferred = self.deferred.lock();
             let Some(current) = deferred.get(session_id) else {
                 return;
             };
             if !Arc::ptr_eq(current, events) {
-                return;
-            }
-            if !publish {
-                deferred.remove(session_id);
                 return;
             }
 
@@ -112,8 +114,24 @@ impl PublicationState {
             }
         }
     }
+
+    /// 丢弃 defer 期间收集的事件（guard 析构时），不向 observer 发布。
+    fn discard_deferred(&self, session_id: &SessionId, events: &DeferredEvents) {
+        let mut deferred = self.deferred.lock();
+        let Some(current) = deferred.get(session_id) else {
+            return;
+        };
+        if !Arc::ptr_eq(current, events) {
+            return;
+        }
+        deferred.remove(session_id);
+    }
 }
 
+/// Sink 级状态。session 生命周期与 lane 的对应关系是隐式三态，必须配对维护：
+/// - active + 有 lane：正常发布；
+/// - inactive（`release` 后）：`lanes` 中移除、`inactive_sessions` 记录，`lane()` 拒绝重建；
+/// - active + 无 lane（`activate` 后、首次发布前）：`lane()` 懒重建。
 #[derive(Default)]
 struct SinkState {
     closed: bool,
@@ -337,6 +355,8 @@ impl SessionEventLane {
             .try_send(PublishCommand::Live(event))
             .map_err(|error| match error {
                 mpsc::error::TrySendError::Full(_) => SessionEventPublishError::Full {
+                    // 累计值：`session.rs` 的幂次限频依赖"自 lane 启动以来丢弃总数"
+                    // 的单调递增语义，不要改成"本次丢弃数"。
                     dropped: self.dropped_live.fetch_add(1, Ordering::Relaxed) + 1,
                 },
                 mpsc::error::TrySendError::Closed(_) => SessionEventPublishError::Closed,

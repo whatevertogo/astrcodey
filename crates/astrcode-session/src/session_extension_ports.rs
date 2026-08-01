@@ -18,6 +18,10 @@ pub struct SessionExtensionPorts {
 
 impl SessionExtensionPorts {
     /// Combines ports whose observable state never changes after construction.
+    ///
+    /// 注意：该构造器不提供 runtime snapshot——传入的端口都是构造后不可变的，
+    /// 没有可观测的运行时快照状态，因此 `runtime_snapshot` 固定为 `NoopRuntimePorts`
+    /// （调用 [`Self::runtime_snapshot_state`] 会得到 noop 的默认状态）。
     pub fn from_immutable_ports(
         prompt_contributor: Arc<dyn PromptContributor>,
         turn_hooks: Arc<dyn TurnHooks>,

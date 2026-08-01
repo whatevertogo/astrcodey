@@ -47,8 +47,11 @@ pub(crate) struct CompactionPlan {
 
 #[derive(PartialEq, Eq)]
 enum CompactionOutcome {
-    Skipped,
     Committed,
+    /// 压缩未成功执行；`reason` 说明失败阶段（hook / LLM / 持久化）。
+    Failed {
+        reason: String,
+    },
 }
 
 pub(crate) struct PreparedProviderHistory {
@@ -59,7 +62,6 @@ pub(crate) struct PreparedProviderHistory {
 struct CompactionStageMeta {
     trigger: CompactTrigger,
     strategy: CompactStrategy,
-    llm_api_failed: bool,
 }
 
 pub(crate) struct CompactionHost<'a> {
@@ -196,13 +198,26 @@ async fn run_compaction(
     .await;
 
     // PreCompact may append durable facts, so read the storage projection after the hook.
-    let source_model = publisher.snapshot_model().await?;
+    // 注意：`should_attempt` 放行已置位 in_flight，此处的任何提前返回都必须先收口熔断器。
+    let source_model = match publisher.snapshot_model().await {
+        Ok(model) => model,
+        Err(error) => {
+            record_breaker_attempt(host, &plan, false);
+            return Err(error);
+        },
+    };
     let source_snapshot = context_snapshot(&source_model);
     let custom_instructions = match custom_instructions {
         Ok(instructions) => instructions,
         Err(error) => {
             tracing::warn!(error = %error, "PreCompact extension dispatch failed");
-            return Ok((source_snapshot, CompactionOutcome::Skipped));
+            record_breaker_attempt(host, &plan, false);
+            return Ok((
+                source_snapshot,
+                CompactionOutcome::Failed {
+                    reason: format!("PreCompact extension dispatch failed: {error}"),
+                },
+            ));
         },
     };
 
@@ -234,8 +249,18 @@ async fn run_compaction(
             keep_recent_turns,
         )
     };
-    let Ok(execution) = execution else {
-        return Ok((source_snapshot, CompactionOutcome::Skipped));
+    let execution = match execution {
+        Ok(execution) => execution,
+        Err(error) => {
+            tracing::warn!(error = ?error, "LLM compaction failed");
+            record_breaker_attempt(host, &plan, true);
+            return Ok((
+                source_snapshot,
+                CompactionOutcome::Failed {
+                    reason: format!("LLM compaction failed: {error:?}"),
+                },
+            ));
+        },
     };
 
     let mut compaction = execution.result;
@@ -249,11 +274,13 @@ async fn run_compaction(
         turn_id,
         CompactionStageMeta {
             trigger: plan.trigger,
-            strategy: plan.strategy,
-            llm_api_failed: execution.llm_api_failed,
+            strategy: plan.strategy.clone(),
         },
     )
     .await;
+    // 熔断器收口：`should_attempt` 放行的每次探测都必须在这里复位，否则 in_flight
+    // 永久置位、auto compaction 静默失效。LLM 软失败（fallback 生效）按失败计入。
+    record_breaker_attempt(host, &plan, execution.llm_api_failed);
     let model = publisher.snapshot_model().await?;
     Ok((context_snapshot(&model), outcome))
 }
@@ -280,7 +307,13 @@ pub(crate) async fn run_reactive_compaction(
         publisher,
     )
     .await?;
-    Ok(outcome != CompactionOutcome::Skipped)
+    if let CompactionOutcome::Failed { reason } = &outcome {
+        tracing::warn!(
+            error = %reason,
+            "reactive compaction failed; prompt remains too long"
+        );
+    }
+    Ok(matches!(outcome, CompactionOutcome::Committed))
 }
 
 async fn update_compaction_token_counts(
@@ -343,7 +376,7 @@ fn compact_hook_context(
 }
 
 /// idle compact 的 Pre/Post hook 上下文（trigger 固定为 ManualCommand）。
-fn idle_manual_hook<'a>(
+fn manual_hook_context<'a>(
     session: &'a Session,
     state: &'a SessionReadModel,
     message_count: usize,
@@ -386,14 +419,6 @@ async fn commit_compaction(
         )
         .await;
 
-    if meta.trigger == CompactTrigger::AutoThreshold && meta.llm_api_failed {
-        host.session
-            .runtime()
-            .compact_circuit_breaker()
-            .lock()
-            .record_llm_failure();
-    }
-
     let result = persist_compact_result(
         host.session,
         compaction,
@@ -404,13 +429,6 @@ async fn commit_compaction(
     .await;
     match result {
         Ok(()) => {
-            if meta.trigger == CompactTrigger::AutoThreshold && !meta.llm_api_failed {
-                host.session
-                    .runtime()
-                    .compact_circuit_breaker()
-                    .lock()
-                    .record_compact_success();
-            }
             let hook = compact_hook_context(host.shared, snapshot.messages.len(), meta.trigger);
             if let Err(error) = dispatch_post_compact(host.extension_runner, hook, compaction).await
             {
@@ -432,9 +450,26 @@ async fn commit_compaction(
                     reason: error.to_string(),
                 },
             );
-            CompactionOutcome::Skipped
+            CompactionOutcome::Failed {
+                reason: format!("compaction persist failed: {error}"),
+            }
         },
     }
+}
+
+/// 熔断器收口：仅 auto LLM 探测（`should_attempt` 放行）需要记账；reactive/manual 不记录。
+///
+/// 每次探测放行后无论结果如何都必须调用，否则 `half_open_attempt_in_flight` 永久置位、
+/// auto compaction 在进程生命周期内静默失效（历史 bug：hook/执行/persist 失败路径均漏调）。
+fn record_breaker_attempt(host: &CompactionHost<'_>, plan: &CompactionPlan, llm_failed: bool) {
+    if plan.trigger != CompactTrigger::AutoThreshold || !plan.use_llm_for_compact {
+        return;
+    }
+    host.session
+        .runtime()
+        .compact_circuit_breaker()
+        .lock()
+        .finish_attempt(llm_failed);
 }
 
 // ── Shared hook and persistence ──
@@ -448,7 +483,7 @@ struct CompactHookContext<'a> {
 }
 
 impl CompactHookContext<'_> {
-    fn build_compact_context(&self, compaction: Option<&CompactResult>) -> CompactContext {
+    fn build_context(&self, compaction: Option<&CompactResult>) -> CompactContext {
         CompactContext {
             session_id: self.session_id.to_string(),
             working_dir: self.working_dir.to_string(),
@@ -467,7 +502,7 @@ async fn collect_compact_instructions(
     input: CompactHookContext<'_>,
 ) -> Result<Vec<String>, ExtensionError> {
     let result = extension_runner
-        .emit_compact(CompactEvent::PreCompact, input.build_compact_context(None))
+        .emit_compact(CompactEvent::PreCompact, input.build_context(None))
         .await?;
     match result {
         TypedCompactResult::Contributions(contributions) => Ok(contributions
@@ -489,7 +524,7 @@ async fn dispatch_post_compact(
     extension_runner
         .emit_compact(
             CompactEvent::PostCompact,
-            input.build_compact_context(Some(compaction)),
+            input.build_context(Some(compaction)),
         )
         .await?;
     Ok(())
@@ -557,14 +592,14 @@ pub async fn compact_idle_session(
     let context_assembler = runtime_services.context_assembler_arc();
 
     let state = session.read_model().await?;
-    let pre_hook = idle_manual_hook(session, &state, state.transcript.messages.len());
+    let pre_hook = manual_hook_context(session, &state, state.transcript.messages.len());
     let custom_instructions =
         collect_compact_instructions(extension_runner.as_ref(), pre_hook).await?;
 
     let state = session.read_model().await?;
     let snapshot = context_snapshot(&state);
     let llm = runtime_services.llm();
-    let post_hook = idle_manual_hook(session, &state, snapshot.messages.len());
+    let post_hook = manual_hook_context(session, &state, snapshot.messages.len());
     let tool_registry = session
         .tool_registry_snapshot(&state.identity.working_dir)
         .await?;
@@ -595,9 +630,10 @@ pub async fn compact_idle_session(
     .await;
 
     let mut compaction = match compact_execution {
-        Err(_) => {
+        Err(error) => {
+            // 失败根因不能丢：LLM 故障与"没有可压缩内容"对用户是两种信息。
             return Ok(IdleCompactionOutcome::Skipped {
-                message: "Nothing to compact".into(),
+                message: format!("compaction failed: {error:?}"),
             });
         },
         Ok(compaction) => compaction.result,
@@ -689,18 +725,24 @@ impl CompactCircuitBreaker {
         }
     }
 
-    pub(crate) fn record_llm_failure(&mut self) {
-        self.consecutive_llm_failures = self.consecutive_llm_failures.saturating_add(1);
-        if matches!(self.state, CircuitState::HalfOpen)
-            || self.consecutive_llm_failures >= self.threshold
-        {
+    /// 探测收口：`should_attempt` 放行（返回 true）后必须调用，无论结果如何。
+    ///
+    /// - `llm_failed = true`：连续失败计数 +1；HalfOpen 或达到阈值时进入 cooldown（Open）。
+    /// - `llm_failed = false`：非 LLM 失败（hook/persist），清零计数并进入 cooldown。
+    ///
+    /// 不调用会让状态永久停在 HalfOpen、auto compaction 静默失效。
+    pub(crate) fn finish_attempt(&mut self, llm_failed: bool) {
+        if llm_failed {
+            self.consecutive_llm_failures = self.consecutive_llm_failures.saturating_add(1);
+            if matches!(self.state, CircuitState::HalfOpen)
+                || self.consecutive_llm_failures >= self.threshold
+            {
+                self.start_cooldown();
+            }
+        } else {
+            self.consecutive_llm_failures = 0;
             self.start_cooldown();
         }
-    }
-
-    pub(crate) fn record_compact_success(&mut self) {
-        self.consecutive_llm_failures = 0;
-        self.start_cooldown();
     }
 
     fn allow_half_open_attempt(&mut self) -> bool {
@@ -730,17 +772,37 @@ mod tests {
         let mut breaker = CompactCircuitBreaker::new(2, Duration::from_millis(5));
 
         assert!(breaker.should_attempt());
-        breaker.record_llm_failure();
+        breaker.finish_attempt(true);
         assert!(breaker.should_attempt());
-        breaker.record_llm_failure();
+        breaker.finish_attempt(true);
         assert!(!breaker.should_attempt());
 
         thread::sleep(Duration::from_millis(10));
         assert!(breaker.should_attempt());
         assert!(!breaker.should_attempt());
 
-        breaker.record_compact_success();
+        breaker.finish_attempt(false);
         assert!(!breaker.should_attempt());
+        thread::sleep(Duration::from_millis(10));
+        assert!(breaker.should_attempt());
+        assert!(!breaker.should_attempt());
+    }
+
+    #[test]
+    fn failed_probe_must_finish_attempt_or_breaker_stays_stuck_half_open() {
+        let mut breaker = CompactCircuitBreaker::new(1, Duration::from_millis(5));
+
+        breaker.finish_attempt(true);
+        assert!(!breaker.should_attempt());
+
+        thread::sleep(Duration::from_millis(10));
+        assert!(breaker.should_attempt());
+        assert!(!breaker.should_attempt());
+
+        // 探测失败必须收口：否则 in_flight 永久置位，cooldown 过后也不再放行。
+        breaker.finish_attempt(true);
+        assert!(!breaker.should_attempt());
+
         thread::sleep(Duration::from_millis(10));
         assert!(breaker.should_attempt());
         assert!(!breaker.should_attempt());

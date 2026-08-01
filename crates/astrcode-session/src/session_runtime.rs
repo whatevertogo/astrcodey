@@ -167,6 +167,13 @@ impl PendingSessionCreation {
 }
 
 /// Keeps concurrent openers behind the new-session initialization boundary.
+///
+/// 创建窗口的兜底上限，与 SDK 侧生命周期 hook 的超时上限（120s，见
+/// `astrcode-extension-sdk/src/runtime/peer.rs` 的 invoke 超时）对齐：hook 合法耗时
+/// 可能接近该值，等待方超时会误报创建失败（但创建仍会完成，调用方可重试）。
+/// 仅当单创建者不变式被违反、创建者 token 永远不会 finish 时才会真正挂起到此上限。
+const CREATION_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
+
 #[must_use = "the creation guard must be held until initialization commits or is compensated"]
 pub struct SessionCreationGuard {
     runtime: Arc<SessionRuntimeState>,
@@ -175,13 +182,30 @@ pub struct SessionCreationGuard {
 }
 
 impl SessionCreationGuard {
-    pub fn commit(mut self) {
-        let mut creation = self.runtime.creation.lock();
+    /// 仅当 `creation` 仍指向本 guard 的 pending 状态时，将其替换为 `next` 并返回 true。
+    ///
+    /// commit 与 Drop 共用同一份"只有自己是当前创建者才推进状态"的判断：
+    /// 若单创建者不变式被违反（见 [`SessionRuntimeState::begin_creation`]），后来的
+    /// guard 覆盖了状态，先前的 guard 不应误改他人的状态。
+    fn transition_pending(
+        creation: &mut SessionCreationState,
+        pending: &Arc<PendingSessionCreation>,
+        next: SessionCreationState,
+    ) -> bool {
         if matches!(
             &*creation,
-            SessionCreationState::Pending(current) if Arc::ptr_eq(current, &self.pending)
+            SessionCreationState::Pending(current) if Arc::ptr_eq(current, pending)
         ) {
-            *creation = SessionCreationState::Ready;
+            *creation = next;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn commit(mut self) {
+        let mut creation = self.runtime.creation.lock();
+        if Self::transition_pending(&mut creation, &self.pending, SessionCreationState::Ready) {
             drop(creation);
             self.pending.finish();
         }
@@ -195,11 +219,7 @@ impl Drop for SessionCreationGuard {
             return;
         }
         let mut creation = self.runtime.creation.lock();
-        if matches!(
-            &*creation,
-            SessionCreationState::Pending(current) if Arc::ptr_eq(current, &self.pending)
-        ) {
-            *creation = SessionCreationState::Failed;
+        if Self::transition_pending(&mut creation, &self.pending, SessionCreationState::Failed) {
             drop(creation);
             self.pending.finish();
         }
@@ -278,6 +298,12 @@ impl SessionRuntimeState {
     }
 
     /// Blocks [`Self::wait_for_creation`] until the returned guard commits or fails.
+    ///
+    /// 不变式：同一 runtime 同时只能有一个进行中的创建（单创建者）。该检查只有
+    /// `debug_assert!`，release 下若被违反：后一个 guard 会覆盖前一个的 `Pending`
+    /// 状态，前一个 guard 的 commit/Drop 因 `Arc::ptr_eq` 不匹配而不再 `finish()`
+    /// 其 token——等待旧 token 的 [`Self::wait_for_creation`] 调用将永久挂起。
+    /// 因此 `wait_for_creation` 对每次等待设置了超时兜底，超时按创建失败返回。
     pub fn begin_creation(self: &Arc<Self>) -> SessionCreationGuard {
         let mut creation = self.creation.lock();
         debug_assert!(
@@ -294,14 +320,39 @@ impl SessionRuntimeState {
     }
 
     /// Waits only when this process is currently creating the session.
+    ///
+    /// 正常情况下等待时间很短（创建者 commit/Drop 即唤醒）；每次等待有超时兜底，
+    /// 防止 [`Self::begin_creation`] 单创建者不变式被违反时永久挂起。
     pub async fn wait_for_creation(&self) -> Result<(), SessionCreationFailed> {
+        let mut logged_creator: Option<usize> = None;
         loop {
             let pending = match &*self.creation.lock() {
                 SessionCreationState::Ready => return Ok(()),
                 SessionCreationState::Failed => return Err(SessionCreationFailed),
                 SessionCreationState::Pending(pending) => Arc::clone(pending),
             };
-            pending.wait().await;
+            let creator = Arc::as_ptr(&pending) as usize;
+            if logged_creator != Some(creator) {
+                // 每个 pending 创建者只记一次，避免并发打开时的常规等待刷日志。
+                logged_creator = Some(creator);
+                tracing::debug!(
+                    session_id = %self.session_id,
+                    creator = %creator,
+                    "waiting for in-flight session creation"
+                );
+            }
+            match tokio::time::timeout(CREATION_WAIT_TIMEOUT, pending.wait()).await {
+                Ok(()) => {},
+                Err(_) => {
+                    tracing::error!(
+                        session_id = %self.session_id,
+                        creator = %creator,
+                        "timed out waiting for session creation; treating as failed \
+                         (likely begin_creation single-owner invariant violation)"
+                    );
+                    return Err(SessionCreationFailed);
+                },
+            }
         }
     }
 

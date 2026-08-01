@@ -34,17 +34,18 @@ impl ToolCalls {
         &self,
         mut input: ExecuteToolBatch<'_>,
     ) -> Result<Vec<String>, TurnError> {
-        let mut pending_declared = input
+        // 尚未 commit 的 declared 调用：正常路径逐个移除；turn 出错时兜底补发失败结果。
+        let mut uncommitted_calls = input
             .batch
             .calls
             .iter()
             .map(|call| call.call_id.clone())
             .collect::<HashSet<_>>();
         let result = self
-            .execute_declared_batch(&mut input, &mut pending_declared)
+            .execute_declared_batch(&mut input, &mut uncommitted_calls)
             .await;
         if let Err(error) = &result {
-            self.complete_pending_declared_as_failed(&mut input, &mut pending_declared, error)
+            self.complete_pending_declared_as_failed(&mut input, &mut uncommitted_calls, error)
                 .await;
         }
         result
@@ -53,7 +54,7 @@ impl ToolCalls {
     async fn execute_declared_batch(
         &self,
         input: &mut ExecuteToolBatch<'_>,
-        pending_declared: &mut HashSet<String>,
+        uncommitted_calls: &mut HashSet<String>,
     ) -> Result<Vec<String>, TurnError> {
         let mut discovered_tools = Vec::new();
         let tools = Arc::from(input.tools);
@@ -65,113 +66,67 @@ impl ToolCalls {
                 return Err(TurnError::Aborted);
             }
             let call = input.batch.calls[position].clone();
-            match &call.disposition {
+
+            // 只有「无预执行结果的并行调用」能加入当前并行批次；其余调用必须先 flush：
+            // 并行批次在 flush 时才执行并提交，串行/审批/去重复用调用必须等它完成，
+            // 否则 durable 事件乱序；去重复用还依赖 flush 中 finalize 主调用结果，
+            // 顺序颠倒会死锁。
+            let joins_parallel = matches!(
+                &call.disposition,
+                PreparedToolDisposition::Execute if call.mode == ExecutionMode::Parallel
+            ) && !input.batch.pre_executed.contains_key(&call.index);
+            if !joins_parallel {
+                discovered_tools.extend(
+                    self.flush_and_commit_parallel_batch(
+                        &mut parallel_batch,
+                        &mut parallel_batch_start,
+                        input,
+                        uncommitted_calls,
+                        Arc::clone(&tools),
+                    )
+                    .await?,
+                );
+            }
+
+            // 每个分支只产出本调用的 outcome；None 表示已加入并行批次，稍后统一提交。
+            let outcome = match &call.disposition {
                 PreparedToolDisposition::Rejected { error } => {
-                    discovered_tools.extend(
-                        self.flush_and_commit_parallel_batch(
-                            &mut parallel_batch,
-                            &mut parallel_batch_start,
-                            input,
-                            pending_declared,
-                            Arc::clone(&tools),
-                        )
-                        .await?,
-                    );
-                    discovered_tools.extend(
-                        self.commit_single_outcome(
-                            input,
-                            pending_declared,
-                            position,
-                            ToolExecutionOutcome::failed(error.clone()),
-                        )
-                        .await?,
-                    );
+                    Some(ToolExecutionOutcome::failed(error.clone()))
                 },
-                PreparedToolDisposition::ReuseSameStep => {
-                    discovered_tools.extend(
-                        self.flush_and_commit_parallel_batch(
-                            &mut parallel_batch,
-                            &mut parallel_batch_start,
-                            input,
-                            pending_declared,
-                            Arc::clone(&tools),
-                        )
-                        .await?,
-                    );
-                    let outcome = input
+                PreparedToolDisposition::ReuseSameStep => Some(
+                    input
                         .state
                         .tool_deduplicator()
-                        .await_same_step_outcome(&input.batch.calls[position].call_id)
-                        .await;
-                    discovered_tools.extend(
-                        self.commit_single_outcome(input, pending_declared, position, outcome)
-                            .await?,
-                    );
-                },
+                        .await_same_step_outcome(&call.call_id)
+                        .await,
+                ),
                 PreparedToolDisposition::AwaitApproval {
                     prompt,
                     rule_key,
                     source,
-                } => {
-                    discovered_tools.extend(
-                        self.flush_and_commit_parallel_batch(
-                            &mut parallel_batch,
-                            &mut parallel_batch_start,
-                            input,
-                            pending_declared,
-                            Arc::clone(&tools),
-                        )
-                        .await?,
-                    );
-                    let outcome = self
-                        .request_approval_and_resolve(
-                            input,
-                            position,
-                            prompt.clone(),
-                            rule_key.clone(),
-                            *source,
-                            Arc::clone(&tools),
-                        )
-                        .await?;
-                    discovered_tools.extend(
-                        self.commit_single_outcome(input, pending_declared, position, outcome)
-                            .await?,
-                    );
-                },
+                } => Some(
+                    self.request_approval_and_resolve(
+                        input,
+                        position,
+                        prompt.clone(),
+                        rule_key.clone(),
+                        *source,
+                        Arc::clone(&tools),
+                    )
+                    .await?,
+                ),
                 PreparedToolDisposition::Execute if call.mode == ExecutionMode::Parallel => {
                     if let Some(outcome) = input.batch.pre_executed.remove(&call.index) {
-                        discovered_tools.extend(
-                            self.flush_and_commit_parallel_batch(
-                                &mut parallel_batch,
-                                &mut parallel_batch_start,
-                                input,
-                                pending_declared,
-                                Arc::clone(&tools),
-                            )
-                            .await?,
-                        );
-                        discovered_tools.extend(
-                            self.commit_single_outcome(input, pending_declared, position, outcome)
-                                .await?,
-                        );
+                        Some(outcome)
                     } else {
                         if parallel_batch_start.is_none() {
                             parallel_batch_start = Some(position);
                         }
                         parallel_batch.push(call.to_executable());
+                        None
                     }
                 },
                 PreparedToolDisposition::Execute => {
-                    discovered_tools.extend(
-                        self.flush_and_commit_parallel_batch(
-                            &mut parallel_batch,
-                            &mut parallel_batch_start,
-                            input,
-                            pending_declared,
-                            Arc::clone(&tools),
-                        )
-                        .await?,
-                    );
                     let outcome =
                         if let Some(outcome) = input.batch.pre_executed.remove(&call.index) {
                             outcome
@@ -179,11 +134,14 @@ impl ToolCalls {
                             self.execute_single_tool(call.to_executable(), Arc::clone(&tools))
                                 .await
                         };
-                    discovered_tools.extend(
-                        self.commit_single_outcome(input, pending_declared, position, outcome)
-                            .await?,
-                    );
+                    Some(outcome)
                 },
+            };
+            if let Some(outcome) = outcome {
+                discovered_tools.extend(
+                    self.commit_single_outcome(input, uncommitted_calls, position, outcome)
+                        .await?,
+                );
             }
         }
 
@@ -192,7 +150,7 @@ impl ToolCalls {
                 &mut parallel_batch,
                 &mut parallel_batch_start,
                 input,
-                pending_declared,
+                uncommitted_calls,
                 tools,
             )
             .await?,
@@ -204,10 +162,10 @@ impl ToolCalls {
     async fn complete_pending_declared_as_failed(
         &self,
         input: &mut ExecuteToolBatch<'_>,
-        pending_declared: &mut HashSet<String>,
+        uncommitted_calls: &mut HashSet<String>,
         error: &TurnError,
     ) {
-        if pending_declared.is_empty() {
+        if uncommitted_calls.is_empty() {
             return;
         }
         let message = match error {
@@ -215,14 +173,14 @@ impl ToolCalls {
             other => format!("tool orchestration failed before completion: {other}"),
         };
         for call in &input.batch.calls {
-            if !pending_declared.contains(&call.call_id) {
+            if !uncommitted_calls.contains(&call.call_id) {
                 continue;
             }
             let outcome = match error {
                 TurnError::Aborted => ToolExecutionOutcome::cancelled(message.clone(), None),
                 _ => ToolExecutionOutcome::failed(message.clone()),
             };
-            let (arguments, arguments_json) = crate::tool_types::tool_call_completion_arguments(
+            let completion = crate::tool_types::tool_call_completion_arguments(
                 call.tool_input.clone(),
                 call.raw_arguments.clone(),
             );
@@ -231,8 +189,8 @@ impl ToolCalls {
                 &call.call_id,
                 call.name.clone(),
                 &outcome,
-                arguments,
-                arguments_json,
+                completion.arguments,
+                completion.arguments_json,
             )
             .await
             {
@@ -243,7 +201,7 @@ impl ToolCalls {
                 );
                 continue;
             }
-            pending_declared.remove(&call.call_id);
+            uncommitted_calls.remove(&call.call_id);
             input
                 .state
                 .record_tool_result(tool_result_for_output(&outcome));
@@ -325,7 +283,7 @@ impl ToolCalls {
         parallel_batch: &mut Vec<ExecutableToolInvocation>,
         parallel_batch_start: &mut Option<usize>,
         input: &mut ExecuteToolBatch<'_>,
-        pending_declared: &mut HashSet<String>,
+        uncommitted_calls: &mut HashSet<String>,
         tools: Arc<[ToolDefinition]>,
     ) -> Result<Vec<String>, TurnError> {
         let Some(batch_start) = parallel_batch_start.take() else {
@@ -333,6 +291,9 @@ impl ToolCalls {
         };
         let batch_len = parallel_batch.len();
         let batch_end = batch_start + batch_len;
+        // 连续性不变式：parallel_batch 条目按 position 升序逐调用压入（每个并行调用
+        // 恰好一条），且批次只在遇到非并行调用时整体 flush——因此
+        // `calls[batch_start..batch_end]` 与批次条目一一对应，可按下标回填 outcome。
         let mut outcomes = HashMap::new();
 
         self.flush_parallel_batch(parallel_batch, tools, &mut outcomes)
@@ -341,7 +302,7 @@ impl ToolCalls {
         self.commit_tool_outcomes(
             &input.batch.calls[batch_start..batch_end],
             outcomes,
-            pending_declared,
+            uncommitted_calls,
             input.state,
             Arc::clone(&input.publisher),
         )
@@ -409,7 +370,7 @@ impl ToolCalls {
     async fn commit_single_outcome(
         &self,
         input: &mut ExecuteToolBatch<'_>,
-        pending_declared: &mut HashSet<String>,
+        uncommitted_calls: &mut HashSet<String>,
         position: usize,
         outcome: ToolExecutionOutcome,
     ) -> Result<Vec<String>, TurnError> {
@@ -418,7 +379,7 @@ impl ToolCalls {
         self.commit_tool_outcomes(
             &input.batch.calls[position..position + 1],
             outcomes,
-            pending_declared,
+            uncommitted_calls,
             input.state,
             Arc::clone(&input.publisher),
         )

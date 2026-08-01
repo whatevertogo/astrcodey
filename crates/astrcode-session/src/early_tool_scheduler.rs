@@ -100,7 +100,6 @@ impl EarlyToolScheduler {
 
             self.queued.pop_front();
             self.spawn(slot_index);
-            self.in_flight += 1;
 
             // Sequential 工具独占一个执行周期，不在此轮继续启动其他工具
             if is_sequential {
@@ -110,14 +109,19 @@ impl EarlyToolScheduler {
     }
 
     fn spawn(&mut self, slot_index: usize) {
-        let Some(slot) = self.slots.get(slot_index) else {
-            return;
-        };
+        // 不变式:queued 中的 index 只来自 schedule() 入队时的 `self.slots.len()`,
+        // 且槽位从不删除,index 必合法。取不到槽位属编程错误,panic 比静默返回
+        // 安全——静默返回会漏掉下方 in_flight += 1,使 poll_completed 提前返回
+        // None,剩余队列悬挂。
+        let slot = &self.slots[slot_index];
         let call = slot.prepared.to_executable();
         let tool_registry = std::sync::Arc::clone(&self.tool_registry);
         let runtime_ctx = self.runtime_ctx.clone();
         self.join_set
             .spawn(async move { execute_tool_call(tool_registry, runtime_ctx, call).await });
+        // in_flight 与 join_set 中的任务数一一对应:此处 +1(唯一入口),
+        // poll_completed 减 1,abort_all 归零。
+        self.in_flight += 1;
     }
 
     /// 是否有在途或排队的工具调用。
@@ -191,9 +195,21 @@ pub(crate) struct EarlyExecutionEntry {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::tool::{ExecutionMode, ToolResult};
+    use std::sync::Arc;
+
+    use astrcode_core::{
+        permission::ApprovalMode,
+        tool::{ExecutionMode, LlmModelIds, SessionToolSelection, ToolResult},
+        types::new_session_id,
+    };
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::{
+        permission::{ApprovalHistoryStore, PermissionChain},
+        tool_exec::{ToolCallRuntimeContext, ToolRuntimeCapabilities, TurnToolContext},
+        turn_context::SharedTurnContext,
+    };
 
     /// 辅助：构造仅含逻辑字段（不含 runtime_ctx）的测试用 slots。
     /// 真实的并发/执行行为由集成测试覆盖。
@@ -219,6 +235,51 @@ mod tests {
         }
     }
 
+    /// 构造真实 scheduler 骨架：slots 直接填充（不经过 schedule/spawn）。
+    fn make_scheduler(slots: Vec<EarlyExecutionSlot>) -> EarlyToolScheduler {
+        EarlyToolScheduler {
+            tool_registry: Arc::new(ToolRegistry::new()),
+            runtime_ctx: make_runtime_ctx(),
+            join_set: JoinSet::new(),
+            slots,
+            queued: VecDeque::new(),
+            max_parallel: 1,
+            in_flight: 0,
+        }
+    }
+
+    /// 最小可构造的 runtime 上下文（无 session、无工具），仅满足字段要求——
+    /// into_entries 不触及它。
+    fn make_runtime_ctx() -> ToolCallRuntimeContext {
+        ToolCallRuntimeContext {
+            turn: TurnToolContext {
+                shared: SharedTurnContext {
+                    session_id: new_session_id(),
+                    working_dir: "/workspace".into(),
+                    model_id: "model".into(),
+                    session_store_dir: None,
+                    turn_event_sender: None,
+                    approval_mode: ApprovalMode::default(),
+                    tool_selection: Some(SessionToolSelection::default()),
+                    permission_chain: Arc::new(PermissionChain::new(Vec::new())),
+                    approval_history: Arc::new(ApprovalHistoryStore::default()),
+                },
+                capabilities: ToolRuntimeCapabilities {
+                    file_observation_store: None,
+                    session_ops: None,
+                    llm_models: LlmModelIds {
+                        main: None,
+                        small: None,
+                    },
+                    session_store_dir: None,
+                },
+            },
+            tools: Arc::from([]),
+            tool_result_reader: None,
+            cancellation_token: CancellationToken::new(),
+        }
+    }
+
     fn make_result() -> ToolResult {
         ToolResult {
             content: "ok".to_string(),
@@ -231,18 +292,12 @@ mod tests {
 
     #[test]
     fn into_entries_preserves_order_and_results() {
-        let slots = vec![
+        let scheduler = make_scheduler(vec![
             make_slot("a", ExecutionMode::Parallel, Some(make_result())),
             make_slot("b", ExecutionMode::Parallel, None),
             make_slot("c", ExecutionMode::Sequential, Some(make_result())),
-        ];
-        let entries: Vec<_> = slots
-            .into_iter()
-            .map(|s| EarlyExecutionEntry {
-                prepared: s.prepared,
-                outcome: s.outcome,
-            })
-            .collect();
+        ]);
+        let entries = scheduler.into_entries();
         assert_eq!(entries.len(), 3);
         assert_eq!(entries[0].prepared.call_id, "a");
         assert!(entries[0].outcome.is_some());

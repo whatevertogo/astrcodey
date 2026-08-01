@@ -10,7 +10,10 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as AsyncMutex;
 
-use super::{PermissionContext, PermissionDecision, PermissionPolicy};
+use super::{
+    PermissionContext, PermissionDecision, PermissionPolicy,
+    paths::{extract_tool_paths, path_for_matching},
+};
 
 const APPROVAL_HISTORY_TEMPFILE_PREFIX: &str = ".approval-history.";
 
@@ -251,13 +254,14 @@ impl PermissionPolicy for SessionApprovalHistoryPolicy {
 
     fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
         let inner = self.store.inner.lock();
-        for rule_key in history_lookup_keys(ctx) {
-            if inner.allowed_always.contains(&rule_key) {
+        let keys = history_lookup_keys(ctx);
+        for rule_key in &keys {
+            if inner.allowed_always.contains(rule_key) {
                 return PermissionDecision::Allow;
             }
         }
-        for rule_key in history_lookup_keys(ctx) {
-            if inner.denied_always.contains(&rule_key) {
+        for rule_key in &keys {
+            if inner.denied_always.contains(rule_key) {
                 return PermissionDecision::Deny {
                     reason: format!("Denied by session approval memory ({rule_key})"),
                 };
@@ -267,13 +271,26 @@ impl PermissionPolicy for SessionApprovalHistoryPolicy {
     }
 }
 
-/// 与链上 Ask 策略写入的 rule_key 对齐的候选键（按优先级顺序）。
-fn history_lookup_keys(ctx: &PermissionContext<'_>) -> [String; 3] {
-    [
-        format!("shell:{}", ctx.tool_name),
-        format!("configured:{}", ctx.tool_name),
-        format!("tool:{}", ctx.tool_name),
-    ]
+/// 链上 Ask 策略可能写入的全部 rule_key 候选，外加历史遗留的 `tool:` 前缀。
+///
+/// 覆盖契约：每个 Ask 策略产生的 rule_key 必须能被本函数生成，否则记忆策略会漏判，
+/// 只能靠 prepare.rs 的二次检查兜底。新增 Ask 策略或修改 rule_key 格式时，必须同步
+/// 更新本函数与 `memory_policy_covers_every_ask_rule_key` 测试。
+fn history_lookup_keys(ctx: &PermissionContext<'_>) -> Vec<String> {
+    let mut keys = Vec::with_capacity(8);
+    keys.push(format!("shell:{}", ctx.tool_name));
+    keys.push(format!("configured:{}", ctx.tool_name));
+    keys.push("configured:*".into()); // 通配 tool 规则（configured.rs 中 rule.tool == "*"）
+    keys.push(format!("tool:{}", ctx.tool_name)); // 历史遗留 key，现无策略写入
+    keys.push("git-path".into());
+    keys.push("cwd-outside".into());
+    for path in extract_tool_paths(ctx.tool_input) {
+        keys.push(format!(
+            "sensitive:{}",
+            path_for_matching(&path, ctx.working_dir)
+        ));
+    }
+    keys
 }
 
 #[cfg(test)]
@@ -322,6 +339,118 @@ mod tests {
             tool_selection: None,
         };
         assert_eq!(policy.evaluate(&ctx), PermissionDecision::Allow);
+    }
+
+    /// 每个 Ask 策略实际产生的 rule_key 都必须能被记忆策略生成。
+    #[test]
+    fn memory_policy_covers_every_ask_rule_key() {
+        use astrcode_core::{permission::PermissionRule, tool::access::ResourceAccess};
+
+        use super::super::{
+            configured::{ConfiguredEffect, ConfiguredPolicy},
+            cwd_outside_write_ask::CwdOutsideWriteAskPolicy,
+            git_path_ask::GitPathAskPolicy,
+            sensitive_file_ask::SensitiveFileAskPolicy,
+            shell_broad_access_ask::ShellBroadAccessAskPolicy,
+        };
+
+        fn ctx<'a>(
+            tool_name: &'a str,
+            input: &'a serde_json::Value,
+            accesses: &'a [ResourceAccess],
+        ) -> PermissionContext<'a> {
+            PermissionContext {
+                tool_name,
+                tool_input: input,
+                working_dir: std::path::Path::new("/project"),
+                resource_accesses: accesses,
+                approval_mode: ApprovalMode::Manual,
+                tool_selection: None,
+            }
+        }
+
+        fn assert_ask_key_covered(policy: &dyn PermissionPolicy, ctx: &PermissionContext<'_>) {
+            let decision = policy.evaluate(ctx);
+            let key = match decision {
+                PermissionDecision::Ask {
+                    rule_key: Some(key),
+                    ..
+                } => key,
+                other => panic!("expected Ask with rule_key, got {other:?}"),
+            };
+            assert!(
+                history_lookup_keys(ctx)
+                    .iter()
+                    .any(|candidate| candidate == &key),
+                "memory lookup keys do not cover ask rule_key `{key}`"
+            );
+        }
+
+        let shell_input = serde_json::json!({"command": "ls"});
+        assert_ask_key_covered(&ShellBroadAccessAskPolicy, &ctx("shell", &shell_input, &[]));
+
+        let read_input = serde_json::json!({"path": "a.rs"});
+        let rule = |tool: &str| PermissionRule {
+            tool: tool.into(),
+            pattern: None,
+            path: None,
+        };
+        let configured = ConfiguredPolicy::new(&[rule("read")], ConfiguredEffect::Ask);
+        assert_ask_key_covered(&configured, &ctx("read", &read_input, &[]));
+        let wildcard = ConfiguredPolicy::new(&[rule("*")], ConfiguredEffect::Ask);
+        assert_ask_key_covered(&wildcard, &ctx("read", &read_input, &[]));
+
+        let env_input = serde_json::json!({"path": ".env"});
+        assert_ask_key_covered(
+            &SensitiveFileAskPolicy::new(),
+            &ctx("read", &env_input, &[]),
+        );
+
+        let git_input = serde_json::json!({"path": "repo/.git/config"});
+        assert_ask_key_covered(&GitPathAskPolicy, &ctx("read", &git_input, &[]));
+
+        let all = [ResourceAccess::All];
+        assert_ask_key_covered(&CwdOutsideWriteAskPolicy, &ctx("shell", &shell_input, &all));
+    }
+
+    /// 新补齐的 key 形式在 allow / deny 两个方向都被记忆策略命中。
+    #[tokio::test]
+    async fn memory_policy_honors_new_rule_key_forms() {
+        let cases = [
+            ("sensitive:.env", serde_json::json!({"path": ".env"})),
+            ("git-path", serde_json::json!({"path": "a/.git/config"})),
+            ("cwd-outside", serde_json::json!({})),
+            ("configured:*", serde_json::json!({"path": "a.rs"})),
+        ];
+        for (key, input) in cases {
+            for decision in [ApprovalDecision::AllowAlways, ApprovalDecision::DenyAlways] {
+                let store = Arc::new(ApprovalHistoryStore::default());
+                store.ensure_loaded(None).await.unwrap();
+                let expect_allow = matches!(decision, ApprovalDecision::AllowAlways);
+                store.record_decision(Some(key), decision).await.unwrap();
+                let policy = SessionApprovalHistoryPolicy::new(store);
+                let ctx = PermissionContext {
+                    tool_name: "read",
+                    tool_input: &input,
+                    working_dir: std::path::Path::new("/project"),
+                    resource_accesses: &[],
+                    approval_mode: ApprovalMode::Manual,
+                    tool_selection: None,
+                };
+                if expect_allow {
+                    assert_eq!(
+                        policy.evaluate(&ctx),
+                        PermissionDecision::Allow,
+                        "key `{key}` not honored in allow direction"
+                    );
+                } else {
+                    assert!(
+                        matches!(policy.evaluate(&ctx), PermissionDecision::Deny { .. }),
+                        "key `{key}` not honored in deny direction"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

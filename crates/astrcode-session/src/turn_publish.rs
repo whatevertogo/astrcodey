@@ -57,7 +57,10 @@ impl TurnEvents {
     fn record_ingress_error(&self, error: &TurnError) {
         let mut ingress_error = self.ingress_error.lock();
         if ingress_error.is_none() {
+            // first-wins：后续错误只记日志，避免覆盖首个根因。
             *ingress_error = Some(error.to_string());
+        } else {
+            tracing::warn!(error = %error, "turn event ingress failed again after first error");
         }
     }
 
@@ -73,13 +76,16 @@ impl TurnEvents {
         self.session.read_model().await.map_err(TurnError::from)
     }
 
+    /// 持久化失败统一收尾：发 live 错误事件后返回原始错误。
+    fn durable_failed(publisher: &TurnEvents, error: TurnError) -> TurnError {
+        publisher.live_error(JSON_RPC_INTERNAL_ERROR, error.to_string(), false);
+        error
+    }
+
     pub(crate) async fn durable(&self, payload: DurableEventPayload) -> Result<(), TurnError> {
         match self.persist_durable(payload).await {
             Ok(()) => Ok(()),
-            Err(error) => {
-                self.live_error(JSON_RPC_INTERNAL_ERROR, error.to_string(), false);
-                Err(error)
-            },
+            Err(error) => Err(Self::durable_failed(self, error)),
         }
     }
 
@@ -159,8 +165,7 @@ async fn durable_with_retry(
                     attempt,
                     "turn event ingress durable publish failed"
                 );
-                publisher.live_error(JSON_RPC_INTERNAL_ERROR, error.to_string(), false);
-                return Err(error);
+                return Err(TurnEvents::durable_failed(publisher, error));
             },
         }
     }
@@ -187,6 +192,8 @@ fn durable_publish_error_is_retryable(error: &TurnError) -> bool {
 async fn dispatch_payload(publisher: &TurnEvents, payload: EventPayload) -> Result<(), TurnError> {
     match payload {
         EventPayload::Durable(payload) => durable_with_retry(publisher, payload).await,
+        // 仅 ExtensionEvent 走 required 路径（扩展事件对客户端是强制的）；
+        // 其余 Live 变体默认 best-effort，丢事件是可接受的降级。
         EventPayload::Live(payload @ LiveEventPayload::ExtensionEvent(_)) => {
             publisher.live_required(payload).await
         },
@@ -254,6 +261,7 @@ impl TurnEventIngress {
         };
         let publisher_for_worker = Arc::clone(&publisher);
         let worker = tokio::spawn(async move {
+            tracing::debug!("turn event ingress worker started");
             let mut shutdown_ack = None;
             while let Some(command) = command_rx.recv().await {
                 match command {
@@ -274,6 +282,7 @@ impl TurnEventIngress {
             if let Some(ack) = shutdown_ack {
                 let _ = ack.send(());
             }
+            tracing::debug!("turn event ingress worker stopped");
         });
         (
             sender,

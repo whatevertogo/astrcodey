@@ -19,6 +19,12 @@ impl RuntimeStabilityBudget {
         }
     }
 
+    /// 在运行时变更（如工具目录 revision 变化）后调用：给运行时留出稳定窗口。
+    ///
+    /// 每次调用递增重试计数并按指数退避睡眠，直到 [`DEFAULT_STABILITY_TIMEOUT`]
+    /// 截止；窗口耗尽后返回 `Err(usize)`——错误值携带的是"已进行的重试次数"
+    /// （不是错误码），调用方用它构造 [`crate::SessionError::RuntimeUnstable`]。
+    /// 名字里的 retry 指"是否还能继续重试"：`Ok` = 窗口内，可重试；`Err` = 超时。
     pub(crate) async fn retry_after_change(&mut self) -> Result<(), usize> {
         self.retries += 1;
 

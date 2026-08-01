@@ -27,7 +27,11 @@ use crate::{SessionExtensionPorts, SessionResourceStore};
 
 pub struct SessionRuntimeServices {
     llm: Arc<ArcSwap<ProviderSlot>>,
-    /// 小模型 provider slot。未配置小模型时与主模型相同。
+    /// 小模型 provider slot。
+    ///
+    /// slot 本身不实现"未配置时回退主模型"：该回退发生在调用方
+    /// [`Self::llm_for_model_id`]（按生效配置判定：小模型 id 与主模型 id 相同即
+    /// 视为未配置，走主模型）。这里存放的是 server 构建时传入的 provider 实例。
     small_llm: Arc<ArcSwap<ProviderSlot>>,
     extension_ports: SessionExtensionPorts,
     context_assembler: Arc<dyn ContextAssembler>,
@@ -41,6 +45,10 @@ struct ProviderSlot {
     provider: Arc<dyn LlmProvider>,
 }
 
+/// 主/小模型各持有一份完全相同的 `LiveLlmProvider` 实现，仅绑定的 slot 不同。
+/// 修改本类型时两处（[`SessionRuntimeServices::live_llm`] 与
+/// [`SessionRuntimeServices::live_small_llm`] 返回的实例）必须同步；若后续差异
+/// 增多，应收敛为按 slot 泛型的单一实现。
 struct LiveLlmProvider {
     source: Arc<ArcSwap<ProviderSlot>>,
 }
@@ -126,7 +134,8 @@ impl SessionRuntimeServices {
 
     /// 返回小模型 provider。
     ///
-    /// 未配置小模型时返回的与主模型相同。
+    /// 返回的是 slot 中配置的实例；"未配置小模型时按主模型处理"的回退在
+    /// [`Self::llm_for_model_id`] 中按模型 id 判定，不在本方法内。
     pub fn small_llm(&self) -> Arc<dyn LlmProvider> {
         Arc::clone(&self.small_llm.load_full().provider)
     }

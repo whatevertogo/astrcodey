@@ -83,6 +83,9 @@ impl ToolCallDeduplicator {
     }
 
     /// 在 `commit_tool_results` 完成后调用；释放同 step 等待者并记录跨 step 统计。
+    ///
+    /// `call_id` 未注册是**可达路径**：工具结果可能跨 step 边界迟到提交（early exec 的
+    /// commit 发生在后续 step），此时 `begin_step` 已清空注册表，静默丢弃即可。
     pub(crate) fn finalize_outcome(&mut self, call_id: &str, outcome: &ToolExecutionOutcome) {
         let Some(key) = self.call_key_by_call_id.get(call_id).cloned() else {
             return;
@@ -103,6 +106,9 @@ impl ToolCallDeduplicator {
     }
 
     /// 同 step 重复调用等待 Primary 的最终结果（含 PostToolUse 处理后的内容）。
+    ///
+    /// 三种异常路径（未注册 / Primary 缺失 / 无结果）与 `finalize_outcome` 同理：
+    /// 跨 step 边界迟到会触发，返回 `Failed` 结果作为兜底而非成功结果。
     pub(crate) async fn await_same_step_outcome(
         &self,
         duplicate_call_id: &str,
@@ -135,6 +141,9 @@ impl ToolCallDeduplicator {
     }
 
     /// 每个含工具调用的 step 结束时调用，更新跨 step 连续重复计数。
+    ///
+    /// 注意：只统计本 step **最后一个** call key——模型在 step 内交替调用不同工具时
+    /// （如 A,B,A,B）不会触发连续重复提醒，这是当前实现的已知边界。
     pub(crate) fn end_step(&mut self) {
         for key in self.step_call_keys.drain(..) {
             if self.consecutive_key.as_deref() == Some(key.as_str()) {
@@ -146,7 +155,10 @@ impl ToolCallDeduplicator {
         }
     }
 
-    /// 构建 LLM 请求前检查；连续 3 / 5 / 8 次重复时返回 `<system-reminder>` 文本。
+    /// 构建 LLM 请求前检查；连续 3 / 5 / ≥8 次重复时返回 `<system-reminder>` 文本。
+    ///
+    /// 8 次之后每次 step 都继续提醒：连续重复 9+ 次是最严重的死循环场景，
+    /// 不应在提醒最该生效时静默（历史实现 `_ => None` 会在此处停止提醒）。
     pub(crate) fn check_reminder(&self) -> Option<String> {
         let count = self.consecutive_count;
         let key = self.consecutive_key.as_ref()?;
@@ -160,7 +172,7 @@ impl ToolCallDeduplicator {
                 "<system-reminder>Warning: you have called `{tool_name}` with identical arguments \
                  {count} times in recent steps. Vary your strategy.</system-reminder>"
             ),
-            8 => format!(
+            n if n >= 8 => format!(
                 "<system-reminder>Critical: `{tool_name}` has been invoked {count} consecutive \
                  times with the same arguments: {args_json}. Stop repeating this call and change \
                  your approach.</system-reminder>"
@@ -203,6 +215,8 @@ fn normalize_json_value(value: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// call key 的展示解析。`split_once(':')` 假定工具名不含冒号；
+/// MCP 类命名（`mcp__server:tool`）会被截断，仅影响提醒文案中的工具名展示。
 fn parse_call_key(key: &str) -> (&str, &str) {
     key.split_once(':').unwrap_or((key, "{}"))
 }

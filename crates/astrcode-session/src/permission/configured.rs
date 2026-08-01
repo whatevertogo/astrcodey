@@ -1,21 +1,23 @@
-use astrcode_core::permission::{ApprovalMode, PermissionRule};
+use astrcode_core::permission::PermissionRule;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use super::{
     PermissionContext, PermissionDecision, PermissionPolicy,
-    paths::{extract_tool_paths, path_for_matching},
+    paths::{extract_tool_paths, path_matches_glob},
 };
 
-pub(super) struct ConfiguredDenyPolicy {
+/// 用户配置规则策略：deny / allow / ask 共享同一匹配逻辑，仅决策与优先级不同。
+pub(super) struct ConfiguredPolicy {
     rules: Vec<CompiledRule>,
+    effect: ConfiguredEffect,
 }
 
-pub(super) struct ConfiguredAllowPolicy {
-    rules: Vec<CompiledRule>,
-}
-
-pub(super) struct ConfiguredAskPolicy {
-    rules: Vec<CompiledRule>,
+/// 规则命中后的决策类型；同时决定策略优先级（见 `PermissionPolicy::priority`）。
+#[derive(Clone, Copy)]
+pub(super) enum ConfiguredEffect {
+    Deny,
+    Allow,
+    Ask,
 }
 
 struct CompiledRule {
@@ -24,26 +26,11 @@ struct CompiledRule {
     path_glob: Option<GlobSet>,
 }
 
-impl ConfiguredDenyPolicy {
-    pub(super) fn new(rules: &[PermissionRule]) -> Self {
+impl ConfiguredPolicy {
+    pub(super) fn new(rules: &[PermissionRule], effect: ConfiguredEffect) -> Self {
         Self {
             rules: compile_rules(rules),
-        }
-    }
-}
-
-impl ConfiguredAllowPolicy {
-    pub(super) fn new(rules: &[PermissionRule]) -> Self {
-        Self {
-            rules: compile_rules(rules),
-        }
-    }
-}
-
-impl ConfiguredAskPolicy {
-    pub(super) fn new(rules: &[PermissionRule]) -> Self {
-        Self {
-            rules: compile_rules(rules),
+            effect,
         }
     }
 }
@@ -82,60 +69,34 @@ fn rule_matches(rule: &CompiledRule, ctx: &PermissionContext<'_>) -> bool {
         if paths.is_empty() {
             return false;
         }
-        return paths.iter().any(|path| {
-            let rel = path_for_matching(path, ctx.working_dir);
-            globset.is_match(&rel) || globset.is_match(path.to_string_lossy().as_ref())
-        });
+        return paths
+            .iter()
+            .any(|path| path_matches_glob(path, ctx.working_dir, globset));
     }
     true
 }
 
-impl PermissionPolicy for ConfiguredDenyPolicy {
+impl PermissionPolicy for ConfiguredPolicy {
     fn priority(&self) -> u32 {
-        10
+        match self.effect {
+            ConfiguredEffect::Deny => 10,
+            ConfiguredEffect::Allow => 60,
+            ConfiguredEffect::Ask => 65,
+        }
     }
 
     fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
         for rule in &self.rules {
             if rule_matches(rule, ctx) {
-                return PermissionDecision::Deny {
-                    reason: format!("Denied by user rule for tool `{}`", ctx.tool_name),
-                };
-            }
-        }
-        PermissionDecision::Pass
-    }
-}
-
-impl PermissionPolicy for ConfiguredAllowPolicy {
-    fn priority(&self) -> u32 {
-        60
-    }
-
-    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
-        for rule in &self.rules {
-            if rule_matches(rule, ctx) {
-                return PermissionDecision::Allow;
-            }
-        }
-        PermissionDecision::Pass
-    }
-}
-
-impl PermissionPolicy for ConfiguredAskPolicy {
-    fn priority(&self) -> u32 {
-        65
-    }
-
-    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
-        if ctx.approval_mode == ApprovalMode::Yolo {
-            return PermissionDecision::Pass;
-        }
-        for rule in &self.rules {
-            if rule_matches(rule, ctx) {
-                return PermissionDecision::Ask {
-                    prompt: format!("User rule requires approval for tool `{}`", ctx.tool_name),
-                    rule_key: Some(format!("configured:{}", rule.tool)),
+                return match self.effect {
+                    ConfiguredEffect::Deny => PermissionDecision::Deny {
+                        reason: format!("Denied by user rule for tool `{}`", ctx.tool_name),
+                    },
+                    ConfiguredEffect::Allow => PermissionDecision::Allow,
+                    ConfiguredEffect::Ask => PermissionDecision::Ask {
+                        prompt: format!("User rule requires approval for tool `{}`", ctx.tool_name),
+                        rule_key: Some(format!("configured:{}", rule.tool)),
+                    },
                 };
             }
         }

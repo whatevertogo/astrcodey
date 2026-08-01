@@ -46,10 +46,7 @@ impl ToolCalls {
 
     pub(crate) fn list_definitions_with_prompt_metadata(
         &self,
-    ) -> Vec<(
-        ToolDefinition,
-        Option<astrcode_core::tool::ToolPromptMetadata>,
-    )> {
+    ) -> Vec<crate::tool_registry::DefinitionWithPromptMetadata> {
         self.tool_registry.list_definitions_with_prompt_metadata()
     }
 

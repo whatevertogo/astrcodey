@@ -1,4 +1,4 @@
-use astrcode_core::{permission::ApprovalMode, tool::access::ResourceAccess};
+use astrcode_core::tool::access::ResourceAccess;
 
 use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
@@ -10,9 +10,6 @@ impl PermissionPolicy for CwdOutsideWriteAskPolicy {
     }
 
     fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
-        if ctx.approval_mode == ApprovalMode::Yolo {
-            return PermissionDecision::Pass;
-        }
         if ctx
             .resource_accesses
             .iter()

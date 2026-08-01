@@ -5,6 +5,29 @@ use astrcode_core::llm::{LlmContent, LlmRole};
 use astrcode_session_projection::SessionReadModel;
 
 pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
+    let Some(usage) = &model.context_usage else {
+        return ContextSnapshot::new(
+            model.stats.last_seq,
+            model.system_prompt.text.clone(),
+            model
+                .transcript
+                .messages
+                .iter()
+                .map(|entry| entry.message.clone())
+                .collect(),
+        );
+    };
+    // covered 前缀必须再克隆一份传给 anchor：with_input_token_anchor 只接收 owned
+    // Vec 并在过滤空间重算 covered 计数（provider_visible_messages 含相邻 assistant
+    // 合并等非逐条变换，无法从已过滤的 snapshot.messages 反推），所以前缀消息会
+    // 随全量克隆各出现一次——这是 API 形状决定的必要克隆，不是冗余。
+    let covered_messages = model
+        .transcript
+        .messages
+        .iter()
+        .take(usage.covered_message_count)
+        .map(|entry| entry.message.clone())
+        .collect();
     let snapshot = ContextSnapshot::new(
         model.stats.last_seq,
         model.system_prompt.text.clone(),
@@ -15,16 +38,6 @@ pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
             .map(|entry| entry.message.clone())
             .collect(),
     );
-    let Some(usage) = &model.context_usage else {
-        return snapshot;
-    };
-    let covered_messages = model
-        .transcript
-        .messages
-        .iter()
-        .take(usage.covered_message_count)
-        .map(|entry| entry.message.clone())
-        .collect();
     snapshot.with_input_token_anchor(
         usage.context_tokens,
         usage.model_context_window,

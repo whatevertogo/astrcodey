@@ -73,31 +73,39 @@ pub fn transcript_rewritten_payload(
 /// 构造写入父 session 的 `AgentSessionCompleted` 载荷。
 ///
 /// `child_session_id` 与父 log 中 [`AgentSessionSpawned`] 一致，投影靠它定位 link；
-/// `final_session_id` 是应打开/订阅的 leaf。当前两者恒等——compact 只重写同一 session
-/// 的 transcript，不改变 session id。若未来落地跨 session continuation 使二者不同，
-/// 再在此处引入区分逻辑。
+/// `final_session_id` 是应打开/订阅的 leaf（双 id 恒等关系见 `agent_session_final_ids`）。
 ///
 /// [`AgentSessionSpawned`]: astrcode_core::event::DurableEventPayload::AgentSessionSpawned
 pub fn agent_session_completed_payload(
     child_session_id: SessionId,
     summary: String,
 ) -> DurableEventPayload {
+    let (child_session_id, final_session_id) = agent_session_final_ids(child_session_id);
     DurableEventPayload::AgentSessionCompleted {
-        final_session_id: child_session_id.clone(),
+        final_session_id,
         child_session_id,
         summary,
     }
 }
 
 /// 构造写入父 session 的 `AgentSessionFailed` 载荷（双 session id 语义见
-/// [`agent_session_completed_payload`]）。
+/// `agent_session_final_ids`）。
 pub fn agent_session_failed_payload(
     child_session_id: SessionId,
     error: String,
 ) -> DurableEventPayload {
+    let (child_session_id, final_session_id) = agent_session_final_ids(child_session_id);
     DurableEventPayload::AgentSessionFailed {
-        final_session_id: child_session_id.clone(),
+        final_session_id,
         child_session_id,
         error,
     }
+}
+
+/// 完成/失败载荷共用的双 session id 构造：当前 `final_session_id` 与
+/// `child_session_id` 恒等——compact 只重写同一 session 的 transcript，不改变
+/// session id。若未来落地跨 session continuation 使二者不同，只需改这里。
+fn agent_session_final_ids(child_session_id: SessionId) -> (SessionId, SessionId) {
+    let final_session_id = child_session_id.clone();
+    (child_session_id, final_session_id)
 }

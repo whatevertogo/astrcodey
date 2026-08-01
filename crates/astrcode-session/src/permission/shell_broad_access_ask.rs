@@ -1,5 +1,3 @@
-use astrcode_core::permission::ApprovalMode;
-
 use super::{PermissionContext, PermissionDecision, PermissionPolicy};
 
 pub(super) struct ShellBroadAccessAskPolicy;
@@ -10,9 +8,6 @@ impl PermissionPolicy for ShellBroadAccessAskPolicy {
     }
 
     fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
-        if ctx.approval_mode == ApprovalMode::Yolo {
-            return PermissionDecision::Pass;
-        }
         if matches!(ctx.tool_name, "shell" | "terminal") {
             let cmd = ctx
                 .tool_input
@@ -31,6 +26,8 @@ impl PermissionPolicy for ShellBroadAccessAskPolicy {
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::permission::ApprovalMode;
+
     use super::*;
 
     #[test]
