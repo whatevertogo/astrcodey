@@ -71,7 +71,7 @@ export type ApprovalDecision = ApprovalDecisionDto
 export type ToolApproval = ToolApprovalDto
 
 export function toolCallHasError(status: ToolCallStatus): boolean {
-  return status === 'error' || status === 'failed'
+  return status === 'failed'
 }
 
 export function toolCallIsTerminal(status: ToolCallStatus): boolean {

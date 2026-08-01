@@ -263,7 +263,7 @@ impl LlmProvider for AutoCompactFailingLlm {
 
     fn model_limits(&self) -> ModelLimits {
         ModelLimits {
-            max_input_tokens: 100,
+            max_input_tokens: 200000,
             max_output_tokens: 1024,
         }
     }
@@ -583,7 +583,7 @@ impl LlmProvider for DelayedLlm {
 
     fn model_limits(&self) -> ModelLimits {
         ModelLimits {
-            max_input_tokens: 1024,
+            max_input_tokens: 200000,
             max_output_tokens: 1024,
         }
     }

@@ -32,7 +32,6 @@ struct PostCompactCollectInput {
     source_messages: Vec<LlmMessage>,
     retained_messages: Vec<LlmMessage>,
     working_dir: String,
-    session_id: String,
     system_prompt: Option<String>,
     tools: Vec<ToolDefinition>,
     settings: ContextSettings,
@@ -47,7 +46,6 @@ impl PostCompactEnricher for DefaultPostCompactEnricher {
             source_messages: input.source_messages.to_vec(),
             retained_messages,
             working_dir: input.working_dir.to_string(),
-            session_id: input.session_id.to_string(),
             system_prompt: input.system_prompt.map(str::to_string),
             tools: input.tools.to_vec(),
             settings: input.settings.clone(),
@@ -344,7 +342,6 @@ mod tests {
         let temp = tempfile_dir("post-compact-notes");
         let home = temp.join("home");
         std::env::set_var("ASTRCODE_TEST_HOME", &home);
-        let session_id = "session-post-compact-notes";
         let session_dir = temp.join("session-store");
         let plans = session_dir
             .join("extension_data")
@@ -389,7 +386,6 @@ mod tests {
             source_messages: messages,
             retained_messages: compaction.retained_messages.clone(),
             working_dir: temp.to_str().unwrap().to_string(),
-            session_id: session_id.to_string(),
             system_prompt: Some("# Skills\n\nskill body\n\n# Agents\n\nagent list".to_string()),
             tools,
             settings,

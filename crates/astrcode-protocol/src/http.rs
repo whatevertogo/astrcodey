@@ -475,7 +475,8 @@ impl_wire_values!(ConversationBlockStatusDto {
     Error,
 });
 
-/// 工具调用状态。`Error` 表示工具正常返回了语义错误，
+/// 工具调用生命周期状态。`Complete` 只表示调用正常结束；
+/// 结果是否为错误属结果语义（见块文本/元数据），不体现在生命周期里。
 /// `Failed` 表示执行基础设施失败，`Cancelled` 表示调用被取消。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -483,7 +484,6 @@ impl_wire_values!(ConversationBlockStatusDto {
 pub enum ToolCallStatusDto {
     Streaming,
     Complete,
-    Error,
     Failed,
     Cancelled,
 }
@@ -492,7 +492,6 @@ impl ToolCallStatusDto {
     pub const ALL: &'static [Self] = &[
         Self::Streaming,
         Self::Complete,
-        Self::Error,
         Self::Failed,
         Self::Cancelled,
     ];

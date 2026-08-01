@@ -55,7 +55,7 @@ fn durable_session_update(payload: &DurableEventPayload) -> Option<SessionUpdate
         } => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
             ToolCallId::new(call_id.as_str()),
             completed_tool_fields(
-                result.is_error,
+                ToolCallStatus::Completed,
                 serde_json::json!({
                     "content": result.content,
                     "is_error": result.is_error,
@@ -75,7 +75,7 @@ fn durable_session_update(payload: &DurableEventPayload) -> Option<SessionUpdate
         } => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
             ToolCallId::new(call_id.as_str()),
             completed_tool_fields(
-                true,
+                ToolCallStatus::Failed,
                 serde_json::json!({
                     "error": error,
                     "metadata": metadata,
@@ -92,9 +92,9 @@ fn durable_session_update(payload: &DurableEventPayload) -> Option<SessionUpdate
         } => Some(SessionUpdate::ToolCallUpdate(ToolCallUpdate::new(
             ToolCallId::new(call_id.as_str()),
             completed_tool_fields(
-                true,
+                ToolCallStatus::Failed,
                 serde_json::json!({
-                    "cancelled": true,
+                    ACP_TOOL_CALL_CANCELLED_MARKER: true,
                     "reason": reason,
                     "duration_ms": duration_ms,
                 }),
@@ -147,13 +147,16 @@ fn live_session_update(payload: &LiveEventPayload) -> Option<SessionUpdate> {
     }
 }
 
-fn completed_tool_fields(is_error: bool, raw_output: serde_json::Value) -> ToolCallUpdateFields {
+/// ACP schema 的 `ToolCallStatus` 没有 Cancelled；取消以 `Failed` + raw_output
+/// 中的此标记表达（生命周期之外的结果语义字段不受影响）。
+const ACP_TOOL_CALL_CANCELLED_MARKER: &str = "cancelled";
+
+fn completed_tool_fields(
+    status: ToolCallStatus,
+    raw_output: serde_json::Value,
+) -> ToolCallUpdateFields {
     ToolCallUpdateFields::new()
-        .status(Some(if is_error {
-            ToolCallStatus::Failed
-        } else {
-            ToolCallStatus::Completed
-        }))
+        .status(Some(status))
         .raw_output(Some(raw_output))
 }
 
@@ -166,8 +169,11 @@ fn stream_name(stream: ToolOutputStream) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use astrcode_core::{
         event::{EventPayload, ToolOutputStream},
+        tool::ToolResult,
         types::ToolCallId as CoreToolCallId,
     };
 
@@ -189,5 +195,77 @@ mod tests {
         assert_eq!(update.tool_call_id, ToolCallId::new("call-1"));
         assert_eq!(update.fields.status, Some(ToolCallStatus::InProgress));
         assert!(update.fields.raw_output.is_some());
+    }
+
+    #[test]
+    fn maps_tool_terminal_events_to_lifecycle_statuses() {
+        let cases = [
+            (
+                DurableEventPayload::ToolCallCompleted {
+                    call_id: "call-ok".into(),
+                    tool_name: "probe".into(),
+                    result: ToolResult::success("done"),
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+                ToolCallStatus::Completed,
+                false,
+            ),
+            // `is_error` 是结果语义，不影响生命周期状态。
+            (
+                DurableEventPayload::ToolCallCompleted {
+                    call_id: "call-domain-error".into(),
+                    tool_name: "probe".into(),
+                    result: ToolResult::error("domain error"),
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+                ToolCallStatus::Completed,
+                false,
+            ),
+            (
+                DurableEventPayload::ToolCallFailed {
+                    call_id: "call-failed".into(),
+                    tool_name: "probe".into(),
+                    error: "executor failed".into(),
+                    metadata: BTreeMap::new(),
+                    duration_ms: Some(7),
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+                ToolCallStatus::Failed,
+                false,
+            ),
+            // ACP schema 无 Cancelled：取消以 Failed + raw_output 标记表达。
+            (
+                DurableEventPayload::ToolCallCancelled {
+                    call_id: "call-cancelled".into(),
+                    tool_name: "probe".into(),
+                    reason: "turn aborted".into(),
+                    duration_ms: Some(8),
+                    arguments: String::new(),
+                    arguments_json: None,
+                },
+                ToolCallStatus::Failed,
+                true,
+            ),
+        ];
+
+        for (payload, expected_status, expected_cancelled_marker) in cases {
+            let update = to_session_update(&EventPayload::Durable(payload)).unwrap();
+            let SessionUpdate::ToolCallUpdate(update) = update else {
+                panic!("expected tool call update");
+            };
+            assert_eq!(update.fields.status, Some(expected_status));
+            assert_eq!(
+                update
+                    .fields
+                    .raw_output
+                    .as_ref()
+                    .and_then(|value| value[ACP_TOOL_CALL_CANCELLED_MARKER].as_bool())
+                    .unwrap_or(false),
+                expected_cancelled_marker,
+            );
+        }
     }
 }

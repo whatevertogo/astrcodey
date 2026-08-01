@@ -593,7 +593,8 @@ async fn completed_background_shell_can_be_polled_repeatedly_without_error() {
         .execute(
             serde_json::json!({
                 "shellId": shell_id,
-                "blockUntilMs": 0
+                "blockUntilMs": 0,
+                "maxOutputTokens": 256
             }),
             &ctx,
         )
@@ -604,6 +605,10 @@ async fn completed_background_shell_can_be_polled_repeatedly_without_error() {
     assert_eq!(
         repeated_poll.metadata["hasNewOutput"],
         serde_json::json!(false)
+    );
+    assert_eq!(
+        repeated_poll.metadata["maxOutputTokens"],
+        serde_json::json!(256)
     );
     assert!(
         repeated_poll
@@ -721,12 +726,18 @@ async fn shell_id_and_run_in_background_are_mutually_exclusive() {
 }
 
 #[tokio::test]
-async fn max_output_tokens_requires_shell_id() {
+async fn max_output_tokens_is_hidden_and_ignored_for_foreground_shells() {
     let tool = ShellTool {
         working_dir: std::env::current_dir().expect("cwd should exist"),
         timeout_secs: 30,
     };
-    let result = tool
+    assert!(
+        tool.definition().parameters["properties"]
+            .get("maxOutputTokens")
+            .is_none(),
+        "model-facing schema must not advertise a background-poll tuning parameter"
+    );
+    let (result, discovered) = tool
         .execute(
             serde_json::json!({
                 "command": "echo hi",
@@ -734,10 +745,13 @@ async fn max_output_tokens_requires_shell_id() {
             }),
             &empty_ctx(),
         )
-        .await;
-    let err = result.expect_err("maxOutputTokens without shellId should fail");
+        .await
+        .expect("legacy output hint must not reject a foreground command")
+        .into_parts();
+    assert!(discovered.is_empty());
     assert!(
-        err.to_string().contains("maxOutputTokens can only be used"),
-        "unexpected error: {err}"
+        result.content.contains("hi"),
+        "foreground command should still execute: {}",
+        result.content
     );
 }

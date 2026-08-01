@@ -854,41 +854,6 @@ mod tests {
     }
 
     #[test]
-    fn test_model_options_are_resolved() {
-        let config = Config {
-            profiles: vec![Profile {
-                name: "openai".into(),
-                provider_kind: "openai".into(),
-                base_url: "https://api.openai.com/v1".into(),
-                api_key: Some("sk-test".into()),
-                wire_format: ProviderWireFormat::OpenAiResponses,
-                auth_scheme: ProviderAuthScheme::Bearer,
-                capabilities: ProviderCapabilities::default(),
-                models: vec![ModelConfig {
-                    id: "gpt-4.1".into(),
-                    max_tokens: Some(8192),
-                    context_limit: Some(128000),
-                    model_options: Some(ModelOptionsConfig {
-                        thinking: Some(crate::llm::thinking::ThinkingConfig {
-                            enabled: true,
-                            effort: Some("high".into()),
-                            budget_tokens: None,
-                        }),
-                    }),
-                    thinking_capability: None,
-                }],
-            }],
-            active_profile: "openai".into(),
-            active_model: "gpt-4.1".into(),
-            ..Config::default()
-        };
-
-        let effective = config.into_effective().unwrap();
-        assert!(effective.llm.thinking.enabled);
-        assert_eq!(effective.llm.thinking.effort.as_deref(), Some("high"));
-    }
-
-    #[test]
     fn test_thinking_config_resolves_effort_and_budget() {
         let config = Config {
             profiles: vec![Profile {

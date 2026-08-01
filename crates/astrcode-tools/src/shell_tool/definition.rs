@@ -6,8 +6,6 @@ use std::{
 use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolOrigin};
 use astrcode_extension_sdk::shell::resolve_shell;
 
-use crate::background_shell::{DEFAULT_STATUS_OUTPUT_MAX_TOKENS, MAX_STATUS_OUTPUT_MAX_TOKENS};
-
 pub(super) fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
     static DEFINITIONS: OnceLock<Mutex<HashMap<(String, u64), ToolDefinition>>> = OnceLock::new();
     let shell = resolve_shell();
@@ -42,9 +40,8 @@ pub(super) fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                  (same as `runInBackground`) and can be checked with the returned `shellId`.\n",
                 "- Poll/wait on a background shell with `shellId` and optional `blockUntilMs` (0 \
                  = status only). Each poll returns only output written since the previous poll.\n",
-                "- Background-shell poll output is token-budgeted (default {default_poll_tokens} \
-                 tokens, max {max_poll_tokens}); large increments are shown as head+tail previews \
-                 with omitted-token counts.\n",
+                "- Background-shell poll output is bounded; use `read` on the returned output \
+                 file when the status preview is insufficient.\n",
                 "- A completed background shell remains queryable through `shellId`; repeated \
                  polls return completed status with only newly written output, usually none. Stop \
                  polling once completed unless you need to inspect the output file.\n",
@@ -64,8 +61,6 @@ pub(super) fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
             ),
             shell = shell.name,
             timeout_secs = timeout_secs,
-            default_poll_tokens = DEFAULT_STATUS_OUTPUT_MAX_TOKENS,
-            max_poll_tokens = MAX_STATUS_OUTPUT_MAX_TOKENS,
         ),
         strict: true,
         origin: ToolOrigin::Builtin,
@@ -104,12 +99,6 @@ pub(super) fn shell_tool_definition(timeout_secs: u64) -> ToolDefinition {
                     "type": "integer",
                     "minimum": 0,
                     "description": "With shellId: max ms to wait for new output or completion (0 = immediate status)."
-                },
-                "maxOutputTokens": {
-                    "type": "integer",
-                    "minimum": 256,
-                    "maximum": MAX_STATUS_OUTPUT_MAX_TOKENS,
-                    "description": "With shellId only: token budget for this poll's incremental output preview. Defaults to 10000, matching Codex unified exec. Large increments return a head+tail preview with omittedOutputTokens metadata."
                 }
             },
             "required": [],

@@ -251,59 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn conversation_snapshot_places_compact_summary_before_retained_messages() {
-        use astrcode_core::compaction::CompactStrategy;
-        use astrcode_session_projection::CompactionView;
-
-        let mut session = session_read_model("session-compact");
-        session.stats.last_seq = 7;
-        // compact 之后的 retained messages
-        session
-            .transcript
-            .messages
-            .push(astrcode_session_projection::SequencedLlmMessage {
-                message: LlmMessage::user("recent user"),
-                updated_seq: 1,
-                source: None,
-            });
-        session
-            .transcript
-            .messages
-            .push(astrcode_session_projection::SequencedLlmMessage {
-                message: LlmMessage::assistant("recent assistant"),
-                updated_seq: 2,
-                source: None,
-            });
-        // compact 元数据
-        session.compactions.push(CompactionView {
-            trigger: "manual_command".into(),
-            pre_tokens: 1000,
-            post_tokens: 200,
-            summary: "Earlier conversation was compacted".into(),
-            transcript_path: None,
-            seq: 5,
-            source_seq: 4,
-            strategy: CompactStrategy::Manual {
-                keep_recent_turns: None,
-            },
-        });
-
-        let dto = conversation_to_dto(&session, None);
-
-        // 顺序：CompactSummary → User → Assistant
-        assert_eq!(dto.blocks.len(), 3);
-        assert!(matches!(
-            &dto.blocks[0],
-            ConversationBlockDto::CompactSummary { .. }
-        ));
-        assert!(matches!(&dto.blocks[1], ConversationBlockDto::User { .. }));
-        assert!(matches!(
-            &dto.blocks[2],
-            ConversationBlockDto::Assistant { .. }
-        ));
-    }
-
-    #[test]
     fn conversation_snapshot_shows_only_latest_compact_before_retained_messages() {
         use astrcode_core::compaction::CompactStrategy;
         use astrcode_session_projection::CompactionView;

@@ -7,8 +7,6 @@ export function statusLabel(status: ToolCallStatus): string {
   switch (status) {
     case 'complete':
       return '完成'
-    case 'error':
-      return '结果错误'
     case 'failed':
       return '执行失败'
     case 'cancelled':

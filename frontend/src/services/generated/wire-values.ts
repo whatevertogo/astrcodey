@@ -17,4 +17,4 @@ export const EXTENSION_CAPABILITIES = ["session_control","session_inspect","publ
 export const TOOL_ORIGINS = ["builtin","bundled","extension","sdk"] as const
 export const EXECUTION_MODES = ["sequential","parallel"] as const
 export const BLOCK_STATUSES = ["streaming","complete","error"] as const
-export const TOOL_CALL_STATUSES = ["streaming","complete","error","failed","cancelled"] as const
+export const TOOL_CALL_STATUSES = ["streaming","complete","failed","cancelled"] as const

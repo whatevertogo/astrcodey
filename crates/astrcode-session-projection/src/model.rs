@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashSet};
 
 use astrcode_core::{
     event::{ParentSessionRef, Phase, SessionStarted, SystemPromptSource},
-    llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE},
+    llm::{LlmContent, LlmMessage, LlmRole},
     tool::SessionToolSelection,
     types::*,
     user_input::UserInput,

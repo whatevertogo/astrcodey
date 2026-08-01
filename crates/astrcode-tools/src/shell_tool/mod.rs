@@ -76,7 +76,7 @@ struct ShellArgs {
     /// 与 `shellId` 联用：最多阻塞等待的毫秒数（0 表示立即返回当前状态）。
     #[serde(default, rename = "blockUntilMs")]
     block_until_ms: Option<u64>,
-    /// 与 `shellId` 联用：本次增量输出预览的 token 预算。
+    /// 兼容旧版后台轮询调用；模型 schema 不再暴露这个调优参数。
     #[serde(default, rename = "maxOutputTokens")]
     max_output_tokens: Option<usize>,
 }
@@ -139,12 +139,6 @@ impl Tool for ShellTool {
             )
             .await
             .map(Into::into);
-        }
-
-        if args.max_output_tokens.is_some() {
-            return Err(ToolError::InvalidArguments(
-                "maxOutputTokens can only be used with shellId background-shell polling".into(),
-            ));
         }
 
         if args.run_in_background == Some(true) {
