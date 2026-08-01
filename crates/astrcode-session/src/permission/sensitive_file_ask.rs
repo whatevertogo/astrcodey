@@ -5,10 +5,18 @@ use super::{
     paths::{extract_tool_paths, path_for_matching, path_matches_glob},
 };
 
+// astrcode-extensions::host_router::workspace::is_sensitive_component
+// 有对应的组件匹配定义,修改时需同步。
 const SENSITIVE_PATTERNS: &[&str] = &[
     ".env",
     ".env.*",
     "**/.ssh/**",
+    "**/.git/**",
+    "**/.aws/**",
+    "**/.azure/**",
+    "**/.gcloud/**",
+    "**/.gitconfig",
+    "**/.npmrc",
     "**/credentials*",
     "**/secret*",
     "**/*.pem",
@@ -100,5 +108,33 @@ mod tests {
             policy.evaluate(&ctx),
             PermissionDecision::Ask { .. }
         ));
+    }
+
+    #[test]
+    fn vcs_and_provider_config_paths_trigger_ask() {
+        let policy = SensitiveFileAskPolicy::new();
+        for path in [
+            ".git/HEAD",
+            "sub/.git/config",
+            ".aws/credentials",
+            "sub/.azure/config",
+            ".gcloud/application_default_credentials.json",
+            ".gitconfig",
+            "sub/.npmrc",
+        ] {
+            let input = serde_json::json!({"path": path});
+            let ctx = PermissionContext {
+                tool_name: "read",
+                tool_input: &input,
+                working_dir: std::path::Path::new("/project"),
+                resource_accesses: &[],
+                approval_mode: ApprovalMode::Manual,
+                tool_selection: None,
+            };
+            assert!(
+                matches!(policy.evaluate(&ctx), PermissionDecision::Ask { .. }),
+                "path {path} should trigger ask"
+            );
+        }
     }
 }

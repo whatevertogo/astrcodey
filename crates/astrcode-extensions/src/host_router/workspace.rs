@@ -508,6 +508,8 @@ fn reject_sensitive_path(relative_path: &str) -> Result<(), ErrorPayload> {
     Ok(())
 }
 
+// astrcode-session::permission::sensitive_file_ask::SENSITIVE_PATTERNS 有对应的 glob
+// 定义,修改时需同步。
 fn is_sensitive_component(component: &str) -> bool {
     let name = component.to_ascii_lowercase();
     name == ".git"
