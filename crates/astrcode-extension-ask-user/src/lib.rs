@@ -24,6 +24,8 @@ use serde_json::json;
 
 const EXTENSION_ID: &str = "astrcode-ask-user";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
+/// 用户在此时间内未响应时自动选择推荐选项（无推荐则继续等待到总超时）。
+const AUTO_SELECT_DELAY: Duration = Duration::from_secs(60);
 const CAPABILITIES: &[ExtensionCapability] = &[
     ExtensionCapability::AuthenticatedHttp,
     ExtensionCapability::EmitEvents,
@@ -160,22 +162,41 @@ impl ToolHandler for AskUserToolHandler {
         let pending = PendingQuestion::new(session_id.clone(), call_id.clone(), input);
         let (mut receiver, mut guard) = self.registry.register(pending.clone(), events)?;
 
-        let sleep = tokio::time::sleep(self.timeout);
-        tokio::pin!(sleep);
-        let resolution = tokio::select! {
-            biased;
-            received = &mut receiver => received.map_err(|_| {
-                ExtensionError::Internal("askUser resolution channel closed".into())
-            })?,
-            () = &mut sleep => {
-                match self.registry.timeout(&session_id, &call_id) {
-                    Ok(()) | Err(ResolveError::AlreadyResolved) => {},
-                    Err(error) => return Err(resolve_error_to_extension(error)),
-                }
-                receiver.await.map_err(|_| {
-                    ExtensionError::Internal("askUser timeout resolution channel closed".into())
-                })?
-            },
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let auto_select_deadline = tokio::time::Instant::now() + AUTO_SELECT_DELAY;
+        let auto_select = tokio::time::sleep_until(auto_select_deadline);
+        let timeout_sleep = tokio::time::sleep_until(deadline);
+        tokio::pin!(auto_select);
+        tokio::pin!(timeout_sleep);
+        // 无推荐选项时禁用自动选择分支，仅等待用户响应或总超时。
+        let mut auto_select_enabled = true;
+        let resolution = loop {
+            tokio::select! {
+                biased;
+                received = &mut receiver => break received.map_err(|_| {
+                    ExtensionError::Internal("askUser resolution channel closed".into())
+                })?,
+                () = &mut auto_select, if auto_select_enabled => {
+                    match self.registry.auto_select_recommended(&session_id, &call_id) {
+                        Ok(()) => {
+                            break receiver.await.map_err(|_| {
+                                ExtensionError::Internal("askUser auto-select resolution channel closed".into())
+                            })?;
+                        },
+                        Err(ResolveError::NoRecommended) => auto_select_enabled = false,
+                        Err(error) => return Err(resolve_error_to_extension(error)),
+                    }
+                },
+                () = &mut timeout_sleep => {
+                    match self.registry.timeout(&session_id, &call_id) {
+                        Ok(()) | Err(ResolveError::AlreadyResolved) => {},
+                        Err(error) => return Err(resolve_error_to_extension(error)),
+                    }
+                    break receiver.await.map_err(|_| {
+                        ExtensionError::Internal("askUser timeout resolution channel closed".into())
+                    })?;
+                },
+            }
         };
         guard.disarm();
 
@@ -189,6 +210,14 @@ fn resolution_result(pending: &PendingQuestion, resolution: Resolution) -> ToolR
             serde_json::to_string(&json!({
                 "questions": pending.questions,
                 "answers": answers,
+            }))
+            .unwrap_or_else(|_| "{}".into()),
+        ),
+        Resolution::AutoAnswered(answers) => ToolResult::success(
+            serde_json::to_string(&json!({
+                "questions": pending.questions,
+                "answers": answers,
+                "autoSelected": true,
             }))
             .unwrap_or_else(|_| "{}".into()),
         ),
@@ -288,6 +317,11 @@ fn resolve_http_result(result: Result<(), ResolveError>) -> ExtensionHttpRespons
         Err(ResolveError::InvalidAnswers(message)) => {
             ExtensionHttpResponse::error(400, "invalid_answers", message)
         },
+        Err(ResolveError::NoRecommended) => ExtensionHttpResponse::error(
+            409,
+            "no_recommended",
+            "question has no recommended option",
+        ),
     }
 }
 
@@ -296,6 +330,7 @@ fn resolve_error_to_extension(error: ResolveError) -> ExtensionError {
         ResolveError::NotFound => "askUser question not found".into(),
         ResolveError::AlreadyResolved => "askUser call id was already used".into(),
         ResolveError::InvalidAnswers(message) => message,
+        ResolveError::NoRecommended => "askUser question has no recommended option".into(),
     })
 }
 
@@ -343,11 +378,13 @@ mod tests {
                             label: "A".into(),
                             description: "First".into(),
                             preview: None,
+                            recommended: true,
                         },
                         AskUserOption {
                             label: "B".into(),
                             description: "Second".into(),
                             preview: None,
+                            recommended: false,
                         },
                     ],
                     multi_select: false,
@@ -355,6 +392,61 @@ mod tests {
                 metadata: None,
             },
         )
+    }
+
+    #[tokio::test]
+    async fn registry_auto_selects_recommended_option_on_timeout() {
+        let registry = Arc::new(PendingRegistry::default());
+        let events: Arc<dyn ExtensionEventSink> = Arc::new(RecordingEvents::default());
+
+        let question = pending("session-1", "auto-ok");
+        let (receiver, mut guard) = registry.register(question.clone(), events.clone()).unwrap();
+
+        registry
+            .auto_select_recommended("session-1", "auto-ok")
+            .unwrap();
+        assert!(matches!(
+            receiver.await.unwrap(),
+            Resolution::AutoAnswered(answers) if answers["Which approach?"] == "A"
+        ));
+        guard.disarm();
+        assert!(registry.list("session-1").is_empty());
+
+        // 无推荐选项时返回 NoRecommended 且不改变 pending 状态。
+        let no_recommended = PendingQuestion::new(
+            "session-1".into(),
+            "auto-none".into(),
+            AskUserInput {
+                questions: vec![AskUserQuestion {
+                    question: "Pick one?".into(),
+                    header: "Pick".into(),
+                    options: vec![
+                        AskUserOption {
+                            label: "A".into(),
+                            description: "First".into(),
+                            preview: None,
+                            recommended: false,
+                        },
+                        AskUserOption {
+                            label: "B".into(),
+                            description: "Second".into(),
+                            preview: None,
+                            recommended: false,
+                        },
+                    ],
+                    multi_select: false,
+                }],
+                metadata: None,
+            },
+        );
+        let (_, mut no_recommended_guard) =
+            registry.register(no_recommended, events.clone()).unwrap();
+        assert!(matches!(
+            registry.auto_select_recommended("session-1", "auto-none"),
+            Err(ResolveError::NoRecommended)
+        ));
+        assert_eq!(registry.list("session-1").len(), 1);
+        no_recommended_guard.disarm();
     }
 
     #[tokio::test]

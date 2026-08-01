@@ -2,6 +2,7 @@ import { useAppStore } from '../../store/conversation'
 import MessageList from './MessageList'
 import InputBar from './InputBar'
 import TopBar from './TopBar'
+import { PendingAskUserBanner } from './PendingAskUserBanner'
 import { useKeybindings } from '../../hooks/useKeybindings'
 import { Icon } from '../ui'
 
@@ -26,6 +27,7 @@ export default function ChatView({
   return (
     <div className="flex h-full min-h-0 min-w-0 flex-col overflow-hidden bg-panel-bg">
       <TopBar isSidebarOpen={isSidebarOpen} onToggleSidebar={onToggleSidebar} />
+      <PendingAskUserBanner />
       {showHeroComposer ? (
         <main className="flex min-h-0 flex-1 flex-col bg-panel-bg px-[var(--layout-page-padding-x)] pb-5">
           <div className="flex min-h-0 flex-1 items-center justify-center">

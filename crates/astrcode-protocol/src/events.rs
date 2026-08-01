@@ -69,6 +69,18 @@ pub enum ClientNotification {
         text: String,
     },
 
+    /// ask-user 扩展的跨会话通知：问题挂起或已解决。
+    ///
+    /// 与会话绑定的 conversation 流不同，该通知走全局通道，使
+    /// 前端在查看其他会话时也能发现本会话的待回答问题。
+    AskUserEvent {
+        /// 挂起问题所属的会话。
+        session_id: String,
+        /// `ask_user.pending` 或 `ask_user.resolved`。
+        event_type: String,
+        payload: serde_json::Value,
+    },
+
     /// 扩展注册表发生变化，客户端应清空并重新拉取命令/快捷键/状态栏快照。
     ExtensionRegistryChanged,
 }

@@ -78,6 +78,9 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
             app.needs_extension_refresh = true;
             app.status_text = "Extension registry changed".into();
         },
+        // TUI 订阅 all_notifications，原始 ask_user.pending/resolved live Event
+        // 已经可达；AskUserEvent 是桌面端跨会话广播，这里显式忽略。
+        ClientNotification::AskUserEvent { .. } => {},
     }
 }
 

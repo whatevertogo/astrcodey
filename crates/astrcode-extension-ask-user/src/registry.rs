@@ -16,6 +16,7 @@ pub const RESOLVED_EVENT_TYPE: &str = "ask_user.resolved";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
     Answered(HashMap<String, String>),
+    AutoAnswered(HashMap<String, String>),
     Rejected,
     TimedOut,
     TurnCancelled,
@@ -27,6 +28,7 @@ impl Resolution {
     fn event_name(&self) -> &'static str {
         match self {
             Self::Answered(_) => "answered",
+            Self::AutoAnswered(_) => "auto_answered",
             Self::Rejected => "rejected",
             Self::TimedOut => "timed_out",
             Self::TurnCancelled => "turn_cancelled",
@@ -41,6 +43,8 @@ pub enum ResolveError {
     NotFound,
     AlreadyResolved,
     InvalidAnswers(String),
+    /// 问题没有推荐选项，无法自动选择。
+    NoRecommended,
 }
 
 #[derive(Clone, Hash, PartialEq, Eq)]
@@ -161,6 +165,31 @@ impl PendingRegistry {
 
     pub fn reject(&self, session_id: &str, call_id: &str) -> Result<(), ResolveError> {
         self.resolve(&PendingKey::new(session_id, call_id), Resolution::Rejected)
+    }
+
+    /// 用户超时未响应时自动选择推荐选项。所有问题都必须有推荐选项，
+    /// 否则返回 [`ResolveError::NoRecommended`] 且不改变任何状态。
+    pub fn auto_select_recommended(
+        &self,
+        session_id: &str,
+        call_id: &str,
+    ) -> Result<(), ResolveError> {
+        let key = PendingKey::new(session_id, call_id);
+        let question = {
+            let state = self.state.lock();
+            let Some(entry) = state.pending.get(&key) else {
+                return Err(if state.resolved.contains(&key) {
+                    ResolveError::AlreadyResolved
+                } else {
+                    ResolveError::NotFound
+                });
+            };
+            entry.question.clone()
+        };
+        let Some(answers) = question.auto_recommended_answers() else {
+            return Err(ResolveError::NoRecommended);
+        };
+        self.resolve(&key, Resolution::AutoAnswered(answers))
     }
 
     pub fn timeout(&self, session_id: &str, call_id: &str) -> Result<(), ResolveError> {

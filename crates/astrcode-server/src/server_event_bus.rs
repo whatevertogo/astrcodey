@@ -150,9 +150,35 @@ impl ServerEventBus {
         if route.root_session_id() != &event.session_id && route.forwards_to_root(&event.payload) {
             self.send_to_existing_conversation_fanout(route.root_session_id(), Arc::clone(&event));
         }
+        self.broadcast_ask_user_event(&event);
         let _ = self
             .all_notifications
             .send(ClientNotification::Event((*event).clone()));
+    }
+
+    /// ask-user 的问题状态跨会话可见：pending/resolved 同时广播到全局通道，
+    /// 前端即使不在问题所属会话也能收到通知并提示用户。
+    fn broadcast_ask_user_event(&self, event: &Event) {
+        let EventPayload::Live(LiveEventPayload::ExtensionEvent(extension_event)) = &event.payload
+        else {
+            return;
+        };
+        if extension_event.extension_id != "astrcode-ask-user" {
+            return;
+        }
+        if !matches!(
+            extension_event.event_type.as_str(),
+            "ask_user.pending" | "ask_user.resolved"
+        ) {
+            return;
+        }
+        let _ = self
+            .global_notifications
+            .send(ClientNotification::AskUserEvent {
+                session_id: event.session_id.to_string(),
+                event_type: extension_event.event_type.clone(),
+                payload: extension_event.payload.clone(),
+            });
     }
 
     pub fn detach(&self, session_id: &SessionId) {
@@ -518,5 +544,60 @@ mod tests {
             parent_rx.recv().await,
             Ok(event) if event.session_id == child
         ));
+    }
+
+    #[tokio::test]
+    async fn ask_user_pending_broadcasts_to_global_notifications() {
+        use astrcode_core::event::ExtensionEventData;
+
+        let bus = ServerEventBus::new();
+        let session_id = SessionId::new("session-1");
+        let mut global_rx = bus.subscribe_global_notifications();
+
+        bus.publish_event(live(
+            session_id.clone(),
+            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                extension_id: "astrcode-ask-user".into(),
+                event_type: "ask_user.pending".into(),
+                schema_version: 1,
+                payload: serde_json::json!({ "callId": "call-1" }),
+            }),
+        ));
+        assert!(matches!(
+            global_rx.recv().await,
+            Ok(ClientNotification::AskUserEvent {
+                session_id: broadcast_session,
+                event_type,
+                ..
+            }) if broadcast_session == session_id.to_string()
+                && event_type == "ask_user.pending"
+        ));
+
+        // resolved 同样广播；其他扩展的事件不广播。
+        bus.publish_event(live(
+            session_id.clone(),
+            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                extension_id: "astrcode-ask-user".into(),
+                event_type: "ask_user.resolved".into(),
+                schema_version: 1,
+                payload: serde_json::json!({ "callId": "call-1" }),
+            }),
+        ));
+        assert!(matches!(
+            global_rx.recv().await,
+            Ok(ClientNotification::AskUserEvent { event_type, .. })
+                if event_type == "ask_user.resolved"
+        ));
+
+        bus.publish_event(live(
+            session_id,
+            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                extension_id: "other-extension".into(),
+                event_type: "whatever".into(),
+                schema_version: 1,
+                payload: serde_json::json!({}),
+            }),
+        ));
+        assert!(matches!(global_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

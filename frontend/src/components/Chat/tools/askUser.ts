@@ -14,6 +14,7 @@ export interface AskUserInput {
 export interface AskUserOutput {
   questions: AskUserQuestion[]
   answers: Record<string, string>
+  autoSelected?: boolean
 }
 
 type JsonRecord = Record<string, unknown>
@@ -41,7 +42,12 @@ function parseOption(raw: unknown): AskUserOption | null {
     typeof obj.preview === 'string' && obj.preview.trim()
       ? obj.preview
       : undefined
-  return { label: obj.label, description: obj.description, preview }
+  return {
+    label: obj.label,
+    description: obj.description,
+    preview,
+    recommended: obj.recommended === true,
+  }
 }
 
 function parseQuestion(raw: unknown): AskUserQuestion | null {
@@ -91,7 +97,11 @@ export function parseAskUserOutput(text: string): AskUserOutput | null {
     const questions = arrayValue(obj, 'questions')
       .map(parseQuestion)
       .filter((q): q is AskUserQuestion => q != null)
-    return { questions, answers: Object.fromEntries(answerEntries) }
+    return {
+      questions,
+      answers: Object.fromEntries(answerEntries),
+      autoSelected: obj.autoSelected === true,
+    }
   } catch {
     return null
   }

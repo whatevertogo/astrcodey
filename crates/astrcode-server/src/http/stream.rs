@@ -444,6 +444,18 @@ async fn notification_to_sse_items(
             };
             ConversationDeltaDto::AppendBlock { block }
         },
+        // 跨会话广播的 ask-user 状态：转成与会话流相同的 ExtensionEvent delta，
+        // 前端 applyDelta 的现有解析逻辑可直接复用（payload 自带 sessionId）。
+        ClientNotification::AskUserEvent {
+            session_id: _,
+            event_type,
+            payload,
+        } => ConversationDeltaDto::ExtensionEvent {
+            extension_id: "astrcode-ask-user".into(),
+            event_type,
+            schema_version: 1,
+            payload,
+        },
         _ => return Vec::new(),
     };
 

@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useReducer, useState } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useState } from 'react'
 import { useAppStore } from '../../../store/conversation'
 import { cn } from '../../../lib/utils'
 import {
@@ -12,6 +12,9 @@ import {
   parseAskUserOutput,
   type AskUserQuestion,
 } from './askUser'
+
+/// 与扩展侧 AUTO_SELECT_DELAY 一致：倒计时结束后服务端自动选择推荐项。
+const AUTO_SELECT_SECS = 60
 
 type QuestionState = {
   selectedLabels: string[]
@@ -108,17 +111,30 @@ function answerForQuestion(
   return st.selectedLabels[0] ?? null
 }
 
-function CompletedAnswers({ answers }: { answers: Record<string, string> }) {
+function CompletedAnswers({
+  answers,
+  autoSelected,
+}: {
+  answers: Record<string, string>
+  autoSelected?: boolean
+}) {
   return (
-    <ul className="space-y-2 text-[13px] text-text-secondary">
-      {Object.entries(answers).map(([question, answer]) => (
-        <li key={question}>
-          <span className="text-text-muted">{question}</span>
-          <span className="mx-2 text-text-muted">→</span>
-          <span className="font-medium text-text-primary">{answer}</span>
-        </li>
-      ))}
-    </ul>
+    <div className="space-y-2">
+      {autoSelected && (
+        <p className="text-[12px] text-text-muted">
+          超时未响应，已自动选择推荐选项
+        </p>
+      )}
+      <ul className="space-y-2 text-[13px] text-text-secondary">
+        {Object.entries(answers).map(([question, answer]) => (
+          <li key={question}>
+            <span className="text-text-muted">{question}</span>
+            <span className="mx-2 text-text-muted">→</span>
+            <span className="font-medium text-text-primary">{answer}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 
@@ -157,6 +173,21 @@ export function AskUserCard({
     string
   > | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  const [remainingSecs, setRemainingSecs] = useState(AUTO_SELECT_SECS)
+
+  useEffect(() => {
+    if (!pending) return
+    const startedAt = Date.now()
+    const timer = window.setInterval(() => {
+      const remaining = Math.max(
+        0,
+        AUTO_SELECT_SECS - Math.floor((Date.now() - startedAt) / 1000)
+      )
+      setRemainingSecs(remaining)
+      if (remaining <= 0) window.clearInterval(timer)
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [pending])
 
   const questions = input?.questions ?? completed?.questions ?? []
   const current = questions[state.index]
@@ -218,7 +249,10 @@ export function AskUserCard({
         <p className="text-[12px] font-semibold uppercase tracking-wider text-text-muted">
           {completed?.answers ? '用户回答' : '已提交，等待继续'}
         </p>
-        <CompletedAnswers answers={visibleCompletedAnswers} />
+        <CompletedAnswers
+          answers={visibleCompletedAnswers}
+          autoSelected={completed?.autoSelected}
+        />
       </div>
     )
   }
@@ -238,6 +272,14 @@ export function AskUserCard({
       {questions.length > 1 && (
         <p className="text-[11px] font-semibold uppercase tracking-wider text-text-muted">
           问题 {state.index + 1} / {questions.length}
+        </p>
+      )}
+
+      {pending && (
+        <p className="text-[12px] text-text-muted">
+          {remainingSecs > 0
+            ? `${remainingSecs}s 后自动选择推荐选项`
+            : '正在自动选择推荐选项…'}
         </p>
       )}
 
@@ -276,8 +318,15 @@ export function AskUserCard({
                       : 'border-border bg-surface hover:border-accent/40'
                   )}
                 >
-                  <span className="block text-[13px] font-medium text-text-primary">
-                    {opt.label}
+                  <span className="flex items-center gap-2">
+                    <span className="block text-[13px] font-medium text-text-primary">
+                      {opt.label}
+                    </span>
+                    {opt.recommended && (
+                      <span className="rounded-sm border border-accent/50 bg-accent/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent">
+                        推荐
+                      </span>
+                    )}
                   </span>
                   <span className="mt-0.5 block text-[12px] text-text-muted">
                     {opt.description}

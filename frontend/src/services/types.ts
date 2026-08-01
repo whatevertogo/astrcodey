@@ -214,6 +214,7 @@ export interface AskUserOption {
   label: string
   description: string
   preview?: string
+  recommended?: boolean
 }
 
 export interface AskUserQuestion {

@@ -17,6 +17,9 @@ pub struct AskUserOption {
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// 推荐选项：用户在超时前未响应时自动选择该项。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommended: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +65,16 @@ impl PendingQuestion {
             questions: input.questions,
             metadata: input.metadata,
         }
+    }
+
+    /// 每个问题都有且仅有一个推荐选项时，返回自动选择的答案；否则 `None`。
+    pub fn auto_recommended_answers(&self) -> Option<HashMap<String, String>> {
+        let mut answers = HashMap::new();
+        for question in &self.questions {
+            let recommended = question.options.iter().find(|option| option.recommended)?;
+            answers.insert(question.question.clone(), recommended.label.clone());
+        }
+        Some(answers)
     }
 
     pub fn validate_answers(&self, answers: &HashMap<String, String>) -> Result<(), String> {
@@ -133,6 +146,10 @@ pub fn tool_definition() -> ToolDefinition {
                                         "preview": {
                                             "type": "string",
                                             "description": "Optional markdown preview (single-select only)."
+                                        },
+                                        "recommended": {
+                                            "type": "boolean",
+                                            "description": "Mark this option as the recommended default. When set, the tool auto-selects it if the user does not respond within the timeout."
                                         }
                                     },
                                     "required": ["label", "description"]
@@ -198,6 +215,7 @@ pub fn validate_input(input: &AskUserInput) -> Result<(), String> {
             ));
         }
         let mut seen_labels = HashSet::new();
+        let mut recommended_count = 0usize;
         for option in &question.options {
             if option.label.trim().is_empty() {
                 return Err("option labels must not be empty".into());
@@ -211,6 +229,18 @@ pub fn validate_input(input: &AskUserInput) -> Result<(), String> {
             if question.multi_select && option.preview.is_some() {
                 return Err("preview is not supported for multiSelect questions".into());
             }
+            if option.recommended {
+                recommended_count += 1;
+                if question.multi_select {
+                    return Err("recommended is not supported for multiSelect questions".into());
+                }
+            }
+        }
+        if recommended_count > 1 {
+            return Err(format!(
+                "question '{}' can have at most one recommended option",
+                question.question
+            ));
         }
     }
     Ok(())
