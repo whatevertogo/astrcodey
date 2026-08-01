@@ -110,6 +110,7 @@ const frameState = {
   statusItemRevisions: {},
   pendingAskUserQuestions: {},
   resolvedAskUserCallIds: {},
+  pendingAskUserRefreshInFlight: false,
   askUserEventRevision: 0,
   transientHint: null,
 }
@@ -209,12 +210,13 @@ assert.equal(approvalResolvedPatch.blocks?.[0].approval, undefined)
 const askUserPending = {
   sessionId: 'session-1',
   callId: 'call-1',
+  autoSelectAt: 60_000,
   questions: [
     {
       question: 'Which approach?',
       header: 'Approach',
       options: [
-        { label: 'A', description: 'First' },
+        { label: 'A', description: 'First', recommended: true },
         { label: 'B', description: 'Second' },
       ],
     },
@@ -250,52 +252,144 @@ const askUserPatch = reduceConversationDeltas(frameState, [
     payload: { ...askUserPending, questions: [...askUserPending.questions] },
   },
 ])
-assert.equal(askUserPatch.pendingAskUserQuestions['call-1']?.callId, 'call-1')
 assert.equal(
-  askUserPatch.pendingAskUserQuestions['call-1']?.questions.length,
+  askUserPatch.pendingAskUserQuestions['session-1:call-1']?.callId,
+  'call-1'
+)
+assert.equal(
+  askUserPatch.pendingAskUserQuestions['session-1:call-1']?.questions.length,
   1
 )
-assert.deepEqual(askUserPatch.resolvedAskUserCallIds, {})
+assert.equal(
+  askUserPatch.pendingAskUserQuestions['session-1:call-1']?.questions[0]
+    .options[0].recommended,
+  true,
+  'the recommended flag must survive wire decoding'
+)
+assert.equal(
+  askUserPatch.pendingAskUserQuestions['session-1:call-1']?.autoSelectAt,
+  60_000,
+  'the server auto-select deadline must survive wire decoding'
+)
+assert.equal(askUserPatch.resolvedAskUserCallIds, undefined)
+
+const collisionPatch = reduceConversationDeltas(frameState, [
+  {
+    kind: 'extensionEvent',
+    extensionId: 'astrcode-ask-user',
+    eventType: 'ask_user.pending',
+    schemaVersion: 1,
+    payload: askUserPending,
+  },
+  {
+    kind: 'extensionEvent',
+    extensionId: 'astrcode-ask-user',
+    eventType: 'ask_user.pending',
+    schemaVersion: 1,
+    payload: { ...askUserPending, sessionId: 'session-2' },
+  },
+  {
+    kind: 'extensionEvent',
+    extensionId: 'astrcode-ask-user',
+    eventType: 'ask_user.resolved',
+    schemaVersion: 1,
+    payload: { sessionId: 'session-1', callId: 'call-1' },
+  },
+])
+assert.equal(
+  collisionPatch.pendingAskUserQuestions['session-2:call-1']?.sessionId,
+  'session-2',
+  'a callId reused by another session must not be dropped or mis-resolved'
+)
+assert.equal(
+  collisionPatch.pendingAskUserQuestions['session-1:call-1'],
+  undefined
+)
+
+const resolvedDuringRefreshPatch = reduceConversationDeltas(
+  { ...frameState, pendingAskUserRefreshInFlight: true },
+  [
+    {
+      kind: 'extensionEvent',
+      extensionId: 'astrcode-ask-user',
+      eventType: 'ask_user.resolved',
+      schemaVersion: 1,
+      payload: { sessionId: 'session-1', callId: 'call-during-refresh' },
+    },
+  ]
+)
+assert.deepEqual(resolvedDuringRefreshPatch.resolvedAskUserCallIds, {
+  'session-1:call-during-refresh': 'session-1',
+})
 
 const pendingDuringSnapshot = {
   ...askUserPending,
   callId: 'call-new',
 }
+const otherSessionPending = {
+  ...askUserPending,
+  sessionId: 'session-2',
+  callId: 'call-other',
+}
 assert.deepEqual(
   mergePendingAskUserSnapshot(
-    { 'call-old': askUserPending, 'call-new': pendingDuringSnapshot },
-    { 'call-resolved': true },
+    {
+      'session-1:call-old': askUserPending,
+      'session-1:call-new': pendingDuringSnapshot,
+      'session-2:call-other': otherSessionPending,
+    },
+    { 'session-1:call-resolved': 'session-1' },
     [
       { ...askUserPending, callId: 'call-resolved' },
       { ...askUserPending, callId: 'call-snapshot' },
+      otherSessionPending,
     ],
-    'session-1',
-    new Set(['call-old']),
+    {
+      'session-1:call-old': askUserPending,
+      'session-2:call-other': otherSessionPending,
+    },
     true
   ),
   {
     pendingAskUserQuestions: {
-      'call-snapshot': { ...askUserPending, callId: 'call-snapshot' },
-      'call-new': pendingDuringSnapshot,
+      'session-2:call-other': otherSessionPending,
+      'session-1:call-snapshot': { ...askUserPending, callId: 'call-snapshot' },
+      'session-1:call-new': pendingDuringSnapshot,
     },
-    resolvedAskUserCallIds: { 'call-resolved': true },
+    resolvedAskUserCallIds: {},
   },
-  'REST recovery must preserve a pending SSE event that arrived during the request and ignore resolved tombstones'
+  'global REST recovery must restore every session, preserve newer SSE pending events, and ignore resolved tombstones'
 )
 assert.deepEqual(
   mergePendingAskUserSnapshot(
     {},
-    { 'call-1': true },
+    { 'session-1:call-1': 'session-1' },
     [askUserPending],
-    'session-1',
-    new Set(),
+    {},
     false
   ),
   {
-    pendingAskUserQuestions: { 'call-1': askUserPending },
+    pendingAskUserQuestions: { 'session-1:call-1': askUserPending },
     resolvedAskUserCallIds: {},
   },
   'an authoritative REST snapshot must allow a reused call ID'
+)
+
+const reusedCallIdPending = {
+  ...askUserPending,
+  questions: [{ ...askUserPending.questions[0], question: 'new question' }],
+  autoSelectAt: 90_000,
+}
+assert.deepEqual(
+  mergePendingAskUserSnapshot(
+    { 'session-1:call-1': reusedCallIdPending },
+    {},
+    [askUserPending],
+    { 'session-1:call-1': askUserPending },
+    true
+  ).pendingAskUserQuestions,
+  { 'session-1:call-1': reusedCallIdPending },
+  'a new question that reuses a resolved call ID must replace the stale snapshot entry'
 )
 
 const frameBuffer = new ConversationDeltaFrameBuffer({
@@ -418,6 +512,7 @@ const reducerInitialState = {
   statusItemRevisions: {},
   pendingAskUserQuestions: {},
   resolvedAskUserCallIds: {},
+  pendingAskUserRefreshInFlight: false,
   askUserEventRevision: 0,
   transientHint: null,
 }
@@ -434,6 +529,7 @@ assert.deepEqual(
     statusItemRevisions: undefined,
     pendingAskUserQuestions: undefined,
     resolvedAskUserCallIds: undefined,
+    pendingAskUserRefreshInFlight: undefined,
     askUserEventRevision: undefined,
     transientHint: undefined,
   },
@@ -443,6 +539,7 @@ assert.deepEqual(
     statusItemRevisions: undefined,
     pendingAskUserQuestions: undefined,
     resolvedAskUserCallIds: undefined,
+    pendingAskUserRefreshInFlight: undefined,
     askUserEventRevision: undefined,
     transientHint: undefined,
   },

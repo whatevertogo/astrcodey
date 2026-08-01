@@ -332,7 +332,8 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
             Ok(notification) => match notification {
                 ClientNotification::StatusItemUpdate { .. }
                 | ClientNotification::ExtensionRegistryChanged
-                | ClientNotification::ExtensionCommandResult { .. } => {
+                | ClientNotification::ExtensionCommandResult { .. }
+                | ClientNotification::GlobalExtensionEvent { .. } => {
                     buffered.push(LiveInput::Notification(Box::new(notification)));
                 },
                 _ => {},
@@ -443,6 +444,23 @@ async fn notification_to_sse_items(
                 }
             };
             ConversationDeltaDto::AppendBlock { block }
+        },
+        ClientNotification::GlobalExtensionEvent {
+            session_id,
+            extension_id,
+            event_type,
+            schema_version,
+            payload,
+        } => {
+            if session_id == state.session_id.as_str() {
+                return Vec::new();
+            }
+            ConversationDeltaDto::ExtensionEvent {
+                extension_id,
+                event_type,
+                schema_version,
+                payload,
+            }
         },
         _ => return Vec::new(),
     };

@@ -6,6 +6,7 @@ import {
   buildMessageListItems,
   processSummaryTitle,
 } from '../../target/frontend-assistant-run/assistantRunModel.js'
+import { remainingAutoSelectSeconds } from '../../target/frontend-assistant-run/tools/askUser.js'
 
 function assistant(id, text, status = 'complete', extra = {}) {
   return { kind: 'assistant', id, text, status, ...extra }
@@ -95,7 +96,6 @@ assert.equal(streamingRun.hasStreamingWork, true)
 assert.equal(processSummaryTitle(streamingRun.segments[0]), '处理中')
 
 for (const [status, expectedRunStatus] of [
-  ['error', 'error'],
   ['failed', 'error'],
   ['cancelled', 'complete'],
 ]) {
@@ -154,4 +154,20 @@ assert.equal(
     assistant('a7', '<think-block>hidden</think-block>\nvisible')
   ),
   'visible'
+)
+
+assert.equal(
+  remainingAutoSelectSeconds(
+    {
+      sessionId: 'session-1',
+      callId: 'call-1',
+      questions: [],
+      autoSelectAt: 1_060_000,
+      serverTime: 1_000_000,
+      receivedAtMonotonic: 5_000,
+    },
+    35_000
+  ),
+  30,
+  'countdown must use server-relative time instead of the client wall clock'
 )

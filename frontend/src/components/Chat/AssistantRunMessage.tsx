@@ -9,6 +9,8 @@ import { Icon, type IconName } from '../ui/Icon'
 import { AssistantMessageContent } from './AssistantMessage'
 import { MarkdownContent, StreamingMarkdown } from './MarkdownContent'
 import ToolCallBlock from './ToolCallBlock'
+import { AskUserCard } from './tools/AskUserCard'
+import { toolArgs } from './tools/helpers'
 import {
   buildAssistantRunModel,
   type AssistantLikeBlock,
@@ -199,6 +201,40 @@ function segmentNeedsAttention(segment: AssistantRunSegment) {
   )
 }
 
+function isPendingAskUserEntry(entry: ProcessEntry): boolean {
+  return entry.type === 'tool' && isPendingAskUser(entry.activity.block)
+}
+
+/// 待回答的 askUser 问题：从 process 折叠中提取出来，直接渲染在消息流里。
+/// 完成后（block 不再 streaming）自然回到 process 折叠中显示结果。
+function PendingAskUserPrompts({
+  entries,
+  sessionId,
+}: {
+  entries: Extract<ProcessEntry, { type: 'tool' }>[]
+  sessionId: string | null
+}) {
+  const askUserEntries = entries.filter(isPendingAskUserEntry)
+  if (askUserEntries.length === 0) return null
+
+  return (
+    <div className="space-y-2">
+      {askUserEntries.map((entry) => (
+        <div
+          key={entry.id}
+          className="rounded-lg border border-accent/30 bg-accent/5 p-3"
+        >
+          <AskUserCard
+            block={entry.activity.block}
+            sessionId={sessionId}
+            args={toolArgs(entry.activity.block)}
+          />
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function AssistantRunMessage({ blocks, sessionId }: AssistantRunMessageProps) {
   const runModel = buildAssistantRunModel(blocks)
 
@@ -220,16 +256,29 @@ function AssistantRunMessage({ blocks, sessionId }: AssistantRunMessageProps) {
 
             const nextSegment = runModel.segments[index + 1]
             const forceOpen = segmentNeedsAttention(segment)
+            const pendingAskUser = segment.entries.filter(
+              isPendingAskUserEntry
+            ) as Extract<ProcessEntry, { type: 'tool' }>[]
+            const remainingEntries = segment.entries.filter(
+              (entry) => !isPendingAskUserEntry(entry)
+            )
 
             return (
-              <ProcessSummary
-                key={segment.id}
-                title={processSummaryTitle(segment)}
-                entries={segment.entries}
-                sessionId={sessionId}
-                hasFollowingContent={nextSegment?.type === 'content'}
-                forceOpen={forceOpen}
-              />
+              <div key={segment.id} className="space-y-2">
+                <PendingAskUserPrompts
+                  entries={pendingAskUser}
+                  sessionId={sessionId}
+                />
+                {remainingEntries.length > 0 ? (
+                  <ProcessSummary
+                    title={processSummaryTitle(segment)}
+                    entries={remainingEntries}
+                    sessionId={sessionId}
+                    hasFollowingContent={nextSegment?.type === 'content'}
+                    forceOpen={forceOpen}
+                  />
+                ) : null}
+              </div>
             )
           })}
         </div>

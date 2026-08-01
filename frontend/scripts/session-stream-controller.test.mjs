@@ -3,6 +3,7 @@ import {
   SessionStreamController,
   SessionStreamProtocolError,
 } from '../../target/frontend-session-stream/sessionStreamController.js'
+import { PendingAskUserPoller } from '../../target/frontend-session-stream/pendingAskUserPoller.js'
 
 function deferred() {
   let resolve
@@ -41,6 +42,69 @@ function testScheduler() {
 async function flushMicrotasks() {
   await Promise.resolve()
   await Promise.resolve()
+}
+
+{
+  const timers = []
+  const scheduler = {
+    schedule(callback, delayMs) {
+      const timer = { callback, delayMs, cancelled: false }
+      timers.push(timer)
+      return timer
+    },
+    cancel(timer) {
+      timer.cancelled = true
+    },
+  }
+  const runNext = () => {
+    const timer = timers.find((candidate) => !candidate.cancelled)
+    assert.ok(timer, 'expected a scheduled pending ask-user refresh')
+    timer.cancelled = true
+    timer.callback()
+  }
+  const state = {
+    connectionStatus: 'connected',
+    activeSessionId: null,
+    sessionStreamStatus: 'disconnected',
+    askUserExtensionAvailable: null,
+    pendingAskUserRefreshInFlight: false,
+  }
+  let refreshCount = 0
+  const poller = new PendingAskUserPoller({
+    readState: () => state,
+    refresh: () => {
+      refreshCount += 1
+    },
+    scheduler,
+  })
+
+  poller.start()
+  assert.equal(timers[0].delayMs, 5000)
+  runNext()
+  assert.equal(refreshCount, 1)
+
+  state.activeSessionId = 'session-1'
+  state.sessionStreamStatus = 'connecting'
+  runNext()
+  assert.equal(refreshCount, 2)
+  state.sessionStreamStatus = 'connected'
+  runNext()
+  state.activeSessionId = null
+  state.pendingAskUserRefreshInFlight = true
+  runNext()
+  state.pendingAskUserRefreshInFlight = false
+  state.connectionStatus = 'disconnected'
+  runNext()
+  assert.equal(refreshCount, 2)
+
+  state.connectionStatus = 'connected'
+  runNext()
+  assert.equal(refreshCount, 3)
+  state.askUserExtensionAvailable = false
+  runNext()
+  assert.equal(refreshCount, 3)
+  poller.stop()
+  assert.equal(timers.at(-1).cancelled, true)
 }
 
 {

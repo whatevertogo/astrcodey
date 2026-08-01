@@ -96,12 +96,12 @@ impl OwnedTaskSet {
         self.tracker.wait().await;
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(feature = "testing")]
     pub(crate) fn task_count(&self) -> usize {
         self.tracker.len()
     }
 
-    #[cfg(any(test, feature = "testing"))]
+    #[cfg(feature = "testing")]
     pub(crate) fn is_accepting(&self) -> bool {
         self.accepting.load(Ordering::Acquire)
     }

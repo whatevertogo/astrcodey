@@ -69,6 +69,15 @@ pub enum ClientNotification {
         text: String,
     },
 
+    /// 需要跨会话传播的扩展事件。
+    GlobalExtensionEvent {
+        session_id: String,
+        extension_id: String,
+        event_type: String,
+        schema_version: u32,
+        payload: serde_json::Value,
+    },
+
     /// 扩展注册表发生变化，客户端应清空并重新拉取命令/快捷键/状态栏快照。
     ExtensionRegistryChanged,
 }

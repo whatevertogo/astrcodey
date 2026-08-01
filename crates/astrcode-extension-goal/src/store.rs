@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use astrcode_extension_sdk::hostpaths;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -192,11 +193,10 @@ impl GoalStore {
             )
         })?;
         let path = self.state_path();
-        let tmp = self.root.join(format!("{GOAL_STATE_FILE}.tmp"));
         let json = serde_json::to_string_pretty(state)
             .map_err(|error| format!("serialize goal state: {error}"))?;
-        std::fs::write(&tmp, json).map_err(|error| format!("write goal state: {error}"))?;
-        std::fs::rename(&tmp, &path).map_err(|error| format!("save goal state: {error}"))?;
+        hostpaths::write_file_atomic(&path, &json)
+            .map_err(|error| format!("save goal state: {error}"))?;
         Ok(())
     }
 

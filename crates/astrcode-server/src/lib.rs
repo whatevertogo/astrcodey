@@ -3,7 +3,7 @@
 pub mod acp;
 pub mod bootstrap;
 pub mod http;
-pub mod task_utils;
+mod task_utils;
 pub mod transport;
 
 pub use child_session::{ChildCleanup, ChildSessionCoordinator};

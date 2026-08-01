@@ -9,11 +9,7 @@ use astrcode_core::event::{DurableEventPayload, EventPayload};
 use astrcode_protocol::{commands::*, events::*};
 use tokio::sync::broadcast;
 
-use crate::{
-    error::ClientError,
-    stream::ConversationStream,
-    transport::{ClientTransport, TransportError},
-};
+use crate::{error::ClientError, stream::ConversationStream, transport::ClientTransport};
 
 /// 类型化的 astrcode JSON-RPC 客户端。
 ///
@@ -47,12 +43,21 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     {
         let mut rx = self.transport.subscribe().await?;
         self.transport.send(cmd).await?;
-        while let Ok(notification) = rx.recv().await {
-            if predicate(&notification) {
-                return Ok(notification);
+        loop {
+            match rx.recv().await {
+                Ok(notification) => {
+                    if predicate(&notification) {
+                        return Ok(notification);
+                    }
+                },
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    return Err(ClientError::StreamLagged { skipped });
+                },
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(ClientError::StreamDisconnected);
+                },
             }
         }
-        Err(ClientError::UnexpectedResponse)
     }
 
     /// 创建新的会话。
@@ -187,32 +192,16 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     }
 }
 
-/// 用于测试的模拟传输层。
-///
-/// 所有操作均为空操作（no-op），适用于单元测试中不需要真实服务端的场景。
-pub struct MockTransport;
-
-#[async_trait::async_trait]
-impl ClientTransport for MockTransport {
-    async fn send(&self, _command: &ClientCommand) -> Result<(), TransportError> {
-        Ok(())
-    }
-
-    async fn subscribe(&self) -> Result<broadcast::Receiver<ClientNotification>, TransportError> {
-        let (tx, rx) = broadcast::channel(1);
-        drop(tx);
-        Ok(rx)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::TransportError;
 
     /// A transport that records sent commands and allows injecting responses.
     struct StubTransport {
         sent: std::sync::Mutex<Vec<ClientCommand>>,
         responses: std::sync::Mutex<Vec<ClientNotification>>,
+        response_capacity: usize,
     }
 
     impl StubTransport {
@@ -220,6 +209,15 @@ mod tests {
             Self {
                 sent: std::sync::Mutex::new(Vec::new()),
                 responses: std::sync::Mutex::new(responses),
+                response_capacity: 16,
+            }
+        }
+
+        fn lagging(responses: Vec<ClientNotification>) -> Self {
+            Self {
+                sent: std::sync::Mutex::new(Vec::new()),
+                responses: std::sync::Mutex::new(responses),
+                response_capacity: 1,
             }
         }
     }
@@ -234,7 +232,7 @@ mod tests {
         async fn subscribe(
             &self,
         ) -> Result<broadcast::Receiver<ClientNotification>, TransportError> {
-            let (tx, rx) = broadcast::channel::<ClientNotification>(16);
+            let (tx, rx) = broadcast::channel::<ClientNotification>(self.response_capacity);
             let responses = std::mem::take(&mut *self.responses.lock().expect("responses lock"));
             for notification in responses {
                 let _ = tx.send(notification);
@@ -290,6 +288,18 @@ mod tests {
 
         let err = client.create_session("/tmp").await.unwrap_err();
         assert!(matches!(err, ClientError::Server(msg) if msg.contains("internal error")));
+    }
+
+    #[tokio::test]
+    async fn wait_for_returns_lag_instead_of_waiting_for_a_lost_response() {
+        let transport = StubTransport::lagging(vec![
+            ClientNotification::ExtensionRegistryChanged,
+            ClientNotification::ExtensionRegistryChanged,
+        ]);
+        let client = AstrcodeClient::new(transport);
+
+        let error = client.list_sessions().await.unwrap_err();
+        assert!(matches!(error, ClientError::StreamLagged { skipped: 1 }));
     }
 
     #[tokio::test]

@@ -96,13 +96,22 @@ pub async fn run(
     Ok(())
 }
 
+/// MEMORY.md 不存在视为空;其他 IO 错误(权限、损坏等)必须传播,不能静默当成空记忆。
+fn read_memory_or_empty(store: &MemoryStore) -> std::io::Result<String> {
+    match store.read_memory() {
+        Ok(content) => Ok(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(error),
+    }
+}
+
 fn format_existing_memories(
     user: &MemoryStore,
     project: &MemoryStore,
     max_chars: usize,
 ) -> std::io::Result<String> {
-    let user_md = user.read_memory().unwrap_or_default();
-    let project_md = project.read_memory().unwrap_or_default();
+    let user_md = read_memory_or_empty(user)?;
+    let project_md = read_memory_or_empty(project)?;
     let combined = format!("### User memory\n{user_md}\n\n### Project memory\n{project_md}");
     if combined.len() <= max_chars {
         return Ok(combined);

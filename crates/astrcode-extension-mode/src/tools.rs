@@ -17,12 +17,12 @@ use crate::{
 
 // ─── Tool Names ──────────────────────────────────────────────────────────
 
-pub const SWITCH_MODE_TOOL_NAME: &str = "switchMode";
-pub const UPSERT_PLAN_TOOL_NAME: &str = "upsertSessionPlan";
+pub(crate) const SWITCH_MODE_TOOL_NAME: &str = "switchMode";
+pub(crate) const UPSERT_PLAN_TOOL_NAME: &str = "upsertSessionPlan";
 
 // ─── Tool Definitions ────────────────────────────────────────────────────
 
-pub fn switch_mode_tool_definition() -> ToolDefinition {
+pub(crate) fn switch_mode_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: SWITCH_MODE_TOOL_NAME.into(),
         description: ("Switch agent mode: \"code\" (default, full execution) or \"plan\" \
@@ -60,7 +60,7 @@ pub fn switch_mode_tool_definition() -> ToolDefinition {
     }
 }
 
-pub fn upsert_plan_tool_definition() -> ToolDefinition {
+pub(crate) fn upsert_plan_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: UPSERT_PLAN_TOOL_NAME.into(),
         description: "Create or update the session plan (plan mode only).\n\nProvide full plan \
@@ -116,7 +116,7 @@ fn transition_context(from: &ModeId, to: &ModeId, user_initiated: bool) -> Optio
     }
 }
 
-pub fn handle_switch_mode(
+pub(crate) fn handle_switch_mode(
     arguments: Value,
     mode_root: &Path,
     plan_dir: &Path,
@@ -208,7 +208,7 @@ pub fn handle_switch_mode(
     ))
 }
 
-pub fn handle_upsert_plan(
+pub(crate) fn handle_upsert_plan(
     arguments: Value,
     mode_root: &Path,
     plan_dir: &Path,

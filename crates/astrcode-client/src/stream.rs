@@ -9,6 +9,7 @@ use tokio::sync::broadcast;
 pub struct ConversationStream {
     rx: broadcast::Receiver<ClientNotification>,
     disconnected: bool,
+    lagged: Option<u64>,
 }
 
 impl ConversationStream {
@@ -17,6 +18,7 @@ impl ConversationStream {
         Self {
             rx,
             disconnected: false,
+            lagged: None,
         }
     }
 
@@ -24,13 +26,20 @@ impl ConversationStream {
     ///
     /// - 返回 `Ok(ClientNotification)` 表示成功收到一条事件。
     /// - 返回 `Err(StreamError::Disconnected)` 表示事件流已关闭。
+    /// - 返回 `Err(StreamError::Lagged)` 表示事件流不再完整，调用方应重新同步状态。
     pub async fn recv(&mut self) -> Result<ClientNotification, StreamError> {
+        if let Some(skipped) = self.lagged.take() {
+            return Err(StreamError::Lagged { skipped });
+        }
         if self.disconnected {
             return Err(StreamError::Disconnected);
         }
         match self.rx.recv().await {
             Ok(notification) => Ok(notification),
-            Err(_) => {
+            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                Err(StreamError::Lagged { skipped })
+            },
+            Err(broadcast::error::RecvError::Closed) => {
                 self.disconnected = true;
                 Err(StreamError::Disconnected)
             },
@@ -47,11 +56,12 @@ impl ConversationStream {
             match self.rx.try_recv() {
                 Ok(event) => items.push(event),
                 Err(broadcast::error::TryRecvError::Empty) => break,
-                Err(
-                    broadcast::error::TryRecvError::Closed
-                    | broadcast::error::TryRecvError::Lagged(_),
-                ) => {
+                Err(broadcast::error::TryRecvError::Closed) => {
                     self.disconnected = true;
+                    break;
+                },
+                Err(broadcast::error::TryRecvError::Lagged(skipped)) => {
+                    self.lagged = Some(skipped);
                     break;
                 },
             }
@@ -66,6 +76,9 @@ pub enum StreamError {
     /// 事件流连接已断开，无法继续接收。
     #[error("Stream disconnected")]
     Disconnected,
+    /// 消费者落后于广播缓冲区，部分通知已丢失。
+    #[error("Stream lagged and skipped {skipped} notifications")]
+    Lagged { skipped: u64 },
 }
 
 #[cfg(test)]
@@ -124,7 +137,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_stream_lag_disconnects_during_drain() {
+    async fn conversation_stream_reports_lag_after_drain() {
         let (tx, rx) = broadcast::channel::<ClientNotification>(1);
         let mut stream = ConversationStream::new(rx);
 
@@ -136,7 +149,23 @@ mod tests {
         assert!(stream.drain_pending().is_empty());
         assert!(matches!(
             stream.recv().await,
-            Err(StreamError::Disconnected)
+            Err(StreamError::Lagged { skipped: 1 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn conversation_stream_recv_reports_lag() {
+        let (tx, rx) = broadcast::channel::<ClientNotification>(1);
+        let mut stream = ConversationStream::new(rx);
+
+        tx.send(ClientNotification::ExtensionRegistryChanged)
+            .unwrap();
+        tx.send(ClientNotification::ExtensionRegistryChanged)
+            .unwrap();
+
+        assert!(matches!(
+            stream.recv().await,
+            Err(StreamError::Lagged { skipped: 1 })
         ));
     }
 }

@@ -78,6 +78,8 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
             app.needs_extension_refresh = true;
             app.status_text = "Extension registry changed".into();
         },
+        // TUI 已从 all_notifications 收到原始扩展事件，无需处理桌面端全局副本。
+        ClientNotification::GlobalExtensionEvent { .. } => {},
     }
 }
 
@@ -333,7 +335,8 @@ fn apply_event(app: &mut App, event: &Event) {
                 if let Some(renderer) = app.tool_renderers.get(tool_name) {
                     let ctx = ToolRenderCtx { tool_name };
                     if let Some(spec) = renderer.render_result(result, &ctx) {
-                        let fallback = tool_completion_summary(tool_name, result);
+                        let fallback =
+                            tool_completion_summary(tool_name, result, &MAIN_SUMMARY_FORMAT);
                         app.push_rendered_message(
                             MessageRole::Tool,
                             tool_display_name(tool_name).to_string(),
@@ -348,7 +351,7 @@ fn apply_event(app: &mut App, event: &Event) {
                     }
                 }
                 // Fallback: compact one-line summary (codex style).
-                let summary = tool_completion_summary(tool_name, result);
+                let summary = tool_completion_summary(tool_name, result, &MAIN_SUMMARY_FORMAT);
                 app.push_message(
                     MessageRole::Tool,
                     tool_display_name(tool_name).to_string(),
@@ -562,7 +565,7 @@ fn apply_child_session_event(app: &mut App, call_id: &str, event: &Event) {
             tool_name, result, ..
         }) => {
             if let Some(tracker) = app.child_agents.get_mut(call_id) {
-                let summary = child_tool_summary(tool_name, result);
+                let summary = tool_completion_summary(tool_name, result, &CHILD_SUMMARY_FORMAT);
                 tracker.on_tool_completed(
                     tool_name,
                     &summary,
@@ -611,8 +614,54 @@ fn apply_child_session_event(app: &mut App, call_id: &str, event: &Event) {
     }
 }
 
-/// 子 agent 工具完成的简短摘要。
-fn child_tool_summary(tool_name: &str, result: &astrcode_core::tool::ToolResult) -> String {
+/// tool_completion_summary 的格式化参数，区分主会话与子 agent 两种展示风格。
+struct ToolSummaryFormat {
+    /// 摘要前缀（主会话 "● "，子 agent 无）
+    prefix: &'static str,
+    /// shell 单行输出的截断长度
+    shell_preview_max: usize,
+    /// 默认分支单行输出的截断长度
+    fallback_preview_max: usize,
+    /// shell 无输出时的文案
+    shell_empty: &'static str,
+    /// 无实质内容时的完成文案
+    done: &'static str,
+    /// read 分支的动词前缀
+    read_verb: &'static str,
+    /// glob 分支的动词前缀
+    glob_verb: &'static str,
+    /// shell 多行输出计数是否加括号
+    shell_lines_parens: bool,
+}
+
+const MAIN_SUMMARY_FORMAT: ToolSummaryFormat = ToolSummaryFormat {
+    prefix: "● ",
+    shell_preview_max: 80,
+    fallback_preview_max: 60,
+    shell_empty: "Ran (no output)",
+    done: "Done",
+    read_verb: "Read ",
+    glob_verb: "Found ",
+    shell_lines_parens: true,
+};
+
+const CHILD_SUMMARY_FORMAT: ToolSummaryFormat = ToolSummaryFormat {
+    prefix: "",
+    shell_preview_max: 50,
+    fallback_preview_max: 50,
+    shell_empty: "done",
+    done: "done",
+    read_verb: "",
+    glob_verb: "",
+    shell_lines_parens: false,
+};
+
+/// 工具完成的单行摘要；主会话调用点已分流 is_error，错误分支仅子 agent 路径触发。
+fn tool_completion_summary(
+    tool_name: &str,
+    result: &astrcode_core::tool::ToolResult,
+    fmt: &ToolSummaryFormat,
+) -> String {
     let content = result.content.trim();
     if result.is_error {
         return truncate_first_line(result.error.as_deref().unwrap_or(content), 60);
@@ -621,34 +670,51 @@ fn child_tool_summary(tool_name: &str, result: &astrcode_core::tool::ToolResult)
         "shell" => {
             let line_count = content.lines().count();
             if line_count <= 1 && !content.is_empty() {
-                truncate_first_line(content, 50)
+                format!(
+                    "{}{}",
+                    fmt.prefix,
+                    truncate_first_line(content, fmt.shell_preview_max)
+                )
             } else if line_count > 1 {
-                format!("{line_count} lines of output")
+                if fmt.shell_lines_parens {
+                    format!("{}({line_count} lines of output)", fmt.prefix)
+                } else {
+                    format!("{line_count} lines of output")
+                }
             } else {
-                "done".into()
+                format!("{}{}", fmt.prefix, fmt.shell_empty)
             }
         },
         "read" => {
-            if content.is_empty() {
-                "done".into()
+            if content.is_empty() && fmt.read_verb.is_empty() {
+                format!("{}{}", fmt.prefix, fmt.done)
             } else {
-                format!("{} line(s)", content.lines().count())
+                format!(
+                    "{}{}{} line(s)",
+                    fmt.prefix,
+                    fmt.read_verb,
+                    content.lines().count().max(1)
+                )
             }
         },
-        "write" | "edit" | "patch" => "done".into(),
+        "write" | "edit" | "patch" => format!("{}{}", fmt.prefix, fmt.done),
         "glob" => {
             let count = content.lines().filter(|l| !l.trim().is_empty()).count();
-            format!("{count} file(s)")
+            format!("{}{}{count} file(s)", fmt.prefix, fmt.glob_verb)
         },
         "grep" => {
             let count = content.lines().filter(|l| !l.trim().is_empty()).count();
-            format!("{count} match(es)")
+            format!("{}{count} match(es)", fmt.prefix)
         },
         _ => {
             if content.is_empty() {
-                "done".into()
+                format!("{}{}", fmt.prefix, fmt.done)
             } else {
-                truncate_first_line(content, 50)
+                format!(
+                    "{}{}",
+                    fmt.prefix,
+                    truncate_first_line(content, fmt.fallback_preview_max)
+                )
             }
         },
     }
@@ -839,42 +905,6 @@ fn tool_call_summary(tool_name: &str, arguments: Option<&serde_json::Value>) -> 
             format!("Task: {desc}")
         },
         _ => format!("{action}..."),
-    }
-}
-
-/// Codex-style one-line tool completion summary for scrollback.
-fn tool_completion_summary(tool_name: &str, result: &astrcode_core::tool::ToolResult) -> String {
-    let content = result.content.trim();
-    match tool_name {
-        "shell" => {
-            if content.is_empty() {
-                "● Ran (no output)".into()
-            } else {
-                let line_count = content.lines().count();
-                if line_count <= 1 {
-                    format!("● {}", truncate_first_line(content, 80))
-                } else {
-                    format!("● ({line_count} lines of output)")
-                }
-            }
-        },
-        "read" => format!("● Read {} line(s)", content.lines().count().max(1)),
-        "write" | "edit" | "patch" => "● Done".into(),
-        "glob" => {
-            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
-            format!("● Found {count} file(s)")
-        },
-        "grep" => {
-            let count = content.lines().filter(|l| !l.trim().is_empty()).count();
-            format!("● {count} match(es)")
-        },
-        _ => {
-            if content.is_empty() {
-                "● Done".into()
-            } else {
-                format!("● {}", truncate_first_line(content, 60))
-            }
-        },
     }
 }
 

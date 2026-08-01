@@ -2,6 +2,7 @@ import type {
   AskUserOption,
   AskUserQuestion,
   ConversationBlock,
+  PendingAskUserQuestion,
 } from '../../../services/types'
 
 export type { AskUserOption, AskUserQuestion } from '../../../services/types'
@@ -14,6 +15,21 @@ export interface AskUserInput {
 export interface AskUserOutput {
   questions: AskUserQuestion[]
   answers: Record<string, string>
+  autoSelected?: boolean
+}
+
+export function remainingAutoSelectSeconds(
+  pending: PendingAskUserQuestion,
+  monotonicNow: number
+): number | null {
+  if (pending.autoSelectAt === undefined || pending.serverTime === undefined) {
+    return null
+  }
+  const elapsed = Math.max(0, monotonicNow - pending.receivedAtMonotonic)
+  return Math.max(
+    0,
+    Math.ceil((pending.autoSelectAt - pending.serverTime - elapsed) / 1000)
+  )
 }
 
 type JsonRecord = Record<string, unknown>
@@ -41,7 +57,12 @@ function parseOption(raw: unknown): AskUserOption | null {
     typeof obj.preview === 'string' && obj.preview.trim()
       ? obj.preview
       : undefined
-  return { label: obj.label, description: obj.description, preview }
+  return {
+    label: obj.label,
+    description: obj.description,
+    preview,
+    recommended: obj.recommended === true,
+  }
 }
 
 function parseQuestion(raw: unknown): AskUserQuestion | null {
@@ -91,7 +112,11 @@ export function parseAskUserOutput(text: string): AskUserOutput | null {
     const questions = arrayValue(obj, 'questions')
       .map(parseQuestion)
       .filter((q): q is AskUserQuestion => q != null)
-    return { questions, answers: Object.fromEntries(answerEntries) }
+    return {
+      questions,
+      answers: Object.fromEntries(answerEntries),
+      autoSelected: obj.autoSelected === true,
+    }
   } catch {
     return null
   }

@@ -214,6 +214,7 @@ export interface AskUserOption {
   label: string
   description: string
   preview?: string
+  recommended?: boolean
 }
 
 export interface AskUserQuestion {
@@ -228,6 +229,9 @@ export interface PendingAskUserQuestion {
   callId: string
   questions: AskUserQuestion[]
   metadata?: { source?: string }
+  autoSelectAt?: number
+  serverTime?: number
+  receivedAtMonotonic: number
 }
 
 export interface PendingAskUserQuestionsResponse {

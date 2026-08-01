@@ -4,6 +4,7 @@
 //! host's internal crates. The runtime remains responsible for adapting these
 //! contracts to session, storage, and provider implementations.
 
+pub mod discovery;
 pub mod extension;
 pub mod frontmatter;
 pub mod hostpaths;

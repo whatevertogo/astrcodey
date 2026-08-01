@@ -1,27 +1,37 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use astrcode_extension_sdk::tool::{ExecutionMode, ToolDefinition, ToolOrigin};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-pub const ASK_USER_TOOL_NAME: &str = "askUser";
-pub const ASK_USER_HEADER_MAX_LEN: usize = 12;
-pub const ASK_USER_MAX_QUESTIONS: usize = 4;
-pub const ASK_USER_MIN_OPTIONS: usize = 2;
-pub const ASK_USER_MAX_OPTIONS: usize = 4;
+pub(crate) const ASK_USER_TOOL_NAME: &str = "askUser";
+pub(crate) const ASK_USER_HEADER_MAX_LEN: usize = 12;
+pub(crate) const ASK_USER_MAX_QUESTIONS: usize = 4;
+pub(crate) const ASK_USER_MIN_OPTIONS: usize = 2;
+pub(crate) const ASK_USER_MAX_OPTIONS: usize = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AskUserOption {
+pub(crate) struct AskUserOption {
     pub label: String,
     pub description: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// 推荐选项：用户在超时前未响应时自动选择该项。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub recommended: bool,
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AskUserQuestion {
+pub(crate) struct AskUserQuestion {
     pub question: String,
     pub header: String,
     pub options: Vec<AskUserOption>,
@@ -31,14 +41,14 @@ pub struct AskUserQuestion {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AskUserMetadata {
+pub(crate) struct AskUserMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AskUserInput {
+pub(crate) struct AskUserInput {
     pub questions: Vec<AskUserQuestion>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<AskUserMetadata>,
@@ -46,25 +56,63 @@ pub struct AskUserInput {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct PendingQuestion {
+pub(crate) struct PendingQuestion {
     pub session_id: String,
     pub call_id: String,
     pub questions: Vec<AskUserQuestion>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<AskUserMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_select_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_time: Option<u64>,
 }
 
 impl PendingQuestion {
-    pub fn new(session_id: String, call_id: String, input: AskUserInput) -> Self {
+    pub(crate) fn new(
+        session_id: String,
+        call_id: String,
+        input: AskUserInput,
+        auto_select_at: Option<u64>,
+    ) -> Self {
         Self {
             session_id,
             call_id,
             questions: input.questions,
             metadata: input.metadata,
+            auto_select_at,
+            server_time: unix_time_millis(),
         }
     }
 
-    pub fn validate_answers(&self, answers: &HashMap<String, String>) -> Result<(), String> {
+    pub(crate) fn with_current_server_time(&self) -> Self {
+        let mut question = self.clone();
+        question.server_time = unix_time_millis();
+        question
+    }
+
+    /// 每个问题至少有一个推荐选项时返回自动选择的答案；否则 `None`。
+    pub(crate) fn auto_recommended_answers(&self) -> Option<HashMap<String, String>> {
+        let mut answers = HashMap::new();
+        for question in &self.questions {
+            let recommended = question
+                .options
+                .iter()
+                .filter(|option| option.recommended)
+                .map(|option| option.label.as_str())
+                .collect::<Vec<_>>();
+            let first = recommended.first()?;
+            let answer = if question.multi_select {
+                recommended.join(", ")
+            } else {
+                (*first).to_owned()
+            };
+            answers.insert(question.question.clone(), answer);
+        }
+        Some(answers)
+    }
+
+    pub(crate) fn validate_answers(&self, answers: &HashMap<String, String>) -> Result<(), String> {
         let expected = self
             .questions
             .iter()
@@ -81,13 +129,22 @@ impl PendingQuestion {
     }
 }
 
+fn unix_time_millis() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .try_into()
+        .ok()
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AnswerRequest {
+pub(crate) struct AnswerRequest {
     pub answers: HashMap<String, String>,
 }
 
-pub fn tool_definition() -> ToolDefinition {
+pub(crate) fn tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: ASK_USER_TOOL_NAME.into(),
         description: ("Ask the user one to four multiple-choice questions to clarify \
@@ -133,6 +190,10 @@ pub fn tool_definition() -> ToolDefinition {
                                         "preview": {
                                             "type": "string",
                                             "description": "Optional markdown preview (single-select only)."
+                                        },
+                                        "recommended": {
+                                            "type": "boolean",
+                                            "description": "Mark this option as a recommended default. On timeout, single-select questions use the first marked option; multi-select questions use every marked option."
                                         }
                                     },
                                     "required": ["label", "description"]
@@ -162,7 +223,7 @@ pub fn tool_definition() -> ToolDefinition {
     }
 }
 
-pub fn validate_input(input: &AskUserInput) -> Result<(), String> {
+pub(crate) fn validate_input(input: &AskUserInput) -> Result<(), String> {
     if input.questions.is_empty() {
         return Err("questions must contain at least one item".into());
     }

@@ -36,9 +36,8 @@ use astrcode_extension_sdk::{
 };
 use serde_json::json;
 
-pub use crate::catalog::{ModeCatalog, ModeId as ExportedModeId, ModeSpec};
 use crate::{
-    catalog::{ModeId, builtin_catalog},
+    catalog::{ModeCatalog, ModeId, builtin_catalog},
     tools::{
         SWITCH_MODE_TOOL_NAME, UPSERT_PLAN_TOOL_NAME, handle_switch_mode, handle_upsert_plan,
         switch_mode_tool_definition, upsert_plan_tool_definition,

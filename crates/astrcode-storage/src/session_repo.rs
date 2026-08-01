@@ -780,7 +780,10 @@ impl SessionStore for FileSystemSessionRepository {
                     .join(".recycled")
                     .join(extension_name.as_ref());
                 tokio::fs::create_dir_all(&recycled).await?;
-                let dest = recycled.join(dir.file_name().unwrap_or_default());
+                let dir_name = dir
+                    .file_name()
+                    .ok_or_else(|| StorageError::InvalidId("unexpected session dir path".into()))?;
+                let dest = recycled.join(dir_name);
                 tokio::fs::rename(&dir, &dest).await?;
                 return Ok(());
             }
@@ -807,7 +810,7 @@ impl SessionStore for FileSystemSessionRepository {
             .ok_or_else(|| StorageError::InvalidId("unexpected recycled path".into()))?;
         let extension_name = extension_dir
             .file_name()
-            .unwrap_or_default()
+            .ok_or_else(|| StorageError::InvalidId("unexpected recycled path".into()))?
             .to_string_lossy()
             .to_string();
         let recycled_root = extension_dir

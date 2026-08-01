@@ -5,13 +5,14 @@
 //! `SKILL.md` content only when a matching task appears.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::Arc,
 };
 
 use astrcode_extension_sdk::{
+    discovery::DiscoveryCache,
     extension::{
         CommandContext, CommandDiscoveryHandler, CommandHandler, Extension, ExtensionCapability,
         ExtensionCommandResult, ExtensionError, PromptBuildContext, PromptBuildHandler,
@@ -23,7 +24,7 @@ use astrcode_extension_sdk::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub const SKILL_TOOL_NAME: &str = "Skill";
+const SKILL_TOOL_NAME: &str = "Skill";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const MAX_INDEX_CHARS: usize = 8_000;
 const MAX_DESCRIPTION_CHARS: usize = 250;
@@ -66,32 +67,19 @@ impl Extension for SkillExtension {
 
 /// Skill 发现结果缓存，按 working_dir 缓存。
 struct SkillShared {
-    cache: Mutex<HashMap<String, Vec<SkillDefinition>>>,
+    cache: DiscoveryCache<Vec<SkillDefinition>>,
 }
 
 impl SkillShared {
     fn new() -> Self {
         Self {
-            cache: Mutex::new(HashMap::new()),
+            cache: DiscoveryCache::new(),
         }
     }
 
     fn get_or_discover(&self, working_dir: &str) -> Vec<SkillDefinition> {
-        if let Some(skills) = self
-            .cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(working_dir)
-        {
-            return skills.clone();
-        }
-        let skills = discover_skills(working_dir);
         self.cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(working_dir.to_string())
-            .or_insert_with(|| skills.clone());
-        skills
+            .get_or_discover(working_dir, || discover_skills(working_dir))
     }
 }
 

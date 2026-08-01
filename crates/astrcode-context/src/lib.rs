@@ -5,7 +5,6 @@
 //! - `context_assembler`：上下文窗口裁剪
 //! - `compaction`：LLM 驱动的摘要压缩
 //! - `token_budget`：token 估算
-//! - `contribution`：扩展动态贡献类型
 
 pub use astrcode_core::config::ContextSettings;
 pub use context::{
@@ -20,7 +19,6 @@ pub use context_assembler::{ContextAssembler, ContextPrepareInput, PreparedConte
 pub mod compaction;
 mod context;
 pub mod context_assembler;
-pub mod contribution;
 pub mod post_compact_enricher;
 pub mod prompt_engine;
 pub mod token_budget;

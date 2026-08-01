@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use astrcode_extension_sdk::hostpaths;
 use serde::{Deserialize, Serialize};
 
 /// Per-session mode state persisted to disk.
@@ -22,7 +23,7 @@ pub(crate) struct ModeState {
 }
 
 impl ModeState {
-    pub fn initial() -> Self {
+    pub(crate) fn initial() -> Self {
         Self {
             current_mode: "code".into(),
             previous_mode: None,
@@ -36,16 +37,16 @@ const MODE_STATE_FILE: &str = "mode-state.json";
 const PLAN_FILE: &str = "plan.md";
 
 /// Compute the mode state storage root from a known session base directory.
-pub fn mode_dir_from_base(base: &Path) -> PathBuf {
+pub(crate) fn mode_dir_from_base(base: &Path) -> PathBuf {
     base.join("mode")
 }
 
 /// Compute the plan artifact directory from a known session base directory.
-pub fn plan_dir_from_base(base: &Path) -> PathBuf {
+pub(crate) fn plan_dir_from_base(base: &Path) -> PathBuf {
     base.join("plan")
 }
 
-pub fn load_mode_state(root: &Path) -> Result<ModeState, String> {
+pub(crate) fn load_mode_state(root: &Path) -> Result<ModeState, String> {
     let path = root.join(MODE_STATE_FILE);
     match std::fs::read_to_string(&path) {
         Ok(content) => serde_json::from_str(&content).map_err(|e| format!("parse mode state: {e}")),
@@ -54,22 +55,20 @@ pub fn load_mode_state(root: &Path) -> Result<ModeState, String> {
     }
 }
 
-pub fn save_mode_state(root: &Path, state: &ModeState) -> Result<(), String> {
+pub(crate) fn save_mode_state(root: &Path, state: &ModeState) -> Result<(), String> {
     std::fs::create_dir_all(root).map_err(|e| format!("create mode directory: {e}"))?;
     let path = root.join(MODE_STATE_FILE);
-    let tmp = root.join(format!("{MODE_STATE_FILE}.tmp"));
     let json =
         serde_json::to_string_pretty(state).map_err(|e| format!("serialize mode state: {e}"))?;
-    std::fs::write(&tmp, json).map_err(|e| format!("write mode state: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("save mode state: {e}"))?;
+    hostpaths::write_file_atomic(&path, &json).map_err(|e| format!("save mode state: {e}"))?;
     Ok(())
 }
 
-pub fn plan_file_path(plan_dir: &Path) -> PathBuf {
+pub(crate) fn plan_file_path(plan_dir: &Path) -> PathBuf {
     plan_dir.join(PLAN_FILE)
 }
 
-pub fn load_plan(plan_dir: &Path) -> Result<Option<String>, String> {
+pub(crate) fn load_plan(plan_dir: &Path) -> Result<Option<String>, String> {
     let path = plan_file_path(plan_dir);
     match std::fs::read_to_string(&path) {
         Ok(content) => Ok(Some(content)),
@@ -78,12 +77,10 @@ pub fn load_plan(plan_dir: &Path) -> Result<Option<String>, String> {
     }
 }
 
-pub fn save_plan(plan_dir: &Path, content: &str) -> Result<String, String> {
+pub(crate) fn save_plan(plan_dir: &Path, content: &str) -> Result<String, String> {
     std::fs::create_dir_all(plan_dir).map_err(|e| format!("create plan directory: {e}"))?;
     let path = plan_file_path(plan_dir);
-    let tmp = plan_dir.join("plan.md.tmp");
-    std::fs::write(&tmp, content).map_err(|e| format!("write plan artifact: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("save plan artifact: {e}"))?;
+    hostpaths::write_file_atomic(&path, content).map_err(|e| format!("save plan artifact: {e}"))?;
     Ok(path.to_string_lossy().to_string())
 }
 

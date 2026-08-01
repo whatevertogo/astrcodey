@@ -14,7 +14,10 @@ use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
-    event::{DurableEvent, DurableEventPayload, LiveEvent, LiveEventPayload, StoredEvent},
+    event::{
+        DurableEvent, DurableEventPayload, ExtensionEventData, LiveEvent, LiveEventPayload,
+        StoredEvent,
+    },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::{SessionToolSelection, ToolDefinition, ToolResult, ToolResultArtifactSlice},
     types::{Cursor, SessionId, new_message_id},
@@ -1323,6 +1326,115 @@ async fn stream_preserves_global_updates_during_replay_drain() {
     let body = read_sse_until(response.into_body(), "extensionRegistryChanged").await;
     assert!(body.contains("missed while reconnecting"));
     assert!(body.contains("extensionRegistryChanged"));
+}
+
+#[tokio::test]
+async fn stream_preserves_ask_user_events_during_replay_drain() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let (app, token, events) =
+        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+    let sid = SessionId::from(session_id.clone());
+
+    runtime
+        .event_store()
+        .append_event(DurableEvent::new(
+            sid,
+            None,
+            DurableEventPayload::UserMessage {
+                message_id: "missed-message".into(),
+                text: "missed while reconnecting".into(),
+                attachments: vec![],
+                accepted_seq: None,
+            },
+        ))
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .header("authorization", format!("Bearer {token}"))
+                .uri(format!("/api/sessions/{session_id}/stream?cursor=0"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // 其他会话的 ask-user 问题在 replay 期间降临：跨会话广播经全局通知通道送达，
+    // drain 必须保留而不是丢弃。
+    events.send_notification(ClientNotification::Event(
+        LiveEvent::new(
+            SessionId::from("other-session"),
+            None,
+            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                extension_id: "astrcode-ask-user".into(),
+                event_type: "ask_user.pending".into(),
+                schema_version: 1,
+                payload: serde_json::json!({ "callId": "call-1" }),
+            }),
+        )
+        .into(),
+    ));
+
+    let body = read_sse_until(response.into_body(), "ask_user.pending").await;
+    assert!(body.contains("missed while reconnecting"));
+    assert!(body.contains("ask_user.pending"));
+    assert!(body.contains("call-1"));
+}
+
+#[tokio::test]
+async fn stream_suppresses_current_session_ask_user_global_copy() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let (app, token, events) =
+        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .header("authorization", format!("Bearer {token}"))
+                .uri(format!("/api/sessions/{session_id}/stream"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = response.into_body();
+    tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("SSE connection comment should be immediate")
+        .expect("SSE body should stay open")
+        .unwrap();
+
+    events.send_notification(ClientNotification::Event(
+        LiveEvent::new(
+            SessionId::from(session_id),
+            None,
+            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                extension_id: "astrcode-ask-user".into(),
+                event_type: "ask_user.pending".into(),
+                schema_version: 1,
+                payload: serde_json::json!({ "callId": "current-session-call" }),
+            }),
+        )
+        .into(),
+    ));
+
+    let first = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("current-session event should be delivered")
+        .expect("SSE body should stay open")
+        .unwrap();
+    let first = std::str::from_utf8(first.data_ref().unwrap()).unwrap();
+    assert_eq!(first.matches("current-session-call").count(), 1);
+
+    let duplicate = tokio::time::timeout(Duration::from_millis(250), body.frame()).await;
+    assert!(duplicate.is_err(), "global copy should not be delivered");
 }
 
 #[tokio::test]

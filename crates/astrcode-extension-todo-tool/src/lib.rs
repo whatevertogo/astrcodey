@@ -23,12 +23,16 @@ pub(crate) const TODO_WRITE_TOOL_NAME: &str = "todoWrite";
 const TODO_WRITE_DESCRIPTION: &str =
     "Update the session todo list to track multi-step task progress.\n\nWhen NOT to use:\n- \
      Simple Q&A or single straightforward task\n- One file, one edit, no progress tracking \
-     needed\n\nTips:\n- Multi-step work, task lists, or when progress tracking helps\n- `agent` \
-     steps: note serial/parallel in `content` if it matters\n\nRules:\n- Send the full list every \
-     time (not a patch). Keep exactly one `in_progress`.\n- Mark `in_progress` BEFORE starting \
-     work. Mark `completed` only when fully done (tests pass, implementation complete).\n- After \
-     receiving new instructions, immediately add them as todos.\n- Each item: `content` \
-     (imperative: \"Fix auth bug\") + `activeForm` (continuous: \"Fixing auth bug\").";
+     needed\n\nTips:\n- Multi-step work, task lists, or when progress tracking helps\n- When \
+     creating or updating items, decide each step's executor: prefix `[self]` or `[agent: \
+     <type>]`; for agent steps mark `(parallel)` when independent, `(serial)` otherwise. Default \
+     to `[self]` — delegate only when the step is an isolated non-trivial subtask, parallel \
+     investigation clearly pays off, or independent verification is warranted (see `agent` \
+     guidance). Revisit executors when new evidence changes dependencies.\n\nRules:\n- Send the \
+     full list every time (not a patch). Keep exactly one `in_progress`.\n- Mark `in_progress` \
+     BEFORE starting work. Mark `completed` only when fully done (tests pass, implementation \
+     complete).\n- After receiving new instructions, immediately add them as todos.\n- Each item: \
+     `content` (imperative: \"Fix auth bug\") + `activeForm` (continuous: \"Fixing auth bug\").";
 const PROGRESS_SCHEMA_VERSION: u32 = 1;
 const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;
@@ -501,7 +505,7 @@ fn todo_write_tool_definition() -> ToolDefinition {
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "Imperative form. Note serial/parallel `agent` if relevant."
+                                "description": "Imperative form. Prefix `[self]` or `[agent: <type>]`; agent steps add `(parallel)`/`(serial)`."
                             },
                             "activeForm": {
                                 "type": "string",
@@ -753,5 +757,20 @@ mod tests {
                 .assistant_cycles_since_todo_write,
             0
         );
+    }
+
+    #[test]
+    fn description_biases_executor_decision_per_item() {
+        let definition = todo_write_tool_definition();
+        assert!(definition.description.contains("`[self]`"));
+        assert!(definition.description.contains("`[agent: <type>]`"));
+        assert!(definition.description.contains("Default to `[self]`"));
+        assert!(definition.description.contains("(parallel)"));
+        let content_description = definition.parameters["properties"]["todos"]["items"]
+            ["properties"]["content"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(content_description.contains("`[self]`"));
+        assert!(content_description.contains("`[agent: <type>]`"));
     }
 }

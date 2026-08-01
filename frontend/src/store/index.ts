@@ -14,6 +14,10 @@ import {
   withTimeout,
 } from './delta/blockHelpers'
 import { startSessionStream } from './stream'
+import {
+  PendingAskUserPoller,
+  type PendingAskUserPollScheduler,
+} from './pendingAskUserPoller'
 import { canInjectMidTurn, isExecutionPhase } from './phaseHelpers'
 import {
   computeInitialProjectFolderOrder,
@@ -25,6 +29,14 @@ let commandRefreshGeneration = 0
 let sessionSwitchGeneration = 0
 let conversationRefreshGeneration = 0
 let pendingAskRefreshGeneration = 0
+let pendingAskUserPoller: PendingAskUserPoller | null = null
+
+const PENDING_ASK_USER_REFRESH_TIMEOUT_MS = 10_000
+
+const pendingAskUserPollScheduler: PendingAskUserPollScheduler = {
+  schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
+  cancel: (timer) => window.clearTimeout(timer as number),
+}
 
 function resetSessionView(): Partial<AppState> {
   return {
@@ -41,9 +53,7 @@ function resetSessionView(): Partial<AppState> {
     workingDir: null,
     agentSessions: [],
     pendingMessages: [],
-    pendingAskUserQuestions: {},
-    resolvedAskUserCallIds: {},
-    askUserEventRevision: 0,
+    // ask-user pending、刷新状态和事件版本均为跨会话状态，不随单会话视图重置。
     composerDeliveryMode: 'queued',
     slashCommands: [],
     keybindings: [],
@@ -80,7 +90,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   pendingMessages: [],
   pendingAskUserQuestions: {},
   resolvedAskUserCallIds: {},
+  pendingAskUserRefreshInFlight: false,
   askUserEventRevision: 0,
+  askUserExtensionAvailable: null,
   composerDeliveryMode: 'queued',
   projectFolderOrder: [],
 
@@ -117,8 +129,16 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     set({ connectionStatus: 'connected' })
-    await get().refreshSessions()
+    pendingAskUserPoller?.stop()
+    pendingAskUserPoller = new PendingAskUserPoller({
+      readState: get,
+      refresh: () => void get().refreshPendingAskUserQuestions(),
+      scheduler: pendingAskUserPollScheduler,
+    })
+    pendingAskUserPoller.start()
     void get().refreshExtensionData()
+    const pendingRefresh = get().refreshPendingAskUserQuestions()
+    await Promise.all([get().refreshSessions(), pendingRefresh])
   },
 
   refreshSessions: async () => {
@@ -159,7 +179,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       state.sessionStream?.stop()
       set(resetSessionView())
     }
-    await get().refreshSessions()
+    await Promise.all([
+      get().refreshSessions(),
+      get().refreshPendingAskUserQuestions(),
+    ])
   },
 
   forkSession: async (sourceSessionId: string) => {
@@ -190,7 +213,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       state.sessionStream?.stop()
       set(resetSessionView())
     }
-    await get().refreshSessions()
+    await Promise.all([
+      get().refreshSessions(),
+      get().refreshPendingAskUserQuestions(),
+    ])
   },
 
   bumpModelRefreshKey: () => {
@@ -303,41 +329,66 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   refreshPendingAskUserQuestions: async () => {
-    const sessionId = get().activeSessionId
-    if (!sessionId) return
-    const switchGeneration = sessionSwitchGeneration
     const refreshGeneration = ++pendingAskRefreshGeneration
-    const pendingAtStart = new Set(Object.keys(get().pendingAskUserQuestions))
+    const abortController = new AbortController()
+    const timeout = window.setTimeout(
+      () => abortController.abort(),
+      PENDING_ASK_USER_REFRESH_TIMEOUT_MS
+    )
+    set({ pendingAskUserRefreshInFlight: true })
+    const pendingAtStart = get().pendingAskUserQuestions
     const revisionAtStart = get().askUserEventRevision
 
     try {
-      const response = await api.listPendingAskUserQuestions(sessionId)
-      if (
-        get().activeSessionId !== sessionId ||
-        switchGeneration !== sessionSwitchGeneration ||
-        refreshGeneration !== pendingAskRefreshGeneration
-      ) {
+      const response = await api.listPendingAskUserQuestions(
+        abortController.signal
+      )
+      if (refreshGeneration !== pendingAskRefreshGeneration) {
         return
       }
-      set((current) => {
-        return mergePendingAskUserSnapshot(
+      set((current) => ({
+        ...mergePendingAskUserSnapshot(
           current.pendingAskUserQuestions,
           current.resolvedAskUserCallIds,
           response.questions,
-          sessionId,
           pendingAtStart,
           current.askUserEventRevision !== revisionAtStart
-        )
-      })
+        ),
+        pendingAskUserRefreshInFlight: false,
+      }))
     } catch (error) {
       console.debug('Failed to refresh pending ask-user questions:', error)
+      if (refreshGeneration === pendingAskRefreshGeneration) {
+        set({
+          pendingAskUserRefreshInFlight: false,
+          resolvedAskUserCallIds: {},
+        })
+      }
+    } finally {
+      window.clearTimeout(timeout)
     }
   },
 
   refreshExtensionData: async () => {
     try {
       const extensions = await api.listExtensions()
-      set({ extensions })
+      const askUser = extensions.find(
+        (extension) => extension.extensionId === 'astrcode-ask-user'
+      )
+      const askUserExtensionAvailable =
+        askUser !== undefined && askUser.enabled && askUser.loaded
+      if (!askUserExtensionAvailable) {
+        pendingAskRefreshGeneration += 1
+        set({
+          extensions,
+          askUserExtensionAvailable,
+          pendingAskUserQuestions: {},
+          resolvedAskUserCallIds: {},
+          pendingAskUserRefreshInFlight: false,
+        })
+        return
+      }
+      set({ extensions, askUserExtensionAvailable })
     } catch (err) {
       console.error('Failed to refresh extensions:', err)
       set({

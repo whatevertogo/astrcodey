@@ -16,6 +16,10 @@ use tokio::sync::broadcast;
 
 use crate::protocol_mapping::session_snapshot;
 
+const ASK_USER_EXTENSION_ID: &str = "astrcode-ask-user";
+const ASK_USER_PENDING_EVENT_TYPE: &str = "ask_user.pending";
+const ASK_USER_RESOLVED_EVENT_TYPE: &str = "ask_user.resolved";
+
 pub(crate) struct StreamingSnapshot {
     pub message_id: String,
     pub text: String,
@@ -150,9 +154,35 @@ impl ServerEventBus {
         if route.root_session_id() != &event.session_id && route.forwards_to_root(&event.payload) {
             self.send_to_existing_conversation_fanout(route.root_session_id(), Arc::clone(&event));
         }
+        self.broadcast_global_extension_event(&event);
         let _ = self
             .all_notifications
             .send(ClientNotification::Event((*event).clone()));
+    }
+
+    fn broadcast_global_extension_event(&self, event: &Event) {
+        let EventPayload::Live(LiveEventPayload::ExtensionEvent(extension_event)) = &event.payload
+        else {
+            return;
+        };
+        if extension_event.extension_id != ASK_USER_EXTENSION_ID {
+            return;
+        }
+        if !matches!(
+            extension_event.event_type.as_str(),
+            ASK_USER_PENDING_EVENT_TYPE | ASK_USER_RESOLVED_EVENT_TYPE
+        ) {
+            return;
+        }
+        let _ = self
+            .global_notifications
+            .send(ClientNotification::GlobalExtensionEvent {
+                session_id: event.session_id.to_string(),
+                extension_id: extension_event.extension_id.clone(),
+                event_type: extension_event.event_type.clone(),
+                schema_version: extension_event.schema_version,
+                payload: extension_event.payload.clone(),
+            });
     }
 
     pub fn detach(&self, session_id: &SessionId) {
@@ -518,5 +548,63 @@ mod tests {
             parent_rx.recv().await,
             Ok(event) if event.session_id == child
         ));
+    }
+
+    #[tokio::test]
+    async fn ask_user_pending_broadcasts_to_global_notifications() {
+        use astrcode_core::event::ExtensionEventData;
+
+        let bus = ServerEventBus::new();
+        let session_id = SessionId::new("session-1");
+        let mut global_rx = bus.subscribe_global_notifications();
+
+        bus.publish_event(live(
+            session_id.clone(),
+            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                extension_id: "astrcode-ask-user".into(),
+                event_type: "ask_user.pending".into(),
+                schema_version: 1,
+                payload: serde_json::json!({ "callId": "call-1" }),
+            }),
+        ));
+        assert!(matches!(
+            global_rx.recv().await,
+            Ok(ClientNotification::GlobalExtensionEvent {
+                session_id: broadcast_session,
+                extension_id,
+                event_type,
+                schema_version: 1,
+                ..
+            }) if broadcast_session == session_id.to_string()
+                && extension_id == "astrcode-ask-user"
+                && event_type == "ask_user.pending"
+        ));
+
+        // resolved 同样广播；其他扩展的事件不广播。
+        bus.publish_event(live(
+            session_id.clone(),
+            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                extension_id: "astrcode-ask-user".into(),
+                event_type: "ask_user.resolved".into(),
+                schema_version: 1,
+                payload: serde_json::json!({ "callId": "call-1" }),
+            }),
+        ));
+        assert!(matches!(
+            global_rx.recv().await,
+            Ok(ClientNotification::GlobalExtensionEvent { event_type, .. })
+                if event_type == "ask_user.resolved"
+        ));
+
+        bus.publish_event(live(
+            session_id,
+            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                extension_id: "other-extension".into(),
+                event_type: "whatever".into(),
+                schema_version: 1,
+                payload: serde_json::json!({}),
+            }),
+        ));
+        assert!(matches!(global_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

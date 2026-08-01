@@ -9,7 +9,7 @@ use astrcode_extension_sdk::{extension::SessionToolSelection, frontmatter, hostp
 
 /// 解析后的 Agent 配置（兼容 Claude 格式）。
 #[derive(Debug, Clone)]
-pub struct AgentConfig {
+pub(crate) struct AgentConfig {
     /// 由名称标准化生成的唯一标识。
     pub id: String,
     pub name: String,
@@ -26,7 +26,7 @@ pub struct AgentConfig {
 /// 返回所有内置 Agent 配置。
 ///
 /// 内置 Agent 包括 explore（探索）、reviewer（审查）和 execute（执行）。
-pub fn builtin_agents() -> Vec<AgentConfig> {
+pub(crate) fn builtin_agents() -> Vec<AgentConfig> {
     [
         (
             "builtin://explore.md",
@@ -52,7 +52,7 @@ pub fn builtin_agents() -> Vec<AgentConfig> {
 /// 1. 内置 Agent
 /// 2. 用户级: `~/.claude/agents/` + `~/.astrcode/agents/`
 /// 3. 项目级: `.claude/agents/` + `.astrcode/agents/`
-pub fn discover_agents(working_dir: Option<&str>) -> Vec<AgentConfig> {
+pub(crate) fn discover_agents(working_dir: Option<&str>) -> Vec<AgentConfig> {
     let mut agents = builtin_agents();
 
     // 扫描用户主目录下的 Agent

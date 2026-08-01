@@ -54,8 +54,10 @@ export interface AppState {
   transientHint: string | null
   pendingMessages: PendingMessage[]
   pendingAskUserQuestions: Record<string, PendingAskUserQuestion>
-  resolvedAskUserCallIds: Record<string, true>
+  resolvedAskUserCallIds: Record<string, string>
+  pendingAskUserRefreshInFlight: boolean
   askUserEventRevision: number
+  askUserExtensionAvailable: boolean | null
   composerDeliveryMode: MessageDelivery
 
   initServer: () => Promise<void>
