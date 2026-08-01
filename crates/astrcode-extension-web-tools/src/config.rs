@@ -130,7 +130,17 @@ const fn default_max_redirects() -> usize {
 }
 
 pub(crate) fn load_config(config: &ExtensionConfig) -> WebToolsConfig {
-    config.deserialize().unwrap_or_default()
+    match config.deserialize() {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                extension_id = EXTENSION_ID,
+                %error,
+                "invalid web-tools config, falling back to defaults"
+            );
+            WebToolsConfig::default()
+        },
+    }
 }
 
 pub(crate) fn resolve_api_key(inline: Option<&str>, env_name: Option<&str>) -> Option<String> {

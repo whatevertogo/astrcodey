@@ -9,11 +9,7 @@ use astrcode_core::event::{DurableEventPayload, EventPayload};
 use astrcode_protocol::{commands::*, events::*};
 use tokio::sync::broadcast;
 
-use crate::{
-    error::ClientError,
-    stream::ConversationStream,
-    transport::{ClientTransport, TransportError},
-};
+use crate::{error::ClientError, stream::ConversationStream, transport::ClientTransport};
 
 /// 类型化的 astrcode JSON-RPC 客户端。
 ///
@@ -47,12 +43,21 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     {
         let mut rx = self.transport.subscribe().await?;
         self.transport.send(cmd).await?;
-        while let Ok(notification) = rx.recv().await {
-            if predicate(&notification) {
-                return Ok(notification);
+        loop {
+            match rx.recv().await {
+                Ok(notification) => {
+                    if predicate(&notification) {
+                        return Ok(notification);
+                    }
+                },
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, "wait_for lagged, skipped notifications");
+                },
+                Err(broadcast::error::RecvError::Closed) => {
+                    return Err(ClientError::UnexpectedResponse);
+                },
             }
         }
-        Err(ClientError::UnexpectedResponse)
     }
 
     /// 创建新的会话。
@@ -187,27 +192,10 @@ impl<T: ClientTransport> AstrcodeClient<T> {
     }
 }
 
-/// 用于测试的模拟传输层。
-///
-/// 所有操作均为空操作（no-op），适用于单元测试中不需要真实服务端的场景。
-pub struct MockTransport;
-
-#[async_trait::async_trait]
-impl ClientTransport for MockTransport {
-    async fn send(&self, _command: &ClientCommand) -> Result<(), TransportError> {
-        Ok(())
-    }
-
-    async fn subscribe(&self) -> Result<broadcast::Receiver<ClientNotification>, TransportError> {
-        let (tx, rx) = broadcast::channel(1);
-        drop(tx);
-        Ok(rx)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::transport::TransportError;
 
     /// A transport that records sent commands and allows injecting responses.
     struct StubTransport {

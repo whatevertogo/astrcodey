@@ -683,7 +683,7 @@ impl MemoryStore {
 
         // 更新 processed_sessions.json
         let path = self.processed_path();
-        let mut existing = self.list_processed().unwrap_or_default();
+        let mut existing = self.list_processed()?;
         for entry in processed {
             existing.insert(entry.session_id.clone(), entry.updated_at.clone());
         }

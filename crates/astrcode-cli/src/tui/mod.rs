@@ -191,7 +191,7 @@ async fn handle_key(
                     decision,
                 })
                 .await
-                .ok();
+                .map_err(io_error)?;
             app.pending_tool_approval = None;
             app.status_text = format!("● Approval sent for {}", pending.tool_name);
             return Ok(());

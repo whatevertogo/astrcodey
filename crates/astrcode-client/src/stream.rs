@@ -24,16 +24,22 @@ impl ConversationStream {
     ///
     /// - 返回 `Ok(ClientNotification)` 表示成功收到一条事件。
     /// - 返回 `Err(StreamError::Disconnected)` 表示事件流已关闭。
+    /// - 慢消费者丢事件（Lagged）时记录警告并继续接收，不视为断开。
     pub async fn recv(&mut self) -> Result<ClientNotification, StreamError> {
         if self.disconnected {
             return Err(StreamError::Disconnected);
         }
-        match self.rx.recv().await {
-            Ok(notification) => Ok(notification),
-            Err(_) => {
-                self.disconnected = true;
-                Err(StreamError::Disconnected)
-            },
+        loop {
+            match self.rx.recv().await {
+                Ok(notification) => return Ok(notification),
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(skipped, "event stream lagged, skipped notifications");
+                },
+                Err(broadcast::error::RecvError::Closed) => {
+                    self.disconnected = true;
+                    return Err(StreamError::Disconnected);
+                },
+            }
         }
     }
 

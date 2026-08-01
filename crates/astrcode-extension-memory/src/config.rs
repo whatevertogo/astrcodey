@@ -51,6 +51,12 @@ impl MemoryConfig {
     pub(crate) fn from_extension_config(
         config: &astrcode_extension_sdk::extension::ExtensionConfig,
     ) -> Self {
-        config.deserialize().unwrap_or_default()
+        match config.deserialize() {
+            Ok(config) => config,
+            Err(error) => {
+                tracing::warn!(%error, "invalid memory extension config, falling back to defaults");
+                Self::default()
+            },
+        }
     }
 }

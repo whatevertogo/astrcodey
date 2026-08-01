@@ -145,12 +145,17 @@ impl StdioClientTransport {
             for line in reader.lines() {
                 let line = match line {
                     Ok(l) => l,
-                    Err(_) => break,
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to read server stdout, stopping event reader");
+                        break;
+                    },
                 };
                 if line.is_empty() {
                     continue;
                 }
                 let Ok(message) = from_jsonl_line::<JsonRpcMessage>(&line) else {
+                    let truncated: String = line.chars().take(256).collect();
+                    tracing::warn!(line = %truncated, "failed to parse server stdout line, skipping");
                     continue;
                 };
                 if let Ok(event) = notification_from_jsonrpc_message(&message) {
