@@ -143,9 +143,11 @@ export async function getConversation(
   )
 }
 
-export async function listPendingAskUserQuestions() {
+export async function listPendingAskUserQuestions(signal?: AbortSignal) {
   return decodePendingAskUserQuestionsResponse(
-    await request<unknown>('/api/extensions/astrcode-ask-user/questions')
+    await request<unknown>('/api/extensions/astrcode-ask-user/questions', {
+      signal,
+    })
   )
 }
 

@@ -1,8 +1,11 @@
+import type { SessionStreamStatus } from './sessionStreamController'
+
 const PENDING_ASK_USER_POLL_INTERVAL_MS = 5000
 
 export interface PendingAskUserPollState {
   connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error'
   activeSessionId: string | null
+  sessionStreamStatus: SessionStreamStatus
   pendingAskUserRefreshInFlight: boolean
 }
 
@@ -53,7 +56,8 @@ export class PendingAskUserPoller {
       const state = this.readState()
       if (
         state.connectionStatus === 'connected' &&
-        state.activeSessionId === null &&
+        (state.activeSessionId === null ||
+          state.sessionStreamStatus !== 'connected') &&
         !state.pendingAskUserRefreshInFlight
       ) {
         this.refresh()

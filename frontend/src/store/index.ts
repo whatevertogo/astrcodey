@@ -31,6 +31,8 @@ let conversationRefreshGeneration = 0
 let pendingAskRefreshGeneration = 0
 let pendingAskUserPoller: PendingAskUserPoller | null = null
 
+const PENDING_ASK_USER_REFRESH_TIMEOUT_MS = 10_000
+
 const pendingAskUserPollScheduler: PendingAskUserPollScheduler = {
   schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
   cancel: (timer) => window.clearTimeout(timer as number),
@@ -327,12 +329,19 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   refreshPendingAskUserQuestions: async () => {
     const refreshGeneration = ++pendingAskRefreshGeneration
+    const abortController = new AbortController()
+    const timeout = window.setTimeout(
+      () => abortController.abort(),
+      PENDING_ASK_USER_REFRESH_TIMEOUT_MS
+    )
     set({ pendingAskUserRefreshInFlight: true })
     const pendingAtStart = new Set(Object.keys(get().pendingAskUserQuestions))
     const revisionAtStart = get().askUserEventRevision
 
     try {
-      const response = await api.listPendingAskUserQuestions()
+      const response = await api.listPendingAskUserQuestions(
+        abortController.signal
+      )
       if (refreshGeneration !== pendingAskRefreshGeneration) {
         return
       }
@@ -354,6 +363,8 @@ export const useAppStore = create<AppState>((set, get) => ({
           resolvedAskUserCallIds: {},
         })
       }
+    } finally {
+      window.clearTimeout(timeout)
     }
   },
 

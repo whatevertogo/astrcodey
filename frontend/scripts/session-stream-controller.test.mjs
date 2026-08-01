@@ -65,6 +65,7 @@ async function flushMicrotasks() {
   const state = {
     connectionStatus: 'connected',
     activeSessionId: null,
+    sessionStreamStatus: 'disconnected',
     pendingAskUserRefreshInFlight: false,
   }
   let refreshCount = 0
@@ -82,6 +83,10 @@ async function flushMicrotasks() {
   assert.equal(refreshCount, 1)
 
   state.activeSessionId = 'session-1'
+  state.sessionStreamStatus = 'connecting'
+  runNext()
+  assert.equal(refreshCount, 2)
+  state.sessionStreamStatus = 'connected'
   runNext()
   state.activeSessionId = null
   state.pendingAskUserRefreshInFlight = true
@@ -89,11 +94,11 @@ async function flushMicrotasks() {
   state.pendingAskUserRefreshInFlight = false
   state.connectionStatus = 'disconnected'
   runNext()
-  assert.equal(refreshCount, 1)
+  assert.equal(refreshCount, 2)
 
   state.connectionStatus = 'connected'
   runNext()
-  assert.equal(refreshCount, 2)
+  assert.equal(refreshCount, 3)
   poller.stop()
   assert.equal(timers.at(-1).cancelled, true)
 }
