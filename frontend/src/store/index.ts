@@ -41,8 +41,9 @@ function resetSessionView(): Partial<AppState> {
     workingDir: null,
     agentSessions: [],
     pendingMessages: [],
-    pendingAskUserQuestions: {},
+    // pendingAskUserQuestions 是跨会话的全局 map（banner 依赖），不随单会话视图重置。
     resolvedAskUserCallIds: {},
+    pendingAskUserRefreshSessionId: null,
     askUserEventRevision: 0,
     composerDeliveryMode: 'queued',
     slashCommands: [],
@@ -80,6 +81,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   pendingMessages: [],
   pendingAskUserQuestions: {},
   resolvedAskUserCallIds: {},
+  pendingAskUserRefreshSessionId: null,
   askUserEventRevision: 0,
   composerDeliveryMode: 'queued',
   projectFolderOrder: [],
@@ -307,6 +309,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!sessionId) return
     const switchGeneration = sessionSwitchGeneration
     const refreshGeneration = ++pendingAskRefreshGeneration
+    set({ pendingAskUserRefreshSessionId: sessionId })
     const pendingAtStart = new Set(Object.keys(get().pendingAskUserQuestions))
     const revisionAtStart = get().askUserEventRevision
 
@@ -319,18 +322,22 @@ export const useAppStore = create<AppState>((set, get) => ({
       ) {
         return
       }
-      set((current) => {
-        return mergePendingAskUserSnapshot(
+      set((current) => ({
+        ...mergePendingAskUserSnapshot(
           current.pendingAskUserQuestions,
           current.resolvedAskUserCallIds,
           response.questions,
           sessionId,
           pendingAtStart,
           current.askUserEventRevision !== revisionAtStart
-        )
-      })
+        ),
+        pendingAskUserRefreshSessionId: null,
+      }))
     } catch (error) {
       console.debug('Failed to refresh pending ask-user questions:', error)
+      if (refreshGeneration === pendingAskRefreshGeneration) {
+        set({ pendingAskUserRefreshSessionId: null })
+      }
     }
   },
 

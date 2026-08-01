@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useReducer, useState } from 'react'
 import { useAppStore } from '../../../store/conversation'
+import { pendingAskUserKey } from '../../../store/delta/applyDelta'
 import { cn } from '../../../lib/utils'
 import {
   rejectAskUserQuestion,
@@ -12,9 +13,6 @@ import {
   parseAskUserOutput,
   type AskUserQuestion,
 } from './askUser'
-
-/// 与扩展侧 AUTO_SELECT_DELAY 一致：倒计时结束后服务端自动选择推荐项。
-const AUTO_SELECT_SECS = 60
 
 type QuestionState = {
   selectedLabels: string[]
@@ -147,8 +145,9 @@ export function AskUserCard({
   sessionId: string | null
   args: JsonRecord
 }) {
-  const pendingQuestion = useAppStore(
-    (state) => state.pendingAskUserQuestions[block.id]
+  const pendingKey = sessionId ? pendingAskUserKey(sessionId, block.id) : null
+  const pendingQuestion = useAppStore((state) =>
+    pendingKey ? state.pendingAskUserQuestions[pendingKey] : undefined
   )
   const input = useMemo(
     () =>
@@ -173,23 +172,22 @@ export function AskUserCard({
     string
   > | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
-  const [remainingSecs, setRemainingSecs] = useState(AUTO_SELECT_SECS)
-
-  useEffect(() => {
-    if (!pending) return
-    const startedAt = Date.now()
-    const timer = window.setInterval(() => {
-      const remaining = Math.max(
-        0,
-        AUTO_SELECT_SECS - Math.floor((Date.now() - startedAt) / 1000)
-      )
-      setRemainingSecs(remaining)
-      if (remaining <= 0) window.clearInterval(timer)
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [pending])
+  const [clockMillis, setClockMillis] = useState(() => Date.now())
 
   const questions = input?.questions ?? completed?.questions ?? []
+  const autoSelectAt = pendingQuestion?.autoSelectAt
+  const remainingSecs =
+    autoSelectAt === undefined
+      ? null
+      : Math.max(0, Math.ceil((autoSelectAt - clockMillis) / 1000))
+
+  useEffect(() => {
+    if (autoSelectAt === undefined) return
+    const timer = window.setInterval(() => {
+      setClockMillis(Date.now())
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [autoSelectAt])
   const current = questions[state.index]
   const qState = current
     ? (state.byQuestion[current.question] ?? emptyQuestionState())
@@ -275,7 +273,7 @@ export function AskUserCard({
         </p>
       )}
 
-      {pending && (
+      {remainingSecs !== null && (
         <p className="text-[12px] text-text-muted">
           {remainingSecs > 0
             ? `${remainingSecs}s 后自动选择推荐选项`

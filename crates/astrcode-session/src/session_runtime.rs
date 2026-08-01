@@ -439,6 +439,17 @@ mod tests {
         assert_eq!(second_rx.await.unwrap(), ApprovalDecision::DenyOnce);
         drop(second_guard);
 
+        let dropped_call_id = ToolCallId::from("tool-dropped");
+        let (dropped_tx, dropped_rx) = oneshot::channel();
+        let _dropped_guard = runtime
+            .register_pending_approval(dropped_call_id.clone(), dropped_tx)
+            .unwrap();
+        drop(dropped_rx);
+        assert!(matches!(
+            runtime.resolve_tool_approval(&dropped_call_id, ApprovalDecision::DenyOnce),
+            Err(ToolApprovalResolveError::ReceiverDropped { .. })
+        ));
+
         let cleanup_call_id = ToolCallId::from("tool-2");
         let cleanup_guard = runtime
             .register_pending_approval(cleanup_call_id.clone(), oneshot::channel().0)

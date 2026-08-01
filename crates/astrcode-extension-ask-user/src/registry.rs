@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_extension_sdk::extension::{ExtensionError, ExtensionEventSink};
 use parking_lot::Mutex;
@@ -72,7 +69,7 @@ struct PendingEntry {
 #[derive(Default)]
 struct RegistryState {
     pending: HashMap<PendingKey, PendingEntry>,
-    resolved: HashSet<PendingKey>,
+    resolved: HashMap<PendingKey, Arc<()>>,
 }
 
 #[derive(Default)]
@@ -110,7 +107,10 @@ impl PendingRegistry {
         if let Err(error) = events.emit(
             PENDING_EVENT_TYPE,
             1,
-            serde_json::to_value(&question).unwrap_or_else(|_| json!({})),
+            serde_json::to_value(&question).map_err(|error| {
+                self.abandon_registered(&key, &registration);
+                ExtensionError::Internal(format!("serialize askUser pending event: {error}"))
+            })?,
         ) {
             self.abandon_registered(&key, &registration);
             return Err(error);
@@ -149,7 +149,7 @@ impl PendingRegistry {
         {
             let state = self.state.lock();
             let Some(entry) = state.pending.get(&key) else {
-                return Err(if state.resolved.contains(&key) {
+                return Err(if state.resolved.contains_key(&key) {
                     ResolveError::AlreadyResolved
                 } else {
                     ResolveError::NotFound
@@ -178,7 +178,7 @@ impl PendingRegistry {
         let question = {
             let state = self.state.lock();
             let Some(entry) = state.pending.get(&key) else {
-                return Err(if state.resolved.contains(&key) {
+                return Err(if state.resolved.contains_key(&key) {
                     ResolveError::AlreadyResolved
                 } else {
                     ResolveError::NotFound
@@ -199,7 +199,7 @@ impl PendingRegistry {
     pub(crate) fn shutdown_session(&self, session_id: &str) {
         let entries = {
             let mut state = self.state.lock();
-            state.resolved.retain(|key| key.session_id != session_id);
+            state.resolved.retain(|key, _| key.session_id != session_id);
             let keys = state
                 .pending
                 .keys()
@@ -230,13 +230,15 @@ impl PendingRegistry {
         let entry = {
             let mut state = self.state.lock();
             let Some(entry) = state.pending.remove(key) else {
-                return Err(if state.resolved.contains(key) {
+                return Err(if state.resolved.contains_key(key) {
                     ResolveError::AlreadyResolved
                 } else {
                     ResolveError::NotFound
                 });
             };
-            state.resolved.insert(key.clone());
+            state
+                .resolved
+                .insert(key.clone(), Arc::clone(&entry.registration));
             entry
         };
         finish_entry(key.clone(), entry, resolution);
@@ -265,10 +267,23 @@ impl PendingRegistry {
             let Some(entry) = state.pending.remove(key) else {
                 return;
             };
-            state.resolved.insert(key.clone());
+            state
+                .resolved
+                .insert(key.clone(), Arc::clone(&entry.registration));
             entry
         };
         finish_entry(key.clone(), entry, resolution);
+    }
+
+    fn forget_resolved(&self, key: &PendingKey, registration: &Arc<()>) {
+        let mut state = self.state.lock();
+        if state
+            .resolved
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, registration))
+        {
+            state.resolved.remove(key);
+        }
     }
 }
 
@@ -302,7 +317,9 @@ pub(crate) struct PendingGuard {
 
 impl PendingGuard {
     pub(crate) fn disarm(&mut self) {
-        self.key = None;
+        if let Some(key) = self.key.take() {
+            self.registry.forget_resolved(&key, &self.registration);
+        }
     }
 }
 
@@ -313,5 +330,6 @@ impl Drop for PendingGuard {
         };
         self.registry
             .resolve_registered(&key, &self.registration, Resolution::TurnCancelled);
+        self.registry.forget_resolved(&key, &self.registration);
     }
 }

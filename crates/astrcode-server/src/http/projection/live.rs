@@ -302,6 +302,9 @@ mod tests {
 
     use super::*;
 
+    const ASK_USER_EXTENSION_ID: &str = "astrcode-ask-user";
+    const ASK_USER_PENDING_EVENT_TYPE: &str = "ask_user.pending";
+
     fn event(payload: EventPayload, turn_id: Option<&str>) -> Event {
         match payload {
             EventPayload::Durable(payload) => StoredEvent::new(
@@ -415,8 +418,8 @@ mod tests {
     fn extension_event_preserves_namespaced_live_payload() {
         let event = event(
             EventPayload::Live(LiveEventPayload::ExtensionEvent(ExtensionEventData {
-                extension_id: "astrcode-ask-user".into(),
-                event_type: "ask_user.pending".into(),
+                extension_id: ASK_USER_EXTENSION_ID.into(),
+                event_type: ASK_USER_PENDING_EVENT_TYPE.into(),
                 schema_version: 1,
                 payload: serde_json::json!({ "callId": "call-1" }),
             })),
@@ -430,8 +433,8 @@ mod tests {
                 event_type,
                 schema_version: 1,
                 payload,
-            }] if extension_id == "astrcode-ask-user"
-                && event_type == "ask_user.pending"
+            }] if extension_id == ASK_USER_EXTENSION_ID
+                && event_type == ASK_USER_PENDING_EVENT_TYPE
                 && payload["callId"] == "call-1"
         ));
     }

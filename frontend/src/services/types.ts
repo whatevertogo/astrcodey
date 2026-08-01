@@ -229,6 +229,7 @@ export interface PendingAskUserQuestion {
   callId: string
   questions: AskUserQuestion[]
   metadata?: { source?: string }
+  autoSelectAt?: number
 }
 
 export interface PendingAskUserQuestionsResponse {

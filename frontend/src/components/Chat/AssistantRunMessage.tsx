@@ -202,9 +202,7 @@ function segmentNeedsAttention(segment: AssistantRunSegment) {
 }
 
 function isPendingAskUserEntry(entry: ProcessEntry): boolean {
-  return (
-    entry.type === 'tool' && isPendingAskUser(entry.activity.block)
-  )
+  return entry.type === 'tool' && isPendingAskUser(entry.activity.block)
 }
 
 /// 待回答的 askUser 问题：从 process 折叠中提取出来，直接渲染在消息流里。

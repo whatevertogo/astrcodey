@@ -18,8 +18,12 @@ pub(crate) struct AskUserOption {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
     /// 推荐选项：用户在超时前未响应时自动选择该项。
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[serde(default, skip_serializing_if = "is_false")]
     pub recommended: bool,
+}
+
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,15 +59,23 @@ pub(crate) struct PendingQuestion {
     pub questions: Vec<AskUserQuestion>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub metadata: Option<AskUserMetadata>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_select_at: Option<u64>,
 }
 
 impl PendingQuestion {
-    pub(crate) fn new(session_id: String, call_id: String, input: AskUserInput) -> Self {
+    pub(crate) fn new(
+        session_id: String,
+        call_id: String,
+        input: AskUserInput,
+        auto_select_at: Option<u64>,
+    ) -> Self {
         Self {
             session_id,
             call_id,
             questions: input.questions,
             metadata: input.metadata,
+            auto_select_at,
         }
     }
 

@@ -16,6 +16,10 @@ use tokio::sync::broadcast;
 
 use crate::protocol_mapping::session_snapshot;
 
+const ASK_USER_EXTENSION_ID: &str = "astrcode-ask-user";
+const ASK_USER_PENDING_EVENT_TYPE: &str = "ask_user.pending";
+const ASK_USER_RESOLVED_EVENT_TYPE: &str = "ask_user.resolved";
+
 pub(crate) struct StreamingSnapshot {
     pub message_id: String,
     pub text: String,
@@ -150,33 +154,33 @@ impl ServerEventBus {
         if route.root_session_id() != &event.session_id && route.forwards_to_root(&event.payload) {
             self.send_to_existing_conversation_fanout(route.root_session_id(), Arc::clone(&event));
         }
-        self.broadcast_ask_user_event(&event);
+        self.broadcast_global_extension_event(&event);
         let _ = self
             .all_notifications
             .send(ClientNotification::Event((*event).clone()));
     }
 
-    /// ask-user 的问题状态跨会话可见：pending/resolved 同时广播到全局通道，
-    /// 前端即使不在问题所属会话也能收到通知并提示用户。
-    fn broadcast_ask_user_event(&self, event: &Event) {
+    fn broadcast_global_extension_event(&self, event: &Event) {
         let EventPayload::Live(LiveEventPayload::ExtensionEvent(extension_event)) = &event.payload
         else {
             return;
         };
-        if extension_event.extension_id != "astrcode-ask-user" {
+        if extension_event.extension_id != ASK_USER_EXTENSION_ID {
             return;
         }
         if !matches!(
             extension_event.event_type.as_str(),
-            "ask_user.pending" | "ask_user.resolved"
+            ASK_USER_PENDING_EVENT_TYPE | ASK_USER_RESOLVED_EVENT_TYPE
         ) {
             return;
         }
         let _ = self
             .global_notifications
-            .send(ClientNotification::AskUserEvent {
+            .send(ClientNotification::GlobalExtensionEvent {
                 session_id: event.session_id.to_string(),
+                extension_id: extension_event.extension_id.clone(),
                 event_type: extension_event.event_type.clone(),
+                schema_version: extension_event.schema_version,
                 payload: extension_event.payload.clone(),
             });
     }
@@ -565,11 +569,14 @@ mod tests {
         ));
         assert!(matches!(
             global_rx.recv().await,
-            Ok(ClientNotification::AskUserEvent {
+            Ok(ClientNotification::GlobalExtensionEvent {
                 session_id: broadcast_session,
+                extension_id,
                 event_type,
+                schema_version: 1,
                 ..
             }) if broadcast_session == session_id.to_string()
+                && extension_id == "astrcode-ask-user"
                 && event_type == "ask_user.pending"
         ));
 
@@ -585,7 +592,7 @@ mod tests {
         ));
         assert!(matches!(
             global_rx.recv().await,
-            Ok(ClientNotification::AskUserEvent { event_type, .. })
+            Ok(ClientNotification::GlobalExtensionEvent { event_type, .. })
                 if event_type == "ask_user.resolved"
         ));
 

@@ -2,7 +2,10 @@
 
 use std::collections::BTreeSet;
 
-use astrcode_core::{tool::SessionToolSelection, types::SessionId};
+use astrcode_core::{
+    tool::{SessionApiError, SessionToolSelection},
+    types::SessionId,
+};
 use astrcode_protocol::http::{
     CommandCompletionItemDto, CommandCompletionRequest, CommandCompletionResponse,
     CommandInvokeRequest, CommandInvokeResponse, CompactSessionRequest, CompactSessionResponse,
@@ -21,8 +24,8 @@ use axum::{
 use serde::Deserialize;
 
 use super::super::{
-    HttpState, bad_request_response, handler_error_response, internal_error_response,
-    not_found_response,
+    HttpState, bad_request_response, conflict_response, handler_error_response,
+    internal_error_response, not_found_response,
     projection::{session_title_from_working_dir, snapshot::conversation_to_dto},
 };
 use crate::{
@@ -76,30 +79,17 @@ pub(in crate::http) async fn configure_session_tools(
         Ok(selection) => selection,
         Err(message) => return bad_request_response("invalid_tool_selection", message),
     };
-    let session_id = SessionId::from(session_id);
-    let session = match state
-        .app
-        .runtime()
-        .session_manager()
-        .open(session_id.clone())
-        .await
-    {
-        Ok(session) => session,
-        Err(error) => return not_found_response("session_not_found", error),
-    };
-
     match state
         .app
-        .runtime()
-        .session_manager()
-        .configure_session_tools(&session, selection)
+        .session_commands()
+        .configure_tools(SessionId::from(session_id), selection)
         .await
     {
         Ok(effective) => Json(ConfigureSessionToolsResponse {
             selection: effective.into(),
         })
         .into_response(),
-        Err(error) => internal_error_response("configure_tools_failed", error),
+        Err(error) => handler_error_response(error, "configure_tools_failed"),
     }
 }
 
@@ -217,10 +207,15 @@ pub(in crate::http) async fn resolve_tool_approval(
         .await
     {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
-        Err(error) => handler_error_response(
-            HandlerError::SessionNotFound(error.to_string()),
-            "approval_failed",
-        ),
+        Err(error) => approval_error_response(error),
+    }
+}
+
+fn approval_error_response(error: SessionApiError) -> Response {
+    match error {
+        SessionApiError::NotFound(message) => not_found_response("approval_not_pending", message),
+        SessionApiError::SessionBusy(message) => conflict_response("approval_unavailable", message),
+        error => internal_error_response("approval_failed", error),
     }
 }
 
@@ -510,5 +505,22 @@ fn summary_to_dto(summary: SessionSummary) -> SessionListItemDto {
         updated_at: summary.updated_at,
         phase: summary.phase.into(),
         first_user_message: summary.first_user_message,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn approval_errors_preserve_not_found_and_busy_statuses() {
+        assert_eq!(
+            approval_error_response(SessionApiError::NotFound("missing".into())).status(),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            approval_error_response(SessionApiError::SessionBusy("dropped".into())).status(),
+            StatusCode::CONFLICT
+        );
     }
 }

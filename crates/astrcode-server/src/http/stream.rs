@@ -332,7 +332,8 @@ async fn drain_stale_live_events(state: &mut LiveStreamState) {
             Ok(notification) => match notification {
                 ClientNotification::StatusItemUpdate { .. }
                 | ClientNotification::ExtensionRegistryChanged
-                | ClientNotification::ExtensionCommandResult { .. } => {
+                | ClientNotification::ExtensionCommandResult { .. }
+                | ClientNotification::GlobalExtensionEvent { .. } => {
                     buffered.push(LiveInput::Notification(Box::new(notification)));
                 },
                 _ => {},
@@ -444,16 +445,16 @@ async fn notification_to_sse_items(
             };
             ConversationDeltaDto::AppendBlock { block }
         },
-        // 跨会话广播的 ask-user 状态：转成与会话流相同的 ExtensionEvent delta，
-        // 前端 applyDelta 的现有解析逻辑可直接复用（payload 自带 sessionId）。
-        ClientNotification::AskUserEvent {
-            session_id: _,
+        ClientNotification::GlobalExtensionEvent {
+            extension_id,
             event_type,
+            schema_version,
             payload,
+            ..
         } => ConversationDeltaDto::ExtensionEvent {
-            extension_id: "astrcode-ask-user".into(),
+            extension_id,
             event_type,
-            schema_version: 1,
+            schema_version,
             payload,
         },
         _ => return Vec::new(),

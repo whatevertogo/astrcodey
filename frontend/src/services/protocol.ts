@@ -345,6 +345,10 @@ function decodeAskUserOption(value: unknown) {
     label: requiredString(object, 'label'),
     description: requiredString(object, 'description'),
     preview: optionalString(object, 'preview'),
+    recommended:
+      object.recommended === undefined
+        ? undefined
+        : requiredBoolean(object, 'recommended'),
   }
 }
 
@@ -370,6 +374,7 @@ export function decodePendingAskUserQuestion(
     sessionId: requiredString(object, 'sessionId'),
     callId: requiredString(object, 'callId'),
     questions: arrayField(object, 'questions').map(decodeAskUserQuestion),
+    autoSelectAt: optionalNumber(object, 'autoSelectAt'),
     metadata: metadata
       ? { source: optionalString(metadata, 'source') }
       : undefined,

@@ -106,6 +106,29 @@ impl SessionCommandService {
             .map_err(HandlerError::from)
     }
 
+    pub(crate) async fn configure_tools(
+        &self,
+        session_id: SessionId,
+        selection: SessionToolSelection,
+    ) -> Result<SessionToolSelection, HandlerError> {
+        let session = self
+            .runtime
+            .session_manager()
+            .open(session_id.clone())
+            .await
+            .map_err(|error| match error {
+                crate::session_manager::SessionManagerError::Storage(
+                    astrcode_storage::StorageError::NotFound(_),
+                ) => HandlerError::SessionNotFound(session_id.to_string()),
+                error => HandlerError::SessionManager(error),
+            })?;
+        self.runtime
+            .session_manager()
+            .configure_session_tools(&session, selection)
+            .await
+            .map_err(HandlerError::Session)
+    }
+
     pub(crate) async fn submit_input_with_completion(
         &self,
         session_id: SessionId,

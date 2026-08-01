@@ -1,7 +1,10 @@
 mod model;
 mod registry;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use astrcode_extension_sdk::{
     extension::{
@@ -158,7 +161,17 @@ impl ToolHandler for AskUserToolHandler {
             .events
             .clone()
             .ok_or_else(|| ExtensionError::Internal("askUser event sink unavailable".into()))?;
-        let pending = PendingQuestion::new(session_id.clone(), call_id.clone(), input);
+        let auto_select_at = if input
+            .questions
+            .iter()
+            .all(|question| question.options.iter().any(|option| option.recommended))
+        {
+            auto_select_deadline_millis()
+        } else {
+            None
+        };
+        let pending =
+            PendingQuestion::new(session_id.clone(), call_id.clone(), input, auto_select_at);
         let (mut receiver, mut guard) = self.registry.register(pending.clone(), events)?;
 
         let deadline = tokio::time::Instant::now() + self.timeout;
@@ -177,7 +190,9 @@ impl ToolHandler for AskUserToolHandler {
                 })?,
                 () = &mut auto_select, if auto_select_enabled => {
                     match self.registry.auto_select_recommended(&session_id, &call_id) {
-                        Ok(()) => {
+                        // AlreadyResolved:用户答案与自动选择竞态,resolve() 先从
+                        // pending 移除再 send,答案已在 receiver 里,照常收取。
+                        Ok(()) | Err(ResolveError::AlreadyResolved) => {
                             break receiver.await.map_err(|_| {
                                 ExtensionError::Internal("askUser auto-select resolution channel closed".into())
                             })?;
@@ -206,19 +221,19 @@ impl ToolHandler for AskUserToolHandler {
 fn resolution_result(pending: &PendingQuestion, resolution: Resolution) -> ToolResult {
     match resolution {
         Resolution::Answered(answers) => ToolResult::success(
-            serde_json::to_string(&json!({
+            json!({
                 "questions": pending.questions,
                 "answers": answers,
-            }))
-            .unwrap_or_else(|_| "{}".into()),
+            })
+            .to_string(),
         ),
         Resolution::AutoAnswered(answers) => ToolResult::success(
-            serde_json::to_string(&json!({
+            json!({
                 "questions": pending.questions,
                 "answers": answers,
                 "autoSelected": true,
-            }))
-            .unwrap_or_else(|_| "{}".into()),
+            })
+            .to_string(),
         ),
         Resolution::Rejected => ToolResult::error("User rejected the question"),
         Resolution::TimedOut => ToolResult::error("Timed out waiting for user response"),
@@ -228,6 +243,16 @@ fn resolution_result(pending: &PendingQuestion, resolution: Resolution) -> ToolR
             ToolResult::error("askUser extension stopped while waiting for user")
         },
     }
+}
+
+fn auto_select_deadline_millis() -> Option<u64> {
+    SystemTime::now()
+        .checked_add(AUTO_SELECT_DELAY)?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .try_into()
+        .ok()
 }
 
 struct AskUserSessionShutdown {
@@ -390,6 +415,7 @@ mod tests {
                 }],
                 metadata: None,
             },
+            Some(60_000),
         )
     }
 
@@ -437,6 +463,7 @@ mod tests {
                 }],
                 metadata: None,
             },
+            None,
         );
         let (_, mut no_recommended_guard) =
             registry.register(no_recommended, events.clone()).unwrap();
@@ -446,6 +473,38 @@ mod tests {
         ));
         assert_eq!(registry.list("session-1").len(), 1);
         no_recommended_guard.disarm();
+    }
+
+    #[tokio::test]
+    async fn answer_winning_before_auto_select_is_not_lost() {
+        let registry = Arc::new(PendingRegistry::default());
+        let events: Arc<dyn ExtensionEventSink> = Arc::new(RecordingEvents::default());
+        let (receiver, mut guard) = registry
+            .register(pending("session-1", "race"), events)
+            .unwrap();
+
+        // 用户答案先完成;自动选择随后只应看到 AlreadyResolved。
+        registry
+            .answer(
+                "session-1",
+                "race",
+                HashMap::from([("Which approach?".into(), "B".into())]),
+            )
+            .unwrap();
+        assert!(matches!(
+            registry.auto_select_recommended("session-1", "race"),
+            Err(ResolveError::AlreadyResolved)
+        ));
+        // execute 循环此时仍从 receiver 收取,用户答案不丢。
+        assert!(matches!(
+            receiver.await.unwrap(),
+            Resolution::Answered(answers) if answers["Which approach?"] == "B"
+        ));
+        guard.disarm();
+        assert!(matches!(
+            registry.auto_select_recommended("session-1", "race"),
+            Err(ResolveError::NotFound)
+        ));
     }
 
     #[tokio::test]
@@ -482,7 +541,7 @@ mod tests {
         assert!(registry.list("session-1").is_empty());
         assert_eq!(
             registry.reject("session-1", "call-1"),
-            Err(ResolveError::AlreadyResolved)
+            Err(ResolveError::NotFound)
         );
 
         let (reused, mut reused_guard) = registry

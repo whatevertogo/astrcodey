@@ -29,15 +29,21 @@ export type ConversationRenderState = Pick<
   | 'statusItemRevisions'
   | 'pendingAskUserQuestions'
   | 'resolvedAskUserCallIds'
+  | 'pendingAskUserRefreshSessionId'
   | 'askUserEventRevision'
   | 'transientHint'
 >
 
 type ConversationRenderPatch = Partial<ConversationRenderState>
 
+/** ToolCallId 仅在 turn 内唯一，跨会话可能碰撞，pending map 以 sessionId+callId 复合键索引。 */
+export function pendingAskUserKey(sessionId: string, callId: string): string {
+  return `${sessionId}:${callId}`
+}
+
 export function mergePendingAskUserSnapshot(
   currentPending: Record<string, PendingAskUserQuestion>,
-  resolvedCallIds: Record<string, true>,
+  resolvedCallIds: Record<string, string>,
   snapshot: PendingAskUserQuestion[],
   sessionId: string,
   pendingAtStart: ReadonlySet<string>,
@@ -46,27 +52,38 @@ export function mergePendingAskUserSnapshot(
   ConversationRenderState,
   'pendingAskUserQuestions' | 'resolvedAskUserCallIds'
 > {
-  const pending = Object.fromEntries(
-    snapshot
-      .filter(
-        (question) =>
-          question.sessionId === sessionId &&
-          (!eventsArrivedDuringRequest || !resolvedCallIds[question.callId])
-      )
-      .map((question) => [question.callId, question])
-  )
+  const pending: Record<string, PendingAskUserQuestion> = {}
+  // 其他会话的 pending 不在本次快照范围内，原样保留（已 resolved 的除外）。
+  for (const [key, question] of Object.entries(currentPending)) {
+    if (question.sessionId !== sessionId && !resolvedCallIds[key]) {
+      pending[key] = question
+    }
+  }
+  // 当前会话以服务端快照为准。
+  for (const question of snapshot) {
+    if (question.sessionId !== sessionId) continue
+    const key = pendingAskUserKey(question.sessionId, question.callId)
+    if (eventsArrivedDuringRequest && resolvedCallIds[key]) continue
+    pending[key] = question
+  }
+  // 请求期间经 SSE 新到达的当前会话 pending 比快照新，不能被旧快照丢弃。
   if (eventsArrivedDuringRequest) {
-    for (const [callId, question] of Object.entries(currentPending)) {
-      if (!pendingAtStart.has(callId) && !resolvedCallIds[callId]) {
-        pending[callId] = question
+    for (const [key, question] of Object.entries(currentPending)) {
+      if (
+        question.sessionId === sessionId &&
+        !pendingAtStart.has(key) &&
+        !resolvedCallIds[key]
+      ) {
+        pending[key] = question
       }
     }
   }
 
-  const nextResolved = { ...resolvedCallIds }
-  for (const callId of Object.keys(pending)) {
-    delete nextResolved[callId]
-  }
+  const nextResolved = Object.fromEntries(
+    Object.entries(resolvedCallIds).filter(
+      ([, resolvedSessionId]) => resolvedSessionId !== sessionId
+    )
+  )
   return {
     pendingAskUserQuestions: pending,
     resolvedAskUserCallIds: nextResolved,
@@ -241,17 +258,18 @@ export function reduceConversationDeltas(
         if (delta.eventType === 'ask_user.pending') {
           try {
             const pending = decodePendingAskUserQuestion(delta.payload)
-            if (pendingAskUserQuestions[pending.callId]) {
+            const key = pendingAskUserKey(pending.sessionId, pending.callId)
+            if (pendingAskUserQuestions[key]) {
               break
             }
-            if (resolvedAskUserCallIds[pending.callId]) {
+            if (resolvedAskUserCallIds[key]) {
               const nextResolved = { ...resolvedAskUserCallIds }
-              delete nextResolved[pending.callId]
+              delete nextResolved[key]
               resolvedAskUserCallIds = nextResolved
             }
             pendingAskUserQuestions = {
               ...pendingAskUserQuestions,
-              [pending.callId]: pending,
+              [key]: pending,
             }
             askUserEventRevision += 1
           } catch (error) {
@@ -267,20 +285,32 @@ export function reduceConversationDeltas(
           ) {
             break
           }
-          const callId = (delta.payload as Record<string, unknown>).callId
-          if (typeof callId !== 'string') break
+          const payload = delta.payload as Record<string, unknown>
+          const sessionId = payload.sessionId
+          const callId = payload.callId
+          if (typeof sessionId !== 'string' || typeof callId !== 'string') {
+            break
+          }
+          const key = pendingAskUserKey(sessionId, callId)
+          const wasPending = pendingAskUserQuestions[key] !== undefined
+          const trackResolution =
+            current.pendingAskUserRefreshSessionId === sessionId
           if (
-            resolvedAskUserCallIds[callId] &&
-            !pendingAskUserQuestions[callId]
+            !wasPending &&
+            (!trackResolution || resolvedAskUserCallIds[key] === sessionId)
           ) {
             break
           }
-          const nextPending = { ...pendingAskUserQuestions }
-          delete nextPending[callId]
-          pendingAskUserQuestions = nextPending
-          resolvedAskUserCallIds = {
-            ...resolvedAskUserCallIds,
-            [callId]: true,
+          if (wasPending) {
+            const nextPending = { ...pendingAskUserQuestions }
+            delete nextPending[key]
+            pendingAskUserQuestions = nextPending
+          }
+          if (trackResolution) {
+            resolvedAskUserCallIds = {
+              ...resolvedAskUserCallIds,
+              [key]: sessionId,
+            }
           }
           askUserEventRevision += 1
         }
