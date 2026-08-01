@@ -23,7 +23,7 @@ use astrcode_extension_sdk::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-pub const SKILL_TOOL_NAME: &str = "Skill";
+const SKILL_TOOL_NAME: &str = "Skill";
 const SKILL_FILE_NAME: &str = "SKILL.md";
 const MAX_INDEX_CHARS: usize = 8_000;
 const MAX_DESCRIPTION_CHARS: usize = 250;

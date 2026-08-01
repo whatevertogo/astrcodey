@@ -162,7 +162,6 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 - `prompt_engine`：具体的 system prompt 组装、规则文件加载和 provider message 分组。稳定 section 与动态 section 分开输出，格式异常的自定义 prompt 会完整回退为单条 system message。
 - `context_assembler`：根据模型限制和 `ContextSettings` 裁剪历史消息，生成 LLM 请求上下文。
 - `token_budget`：token 粗估和预算门控。
-- `contribution`：上下文贡献类型，供扩展或宿主注入额外片段。
 - `compaction`：compact 主流程。包含 XML contract 解析、摘要格式、确定性 fallback、merge、post-compact 上下文恢复等。
 - `post_compact_enricher`：compact 后自动找回最近 read 过但已被压缩移出的文件上下文。
 

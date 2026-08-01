@@ -3,15 +3,15 @@
 //! 通过 HTTP 操控内嵌 server 执行 eval case，从 event log 提取 metrics，
 //! 运行 judge 判定，输出结构化报告。
 
-pub mod adapter;
+mod adapter;
 pub mod case;
-pub mod client;
+mod client;
 mod git;
 pub mod judge;
 pub mod metrics;
 pub mod report;
-pub mod runner;
-pub mod setup;
+mod runner;
+mod setup;
 mod swebench_instance;
 
 use std::path::PathBuf;

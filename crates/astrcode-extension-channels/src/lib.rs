@@ -35,14 +35,14 @@ pub fn extension() -> Arc<dyn Extension> {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ChannelsConfig {
+pub(crate) struct ChannelsConfig {
     #[serde(default)]
     pub telegram: TelegramChannelConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct TelegramChannelConfig {
+pub(crate) struct TelegramChannelConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]

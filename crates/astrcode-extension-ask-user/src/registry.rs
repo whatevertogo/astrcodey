@@ -10,11 +10,11 @@ use tokio::sync::oneshot;
 
 use crate::model::PendingQuestion;
 
-pub const PENDING_EVENT_TYPE: &str = "ask_user.pending";
-pub const RESOLVED_EVENT_TYPE: &str = "ask_user.resolved";
+pub(crate) const PENDING_EVENT_TYPE: &str = "ask_user.pending";
+pub(crate) const RESOLVED_EVENT_TYPE: &str = "ask_user.resolved";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Resolution {
+pub(crate) enum Resolution {
     Answered(HashMap<String, String>),
     AutoAnswered(HashMap<String, String>),
     Rejected,
@@ -39,7 +39,7 @@ impl Resolution {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ResolveError {
+pub(crate) enum ResolveError {
     NotFound,
     AlreadyResolved,
     InvalidAnswers(String),
@@ -76,12 +76,12 @@ struct RegistryState {
 }
 
 #[derive(Default)]
-pub struct PendingRegistry {
+pub(crate) struct PendingRegistry {
     state: Mutex<RegistryState>,
 }
 
 impl PendingRegistry {
-    pub fn register(
+    pub(crate) fn register(
         self: &Arc<Self>,
         question: PendingQuestion,
         events: Arc<dyn ExtensionEventSink>,
@@ -126,7 +126,7 @@ impl PendingRegistry {
         ))
     }
 
-    pub fn list(&self, session_id: &str) -> Vec<PendingQuestion> {
+    pub(crate) fn list(&self, session_id: &str) -> Vec<PendingQuestion> {
         let mut questions = self
             .state
             .lock()
@@ -139,7 +139,7 @@ impl PendingRegistry {
         questions
     }
 
-    pub fn answer(
+    pub(crate) fn answer(
         &self,
         session_id: &str,
         call_id: &str,
@@ -163,13 +163,13 @@ impl PendingRegistry {
         self.resolve(&key, Resolution::Answered(answers))
     }
 
-    pub fn reject(&self, session_id: &str, call_id: &str) -> Result<(), ResolveError> {
+    pub(crate) fn reject(&self, session_id: &str, call_id: &str) -> Result<(), ResolveError> {
         self.resolve(&PendingKey::new(session_id, call_id), Resolution::Rejected)
     }
 
     /// 用户超时未响应时自动选择推荐选项。所有问题都必须有推荐选项，
     /// 否则返回 [`ResolveError::NoRecommended`] 且不改变任何状态。
-    pub fn auto_select_recommended(
+    pub(crate) fn auto_select_recommended(
         &self,
         session_id: &str,
         call_id: &str,
@@ -192,11 +192,11 @@ impl PendingRegistry {
         self.resolve(&key, Resolution::AutoAnswered(answers))
     }
 
-    pub fn timeout(&self, session_id: &str, call_id: &str) -> Result<(), ResolveError> {
+    pub(crate) fn timeout(&self, session_id: &str, call_id: &str) -> Result<(), ResolveError> {
         self.resolve(&PendingKey::new(session_id, call_id), Resolution::TimedOut)
     }
 
-    pub fn shutdown_session(&self, session_id: &str) {
+    pub(crate) fn shutdown_session(&self, session_id: &str) {
         let entries = {
             let mut state = self.state.lock();
             state.resolved.retain(|key| key.session_id != session_id);
@@ -215,7 +215,7 @@ impl PendingRegistry {
         }
     }
 
-    pub fn shutdown_extension(&self) {
+    pub(crate) fn shutdown_extension(&self) {
         let entries = {
             let mut state = self.state.lock();
             state.resolved.clear();
@@ -294,14 +294,14 @@ fn finish_entry(key: PendingKey, entry: PendingEntry, resolution: Resolution) {
     }
 }
 
-pub struct PendingGuard {
+pub(crate) struct PendingGuard {
     registry: Arc<PendingRegistry>,
     key: Option<PendingKey>,
     registration: Arc<()>,
 }
 
 impl PendingGuard {
-    pub fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.key = None;
     }
 }

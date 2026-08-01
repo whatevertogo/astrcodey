@@ -6,22 +6,22 @@ use serde::{Deserialize, Serialize};
 
 /// Mode identifier.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ModeId(String);
+pub(crate) struct ModeId(String);
 
 impl ModeId {
-    pub fn code() -> Self {
+    pub(crate) fn code() -> Self {
         Self("code".into())
     }
 
-    pub fn plan() -> Self {
+    pub(crate) fn plan() -> Self {
         Self("plan".into())
     }
 
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.0
     }
 
-    pub fn from_raw(value: &str) -> Self {
+    pub(crate) fn from_raw(value: &str) -> Self {
         Self(value.to_string())
     }
 }
@@ -37,9 +37,11 @@ const PLAN_RESTRICTED_TOOLS: &[&str] = &["write", "edit", "patch", "shell", "ter
 
 /// Declarative definition of an agent running mode.
 #[derive(Debug, Clone)]
-pub struct ModeSpec {
+pub(crate) struct ModeSpec {
     pub id: ModeId,
     pub name: String,
+    // 模式声明的一部分,当前仅在定义处写入、尚无读取方。
+    #[allow(dead_code)]
     pub description: String,
     /// Tool names that are blocked in this mode.
     pub restricted_tools: HashSet<String>,
@@ -51,13 +53,13 @@ pub struct ModeSpec {
 
 /// Registry of available modes with lookup by ID.
 #[derive(Clone)]
-pub struct ModeCatalog {
+pub(crate) struct ModeCatalog {
     modes: Vec<ModeSpec>,
     index: BTreeMap<String, usize>,
 }
 
 impl ModeCatalog {
-    pub fn new(modes: Vec<ModeSpec>) -> Self {
+    pub(crate) fn new(modes: Vec<ModeSpec>) -> Self {
         let index = modes
             .iter()
             .enumerate()
@@ -66,17 +68,18 @@ impl ModeCatalog {
         Self { modes, index }
     }
 
-    pub fn get(&self, id: &ModeId) -> Option<&ModeSpec> {
+    pub(crate) fn get(&self, id: &ModeId) -> Option<&ModeSpec> {
         self.index.get(id.as_str()).map(|&i| &self.modes[i])
     }
 
-    pub fn list(&self) -> &[ModeSpec] {
+    #[cfg(test)]
+    pub(crate) fn list(&self) -> &[ModeSpec] {
         &self.modes
     }
 }
 
 /// Validates whether transitioning from one mode to another is allowed.
-pub fn validate_transition(
+pub(crate) fn validate_transition(
     catalog: &ModeCatalog,
     from: &ModeId,
     to: &ModeId,
@@ -96,7 +99,7 @@ pub fn validate_transition(
     Ok(())
 }
 
-pub fn builtin_mode_specs() -> Vec<ModeSpec> {
+pub(crate) fn builtin_mode_specs() -> Vec<ModeSpec> {
     let transitions = vec![ModeId::code(), ModeId::plan()];
     vec![
         ModeSpec {
@@ -122,7 +125,7 @@ pub fn builtin_mode_specs() -> Vec<ModeSpec> {
     ]
 }
 
-pub fn builtin_catalog() -> ModeCatalog {
+pub(crate) fn builtin_catalog() -> ModeCatalog {
     ModeCatalog::new(builtin_mode_specs())
 }
 

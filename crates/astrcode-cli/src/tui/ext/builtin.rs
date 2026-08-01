@@ -184,6 +184,51 @@ impl ToolRenderer for EditRenderer {
 
 // ─── Shell ────────────────────────────────────────────────────────────────
 
+/// 构建「预览前 max_preview 行 → … more → summary → Box」的渲染;
+/// content 无有效行时回退为单行 summary 文本。
+fn preview_summary_box(
+    content: &str,
+    max_preview: usize,
+    more_suffix: &str,
+    summary: String,
+    tone: RenderTone,
+) -> RenderSpec {
+    let lines: Vec<&str> = content.lines().collect();
+    if lines.is_empty() {
+        return RenderSpec::Text {
+            text: summary,
+            tone,
+        };
+    }
+
+    let preview = lines
+        .iter()
+        .take(max_preview)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut children = vec![RenderSpec::Code {
+        language: None,
+        text: preview,
+        tone: RenderTone::Default,
+    }];
+    if lines.len() > max_preview {
+        children.push(RenderSpec::Text {
+            text: format!("… {} more{}", lines.len() - max_preview, more_suffix),
+            tone: RenderTone::Muted,
+        });
+    }
+    children.push(RenderSpec::Text {
+        text: summary,
+        tone,
+    });
+    RenderSpec::Box {
+        title: None,
+        tone: RenderTone::Default,
+        children,
+    }
+}
+
 pub struct ShellRenderer;
 
 impl ToolRenderer for ShellRenderer {
@@ -220,36 +265,7 @@ impl ToolRenderer for ShellRenderer {
 
         // 对于有实质输出的命令，截取前几行展示
         let content = result.content.trim();
-        let output_lines: Vec<&str> = content.lines().collect();
-        if output_lines.is_empty() || (output_lines.len() == 1 && output_lines[0].trim().is_empty())
-        {
-            return Some(RenderSpec::Text { text: status, tone });
-        }
-
-        let max_preview = 8;
-        let preview: String = output_lines
-            .iter()
-            .take(max_preview)
-            .copied()
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut children = vec![RenderSpec::Code {
-            language: None,
-            text: preview,
-            tone: RenderTone::Default,
-        }];
-        if output_lines.len() > max_preview {
-            children.push(RenderSpec::Text {
-                text: format!("… {} more lines", output_lines.len() - max_preview),
-                tone: RenderTone::Muted,
-            });
-        }
-        children.push(RenderSpec::Text { text: status, tone });
-        Some(RenderSpec::Box {
-            title: None,
-            tone: RenderTone::Default,
-            children,
-        })
+        Some(preview_summary_box(content, 8, " lines", status, tone))
     }
 }
 
@@ -285,36 +301,13 @@ impl ToolRenderer for GrepRenderer {
 
         // 预览前几条匹配
         let content = result.content.trim();
-        let preview_lines: Vec<&str> = content.lines().take(6).collect();
-        if preview_lines.is_empty() {
-            return Some(RenderSpec::Text {
-                text: summary,
-                tone: RenderTone::Success,
-            });
-        }
-
-        let preview = preview_lines.join("\n");
-        let total_lines = content.lines().count();
-        let mut children = vec![RenderSpec::Code {
-            language: None,
-            text: preview,
-            tone: RenderTone::Default,
-        }];
-        if total_lines > 6 {
-            children.push(RenderSpec::Text {
-                text: format!("… {} more", total_lines - 6),
-                tone: RenderTone::Muted,
-            });
-        }
-        children.push(RenderSpec::Text {
-            text: summary,
-            tone: RenderTone::Success,
-        });
-        Some(RenderSpec::Box {
-            title: None,
-            tone: RenderTone::Default,
-            children,
-        })
+        Some(preview_summary_box(
+            content,
+            6,
+            "",
+            summary,
+            RenderTone::Success,
+        ))
     }
 }
 
@@ -355,36 +348,13 @@ impl ToolRenderer for FindRenderer {
 
         // 预览前几个文件路径
         let content = result.content.trim();
-        let preview_lines: Vec<&str> = content.lines().take(8).collect();
-        if preview_lines.is_empty() {
-            return Some(RenderSpec::Text {
-                text: summary,
-                tone: RenderTone::Success,
-            });
-        }
-
-        let preview = preview_lines.join("\n");
-        let total_lines = content.lines().count();
-        let mut children = vec![RenderSpec::Code {
-            language: None,
-            text: preview,
-            tone: RenderTone::Default,
-        }];
-        if total_lines > 8 {
-            children.push(RenderSpec::Text {
-                text: format!("… {} more", total_lines - 8),
-                tone: RenderTone::Muted,
-            });
-        }
-        children.push(RenderSpec::Text {
-            text: summary,
-            tone: RenderTone::Success,
-        });
-        Some(RenderSpec::Box {
-            title: None,
-            tone: RenderTone::Default,
-            children,
-        })
+        Some(preview_summary_box(
+            content,
+            8,
+            "",
+            summary,
+            RenderTone::Success,
+        ))
     }
 }
 

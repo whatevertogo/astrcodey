@@ -14,11 +14,10 @@ use astrcode_extension_sdk::{
         ExtensionToolContext, ToolExecutionResult, ToolPromptMetadata, ToolPromptTag, ToolResult,
     },
 };
-pub use model::{
-    ASK_USER_TOOL_NAME, AskUserInput, AskUserMetadata, AskUserOption, AskUserQuestion,
-    PendingQuestion,
+use model::{
+    ASK_USER_TOOL_NAME, AnswerRequest, AskUserInput, PendingQuestion, tool_definition,
+    validate_input,
 };
-use model::{AnswerRequest, tool_definition, validate_input};
 use registry::{PendingRegistry, Resolution, ResolveError};
 use serde_json::json;
 
