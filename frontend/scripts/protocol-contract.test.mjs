@@ -216,7 +216,7 @@ assert.equal(userWithoutAttachments.kind, 'user')
 assert.equal(userWithoutAttachments.text, 'hello')
 assert.equal(userWithoutAttachments.attachments, undefined)
 
-for (const status of ['error', 'failed', 'cancelled']) {
+for (const status of ['failed', 'cancelled']) {
   const toolBlock = decodeConversationBlock({
     kind: 'toolCall',
     id: `tool-${status}`,
@@ -228,6 +228,19 @@ for (const status of ['error', 'failed', 'cancelled']) {
   assert.equal(toolBlock.kind, 'toolCall')
   assert.equal(toolBlock.status, status)
 }
+
+assert.throws(
+  () =>
+    decodeConversationBlock({
+      kind: 'toolCall',
+      id: 'tool-error',
+      name: 'probe',
+      arguments: '{}',
+      text: 'error',
+      status: 'error',
+    }),
+  ProtocolDecodeError
+)
 
 const toolWithApproval = decodeConversationBlock({
   kind: 'toolCall',
