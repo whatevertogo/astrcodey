@@ -21,6 +21,10 @@ const ANTHROPIC_MAX_STRICT_TOOLS: usize = 20;
 const ANTHROPIC_MAX_OPTIONAL_PARAMETERS: usize = 24;
 const ANTHROPIC_MAX_UNION_PARAMETERS: usize = 16;
 
+/// 三种遍历器共享的子 schema 关键字清单：数组形态与对象形态各一组。
+const CHILD_SCHEMA_KEYWORDS: [&str; 4] = ["anyOf", "oneOf", "allOf", "prefixItems"];
+const DEFINITION_KEYWORDS: [&str; 3] = ["$defs", "definitions", "patternProperties"];
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum StrictToolProvider {
     OpenAi,
@@ -159,39 +163,14 @@ fn promote_optional_parameters(
     let Some(object) = schema.as_object_mut() else {
         return 0;
     };
-
-    let mut promoted = 0;
-    let mut required = object
-        .get("required")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut required_names = required
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect::<HashSet<_>>();
-    if let Some(Value::Object(properties)) = object.get_mut("properties") {
-        for (name, property_schema) in properties {
-            if promoted == maximum {
-                break;
-            }
-            if required_names.contains(name) {
-                continue;
-            }
-            let is_union = is_union_schema(property_schema);
-            if is_union != existing_unions_only {
-                continue;
-            }
-            make_nullable(property_schema);
-            required_names.insert(name.clone());
-            required.push(Value::String(name.clone()));
-            promoted += 1;
-        }
-    }
-    if promoted > 0 {
-        object.insert("required".into(), Value::Array(required));
-    }
+    // 校验（validate_anthropic_tool）已保证 `required` 为数组或缺失；此处仅防御。
+    let Some(required) = required_array(object) else {
+        return 0;
+    };
+    let promoted =
+        promote_properties_to_required(object, required, maximum, |_, property_schema| {
+            is_union_schema(property_schema) == existing_unions_only
+        });
     if promoted == maximum {
         return promoted;
     }
@@ -201,46 +180,104 @@ fn promote_optional_parameters(
     }) + promoted
 }
 
+/// 提取 `required` 数组；`None` 表示该键存在但类型错误——调用方应保留原值，
+/// 让后续校验以"`required` must be an array"拒绝，而不是用默认值掩盖损坏。
+fn required_array(object: &Map<String, Value>) -> Option<Vec<Value>> {
+    match object.get("required") {
+        None => Some(Vec::new()),
+        Some(Value::Array(values)) => Some(values.clone()),
+        Some(_) => None,
+    }
+}
+
+/// 将对象属性提升进 `required`（对提升的属性做 nullable 包裹），返回提升数量。
+///
+/// `required` 缺失视为空数组；`properties` 存在时写回提升后的 `required` 数组。
+fn promote_properties_to_required(
+    object: &mut Map<String, Value>,
+    mut required: Vec<Value>,
+    maximum: usize,
+    mut should_promote: impl FnMut(&str, &Value) -> bool,
+) -> usize {
+    let mut required_names = required
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<HashSet<_>>();
+    let Some(Value::Object(properties)) = object.get_mut("properties") else {
+        return 0;
+    };
+    let mut promoted = 0;
+    for (name, property_schema) in properties {
+        if promoted == maximum {
+            break;
+        }
+        if required_names.contains(name) {
+            continue;
+        }
+        if !should_promote(name, property_schema) {
+            continue;
+        }
+        make_nullable(property_schema);
+        required_names.insert(name.clone());
+        required.push(Value::String(name.clone()));
+        promoted += 1;
+    }
+    object.insert("required".into(), Value::Array(required));
+    promoted
+}
+
+/// 遍历所有子 schema；回调返回 `false` 时提前停止。三种遍历器共享的骨架。
+fn for_each_child_schema_mut(
+    schema: &mut Map<String, Value>,
+    mut visit: impl FnMut(&mut Value) -> bool,
+) -> bool {
+    if let Some(Value::Object(properties)) = schema.get_mut("properties") {
+        for child in properties.values_mut() {
+            if !visit(child) {
+                return false;
+            }
+        }
+    }
+    if let Some(items) = schema.get_mut("items") {
+        if !visit(items) {
+            return false;
+        }
+    }
+    for keyword in CHILD_SCHEMA_KEYWORDS {
+        if let Some(Value::Array(children)) = schema.get_mut(keyword) {
+            for child in children {
+                if !visit(child) {
+                    return false;
+                }
+            }
+        }
+    }
+    for keyword in DEFINITION_KEYWORDS {
+        if let Some(Value::Object(definitions)) = schema.get_mut(keyword) {
+            for child in definitions.values_mut() {
+                if !visit(child) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 fn visit_child_schemas_mut_count(
     schema: &mut Map<String, Value>,
     maximum: usize,
     mut visit: impl FnMut(&mut Value, usize) -> usize,
 ) -> usize {
     let mut visited = 0;
-    if let Some(Value::Object(properties)) = schema.get_mut("properties") {
-        for child in properties.values_mut() {
-            visited += visit(child, maximum - visited);
-            if visited == maximum {
-                return visited;
-            }
+    for_each_child_schema_mut(schema, |child| {
+        if visited == maximum {
+            return false;
         }
-    }
-    if let Some(items) = schema.get_mut("items") {
-        visited += visit(items, maximum - visited);
-    }
-    if visited == maximum {
-        return visited;
-    }
-    for keyword in ["anyOf", "oneOf", "allOf", "prefixItems"] {
-        if let Some(Value::Array(children)) = schema.get_mut(keyword) {
-            for child in children {
-                visited += visit(child, maximum - visited);
-                if visited == maximum {
-                    return visited;
-                }
-            }
-        }
-    }
-    for keyword in ["$defs", "definitions", "patternProperties"] {
-        if let Some(Value::Object(definitions)) = schema.get_mut(keyword) {
-            for child in definitions.values_mut() {
-                visited += visit(child, maximum - visited);
-                if visited == maximum {
-                    return visited;
-                }
-            }
-        }
-    }
+        visited += visit(child, maximum - visited);
+        visited < maximum
+    });
     visited
 }
 
@@ -253,7 +290,7 @@ fn tool_origin_priority(origin: ToolOrigin) -> u8 {
     }
 }
 
-pub(crate) fn validate_strict_tools(
+fn validate_strict_tools(
     tools: &[ToolDefinition],
     supports_strict_tool_use: bool,
     provider: StrictToolProvider,
@@ -280,25 +317,11 @@ fn compile_openai_schema(schema: &mut Value) {
     let Some(object) = schema.as_object_mut() else {
         return;
     };
-    let mut required = object
-        .get("required")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let mut required_names = required
-        .iter()
-        .filter_map(Value::as_str)
-        .map(str::to_owned)
-        .collect::<HashSet<_>>();
-    if let Some(Value::Object(properties)) = object.get_mut("properties") {
-        for (name, property_schema) in properties {
-            if required_names.insert(name.clone()) {
-                make_nullable(property_schema);
-                required.push(Value::String(name.clone()));
-            }
-        }
-        object.insert("required".into(), Value::Array(required));
-    }
+    // `required` 类型损坏时保留原值，由 validate_strict_tools 以类型化错误拒绝。
+    let Some(required) = required_array(object) else {
+        return;
+    };
+    promote_properties_to_required(object, required, usize::MAX, |_, _| true);
     if is_object_schema_object(object) {
         object.insert("additionalProperties".into(), Value::Bool(false));
     }
@@ -350,14 +373,12 @@ fn is_object_schema_object(object: &Map<String, Value>) -> bool {
 
 fn make_nullable(schema: &mut Value) {
     let Some(object) = schema.as_object_mut() else {
-        let original = std::mem::take(schema);
-        *schema = serde_json::json!({"anyOf": [original, {"type": "null"}]});
+        wrap_nullable(schema);
         return;
     };
 
     if object.contains_key("const") {
-        let original = std::mem::take(schema);
-        *schema = serde_json::json!({"anyOf": [original, {"type": "null"}]});
+        wrap_nullable(schema);
         return;
     }
     if let Some(Value::Array(values)) = object.get_mut("enum") {
@@ -387,6 +408,11 @@ fn make_nullable(schema: &mut Value) {
         return;
     }
 
+    wrap_nullable(schema);
+}
+
+/// 将 schema 包裹为 `anyOf: [原值, {"type": "null"}]`。
+fn wrap_nullable(schema: &mut Value) {
     let original = std::mem::take(schema);
     *schema = serde_json::json!({"anyOf": [original, {"type": "null"}]});
 }
@@ -405,28 +431,10 @@ fn visit_child_schemas_mut(schema: &mut Value, mut visit: impl FnMut(&mut Value)
     let Some(object) = schema.as_object_mut() else {
         return;
     };
-    if let Some(Value::Object(properties)) = object.get_mut("properties") {
-        for child in properties.values_mut() {
-            visit(child);
-        }
-    }
-    if let Some(items) = object.get_mut("items") {
-        visit(items);
-    }
-    for keyword in ["anyOf", "oneOf", "allOf", "prefixItems"] {
-        if let Some(Value::Array(children)) = object.get_mut(keyword) {
-            for child in children {
-                visit(child);
-            }
-        }
-    }
-    for keyword in ["$defs", "definitions", "patternProperties"] {
-        if let Some(Value::Object(definitions)) = object.get_mut(keyword) {
-            for child in definitions.values_mut() {
-                visit(child);
-            }
-        }
-    }
+    for_each_child_schema_mut(object, |child| {
+        visit(child);
+        true
+    });
 }
 
 fn validate_openai_tool(tool: &ToolDefinition) -> Result<(), LlmError> {
@@ -1173,7 +1181,7 @@ fn visit_child_schemas(
     if let Some(items) = schema.get("items") {
         visit(items, &child_path(path, "items"))?;
     }
-    for keyword in ["anyOf", "oneOf", "allOf", "prefixItems"] {
+    for keyword in CHILD_SCHEMA_KEYWORDS {
         if let Some(Value::Array(children)) = schema.get(keyword) {
             for (index, child) in children.iter().enumerate() {
                 visit(
@@ -1183,7 +1191,7 @@ fn visit_child_schemas(
             }
         }
     }
-    for keyword in ["$defs", "definitions", "patternProperties"] {
+    for keyword in DEFINITION_KEYWORDS {
         if let Some(Value::Object(definitions)) = schema.get(keyword) {
             for (name, child) in definitions {
                 let child_path = child_path(&child_path(path, keyword), name);
@@ -1328,6 +1336,19 @@ mod tests {
                     }),
                 ),
                 Some("`$/properties/value`"),
+            ),
+            (
+                StrictToolProvider::OpenAi,
+                tool(
+                    "corruptedRequired",
+                    json!({
+                        "type": "object",
+                        "properties": {"value": {"type": "string"}},
+                        "required": "bogus",
+                        "additionalProperties": false
+                    }),
+                ),
+                Some("`$/required`"),
             ),
             (
                 StrictToolProvider::OpenAi,

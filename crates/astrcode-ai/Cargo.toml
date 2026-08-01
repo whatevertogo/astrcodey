@@ -19,3 +19,4 @@ getrandom = { workspace = true }
 astrcode-bundled-extensions = { path = "../astrcode-bundled-extensions" }
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 astrcode-tools = { path = "../astrcode-tools" }
+tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros", "net"] }

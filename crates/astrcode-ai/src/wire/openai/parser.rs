@@ -275,30 +275,45 @@ impl StandardAccumulator {
                 if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
                     return;
                 }
-                let item_id = item
+                let Some(item_id) = item
                     .get("id")
                     .and_then(|v| v.as_str())
                     .or_else(|| event["item_id"].as_str())
-                    .unwrap_or_default()
-                    .to_string();
+                else {
+                    tracing::warn!(
+                        "OpenAI Responses output_item.added function_call missing item id; \
+                         skipping event"
+                    );
+                    return;
+                };
                 let call_id = item
                     .get("call_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(item_id.as_str())
+                    .unwrap_or(item_id)
                     .to_string();
-                let name = item
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let partial = self.response_tool_items.entry(item_id.clone()).or_default();
+                let name = match item.get("name").and_then(|v| v.as_str()) {
+                    Some(name) => name,
+                    None => {
+                        tracing::warn!(
+                            "OpenAI Responses output_item.added function_call missing `name`"
+                        );
+                        ""
+                    },
+                };
+                let partial = self
+                    .response_tool_items
+                    .entry(item_id.to_string())
+                    .or_default();
                 partial.call_id = Some(call_id);
-                partial.name = Some(name);
+                partial.name = Some(name.to_string());
                 let item_arguments = item.get("arguments").and_then(json_argument_fragment);
-                let started_call_id = self.emit_response_tool_start(&item_id, tx);
+                let started_call_id = self.emit_response_tool_start(item_id, tx);
                 if let (Some(call_id), Some(arguments)) = (started_call_id, item_arguments) {
                     if !arguments.is_empty() {
-                        let partial = self.response_tool_items.entry(item_id.clone()).or_default();
+                        let partial = self
+                            .response_tool_items
+                            .entry(item_id.to_string())
+                            .or_default();
                         partial.arguments_delta_seen = true;
                         send_event(
                             tx,
@@ -311,7 +326,17 @@ impl StandardAccumulator {
                 }
             },
             "response.function_call_arguments.delta" => {
-                let item_id = event["item_id"].as_str().unwrap_or_default();
+                let Some(item_id) = event
+                    .get("item_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|id| !id.is_empty())
+                else {
+                    tracing::warn!(
+                        "OpenAI Responses function_call_arguments.delta missing `item_id`; \
+                         skipping event"
+                    );
+                    return;
+                };
                 if let Some(delta) = event.get("delta").and_then(json_argument_fragment) {
                     if delta.is_empty() {
                         return;
@@ -334,22 +359,41 @@ impl StandardAccumulator {
                 }
             },
             "response.function_call_arguments.done" => {
-                let item_id = event["item_id"].as_str().unwrap_or_default().to_string();
-                let partial = self.response_tool_items.entry(item_id.clone()).or_default();
+                let Some(item_id) = event
+                    .get("item_id")
+                    .and_then(|v| v.as_str())
+                    .filter(|id| !id.is_empty())
+                else {
+                    tracing::warn!(
+                        "OpenAI Responses function_call_arguments.done missing `item_id`; \
+                         skipping event"
+                    );
+                    return;
+                };
+                let partial = self
+                    .response_tool_items
+                    .entry(item_id.to_string())
+                    .or_default();
                 if let Some(call_id) = event["call_id"].as_str() {
                     partial.call_id = Some(call_id.to_string());
                 }
                 if let Some(name) = event["name"].as_str() {
                     partial.name = Some(name.to_string());
                 }
-                let fallback_call_id = partial.call_id.clone().unwrap_or_else(|| item_id.clone());
+                let fallback_call_id = partial
+                    .call_id
+                    .clone()
+                    .unwrap_or_else(|| item_id.to_string());
                 let call_id = if partial.started {
                     fallback_call_id
                 } else {
-                    self.emit_response_tool_start(&item_id, tx)
+                    self.emit_response_tool_start(item_id, tx)
                         .unwrap_or(fallback_call_id)
                 };
-                let partial = self.response_tool_items.entry(item_id).or_default();
+                let partial = self
+                    .response_tool_items
+                    .entry(item_id.to_string())
+                    .or_default();
                 if !partial.arguments_delta_seen {
                     if let Some(arguments) = event.get("arguments").and_then(json_argument_fragment)
                     {
@@ -378,7 +422,9 @@ impl StandardAccumulator {
                     },
                 );
             },
-            _ => {},
+            _ => {
+                tracing::debug!("Ignoring unknown OpenAI Responses event type: {event_type}");
+            },
         }
     }
 
@@ -484,7 +530,7 @@ fn process_sse_data(
         "Failed to parse {} SSE data: {} bytes, preview: {:?}",
         api_mode_name,
         data.len(),
-        &data[..data.len().min(80)]
+        &data[..data.floor_char_boundary(80)]
     );
 }
 
@@ -1306,5 +1352,58 @@ mod accumulator_tests {
             .count();
         assert_eq!(count, 1);
         assert!(acc.done_sent());
+    }
+
+    #[test]
+    fn responses_output_item_added_without_id_is_skipped() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = StandardAccumulator::default();
+
+        acc.ingest_responses(
+            &serde_json::json!({
+                "type": "response.output_item.added",
+                "item": {"type": "function_call", "call_id": "c1", "name": "read"}
+            }),
+            &tx,
+        );
+
+        assert!(
+            rx.try_recv().is_err(),
+            "缺 item id 时不应发出带空 id 的伪造事件"
+        );
+    }
+
+    #[test]
+    fn responses_arguments_delta_without_item_id_is_skipped() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = StandardAccumulator::default();
+
+        acc.ingest_responses(
+            &serde_json::json!({
+                "type": "response.function_call_arguments.delta",
+                "delta": "{\"path\""
+            }),
+            &tx,
+        );
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn responses_arguments_done_without_item_id_is_skipped() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut acc = StandardAccumulator::default();
+
+        acc.ingest_responses(
+            &serde_json::json!({
+                "type": "response.function_call_arguments.done",
+                "call_id": "c1",
+                "name": "read",
+                "arguments": "{}"
+            }),
+            &tx,
+        );
+
+        assert!(rx.try_recv().is_err());
     }
 }

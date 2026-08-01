@@ -60,10 +60,9 @@ impl StandardProvider {
         openai_wire::OpenAiRequestConfig {
             api_mode: self.api_mode,
             model_id: &self.model_id,
-            max_output_tokens: max_output_tokens
-                .unwrap_or(self.model_limits_val.max_output_tokens)
-                .min(self.model_limits_val.max_output_tokens)
-                .max(1),
+            max_output_tokens: self
+                .model_limits_val
+                .effective_output_cap(max_output_tokens),
             supports_stream_usage: self.config.supports_stream_usage(),
             supports_prompt_cache_key: self.config.supports_prompt_cache_key(),
             supports_strict_tool_use: self.config.supports_strict_tool_use,

@@ -4,7 +4,7 @@
 //! [`LlmEvent`]。拥有「`Done` 至多发一次」守卫，以及与 OpenAI parser 共享的
 //! 累积/增量文本去重（复用 [`crate::common::stream_text_delta`]）。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use astrcode_core::llm::{LlmEvent, LlmTokenUsage, LlmTokenUsageSource};
 use tokio::sync::mpsc;
@@ -51,6 +51,32 @@ pub(crate) struct AnthropicStreamState {
     /// SSE content block index → actual tool call id。
     index_to_call_id: HashMap<u64, String>,
     block_stream_state: HashMap<u64, BlockStreamState>,
+    /// 已开始但尚未收到 `content_block_stop` 的 tool call id；流结束时补发完成事件。
+    started_tool_call_ids: HashSet<String>,
+}
+
+impl AnthropicStreamState {
+    /// 流结束时补发未收到 `content_block_stop` 的工具调用完成事件，防止调用方卡死等待。
+    pub(crate) fn emit_pending_tool_completions(
+        &mut self,
+        tx: &mpsc::UnboundedSender<LlmEvent>,
+    ) -> bool {
+        for call_id in self.started_tool_call_ids.drain() {
+            if !send_event(tx, LlmEvent::ToolCallCompleted { call_id }) {
+                return false;
+            }
+        }
+        true
+    }
+}
+
+/// 读取 content_block 事件的 `index` 字段；缺失视为协议违规，告警后由调用方跳过该事件。
+fn block_index(event: &serde_json::Value, what: &str) -> Option<u64> {
+    let index = event.get("index").and_then(|v| v.as_u64());
+    if index.is_none() {
+        tracing::warn!("Anthropic {what} event missing `index`; skipping event");
+    }
+    index
 }
 
 #[derive(Debug, Default)]
@@ -92,19 +118,26 @@ fn handle_anthropic_event(
             if let Some(block) = event.get("content_block") {
                 match block.get("type").and_then(|v| v.as_str()) {
                     Some("tool_use") => {
-                        let call_id = block
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string();
-                        let name = block
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or_default()
-                            .to_string();
+                        let Some(call_id) = block.get("id").and_then(|v| v.as_str()) else {
+                            tracing::warn!(
+                                "Anthropic content_block_start tool_use missing `id`; skipping \
+                                 event"
+                            );
+                            return true;
+                        };
+                        let name = match block.get("name").and_then(|v| v.as_str()) {
+                            Some(name) => name,
+                            None => {
+                                tracing::warn!(
+                                    "Anthropic content_block_start tool_use missing `name`"
+                                );
+                                ""
+                            },
+                        };
                         if let Some(index) = event.get("index").and_then(|v| v.as_u64()) {
-                            state.index_to_call_id.insert(index, call_id.clone());
+                            state.index_to_call_id.insert(index, call_id.to_string());
                         }
+                        state.started_tool_call_ids.insert(call_id.to_string());
                         let initial_args = block
                             .get("input")
                             .filter(|v| v.as_object().is_some_and(|obj| !obj.is_empty()))
@@ -113,14 +146,16 @@ fn handle_anthropic_event(
                         send_event(
                             tx,
                             LlmEvent::ToolCallStart {
-                                call_id,
-                                name,
+                                call_id: call_id.to_string(),
+                                name: name.to_string(),
                                 arguments: initial_args,
                             },
                         )
                     },
                     Some("thinking") => {
-                        let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let Some(index) = block_index(event, "content_block_start thinking") else {
+                            return true;
+                        };
                         state
                             .block_stream_state
                             .insert(index, BlockStreamState::default());
@@ -139,7 +174,9 @@ fn handle_anthropic_event(
                         }
                     },
                     Some("text") => {
-                        let index = event.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let Some(index) = block_index(event, "content_block_start text") else {
+                            return true;
+                        };
                         state
                             .block_stream_state
                             .insert(index, BlockStreamState::default());
@@ -167,10 +204,10 @@ fn handle_anthropic_event(
             if let Some(delta) = event.get("delta") {
                 match delta.get("type").and_then(|v| v.as_str()) {
                     Some("text_delta") => {
-                        let index = event
-                            .get("index")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or_default();
+                        let Some(index) = block_index(event, "content_block_delta text_delta")
+                        else {
+                            return true;
+                        };
                         if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
                             let block_state = state.block_stream_state.entry(index).or_default();
                             emit_block_stream_delta(block_state, tx, text, false)
@@ -179,10 +216,10 @@ fn handle_anthropic_event(
                         }
                     },
                     Some("thinking_delta") => {
-                        let index = event
-                            .get("index")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or_default();
+                        let Some(index) = block_index(event, "content_block_delta thinking_delta")
+                        else {
+                            return true;
+                        };
                         if let Some(thinking) = delta.get("thinking").and_then(|v| v.as_str()) {
                             let block_state = state.block_stream_state.entry(index).or_default();
                             emit_block_stream_delta(block_state, tx, thinking, true)
@@ -191,10 +228,11 @@ fn handle_anthropic_event(
                         }
                     },
                     Some("input_json_delta") => {
-                        let index = event
-                            .get("index")
-                            .and_then(|v| v.as_u64())
-                            .unwrap_or_default();
+                        let Some(index) =
+                            block_index(event, "content_block_delta input_json_delta")
+                        else {
+                            return true;
+                        };
                         let call_id = state
                             .index_to_call_id
                             .get(&index)
@@ -219,15 +257,21 @@ fn handle_anthropic_event(
             }
         },
         "content_block_stop" => {
-            if let Some(index) = event.get("index").and_then(|v| v.as_u64()) {
-                if let Some(call_id) = state.index_to_call_id.get(&index) {
-                    return send_event(
-                        tx,
-                        LlmEvent::ToolCallCompleted {
-                            call_id: call_id.clone(),
-                        },
-                    );
-                }
+            let Some(index) = event.get("index").and_then(|v| v.as_u64()) else {
+                tracing::warn!(
+                    "Anthropic content_block_stop event missing `index`; tool call completion \
+                     deferred to stream end"
+                );
+                return true;
+            };
+            if let Some(call_id) = state.index_to_call_id.get(&index) {
+                state.started_tool_call_ids.remove(call_id);
+                return send_event(
+                    tx,
+                    LlmEvent::ToolCallCompleted {
+                        call_id: call_id.clone(),
+                    },
+                );
             }
             true
         },
@@ -256,7 +300,10 @@ fn handle_anthropic_event(
                 .to_string();
             send_event(tx, LlmEvent::Error { message })
         },
-        _ => true,
+        _ => {
+            tracing::debug!("Ignoring unknown Anthropic event type: {event_type}");
+            true
+        },
     }
 }
 
@@ -309,12 +356,23 @@ pub(crate) fn process_sse_line(
         return false;
     }
 
-    if let Ok(event) = serde_json::from_str::<serde_json::Value>(data) {
-        if !handle_anthropic_event(current_event_type, &event, tx, state) {
-            return false;
-        }
-        current_event_type.clear();
+    match serde_json::from_str::<serde_json::Value>(data) {
+        Ok(event) => {
+            if !handle_anthropic_event(current_event_type, &event, tx, state) {
+                return false;
+            }
+        },
+        Err(error) => {
+            tracing::warn!(
+                "Failed to parse Anthropic SSE data (event type: {:?}): {} bytes, preview: {:?}: \
+                 {error}",
+                current_event_type,
+                data.len(),
+                &data[..data.floor_char_boundary(80)]
+            );
+        },
     }
+    current_event_type.clear();
     true
 }
 
@@ -505,5 +563,103 @@ mod tests {
             })
             .collect();
         assert_eq!(thinking, "The user");
+    }
+
+    #[test]
+    fn content_block_delta_missing_index_is_skipped() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = AnthropicStreamState::default();
+
+        let delta = serde_json::json!({
+            "delta": {"type": "text_delta", "text": "hi"}
+        });
+        assert!(handle_anthropic_event(
+            "content_block_delta",
+            &delta,
+            &tx,
+            &mut state,
+        ));
+        assert!(rx.try_recv().is_err(), "缺 index 的增量不应落入默认块");
+    }
+
+    #[test]
+    fn tool_use_start_missing_id_is_skipped() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = AnthropicStreamState::default();
+
+        let start = serde_json::json!({
+            "index": 0,
+            "content_block": {"type": "tool_use", "name": "read", "input": {}}
+        });
+        assert!(handle_anthropic_event(
+            "content_block_start",
+            &start,
+            &tx,
+            &mut state,
+        ));
+        assert!(rx.try_recv().is_err());
+        assert!(state.started_tool_call_ids.is_empty());
+    }
+
+    #[test]
+    fn tool_call_without_stop_is_completed_at_stream_end() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = AnthropicStreamState::default();
+
+        let start = serde_json::json!({
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "call_1", "name": "read", "input": {}}
+        });
+        assert!(handle_anthropic_event(
+            "content_block_start",
+            &start,
+            &tx,
+            &mut state,
+        ));
+        assert!(rx.try_recv().is_ok(), "ToolCallStart 应已发送");
+
+        assert!(state.emit_pending_tool_completions(&tx));
+        let completed: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|event| matches!(event, LlmEvent::ToolCallCompleted { .. }))
+            .collect();
+        assert!(completed.iter().any(
+            |event| matches!(event, LlmEvent::ToolCallCompleted { call_id } if call_id == "call_1")
+        ));
+    }
+
+    #[test]
+    fn content_block_stop_removes_tool_call_from_pending() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = AnthropicStreamState::default();
+
+        let start = serde_json::json!({
+            "index": 0,
+            "content_block": {"type": "tool_use", "id": "call_1", "name": "read"}
+        });
+        assert!(handle_anthropic_event(
+            "content_block_start",
+            &start,
+            &tx,
+            &mut state,
+        ));
+        let stop = serde_json::json!({"index": 0});
+        assert!(handle_anthropic_event(
+            "content_block_stop",
+            &stop,
+            &tx,
+            &mut state,
+        ));
+        let completed: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())
+            .filter(|event| matches!(event, LlmEvent::ToolCallCompleted { .. }))
+            .collect();
+        assert!(completed.iter().any(
+            |event| matches!(event, LlmEvent::ToolCallCompleted { call_id } if call_id == "call_1")
+        ));
+
+        assert!(state.emit_pending_tool_completions(&tx));
+        assert!(
+            rx.try_recv().is_err(),
+            "已收到 stop 的工具调用不应在流结束时重复补发"
+        );
     }
 }

@@ -827,6 +827,16 @@ pub struct ModelLimits {
     pub max_output_tokens: usize,
 }
 
+impl ModelLimits {
+    /// 计算实际输出上限：请求值或模型上限，钳制到模型上限内且至少为 1。
+    pub fn effective_output_cap(&self, requested: Option<usize>) -> usize {
+        requested
+            .unwrap_or(self.max_output_tokens)
+            .min(self.max_output_tokens)
+            .max(1)
+    }
+}
+
 /// 从 LLM 事件流中收集所有文本增量，返回完整文本。
 ///
 /// 遇到 `Error` 事件时返回错误，忽略非文本事件（tool call、thinking 等）。

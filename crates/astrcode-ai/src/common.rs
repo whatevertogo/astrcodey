@@ -5,7 +5,10 @@
 //! 本模块将这一公共骨架提取为泛型函数，各 provider 只需提供
 //! SSE 事件处理和请求体构造。
 
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::{AtomicBool, Ordering},
+    time::{Duration, Instant},
+};
 
 use astrcode_core::{
     config::ProviderAuthScheme,
@@ -176,12 +179,19 @@ pub struct HttpPostRequest {
 impl HttpPostRequest {
     /// 发起带重试的 POST 请求，成功时调用 `on_success` 处理响应流。
     ///
+    /// `stream_started` 由 `on_success` 在开始消费响应体（收到任何 SSE 行）时置位；
+    /// 已置位后传输层错误不再重试，避免已投递事件重复。
+    ///
     /// 重试逻辑：
     /// - 传输层错误（DNS/TLS/连接重置）→ 按 `max_transport_retries` 重试
     /// - 可重试 HTTP 状态码（408/429/500/502/503/504）→ 按 `max_retries` 重试
-    /// - `on_success` 返回 `Transport` 错误 → 按传输层错误重试
+    /// - `on_success` 返回 `Transport` 错误且流尚未开始消费 → 按传输层错误重试
     /// - 其他错误 → 直接返回
-    pub async fn run<F, Fut>(&self, mut on_success: F) -> Result<(), LlmError>
+    pub async fn run<F, Fut>(
+        &self,
+        stream_started: &AtomicBool,
+        mut on_success: F,
+    ) -> Result<(), LlmError>
     where
         F: FnMut(reqwest::Response) -> Fut,
         Fut: std::future::Future<Output = Result<(), LlmError>>,
@@ -222,21 +232,24 @@ impl HttpPostRequest {
             if status.is_success() {
                 match on_success(response).await {
                     Ok(()) => return Ok(()),
-                    Err(LlmError::Transport { message }) => {
-                        if self.retry.should_retry_transport(attempt) {
-                            let delay = self.retry.delay(attempt);
-                            tracing::warn!(
-                                "LLM stream read failed with transport error (attempt \
-                                 {attempt}/{}), retrying after {}ms: {message}",
-                                self.retry.max_transport_retries,
-                                delay.as_millis(),
-                            );
-                            tokio::time::sleep(delay).await;
-                            continue;
+                    Err(error) => {
+                        if !stream_started.load(Ordering::SeqCst)
+                            && self.retry.should_retry_transport(attempt)
+                        {
+                            if let LlmError::Transport { message } = &error {
+                                let delay = self.retry.delay(attempt);
+                                tracing::warn!(
+                                    "LLM stream read failed with transport error (attempt \
+                                     {attempt}/{}), retrying after {}ms: {message}",
+                                    self.retry.max_transport_retries,
+                                    delay.as_millis(),
+                                );
+                                tokio::time::sleep(delay).await;
+                                continue;
+                            }
                         }
-                        return Err(LlmError::transport(message));
+                        return Err(error);
                     },
-                    Err(error) => return Err(error),
                 }
             }
 
@@ -369,19 +382,12 @@ impl SseStreamSummary {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SseBodyPreview {
-    Capture,
-    Skip,
-}
-
 /// 解码 HTTP 响应并逐行分发 SSE 内容。
 ///
 /// 返回 `None` 表示接收端关闭或回调主动停止，调用方不应继续发送收尾事件。
 pub(crate) async fn consume_sse_lines(
     response: reqwest::Response,
     tx: &mpsc::UnboundedSender<LlmEvent>,
-    preview: SseBodyPreview,
     mut on_line: impl FnMut(&str) -> bool,
 ) -> Result<Option<SseStreamSummary>, LlmError> {
     let endpoint = response.url().to_string();
@@ -421,7 +427,7 @@ pub(crate) async fn consume_sse_lines(
                 "LLM stream first bytes received"
             );
         }
-        if preview == SseBodyPreview::Capture && body_preview.is_empty() && !bytes.is_empty() {
+        if body_preview.is_empty() && !bytes.is_empty() {
             body_preview = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_string();
         }
         if let Some(text) = decoder.push(&bytes).map_err(stream_decoder_error)? {
@@ -608,6 +614,36 @@ fn is_sensitive_query_key(key: &str) -> bool {
     )
 }
 
+/// 极简 HTTP 测试服务器（仅测试用）：每收到一个请求调用 `respond(请求序号)` 并写入响应。
+#[cfg(test)]
+pub(crate) async fn spawn_test_server(
+    respond: impl Fn(u32) -> Vec<u8> + Send + Sync + 'static,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicU32>) {
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let requests = std::sync::Arc::new(AtomicU32::new(0));
+    let counter = requests.clone();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let count = counter.fetch_add(1, AtomicOrdering::SeqCst) + 1;
+            let body = respond(count);
+            tokio::spawn(async move {
+                let mut buf = [0_u8; 2048];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&body).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), requests)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,5 +773,80 @@ mod tests {
             "Wed, 21 Oct 2026 07:28:00 GMT".parse().unwrap(),
         );
         assert_eq!(parse_retry_after_ms(&headers), None);
+    }
+
+    fn test_request(addr: String) -> HttpPostRequest {
+        HttpPostRequest {
+            client: reqwest::Client::new(),
+            endpoint: addr,
+            headers: vec![],
+            body: serde_json::json!({}),
+            retry: RetryPolicy {
+                base_delay_ms: 1,
+                max_delay_ms: 100,
+                ..RetryPolicy::default()
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn run_does_not_retry_transport_error_after_stream_lines_were_consumed() {
+        let (addr, requests) = spawn_test_server(|_| {
+            // 声明 Content-Length 但只发送部分 body 后断开 → 流中途传输错误。
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 10000\r\n\r\ndata: {\"type\":\"message_stop\"}\n\n"
+                .to_vec()
+        })
+        .await;
+        let stream_started = AtomicBool::new(false);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = test_request(addr)
+            .run(&stream_started, |response| {
+                let tx = &tx;
+                let stream_started = &stream_started;
+                async move {
+                    consume_sse_lines(response, tx, |line| {
+                        let _ = line;
+                        stream_started.store(true, Ordering::SeqCst);
+                        !tx.is_closed()
+                    })
+                    .await
+                    .map(|_| ())
+                }
+            })
+            .await;
+
+        assert!(matches!(result, Err(LlmError::Transport { .. })));
+        assert_eq!(requests.load(Ordering::SeqCst), 1, "已消费流后不应重试");
+    }
+
+    #[tokio::test]
+    async fn run_retries_transport_error_before_any_stream_line() {
+        let (addr, requests) = spawn_test_server(|_| {
+            // 声明 Content-Length 但 body 未发送 → 首个 body read 即失败。
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 10000\r\n\r\n"
+                .to_vec()
+        })
+        .await;
+        let stream_started = AtomicBool::new(false);
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let result = test_request(addr)
+            .run(&stream_started, |response| {
+                let tx = &tx;
+                let stream_started = &stream_started;
+                async move {
+                    consume_sse_lines(response, tx, |line| {
+                        let _ = line;
+                        stream_started.store(true, Ordering::SeqCst);
+                        !tx.is_closed()
+                    })
+                    .await
+                    .map(|_| ())
+                }
+            })
+            .await;
+
+        assert!(matches!(result, Err(LlmError::Transport { .. })));
+        // 默认 max_transport_retries = 2：尝试 1、2 重试，第 3 次失败后返回。
+        assert_eq!(requests.load(Ordering::SeqCst), 3, "未消费任何行时应重试");
     }
 }
