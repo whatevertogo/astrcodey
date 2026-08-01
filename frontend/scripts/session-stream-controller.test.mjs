@@ -66,6 +66,7 @@ async function flushMicrotasks() {
     connectionStatus: 'connected',
     activeSessionId: null,
     sessionStreamStatus: 'disconnected',
+    askUserExtensionAvailable: null,
     pendingAskUserRefreshInFlight: false,
   }
   let refreshCount = 0
@@ -97,6 +98,9 @@ async function flushMicrotasks() {
   assert.equal(refreshCount, 2)
 
   state.connectionStatus = 'connected'
+  runNext()
+  assert.equal(refreshCount, 3)
+  state.askUserExtensionAvailable = false
   runNext()
   assert.equal(refreshCount, 3)
   poller.stop()

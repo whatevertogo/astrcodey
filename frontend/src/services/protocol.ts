@@ -378,6 +378,8 @@ export function decodePendingAskUserQuestion(
     metadata: metadata
       ? { source: optionalString(metadata, 'source') }
       : undefined,
+    serverTime: optionalNumber(object, 'serverTime'),
+    receivedAtMonotonic: performance.now(),
   }
 }
 

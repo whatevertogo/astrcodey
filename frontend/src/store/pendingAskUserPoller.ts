@@ -6,6 +6,7 @@ export interface PendingAskUserPollState {
   connectionStatus: 'disconnected' | 'connecting' | 'connected' | 'error'
   activeSessionId: string | null
   sessionStreamStatus: SessionStreamStatus
+  askUserExtensionAvailable: boolean | null
   pendingAskUserRefreshInFlight: boolean
 }
 
@@ -56,6 +57,7 @@ export class PendingAskUserPoller {
       const state = this.readState()
       if (
         state.connectionStatus === 'connected' &&
+        state.askUserExtensionAvailable !== false &&
         (state.activeSessionId === null ||
           state.sessionStreamStatus !== 'connected') &&
         !state.pendingAskUserRefreshInFlight

@@ -1,4 +1,7 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use astrcode_extension_sdk::tool::{ExecutionMode, ToolDefinition, ToolOrigin};
 use serde::{Deserialize, Serialize};
@@ -61,6 +64,8 @@ pub(crate) struct PendingQuestion {
     pub metadata: Option<AskUserMetadata>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_select_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_time: Option<u64>,
 }
 
 impl PendingQuestion {
@@ -76,7 +81,14 @@ impl PendingQuestion {
             questions: input.questions,
             metadata: input.metadata,
             auto_select_at,
+            server_time: unix_time_millis(),
         }
+    }
+
+    pub(crate) fn with_current_server_time(&self) -> Self {
+        let mut question = self.clone();
+        question.server_time = unix_time_millis();
+        question
     }
 
     /// 每个问题至少有一个推荐选项时返回自动选择的答案；否则 `None`。
@@ -115,6 +127,15 @@ impl PendingQuestion {
         }
         Ok(())
     }
+}
+
+fn unix_time_millis() -> Option<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .try_into()
+        .ok()
 }
 
 #[derive(Debug, Deserialize)]

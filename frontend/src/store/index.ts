@@ -92,6 +92,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   resolvedAskUserCallIds: {},
   pendingAskUserRefreshInFlight: false,
   askUserEventRevision: 0,
+  askUserExtensionAvailable: null,
   composerDeliveryMode: 'queued',
   projectFolderOrder: [],
 
@@ -128,8 +129,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
 
     set({ connectionStatus: 'connected' })
-    await get().refreshSessions()
-    void get().refreshPendingAskUserQuestions()
     pendingAskUserPoller?.stop()
     pendingAskUserPoller = new PendingAskUserPoller({
       readState: get,
@@ -138,6 +137,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     })
     pendingAskUserPoller.start()
     void get().refreshExtensionData()
+    const pendingRefresh = get().refreshPendingAskUserQuestions()
+    await Promise.all([get().refreshSessions(), pendingRefresh])
   },
 
   refreshSessions: async () => {
@@ -371,7 +372,23 @@ export const useAppStore = create<AppState>((set, get) => ({
   refreshExtensionData: async () => {
     try {
       const extensions = await api.listExtensions()
-      set({ extensions })
+      const askUser = extensions.find(
+        (extension) => extension.extensionId === 'astrcode-ask-user'
+      )
+      const askUserExtensionAvailable =
+        askUser !== undefined && askUser.enabled && askUser.loaded
+      if (!askUserExtensionAvailable) {
+        pendingAskRefreshGeneration += 1
+        set({
+          extensions,
+          askUserExtensionAvailable,
+          pendingAskUserQuestions: {},
+          resolvedAskUserCallIds: {},
+          pendingAskUserRefreshInFlight: false,
+        })
+        return
+      }
+      set({ extensions, askUserExtensionAvailable })
     } catch (err) {
       console.error('Failed to refresh extensions:', err)
       set({

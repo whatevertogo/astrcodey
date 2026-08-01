@@ -133,7 +133,7 @@ impl PendingRegistry {
             .pending
             .iter()
             .filter(|(key, _)| key.session_id == session_id)
-            .map(|(_, entry)| entry.question.clone())
+            .map(|(_, entry)| entry.question.with_current_server_time())
             .collect::<Vec<_>>();
         questions.sort_by(|left, right| left.call_id.cmp(&right.call_id));
         questions
@@ -145,7 +145,7 @@ impl PendingRegistry {
             .lock()
             .pending
             .values()
-            .map(|entry| entry.question.clone())
+            .map(|entry| entry.question.with_current_server_time())
             .collect::<Vec<_>>();
         questions.sort_by(|left, right| {
             left.session_id

@@ -57,6 +57,7 @@ export interface AppState {
   resolvedAskUserCallIds: Record<string, string>
   pendingAskUserRefreshInFlight: boolean
   askUserEventRevision: number
+  askUserExtensionAvailable: boolean | null
   composerDeliveryMode: MessageDelivery
 
   initServer: () => Promise<void>

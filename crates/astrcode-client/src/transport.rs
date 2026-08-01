@@ -154,8 +154,10 @@ impl StdioClientTransport {
                     continue;
                 }
                 let Ok(message) = from_jsonl_line::<JsonRpcMessage>(&line) else {
-                    let truncated: String = line.chars().take(256).collect();
-                    tracing::warn!(line = %truncated, "failed to parse server stdout line, skipping");
+                    tracing::warn!(
+                        line_bytes = line.len(),
+                        "failed to parse server stdout line, skipping"
+                    );
                     continue;
                 };
                 if let Ok(event) = notification_from_jsonrpc_message(&message) {

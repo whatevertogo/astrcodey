@@ -736,6 +736,7 @@ mod tests {
             .unwrap();
         assert_eq!(all.status, 200);
         assert_eq!(all.body["questions"][0]["sessionId"], "session-1");
+        assert!(all.body["questions"][0]["serverTime"].is_number());
 
         let mut invalid = ExtensionHttpRequest::new(
             ExtensionHttpMethod::Post,

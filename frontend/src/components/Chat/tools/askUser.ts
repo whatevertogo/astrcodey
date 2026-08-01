@@ -2,6 +2,7 @@ import type {
   AskUserOption,
   AskUserQuestion,
   ConversationBlock,
+  PendingAskUserQuestion,
 } from '../../../services/types'
 
 export type { AskUserOption, AskUserQuestion } from '../../../services/types'
@@ -15,6 +16,20 @@ export interface AskUserOutput {
   questions: AskUserQuestion[]
   answers: Record<string, string>
   autoSelected?: boolean
+}
+
+export function remainingAutoSelectSeconds(
+  pending: PendingAskUserQuestion,
+  monotonicNow: number
+): number | null {
+  if (pending.autoSelectAt === undefined || pending.serverTime === undefined) {
+    return null
+  }
+  const elapsed = Math.max(0, monotonicNow - pending.receivedAtMonotonic)
+  return Math.max(
+    0,
+    Math.ceil((pending.autoSelectAt - pending.serverTime - elapsed) / 1000)
+  )
 }
 
 type JsonRecord = Record<string, unknown>

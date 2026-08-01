@@ -11,6 +11,7 @@ import type { JsonRecord } from './helpers'
 import {
   parseAskUserInput,
   parseAskUserOutput,
+  remainingAutoSelectSeconds,
   type AskUserQuestion,
 } from './askUser'
 
@@ -172,22 +173,27 @@ export function AskUserCard({
     string
   > | null>(null)
   const [submitError, setSubmitError] = useState<string | null>(null)
-  const [clockMillis, setClockMillis] = useState(() => Date.now())
+  const [monotonicMillis, setMonotonicMillis] = useState(() =>
+    performance.now()
+  )
 
   const questions = input?.questions ?? completed?.questions ?? []
-  const autoSelectAt = pendingQuestion?.autoSelectAt
-  const remainingSecs =
-    autoSelectAt === undefined
-      ? null
-      : Math.max(0, Math.ceil((autoSelectAt - clockMillis) / 1000))
+  const remainingSecs = pendingQuestion
+    ? remainingAutoSelectSeconds(pendingQuestion, monotonicMillis)
+    : null
 
   useEffect(() => {
-    if (autoSelectAt === undefined) return
+    if (
+      pendingQuestion?.autoSelectAt === undefined ||
+      pendingQuestion.serverTime === undefined
+    ) {
+      return
+    }
     const timer = window.setInterval(() => {
-      setClockMillis(Date.now())
+      setMonotonicMillis(performance.now())
     }, 1000)
     return () => window.clearInterval(timer)
-  }, [autoSelectAt])
+  }, [pendingQuestion])
   const current = questions[state.index]
   const qState = current
     ? (state.byQuestion[current.question] ?? emptyQuestionState())

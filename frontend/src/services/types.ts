@@ -230,6 +230,8 @@ export interface PendingAskUserQuestion {
   questions: AskUserQuestion[]
   metadata?: { source?: string }
   autoSelectAt?: number
+  serverTime?: number
+  receivedAtMonotonic: number
 }
 
 export interface PendingAskUserQuestionsResponse {
