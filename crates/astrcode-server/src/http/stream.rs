@@ -446,16 +446,21 @@ async fn notification_to_sse_items(
             ConversationDeltaDto::AppendBlock { block }
         },
         ClientNotification::GlobalExtensionEvent {
+            session_id,
             extension_id,
             event_type,
             schema_version,
             payload,
-            ..
-        } => ConversationDeltaDto::ExtensionEvent {
-            extension_id,
-            event_type,
-            schema_version,
-            payload,
+        } => {
+            if session_id == state.session_id.as_str() {
+                return Vec::new();
+            }
+            ConversationDeltaDto::ExtensionEvent {
+                extension_id,
+                event_type,
+                schema_version,
+                payload,
+            }
         },
         _ => return Vec::new(),
     };

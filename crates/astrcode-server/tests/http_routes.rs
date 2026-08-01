@@ -1387,6 +1387,57 @@ async fn stream_preserves_ask_user_events_during_replay_drain() {
 }
 
 #[tokio::test]
+async fn stream_suppresses_current_session_ask_user_global_copy() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let (app, token, events) =
+        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .header("authorization", format!("Bearer {token}"))
+                .uri(format!("/api/sessions/{session_id}/stream"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let mut body = response.into_body();
+    tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("SSE connection comment should be immediate")
+        .expect("SSE body should stay open")
+        .unwrap();
+
+    events.send_notification(ClientNotification::Event(
+        LiveEvent::new(
+            SessionId::from(session_id),
+            None,
+            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                extension_id: "astrcode-ask-user".into(),
+                event_type: "ask_user.pending".into(),
+                schema_version: 1,
+                payload: serde_json::json!({ "callId": "current-session-call" }),
+            }),
+        )
+        .into(),
+    ));
+
+    let first = tokio::time::timeout(Duration::from_secs(1), body.frame())
+        .await
+        .expect("current-session event should be delivered")
+        .expect("SSE body should stay open")
+        .unwrap();
+    let first = std::str::from_utf8(first.data_ref().unwrap()).unwrap();
+    assert_eq!(first.matches("current-session-call").count(), 1);
+
+    let duplicate = tokio::time::timeout(Duration::from_millis(250), body.frame()).await;
+    assert!(duplicate.is_err(), "global copy should not be delivered");
+}
+
+#[tokio::test]
 async fn stream_replays_events_after_snapshot_cursor() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
     let (app, token) = router(Arc::clone(&runtime)).unwrap();
