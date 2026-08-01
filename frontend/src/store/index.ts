@@ -335,7 +335,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       PENDING_ASK_USER_REFRESH_TIMEOUT_MS
     )
     set({ pendingAskUserRefreshInFlight: true })
-    const pendingAtStart = new Set(Object.keys(get().pendingAskUserQuestions))
+    const pendingAtStart = get().pendingAskUserQuestions
     const revisionAtStart = get().askUserEventRevision
 
     try {

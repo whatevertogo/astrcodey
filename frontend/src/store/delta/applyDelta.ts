@@ -45,7 +45,7 @@ export function mergePendingAskUserSnapshot(
   currentPending: Record<string, PendingAskUserQuestion>,
   resolvedCallIds: Record<string, string>,
   snapshot: PendingAskUserQuestion[],
-  pendingAtStart: ReadonlySet<string>,
+  pendingAtStart: Readonly<Record<string, PendingAskUserQuestion>>,
   eventsArrivedDuringRequest: boolean
 ): Pick<
   ConversationRenderState,
@@ -61,7 +61,8 @@ export function mergePendingAskUserSnapshot(
   // 请求期间经 SSE 新到达的 pending 比快照新，不能被旧快照丢弃。
   if (eventsArrivedDuringRequest) {
     for (const [key, question] of Object.entries(currentPending)) {
-      if (!pendingAtStart.has(key) && !resolvedCallIds[key]) {
+      // callId 可跨 turn 复用；对象身份用于区分请求开始时的旧条目与新解码的 SSE 条目。
+      if (pendingAtStart[key] !== question && !resolvedCallIds[key]) {
         pending[key] = question
       }
     }

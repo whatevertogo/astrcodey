@@ -344,7 +344,10 @@ assert.deepEqual(
       { ...askUserPending, callId: 'call-snapshot' },
       otherSessionPending,
     ],
-    new Set(['session-1:call-old', 'session-2:call-other']),
+    {
+      'session-1:call-old': askUserPending,
+      'session-2:call-other': otherSessionPending,
+    },
     true
   ),
   {
@@ -362,7 +365,7 @@ assert.deepEqual(
     {},
     { 'session-1:call-1': 'session-1' },
     [askUserPending],
-    new Set(),
+    {},
     false
   ),
   {
@@ -370,6 +373,23 @@ assert.deepEqual(
     resolvedAskUserCallIds: {},
   },
   'an authoritative REST snapshot must allow a reused call ID'
+)
+
+const reusedCallIdPending = {
+  ...askUserPending,
+  questions: [{ ...askUserPending.questions[0], question: 'new question' }],
+  autoSelectAt: 90_000,
+}
+assert.deepEqual(
+  mergePendingAskUserSnapshot(
+    { 'session-1:call-1': reusedCallIdPending },
+    {},
+    [askUserPending],
+    { 'session-1:call-1': askUserPending },
+    true
+  ).pendingAskUserQuestions,
+  { 'session-1:call-1': reusedCallIdPending },
+  'a new question that reuses a resolved call ID must replace the stale snapshot entry'
 )
 
 const frameBuffer = new ConversationDeltaFrameBuffer({
