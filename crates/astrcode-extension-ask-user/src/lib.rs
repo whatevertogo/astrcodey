@@ -86,6 +86,10 @@ impl Extension for AskUserExtension {
             registry: Arc::clone(&self.registry),
         });
         registrar.http_route(
+            ExtensionHttpRoute::authenticated(ExtensionHttpMethod::Get, "/questions"),
+            http.clone(),
+        );
+        registrar.http_route(
             ExtensionHttpRoute::authenticated(
                 ExtensionHttpMethod::Get,
                 "/sessions/{sessionId}/questions",
@@ -277,6 +281,12 @@ impl ExtensionHttpHandler for AskUserHttpHandler {
         &self,
         request: ExtensionHttpRequest,
     ) -> Result<ExtensionHttpResponse, ExtensionError> {
+        if request.method == ExtensionHttpMethod::Get && request.path == "/questions" {
+            return Ok(ExtensionHttpResponse::json(
+                200,
+                json!({ "questions": self.registry.list_all() }),
+            ));
+        }
         let Some(session_id) = request.path_params.get("sessionId") else {
             return Ok(ExtensionHttpResponse::error(
                 404,
@@ -475,6 +485,60 @@ mod tests {
         no_recommended_guard.disarm();
     }
 
+    #[test]
+    fn recommended_options_follow_the_declared_single_and_multi_select_semantics() {
+        let input = AskUserInput {
+            questions: vec![
+                AskUserQuestion {
+                    question: "Pick one?".into(),
+                    header: "Single".into(),
+                    options: vec![
+                        AskUserOption {
+                            label: "A".into(),
+                            description: "First".into(),
+                            preview: None,
+                            recommended: true,
+                        },
+                        AskUserOption {
+                            label: "B".into(),
+                            description: "Second".into(),
+                            preview: None,
+                            recommended: true,
+                        },
+                    ],
+                    multi_select: false,
+                },
+                AskUserQuestion {
+                    question: "Pick several?".into(),
+                    header: "Multiple".into(),
+                    options: vec![
+                        AskUserOption {
+                            label: "X".into(),
+                            description: "First".into(),
+                            preview: None,
+                            recommended: true,
+                        },
+                        AskUserOption {
+                            label: "Y".into(),
+                            description: "Second".into(),
+                            preview: None,
+                            recommended: true,
+                        },
+                    ],
+                    multi_select: true,
+                },
+            ],
+            metadata: None,
+        };
+
+        assert_eq!(validate_input(&input), Ok(()));
+        let answers = PendingQuestion::new("session-1".into(), "call-1".into(), input, None)
+            .auto_recommended_answers()
+            .unwrap();
+        assert_eq!(answers["Pick one?"], "A");
+        assert_eq!(answers["Pick several?"], "X, Y");
+    }
+
     #[tokio::test]
     async fn answer_winning_before_auto_select_is_not_lost() {
         let registry = Arc::new(PendingRegistry::default());
@@ -662,6 +726,16 @@ mod tests {
         let listed = handler.handle(list).await.unwrap();
         assert_eq!(listed.status, 200);
         assert_eq!(listed.body["questions"][0]["callId"], "call-1");
+
+        let all = handler
+            .handle(ExtensionHttpRequest::new(
+                ExtensionHttpMethod::Get,
+                "/questions",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(all.status, 200);
+        assert_eq!(all.body["questions"][0]["sessionId"], "session-1");
 
         let mut invalid = ExtensionHttpRequest::new(
             ExtensionHttpMethod::Post,

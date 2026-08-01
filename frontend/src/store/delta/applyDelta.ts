@@ -29,7 +29,7 @@ export type ConversationRenderState = Pick<
   | 'statusItemRevisions'
   | 'pendingAskUserQuestions'
   | 'resolvedAskUserCallIds'
-  | 'pendingAskUserRefreshSessionId'
+  | 'pendingAskUserRefreshInFlight'
   | 'askUserEventRevision'
   | 'transientHint'
 >
@@ -45,7 +45,6 @@ export function mergePendingAskUserSnapshot(
   currentPending: Record<string, PendingAskUserQuestion>,
   resolvedCallIds: Record<string, string>,
   snapshot: PendingAskUserQuestion[],
-  sessionId: string,
   pendingAtStart: ReadonlySet<string>,
   eventsArrivedDuringRequest: boolean
 ): Pick<
@@ -53,40 +52,24 @@ export function mergePendingAskUserSnapshot(
   'pendingAskUserQuestions' | 'resolvedAskUserCallIds'
 > {
   const pending: Record<string, PendingAskUserQuestion> = {}
-  // 其他会话的 pending 不在本次快照范围内，原样保留（已 resolved 的除外）。
-  for (const [key, question] of Object.entries(currentPending)) {
-    if (question.sessionId !== sessionId && !resolvedCallIds[key]) {
-      pending[key] = question
-    }
-  }
-  // 当前会话以服务端快照为准。
+  // 全局快照是权威基线；请求期间已 resolved 的条目不能被旧快照复活。
   for (const question of snapshot) {
-    if (question.sessionId !== sessionId) continue
     const key = pendingAskUserKey(question.sessionId, question.callId)
     if (eventsArrivedDuringRequest && resolvedCallIds[key]) continue
     pending[key] = question
   }
-  // 请求期间经 SSE 新到达的当前会话 pending 比快照新，不能被旧快照丢弃。
+  // 请求期间经 SSE 新到达的 pending 比快照新，不能被旧快照丢弃。
   if (eventsArrivedDuringRequest) {
     for (const [key, question] of Object.entries(currentPending)) {
-      if (
-        question.sessionId === sessionId &&
-        !pendingAtStart.has(key) &&
-        !resolvedCallIds[key]
-      ) {
+      if (!pendingAtStart.has(key) && !resolvedCallIds[key]) {
         pending[key] = question
       }
     }
   }
 
-  const nextResolved = Object.fromEntries(
-    Object.entries(resolvedCallIds).filter(
-      ([, resolvedSessionId]) => resolvedSessionId !== sessionId
-    )
-  )
   return {
     pendingAskUserQuestions: pending,
-    resolvedAskUserCallIds: nextResolved,
+    resolvedAskUserCallIds: {},
   }
 }
 
@@ -293,8 +276,7 @@ export function reduceConversationDeltas(
           }
           const key = pendingAskUserKey(sessionId, callId)
           const wasPending = pendingAskUserQuestions[key] !== undefined
-          const trackResolution =
-            current.pendingAskUserRefreshSessionId === sessionId
+          const trackResolution = current.pendingAskUserRefreshInFlight
           if (
             !wasPending &&
             (!trackResolution || resolvedAskUserCallIds[key] === sessionId)

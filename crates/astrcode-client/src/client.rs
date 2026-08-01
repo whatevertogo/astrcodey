@@ -51,10 +51,10 @@ impl<T: ClientTransport> AstrcodeClient<T> {
                     }
                 },
                 Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(skipped, "wait_for lagged, skipped notifications");
+                    return Err(ClientError::StreamLagged { skipped });
                 },
                 Err(broadcast::error::RecvError::Closed) => {
-                    return Err(ClientError::UnexpectedResponse);
+                    return Err(ClientError::StreamDisconnected);
                 },
             }
         }
@@ -201,6 +201,7 @@ mod tests {
     struct StubTransport {
         sent: std::sync::Mutex<Vec<ClientCommand>>,
         responses: std::sync::Mutex<Vec<ClientNotification>>,
+        response_capacity: usize,
     }
 
     impl StubTransport {
@@ -208,6 +209,15 @@ mod tests {
             Self {
                 sent: std::sync::Mutex::new(Vec::new()),
                 responses: std::sync::Mutex::new(responses),
+                response_capacity: 16,
+            }
+        }
+
+        fn lagging(responses: Vec<ClientNotification>) -> Self {
+            Self {
+                sent: std::sync::Mutex::new(Vec::new()),
+                responses: std::sync::Mutex::new(responses),
+                response_capacity: 1,
             }
         }
     }
@@ -222,7 +232,7 @@ mod tests {
         async fn subscribe(
             &self,
         ) -> Result<broadcast::Receiver<ClientNotification>, TransportError> {
-            let (tx, rx) = broadcast::channel::<ClientNotification>(16);
+            let (tx, rx) = broadcast::channel::<ClientNotification>(self.response_capacity);
             let responses = std::mem::take(&mut *self.responses.lock().expect("responses lock"));
             for notification in responses {
                 let _ = tx.send(notification);
@@ -278,6 +288,18 @@ mod tests {
 
         let err = client.create_session("/tmp").await.unwrap_err();
         assert!(matches!(err, ClientError::Server(msg) if msg.contains("internal error")));
+    }
+
+    #[tokio::test]
+    async fn wait_for_returns_lag_instead_of_waiting_for_a_lost_response() {
+        let transport = StubTransport::lagging(vec![
+            ClientNotification::ExtensionRegistryChanged,
+            ClientNotification::ExtensionRegistryChanged,
+        ]);
+        let client = AstrcodeClient::new(transport);
+
+        let error = client.list_sessions().await.unwrap_err();
+        assert!(matches!(error, ClientError::StreamLagged { skipped: 1 }));
     }
 
     #[tokio::test]

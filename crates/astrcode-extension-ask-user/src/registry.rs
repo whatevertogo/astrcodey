@@ -139,6 +139,22 @@ impl PendingRegistry {
         questions
     }
 
+    pub(crate) fn list_all(&self) -> Vec<PendingQuestion> {
+        let mut questions = self
+            .state
+            .lock()
+            .pending
+            .values()
+            .map(|entry| entry.question.clone())
+            .collect::<Vec<_>>();
+        questions.sort_by(|left, right| {
+            left.session_id
+                .cmp(&right.session_id)
+                .then_with(|| left.call_id.cmp(&right.call_id))
+        });
+        questions
+    }
+
     pub(crate) fn answer(
         &self,
         session_id: &str,

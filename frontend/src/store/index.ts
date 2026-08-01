@@ -41,10 +41,7 @@ function resetSessionView(): Partial<AppState> {
     workingDir: null,
     agentSessions: [],
     pendingMessages: [],
-    // pendingAskUserQuestions 是跨会话的全局 map（banner 依赖），不随单会话视图重置。
-    resolvedAskUserCallIds: {},
-    pendingAskUserRefreshSessionId: null,
-    askUserEventRevision: 0,
+    // ask-user pending、刷新状态和事件版本均为跨会话状态，不随单会话视图重置。
     composerDeliveryMode: 'queued',
     slashCommands: [],
     keybindings: [],
@@ -81,7 +78,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   pendingMessages: [],
   pendingAskUserQuestions: {},
   resolvedAskUserCallIds: {},
-  pendingAskUserRefreshSessionId: null,
+  pendingAskUserRefreshInFlight: false,
   askUserEventRevision: 0,
   composerDeliveryMode: 'queued',
   projectFolderOrder: [],
@@ -305,21 +302,14 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   refreshPendingAskUserQuestions: async () => {
-    const sessionId = get().activeSessionId
-    if (!sessionId) return
-    const switchGeneration = sessionSwitchGeneration
     const refreshGeneration = ++pendingAskRefreshGeneration
-    set({ pendingAskUserRefreshSessionId: sessionId })
+    set({ pendingAskUserRefreshInFlight: true })
     const pendingAtStart = new Set(Object.keys(get().pendingAskUserQuestions))
     const revisionAtStart = get().askUserEventRevision
 
     try {
-      const response = await api.listPendingAskUserQuestions(sessionId)
-      if (
-        get().activeSessionId !== sessionId ||
-        switchGeneration !== sessionSwitchGeneration ||
-        refreshGeneration !== pendingAskRefreshGeneration
-      ) {
+      const response = await api.listPendingAskUserQuestions()
+      if (refreshGeneration !== pendingAskRefreshGeneration) {
         return
       }
       set((current) => ({
@@ -327,16 +317,18 @@ export const useAppStore = create<AppState>((set, get) => ({
           current.pendingAskUserQuestions,
           current.resolvedAskUserCallIds,
           response.questions,
-          sessionId,
           pendingAtStart,
           current.askUserEventRevision !== revisionAtStart
         ),
-        pendingAskUserRefreshSessionId: null,
+        pendingAskUserRefreshInFlight: false,
       }))
     } catch (error) {
       console.debug('Failed to refresh pending ask-user questions:', error)
       if (refreshGeneration === pendingAskRefreshGeneration) {
-        set({ pendingAskUserRefreshSessionId: null })
+        set({
+          pendingAskUserRefreshInFlight: false,
+          resolvedAskUserCallIds: {},
+        })
       }
     }
   },

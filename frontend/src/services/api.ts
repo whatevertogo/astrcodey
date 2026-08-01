@@ -143,11 +143,9 @@ export async function getConversation(
   )
 }
 
-export async function listPendingAskUserQuestions(sessionId: string) {
+export async function listPendingAskUserQuestions() {
   return decodePendingAskUserQuestionsResponse(
-    await request<unknown>(
-      `/api/extensions/astrcode-ask-user/sessions/${encodeURIComponent(sessionId)}/questions`
-    )
+    await request<unknown>('/api/extensions/astrcode-ask-user/questions')
   )
 }
 

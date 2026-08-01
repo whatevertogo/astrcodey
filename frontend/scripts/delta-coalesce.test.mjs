@@ -110,7 +110,7 @@ const frameState = {
   statusItemRevisions: {},
   pendingAskUserQuestions: {},
   resolvedAskUserCallIds: {},
-  pendingAskUserRefreshSessionId: null,
+  pendingAskUserRefreshInFlight: false,
   askUserEventRevision: 0,
   transientHint: null,
 }
@@ -307,7 +307,7 @@ assert.equal(
 )
 
 const resolvedDuringRefreshPatch = reduceConversationDeltas(
-  { ...frameState, pendingAskUserRefreshSessionId: 'session-1' },
+  { ...frameState, pendingAskUserRefreshInFlight: true },
   [
     {
       kind: 'extensionEvent',
@@ -342,8 +342,8 @@ assert.deepEqual(
     [
       { ...askUserPending, callId: 'call-resolved' },
       { ...askUserPending, callId: 'call-snapshot' },
+      otherSessionPending,
     ],
-    'session-1',
     new Set(['session-1:call-old', 'session-2:call-other']),
     true
   ),
@@ -355,14 +355,13 @@ assert.deepEqual(
     },
     resolvedAskUserCallIds: {},
   },
-  'REST recovery must preserve a pending SSE event that arrived during the request, keep entries of other sessions, and ignore resolved tombstones'
+  'global REST recovery must restore every session, preserve newer SSE pending events, and ignore resolved tombstones'
 )
 assert.deepEqual(
   mergePendingAskUserSnapshot(
     {},
     { 'session-1:call-1': 'session-1' },
     [askUserPending],
-    'session-1',
     new Set(),
     false
   ),
@@ -493,7 +492,7 @@ const reducerInitialState = {
   statusItemRevisions: {},
   pendingAskUserQuestions: {},
   resolvedAskUserCallIds: {},
-  pendingAskUserRefreshSessionId: null,
+  pendingAskUserRefreshInFlight: false,
   askUserEventRevision: 0,
   transientHint: null,
 }
@@ -510,7 +509,7 @@ assert.deepEqual(
     statusItemRevisions: undefined,
     pendingAskUserQuestions: undefined,
     resolvedAskUserCallIds: undefined,
-    pendingAskUserRefreshSessionId: undefined,
+    pendingAskUserRefreshInFlight: undefined,
     askUserEventRevision: undefined,
     transientHint: undefined,
   },
@@ -520,7 +519,7 @@ assert.deepEqual(
     statusItemRevisions: undefined,
     pendingAskUserQuestions: undefined,
     resolvedAskUserCallIds: undefined,
-    pendingAskUserRefreshSessionId: undefined,
+    pendingAskUserRefreshInFlight: undefined,
     askUserEventRevision: undefined,
     transientHint: undefined,
   },

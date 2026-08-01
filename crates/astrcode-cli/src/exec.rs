@@ -5,7 +5,7 @@
 
 use std::io::Write;
 
-use astrcode_client::{client::AstrcodeClient, error::ClientError};
+use astrcode_client::{client::AstrcodeClient, error::ClientError, stream::StreamError};
 use astrcode_core::event::{DurableEventPayload, EventPayload, LiveEventPayload};
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 use thiserror::Error;
@@ -16,6 +16,8 @@ use crate::transport::InProcessTransport;
 pub enum ExecError {
     #[error(transparent)]
     Client(#[from] ClientError),
+    #[error(transparent)]
+    Stream(#[from] StreamError),
     #[error("exec timed out after {0}s")]
     Timeout(u64),
     #[error("write stdout: {0}")]
@@ -61,10 +63,7 @@ pub async fn run(
         } else {
             stream.recv().await
         };
-        let notification = match recv_result {
-            Ok(n) => n,
-            Err(_) => break,
-        };
+        let notification = recv_result?;
         let action = render_notification(
             &notification,
             jsonl,

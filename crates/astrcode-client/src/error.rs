@@ -28,6 +28,9 @@ pub enum ClientError {
     /// 事件流连接已断开。
     #[error("Stream disconnected")]
     StreamDisconnected,
+    /// 事件流消费者落后，部分通知已被覆盖。
+    #[error("Stream lagged and skipped {skipped} notifications")]
+    StreamLagged { skipped: u64 },
     /// JSON 序列化/反序列化错误。
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),

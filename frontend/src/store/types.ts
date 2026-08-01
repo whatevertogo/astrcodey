@@ -55,7 +55,7 @@ export interface AppState {
   pendingMessages: PendingMessage[]
   pendingAskUserQuestions: Record<string, PendingAskUserQuestion>
   resolvedAskUserCallIds: Record<string, string>
-  pendingAskUserRefreshSessionId: string | null
+  pendingAskUserRefreshInFlight: boolean
   askUserEventRevision: number
   composerDeliveryMode: MessageDelivery
 
