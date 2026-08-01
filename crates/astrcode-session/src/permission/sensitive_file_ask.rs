@@ -82,8 +82,26 @@ impl PermissionPolicy for SensitiveFileAskPolicy {
                 };
             }
         }
+        if let Some(pattern) = sensitive_grep_glob(ctx, self.globset.as_ref()) {
+            return PermissionDecision::Ask {
+                prompt: format!("Search sensitive path pattern `{pattern}`?"),
+                rule_key: Some(format!("sensitive:{pattern}")),
+            };
+        }
         PermissionDecision::Pass
     }
+}
+
+fn sensitive_grep_glob<'a>(
+    ctx: &'a PermissionContext<'_>,
+    globset: Option<&GlobSet>,
+) -> Option<&'a str> {
+    if ctx.tool_name != "grep" {
+        return None;
+    }
+    let pattern = ctx.tool_input.get("glob")?.as_str()?.trim();
+    (!pattern.is_empty() && globset.is_none_or(|globset| globset.is_match(pattern)))
+        .then_some(pattern)
 }
 
 #[cfg(test)]
@@ -134,6 +152,32 @@ mod tests {
             assert!(
                 matches!(policy.evaluate(&ctx), PermissionDecision::Ask { .. }),
                 "path {path} should trigger ask"
+            );
+        }
+    }
+
+    #[test]
+    fn grep_glob_filters_targeting_sensitive_files_trigger_ask() {
+        let policy = SensitiveFileAskPolicy::new();
+        for (glob, should_ask) in [
+            ("**/.npmrc", true),
+            (".aws/**", true),
+            ("**/*.pem", true),
+            ("**/*.rs", false),
+        ] {
+            let input = serde_json::json!({"path": ".", "glob": glob});
+            let ctx = PermissionContext {
+                tool_name: "grep",
+                tool_input: &input,
+                working_dir: std::path::Path::new("/project"),
+                resource_accesses: &[],
+                approval_mode: ApprovalMode::Manual,
+                tool_selection: None,
+            };
+            assert_eq!(
+                matches!(policy.evaluate(&ctx), PermissionDecision::Ask { .. }),
+                should_ask,
+                "unexpected decision for grep glob {glob}"
             );
         }
     }

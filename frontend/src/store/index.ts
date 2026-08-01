@@ -117,6 +117,7 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     set({ connectionStatus: 'connected' })
     await get().refreshSessions()
+    void get().refreshPendingAskUserQuestions()
     void get().refreshExtensionData()
   },
 
