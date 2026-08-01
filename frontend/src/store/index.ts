@@ -14,6 +14,10 @@ import {
   withTimeout,
 } from './delta/blockHelpers'
 import { startSessionStream } from './stream'
+import {
+  PendingAskUserPoller,
+  type PendingAskUserPollScheduler,
+} from './pendingAskUserPoller'
 import { canInjectMidTurn, isExecutionPhase } from './phaseHelpers'
 import {
   computeInitialProjectFolderOrder,
@@ -25,6 +29,12 @@ let commandRefreshGeneration = 0
 let sessionSwitchGeneration = 0
 let conversationRefreshGeneration = 0
 let pendingAskRefreshGeneration = 0
+let pendingAskUserPoller: PendingAskUserPoller | null = null
+
+const pendingAskUserPollScheduler: PendingAskUserPollScheduler = {
+  schedule: (callback, delayMs) => window.setTimeout(callback, delayMs),
+  cancel: (timer) => window.clearTimeout(timer as number),
+}
 
 function resetSessionView(): Partial<AppState> {
   return {
@@ -118,6 +128,13 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ connectionStatus: 'connected' })
     await get().refreshSessions()
     void get().refreshPendingAskUserQuestions()
+    pendingAskUserPoller?.stop()
+    pendingAskUserPoller = new PendingAskUserPoller({
+      readState: get,
+      refresh: () => void get().refreshPendingAskUserQuestions(),
+      scheduler: pendingAskUserPollScheduler,
+    })
+    pendingAskUserPoller.start()
     void get().refreshExtensionData()
   },
 
@@ -159,7 +176,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       state.sessionStream?.stop()
       set(resetSessionView())
     }
-    await get().refreshSessions()
+    await Promise.all([
+      get().refreshSessions(),
+      get().refreshPendingAskUserQuestions(),
+    ])
   },
 
   forkSession: async (sourceSessionId: string) => {
@@ -190,7 +210,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       state.sessionStream?.stop()
       set(resetSessionView())
     }
-    await get().refreshSessions()
+    await Promise.all([
+      get().refreshSessions(),
+      get().refreshPendingAskUserQuestions(),
+    ])
   },
 
   bumpModelRefreshKey: () => {

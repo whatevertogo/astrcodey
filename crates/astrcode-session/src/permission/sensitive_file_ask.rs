@@ -100,8 +100,26 @@ fn sensitive_grep_glob<'a>(
         return None;
     }
     let pattern = ctx.tool_input.get("glob")?.as_str()?.trim();
-    (!pattern.is_empty() && globset.is_none_or(|globset| globset.is_match(pattern)))
-        .then_some(pattern)
+    (!pattern.is_empty()
+        && globset
+            .is_none_or(|globset| has_unescaped_glob_meta(pattern) || globset.is_match(pattern)))
+    .then_some(pattern)
+}
+
+fn has_unescaped_glob_meta(pattern: &str) -> bool {
+    let mut escaped = false;
+    for character in pattern.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '*' | '?' | '[' | '{' => return true,
+            _ => {},
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -163,7 +181,8 @@ mod tests {
             ("**/.npmrc", true),
             (".aws/**", true),
             ("**/*.pem", true),
-            ("**/*.rs", false),
+            ("**/.npmr?", true),
+            ("src/lib.rs", false),
         ] {
             let input = serde_json::json!({"path": ".", "glob": glob});
             let ctx = PermissionContext {
