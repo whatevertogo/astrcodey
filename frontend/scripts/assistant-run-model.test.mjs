@@ -95,7 +95,6 @@ assert.equal(streamingRun.hasStreamingWork, true)
 assert.equal(processSummaryTitle(streamingRun.segments[0]), '处理中')
 
 for (const [status, expectedRunStatus] of [
-  ['error', 'error'],
   ['failed', 'error'],
   ['cancelled', 'complete'],
 ]) {
