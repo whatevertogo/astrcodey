@@ -269,7 +269,7 @@ impl MemoryStore {
     fn append_unlocked(&self, category: &str, content: &str) -> std::io::Result<()> {
         let mut parsed = self.read_parsed()?;
         parsed.add_entry(category, content);
-        atomic_write(&self.memory_path(), &parsed.render())
+        hostpaths::write_file_atomic(&self.memory_path(), &parsed.render())
     }
 
     fn new_user() -> std::io::Result<Self> {
@@ -317,7 +317,7 @@ impl MemoryStore {
     /// 初始化 MEMORY.md，写入 header + 空 sections。
     fn init_memory_file(&self) -> std::io::Result<()> {
         let content = self.empty_memory_content();
-        atomic_write(&self.memory_path(), &content)
+        hostpaths::write_file_atomic(&self.memory_path(), &content)
     }
 
     fn empty_memory_content(&self) -> String {
@@ -420,7 +420,7 @@ impl MemoryStore {
             UpsertResult::Added(_) => {
                 let mut parsed = self.read_parsed()?;
                 parsed.add_entry(category, content);
-                atomic_write(&self.memory_path(), &parsed.render())?;
+                hostpaths::write_file_atomic(&self.memory_path(), &parsed.render())?;
                 Ok(true)
             },
             UpsertResult::Updated {
@@ -428,7 +428,7 @@ impl MemoryStore {
             } => {
                 let mut parsed = self.read_parsed()?;
                 parsed.replace_or_add_entry(category, &previous_content, content);
-                atomic_write(&self.memory_path(), &parsed.render())?;
+                hostpaths::write_file_atomic(&self.memory_path(), &parsed.render())?;
                 Ok(true)
             },
         }
@@ -440,7 +440,7 @@ impl MemoryStore {
         let mut parsed = self.read_parsed()?;
         let removed = parsed.remove_entries_returning_content(pattern);
         if !removed.is_empty() {
-            atomic_write(&self.memory_path(), &parsed.render())?;
+            hostpaths::write_file_atomic(&self.memory_path(), &parsed.render())?;
         }
         let index_removed = self.memory_index().delete_by_content_match(pattern)?;
 
@@ -677,7 +677,7 @@ impl MemoryStore {
             let dir = self.contexts_dir();
             std::fs::create_dir_all(&dir)?;
             for (filename, content) in context_files {
-                atomic_write(&dir.join(filename), content)?;
+                hostpaths::write_file_atomic(&dir.join(filename), content)?;
             }
         }
 
@@ -689,7 +689,7 @@ impl MemoryStore {
         }
         let json = serde_json::to_string_pretty(&existing)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        atomic_write(&path, &json)?;
+        hostpaths::write_file_atomic(&path, &json)?;
 
         Ok(())
     }
@@ -744,7 +744,7 @@ impl MemoryStore {
                 } => {
                     let mut parsed = self.read_parsed()?;
                     parsed.replace_or_add_entry(category, &previous_content, &entry.content);
-                    atomic_write(&self.memory_path(), &parsed.render())?;
+                    hostpaths::write_file_atomic(&self.memory_path(), &parsed.render())?;
                     changed += 1;
                 },
             }
@@ -756,7 +756,7 @@ impl MemoryStore {
         let mut parsed = self.read_parsed()?;
         let removed = parsed.remove_entries_returning_content(pattern);
         if !removed.is_empty() {
-            atomic_write(&self.memory_path(), &parsed.render())?;
+            hostpaths::write_file_atomic(&self.memory_path(), &parsed.render())?;
         }
         Ok(removed)
     }
@@ -787,14 +787,6 @@ pub(crate) fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
 /// 判断关键词是否像代码实体（路径、扩展名、CamelCase）。
 fn is_code_entity(kw: &str) -> bool {
     kw.contains('/') || kw.contains('\\') || kw.contains('.') || kw.chars().any(char::is_uppercase)
-}
-
-/// 原子写入：先写 .tmp 再 rename，防止写到一半崩溃。
-fn atomic_write(path: &std::path::Path, content: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, path)?;
-    Ok(())
 }
 
 // ─── MemoryStorePool ───────────────────────────────────────────────────

@@ -5,12 +5,10 @@
 
 mod agent;
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
 use astrcode_extension_sdk::{
+    discovery::DiscoveryCache,
     extension::{
         Extension, ExtensionCapability, ExtensionError, PromptBuildContext, PromptBuildHandler,
         PromptContributions, Registrar, ToolHandler,
@@ -62,33 +60,20 @@ impl Extension for AgentToolsExtension {
 
 /// Agent 发现结果缓存，按 working_dir 缓存。
 struct AgentShared {
-    cache: Mutex<HashMap<String, Vec<agent::AgentConfig>>>,
+    cache: DiscoveryCache<Vec<agent::AgentConfig>>,
 }
 
 impl AgentShared {
     fn new() -> Self {
         Self {
-            cache: Mutex::new(HashMap::new()),
+            cache: DiscoveryCache::new(),
         }
     }
 
     fn get_or_discover(&self, working_dir: Option<&str>) -> Vec<agent::AgentConfig> {
-        let key = working_dir.unwrap_or("");
-        if let Some(agents) = self
-            .cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(key)
-        {
-            return agents.clone();
-        }
-        let agents = agent::discover_agents(working_dir);
-        self.cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .entry(key.to_string())
-            .or_insert_with(|| agents.clone());
-        agents
+        self.cache.get_or_discover(working_dir.unwrap_or(""), || {
+            agent::discover_agents(working_dir)
+        })
     }
 }
 

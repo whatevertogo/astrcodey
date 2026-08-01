@@ -13,6 +13,22 @@ pub fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
+/// Atomically write `content` to `path`.
+///
+/// The bytes go to a sibling `<file name>.tmp` file first, which is then
+/// renamed over `path`, so a crash mid-write cannot leave a truncated target.
+/// Parent directories are created as needed.
+pub fn write_file_atomic(path: &Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".tmp");
+    std::fs::write(PathBuf::from(&tmp), content)?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
 /// Return whether `candidate` stays inside `root`.
 ///
 /// Existing paths are canonicalized so symlink escapes are rejected. For a path
@@ -52,6 +68,22 @@ fn normalize_path(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_file_atomic_creates_parents_and_leaves_no_tmp() {
+        let root = std::env::temp_dir().join(format!(
+            "astrcode-sdk-hostpaths-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let path = root.join("nested").join("state.json");
+
+        write_file_atomic(&path, "{}").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
+        assert!(!root.join("nested").join("state.json.tmp").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn resolves_paths_and_rejects_lexical_escape() {
