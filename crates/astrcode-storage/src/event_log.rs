@@ -146,202 +146,23 @@ fn parse_event_line(
     line: &str,
 ) -> Result<StoredEvent, StorageError> {
     let trimmed = line.trim();
-    let event = match decode_stored_event(trimmed) {
-        Ok(event) => event,
-        Err(e) => {
-            let preview = if trimmed.len() > 100 {
-                let end = trimmed.floor_char_boundary(100);
-                format!("{}...", &trimmed[..end])
-            } else {
-                trimmed.to_string()
-            };
-            let context = format!(
-                "failed to parse event at {}:{} (content: '{}'). The session file may be \
-                 corrupted. Original error: {e}",
-                path.display(),
-                line_number,
-                preview,
-            );
-            return Err(StorageError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                context,
-            )));
-        },
-    };
+    let event = serde_json::from_str::<StoredEvent>(trimmed).map_err(|error| {
+        let preview = if trimmed.len() > 100 {
+            let end = trimmed.floor_char_boundary(100);
+            format!("{}...", &trimmed[..end])
+        } else {
+            trimmed.to_string()
+        };
+        StorageError::CorruptLog(format!(
+            "failed to parse event at {}:{} (content: '{}'): {}",
+            path.display(),
+            line_number,
+            preview,
+            error
+        ))
+    })?;
     validate_event(&event, line_number, path)?;
     Ok(event)
-}
-
-fn decode_stored_event(encoded: &str) -> Result<StoredEvent, String> {
-    let value =
-        serde_json::from_str::<serde_json::Value>(encoded).map_err(|error| error.to_string())?;
-    match serde_json::from_value(value.clone()) {
-        Ok(event) => Ok(event),
-        Err(current_error) => {
-            let Some(upgraded) = upgrade_legacy_event(value)? else {
-                return Err(current_error.to_string());
-            };
-            serde_json::from_value(upgraded).map_err(|legacy_error| {
-                format!("{current_error}; legacy event conversion also failed: {legacy_error}")
-            })
-        },
-    }
-}
-
-fn upgrade_legacy_event(mut event: serde_json::Value) -> Result<Option<serde_json::Value>, String> {
-    let payload = event
-        .get_mut("payload")
-        .and_then(serde_json::Value::as_object_mut)
-        .ok_or_else(|| "legacy event payload must be an object".to_string())?;
-    let event_type = payload
-        .get("type")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| "legacy event payload is missing type".to_string())?
-        .to_owned();
-
-    match event_type.as_str() {
-        "session_started" => {
-            if payload.contains_key("initial_system_prompt") {
-                return Ok(None);
-            }
-            if let Some(parent_session_id) = payload.remove("parent_session_id") {
-                if !parent_session_id.is_null() {
-                    payload.insert(
-                        "parent".into(),
-                        serde_json::json!({ "session_id": parent_session_id }),
-                    );
-                }
-            }
-            if payload
-                .get("tool_selection")
-                .is_none_or(serde_json::Value::is_null)
-            {
-                payload.insert(
-                    "tool_selection".into(),
-                    serde_json::json!({ "mode": "all", "except": [] }),
-                );
-            }
-            payload.insert(
-                "initial_system_prompt".into(),
-                serde_json::json!({
-                    "text": "",
-                    "fingerprint": "",
-                }),
-            );
-        },
-        "system_prompt_configured" => {
-            payload
-                .entry("source")
-                .or_insert_with(|| serde_json::json!("native"));
-        },
-        "session_continued_from_compaction" => {
-            let source_seq = payload
-                .remove("parent_cursor")
-                .and_then(|cursor| {
-                    cursor
-                        .as_str()
-                        .and_then(|cursor| cursor.parse::<u64>().ok())
-                        .or_else(|| cursor.as_u64())
-                })
-                .ok_or_else(|| {
-                    "legacy session_continued_from_compaction has invalid parent_cursor".to_string()
-                })?;
-            let summary =
-                take_legacy_string(payload, "summary", "session_continued_from_compaction")?;
-            let transcript_path = payload
-                .remove("transcript_path")
-                .unwrap_or(serde_json::Value::Null);
-            let mut messages = take_legacy_array(
-                payload,
-                "context_messages",
-                "session_continued_from_compaction",
-            )?;
-            messages.extend(take_legacy_array(
-                payload,
-                "retained_messages",
-                "session_continued_from_compaction",
-            )?);
-            *payload = serde_json::json!({
-                "type": "transcript_rewritten",
-                "source_seq": source_seq,
-                "messages": messages,
-                "reason": {
-                    "type": "compaction",
-                    "trigger": "legacy",
-                    "pre_tokens": 0,
-                    "post_tokens": 0,
-                    "summary": summary,
-                    "transcript_path": transcript_path,
-                    "strategy": { "type": "manual" },
-                },
-            })
-            .as_object()
-            .cloned()
-            .ok_or_else(|| "legacy transcript rewrite conversion must be an object".to_string())?;
-        },
-        "session_forked" => {
-            let mut messages = take_legacy_array(payload, "context_messages", "session_forked")?;
-            messages.extend(take_legacy_array(
-                payload,
-                "retained_messages",
-                "session_forked",
-            )?);
-            payload.insert("messages".into(), serde_json::Value::Array(messages));
-            payload.insert("first_user_message".into(), serde_json::Value::Null);
-        },
-        "session_deleted"
-        | "agent_run_started"
-        | "agent_run_completed"
-        | "assistant_message_started"
-        | "assistant_text_delta"
-        | "thinking_delta"
-        | "tool_call_started"
-        | "tool_call_arguments_delta"
-        | "tool_output_delta"
-        | "tool_call_interaction_pending"
-        | "compaction_started"
-        | "compaction_completed"
-        | "compaction_skipped"
-        | "compaction_failed"
-        | "compact_boundary_created"
-        | "custom" => {
-            let legacy_payload = serde_json::Value::Object(payload.clone());
-            *payload = serde_json::json!({
-                "type": "extension_event",
-                "extension_id": "astrcode.legacy",
-                "event_type": format!("legacy.{event_type}"),
-                "schema_version": 1,
-                "payload": legacy_payload,
-            })
-            .as_object()
-            .cloned()
-            .ok_or_else(|| "legacy compatibility event must be an object".to_string())?;
-        },
-        _ => return Ok(None),
-    }
-    Ok(Some(event))
-}
-
-fn take_legacy_string(
-    payload: &mut serde_json::Map<String, serde_json::Value>,
-    field: &str,
-    event_type: &str,
-) -> Result<String, String> {
-    payload
-        .remove(field)
-        .and_then(|value| value.as_str().map(str::to_owned))
-        .ok_or_else(|| format!("legacy {event_type} has invalid {field}"))
-}
-
-fn take_legacy_array(
-    payload: &mut serde_json::Map<String, serde_json::Value>,
-    field: &str,
-    event_type: &str,
-) -> Result<Vec<serde_json::Value>, String> {
-    payload
-        .remove(field)
-        .and_then(|value| value.as_array().cloned())
-        .ok_or_else(|| format!("legacy {event_type} has invalid {field}"))
 }
 
 fn scan_events_at_path(
