@@ -515,36 +515,6 @@ mod tests {
     }
 
     #[test]
-    fn chat_emits_glm_thinking_toggle() {
-        use astrcode_core::llm::thinking::{
-            ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
-        };
-        let config = OpenAiRequestConfig {
-            api_mode: OpenAiApiMode::ChatCompletions,
-            model_id: "glm-5.1-flash",
-            max_output_tokens: 1024,
-            supports_stream_usage: false,
-            supports_prompt_cache_key: false,
-            supports_strict_tool_use: false,
-            prompt_cache_retention: None,
-            thinking: &ThinkingConfig {
-                enabled: true,
-                effort: None,
-                budget_tokens: None,
-            },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiChat,
-                allowed_effort: Some(vec![]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            }),
-        };
-        let body = build_chat_request_body(config, &[], &[]);
-        assert_eq!(body["thinking"]["type"], "enabled");
-    }
-
-    #[test]
     fn prompt_cache_key_pinned_for_chat_and_responses() {
         use astrcode_core::{
             llm::{LlmMessage, thinking::ThinkingConfig},

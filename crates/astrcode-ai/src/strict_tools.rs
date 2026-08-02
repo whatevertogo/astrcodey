@@ -1811,8 +1811,7 @@ mod tests {
             .into_iter()
             .map(|id| (id.to_string(), true))
             .collect::<BTreeMap<_, _>>();
-        let mut errors = Vec::new();
-        for extension in astrcode_bundled_extensions::bundled_extensions(&states, &mut errors) {
+        for extension in astrcode_bundled_extensions::bundled_extensions(&states) {
             if extension.id() == "astrcode-mcp" {
                 continue;
             }
@@ -1825,8 +1824,6 @@ mod tests {
                     .map(|(definition, _)| definition.clone()),
             );
         }
-        assert!(errors.is_empty());
-
         let mut openai_definitions = definitions.clone();
         prepare_strict_tools(&mut openai_definitions, true, StrictToolProvider::OpenAi)
             .expect("all first-party schemas should compile for OpenAI");

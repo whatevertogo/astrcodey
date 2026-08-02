@@ -11,7 +11,6 @@ use tokio::sync::{OnceCell, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    compaction::CompactCircuitBreaker,
     permission::ApprovalHistoryStore,
     session_event_sink::{SessionEventObserver, SessionEventSink},
     session_tools::SessionToolCache,
@@ -140,7 +139,6 @@ pub struct SessionRuntimeState {
     event_sink: Arc<SessionEventSink>,
     tools: ToolResources,
     approvals: ApprovalRuntime,
-    compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
     creation: Mutex<SessionCreationState>,
     lifecycle_initialized: OnceCell<()>,
 }
@@ -250,10 +248,6 @@ impl SessionRuntimeState {
                 registry_snapshots: SessionToolCache::new(),
             },
             approvals: ApprovalRuntime::new(),
-            compact_circuit_breaker: Mutex::new(CompactCircuitBreaker::new(
-                3,
-                Duration::from_secs(60),
-            )),
             creation: Mutex::new(SessionCreationState::Ready),
             lifecycle_initialized: OnceCell::new(),
         }
@@ -265,16 +259,6 @@ impl SessionRuntimeState {
 
     pub(crate) fn tool_registry_cache(&self) -> &SessionToolCache {
         &self.tools.registry_snapshots
-    }
-
-    pub(crate) fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {
-        &self.compact_circuit_breaker
-    }
-
-    pub(crate) fn configure_compact_circuit_breaker(&self, threshold: u32, cooldown: Duration) {
-        self.compact_circuit_breaker
-            .lock()
-            .reconfigure(threshold, cooldown);
     }
 
     pub fn session_id(&self) -> &SessionId {

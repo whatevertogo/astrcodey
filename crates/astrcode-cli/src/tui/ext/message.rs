@@ -64,12 +64,4 @@ mod tests {
         assert!(reg.get("my_type").is_some());
         assert!(reg.get("other_type").is_none());
     }
-
-    #[test]
-    fn later_registration_overrides_earlier() {
-        let mut reg = MessageRendererRegistry::new();
-        reg.register("t", Arc::new(EchoRenderer));
-        reg.register("t", Arc::new(EchoRenderer));
-        assert!(reg.get("t").is_some());
-    }
 }

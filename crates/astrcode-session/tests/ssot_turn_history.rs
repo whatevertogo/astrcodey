@@ -15,11 +15,9 @@ use astrcode_core::{
         LlmTokenUsageSource, ModelLimits, ProviderInputTokenCount,
     },
     tool::ToolDefinition,
-    types::{new_message_id, new_session_id, new_turn_id},
+    types::{new_message_id, new_turn_id},
 };
-use astrcode_session::{Session, SessionCreateParams, SessionRuntimeServices, SessionRuntimeState};
 use astrcode_session_projection::SessionReadModel;
-use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::mpsc;
 
 mod common;
@@ -38,56 +36,6 @@ impl ProviderMessages for SessionReadModel {
                 .collect(),
         )
     }
-}
-
-fn test_caps(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeServices> {
-    common::test_runtime_services(llm)
-}
-
-async fn spawn_session(llm: Arc<dyn LlmProvider>) -> Session {
-    let (session, _, _) = spawn_session_with_store(llm).await;
-    session
-}
-
-async fn spawn_session_with_store(
-    llm: Arc<dyn LlmProvider>,
-) -> (
-    Session,
-    Arc<dyn SessionStore>,
-    astrcode_core::types::SessionId,
-) {
-    let (session, store, session_id, _) = spawn_session_with_services(llm).await;
-    (session, store, session_id)
-}
-
-async fn spawn_session_with_services(
-    llm: Arc<dyn LlmProvider>,
-) -> (
-    Session,
-    Arc<dyn SessionStore>,
-    astrcode_core::types::SessionId,
-    Arc<SessionRuntimeServices>,
-) {
-    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    let caps = test_caps(llm);
-    let sid = new_session_id();
-    let runtime = Arc::new(SessionRuntimeState::new(sid.clone(), store.clone()));
-    let working_dir = std::env::temp_dir().join(sid.as_str());
-    std::fs::create_dir_all(&working_dir).unwrap();
-    let session = Session::create_with_params(SessionCreateParams {
-        working_dir: working_dir.to_string_lossy().into_owned(),
-        model_id: "mock-model".into(),
-        parent_session_id: None,
-        tool_selection: None,
-        source_extension: None,
-        extra_system_prompt: None,
-        initial_system_prompt: None,
-        runtime,
-        runtime_services: Arc::clone(&caps),
-    })
-    .await
-    .unwrap();
-    (session, store, sid, caps)
 }
 
 struct ToolLoopLlm {
@@ -141,7 +89,7 @@ async fn ssot_tool_loop_projection_matches_provider_messages() {
     let llm = Arc::new(ToolLoopLlm {
         calls: AtomicUsize::new(0),
     });
-    let session = spawn_session(llm).await;
+    let session = common::spawn_session(llm).await;
     let turn_id = new_turn_id();
     let handle = session
         .submit("run tools".into(), turn_id, None)
@@ -198,7 +146,8 @@ impl LlmProvider for FailingGenerateLlm {
 
 #[tokio::test]
 async fn provider_start_error_is_persisted_as_durable_error() {
-    let (session, store, sid) = spawn_session_with_store(Arc::new(FailingGenerateLlm)).await;
+    let (session, store, sid) =
+        common::spawn_session_with_store(Arc::new(FailingGenerateLlm)).await;
     let turn_id = new_turn_id();
     let handle = session
         .submit("trigger provider error".into(), turn_id, None)
@@ -256,7 +205,8 @@ impl LlmProvider for UsageLlm {
 
 #[tokio::test]
 async fn top_level_turn_persists_the_current_main_model_before_running() {
-    let (session, store, sid, services) = spawn_session_with_services(Arc::new(UsageLlm)).await;
+    let (session, store, sid, services) =
+        common::spawn_session_with_services(Arc::new(UsageLlm)).await;
     let mut effective = services.read_effective().as_ref().clone();
     effective.llm.model_id = "new-main-model".into();
     services.update_effective(effective);
@@ -283,7 +233,7 @@ async fn top_level_turn_persists_the_current_main_model_before_running() {
 
 #[tokio::test]
 async fn token_usage_is_persisted_as_durable_event() {
-    let (session, store, sid) = spawn_session_with_store(Arc::new(UsageLlm)).await;
+    let (session, store, sid) = common::spawn_session_with_store(Arc::new(UsageLlm)).await;
     let turn_id = new_turn_id();
     let handle = session
         .submit("record usage".into(), turn_id, None)
@@ -370,7 +320,8 @@ impl LlmProvider for NoUsageCountingLlm {
 
 #[tokio::test]
 async fn token_usage_missing_stream_usage_records_provider_count_fallback() {
-    let (session, store, sid) = spawn_session_with_store(Arc::new(NoUsageCountingLlm)).await;
+    let (session, store, sid) =
+        common::spawn_session_with_store(Arc::new(NoUsageCountingLlm)).await;
     let turn_id = new_turn_id();
     let handle = session
         .submit("record fallback usage".into(), turn_id, None)
@@ -444,7 +395,7 @@ impl LlmProvider for ThinkingToolsLlm {
 
 #[tokio::test]
 async fn ssot_thinking_and_tools_merge_in_projection() {
-    let session = spawn_session(Arc::new(ThinkingToolsLlm {
+    let session = common::spawn_session(Arc::new(ThinkingToolsLlm {
         calls: AtomicUsize::new(0),
     }))
     .await;
@@ -563,7 +514,7 @@ impl LlmProvider for EarlyCompletedToolLlm {
 
 #[tokio::test]
 async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
-    let session = spawn_session(Arc::new(DelayThenCompleteLlm {
+    let session = common::spawn_session(Arc::new(DelayThenCompleteLlm {
         calls: AtomicUsize::new(0),
     }))
     .await;
@@ -592,7 +543,7 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
 
 #[tokio::test]
 async fn ssot_early_tool_completion_persists_request_after_assistant_message() {
-    let (session, store, sid) = spawn_session_with_store(Arc::new(EarlyCompletedToolLlm {
+    let (session, store, sid) = common::spawn_session_with_store(Arc::new(EarlyCompletedToolLlm {
         calls: AtomicUsize::new(0),
     }))
     .await;
@@ -655,7 +606,7 @@ async fn ssot_mid_turn_inject_visible_on_next_prepare() {
     let llm = Arc::new(DelayThenCompleteLlm {
         calls: AtomicUsize::new(0),
     });
-    let session = Arc::new(spawn_session(llm).await);
+    let session = Arc::new(common::spawn_session(llm).await);
     let turn_id = new_turn_id();
     let session_for_inject = Arc::clone(&session);
     let inject_turn = turn_id.clone();

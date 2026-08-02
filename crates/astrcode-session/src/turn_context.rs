@@ -148,7 +148,7 @@ pub enum TurnError {
     #[error("Extension error: {0}")]
     Extension(#[from] ExtensionError),
     #[error("{0}")]
-    Session(#[from] crate::session::SessionError),
+    Session(#[from] crate::SessionError),
     #[error("session projection error: {0}")]
     Projection(#[from] astrcode_session_projection::ProjectionError),
     #[error("tool approval registration error: {0}")]

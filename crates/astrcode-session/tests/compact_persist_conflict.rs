@@ -5,29 +5,21 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use astrcode_context::{
-    CompactResult, ContextAssembler, ContextPrepareInput, NoopPostCompactEnricher, PreparedContext,
-    context_assembler::LlmContextAssembler, is_compact_summary_message,
-};
+use astrcode_context::{CompactResult, is_compact_summary_message};
 use astrcode_core::{
     compaction::CompactStrategy,
-    config::{
-        AgentSettings, ContextSettings, EffectiveConfig, ExtensionSettings, LlmSettings,
-        ProviderAuthScheme, ProviderWireFormat,
-    },
+    config::ContextSettings,
     event::DurableEventPayload,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
     tool::ToolDefinition,
-    types::{SessionId, new_message_id, new_session_id, new_turn_id},
+    types::{SessionId, new_message_id, new_turn_id},
 };
-use astrcode_extension_sdk::runtime_ports::NoopRuntimePorts;
-use astrcode_session::{
-    Session, SessionCreateParams, SessionExtensionPorts, SessionRuntimeServices,
-    SessionRuntimeState,
-};
+use astrcode_session::Session;
 use astrcode_session_projection::{SessionReadModel, TranscriptArtifactView};
-use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
+use astrcode_storage::SessionStore;
 use tokio::sync::mpsc;
+
+mod common;
 
 const VALID_COMPACT_SUMMARY: &str = r#"<summary>
 1. Primary Request and Intent:
@@ -57,113 +49,6 @@ const VALID_COMPACT_SUMMARY: &str = r#"<summary>
 9. Optional Next Step:
    - (none)
 </summary>"#;
-
-struct TestContextAssembler {
-    settings: ContextSettings,
-}
-
-impl ContextAssembler for TestContextAssembler {
-    fn settings(&self) -> &ContextSettings {
-        &self.settings
-    }
-
-    fn should_auto_compact(&self, input: &ContextPrepareInput<'_>) -> bool {
-        self.settings.auto_compact_enabled && !input.messages.is_empty()
-    }
-
-    fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
-        LlmContextAssembler::new(self.settings.clone()).prepare_messages(input)
-    }
-}
-
-fn test_caps(llm: Arc<dyn LlmProvider>, context: ContextSettings) -> Arc<SessionRuntimeServices> {
-    let context_assembler = Arc::new(TestContextAssembler {
-        settings: context.clone(),
-    });
-    let effective = EffectiveConfig {
-        llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            wire_format: ProviderWireFormat::OpenAiChatCompletions,
-            auth_scheme: ProviderAuthScheme::Bearer,
-            model_id: "mock-model".into(),
-            max_tokens: 1024,
-            context_limit: 200_000,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            supports_stream_usage: false,
-            supports_strict_tool_use: false,
-            prompt_cache_retention: None,
-            thinking: Default::default(),
-            thinking_capability: None,
-            thinking_configured: false,
-        },
-        small_llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            wire_format: ProviderWireFormat::OpenAiChatCompletions,
-            auth_scheme: ProviderAuthScheme::Bearer,
-            model_id: "mock-model".into(),
-            max_tokens: 1024,
-            context_limit: 200_000,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            supports_stream_usage: false,
-            supports_strict_tool_use: false,
-            prompt_cache_retention: None,
-            thinking: Default::default(),
-            thinking_capability: None,
-            thinking_configured: false,
-        },
-        context,
-        agent: AgentSettings::default(),
-        permissions: Default::default(),
-        extensions: ExtensionSettings::default(),
-    };
-    Arc::new(SessionRuntimeServices::new(
-        llm.clone(),
-        llm,
-        effective,
-        SessionExtensionPorts::default(),
-        context_assembler,
-        Arc::new(NoopPostCompactEnricher),
-        Arc::new(NoopRuntimePorts),
-    ))
-}
-
-async fn spawn_session(
-    llm: Arc<dyn LlmProvider>,
-    context: ContextSettings,
-) -> (Session, Arc<dyn SessionStore>) {
-    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    let caps = test_caps(llm, context);
-    let sid = new_session_id();
-    let runtime = Arc::new(SessionRuntimeState::new(sid.clone(), store.clone()));
-    let working_dir = std::env::temp_dir().join(sid.as_str());
-    std::fs::create_dir_all(&working_dir).unwrap();
-    let session = Session::create_with_params(SessionCreateParams {
-        working_dir: working_dir.to_string_lossy().into_owned(),
-        model_id: "mock-model".into(),
-        parent_session_id: None,
-        tool_selection: None,
-        source_extension: None,
-        extra_system_prompt: None,
-        initial_system_prompt: None,
-        runtime,
-        runtime_services: caps,
-    })
-    .await
-    .unwrap();
-    (session, store)
-}
 
 fn is_compact_summary_request(messages: &[LlmMessage]) -> bool {
     messages.last().is_some_and(|message| {
@@ -334,7 +219,11 @@ impl LlmProvider for RaceOnCompactLlm {
 
 #[tokio::test]
 async fn transcript_rewrite_preserves_new_tail_events() {
-    let (session, store) = spawn_session(Arc::new(StaticOkLlm), ContextSettings::default()).await;
+    let (session, store, _, _) = common::spawn_session_with_context_and_services(
+        Arc::new(StaticOkLlm),
+        ContextSettings::default(),
+    )
+    .await;
     configure_system_prompt(&session).await;
     seed_history(&session, 2).await;
 
@@ -399,7 +288,7 @@ async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
         race_message: "concurrent race during compact".into(),
     });
 
-    let (session, store) = spawn_session(
+    let (session, store, _, _) = common::spawn_session_with_context_and_services(
         Arc::clone(&llm) as Arc<dyn LlmProvider>,
         ContextSettings {
             auto_compact_enabled: true,
@@ -514,8 +403,11 @@ async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
         compact_max_retry_attempts: 1,
         ..Default::default()
     };
-    let (session, store) =
-        spawn_session(Arc::clone(&race_llm) as Arc<dyn LlmProvider>, context).await;
+    let (session, store, _, _) = common::spawn_session_with_context_and_services(
+        Arc::clone(&race_llm) as Arc<dyn LlmProvider>,
+        context,
+    )
+    .await;
     let session = Arc::new(session);
     *session_to_race.lock().unwrap() = Some(Arc::clone(&session));
     configure_system_prompt(session.as_ref()).await;

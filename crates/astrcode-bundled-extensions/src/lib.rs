@@ -30,8 +30,7 @@ impl Default for BundledExtensionSource {
 #[async_trait::async_trait]
 impl ExtensionSource for BundledExtensionSource {
     async fn discover(&self, _ctx: &ExtensionLoadContext) -> DiscoverExtensionsResult {
-        let mut errors = Vec::new();
-        let extensions = bundled_extensions(&self.extension_states, &mut errors);
+        let extensions = bundled_extensions(&self.extension_states);
         let candidates = extensions
             .into_iter()
             .map(|extension| {
@@ -45,7 +44,7 @@ impl ExtensionSource for BundledExtensionSource {
             .collect();
         DiscoverExtensionsResult {
             candidates,
-            errors,
+            errors: Vec::new(),
             failures: Vec::new(),
         }
     }
@@ -61,7 +60,6 @@ impl ExtensionSource for BundledExtensionSource {
 /// same tool name.
 pub fn bundled_extensions(
     extension_states: &BTreeMap<String, bool>,
-    _errors: &mut Vec<String>,
 ) -> Vec<std::sync::Arc<dyn astrcode_extension_sdk::extension::Extension>> {
     let mut extensions = Vec::new();
 
@@ -181,9 +179,7 @@ mod tests {
             .into_iter()
             .map(|id| (id.to_string(), true))
             .collect();
-        let mut errors = Vec::new();
-        let extensions = bundled_extensions(&states, &mut errors);
-        assert!(errors.is_empty());
+        let extensions = bundled_extensions(&states);
 
         let mut non_strict = Vec::new();
         for extension in extensions {

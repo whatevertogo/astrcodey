@@ -28,9 +28,10 @@ use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::CompactSnapshotInput;
 
 use crate::{
+    SessionError,
     deferred_tools::append_deferred_tools_reminder,
     projection_context::context_snapshot,
-    session::{Session, SessionError},
+    session::Session,
     turn_context::{SharedTurnContext, TurnError},
     turn_publish::TurnEvents,
     turn_stages::TurnState,
@@ -69,6 +70,7 @@ pub(crate) struct CompactionHost<'a> {
     pub llm: &'a Arc<dyn LlmProvider>,
     pub shared: &'a SharedTurnContext,
     pub extension_runner: &'a dyn TurnHooks,
+    pub breaker: &'a parking_lot::Mutex<CompactCircuitBreaker>,
 }
 
 async fn try_provider_input_tokens(
@@ -135,7 +137,7 @@ pub(crate) async fn plan_auto_compaction(
     Some(CompactionPlan {
         trigger: CompactTrigger::AutoThreshold,
         strategy: CompactStrategy::Auto,
-        use_llm_for_compact: should_attempt_auto_llm_compact(host.session),
+        use_llm_for_compact: should_attempt_auto_llm_compact(host),
         keep_recent_turns: None,
     })
 }
@@ -353,12 +355,8 @@ async fn update_compaction_token_counts(
     }
 }
 
-fn should_attempt_auto_llm_compact(session: &Session) -> bool {
-    session
-        .runtime()
-        .compact_circuit_breaker()
-        .lock()
-        .should_attempt()
+fn should_attempt_auto_llm_compact(host: &CompactionHost<'_>) -> bool {
+    host.breaker.lock().should_attempt()
 }
 
 fn compact_hook_context(
@@ -465,11 +463,7 @@ fn record_breaker_attempt(host: &CompactionHost<'_>, plan: &CompactionPlan, llm_
     if plan.trigger != CompactTrigger::AutoThreshold || !plan.use_llm_for_compact {
         return;
     }
-    host.session
-        .runtime()
-        .compact_circuit_breaker()
-        .lock()
-        .finish_attempt(llm_failed);
+    host.breaker.lock().finish_attempt(llm_failed);
 }
 
 // ── Shared hook and persistence ──
@@ -703,11 +697,6 @@ impl CompactCircuitBreaker {
             cooldown,
             half_open_attempt_in_flight: false,
         }
-    }
-
-    pub(crate) fn reconfigure(&mut self, threshold: u32, cooldown: Duration) {
-        self.threshold = threshold.max(1);
-        self.cooldown = cooldown;
     }
 
     pub(crate) fn should_attempt(&mut self) -> bool {

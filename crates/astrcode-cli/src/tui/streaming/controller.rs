@@ -3,7 +3,7 @@
 use ratatui::text::Line;
 
 use super::StreamState;
-use crate::tui::{render::visual_lines, theme::Theme};
+use crate::tui::render::visual_lines;
 
 /// Manages one assistant message stream.
 pub struct StreamController {
@@ -24,7 +24,7 @@ impl StreamController {
     }
 
     /// Push a text delta. Returns true if new lines were enqueued.
-    pub fn push_delta(&mut self, delta: &str, theme: &Theme) -> bool {
+    pub fn push_delta(&mut self, delta: &str) -> bool {
         if delta.is_empty() {
             return false;
         }
@@ -32,20 +32,20 @@ impl StreamController {
         self.pending.push_str(delta);
 
         if delta.contains('\n') {
-            return self.commit_complete_lines(theme);
+            return self.commit_complete_lines();
         }
         false
     }
 
     /// Finalize the stream: render remaining pending text and return all queued lines.
-    pub fn finalize(&mut self, completed_text: &str, theme: &Theme) -> Vec<Line<'static>> {
+    pub fn finalize(&mut self, completed_text: &str) -> Vec<Line<'static>> {
         if !self.state.has_seen_delta {
             // No deltas seen — render the completed text directly.
             self.pending.push_str(completed_text);
         }
         // Render whatever is left.
         if !self.pending.trim().is_empty() {
-            let lines = self.render_text(&self.pending.clone(), theme);
+            let lines = self.render_text(&self.pending.clone());
             self.state.enqueue(lines);
         }
         self.pending.clear();
@@ -56,7 +56,7 @@ impl StreamController {
         &mut self.state
     }
 
-    fn commit_complete_lines(&mut self, theme: &Theme) -> bool {
+    fn commit_complete_lines(&mut self) -> bool {
         // Split on newlines, keep the last (possibly incomplete) chunk in pending.
         let text = std::mem::take(&mut self.pending);
         let mut parts: Vec<&str> = text.splitn(usize::MAX, '\n').collect();
@@ -67,7 +67,7 @@ impl StreamController {
         if complete.is_empty() {
             return false;
         }
-        let lines = self.render_text(&complete, theme);
+        let lines = self.render_text(&complete);
         if lines.is_empty() {
             return false;
         }
@@ -75,7 +75,7 @@ impl StreamController {
         true
     }
 
-    fn render_text(&self, text: &str, _theme: &Theme) -> Vec<Line<'static>> {
+    fn render_text(&self, text: &str) -> Vec<Line<'static>> {
         let width = self.width.unwrap_or(120);
         visual_lines(text, width)
             .into_iter()

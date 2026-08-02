@@ -114,17 +114,11 @@ impl ToolCallDeduplicator {
         duplicate_call_id: &str,
     ) -> ToolExecutionOutcome {
         let Some(key) = self.call_key_by_call_id.get(duplicate_call_id) else {
-            return deduplication_error(
-                duplicate_call_id,
-                "duplicate call was not registered in the current step",
-            );
+            return deduplication_error("duplicate call was not registered in the current step");
         };
 
         let Some(entry) = self.same_step_in_flight.get(key) else {
-            return deduplication_error(
-                duplicate_call_id,
-                "primary call is missing from the current step",
-            );
+            return deduplication_error("primary call is missing from the current step");
         };
 
         let mut rx = entry.outcome_tx.subscribe();
@@ -137,7 +131,7 @@ impl ToolCallDeduplicator {
             }
         }
 
-        deduplication_error(duplicate_call_id, "primary call did not produce a result")
+        deduplication_error("primary call did not produce a result")
     }
 
     /// 每个含工具调用的 step 结束时调用，更新跨 step 连续重复计数。
@@ -189,7 +183,7 @@ impl ToolCallDeduplicator {
     }
 }
 
-fn deduplication_error(_call_id: &str, reason: &str) -> ToolExecutionOutcome {
+fn deduplication_error(reason: &str) -> ToolExecutionOutcome {
     ToolExecutionOutcome::failed(format!("Tool deduplication failed: {reason}"))
 }
 

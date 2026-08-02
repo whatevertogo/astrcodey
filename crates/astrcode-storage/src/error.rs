@@ -34,3 +34,21 @@ pub enum StorageError {
     #[error("Unsupported storage operation: {0}")]
     Unsupported(String),
 }
+
+impl StorageError {
+    /// 错误是否属于临时性 IO 故障，调用方可重试。
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Io(error) => matches!(
+                error.kind(),
+                std::io::ErrorKind::Interrupted
+                    | std::io::ErrorKind::WouldBlock
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::NotConnected
+            ),
+            _ => false,
+        }
+    }
+}

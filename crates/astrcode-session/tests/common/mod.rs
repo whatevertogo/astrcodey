@@ -10,14 +10,21 @@ use astrcode_core::{
         ProviderAuthScheme, ProviderWireFormat,
     },
     llm::LlmProvider,
+    types::{SessionId, new_session_id},
 };
 use astrcode_extension_sdk::runtime_ports::{NoopRuntimePorts, ToolCatalogProvider};
-use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices};
+use astrcode_session::{
+    Session, SessionCreateParams, SessionExtensionPorts, SessionRuntimeServices,
+    SessionRuntimeState,
+};
+use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 
+#[allow(dead_code)] // Each integration-test binary imports this shared module independently.
 pub fn test_runtime_services(llm: Arc<dyn LlmProvider>) -> Arc<SessionRuntimeServices> {
     test_runtime_services_with_context(llm, ContextSettings::default())
 }
 
+#[allow(dead_code)] // Each integration-test binary imports this shared module independently.
 pub fn test_runtime_services_with_context(
     llm: Arc<dyn LlmProvider>,
     context: ContextSettings,
@@ -56,13 +63,72 @@ pub fn test_runtime_services_with_tool_catalog(
     )
 }
 
+#[allow(dead_code)] // Each integration-test binary imports this shared module independently.
+pub async fn spawn_session(llm: Arc<dyn LlmProvider>) -> Session {
+    spawn_session_with_context_and_services(llm, ContextSettings::default())
+        .await
+        .0
+}
+
+#[allow(dead_code)] // Each integration-test binary imports this shared module independently.
+pub async fn spawn_session_with_store(
+    llm: Arc<dyn LlmProvider>,
+) -> (Session, Arc<dyn SessionStore>, SessionId) {
+    let (session, store, sid, _) =
+        spawn_session_with_context_and_services(llm, ContextSettings::default()).await;
+    (session, store, sid)
+}
+
+#[allow(dead_code)] // Each integration-test binary imports this shared module independently.
+pub async fn spawn_session_with_services(
+    llm: Arc<dyn LlmProvider>,
+) -> (
+    Session,
+    Arc<dyn SessionStore>,
+    SessionId,
+    Arc<SessionRuntimeServices>,
+) {
+    spawn_session_with_context_and_services(llm, ContextSettings::default()).await
+}
+
+pub async fn spawn_session_with_context_and_services(
+    llm: Arc<dyn LlmProvider>,
+    context: ContextSettings,
+) -> (
+    Session,
+    Arc<dyn SessionStore>,
+    SessionId,
+    Arc<SessionRuntimeServices>,
+) {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let caps = test_runtime_services_with_context(llm, context);
+    let sid = new_session_id();
+    let runtime = Arc::new(SessionRuntimeState::new(sid.clone(), store.clone()));
+    let working_dir = std::env::temp_dir().join(sid.as_str());
+    std::fs::create_dir_all(&working_dir).unwrap();
+    let session = Session::create_with_params(SessionCreateParams {
+        working_dir: working_dir.to_string_lossy().into_owned(),
+        model_id: "mock-model".into(),
+        parent_session_id: None,
+        tool_selection: None,
+        source_extension: None,
+        extra_system_prompt: None,
+        initial_system_prompt: None,
+        runtime,
+        runtime_services: Arc::clone(&caps),
+    })
+    .await
+    .unwrap();
+    (session, store, sid, caps)
+}
+
 fn test_runtime_services_with_context_and_extensions(
     llm: Arc<dyn LlmProvider>,
     context: ContextSettings,
     extension_ports: SessionExtensionPorts,
     tool_catalog: Option<Arc<dyn ToolCatalogProvider>>,
 ) -> Arc<SessionRuntimeServices> {
-    let context_assembler: Arc<dyn ContextAssembler> = Arc::new(NoopContextAssembler {
+    let context_assembler: Arc<dyn ContextAssembler> = Arc::new(TestContextAssembler {
         settings: context.clone(),
     });
     let tool_catalog =
@@ -78,17 +144,17 @@ fn test_runtime_services_with_context_and_extensions(
     ))
 }
 
-struct NoopContextAssembler {
+struct TestContextAssembler {
     settings: ContextSettings,
 }
 
-impl ContextAssembler for NoopContextAssembler {
+impl ContextAssembler for TestContextAssembler {
     fn settings(&self) -> &ContextSettings {
         &self.settings
     }
 
-    fn should_auto_compact(&self, _input: &ContextPrepareInput<'_>) -> bool {
-        false
+    fn should_auto_compact(&self, input: &ContextPrepareInput<'_>) -> bool {
+        self.settings.auto_compact_enabled && !input.messages.is_empty()
     }
 
     fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {

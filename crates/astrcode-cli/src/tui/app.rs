@@ -16,7 +16,6 @@ use crate::tui::{
     },
     render::RenderSpec,
     store::transcript::{Message, MessageBody, MessageRole, ScrollbackEntry},
-    theme::Theme,
 };
 
 pub struct App {
@@ -68,8 +67,6 @@ pub struct App {
     // Extension registries
     pub tool_renderers: ToolRendererRegistry,
     pub message_renderers: MessageRendererRegistry,
-    // Theme
-    pub theme: Theme,
 }
 
 /// 挂起的工具审批请求。
@@ -109,7 +106,7 @@ pub struct UiPicker {
 }
 
 impl App {
-    pub fn new(theme: Theme) -> Self {
+    pub fn new() -> Self {
         let mut tool_renderers = ToolRendererRegistry::new();
         let message_renderers = MessageRendererRegistry::new();
         register_builtin(&mut tool_renderers);
@@ -146,7 +143,6 @@ impl App {
             child_session_map: BTreeMap::new(),
             tool_renderers,
             message_renderers,
-            theme,
         }
     }
 

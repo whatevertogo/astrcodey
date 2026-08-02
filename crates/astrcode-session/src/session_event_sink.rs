@@ -38,6 +38,16 @@ pub enum SessionEventPublishError {
     Storage(#[from] StorageError),
 }
 
+impl SessionEventPublishError {
+    /// 错误是否属于临时性存储故障，调用方可重试。
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Storage(error) => error.is_retryable(),
+            _ => false,
+        }
+    }
+}
+
 pub struct SessionEventSink {
     publication: Arc<PublicationState>,
     state: Mutex<SinkState>,

@@ -18,14 +18,12 @@ use astrcode_core::{
     types::TurnId,
 };
 use astrcode_session_projection::SessionReadModel;
-use astrcode_storage::StorageError;
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     payload::JSON_RPC_INTERNAL_ERROR,
-    session::{Session, SessionError},
-    session_event_sink::SessionEventPublishError,
+    session::Session,
     turn_context::{TurnError, TurnEventTx},
 };
 
@@ -172,21 +170,7 @@ async fn durable_with_retry(
 }
 
 fn durable_publish_error_is_retryable(error: &TurnError) -> bool {
-    let TurnError::Session(SessionError::EventPublish(SessionEventPublishError::Storage(
-        StorageError::Io(error),
-    ))) = error
-    else {
-        return false;
-    };
-    matches!(
-        error.kind(),
-        std::io::ErrorKind::Interrupted
-            | std::io::ErrorKind::WouldBlock
-            | std::io::ErrorKind::TimedOut
-            | std::io::ErrorKind::ConnectionAborted
-            | std::io::ErrorKind::ConnectionReset
-            | std::io::ErrorKind::NotConnected
-    )
+    matches!(error, TurnError::Session(error) if error.is_retryable())
 }
 
 async fn dispatch_payload(publisher: &TurnEvents, payload: EventPayload) -> Result<(), TurnError> {
@@ -352,13 +336,14 @@ mod tests {
         },
         runtime_ports::TurnHooks,
     };
-    use astrcode_storage::in_memory::InMemoryEventStore;
+    use astrcode_storage::{StorageError, in_memory::InMemoryEventStore};
     use tokio::sync::mpsc;
 
     use super::*;
     use crate::{
+        SessionError,
         session::{Session, SessionCreateParams},
-        session_event_sink::SessionEventSink,
+        session_event_sink::{SessionEventPublishError, SessionEventSink},
         session_runtime::SessionRuntimeState,
         session_runtime_services::SessionRuntimeServices,
         test_support::{ChannelObserver, test_runtime_services, test_runtime_services_with_hooks},

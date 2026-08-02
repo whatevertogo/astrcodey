@@ -128,11 +128,7 @@ fn test_caps() -> Arc<SessionRuntimeServices> {
     common::test_runtime_services(llm)
 }
 
-fn runtime(
-    session_id: SessionId,
-    store: &Arc<dyn SessionStore>,
-    _caps: &SessionRuntimeServices,
-) -> Arc<SessionRuntimeState> {
+fn runtime(session_id: SessionId, store: &Arc<dyn SessionStore>) -> Arc<SessionRuntimeState> {
     Arc::new(SessionRuntimeState::new(session_id, store.clone()))
 }
 
@@ -142,7 +138,7 @@ async fn reopen_restores_native_extra_system_prompt() {
     let caps = test_caps();
     let sid = new_session_id();
 
-    let runtime_a = runtime(sid.clone(), &store, &caps);
+    let runtime_a = runtime(sid.clone(), &store);
     let session_a = Session::create_with_params(SessionCreateParams {
         working_dir: ".".into(),
         model_id: "mock-model".into(),
@@ -166,7 +162,7 @@ async fn reopen_restores_native_extra_system_prompt() {
     // 模拟跨进程重启：丢弃 runtime_a，开新 runtime + Session 实例
     drop(session_a);
     drop(runtime_a);
-    let runtime_b = runtime(sid.clone(), &store, &caps);
+    let runtime_b = runtime(sid.clone(), &store);
     let session_b = Session::open(Arc::clone(&runtime_b), Arc::clone(&caps))
         .await
         .unwrap();
@@ -195,7 +191,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
         source_extension: None,
         extra_system_prompt: None,
         initial_system_prompt: None,
-        runtime: runtime(parent_id, &store, &caps),
+        runtime: runtime(parent_id, &store),
         runtime_services: Arc::clone(&caps),
     })
     .await
@@ -210,7 +206,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
         source_extension: None,
         extra_system_prompt: None,
         initial_system_prompt: None,
-        runtime: runtime(direct_child_id, &store, &caps),
+        runtime: runtime(direct_child_id, &store),
         runtime_services: Arc::clone(&caps),
     })
     .await
@@ -265,7 +261,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
 
     let child_id = child.id().clone();
     drop(child);
-    let reopened = Session::open(runtime(child_id, &store, &caps), caps)
+    let reopened = Session::open(runtime(child_id, &store), caps)
         .await
         .unwrap();
     assert_eq!(
@@ -307,7 +303,7 @@ async fn parent_and_spawned_child_each_emit_session_start_once() {
         source_extension: None,
         extra_system_prompt: None,
         initial_system_prompt: None,
-        runtime: runtime(parent_id, &store, &caps),
+        runtime: runtime(parent_id, &store),
         runtime_services: Arc::clone(&caps),
     })
     .await
@@ -364,7 +360,7 @@ async fn prompt_failure_does_not_create_session() {
         source_extension: None,
         extra_system_prompt: None,
         initial_system_prompt: None,
-        runtime: runtime(session_id, &store, &caps),
+        runtime: runtime(session_id, &store),
         runtime_services: caps,
     })
     .await
@@ -396,7 +392,7 @@ async fn inherited_initial_prompt_survives_initialization_and_reopen() {
         source_extension: None,
         extra_system_prompt: None,
         initial_system_prompt: Some(inherited.clone()),
-        runtime: runtime(session_id.clone(), &store, &caps),
+        runtime: runtime(session_id.clone(), &store),
         runtime_services: Arc::clone(&caps),
     })
     .await
@@ -407,7 +403,7 @@ async fn inherited_initial_prompt_survives_initialization_and_reopen() {
     assert_eq!(model.system_prompt.text, inherited.text);
     assert_eq!(model.system_prompt.source, SystemPromptSource::Inherited);
 
-    let reopened = Session::open(runtime(session_id, &store, &caps), caps)
+    let reopened = Session::open(runtime(session_id, &store), caps)
         .await
         .unwrap();
     let reopened_model = reopened.read_model().await.unwrap();

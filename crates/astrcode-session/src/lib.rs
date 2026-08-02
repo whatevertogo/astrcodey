@@ -12,14 +12,19 @@ pub(crate) mod permission;
 pub(crate) mod projection_context;
 pub(crate) mod runtime_stability;
 mod session;
+mod session_compaction;
+mod session_error;
 mod session_event_sink;
 mod session_extension_ports;
+mod session_lifecycle;
+mod session_prompt;
 mod session_resource_store;
 mod session_runtime;
 mod session_runtime_services;
 pub(crate) mod session_setup;
 mod session_state;
 pub(crate) mod session_tools;
+mod session_turn;
 pub(crate) mod steer;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -40,21 +45,23 @@ pub use payload::{
     agent_session_completed_payload, agent_session_failed_payload,
     system_prompt_configured_payload, transcript_rewritten_payload,
 };
-pub use session::{
-    InterruptedToolOutcome, Session, SessionCreateParams, SessionError, SpawnChildParams,
-    emit_interrupted_tool_results, emit_lifecycle_for_read_model, emit_turn_aborted_context,
-    finalize_aborted_turn, finalize_turn,
-};
+pub use session::{Session, SessionCreateParams, emit_lifecycle_for_read_model};
+pub use session_error::SessionError;
 pub use session_event_sink::{
     SessionEventObserver, SessionEventPublicationGuard, SessionEventPublishError, SessionEventSink,
 };
 pub use session_extension_ports::SessionExtensionPorts;
+pub use session_lifecycle::SpawnChildParams;
 pub use session_resource_store::SessionResourceStore;
 pub use session_runtime::{
     SessionCreationFailed, SessionCreationGuard, SessionRuntimeState,
     ToolApprovalRegistrationError, ToolApprovalResolveError,
 };
 pub use session_runtime_services::SessionRuntimeServices;
+pub use session_turn::{
+    InterruptedToolOutcome, emit_interrupted_tool_results, emit_turn_aborted_context,
+    finalize_aborted_turn, finalize_turn,
+};
 pub use tool_registry::{ToolRegistry, ToolRegistryError};
 pub use turn_context::{TurnError, TurnEventTx};
 pub use turn_handle::{TurnHandle, TurnShutdownHandle};

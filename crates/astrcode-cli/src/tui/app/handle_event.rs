@@ -168,8 +168,7 @@ fn apply_event(app: &mut App, event: &Event) {
                 msg.body.append_text(delta);
             }
             if let Some(ctrl) = app.stream_states.get_mut(message_id.as_str()) {
-                let theme = app.theme.clone();
-                if ctrl.push_delta(delta, &theme) {
+                if ctrl.push_delta(delta) {
                     // Lines are queued; commit_tick will drain them.
                 }
             }
@@ -180,10 +179,9 @@ fn apply_event(app: &mut App, event: &Event) {
             text,
             ..
         }) => {
-            let theme = app.theme.clone();
             let lines = if let Some(ctrl) = app.stream_states.remove(message_id.as_str()) {
                 let mut ctrl = ctrl;
-                ctrl.finalize(text, &theme)
+                ctrl.finalize(text)
             } else {
                 Vec::new()
             };
@@ -925,7 +923,7 @@ mod tests {
     use crate::tui::store::transcript::{MessageRole, ScrollbackEntry};
 
     fn make_app() -> App {
-        App::new(crate::tui::theme::Theme::detect())
+        App::new()
     }
 
     fn apply_payload(app: &mut App, payload: EventPayload) {

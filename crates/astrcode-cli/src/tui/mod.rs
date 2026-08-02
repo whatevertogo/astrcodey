@@ -57,7 +57,7 @@ pub async fn run(bootstrap_opts: astrcode_server::bootstrap::BootstrapOptions) -
 
     let mut terminal = TerminalSession::enter()?;
     let theme = Theme::detect();
-    let mut app = App::new(theme.clone());
+    let mut app = App::new();
 
     let broker = EventBroker::new();
     let mut event_stream = EventStream::new(broker);

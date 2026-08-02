@@ -23,13 +23,14 @@ use astrcode_extension_sdk::extension::{
     ProviderResult,
 };
 use astrcode_session_projection::SessionReadModel;
+use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     compaction::{
-        CompactionHost, PreparedProviderHistory, plan_auto_compaction, prepare_provider_history,
-        run_reactive_compaction,
+        CompactCircuitBreaker, CompactionHost, PreparedProviderHistory, plan_auto_compaction,
+        prepare_provider_history, run_reactive_compaction,
     },
     llm_stream::{StreamOutcome, consume_llm_stream, non_empty_reasoning_content},
     projection_context::context_snapshot,
@@ -66,6 +67,20 @@ pub(crate) struct TurnLoop {
     llm: Arc<dyn astrcode_core::llm::LlmProvider>,
     cancellation_token: CancellationToken,
     tools: ToolCalls,
+    compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
+}
+
+/// Step 阶段间共享的 hook/publisher/lifecycle 上下文。
+struct StepHooks<'a> {
+    extension_runner: &'a dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+    lifecycle_ctx: &'a astrcode_extension_sdk::extension::LifecycleContext,
+    publisher: &'a Arc<TurnEvents>,
+}
+
+/// LLM 请求被消费前抓取的快照，供 outcome 后续阶段使用。
+struct LlmRequestSnapshot {
+    messages: Vec<LlmMessage>,
+    context_window: usize,
 }
 
 impl TurnLoop {
@@ -103,6 +118,7 @@ impl TurnLoop {
             llm: &self.llm,
             shared: &shared,
             extension_runner,
+            breaker: &self.compact_circuit_breaker,
         };
         run_reactive_compaction(&host, state, turn_id, publisher).await
     }
@@ -116,7 +132,6 @@ impl TurnLoop {
         tool_registry: Arc<crate::ToolRegistry>,
         cancellation_token: CancellationToken,
     ) -> Result<Self, TurnError> {
-        let runtime = session.runtime();
         let runtime_services = session.runtime_services();
         let turn =
             TurnToolContext::for_turn(&session, session_state, tool_selection, session_store_dir);
@@ -127,16 +142,17 @@ impl TurnLoop {
             session.clone(),
             cancellation_token.clone(),
         );
-        let context_settings = runtime_services.context_assembler().settings().clone();
-        runtime.configure_compact_circuit_breaker(
+        let context_settings = runtime_services.context_assembler().settings();
+        let compact_circuit_breaker = Mutex::new(CompactCircuitBreaker::new(
             context_settings.compact_circuit_breaker_threshold,
             Duration::from_secs(context_settings.compact_circuit_breaker_cooldown_secs),
-        );
+        ));
         Ok(Self {
             session,
             llm,
             cancellation_token,
             tools,
+            compact_circuit_breaker,
         })
     }
 
@@ -291,10 +307,13 @@ impl TurnLoop {
             },
             Err(error) => return Err(error),
         };
-        let request_messages = prepared.messages.clone();
-        let model_context_window = prepared.llm.model_limits().max_input_tokens;
+
         // 提取 deduplicator 用于流式工具执行；llm_stage 返回后归还。
         // visible_tools 传给 early exec context 供 prepare 使用。
+        let request = LlmRequestSnapshot {
+            messages: prepared.messages.clone(),
+            context_window: prepared.llm.model_limits().max_input_tokens,
+        };
         let dedup_for_early = state.tool_deduplicator_mut();
         let outcome = match self
             .llm_stage(
@@ -314,111 +333,149 @@ impl TurnLoop {
             },
             Err(error) => return Err(error),
         };
+
+        let hooks = StepHooks {
+            extension_runner,
+            lifecycle_ctx,
+            publisher,
+        };
         match outcome {
-            StreamOutcome::Complete {
-                text,
-                reasoning_content,
-                finish_reason,
-                message_id,
-                message_started,
-                usage,
-            } => {
-                let reasoning_content = non_empty_reasoning_content(reasoning_content);
-                let assistant_text_for_continue = text.clone();
-                state.record_assistant_text(&text, reasoning_content.clone());
-                if (!text.is_empty() || reasoning_content.is_some()) && message_started {
-                    publisher
-                        .durable(DurableEventPayload::AssistantMessageCompleted {
-                            message_id,
-                            text,
-                            reasoning_content,
-                        })
-                        .await?;
-                }
-                self.persist_token_usage(publisher, usage, model_context_window)
-                    .await?;
-                on_step_end_best_effort(extension_runner, lifecycle_ctx).await;
-
-                if self
-                    .should_continue_after_stop(
-                        extension_runner,
-                        &assistant_text_for_continue,
-                        &finish_reason,
-                        state,
-                    )
-                    .await?
-                {
-                    return Ok(StepOutcome::Continue);
-                }
-
-                if self
-                    .has_pending_mid_turn_user_messages(publisher, state)
-                    .await?
-                {
-                    tracing::debug!("pending mid-turn user messages; running one more agent step");
-                    return Ok(StepOutcome::Continue);
-                }
-
-                let hook_messages = state.provider_response_messages(request_messages);
-                let output = self
-                    .postprocess_complete_stage(
-                        extension_runner,
-                        user_text.to_string(),
-                        state,
-                        finish_reason,
-                        hook_messages,
-                    )
-                    .await?;
-                Ok(StepOutcome::Finished(output))
+            StreamOutcome::Complete { .. } => {
+                self.complete_stage(&hooks, state, outcome, user_text, request)
+                    .await
             },
-            StreamOutcome::ToolCalls {
-                text,
-                reasoning_content,
-                tool_calls,
-                early_results,
-                message_id,
-                message_started,
-                usage,
-            } => {
-                let reasoning_content = non_empty_reasoning_content(reasoning_content);
-                let visible_text = text.as_deref().unwrap_or_default();
-                state.record_assistant_tool_calls(
-                    visible_text,
-                    reasoning_content.clone(),
-                    &tool_calls,
-                );
-                if !tool_calls.is_empty() || message_started {
-                    if !message_started {
-                        publisher.live(LiveEventPayload::AssistantMessageStarted {
-                            message_id: message_id.clone(),
-                        });
-                    }
-                    publisher
-                        .durable(DurableEventPayload::AssistantMessageCompleted {
-                            message_id,
-                            text: visible_text.to_string(),
-                            reasoning_content,
-                        })
-                        .await?;
-                }
-                self.persist_token_usage(publisher, usage, model_context_window)
-                    .await?;
-
-                let hook_messages = state.provider_response_messages(request_messages);
-                self.tools_stage(
-                    extension_runner,
-                    state,
-                    &tool_calls,
-                    early_results,
-                    publisher,
-                    hook_messages,
-                )
-                .await?;
-
-                on_step_end_best_effort(extension_runner, lifecycle_ctx).await;
-                Ok(StepOutcome::Continue)
+            StreamOutcome::ToolCalls { .. } => {
+                self.tool_calls_stage(&hooks, state, outcome, request).await
             },
         }
+    }
+
+    async fn complete_stage(
+        &self,
+        hooks: &StepHooks<'_>,
+        state: &mut TurnState,
+        outcome: StreamOutcome,
+        user_text: &str,
+        request: LlmRequestSnapshot,
+    ) -> Result<StepOutcome, TurnError> {
+        let StreamOutcome::Complete {
+            text,
+            reasoning_content,
+            finish_reason,
+            message_id,
+            message_started,
+            usage,
+        } = outcome
+        else {
+            unreachable!("complete_stage expects StreamOutcome::Complete");
+        };
+
+        let reasoning_content = non_empty_reasoning_content(reasoning_content);
+        let assistant_text_for_continue = text.clone();
+        state.record_assistant_text(&text, reasoning_content.clone());
+        if (!text.is_empty() || reasoning_content.is_some()) && message_started {
+            hooks
+                .publisher
+                .durable(DurableEventPayload::AssistantMessageCompleted {
+                    message_id,
+                    text,
+                    reasoning_content,
+                })
+                .await?;
+        }
+        self.persist_token_usage(hooks.publisher, usage, request.context_window)
+            .await?;
+        on_step_end_best_effort(hooks.extension_runner, hooks.lifecycle_ctx).await;
+
+        if self
+            .should_continue_after_stop(
+                hooks.extension_runner,
+                &assistant_text_for_continue,
+                &finish_reason,
+                state,
+            )
+            .await?
+        {
+            return Ok(StepOutcome::Continue);
+        }
+
+        if self
+            .has_pending_mid_turn_user_messages(hooks.publisher, state)
+            .await?
+        {
+            tracing::debug!("pending mid-turn user messages; running one more agent step");
+            return Ok(StepOutcome::Continue);
+        }
+
+        let hook_messages = state.provider_response_messages(request.messages);
+        let output = self
+            .postprocess_complete_stage(
+                hooks.extension_runner,
+                user_text.to_string(),
+                state,
+                finish_reason,
+                hook_messages,
+            )
+            .await?;
+        Ok(StepOutcome::Finished(output))
+    }
+
+    async fn tool_calls_stage(
+        &self,
+        hooks: &StepHooks<'_>,
+        state: &mut TurnState,
+        outcome: StreamOutcome,
+        request: LlmRequestSnapshot,
+    ) -> Result<StepOutcome, TurnError> {
+        let StreamOutcome::ToolCalls {
+            text,
+            reasoning_content,
+            tool_calls,
+            early_results,
+            message_id,
+            message_started,
+            usage,
+        } = outcome
+        else {
+            unreachable!("tool_calls_stage expects StreamOutcome::ToolCalls");
+        };
+
+        let reasoning_content = non_empty_reasoning_content(reasoning_content);
+        let visible_text = text.as_deref().unwrap_or_default();
+        state.record_assistant_tool_calls(visible_text, reasoning_content.clone(), &tool_calls);
+        if !tool_calls.is_empty() || message_started {
+            if !message_started {
+                hooks
+                    .publisher
+                    .live(LiveEventPayload::AssistantMessageStarted {
+                        message_id: message_id.clone(),
+                    });
+            }
+            hooks
+                .publisher
+                .durable(DurableEventPayload::AssistantMessageCompleted {
+                    message_id,
+                    text: visible_text.to_string(),
+                    reasoning_content,
+                })
+                .await?;
+        }
+        self.persist_token_usage(hooks.publisher, usage, request.context_window)
+            .await?;
+
+        let hook_messages = state.provider_response_messages(request.messages);
+        self.tools_stage(
+            hooks.extension_runner,
+            state,
+            &tool_calls,
+            early_results,
+            hooks.publisher,
+            hook_messages,
+        )
+        .await?;
+
+        on_step_end_best_effort(hooks.extension_runner, hooks.lifecycle_ctx).await;
+        Ok(StepOutcome::Continue)
     }
 
     /// 上下文溢出恢复：reactive compaction 成功则继续 step，否则返回 `CompactExhausted`。
@@ -453,6 +510,7 @@ impl TurnLoop {
             llm: &self.llm,
             shared: &shared,
             extension_runner,
+            breaker: &self.compact_circuit_breaker,
         };
         let model = publisher.snapshot_model().await?;
         let snapshot = context_snapshot(&model);
@@ -822,7 +880,7 @@ impl TurnLoop {
     /// 每个 agent step 开始前：重载读模型，返回自上次 step 以来新增的 durable user 消息条数。
     async fn sync_mid_turn_user_messages(
         &self,
-        publisher: &Arc<TurnEvents>,
+        publisher: &TurnEvents,
         state: &mut TurnState,
     ) -> Result<u32, TurnError> {
         let model = publisher.snapshot_model().await?;
@@ -843,7 +901,7 @@ impl TurnLoop {
 
     async fn has_pending_mid_turn_user_messages(
         &self,
-        publisher: &Arc<TurnEvents>,
+        publisher: &TurnEvents,
         state: &TurnState,
     ) -> Result<bool, TurnError> {
         let model = publisher.snapshot_model().await?;
