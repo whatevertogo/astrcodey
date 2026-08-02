@@ -7,6 +7,9 @@ interface TodoItem {
   content: string
   activeForm: string
   status: TodoStatus
+  executor?: string
+  agentType?: string
+  mode?: string
 }
 
 function todoStatus(value: unknown): TodoStatus | undefined {
@@ -30,7 +33,21 @@ function parseTodoItem(value: unknown): TodoItem | undefined {
         : ''
   const status = todoStatus(record.status)
   if (!content || !activeForm || !status) return undefined
-  return { content, activeForm, status }
+  const executor =
+    typeof record.executor === 'string' ? record.executor : undefined
+  const agentType =
+    typeof record.agentType === 'string' ? record.agentType : undefined
+  const mode = typeof record.mode === 'string' ? record.mode : undefined
+  return { content, activeForm, status, executor, agentType, mode }
+}
+
+function executorTag(item: TodoItem): string {
+  if (item.executor === 'agent') {
+    const type = item.agentType ? `: ${item.agentType}` : ''
+    return `[agent${type}] `
+  }
+  if (item.executor === 'self') return '[self] '
+  return ''
 }
 
 export function todoItemsFromContext(
@@ -96,7 +113,7 @@ export function buildTodoRenderSpec(items: TodoItem[]): RenderSpec {
       case 'completed':
         return {
           type: 'progress',
-          label: item.content,
+          label: executorTag(item) + item.content,
           status: '已完成',
           value: 1,
           tone: 'success',
@@ -104,7 +121,7 @@ export function buildTodoRenderSpec(items: TodoItem[]): RenderSpec {
       case 'in_progress':
         return {
           type: 'progress',
-          label: item.content,
+          label: executorTag(item) + item.content,
           status: '进行中',
           value: 0.5,
           tone: 'accent',
@@ -112,7 +129,7 @@ export function buildTodoRenderSpec(items: TodoItem[]): RenderSpec {
       case 'pending':
         return {
           type: 'progress',
-          label: item.content,
+          label: executorTag(item) + item.content,
           status: '待处理',
           value: 0,
           tone: 'muted',

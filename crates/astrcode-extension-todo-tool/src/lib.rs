@@ -23,16 +23,17 @@ pub(crate) const TODO_WRITE_TOOL_NAME: &str = "todoWrite";
 const TODO_WRITE_DESCRIPTION: &str =
     "Update the session todo list to track multi-step task progress.\n\nWhen NOT to use:\n- \
      Simple Q&A or single straightforward task\n- One file, one edit, no progress tracking \
-     needed\n\nTips:\n- Multi-step work, task lists, or when progress tracking helps\n- When \
-     creating or updating items, decide each step's executor: prefix `[self]` or `[agent: \
-     <type>]`; for agent steps mark `(parallel)` when independent, `(serial)` otherwise. Default \
-     to `[self]` — delegate only when the step is an isolated non-trivial subtask, parallel \
-     investigation clearly pays off, or independent verification is warranted (see `agent` \
-     guidance). Revisit executors when new evidence changes dependencies.\n\nRules:\n- Send the \
-     full list every time (not a patch). Keep exactly one `in_progress`.\n- Mark `in_progress` \
-     BEFORE starting work. Mark `completed` only when fully done (tests pass, implementation \
-     complete).\n- After receiving new instructions, immediately add them as todos.\n- Each item: \
-     `content` (imperative: \"Fix auth bug\") + `activeForm` (continuous: \"Fixing auth bug\").";
+     needed\n\nTips:\n- Multi-step work, task lists, or when progress tracking helps\n- Every \
+     item must declare `executor`: `self` (main agent does it directly) or `agent` (delegate; \
+     then `agentType` is required). For agent steps set `mode`: `parallel` when independent of \
+     other steps, `serial` otherwise. Default to `self` — delegate only when the step is an \
+     isolated non-trivial subtask, parallel investigation clearly pays off, or independent \
+     verification is warranted (see `agent` guidance). Revisit executors when new evidence \
+     changes dependencies.\n\nRules:\n- Send the full list every time (not a patch). Keep exactly \
+     one `in_progress`.\n- Mark `in_progress` BEFORE starting work. Mark `completed` only when \
+     fully done (tests pass, implementation complete).\n- After receiving new instructions, \
+     immediately add them as todos.\n- Each item: `content` (imperative: \"Fix auth bug\") + \
+     `activeForm` (continuous: \"Fixing auth bug\").";
 const PROGRESS_SCHEMA_VERSION: u32 = 1;
 const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;
@@ -151,10 +152,10 @@ fn todo_write_metadata()
         TODO_WRITE_TOOL_NAME.to_string(),
         astrcode_extension_sdk::tool::ToolPromptMetadata::new(String::new())
             .example(
-                "{ todos: [{ content: \"分析现有代码结构\", status: \"in_progress\", activeForm: \
-                 \"正在分析现有代码结构\" }, { content: \"设计优化方案\", status: \"pending\", \
-                 activeForm: \"准备设计优化方案\" }, { content: \"验证优化效果\", status: \
-                 \"pending\", activeForm: \"准备验证优化效果\" }] }",
+                "{ todos: [{ content: \"分析现有代码结构\", executor: \"self\", status: \
+                 \"in_progress\", activeForm: \"正在分析现有代码结构\" }, { content: \
+                 \"审查安全相关改动\", executor: \"agent\", agentType: \"reviewer\", mode: \
+                 \"parallel\", status: \"pending\", activeForm: \"准备审查安全相关改动\" }] }",
             )
             .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
     );
@@ -173,6 +174,27 @@ struct TodoInputItem {
     content: String,
     active_form: String,
     status: ProgressStatus,
+    executor: TodoExecutor,
+    agent_type: Option<String>,
+    mode: Option<StepMode>,
+}
+
+/// Step executor: the main agent itself or a delegated subagent.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) enum TodoExecutor {
+    #[serde(rename = "self")]
+    #[default]
+    MainAgent,
+    #[serde(rename = "agent")]
+    SubAgent,
+}
+
+/// Execution order of a delegated step relative to other steps.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StepMode {
+    Serial,
+    Parallel,
 }
 
 /// Progress item status for the single-agent todo list.
@@ -191,6 +213,12 @@ pub(crate) struct ProgressItem {
     pub content: String,
     pub active_form: String,
     pub status: ProgressStatus,
+    #[serde(default)]
+    pub executor: TodoExecutor,
+    #[serde(default)]
+    pub agent_type: Option<String>,
+    #[serde(default)]
+    pub mode: Option<StepMode>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub metadata: BTreeMap<String, Value>,
 }
@@ -401,7 +429,12 @@ fn reminder_message(items: &[ProgressItem]) -> String {
 fn handle_todo_write(arguments: Value, store: &ProgressListStore) -> Result<ToolResult, String> {
     let args = serde_json::from_value::<TodoWriteArgs>(arguments)
         .map_err(|error| format!("invalid args for {TODO_WRITE_TOOL_NAME}: {error}"))?;
-    let outcome = store.replace(args.todos.into_iter().map(ProgressItem::from).collect())?;
+    let items = args
+        .todos
+        .into_iter()
+        .map(TodoInputItem::into_progress_item)
+        .collect::<Result<Vec<_>, _>>()?;
+    let outcome = store.replace(items)?;
 
     let mut content = String::from(
         "Todos have been modified successfully. Continue to use the todo list to track your \
@@ -453,13 +486,41 @@ fn validate_text(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-impl From<TodoInputItem> for ProgressItem {
-    fn from(item: TodoInputItem) -> Self {
-        Self {
-            content: item.content,
-            active_form: item.active_form,
-            status: item.status,
-            metadata: BTreeMap::new(),
+impl TodoInputItem {
+    fn into_progress_item(self) -> Result<ProgressItem, String> {
+        let agent_type = self.agent_type.map(|value| value.trim().to_string());
+        match self.executor {
+            TodoExecutor::SubAgent => {
+                let agent_type = agent_type
+                    .filter(|value| !value.is_empty())
+                    .ok_or_else(|| "executor \"agent\" requires non-empty agentType".to_string())?;
+                Ok(ProgressItem {
+                    content: self.content,
+                    active_form: self.active_form,
+                    status: self.status,
+                    executor: self.executor,
+                    agent_type: Some(agent_type),
+                    mode: self.mode,
+                    metadata: BTreeMap::new(),
+                })
+            },
+            TodoExecutor::MainAgent => {
+                if agent_type.is_some() {
+                    return Err("agentType is only allowed when executor is \"agent\"".to_string());
+                }
+                if self.mode.is_some() {
+                    return Err("mode is only allowed when executor is \"agent\"".to_string());
+                }
+                Ok(ProgressItem {
+                    content: self.content,
+                    active_form: self.active_form,
+                    status: self.status,
+                    executor: self.executor,
+                    agent_type: None,
+                    mode: None,
+                    metadata: BTreeMap::new(),
+                })
+            },
         }
     }
 }
@@ -505,7 +566,7 @@ fn todo_write_tool_definition() -> ToolDefinition {
                         "properties": {
                             "content": {
                                 "type": "string",
-                                "description": "Imperative form. Prefix `[self]` or `[agent: <type>]`; agent steps add `(parallel)`/`(serial)`."
+                                "description": "Imperative form."
                             },
                             "activeForm": {
                                 "type": "string",
@@ -514,9 +575,23 @@ fn todo_write_tool_definition() -> ToolDefinition {
                             "status": {
                                 "type": "string",
                                 "enum": ["pending", "in_progress", "completed"]
+                            },
+                            "executor": {
+                                "type": "string",
+                                "enum": ["self", "agent"],
+                                "description": "Who executes this step: `self` for the main agent directly, `agent` to delegate to a subagent."
+                            },
+                            "agentType": {
+                                "type": "string",
+                                "description": "Subagent type (e.g. explore, execute, reviewer). Required when executor is `agent`."
+                            },
+                            "mode": {
+                                "type": "string",
+                                "enum": ["serial", "parallel"],
+                                "description": "For agent steps: `parallel` when independent, `serial` when dependent."
                             }
                         },
-                        "required": ["content", "activeForm", "status"]
+                        "required": ["content", "activeForm", "status", "executor"]
                     },
                     "description": "The full replacement progress todo list."
                 }
@@ -540,7 +615,25 @@ mod tests {
             content: content.to_string(),
             active_form: active_form.to_string(),
             status,
+            executor: TodoExecutor::MainAgent,
+            agent_type: None,
+            mode: None,
             metadata: BTreeMap::new(),
+        }
+    }
+
+    fn input_item(
+        executor: TodoExecutor,
+        agent_type: Option<&str>,
+        mode: Option<StepMode>,
+    ) -> TodoInputItem {
+        TodoInputItem {
+            content: "Run tests".into(),
+            active_form: "Running tests".into(),
+            status: ProgressStatus::Pending,
+            executor,
+            agent_type: agent_type.map(String::from),
+            mode,
         }
     }
 
@@ -581,7 +674,8 @@ mod tests {
                     {
                         "content": "Inspect files",
                         "activeForm": "Inspecting files",
-                        "status": "in_progress"
+                        "status": "in_progress",
+                        "executor": "self"
                     }
                 ]
             }),
@@ -590,6 +684,7 @@ mod tests {
         .expect("write should succeed");
         assert!(first.metadata["oldTodos"].as_array().unwrap().is_empty());
         assert_eq!(first.metadata["newTodos"][0]["content"], "Inspect files");
+        assert_eq!(first.metadata["newTodos"][0]["executor"], "self");
 
         let second = handle_todo_write(
             json!({
@@ -597,7 +692,10 @@ mod tests {
                     {
                         "content": "Run tests",
                         "activeForm": "Running tests",
-                        "status": "pending"
+                        "status": "pending",
+                        "executor": "agent",
+                        "agentType": "execute",
+                        "mode": "serial"
                     }
                 ]
             }),
@@ -606,6 +704,9 @@ mod tests {
         .expect("replace should succeed");
         assert_eq!(second.metadata["oldTodos"][0]["content"], "Inspect files");
         assert_eq!(second.metadata["newTodos"][0]["content"], "Run tests");
+        assert_eq!(second.metadata["newTodos"][0]["executor"], "agent");
+        assert_eq!(second.metadata["newTodos"][0]["agentType"], "execute");
+        assert_eq!(second.metadata["newTodos"][0]["mode"], "serial");
     }
 
     #[test]
@@ -642,6 +743,87 @@ mod tests {
             blank_active_form.expect_err("blank active form should fail"),
             "activeForm must not be empty"
         );
+    }
+
+    #[test]
+    fn rejects_agent_executor_without_agent_type() {
+        assert_eq!(
+            input_item(TodoExecutor::SubAgent, None, None)
+                .into_progress_item()
+                .expect_err("agent without agentType should fail"),
+            "executor \"agent\" requires non-empty agentType"
+        );
+
+        let blank = input_item(TodoExecutor::SubAgent, Some("   "), None)
+            .into_progress_item()
+            .expect_err("blank agentType should fail");
+        assert!(blank.contains("agentType"));
+    }
+
+    #[test]
+    fn rejects_self_executor_with_agent_type_or_mode() {
+        assert_eq!(
+            input_item(TodoExecutor::MainAgent, Some("explore"), None)
+                .into_progress_item()
+                .expect_err("self with agentType should fail"),
+            "agentType is only allowed when executor is \"agent\""
+        );
+        assert_eq!(
+            input_item(TodoExecutor::MainAgent, None, Some(StepMode::Parallel))
+                .into_progress_item()
+                .expect_err("self with mode should fail"),
+            "mode is only allowed when executor is \"agent\""
+        );
+    }
+
+    #[test]
+    fn accepts_agent_executor_with_agent_type() {
+        let item = input_item(
+            TodoExecutor::SubAgent,
+            Some(" reviewer "),
+            Some(StepMode::Parallel),
+        )
+        .into_progress_item()
+        .expect("agent with agentType should succeed");
+        assert_eq!(item.executor, TodoExecutor::SubAgent);
+        assert_eq!(item.agent_type.as_deref(), Some("reviewer"));
+        assert_eq!(item.mode, Some(StepMode::Parallel));
+    }
+
+    #[test]
+    fn rejects_todo_without_executor_field() {
+        let store = test_store("missing-executor");
+        let result = handle_todo_write(
+            json!({
+                "todos": [
+                    {
+                        "content": "Inspect files",
+                        "activeForm": "Inspecting files",
+                        "status": "in_progress"
+                    }
+                ]
+            }),
+            &store,
+        );
+        assert!(
+            result
+                .expect_err("missing executor should fail")
+                .contains("executor")
+        );
+    }
+
+    #[test]
+    fn loads_legacy_items_without_executor_as_self() {
+        let store = test_store("legacy");
+        std::fs::create_dir_all(&store.root).unwrap();
+        let legacy = r#"{"schemaVersion":1,"items":[{"content":"Run tests","activeForm":"Running tests","status":"pending"}],"updatedAt":"2026-01-01T00:00:00Z"}"#;
+        std::fs::write(store.root.join(PROGRESS_FILE), legacy).unwrap();
+
+        let items = store.load_items().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].executor, TodoExecutor::MainAgent);
+        assert_eq!(items[0].agent_type, None);
+        assert_eq!(items[0].mode, None);
     }
 
     #[test]
@@ -760,17 +942,21 @@ mod tests {
     }
 
     #[test]
-    fn description_biases_executor_decision_per_item() {
+    fn tool_contract_forces_executor_decision() {
         let definition = todo_write_tool_definition();
-        assert!(definition.description.contains("`[self]`"));
-        assert!(definition.description.contains("`[agent: <type>]`"));
-        assert!(definition.description.contains("Default to `[self]`"));
-        assert!(definition.description.contains("(parallel)"));
-        let content_description = definition.parameters["properties"]["todos"]["items"]
-            ["properties"]["content"]["description"]
-            .as_str()
+        assert!(definition.description.contains("`executor`"));
+        assert!(definition.description.contains("`agentType`"));
+        assert!(definition.description.contains("Default to `self`"));
+        let properties = &definition.parameters["properties"]["todos"]["items"]["properties"];
+        assert_eq!(properties["executor"]["enum"], json!(["self", "agent"]));
+        assert_eq!(properties["mode"]["enum"], json!(["serial", "parallel"]));
+        let required = definition.parameters["properties"]["todos"]["items"]["required"]
+            .as_array()
             .unwrap();
-        assert!(content_description.contains("`[self]`"));
-        assert!(content_description.contains("`[agent: <type>]`"));
+        assert!(required.contains(&json!("executor")));
+        assert_eq!(
+            properties["content"]["description"].as_str().unwrap(),
+            "Imperative form."
+        );
     }
 }
