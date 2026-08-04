@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 
 import {
+  assistantRunCompletedReply,
   assistantRunCopyText,
   assistantVisibleText,
   buildAssistantRunModel,
@@ -130,13 +131,32 @@ const extendedMessageItems = buildMessageListItems([
   { kind: 'user', id: 'u1', text: 'hi' },
   assistant('a4', 'thinking', 'complete'),
   tool('t4', 'read', 'complete'),
-  assistant('a5', 'reply', 'streaming'),
-  tool('t5', 'shell', 'streaming'),
+  assistant('a5', 'reply', 'complete', { storageSeq: 42 }),
 ])
 assert.equal(
   extendedMessageItems[1].id,
   messageItems[1].id,
   'appending work must not remount the active assistant run'
+)
+assert.deepEqual(
+  extendedMessageItems.map((item) => item.type),
+  ['block', 'assistantRun'],
+  'an assistant run already provides the session-end fork action'
+)
+
+const unactionableRunItems = buildMessageListItems([
+  { kind: 'user', id: 'u2', text: 'hi' },
+  assistant('a6', 'reply', 'complete'),
+])
+assert.equal(
+  unactionableRunItems.at(-1)?.type,
+  'forkRow',
+  'keep the session-level fork fallback when a reply has no storage sequence'
+)
+assert.equal(
+  assistantRunCompletedReply(unactionableRunItems[1].blocks)?.id,
+  'a6',
+  'a completed reply without a storage sequence must still expose copy actions'
 )
 
 const longRunBlocks = [
@@ -169,6 +189,12 @@ assert.equal(
   ]),
   'progress\n\nfinal answer',
   'copying a completed turn must include visible assistant text without thinking or tool output'
+)
+assert.equal(
+  assistantRunCompletedReply([
+    assistant('a-action', 'reply', 'complete', { storageSeq: 42 }),
+  ])?.storageSeq,
+  42
 )
 
 assert.equal(

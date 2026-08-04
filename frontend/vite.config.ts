@@ -5,7 +5,7 @@ import react, { reactCompilerPreset } from '@vitejs/plugin-react'
 import babel from '@rolldown/plugin-babel'
 import tailwindcss from '@tailwindcss/vite'
 import { defineConfig } from 'vite'
-import type { RunInfoDto } from './src/services/generated/RunInfoDto'
+import type { RunInfoDto } from './src/services/generated/RunInfoDto.ts'
 
 function resolveRunInfo(): RunInfoDto | undefined {
   const astrcodeHome =

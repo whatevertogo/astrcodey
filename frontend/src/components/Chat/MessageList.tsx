@@ -9,7 +9,7 @@ import {
 import { useVirtualizer, type Virtualizer } from '@tanstack/react-virtual'
 import type { ConversationBlock } from '../../services/types'
 import { cn } from '../../lib/utils'
-import { emptyStateSurface } from '../../lib/styles'
+import { emptyStateSurface, ghostIconButton } from '../../lib/styles'
 import { useAppStore } from '../../store/conversation'
 import AssistantRunMessage from './AssistantRunMessage'
 import UserMessage from './UserMessage'
@@ -47,18 +47,19 @@ function ForkRow({ sessionId }: { sessionId: string | null }) {
   const forkSession = useAppStore((s) => s.forkSession)
   if (!sessionId) return null
   return (
-    <div className="flex items-center gap-3 py-1" aria-hidden={false}>
-      <div className="h-px flex-1 border-t border-dashed border-border" />
+    <div className="flex items-center py-1">
       <button
         type="button"
-        className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface/60 px-3.5 py-1.5 text-[12px] font-medium text-text-muted transition-colors duration-150 hover:border-accent-strong/40 hover:text-text-primary"
+        className={cn(
+          ghostIconButton,
+          'h-7 gap-1.5 rounded-md px-2 text-[12px] font-medium'
+        )}
         onClick={() => void forkSession(sessionId)}
-        title="从当前会话末尾分叉出一个新会话"
+        aria-label="分叉当前会话"
       >
         <Icon name="branch" size={13} />
-        从此处分叉
+        分叉当前会话
       </button>
-      <div className="h-px flex-1 border-t border-dashed border-border" />
     </div>
   )
 }

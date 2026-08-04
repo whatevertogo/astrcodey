@@ -141,7 +141,14 @@ export function buildMessageListItems(
     index += 1
   }
 
-  if (items.length > 0) {
+  const lastItem = items[items.length - 1]
+  const completedReply =
+    lastItem?.type === 'assistantRun'
+      ? assistantRunCompletedReply(lastItem.blocks)
+      : null
+  const hasInlineForkAction =
+    completedReply != null && completedReply.storageSeq != null
+  if (items.length > 0 && !hasInlineForkAction) {
     items.push({ type: 'forkRow', id: 'fork-row' })
   }
 
@@ -151,7 +158,7 @@ export function buildMessageListItems(
 export function streamingMessageListItemId(
   items: MessageListItem[]
 ): string | null {
-  // forkRow 恒为最后一项，向前找最后一个真正的消息项。
+  // 会话级分叉入口仅在没有末尾 assistant run 时出现，跳过后检查真实末项。
   for (let index = items.length - 1; index >= 0; index -= 1) {
     const item = items[index]
     if (item.type === 'forkRow') continue
@@ -181,6 +188,20 @@ export function assistantRunCopyText(blocks: AssistantLikeBlock[]): string {
     .map((text) => text.trim())
     .filter(Boolean)
     .join('\n\n')
+}
+
+export function assistantRunCompletedReply(
+  blocks: AssistantLikeBlock[]
+): AssistantBlock | null {
+  const finalBlock = blocks[blocks.length - 1]
+  if (
+    finalBlock?.kind !== 'assistant' ||
+    finalBlock.status !== 'complete' ||
+    !assistantRunCopyText(blocks)
+  ) {
+    return null
+  }
+  return finalBlock
 }
 
 function filenameFor(path: string): string {

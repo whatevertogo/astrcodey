@@ -14,6 +14,7 @@ import ToolCallBlock from './ToolCallBlock'
 import { AskUserCard } from './tools/AskUserCard'
 import { toolArgs } from './tools/helpers'
 import {
+  assistantRunCompletedReply,
   assistantRunCopyText,
   buildAssistantRunModel,
   type AssistantLikeBlock,
@@ -52,28 +53,34 @@ function AssistantRunActions({
 
   return (
     <div
-      className="flex min-h-8 items-center gap-0.5 pt-0.5 text-text-muted opacity-0 transition-opacity duration-150 hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none"
+      className="flex min-h-8 items-center gap-1 pt-1 text-text-muted opacity-60 transition-opacity duration-150 hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none"
       role="group"
       aria-label="Turn 操作"
     >
       <button
         type="button"
-        className={cn(ghostIconButton, 'h-7 w-7 rounded-md')}
+        className={cn(
+          ghostIconButton,
+          'h-7 gap-1.5 rounded-md px-2 text-[12px] font-medium'
+        )}
         onClick={handleCopy}
-        title={copied ? '已复制' : '复制此 Turn'}
         aria-label={copied ? '已复制' : '复制此 Turn'}
       >
         <Icon name="copy" size={15} />
+        {copied ? '已复制' : '复制'}
       </button>
       {sessionId && storageSeq != null ? (
         <button
           type="button"
-          className={cn(ghostIconButton, 'h-7 w-7 rounded-md')}
+          className={cn(
+            ghostIconButton,
+            'h-7 gap-1.5 rounded-md px-2 text-[12px] font-medium'
+          )}
           onClick={() => void forkSession(sessionId, storageSeq)}
-          title="从此 Turn 分叉"
           aria-label="从此 Turn 分叉"
         >
           <Icon name="branch" size={15} />
+          分叉
         </button>
       ) : null}
       <span className="sr-only" aria-live="polite">
@@ -294,11 +301,7 @@ function PendingAskUserPrompts({
 
 function AssistantRunMessage({ blocks, sessionId }: AssistantRunMessageProps) {
   const runModel = buildAssistantRunModel(blocks)
-  const completedReply =
-    runModel.finalReplyBlock === blocks[blocks.length - 1] &&
-    runModel.finalReplyBlock.status === 'complete'
-      ? runModel.finalReplyBlock
-      : null
+  const completedReply = assistantRunCompletedReply(blocks)
   const copyText = completedReply ? assistantRunCopyText(blocks) : ''
 
   return (
