@@ -9,11 +9,13 @@ use astrcode_core::tool::{
 use astrcode_extension_sdk::{
     s5r::ErrorPayload,
     session::{
-        HostCreateSessionOutput, HostCreateSessionRequest, HostSubmitTurnOutput,
-        HostSubmitTurnRequest, SessionToolSelectionDto,
+        HostCreateSessionOutput, HostCreateSessionRequest, HostSessionReactivateOutput,
+        HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
+        HostSubmitTurnRequest, SessionLifecycleStateDto, SessionToolSelectionDto,
     },
+    session_inspect::SessionHistorySnapshotOutput,
 };
-use astrcode_storage::{EventReader, SessionReader};
+use astrcode_storage::{EventReader, SessionReader, StorageError};
 use serde_json::{Value, json};
 
 use super::{InvokeContext, block_on_async, capability::SessionCapability, session_inspect};
@@ -52,6 +54,9 @@ impl SessionGroup {
             SessionCapability::CancelTurn => cancel_turn(&input, ctx),
             SessionCapability::ExecutionView => execution_view(&input, ctx),
             SessionCapability::Dispose => dispose_session(&input, ctx),
+            SessionCapability::Reactivate => reactivate_session(&input, ctx),
+            SessionCapability::State => session_state(&input, ctx),
+            SessionCapability::HistorySnapshot => self.history_snapshot(&input, ctx),
             SessionCapability::InspectList => self.inspect_list(),
             SessionCapability::InspectSnapshot => self.inspect_snapshot(input),
             SessionCapability::InspectReadModel => self.inspect_read_model(input),
@@ -121,6 +126,46 @@ impl SessionGroup {
     fn inspect_provider_messages(&self, input: Value) -> Result<Value, ErrorPayload> {
         let reader = self.session_reader()?;
         block_on_async(async move { session_inspect::provider_messages(reader, input).await })?
+    }
+
+    fn history_snapshot(&self, input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
+        let request =
+            parse_wire_request::<HostSessionTargetRequest>(input, "session.history.snapshot")?;
+        let access = session_access_from_target(request, ctx)?;
+        let reader = self.session_reader()?;
+        let ops = ctx.session_ops.as_ref().map(Arc::clone);
+        block_on_async(async move {
+            if let Some(ops) = ops {
+                ops.session_state(access.as_access())
+                    .await
+                    .map_err(session_api_error)?;
+            } else if access.caller_session_id != access.target_session_id {
+                return Err(ErrorPayload::new(
+                    "permission_denied",
+                    "session history is limited to the caller session without session_control",
+                ));
+            }
+
+            let session_id = astrcode_core::types::SessionId::new(&access.target_session_id);
+            let (lifecycle, model) = match reader.session_read_model(&session_id).await {
+                Ok(model) => (SessionLifecycleStateDto::Active, model),
+                Err(StorageError::NotFound(_)) => (
+                    SessionLifecycleStateDto::Recycled,
+                    reader
+                        .recycled_session_read_model(&session_id)
+                        .await
+                        .map_err(storage_error)?,
+                ),
+                Err(error) => return Err(storage_error(error)),
+            };
+            serialize_wire_response(
+                SessionHistorySnapshotOutput {
+                    lifecycle,
+                    read_model: session_inspect::read_model_dto((*model).clone()),
+                },
+                "session.history.snapshot",
+            )
+        })?
     }
 
     fn session_reader(&self) -> Result<Arc<dyn SessionReader>, ErrorPayload> {
@@ -301,6 +346,41 @@ fn dispose_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPay
     })?
 }
 
+fn session_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
+    let request = parse_wire_request::<HostSessionTargetRequest>(input, "session.control.state")?;
+    let ops = required_session_ops(ctx)?;
+    let access = session_access_from_target(request, ctx)?;
+    block_on_async(async move {
+        let state = ops
+            .session_state(access.as_access())
+            .await
+            .map_err(session_api_error)?;
+        let phase = session_inspect::phase_name(state.phase).into();
+        serialize_wire_response(
+            HostSessionStateOutput::from_state(state, phase),
+            "session.control.state",
+        )
+    })?
+}
+
+fn reactivate_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
+    let request =
+        parse_wire_request::<HostSessionTargetRequest>(input, "session.control.reactivate")?;
+    let target_session_id = request.target_session_id.clone();
+    let ops = required_session_ops(ctx)?;
+    let access = session_access_from_target(request, ctx)?;
+    block_on_async(async move {
+        let result = ops
+            .reactivate_session(access.as_access())
+            .await
+            .map_err(session_api_error)?;
+        serialize_wire_response(
+            HostSessionReactivateOutput::from_result(target_session_id, result),
+            "session.control.reactivate",
+        )
+    })?
+}
+
 fn session_delivery_outcome_json(outcome: SessionDeliveryOutcome) -> Value {
     match outcome {
         SessionDeliveryOutcome::Started { turn_id } => {
@@ -337,6 +417,32 @@ fn session_access_from_input(
         .filter(|target| !target.is_empty())
         .ok_or_else(|| ErrorPayload::new("invalid_input", "target_session_id required"))?;
     Ok(SessionAccessPair::new(caller, target))
+}
+
+fn session_access_from_target(
+    request: HostSessionTargetRequest,
+    ctx: &InvokeContext,
+) -> Result<SessionAccessPair, ErrorPayload> {
+    let caller = ctx
+        .session_id
+        .as_deref()
+        .ok_or_else(|| ErrorPayload::new("invalid_input", "caller session_id required"))?;
+    Ok(SessionAccessPair::new(caller, request.target_session_id))
+}
+
+fn session_api_error(error: astrcode_core::tool::SessionApiError) -> ErrorPayload {
+    let code = match &error {
+        astrcode_core::tool::SessionApiError::NotFound(_) => "session_not_found",
+        astrcode_core::tool::SessionApiError::PermissionDenied(_) => "permission_denied",
+        astrcode_core::tool::SessionApiError::SessionBusy(_) => "session_busy",
+        astrcode_core::tool::SessionApiError::Unsupported(_) => "unsupported",
+        _ => "session_error",
+    };
+    ErrorPayload::new(code, error.to_string())
+}
+
+fn storage_error(error: StorageError) -> ErrorPayload {
+    ErrorPayload::new("session_error", error.to_string())
 }
 
 fn required_session_content(input: &Value) -> Result<String, ErrorPayload> {

@@ -27,7 +27,8 @@ pub use registry::{
 use serde_json::{Value, json};
 
 pub use crate::session::{
-    HostCreateSessionOutput, HostCreateSessionRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
+    HostCreateSessionOutput, HostCreateSessionRequest, HostSessionReactivateOutput,
+    HostSessionStateOutput, HostSubmitTurnOutput, HostSubmitTurnRequest,
 };
 use crate::{
     extension::ContinueAfterStopOptions,

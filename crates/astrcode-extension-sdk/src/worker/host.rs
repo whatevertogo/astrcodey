@@ -6,17 +6,20 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use crate::session::HostSessionTargetRequest;
 use crate::{
     extension::{ExtensionHttpRequest, ExtensionHttpResponse},
     runtime::{OutboundInvokeControl, Peer, PeerError},
     s5r::ErrorPayload,
     session::{
-        HostCreateSessionOutput, HostCreateSessionRequest, HostSubmitTurnOutput,
-        HostSubmitTurnRequest, SessionToolSelectionDto,
+        HostCreateSessionOutput, HostCreateSessionRequest, HostSessionReactivateOutput,
+        HostSessionStateOutput, HostSubmitTurnOutput, HostSubmitTurnRequest,
+        SessionToolSelectionDto,
     },
     session_inspect::{
-        SessionInspectListOutput, SessionInspectProviderMessagesOutput,
-        SessionInspectReadModelOutput, SessionInspectSnapshotOutput,
+        SessionHistorySnapshotOutput, SessionInspectListOutput,
+        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
+        SessionInspectSnapshotOutput,
     },
 };
 
@@ -285,11 +288,6 @@ pub struct HostWorkspaceGlobOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostSessionTargetRequest {
-    pub target_session_id: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct HostSessionInputRequest {
     pub target_session_id: String,
     pub content: String,
@@ -410,6 +408,39 @@ impl HostClient {
         )
         .await?;
         deserialize_response(output, "session.control.execution_view")
+    }
+
+    pub async fn session_state(
+        request: HostSessionTargetRequest,
+    ) -> Result<HostSessionStateOutput, ErrorPayload> {
+        let output = Self::call(
+            "astrcode.session.control.state",
+            serialize_request(request)?,
+        )
+        .await?;
+        deserialize_response(output, "session.control.state")
+    }
+
+    pub async fn reactivate_session(
+        request: HostSessionTargetRequest,
+    ) -> Result<HostSessionReactivateOutput, ErrorPayload> {
+        let output = Self::call(
+            "astrcode.session.control.reactivate",
+            serialize_request(request)?,
+        )
+        .await?;
+        deserialize_response(output, "session.control.reactivate")
+    }
+
+    pub async fn session_history_snapshot(
+        request: HostSessionTargetRequest,
+    ) -> Result<SessionHistorySnapshotOutput, ErrorPayload> {
+        let output = Self::call(
+            "astrcode.session.history.snapshot",
+            serialize_request(request)?,
+        )
+        .await?;
+        deserialize_response(output, "session.history.snapshot")
     }
 
     /// 创建子 session（manifest 须声明 `session_control`）。

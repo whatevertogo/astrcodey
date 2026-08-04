@@ -18,8 +18,8 @@ use astrcode_core::{
     event::{DurableEvent, DurableEventPayload, StoredEvent},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::{
-        CreateSessionRequest, SessionAccess, SessionDeliveryOutcome, SessionOperations,
-        SubmitTurnRequest, SubmitTurnResult, ToolDefinition,
+        CreateSessionRequest, SessionAccess, SessionDeliveryOutcome, SessionLifecycleState,
+        SessionOperations, SubmitTurnRequest, SubmitTurnResult, ToolDefinition,
     },
     types::{Cursor, SessionId, new_session_id, new_turn_id},
 };
@@ -265,6 +265,22 @@ impl SessionReader for BlockingChildCreateStore {
         self.inner.session_read_model(session_id).await
     }
 
+    async fn recycled_session_read_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<SessionReadModel>, StorageError> {
+        let events = self
+            .recycled
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        replay(session_id.clone(), &events)
+            .map(Arc::new)
+            .map_err(|error| StorageError::CorruptLog(error.to_string()))
+    }
+
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
         self.inner.list_session_summaries().await
     }
@@ -429,22 +445,6 @@ impl SessionStore for BlockingChildCreateStore {
             self.restore_finished.add_permits(1);
         }
         Ok(())
-    }
-
-    async fn recycled_session_read_model(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Arc<SessionReadModel>, StorageError> {
-        let events = self
-            .recycled
-            .lock()
-            .await
-            .get(session_id)
-            .cloned()
-            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
-        replay(session_id.clone(), &events)
-            .map(Arc::new)
-            .map_err(|error| StorageError::CorruptLog(error.to_string()))
     }
 }
 
@@ -649,6 +649,104 @@ async fn restore_authorizes_against_recycled_ancestor_chain_before_mutation() {
     ops.query_session(SessionAccess::new(root_id.as_str(), grandchild_id.as_str()))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn reactivate_restores_runtime_parent_relation_and_is_idempotent() {
+    let blocking_store = Arc::new(BlockingChildCreateStore::new());
+    let store: Arc<dyn SessionStore> = blocking_store.clone();
+    let root_id = new_session_id();
+    store
+        .create_session(session_started_event_for_test(root_id.clone(), ".", "mock"))
+        .await
+        .unwrap();
+    let ops = build_test_ops(Arc::clone(&store), "unused");
+    let child = ops
+        .create_session(
+            root_id.as_str(),
+            CreateSessionRequest {
+                name: "reactivated-child".into(),
+                source_extension: Some("test".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let child_id = SessionId::from(child.session_id);
+    let access = || SessionAccess::new(root_id.as_str(), child_id.as_str());
+
+    assert_eq!(
+        ops.session_state(access()).await.unwrap().lifecycle,
+        SessionLifecycleState::Active
+    );
+    ops.recycle_session(access()).await.unwrap();
+    assert_eq!(
+        ops.session_state(access()).await.unwrap().lifecycle,
+        SessionLifecycleState::Recycled
+    );
+    assert!(
+        store
+            .session_read_model(&root_id)
+            .await
+            .unwrap()
+            .agent_sessions
+            .is_empty(),
+        "recycling must remove the active child relation"
+    );
+
+    let reactivated = ops.reactivate_session(access()).await.unwrap();
+    assert!(reactivated.reactivated);
+    assert_eq!(
+        ops.session_state(access()).await.unwrap().lifecycle,
+        SessionLifecycleState::Active
+    );
+    assert!(
+        store
+            .session_read_model(&root_id)
+            .await
+            .unwrap()
+            .agent_sessions
+            .iter()
+            .any(|link| link.child_session_id == child_id),
+        "reactivation must restore the parent projection link"
+    );
+
+    let repeated = ops.reactivate_session(access()).await.unwrap();
+    assert!(!repeated.reactivated, "repeat activation should be a no-op");
+    assert_eq!(
+        store
+            .session_read_model(&root_id)
+            .await
+            .unwrap()
+            .agent_sessions
+            .iter()
+            .filter(|link| link.child_session_id == child_id)
+            .count(),
+        1,
+        "idempotent activation must not duplicate the parent link"
+    );
+
+    ops.recycle_session(access()).await.unwrap();
+    blocking_store.fail_next_sync_for(root_id.clone()).await;
+    let failed = ops.reactivate_session(access()).await.unwrap_err();
+    assert!(
+        failed.to_string().contains("injected durable sync failure"),
+        "reactivation must report the parent relation sync failure: {failed}"
+    );
+    assert_eq!(
+        ops.session_state(access()).await.unwrap().lifecycle,
+        SessionLifecycleState::Recycled,
+        "a failed relation sync must return the child to recycled storage"
+    );
+    assert!(
+        store
+            .session_read_model(&root_id)
+            .await
+            .unwrap()
+            .agent_sessions
+            .is_empty(),
+        "reactivation rollback must remove the partially restored parent link"
+    );
 }
 
 #[tokio::test]

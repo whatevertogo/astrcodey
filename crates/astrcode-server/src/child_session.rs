@@ -613,6 +613,67 @@ impl ChildSessionCoordinator {
         Ok((turn_id, target_sid.clone()))
     }
 
+    pub(crate) async fn reattach_recycled_child(
+        &self,
+        parent_sid: &SessionId,
+        child_sid: &SessionId,
+    ) -> Result<(), SessionApiError> {
+        let events = self
+            .session_manager
+            .replay_events(parent_sid)
+            .await
+            .map_err(SessionApiError::internal)?;
+        let registration = events.iter().rev().find_map(|event| {
+            let DurableEventPayload::AgentSessionSpawned {
+                child_session_id,
+                agent_name,
+                task,
+                tool_selection,
+                tool_call_id,
+            } = &event.payload
+            else {
+                return None;
+            };
+            (child_session_id == child_sid).then(|| DurableEventPayload::AgentSessionSpawned {
+                child_session_id: child_session_id.clone(),
+                agent_name: agent_name.clone(),
+                task: task.clone(),
+                tool_selection: tool_selection.clone(),
+                tool_call_id: tool_call_id.clone(),
+            })
+        });
+        let registration = registration.ok_or_else(|| {
+            SessionApiError::internal_msg(format!(
+                "parent session {parent_sid} has no durable registration for child {child_sid}"
+            ))
+        })?;
+
+        let parent = self
+            .session_manager
+            .open(parent_sid.clone())
+            .await
+            .map_err(SessionApiError::internal)?;
+        if parent
+            .read_model()
+            .await
+            .map_err(SessionApiError::internal)?
+            .agent_sessions
+            .iter()
+            .any(|link| link.child_session_id == *child_sid)
+        {
+            return Ok(());
+        }
+
+        parent
+            .emit_durable(None, registration)
+            .await
+            .map_err(SessionApiError::internal)?;
+        self.session_manager
+            .sync_durable_events_required(parent_sid)
+            .await
+            .map_err(SessionApiError::internal)
+    }
+
     async fn record_completed(
         &self,
         parent_sid: &SessionId,

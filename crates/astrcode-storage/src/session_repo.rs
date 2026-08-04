@@ -523,6 +523,21 @@ impl SessionReader for FileSystemSessionRepository {
         Ok(meta.projection.snapshot().await)
     }
 
+    async fn recycled_session_read_model(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<SessionReadModel>, StorageError> {
+        validate_storage_session_id(session_id)?;
+        let recycled_dir = self
+            .find_recycled_session_dir(session_id)
+            .await
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        let events =
+            EventLog::replay_read_only(Self::event_log_path(&recycled_dir, session_id)).await?;
+        let model = replay(session_id.clone(), &events).map_err(corrupt_projection)?;
+        Ok(Arc::new(model))
+    }
+
     async fn session_has_messages(&self, session_id: &SessionId) -> Result<bool, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
         let has_messages = meta.projection.snapshot().await.has_messages();
@@ -827,21 +842,6 @@ impl SessionStore for FileSystemSessionRepository {
         tokio::fs::rename(&recycled_path, &dest).await?;
 
         Ok(())
-    }
-
-    async fn recycled_session_read_model(
-        &self,
-        session_id: &SessionId,
-    ) -> Result<Arc<SessionReadModel>, StorageError> {
-        validate_storage_session_id(session_id)?;
-        let recycled_dir = self
-            .find_recycled_session_dir(session_id)
-            .await
-            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
-        let events =
-            EventLog::replay_read_only(Self::event_log_path(&recycled_dir, session_id)).await?;
-        let model = replay(session_id.clone(), &events).map_err(corrupt_projection)?;
-        Ok(Arc::new(model))
     }
 
     async fn write_compact_snapshot(

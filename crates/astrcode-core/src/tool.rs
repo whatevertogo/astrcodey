@@ -480,6 +480,16 @@ pub trait SessionOperations: Send + Sync {
         access: SessionAccess<'_>,
     ) -> Result<SessionStatus, SessionApiError>;
 
+    /// 查询活跃或已回收 session 的生命周期与执行快照。
+    async fn session_state(
+        &self,
+        _access: SessionAccess<'_>,
+    ) -> Result<SessionState, SessionApiError> {
+        Err(SessionApiError::Unsupported(
+            "session state is not supported by this host".into(),
+        ))
+    }
+
     /// 回收目标 session 到 .recycled/ 目录（默认的清理方式）。
     ///
     /// 数据保留用于调试/审计，可通过 `restore_session` 恢复。
@@ -490,6 +500,19 @@ pub trait SessionOperations: Send + Sync {
 
     /// 从 .recycled/ 恢复一个已回收的 session。
     async fn restore_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError>;
+
+    /// 完整激活一个已回收的直属子 session。
+    ///
+    /// 与仅恢复存储位置的 [`Self::restore_session`] 不同，该操作还必须恢复运行时并
+    /// 重新建立父 session 的活跃子会话关系。
+    async fn reactivate_session(
+        &self,
+        _access: SessionAccess<'_>,
+    ) -> Result<SessionReactivation, SessionApiError> {
+        Err(SessionApiError::Unsupported(
+            "session reactivation is not supported by this host".into(),
+        ))
+    }
 
     /// 解析目标 session 上挂起的工具审批。
     async fn resolve_tool_approval(
@@ -673,6 +696,29 @@ pub struct SessionStatus {
     pub has_active_turn: bool,
     pub last_finish_reason: Option<String>,
     pub message_count: usize,
+}
+
+/// Session 数据当前所处的生命周期位置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionLifecycleState {
+    Active,
+    Recycled,
+}
+
+/// 活跃或已回收 session 的只读状态。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionState {
+    pub lifecycle: SessionLifecycleState,
+    pub phase: crate::event::Phase,
+    pub active_turn_id: Option<String>,
+    pub queued_inputs: usize,
+    pub message_count: usize,
+}
+
+/// Session 激活结果；重复激活是成功的幂等 no-op。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionReactivation {
+    pub reactivated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -10,7 +10,8 @@ pub use crate::{
     extension::SessionToolSelection,
     tool::{
         CreateSessionRequest, SessionAccess, SessionAccessPair, SessionApiError, SessionHandle,
-        SessionOperations, SessionStatus, SubmitTurnRequest, SubmitTurnResult,
+        SessionLifecycleState, SessionOperations, SessionReactivation, SessionState, SessionStatus,
+        SubmitTurnRequest, SubmitTurnResult,
     },
 };
 
@@ -179,6 +180,116 @@ impl From<SessionHandle> for HostCreateSessionOutput {
     }
 }
 
+/// 插件 session control 操作的目标。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSessionTargetRequest {
+    pub target_session_id: String,
+}
+
+impl HostSessionTargetRequest {
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "target_session_id": { "type": "string" }
+            },
+            "required": ["target_session_id"],
+            "additionalProperties": false
+        })
+    }
+}
+
+/// Session 生命周期的稳定线缆表示。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionLifecycleStateDto {
+    Active,
+    Recycled,
+}
+
+impl From<SessionLifecycleState> for SessionLifecycleStateDto {
+    fn from(state: SessionLifecycleState) -> Self {
+        match state {
+            SessionLifecycleState::Active => Self::Active,
+            SessionLifecycleState::Recycled => Self::Recycled,
+        }
+    }
+}
+
+/// `astrcode.session.control.state` 的线缆响应。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSessionStateOutput {
+    pub lifecycle: SessionLifecycleStateDto,
+    pub phase: String,
+    pub active_turn_id: Option<String>,
+    pub queued_inputs: usize,
+    pub message_count: usize,
+}
+
+impl HostSessionStateOutput {
+    pub fn from_state(state: SessionState, phase: String) -> Self {
+        Self {
+            lifecycle: state.lifecycle.into(),
+            phase,
+            active_turn_id: state.active_turn_id,
+            queued_inputs: state.queued_inputs,
+            message_count: state.message_count,
+        }
+    }
+
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "lifecycle": { "type": "string", "enum": ["active", "recycled"] },
+                "phase": { "type": "string" },
+                "active_turn_id": { "type": ["string", "null"] },
+                "queued_inputs": { "type": "integer", "minimum": 0 },
+                "message_count": { "type": "integer", "minimum": 0 }
+            },
+            "required": [
+                "lifecycle",
+                "phase",
+                "active_turn_id",
+                "queued_inputs",
+                "message_count"
+            ],
+            "additionalProperties": false
+        })
+    }
+}
+
+/// `astrcode.session.control.reactivate` 的线缆响应。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSessionReactivateOutput {
+    pub session_id: String,
+    pub reactivated: bool,
+}
+
+impl HostSessionReactivateOutput {
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string" },
+                "reactivated": { "type": "boolean" }
+            },
+            "required": ["session_id", "reactivated"],
+            "additionalProperties": false
+        })
+    }
+
+    pub fn from_result(session_id: String, result: SessionReactivation) -> Self {
+        Self {
+            session_id,
+            reactivated: result.reactivated,
+        }
+    }
+}
+
 /// `astrcode.session.control.submit_turn` 的线缆请求。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -330,6 +441,29 @@ mod tests {
                 session_id: "child-1".into(),
             },
             &HostCreateSessionOutput::wire_schema(),
+        );
+        assert_schema_fields(
+            &HostSessionTargetRequest {
+                target_session_id: "child-1".into(),
+            },
+            &HostSessionTargetRequest::wire_schema(),
+        );
+        assert_schema_fields(
+            &HostSessionStateOutput {
+                lifecycle: SessionLifecycleStateDto::Recycled,
+                phase: "idle".into(),
+                active_turn_id: None,
+                queued_inputs: 0,
+                message_count: 2,
+            },
+            &HostSessionStateOutput::wire_schema(),
+        );
+        assert_schema_fields(
+            &HostSessionReactivateOutput {
+                session_id: "child-1".into(),
+                reactivated: true,
+            },
+            &HostSessionReactivateOutput::wire_schema(),
         );
 
         let submit = HostSubmitTurnRequest {

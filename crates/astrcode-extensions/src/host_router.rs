@@ -463,7 +463,8 @@ mod tests {
         permission::ApprovalDecision,
         tool::{
             CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
-            SessionDeliveryOutcome, SessionHandle, SessionStatus, SessionToolSelection,
+            SessionDeliveryOutcome, SessionHandle, SessionLifecycleState, SessionOperations,
+            SessionReactivation, SessionState, SessionStatus, SessionToolSelection,
             SubmitTurnRequest, SubmitTurnResult,
         },
     };
@@ -492,6 +493,8 @@ mod tests {
         let names: Vec<_> = caps.iter().map(|c| c.name.as_str()).collect();
         assert!(names.contains(&"astrcode.session.control.create"));
         assert!(names.contains(&"astrcode.session.control.configure_tools"));
+        assert!(names.contains(&"astrcode.session.control.state"));
+        assert!(names.contains(&"astrcode.session.control.reactivate"));
     }
 
     #[test]
@@ -506,6 +509,21 @@ mod tests {
         assert!(names.contains(&"astrcode.session.inspect.snapshot"));
         assert!(names.contains(&"astrcode.session.inspect.read_model"));
         assert!(names.contains(&"astrcode.session.inspect.provider_messages"));
+    }
+
+    #[test]
+    fn catalog_includes_session_history_snapshot() {
+        let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionHistory]);
+        let snapshot = caps
+            .iter()
+            .find(|descriptor| descriptor.name == "astrcode.session.history.snapshot")
+            .expect("history snapshot capability");
+
+        assert_eq!(
+            snapshot.input_schema["required"],
+            json!(["target_session_id"])
+        );
+        assert_eq!(snapshot.input_schema["additionalProperties"], false);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -539,7 +557,11 @@ mod tests {
             ..Default::default()
         });
         let ctx = InvokeContext {
-            declared_capabilities: vec![ExtensionCapability::SessionInspect],
+            session_id: Some("inspect-session".into()),
+            declared_capabilities: vec![
+                ExtensionCapability::SessionHistory,
+                ExtensionCapability::SessionInspect,
+            ],
             ..Default::default()
         };
 
@@ -557,6 +579,16 @@ mod tests {
             .expect("read session model");
         assert_eq!(model["readModel"]["modelId"], "test-model");
         assert_eq!(model["readModel"]["phase"], "idle");
+
+        let history = router
+            .invoke_sync(
+                "astrcode.session.history.snapshot",
+                &json!({ "target_session_id": "inspect-session" }).to_string(),
+                &ctx,
+            )
+            .expect("read scoped history snapshot");
+        assert_eq!(history["lifecycle"], "active");
+        assert_eq!(history["readModel"]["modelId"], "test-model");
     }
 
     #[test]
@@ -903,6 +935,41 @@ mod tests {
     }
 
     #[test]
+    fn invoke_session_lifecycle_apis_forward_scoped_target() {
+        let router = HostRouter::from_backends(HostBackends::default());
+        let ops = Arc::new(CapturingSessionOps::default());
+        let ctx = InvokeContext {
+            session_id: Some("parent".into()),
+            session_ops: Some(ops.clone()),
+            declared_capabilities: vec![ExtensionCapability::SessionControl],
+            ..Default::default()
+        };
+        let input = json!({ "target_session_id": "child" }).to_string();
+
+        let state = router
+            .invoke_sync("astrcode.session.control.state", &input, &ctx)
+            .expect("read lifecycle state");
+        assert_eq!(state["lifecycle"], "recycled");
+        assert_eq!(state["message_count"], 2);
+
+        let reactivation = router
+            .invoke_sync("astrcode.session.control.reactivate", &input, &ctx)
+            .expect("reactivate session");
+        assert_eq!(reactivation["session_id"], "child");
+        assert_eq!(reactivation["reactivated"], true);
+        assert_eq!(
+            ops.lifecycle_calls
+                .lock()
+                .expect("lifecycle calls")
+                .as_slice(),
+            &[
+                ("state".into(), "parent".into(), "child".into()),
+                ("reactivate".into(), "parent".into(), "child".into())
+            ]
+        );
+    }
+
+    #[test]
     fn invoke_stream_sync_rejects_precancelled_token() {
         let router = HostRouter::from_backends(HostBackends::default());
         let token = CancellationToken::new();
@@ -953,6 +1020,7 @@ mod tests {
     struct CapturingSessionOps {
         creates: Mutex<Vec<CreateSessionRequest>>,
         tool_configurations: Mutex<Vec<(String, String, SessionToolSelection)>>,
+        lifecycle_calls: Mutex<Vec<(String, String, String)>>,
     }
 
     #[async_trait::async_trait]
@@ -1026,6 +1094,24 @@ mod tests {
             })
         }
 
+        async fn session_state(
+            &self,
+            access: SessionAccess<'_>,
+        ) -> Result<SessionState, SessionApiError> {
+            self.lifecycle_calls.lock().expect("lifecycle calls").push((
+                "state".into(),
+                access.caller_session_id.into(),
+                access.target_session_id.into(),
+            ));
+            Ok(SessionState {
+                lifecycle: SessionLifecycleState::Recycled,
+                phase: astrcode_core::event::Phase::Idle,
+                active_turn_id: None,
+                queued_inputs: 0,
+                message_count: 2,
+            })
+        }
+
         async fn recycle_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
             Ok(())
         }
@@ -1036,6 +1122,18 @@ mod tests {
 
         async fn restore_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
             Ok(())
+        }
+
+        async fn reactivate_session(
+            &self,
+            access: SessionAccess<'_>,
+        ) -> Result<SessionReactivation, SessionApiError> {
+            self.lifecycle_calls.lock().expect("lifecycle calls").push((
+                "reactivate".into(),
+                access.caller_session_id.into(),
+                access.target_session_id.into(),
+            ));
+            Ok(SessionReactivation { reactivated: true })
         }
 
         async fn resolve_tool_approval(

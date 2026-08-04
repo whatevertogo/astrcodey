@@ -1,7 +1,7 @@
 use std::{collections::HashMap, future::Future, panic::AssertUnwindSafe, sync::Arc};
 
 use astrcode_core::{
-    event::{DurableEventPayload, Event, PersistedSystemPrompt},
+    event::{DurableEventPayload, Event, PersistedSystemPrompt, StoredEvent},
     llm::LlmMessage,
     tool::SessionToolSelection,
     types::{Cursor, SessionId, TurnId},
@@ -328,6 +328,16 @@ impl SessionManager {
     ) -> Result<Arc<SessionReadModel>, SessionManagerError> {
         self.event_store
             .recycled_session_read_model(session_id)
+            .await
+            .map_err(SessionManagerError::from)
+    }
+
+    pub(crate) async fn replay_events(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Vec<StoredEvent>, SessionManagerError> {
+        self.event_store
+            .replay_events(session_id)
             .await
             .map_err(SessionManagerError::from)
     }

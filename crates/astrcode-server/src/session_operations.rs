@@ -5,8 +5,9 @@ use std::sync::Arc;
 use astrcode_core::{
     tool::{
         CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
-        SessionDeliveryOutcome, SessionExecutionView, SessionHandle, SessionOperations,
-        SessionStatus, SessionToolSelection, SubmitTurnRequest, SubmitTurnResult,
+        SessionDeliveryOutcome, SessionExecutionView, SessionHandle, SessionLifecycleState,
+        SessionOperations, SessionReactivation, SessionState, SessionStatus, SessionToolSelection,
+        SubmitTurnRequest, SubmitTurnResult,
     },
     types::{SessionId, TurnId},
 };
@@ -87,6 +88,43 @@ impl ServerSessionOperations {
             .map_err(SessionApiError::internal)?;
         Ok(SubmitTurnResult::Completed { content })
     }
+
+    async fn rollback_reactivation(
+        session_manager: &SessionManager,
+        child_sessions: &ChildSessionCoordinator,
+        parent_sid: &SessionId,
+        target_sid: &SessionId,
+        activation_error: SessionApiError,
+    ) -> SessionApiError {
+        let rollback_error = match session_manager.recycle_session(target_sid).await {
+            Ok(()) => child_sessions
+                .record_child_recycled(parent_sid, target_sid)
+                .await
+                .err()
+                .map(|error| error.to_string()),
+            Err(error) => Some(error.to_string()),
+        };
+        match rollback_error {
+            None => activation_error,
+            Some(rollback_error) => SessionApiError::internal(ReactivationRollbackError {
+                session_id: target_sid.clone(),
+                activation_error,
+                rollback_error,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "session {session_id} reactivation failed ({activation_error}) and rollback also failed \
+     ({rollback_error})"
+)]
+struct ReactivationRollbackError {
+    session_id: SessionId,
+    #[source]
+    activation_error: SessionApiError,
+    rollback_error: String,
 }
 
 #[async_trait::async_trait]
@@ -261,6 +299,53 @@ impl SessionOperations for ServerSessionOperations {
         })
     }
 
+    async fn session_state(
+        &self,
+        access: SessionAccess<'_>,
+    ) -> Result<SessionState, SessionApiError> {
+        let caller_sid = SessionId::from(access.caller_session_id);
+        let target_sid = SessionId::from(access.target_session_id);
+        match self.session_manager.read_model(&target_sid).await {
+            Ok(_) => {
+                self.child_sessions
+                    .verify_access(&caller_sid, &target_sid)
+                    .await?;
+                let view = self
+                    .scheduler
+                    .execution_view(&target_sid)
+                    .await
+                    .map_err(SessionApiError::internal)?;
+                Ok(SessionState {
+                    lifecycle: SessionLifecycleState::Active,
+                    phase: view.phase,
+                    active_turn_id: view.active_turn_id.map(TurnId::into_string),
+                    queued_inputs: view.queued_inputs,
+                    message_count: view.message_count,
+                })
+            },
+            Err(crate::session_manager::SessionManagerError::Storage(
+                astrcode_storage::StorageError::NotFound(_),
+            )) => {
+                self.child_sessions
+                    .verify_restore_access(&caller_sid, &target_sid)
+                    .await?;
+                let model = self
+                    .session_manager
+                    .read_recycled_model(&target_sid)
+                    .await
+                    .map_err(map_restore_error)?;
+                Ok(SessionState {
+                    lifecycle: SessionLifecycleState::Recycled,
+                    phase: model.execution.phase,
+                    active_turn_id: None,
+                    queued_inputs: model.execution.pending_inputs.len(),
+                    message_count: model.transcript.messages.len(),
+                })
+            },
+            Err(error) => Err(SessionApiError::internal(error)),
+        }
+    }
+
     async fn recycle_session(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
         let (_, target_sid) = self.verified_session_ids(access).await?;
 
@@ -308,6 +393,133 @@ impl SessionOperations for ServerSessionOperations {
                     .restore_session_in_transition(&transition)
                     .await
                     .map_err(map_restore_error)
+            }
+            .await;
+            let _ = result_tx.send(result);
+        });
+
+        result_rx.await.map_err(SessionApiError::internal)?
+    }
+
+    async fn reactivate_session(
+        &self,
+        access: SessionAccess<'_>,
+    ) -> Result<SessionReactivation, SessionApiError> {
+        let caller_sid = SessionId::from(access.caller_session_id);
+        let target_sid = SessionId::from(access.target_session_id);
+        if caller_sid == target_sid {
+            return Err(SessionApiError::PermissionDenied(
+                "session reactivation requires an active direct parent".into(),
+            ));
+        }
+
+        let admission = self
+            .scheduler
+            .admit_owned()
+            .map_err(SessionApiError::internal)?;
+        let scheduler = Arc::clone(&self.scheduler);
+        let session_manager = Arc::clone(&self.session_manager);
+        let child_sessions = Arc::clone(&self.child_sessions);
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+
+        admission.spawn_named("session_reactivation_owner", async move {
+            let result = async {
+                let _parent_operation = scheduler
+                    .begin_session_operation(&caller_sid)
+                    .await
+                    .map_err(SessionApiError::internal)?;
+                session_manager
+                    .read_model(&caller_sid)
+                    .await
+                    .map_err(|error| match error {
+                        crate::session_manager::SessionManagerError::Storage(
+                            astrcode_storage::StorageError::NotFound(_),
+                        ) => SessionApiError::NotFound(format!("parent session {caller_sid}")),
+                        error => SessionApiError::internal(error),
+                    })?;
+                let _target_operation = scheduler
+                    .begin_session_operation(&target_sid)
+                    .await
+                    .map_err(SessionApiError::internal)?;
+
+                let (target_model, was_recycled) =
+                    match session_manager.read_model(&target_sid).await {
+                        Ok(model) => {
+                            child_sessions
+                                .verify_access(&caller_sid, &target_sid)
+                                .await?;
+                            (model, false)
+                        },
+                        Err(crate::session_manager::SessionManagerError::Storage(
+                            astrcode_storage::StorageError::NotFound(_),
+                        )) => {
+                            child_sessions
+                                .verify_restore_access(&caller_sid, &target_sid)
+                                .await?;
+                            let model = session_manager
+                                .read_recycled_model(&target_sid)
+                                .await
+                                .map_err(map_restore_error)?;
+                            (model, true)
+                        },
+                        Err(error) => return Err(SessionApiError::internal(error)),
+                    };
+                let direct_parent = target_model
+                    .identity
+                    .parent
+                    .as_ref()
+                    .map(|parent| &parent.session_id);
+                if direct_parent != Some(&caller_sid) {
+                    return Err(SessionApiError::PermissionDenied(format!(
+                        "session {target_sid} is not a direct child of {caller_sid}"
+                    )));
+                }
+
+                if was_recycled {
+                    let transition = session_manager.begin_session_transition(&target_sid).await;
+                    session_manager
+                        .restore_session_in_transition(&transition)
+                        .await
+                        .map_err(map_restore_error)?;
+                    drop(transition);
+                }
+
+                if let Err(error) = session_manager.open(target_sid.clone()).await {
+                    let error = SessionApiError::internal(error);
+                    return Err(if was_recycled {
+                        Self::rollback_reactivation(
+                            &session_manager,
+                            &child_sessions,
+                            &caller_sid,
+                            &target_sid,
+                            error,
+                        )
+                        .await
+                    } else {
+                        error
+                    });
+                }
+                if let Err(error) = child_sessions
+                    .reattach_recycled_child(&caller_sid, &target_sid)
+                    .await
+                {
+                    return Err(if was_recycled {
+                        Self::rollback_reactivation(
+                            &session_manager,
+                            &child_sessions,
+                            &caller_sid,
+                            &target_sid,
+                            error,
+                        )
+                        .await
+                    } else {
+                        error
+                    });
+                }
+
+                Ok(SessionReactivation {
+                    reactivated: was_recycled,
+                })
             }
             .await;
             let _ = result_tx.send(result);

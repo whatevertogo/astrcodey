@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::session::SessionToolSelectionDto;
+use crate::session::{SessionLifecycleStateDto, SessionToolSelectionDto};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -155,6 +155,14 @@ pub struct SessionInspectReadModel {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionInspectReadModelOutput {
+    pub read_model: SessionInspectReadModel,
+}
+
+/// `astrcode.session.history.snapshot` 的作用域受限只读响应。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionHistorySnapshotOutput {
+    pub lifecycle: SessionLifecycleStateDto,
     pub read_model: SessionInspectReadModel,
 }
 

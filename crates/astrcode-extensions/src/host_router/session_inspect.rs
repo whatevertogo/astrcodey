@@ -143,7 +143,7 @@ fn list_item(summary: SessionSummary) -> SessionInspectListItem {
     }
 }
 
-fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel {
+pub(super) fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel {
     let mut pending_tool_call_ids = model
         .execution
         .pending_tool_calls
@@ -294,7 +294,7 @@ fn compact_strategy(strategy: CompactStrategy) -> (&'static str, Option<usize>) 
     }
 }
 
-fn phase_name(phase: Phase) -> &'static str {
+pub(super) fn phase_name(phase: Phase) -> &'static str {
     match phase {
         Phase::Idle => "idle",
         Phase::Thinking => "thinking",
