@@ -1,10 +1,12 @@
-import { memo, useState } from 'react'
+import { memo, useCallback, useState } from 'react'
 import {
   useElapsedSeconds,
   runningElapsedLabel,
 } from '../../hooks/useElapsedSeconds'
+import { ghostIconButton } from '../../lib/styles'
 import { cn } from '../../lib/utils'
 import { toolCallHasError, toolCallIsTerminal } from '../../services/types'
+import { useAppStore } from '../../store/conversation'
 import { Icon, type IconName } from '../ui/Icon'
 import { AssistantMessageContent } from './AssistantMessage'
 import { MarkdownContent, StreamingMarkdown } from './MarkdownContent'
@@ -12,6 +14,7 @@ import ToolCallBlock from './ToolCallBlock'
 import { AskUserCard } from './tools/AskUserCard'
 import { toolArgs } from './tools/helpers'
 import {
+  assistantRunCopyText,
   buildAssistantRunModel,
   type AssistantLikeBlock,
   type AssistantRunSegment,
@@ -24,6 +27,60 @@ import { isPendingAskUser } from './tools/askUser'
 interface AssistantRunMessageProps {
   blocks: AssistantLikeBlock[]
   sessionId: string | null
+}
+
+function AssistantRunActions({
+  copyText,
+  sessionId,
+  storageSeq,
+}: {
+  copyText: string
+  sessionId: string | null
+  storageSeq?: number
+}) {
+  const forkSession = useAppStore((state) => state.forkSession)
+  const [copied, setCopied] = useState(false)
+  const handleCopy = useCallback(() => {
+    void navigator.clipboard
+      .writeText(copyText)
+      .then(() => {
+        setCopied(true)
+        window.setTimeout(() => setCopied(false), 2000)
+      })
+      .catch(() => undefined)
+  }, [copyText])
+
+  return (
+    <div
+      className="flex min-h-8 items-center gap-0.5 pt-0.5 text-text-muted opacity-0 transition-opacity duration-150 hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none"
+      role="group"
+      aria-label="Turn 操作"
+    >
+      <button
+        type="button"
+        className={cn(ghostIconButton, 'h-7 w-7 rounded-md')}
+        onClick={handleCopy}
+        title={copied ? '已复制' : '复制此 Turn'}
+        aria-label={copied ? '已复制' : '复制此 Turn'}
+      >
+        <Icon name="copy" size={15} />
+      </button>
+      {sessionId && storageSeq != null ? (
+        <button
+          type="button"
+          className={cn(ghostIconButton, 'h-7 w-7 rounded-md')}
+          onClick={() => void forkSession(sessionId, storageSeq)}
+          title="从此 Turn 分叉"
+          aria-label="从此 Turn 分叉"
+        >
+          <Icon name="branch" size={15} />
+        </button>
+      ) : null}
+      <span className="sr-only" aria-live="polite">
+        {copied ? '已复制' : ''}
+      </span>
+    </div>
+  )
 }
 
 function toolNeedsAttention(block: ToolActivity['block']) {
@@ -237,6 +294,12 @@ function PendingAskUserPrompts({
 
 function AssistantRunMessage({ blocks, sessionId }: AssistantRunMessageProps) {
   const runModel = buildAssistantRunModel(blocks)
+  const completedReply =
+    runModel.finalReplyBlock === blocks[blocks.length - 1] &&
+    runModel.finalReplyBlock.status === 'complete'
+      ? runModel.finalReplyBlock
+      : null
+  const copyText = completedReply ? assistantRunCopyText(blocks) : ''
 
   return (
     <div className="flex items-start animate-message-enter motion-reduce:animate-none">
@@ -282,6 +345,13 @@ function AssistantRunMessage({ blocks, sessionId }: AssistantRunMessageProps) {
             )
           })}
         </div>
+        {completedReply && copyText ? (
+          <AssistantRunActions
+            copyText={copyText}
+            sessionId={sessionId}
+            storageSeq={completedReply.storageSeq}
+          />
+        ) : null}
       </div>
     </div>
   )

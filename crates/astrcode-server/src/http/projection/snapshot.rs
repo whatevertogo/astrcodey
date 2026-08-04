@@ -28,12 +28,14 @@ pub(in crate::http) fn conversation_to_dto(
 
     // 与 provider_messages 一致：最新 compact 摘要紧挨保留消息之前（被压掉的历史不在 UI 展示）
     let mut blocks: Vec<ConversationBlockDto> = Vec::new();
-    if let Some(compaction) = latest_compaction(&session.compactions) {
+    let latest_compaction = latest_compaction(&session.compactions);
+    if let Some(compaction) = latest_compaction {
         blocks.push(compact_summary_block(compaction));
     }
     blocks.extend(transcript_blocks(
         &session.transcript.messages,
         &session.transcript.artifacts,
+        latest_compaction.map(|compaction| compaction.source_seq),
     ));
     apply_pending_tool_approvals(&mut blocks, &session.execution.pending_tool_approvals);
 
@@ -163,15 +165,15 @@ mod tests {
     }
 
     #[test]
-    fn conversation_snapshot_cursor_is_full_snapshot_version() {
+    fn conversation_snapshot_exposes_full_cursor_and_message_fork_point() {
         let mut session = session_read_model("session-1");
         session.stats.last_seq = 9;
         session
             .transcript
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
-                message: LlmMessage::user("hello"),
-                updated_seq: 1,
+                message: LlmMessage::assistant("hello"),
+                updated_seq: 4,
                 source: None,
             });
 
@@ -179,6 +181,13 @@ mod tests {
 
         assert_eq!(dto.cursor.value, "9");
         assert_eq!(dto.blocks.len(), 1);
+        assert!(matches!(
+            &dto.blocks[0],
+            ConversationBlockDto::Assistant {
+                storage_seq: Some(4),
+                ..
+            }
+        ));
     }
 
     #[test]

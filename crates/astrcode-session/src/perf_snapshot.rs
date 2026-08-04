@@ -100,6 +100,8 @@ fn live_payload_type(payload: &LiveEventPayload) -> &'static str {
     match payload {
         LiveEventPayload::AgentRunStarted => "agent_run_started",
         LiveEventPayload::AgentRunCompleted { .. } => "agent_run_completed",
+        LiveEventPayload::LlmRetrying { .. } => "llm_retrying",
+        LiveEventPayload::LlmRetryRecovered => "llm_retry_recovered",
         LiveEventPayload::AssistantMessageStarted { .. } => "assistant_message_started",
         LiveEventPayload::AssistantTextDelta { .. } => "assistant_text_delta",
         LiveEventPayload::ThinkingDelta { .. } => "thinking_delta",
@@ -219,6 +221,12 @@ fn live_payload_details(payload: &LiveEventPayload) -> String {
         LiveEventPayload::ToolCallStarted { call_id, tool_name } => {
             format!("tool={tool_name} call={call_id}")
         },
+        LiveEventPayload::LlmRetrying {
+            status,
+            attempt,
+            max_retries,
+            delay_ms,
+        } => format!("status={status} attempt={attempt}/{max_retries} delay_ms={delay_ms}"),
         LiveEventPayload::ToolOutputDelta {
             call_id,
             stream,

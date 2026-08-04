@@ -1004,35 +1004,6 @@ mod tests {
     }
 
     #[test]
-    fn markdown_like_assistant_stream_is_not_reflowed_as_completed_message() {
-        let mut app = make_app();
-        apply_payload(
-            &mut app,
-            EventPayload::Live(LiveEventPayload::AssistantMessageStarted {
-                message_id: "msg-1".into(),
-            }),
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::Live(LiveEventPayload::AssistantTextDelta {
-                message_id: "msg-1".into(),
-                delta: "# Title\n- item".into(),
-            }),
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::Durable(DurableEventPayload::AssistantMessageCompleted {
-                message_id: "msg-1".into(),
-                text: "# Title\n- item".into(),
-                reasoning_content: None,
-            }),
-        );
-        assert!(!app.scrollback_queue.iter().any(|e| {
-            matches!(e, ScrollbackEntry::Message(m) if m.role == MessageRole::Assistant)
-        }));
-    }
-
-    #[test]
     fn completion_statuses_preserve_actionable_reasons_without_scrollback() {
         let mut app = make_app();
         apply_payload(

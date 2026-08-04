@@ -38,7 +38,7 @@ pub(crate) async fn stream_request(
         body,
         retry,
     }
-    .run(&stream_started, |response| {
+    .run(&stream_started, &tx, |response| {
         parse_stream(response, &tx, &stream_started)
     })
     .await

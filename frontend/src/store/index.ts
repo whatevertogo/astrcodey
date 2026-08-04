@@ -185,9 +185,9 @@ export const useAppStore = create<AppState>((set, get) => ({
     ])
   },
 
-  forkSession: async (sourceSessionId: string) => {
+  forkSession: async (sourceSessionId: string, storageSeq?: number) => {
     try {
-      const response = await api.forkSession(sourceSessionId)
+      const response = await api.forkSession(sourceSessionId, storageSeq)
       await get().refreshSessions()
       await get().switchSession(response.sessionId)
     } catch (err) {

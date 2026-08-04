@@ -1,20 +1,36 @@
 import { useAppStore } from '../../store/conversation'
 import { pendingAskUserKey } from '../../store/delta/applyDelta'
 import { Icon } from '../ui'
+import { AskUserCard } from './tools/AskUserCard'
+import {
+  pendingAskUserHasVisibleBlock,
+  recoveredAskUserBlock,
+} from './tools/askUser'
 
-// 跨会话提示条：当前激活会话之外的待回答问题。
-// ask-user 的 pending/resolved 经全局通知通道广播，这里把"其他会话在等你"
-// 渲染成可点击的横幅，点击切换到对应会话直接回答。
+// 当前会话在重连时可能丢失 live tool block，此处用 pending 快照恢复问卷；
+// 其他会话的待回答问题仍渲染成可点击横幅。
 export function PendingAskUserBanner() {
   const pendingAskUserQuestions = useAppStore((s) => s.pendingAskUserQuestions)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
+  const blocks = useAppStore((s) => s.blocks)
   const sessions = useAppStore((s) => s.sessions)
   const switchSession = useAppStore((s) => s.switchSession)
 
-  const otherSessionQuestions = Object.values(pendingAskUserQuestions).filter(
+  const questions = Object.values(pendingAskUserQuestions)
+  const recoveredCurrentSessionQuestions = questions.filter(
+    (question) =>
+      question.sessionId === activeSessionId &&
+      !pendingAskUserHasVisibleBlock(blocks, question)
+  )
+  const otherSessionQuestions = questions.filter(
     (question) => question.sessionId !== activeSessionId
   )
-  if (otherSessionQuestions.length === 0) return null
+  if (
+    recoveredCurrentSessionQuestions.length === 0 &&
+    otherSessionQuestions.length === 0
+  ) {
+    return null
+  }
 
   const titleFor = (sessionId: string) =>
     sessions.find((session) => session.sessionId === sessionId)?.title ??
@@ -22,6 +38,21 @@ export function PendingAskUserBanner() {
 
   return (
     <div className="flex flex-col gap-1.5 border-b border-border bg-surface-soft/60 px-4 py-2">
+      {recoveredCurrentSessionQuestions.map((question) => {
+        const block = recoveredAskUserBlock(question)
+        return (
+          <div
+            key={pendingAskUserKey(question.sessionId, question.callId)}
+            className="rounded-lg border border-accent/30 bg-accent/5 p-3"
+          >
+            <AskUserCard
+              block={block}
+              sessionId={question.sessionId}
+              args={block.argumentsJson ?? {}}
+            />
+          </div>
+        )
+      })}
       {otherSessionQuestions.map((question) => (
         <button
           key={pendingAskUserKey(question.sessionId, question.callId)}

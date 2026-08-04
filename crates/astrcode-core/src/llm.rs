@@ -499,6 +499,15 @@ impl LlmRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LlmEvent {
+    /// 远端返回瞬态 HTTP 错误，当前请求将在退避后重试。
+    Retrying {
+        status: u16,
+        attempt: u32,
+        max_retries: u32,
+        delay_ms: u64,
+    },
+    /// 重试后已重新取得成功的 HTTP 响应。
+    RetryRecovered,
     /// 文本增量（部分响应）。
     ContentDelta { delta: String },
     /// 推理模型思维链增量。

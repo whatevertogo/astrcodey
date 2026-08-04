@@ -10,5 +10,5 @@ astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 async-trait = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
+noyalib = { workspace = true }
 tracing = { workspace = true }

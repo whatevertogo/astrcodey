@@ -44,9 +44,9 @@ pub(crate) const DEFAULT_LLM_CONNECT_TIMEOUT_SECS: u64 = 10;
 /// LLM 读取超时时间（秒）。
 pub(crate) const DEFAULT_LLM_READ_TIMEOUT_SECS: u64 = 90;
 /// LLM 最大重试次数。
-pub(crate) const DEFAULT_LLM_MAX_RETRIES: u32 = 2;
+pub(crate) const DEFAULT_LLM_MAX_RETRIES: u32 = 5;
 /// LLM 重试的指数退避基础延迟（毫秒）。
-pub(crate) const DEFAULT_LLM_RETRY_BASE_DELAY_MS: u64 = 250;
+pub(crate) const DEFAULT_LLM_RETRY_BASE_DELAY_MS: u64 = 1_000;
 /// 模型未显式配置 `maxTokens` 时的默认值。
 pub(crate) const DEFAULT_LLM_MAX_TOKENS: u32 = 8192;
 /// 模型未显式配置 `contextLimit` 时的默认值。

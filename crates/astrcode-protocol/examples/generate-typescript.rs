@@ -106,6 +106,7 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         ConversationCursorDto,
         ConversationSnapshotResponseDto,
         ConversationControlStateDto,
+        LlmRetryStatusDto,
         ConversationBlockDto,
         ConversationBlockStatusDto,
         ToolCallStatusDto,

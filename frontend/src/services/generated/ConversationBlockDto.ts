@@ -8,7 +8,11 @@ import type { JsonValue } from "./serde_json/JsonValue";
 /**
  * conversation 块。
  */
-export type ConversationBlockDto = { "kind": "user", id: string, text: string, attachments?: Array<PromptAttachmentDto>, source?: string | null, } | { "kind": "assistant", id: string, text: string, reasoningContent?: string | null, status: ConversationBlockStatusDto, } | { "kind": "toolCall", id: string, name: string,
+export type ConversationBlockDto = { "kind": "user", id: string, text: string, attachments?: Array<PromptAttachmentDto>, source?: string | null, } | { "kind": "assistant", id: string, text: string, reasoningContent?: string | null,
+/**
+ * 该消息持久化后的 durable seq，可作为精确 fork 点。
+ */
+storageSeq?: number | null, status: ConversationBlockStatusDto, } | { "kind": "toolCall", id: string, name: string,
 /**
  * LLM 对本次调用的参数（用于折叠摘要行显示）。
  */

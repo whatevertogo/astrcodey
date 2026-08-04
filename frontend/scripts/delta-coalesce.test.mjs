@@ -153,6 +153,28 @@ assert.equal(
   'duplicate child-agent projections should not notify subscribers'
 )
 
+const retryControlPatch = reduceConversationDeltas(
+  {
+    ...frameState,
+    control: framePatch.control,
+  },
+  [
+    {
+      kind: 'updateControlState',
+      control: {
+        ...framePatch.control,
+        retryStatus: {
+          status: 503,
+          attempt: 1,
+          maxRetries: 5,
+          delayMs: 1000,
+        },
+      },
+    },
+  ]
+)
+assert.equal(retryControlPatch.control?.retryStatus?.maxRetries, 5)
+
 const statusAbaPatch = reduceConversationDeltas(frameState, [
   { kind: 'statusItemUpdate', id: 'branch', text: 'main' },
   { kind: 'statusItemUpdate', id: 'branch', text: 'main' },

@@ -37,8 +37,8 @@ activeModel = "deepseek-v4-flash"
 [runtime]
 llmConnectTimeoutSecs = 10
 llmReadTimeoutSecs = 90
-llmMaxRetries = 2
-llmRetryBaseDelayMs = 250
+llmMaxRetries = 5
+llmRetryBaseDelayMs = 1000
 compactAutoEnabled = true
 compactThresholdPercent = 83.5
 compactKeepRecentTurns = 1
@@ -96,8 +96,8 @@ provider = "duckduckgo"
 |------|------|------|
 | `llmConnectTimeoutSecs` | `10` | LLM 连接超时（秒） |
 | `llmReadTimeoutSecs` | `90` | LLM 读取超时（秒） |
-| `llmMaxRetries` | `2` | 失败重试次数 |
-| `llmRetryBaseDelayMs` | `250` | 指数退避基础延迟（毫秒） |
+| `llmMaxRetries` | `5` | 失败重试次数 |
+| `llmRetryBaseDelayMs` | `1000` | 指数退避基础延迟（毫秒） |
 | `compactAutoEnabled` | `true` | 上下文占用超阈值时自动 compact |
 | `compactThresholdPercent` | `83.5` | 触发自动 compact 的上下文占用百分比 |
 | `compactMaxRetryAttempts` | `3` | compact LLM 调用最大重试 |

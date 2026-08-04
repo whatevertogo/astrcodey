@@ -29,8 +29,8 @@ pub struct RetryPolicy {
 impl Default for RetryPolicy {
     fn default() -> Self {
         Self {
-            max_retries: 2,
-            base_delay_ms: 250,
+            max_retries: 5,
+            base_delay_ms: 1_000,
             max_delay_ms: DEFAULT_MAX_DELAY_MS,
             max_transport_retries: 2,
         }
@@ -91,8 +91,8 @@ mod tests {
     #[test]
     fn default_policy_values() {
         let policy = RetryPolicy::default();
-        assert_eq!(policy.max_retries, 2);
-        assert_eq!(policy.base_delay_ms, 250);
+        assert_eq!(policy.max_retries, 5);
+        assert_eq!(policy.base_delay_ms, 1_000);
         assert_eq!(policy.max_transport_retries, 2);
     }
 
@@ -121,12 +121,12 @@ mod tests {
     #[test]
     fn should_retry_returns_false_after_max_retries_exceeded() {
         let policy = RetryPolicy::default();
-        // max_retries=2, attempt=3 is beyond limit
-        assert!(!policy.should_retry(3, 429));
+        // max_retries=5, attempt=6 is beyond limit
+        assert!(!policy.should_retry(6, 429));
         assert!(!policy.should_retry(99, 500));
         // attempt <= max_retries should still retry
         assert!(policy.should_retry(1, 429));
-        assert!(policy.should_retry(2, 429));
+        assert!(policy.should_retry(5, 429));
     }
 
     #[test]

@@ -146,7 +146,10 @@ async fn test_e2e_list_sessions() {
 
     match stream.recv().await.unwrap() {
         ClientNotification::SessionList { sessions } => {
-            assert!(sessions.is_empty() || !sessions.is_empty());
+            assert!(
+                sessions.iter().all(|s| !s.session_id.is_empty()),
+                "returned sessions must carry a session_id"
+            );
         },
         other => panic!("Expected SessionList, got: {:?}", other),
     }

@@ -24,6 +24,7 @@ import type {
   ExtensionStageDiagnosticsDto,
   ExtensionStateDto,
   KeybindingDto,
+  LlmRetryStatusDto,
   ModelDto,
   ModelTestResponseDto,
   PhaseDto,
@@ -151,6 +152,7 @@ export interface ConversationControlState {
   compactPending: boolean
   compacting: boolean
   activeTurnId?: string
+  retryStatus?: LlmRetryStatusDto
 }
 
 export type ConversationBlock =
@@ -166,6 +168,7 @@ export type ConversationBlock =
       id: string
       text: string
       reasoningContent?: string
+      storageSeq?: number
       status: BlockStatus
     }
   | {

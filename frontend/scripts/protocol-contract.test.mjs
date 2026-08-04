@@ -30,6 +30,7 @@ const finalize = decodeConversationStreamEnvelope(fixture[1])
 assert.equal(finalize.delta.kind, 'finalizeBlock')
 assert.equal(finalize.delta.block.kind, 'assistant')
 assert.equal(finalize.delta.block.text, 'complete answer')
+assert.equal(finalize.delta.block.storageSeq, 3)
 assert.equal(finalize.delta.block.status, 'complete')
 
 const rehydrate = decodeConversationStreamEnvelope(fixture[2])
@@ -280,6 +281,12 @@ const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
     canRequestCompact: false,
     compactPending: false,
     compacting: false,
+    retryStatus: {
+      status: 503,
+      attempt: 2,
+      maxRetries: 5,
+      delayMs: 2000,
+    },
   },
   blocks: [
     { kind: 'user', id: 'u-1', text: 'prior message' },
@@ -293,3 +300,9 @@ const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
   agentSessions: [],
 })
 assert.equal(snapshotWithoutAttachmentFields.blocks.length, 2)
+assert.deepEqual(snapshotWithoutAttachmentFields.control.retryStatus, {
+  status: 503,
+  attempt: 2,
+  maxRetries: 5,
+  delayMs: 2000,
+})

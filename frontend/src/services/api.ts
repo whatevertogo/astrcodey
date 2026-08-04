@@ -9,6 +9,7 @@ import type {
   DeleteProjectResponseDto,
   ExtensionListResponseDto,
   ExtensionReloadResponseDto,
+  ForkSessionRequest,
   ModelListResponseDto,
   SetExtensionEnabledResponseDto,
   ToolApprovalRequest,
@@ -279,15 +280,17 @@ export async function deleteSession(sessionId: string): Promise<void> {
   })
 }
 
-/** 从源会话末尾 fork 出新会话；不传 cursor 时后端从最新持久化点分叉。 */
+/** 从指定持久化点 fork；不传 storageSeq 时从源会话末尾分叉。 */
 export async function forkSession(
-  sessionId: string
+  sessionId: string,
+  storageSeq?: number
 ): Promise<CreateSessionResponse> {
+  const body: ForkSessionRequest = storageSeq == null ? {} : { storageSeq }
   return request<CreateSessionResponse>(
     `/api/sessions/${encodeURIComponent(sessionId)}/fork`,
     {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify(body),
     }
   )
 }

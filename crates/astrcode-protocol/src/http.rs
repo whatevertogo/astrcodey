@@ -391,6 +391,20 @@ pub struct ConversationControlStateDto {
     /// 活跃 turn ID，v1 snapshot 暂无。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn_id: Option<String>,
+    /// 当前 LLM HTTP 请求的瞬态重试状态；恢复或 turn 结束后清空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_status: Option<LlmRetryStatusDto>,
+}
+
+/// LLM HTTP 请求的瞬态重试状态。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmRetryStatusDto {
+    pub status: u16,
+    pub attempt: u32,
+    pub max_retries: u32,
+    pub delay_ms: u64,
 }
 
 /// conversation 块。
@@ -415,6 +429,9 @@ pub enum ConversationBlockDto {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
+        /// 该消息持久化后的 durable seq，可作为精确 fork 点。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        storage_seq: Option<u64>,
         status: ConversationBlockStatusDto,
     },
     ToolCall {
@@ -1104,11 +1121,13 @@ mod tests {
                         id,
                         text,
                         reasoning_content: _,
+                        storage_seq,
                         status,
                     },
             } => {
                 assert_eq!(id, "assistant-1");
                 assert_eq!(text, "complete answer");
+                assert_eq!(*storage_seq, Some(3));
                 assert!(matches!(status, ConversationBlockStatusDto::Complete));
             },
             other => panic!("unexpected fixture delta: {other:?}"),

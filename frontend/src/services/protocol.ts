@@ -187,6 +187,7 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
         id,
         text: requiredString(object, 'text'),
         reasoningContent: optionalString(object, 'reasoningContent'),
+        storageSeq: optionalNumber(object, 'storageSeq'),
         status: decodeBlockStatus(object.status),
       }
     case 'toolCall': {
@@ -238,6 +239,7 @@ export function decodeConversationControlState(
   value: unknown
 ): ConversationControlState {
   const object = decodeObject(value, 'control')
+  const retryStatus = optionalObject(object, 'retryStatus')
   return {
     phase: decodePhase(object.phase),
     canSubmitPrompt: requiredBoolean(object, 'canSubmitPrompt'),
@@ -245,6 +247,14 @@ export function decodeConversationControlState(
     compactPending: requiredBoolean(object, 'compactPending'),
     compacting: requiredBoolean(object, 'compacting'),
     activeTurnId: optionalString(object, 'activeTurnId'),
+    retryStatus: retryStatus
+      ? {
+          status: requiredNumber(retryStatus, 'status'),
+          attempt: requiredNumber(retryStatus, 'attempt'),
+          maxRetries: requiredNumber(retryStatus, 'maxRetries'),
+          delayMs: requiredNumber(retryStatus, 'delayMs'),
+        }
+      : undefined,
   }
 }
 

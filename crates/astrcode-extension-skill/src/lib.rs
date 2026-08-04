@@ -21,6 +21,7 @@ use astrcode_extension_sdk::{
     frontmatter, hostpaths,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
 };
+use noyalib::compat::serde_yaml as yaml;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -473,7 +474,7 @@ fn parse_skill_md(
 ) -> Option<SkillDefinition> {
     let normalized = normalize_skill_content(content);
     let (frontmatter, body) = frontmatter::split_frontmatter(&normalized)?;
-    let raw = serde_yaml::from_str::<RawSkillFrontmatter>(frontmatter).ok()?;
+    let raw = yaml::from_str::<RawSkillFrontmatter>(frontmatter).ok()?;
     let guide = body.trim().to_string();
     if guide.is_empty() {
         return None;

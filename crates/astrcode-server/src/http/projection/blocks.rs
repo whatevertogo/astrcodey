@@ -50,6 +50,7 @@ pub(in crate::http) fn streaming_assistant_block(
         id,
         text,
         reasoning_content,
+        storage_seq: None,
         status: ConversationBlockStatusDto::Streaming,
     }
 }
@@ -104,6 +105,7 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             id: message_id.to_string(),
             text: text.clone(),
             reasoning_content: reasoning_content.clone(),
+            storage_seq: event.seq,
             status: ConversationBlockStatusDto::Complete,
         }),
         DurableEventPayload::ToolCallCompleted {
@@ -204,8 +206,9 @@ fn tool_call_terminal_block(
 pub(in crate::http) fn transcript_blocks(
     messages: &[SequencedLlmMessage],
     artifacts: &[TranscriptArtifactView],
+    forkable_after_seq: Option<u64>,
 ) -> Vec<ConversationBlockDto> {
-    let mut blocks = sequenced_message_blocks(messages);
+    let mut blocks = sequenced_message_blocks(messages, forkable_after_seq);
     blocks.extend(artifacts.iter().map(|artifact| SequencedConversationBlock {
         seq: artifact.seq(),
         block: transcript_artifact_block(artifact),
@@ -219,7 +222,10 @@ struct SequencedConversationBlock {
     block: ConversationBlockDto,
 }
 
-fn sequenced_message_blocks(messages: &[SequencedLlmMessage]) -> Vec<SequencedConversationBlock> {
+fn sequenced_message_blocks(
+    messages: &[SequencedLlmMessage],
+    forkable_after_seq: Option<u64>,
+) -> Vec<SequencedConversationBlock> {
     let mut blocks = Vec::new();
     let mut tool_block_indices = BTreeMap::new();
 
@@ -252,6 +258,9 @@ fn sequenced_message_blocks(messages: &[SequencedLlmMessage]) -> Vec<SequencedCo
                             id,
                             text,
                             reasoning_content: message.reasoning_content.clone(),
+                            storage_seq: forkable_after_seq
+                                .is_none_or(|seq| seq_msg.updated_seq > seq)
+                                .then_some(seq_msg.updated_seq),
                             status: ConversationBlockStatusDto::Complete,
                         },
                     });
@@ -444,12 +453,44 @@ mod tests {
             },
         ];
 
-        let blocks = transcript_blocks(&messages, &[]);
+        let blocks = transcript_blocks(&messages, &[], None);
 
         assert_eq!(blocks.len(), 1);
         assert!(matches!(
             &blocks[0],
             ConversationBlockDto::User { text, .. } if text == "visible"
+        ));
+    }
+
+    #[test]
+    fn transcript_blocks_only_exposes_precise_fork_points() {
+        let messages = [
+            SequencedLlmMessage {
+                message: LlmMessage::assistant("compacted reply"),
+                updated_seq: 5,
+                source: None,
+            },
+            SequencedLlmMessage {
+                message: LlmMessage::assistant("tail reply"),
+                updated_seq: 8,
+                source: None,
+            },
+        ];
+
+        let blocks = transcript_blocks(&messages, &[], Some(5));
+
+        assert!(matches!(
+            blocks.as_slice(),
+            [
+                ConversationBlockDto::Assistant {
+                    storage_seq: None,
+                    ..
+                },
+                ConversationBlockDto::Assistant {
+                    storage_seq: Some(8),
+                    ..
+                }
+            ]
         ));
     }
 
@@ -507,7 +548,7 @@ mod tests {
                 ),
         );
 
-        let blocks = transcript_blocks(&messages, &[]);
+        let blocks = transcript_blocks(&messages, &[], None);
         let statuses = blocks
             .iter()
             .map(|block| {

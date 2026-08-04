@@ -76,7 +76,6 @@ replace_package_version(Path("crates/astrcode-extensions/tests/s5r-guest/Cargo.t
 for path in [
     Path("Cargo.lock"),
     Path("crates/astrcode-extensions/tests/s5r-guest/Cargo.lock"),
-    Path("src-tauri/Cargo.lock"),
 ]:
     if not path.exists():
         continue

@@ -17,7 +17,8 @@ use serde_json::Value;
 ///
 /// - escapes raw control characters inside strings;
 /// - removes a comma before a closing bracket or after a complete root value;
-/// - closes a string or nested container truncated at the end.
+/// - closes a string or nested container truncated at the end;
+/// - completes a literal truncated mid-value (`{"ok": tru`).
 ///
 /// If the repaired candidate is still invalid, the original parse error is
 /// returned so the caller can reject the call and preserve the provider output.
@@ -161,6 +162,10 @@ fn repair_tool_arguments(arguments: &str) -> Option<String> {
         changed = true;
     }
 
+    if complete_truncated_literal(&mut repaired, &open_containers) {
+        changed = true;
+    }
+
     while let Some(opening) = open_containers.pop() {
         // 按打开顺序逆序补闭合括号（栈顶即最近打开的容器），修复截断的嵌套结构。
         repaired.push(match opening {
@@ -171,6 +176,52 @@ fn repair_tool_arguments(arguments: &str) -> Option<String> {
     }
 
     changed.then_some(repaired)
+}
+
+/// 补全在值位置被截断的 JSON 字面量（`tru` → `true`、`fals` → `false`、`nul` → `null`）。
+///
+/// 仅当截断 token 处于值位置（根级、冒号或数组元素之后）时补全；对象中逗号之后是
+/// key 位置（`{"a": 1, tru`），key 截断（`{"tru`）无法安全推断，保持不修复，
+/// 由调用方按原始解析错误拒绝。
+fn complete_truncated_literal(output: &mut String, open_containers: &[OpenContainer]) -> bool {
+    let trimmed_end = output.trim_end();
+    let Some(last) = trimmed_end.chars().next_back() else {
+        return false;
+    };
+    if !last.is_ascii_alphabetic() {
+        return false;
+    }
+
+    // 末尾 token 起点：从后往前第一个非字母字符之后的位置（全字母则为 0）。
+    let token_start = trimmed_end
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !ch.is_ascii_alphabetic())
+        .map_or(0, |(idx, ch)| idx + ch.len_utf8());
+
+    let full_literal = match &trimmed_end[token_start..] {
+        "t" | "tr" | "tru" => "true",
+        "f" | "fa" | "fal" | "fals" => "false",
+        "n" | "nu" | "nul" => "null",
+        _ => return false,
+    };
+
+    let in_value_position = match trimmed_end[..token_start].trim_end().chars().next_back() {
+        None => true,      // 根级值，如 `tru`
+        Some(':') => true, // 对象/根级冒号之后，如 `{"ok": tru`
+        Some('[') => true, // 数组第一个元素，如 `[tru`
+        // `[1, tru` 可补；对象中逗号之后是 key 位置，不补。
+        Some(',') => matches!(open_containers.last(), Some(OpenContainer::Array)),
+        // key 截断（`{"tru`）或紧随完整值（`{"a": "x" tru`），不推断。
+        _ => false,
+    };
+    if !in_value_position {
+        return false;
+    }
+
+    output.truncate(token_start);
+    output.push_str(full_literal);
+    true
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -256,6 +307,27 @@ mod tests {
                 "{\"text\":\"line1\nline2",
                 serde_json::json!({"text": "line1\nline2"}),
             ),
+            (
+                "truncated literal true",
+                r#"{"ok": tru"#,
+                serde_json::json!({"ok": true}),
+            ),
+            (
+                "truncated literal false",
+                r#"{"ok": fals"#,
+                serde_json::json!({"ok": false}),
+            ),
+            (
+                "truncated literal null in array",
+                "[nul",
+                serde_json::json!([null]),
+            ),
+            (
+                "truncated literal after array comma",
+                "[1, tru",
+                serde_json::json!([1, true]),
+            ),
+            ("truncated literal at root", "tru", serde_json::json!(true)),
         ];
 
         for (case, input, expected) in cases {
@@ -270,6 +342,14 @@ mod tests {
         let cases = [
             r#"{"segments":[{"emotion":"NORMAL","text">"news"}]}"#,
             r#"{"items":[1,2,"#,
+            // 结构完整但字面量不完整：模型写错而非流截断，不推断。
+            r#"{"ok": tru}"#,
+            // key 截断无法安全补全。
+            r#"{"tru"#,
+            // 对象中逗号之后是 key 位置，不是值位置。
+            r#"{"a": 1, tru"#,
+            // 不是任何字面量的前缀。
+            r#"trut"#,
         ];
 
         for input in cases {

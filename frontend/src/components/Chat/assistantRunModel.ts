@@ -174,6 +174,15 @@ export function assistantVisibleText(block: AssistantBlock): string {
   return extractThinkingBlocks(block.text).visibleText
 }
 
+export function assistantRunCopyText(blocks: AssistantLikeBlock[]): string {
+  return blocks
+    .filter((block): block is AssistantBlock => block.kind === 'assistant')
+    .map(assistantVisibleText)
+    .map((text) => text.trim())
+    .filter(Boolean)
+    .join('\n\n')
+}
+
 function filenameFor(path: string): string {
   const normalized = path.replace(/\\/g, '/')
   const filename = normalized.split('/').filter(Boolean).pop()

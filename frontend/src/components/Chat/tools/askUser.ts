@@ -128,6 +128,36 @@ export function isPendingAskUser(block: AskUserBlock): boolean {
   return block.name === 'askUser' && block.status === 'streaming'
 }
 
+export function pendingAskUserHasVisibleBlock(
+  blocks: ConversationBlock[],
+  pending: PendingAskUserQuestion
+): boolean {
+  return blocks.some(
+    (block) =>
+      block.kind === 'toolCall' &&
+      block.id === pending.callId &&
+      isPendingAskUser(block)
+  )
+}
+
+export function recoveredAskUserBlock(
+  pending: PendingAskUserQuestion
+): AskUserBlock {
+  const argumentsJson = {
+    questions: pending.questions,
+    ...(pending.metadata ? { metadata: pending.metadata } : {}),
+  }
+  return {
+    kind: 'toolCall',
+    id: pending.callId,
+    name: 'askUser',
+    arguments: JSON.stringify(argumentsJson),
+    argumentsJson,
+    text: '',
+    status: 'streaming',
+  }
+}
+
 export function askUserSummary(
   block: AskUserBlock,
   args: JsonRecord

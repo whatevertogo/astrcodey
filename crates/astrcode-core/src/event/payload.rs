@@ -215,6 +215,13 @@ pub enum LiveEventPayload {
     AgentRunCompleted {
         reason: String,
     },
+    LlmRetrying {
+        status: u16,
+        attempt: u32,
+        max_retries: u32,
+        delay_ms: u64,
+    },
+    LlmRetryRecovered,
     AssistantMessageStarted {
         message_id: MessageId,
     },

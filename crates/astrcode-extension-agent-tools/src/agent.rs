@@ -6,6 +6,7 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
 use astrcode_extension_sdk::{extension::SessionToolSelection, frontmatter, hostpaths};
+use noyalib::compat::serde_yaml as yaml;
 
 /// 解析后的 Agent 配置（兼容 Claude 格式）。
 #[derive(Debug, Clone)]
@@ -160,8 +161,8 @@ fn parse(path: &str, content: &str) -> Result<AgentConfig, String> {
 
 /// 从 YAML 文本和可选的 Markdown 正文构建 AgentConfig。
 fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<AgentConfig, String> {
-    let root: serde_yaml::Value =
-        serde_yaml::from_str(yaml_text).map_err(|e| format!("{path}: parse YAML: {e}"))?;
+    let root: yaml::Value =
+        yaml::from_str(yaml_text).map_err(|e| format!("{path}: parse YAML: {e}"))?;
     let m = root
         .as_mapping()
         .ok_or_else(|| format!("{path}: expected YAML mapping"))?;
@@ -200,22 +201,19 @@ fn build(path: &str, yaml_text: &str, markdown_body: Option<&str>) -> Result<Age
 }
 
 /// 从 YAML 映射中获取字符串值。
-fn mapping_str(m: &serde_yaml::Mapping, key: &str) -> Option<String> {
-    let v = m.get(serde_yaml::Value::String(key.into()))?;
+fn mapping_str(m: &yaml::Mapping, key: &str) -> Option<String> {
+    let v = m.get(key)?;
     v.as_str().map(String::from)
 }
 
-fn mapping_string_list(
-    mapping: &serde_yaml::Mapping,
-    key: &str,
-) -> Result<Option<Vec<String>>, String> {
-    let Some(value) = mapping.get(serde_yaml::Value::String(key.into())) else {
+fn mapping_string_list(mapping: &yaml::Mapping, key: &str) -> Result<Option<Vec<String>>, String> {
+    let Some(value) = mapping.get(key) else {
         return Ok(None);
     };
     let tools = match value {
-        serde_yaml::Value::Null => return Ok(None),
-        serde_yaml::Value::String(value) => parse_tool_names(value, key)?,
-        serde_yaml::Value::Sequence(values) => {
+        yaml::Value::Null => return Ok(None),
+        yaml::Value::String(value) => parse_tool_names(value, key)?,
+        yaml::Value::Sequence(values) => {
             let mut tools = Vec::new();
             for value in values {
                 let value = value

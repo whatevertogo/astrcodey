@@ -3,7 +3,7 @@
 use astrcode_core::event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase};
 use astrcode_protocol::{
     agent_session_link::AgentSessionLinkDto,
-    http::{ConversationControlStateDto, ConversationDeltaDto, ToolApprovalDto},
+    http::{ConversationControlStateDto, ConversationDeltaDto, LlmRetryStatusDto, ToolApprovalDto},
 };
 
 use super::{
@@ -192,6 +192,8 @@ fn live_event_to_deltas(
             .collect(),
         LiveEventPayload::AgentRunStarted
         | LiveEventPayload::AgentRunCompleted { .. }
+        | LiveEventPayload::LlmRetrying { .. }
+        | LiveEventPayload::LlmRetryRecovered
         | LiveEventPayload::CompactionStarted
         | LiveEventPayload::CompactionCompleted { .. }
         | LiveEventPayload::CompactionSkipped { .. }
@@ -217,7 +219,11 @@ fn projected_phase(payload: &EventPayload) -> Phase {
         EventPayload::Durable(
             DurableEventPayload::TurnStarted | DurableEventPayload::UserMessage { .. },
         )
-        | EventPayload::Live(LiveEventPayload::AgentRunStarted) => Phase::Thinking,
+        | EventPayload::Live(
+            LiveEventPayload::AgentRunStarted
+            | LiveEventPayload::LlmRetrying { .. }
+            | LiveEventPayload::LlmRetryRecovered,
+        ) => Phase::Thinking,
         EventPayload::Live(
             LiveEventPayload::AssistantMessageStarted { .. }
             | LiveEventPayload::AssistantTextDelta { .. }
@@ -266,7 +272,22 @@ fn control_from_event(event: &Event, has_messages: bool) -> ConversationControlS
         },
         _ => projected_phase(&event.payload),
     };
-    control_from_state(phase, has_messages, active_turn_id_for_event(event))
+    let mut control = control_from_state(phase, has_messages, active_turn_id_for_event(event));
+    if let EventPayload::Live(LiveEventPayload::LlmRetrying {
+        status,
+        attempt,
+        max_retries,
+        delay_ms,
+    }) = &event.payload
+    {
+        control.retry_status = Some(LlmRetryStatusDto {
+            status: *status,
+            attempt: *attempt,
+            max_retries: *max_retries,
+            delay_ms: *delay_ms,
+        });
+    }
+    control
 }
 
 pub(in crate::http) fn control_from_phase(
@@ -289,6 +310,7 @@ fn control_from_state(
         compact_pending: false,
         compacting: matches!(phase, Phase::Compacting),
         active_turn_id,
+        retry_status: None,
     }
 }
 
@@ -381,11 +403,13 @@ mod tests {
                         id,
                         text,
                         reasoning_content: _,
+                        storage_seq,
                         status,
                     },
             } => {
                 assert_eq!(id, "assistant-1");
                 assert_eq!(text, "complete answer");
+                assert_eq!(storage_seq, Some(1));
                 assert!(matches!(status, ConversationBlockStatusDto::Complete));
             },
             other => panic!("unexpected delta: {other:?}"),
@@ -412,6 +436,38 @@ mod tests {
             },
             other => panic!("unexpected delta: {other:?}"),
         }
+    }
+
+    #[test]
+    fn llm_retry_projects_transient_control_status() {
+        let event = event(
+            EventPayload::Live(LiveEventPayload::LlmRetrying {
+                status: 503,
+                attempt: 2,
+                max_retries: 5,
+                delay_ms: 2_000,
+            }),
+            Some("turn-1"),
+        );
+
+        let deltas = event_to_deltas(&event, true);
+
+        assert!(matches!(
+            deltas.as_slice(),
+            [ConversationDeltaDto::UpdateControlState {
+                control: ConversationControlStateDto {
+                    phase: PhaseDto::Thinking,
+                    active_turn_id: Some(turn_id),
+                    retry_status: Some(LlmRetryStatusDto {
+                        status: 503,
+                        attempt: 2,
+                        max_retries: 5,
+                        delay_ms: 2_000,
+                    }),
+                    ..
+                }
+            }] if turn_id == "turn-1"
+        ));
     }
 
     #[test]

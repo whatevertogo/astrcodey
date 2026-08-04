@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict'
 
 import {
+  assistantRunCopyText,
   assistantVisibleText,
   buildAssistantRunModel,
   buildMessageListItems,
   processSummaryTitle,
 } from '../../target/frontend-assistant-run/assistantRunModel.js'
-import { remainingAutoSelectSeconds } from '../../target/frontend-assistant-run/tools/askUser.js'
+import {
+  pendingAskUserHasVisibleBlock,
+  recoveredAskUserBlock,
+  remainingAutoSelectSeconds,
+} from '../../target/frontend-assistant-run/tools/askUser.js'
 
 function assistant(id, text, status = 'complete', extra = {}) {
   return { kind: 'assistant', id, text, status, ...extra }
@@ -157,6 +162,16 @@ assert.equal(
 )
 
 assert.equal(
+  assistantRunCopyText([
+    assistant('a-copy-1', '<think-block>hidden</think-block>\nprogress'),
+    tool('t-copy', 'read'),
+    assistant('a-copy-2', 'final answer', 'complete', { storageSeq: 42 }),
+  ]),
+  'progress\n\nfinal answer',
+  'copying a completed turn must include visible assistant text without thinking or tool output'
+)
+
+assert.equal(
   remainingAutoSelectSeconds(
     {
       sessionId: 'session-1',
@@ -170,4 +185,48 @@ assert.equal(
   ),
   30,
   'countdown must use server-relative time instead of the client wall clock'
+)
+
+const recoveredPendingQuestion = {
+  sessionId: 'session-1',
+  callId: 'ask-user-1',
+  questions: [
+    {
+      header: 'Scope',
+      question: 'Which option?',
+      options: [
+        { label: 'A', description: 'First option' },
+        { label: 'B', description: 'Second option' },
+      ],
+    },
+  ],
+  metadata: { source: 'reconnect' },
+  receivedAtMonotonic: 0,
+}
+const recoveredBlock = recoveredAskUserBlock(recoveredPendingQuestion)
+
+assert.equal(
+  pendingAskUserHasVisibleBlock([], recoveredPendingQuestion),
+  false,
+  'a pending snapshot without its lost live tool block needs recovery rendering'
+)
+assert.equal(recoveredBlock.id, recoveredPendingQuestion.callId)
+assert.equal(recoveredBlock.name, 'askUser')
+assert.equal(recoveredBlock.status, 'streaming')
+assert.deepEqual(recoveredBlock.argumentsJson, {
+  questions: recoveredPendingQuestion.questions,
+  metadata: recoveredPendingQuestion.metadata,
+})
+assert.equal(
+  pendingAskUserHasVisibleBlock([recoveredBlock], recoveredPendingQuestion),
+  true,
+  'an existing streaming askUser block must suppress duplicate recovery UI'
+)
+assert.equal(
+  pendingAskUserHasVisibleBlock(
+    [tool(recoveredPendingQuestion.callId, 'askUser', 'complete')],
+    recoveredPendingQuestion
+  ),
+  false,
+  'a reused call id with only an old terminal block still needs recovery rendering'
 )

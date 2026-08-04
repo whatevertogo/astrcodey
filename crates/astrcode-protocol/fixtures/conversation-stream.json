@@ -17,6 +17,7 @@
         "kind": "assistant",
         "id": "assistant-1",
         "text": "complete answer",
+        "storageSeq": 3,
         "status": "complete"
       }
     }

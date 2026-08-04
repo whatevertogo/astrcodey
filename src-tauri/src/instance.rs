@@ -12,7 +12,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use fs2::FileExt;
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 

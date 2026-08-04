@@ -190,34 +190,39 @@ impl HttpPostRequest {
     pub async fn run<F, Fut>(
         &self,
         stream_started: &AtomicBool,
+        events: &mpsc::UnboundedSender<LlmEvent>,
         mut on_success: F,
     ) -> Result<(), LlmError>
     where
         F: FnMut(reqwest::Response) -> Fut,
         Fut: std::future::Future<Output = Result<(), LlmError>>,
     {
-        let mut attempt = 0;
+        let mut request_attempt = 0;
+        let mut http_retry_attempt = 0;
+        let mut transport_retry_attempt = 0;
+        let mut retry_reported = false;
 
         loop {
-            attempt += 1;
+            request_attempt += 1;
             let attempt_started = Instant::now();
             let response = match self.send_once().await {
                 Ok(response) => {
                     tracing::debug!(
                         endpoint = %redacted_endpoint(&self.endpoint),
                         status = %response.status(),
-                        attempt,
+                        attempt = request_attempt,
                         elapsed_ms = attempt_started.elapsed().as_millis(),
                         "LLM response headers received"
                     );
                     response
                 },
                 Err(error) => {
-                    if self.retry.should_retry_transport(attempt) {
-                        let delay = self.retry.delay(attempt);
+                    transport_retry_attempt += 1;
+                    if self.retry.should_retry_transport(transport_retry_attempt) {
+                        let delay = self.retry.delay(transport_retry_attempt);
                         tracing::warn!(
-                            "LLM request failed with transport error (attempt {attempt}/{}), \
-                             retrying after {}ms: {error}",
+                            "LLM request failed with transport error (attempt \
+                             {transport_retry_attempt}/{}), retrying after {}ms: {error}",
                             self.retry.max_transport_retries,
                             delay.as_millis(),
                         );
@@ -230,17 +235,23 @@ impl HttpPostRequest {
 
             let status = response.status();
             if status.is_success() {
+                if retry_reported {
+                    send_event(events, LlmEvent::RetryRecovered);
+                    retry_reported = false;
+                }
                 match on_success(response).await {
                     Ok(()) => return Ok(()),
                     Err(error) => {
-                        if !stream_started.load(Ordering::SeqCst)
-                            && self.retry.should_retry_transport(attempt)
-                        {
+                        if !stream_started.load(Ordering::SeqCst) {
                             if let LlmError::Transport { message } = &error {
-                                let delay = self.retry.delay(attempt);
+                                transport_retry_attempt += 1;
+                                if !self.retry.should_retry_transport(transport_retry_attempt) {
+                                    return Err(error);
+                                }
+                                let delay = self.retry.delay(transport_retry_attempt);
                                 tracing::warn!(
                                     "LLM stream read failed with transport error (attempt \
-                                     {attempt}/{}), retrying after {}ms: {message}",
+                                     {transport_retry_attempt}/{}), retrying after {}ms: {message}",
                                     self.retry.max_transport_retries,
                                     delay.as_millis(),
                                 );
@@ -253,10 +264,22 @@ impl HttpPostRequest {
                 }
             }
 
-            if self.retry.should_retry(attempt, status.as_u16()) {
-                let delay = self.retry.delay(attempt);
+            http_retry_attempt += 1;
+            if self.retry.should_retry(http_retry_attempt, status.as_u16()) {
+                let delay = self.retry.delay(http_retry_attempt);
+                send_event(
+                    events,
+                    LlmEvent::Retrying {
+                        status: status.as_u16(),
+                        attempt: http_retry_attempt,
+                        max_retries: self.retry.max_retries,
+                        delay_ms: delay.as_millis().try_into().unwrap_or(u64::MAX),
+                    },
+                );
+                retry_reported = true;
                 tracing::warn!(
-                    "LLM request failed with {status}, retrying (attempt {attempt}/{}) after {}ms",
+                    "LLM request failed with {status}, retrying (attempt {http_retry_attempt}/{}) \
+                     after {}ms",
                     self.retry.max_retries,
                     delay.as_millis()
                 );
@@ -272,18 +295,19 @@ impl HttpPostRequest {
 
     /// 发起带重试的 JSON POST 请求，返回 JSON 响应体。
     pub async fn json(&self) -> Result<serde_json::Value, LlmError> {
-        let mut attempt = 0;
+        let mut http_retry_attempt = 0;
+        let mut transport_retry_attempt = 0;
 
         loop {
-            attempt += 1;
             let response = match self.send_once().await {
                 Ok(response) => response,
                 Err(error) => {
-                    if self.retry.should_retry_transport(attempt) {
-                        let delay = self.retry.delay(attempt);
+                    transport_retry_attempt += 1;
+                    if self.retry.should_retry_transport(transport_retry_attempt) {
+                        let delay = self.retry.delay(transport_retry_attempt);
                         tracing::warn!(
-                            "LLM JSON request failed with transport error (attempt {attempt}/{}), \
-                             retrying after {}ms: {error}",
+                            "LLM JSON request failed with transport error (attempt \
+                             {transport_retry_attempt}/{}), retrying after {}ms: {error}",
                             self.retry.max_transport_retries,
                             delay.as_millis(),
                         );
@@ -309,11 +333,12 @@ impl HttpPostRequest {
                 });
             }
 
-            if self.retry.should_retry(attempt, status.as_u16()) {
-                let delay = self.retry.delay(attempt);
+            http_retry_attempt += 1;
+            if self.retry.should_retry(http_retry_attempt, status.as_u16()) {
+                let delay = self.retry.delay(http_retry_attempt);
                 tracing::warn!(
-                    "LLM JSON request failed with {status}, retrying (attempt {attempt}/{}) after \
-                     {}ms",
+                    "LLM JSON request failed with {status}, retrying (attempt \
+                     {http_retry_attempt}/{}) after {}ms",
                     self.retry.max_retries,
                     delay.as_millis()
                 );
@@ -790,6 +815,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_retries_are_independent_and_stream_reports_recovery() {
+        let (addr, requests) = spawn_test_server(|request| {
+            if request == 1 {
+                Vec::new()
+            } else if request <= 3 {
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_vec()
+            } else {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec()
+            }
+        })
+        .await;
+        let stream_started = AtomicBool::new(false);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let result = test_request(addr)
+            .run(&stream_started, &tx, |_response| async { Ok(()) })
+            .await;
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+
+        assert!(result.is_ok());
+        assert_eq!(requests.load(Ordering::SeqCst), 4);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                LlmEvent::Retrying {
+                    status: 503,
+                    attempt: 1,
+                    max_retries: 5,
+                    ..
+                },
+                LlmEvent::Retrying {
+                    status: 503,
+                    attempt: 2,
+                    max_retries: 5,
+                    ..
+                },
+                LlmEvent::RetryRecovered
+            ]
+        ));
+
+        let (addr, requests) = spawn_test_server(|request| {
+            if request == 1 {
+                Vec::new()
+            } else if request <= 6 {
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_vec()
+            } else {
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}"
+                    .to_vec()
+            }
+        })
+        .await;
+
+        let value = test_request(addr).json().await.unwrap();
+
+        assert_eq!(value, serde_json::json!({ "ok": true }));
+        assert_eq!(requests.load(Ordering::SeqCst), 7);
+    }
+
+    #[tokio::test]
     async fn run_does_not_retry_transport_error_after_stream_lines_were_consumed() {
         let (addr, requests) = spawn_test_server(|_| {
             // 声明 Content-Length 但只发送部分 body 后断开 → 流中途传输错误。
@@ -800,7 +886,7 @@ mod tests {
         let stream_started = AtomicBool::new(false);
         let (tx, _rx) = mpsc::unbounded_channel();
         let result = test_request(addr)
-            .run(&stream_started, |response| {
+            .run(&stream_started, &tx, |response| {
                 let tx = &tx;
                 let stream_started = &stream_started;
                 async move {
@@ -830,7 +916,7 @@ mod tests {
         let stream_started = AtomicBool::new(false);
         let (tx, _rx) = mpsc::unbounded_channel();
         let result = test_request(addr)
-            .run(&stream_started, |response| {
+            .run(&stream_started, &tx, |response| {
                 let tx = &tx;
                 let stream_started = &stream_started;
                 async move {

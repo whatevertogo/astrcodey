@@ -384,6 +384,7 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   const extraStatusItems = Object.entries(statusItems).filter(
     ([id, text]) => text && !['git-branch', 'branch', 'gitBranch'].includes(id)
   )
+  const retryStatus = control?.retryStatus
 
   return (
     <div
@@ -435,6 +436,20 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
               <div className="flex min-w-0 max-w-[180px] items-center gap-2">
                 <Icon name="branch" size={16} className="shrink-0" />
                 <span className="truncate">{branchLabel}</span>
+              </div>
+            )}
+            {retryStatus && (
+              <div
+                className="flex shrink-0 items-center gap-2 text-warning"
+                role="status"
+                aria-live="polite"
+              >
+                <Icon name="retry" size={16} />
+                <span>
+                  远端 {retryStatus.status} · 重试 {retryStatus.attempt}/
+                  {retryStatus.maxRetries} · 退避{' '}
+                  {(retryStatus.delayMs / 1000).toFixed(1)} 秒
+                </span>
               </div>
             )}
             {extraStatusItems.map(([id, text]) => (

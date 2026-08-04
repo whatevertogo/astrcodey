@@ -116,6 +116,20 @@ pub(crate) async fn consume_llm_stream(
             return Err(TurnError::StreamEndedUnexpectedly);
         };
         match event {
+            LlmEvent::Retrying {
+                status,
+                attempt,
+                max_retries,
+                delay_ms,
+            } => consumer.publisher.live(LiveEventPayload::LlmRetrying {
+                status,
+                attempt,
+                max_retries,
+                delay_ms,
+            }),
+            LlmEvent::RetryRecovered => {
+                consumer.publisher.live(LiveEventPayload::LlmRetryRecovered)
+            },
             LlmEvent::ContentDelta { delta } => consumer.handle_content_delta(delta),
             LlmEvent::ThinkingDelta { delta } => consumer.handle_thinking_delta(delta),
             LlmEvent::ToolCallStart {

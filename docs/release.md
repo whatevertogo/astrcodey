@@ -23,7 +23,6 @@
 | `Cargo.toml` | `[workspace.package].version` |
 | `Cargo.lock` | workspace 内 `astrcode*` 包版本 |
 | `src-tauri/tauri.conf.json` | 桌面应用版本 |
-| `src-tauri/Cargo.lock` | `astrcode-desktop` 包版本 |
 | `frontend/package.json` / `frontend/package-lock.json` | 桌面前端包版本 |
 | `npm/astrcode/package.json` | npm 主包版本和平台包依赖版本 |
 | `crates/astrcode-extensions/tests/s5r-guest/Cargo.toml` | s5r fixture 包版本 |

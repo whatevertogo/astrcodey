@@ -85,7 +85,11 @@ function sameControlState(
     left.canRequestCompact === right.canRequestCompact &&
     left.compactPending === right.compactPending &&
     left.compacting === right.compacting &&
-    left.activeTurnId === right.activeTurnId
+    left.activeTurnId === right.activeTurnId &&
+    left.retryStatus?.status === right.retryStatus?.status &&
+    left.retryStatus?.attempt === right.retryStatus?.attempt &&
+    left.retryStatus?.maxRetries === right.retryStatus?.maxRetries &&
+    left.retryStatus?.delayMs === right.retryStatus?.delayMs
   )
 }
 
