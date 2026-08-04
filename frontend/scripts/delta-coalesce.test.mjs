@@ -63,6 +63,54 @@ assert.deepEqual(created[1], {
   status: 'streaming',
 })
 
+const retriedAssistant = reduceConversationDeltas(
+  {
+    blocks: [
+      {
+        kind: 'assistant',
+        id: 'assistant-retry',
+        text: 'stale',
+        reasoningContent: 'stale reasoning',
+        status: 'streaming',
+      },
+    ],
+    control: null,
+    cursor: '1',
+    phase: 'streaming',
+    compactSubmitting: false,
+    agentSessions: [],
+    statusItems: {},
+    statusItemRevisions: {},
+    pendingAskUserQuestions: {},
+    resolvedAskUserCallIds: {},
+    pendingAskUserRefreshInFlight: false,
+    askUserEventRevision: 0,
+    transientHint: null,
+  },
+  [
+    { kind: 'resetBlock', blockId: 'assistant-retry' },
+    {
+      kind: 'thinkingDelta',
+      blockId: 'assistant-retry',
+      delta: 'fresh reasoning',
+    },
+    {
+      kind: 'patchBlock',
+      blockId: 'assistant-retry',
+      textDelta: 'fresh',
+    },
+  ],
+  '2'
+)
+
+assert.deepEqual(retriedAssistant.blocks?.[0], {
+  kind: 'assistant',
+  id: 'assistant-retry',
+  text: 'fresh',
+  reasoningContent: 'fresh reasoning',
+  status: 'streaming',
+})
+
 const patchedCreatedTool = applyCoalescedDeltas(
   [],
   [

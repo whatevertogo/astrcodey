@@ -216,13 +216,18 @@ pub enum LiveEventPayload {
         reason: String,
     },
     LlmRetrying {
-        status: u16,
+        /// HTTP 状态码；连接或响应流中断时为空。
+        status: Option<u16>,
         attempt: u32,
         max_retries: u32,
         delay_ms: u64,
     },
     LlmRetryRecovered,
     AssistantMessageStarted {
+        message_id: MessageId,
+    },
+    /// 丢弃同一消息在失败流中产生的临时文本与思考内容。
+    AssistantMessageReset {
         message_id: MessageId,
     },
     AssistantTextDelta {

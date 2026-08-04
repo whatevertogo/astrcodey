@@ -4,6 +4,7 @@ import path from 'node:path'
 import {
   ProtocolDecodeError,
   decodeConversationBlock,
+  decodeConversationDelta,
   decodeConversationSnapshot,
   decodeConversationStreamEnvelope,
 } from '../../target/frontend-contract/services/protocol.js'
@@ -306,3 +307,26 @@ assert.deepEqual(snapshotWithoutAttachmentFields.control.retryStatus, {
   maxRetries: 5,
   delayMs: 2000,
 })
+
+const transportRetrySnapshot = decodeConversationSnapshot({
+  ...snapshotWithoutAttachmentFields,
+  control: {
+    ...snapshotWithoutAttachmentFields.control,
+    retryStatus: {
+      attempt: 1,
+      maxRetries: 3,
+      delayMs: 500,
+    },
+  },
+})
+assert.deepEqual(transportRetrySnapshot.control.retryStatus, {
+  status: undefined,
+  attempt: 1,
+  maxRetries: 3,
+  delayMs: 500,
+})
+
+assert.deepEqual(
+  decodeConversationDelta({ kind: 'resetBlock', blockId: 'assistant-1' }),
+  { kind: 'resetBlock', blockId: 'assistant-1' }
+)

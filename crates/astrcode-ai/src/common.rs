@@ -180,16 +180,18 @@ impl HttpPostRequest {
     /// 发起带重试的 POST 请求，成功时调用 `on_success` 处理响应流。
     ///
     /// `stream_started` 由 `on_success` 在开始消费响应体（收到任何 SSE 行）时置位；
-    /// 已置位后传输层错误不再重试，避免已投递事件重复。
+    /// `stream_replay_safe` 在流中出现工具调用后由协议层清除。已输出但仍可重放的纯文本/
+    /// 思考流会在重试前通知下游清空临时状态；可能触发工具副作用后则不再重试。
     ///
     /// 重试逻辑：
     /// - 传输层错误（DNS/TLS/连接重置）→ 按 `max_transport_retries` 重试
     /// - 可重试 HTTP 状态码（408/429/500/502/503/504）→ 按 `max_retries` 重试
-    /// - `on_success` 返回 `Transport` 错误且流尚未开始消费 → 按传输层错误重试
+    /// - `on_success` 返回 `Transport` 错误，且流尚未消费或仍可安全重放 → 按传输层错误重试
     /// - 其他错误 → 直接返回
     pub async fn run<F, Fut>(
         &self,
         stream_started: &AtomicBool,
+        stream_replay_safe: &AtomicBool,
         events: &mpsc::UnboundedSender<LlmEvent>,
         mut on_success: F,
     ) -> Result<(), LlmError>
@@ -220,6 +222,14 @@ impl HttpPostRequest {
                     transport_retry_attempt += 1;
                     if self.retry.should_retry_transport(transport_retry_attempt) {
                         let delay = self.retry.delay(transport_retry_attempt);
+                        send_retrying_event(
+                            events,
+                            None,
+                            transport_retry_attempt,
+                            self.retry.max_transport_retries,
+                            delay,
+                        );
+                        retry_reported = true;
                         tracing::warn!(
                             "LLM request failed with transport error (attempt \
                              {transport_retry_attempt}/{}), retrying after {}ms: {error}",
@@ -237,24 +247,34 @@ impl HttpPostRequest {
             if status.is_success() {
                 if retry_reported {
                     send_event(events, LlmEvent::RetryRecovered);
-                    retry_reported = false;
                 }
                 match on_success(response).await {
                     Ok(()) => return Ok(()),
                     Err(error) => {
-                        if !stream_started.load(Ordering::SeqCst) {
-                            if let LlmError::Transport { message } = &error {
+                        if let LlmError::Transport { message } = &error {
+                            let started = stream_started.load(Ordering::SeqCst);
+                            if !started || stream_replay_safe.load(Ordering::SeqCst) {
                                 transport_retry_attempt += 1;
                                 if !self.retry.should_retry_transport(transport_retry_attempt) {
                                     return Err(error);
                                 }
                                 let delay = self.retry.delay(transport_retry_attempt);
+                                send_retrying_event(
+                                    events,
+                                    None,
+                                    transport_retry_attempt,
+                                    self.retry.max_transport_retries,
+                                    delay,
+                                );
+                                retry_reported = true;
                                 tracing::warn!(
                                     "LLM stream read failed with transport error (attempt \
                                      {transport_retry_attempt}/{}), retrying after {}ms: {message}",
                                     self.retry.max_transport_retries,
                                     delay.as_millis(),
                                 );
+                                stream_started.store(false, Ordering::SeqCst);
+                                stream_replay_safe.store(true, Ordering::SeqCst);
                                 tokio::time::sleep(delay).await;
                                 continue;
                             }
@@ -267,14 +287,12 @@ impl HttpPostRequest {
             http_retry_attempt += 1;
             if self.retry.should_retry(http_retry_attempt, status.as_u16()) {
                 let delay = self.retry.delay(http_retry_attempt);
-                send_event(
+                send_retrying_event(
                     events,
-                    LlmEvent::Retrying {
-                        status: status.as_u16(),
-                        attempt: http_retry_attempt,
-                        max_retries: self.retry.max_retries,
-                        delay_ms: delay.as_millis().try_into().unwrap_or(u64::MAX),
-                    },
+                    Some(status.as_u16()),
+                    http_retry_attempt,
+                    self.retry.max_retries,
+                    delay,
                 );
                 retry_reported = true;
                 tracing::warn!(
@@ -365,6 +383,24 @@ impl HttpPostRequest {
             .await
             .map_err(|error| transport_error("send request", &self.endpoint, error))
     }
+}
+
+fn send_retrying_event(
+    events: &mpsc::UnboundedSender<LlmEvent>,
+    status: Option<u16>,
+    attempt: u32,
+    max_retries: u32,
+    delay: Duration,
+) {
+    send_event(
+        events,
+        LlmEvent::Retrying {
+            status,
+            attempt,
+            max_retries,
+            delay_ms: delay.as_millis().try_into().unwrap_or(u64::MAX),
+        },
+    );
 }
 
 /// 读取非 2xx 响应体；传输失败时记录并返回空串（仍附带 HTTP 状态码）。
@@ -828,33 +864,48 @@ mod tests {
         })
         .await;
         let stream_started = AtomicBool::new(false);
+        let stream_replay_safe = AtomicBool::new(true);
         let (tx, mut rx) = mpsc::unbounded_channel();
 
         let result = test_request(addr)
-            .run(&stream_started, &tx, |_response| async { Ok(()) })
+            .run(
+                &stream_started,
+                &stream_replay_safe,
+                &tx,
+                |_response| async { Ok(()) },
+            )
             .await;
         let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
 
         assert!(result.is_ok());
         assert_eq!(requests.load(Ordering::SeqCst), 4);
-        assert!(matches!(
-            events.as_slice(),
-            [
-                LlmEvent::Retrying {
-                    status: 503,
-                    attempt: 1,
-                    max_retries: 5,
-                    ..
-                },
-                LlmEvent::Retrying {
-                    status: 503,
-                    attempt: 2,
-                    max_retries: 5,
-                    ..
-                },
-                LlmEvent::RetryRecovered
-            ]
-        ));
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    LlmEvent::Retrying {
+                        status: None,
+                        attempt: 1,
+                        max_retries: 2,
+                        ..
+                    },
+                    LlmEvent::Retrying {
+                        status: Some(503),
+                        attempt: 1,
+                        max_retries: 5,
+                        ..
+                    },
+                    LlmEvent::Retrying {
+                        status: Some(503),
+                        attempt: 2,
+                        max_retries: 5,
+                        ..
+                    },
+                    LlmEvent::RetryRecovered
+                ]
+            ),
+            "unexpected events: {events:?}"
+        );
 
         let (addr, requests) = spawn_test_server(|request| {
             if request == 1 {
@@ -884,15 +935,18 @@ mod tests {
         })
         .await;
         let stream_started = AtomicBool::new(false);
+        let stream_replay_safe = AtomicBool::new(true);
         let (tx, _rx) = mpsc::unbounded_channel();
         let result = test_request(addr)
-            .run(&stream_started, &tx, |response| {
+            .run(&stream_started, &stream_replay_safe, &tx, |response| {
                 let tx = &tx;
                 let stream_started = &stream_started;
+                let stream_replay_safe = &stream_replay_safe;
                 async move {
                     consume_sse_lines(response, tx, |line| {
                         let _ = line;
                         stream_started.store(true, Ordering::SeqCst);
+                        stream_replay_safe.store(false, Ordering::SeqCst);
                         !tx.is_closed()
                     })
                     .await
@@ -906,6 +960,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_retries_transport_error_while_consumed_stream_is_replay_safe() {
+        let (addr, requests) = spawn_test_server(|request| {
+            if request == 1 {
+                // 已发送纯文本 SSE 后中断；调用方仍可丢弃临时输出并安全重放。
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 10000\r\n\r\ndata: partial\n\n"
+                    .to_vec()
+            } else {
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_vec()
+            }
+        })
+        .await;
+        let stream_started = AtomicBool::new(false);
+        let stream_replay_safe = AtomicBool::new(true);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+
+        let result = test_request(addr)
+            .run(&stream_started, &stream_replay_safe, &tx, |response| {
+                let tx = &tx;
+                let stream_started = &stream_started;
+                async move {
+                    consume_sse_lines(response, tx, |_| {
+                        stream_started.store(true, Ordering::SeqCst);
+                        !tx.is_closed()
+                    })
+                    .await
+                    .map(|_| ())
+                }
+            })
+            .await;
+        let events: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+
+        assert!(result.is_ok());
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        assert!(
+            matches!(
+                events.as_slice(),
+                [
+                    LlmEvent::Retrying {
+                        status: None,
+                        attempt: 1,
+                        max_retries: 2,
+                        ..
+                    },
+                    LlmEvent::RetryRecovered
+                ]
+            ),
+            "unexpected events: {events:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn run_retries_transport_error_before_any_stream_line() {
         let (addr, requests) = spawn_test_server(|_| {
             // 声明 Content-Length 但 body 未发送 → 首个 body read 即失败。
@@ -914,9 +1020,10 @@ mod tests {
         })
         .await;
         let stream_started = AtomicBool::new(false);
+        let stream_replay_safe = AtomicBool::new(true);
         let (tx, _rx) = mpsc::unbounded_channel();
         let result = test_request(addr)
-            .run(&stream_started, &tx, |response| {
+            .run(&stream_started, &stream_replay_safe, &tx, |response| {
                 let tx = &tx;
                 let stream_started = &stream_started;
                 async move {

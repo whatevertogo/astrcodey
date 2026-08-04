@@ -244,6 +244,7 @@ export interface PendingAskUserQuestionsResponse {
 export type ConversationDelta =
   | { kind: 'appendBlock'; block: ConversationBlock }
   | { kind: 'patchBlock'; blockId: string; textDelta: string }
+  | { kind: 'resetBlock'; blockId: string }
   | { kind: 'finalizeBlock'; block: ConversationBlock }
   | { kind: 'updateControlState'; control: ConversationControlState }
   | { kind: 'rehydrateRequired' }

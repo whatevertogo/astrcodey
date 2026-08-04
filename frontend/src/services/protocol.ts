@@ -249,7 +249,7 @@ export function decodeConversationControlState(
     activeTurnId: optionalString(object, 'activeTurnId'),
     retryStatus: retryStatus
       ? {
-          status: requiredNumber(retryStatus, 'status'),
+          status: optionalNumber(retryStatus, 'status'),
           attempt: requiredNumber(retryStatus, 'attempt'),
           maxRetries: requiredNumber(retryStatus, 'maxRetries'),
           delayMs: requiredNumber(retryStatus, 'delayMs'),
@@ -271,6 +271,8 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
         blockId: requiredString(object, 'blockId'),
         textDelta: requiredString(object, 'textDelta'),
       }
+    case 'resetBlock':
+      return { kind, blockId: requiredString(object, 'blockId') }
     case 'finalizeBlock':
       return { kind, block: decodeConversationBlock(object.block) }
     case 'updateControlState':

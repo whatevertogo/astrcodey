@@ -136,6 +136,16 @@ fn apply_event(app: &mut App, event: &Event) {
             app.is_streaming = false;
             app.status_text = ready_status(reason);
         },
+        EventPayload::Live(LiveEventPayload::LlmRetrying {
+            attempt,
+            max_retries,
+            ..
+        }) => {
+            app.status_text = format!("Reconnecting · {attempt}/{max_retries}");
+        },
+        EventPayload::Live(LiveEventPayload::LlmRetryRecovered) => {
+            app.status_text = "Thinking".into();
+        },
         EventPayload::Durable(DurableEventPayload::UserMessage { .. }) => {
             // Optimistically pushed on Enter; skip.
         },
@@ -155,13 +165,28 @@ fn apply_event(app: &mut App, event: &Event) {
             app.status_text = "Thinking".into();
             tracing::debug!(message_id = %message_id, "stream_open");
         },
+        EventPayload::Live(LiveEventPayload::AssistantMessageReset { message_id }) => {
+            let width = app.content_width;
+            app.stream_states
+                .insert(message_id.to_string(), StreamController::new(Some(width)));
+            app.pending_assistant_stream_reset = Some(message_id.to_string());
+            app.scrollback_queue
+                .retain(|entry| entry.assistant_message_id() != Some(message_id.as_str()));
+            if let Some(message) = app.find_message_mut(message_id.as_str()) {
+                message.body.set_text(String::new());
+            }
+            tracing::debug!(message_id = %message_id, "stream_reset");
+        },
         EventPayload::Live(LiveEventPayload::AssistantTextDelta { message_id, delta }) => {
             // 第一次收到 text delta 时写入 StreamHeader
             let is_first_delta = app
                 .find_message_mut(message_id.as_str())
                 .is_some_and(|msg| msg.body.is_empty());
             if is_first_delta {
-                app.scrollback_queue.push(ScrollbackEntry::StreamHeader);
+                app.scrollback_queue
+                    .push(ScrollbackEntry::AssistantStreamHeader {
+                        message_id: message_id.to_string(),
+                    });
                 app.status_text = "Working".into();
             }
             if let Some(msg) = app.find_message_mut(message_id.as_str()) {
@@ -187,10 +212,11 @@ fn apply_event(app: &mut App, event: &Event) {
             };
             let has_visible_content = !lines.is_empty() || !text.trim().is_empty();
             for line in lines {
-                app.scrollback_queue.push(ScrollbackEntry::StreamText {
-                    role: MessageRole::Assistant,
-                    text: line.spans.iter().map(|s| s.content.as_ref()).collect(),
-                });
+                app.scrollback_queue
+                    .push(ScrollbackEntry::AssistantStreamText {
+                        message_id: message_id.to_string(),
+                        text: line.spans.iter().map(|s| s.content.as_ref()).collect(),
+                    });
             }
             // Only add blank separator when there's visible content (avoid gaps between tool
             // calls when LLM returns empty text before issuing more tool calls).
@@ -723,6 +749,7 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
     app.working_dir = snapshot.working_dir.clone();
     app.messages.clear();
     app.needs_terminal_reset = true;
+    app.pending_assistant_stream_reset = None;
     app.stream_states.clear();
     app.child_agents.clear();
     app.child_session_map.clear();
@@ -991,7 +1018,8 @@ mod tests {
         assert_eq!(app.messages[0].body.plain_text(), "first line\nsecond");
         assert!(matches!(
             app.scrollback_queue.first(),
-            Some(ScrollbackEntry::StreamHeader)
+            Some(ScrollbackEntry::AssistantStreamHeader { message_id })
+                if message_id == "msg-1"
         ));
         assert!(
             app.scrollback_queue
@@ -1001,6 +1029,79 @@ mod tests {
         assert!(!app.scrollback_queue.iter().any(|e| {
             matches!(e, ScrollbackEntry::Message(m) if m.role == MessageRole::Assistant)
         }));
+    }
+
+    #[test]
+    fn assistant_retry_reset_reuses_streaming_message() {
+        let mut app = make_app();
+        apply_payload(
+            &mut app,
+            EventPayload::Live(LiveEventPayload::AssistantMessageStarted {
+                message_id: "msg-1".into(),
+            }),
+        );
+        apply_payload(
+            &mut app,
+            EventPayload::Live(LiveEventPayload::AssistantTextDelta {
+                message_id: "msg-1".into(),
+                delta: "stale".into(),
+            }),
+        );
+        app.scrollback_queue
+            .push(ScrollbackEntry::AssistantStreamText {
+                message_id: "msg-1".into(),
+                text: "stale committed line".into(),
+            });
+
+        apply_payload(
+            &mut app,
+            EventPayload::Live(LiveEventPayload::AssistantMessageReset {
+                message_id: "msg-1".into(),
+            }),
+        );
+
+        assert_eq!(app.pending_assistant_stream_reset.as_deref(), Some("msg-1"));
+        assert!(
+            app.scrollback_queue
+                .iter()
+                .all(|entry| entry.assistant_message_id() != Some("msg-1"))
+        );
+
+        apply_payload(
+            &mut app,
+            EventPayload::Live(LiveEventPayload::AssistantTextDelta {
+                message_id: "msg-1".into(),
+                delta: "fresh".into(),
+            }),
+        );
+
+        assert_eq!(app.messages.len(), 1);
+        assert_eq!(app.messages[0].body.plain_text(), "fresh");
+        assert!(app.scrollback_queue.iter().any(|entry| matches!(
+            entry,
+            ScrollbackEntry::AssistantStreamHeader { message_id } if message_id == "msg-1"
+        )));
+        assert!(!app.scrollback_queue.iter().any(|entry| matches!(
+            entry,
+            ScrollbackEntry::AssistantStreamText { text, .. } if text.contains("stale")
+        )));
+
+        apply_payload(
+            &mut app,
+            EventPayload::Live(LiveEventPayload::LlmRetrying {
+                status: None,
+                attempt: 1,
+                max_retries: 2,
+                delay_ms: 100,
+            }),
+        );
+        assert_eq!(app.status_text, "Reconnecting · 1/2");
+
+        apply_payload(
+            &mut app,
+            EventPayload::Live(LiveEventPayload::LlmRetryRecovered),
+        );
+        assert_eq!(app.status_text, "Thinking");
     }
 
     #[test]

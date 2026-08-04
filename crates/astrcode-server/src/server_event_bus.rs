@@ -347,6 +347,9 @@ fn update_streaming(state: &StreamingState, payload: &EventPayload) {
         EventPayload::Live(LiveEventPayload::AssistantMessageStarted { message_id }) => {
             *guard = Some((message_id.clone(), String::new(), String::new()));
         },
+        EventPayload::Live(LiveEventPayload::AssistantMessageReset { message_id }) => {
+            *guard = Some((message_id.clone(), String::new(), String::new()));
+        },
         EventPayload::Live(LiveEventPayload::AssistantTextDelta { delta, .. }) => {
             if let Some((_, text, _)) = guard.as_mut() {
                 text.push_str(delta);

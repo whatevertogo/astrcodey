@@ -92,5 +92,17 @@ pub enum ScrollbackEntry {
     Message(Message),
     StreamHeader,
     StreamText { role: MessageRole, text: String },
+    AssistantStreamHeader { message_id: String },
+    AssistantStreamText { message_id: String, text: String },
     BlankLine,
+}
+
+impl ScrollbackEntry {
+    pub fn assistant_message_id(&self) -> Option<&str> {
+        match self {
+            Self::AssistantStreamHeader { message_id }
+            | Self::AssistantStreamText { message_id, .. } => Some(message_id),
+            _ => None,
+        }
+    }
 }

@@ -30,6 +30,7 @@ pub(crate) async fn stream_request(
     ensure_header(&mut headers, "anthropic-version", ANTHROPIC_API_VERSION);
     ensure_header(&mut headers, "Accept", "text/event-stream");
     let stream_started = AtomicBool::new(false);
+    let stream_replay_safe = AtomicBool::new(true);
 
     HttpPostRequest {
         client,
@@ -38,8 +39,8 @@ pub(crate) async fn stream_request(
         body,
         retry,
     }
-    .run(&stream_started, &tx, |response| {
-        parse_stream(response, &tx, &stream_started)
+    .run(&stream_started, &stream_replay_safe, &tx, |response| {
+        parse_stream(response, &tx, &stream_started, &stream_replay_safe)
     })
     .await
 }
@@ -48,19 +49,24 @@ async fn parse_stream(
     response: reqwest::Response,
     tx: &mpsc::UnboundedSender<LlmEvent>,
     stream_started: &AtomicBool,
+    stream_replay_safe: &AtomicBool,
 ) -> Result<(), LlmError> {
     let mut state = AnthropicStreamState::default();
     let mut current_event_type = String::new();
     let mut has_data_line = false;
     let completed = consume_sse_lines(response, tx, |line| {
         stream_started.store(true, Ordering::SeqCst);
-        process_sse_line(
+        let keep_reading = process_sse_line(
             line,
             tx,
             &mut state,
             &mut current_event_type,
             &mut has_data_line,
-        )
+        );
+        if state.has_started_tool_call() {
+            stream_replay_safe.store(false, Ordering::SeqCst);
+        }
+        keep_reading
     })
     .await?;
 

@@ -53,9 +53,14 @@ pub(crate) struct AnthropicStreamState {
     block_stream_state: HashMap<u64, BlockStreamState>,
     /// 已开始但尚未收到 `content_block_stop` 的 tool call id；流结束时补发完成事件。
     started_tool_call_ids: HashSet<String>,
+    saw_tool_call: bool,
 }
 
 impl AnthropicStreamState {
+    pub(crate) fn has_started_tool_call(&self) -> bool {
+        self.saw_tool_call
+    }
+
     /// 流结束时补发未收到 `content_block_stop` 的工具调用完成事件，防止调用方卡死等待。
     pub(crate) fn emit_pending_tool_completions(
         &mut self,
@@ -138,6 +143,7 @@ fn handle_anthropic_event(
                             state.index_to_call_id.insert(index, call_id.to_string());
                         }
                         state.started_tool_call_ids.insert(call_id.to_string());
+                        state.saw_tool_call = true;
                         let initial_args = block
                             .get("input")
                             .filter(|v| v.as_object().is_some_and(|obj| !obj.is_empty()))
@@ -599,6 +605,7 @@ mod tests {
         ));
         assert!(rx.try_recv().is_err());
         assert!(state.started_tool_call_ids.is_empty());
+        assert!(!state.has_started_tool_call());
     }
 
     #[test]
@@ -617,6 +624,7 @@ mod tests {
             &mut state,
         ));
         assert!(rx.try_recv().is_ok(), "ToolCallStart 应已发送");
+        assert!(state.has_started_tool_call());
 
         assert!(state.emit_pending_tool_completions(&tx));
         let completed: Vec<_> = std::iter::from_fn(|| rx.try_recv().ok())

@@ -29,9 +29,14 @@ const REFLOW_MAX_LINES: usize = 500;
 pub struct TerminalSession {
     pub terminal: CustomTerminal<CrosstermBackend<Stdout>>,
     /// All history lines ever written, kept for resize reflow.
-    history_source: Vec<Line<'static>>,
+    history_source: Vec<HistoryLine>,
     /// Last known terminal width (to detect width changes that need reflow).
     last_width: u16,
+}
+
+struct HistoryLine {
+    assistant_message_id: Option<String>,
+    line: Line<'static>,
 }
 
 impl TerminalSession {
@@ -83,6 +88,16 @@ impl TerminalSession {
         Ok(())
     }
 
+    /// Remove transient lines emitted by a failed assistant stream, then replay retained history.
+    pub fn reset_assistant_stream(&mut self, message_id: &str) -> io::Result<()> {
+        if !remove_assistant_history(&mut self.history_source, message_id) {
+            return Ok(());
+        }
+        let screen_size = self.terminal.size()?;
+        let replay_count = self.history_source.len().min(REFLOW_MAX_LINES);
+        self.clear_and_replay_history(screen_size, replay_count)
+    }
+
     pub fn composer_width(&self) -> usize {
         self.terminal.composer_width()
     }
@@ -99,9 +114,14 @@ impl TerminalSession {
         }
         let width = self.terminal.viewport_area.width;
         for entry in entries {
+            let assistant_message_id = entry.assistant_message_id().map(str::to_owned);
             let lines = scrollback_entry_to_lines(&entry, width, theme, message_renderers);
             // Store in memory for reflow.
-            self.history_source.extend(lines.clone());
+            self.history_source
+                .extend(lines.iter().cloned().map(|line| HistoryLine {
+                    assistant_message_id: assistant_message_id.clone(),
+                    line,
+                }));
             // Insert into terminal scrollback.
             insert_history_lines(&mut self.terminal, lines)?;
         }
@@ -156,11 +176,23 @@ impl TerminalSession {
 
     /// Clear all visible history and re-insert from history_source at the new width.
     fn reflow_history(&mut self, screen_size: ratatui::layout::Size) -> io::Result<()> {
-        // Reset viewport to top of screen (as if starting fresh).
+        let available_rows = screen_size.height.saturating_sub(INLINE_VIEWPORT_HEIGHT) as usize;
+        let replay_count = self
+            .history_source
+            .len()
+            .min(available_rows)
+            .min(REFLOW_MAX_LINES);
+        self.clear_and_replay_history(screen_size, replay_count)
+    }
+
+    fn clear_and_replay_history(
+        &mut self,
+        screen_size: ratatui::layout::Size,
+        replay_count: usize,
+    ) -> io::Result<()> {
         let new_area = ratatui::layout::Rect::new(0, 0, screen_size.width, 0);
         self.terminal.set_viewport_area(new_area);
 
-        // Clear BOTH visible screen AND scrollback buffer.
         // CSI 2J = clear visible screen, CSI 3J = purge scrollback, CSI H = home cursor.
         let writer = self.terminal.backend_mut();
         std::io::Write::write_all(writer, b"\x1b[2J\x1b[3J\x1b[H")?;
@@ -169,15 +201,11 @@ impl TerminalSession {
         self.terminal.last_known_cursor_pos = Position { x: 0, y: 0 };
         self.terminal.invalidate_viewport();
 
-        // Re-insert the tail of history that fits on screen.
-        let available_rows = screen_size.height.saturating_sub(INLINE_VIEWPORT_HEIGHT) as usize;
-        let replay_count = self
-            .history_source
-            .len()
-            .min(available_rows)
-            .min(REFLOW_MAX_LINES);
         let start = self.history_source.len().saturating_sub(replay_count);
-        let lines_to_replay: Vec<Line<'static>> = self.history_source[start..].to_vec();
+        let lines_to_replay: Vec<Line<'static>> = self.history_source[start..]
+            .iter()
+            .map(|history| history.line.clone())
+            .collect();
 
         if !lines_to_replay.is_empty() {
             insert_history_lines(&mut self.terminal, lines_to_replay)?;
@@ -215,7 +243,10 @@ impl TerminalSession {
             .min(available_rows)
             .min(REFLOW_MAX_LINES);
         let start = self.history_source.len().saturating_sub(replay_count);
-        let lines_to_replay: Vec<Line<'static>> = self.history_source[start..].to_vec();
+        let lines_to_replay: Vec<Line<'static>> = self.history_source[start..]
+            .iter()
+            .map(|history| history.line.clone())
+            .collect();
 
         if !lines_to_replay.is_empty() {
             insert_history_lines(&mut self.terminal, lines_to_replay)?;
@@ -243,10 +274,45 @@ impl TerminalSession {
     }
 }
 
+fn remove_assistant_history(history: &mut Vec<HistoryLine>, message_id: &str) -> bool {
+    let previous_len = history.len();
+    history.retain(|line| line.assistant_message_id.as_deref() != Some(message_id));
+    history.len() != previous_len
+}
+
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.terminal.show_cursor();
         let _ = execute!(io::stdout(), DisableBracketedPaste);
         let _ = disable_raw_mode();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assistant_stream_reset_removes_only_matching_history() {
+        let mut history = vec![
+            HistoryLine {
+                assistant_message_id: None,
+                line: Line::from("stable"),
+            },
+            HistoryLine {
+                assistant_message_id: Some("retrying".into()),
+                line: Line::from("stale"),
+            },
+            HistoryLine {
+                assistant_message_id: Some("other".into()),
+                line: Line::from("other stream"),
+            },
+        ];
+
+        assert!(remove_assistant_history(&mut history, "retrying"));
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].assistant_message_id, None);
+        assert_eq!(history[1].assistant_message_id.as_deref(), Some("other"));
+        assert!(!remove_assistant_history(&mut history, "retrying"));
     }
 }

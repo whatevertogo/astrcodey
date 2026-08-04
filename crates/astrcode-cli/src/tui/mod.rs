@@ -116,14 +116,16 @@ pub async fn run(bootstrap_opts: astrcode_server::bootstrap::BootstrapOptions) -
                 }
                 // Commit streaming lines
                 let now = std::time::Instant::now();
-                for ctrl in app.stream_states.values_mut() {
+                for (message_id, ctrl) in &mut app.stream_states {
                     let output = run_commit_tick(&mut chunking_policy, Some(ctrl), now);
                     for line in output.lines {
                         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                        app.scrollback_queue.push(store::transcript::ScrollbackEntry::StreamText {
-                            role: store::transcript::MessageRole::Assistant,
-                            text,
-                        });
+                        app.scrollback_queue.push(
+                            store::transcript::ScrollbackEntry::AssistantStreamText {
+                                message_id: message_id.clone(),
+                                text,
+                            },
+                        );
                     }
                 }
                 dirty = true;
@@ -148,6 +150,9 @@ pub async fn run(bootstrap_opts: astrcode_server::bootstrap::BootstrapOptions) -
             if app.needs_terminal_reset {
                 app.needs_terminal_reset = false;
                 terminal.reset_for_session_switch()?;
+            }
+            if let Some(message_id) = app.pending_assistant_stream_reset.take() {
+                terminal.reset_assistant_stream(&message_id)?;
             }
             // Flush scrollback entries into terminal native scrollback.
             let entries = std::mem::take(&mut app.scrollback_queue);

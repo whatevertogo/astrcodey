@@ -46,12 +46,17 @@ pub(crate) struct StandardAccumulator {
     cache_usage_reported: bool,
     /// 累计的 reasoning 文本，用于 diff 提取增量。
     reasoning_accumulated: String,
+    saw_tool_call: bool,
 }
 
 impl StandardAccumulator {
     #[cfg(test)]
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub(crate) fn has_started_tool_call(&self) -> bool {
+        self.saw_tool_call
     }
 
     fn ingest_tool_call_like_delta(
@@ -80,6 +85,7 @@ impl StandardAccumulator {
                 let call_id = chat_tool_call_id(index, partial);
                 partial.emitted_call_id = Some(call_id.clone());
                 partial.started = true;
+                self.saw_tool_call = true;
                 send_event(
                     tx,
                     LlmEvent::ToolCallStart {
@@ -152,6 +158,7 @@ impl StandardAccumulator {
             .clone()
             .unwrap_or_else(|| item_id.to_string());
         partial.started = true;
+        self.saw_tool_call = true;
         send_event(
             tx,
             LlmEvent::ToolCallStart {
@@ -908,6 +915,7 @@ mod accumulator_tests {
         );
 
         let events = drain_events(&mut rx);
+        assert!(acc.has_started_tool_call());
         assert!(events.iter().any(|e| matches!(
             e, LlmEvent::ToolCallStart { call_id, name, arguments }
             if call_id == "call_1" && name == "glob" && arguments.is_empty()

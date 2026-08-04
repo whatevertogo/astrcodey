@@ -396,12 +396,14 @@ pub struct ConversationControlStateDto {
     pub retry_status: Option<LlmRetryStatusDto>,
 }
 
-/// LLM HTTP 请求的瞬态重试状态。
+/// LLM 请求的瞬态 HTTP 或传输重试状态。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LlmRetryStatusDto {
-    pub status: u16,
+    /// HTTP 状态码；连接或响应流中断时为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<u16>,
     pub attempt: u32,
     pub max_retries: u32,
     pub delay_ms: u64,
@@ -539,6 +541,10 @@ pub enum ConversationDeltaDto {
     PatchBlock {
         block_id: String,
         text_delta: String,
+    },
+    /// 丢弃失败流为该 assistant block 产生的临时文本与思考内容。
+    ResetBlock {
+        block_id: String,
     },
     /// 用持久化后的最终内容完成或补齐 block。
     FinalizeBlock {

@@ -103,6 +103,7 @@ fn live_payload_type(payload: &LiveEventPayload) -> &'static str {
         LiveEventPayload::LlmRetrying { .. } => "llm_retrying",
         LiveEventPayload::LlmRetryRecovered => "llm_retry_recovered",
         LiveEventPayload::AssistantMessageStarted { .. } => "assistant_message_started",
+        LiveEventPayload::AssistantMessageReset { .. } => "assistant_message_reset",
         LiveEventPayload::AssistantTextDelta { .. } => "assistant_text_delta",
         LiveEventPayload::ThinkingDelta { .. } => "thinking_delta",
         LiveEventPayload::ToolCallStarted { .. } => "tool_call_started",
@@ -226,7 +227,12 @@ fn live_payload_details(payload: &LiveEventPayload) -> String {
             attempt,
             max_retries,
             delay_ms,
-        } => format!("status={status} attempt={attempt}/{max_retries} delay_ms={delay_ms}"),
+        } => format!(
+            "status={} attempt={attempt}/{max_retries} delay_ms={delay_ms}",
+            status
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "transport".into())
+        ),
         LiveEventPayload::ToolOutputDelta {
             call_id,
             stream,

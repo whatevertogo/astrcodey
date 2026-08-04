@@ -45,6 +45,8 @@ pub struct App {
     pub needs_extension_refresh: bool,
     /// Resume / 切换会话后需要清屏重置终端。
     pub needs_terminal_reset: bool,
+    /// 流重试后需要从终端历史中撤回的 assistant message。
+    pub pending_assistant_stream_reset: Option<String>,
     /// 服务端 UI 选择请求。
     pub ui_picker: Option<UiPicker>,
     /// 挂起的工具审批（Tool Gate）。
@@ -129,6 +131,7 @@ impl App {
             keybindings: Vec::new(),
             needs_extension_refresh: false,
             needs_terminal_reset: false,
+            pending_assistant_stream_reset: None,
             ui_picker: None,
             pending_tool_approval: None,
             session_picker: None,

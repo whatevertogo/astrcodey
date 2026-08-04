@@ -499,9 +499,10 @@ impl LlmRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum LlmEvent {
-    /// 远端返回瞬态 HTTP 错误，当前请求将在退避后重试。
+    /// 远端返回瞬态 HTTP 或传输错误，当前请求将在退避后重试。
     Retrying {
-        status: u16,
+        /// HTTP 状态码；连接或响应流中断时为空。
+        status: Option<u16>,
         attempt: u32,
         max_retries: u32,
         delay_ms: u64,

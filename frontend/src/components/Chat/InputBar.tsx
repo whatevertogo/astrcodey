@@ -446,8 +446,10 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
               >
                 <Icon name="retry" size={16} />
                 <span>
-                  远端 {retryStatus.status} · 重试 {retryStatus.attempt}/
-                  {retryStatus.maxRetries} · 退避{' '}
+                  {retryStatus.status == null
+                    ? '连接中断'
+                    : `远端 ${retryStatus.status}`}{' '}
+                  · 重试 {retryStatus.attempt}/{retryStatus.maxRetries} · 退避{' '}
                   {(retryStatus.delayMs / 1000).toFixed(1)} 秒
                 </span>
               </div>

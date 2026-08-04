@@ -180,6 +180,17 @@ export function reduceConversationDeltas(
         blocks = upsertBlock(blocks, delta.block)
         break
 
+      case 'resetBlock':
+        blocks = blocks.map((block) => {
+          if (block.id !== delta.blockId || block.kind !== 'assistant') {
+            return block
+          }
+          const reset = { ...block, text: '' }
+          delete reset.reasoningContent
+          return reset
+        })
+        break
+
       case 'updateControlState': {
         if (!sameControlState(control, delta.control)) {
           control = delta.control

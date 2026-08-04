@@ -157,6 +157,11 @@ fn live_event_to_deltas(
                 control: control_from_event(event, has_messages),
             },
         ],
+        LiveEventPayload::AssistantMessageReset { message_id } => {
+            vec![ConversationDeltaDto::ResetBlock {
+                block_id: message_id.to_string(),
+            }]
+        },
         LiveEventPayload::AssistantTextDelta { message_id, delta } => {
             vec![ConversationDeltaDto::PatchBlock {
                 block_id: message_id.to_string(),
@@ -222,7 +227,8 @@ fn projected_phase(payload: &EventPayload) -> Phase {
         | EventPayload::Live(
             LiveEventPayload::AgentRunStarted
             | LiveEventPayload::LlmRetrying { .. }
-            | LiveEventPayload::LlmRetryRecovered,
+            | LiveEventPayload::LlmRetryRecovered
+            | LiveEventPayload::AssistantMessageReset { .. },
         ) => Phase::Thinking,
         EventPayload::Live(
             LiveEventPayload::AssistantMessageStarted { .. }
@@ -442,7 +448,7 @@ mod tests {
     fn llm_retry_projects_transient_control_status() {
         let event = event(
             EventPayload::Live(LiveEventPayload::LlmRetrying {
-                status: 503,
+                status: Some(503),
                 attempt: 2,
                 max_retries: 5,
                 delay_ms: 2_000,
@@ -459,7 +465,7 @@ mod tests {
                     phase: PhaseDto::Thinking,
                     active_turn_id: Some(turn_id),
                     retry_status: Some(LlmRetryStatusDto {
-                        status: 503,
+                        status: Some(503),
                         attempt: 2,
                         max_retries: 5,
                         delay_ms: 2_000,
@@ -467,6 +473,21 @@ mod tests {
                     ..
                 }
             }] if turn_id == "turn-1"
+        ));
+    }
+
+    #[test]
+    fn assistant_message_reset_projects_explicit_block_reset() {
+        let event = event(
+            EventPayload::Live(LiveEventPayload::AssistantMessageReset {
+                message_id: "assistant-1".into(),
+            }),
+            Some("turn-1"),
+        );
+
+        assert!(matches!(
+            event_to_deltas(&event, true).as_slice(),
+            [ConversationDeltaDto::ResetBlock { block_id }] if block_id == "assistant-1"
         ));
     }
 

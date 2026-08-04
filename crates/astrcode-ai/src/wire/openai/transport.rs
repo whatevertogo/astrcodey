@@ -26,6 +26,7 @@ pub(crate) async fn stream_request(
     let mut headers = base_headers(&config);
     ensure_header(&mut headers, "Accept", "text/event-stream");
     let stream_started = AtomicBool::new(false);
+    let stream_replay_safe = AtomicBool::new(true);
 
     HttpPostRequest {
         client,
@@ -34,8 +35,14 @@ pub(crate) async fn stream_request(
         body,
         retry,
     }
-    .run(&stream_started, &tx, |response| {
-        parse_stream(response, api_mode, &tx, &stream_started)
+    .run(&stream_started, &stream_replay_safe, &tx, |response| {
+        parse_stream(
+            response,
+            api_mode,
+            &tx,
+            &stream_started,
+            &stream_replay_safe,
+        )
     })
     .await
 }
@@ -45,6 +52,7 @@ async fn parse_stream(
     api_mode: OpenAiApiMode,
     tx: &mpsc::UnboundedSender<LlmEvent>,
     stream_started: &AtomicBool,
+    stream_replay_safe: &AtomicBool,
 ) -> Result<(), LlmError> {
     let mut accumulator = StandardAccumulator::default();
     let mut has_data_line = false;
@@ -54,6 +62,9 @@ async fn parse_stream(
             has_data_line = true;
         }
         process_sse_line(line, &mut accumulator, api_mode, tx);
+        if accumulator.has_started_tool_call() {
+            stream_replay_safe.store(false, Ordering::SeqCst);
+        }
         !tx.is_closed()
     })
     .await?;
@@ -86,7 +97,15 @@ mod tests {
         let response = client.post(&addr).body("{}").send().await.unwrap();
         let (tx, rx) = mpsc::unbounded_channel();
         let stream_started = AtomicBool::new(false);
-        let result = parse_stream(response, OpenAiApiMode::Responses, &tx, &stream_started).await;
+        let stream_replay_safe = AtomicBool::new(true);
+        let result = parse_stream(
+            response,
+            OpenAiApiMode::Responses,
+            &tx,
+            &stream_started,
+            &stream_replay_safe,
+        )
+        .await;
         (result, rx)
     }
 

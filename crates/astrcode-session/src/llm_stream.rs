@@ -121,12 +121,15 @@ pub(crate) async fn consume_llm_stream(
                 attempt,
                 max_retries,
                 delay_ms,
-            } => consumer.publisher.live(LiveEventPayload::LlmRetrying {
-                status,
-                attempt,
-                max_retries,
-                delay_ms,
-            }),
+            } => {
+                consumer.reset_for_retry();
+                consumer.publisher.live(LiveEventPayload::LlmRetrying {
+                    status,
+                    attempt,
+                    max_retries,
+                    delay_ms,
+                });
+            },
             LlmEvent::RetryRecovered => {
                 consumer.publisher.live(LiveEventPayload::LlmRetryRecovered)
             },
@@ -205,6 +208,21 @@ impl<'a> StreamConsumer<'a> {
             message_id: self.message_id.clone(),
             delta,
         });
+    }
+
+    fn reset_for_retry(&mut self) {
+        self.current_text.clear();
+        self.reasoning_content.clear();
+        self.tool_calls.clear();
+        self.pending = None;
+        self.captured_usage = None;
+        self.handled_tool_call_ids.clear();
+        if self.message_started {
+            self.publisher
+                .live(LiveEventPayload::AssistantMessageReset {
+                    message_id: self.message_id.clone(),
+                });
+        }
     }
 
     fn handle_thinking_delta(&mut self, delta: String) {
@@ -397,7 +415,106 @@ pub(crate) fn non_empty_reasoning_content(reasoning_content: String) -> Option<S
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use astrcode_core::event::EventPayload;
+    use astrcode_storage::in_memory::InMemoryEventStore;
+
     use super::*;
+    use crate::{
+        session::{Session, SessionCreateParams},
+        session_event_sink::SessionEventSink,
+        session_runtime::SessionRuntimeState,
+        test_support::{ChannelObserver, test_runtime_services},
+    };
+
+    #[tokio::test]
+    async fn retry_discards_partial_response_and_emits_reset() {
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let store = Arc::new(InMemoryEventStore::new());
+        let runtime = Arc::new(SessionRuntimeState::new_with_event_sink(
+            new_session_id(),
+            store.clone(),
+            Arc::new(SessionEventSink::new(ChannelObserver::new(events_tx))),
+        ));
+        let session = Session::create_with_params(SessionCreateParams {
+            working_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            model_id: "mock-model".into(),
+            parent_session_id: None,
+            tool_selection: None,
+            source_extension: None,
+            extra_system_prompt: None,
+            initial_system_prompt: None,
+            runtime,
+            runtime_services: test_runtime_services(),
+        })
+        .await
+        .unwrap();
+        while events_rx.try_recv().is_ok() {}
+
+        let publisher = TurnEvents::new(session.clone(), new_turn_id());
+        let message_id = new_message_id();
+        let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+        for event in [
+            LlmEvent::ThinkingDelta {
+                delta: "stale reasoning".into(),
+            },
+            LlmEvent::ContentDelta {
+                delta: "stale".into(),
+            },
+            LlmEvent::Retrying {
+                status: None,
+                attempt: 1,
+                max_retries: 2,
+                delay_ms: 1,
+            },
+            LlmEvent::ThinkingDelta {
+                delta: "fresh reasoning".into(),
+            },
+            LlmEvent::ContentDelta {
+                delta: "fresh".into(),
+            },
+            LlmEvent::Done {
+                finish_reason: "stop".into(),
+            },
+        ] {
+            stream_tx.send(event).unwrap();
+        }
+
+        let outcome = consume_llm_stream(
+            stream_rx,
+            &publisher,
+            message_id.clone(),
+            &CancellationToken::new(),
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            StreamOutcome::Complete {
+                text,
+                reasoning_content,
+                message_id: outcome_message_id,
+                ..
+            } if text == "fresh"
+                && reasoning_content == "fresh reasoning"
+                && outcome_message_id == message_id
+        ));
+        session
+            .runtime
+            .event_sink()
+            .sync(store, session.id())
+            .await
+            .unwrap();
+        assert!(
+            std::iter::from_fn(|| events_rx.try_recv().ok()).any(|event| matches!(
+                event.payload,
+                EventPayload::Live(LiveEventPayload::AssistantMessageReset { .. })
+            ))
+        );
+    }
 
     #[test]
     fn non_empty_reasoning_returns_some() {
