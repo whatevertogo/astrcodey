@@ -17,6 +17,8 @@ pub const CAP_HANDLER_INVOKE: &str = "handler.invoke";
 pub const WIRE_CODEC_JSON: &str = "json";
 pub const SUPPORTED_PROTOCOL_VERSIONS_KEY: &str = "supported_protocol_versions";
 pub const WIRE_CODEC_METADATA_KEY: &str = "wire_codec";
+/// Wire feature: nested invokes carry the id of the inbound invoke that created them.
+pub const WIRE_FEATURE_PARENT_INVOKE_ID: &str = "parent_invoke_id";
 
 /// 五类线缆消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,6 +127,8 @@ pub struct InvokeMsg {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(alias = "caller_plugin_id")]
     pub caller_extension_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_invoke_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,9 +304,30 @@ mod tests {
             input: serde_json::json!({}),
             stream: false,
             caller_extension_id: Some("ext".into()),
+            parent_invoke_id: Some("req-parent".into()),
         });
         let json = serde_json::to_string(&msg).unwrap();
         let back: WireMessage = serde_json::from_str(&json).unwrap();
-        assert!(matches!(back, WireMessage::Invoke(_)));
+        let WireMessage::Invoke(back) = back else {
+            panic!("expected invoke");
+        };
+        assert_eq!(back.parent_invoke_id.as_deref(), Some("req-parent"));
+    }
+
+    #[test]
+    fn legacy_invoke_without_parent_id_still_decodes() {
+        let message: WireMessage = serde_json::from_value(serde_json::json!({
+            "type": "invoke",
+            "id": "legacy-1",
+            "capability": "handler.invoke",
+            "input": {},
+            "stream": false
+        }))
+        .unwrap();
+
+        let WireMessage::Invoke(invoke) = message else {
+            panic!("expected invoke");
+        };
+        assert!(invoke.parent_invoke_id.is_none());
     }
 }

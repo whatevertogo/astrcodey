@@ -97,6 +97,13 @@ Hook 语义矩阵见 [extension-hook-matrix.md](extension-hook-matrix.md)。
 3. 宿主经 `handler.invoke` 调用工具 / 命令 / 钩子
 4. 子进程经 `astrcode.*` `invoke` 调用宿主能力（可 `stream: true`）
 
+当前 Worker 会在握手 manifest 的 `wire_features` 中声明 `parent_invoke_id`。在 handler
+作用域内发起的嵌套 invoke 会携带父请求 ID 与父取消令牌，宿主据此恢复该请求自己的
+session、working directory 和授权上下文。宿主只会为声明此 feature 且工具 mode 为
+`parallel` 的 worker 开放有界并行；旧 worker 继续按 S5R 1.0 解码，并自动降级串行。
+handler 自行创建的脱离 Tokio task 不继承 task-local 调用作用域；当前 Worker API 不支持
+这类任务在原 handler 返回后继续使用会话级 HostClient 能力。
+
 ---
 
 ## 5. 宿主能力

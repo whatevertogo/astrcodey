@@ -348,6 +348,7 @@ mod tests {
                     }),
                     stream: false,
                     caller_extension_id: None,
+                    parent_invoke_id: None,
                 },
                 CancelToken::default(),
             )

@@ -1,12 +1,17 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     future::Future,
+    panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
-use tokio::{sync::watch, task::JoinHandle};
+use tokio::{
+    sync::{Notify, watch},
+    task::AbortHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 /// 扩展可以显式申请的宿主能力。
@@ -102,11 +107,13 @@ pub struct ExtensionTasks {
     shutdown: CancellationToken,
     state: Arc<Mutex<ExtensionTaskState>>,
     lifecycle: watch::Sender<ExtensionTaskLifecycle>,
+    completed: Arc<Notify>,
 }
 
 #[derive(Default)]
 struct ExtensionTaskState {
-    tasks: Vec<ExtensionTask>,
+    next_task_id: u64,
+    tasks: HashMap<u64, ExtensionTask>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,7 +125,24 @@ enum ExtensionTaskLifecycle {
 
 struct ExtensionTask {
     name: String,
-    handle: JoinHandle<()>,
+    abort_handle: AbortHandle,
+}
+
+struct ExtensionTaskCompletion {
+    task_id: u64,
+    state: Arc<Mutex<ExtensionTaskState>>,
+    completed: Arc<Notify>,
+}
+
+impl Drop for ExtensionTaskCompletion {
+    fn drop(&mut self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .tasks
+            .remove(&self.task_id);
+        self.completed.notify_waiters();
+    }
 }
 
 impl ExtensionTasks {
@@ -137,6 +161,7 @@ impl ExtensionTasks {
             shutdown: CancellationToken::new(),
             state: Arc::new(Mutex::new(ExtensionTaskState::default())),
             lifecycle: watch::channel(lifecycle).0,
+            completed: Arc::new(Notify::new()),
         }
     }
 
@@ -164,40 +189,66 @@ impl ExtensionTasks {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let mut state = self.lock_state();
         let name = name.into();
-        let handle = match *self.lifecycle.borrow() {
-            ExtensionTaskLifecycle::Active => tokio::spawn(future),
-            ExtensionTaskLifecycle::Suspended => {
-                let mut lifecycle = self.lifecycle.subscribe();
-                tokio::spawn(async move {
-                    loop {
-                        let current_lifecycle = *lifecycle.borrow_and_update();
-                        match current_lifecycle {
-                            ExtensionTaskLifecycle::Active
-                            | ExtensionTaskLifecycle::Shutdown { was_active: true } => {
-                                future.await;
-                                return;
-                            },
-                            ExtensionTaskLifecycle::Shutdown { was_active: false } => return,
-                            ExtensionTaskLifecycle::Suspended => {
-                                if lifecycle.changed().await.is_err() {
-                                    return;
-                                }
-                            },
-                        }
-                    }
-                })
-            },
-            ExtensionTaskLifecycle::Shutdown { .. } => {
-                tracing::debug!(
-                    extension_id = %self.extension_id,
-                    "skip spawning extension task after shutdown"
-                );
-                return;
-            },
+        let mut state = self.lock_state();
+        if matches!(
+            *self.lifecycle.borrow(),
+            ExtensionTaskLifecycle::Shutdown { .. }
+        ) {
+            tracing::debug!(
+                extension_id = %self.extension_id,
+                "skip spawning extension task after shutdown"
+            );
+            return;
+        }
+
+        let task_id = state.next_task_id;
+        state.next_task_id = state.next_task_id.wrapping_add(1);
+        let mut lifecycle = self.lifecycle.subscribe();
+        let extension_id = Arc::clone(&self.extension_id);
+        let task_name = name.clone();
+        let task_state = Arc::clone(&self.state);
+        let completed = Arc::clone(&self.completed);
+        let completion = ExtensionTaskCompletion {
+            task_id,
+            state: task_state,
+            completed,
         };
-        state.tasks.push(ExtensionTask { name, handle });
+        let handle = tokio::spawn(async move {
+            let _completion = completion;
+            let run = async move {
+                loop {
+                    let current_lifecycle = *lifecycle.borrow_and_update();
+                    match current_lifecycle {
+                        ExtensionTaskLifecycle::Active
+                        | ExtensionTaskLifecycle::Shutdown { was_active: true } => {
+                            future.await;
+                            return;
+                        },
+                        ExtensionTaskLifecycle::Shutdown { was_active: false } => return,
+                        ExtensionTaskLifecycle::Suspended => {
+                            if lifecycle.changed().await.is_err() {
+                                return;
+                            }
+                        },
+                    }
+                }
+            };
+            if AssertUnwindSafe(run).catch_unwind().await.is_err() {
+                tracing::error!(
+                    extension_id = %extension_id,
+                    task = %task_name,
+                    "extension task panicked"
+                );
+            }
+        });
+        state.tasks.insert(
+            task_id,
+            ExtensionTask {
+                name,
+                abort_handle: handle.abort_handle(),
+            },
+        );
     }
 
     pub fn cancel(&self) {
@@ -218,67 +269,48 @@ impl ExtensionTasks {
         });
     }
 
-    pub async fn wait(&self, timeout: Duration) {
-        let tasks = std::mem::take(&mut self.lock_state().tasks);
+    /// 等待所有托管任务退出，超时后请求中止并短暂等待回收。
+    ///
+    /// 仅在任务集合确实清空时返回 `true`；`false` 表示中止后仍有任务未回收。
+    pub async fn wait(&self, timeout: Duration) -> bool {
+        if self
+            .wait_until_empty(tokio::time::Instant::now() + timeout)
+            .await
+        {
+            return true;
+        }
 
-        let deadline = tokio::time::Instant::now() + timeout;
-        for task in tasks {
+        let remaining = self
+            .lock_state()
+            .tasks
+            .values()
+            .map(|task| (task.name.clone(), task.abort_handle.clone()))
+            .collect::<Vec<_>>();
+        for (name, abort_handle) in remaining {
+            tracing::warn!(
+                extension_id = %self.extension_id,
+                task = %name,
+                "extension task did not stop before shared timeout; aborting"
+            );
+            abort_handle.abort();
+        }
+
+        self.wait_until_empty(tokio::time::Instant::now() + Duration::from_millis(100))
+            .await
+    }
+
+    async fn wait_until_empty(&self, deadline: tokio::time::Instant) -> bool {
+        loop {
+            let notified = self.completed.notified();
+            if self.lock_state().tasks.is_empty() {
+                return true;
+            }
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                self.abort_one(task).await;
-            } else {
-                self.wait_one(task, deadline - now).await;
+                return self.lock_state().tasks.is_empty();
             }
+            let _ = tokio::time::timeout(deadline - now, notified).await;
         }
-    }
-
-    async fn wait_one(&self, task: ExtensionTask, timeout: Duration) {
-        let ExtensionTask { name, mut handle } = task;
-        match tokio::time::timeout(timeout, &mut handle).await {
-            Ok(Ok(())) => {},
-            Ok(Err(join_err)) if join_err.is_cancelled() => {
-                tracing::debug!(
-                    extension_id = %self.extension_id,
-                    task = %name,
-                    "extension task cancelled"
-                );
-            },
-            Ok(Err(join_err)) if join_err.is_panic() => {
-                tracing::error!(
-                    extension_id = %self.extension_id,
-                    task = %name,
-                    "extension task panicked"
-                );
-            },
-            Ok(Err(join_err)) => {
-                tracing::warn!(
-                    extension_id = %self.extension_id,
-                    task = %name,
-                    error = %join_err,
-                    "extension task failed"
-                );
-            },
-            Err(_) => {
-                tracing::warn!(
-                    extension_id = %self.extension_id,
-                    task = %name,
-                    "extension task did not stop before timeout; aborting"
-                );
-                handle.abort();
-                let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
-            },
-        }
-    }
-
-    async fn abort_one(&self, task: ExtensionTask) {
-        let ExtensionTask { name, handle } = task;
-        tracing::warn!(
-            extension_id = %self.extension_id,
-            task = %name,
-            "extension task did not stop before shared timeout; aborting"
-        );
-        handle.abort();
-        let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, ExtensionTaskState> {
@@ -360,6 +392,8 @@ pub trait OutboundNetworkService: Send + Sync {
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use tokio::sync::oneshot;
+
     use super::*;
 
     #[tokio::test]
@@ -394,7 +428,7 @@ mod tests {
         .await
         .unwrap();
         tasks.cancel();
-        tasks.wait(Duration::from_secs(1)).await;
+        assert!(tasks.wait(Duration::from_secs(1)).await);
     }
 
     #[tokio::test]
@@ -413,11 +447,30 @@ mod tests {
             finished_clone.store(true, Ordering::SeqCst);
         });
         tasks.cancel();
-        tasks.wait(Duration::from_secs(1)).await;
+        assert!(tasks.wait(Duration::from_secs(1)).await);
         assert!(
             finished.load(Ordering::SeqCst),
             "cooperative task should run to completion before the timeout"
         );
+    }
+
+    #[tokio::test]
+    async fn completed_tasks_are_reaped_before_shutdown() {
+        let tasks = ExtensionTasks::new("ext");
+        for _ in 0..64 {
+            tasks.spawn("short", async {});
+        }
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if tasks.lock_state().tasks.is_empty() {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -431,12 +484,23 @@ mod tests {
         });
         tasks.cancel();
         let start = tokio::time::Instant::now();
-        tasks.wait(Duration::from_millis(50)).await;
+        assert!(tasks.wait(Duration::from_millis(50)).await);
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "wait should abort the stuck task instead of blocking; elapsed={:?}",
             start.elapsed()
         );
+        assert!(tasks.lock_state().tasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn immediate_abort_reaps_a_task_before_its_first_poll() {
+        let tasks = ExtensionTasks::new("ext");
+        tasks.spawn("unpolled", std::future::pending());
+        tasks.cancel();
+        assert!(tasks.wait(Duration::ZERO).await);
+
+        assert!(tasks.lock_state().tasks.is_empty());
     }
 
     #[tokio::test]
@@ -448,7 +512,27 @@ mod tests {
             panic!("extension task exploded");
         });
         tasks.cancel();
-        tasks.wait(Duration::from_secs(1)).await;
+        assert!(tasks.wait(Duration::from_secs(1)).await);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn wait_reports_task_that_cannot_be_reaped_after_abort() {
+        let tasks = ExtensionTasks::new("ext");
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        tasks.spawn("blocking", async move {
+            tokio::task::block_in_place(|| {
+                let _ = entered_tx.send(());
+                let _ = release_rx.recv();
+            });
+        });
+        entered_rx.await.unwrap();
+
+        tasks.cancel();
+        assert!(!tasks.wait(Duration::ZERO).await);
+
+        release_tx.send(()).unwrap();
+        assert!(tasks.wait(Duration::from_secs(1)).await);
     }
 
     #[tokio::test]
@@ -463,9 +547,10 @@ mod tests {
         assert!(join.join().is_err(), "helper thread should have panicked");
 
         // 尽管已毒化,所有经由 lock_state() 的操作都应恢复,而非 panic。
-        tasks.spawn("after-poison", async {});
+        tasks.spawn("after-poison", std::future::pending());
         assert_eq!(tasks.lock_state().tasks.len(), 1);
         tasks.cancel();
+        assert!(tasks.wait(Duration::from_millis(10)).await);
         assert!(matches!(
             *tasks.lifecycle.borrow(),
             ExtensionTaskLifecycle::Shutdown { .. }

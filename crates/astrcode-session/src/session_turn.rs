@@ -25,6 +25,7 @@ use crate::{
     runtime_stability::RuntimeStabilityBudget,
     session::Session,
     session_error::SessionError,
+    session_runtime_services::SessionRuntimeView,
     turn_context::TurnError,
     turn_handle::{SharedTurnFinalization, TurnHandle},
     turn_runner::{RunTurnResult, TurnFinalization, TurnLoop, run_turn},
@@ -56,6 +57,7 @@ impl Session {
 
     async fn apply_user_message_envelope(
         &self,
+        runtime_view: &SessionRuntimeView,
         text: String,
         attachments: &[MessageAttachment],
         turn_id: &TurnId,
@@ -71,9 +73,8 @@ impl Session {
             attachments: attachments.to_vec(),
             session_store_dir: self.session_store_dir().await,
         };
-        match self
-            .runtime_services()
-            .turn_hooks_arc()
+        match runtime_view
+            .turn_hooks()
             .emit_user_message_envelope(ctx)
             .await?
         {
@@ -91,7 +92,10 @@ impl Session {
         }
     }
 
-    async fn prepare_turn_runner(&self) -> Result<TurnLoop, TurnError> {
+    async fn prepare_turn_runner(
+        &self,
+        runtime_view: &SessionRuntimeView,
+    ) -> Result<TurnLoop, TurnError> {
         let session_store_dir = self
             .runtime
             .store()
@@ -132,13 +136,18 @@ impl Session {
             let tool_selection_ref: Option<&SessionToolSelection> = tool_selection.as_ref();
             let mut stability = RuntimeStabilityBudget::new();
             let tool_snapshot = self
-                .resolve_tool_registry_snapshot(&working_dir, tool_selection_ref, &mut stability)
+                .resolve_tool_registry_snapshot(
+                    runtime_view,
+                    &working_dir,
+                    tool_selection_ref,
+                    &mut stability,
+                )
                 .await?;
             (tool_snapshot.registry, tool_selection, false)
         } else {
             let stored_fingerprint = pre_state.system_prompt.fingerprint.clone();
             let prepared = self
-                .prepare_runtime_snapshot(&working_dir, &pre_state, &model_id)
+                .prepare_runtime_snapshot(runtime_view, &working_dir, &pre_state, &model_id)
                 .await?;
             let prompt_changed = self
                 .persist_system_prompt(prepared.prompt, Some(&stored_fingerprint))
@@ -152,7 +161,6 @@ impl Session {
         } else {
             pre_state
         };
-        let cancellation_token = CancellationToken::new();
         TurnLoop::new_with_llm(
             self.clone(),
             &session_state,
@@ -160,7 +168,7 @@ impl Session {
             session_store_dir,
             llm,
             registry,
-            cancellation_token,
+            runtime_view.turn_hooks_arc(),
         )
     }
 
@@ -197,13 +205,14 @@ impl Session {
         turn_id: TurnId,
         accepted_seq: Option<u64>,
     ) -> Result<TurnHandle, TurnError> {
+        let runtime_view = self.runtime_services.turn_runtime_view().await?;
         let UserInput { text, attachments } = input;
         let text = self
-            .apply_user_message_envelope(text, &attachments, &turn_id)
+            .apply_user_message_envelope(&runtime_view, text, &attachments, &turn_id)
             .await?;
         self.emit_turn_start_events(&text, &attachments, &turn_id, accepted_seq)
             .await?;
-        let agent = match self.prepare_turn_runner().await {
+        let agent = match self.prepare_turn_runner(&runtime_view).await {
             Ok(agent) => agent,
             Err(error) => {
                 self.settle_failed_turn_setup(&turn_id, &error).await;
@@ -393,4 +402,203 @@ pub async fn emit_turn_aborted_context(
         .emit_durable(turn_id, DurableEventPayload::TurnAbortedContext)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    };
+
+    use astrcode_extension_sdk::{
+        extension::{
+            ExtensionError, ExtensionEvent, LifecycleContext, PromptBuildContext,
+            PromptContributions, UserMessageEnvelopeContext, UserMessageEnvelopeResult,
+        },
+        runtime_ports::{
+            PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
+            SessionOperationsProvider, ToolCatalogProvider, ToolCatalogScope, ToolCatalogSnapshot,
+            TurnExtensionView, TurnExtensionViewProvider, TurnHooks,
+        },
+    };
+    use astrcode_storage::in_memory::InMemoryEventStore;
+
+    use super::*;
+    use crate::{
+        SessionExtensionPorts, SessionRuntimeServices,
+        session::SessionCreateParams,
+        session_runtime::SessionRuntimeState,
+        test_support::{NoopContextAssembler, UnusedLlm, test_effective_config},
+    };
+
+    struct SwitchingRuntime {
+        state: Arc<SwitchingState>,
+    }
+
+    struct SwitchingState {
+        current_generation: AtomicU64,
+        calls: Mutex<Vec<String>>,
+    }
+
+    struct TaggedRuntimeView {
+        generation: u64,
+        state: Arc<SwitchingState>,
+    }
+
+    impl TaggedRuntimeView {
+        fn record(&self, operation: &str) {
+            self.state
+                .calls
+                .lock()
+                .unwrap()
+                .push(format!("{}:{operation}", self.generation));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolCatalogProvider for TaggedRuntimeView {
+        fn revision(&self) -> u64 {
+            self.generation
+        }
+
+        async fn tool_catalog(
+            &self,
+            _scope: &ToolCatalogScope,
+        ) -> Result<ToolCatalogSnapshot, ExtensionError> {
+            self.record("tool_catalog");
+            Ok(ToolCatalogSnapshot::complete(self.generation, Vec::new()))
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PromptContributor for TaggedRuntimeView {
+        async fn collect_prompt_contributions(
+            &self,
+            _ctx: PromptBuildContext,
+        ) -> Result<PromptContributions, ExtensionError> {
+            self.record("prompt");
+            Ok(PromptContributions::default())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TurnHooks for TaggedRuntimeView {
+        async fn emit_user_message_envelope(
+            &self,
+            _ctx: UserMessageEnvelopeContext,
+        ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
+            self.record("envelope");
+            self.state.current_generation.store(2, Ordering::Release);
+            Ok(UserMessageEnvelopeResult::Allow)
+        }
+
+        async fn emit_lifecycle(
+            &self,
+            event: ExtensionEvent,
+            _ctx: LifecycleContext,
+        ) -> Result<(), ExtensionError> {
+            self.record(match event {
+                ExtensionEvent::TurnStart => "turn_start",
+                ExtensionEvent::UserPromptSubmit => "prompt_submit",
+                ExtensionEvent::TurnEnd => "turn_end",
+                _ => "other_lifecycle",
+            });
+            if event == ExtensionEvent::TurnStart {
+                Err(ExtensionError::Internal("stop before provider call".into()))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl TurnExtensionViewProvider for SwitchingRuntime {
+        fn turn_extension_view(&self) -> TurnExtensionView {
+            let generation = self.state.current_generation.load(Ordering::Acquire);
+            let view = Arc::new(TaggedRuntimeView {
+                generation,
+                state: Arc::clone(&self.state),
+            });
+            let tool_catalog: Arc<dyn ToolCatalogProvider> = view.clone();
+            let prompt_contributor: Arc<dyn PromptContributor> = view.clone();
+            let turn_hooks: Arc<dyn TurnHooks> = view;
+            TurnExtensionView::new(generation, tool_catalog, prompt_contributor, turn_hooks)
+        }
+    }
+
+    impl RuntimeSnapshotProvider for SwitchingRuntime {
+        fn runtime_snapshot_state(&self) -> RuntimeSnapshotState {
+            RuntimeSnapshotState::Stable(self.state.current_generation.load(Ordering::Acquire))
+        }
+    }
+
+    impl SessionOperationsProvider for SwitchingRuntime {}
+
+    #[tokio::test]
+    async fn one_turn_keeps_the_extension_generation_captured_before_envelope() {
+        let state = Arc::new(SwitchingState {
+            current_generation: AtomicU64::new(9),
+            calls: Mutex::new(Vec::new()),
+        });
+        let extension_runtime = Arc::new(SwitchingRuntime {
+            state: Arc::clone(&state),
+        });
+        let llm: Arc<dyn astrcode_core::llm::LlmProvider> = Arc::new(UnusedLlm);
+        let runtime_services = Arc::new(SessionRuntimeServices::new(
+            llm.clone(),
+            llm,
+            test_effective_config(astrcode_core::config::ContextSettings::default()),
+            SessionExtensionPorts::from_adapter(extension_runtime),
+            Arc::new(NoopContextAssembler::new(
+                astrcode_core::config::ContextSettings::default(),
+            )),
+            Arc::new(astrcode_context::NoopPostCompactEnricher),
+            Arc::new(astrcode_extension_sdk::runtime_ports::NoopRuntimePorts),
+        ));
+        let session_id = new_session_id();
+        let store: Arc<dyn astrcode_storage::SessionStore> = Arc::new(InMemoryEventStore::new());
+        let runtime = Arc::new(SessionRuntimeState::new(session_id, store));
+        let session = Session::create_with_params(SessionCreateParams {
+            working_dir: std::env::temp_dir().to_string_lossy().into_owned(),
+            model_id: "mock-model".into(),
+            parent_session_id: None,
+            tool_selection: None,
+            source_extension: None,
+            extra_system_prompt: None,
+            initial_system_prompt: None,
+            runtime,
+            runtime_services,
+        })
+        .await
+        .unwrap();
+
+        state.calls.lock().unwrap().clear();
+        state.current_generation.store(1, Ordering::Release);
+        let handle = session
+            .submit(UserInput::text_only("pin generation"), new_turn_id(), None)
+            .await
+            .unwrap();
+        let result = handle.wait().await.unwrap();
+        assert!(result.output.is_err());
+        assert_eq!(state.current_generation.load(Ordering::Acquire), 2);
+
+        let calls = state.calls.lock().unwrap().clone();
+        for expected in [
+            "1:envelope",
+            "1:tool_catalog",
+            "1:prompt",
+            "1:turn_start",
+            "1:prompt_submit",
+            "1:turn_end",
+        ] {
+            assert!(
+                calls.iter().any(|call| call == expected),
+                "calls: {calls:?}"
+            );
+        }
+        assert!(
+            calls.iter().all(|call| call.starts_with("1:")),
+            "turn mixed extension generations: {calls:?}"
+        );
+    }
 }

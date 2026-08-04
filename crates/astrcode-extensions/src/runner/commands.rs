@@ -1,8 +1,11 @@
-use std::{fmt, sync::Arc};
+use std::{
+    fmt,
+    sync::{Arc, Weak},
+};
 
 use astrcode_extension_sdk::extension::*;
 
-use super::ExtensionRunner;
+use super::{ExtensionRunner, ExtensionView, HandlerIndex};
 
 #[derive(Debug, Clone)]
 pub struct RegisteredSlashCommand {
@@ -60,16 +63,23 @@ pub struct ShadowedSlashCommand {
     pub priority: i32,
 }
 
-impl ExtensionRunner {
+impl ExtensionView {
     /// 从 HandlerIndex 缓存收集斜杠命令。
     pub async fn collect_commands_for_typed(
         &self,
         working_dir: &str,
     ) -> Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> {
-        let index = self.load_index();
+        let index = &self.index;
         let mut cmds = Vec::new();
         for (ext_id, cmd, handler) in &index.static_commands {
-            cmds.push((ext_id.clone(), cmd.clone(), Arc::clone(handler)));
+            cmds.push((
+                ext_id.clone(),
+                cmd.clone(),
+                Arc::new(ViewCommandHandler {
+                    handler: Arc::clone(handler),
+                    index: Arc::downgrade(index),
+                }) as Arc<dyn CommandHandler>,
+            ));
         }
         for (extension_id, discovery) in &index.command_discoveries {
             match tokio::time::timeout(self.operation_timeout, discovery.discover(working_dir))
@@ -77,7 +87,14 @@ impl ExtensionRunner {
             {
                 Ok(discovered) => {
                     for (cmd, handler) in discovered {
-                        cmds.push((extension_id.clone(), cmd, handler));
+                        cmds.push((
+                            extension_id.clone(),
+                            cmd,
+                            Arc::new(ViewCommandHandler {
+                                handler,
+                                index: Arc::downgrade(index),
+                            }) as Arc<dyn CommandHandler>,
+                        ));
                     }
                 },
                 Err(_) => {
@@ -190,6 +207,120 @@ impl ExtensionRunner {
         resolved
             .handler
             .complete(&resolved.command.name, argument, cursor, working_dir, ctx)
+            .await
+    }
+}
+
+impl ExtensionRunner {
+    pub async fn collect_commands_for_typed(
+        &self,
+        working_dir: &str,
+    ) -> Vec<(String, SlashCommand, Arc<dyn CommandHandler>)> {
+        self.extension_view()
+            .collect_commands_for_typed(working_dir)
+            .await
+    }
+
+    pub async fn resolve_commands_for_typed(&self, working_dir: &str) -> Vec<ResolvedSlashCommand> {
+        self.extension_view()
+            .resolve_commands_for_typed(working_dir)
+            .await
+    }
+
+    pub async fn invoke_resolved_command_typed(
+        &self,
+        resolved: &ResolvedSlashCommand,
+        arguments: &str,
+        working_dir: &str,
+        ctx: &CommandContext,
+    ) -> Result<ExtensionCommandResult, ExtensionError> {
+        resolved
+            .handler
+            .execute(&resolved.command.name, arguments, working_dir, ctx)
+            .await
+    }
+
+    pub async fn dispatch_command_typed(
+        &self,
+        command_name: &str,
+        arguments: &str,
+        working_dir: &str,
+        ctx: &CommandContext,
+    ) -> Result<ExtensionCommandResult, ExtensionError> {
+        self.extension_view()
+            .dispatch_command_typed(command_name, arguments, working_dir, ctx)
+            .await
+    }
+
+    pub async fn complete_command_typed(
+        &self,
+        command_name: &str,
+        argument: &str,
+        cursor: usize,
+        working_dir: &str,
+        ctx: &CommandContext,
+    ) -> Result<CommandCompletions, ExtensionError> {
+        self.extension_view()
+            .complete_command_typed(command_name, argument, cursor, working_dir, ctx)
+            .await
+    }
+
+    pub async fn complete_resolved_command_typed(
+        &self,
+        resolved: &ResolvedSlashCommand,
+        argument: &str,
+        cursor: usize,
+        working_dir: &str,
+        ctx: &CommandContext,
+    ) -> Result<CommandCompletions, ExtensionError> {
+        resolved
+            .handler
+            .complete(&resolved.command.name, argument, cursor, working_dir, ctx)
+            .await
+    }
+}
+
+struct ViewCommandHandler {
+    handler: Arc<dyn CommandHandler>,
+    index: Weak<HandlerIndex>,
+}
+
+impl ViewCommandHandler {
+    fn retain_generation(&self, command_name: &str) -> Result<Arc<HandlerIndex>, ExtensionError> {
+        self.index.upgrade().ok_or_else(|| {
+            ExtensionError::NotFound(format!(
+                "command {command_name} generation is no longer available"
+            ))
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandHandler for ViewCommandHandler {
+    async fn execute(
+        &self,
+        command_name: &str,
+        args: &str,
+        working_dir: &str,
+        ctx: &CommandContext,
+    ) -> Result<ExtensionCommandResult, ExtensionError> {
+        let _active_index = self.retain_generation(command_name)?;
+        self.handler
+            .execute(command_name, args, working_dir, ctx)
+            .await
+    }
+
+    async fn complete(
+        &self,
+        command_name: &str,
+        argument: &str,
+        cursor: usize,
+        working_dir: &str,
+        ctx: &CommandContext,
+    ) -> Result<CommandCompletions, ExtensionError> {
+        let _active_index = self.retain_generation(command_name)?;
+        self.handler
+            .complete(command_name, argument, cursor, working_dir, ctx)
             .await
     }
 }

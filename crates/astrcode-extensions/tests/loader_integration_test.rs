@@ -352,6 +352,13 @@ async fn sync_sources_reconciles_only_changed_sources_and_preserves_source_order
         ExtensionRuntime::sync_sources(&runner, &ctx, &[&UnavailableFingerprintSource]).await,
         vec!["source unavailable"]
     );
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        while old_b_stops.load(Ordering::SeqCst) == 0 || removed_stops.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("unpublished extension instances should retire");
 
     assert_eq!(old_a_starts.load(Ordering::SeqCst), 1);
     assert_eq!(old_a_stops.load(Ordering::SeqCst), 0);

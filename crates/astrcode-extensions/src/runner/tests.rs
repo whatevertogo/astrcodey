@@ -27,7 +27,10 @@ use astrcode_extension_sdk::{
         StopReason, ToolDiscoveryHandler, ToolHandler, ToolHookTarget, UserMessageEnvelopeContext,
         UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
     },
-    runtime_ports::{RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness},
+    runtime_ports::{
+        RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness,
+        TurnExtensionViewProvider,
+    },
     tool::{
         ExecutionMode, ExtensionToolContext, ToolCapabilities, ToolDefinition,
         ToolExecutionContext, ToolOrigin, ToolResult,
@@ -74,6 +77,10 @@ struct ConfigChangeProbeState {
 struct StateProbeExtension;
 
 struct StateProbeTool;
+
+struct ToolRetirementProbeExtension {
+    stopped: Arc<AtomicUsize>,
+}
 
 struct SlowToolDiscoveryExtension;
 
@@ -132,6 +139,15 @@ struct TargetedPreHookExtension {
 
 struct CountingPreHook {
     calls: Arc<AtomicUsize>,
+}
+
+struct GenerationProbeExtension {
+    label: &'static str,
+    stopped: Arc<AtomicUsize>,
+}
+
+struct GenerationProbeHook {
+    label: &'static str,
 }
 
 struct StartFailingExtension;
@@ -278,6 +294,32 @@ impl ToolHandler for StateProbeTool {
             Default::default(),
         )
         .into())
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for ToolRetirementProbeExtension {
+    fn id(&self) -> &str {
+        "tool-retirement-probe"
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.tool(
+            ToolDefinition {
+                name: "retirementProbe".into(),
+                description: String::new(),
+                parameters: json!({"type": "object"}),
+                strict: false,
+                origin: ToolOrigin::Extension,
+                execution_mode: ExecutionMode::Sequential,
+            },
+            Arc::new(StateProbeTool),
+        );
+    }
+
+    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+        self.stopped.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -435,6 +477,39 @@ impl PreToolUseHandler for CountingPreHook {
     async fn handle(&self, _ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(PreToolUseResult::Allow)
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for GenerationProbeExtension {
+    fn id(&self) -> &str {
+        "generation-probe"
+    }
+
+    fn capabilities(&self) -> &[ExtensionCapability] {
+        &[ExtensionCapability::ToolIntercept]
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.on_pre_tool_use(
+            HookMode::Blocking,
+            0,
+            Arc::new(GenerationProbeHook { label: self.label }),
+        );
+    }
+
+    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+        self.stopped.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl PreToolUseHandler for GenerationProbeHook {
+    async fn handle(&self, _ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
+        Ok(PreToolUseResult::ModifyInput {
+            tool_input: json!({ "generation": self.label }),
+        })
     }
 }
 
@@ -954,9 +1029,193 @@ async fn unregister_stops_extension_and_managed_tasks() {
         .await
         .unwrap();
     assert!(unregistered);
+    assert!(runner.shutdown().await.is_empty());
     assert_eq!(started.load(Ordering::SeqCst), 1);
     assert_eq!(stopped.load(Ordering::SeqCst), 1);
     assert!(task_stopped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn cached_extension_tool_does_not_hold_retired_generation_alive() {
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    runner
+        .register(Arc::new(ToolRetirementProbeExtension {
+            stopped: Arc::clone(&stopped),
+        }))
+        .await
+        .unwrap();
+    let cached_tool = runner
+        .tool_catalog_snapshot_typed("D:/workspace")
+        .await
+        .tools
+        .into_iter()
+        .find(|tool| tool.definition().name == "retirementProbe")
+        .unwrap();
+
+    assert!(
+        runner
+            .unregister("tool-retirement-probe", StopReason::Reload)
+            .await
+            .unwrap()
+    );
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while stopped.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("cached tool wrapper must not block extension retirement");
+    assert_eq!(stopped.load(Ordering::SeqCst), 1);
+
+    let result = cached_tool
+        .execute(
+            json!({}),
+            &ToolExecutionContext::new(
+                "session".into(),
+                "D:/workspace",
+                None,
+                None,
+                ToolCapabilities::default(),
+            ),
+        )
+        .await
+        .unwrap();
+    assert!(result.is_error);
+    assert!(result.content.contains("is not available"));
+    assert_eq!(
+        result.metadata.get("extensionId"),
+        Some(&json!("tool-retirement-probe"))
+    );
+    assert!(runner.shutdown().await.is_empty());
+}
+
+#[tokio::test]
+async fn extension_view_pins_one_generation_until_retirement() {
+    let version_one_stops = Arc::new(AtomicUsize::new(0));
+    let version_two_stops = Arc::new(AtomicUsize::new(0));
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+
+    runner
+        .register(Arc::new(GenerationProbeExtension {
+            label: "v1",
+            stopped: Arc::clone(&version_one_stops),
+        }))
+        .await
+        .unwrap();
+    let version_one_view = runner.extension_view();
+    let version_one_generation = version_one_view.generation();
+
+    let removed = tokio::time::timeout(
+        Duration::from_secs(1),
+        runner.unregister("generation-probe", StopReason::Reload),
+    )
+    .await
+    .expect("unregister must not wait for an in-flight generation")
+    .unwrap();
+    assert!(removed);
+
+    runner
+        .register(Arc::new(GenerationProbeExtension {
+            label: "v2",
+            stopped: Arc::clone(&version_two_stops),
+        }))
+        .await
+        .unwrap();
+    let version_two_view = runner.extension_view();
+    assert!(version_two_view.generation() > version_one_generation);
+    assert_eq!(version_one_stops.load(Ordering::SeqCst), 0);
+    let turn_view = runner.turn_extension_view();
+    assert_eq!(turn_view.generation(), version_two_view.generation());
+    assert_eq!(
+        turn_view.tool_catalog().revision(),
+        version_two_view.generation()
+    );
+
+    let context = || PreToolUseContext {
+        session_id: "session".into(),
+        working_dir: "D:/workspace".into(),
+        model: ModelSelection::simple("model"),
+        call_id: "call-1".into(),
+        tool_name: "probe".into(),
+        tool_input: json!({}),
+        approval_mode: astrcode_core::permission::ApprovalMode::Manual,
+        available_tools: Vec::new(),
+        event_tx: None,
+        extension_event_sink: None,
+        session_store_dir: None,
+    };
+    let version_one_result = version_one_view.emit_pre_tool_use(context()).await.unwrap();
+    let version_two_result = version_two_view.emit_pre_tool_use(context()).await.unwrap();
+    assert!(matches!(
+        version_one_result,
+        PreToolUseResult::ModifyInput { tool_input }
+            if tool_input == json!({ "generation": "v1" })
+    ));
+    assert!(matches!(
+        version_two_result,
+        PreToolUseResult::ModifyInput { tool_input }
+            if tool_input == json!({ "generation": "v2" })
+    ));
+    assert_eq!(version_one_stops.load(Ordering::SeqCst), 0);
+
+    drop(version_one_view);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while version_one_stops.load(Ordering::SeqCst) == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("retired generation should stop after its final view is dropped");
+    assert_eq!(version_one_stops.load(Ordering::SeqCst), 1);
+
+    drop(version_two_view);
+    drop(turn_view);
+    assert!(runner.shutdown().await.is_empty());
+    assert_eq!(version_one_stops.load(Ordering::SeqCst), 1);
+    assert_eq!(version_two_stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn cancelled_shutdown_does_not_abandon_pending_retirement() {
+    let stopped = Arc::new(AtomicUsize::new(0));
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    runner
+        .register(Arc::new(GenerationProbeExtension {
+            label: "v1",
+            stopped: Arc::clone(&stopped),
+        }))
+        .await
+        .unwrap();
+    let active_view = runner.extension_view();
+    assert!(
+        runner
+            .unregister("generation-probe", StopReason::Reload)
+            .await
+            .unwrap()
+    );
+
+    let mut first_shutdown = {
+        let runner = Arc::clone(&runner);
+        tokio::spawn(async move { runner.shutdown().await })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut first_shutdown)
+            .await
+            .is_err(),
+        "shutdown should wait for the active generation"
+    );
+    first_shutdown.abort();
+    assert!(first_shutdown.await.unwrap_err().is_cancelled());
+
+    drop(active_view);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), runner.shutdown())
+            .await
+            .expect("a later shutdown must recover the pending retirement")
+            .is_empty()
+    );
+    assert_eq!(stopped.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -1016,6 +1275,19 @@ async fn shutdown_stops_all_extensions_with_shutdown_reason() {
     assert_eq!(stopped.load(Ordering::SeqCst), 1);
     assert!(task_stopped.load(Ordering::SeqCst));
     assert_eq!(runner.count().await, 0);
+}
+
+#[tokio::test]
+async fn shutdown_is_terminal_and_idempotent() {
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+
+    assert!(runner.shutdown().await.is_empty());
+    assert!(matches!(
+        runner.register(Arc::new(StateProbeExtension)).await,
+        Err(ExtensionError::Internal(message))
+            if message == "extension runner is shutting down"
+    ));
+    assert!(runner.shutdown().await.is_empty());
 }
 
 #[tokio::test]
@@ -1342,29 +1614,83 @@ async fn config_notifications_are_ordered_idempotent_and_retry_failures() {
     state.release.notify_one();
     assert!(notify_v6.await.unwrap().is_empty());
     assert!(unregister.await.unwrap().unwrap());
+    assert!(runner.shutdown().await.is_empty());
     assert!(state.stopped.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn config_update_waits_for_turn_views_and_recovers_after_wait_timeout() {
+    let state = Arc::new(ConfigChangeProbeState::default());
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_millis(100)));
+    let config =
+        |version| BTreeMap::from([("config-change-probe".into(), json!({"version": version}))]);
+    runner.update_extension_configs(config(1));
+    runner
+        .register(Arc::new(ConfigChangeProbeExtension(Arc::clone(&state))))
+        .await
+        .unwrap();
+
+    let version_one_view = runner.turn_extension_view();
+    let version_one_generation = version_one_view.generation();
+    runner.update_extension_configs(config(2));
+    let notify_version_two = {
+        let runner = Arc::clone(&runner);
+        tokio::spawn(async move { runner.notify_config_changed().await })
+    };
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while runner.runtime_snapshot_state() != RuntimeSnapshotState::Updating {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("config update must publish Updating before waiting for turn views");
+    assert_eq!(state.calls.load(Ordering::SeqCst), 0);
+
+    drop(version_one_view);
+    assert!(notify_version_two.await.unwrap().is_empty());
+    assert_eq!(state.applied_version.load(Ordering::SeqCst), 2);
+    let version_two_view = runner.turn_extension_view();
+    assert!(version_two_view.generation() > version_one_generation);
+
+    runner.update_extension_configs(config(3));
+    let errors = runner.notify_config_changed().await;
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("active turn extension view"));
+    assert!(errors[0].contains("was not applied"));
+    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
+    let stable_generation = match runner.runtime_snapshot_state() {
+        RuntimeSnapshotState::Stable(generation) => generation,
+        RuntimeSnapshotState::Updating => panic!("timed out update must restore stable state"),
+    };
+    let recovered_view = runner.turn_extension_view();
+    assert_eq!(recovered_view.generation(), stable_generation);
+    drop(recovered_view);
+
+    drop(version_two_view);
+    assert!(runner.notify_config_changed().await.is_empty());
+    assert_eq!(state.applied_version.load(Ordering::SeqCst), 3);
+    assert!(runner.shutdown().await.is_empty());
 }
 
 #[tokio::test]
 async fn recorded_hook_tracks_error_and_timeout() {
     let runner = ExtensionRunner::new(Duration::from_millis(10));
+    let view = runner.extension_view();
 
     assert!(
-        runner
-            .run_recorded_hook::<()>("probe", "pre_tool_use", async {
-                Err(ExtensionError::Internal("injected failure".into()))
-            })
-            .await
-            .is_err()
+        view.run_recorded_hook::<()>("probe", "pre_tool_use", async {
+            Err(ExtensionError::Internal("injected failure".into()))
+        })
+        .await
+        .is_err()
     );
     assert!(matches!(
-        runner
-            .run_recorded_hook(
-                "probe",
-                "pre_tool_use",
-                std::future::pending::<Result<(), ExtensionError>>(),
-            )
-            .await,
+        view.run_recorded_hook(
+            "probe",
+            "pre_tool_use",
+            std::future::pending::<Result<(), ExtensionError>>(),
+        )
+        .await,
         Err(ExtensionError::Timeout(10))
     ));
 
@@ -1408,12 +1734,15 @@ async fn operation_timeout_bounds_advisory_hooks_and_stop() {
     assert_eq!(diagnostics.hook_calls, 1);
     assert_eq!(diagnostics.hook_timeouts, 1);
 
-    assert!(matches!(
+    assert!(
         runner
             .unregister("operation-timeout", StopReason::Disabled)
-            .await,
-        Err(ExtensionError::Timeout(10))
-    ));
+            .await
+            .unwrap()
+    );
+    let errors = runner.shutdown().await;
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("timed out after 10ms"));
     assert_eq!(runner.count().await, 0);
 }
 
@@ -1736,6 +2065,46 @@ async fn command_completion_dispatches_to_resolved_handler() {
     assert_eq!(completions.items.len(), 1);
     assert_eq!(completions.items[0].label, "complete-high:de:2");
     assert_eq!(completions.items[0].insert_text, "complete-high");
+}
+
+#[tokio::test]
+async fn cached_command_does_not_block_retirement_and_becomes_unavailable() {
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    runner
+        .register(Arc::new(CommandProbeExtension {
+            id: "retired-command",
+            command_name: "retire",
+            priority: 0,
+            argument_completions: false,
+        }))
+        .await
+        .unwrap();
+    let command = runner
+        .resolve_commands_for_typed(".")
+        .await
+        .into_iter()
+        .find(|command| command.command.name == "retire")
+        .unwrap();
+
+    assert!(
+        runner
+            .unregister("retired-command", StopReason::Disabled)
+            .await
+            .unwrap()
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), runner.shutdown())
+            .await
+            .expect("cached command must not retain the retired generation")
+            .is_empty()
+    );
+    assert!(matches!(
+        runner
+            .invoke_resolved_command_typed(&command, "", ".", &command_ctx())
+            .await,
+        Err(ExtensionError::NotFound(message))
+            if message.contains("generation is no longer available")
+    ));
 }
 
 #[tokio::test]

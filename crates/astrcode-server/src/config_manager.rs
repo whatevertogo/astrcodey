@@ -17,7 +17,7 @@ use astrcode_core::{
     config::{Config, ConfigStore, ConfigStoreError, EffectiveConfig, LlmSettings, ResolveError},
     llm::{LlmClientConfig, LlmProvider},
 };
-use astrcode_extension_sdk::runtime_ports::{CompositeToolCatalogProvider, ToolCatalogProvider};
+use astrcode_extension_sdk::runtime_ports::ToolCatalogProvider;
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices};
 use parking_lot::RwLock;
@@ -70,15 +70,10 @@ pub(crate) fn assemble_session_runtime_services(
     context_assembler: Arc<LlmContextAssembler>,
     shell_timeout_secs: Arc<AtomicU64>,
 ) -> Arc<SessionRuntimeServices> {
-    let extension_catalog: Arc<dyn ToolCatalogProvider> = extension_runner.clone();
-    let builtin_catalog = astrcode_tools::registry::default_tool_catalog_with_shell_timeout_source(
-        shell_timeout_secs,
-    );
     let tool_catalog: Arc<dyn ToolCatalogProvider> =
-        Arc::new(CompositeToolCatalogProvider::new(vec![
-            ("extensions".into(), extension_catalog),
-            ("builtins".into(), builtin_catalog),
-        ]));
+        astrcode_tools::registry::default_tool_catalog_with_shell_timeout_source(
+            shell_timeout_secs,
+        );
 
     Arc::new(SessionRuntimeServices::new(
         llm,

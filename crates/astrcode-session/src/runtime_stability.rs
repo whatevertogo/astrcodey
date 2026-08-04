@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use tokio::time::{Instant, sleep_until};
 
+use crate::session_error::SessionError;
+
 const DEFAULT_STABILITY_TIMEOUT: Duration = Duration::from_secs(30);
 const MIN_RETRY_DELAY: Duration = Duration::from_millis(5);
 const MAX_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -44,6 +46,15 @@ impl RuntimeStabilityBudget {
         }
         Ok(())
     }
+}
+
+pub(crate) async fn retry_runtime_snapshot(
+    stability: &mut RuntimeStabilityBudget,
+) -> Result<(), SessionError> {
+    stability
+        .retry_after_change()
+        .await
+        .map_err(|attempts| SessionError::RuntimeUnstable { attempts })
 }
 
 #[cfg(test)]

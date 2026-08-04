@@ -60,11 +60,10 @@ impl ExtensionHealthReport {
 impl ExtensionRunner {
     /// 主动采样已运行扩展的健康状态，不创建后台轮询任务。
     pub async fn check_health(&self) -> Vec<ExtensionHealthReport> {
-        let extensions = self
-            .registry
-            .extensions
-            .read()
-            .await
+        let registered = self.registry.extensions.read().await;
+        // 钉住当前代际，防止健康检查期间扩展被退休停止。
+        let _generation_pin = self.extension_view();
+        let extensions = registered
             .iter()
             .map(|hosted| {
                 (
@@ -73,6 +72,7 @@ impl ExtensionRunner {
                 )
             })
             .collect::<Vec<_>>();
+        drop(registered);
         let mut reports = Vec::with_capacity(extensions.len());
         for (extension_id, extension) in extensions {
             let error = self
@@ -138,25 +138,6 @@ impl ExtensionRunner {
         stage.status = status;
         stage.duration_ms = elapsed.map(|duration| duration.as_millis() as u64);
         stage.error = error;
-    }
-
-    pub(super) fn record_hook_result(
-        &self,
-        extension_id: &str,
-        hook: &'static str,
-        elapsed: Duration,
-        error: Option<String>,
-        timed_out: bool,
-    ) {
-        let mut diagnostics = self.diagnostics.write();
-        let entry = diagnostics.entry(extension_id.to_string()).or_default();
-        entry.hook_calls = entry.hook_calls.saturating_add(1);
-        if timed_out {
-            entry.hook_timeouts = entry.hook_timeouts.saturating_add(1);
-        }
-        entry.last_hook = Some(hook.to_string());
-        entry.last_duration_ms = Some(elapsed.as_millis() as u64);
-        entry.last_error = error;
     }
 
     pub fn diagnostics_snapshot(&self) -> BTreeMap<String, ExtensionDiagnostics> {

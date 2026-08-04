@@ -5,7 +5,7 @@ use astrcode_extension_sdk::{
     tool::{ToolDefinition, ToolPromptMetadata},
 };
 
-use super::{ExtensionRunner, HostedExtension};
+use super::{ExtensionRunner, HostedExtension, retirement::ExtensionIndexLease};
 
 pub(super) type ExtensionHandler<H> = (String, HookMode, Arc<H>);
 pub(super) type ToolExtensionHandler<H> = (String, HookMode, ToolHookTarget, Arc<H>);
@@ -28,6 +28,7 @@ pub(super) struct HttpRouteEntry {
 #[derive(Default)]
 #[allow(clippy::type_complexity)]
 pub(super) struct HandlerIndex {
+    pub(super) generation: u64,
     pub(super) pre_tool_use: Vec<ToolExtensionHandler<dyn PreToolUseHandler>>,
     pub(super) post_tool_use: Vec<ToolExtensionHandler<dyn PostToolUseHandler>>,
     pub(super) provider: HashMap<ProviderEvent, Vec<ExtensionHandler<dyn ProviderHandler>>>,
@@ -57,6 +58,8 @@ pub(super) struct HandlerIndex {
     pub(super) extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>>,
     pub(super) capabilities: HashMap<String, Vec<ExtensionCapability>>,
     pub(super) http_routes: Vec<HttpRouteEntry>,
+    pub(super) extension_tasks: HashMap<String, ExtensionTasks>,
+    _publication_leases: Vec<ExtensionIndexLease>,
 }
 
 impl HandlerIndex {
@@ -67,7 +70,7 @@ impl HandlerIndex {
     }
 }
 
-pub(super) fn build_handler_index(extensions: &[HostedExtension]) -> HandlerIndex {
+pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u64) -> HandlerIndex {
     let mut pre_tool_use = Vec::new();
     let mut post_tool_use = Vec::new();
     let mut provider = Vec::new();
@@ -86,11 +89,15 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension]) -> HandlerInde
     let mut extension_event_decls = HashMap::new();
     let mut capabilities = HashMap::new();
     let mut http_routes = Vec::new();
+    let mut extension_tasks = HashMap::new();
+    let mut publication_leases = Vec::with_capacity(extensions.len());
 
     for hosted in extensions {
         let manifest = &hosted.manifest;
         let registrations = &manifest.registrations;
         capabilities.insert(manifest.id.clone(), manifest.capabilities.clone());
+        extension_tasks.insert(manifest.id.clone(), hosted.tasks.clone());
+        publication_leases.push(hosted.publication_lease.acquire());
         for registration in registrations.pre_tool_use() {
             pre_tool_use.push((
                 registration.priority,
@@ -194,6 +201,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension]) -> HandlerInde
     }
 
     HandlerIndex {
+        generation,
         pre_tool_use: handlers_by_priority(pre_tool_use),
         post_tool_use: handlers_by_priority(post_tool_use),
         provider: handlers_by_event(provider),
@@ -212,6 +220,8 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension]) -> HandlerInde
         extension_event_decls,
         capabilities,
         http_routes,
+        extension_tasks,
+        _publication_leases: publication_leases,
     }
 }
 

@@ -20,10 +20,15 @@ use astrcode_core::{
     tool::ToolDefinition,
 };
 use astrcode_extension_sdk::runtime_ports::{
-    PromptContributor, RuntimeSnapshotState, ToolCatalogProvider, TurnHooks,
+    CompositeToolCatalogProvider, PromptContributor, RuntimeSnapshotState, ToolCatalogProvider,
+    TurnExtensionView, TurnHooks,
 };
 
-use crate::{SessionExtensionPorts, SessionResourceStore};
+use crate::{
+    SessionExtensionPorts, SessionResourceStore,
+    runtime_stability::{RuntimeStabilityBudget, retry_runtime_snapshot},
+    session_error::SessionError,
+};
 
 pub struct SessionRuntimeServices {
     llm: Arc<ArcSwap<ProviderSlot>>,
@@ -39,6 +44,30 @@ pub struct SessionRuntimeServices {
     effective_config: ArcSwap<EffectiveConfig>,
     tool_catalog: Arc<dyn ToolCatalogProvider>,
     session_resources: SessionResourceStore,
+}
+
+/// Extension ports and the combined tool catalog pinned to one generation.
+pub(crate) struct SessionRuntimeView {
+    extension: TurnExtensionView,
+    tool_catalog: Arc<dyn ToolCatalogProvider>,
+}
+
+impl SessionRuntimeView {
+    pub(crate) fn tool_catalog(&self) -> &dyn ToolCatalogProvider {
+        self.tool_catalog.as_ref()
+    }
+
+    pub(crate) fn prompt_contributor(&self) -> &dyn PromptContributor {
+        self.extension.prompt_contributor()
+    }
+
+    pub(crate) fn turn_hooks(&self) -> &dyn TurnHooks {
+        self.extension.turn_hooks()
+    }
+
+    pub(crate) fn turn_hooks_arc(&self) -> Arc<dyn TurnHooks> {
+        self.extension.turn_hooks_arc()
+    }
 }
 
 struct ProviderSlot {
@@ -162,24 +191,41 @@ impl SessionRuntimeServices {
         })
     }
 
-    pub(crate) fn tool_catalog(&self) -> &dyn ToolCatalogProvider {
-        self.tool_catalog.as_ref()
+    /// 直接读取当前 turn hooks，不等待 runtime 稳定窗口。
+    ///
+    /// 只用于生命周期事件等不需要固定 tool catalog / generation 的路径。
+    pub(crate) fn turn_hooks(&self) -> Arc<dyn TurnHooks> {
+        self.extension_ports.turn_extension_view().turn_hooks_arc()
     }
 
-    pub(crate) fn runtime_snapshot_state(&self) -> RuntimeSnapshotState {
-        self.extension_ports.runtime_snapshot_state()
-    }
-
-    pub(crate) fn prompt_contributor(&self) -> &dyn PromptContributor {
-        self.extension_ports.prompt_contributor()
-    }
-
-    pub(crate) fn turn_hooks(&self) -> &dyn TurnHooks {
-        self.extension_ports.turn_hooks()
-    }
-
-    pub fn turn_hooks_arc(&self) -> Arc<dyn TurnHooks> {
-        self.extension_ports.turn_hooks_arc()
+    pub(crate) async fn turn_runtime_view(&self) -> Result<SessionRuntimeView, SessionError> {
+        let mut stability = RuntimeStabilityBudget::new();
+        loop {
+            let RuntimeSnapshotState::Stable(generation) =
+                self.extension_ports.runtime_snapshot_state()
+            else {
+                retry_runtime_snapshot(&mut stability).await?;
+                continue;
+            };
+            let extension = self.extension_ports.turn_extension_view();
+            if extension.generation() != generation
+                || self.extension_ports.runtime_snapshot_state()
+                    != RuntimeSnapshotState::Stable(generation)
+            {
+                retry_runtime_snapshot(&mut stability).await?;
+                continue;
+            }
+            let extension_catalog = extension.tool_catalog_arc();
+            let tool_catalog: Arc<dyn ToolCatalogProvider> =
+                Arc::new(CompositeToolCatalogProvider::new(vec![
+                    ("extensions".into(), extension_catalog),
+                    ("builtins".into(), Arc::clone(&self.tool_catalog)),
+                ]));
+            return Ok(SessionRuntimeView {
+                extension,
+                tool_catalog,
+            });
+        }
     }
 
     pub(crate) fn context_assembler(&self) -> &dyn ContextAssembler {
@@ -221,6 +267,11 @@ impl SessionRuntimeServices {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+        time::Duration,
+    };
+
     use astrcode_context::{
         CompactResult, ContextAssembler, PostCompactEnrichInput,
         context_assembler::LlmContextAssembler,
@@ -230,7 +281,10 @@ mod tests {
         llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
         tool::ToolDefinition,
     };
-    use astrcode_extension_sdk::runtime_ports::NoopRuntimePorts;
+    use astrcode_extension_sdk::runtime_ports::{
+        NoopRuntimePorts, RuntimeSnapshotProvider, SessionOperationsProvider, TurnExtensionView,
+        TurnExtensionViewProvider,
+    };
     use tokio::sync::mpsc;
 
     use super::*;
@@ -241,6 +295,35 @@ mod tests {
     struct TaggedLlm {
         max_input_tokens: usize,
     }
+
+    struct StabilizingRuntime {
+        updating: AtomicBool,
+        generation: AtomicU64,
+        view_calls: AtomicUsize,
+    }
+
+    impl RuntimeSnapshotProvider for StabilizingRuntime {
+        fn runtime_snapshot_state(&self) -> RuntimeSnapshotState {
+            if self.updating.load(Ordering::Acquire) {
+                RuntimeSnapshotState::Updating
+            } else {
+                RuntimeSnapshotState::Stable(self.generation.load(Ordering::Acquire))
+            }
+        }
+    }
+
+    impl TurnExtensionViewProvider for StabilizingRuntime {
+        fn turn_extension_view(&self) -> TurnExtensionView {
+            let generation = self.generation.load(Ordering::Acquire);
+            if self.view_calls.fetch_add(1, Ordering::AcqRel) == 0 {
+                self.generation.store(generation + 1, Ordering::Release);
+            }
+            let noop = Arc::new(NoopRuntimePorts);
+            TurnExtensionView::new(generation, noop.clone(), noop.clone(), noop)
+        }
+    }
+
+    impl SessionOperationsProvider for StabilizingRuntime {}
 
     #[async_trait::async_trait]
     impl LlmProvider for TaggedLlm {
@@ -306,6 +389,36 @@ mod tests {
             )
             .await;
         assert_eq!(compaction.summary, "compact enriched");
+    }
+
+    #[tokio::test]
+    async fn turn_view_waits_for_stability_and_rechecks_generation() {
+        let extension_runtime = Arc::new(StabilizingRuntime {
+            updating: AtomicBool::new(true),
+            generation: AtomicU64::new(1),
+            view_calls: AtomicUsize::new(0),
+        });
+        let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
+        let context = ContextSettings::default();
+        let services = SessionRuntimeServices::new(
+            llm.clone(),
+            llm,
+            test_effective_config(context.clone()),
+            SessionExtensionPorts::from_adapter(Arc::clone(&extension_runtime)),
+            Arc::new(NoopContextAssembler::new(context)),
+            Arc::new(CountingPostCompactEnricher),
+            Arc::new(NoopRuntimePorts),
+        );
+        let runtime_for_update = Arc::clone(&extension_runtime);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            runtime_for_update.updating.store(false, Ordering::Release);
+        });
+
+        let view = services.turn_runtime_view().await.unwrap();
+
+        assert_eq!(view.extension.generation(), 2);
+        assert_eq!(extension_runtime.view_calls.load(Ordering::Acquire), 2);
     }
 
     #[test]

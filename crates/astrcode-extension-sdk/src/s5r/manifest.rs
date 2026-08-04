@@ -17,6 +17,8 @@ pub struct InitializeManifest {
     pub protocol: InitializeManifestProtocol,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wire_codec: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wire_features: Vec<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]

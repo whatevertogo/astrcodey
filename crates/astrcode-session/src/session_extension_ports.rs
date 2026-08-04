@@ -4,49 +4,56 @@ use std::sync::Arc;
 
 use astrcode_extension_sdk::runtime_ports::{
     NoopRuntimePorts, PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
-    SessionOperationsProvider, TurnHooks,
+    SessionOperationsProvider, TurnExtensionView, TurnExtensionViewProvider, TurnHooks,
 };
+
+struct FixedTurnExtensionViewProvider {
+    view: TurnExtensionView,
+}
+
+impl RuntimeSnapshotProvider for FixedTurnExtensionViewProvider {}
+
+impl TurnExtensionViewProvider for FixedTurnExtensionViewProvider {
+    fn turn_extension_view(&self) -> TurnExtensionView {
+        self.view.clone()
+    }
+}
 
 /// Groups narrow extension ports without making Session depend on a concrete
 /// extension runner.
 pub struct SessionExtensionPorts {
-    runtime_snapshot: Arc<dyn RuntimeSnapshotProvider>,
-    prompt_contributor: Arc<dyn PromptContributor>,
-    turn_hooks: Arc<dyn TurnHooks>,
+    turn_view_provider: Arc<dyn TurnExtensionViewProvider>,
     session_operations: Arc<dyn SessionOperationsProvider>,
 }
 
 impl SessionExtensionPorts {
     /// Combines ports whose observable state never changes after construction.
     ///
-    /// 注意：该构造器不提供 runtime snapshot——传入的端口都是构造后不可变的，
-    /// 没有可观测的运行时快照状态，因此 `runtime_snapshot` 固定为 `NoopRuntimePorts`
-    /// （调用 [`Self::runtime_snapshot_state`] 会得到 noop 的默认状态）。
+    /// 传入端口在构造后不可变，因此它们共享 generation 0 的固定视图。
     pub fn from_immutable_ports(
         prompt_contributor: Arc<dyn PromptContributor>,
         turn_hooks: Arc<dyn TurnHooks>,
         session_operations: Arc<dyn SessionOperationsProvider>,
     ) -> Self {
+        let noop = Arc::new(NoopRuntimePorts);
+        let view = TurnExtensionView::new(
+            0,
+            noop,
+            Arc::clone(&prompt_contributor),
+            Arc::clone(&turn_hooks),
+        );
         Self {
-            runtime_snapshot: Arc::new(NoopRuntimePorts),
-            prompt_contributor,
-            turn_hooks,
+            turn_view_provider: Arc::new(FixedTurnExtensionViewProvider { view }),
             session_operations,
         }
     }
 
     pub fn from_adapter<T>(adapter: Arc<T>) -> Self
     where
-        T: PromptContributor
-            + RuntimeSnapshotProvider
-            + TurnHooks
-            + SessionOperationsProvider
-            + 'static,
+        T: TurnExtensionViewProvider + SessionOperationsProvider + 'static,
     {
         Self {
-            runtime_snapshot: adapter.clone(),
-            prompt_contributor: adapter.clone(),
-            turn_hooks: adapter.clone(),
+            turn_view_provider: adapter.clone(),
             session_operations: adapter,
         }
     }
@@ -57,20 +64,12 @@ impl SessionExtensionPorts {
         Self::from_immutable_ports(noop.clone(), turn_hooks, noop)
     }
 
+    pub(crate) fn turn_extension_view(&self) -> TurnExtensionView {
+        self.turn_view_provider.turn_extension_view()
+    }
+
     pub(crate) fn runtime_snapshot_state(&self) -> RuntimeSnapshotState {
-        self.runtime_snapshot.runtime_snapshot_state()
-    }
-
-    pub(crate) fn prompt_contributor(&self) -> &dyn PromptContributor {
-        self.prompt_contributor.as_ref()
-    }
-
-    pub(crate) fn turn_hooks(&self) -> &dyn TurnHooks {
-        self.turn_hooks.as_ref()
-    }
-
-    pub(crate) fn turn_hooks_arc(&self) -> Arc<dyn TurnHooks> {
-        Arc::clone(&self.turn_hooks)
+        self.turn_view_provider.runtime_snapshot_state()
     }
 
     pub(crate) fn session_operations(&self) -> &dyn SessionOperationsProvider {

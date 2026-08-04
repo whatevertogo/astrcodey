@@ -9,7 +9,7 @@ use std::{
 use astrcode_core::{
     event::{DurableEventPayload, EventPayload, ExtensionEventData},
     llm::{LlmEvent, LlmMessage, LlmProvider},
-    tool::{ToolDefinition, ToolExecutionContext},
+    tool::{ExecutionMode, ToolDefinition, ToolExecutionContext},
 };
 use astrcode_extension_sdk::{
     config::ModelSelection,
@@ -449,6 +449,57 @@ async fn s5r_workspace_read_via_host_invoke() {
         result.content
     );
     let _ = fs::remove_dir_all(&wd);
+}
+
+#[tokio::test]
+async fn s5r_parallel_tools_keep_request_scoped_workspace_contexts() {
+    let suffix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = std::env::temp_dir().join(format!("astrcode-s5r-parallel-{suffix}"));
+    let workspace_a = root.join("a");
+    let workspace_b = root.join("b");
+    fs::create_dir_all(&workspace_a).unwrap();
+    fs::create_dir_all(&workspace_b).unwrap();
+    fs::write(workspace_a.join("probe.txt"), "workspace-a").unwrap();
+    fs::write(workspace_b.join("probe.txt"), "workspace-b").unwrap();
+
+    let ext = load_s5r(mock_router()).await;
+    let mut registrar = Registrar::new();
+    ext.register(&mut registrar);
+    let (definition, handler) = registrar
+        .tools()
+        .iter()
+        .find(|(definition, _)| definition.name == "parallel_read_workspace")
+        .expect("parallel_read_workspace tool");
+    assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
+
+    let workspace_a = workspace_a.to_string_lossy().into_owned();
+    let workspace_b = workspace_b.to_string_lossy().into_owned();
+    let context_a = tool_ctx(&workspace_a);
+    let context_b = tool_ctx(&workspace_b);
+    let call_a = handler.execute(
+        "parallel_read_workspace",
+        serde_json::json!({ "delay_ms": 150 }),
+        &workspace_a,
+        &context_a,
+    );
+    let call_b = handler.execute(
+        "parallel_read_workspace",
+        serde_json::json!({ "delay_ms": 150 }),
+        &workspace_b,
+        &context_b,
+    );
+    let (result_a, result_b) = tokio::join!(call_a, call_b);
+    let result_a = result_a.expect("workspace A invocation");
+    let result_b = result_b.expect("workspace B invocation");
+
+    assert_eq!(result_a.content, "content=workspace-a peak=2");
+    assert_eq!(result_b.content, "content=workspace-b peak=2");
+
+    ext.stop(StopReason::Disabled).await.expect("stop");
+    let _ = fs::remove_dir_all(root);
 }
 
 #[tokio::test]

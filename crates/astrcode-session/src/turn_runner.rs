@@ -66,6 +66,7 @@ pub(crate) struct TurnLoop {
     session: Session,
     llm: Arc<dyn astrcode_core::llm::LlmProvider>,
     cancellation_token: CancellationToken,
+    extension_hooks: Arc<dyn astrcode_extension_sdk::runtime_ports::TurnHooks>,
     tools: ToolCalls,
     compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
 }
@@ -130,15 +131,16 @@ impl TurnLoop {
         session_store_dir: Option<std::path::PathBuf>,
         llm: Arc<dyn astrcode_core::llm::LlmProvider>,
         tool_registry: Arc<crate::ToolRegistry>,
-        cancellation_token: CancellationToken,
+        extension_hooks: Arc<dyn astrcode_extension_sdk::runtime_ports::TurnHooks>,
     ) -> Result<Self, TurnError> {
         let runtime_services = session.runtime_services();
+        let cancellation_token = CancellationToken::new();
         let turn =
             TurnToolContext::for_turn(&session, session_state, tool_selection, session_store_dir);
         let tools = ToolCalls::new(
             turn,
             tool_registry,
-            runtime_services.turn_hooks_arc(),
+            Arc::clone(&extension_hooks),
             session.clone(),
             cancellation_token.clone(),
         );
@@ -151,6 +153,7 @@ impl TurnLoop {
             session,
             llm,
             cancellation_token,
+            extension_hooks,
             tools,
             compact_circuit_breaker,
         })
@@ -162,7 +165,7 @@ impl TurnLoop {
         turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
     ) -> Result<TurnOutput, TurnError> {
-        let extension_runner = self.session().runtime_services().turn_hooks_arc();
+        let extension_runner = Arc::clone(&self.extension_hooks);
         let event_bridge = ExtensionEvents::start(Arc::clone(publisher), self.tools.shared_mut());
         let result = self
             .process_prompt_inner(user_text, turn_id, publisher)
@@ -205,7 +208,7 @@ impl TurnLoop {
         publisher: &Arc<TurnEvents>,
     ) -> Result<TurnOutput, TurnError> {
         let all_tools = self.tools.list_definitions_with_prompt_metadata();
-        let extension_runner = self.session().runtime_services().turn_hooks_arc();
+        let extension_runner = Arc::clone(&self.extension_hooks);
 
         let lifecycle_ctx = self.shared().lifecycle_ctx();
         let (turn_start_res, prompt_submit_res) = tokio::join!(

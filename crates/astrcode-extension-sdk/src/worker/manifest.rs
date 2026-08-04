@@ -70,6 +70,7 @@ impl ManifestCatalog {
                 s5r: crate::s5r::S5R_VERSION.into(),
             },
             wire_codec: None,
+            wire_features: vec![crate::s5r::WIRE_FEATURE_PARENT_INVOKE_ID.into()],
             capabilities: self.capabilities.clone(),
             tools,
             hooks: self.hooks.clone(),
@@ -98,6 +99,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(metadata["tools"][0]["strict"], true);
+        assert_eq!(
+            metadata["wire_features"],
+            serde_json::json!([crate::s5r::WIRE_FEATURE_PARENT_INVOKE_ID])
+        );
     }
 
     #[test]

@@ -165,8 +165,11 @@ let response = HostClient::dispatch_public_http(
 操作系统沙箱，后者允许访问宿主网络可达的 HTTP(S) 地址。两者均有并发、总超时和
 I/O 大小限制，并响应会话取消。
 
-扩展只支持公开 HTTP 路由，且不能注册在 `/api` 下。s5r handler 串行执行，因此
-`public_http_dispatch` 会拒绝同步调用自己的公开路由，避免重入死锁。
+扩展只支持公开 HTTP 路由，且不能注册在 `/api` 下。s5r 工具默认串行；显式声明
+`ExecutionMode::Parallel` 且 worker 广告 `parent_invoke_id` wire feature 时，宿主会在同一
+worker 内启用最多 8 个并行调用，并按 request id 隔离 session/working directory 上下文。旧
+worker 缺少该 feature 时自动降级串行。`public_http_dispatch` 仍拒绝同步调用自己的公开
+路由，因为路由和非并行 handler 需要取得顺序执行通道，重入会形成等待环。
 
 进程内 bundled 工具还可读 `ToolExecutionContext.capabilities`：
 

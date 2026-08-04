@@ -1,4 +1,7 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{Arc, Weak},
+};
 
 use astrcode_core::tool::access::ResourceAccess;
 use astrcode_extension_sdk::{
@@ -13,26 +16,24 @@ use astrcode_extension_sdk::{
     },
 };
 
-use super::{ExtensionRunner, bind_extension_event_sink};
+use super::{ExtensionRunner, ExtensionView, HandlerIndex, bind_extension_event_sink};
 
-impl ExtensionRunner {
+impl ExtensionView {
     /// 从 HandlerIndex 缓存收集工具适配器。
     pub async fn tool_catalog_snapshot_typed(&self, working_dir: &str) -> ToolCatalogSnapshot {
         let scope = ToolCatalogScope {
             working_dir: working_dir.to_owned(),
             session_store_dir: None,
         };
-        self.tool_catalog_snapshot_for_scope(&scope, self.revision())
-            .await
+        self.tool_catalog_snapshot_for_scope(&scope).await
     }
 
     pub(super) async fn tool_catalog_snapshot_for_scope(
         &self,
         scope: &ToolCatalogScope,
-        revision: u64,
     ) -> ToolCatalogSnapshot {
         let working_dir = &scope.working_dir;
-        let index = self.load_index();
+        let index = Arc::clone(&self.index);
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut diagnostics = Vec::new();
         for (def, handler, ext_id, capabilities) in &index.static_tools {
@@ -49,6 +50,7 @@ impl ExtensionRunner {
                     .get(ext_id)
                     .cloned()
                     .unwrap_or_default(),
+                index: Arc::downgrade(&index),
             }));
         }
         for (ext_id, discovery, capabilities) in &index.tool_discoveries {
@@ -69,6 +71,7 @@ impl ExtensionRunner {
                                 .get(ext_id)
                                 .cloned()
                                 .unwrap_or_default(),
+                            index: Arc::downgrade(&index),
                         }));
                     }
                 },
@@ -86,7 +89,7 @@ impl ExtensionRunner {
             }
         }
         ToolCatalogSnapshot {
-            revision,
+            revision: self.generation(),
             tools,
             completeness: if diagnostics.is_empty() {
                 ToolCatalogCompleteness::Complete
@@ -95,6 +98,28 @@ impl ExtensionRunner {
             },
             diagnostics,
         }
+    }
+}
+
+impl ExtensionRunner {
+    pub async fn tool_catalog_snapshot_typed(&self, working_dir: &str) -> ToolCatalogSnapshot {
+        self.extension_view()
+            .tool_catalog_snapshot_typed(working_dir)
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolCatalogProvider for ExtensionView {
+    fn revision(&self) -> u64 {
+        self.generation()
+    }
+
+    async fn tool_catalog(
+        &self,
+        scope: &ToolCatalogScope,
+    ) -> Result<ToolCatalogSnapshot, ExtensionError> {
+        Ok(self.tool_catalog_snapshot_for_scope(scope).await)
     }
 }
 
@@ -107,6 +132,7 @@ struct HandlerTool {
     extension_id: String,
     capabilities: Vec<ExtensionCapability>,
     event_declarations: Vec<ExtensionEventDecl>,
+    index: Weak<HandlerIndex>,
 }
 
 // Providers occasionally stringify booleans despite the declared tool schema.
@@ -195,6 +221,14 @@ impl Tool for HandlerTool {
         mut arguments: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolExecutionResult, ToolError> {
+        let Some(active_index) = self.index.upgrade() else {
+            return Ok(extension_error_result(
+                &self.definition.name,
+                &self.extension_id,
+                ExtensionError::NotFound("extension generation is no longer available".into()),
+            )
+            .into());
+        };
         let normalized_booleans =
             normalize_stringified_booleans(&mut arguments, &self.definition.parameters);
         if normalized_booleans > 0 {
@@ -237,6 +271,7 @@ impl Tool for HandlerTool {
             },
         };
 
+        drop(active_index);
         Ok(result)
     }
 }

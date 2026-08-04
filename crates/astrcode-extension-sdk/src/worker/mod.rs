@@ -192,9 +192,8 @@ impl Worker {
             .await
             .map_err(|e| crate::s5r::ErrorPayload::new("initialize_failed", e.to_string()))?;
 
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
-        }
+        peer.wait_closed().await;
+        Ok(())
     }
 }
 

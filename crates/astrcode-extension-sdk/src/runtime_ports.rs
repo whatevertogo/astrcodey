@@ -223,6 +223,64 @@ pub trait TurnHooks: Send + Sync {
     }
 }
 
+/// Immutable extension-runtime generation used by one turn or standalone operation.
+///
+/// The three ports must describe the same published generation. Keeping them in one
+/// value prevents a reload from mixing a tool catalog from one generation with prompt
+/// contributions or hooks from another.
+#[derive(Clone)]
+pub struct TurnExtensionView {
+    generation: u64,
+    tool_catalog: Arc<dyn ToolCatalogProvider>,
+    prompt_contributor: Arc<dyn PromptContributor>,
+    turn_hooks: Arc<dyn TurnHooks>,
+}
+
+impl TurnExtensionView {
+    pub fn new(
+        generation: u64,
+        tool_catalog: Arc<dyn ToolCatalogProvider>,
+        prompt_contributor: Arc<dyn PromptContributor>,
+        turn_hooks: Arc<dyn TurnHooks>,
+    ) -> Self {
+        Self {
+            generation,
+            tool_catalog,
+            prompt_contributor,
+            turn_hooks,
+        }
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn tool_catalog(&self) -> &dyn ToolCatalogProvider {
+        self.tool_catalog.as_ref()
+    }
+
+    pub fn tool_catalog_arc(&self) -> Arc<dyn ToolCatalogProvider> {
+        Arc::clone(&self.tool_catalog)
+    }
+
+    pub fn prompt_contributor(&self) -> &dyn PromptContributor {
+        self.prompt_contributor.as_ref()
+    }
+
+    pub fn turn_hooks(&self) -> &dyn TurnHooks {
+        self.turn_hooks.as_ref()
+    }
+
+    pub fn turn_hooks_arc(&self) -> Arc<dyn TurnHooks> {
+        Arc::clone(&self.turn_hooks)
+    }
+}
+
+/// Captures one immutable extension view without exposing the concrete runner.
+pub trait TurnExtensionViewProvider: RuntimeSnapshotProvider + Send + Sync {
+    fn turn_extension_view(&self) -> TurnExtensionView;
+}
+
 /// Provides late-bound session operations to tools without coupling Session
 /// to a concrete server implementation.
 pub trait SessionOperationsProvider: Send + Sync {
@@ -244,6 +302,13 @@ impl PromptContributor for NoopRuntimePorts {}
 
 #[async_trait::async_trait]
 impl TurnHooks for NoopRuntimePorts {}
+
+impl TurnExtensionViewProvider for NoopRuntimePorts {
+    fn turn_extension_view(&self) -> TurnExtensionView {
+        let noop = Arc::new(Self);
+        TurnExtensionView::new(0, noop.clone(), noop.clone(), noop)
+    }
+}
 
 impl SessionOperationsProvider for NoopRuntimePorts {}
 

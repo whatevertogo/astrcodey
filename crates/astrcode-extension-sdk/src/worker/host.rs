@@ -68,6 +68,9 @@ fn peer_error_to_payload(err: PeerError) -> ErrorPayload {
     match err {
         PeerError::Closed => ErrorPayload::new("peer_closed", "host peer closed"),
         PeerError::Timeout => ErrorPayload::new("timeout", "host invoke timed out"),
+        PeerError::Busy => {
+            ErrorPayload::new("peer_busy", "host invoke concurrency limit reached").retryable(true)
+        },
         PeerError::Payload(msg) => ErrorPayload::new("host_error", msg),
         PeerError::Msg(msg) => ErrorPayload::new("transport_error", msg),
     }

@@ -18,7 +18,7 @@ use astrcode_extension_sdk::{
         ProviderHandler, ProviderResult, Registrar, SlashCommand, StopReason, ToolHandler,
     },
     s5r::event_to_name,
-    tool::ToolDefinition,
+    tool::{ExecutionMode, ToolDefinition},
 };
 pub use protocol::S5R_PROTOCOL_VERSION;
 use serde_json::{Value, json};
@@ -149,6 +149,7 @@ impl Extension for S5rExtension {
                 Arc::new(S5rToolHandler {
                     session: Arc::clone(&self.session),
                     extension_id: self.id.clone(),
+                    execution_mode: tool_def.execution_mode,
                 }),
             );
         }
@@ -337,6 +338,7 @@ fn hook_invoke_ctx(
 struct S5rToolHandler {
     session: Arc<S5rSession>,
     extension_id: String,
+    execution_mode: ExecutionMode,
 }
 
 #[async_trait::async_trait]
@@ -374,7 +376,7 @@ impl ToolHandler for S5rToolHandler {
         let hid = handler_id(&self.extension_id, "tool", tool_name);
         let resp = self
             .session
-            .invoke_handler_with_continuations(&hid, event, &invoke_ctx)
+            .invoke_handler_with_continuations(&hid, event, &invoke_ctx, self.execution_mode)
             .await?;
         parse_tool_result(&resp).map(Into::into)
     }
@@ -417,7 +419,7 @@ impl CommandHandler for S5rCommandHandler {
         let hid = handler_id(&self.extension_id, "command", command_name);
         let resp = self
             .session
-            .invoke_handler_with_continuations(&hid, event, &invoke_ctx)
+            .invoke_handler_with_continuations(&hid, event, &invoke_ctx, ExecutionMode::Sequential)
             .await?;
         parse_command_result(&resp)
     }
@@ -456,6 +458,7 @@ impl PreToolUseHandler for S5rPreToolUseHandler {
                 &hid,
                 json!({ "on": "pre_tool_use", "input": input }),
                 &invoke_ctx,
+                ExecutionMode::Sequential,
             )
             .await?;
         parse_pre_tool_use_result(&resp)
@@ -497,6 +500,7 @@ impl PostToolUseHandler for S5rPostToolUseHandler {
                 &hid,
                 json!({ "on": "post_tool_use", "input": input }),
                 &invoke_ctx,
+                ExecutionMode::Sequential,
             )
             .await?;
         parse_post_tool_use_result(&resp)
@@ -534,6 +538,7 @@ impl ProviderHandler for S5rProviderHandler {
                 &hid,
                 json!({ "on": self.on, "input": input }),
                 &invoke_ctx,
+                ExecutionMode::Sequential,
             )
             .await?;
         parse_provider_result(&resp)
@@ -575,6 +580,7 @@ impl ContinueAfterStopHandler for S5rContinueAfterStopHandler {
                 &hid,
                 json!({ "on": "continue_after_stop", "input": input }),
                 &invoke_ctx,
+                ExecutionMode::Sequential,
             )
             .await?;
         parse_continue_after_stop_result(&resp)
@@ -610,6 +616,7 @@ impl PromptBuildHandler for S5rPromptBuildHandler {
                 &hid,
                 json!({ "on": "prompt_build", "input": input }),
                 &invoke_ctx,
+                ExecutionMode::Sequential,
             )
             .await?;
         parse_prompt_build_result(&resp)
@@ -651,6 +658,7 @@ impl CompactHandler for S5rCompactHandler {
                 &hid,
                 json!({ "on": self.on, "input": input }),
                 &invoke_ctx,
+                ExecutionMode::Sequential,
             )
             .await?;
         parse_compact_result(&resp)
@@ -688,6 +696,7 @@ impl LifecycleHandler for S5rLifecycleHandler {
                 &hid,
                 json!({ "on": self.on, "input": input }),
                 &invoke_ctx,
+                ExecutionMode::Sequential,
             )
             .await?;
         parse_lifecycle_result(&resp)

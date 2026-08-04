@@ -30,6 +30,9 @@ sha2 = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+process-wrap = { workspace = true, features = ["job-object", "kill-on-drop", "tokio1"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
 astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }

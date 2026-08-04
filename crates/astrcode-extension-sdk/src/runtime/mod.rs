@@ -8,7 +8,8 @@ mod transport;
 
 pub use cancel::CancelToken;
 pub use peer::{
-    InitializeHandler, InvokeHandler, InvokeReply, OutboundInvokeControl, Peer, PeerError,
+    InitializeHandler, InvokeHandler, InvokeReply, OutboundInvokeControl, OutboundInvokeTracker,
+    Peer, PeerError,
 };
 pub use stream::EventStream;
 pub use transport::{

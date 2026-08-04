@@ -1,6 +1,6 @@
 use astrcode_extension_sdk::extension::*;
 
-use super::ExtensionRunner;
+use super::{ExtensionRunner, ExtensionView};
 
 #[derive(Debug, Clone)]
 pub enum ExtensionHttpDispatchResult {
@@ -11,7 +11,7 @@ pub enum ExtensionHttpDispatchResult {
     Response(ExtensionHttpResponse),
 }
 
-impl ExtensionRunner {
+impl ExtensionView {
     pub async fn dispatch_public_http_route(
         &self,
         request: ExtensionHttpRequest,
@@ -61,7 +61,7 @@ impl ExtensionRunner {
         mut request: ExtensionHttpRequest,
         body: &[u8],
     ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
-        let index = self.load_index();
+        let index = &self.index;
         let mut path_matched = false;
         let matched = index.http_routes.iter().find_map(|entry| {
             if entry.route.access != access
@@ -127,6 +127,40 @@ impl ExtensionRunner {
             )));
         }
         Ok(ExtensionHttpDispatchResult::Response(response))
+    }
+}
+
+impl ExtensionRunner {
+    pub async fn dispatch_public_http_route(
+        &self,
+        request: ExtensionHttpRequest,
+        body: &[u8],
+    ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
+        self.extension_view()
+            .dispatch_public_http_route(request, body)
+            .await
+    }
+
+    pub async fn dispatch_authenticated_http_route(
+        &self,
+        extension_id: &str,
+        request: ExtensionHttpRequest,
+        body: &[u8],
+    ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
+        self.extension_view()
+            .dispatch_authenticated_http_route(extension_id, request, body)
+            .await
+    }
+
+    pub async fn dispatch_public_http_route_from(
+        &self,
+        caller_extension_id: &str,
+        request: ExtensionHttpRequest,
+        body: &[u8],
+    ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
+        self.extension_view()
+            .dispatch_public_http_route_from(caller_extension_id, request, body)
+            .await
     }
 }
 

@@ -20,6 +20,7 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub(crate) struct ExtensionRegistration {
     extension_id: String,
+    wire_features: Vec<String>,
     capabilities: Vec<ExtensionCapability>,
     tools: Vec<ToolDefinition>,
     commands: Vec<SlashCommand>,
@@ -37,6 +38,12 @@ pub(crate) struct RegisteredHttpRoute {
 impl ExtensionRegistration {
     pub(crate) fn extension_id(&self) -> &str {
         &self.extension_id
+    }
+
+    pub(crate) fn supports_wire_feature(&self, feature: &str) -> bool {
+        self.wire_features
+            .iter()
+            .any(|candidate| candidate == feature)
     }
 
     pub(crate) fn capabilities(&self) -> &[ExtensionCapability] {
@@ -88,6 +95,7 @@ fn registration_from_manifest(
     }
     let extension_id = extension_id.to_owned();
 
+    let wire_features = manifest.wire_features;
     let capabilities = manifest
         .capabilities
         .into_iter()
@@ -125,6 +133,7 @@ fn registration_from_manifest(
 
     Ok(ExtensionRegistration {
         extension_id,
+        wire_features,
         capabilities,
         tools,
         commands,
@@ -256,6 +265,7 @@ mod tests {
                     "future_protocol_field": true
                 },
                 "wire_codec": "json",
+                "wire_features": ["parent_invoke_id", "future_feature"],
                 "future_manifest_field": {"enabled": true},
                 "tools": [
                     {
@@ -280,6 +290,11 @@ mod tests {
         .expect("manifest should parse");
 
         assert!(!registration.tools()[0].strict);
+        assert!(
+            registration
+                .supports_wire_feature(astrcode_extension_sdk::s5r::WIRE_FEATURE_PARENT_INVOKE_ID)
+        );
+        assert!(registration.supports_wire_feature("future_feature"));
         assert_eq!(
             registration.tools()[0].execution_mode,
             ExecutionMode::Sequential

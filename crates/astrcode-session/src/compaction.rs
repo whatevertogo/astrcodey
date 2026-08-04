@@ -582,7 +582,8 @@ pub async fn compact_idle_session(
     keep_recent_turns: Option<usize>,
 ) -> Result<IdleCompactionOutcome, IdleCompactionError> {
     let runtime_services = session.runtime_services();
-    let extension_runner = runtime_services.turn_hooks_arc();
+    let runtime_view = runtime_services.turn_runtime_view().await?;
+    let extension_runner = runtime_view.turn_hooks_arc();
     let context_assembler = runtime_services.context_assembler_arc();
 
     let state = session.read_model().await?;
@@ -595,7 +596,7 @@ pub async fn compact_idle_session(
     let llm = runtime_services.llm();
     let post_hook = manual_hook_context(session, &state, snapshot.messages.len());
     let tool_registry = session
-        .tool_registry_snapshot(&state.identity.working_dir)
+        .tool_registry_snapshot_for_view(&runtime_view, &state.identity.working_dir)
         .await?;
     let tools = tool_registry.list_definitions();
     let transcript_path = session

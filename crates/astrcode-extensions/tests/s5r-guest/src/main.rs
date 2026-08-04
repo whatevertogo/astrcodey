@@ -14,6 +14,7 @@ use astrcode_extension_sdk::{
         ErrorPayload,
         effects::{CallContinuation, HandlerResult},
     },
+    tool::ExecutionMode,
     worker_prelude::*,
 };
 use serde::Deserialize;
@@ -22,6 +23,8 @@ use serde_json::{Value, json};
 static PIPELINE_STEP_1_CALLS: AtomicU32 = AtomicU32::new(0);
 static PIPELINE_STEP_2_CALLS: AtomicU32 = AtomicU32::new(0);
 static PIPELINE_LLM_OK: AtomicBool = AtomicBool::new(false);
+static PARALLEL_ACTIVE: AtomicU32 = AtomicU32::new(0);
+static PARALLEL_PEAK: AtomicU32 = AtomicU32::new(0);
 
 const EXT_ID: &str = "s5r-guest-demo";
 
@@ -50,6 +53,27 @@ struct PreToolInput {
 #[derive(Deserialize)]
 struct PipelineStepInput {
     step: u64,
+}
+
+#[derive(Deserialize)]
+struct ParallelReadArgs {
+    delay_ms: u64,
+}
+
+struct ParallelCallGuard;
+
+impl ParallelCallGuard {
+    fn enter() -> Self {
+        let active = PARALLEL_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+        PARALLEL_PEAK.fetch_max(active, Ordering::SeqCst);
+        Self
+    }
+}
+
+impl Drop for ParallelCallGuard {
+    fn drop(&mut self) {
+        PARALLEL_ACTIVE.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 #[tokio::main]
@@ -181,6 +205,28 @@ async fn run() -> Result<(), ErrorPayload> {
                 HostClient::call("astrcode.workspace.read", json!({ "path": "probe.txt" })).await?;
             let content = out["content"].as_str().unwrap_or("");
             Ok(tool_text(format!("read probe.txt: {content}"), false))
+        }),
+    )?;
+
+    worker.tool(
+        tool("parallel_read_workspace")
+            .description("Read probe.txt with a bounded parallel handler")
+            .parameters(json!({
+                "type": "object",
+                "properties": { "delay_ms": { "type": "integer", "minimum": 0 } },
+                "required": ["delay_ms"]
+            }))
+            .execution_mode(ExecutionMode::Parallel)
+            .build(),
+        tool_handler_args(|args: ParallelReadArgs, _ctx| async move {
+            let _active = ParallelCallGuard::enter();
+            tokio::time::sleep(Duration::from_millis(args.delay_ms)).await;
+            let output =
+                HostClient::call("astrcode.workspace.read", json!({ "path": "probe.txt" }))
+                    .await?;
+            let content = output["content"].as_str().unwrap_or("");
+            let peak = PARALLEL_PEAK.load(Ordering::SeqCst);
+            Ok(tool_text(format!("content={content} peak={peak}"), false))
         }),
     )?;
 
