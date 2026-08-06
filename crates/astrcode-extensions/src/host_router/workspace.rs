@@ -6,13 +6,24 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use astrcode_extension_sdk::s5r::ErrorPayload;
+use astrcode_extension_sdk::{
+    extension::ExtensionTasks,
+    host::{
+        HostWorkspaceEditRequest, HostWorkspaceGlobRequest, HostWorkspaceGrepRequest,
+        HostWorkspaceListRequest, HostWorkspaceReadRequest, HostWorkspaceWriteRequest,
+    },
+    s5r::ErrorPayload,
+};
 use globset::Glob;
 use regex::Regex;
+use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 use walkdir::{DirEntry, WalkDir};
 
-use super::{capability::WorkspaceCapability, path::canonicalize_workspace_path, run_blocking_io};
+use super::{
+    capability::WorkspaceCapability, decode_host_input, path::canonicalize_workspace_path,
+    run_blocking_io, run_blocking_io_to_completion,
+};
 
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_WALK_ENTRIES: usize = 5_000;
@@ -34,21 +45,43 @@ impl WorkspaceGroup {
         }
     }
 
-    pub(super) fn invoke(
+    pub(super) async fn invoke(
         &self,
         capability: WorkspaceCapability,
-        input: &Value,
+        input: Value,
         working_dir: Option<&str>,
+        tasks: Option<&ExtensionTasks>,
     ) -> Result<Value, ErrorPayload> {
-        let root = self.root(working_dir)?;
-        run_blocking_io(|| match capability {
-            WorkspaceCapability::Read => read(root, input),
-            WorkspaceCapability::List => list(root, input),
-            WorkspaceCapability::Grep => grep(root, input),
-            WorkspaceCapability::Glob => glob(root, input),
-            WorkspaceCapability::Write => write(root, input),
-            WorkspaceCapability::Edit => edit(root, input),
-        })
+        let root = self.root(working_dir)?.to_owned();
+        match capability {
+            WorkspaceCapability::Read => run_workspace_io(input, root, read).await,
+            WorkspaceCapability::List => run_workspace_io(input, root, list).await,
+            WorkspaceCapability::Grep => run_workspace_io(input, root, grep).await,
+            WorkspaceCapability::Glob => run_workspace_io(input, root, glob).await,
+            WorkspaceCapability::Write => {
+                run_persistent_workspace_io(tasks, "workspace-write", input, root, write).await
+            },
+            WorkspaceCapability::Edit => {
+                run_persistent_workspace_io(tasks, "workspace-edit", input, root, edit).await
+            },
+        }
+    }
+
+    pub(super) fn is_available(
+        &self,
+        capability: WorkspaceCapability,
+        working_dir: Option<&str>,
+        tasks: Option<&ExtensionTasks>,
+    ) -> bool {
+        let has_workspace = working_dir.is_some() || self.default_working_dir.is_some();
+        has_workspace
+            && match capability {
+                WorkspaceCapability::Write | WorkspaceCapability::Edit => tasks.is_some(),
+                WorkspaceCapability::Read
+                | WorkspaceCapability::List
+                | WorkspaceCapability::Grep
+                | WorkspaceCapability::Glob => true,
+            }
     }
 
     fn root<'a>(&'a self, working_dir: Option<&'a str>) -> Result<&'a str, ErrorPayload> {
@@ -58,8 +91,34 @@ impl WorkspaceGroup {
     }
 }
 
-fn read(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
-    let relative_path = required_string(input, "path")?;
+async fn run_workspace_io<Request>(
+    input: Value,
+    root: String,
+    operation: fn(&str, Request) -> Result<Value, ErrorPayload>,
+) -> Result<Value, ErrorPayload>
+where
+    Request: DeserializeOwned + Send + 'static,
+{
+    let request = decode_host_input(input)?;
+    run_blocking_io(move || operation(&root, request)).await
+}
+
+async fn run_persistent_workspace_io<Request>(
+    tasks: Option<&ExtensionTasks>,
+    name: &'static str,
+    input: Value,
+    root: String,
+    operation: fn(&str, Request) -> Result<Value, ErrorPayload>,
+) -> Result<Value, ErrorPayload>
+where
+    Request: DeserializeOwned + Send + 'static,
+{
+    let request = decode_host_input(input)?;
+    run_blocking_io_to_completion(tasks, name, move || operation(&root, request)).await
+}
+
+fn read(root: &str, request: HostWorkspaceReadRequest) -> Result<Value, ErrorPayload> {
+    let relative_path = required_non_empty(&request.path, "path")?;
     reject_sensitive_path(relative_path)?;
     let path = resolve_existing_path(root, relative_path, "workspace.read")?;
     let metadata = std::fs::metadata(&path)
@@ -70,9 +129,8 @@ fn read(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
             "workspace.read path must be a regular file",
         ));
     }
-    let max_bytes = input
-        .get("max_bytes")
-        .and_then(Value::as_u64)
+    let max_bytes = request
+        .max_bytes
         .unwrap_or(MAX_FILE_BYTES as u64)
         .min(MAX_FILE_BYTES as u64);
     if metadata.len() > max_bytes {
@@ -94,8 +152,8 @@ fn read(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     Ok(json!({ "content": content }))
 }
 
-fn list(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
-    let relative_path = input.get("path").and_then(Value::as_str).unwrap_or(".");
+fn list(root: &str, request: HostWorkspaceListRequest) -> Result<Value, ErrorPayload> {
+    let relative_path = request.path.as_str();
     reject_sensitive_path(relative_path)?;
     let path = resolve_existing_path(root, relative_path, "workspace.list")?;
     if !path.is_dir() {
@@ -104,8 +162,8 @@ fn list(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
             "workspace.list path must be a directory",
         ));
     }
-    let depth = bounded_usize(input, "depth", 1, 1, 32);
-    let limit = bounded_usize(input, "limit", MAX_LIST_ENTRIES, 1, MAX_LIST_ENTRIES);
+    let depth = request.depth.clamp(1, 32);
+    let limit = bounded_limit(request.limit, MAX_LIST_ENTRIES, MAX_LIST_ENTRIES);
     let canonical_root = canonical_root(root)?;
     let mut entries = Vec::new();
     let mut scanned = 0usize;
@@ -153,17 +211,17 @@ fn list(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     }))
 }
 
-fn grep(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
-    let pattern = required_string(input, "pattern")?;
+fn grep(root: &str, request: HostWorkspaceGrepRequest) -> Result<Value, ErrorPayload> {
+    let pattern = required_non_empty(&request.pattern, "pattern")?;
     let regex = Regex::new(pattern)
         .map_err(|error| ErrorPayload::new("invalid_input", format!("invalid regex: {error}")))?;
-    let relative_path = input.get("path").and_then(Value::as_str).unwrap_or(".");
+    let relative_path = request.path.as_deref().unwrap_or(".");
     reject_sensitive_path(relative_path)?;
     let search_root = resolve_existing_path(root, relative_path, "workspace.grep")?;
     let canonical_root = canonical_root(root)?;
-    let max_matches = bounded_usize(input, "max_matches", 100, 1, MAX_SEARCH_MATCHES);
-    let max_bytes = bounded_usize(input, "max_bytes", 64 * 1024, 1, MAX_SEARCH_OUTPUT_BYTES);
-    let max_line_chars = bounded_usize(input, "max_line_chars", 500, 1, MAX_SEARCH_LINE_CHARS);
+    let max_matches = bounded_limit(request.max_matches, 100, MAX_SEARCH_MATCHES);
+    let max_bytes = bounded_limit(request.max_bytes, 64 * 1024, MAX_SEARCH_OUTPUT_BYTES);
+    let max_line_chars = bounded_limit(request.max_line_chars, 500, MAX_SEARCH_LINE_CHARS);
     let searchable = searchable_files_with_limit(&canonical_root, &search_root, MAX_WALK_ENTRIES)?;
     let mut matches = Vec::new();
     let mut output_bytes = 0usize;
@@ -216,8 +274,8 @@ fn grep(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     }))
 }
 
-fn glob(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
-    let pattern = required_string(input, "pattern")?;
+fn glob(root: &str, request: HostWorkspaceGlobRequest) -> Result<Value, ErrorPayload> {
+    let pattern = required_non_empty(&request.pattern, "pattern")?;
     if Path::new(pattern).is_absolute() {
         return Err(ErrorPayload::new(
             "permission_denied",
@@ -227,7 +285,7 @@ fn glob(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     let matcher = Glob::new(pattern)
         .map_err(|error| ErrorPayload::new("invalid_input", error.to_string()))?
         .compile_matcher();
-    let relative_root = input.get("root").and_then(Value::as_str).unwrap_or(".");
+    let relative_root = request.root.as_deref().unwrap_or(".");
     if is_overly_broad_glob(pattern, relative_root) {
         return Err(ErrorPayload::new(
             "invalid_input",
@@ -244,11 +302,8 @@ fn glob(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
         ));
     }
     let canonical_root = canonical_root(root)?;
-    let max_matches = bounded_usize(input, "max_matches", 200, 1, MAX_SEARCH_MATCHES);
-    let include_ignored = input
-        .get("include_ignored")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+    let max_matches = bounded_limit(request.max_matches, 200, MAX_SEARCH_MATCHES);
+    let include_ignored = request.include_ignored;
     let mut paths = Vec::new();
     let mut scanned = 0usize;
     let mut truncated = false;
@@ -319,9 +374,9 @@ fn segment_has_literal(segment: &str) -> bool {
     false
 }
 
-fn write(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
-    let relative_path = required_string(input, "path")?;
-    let content = required_string_allow_empty(input, "content")?;
+fn write(root: &str, request: HostWorkspaceWriteRequest) -> Result<Value, ErrorPayload> {
+    let relative_path = required_non_empty(&request.path, "path")?;
+    let content = request.content.as_str();
     enforce_content_limit(content)?;
     reject_sensitive_path(relative_path)?;
     let (parent, file_name, parent_created) = resolve_write_target(root, relative_path)?;
@@ -336,14 +391,11 @@ fn write(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
     }))
 }
 
-fn edit(root: &str, input: &Value) -> Result<Value, ErrorPayload> {
-    let relative_path = required_string(input, "path")?;
-    let old_text = required_string(input, "old_text")?;
-    let new_text = required_string_allow_empty(input, "new_text")?;
-    let replace_all = input
-        .get("replace_all")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
+fn edit(root: &str, request: HostWorkspaceEditRequest) -> Result<Value, ErrorPayload> {
+    let relative_path = required_non_empty(&request.path, "path")?;
+    let old_text = required_non_empty(&request.old_text, "old_text")?;
+    let new_text = request.new_text.as_str();
+    let replace_all = request.replace_all;
     reject_sensitive_path(relative_path)?;
     let path = resolve_existing_path(root, relative_path, "workspace.edit")?;
     let metadata = std::fs::metadata(&path)
@@ -529,24 +581,15 @@ fn is_sensitive_component(component: &str) -> bool {
         || name.starts_with("id_ed25519")
 }
 
-fn required_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, ErrorPayload> {
-    required_string_allow_empty(input, key).and_then(|value| {
-        if value.is_empty() {
-            Err(ErrorPayload::new(
-                "invalid_input",
-                format!("{key} must not be empty"),
-            ))
-        } else {
-            Ok(value)
-        }
-    })
-}
-
-fn required_string_allow_empty<'a>(input: &'a Value, key: &str) -> Result<&'a str, ErrorPayload> {
-    input
-        .get(key)
-        .and_then(Value::as_str)
-        .ok_or_else(|| ErrorPayload::new("invalid_input", format!("{key} must be a string")))
+fn required_non_empty<'a>(value: &'a str, key: &str) -> Result<&'a str, ErrorPayload> {
+    if value.is_empty() {
+        Err(ErrorPayload::new(
+            "invalid_input",
+            format!("{key} must not be empty"),
+        ))
+    } else {
+        Ok(value)
+    }
 }
 
 fn enforce_content_limit(content: &str) -> Result<(), ErrorPayload> {
@@ -559,13 +602,8 @@ fn enforce_content_limit(content: &str) -> Result<(), ErrorPayload> {
     Ok(())
 }
 
-fn bounded_usize(input: &Value, key: &str, default: usize, min: usize, max: usize) -> usize {
-    input
-        .get(key)
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(default)
-        .clamp(min, max)
+fn bounded_limit(value: Option<usize>, default: usize, max: usize) -> usize {
+    value.unwrap_or(default).clamp(1, max)
 }
 
 fn canonical_root(root: &str) -> Result<PathBuf, ErrorPayload> {
@@ -679,6 +717,15 @@ mod tests {
 
     use super::*;
 
+    fn glob_request(pattern: &str) -> HostWorkspaceGlobRequest {
+        HostWorkspaceGlobRequest {
+            pattern: pattern.into(),
+            root: None,
+            max_matches: None,
+            include_ignored: false,
+        }
+    }
+
     #[test]
     fn write_and_edit_nested_workspace_file() {
         let workspace = tempdir().expect("workspace");
@@ -686,18 +733,22 @@ mod tests {
 
         let written = write(
             root,
-            &json!({ "path": "src/example.txt", "content": "old value" }),
+            HostWorkspaceWriteRequest {
+                path: "src/example.txt".into(),
+                content: "old value".into(),
+            },
         )
         .expect("write nested file");
         assert_eq!(written["parent_created"], true);
 
         let edited = edit(
             root,
-            &json!({
-                "path": "src/example.txt",
-                "old_text": "old",
-                "new_text": "new"
-            }),
+            HostWorkspaceEditRequest {
+                path: "src/example.txt".into(),
+                old_text: "old".into(),
+                new_text: "new".into(),
+                replace_all: false,
+            },
         )
         .expect("edit file");
         assert_eq!(edited["replacements"], 1);
@@ -713,18 +764,36 @@ mod tests {
         let workspace = tempdir().expect("workspace");
         let root = workspace.path().to_str().expect("utf-8 workspace");
 
-        let escape = write(root, &json!({ "path": "../escape", "content": "x" }))
-            .expect_err("parent traversal must fail");
+        let escape = write(
+            root,
+            HostWorkspaceWriteRequest {
+                path: "../escape".into(),
+                content: "x".into(),
+            },
+        )
+        .expect_err("parent traversal must fail");
         assert_eq!(escape.code, "permission_denied");
 
-        let sensitive = write(root, &json!({ "path": ".env", "content": "SECRET=x" }))
-            .expect_err("sensitive file must fail");
+        let sensitive = write(
+            root,
+            HostWorkspaceWriteRequest {
+                path: ".env".into(),
+                content: "SECRET=x".into(),
+            },
+        )
+        .expect_err("sensitive file must fail");
         assert_eq!(sensitive.code, "permission_denied");
 
         std::fs::write(workspace.path().join("secret.pem"), "private")
             .expect("seed sensitive file");
-        let sensitive_read =
-            read(root, &json!({ "path": "secret.pem" })).expect_err("sensitive reads must fail");
+        let sensitive_read = read(
+            root,
+            HostWorkspaceReadRequest {
+                path: "secret.pem".into(),
+                max_bytes: None,
+            },
+        )
+        .expect_err("sensitive reads must fail");
         assert_eq!(sensitive_read.code, "permission_denied");
     }
 
@@ -747,13 +816,22 @@ mod tests {
         .expect("create internal symlink");
         symlink(outside.path(), workspace.path().join("outside")).expect("create external symlink");
 
-        let read_error = read(root, &json!({ "path": "alias/config" }))
-            .expect_err("intermediate symlink read must fail");
+        let read_error = read(
+            root,
+            HostWorkspaceReadRequest {
+                path: "alias/config".into(),
+                max_bytes: None,
+            },
+        )
+        .expect_err("intermediate symlink read must fail");
         assert_eq!(read_error.code, "permission_denied");
 
         let write_error = write(
             root,
-            &json!({ "path": "outside/new/file.txt", "content": "x" }),
+            HostWorkspaceWriteRequest {
+                path: "outside/new/file.txt".into(),
+                content: "x".into(),
+            },
         )
         .expect_err("intermediate symlink write must fail");
         assert_eq!(write_error.code, "permission_denied");
@@ -786,7 +864,15 @@ mod tests {
         .expect("write source");
         std::fs::write(workspace.path().join(".env"), "TOKEN=secret").expect("write secret");
 
-        let listed = list(root, &json!({ "path": ".", "depth": 2 })).expect("list workspace");
+        let listed = list(
+            root,
+            HostWorkspaceListRequest {
+                path: ".".into(),
+                depth: 2,
+                limit: None,
+            },
+        )
+        .expect("list workspace");
         assert!(
             listed["entries"]
                 .as_array()
@@ -804,36 +890,61 @@ mod tests {
 
         let matches = grep(
             root,
-            &json!({ "pattern": "fn (alpha|beta)", "path": "src" }),
+            HostWorkspaceGrepRequest {
+                pattern: "fn (alpha|beta)".into(),
+                path: Some("src".into()),
+                max_matches: None,
+                max_bytes: None,
+                max_line_chars: None,
+            },
         )
         .expect("grep workspace");
         assert_eq!(matches["matches"].as_array().expect("matches").len(), 2);
 
-        let paths = glob(root, &json!({ "pattern": "**/*.rs" })).expect("glob workspace");
+        let paths = glob(root, glob_request("**/*.rs")).expect("glob workspace");
         assert_eq!(paths["paths"], json!(["src/lib.rs"]));
 
         for pattern in [
             "*", "**/*", "**/**", "*/*", "./**/*", "**/?*", "[a-z]*", "**/*.*",
         ] {
-            let error = glob(root, &json!({ "pattern": pattern }))
+            let error = glob(root, glob_request(pattern))
                 .expect_err("root catch-all glob must be rejected");
             assert_eq!(error.code, "invalid_input", "pattern: {pattern}");
             assert!(error.message.contains("workspace.list"));
         }
 
         for pattern in ["*.rs", "**/*.rs", "**/*.toml", "src/**"] {
-            glob(root, &json!({ "pattern": pattern }))
+            glob(root, glob_request(pattern))
                 .unwrap_or_else(|error| panic!("pattern {pattern} should pass: {error:?}"));
         }
 
-        glob(root, &json!({ "pattern": "*", "root": "src" }))
-            .expect("catch-all glob under an explicit subdirectory");
-        let normalized_root_error = glob(root, &json!({ "pattern": "*", "root": "./" }))
-            .expect_err("root ./ must not bypass the catch-all guard");
+        glob(
+            root,
+            HostWorkspaceGlobRequest {
+                root: Some("src".into()),
+                ..glob_request("*")
+            },
+        )
+        .expect("catch-all glob under an explicit subdirectory");
+        let normalized_root_error = glob(
+            root,
+            HostWorkspaceGlobRequest {
+                root: Some("./".into()),
+                ..glob_request("*")
+            },
+        )
+        .expect_err("root ./ must not bypass the catch-all guard");
         assert_eq!(normalized_root_error.code, "invalid_input");
 
-        let limited =
-            list(root, &json!({ "path": ".", "depth": 2, "limit": 1 })).expect("limited list");
+        let limited = list(
+            root,
+            HostWorkspaceListRequest {
+                path: ".".into(),
+                depth: 2,
+                limit: Some(1),
+            },
+        )
+        .expect("limited list");
         assert_eq!(limited["returned_entries"], 1);
         assert_eq!(limited["truncated"], true);
     }

@@ -255,6 +255,7 @@ mod tests {
             turn: TurnToolContext {
                 shared: SharedTurnContext {
                     session_id: new_session_id(),
+                    turn_id: None,
                     working_dir: "/workspace".into(),
                     model_id: "model".into(),
                     session_store_dir: None,
@@ -263,6 +264,7 @@ mod tests {
                     tool_selection: Some(SessionToolSelection::default()),
                     permission_chain: Arc::new(PermissionChain::new(Vec::new())),
                     approval_history: Arc::new(ApprovalHistoryStore::default()),
+                    cancellation_token: CancellationToken::new(),
                 },
                 capabilities: ToolRuntimeCapabilities {
                     file_observation_store: None,

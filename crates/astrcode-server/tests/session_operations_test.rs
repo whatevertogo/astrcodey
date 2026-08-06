@@ -18,8 +18,9 @@ use astrcode_core::{
     event::{DurableEvent, DurableEventPayload, StoredEvent},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::{
-        CreateSessionRequest, SessionAccess, SessionDeliveryOutcome, SessionLifecycleState,
-        SessionOperations, SubmitTurnRequest, SubmitTurnResult, ToolDefinition,
+        CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionDeliveryOutcome,
+        SessionLifecycleState, SessionOperations, SubmitTurnRequest, SubmitTurnResult,
+        ToolDefinition,
     },
     types::{Cursor, SessionId, new_session_id, new_turn_id},
 };
@@ -535,6 +536,30 @@ fn build_test_ops(
     llm_text: &'static str,
 ) -> Arc<ServerSessionOperations> {
     build_test_ops_with_llm(store, Arc::new(StaticTextLlm { text: llm_text }))
+}
+
+#[tokio::test]
+async fn create_root_session_persists_source_extension_attribution() {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let ops = build_test_ops(Arc::clone(&store), "unused");
+
+    let created = ops
+        .create_root_session(CreateRootSessionRequest {
+            working_dir: ".".into(),
+            source_extension: Some("channel-a".into()),
+        })
+        .await
+        .expect("create attributed root session");
+    let model = store
+        .session_read_model(&SessionId::new(created.session_id))
+        .await
+        .expect("read created root session");
+
+    assert!(model.identity.parent.is_none());
+    assert_eq!(
+        model.identity.source_extension.as_deref(),
+        Some("channel-a")
+    );
 }
 
 #[tokio::test]
@@ -2377,7 +2402,10 @@ async fn parent_abort_stops_sync_child_and_recycles() {
         "sync child turn should be active in registry"
     );
 
-    ops.scheduler.abort(&parent_id).await.unwrap();
+    assert!(
+        ops.scheduler.abort(&parent_id).await.unwrap(),
+        "cancelling an idle parent must report its active descendant"
+    );
     release.notify_one();
 
     let sync_result = sync_turn.await.expect("sync turn task panicked");

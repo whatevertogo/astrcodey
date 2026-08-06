@@ -8,14 +8,19 @@ mod agent;
 use std::sync::Arc;
 
 use astrcode_extension_sdk::{
+    builder::{ExtensionToolDefinition, manifest},
     discovery::DiscoveryCache,
     extension::{
-        Extension, ExtensionCapability, ExtensionError, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, Registrar, ToolHandler,
+        Extension, ExtensionCapability, ExtensionError, ExtensionManifest, PromptBuildContext,
+        PromptBuildHandler, PromptContributions, Registrar, ToolContext, ToolHandler,
+    },
+    session::{
+        HostCreateSessionRequest, HostRecycleSessionRequest, HostSubmitTurnOutput,
+        HostSubmitTurnRequest,
     },
     tool::{
-        CreateSessionRequest, ExecutionMode, SessionAccess, SubmitTurnRequest, ToolDefinition,
-        ToolOrigin, ToolResult, tool_metadata,
+        ExecutionMode, ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
+        tool_metadata,
     },
 };
 use serde::Deserialize;
@@ -32,26 +37,24 @@ struct AgentToolsExtension;
 
 #[async_trait::async_trait]
 impl Extension for AgentToolsExtension {
-    fn id(&self) -> &str {
-        "astrcode-agent-tools"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::SessionControl,
-            ExtensionCapability::SmallModel,
-        ]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("astrcode-agent-tools")
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::SessionControl)
+            .capability(ExtensionCapability::SmallModel)
+            .build()
     }
 
     fn register(&self, reg: &mut Registrar) {
         let shared = Arc::new(AgentShared::new());
         reg.tool(
-            agent_tool_definition(),
+            ExtensionToolDefinition::from_definition(agent_tool_definition())
+                .with_prompt(agent_tool_prompt()),
             Arc::new(AgentToolHandler {
                 shared: shared.clone(),
             }),
         );
-        reg.tool_metadata(agent_tool_metadata());
         reg.on_prompt_build(0, Arc::new(AgentPromptBuildHandler { shared }));
     }
 }
@@ -130,18 +133,18 @@ struct AgentToolHandler {
 impl ToolHandler for AgentToolHandler {
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
-        working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        if tool_name != "agent" {
-            return Err(ExtensionError::NotFound(tool_name.into()));
+        if ctx.tool_name() != "agent" {
+            return Err(ExtensionError::NotFound(ctx.tool_name().into()));
         }
 
-        let agents = self.shared.get_or_discover(Some(working_dir));
-        let args: AgentArgs = serde_json::from_value(arguments.clone())
-            .map_err(|e| ExtensionError::Internal(format!("invalid agent args: {e}")))?;
+        let working_dir = ctx
+            .working_dir()
+            .ok_or_else(|| ExtensionError::Internal("agent tool requires a workspace".into()))?;
+        let working_dir = working_dir.to_string_lossy();
+        let agents = self.shared.get_or_discover(Some(&working_dir));
+        let args: AgentArgs = ctx.arguments()?;
 
         let matched = match args.subagent_type.as_deref() {
             None => {
@@ -164,58 +167,49 @@ impl ToolHandler for AgentToolHandler {
                 })?,
         };
 
-        let model_preference = resolve_child_small_model(&ctx.capabilities)?;
-        let model_label = model_preference.as_str().to_owned();
+        let model_preference = resolve_child_small_model(ctx.small_model_id())?;
+        let model_label = model_preference.clone();
 
-        // 获取 session_ops
-        let session_ops =
-            ctx.capabilities.session.ops.as_ref().ok_or_else(|| {
-                ExtensionError::Internal("session operations not available".into())
-            })?;
+        ctx.session_id()
+            .ok_or_else(|| ExtensionError::Internal("agent tool requires a session".into()))?;
+        let session_control = ctx.host().session_control()?;
 
         // 1. 创建子会话
-        let handle = session_ops
-            .create_session(
-                ctx.scope.session_id.as_str(),
-                CreateSessionRequest {
-                    name: matched.name.clone(),
-                    working_dir: None,
-                    system_prompt: Some(enhance_agent_prompt(&matched.body, working_dir)),
-                    model_preference: Some(model_preference),
-                    tool_selection: matched.tool_selection.clone(),
-                    source_extension: Some("astrcode-agent-tools".into()),
-                    ephemeral: true,
-                    tool_call_id: ctx.scope.tool_call_id.clone().unwrap_or_default(),
-                },
-            )
-            .await
-            .map_err(|e| ExtensionError::Internal(format!("create_session: {e}")))?;
+        let handle = session_control
+            .create_child(HostCreateSessionRequest {
+                name: matched.name.clone(),
+                working_dir: None,
+                system_prompt: Some(enhance_agent_prompt(&matched.body, &working_dir)),
+                model_preference: Some(model_preference),
+                tool_selection: matched.tool_selection.clone().map(Into::into),
+                ephemeral: true,
+                tool_call_id: ctx.call_id().map(str::to_owned),
+            })
+            .await?;
 
         // 2. 提交 turn
-        let child_access =
-            SessionAccess::new(ctx.scope.session_id.as_str(), handle.session_id.as_str());
-        let submit = session_ops
-            .submit_turn(
-                SubmitTurnRequest::for_child(
-                    ctx.scope.session_id.as_str(),
-                    handle.session_id.as_str(),
-                    args.prompt,
-                )
-                .wait_for_result(args.wait_for_result)
-                .notify_parent_on_complete(if args.wait_for_result {
+        let submit = session_control
+            .submit_turn(HostSubmitTurnRequest {
+                target_session_id: handle.session_id.clone(),
+                user_prompt: args.prompt,
+                wait_for_result: args.wait_for_result,
+                notify_parent_on_complete: if args.wait_for_result {
                     None
                 } else {
                     Some(format!(
                         "Background agent \"{}\" completed",
                         args.description.trim()
                     ))
-                })
-                .recycle_on_complete(!args.wait_for_result)
-                .tool_call_id(ctx.scope.tool_call_id.clone()),
-            )
+                },
+                recycle_on_complete: !args.wait_for_result,
+                tool_call_id: ctx.call_id().map(str::to_owned),
+            })
             .await;
         if let Err(ref e) = submit {
-            if let Err(recycle_err) = session_ops.recycle_session(child_access).await {
+            if let Err(recycle_err) = session_control
+                .recycle(HostRecycleSessionRequest::new(&handle.session_id))
+                .await
+            {
                 tracing::warn!(
                     child_session_id = %handle.session_id,
                     error = %recycle_err,
@@ -223,7 +217,7 @@ impl ToolHandler for AgentToolHandler {
                 );
             }
         }
-        let result = submit.map_err(|e| ExtensionError::Internal(format!("submit_turn: {e}")))?;
+        let result = submit?;
 
         // 3. 构造 ToolResult
         let mut metadata = tool_metadata([
@@ -234,9 +228,12 @@ impl ToolHandler for AgentToolHandler {
         ]);
 
         match result {
-            astrcode_extension_sdk::tool::SubmitTurnResult::Completed { content } => {
+            HostSubmitTurnOutput::Completed { content } => {
                 // 同步路径：turn 完成后回收 ephemeral 子 session
-                if let Err(e) = session_ops.recycle_session(child_access).await {
+                if let Err(e) = session_control
+                    .recycle(HostRecycleSessionRequest::new(&handle.session_id))
+                    .await
+                {
                     tracing::warn!(
                         child_session_id = %handle.session_id,
                         error = %e,
@@ -252,7 +249,7 @@ impl ToolHandler for AgentToolHandler {
                 }
                 .into())
             },
-            astrcode_extension_sdk::tool::SubmitTurnResult::Backgrounded {
+            HostSubmitTurnOutput::Backgrounded {
                 task_id,
                 session_id,
             } => {
@@ -288,7 +285,8 @@ struct AgentPromptBuildHandler {
 #[async_trait::async_trait]
 impl PromptBuildHandler for AgentPromptBuildHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
-        let agents = self.shared.get_or_discover(Some(&ctx.working_dir));
+        let working_dir = ctx.working_dir().map(|path| path.to_string_lossy());
+        let agents = self.shared.get_or_discover(working_dir.as_deref());
         Ok(PromptContributions {
             agents: vec![format_agents_for_model(&agents)],
             ..Default::default()
@@ -296,34 +294,27 @@ impl PromptBuildHandler for AgentPromptBuildHandler {
     }
 }
 
-fn agent_tool_metadata()
--> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
-    let mut map = std::collections::HashMap::new();
-    map.insert(
-        "agent".to_string(),
-        astrcode_extension_sdk::tool::ToolPromptMetadata::new(
-            "Scale delegation to the work instead of forcing a fixed workflow:\n- Quick lookup or \
-             edit needing only a few direct tool calls → work directly\n- One clear, non-trivial \
-             subtask that benefits from isolation → use the matching single agent\n- Multiple \
-             independent subtasks → use matching agents in parallel\n- Dependent subtasks → \
-             sequence only the agents actually needed\n\nUse `explore` for missing codebase \
-             facts, `execute` for a self-contained implementation after the main agent has \
-             decided the design and acceptance criteria, and `reviewer` for independent \
-             verification when the change's risk or scope warrants it. Agent types may be used \
-             independently or combined. The main agent retains product, architecture, protocol, \
-             dependency, and scope decisions.",
-        )
-        .example(
-            "Planned cross-module auth change with a known design → split independent, \
-             non-overlapping implementation slices across `execute` agents; use `reviewer` after \
-             implementation because the change is security-sensitive. For a small equivalent \
-             change, work directly.",
-        )
-        .caveat("Unknown `subagentType` → pick from [Agents].")
-        .caveat("Don't parallel `execute` on overlapping files.")
-        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Collaboration),
-    );
-    map
+fn agent_tool_prompt() -> ToolPromptMetadata {
+    ToolPromptMetadata::new(
+        "Scale delegation to the work instead of forcing a fixed workflow:\n- Quick lookup or \
+         edit needing only a few direct tool calls → work directly\n- One clear, non-trivial \
+         subtask that benefits from isolation → use the matching single agent\n- Multiple \
+         independent subtasks → use matching agents in parallel\n- Dependent subtasks → sequence \
+         only the agents actually needed\n\nUse `explore` for missing codebase facts, `execute` \
+         for a self-contained implementation after the main agent has decided the design and \
+         acceptance criteria, and `reviewer` for independent verification when the change's risk \
+         or scope warrants it. Agent types may be used independently or combined. The main agent \
+         retains product, architecture, protocol, dependency, and scope decisions.",
+    )
+    .example(
+        "Planned cross-module auth change with a known design → split independent, \
+         non-overlapping implementation slices across `execute` agents; use `reviewer` after \
+         implementation because the change is security-sensitive. For a small equivalent change, \
+         work directly.",
+    )
+    .caveat("Unknown `subagentType` → pick from [Agents].")
+    .caveat("Don't parallel `execute` on overlapping files.")
+    .prompt_tag(ToolPromptTag::Collaboration)
 }
 
 // ─── 共享工具函数 ──────────────────────────────────────────────────────
@@ -331,10 +322,8 @@ fn agent_tool_metadata()
 /// 子 session 固定使用配置的小模型（`activeSmallModel` / effective `small_llm`）。
 ///
 /// agent 文件中的 `model` 字段暂不生效；后续若支持按 agent 选模型再扩展此处。
-fn resolve_child_small_model(
-    caps: &astrcode_extension_sdk::tool::ToolCapabilities,
-) -> Result<String, ExtensionError> {
-    caps.models.tiers.small.clone().ok_or_else(|| {
+fn resolve_child_small_model(small_model_id: Option<&str>) -> Result<String, ExtensionError> {
+    small_model_id.map(str::to_owned).ok_or_else(|| {
         ExtensionError::Internal(
             "子 Agent 需要已配置的小模型（activeSmallProfile + activeSmallModel）。请在设置中配置 \
              Small LLM 后重试。"
@@ -463,8 +452,7 @@ mod tests {
 
     #[test]
     fn agent_guidance_scales_delegation_without_forcing_a_pipeline() {
-        let metadata = agent_tool_metadata();
-        let agent = metadata.get("agent").expect("agent prompt metadata");
+        let agent = agent_tool_prompt();
 
         assert!(agent.guide.contains("instead of forcing a fixed workflow"));
         assert!(agent.guide.contains("used independently or combined"));
@@ -502,21 +490,11 @@ mod tests {
 
     #[test]
     fn resolve_child_small_model_always_uses_configured_small_llm() {
-        let caps = astrcode_extension_sdk::tool::ToolCapabilities {
-            models: astrcode_extension_sdk::tool::ToolModelAccess {
-                tiers: astrcode_extension_sdk::tool::LlmModelIds {
-                    small: Some("haiku".into()),
-                    ..Default::default()
-                },
-            },
-            ..Default::default()
-        };
-        assert_eq!(resolve_child_small_model(&caps).unwrap(), "haiku");
+        assert_eq!(resolve_child_small_model(Some("haiku")).unwrap(), "haiku");
     }
 
     #[test]
     fn resolve_child_small_model_errors_when_missing() {
-        let caps = astrcode_extension_sdk::tool::ToolCapabilities::default();
-        assert!(resolve_child_small_model(&caps).is_err());
+        assert!(resolve_child_small_model(None).is_err());
     }
 }

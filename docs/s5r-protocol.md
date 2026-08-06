@@ -1,6 +1,10 @@
 # s5r 扩展线缆协议
 
 > 与 `astrcode-extension-sdk` 中 `s5r::messages` 及 `runtime::Peer` 对齐。
+>
+> 当前版本：2.0。本版本将模型消息与网络 body 升级为 SDK 的类型化契约，
+> 不兼容 1.0 worker；宿主只接受顶层 `protocol_version` 与
+> `metadata.protocol.s5r` 均为 `"2.0"` 的握手。
 
 ## 命名由来
 
@@ -21,6 +25,14 @@
 2. **Host（AstrCode）** 回复 `Result`（`kind: initialize_result`）
 
 扩展 manifest（`extension_id`、`tools`、`hooks`、`capabilities` 等）放在 `Initialize.metadata` 中；宿主在 `InitializeOutput.capabilities` 中返回已授权的 `astrcode.*` 能力描述。
+其中 `extension_id` 必须与 `extension.json` 的权威发现期身份完全一致；宿主在启动进程前即用
+该 ID 完成 enable/disable 与 replacement retirement 判定。
+
+每条连接的每个入站方向只接受一次 `Initialize`。第一次尝试在进入 handler 前即占用握手机会，
+无论成功或失败都不能在同一连接重试；重复请求返回 `duplicate_initialize`，重试必须建立新连接。
+`Initialize`、`PeerInfo` 和 `HandlerDescriptor` 拒绝未知字段；`handlers` 必须与规范化后的
+manifest 完整、精确一致。非法线缆对象会立即产生协议错误并关闭连接，不会被静默丢弃到
+握手或调用超时。可扩展数据只能放在显式的 `metadata` 对象中。
 
 ## 线缆消息（`WireMessage`）
 
@@ -36,6 +48,7 @@
 
 | 常量 | 用途 |
 |------|------|
+| `s5r.runtime.ping` | Peer runtime 内建的 liveness round-trip；不依赖作者注册工具或 handler |
 | `handler.invoke` | 宿主调用扩展注册的工具 / 命令 / 钩子 |
 | `astrcode.*` | 扩展调用宿主（除默认 session state API 外，须在 manifest 中声明 capability） |
 
@@ -52,7 +65,8 @@
 
 ```json
 {
-  "protocol": { "s5r": "1.0" },
+  "extension_id": "my-extension",
+  "protocol": { "s5r": "2.0" },
   "command": ["/path/to/extension-binary"]
 }
 ```

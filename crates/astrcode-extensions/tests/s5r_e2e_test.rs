@@ -12,21 +12,22 @@ use astrcode_core::{
     tool::{ExecutionMode, ToolDefinition, ToolExecutionContext},
 };
 use astrcode_extension_sdk::{
+    builder::manifest,
     config::ModelSelection,
     extension::{
-        CommandContext, Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
-        ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest,
-        ExtensionHttpResponse, ExtensionHttpRoute, HookMode, LifecycleContext, PreToolUseContext,
-        PreToolUseResult, Registrar, StopReason,
+        Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionEvent,
+        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
+        ExtensionHttpRoute, ExtensionManifest, ExtensionPackageManifest, ExtensionRegistrations,
+        HookMode, HttpContext, PreToolUseResult, Registrar, RuntimeHookCallContext,
+        RuntimeLifecycleContext, RuntimePreToolUseContext, StopReason,
     },
-    tool::ExtensionToolContext,
-    trusted::ExtensionHostServices,
+    testing::{CommandContextBuilder, ToolContextBuilder},
 };
 use astrcode_extensions::{
-    StorageSessionQueryFactory, build_host_router, build_host_router_with_public_http_dispatcher,
+    HostBackends, build_host_router, build_host_router_with_public_http_dispatcher,
     loader::ExtensionLoader, runner::ExtensionRunner, s5r_ext::S5rExtension,
 };
-use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
+use astrcode_storage::{EventReader, SessionReader, in_memory::InMemoryEventStore};
 use async_trait::async_trait;
 
 fn guest_binary_path() -> std::path::PathBuf {
@@ -78,16 +79,14 @@ fn ensure_guest_built() -> std::path::PathBuf {
 }
 
 fn minimal_router() -> Arc<astrcode_extensions::HostRouter> {
-    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    build_host_router(
-        Arc::new(ExtensionHostServices::new(
-            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
-            None,
-            None,
-        )),
-        store,
-        None,
-    )
+    let store = Arc::new(InMemoryEventStore::new());
+    let event_reader: Arc<dyn EventReader> = store.clone();
+    let session_reader: Arc<dyn SessionReader> = store;
+    build_host_router(HostBackends {
+        event_reader: Some(event_reader),
+        session_reader: Some(session_reader),
+        ..HostBackends::default()
+    })
 }
 
 struct MockLlm;
@@ -98,10 +97,8 @@ struct DispatchTargetHandler;
 
 #[async_trait]
 impl ExtensionHttpHandler for DispatchTargetHandler {
-    async fn handle(
-        &self,
-        request: ExtensionHttpRequest,
-    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+    async fn handle(&self, ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError> {
+        let request = ctx.request();
         Ok(ExtensionHttpResponse::json(
             200,
             serde_json::json!({
@@ -115,12 +112,12 @@ impl ExtensionHttpHandler for DispatchTargetHandler {
 
 #[async_trait]
 impl Extension for DispatchTargetExtension {
-    fn id(&self) -> &str {
-        "dispatch-target"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::PublicHttp]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("dispatch-target")
+            .version("test")
+            .description("S5R public HTTP dispatch test target")
+            .capability(ExtensionCapability::PublicHttp)
+            .build()
     }
 
     fn register(&self, registrar: &mut Registrar) {
@@ -159,16 +156,16 @@ impl LlmProvider for MockLlm {
 }
 
 fn mock_router() -> Arc<astrcode_extensions::HostRouter> {
-    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    build_host_router(
-        Arc::new(ExtensionHostServices::new(
-            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
-            Some(Arc::new(MockLlm)),
-            Some(Arc::new(MockLlm)),
-        )),
-        store,
-        None,
-    )
+    let store = Arc::new(InMemoryEventStore::new());
+    let event_reader: Arc<dyn EventReader> = store.clone();
+    let session_reader: Arc<dyn SessionReader> = store;
+    build_host_router(HostBackends {
+        main_llm: Some(Arc::new(MockLlm)),
+        small_llm: Some(Arc::new(MockLlm)),
+        event_reader: Some(event_reader),
+        session_reader: Some(session_reader),
+        ..HostBackends::default()
+    })
 }
 
 async fn load_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<S5rExtension> {
@@ -179,10 +176,12 @@ async fn load_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<S5rExtens
         .as_nanos();
     let ext_dir = std::env::temp_dir().join(format!("astrcode-s5r-e2e-{suffix}"));
     fs::create_dir_all(&ext_dir).unwrap();
-    let manifest = serde_json::json!({
-        "protocol": { "s5r": "1.0" },
+    let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
+        "extension_id": "s5r-guest-demo",
+        "protocol": { "s5r": "2.0" },
         "command": [guest.to_string_lossy()]
-    });
+    }))
+    .unwrap();
     fs::write(
         ext_dir.join("extension.json"),
         serde_json::to_string_pretty(&manifest).unwrap(),
@@ -193,63 +192,94 @@ async fn load_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<S5rExtens
         .expect("load s5r extension")
 }
 
-fn tool_ctx(working_dir: &str) -> ExtensionToolContext {
-    ExtensionToolContext::new(
-        ToolExecutionContext::new(
-            "e2e-session".into(),
-            working_dir,
-            None,
-            None,
-            Default::default(),
-        ),
+fn registrations_for(extension: &S5rExtension) -> ExtensionRegistrations {
+    let manifest = extension.manifest();
+    let mut registrar = Registrar::new();
+    extension.register(&mut registrar);
+    registrar
+        .finish(manifest)
+        .map(|(_, registrations)| registrations)
+        .expect("valid s5r extension registrations")
+}
+
+fn extension_tool_ctx(
+    tool_name: &str,
+    arguments: serde_json::Value,
+    working_dir: &str,
+) -> astrcode_extension_sdk::extension::ToolContext {
+    ToolContextBuilder::new("s5r-guest-demo", tool_name)
+        .session("e2e-session", working_dir, None)
+        .arguments(arguments)
+        .build()
+}
+
+fn core_tool_ctx(working_dir: &str) -> ToolExecutionContext {
+    ToolExecutionContext::new(
+        "e2e-session".into(),
+        working_dir,
         None,
+        None,
+        Default::default(),
     )
 }
 
-fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> PreToolUseContext {
-    PreToolUseContext {
-        session_id: "e2e-session".into(),
-        working_dir: "/tmp".into(),
-        model: ModelSelection::simple("test"),
-        call_id: "call-1".into(),
-        tool_name: tool_name.into(),
+fn runtime_hook_call() -> RuntimeHookCallContext {
+    RuntimeHookCallContext::new("e2e-session", "/tmp", ModelSelection::simple("test"), None)
+}
+
+fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> RuntimePreToolUseContext {
+    RuntimePreToolUseContext::new(
+        runtime_hook_call(),
+        "call-1".into(),
+        tool_name,
         tool_input,
-        approval_mode: astrcode_core::permission::ApprovalMode::Manual,
-        available_tools: vec![],
-        event_tx: None,
-        extension_event_sink: None,
-        session_store_dir: None,
-    }
+        astrcode_core::permission::ApprovalMode::Manual,
+        Vec::new(),
+    )
 }
 
 #[tokio::test]
 async fn s5r_manifest_registers_tools_hooks_and_capabilities() {
     let ext = load_s5r(minimal_router()).await;
-    assert_eq!(ext.id(), "s5r-guest-demo");
-    assert!(ext.capabilities().iter().any(|c| {
+    let manifest = ext.manifest();
+    assert_eq!(manifest.id(), "s5r-guest-demo");
+    assert!(manifest.capabilities().iter().any(|c| {
         matches!(
             c,
             astrcode_extension_sdk::extension::ExtensionCapability::SmallModel
         )
     }));
-    assert!(ext.capabilities().iter().any(|capability| matches!(
+    assert!(manifest.capabilities().iter().any(|capability| matches!(
         capability,
         astrcode_extension_sdk::extension::ExtensionCapability::SessionInspect
     )));
 
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    assert!(reg.tools().iter().any(|(d, _)| d.name == "ping"));
-    assert!(reg.tools().iter().any(|(d, _)| d.name == "greet"));
-    assert_eq!(reg.pre_tool_use().len(), 1);
-    assert_eq!(reg.pre_tool_use()[0].mode, HookMode::Blocking);
+    let mut registrar = Registrar::new();
+    ext.register(&mut registrar);
+    let (_, registrations) = registrar
+        .finish(manifest)
+        .expect("valid s5r extension registrations");
+    assert!(
+        registrations
+            .tools()
+            .iter()
+            .any(|tool| tool.definition().name == "ping")
+    );
+    assert!(
+        registrations
+            .tools()
+            .iter()
+            .any(|tool| tool.definition().name == "greet")
+    );
+    assert_eq!(registrations.pre_tool_use().len(), 1);
+    assert_eq!(registrations.pre_tool_use()[0].mode, HookMode::Blocking);
     assert!(matches!(
-        reg.pre_tool_use()[0].target,
+        registrations.pre_tool_use()[0].target,
         astrcode_extension_sdk::extension::ToolHookTarget::All
     ));
-    assert_eq!(reg.commands().len(), 1);
-    assert_eq!(reg.http_routes().len(), 1);
-    assert_eq!(reg.http_routes()[0].route.path, "/s5r-probe/{id}");
+    assert_eq!(registrations.commands().len(), 1);
+    assert_eq!(registrations.http_routes().len(), 1);
+    assert_eq!(registrations.http_routes()[0].route.path, "/s5r-probe/{id}");
 }
 
 #[tokio::test]
@@ -289,33 +319,32 @@ async fn s5r_host_client_dispatches_to_another_extensions_public_route() {
         .register(Arc::new(DispatchTargetExtension))
         .await
         .unwrap();
-    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let store = Arc::new(InMemoryEventStore::new());
+    let event_reader: Arc<dyn EventReader> = store.clone();
+    let session_reader: Arc<dyn SessionReader> = store;
     let router = build_host_router_with_public_http_dispatcher(
-        Arc::new(ExtensionHostServices::new(
-            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
-            None,
-            None,
-        )),
-        store,
-        None,
+        HostBackends {
+            event_reader: Some(event_reader),
+            session_reader: Some(session_reader),
+            ..HostBackends::default()
+        },
         runner.clone(),
     );
     let ext = load_s5r(router).await;
-    let mut registrar = Registrar::new();
-    ext.register(&mut registrar);
-    let (_, handler) = registrar
+    let registrations = registrations_for(ext.as_ref());
+    let handler = registrations
         .tools()
         .iter()
-        .find(|(definition, _)| definition.name == "dispatch_public_http")
-        .expect("dispatch_public_http tool");
+        .find(|tool| tool.definition().name == "dispatch_public_http")
+        .expect("dispatch_public_http tool")
+        .handler();
 
     let result = handler
-        .execute(
+        .execute(extension_tool_ctx(
             "dispatch_public_http",
             serde_json::json!({}),
             "/tmp",
-            &tool_ctx("/tmp"),
-        )
+        ))
         .await
         .unwrap();
 
@@ -335,11 +364,15 @@ async fn s5r_ping_health() {
 #[tokio::test]
 async fn s5r_ping_tool_returns_pong() {
     let ext = load_s5r(minimal_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let (_, handler) = reg.tools().iter().find(|(d, _)| d.name == "ping").unwrap();
+    let registrations = registrations_for(ext.as_ref());
+    let handler = registrations
+        .tools()
+        .iter()
+        .find(|tool| tool.definition().name == "ping")
+        .unwrap()
+        .handler();
     let result = handler
-        .execute("ping", serde_json::json!({}), "/tmp", &tool_ctx("/tmp"))
+        .execute(extension_tool_ctx("ping", serde_json::json!({}), "/tmp"))
         .await
         .unwrap();
     assert!(!result.is_error);
@@ -349,29 +382,36 @@ async fn s5r_ping_tool_returns_pong() {
 #[tokio::test]
 async fn s5r_greet_and_add_tools() {
     let ext = load_s5r(minimal_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
+    let registrations = registrations_for(ext.as_ref());
 
-    let (_, greet) = reg.tools().iter().find(|(d, _)| d.name == "greet").unwrap();
+    let greet = registrations
+        .tools()
+        .iter()
+        .find(|tool| tool.definition().name == "greet")
+        .unwrap()
+        .handler();
     let r = greet
-        .execute(
+        .execute(extension_tool_ctx(
             "greet",
             serde_json::json!({ "name": "s5r" }),
             "/tmp",
-            &tool_ctx("/tmp"),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(r.content, "hello, s5r!");
 
-    let (_, add) = reg.tools().iter().find(|(d, _)| d.name == "add").unwrap();
+    let add = registrations
+        .tools()
+        .iter()
+        .find(|tool| tool.definition().name == "add")
+        .unwrap()
+        .handler();
     let r = add
-        .execute(
+        .execute(extension_tool_ctx(
             "add",
             serde_json::json!({ "a": 3, "b": 4 }),
             "/tmp",
-            &tool_ctx("/tmp"),
-        )
+        ))
         .await
         .unwrap();
     assert_eq!(r.content, "3 + 4 = 7");
@@ -380,20 +420,19 @@ async fn s5r_greet_and_add_tools() {
 #[tokio::test]
 async fn s5r_ask_llm_via_host_invoke() {
     let ext = load_s5r(mock_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let (_, handler) = reg
+    let registrations = registrations_for(ext.as_ref());
+    let handler = registrations
         .tools()
         .iter()
-        .find(|(d, _)| d.name == "ask_llm")
-        .unwrap();
+        .find(|tool| tool.definition().name == "ask_llm")
+        .unwrap()
+        .handler();
     let result = handler
-        .execute(
+        .execute(extension_tool_ctx(
             "ask_llm",
             serde_json::json!({ "prompt": "hello" }),
             "/tmp",
-            &tool_ctx("/tmp"),
-        )
+        ))
         .await
         .unwrap();
     assert!(!result.is_error);
@@ -414,10 +453,12 @@ async fn s5r_workspace_read_via_host_invoke() {
     let guest = ensure_guest_built();
     let ext_dir = wd.join("ext");
     fs::create_dir_all(&ext_dir).unwrap();
-    let manifest = serde_json::json!({
-        "protocol": { "s5r": "1.0" },
+    let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
+        "extension_id": "s5r-guest-demo",
+        "protocol": { "s5r": "2.0" },
         "command": [guest.to_string_lossy()]
-    });
+    }))
+    .unwrap();
     fs::write(
         ext_dir.join("extension.json"),
         serde_json::to_string_pretty(&manifest).unwrap(),
@@ -427,20 +468,19 @@ async fn s5r_workspace_read_via_host_invoke() {
     let ext = S5rExtension::load(&ext_dir, &manifest, mock_router(), Some(wd_str.as_ref()))
         .await
         .expect("load");
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let (_, handler) = reg
+    let registrations = registrations_for(ext.as_ref());
+    let handler = registrations
         .tools()
         .iter()
-        .find(|(d, _)| d.name == "read_workspace")
-        .unwrap();
+        .find(|tool| tool.definition().name == "read_workspace")
+        .unwrap()
+        .handler();
     let result = handler
-        .execute(
+        .execute(extension_tool_ctx(
             "read_workspace",
             serde_json::json!({}),
             &wd_str,
-            &tool_ctx(&wd_str),
-        )
+        ))
         .await
         .unwrap();
     assert!(
@@ -466,31 +506,28 @@ async fn s5r_parallel_tools_keep_request_scoped_workspace_contexts() {
     fs::write(workspace_b.join("probe.txt"), "workspace-b").unwrap();
 
     let ext = load_s5r(mock_router()).await;
-    let mut registrar = Registrar::new();
-    ext.register(&mut registrar);
-    let (definition, handler) = registrar
+    let registrations = registrations_for(ext.as_ref());
+    let tool = registrations
         .tools()
         .iter()
-        .find(|(definition, _)| definition.name == "parallel_read_workspace")
+        .find(|tool| tool.definition().name == "parallel_read_workspace")
         .expect("parallel_read_workspace tool");
-    assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
+    assert_eq!(tool.definition().execution_mode, ExecutionMode::Parallel);
 
     let workspace_a = workspace_a.to_string_lossy().into_owned();
     let workspace_b = workspace_b.to_string_lossy().into_owned();
-    let context_a = tool_ctx(&workspace_a);
-    let context_b = tool_ctx(&workspace_b);
-    let call_a = handler.execute(
+    let context_a = extension_tool_ctx(
         "parallel_read_workspace",
         serde_json::json!({ "delay_ms": 150 }),
         &workspace_a,
-        &context_a,
     );
-    let call_b = handler.execute(
+    let context_b = extension_tool_ctx(
         "parallel_read_workspace",
         serde_json::json!({ "delay_ms": 150 }),
         &workspace_b,
-        &context_b,
     );
+    let call_a = tool.handler().execute(context_a);
+    let call_b = tool.handler().execute(context_b);
     let (result_a, result_b) = tokio::join!(call_a, call_b);
     let result_a = result_a.expect("workspace A invocation");
     let result_b = result_b.expect("workspace B invocation");
@@ -505,21 +542,20 @@ async fn s5r_parallel_tools_keep_request_scoped_workspace_contexts() {
 #[tokio::test]
 async fn s5r_session_inspect_via_typed_host_client() {
     let ext = load_s5r(minimal_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let (_, handler) = reg
+    let registrations = registrations_for(ext.as_ref());
+    let handler = registrations
         .tools()
         .iter()
-        .find(|(definition, _)| definition.name == "inspect_sessions")
-        .expect("inspect_sessions tool");
+        .find(|tool| tool.definition().name == "inspect_sessions")
+        .expect("inspect_sessions tool")
+        .handler();
 
     let result = handler
-        .execute(
+        .execute(extension_tool_ctx(
             "inspect_sessions",
             serde_json::json!({}),
             "/tmp",
-            &tool_ctx("/tmp"),
-        )
+        ))
         .await
         .expect("invoke inspect_sessions");
 
@@ -533,19 +569,14 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
     runner.register(ext).await.unwrap();
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let ctx = PreToolUseContext {
-        session_id: "e2e-session".into(),
-        working_dir: "/tmp".into(),
-        model: ModelSelection::simple("test"),
-        call_id: "call-1".into(),
-        tool_name: "emit_hook_probe".into(),
-        tool_input: serde_json::json!({}),
-        approval_mode: astrcode_core::permission::ApprovalMode::Manual,
-        available_tools: vec![],
-        event_tx: Some(tx.into()),
-        extension_event_sink: None,
-        session_store_dir: None,
-    };
+    let ctx = RuntimePreToolUseContext::new(
+        runtime_hook_call().with_event_tx(Some(tx.into())),
+        "call-1".into(),
+        "emit_hook_probe",
+        serde_json::json!({}),
+        astrcode_core::permission::ApprovalMode::Manual,
+        Vec::new(),
+    );
     let result = runner.emit_pre_tool_use(ctx).await.unwrap();
     assert!(matches!(result, PreToolUseResult::Allow));
 
@@ -580,24 +611,18 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
 #[tokio::test]
 async fn s5r_demo_command() {
     let ext = load_s5r(minimal_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let (_, handler) = reg
+    let registrations = registrations_for(ext.as_ref());
+    let (_, handler) = registrations
         .commands()
         .iter()
         .find(|(c, _)| c.name == "demo")
         .unwrap();
     let result = handler
         .execute(
-            "demo",
-            "",
-            "/tmp",
-            &CommandContext {
-                session_id: "e2e-session".into(),
-                working_dir: "/tmp".into(),
-                model: ModelSelection::simple("test"),
-                session_store_dir: None,
-            },
+            CommandContextBuilder::new("s5r-guest-demo", "demo")
+                .session("e2e-session", "/tmp", None)
+                .model(ModelSelection::simple("test"))
+                .build(),
         )
         .await
         .unwrap();
@@ -623,15 +648,7 @@ async fn s5r_turn_end_continuations_and_pipeline() {
     runner
         .emit_lifecycle(
             ExtensionEvent::TurnEnd,
-            LifecycleContext {
-                session_id: "e2e-session".into(),
-                working_dir: "/tmp".into(),
-                model: ModelSelection::simple("test"),
-                event_tx: None,
-                extension_event_sink: None,
-                last_exchange: None,
-                mid_turn_user_messages_synced: 0,
-            },
+            RuntimeLifecycleContext::new(runtime_hook_call(), None),
         )
         .await
         .unwrap();
@@ -647,7 +664,7 @@ async fn s5r_turn_end_continuations_and_pipeline() {
         .expect("pipeline_status");
 
     let result = tool
-        .execute(serde_json::json!({}), &tool_ctx("/tmp"))
+        .execute(serde_json::json!({}), &core_tool_ctx("/tmp"))
         .await
         .unwrap();
 
@@ -667,7 +684,8 @@ async fn s5r_loader_discovers_manifest() {
     fs::write(
         ext_dir.join("extension.json"),
         serde_json::json!({
-            "protocol": { "s5r": "1.0" },
+            "extension_id": "s5r-guest-demo",
+            "protocol": { "s5r": "2.0" },
             "command": [guest.to_string_lossy()]
         })
         .to_string(),
@@ -678,8 +696,29 @@ async fn s5r_loader_discovers_manifest() {
         ExtensionLoader::load_from_dir_for_test(&root, &Some(minimal_router()), None).await;
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(exts.len(), 1);
-    assert_eq!(exts[0].id(), "s5r-guest-demo");
+    assert_eq!(exts[0].manifest().id(), "s5r-guest-demo");
     let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn s5r_load_rejects_package_and_handshake_id_mismatch() {
+    let guest = ensure_guest_built();
+    let root = tempfile::tempdir().unwrap();
+    let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
+        "extension_id": "different-extension",
+        "protocol": { "s5r": "2.0" },
+        "command": [guest.to_string_lossy()]
+    }))
+    .unwrap();
+
+    let error = match S5rExtension::load(root.path(), &manifest, minimal_router(), None).await {
+        Ok(_) => panic!("mismatched package and handshake ids must be rejected"),
+        Err(error) => error,
+    };
+
+    assert!(error.contains("extension id mismatch"), "{error}");
+    assert!(error.contains("different-extension"), "{error}");
+    assert!(error.contains("s5r-guest-demo"), "{error}");
 }
 
 #[tokio::test]
@@ -692,18 +731,17 @@ async fn s5r_stop_shuts_down_process() {
 #[tokio::test]
 async fn s5r_cancel_on_stop_during_slow_tool() {
     let ext = load_s5r(minimal_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let handler = reg
+    let registrations = registrations_for(ext.as_ref());
+    let handler = registrations
         .tools()
         .iter()
-        .find(|(d, _)| d.name == "slow")
-        .map(|(_, handler)| Arc::clone(handler))
+        .find(|tool| tool.definition().name == "slow")
+        .map(|tool| Arc::clone(tool.handler()))
         .expect("slow tool");
 
     let slow_task = tokio::spawn(async move {
         handler
-            .execute("slow", serde_json::json!({}), "/tmp", &tool_ctx("/tmp"))
+            .execute(extension_tool_ctx("slow", serde_json::json!({}), "/tmp"))
             .await
     });
 

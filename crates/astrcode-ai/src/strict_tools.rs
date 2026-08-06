@@ -1812,16 +1812,20 @@ mod tests {
             .map(|id| (id.to_string(), true))
             .collect::<BTreeMap<_, _>>();
         for extension in astrcode_bundled_extensions::bundled_extensions(&states) {
-            if extension.id() == "astrcode-mcp" {
+            let manifest = extension.manifest();
+            if manifest.id() == "astrcode-mcp" {
                 continue;
             }
             let mut registrar = Registrar::new();
             extension.register(&mut registrar);
+            let (_, registrations) = registrar
+                .finish(manifest)
+                .expect("bundled extension registrations should match its manifest");
             definitions.extend(
-                registrar
+                registrations
                     .tools()
                     .iter()
-                    .map(|(definition, _)| definition.clone()),
+                    .map(|registration| registration.definition().clone()),
             );
         }
         let mut openai_definitions = definitions.clone();

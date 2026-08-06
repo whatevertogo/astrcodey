@@ -1,17 +1,19 @@
 use std::{
     collections::BTreeMap,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
-use astrcode_extension_sdk::network::{
-    NetworkRedirectPolicy, OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
+use astrcode_extension_sdk::host::{
+    HostNetworkRedirectPolicy, HostNetworkRequest, HostNetworkResponse, NetworkClient,
 };
 use scraper::{Html, Selector};
 use serde::Deserialize;
 use url::Url;
 
-use crate::config::{SearchConfig, SearchProvider, resolve_api_key};
+use crate::{
+    config::{SearchConfig, SearchProvider, resolve_api_key},
+    host_timeout_ms,
+};
 
 const MAX_RESULTS_LIMIT: usize = 20;
 const MIN_QUERY_LEN: usize = 2;
@@ -64,7 +66,7 @@ pub(crate) struct WebSearchOutcome {
 
 pub(crate) async fn run_web_search(
     config: &SearchConfig,
-    network: Arc<dyn OutboundNetworkService>,
+    network: NetworkClient,
     args: WebSearchArgs,
 ) -> Result<WebSearchOutcome, SearchError> {
     let started = Instant::now();
@@ -76,7 +78,7 @@ pub(crate) async fn run_web_search(
         .unwrap_or(config.default_max_results)
         .clamp(1, MAX_RESULTS_LIMIT);
     let backend = SearchNetworkBackend {
-        service: &*network,
+        client: &network,
         timeout: Duration::from_secs(config.request_timeout_secs.max(1)),
     };
 
@@ -95,7 +97,7 @@ pub(crate) async fn run_web_search(
 }
 
 struct SearchNetworkBackend<'a> {
-    service: &'a dyn OutboundNetworkService,
+    client: &'a NetworkClient,
     timeout: Duration,
 }
 
@@ -106,22 +108,19 @@ impl SearchNetworkBackend<'_> {
         url: String,
         mut headers: BTreeMap<String, String>,
         body: Vec<u8>,
-        redirect_policy: NetworkRedirectPolicy,
-    ) -> Result<OutboundNetworkResponse, SearchError> {
+        redirect_policy: HostNetworkRedirectPolicy,
+    ) -> Result<HostNetworkResponse, SearchError> {
         headers.insert("user-agent".into(), HTML_SEARCH_USER_AGENT.into());
-        self.service
-            .request(
-                OutboundNetworkRequest {
-                    url,
-                    method: method.into(),
-                    headers,
-                    body,
-                    max_bytes: 1024 * 1024,
-                    timeout: self.timeout,
-                    redirect_policy,
-                },
-                None,
-            )
+        self.client
+            .send(HostNetworkRequest {
+                url,
+                method: method.into(),
+                headers,
+                body,
+                max_bytes: 1024 * 1024,
+                timeout_ms: host_timeout_ms(self.timeout),
+                redirect_policy,
+            })
             .await
             .map_err(|error| SearchError::Http(error.to_string()))
     }
@@ -193,7 +192,7 @@ async fn search_brave(
             url.to_string(),
             BTreeMap::from([("x-subscription-token".into(), api_key)]),
             Vec::new(),
-            NetworkRedirectPolicy::Manual,
+            HostNetworkRedirectPolicy::Manual,
         )
         .await?;
     if !(200..300).contains(&response.status) {
@@ -238,7 +237,7 @@ async fn search_serper(
                 ("content-type".into(), "application/json".into()),
             ]),
             body,
-            NetworkRedirectPolicy::Manual,
+            HostNetworkRedirectPolicy::Manual,
         )
         .await?;
     if !(200..300).contains(&response.status) {
@@ -305,7 +304,7 @@ async fn search_duckduckgo(
                 "application/x-www-form-urlencoded".into(),
             )]),
             format!("q={}", urlencoding(query)).into_bytes(),
-            NetworkRedirectPolicy::Follow,
+            HostNetworkRedirectPolicy::Follow,
         )
         .await?;
     if !(200..300).contains(&response.status) {

@@ -1,14 +1,18 @@
 use std::{
+    collections::HashMap,
     panic::AssertUnwindSafe,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicUsize, Ordering},
     },
 };
 
-use astrcode_extension_sdk::extension::{ExtensionError, StopReason};
+use astrcode_extension_sdk::extension::{Extension, ExtensionError, ExtensionTasks, StopReason};
 use futures_util::FutureExt;
-use tokio::{sync::Notify, task::JoinSet};
+use tokio::{
+    sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, oneshot},
+    task::JoinSet,
+};
 
 use super::HostedExtension;
 
@@ -108,16 +112,180 @@ pub(super) struct RetirementSupervisor {
     tasks: parking_lot::Mutex<JoinSet<()>>,
     pending: Arc<AtomicUsize>,
     completed: Arc<Notify>,
-    completed_errors: Arc<parking_lot::Mutex<Vec<String>>>,
+    operation_gates: parking_lot::Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
+    completed_errors: Arc<parking_lot::Mutex<Vec<ExtensionRetirementError>>>,
 }
 
 struct RetirementCompletion {
+    extension_id: String,
     pending: Arc<AtomicUsize>,
     completed: Arc<Notify>,
+    completed_errors: Arc<parking_lot::Mutex<Vec<ExtensionRetirementError>>>,
+    finished: bool,
+    _operation_guard: OwnedMutexGuard<()>,
+}
+
+struct RetirementWork {
+    extension_id: String,
+    extension: Arc<dyn Extension>,
+    tasks: ExtensionTasks,
+    publication_lease: Option<Arc<ExtensionPublicationLease>>,
+}
+
+/// Owns a registration after its runtime resources exist but before publication.
+///
+/// Dropping an armed instance synchronously transfers those resources and the keyed lifecycle
+/// guard to the retirement supervisor, so cancellation cannot abandon startup rollback.
+pub(super) struct PendingRegistration<'a> {
+    supervisor: &'a RetirementSupervisor,
+    extension_id: String,
+    extension: Option<Arc<dyn Extension>>,
+    tasks: Option<ExtensionTasks>,
+    operation_guard: Option<OwnedMutexGuard<()>>,
+    operation_timeout: std::time::Duration,
+}
+
+pub(super) struct RetirementTicket {
+    extension_id: String,
+    outcome: oneshot::Receiver<RetirementTicketOutcome>,
+    completed_errors: Arc<parking_lot::Mutex<Vec<ExtensionRetirementError>>>,
+}
+
+struct RetirementTicketOutcome {
+    _completion: RetirementCompletion,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub(crate) struct ExtensionRetirementError {
+    extension_id: String,
+    message: String,
+}
+
+impl ExtensionRetirementError {
+    fn new(extension_id: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            extension_id: extension_id.into(),
+            message: message.into(),
+        }
+    }
+
+    fn combine(extension_id: &str, errors: Vec<Self>) -> Option<Self> {
+        if errors.is_empty() {
+            return None;
+        }
+        let message = errors
+            .into_iter()
+            .map(|error| error.message)
+            .collect::<Vec<_>>()
+            .join("; ");
+        Some(Self::new(extension_id, message))
+    }
+}
+
+impl RetirementCompletion {
+    fn finish(&mut self, error: Option<ExtensionRetirementError>) {
+        if let Some(error) = error {
+            record_error(&self.completed_errors, error);
+        }
+        self.finished = true;
+    }
+}
+
+impl PendingRegistration<'_> {
+    fn take_work(&mut self) -> Option<RetirementWork> {
+        Some(RetirementWork {
+            extension_id: self.extension_id.clone(),
+            extension: self.extension.take()?,
+            tasks: self.tasks.take()?,
+            publication_lease: None,
+        })
+    }
+
+    pub(super) fn retire(mut self) -> Result<RetirementTicket, ExtensionRetirementError> {
+        let Some(work) = self.take_work() else {
+            return Err(ExtensionRetirementError::new(
+                self.extension_id.clone(),
+                format!(
+                    "pending registration lost startup resources for {}",
+                    self.extension_id
+                ),
+            ));
+        };
+        let Some(operation_guard) = self.operation_guard.take() else {
+            return Err(ExtensionRetirementError::new(
+                self.extension_id.clone(),
+                format!(
+                    "pending registration lost its lifecycle gate for {}",
+                    self.extension_id
+                ),
+            ));
+        };
+        Ok(self
+            .supervisor
+            .retire_registration(work, self.operation_timeout, operation_guard))
+    }
+
+    pub(super) fn disarm(mut self) {
+        self.extension.take();
+        self.tasks.take();
+        self.operation_guard.take();
+    }
+}
+
+impl Drop for PendingRegistration<'_> {
+    fn drop(&mut self) {
+        let Some(work) = self.take_work() else {
+            return;
+        };
+        let Some(operation_guard) = self.operation_guard.take() else {
+            return;
+        };
+        self.supervisor
+            .abandon_registration(work, self.operation_timeout, operation_guard);
+    }
+}
+
+impl RetirementTicket {
+    pub(super) async fn wait(self) -> Result<(), ExtensionRetirementError> {
+        let Self {
+            extension_id,
+            outcome,
+            completed_errors,
+        } = self;
+        match outcome.await {
+            Ok(outcome) => {
+                let result =
+                    take_recorded_error(&completed_errors, &extension_id).map_or(Ok(()), Err);
+                drop(outcome);
+                result
+            },
+            Err(_) => Err(
+                take_recorded_error(&completed_errors, &extension_id).unwrap_or_else(|| {
+                    ExtensionRetirementError::new(
+                        extension_id.clone(),
+                        format!("startup retirement outcome channel closed for {extension_id}"),
+                    )
+                }),
+            ),
+        }
+    }
 }
 
 impl Drop for RetirementCompletion {
     fn drop(&mut self) {
+        if !self.finished {
+            record_error(
+                &self.completed_errors,
+                ExtensionRetirementError::new(
+                    self.extension_id.clone(),
+                    format!(
+                        "extension retirement task stopped before completion for {}",
+                        self.extension_id
+                    ),
+                ),
+            );
+        }
         if self.pending.fetch_sub(1, Ordering::AcqRel) == 1 {
             self.completed.notify_waiters();
         }
@@ -130,7 +298,54 @@ impl RetirementSupervisor {
             tasks: parking_lot::Mutex::new(JoinSet::new()),
             pending: Arc::new(AtomicUsize::new(0)),
             completed: Arc::new(Notify::new()),
+            operation_gates: parking_lot::Mutex::new(HashMap::new()),
             completed_errors: Arc::new(parking_lot::Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(super) fn operation_gate(&self, extension_id: &str) -> Arc<AsyncMutex<()>> {
+        let mut gates = self.operation_gates.lock();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(extension_id).and_then(Weak::upgrade) {
+            return gate;
+        }
+
+        let gate = Arc::new(AsyncMutex::new(()));
+        gates.insert(extension_id.to_owned(), Arc::downgrade(&gate));
+        gate
+    }
+
+    pub(super) async fn wait_for(
+        &self,
+        extension_id: &str,
+    ) -> Result<(), ExtensionRetirementError> {
+        let gate = self.operation_gate(extension_id);
+        let _operation_guard = gate.lock().await;
+        self.take_completed_error(extension_id).map_or(Ok(()), Err)
+    }
+
+    pub(super) fn take_completed_error(
+        &self,
+        extension_id: &str,
+    ) -> Option<ExtensionRetirementError> {
+        take_recorded_error(&self.completed_errors, extension_id)
+    }
+
+    pub(super) fn pending_registration(
+        &self,
+        extension_id: String,
+        extension: Arc<dyn Extension>,
+        tasks: ExtensionTasks,
+        operation_guard: OwnedMutexGuard<()>,
+        operation_timeout: std::time::Duration,
+    ) -> PendingRegistration<'_> {
+        PendingRegistration {
+            supervisor: self,
+            extension_id,
+            extension: Some(extension),
+            tasks: Some(tasks),
+            operation_guard: Some(operation_guard),
+            operation_timeout,
         }
     }
 
@@ -139,31 +354,90 @@ impl RetirementSupervisor {
         hosted: HostedExtension,
         reason: StopReason,
         operation_timeout: std::time::Duration,
+        operation_guard: OwnedMutexGuard<()>,
+    ) {
+        let work = RetirementWork {
+            extension_id: hosted.manifest.id().to_owned(),
+            extension: hosted.extension,
+            tasks: hosted.tasks,
+            publication_lease: Some(hosted.publication_lease),
+        };
+        self.spawn_retirement(work, reason, operation_timeout, operation_guard, None);
+    }
+
+    fn retire_registration(
+        &self,
+        work: RetirementWork,
+        operation_timeout: std::time::Duration,
+        operation_guard: OwnedMutexGuard<()>,
+    ) -> RetirementTicket {
+        let extension_id = work.extension_id.clone();
+        let (outcome_tx, outcome) = oneshot::channel();
+        self.spawn_retirement(
+            work,
+            StopReason::StartupFailed,
+            operation_timeout,
+            operation_guard,
+            Some(outcome_tx),
+        );
+        RetirementTicket {
+            extension_id,
+            outcome,
+            completed_errors: Arc::clone(&self.completed_errors),
+        }
+    }
+
+    fn abandon_registration(
+        &self,
+        work: RetirementWork,
+        operation_timeout: std::time::Duration,
+        operation_guard: OwnedMutexGuard<()>,
+    ) {
+        self.spawn_retirement(
+            work,
+            StopReason::StartupFailed,
+            operation_timeout,
+            operation_guard,
+            None,
+        );
+    }
+
+    fn spawn_retirement(
+        &self,
+        work: RetirementWork,
+        reason: StopReason,
+        operation_timeout: std::time::Duration,
+        operation_guard: OwnedMutexGuard<()>,
+        outcome: Option<oneshot::Sender<RetirementTicketOutcome>>,
     ) {
         let mut tasks = self.tasks.lock();
         self.collect_ready(&mut tasks);
         self.pending.fetch_add(1, Ordering::AcqRel);
-        let completion = RetirementCompletion {
+        let extension_id = work.extension_id.clone();
+        let mut completion = RetirementCompletion {
+            extension_id: extension_id.clone(),
             pending: Arc::clone(&self.pending),
             completed: Arc::clone(&self.completed),
+            completed_errors: Arc::clone(&self.completed_errors),
+            finished: false,
+            _operation_guard: operation_guard,
         };
-        let completed_errors = Arc::clone(&self.completed_errors);
         tasks.spawn(async move {
-            let _completion = completion;
-            let extension_id = hosted.manifest.id.clone();
             let result = AssertUnwindSafe(async move {
-                hosted.publication_lease.wait_until_unpublished().await;
-                hosted.tasks.cancel();
-                let tasks_stopped = hosted.tasks.wait(operation_timeout).await;
-                let stop_result =
-                    match tokio::time::timeout(operation_timeout, hosted.extension.stop(reason))
-                        .await
-                    {
-                        Ok(result) => result,
-                        Err(_) => {
-                            Err(ExtensionError::Timeout(operation_timeout.as_millis() as u64))
-                        },
-                    };
+                work.tasks.cancel();
+                if let Some(publication_lease) = work.publication_lease {
+                    publication_lease.wait_until_unpublished().await;
+                }
+                let tasks_stopped = work.tasks.wait(operation_timeout).await;
+                let stop_result = match tokio::time::timeout(
+                    operation_timeout,
+                    work.extension.stop(reason),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(ExtensionError::Timeout(operation_timeout.as_millis() as u64)),
+                };
                 if !tasks_stopped {
                     return match stop_result {
                         Ok(()) => Err(ExtensionError::Internal(
@@ -182,16 +456,22 @@ impl RetirementSupervisor {
             match result {
                 Ok(Ok(())) => {
                     tracing::debug!(%extension_id, "extension retirement completed");
+                    completion.finish(None);
                 },
-                Ok(Err(error)) => record_error(
-                    &completed_errors,
+                Ok(Err(error)) => completion.finish(Some(ExtensionRetirementError::new(
+                    extension_id.clone(),
                     format!("failed to stop extension {extension_id}: {error}"),
-                ),
-                Err(_) => record_error(
-                    &completed_errors,
+                ))),
+                Err(_) => completion.finish(Some(ExtensionRetirementError::new(
+                    extension_id.clone(),
                     format!("extension retirement task panicked for {extension_id}"),
-                ),
+                ))),
             };
+            if let Some(outcome) = outcome {
+                let _ = outcome.send(RetirementTicketOutcome {
+                    _completion: completion,
+                });
+            }
         });
     }
 
@@ -215,6 +495,9 @@ impl RetirementSupervisor {
             self.record_join_result(result);
         }
         std::mem::take(&mut *self.completed_errors.lock())
+            .into_iter()
+            .map(|error| error.to_string())
+            .collect()
     }
 
     fn collect_ready(&self, tasks: &mut JoinSet<()>) {
@@ -225,15 +508,30 @@ impl RetirementSupervisor {
 
     fn record_join_result(&self, result: Result<(), tokio::task::JoinError>) {
         if let Err(error) = result {
-            record_error(
-                &self.completed_errors,
-                format!("extension retirement task failed: {error}"),
+            tracing::debug!(
+                error = %error,
+                "extension retirement join failed after its completion guard recorded the outcome"
             );
         }
     }
 }
 
-fn record_error(errors: &parking_lot::Mutex<Vec<String>>, error: String) {
+fn record_error(
+    errors: &parking_lot::Mutex<Vec<ExtensionRetirementError>>,
+    error: ExtensionRetirementError,
+) {
     tracing::warn!(error = %error, "extension retirement failed");
     errors.lock().push(error);
+}
+
+fn take_recorded_error(
+    errors: &parking_lot::Mutex<Vec<ExtensionRetirementError>>,
+    extension_id: &str,
+) -> Option<ExtensionRetirementError> {
+    let mut recorded = errors.lock();
+    let (matching, remaining) = std::mem::take(&mut *recorded)
+        .into_iter()
+        .partition(|error| error.extension_id == extension_id);
+    *recorded = remaining;
+    ExtensionRetirementError::combine(extension_id, matching)
 }

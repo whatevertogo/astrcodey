@@ -1,6 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_extension_sdk::extension::{ExtensionError, ExtensionEventSink};
+use astrcode_extension_sdk::extension::{
+    ExtensionError, ExtensionEventEmitter, ExtensionEventError,
+};
 use parking_lot::Mutex;
 use serde_json::json;
 use tokio::sync::oneshot;
@@ -62,7 +64,7 @@ impl PendingKey {
 struct PendingEntry {
     question: PendingQuestion,
     sender: oneshot::Sender<Resolution>,
-    events: Arc<dyn ExtensionEventSink>,
+    events: ExtensionEventEmitter,
     registration: Arc<()>,
 }
 
@@ -81,7 +83,7 @@ impl PendingRegistry {
     pub(crate) fn register(
         self: &Arc<Self>,
         question: PendingQuestion,
-        events: Arc<dyn ExtensionEventSink>,
+        events: ExtensionEventEmitter,
     ) -> Result<(oneshot::Receiver<Resolution>, PendingGuard), ExtensionError> {
         let key = PendingKey::new(&question.session_id, &question.call_id);
         let (sender, receiver) = oneshot::channel();
@@ -98,22 +100,15 @@ impl PendingRegistry {
             PendingEntry {
                 question: question.clone(),
                 sender,
-                events: Arc::clone(&events),
+                events: events.clone(),
                 registration: Arc::clone(&registration),
             },
         );
         drop(state);
 
-        if let Err(error) = events.emit(
-            PENDING_EVENT_TYPE,
-            1,
-            serde_json::to_value(&question).map_err(|error| {
-                self.abandon_registered(&key, &registration);
-                ExtensionError::Internal(format!("serialize askUser pending event: {error}"))
-            })?,
-        ) {
+        if let Err(error) = events.emit_now(PENDING_EVENT_TYPE, &question) {
             self.abandon_registered(&key, &registration);
-            return Err(error);
+            return Err(event_error(error));
         }
 
         Ok((
@@ -312,10 +307,9 @@ fn finish_entry(key: PendingKey, entry: PendingEntry, resolution: Resolution) {
             "ask-user receiver closed before resolution"
         );
     }
-    if let Err(error) = entry.events.emit(
+    if let Err(error) = entry.events.emit_now(
         RESOLVED_EVENT_TYPE,
-        1,
-        json!({
+        &json!({
             "sessionId": key.session_id,
             "callId": key.call_id,
             "resolution": event_name,
@@ -323,6 +317,10 @@ fn finish_entry(key: PendingKey, entry: PendingEntry, resolution: Resolution) {
     ) {
         tracing::warn!(%error, "failed to emit ask-user resolved event");
     }
+}
+
+fn event_error(error: ExtensionEventError) -> ExtensionError {
+    ExtensionError::Internal(error.to_string())
 }
 
 pub(crate) struct PendingGuard {

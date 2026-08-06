@@ -3,24 +3,37 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult};
-use astrcode_extension_sdk::extension::{
-    ExtensionCapability, ExtensionError, HookMode, HookResult, LifecycleContext, PreToolUseContext,
-    PreToolUseResult, Registrar, ToolHandler,
+use astrcode_extension_sdk::{
+    builder::manifest,
+    extension::{
+        ExtensionCapability, ExtensionError, ExtensionManifest, HookMode, HookResult,
+        LifecycleContext, PreToolUseContext, PreToolUseResult, Registrar, RuntimeHookCallContext,
+        RuntimeLifecycleContext, RuntimePreToolUseContext, ToolContext, ToolHandler,
+    },
 };
 use astrcode_extensions::{Extension, runner::ExtensionRunner};
 use astrcode_session::ToolRegistry;
+
+fn test_manifest(id: impl Into<String>, capabilities: &[ExtensionCapability]) -> ExtensionManifest {
+    capabilities
+        .iter()
+        .copied()
+        .fold(
+            manifest(id)
+                .version("test")
+                .description("Extension integration test probe"),
+            |manifest, capability| manifest.capability(capability),
+        )
+        .build()
+}
 
 // ─── Test extensions using register() ─────────────────────────────────────
 
 struct SecurityExtension;
 
 impl Extension for SecurityExtension {
-    fn id(&self) -> &str {
-        "test-security"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::ToolIntercept]
+    fn manifest(&self) -> ExtensionManifest {
+        test_manifest("test-security", &[ExtensionCapability::ToolIntercept])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -33,9 +46,9 @@ struct SecurityHandler;
 #[async_trait::async_trait]
 impl astrcode_extension_sdk::extension::PreToolUseHandler for SecurityHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
-        if ctx.tool_name == "shell"
+        if ctx.tool_name() == "shell"
             && ctx
-                .tool_input
+                .tool_input()
                 .get("command")
                 .and_then(|value| value.as_str())
                 .is_some_and(|command| command.contains("rm -rf"))
@@ -51,12 +64,8 @@ impl astrcode_extension_sdk::extension::PreToolUseHandler for SecurityHandler {
 struct AlwaysBlockExtension;
 
 impl Extension for AlwaysBlockExtension {
-    fn id(&self) -> &str {
-        "test-always-block"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::ToolIntercept]
+    fn manifest(&self) -> ExtensionManifest {
+        test_manifest("test-always-block", &[ExtensionCapability::ToolIntercept])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -78,8 +87,8 @@ impl astrcode_extension_sdk::extension::PreToolUseHandler for AlwaysBlockHandler
 struct EchoToolExtension;
 
 impl Extension for EchoToolExtension {
-    fn id(&self) -> &str {
-        "test-echo-tool"
+    fn manifest(&self) -> ExtensionManifest {
+        test_manifest("test-echo-tool", &[])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -108,18 +117,21 @@ struct EchoToolHandler;
 impl ToolHandler for EchoToolHandler {
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
-        working_dir: &str,
-        _ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
+        let tool_name = ctx.tool_name();
         if tool_name != "extensionEcho" {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
-        let text = arguments
+        let text = ctx
+            .raw_arguments()
             .get("text")
             .and_then(|value| value.as_str())
             .unwrap_or("");
+        let working_dir = ctx
+            .working_dir()
+            .ok_or_else(|| ExtensionError::Internal("working directory not injected".into()))?
+            .display();
         Ok(ToolResult {
             content: format!("{working_dir}:{text}"),
             is_error: false,
@@ -138,8 +150,8 @@ struct FixedToolExtension {
 }
 
 impl Extension for FixedToolExtension {
-    fn id(&self) -> &str {
-        self.id
+    fn manifest(&self) -> ExtensionManifest {
+        test_manifest(self.id, &[])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -175,11 +187,9 @@ struct FixedToolHandler {
 impl ToolHandler for FixedToolHandler {
     async fn execute(
         &self,
-        tool_name: &str,
-        _arguments: serde_json::Value,
-        _working_dir: &str,
-        _ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
+        let tool_name = ctx.tool_name();
         if tool_name != self.tool_name {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
@@ -199,12 +209,12 @@ impl ToolHandler for FixedToolHandler {
 struct FireAndForgetExt;
 
 impl Extension for FireAndForgetExt {
-    fn id(&self) -> &str {
-        "test-faf"
+    fn manifest(&self) -> ExtensionManifest {
+        test_manifest("test-faf", &[])
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.on_event(
+        reg.on_lifecycle(
             astrcode_extension_sdk::extension::ExtensionEvent::TurnStart,
             HookMode::NonBlocking,
             0,
@@ -218,28 +228,36 @@ struct FafHandler;
 #[async_trait::async_trait]
 impl astrcode_extension_sdk::extension::LifecycleHandler for FafHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        assert_eq!(ctx.session_id, "test-session");
-        assert_eq!(ctx.working_dir, "/tmp");
+        assert_eq!(ctx.session_id().map(|id| id.as_str()), Some("test-session"));
+        assert_eq!(ctx.working_dir(), Some(std::path::Path::new("/tmp")));
         Ok(HookResult::Allow)
     }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
-fn pre_tool_use_context(command: &str) -> PreToolUseContext {
-    PreToolUseContext {
-        session_id: "test-session".into(),
-        working_dir: "/tmp".into(),
-        model: astrcode_core::config::ModelSelection::simple("test-model"),
-        call_id: "call-1".into(),
-        tool_name: "shell".into(),
-        tool_input: serde_json::json!({ "command": command }),
-        approval_mode: astrcode_core::permission::ApprovalMode::Manual,
-        available_tools: vec![],
-        event_tx: None,
-        extension_event_sink: None,
-        session_store_dir: None,
-    }
+fn hook_call(session_id: &str, model_id: &str) -> RuntimeHookCallContext {
+    RuntimeHookCallContext::new(
+        session_id,
+        "/tmp",
+        astrcode_core::config::ModelSelection::simple(model_id),
+        None,
+    )
+}
+
+fn pre_tool_use_context(command: &str) -> RuntimePreToolUseContext {
+    RuntimePreToolUseContext::new(
+        hook_call("test-session", "test-model"),
+        "call-1".into(),
+        "shell",
+        serde_json::json!({ "command": command }),
+        astrcode_core::permission::ApprovalMode::Manual,
+        Vec::new(),
+    )
+}
+
+fn lifecycle_context(session_id: &str, model_id: &str) -> RuntimeLifecycleContext {
+    RuntimeLifecycleContext::new(hook_call(session_id, model_id), None)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -366,15 +384,7 @@ async fn extension_context_snapshot_works_for_nonblocking() {
     let runner = ExtensionRunner::new(Duration::from_secs(5));
     runner.register(Arc::new(FireAndForgetExt)).await.unwrap();
 
-    let ctx = LifecycleContext {
-        session_id: "test-session".into(),
-        working_dir: "/tmp".into(),
-        model: astrcode_core::config::ModelSelection::simple("test-model"),
-        event_tx: None,
-        extension_event_sink: None,
-        last_exchange: None,
-        mid_turn_user_messages_synced: 0,
-    };
+    let ctx = lifecycle_context("test-session", "test-model");
 
     runner
         .emit_lifecycle(
@@ -392,15 +402,7 @@ async fn extension_context_snapshot_works_for_nonblocking() {
 async fn dispatch_with_no_registered_extensions_is_noop() {
     let runner = ExtensionRunner::new(Duration::from_secs(5));
 
-    let ctx = LifecycleContext {
-        session_id: "empty".into(),
-        working_dir: "/tmp".into(),
-        model: astrcode_core::config::ModelSelection::simple("noop"),
-        event_tx: None,
-        extension_event_sink: None,
-        last_exchange: None,
-        mid_turn_user_messages_synced: 0,
-    };
+    let ctx = lifecycle_context("empty", "noop");
     runner
         .emit_lifecycle(
             astrcode_extension_sdk::extension::ExtensionEvent::SessionStart,
@@ -422,15 +424,7 @@ async fn extension_subscribes_only_to_matching_events() {
         .await
         .unwrap();
 
-    let lifecycle_ctx = LifecycleContext {
-        session_id: "test-session".into(),
-        working_dir: "/tmp".into(),
-        model: astrcode_core::config::ModelSelection::simple("test-model"),
-        event_tx: None,
-        extension_event_sink: None,
-        last_exchange: None,
-        mid_turn_user_messages_synced: 0,
-    };
+    let lifecycle_ctx = lifecycle_context("test-session", "test-model");
     // SessionStart should pass through without blocking.
     runner
         .emit_lifecycle(

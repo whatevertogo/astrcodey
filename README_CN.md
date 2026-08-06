@@ -187,7 +187,6 @@ Telegram 通道配置位于 `extensions.astrcode-channels.telegram`；除非显�
 enabled = true
 botTokenEnv = "TELEGRAM_BOT_TOKEN"
 allowedChatIds = ["123456789"]
-workingDir = "D:/astrcode"
 ```
 
 ### 内置扩展一览
@@ -454,7 +453,7 @@ Agent 支持运行模式切换（Code / Plan）。Plan 模式下只暴露只读�
 
 - **Extension trait** — 每个扩展声明钩子订阅、贡献工具和斜杠命令、处理生命周期事件
 - **扩展 SDK** — 内置扩展和扩展作者统一依赖 `astrcode-extension-sdk`，不直接耦合宿主 `astrcode-core`
-- **能力声明** — 内置扩展通过 `Extension::capabilities()`；磁盘 IPC 扩展在 `extension/initialize` 的 `capabilities` 中声明 `session_state`、`session_control`、`small_model` 等；运行时经 `HostRouter` 鉴权后仅允许已声明的 `astrcode.*` invoke
+- **能力声明** — 内置扩展通过 `Extension::manifest()` 声明；磁盘 IPC 扩展在 `extension/initialize` 的 `capabilities` 中声明 `session_state`、`session_control`、`small_model` 等；运行时经 `HostRouter` 鉴权后仅允许已声明的 `astrcode.*` invoke
 - **隔离状态目录** — session 级扩展状态存入 `<session>/extension_data/<extension-id>/`，避免扩展写入 session 根目录
 - **Hook 模式** — `Blocking`（可修改输入/输出）、`NonBlocking`（fire-and-forget）、`Advisory`（仅观察）
 - **快捷键注册** — 扩展通过 `Registrar::keybinding()` 注册键盘快捷键（如 `Shift+Tab` 切换模式）
@@ -462,7 +461,7 @@ Agent 支持运行模式切换（Code / Plan）。Plan 模式下只暴露只读�
 - **磁盘 s5r 扩展** — stdio 长度前缀帧 + JSON `WireMessage`（`extension.json` 中 `protocol.s5r` + `command`）；Worker 发 `Initialize`、`handler.invoke` 与按能力裁剪的 `astrcode.*` invoke。规范见 [docs/extension-system.md](docs/extension-system.md)
 - **扩展运行时** — 带深度限制的会话派生、工具注册队列、优先级分派
 - **生命周期钩子** — `SessionStart` / `SessionResume` / `SessionShutdown`、`TurnStart` / `TurnEnd` / `TurnAborted`、`PreToolUse` / `PostToolUse`、`BeforeProviderRequest` / `AfterProviderResponse`、`PreCompact` / `PostCompact`、`PromptBuild`、`UserPromptSubmit`
-- **扩展运行时 API** — `Extension::start()`（携带 `ExtensionCtx`，含 `startup_working_dir`、`event_sink` 和按能力裁剪的宿主服务）、`Extension::stop()`（携带 `StopReason`）、`Extension::health()`（健康探测）、`Extension::on_config_changed()`（热更新配置）
+- **扩展运行时 API** — `Extension::start()` 接收 extension 级 `ExtensionStartContext`，提供配置、归属化路径、类型化 host client、事件、受管任务和取消信号；仅 session 可用的操作要等到带 session 归属的 handler 调用。`Extension::stop()` 接收 `StopReason`，`health()` 与 `on_config_changed()` 分别用于健康探测和配置热更新
 - **主动健康检查** — `ExtensionRunner::check_health()` 提供采样 API，宿主决定轮询策略
 - **启动阶段事件** — `bind_startup_event_channel()` 绑定进程级事件通道，扩展在 `start()` 阶段即可 emit 自定义事件
 

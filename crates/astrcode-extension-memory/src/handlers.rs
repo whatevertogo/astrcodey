@@ -5,8 +5,9 @@ use std::{collections::BTreeMap, sync::Arc};
 use astrcode_extension_sdk::{
     extension::{
         ExtensionError, ExtensionTasks, HookResult, LifecycleContext, LifecycleHandler,
-        PromptBuildContext, PromptBuildHandler, PromptContributions, ToolHandler,
+        PromptBuildContext, PromptBuildHandler, PromptContributions, ToolContext, ToolHandler,
     },
+    host::ExtensionHost,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
 };
 use parking_lot::{Mutex, RwLock};
@@ -14,7 +15,6 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    MemoryServices,
     config::MemoryConfig,
     pipeline, prompts,
     scope::ScopedMemoryStores,
@@ -88,12 +88,17 @@ fn ok_text(content: String) -> ToolResult {
     ToolResult::text(content, false, BTreeMap::new())
 }
 
+fn tool_working_dir(ctx: &ToolContext) -> Result<String, ExtensionError> {
+    ctx.working_dir()
+        .map(|path| path.to_string_lossy().into_owned())
+        .ok_or_else(|| ExtensionError::Internal("working directory not injected".into()))
+}
+
 async fn with_scoped_stores<T: Send + 'static>(
     store_pool: Arc<MemoryStorePool>,
-    working_dir: &str,
+    working_dir: String,
     operation: impl FnOnce(ScopedMemoryStores) -> std::io::Result<T> + Send + 'static,
 ) -> Result<T, ExtensionError> {
-    let working_dir = working_dir.to_string();
     tokio::task::spawn_blocking(move || {
         let stores = store_pool.get_scoped(&working_dir)?;
         operation(stores)
@@ -103,12 +108,26 @@ async fn with_scoped_stores<T: Send + 'static>(
     .map_err(|error| ExtensionError::Internal(error.to_string()))
 }
 
+async fn mutate_scoped_stores<T: Send + 'static>(
+    tasks: &ExtensionTasks,
+    task_name: &'static str,
+    store_pool: Arc<MemoryStorePool>,
+    working_dir: String,
+    operation: impl FnOnce(ScopedMemoryStores) -> std::io::Result<T> + Send + 'static,
+) -> Result<T, ExtensionError> {
+    tasks
+        .run_to_completion(
+            task_name,
+            with_scoped_stores(store_pool, working_dir, operation),
+        )
+        .await
+        .map_err(|error| ExtensionError::Internal(error.to_string()))?
+}
+
 // ─── Save Handler ────────────────────────────────────────────────────
 
 pub(crate) struct MemorySaveHandler {
     pub store_pool: Arc<MemoryStorePool>,
-    pub services: MemoryServices,
-    pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
     pub pipeline: Arc<MemoryPipelineCoordinator>,
     pub config: Arc<RwLock<MemoryConfig>>,
 }
@@ -129,13 +148,14 @@ fn default_category() -> String {
 impl ToolHandler for MemorySaveHandler {
     async fn execute(
         &self,
-        _tool_name: &str,
-        arguments: serde_json::Value,
-        working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let args: SaveArgs = serde_json::from_value(arguments)
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        let args: SaveArgs = ctx.arguments()?;
+        let working_dir = tool_working_dir(&ctx)?;
+        let session_id = ctx
+            .session_id()
+            .ok_or_else(|| ExtensionError::Internal("session id not injected".into()))?
+            .to_string();
         let content = args.content;
         let category = args.category;
         let replace = args.replace_match.filter(|s| !s.trim().is_empty());
@@ -143,9 +163,13 @@ impl ToolHandler for MemorySaveHandler {
         // replace_match 路径：精准 upsert，不经过 delete
         if let Some(ref replaces) = replace {
             let replaces = replaces.clone();
-            let changed = with_scoped_stores(self.store_pool.clone(), working_dir, move |stores| {
-                stores.upsert(&category, &content, Some(replaces.as_str()))
-            })
+            let changed = mutate_scoped_stores(
+                ctx.tasks(),
+                "memory-save-upsert",
+                self.store_pool.clone(),
+                working_dir,
+                move |stores| stores.upsert(&category, &content, Some(replaces.as_str())),
+            )
             .await?;
             return Ok(ok_text(
                 if changed {
@@ -159,26 +183,28 @@ impl ToolHandler for MemorySaveHandler {
         }
 
         // 正常新增路径
-        let result = with_scoped_stores(self.store_pool.clone(), working_dir, move |stores| {
-            stores.append(&category, &content)
-        })
+        let result = mutate_scoped_stores(
+            ctx.tasks(),
+            "memory-save-append",
+            self.store_pool.clone(),
+            working_dir.clone(),
+            move |stores| stores.append(&category, &content),
+        )
         .await?;
 
         match result {
             AppendResult::Saved => {
                 let cfg = self.config.read().clone();
                 if cfg.auto_extract_after_save {
-                    if let Some(tasks) = self.tasks.lock().clone() {
-                        spawn_memory_pipeline(
-                            &tasks,
-                            self.pipeline.clone(),
-                            self.store_pool.clone(),
-                            &self.services,
-                            self.config.clone(),
-                            ctx.scope.session_id.to_string(),
-                            working_dir.to_string(),
-                        );
-                    }
+                    spawn_memory_pipeline(
+                        ctx.tasks(),
+                        self.pipeline.clone(),
+                        self.store_pool.clone(),
+                        ctx.host().clone(),
+                        self.config.clone(),
+                        session_id,
+                        working_dir,
+                    );
                 }
                 Ok(ok_text("Memory saved.".to_string()).into())
             },
@@ -211,31 +237,30 @@ struct DeleteArgs {
 impl ToolHandler for MemoryDeleteHandler {
     async fn execute(
         &self,
-        _tool_name: &str,
-        arguments: serde_json::Value,
-        working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let args: DeleteArgs = serde_json::from_value(arguments)
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        let args: DeleteArgs = ctx.arguments()?;
+        let working_dir = tool_working_dir(&ctx)?;
         if args.match_pattern.trim().is_empty() {
             return Ok(ok_text("No pattern provided. Nothing deleted.".to_string()).into());
         }
         let pattern = args.match_pattern;
         let pattern_for_emit = pattern.clone();
-        let removed = with_scoped_stores(self.store_pool.clone(), working_dir, move |stores| {
-            stores.delete_by_content(&pattern)
-        })
+        let removed = mutate_scoped_stores(
+            ctx.tasks(),
+            "memory-delete",
+            self.store_pool.clone(),
+            working_dir,
+            move |stores| stores.delete_by_content(&pattern),
+        )
         .await?;
 
         if !removed.is_empty() {
-            if let Some(ref sink) = ctx.events {
-                let payload = json!({
-                    "match": pattern_for_emit,
-                    "deleted_count": removed.len(),
-                });
-                let _ = sink.emit("memory.deleted", 1, payload);
-            }
+            let payload = json!({
+                "match": pattern_for_emit,
+                "deleted_count": removed.len(),
+            });
+            let _ = ctx.events().emit("memory.deleted", &payload).await;
         }
 
         if removed.is_empty() {
@@ -272,13 +297,10 @@ const fn default_list_limit() -> usize {
 impl ToolHandler for MemoryListHandler {
     async fn execute(
         &self,
-        _tool_name: &str,
-        arguments: serde_json::Value,
-        working_dir: &str,
-        _ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let args: ListArgs = serde_json::from_value(arguments)
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        let args: ListArgs = ctx.arguments()?;
+        let working_dir = tool_working_dir(&ctx)?;
         let limit = args.limit.clamp(1, MAX_LIST_ENTRIES);
         let query = args.query.filter(|q| !q.trim().is_empty());
 
@@ -317,8 +339,15 @@ pub(crate) struct MemoryRecallHandler {
 impl PromptBuildHandler for MemoryRecallHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
         let store_pool = self.store_pool.clone();
-        let working_dir = ctx.working_dir.clone();
-        let session_id = ctx.session_id.clone();
+        let working_dir = ctx
+            .working_dir()
+            .ok_or_else(|| ExtensionError::Internal("memory prompt requires a workspace".into()))?
+            .to_string_lossy()
+            .into_owned();
+        let session_id = ctx
+            .session_id()
+            .ok_or_else(|| ExtensionError::Internal("memory prompt requires a session".into()))?
+            .to_string();
         let session_prefs = self.session_prefs.clone();
 
         let global_prefs = tokio::task::spawn_blocking(move || {
@@ -397,7 +426,7 @@ pub(crate) fn spawn_memory_pipeline(
     tasks: &ExtensionTasks,
     pipeline: Arc<MemoryPipelineCoordinator>,
     store_pool: Arc<MemoryStorePool>,
-    services: &MemoryServices,
+    host: ExtensionHost,
     config: Arc<RwLock<MemoryConfig>>,
     session_id: String,
     working_dir: String,
@@ -409,30 +438,31 @@ pub(crate) fn spawn_memory_pipeline(
         return;
     };
 
-    let services = services.get().cloned();
-    let shutdown = tasks.shutdown();
+    let cancellation = tasks.cancellation();
 
     tasks.spawn("memory-pipeline", async move {
-        let Some(services) = services else {
-            pipeline.reset();
-            return;
-        };
-        let session_query = match services.session_query.clone() {
-            Some(r) => r,
-            None => {
-                tracing::warn!("memory pipeline: session history unavailable");
+        let session_inspect = match host.session_inspect() {
+            Ok(inspect) => inspect,
+            Err(error) => {
+                tracing::warn!(%error, "memory pipeline: session inspection unavailable");
                 pipeline.reset();
                 return;
             },
         };
-        let small_llm = match services.small_llm.clone() {
-            Some(llm) => llm,
-            None => {
+        let models = host.models();
+        match models.small_available() {
+            Ok(true) => {},
+            Ok(false) => {
                 tracing::warn!("memory pipeline: small model unavailable");
                 pipeline.reset();
                 return;
             },
-        };
+            Err(error) => {
+                tracing::warn!(%error, "memory pipeline: small model unavailable");
+                pipeline.reset();
+                return;
+            },
+        }
 
         loop {
             let scoped = match store_pool.get_scoped(&working_dir) {
@@ -445,14 +475,14 @@ pub(crate) fn spawn_memory_pipeline(
             let cfg = config.read().clone();
             let run = pipeline::run(
                 &scoped,
-                session_query.clone(),
-                small_llm.as_ref(),
+                session_inspect.clone(),
+                &models,
                 &current_session_id,
                 &cfg,
             );
 
             tokio::select! {
-                _ = shutdown.cancelled() => {
+                _ = cancellation.cancelled() => {
                     tracing::debug!("memory pipeline stopped");
                     break;
                 },
@@ -467,7 +497,7 @@ pub(crate) fn spawn_memory_pipeline(
                 },
             }
 
-            if shutdown.is_cancelled() {
+            if cancellation.is_cancelled() {
                 break;
             }
             let Some((next_id, next_dir)) = pipeline.complete_run() else {
@@ -483,9 +513,7 @@ pub(crate) fn spawn_memory_pipeline(
 
 pub(crate) struct MemorySessionStartHandler {
     pub store_pool: Arc<MemoryStorePool>,
-    pub services: MemoryServices,
     pub pipeline: Arc<MemoryPipelineCoordinator>,
-    pub tasks: Arc<Mutex<Option<ExtensionTasks>>>,
     pub config: Arc<RwLock<MemoryConfig>>,
     pub session_prefs: Arc<crate::turn_recall::SessionPrefsCache>,
 }
@@ -493,11 +521,12 @@ pub(crate) struct MemorySessionStartHandler {
 #[async_trait::async_trait]
 impl LifecycleHandler for MemorySessionStartHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        let Some(tasks) = self.tasks.lock().clone() else {
-            tracing::debug!(session_id = %ctx.session_id, "memory extension not started");
-            return Ok(HookResult::Allow);
-        };
-        if tasks.shutdown().is_cancelled() {
+        let session_id = ctx
+            .session_id()
+            .ok_or_else(|| ExtensionError::Internal("memory lifecycle requires a session".into()))?
+            .to_string();
+        let tasks = ctx.tasks();
+        if tasks.cancellation().is_cancelled() {
             return Ok(HookResult::Allow);
         }
 
@@ -507,11 +536,19 @@ impl LifecycleHandler for MemorySessionStartHandler {
         // 预加载失败不阻塞——PromptBuild 的 lines_for_session 会兜底。
         let store_pool = self.store_pool.clone();
         let session_prefs = self.session_prefs.clone();
-        let working_dir = ctx.working_dir.clone();
-        let session_id = ctx.session_id.clone();
+        let working_dir = ctx
+            .working_dir()
+            .ok_or_else(|| {
+                ExtensionError::Internal("memory lifecycle requires a workspace".into())
+            })?
+            .to_string_lossy()
+            .into_owned();
+        let preload_working_dir = working_dir.clone();
+        let preload_session_id = session_id.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || {
-            let scoped = store_pool.get_scoped(&working_dir)?;
-            session_prefs.preload_for_session(&session_id, || scoped.all_user_preference_lines())
+            let scoped = store_pool.get_scoped(&preload_working_dir)?;
+            session_prefs
+                .preload_for_session(&preload_session_id, || scoped.all_user_preference_lines())
         })
         .await
         .map_err(|e| ExtensionError::Internal(e.to_string()))?
@@ -524,13 +561,13 @@ impl LifecycleHandler for MemorySessionStartHandler {
         }
 
         spawn_memory_pipeline(
-            &tasks,
+            tasks,
             self.pipeline.clone(),
             self.store_pool.clone(),
-            &self.services,
+            ctx.host().clone(),
             self.config.clone(),
-            ctx.session_id.to_string(),
-            ctx.working_dir.to_string(),
+            session_id,
+            working_dir,
         );
 
         Ok(HookResult::Allow)

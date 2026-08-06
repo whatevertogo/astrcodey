@@ -6,13 +6,16 @@ use serde_json::Value;
 use crate::extension::{ExtensionEvent, HookMode};
 
 /// s5r 协议当前版本。
-pub const S5R_VERSION: &str = "1.0";
+pub const S5R_VERSION: &str = "2.0";
 
 /// 协议 metadata 中的栈标识。
 pub const S5R_STACK: &str = "astrcode";
 
 /// Meta 能力：宿主调用 guest 注册的 handler。
 pub const CAP_HANDLER_INVOKE: &str = "handler.invoke";
+
+/// Peer-owned liveness probe; it never depends on an extension handler.
+pub const CAP_RUNTIME_PING: &str = "s5r.runtime.ping";
 
 pub const WIRE_CODEC_JSON: &str = "json";
 pub const SUPPORTED_PROTOCOL_VERSIONS_KEY: &str = "supported_protocol_versions";
@@ -44,6 +47,7 @@ impl WireMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InitializeMsg {
     pub id: String,
     pub protocol_version: String,
@@ -68,6 +72,7 @@ pub struct InitializeOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PeerInfo {
     pub name: String,
     pub role: String,
@@ -76,6 +81,7 @@ pub struct PeerInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandlerDescriptor {
     pub handler_id: String,
     pub description: String,
@@ -125,7 +131,6 @@ pub struct InvokeMsg {
     #[serde(default)]
     pub stream: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[serde(alias = "caller_plugin_id")]
     pub caller_extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_invoke_id: Option<String>,
@@ -240,6 +245,14 @@ pub fn mode_from_name(name: &str) -> Option<HookMode> {
     }
 }
 
+pub fn mode_to_name(mode: HookMode) -> &'static str {
+    match mode {
+        HookMode::Blocking => "blocking",
+        HookMode::NonBlocking => "non_blocking",
+        HookMode::Advisory => "advisory",
+    }
+}
+
 pub fn event_to_name(event: &ExtensionEvent) -> &'static str {
     match event {
         ExtensionEvent::SessionStart => "session_start",
@@ -267,25 +280,23 @@ pub fn event_to_name(event: &ExtensionEvent) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::LifecycleContext;
+    use crate::{
+        config::ModelSelection,
+        extension::{RuntimeHookCallContext, RuntimeLifecycleContext},
+    };
 
     #[test]
     fn lifecycle_context_for_step_start_carries_sync_count() {
-        let ctx = LifecycleContext {
-            session_id: "s1".into(),
-            working_dir: "/tmp".into(),
-            model: astrcode_core::config::ModelSelection::simple("m"),
-            event_tx: None,
-            extension_event_sink: None,
-            last_exchange: None,
-            mid_turn_user_messages_synced: 0,
-        };
+        let ctx = RuntimeLifecycleContext::new(
+            RuntimeHookCallContext::new("s1", "/tmp", ModelSelection::simple("m"), None),
+            None,
+        );
         let step = ctx.for_step_start(2);
-        assert_eq!(step.mid_turn_user_messages_synced, 2);
+        assert_eq!(step.mid_turn_user_messages_synced(), 2);
     }
 
     #[test]
-    fn continue_after_stop_event_roundtrip() {
+    fn event_and_mode_names_roundtrip() {
         assert_eq!(
             event_from_name("continue_after_stop"),
             Some(ExtensionEvent::ContinueAfterStop)
@@ -294,6 +305,8 @@ mod tests {
             event_to_name(&ExtensionEvent::ContinueAfterStop),
             "continue_after_stop"
         );
+        assert_eq!(mode_from_name("advisory"), Some(HookMode::Advisory));
+        assert_eq!(mode_to_name(HookMode::Advisory), "advisory");
     }
 
     #[test]
@@ -315,10 +328,38 @@ mod tests {
     }
 
     #[test]
-    fn legacy_invoke_without_parent_id_still_decodes() {
+    fn initialize_rejects_unknown_fields_at_each_typed_boundary() {
+        let cases: [(&str, &[u8]); 3] = [
+            (
+                "initialize",
+                br#"{"type":"initialize","id":"req-1","protocol_version":"2.0","peer":{"name":"worker","role":"plugin"},"unexpected":true}"#,
+            ),
+            (
+                "handler",
+                br#"{"type":"initialize","id":"req-1","protocol_version":"2.0","peer":{"name":"worker","role":"plugin"},"handlers":[{"handler_id":"ext:tool:test","description":"test","unexpected":true}]}"#,
+            ),
+            (
+                "peer",
+                br#"{"type":"initialize","id":"req-1","protocol_version":"2.0","peer":{"name":"worker","role":"plugin","unexpected":true}}"#,
+            ),
+        ];
+
+        for (boundary, payload) in cases {
+            let Err(error) = parse_wire_message(payload) else {
+                panic!("{boundary} accepted an unknown field");
+            };
+            assert!(
+                error.contains("unknown field") && error.contains("unexpected"),
+                "{boundary} returned an unexpected parse error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn detached_invoke_without_parent_id_decodes() {
         let message: WireMessage = serde_json::from_value(serde_json::json!({
             "type": "invoke",
-            "id": "legacy-1",
+            "id": "detached-1",
             "capability": "handler.invoke",
             "input": {},
             "stream": false

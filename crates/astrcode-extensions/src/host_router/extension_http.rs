@@ -8,9 +8,7 @@ use astrcode_extension_sdk::{
 };
 use serde_json::Value;
 
-use super::{
-    HOST_INVOKE_TIMEOUT, PublicHttpDispatcher, block_on_async, capability::ExtensionHttpCapability,
-};
+use super::{HOST_INVOKE_TIMEOUT, PublicHttpDispatcher, capability::ExtensionHttpCapability};
 
 #[derive(Default)]
 pub(super) struct ExtensionHttpGroup {
@@ -26,7 +24,7 @@ impl ExtensionHttpGroup {
         self.dispatcher = Some(dispatcher);
     }
 
-    pub(super) fn invoke(
+    pub(super) async fn invoke(
         &self,
         capability: ExtensionHttpCapability,
         input: Value,
@@ -34,12 +32,16 @@ impl ExtensionHttpGroup {
     ) -> Result<Value, ErrorPayload> {
         match capability {
             ExtensionHttpCapability::PublicDispatch => {
-                self.dispatch_public(input, caller_extension_id)
+                self.dispatch_public(input, caller_extension_id).await
             },
         }
     }
 
-    fn dispatch_public(
+    pub(super) fn is_available(&self) -> bool {
+        self.dispatcher.is_some()
+    }
+
+    async fn dispatch_public(
         &self,
         input: Value,
         caller_extension_id: &str,
@@ -52,20 +54,16 @@ impl ExtensionHttpGroup {
         })?;
         let request = serde_json::from_value::<ExtensionHttpRequest>(input)
             .map_err(|error| ErrorPayload::new("invalid_input", error.to_string()))?;
-        let dispatcher = Arc::clone(dispatcher);
-        let caller_extension_id = caller_extension_id.to_owned();
-        block_on_async(async move {
-            tokio::time::timeout(
-                HOST_INVOKE_TIMEOUT,
-                dispatcher.dispatch_public_http(&caller_extension_id, request),
-            )
-            .await
-            .map_err(|_| ErrorPayload::new("timeout", "public HTTP dispatch timed out"))?
-            .and_then(|response| {
-                serde_json::to_value(response)
-                    .map_err(|error| ExtensionError::Internal(error.to_string()))
-            })
-            .map_err(|error| ErrorPayload::new("dispatch_failed", error.to_string()))
-        })?
+        tokio::time::timeout(
+            HOST_INVOKE_TIMEOUT,
+            dispatcher.dispatch_public_http(caller_extension_id, request),
+        )
+        .await
+        .map_err(|_| ErrorPayload::new("timeout", "public HTTP dispatch timed out"))?
+        .and_then(|response| {
+            serde_json::to_value(response)
+                .map_err(|error| ExtensionError::Internal(error.to_string()))
+        })
+        .map_err(|error| ErrorPayload::new("dispatch_failed", error.to_string()))
     }
 }

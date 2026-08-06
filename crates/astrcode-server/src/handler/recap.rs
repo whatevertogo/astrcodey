@@ -2,7 +2,9 @@
 
 use astrcode_context::ContextSnapshot;
 use astrcode_core::{event::DurableEventPayload, llm};
-use astrcode_extension_sdk::extension::ExtensionEvent;
+use astrcode_extension_sdk::extension::{
+    ExtensionEvent, RuntimeHookCallContext, RuntimeLifecycleContext,
+};
 
 use super::{CommandHandler, HandlerError};
 
@@ -78,15 +80,15 @@ impl CommandHandler {
             .map_err(HandlerError::Session)?;
 
         // PostRecap hook (non-blocking)
-        let lifecycle_ctx = astrcode_extension_sdk::extension::LifecycleContext {
-            session_id: sid.to_string(),
-            working_dir: state.identity.working_dir.clone(),
-            model: astrcode_core::config::ModelSelection::simple(state.identity.model_id.clone()),
-            event_tx: None,
-            extension_event_sink: None,
-            last_exchange: None,
-            mid_turn_user_messages_synced: 0,
-        };
+        let lifecycle_ctx = RuntimeLifecycleContext::new(
+            RuntimeHookCallContext::new(
+                sid.to_string(),
+                state.identity.working_dir.clone(),
+                astrcode_core::config::ModelSelection::simple(state.identity.model_id.clone()),
+                session.session_store_dir().await,
+            ),
+            None,
+        );
         if let Err(e) = self
             .runtime
             .extension_runner

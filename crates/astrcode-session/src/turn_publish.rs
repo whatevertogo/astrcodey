@@ -328,11 +328,11 @@ mod tests {
     };
     use astrcode_extension_sdk::{
         extension::{
-            CompactContext, CompactEvent, CompactResult, ContinueAfterStopContext,
-            ContinueAfterStopResult, ExtensionError, ExtensionEvent, LifecycleContext,
-            PostToolUseContext, PostToolUseResult, PreToolUseContext, PreToolUseResult,
-            ProviderContext, ProviderEvent, ProviderResult, UserMessageEnvelopeContext,
-            UserMessageEnvelopeResult,
+            CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, ExtensionEvent,
+            PostToolUseResult, PreToolUseResult, ProviderEvent, ProviderResult,
+            RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
+            RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
+            RuntimeProviderContext, RuntimeUserMessageEnvelopeContext, UserMessageEnvelopeResult,
         },
         runtime_ports::TurnHooks,
     };
@@ -523,10 +523,12 @@ mod tests {
     impl TurnHooks for EmitEventRuntime {
         async fn emit_pre_tool_use(
             &self,
-            ctx: PreToolUseContext,
+            ctx: RuntimePreToolUseContext,
         ) -> Result<PreToolUseResult, ExtensionError> {
             let tx = ctx
-                .event_tx
+                .call()
+                .event_tx()
+                .cloned()
                 .ok_or_else(|| ExtensionError::Internal("no turn event sender".into()))?;
             tx.send(EventPayload::Durable(DurableEventPayload::ExtensionEvent(
                 ExtensionEventData {
@@ -551,7 +553,7 @@ mod tests {
 
         async fn emit_post_tool_use(
             &self,
-            _ctx: PostToolUseContext,
+            _ctx: RuntimePostToolUseContext,
         ) -> Result<PostToolUseResult, ExtensionError> {
             Ok(PostToolUseResult::Allow)
         }
@@ -559,7 +561,7 @@ mod tests {
         async fn emit_provider(
             &self,
             _event: ProviderEvent,
-            _ctx: ProviderContext,
+            _ctx: RuntimeProviderContext,
         ) -> Result<ProviderResult, ExtensionError> {
             Ok(ProviderResult::Allow)
         }
@@ -567,21 +569,21 @@ mod tests {
         async fn emit_compact(
             &self,
             _event: CompactEvent,
-            _ctx: CompactContext,
+            _ctx: RuntimeCompactContext,
         ) -> Result<CompactResult, ExtensionError> {
             Ok(CompactResult::Allow)
         }
 
         async fn emit_continue_after_stop(
             &self,
-            _ctx: ContinueAfterStopContext,
+            _ctx: RuntimeContinueAfterStopContext,
         ) -> Result<ContinueAfterStopResult, ExtensionError> {
             Ok(ContinueAfterStopResult::EndTurn)
         }
 
         async fn emit_user_message_envelope(
             &self,
-            _ctx: UserMessageEnvelopeContext,
+            _ctx: RuntimeUserMessageEnvelopeContext,
         ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
             Ok(UserMessageEnvelopeResult::Allow)
         }
@@ -589,7 +591,7 @@ mod tests {
         async fn emit_lifecycle(
             &self,
             _event: ExtensionEvent,
-            _ctx: LifecycleContext,
+            _ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
             Ok(())
         }
@@ -602,16 +604,17 @@ mod tests {
         async fn emit_lifecycle(
             &self,
             event: ExtensionEvent,
-            ctx: LifecycleContext,
+            ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
             match event {
                 ExtensionEvent::TurnStart => Err(ExtensionError::Internal(
                     "injected turn start failure".into(),
                 )),
                 ExtensionEvent::TurnEnd => {
-                    let tx = ctx
-                        .event_tx
-                        .ok_or_else(|| ExtensionError::Internal("no turn event sender".into()))?;
+                    let tx =
+                        ctx.call().event_tx().cloned().ok_or_else(|| {
+                            ExtensionError::Internal("no turn event sender".into())
+                        })?;
                     tx.send(EventPayload::Durable(DurableEventPayload::ExtensionEvent(
                         ExtensionEventData {
                             extension_id: "turn-end-probe".into(),
@@ -638,24 +641,32 @@ mod tests {
         let turn_id = new_turn_id();
         let publisher = Arc::new(TurnEvents::new(session.clone(), turn_id.clone()));
         let model = session.read_model().await.unwrap();
-        let mut shared =
-            crate::turn_context::SharedTurnContext::from_read_model(session.id(), &model);
+        let mut shared = crate::turn_context::SharedTurnContext::from_read_model(
+            session.id(),
+            &model,
+            session.session_store_dir().await,
+        );
         let bridge = ExtensionEvents::start(Arc::clone(&publisher), &mut shared);
 
-        let ctx = PreToolUseContext {
-            session_id: session.id().to_string(),
-            working_dir: shared.working_dir.clone(),
-            model: shared.model_selection(),
-            call_id: "call-1".into(),
-            tool_name: "any".into(),
-            tool_input: serde_json::json!({}),
-            approval_mode: shared.approval_mode,
-            available_tools: vec![],
-            event_tx: shared.turn_event_tx(),
-            extension_event_sink: None,
-            session_store_dir: None,
-        };
+        let call = RuntimeHookCallContext::new(
+            session.id().to_string(),
+            shared.working_dir.clone(),
+            shared.model_selection(),
+            None,
+        )
+        .with_event_tx(shared.turn_event_tx());
+        let ctx = RuntimePreToolUseContext::new(
+            call,
+            "call-1".into(),
+            "any",
+            serde_json::json!({}),
+            shared.approval_mode,
+            vec![],
+        );
         runtime_services
+            .turn_runtime_view()
+            .await
+            .unwrap()
             .turn_hooks()
             .emit_pre_tool_use(ctx)
             .await

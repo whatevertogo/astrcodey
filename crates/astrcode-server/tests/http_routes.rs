@@ -22,10 +22,13 @@ use astrcode_core::{
     tool::{SessionToolSelection, ToolDefinition, ToolResult, ToolResultArtifactSlice},
     types::{Cursor, SessionId, new_message_id},
 };
-use astrcode_extension_sdk::extension::{
-    ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
-    ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, MAX_EXTENSION_HTTP_BODY_BYTES,
-    Registrar,
+use astrcode_extension_sdk::{
+    builder::manifest,
+    extension::{
+        ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest, HttpContext,
+        MAX_EXTENSION_HTTP_BODY_BYTES, Registrar,
+    },
 };
 use astrcode_extensions::{Extension, runner::ExtensionRunner};
 use astrcode_protocol::{
@@ -76,10 +79,8 @@ struct HttpRoutesHandler;
 
 #[async_trait::async_trait]
 impl ExtensionHttpHandler for HttpRoutesHandler {
-    async fn handle(
-        &self,
-        request: ExtensionHttpRequest,
-    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+    async fn handle(&self, ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError> {
+        let request = ctx.request();
         Ok(ExtensionHttpResponse::json(
             201,
             serde_json::json!({
@@ -93,15 +94,13 @@ impl ExtensionHttpHandler for HttpRoutesHandler {
 
 #[async_trait::async_trait]
 impl Extension for HttpRoutesExtension {
-    fn id(&self) -> &str {
-        "http-routes-test"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::PublicHttp,
-            ExtensionCapability::AuthenticatedHttp,
-        ]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("http-routes-test")
+            .version("test")
+            .description("Server HTTP route test extension")
+            .capability(ExtensionCapability::PublicHttp)
+            .capability(ExtensionCapability::AuthenticatedHttp)
+            .build()
     }
 
     fn register(&self, registrar: &mut Registrar) {

@@ -1,19 +1,18 @@
 //! astrcode-extension-todo-tool — session-local progress todo list.
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use astrcode_extension_sdk::{
+    builder::{ExtensionToolDefinition, manifest},
     extension::{
-        Extension, ExtensionCapability, ExtensionError, HookMode, PostToolUseContext,
-        PostToolUseHandler, PostToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
-        ProviderResult, Registrar, ToolHandler,
+        Extension, ExtensionCapability, ExtensionError, ExtensionManifest, ExtensionPaths,
+        HookMode, PostToolUseContext, PostToolUseHandler, PostToolUseResult, ProviderContext,
+        ProviderHandler, ProviderResult, Registrar, ToolContext, ToolHandler,
     },
-    state,
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
+    tool::{
+        ExecutionMode, ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
+        tool_metadata,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,11 +38,6 @@ const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;
 const REMINDER_STATE_FILE: &str = ".reminder-state.json";
 
-/// Compute todo storage root from a known session base directory.
-pub(crate) fn todo_dir_from_base(base: &Path) -> PathBuf {
-    state::session_data_dir(base, "astrcode-todo-tool").join("todos")
-}
-
 /// Return bundled todo extension.
 pub fn extension() -> Arc<dyn Extension> {
     Arc::new(TodoToolExtension)
@@ -53,26 +47,22 @@ struct TodoToolExtension;
 
 #[async_trait::async_trait]
 impl Extension for TodoToolExtension {
-    fn id(&self) -> &str {
-        "astrcode-todo-tool"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::ProviderRequest,
-            ExtensionCapability::ToolIntercept,
-        ]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("astrcode-todo-tool")
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::ProviderRequest)
+            .capability(ExtensionCapability::ToolIntercept)
+            .build()
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.tool(todo_write_tool_definition(), Arc::new(TodoWriteToolHandler));
-        reg.tool_metadata(todo_write_metadata());
-        reg.on_provider(
-            ProviderEvent::BeforeRequest,
-            HookMode::Blocking,
-            0,
-            Arc::new(TodoReminderHandler),
+        reg.tool(
+            ExtensionToolDefinition::from_definition(todo_write_tool_definition())
+                .with_prompt(todo_write_prompt()),
+            Arc::new(TodoWriteToolHandler),
         );
+        reg.on_before_provider_request(HookMode::Blocking, 0, Arc::new(TodoReminderHandler));
         reg.on_post_tool_use(HookMode::Blocking, 0, Arc::new(TodoPostToolUseHandler));
     }
 }
@@ -83,30 +73,24 @@ struct TodoWriteToolHandler;
 impl ToolHandler for TodoWriteToolHandler {
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: Value,
-        _working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
+        let tool_name = ctx.tool_name();
         if tool_name != TODO_WRITE_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
-        let root = ctx
-            .capabilities
-            .paths
-            .store_dir
-            .as_deref()
-            .map(todo_dir_from_base)
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let root = todo_root(ctx.paths())?;
         let store = ProgressListStore::new(root);
-        Ok(match handle_todo_write(arguments, &store) {
-            Ok(result) => result,
-            Err(error) => {
-                let meta = tool_metadata([("error", json!(&error))]);
-                ToolResult::text(error, true, meta)
-            },
-        }
-        .into())
+        Ok(
+            match handle_todo_write(ctx.raw_arguments().clone(), &store) {
+                Ok(result) => result,
+                Err(error) => {
+                    let meta = tool_metadata([("error", json!(&error))]);
+                    ToolResult::text(error, true, meta)
+                },
+            }
+            .into(),
+        )
     }
 }
 
@@ -115,11 +99,7 @@ struct TodoReminderHandler;
 #[async_trait::async_trait]
 impl ProviderHandler for TodoReminderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let root = ctx
-            .session_store_dir
-            .as_deref()
-            .map(todo_dir_from_base)
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let root = todo_root(ctx.paths())?;
         ProgressReminder::new(root)
             .before_provider_request()
             .map_err(ExtensionError::Internal)
@@ -131,12 +111,8 @@ struct TodoPostToolUseHandler;
 #[async_trait::async_trait]
 impl PostToolUseHandler for TodoPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
-        if ctx.tool_name == TODO_WRITE_TOOL_NAME {
-            let root = ctx
-                .session_store_dir
-                .as_deref()
-                .map(todo_dir_from_base)
-                .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        if ctx.tool_name() == TODO_WRITE_TOOL_NAME {
+            let root = todo_root(ctx.paths())?;
             ProgressReminder::new(root)
                 .record_todo_write()
                 .map_err(ExtensionError::Internal)?;
@@ -145,21 +121,22 @@ impl PostToolUseHandler for TodoPostToolUseHandler {
     }
 }
 
-fn todo_write_metadata()
--> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
-    let mut map = std::collections::HashMap::new();
-    map.insert(
-        TODO_WRITE_TOOL_NAME.to_string(),
-        astrcode_extension_sdk::tool::ToolPromptMetadata::new(String::new())
-            .example(
-                "{ todos: [{ content: \"分析现有代码结构\", executor: \"self\", status: \
-                 \"in_progress\", activeForm: \"正在分析现有代码结构\" }, { content: \
-                 \"审查安全相关改动\", executor: \"agent\", agentType: \"reviewer\", mode: \
-                 \"parallel\", status: \"pending\", activeForm: \"准备审查安全相关改动\" }] }",
-            )
-            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
-    );
-    map
+fn todo_root(paths: &ExtensionPaths) -> Result<PathBuf, ExtensionError> {
+    paths
+        .session_data_dir()
+        .map(|path| path.join("todos"))
+        .map_err(|error| ExtensionError::Internal(error.to_string()))
+}
+
+fn todo_write_prompt() -> ToolPromptMetadata {
+    ToolPromptMetadata::new(String::new())
+        .example(
+            "{ todos: [{ content: \"分析现有代码结构\", executor: \"self\", status: \
+             \"in_progress\", activeForm: \"正在分析现有代码结构\" }, { content: \
+             \"审查安全相关改动\", executor: \"agent\", agentType: \"reviewer\", mode: \
+             \"parallel\", status: \"pending\", activeForm: \"准备审查安全相关改动\" }] }",
+        )
+        .prompt_tag(ToolPromptTag::Planning)
 }
 
 #[derive(Debug, Deserialize)]

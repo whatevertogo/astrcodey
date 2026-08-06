@@ -1,8 +1,11 @@
 //! 受并发、时间和输出上限约束的扩展子进程执行器。
 
-use std::{future::Future, process::Stdio, sync::Arc, time::Duration};
+use std::{future::Future, process::Stdio, time::Duration};
 
-use astrcode_extension_sdk::s5r::ErrorPayload;
+use astrcode_extension_sdk::{
+    host::{HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS, HostProcessRequest},
+    s5r::ErrorPayload,
+};
 use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -11,10 +14,11 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{block_on_async, capability::ProcessCapability, path::canonicalize_workspace_path};
+use super::{
+    capability::ProcessCapability, decode_host_input, path::canonicalize_workspace_path,
+    run_blocking_io,
+};
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_CONCURRENT_PROCESSES: usize = 8;
 const MAX_STREAM_BYTES: usize = 1024 * 1024;
 const MAX_COMBINED_BYTES: usize = 1024 * 1024;
@@ -43,19 +47,19 @@ const SAFE_INHERITED_ENV: &[&str] = &[
 ];
 
 pub(super) struct ProcessGroup {
-    runner: Arc<ProcessRunner>,
+    runner: ProcessRunner,
     default_working_dir: Option<String>,
 }
 
 impl ProcessGroup {
     pub(super) fn new(default_working_dir: Option<String>) -> Self {
         Self {
-            runner: Arc::new(ProcessRunner::default()),
+            runner: ProcessRunner::default(),
             default_working_dir,
         }
     }
 
-    pub(super) fn invoke(
+    pub(super) async fn invoke(
         &self,
         capability: ProcessCapability,
         input: Value,
@@ -64,22 +68,23 @@ impl ProcessGroup {
     ) -> Result<Value, ErrorPayload> {
         match capability {
             ProcessCapability::Spawn => {
+                let request = decode_host_input(input)?;
                 let working_dir = working_dir
                     .map(str::to_owned)
                     .or_else(|| self.default_working_dir.clone());
-                let cancel_token = cancel_token.cloned();
-                let runner = Arc::clone(&self.runner);
-                block_on_async(async move {
-                    runner
-                        .spawn(input, working_dir.as_deref(), cancel_token.as_ref())
-                        .await
-                })?
+                self.runner
+                    .spawn(request, working_dir.as_deref(), cancel_token)
+                    .await
             },
         }
     }
+
+    pub(super) fn is_available(&self, working_dir: Option<&str>) -> bool {
+        working_dir.is_some() || self.default_working_dir.is_some()
+    }
 }
 
-pub(super) struct ProcessRunner {
+struct ProcessRunner {
     permits: Semaphore,
 }
 
@@ -92,25 +97,43 @@ impl Default for ProcessRunner {
 }
 
 impl ProcessRunner {
-    pub(super) async fn spawn(
+    async fn spawn(
         &self,
-        input: Value,
+        request: HostProcessRequest,
         working_dir: Option<&str>,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<Value, ErrorPayload> {
-        let timeout = bounded_timeout(&input);
+        let timeout = validated_timeout(request.timeout_ms)?;
         let deadline = Instant::now() + timeout;
         let _permit = self.acquire_permit(deadline, cancel_token).await?;
-        let command = required_string(&input, "command")?;
-        let args = string_array(&input, "args")?;
-        let stdin = input.get("stdin").and_then(Value::as_str);
-        if stdin.is_some_and(|value| value.len() > MAX_STDIN_BYTES) {
+        if request.command.is_empty() {
+            return Err(ErrorPayload::new(
+                "invalid_input",
+                "command must not be empty",
+            ));
+        }
+        if request
+            .stdin
+            .as_ref()
+            .is_some_and(|value| value.len() > MAX_STDIN_BYTES)
+        {
             return Err(ErrorPayload::new(
                 "input_too_large",
                 format!("stdin exceeds {MAX_STDIN_BYTES} bytes"),
             ));
         }
-        let cwd = resolve_cwd(working_dir, input.get("cwd").and_then(Value::as_str))?;
+        let HostProcessRequest {
+            command,
+            args,
+            cwd: relative_cwd,
+            stdin,
+            timeout_ms: _,
+        } = request;
+        let working_dir = working_dir.map(str::to_owned);
+        let cwd =
+            run_blocking_io(move || resolve_cwd(working_dir.as_deref(), relative_cwd.as_deref()))
+                .await?;
+        ensure_spawn_active(deadline, cancel_token)?;
 
         let mut process = tokio::process::Command::new(command);
         process
@@ -337,37 +360,28 @@ fn resolve_cwd(
     Ok(path)
 }
 
-fn required_string<'a>(input: &'a Value, key: &str) -> Result<&'a str, ErrorPayload> {
-    input
-        .get(key)
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| ErrorPayload::new("invalid_input", format!("{key} must be a string")))
+fn validated_timeout(timeout_ms: Option<u64>) -> Result<Duration, ErrorPayload> {
+    let timeout_ms = timeout_ms.unwrap_or(HOST_PROCESS_DEFAULT_TIMEOUT_MS);
+    if !(1..=HOST_PROCESS_MAX_TIMEOUT_MS).contains(&timeout_ms) {
+        return Err(ErrorPayload::new(
+            "invalid_input",
+            format!("timeout_ms must be between 1 and {HOST_PROCESS_MAX_TIMEOUT_MS}"),
+        ));
+    }
+    Ok(Duration::from_millis(timeout_ms))
 }
 
-fn string_array<'a>(input: &'a Value, key: &str) -> Result<Vec<&'a str>, ErrorPayload> {
-    let Some(value) = input.get(key) else {
-        return Ok(Vec::new());
-    };
-    value
-        .as_array()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", format!("{key} must be an array")))?
-        .iter()
-        .map(|value| {
-            value.as_str().ok_or_else(|| {
-                ErrorPayload::new("invalid_input", format!("{key} values must be strings"))
-            })
-        })
-        .collect()
-}
-
-fn bounded_timeout(input: &Value) -> Duration {
-    input
-        .get("timeout_ms")
-        .and_then(Value::as_u64)
-        .map(Duration::from_millis)
-        .unwrap_or(DEFAULT_TIMEOUT)
-        .min(MAX_TIMEOUT)
+fn ensure_spawn_active(
+    deadline: Instant,
+    cancel_token: Option<&CancellationToken>,
+) -> Result<(), ErrorPayload> {
+    if cancel_token.is_some_and(CancellationToken::is_cancelled) {
+        return Err(cancelled());
+    }
+    if Instant::now() >= deadline {
+        return Err(ErrorPayload::new("timeout", "process timed out"));
+    }
+    Ok(())
 }
 
 fn append_bounded(target: &mut Vec<u8>, chunk: &[u8], limit: usize) -> bool {
@@ -404,21 +418,32 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn spawn_checkpoint_rejects_cancellation_and_elapsed_deadline() {
+        let token = CancellationToken::new();
+        token.cancel();
+        let cancelled = ensure_spawn_active(Instant::now() + Duration::from_secs(1), Some(&token))
+            .expect_err("cancelled process must not spawn");
+        assert_eq!(cancelled.code, "cancelled");
+
+        let timed_out = ensure_spawn_active(Instant::now() - Duration::from_secs(1), None)
+            .expect_err("expired process must not spawn");
+        assert_eq!(timed_out.code, "timeout");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn drains_output_while_writing_stdin() {
         let workspace = tempdir().expect("workspace");
+        let mut request = HostProcessRequest::new("/bin/sh");
+        request.args = vec![
+            "-c".into(),
+            "dd if=/dev/zero bs=131072 count=1 2>/dev/null; cat >/dev/null".into(),
+        ];
+        request.stdin = Some("x".repeat(128 * 1024));
+        request.timeout_ms = Some(5_000);
         let output = ProcessRunner::default()
-            .spawn(
-                json!({
-                    "command": "/bin/sh",
-                    "args": ["-c", "dd if=/dev/zero bs=131072 count=1 2>/dev/null; cat >/dev/null"],
-                    "stdin": "x".repeat(128 * 1024),
-                    "timeout_ms": 5_000
-                }),
-                workspace.path().to_str(),
-                None,
-            )
+            .spawn(request, workspace.path().to_str(), None)
             .await
             .expect("process should not deadlock on full stdin and stdout pipes");
 
@@ -430,12 +455,10 @@ mod tests {
     async fn executes_process_in_workspace() {
         let workspace = tempdir().expect("workspace");
         let runner = ProcessRunner::default();
+        let mut request = HostProcessRequest::new("rustc");
+        request.args = vec!["--version".into()];
         let output = runner
-            .spawn(
-                json!({ "command": "rustc", "args": ["--version"] }),
-                workspace.path().to_str(),
-                None,
-            )
+            .spawn(request, workspace.path().to_str(), None)
             .await
             .expect("rustc should run");
 
@@ -451,12 +474,10 @@ mod tests {
     async fn rejects_cwd_outside_workspace() {
         let workspace = tempdir().expect("workspace");
         let runner = ProcessRunner::default();
+        let mut request = HostProcessRequest::new("rustc");
+        request.cwd = Some("..".into());
         let error = runner
-            .spawn(
-                json!({ "command": "rustc", "cwd": ".." }),
-                workspace.path().to_str(),
-                None,
-            )
+            .spawn(request, workspace.path().to_str(), None)
             .await
             .expect_err("parent cwd must be rejected");
 

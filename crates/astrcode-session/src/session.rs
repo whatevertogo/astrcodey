@@ -206,7 +206,14 @@ impl Session {
 
     pub async fn emit_lifecycle(&self, event: ExtensionEvent) -> Result<(), SessionError> {
         let model = self.read_model().await?;
-        emit_lifecycle_for_read_model(&self.runtime_services, self.id(), &model, event).await
+        emit_lifecycle_for_read_model(
+            &self.runtime_services,
+            self.id(),
+            &model,
+            self.session_store_dir().await,
+            event,
+        )
+        .await
     }
 
     /// 配置后续 turn 使用的模型。活跃 turn 保留已固定的不可变快照。
@@ -254,10 +261,14 @@ pub async fn emit_lifecycle_for_read_model(
     runtime_services: &SessionRuntimeServices,
     session_id: &SessionId,
     model: &SessionReadModel,
+    session_store_dir: Option<std::path::PathBuf>,
     event: ExtensionEvent,
 ) -> Result<(), SessionError> {
-    let ctx = SharedTurnContext::from_read_model(session_id, model).lifecycle_ctx();
+    let ctx =
+        SharedTurnContext::from_read_model(session_id, model, session_store_dir).lifecycle_ctx();
     runtime_services
+        .turn_runtime_view()
+        .await?
         .turn_hooks()
         .emit_lifecycle(event, ctx)
         .await?;

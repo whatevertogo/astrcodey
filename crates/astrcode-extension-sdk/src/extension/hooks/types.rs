@@ -130,6 +130,18 @@ pub enum CompactEvent {
 /// 扩展操作产生的错误。
 #[derive(Debug, thiserror::Error)]
 pub enum ExtensionError {
+    #[error(transparent)]
+    Config(#[from] crate::extension::ExtensionConfigError),
+    #[error(transparent)]
+    Path(#[from] crate::extension::ExtensionPathError),
+    #[error(transparent)]
+    Host(#[from] crate::host::HostError),
+    #[error("invalid extension input `{code}`: {message}")]
+    InvalidInput {
+        code: String,
+        message: String,
+        hint: Option<String>,
+    },
     #[error("Extension not found: {0}")]
     NotFound(String),
     #[error("Hook timed out after {0}ms")]

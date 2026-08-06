@@ -200,6 +200,32 @@ impl HostSessionTargetRequest {
     }
 }
 
+/// `astrcode.session.control.dispose` request. The operation recycles rather than deletes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostRecycleSessionRequest {
+    pub session_id: String,
+}
+
+impl HostRecycleSessionRequest {
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+        }
+    }
+
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string" }
+            },
+            "required": ["session_id"],
+            "additionalProperties": false
+        })
+    }
+}
+
 /// Session 生命周期的稳定线缆表示。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -343,6 +369,133 @@ impl HostSubmitTurnRequest {
     }
 }
 
+/// Submit a turn to a top-level session owned by the calling source extension.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostRootSubmitTurnRequest {
+    pub target_session_id: String,
+    pub user_prompt: String,
+    #[serde(default = "default_wait_for_result")]
+    pub wait_for_result: bool,
+}
+
+impl HostRootSubmitTurnRequest {
+    pub fn new(target_session_id: impl Into<String>, user_prompt: impl Into<String>) -> Self {
+        Self {
+            target_session_id: target_session_id.into(),
+            user_prompt: user_prompt.into(),
+            wait_for_result: true,
+        }
+    }
+
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "target_session_id": { "type": "string" },
+                "user_prompt": { "type": "string" },
+                "wait_for_result": { "type": "boolean" }
+            },
+            "required": ["target_session_id", "user_prompt"],
+            "additionalProperties": false
+        })
+    }
+}
+
+/// Cursor page request for `astrcode.session.read_events`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSessionEventsPageRequest {
+    pub session_id: String,
+    #[serde(default = "default_session_events_cursor")]
+    pub cursor: String,
+    #[serde(default = "default_session_events_limit")]
+    pub limit: usize,
+}
+
+impl HostSessionEventsPageRequest {
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            cursor: default_session_events_cursor(),
+            limit: default_session_events_limit(),
+        }
+    }
+
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string" },
+                "cursor": { "type": "string", "default": "0" },
+                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 }
+            },
+            "required": ["session_id"],
+            "additionalProperties": false
+        })
+    }
+}
+
+fn default_session_events_cursor() -> String {
+    "0".into()
+}
+
+const fn default_session_events_limit() -> usize {
+    100
+}
+
+/// Stable event envelope returned by `astrcode.session.read_events`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSessionEvent {
+    pub seq: u64,
+    pub id: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    pub timestamp: String,
+    pub payload: Value,
+}
+
+/// Cursor page response for `astrcode.session.read_events`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSessionEventsPageOutput {
+    pub events: Vec<HostSessionEvent>,
+    pub next_cursor: String,
+    pub has_more: bool,
+}
+
+impl HostSessionEventsPageOutput {
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "events": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "seq": { "type": "integer", "minimum": 0 },
+                            "id": { "type": "string" },
+                            "session_id": { "type": "string" },
+                            "turn_id": { "type": ["string", "null"] },
+                            "timestamp": { "type": "string" },
+                            "payload": { "type": "object" }
+                        },
+                        "required": ["seq", "id", "session_id", "timestamp", "payload"],
+                        "additionalProperties": false
+                    }
+                },
+                "next_cursor": { "type": "string" },
+                "has_more": { "type": "boolean" }
+            },
+            "required": ["events", "next_cursor", "has_more"],
+            "additionalProperties": false
+        })
+    }
+}
+
 /// `astrcode.session.control.submit_turn` 的线缆响应。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
@@ -449,6 +602,10 @@ mod tests {
             &HostSessionTargetRequest::wire_schema(),
         );
         assert_schema_fields(
+            &HostRecycleSessionRequest::new("child-1"),
+            &HostRecycleSessionRequest::wire_schema(),
+        );
+        assert_schema_fields(
             &HostSessionStateOutput {
                 lifecycle: SessionLifecycleStateDto::Recycled,
                 phase: "idle".into(),
@@ -475,6 +632,34 @@ mod tests {
             tool_call_id: Some("call-1".into()),
         };
         assert_schema_fields(&submit, &HostSubmitTurnRequest::wire_schema());
+        assert_schema_fields(
+            &HostRootSubmitTurnRequest::new("root-1", "review"),
+            &HostRootSubmitTurnRequest::wire_schema(),
+        );
+
+        let events_request: HostSessionEventsPageRequest =
+            serde_json::from_value(json!({ "session_id": "root-1" })).unwrap();
+        assert_eq!(events_request.cursor, "0");
+        assert_eq!(events_request.limit, 100);
+        assert_schema_fields(
+            &events_request,
+            &HostSessionEventsPageRequest::wire_schema(),
+        );
+        assert_schema_fields(
+            &HostSessionEventsPageOutput {
+                events: vec![HostSessionEvent {
+                    seq: 1,
+                    id: "event-1".into(),
+                    session_id: "root-1".into(),
+                    turn_id: None,
+                    timestamp: "2026-08-06T00:00:00Z".into(),
+                    payload: json!({ "type": "turn_started" }),
+                }],
+                next_cursor: "1".into(),
+                has_more: true,
+            },
+            &HostSessionEventsPageOutput::wire_schema(),
+        );
 
         let output_schema = HostSubmitTurnOutput::wire_schema();
         for (output, variant) in [

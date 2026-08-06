@@ -1,27 +1,27 @@
 //! 磁盘 s5r 子进程扩展：stdio 长度前缀帧 + WireMessage。
 
-mod protocol;
 mod session;
 
 use std::{path::Path, sync::Arc};
 
 use astrcode_extension_sdk::{
+    builder::manifest,
     extension::{
         CommandContext, CommandHandler, CompactContext, CompactEvent, CompactHandler,
         CompactResult, ContinueAfterStopContext, ContinueAfterStopHandler,
-        ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCapability,
-        ExtensionCommandResult, ExtensionError, ExtensionEvent, ExtensionEventDecl,
-        ExtensionHttpHandler, ExtensionHttpRequest, ExtensionHttpResponse, HookMode, HookResult,
-        LifecycleContext, LifecycleHandler, PostToolUseContext, PostToolUseHandler,
-        PostToolUseResult, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
-        PromptBuildContext, PromptBuildHandler, PromptContributions, ProviderContext,
-        ProviderHandler, ProviderResult, Registrar, SlashCommand, StopReason, ToolHandler,
+        ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCallContext,
+        ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionEvent,
+        ExtensionEventDecl, ExtensionHttpHandler, ExtensionHttpResponse, ExtensionPackageManifest,
+        ExtensionStartContext, HookMode, HookResult, HttpContext, LifecycleContext,
+        LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
+        PreToolUseContext, PreToolUseHandler, PreToolUseResult, PromptBuildContext,
+        PromptBuildHandler, PromptContributions, ProviderContext, ProviderHandler, ProviderResult,
+        Registrar, SlashCommand, StopReason, ToolContext, ToolHandler,
     },
-    s5r::event_to_name,
+    s5r::{effects::HandlerResult, event_to_name},
     tool::{ExecutionMode, ToolDefinition},
 };
-pub use protocol::S5R_PROTOCOL_VERSION;
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::{
     extension_manifest::{ExtensionRegistration, RegisteredHttpRoute},
@@ -37,6 +37,7 @@ use crate::{
 
 pub struct S5rExtension {
     id: String,
+    version: String,
     capabilities: Vec<ExtensionCapability>,
     session: Arc<S5rSession>,
     event_decls: Vec<ExtensionEventDecl>,
@@ -49,51 +50,54 @@ pub struct S5rExtension {
 impl S5rExtension {
     pub async fn load(
         ext_dir: &Path,
-        manifest: &Value,
+        manifest: &ExtensionPackageManifest,
         host_router: Arc<HostRouter>,
-        working_dir: Option<&str>,
+        _working_dir: Option<&str>,
     ) -> Result<Arc<Self>, String> {
         let (program, args) = parse_command(manifest, ext_dir)?;
         let env = parse_env(manifest);
-        let session =
-            S5rSession::spawn(&program, &args, ext_dir, &env, host_router, working_dir).await?;
-        let reg = session
+        let session = S5rSession::spawn(&program, &args, ext_dir, &env, host_router).await?;
+        let registration = session
             .registration()
             .ok_or("s5r extension did not complete initialize handshake")?;
-        Ok(build_extension(session, reg))
+        if registration.extension_id() != manifest.extension_id {
+            let actual_id = registration.extension_id().to_owned();
+            session.shutdown().await;
+            return Err(format!(
+                "extension id mismatch: extension.json declares {:?}, initialize declares \
+                 {actual_id:?}",
+                manifest.extension_id
+            ));
+        }
+        Ok(build_extension(session, registration))
     }
 }
 
-fn build_extension(session: Arc<S5rSession>, reg: ExtensionRegistration) -> Arc<S5rExtension> {
+fn build_extension(
+    session: Arc<S5rSession>,
+    registration: ExtensionRegistration,
+) -> Arc<S5rExtension> {
     Arc::new(S5rExtension {
-        id: reg.extension_id().to_owned(),
-        capabilities: reg.capabilities().to_vec(),
+        id: registration.extension_id().to_owned(),
+        version: registration.version().to_owned(),
+        capabilities: registration.capabilities().to_vec(),
         session,
-        event_decls: reg.extension_events().to_vec(),
-        tools: reg.tools().to_vec(),
-        commands: reg.commands().to_vec(),
-        subscriptions: reg.subscriptions().to_vec(),
-        http_routes: reg.http_routes().to_vec(),
+        event_decls: registration.extension_events().to_vec(),
+        tools: registration.tools().to_vec(),
+        commands: registration.commands().to_vec(),
+        subscriptions: registration.subscriptions().to_vec(),
+        http_routes: registration.http_routes().to_vec(),
     })
 }
 
 pub(crate) fn parse_command(
-    manifest: &Value,
+    manifest: &ExtensionPackageManifest,
     ext_dir: &Path,
 ) -> Result<(String, Vec<String>), String> {
-    let cmd = manifest
-        .get("command")
-        .ok_or("extension.json missing 'command' array for s5r extension")?;
-    let arr = cmd
-        .as_array()
-        .ok_or("'command' must be a JSON array of strings")?;
-    if arr.is_empty() {
+    if manifest.command.is_empty() {
         return Err("'command' must contain at least the executable path".into());
     }
-    let program = arr[0]
-        .as_str()
-        .ok_or("command[0] must be a string")?
-        .to_string();
+    let program = manifest.command[0].clone();
     let program_path = Path::new(&program);
     let program = if program_path.is_absolute() {
         program
@@ -102,46 +106,36 @@ pub(crate) fn parse_command(
     } else {
         program
     };
-    let args: Vec<String> = arr[1..]
-        .iter()
-        .map(|v| {
-            v.as_str()
-                .ok_or("command elements must be strings")
-                .map(str::to_string)
-        })
-        .collect::<Result<_, _>>()?;
+    let args = manifest.command[1..].to_vec();
     Ok((program, args))
 }
 
-fn parse_env(manifest: &Value) -> Vec<(String, String)> {
+fn parse_env(manifest: &ExtensionPackageManifest) -> Vec<(String, String)> {
     manifest
-        .get("env")
-        .and_then(|v| v.as_object())
-        .map(|obj| {
-            obj.iter()
-                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                .collect()
-        })
-        .unwrap_or_default()
+        .env
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 #[async_trait::async_trait]
 impl Extension for S5rExtension {
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &self.capabilities
+    fn manifest(&self) -> astrcode_extension_sdk::extension::ExtensionManifest {
+        self.capabilities
+            .iter()
+            .copied()
+            .fold(
+                manifest(self.id.clone())
+                    .version(self.version.clone())
+                    .description("External S5R extension"),
+                |builder, capability| builder.capability(capability),
+            )
+            .build()
     }
 
     fn register(&self, reg: &mut Registrar) {
         for decl in &self.event_decls {
-            reg.extension_event(&decl.event_type)
-                .schema_version(decl.schema_version)
-                .durable(decl.durable)
-                .max_payload_bytes(decl.max_payload_bytes)
-                .register();
+            reg.declare_event(decl.clone());
         }
         for tool_def in &self.tools {
             reg.tool(
@@ -167,7 +161,6 @@ impl Extension for S5rExtension {
                 entry.route.clone(),
                 Arc::new(S5rHttpHandler {
                     session: Arc::clone(&self.session),
-                    extension_id: self.id.clone(),
                     handler_id: entry.handler_id.clone(),
                 }),
             );
@@ -252,7 +245,7 @@ impl Extension for S5rExtension {
                 },
                 other => {
                     let on = event_to_name(other).to_string();
-                    reg.on_event(
+                    reg.on_lifecycle(
                         other.clone(),
                         *mode,
                         0,
@@ -265,6 +258,17 @@ impl Extension for S5rExtension {
                 },
             }
         }
+    }
+
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        let invoke_context =
+            crate::runner::transport_invoke_context(ctx.host()).ok_or_else(|| {
+                ExtensionError::Internal(
+                    "s5r startup requires the runner-provided transport context".to_owned(),
+                )
+            })?;
+        self.session.set_detached_invoke_context(invoke_context);
+        Ok(())
     }
 
     async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
@@ -282,26 +286,14 @@ impl Extension for S5rExtension {
 
 struct S5rHttpHandler {
     session: Arc<S5rSession>,
-    extension_id: String,
     handler_id: String,
 }
 
 #[async_trait::async_trait]
 impl ExtensionHttpHandler for S5rHttpHandler {
-    async fn handle(
-        &self,
-        request: ExtensionHttpRequest,
-    ) -> Result<ExtensionHttpResponse, ExtensionError> {
-        let invoke_ctx = hook_invoke_ctx(
-            &self.session,
-            &self.extension_id,
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        let event = serde_json::to_value(request).map_err(|error| {
+    async fn handle(&self, ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError> {
+        let invoke_ctx = transport_invoke_ctx_or_fallback(&self.session, ctx.call());
+        let event = serde_json::to_value(ctx.request()).map_err(|error| {
             ExtensionError::Internal(format!("serialize HTTP request: {error}"))
         })?;
         let response = self
@@ -312,27 +304,48 @@ impl ExtensionHttpHandler for S5rHttpHandler {
     }
 }
 
-fn hook_invoke_ctx(
+fn transport_invoke_ctx_or_fallback(
     session: &Arc<S5rSession>,
-    ext_id: &str,
-    session_id: Option<String>,
-    working_dir: Option<String>,
-    session_store_dir: Option<std::path::PathBuf>,
-    event_tx: Option<astrcode_core::event::EventSender>,
-    session_ops: Option<Arc<dyn astrcode_core::tool::SessionOperations>>,
+    call: &ExtensionCallContext,
 ) -> InvokeContext {
-    InvokeContext {
-        extension_id: ext_id.to_string(),
-        session_id,
-        session_store_dir,
-        session_ops,
-        event_tx,
-        working_dir,
-        cancel_token: None,
+    crate::runner::transport_invoke_context(call.host()).unwrap_or_else(|| InvokeContext {
+        extension_id: call.extension_id().to_owned(),
+        session_id: call.session_id().map(ToString::to_string),
+        working_dir: call
+            .working_dir()
+            .map(|path| path.to_string_lossy().into_owned()),
+        cancel_token: Some(call.cancellation().clone()),
+        tasks: Some(call.tasks().clone()),
         event_declarations: session.event_decls(),
         declared_capabilities: session.declared_capabilities(),
-        on_peer_io_thread: false,
-    }
+        ..InvokeContext::default()
+    })
+}
+
+fn transport_hook_invoke_ctx(call: &ExtensionCallContext) -> Result<InvokeContext, ExtensionError> {
+    crate::runner::transport_invoke_context(call.host()).ok_or_else(|| {
+        ExtensionError::Internal(
+            "s5r hook requires the runner-provided transport context".to_owned(),
+        )
+    })
+}
+
+async fn invoke_hook(
+    session: &S5rSession,
+    extension_id: &str,
+    hook_name: &str,
+    invoke_context: &InvokeContext,
+    input: serde_json::Value,
+) -> Result<HandlerResult, ExtensionError> {
+    let handler = handler_id(extension_id, "hook", hook_name);
+    session
+        .invoke_handler_with_continuations(
+            &handler,
+            json!({ "on": hook_name, "input": input }),
+            invoke_context,
+            ExecutionMode::Sequential,
+        )
+        .await
 }
 
 struct S5rToolHandler {
@@ -345,35 +358,35 @@ struct S5rToolHandler {
 impl ToolHandler for S5rToolHandler {
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: Value,
-        working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let invoke_ctx = InvokeContext {
-            extension_id: self.extension_id.clone(),
-            session_id: Some(ctx.scope.session_id.to_string()),
-            session_store_dir: ctx.capabilities.paths.store_dir.clone(),
-            session_ops: ctx.capabilities.session.ops.clone(),
-            event_tx: ctx.scope.event_tx.clone(),
-            working_dir: Some(working_dir.to_string()),
-            cancel_token: None,
-            event_declarations: self.session.event_decls(),
-            declared_capabilities: self.session.declared_capabilities(),
-            on_peer_io_thread: false,
-        };
+        let tool_name = ctx.tool_name().to_owned();
+        let arguments = ctx.raw_arguments().clone();
+        let session_id = ctx
+            .session_id()
+            .ok_or_else(|| ExtensionError::Internal("s5r tool requires a session id".into()))?
+            .to_string();
+        let working_dir = ctx
+            .working_dir()
+            .ok_or_else(|| {
+                ExtensionError::Internal("s5r tool requires a working directory".into())
+            })?
+            .to_string_lossy()
+            .into_owned();
+        let tool_call_id = ctx.call_id().map(str::to_owned);
+        let invoke_ctx = transport_invoke_ctx_or_fallback(&self.session, ctx.call());
         let event = json!({
             "on": "tool",
-            "name": tool_name,
+            "name": &tool_name,
             "input": {
-                "tool_name": tool_name,
+                "tool_name": &tool_name,
                 "arguments": arguments,
                 "working_dir": working_dir,
-                "session_id": ctx.scope.session_id,
-                "tool_call_id": ctx.scope.tool_call_id,
+                "session_id": session_id,
+                "tool_call_id": tool_call_id,
             }
         });
-        let hid = handler_id(&self.extension_id, "tool", tool_name);
+        let hid = handler_id(&self.extension_id, "tool", &tool_name);
         let resp = self
             .session
             .invoke_handler_with_continuations(&hid, event, &invoke_ctx, self.execution_mode)
@@ -389,34 +402,20 @@ struct S5rCommandHandler {
 
 #[async_trait::async_trait]
 impl CommandHandler for S5rCommandHandler {
-    async fn execute(
-        &self,
-        command_name: &str,
-        arguments: &str,
-        working_dir: &str,
-        ctx: &CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let invoke_ctx = hook_invoke_ctx(
-            &self.session,
-            &self.extension_id,
-            Some(ctx.session_id.to_string()),
-            Some(working_dir.to_string()),
-            None,
-            None,
-            None,
-        );
+    async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError> {
+        let invoke_ctx = transport_invoke_ctx_or_fallback(&self.session, ctx.call());
         let event = json!({
             "on": "command",
-            "name": command_name,
+            "name": ctx.command_name(),
             "input": {
-                "command_name": command_name,
-                "arguments": arguments,
-                "working_dir": working_dir,
-                "session_id": ctx.session_id,
-                "model": ctx.model,
+                "command_name": ctx.command_name(),
+                "arguments": ctx.argument(),
+                "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+                "session_id": ctx.session_id().map(ToString::to_string),
+                "model": ctx.model(),
             }
         });
-        let hid = handler_id(&self.extension_id, "command", command_name);
+        let hid = handler_id(&self.extension_id, "command", ctx.command_name());
         let resp = self
             .session
             .invoke_handler_with_continuations(&hid, event, &invoke_ctx, ExecutionMode::Sequential)
@@ -433,34 +432,24 @@ struct S5rPreToolUseHandler {
 #[async_trait::async_trait]
 impl PreToolUseHandler for S5rPreToolUseHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
-        let invoke_ctx = hook_invoke_ctx(
+        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
+        let input = json!({
+            "session_id": ctx.session_id().map(ToString::to_string),
+            "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+            "model": ctx.model(),
+            "call_id": ctx.call_id(),
+            "tool_name": ctx.tool_name(),
+            "tool_input": ctx.tool_input(),
+            "available_tools": ctx.available_tools(),
+        });
+        let resp = invoke_hook(
             &self.session,
             &self.ext_id,
-            Some(ctx.session_id.clone()),
-            Some(ctx.working_dir.clone()),
-            ctx.session_store_dir,
-            ctx.event_tx,
-            None,
-        );
-        let input = json!({
-            "session_id": ctx.session_id,
-            "working_dir": ctx.working_dir,
-            "model": ctx.model,
-            "call_id": ctx.call_id,
-            "tool_name": ctx.tool_name,
-            "tool_input": ctx.tool_input,
-            "available_tools": ctx.available_tools,
-        });
-        let hid = handler_id(&self.ext_id, "hook", "pre_tool_use");
-        let resp = self
-            .session
-            .invoke_handler_with_continuations(
-                &hid,
-                json!({ "on": "pre_tool_use", "input": input }),
-                &invoke_ctx,
-                ExecutionMode::Sequential,
-            )
-            .await?;
+            "pre_tool_use",
+            &invoke_ctx,
+            input,
+        )
+        .await?;
         parse_pre_tool_use_result(&resp)
     }
 }
@@ -473,36 +462,26 @@ struct S5rPostToolUseHandler {
 #[async_trait::async_trait]
 impl PostToolUseHandler for S5rPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
-        let is_error = ctx.tool_result.is_error;
-        let invoke_ctx = hook_invoke_ctx(
-            &self.session,
-            &self.ext_id,
-            Some(ctx.session_id.clone()),
-            Some(ctx.working_dir.clone()),
-            ctx.session_store_dir,
-            ctx.event_tx,
-            None,
-        );
+        let is_error = ctx.tool_result().is_error;
+        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
         let input = json!({
-            "session_id": ctx.session_id,
-            "working_dir": ctx.working_dir,
-            "model": ctx.model,
-            "call_id": ctx.call_id,
-            "tool_name": ctx.tool_name,
-            "tool_input": ctx.tool_input,
-            "tool_result": ctx.tool_result,
+            "session_id": ctx.session_id().map(ToString::to_string),
+            "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+            "model": ctx.model(),
+            "call_id": ctx.call_id(),
+            "tool_name": ctx.tool_name(),
+            "tool_input": ctx.tool_input(),
+            "tool_result": ctx.tool_result(),
             "is_error": is_error,
         });
-        let hid = handler_id(&self.ext_id, "hook", "post_tool_use");
-        let resp = self
-            .session
-            .invoke_handler_with_continuations(
-                &hid,
-                json!({ "on": "post_tool_use", "input": input }),
-                &invoke_ctx,
-                ExecutionMode::Sequential,
-            )
-            .await?;
+        let resp = invoke_hook(
+            &self.session,
+            &self.ext_id,
+            "post_tool_use",
+            &invoke_ctx,
+            input,
+        )
+        .await?;
         parse_post_tool_use_result(&resp)
     }
 }
@@ -516,31 +495,14 @@ struct S5rProviderHandler {
 #[async_trait::async_trait]
 impl ProviderHandler for S5rProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let invoke_ctx = hook_invoke_ctx(
-            &self.session,
-            &self.ext_id,
-            Some(ctx.session_id.clone()),
-            Some(ctx.working_dir.clone()),
-            ctx.session_store_dir,
-            None,
-            None,
-        );
+        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
         let input = json!({
-            "session_id": ctx.session_id,
-            "working_dir": ctx.working_dir,
-            "model": ctx.model,
-            "messages": ctx.messages,
+            "session_id": ctx.session_id().map(ToString::to_string),
+            "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+            "model": ctx.model(),
+            "messages": ctx.messages(),
         });
-        let hid = handler_id(&self.ext_id, "hook", &self.on);
-        let resp = self
-            .session
-            .invoke_handler_with_continuations(
-                &hid,
-                json!({ "on": self.on, "input": input }),
-                &invoke_ctx,
-                ExecutionMode::Sequential,
-            )
-            .await?;
+        let resp = invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
         parse_provider_result(&resp)
     }
 }
@@ -556,33 +518,23 @@ impl ContinueAfterStopHandler for S5rContinueAfterStopHandler {
         &self,
         ctx: ContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
-        let invoke_ctx = hook_invoke_ctx(
+        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
+        let input = json!({
+            "session_id": ctx.session_id().map(ToString::to_string),
+            "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+            "model": ctx.model(),
+            "assistant_text": ctx.assistant_text(),
+            "finish_reason": ctx.finish_reason(),
+            "continuations_this_turn": ctx.continuations_this_turn(),
+        });
+        let resp = invoke_hook(
             &self.session,
             &self.ext_id,
-            Some(ctx.session_id.clone()),
-            Some(ctx.working_dir.clone()),
-            None,
-            None,
-            None,
-        );
-        let input = json!({
-            "session_id": ctx.session_id,
-            "working_dir": ctx.working_dir,
-            "model": ctx.model,
-            "assistant_text": ctx.assistant_text,
-            "finish_reason": ctx.finish_reason,
-            "continuations_this_turn": ctx.continuations_this_turn,
-        });
-        let hid = handler_id(&self.ext_id, "hook", "continue_after_stop");
-        let resp = self
-            .session
-            .invoke_handler_with_continuations(
-                &hid,
-                json!({ "on": "continue_after_stop", "input": input }),
-                &invoke_ctx,
-                ExecutionMode::Sequential,
-            )
-            .await?;
+            "continue_after_stop",
+            &invoke_ctx,
+            input,
+        )
+        .await?;
         parse_continue_after_stop_result(&resp)
     }
 }
@@ -595,30 +547,20 @@ struct S5rPromptBuildHandler {
 #[async_trait::async_trait]
 impl PromptBuildHandler for S5rPromptBuildHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
-        let invoke_ctx = hook_invoke_ctx(
+        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
+        let input = json!({
+            "session_id": ctx.session_id().map(ToString::to_string),
+            "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+            "model": ctx.model(),
+        });
+        let resp = invoke_hook(
             &self.session,
             &self.ext_id,
-            Some(ctx.session_id.clone()),
-            Some(ctx.working_dir.clone()),
-            None,
-            None,
-            None,
-        );
-        let input = json!({
-            "session_id": ctx.session_id,
-            "working_dir": ctx.working_dir,
-            "model": ctx.model,
-        });
-        let hid = handler_id(&self.ext_id, "hook", "prompt_build");
-        let resp = self
-            .session
-            .invoke_handler_with_continuations(
-                &hid,
-                json!({ "on": "prompt_build", "input": input }),
-                &invoke_ctx,
-                ExecutionMode::Sequential,
-            )
-            .await?;
+            "prompt_build",
+            &invoke_ctx,
+            input,
+        )
+        .await?;
         parse_prompt_build_result(&resp)
     }
 }
@@ -632,35 +574,18 @@ struct S5rCompactHandler {
 #[async_trait::async_trait]
 impl CompactHandler for S5rCompactHandler {
     async fn handle(&self, ctx: CompactContext) -> Result<CompactResult, ExtensionError> {
-        let invoke_ctx = hook_invoke_ctx(
-            &self.session,
-            &self.ext_id,
-            Some(ctx.session_id.clone()),
-            Some(ctx.working_dir.clone()),
-            None,
-            None,
-            None,
-        );
+        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
         let input = json!({
-            "session_id": ctx.session_id,
-            "working_dir": ctx.working_dir,
-            "model": ctx.model,
-            "trigger": ctx.trigger,
-            "message_count": ctx.message_count,
-            "pre_tokens": ctx.pre_tokens,
-            "post_tokens": ctx.post_tokens,
-            "summary": ctx.summary,
+            "session_id": ctx.session_id().map(ToString::to_string),
+            "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+            "model": ctx.model(),
+            "trigger": ctx.trigger(),
+            "message_count": ctx.message_count(),
+            "pre_tokens": ctx.pre_tokens(),
+            "post_tokens": ctx.post_tokens(),
+            "summary": ctx.summary(),
         });
-        let hid = handler_id(&self.ext_id, "hook", &self.on);
-        let resp = self
-            .session
-            .invoke_handler_with_continuations(
-                &hid,
-                json!({ "on": self.on, "input": input }),
-                &invoke_ctx,
-                ExecutionMode::Sequential,
-            )
-            .await?;
+        let resp = invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
         parse_compact_result(&resp)
     }
 }
@@ -674,31 +599,14 @@ struct S5rLifecycleHandler {
 #[async_trait::async_trait]
 impl LifecycleHandler for S5rLifecycleHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        let invoke_ctx = hook_invoke_ctx(
-            &self.session,
-            &self.ext_id,
-            Some(ctx.session_id.clone()),
-            Some(ctx.working_dir.clone()),
-            None,
-            ctx.event_tx,
-            None,
-        );
+        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
         let input = json!({
-            "session_id": ctx.session_id,
-            "working_dir": ctx.working_dir,
-            "model": ctx.model,
-            "mid_turn_user_messages_synced": ctx.mid_turn_user_messages_synced,
+            "session_id": ctx.session_id().map(ToString::to_string),
+            "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+            "model": ctx.model(),
+            "mid_turn_user_messages_synced": ctx.mid_turn_user_messages_synced(),
         });
-        let hid = handler_id(&self.ext_id, "hook", &self.on);
-        let resp = self
-            .session
-            .invoke_handler_with_continuations(
-                &hid,
-                json!({ "on": self.on, "input": input }),
-                &invoke_ctx,
-                ExecutionMode::Sequential,
-            )
-            .await?;
+        let resp = invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
         parse_lifecycle_result(&resp)
     }
 }

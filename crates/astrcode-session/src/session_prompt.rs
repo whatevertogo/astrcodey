@@ -145,7 +145,6 @@ impl Session {
         is_subagent: bool,
         tool_selection: Option<&SessionToolSelection>,
     ) -> Result<(PreparedSystemPrompt, ResolvedToolRegistrySnapshot), SessionError> {
-        let working_dir = scope.working_dir.clone();
         let mut stability = RuntimeStabilityBudget::new();
         loop {
             let tool_snapshot = self
@@ -159,7 +158,7 @@ impl Session {
             let (text, fingerprint) = self
                 .build_system_prompt(
                     runtime_view,
-                    &working_dir,
+                    &scope,
                     model_id,
                     resolved_extra,
                     is_subagent,
@@ -299,7 +298,7 @@ impl Session {
     async fn build_system_prompt(
         &self,
         runtime_view: &SessionRuntimeView,
-        working_dir: &str,
+        scope: &ToolCatalogScope,
         model_id: &str,
         resolved_extra: Option<&str>,
         is_subagent: bool,
@@ -318,7 +317,8 @@ impl Session {
             crate::session_setup::SystemPromptSnapshotInput {
                 prompt_contributor: runtime_view.prompt_contributor(),
                 session_id: self.id().as_str(),
-                working_dir,
+                working_dir: &scope.working_dir,
+                session_store_dir: scope.session_store_dir.clone(),
                 model_id,
                 tools: &tools,
                 extra_system_prompt: resolved_extra,

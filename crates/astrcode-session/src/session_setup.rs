@@ -14,7 +14,7 @@ use astrcode_core::{
     tool::{ToolDefinition, ToolPromptMetadata},
 };
 use astrcode_extension_sdk::{
-    extension::{ExtensionError, PromptBuildContext},
+    extension::{ExtensionError, RuntimeHookCallContext, RuntimePromptBuildContext},
     runtime_ports::{
         PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider, ToolCatalogScope,
     },
@@ -69,6 +69,7 @@ pub(crate) struct SystemPromptSnapshotInput<'a> {
     pub prompt_contributor: &'a dyn PromptContributor,
     pub session_id: &'a str,
     pub working_dir: &'a str,
+    pub session_store_dir: Option<std::path::PathBuf>,
     pub model_id: &'a str,
     pub tools: &'a [ToolDefinition],
     pub extra_system_prompt: Option<&'a str>,
@@ -84,12 +85,15 @@ pub(crate) struct SystemPromptSnapshotInput<'a> {
 async fn collect_extension_prompt_blocks(
     input: &SystemPromptSnapshotInput<'_>,
 ) -> Result<Vec<ExtensionPromptBlock>, ExtensionError> {
-    let prompt_ctx = PromptBuildContext {
-        session_id: input.session_id.to_string(),
-        working_dir: input.working_dir.to_string(),
-        model: ModelSelection::simple(input.model_id),
-        tools: input.tools.to_vec(),
-    };
+    let prompt_ctx = RuntimePromptBuildContext::new(
+        RuntimeHookCallContext::new(
+            input.session_id,
+            input.working_dir,
+            ModelSelection::simple(input.model_id),
+            input.session_store_dir.clone(),
+        ),
+        input.tools.to_vec(),
+    );
     let contributions = input
         .prompt_contributor
         .collect_prompt_contributions(prompt_ctx)

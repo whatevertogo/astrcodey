@@ -20,30 +20,14 @@ pub(crate) struct ManifestCatalog {
     pub http_routes: Vec<ManifestHttpRoute>,
     pub capabilities: Vec<String>,
     pub extension_events: Vec<ExtensionEventDecl>,
-    invalid_extension_event: Option<String>,
 }
 
 impl ManifestCatalog {
-    pub(crate) fn push_legacy_extension_event(&mut self, event: Value) {
-        match serde_json::from_value::<ManifestExtensionEvent>(event) {
-            Ok(event) => self.extension_events.push(event.into()),
-            Err(error) if self.invalid_extension_event.is_none() => {
-                self.invalid_extension_event = Some(error.to_string());
-            },
-            Err(_) => {},
-        }
-    }
-
     pub(crate) fn to_metadata_value(
         &self,
         extension_id: &str,
         version: &str,
     ) -> Result<Value, String> {
-        if let Some(error) = &self.invalid_extension_event {
-            return Err(format!(
-                "invalid legacy extension event declaration: {error}"
-            ));
-        }
         let tools = self
             .tools
             .iter()
@@ -74,6 +58,7 @@ impl ManifestCatalog {
             capabilities: self.capabilities.clone(),
             tools,
             hooks: self.hooks.clone(),
+            continuation_hooks: self.continuation_hooks.clone(),
             commands: self.commands.clone(),
             http_routes: self.http_routes.clone(),
             extension_events,
@@ -85,12 +70,12 @@ impl ManifestCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{builder::tool, extension::ContinueAfterStopLimit};
+    use crate::{builder::worker_tool as tool, extension::ContinueAfterStopLimit};
 
     #[test]
     fn tool_strict_declaration_is_included_in_manifest() {
         let catalog = ManifestCatalog {
-            tools: vec![tool("strictTool").strict().build()],
+            tools: vec![tool("strictTool").strict().build().into()],
             ..Default::default()
         };
 
@@ -147,28 +132,20 @@ mod tests {
     }
 
     #[test]
-    fn legacy_extension_event_values_are_validated_into_the_typed_manifest() {
+    fn typed_extension_events_are_serialized_into_the_manifest() {
         let mut catalog = ManifestCatalog::default();
-        catalog.push_legacy_extension_event(serde_json::json!({
-            "event_type": "legacy.event"
-        }));
+        catalog.extension_events.push(ExtensionEventDecl {
+            event_type: "typed.event".into(),
+            schema_version: 2,
+            durable: false,
+            max_payload_bytes: 4096,
+        });
         let metadata = catalog
             .to_metadata_value("test-extension", "0.0.0")
             .unwrap();
-        assert_eq!(
-            metadata["extension_events"][0]["event_type"],
-            "legacy.event"
-        );
-        assert_eq!(metadata["extension_events"][0]["schema_version"], 1);
-
-        catalog.push_legacy_extension_event(serde_json::json!({
-            "event_tipe": "typo"
-        }));
-        assert!(
-            catalog
-                .to_metadata_value("test-extension", "0.0.0")
-                .unwrap_err()
-                .contains("event_type")
-        );
+        assert_eq!(metadata["extension_events"][0]["event_type"], "typed.event");
+        assert_eq!(metadata["extension_events"][0]["schema_version"], 2);
+        assert_eq!(metadata["extension_events"][0]["durable"], false);
+        assert_eq!(metadata["extension_events"][0]["max_payload_bytes"], 4096);
     }
 }

@@ -10,18 +10,6 @@ pub mod frontmatter;
 pub mod hostpaths;
 pub mod shell;
 
-/// Typed access to the host's single restricted outbound-network service.
-pub mod network {
-    pub use crate::extension::{
-        NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkErrorKind,
-        OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
-    };
-}
-
-pub mod trusted {
-    pub use crate::authoring_runtime::ExtensionHostServices;
-}
-
 pub mod config {
     pub use astrcode_core::config::ModelSelection;
 }
@@ -37,8 +25,6 @@ pub mod event {
     pub use astrcode_core::event::{Event, EventPayload, EventSendError, EventSender};
 }
 
-pub mod session_query;
-
 pub mod tool {
     pub use astrcode_core::tool::{
         CreateRootSessionRequest, CreateSessionRequest, ExecutionMode, LlmModelIds, SessionAccess,
@@ -50,11 +36,11 @@ pub mod tool {
         ToolSessionControl, ToolSessionPaths, tool_metadata,
     };
 
-    pub use crate::extension::ExtensionToolContext;
+    pub use crate::extension::ToolContext;
 }
 
 pub mod types {
-    pub use astrcode_core::types::{SessionId, project_key_from_path};
+    pub use astrcode_core::types::{SessionId, ToolCallId, project_key_from_path};
 }
 
 /// Protocol types needed by extensions.
@@ -76,75 +62,92 @@ pub mod permission {
     pub use astrcode_core::permission::{ApprovalDecision, ApprovalMode};
 }
 
-mod authoring_runtime;
 pub mod builder;
+pub mod host;
 pub mod manifest;
 pub mod runtime;
 pub mod runtime_ports;
 pub mod s5r;
 pub mod session;
 pub mod session_inspect;
+pub mod testing;
 pub mod worker;
 
-/// Namespaced persistence locations for session-scoped extension data.
-pub mod state {
-    use std::path::{Path, PathBuf};
-
-    /// Returns the only directory an extension should use for session-local state.
-    pub fn session_data_dir(session_base: &Path, extension_id: &str) -> PathBuf {
-        session_base.join("extension_data").join(extension_id)
-    }
-}
-
-/// 进程内（bundled）扩展：实现 [`extension::Extension`] trait，使用 [`builder::handler_fn`]。
+/// In-process bundled extension authoring surface.
 pub mod prelude {
     pub use crate::{
-        builder::{continue_after_stop_handler_fn, handler_fn, tool},
+        builder::{
+            ExtensionEventDeclarationBuilder, ExtensionHttpRouteBuilder, ExtensionManifestBuilder,
+            ExtensionToolDefinition, KeybindingBuilder, SlashCommandBuilder, StatusItemBuilder,
+            command, command_handler, continue_after_stop_handler_fn, extension_event,
+            http_handler, http_route, keybinding, manifest, status_item, tool, tool_handler,
+            tool_handler_args,
+        },
         extension::{
-            CommandContext, CommandHandler, CompactContext, CompactContributions, CompactEvent,
-            CompactHandler, CompactResult, ContinueAfterStopContext, ContinueAfterStopHandler,
-            ContinueAfterStopLimit, ContinueAfterStopOptions, ContinueAfterStopResult, Extension,
-            ExtensionCapability, ExtensionCommandResult, ExtensionConfig, ExtensionCtx,
-            ExtensionError, ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod,
-            ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
-            HookMode, HookResult, LifecycleContext, LifecycleHandler, PostToolUseContext,
+            CommandCompletionContext, CommandContext, CommandDiscovery, CommandDiscoveryContext,
+            CommandDiscoveryHandler, CommandHandler, CompactContext, CompactContributions,
+            CompactEvent, CompactHandler, CompactResult, ContinueAfterStopContext,
+            ContinueAfterStopHandler, ContinueAfterStopLimit, ContinueAfterStopOptions,
+            ContinueAfterStopResult, DiscoveredCommand, DiscoveredTool, Extension,
+            ExtensionCallContext, ExtensionCapability, ExtensionCommandResult, ExtensionConfig,
+            ExtensionConfigError, ExtensionError, ExtensionEvent, ExtensionEventEmitter,
+            ExtensionEventError, ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest,
+            ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest, ExtensionPathError,
+            ExtensionPaths, ExtensionStartContext, ExtensionTaskError, ExtensionTasks, HookMode,
+            HookResult, HttpContext, LifecycleContext, LifecycleHandler, PostToolUseContext,
             PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
             PreToolUseResult, PromptBuildContext, PromptBuildHandler, PromptContributions,
             ProviderContext, ProviderEvent, ProviderHandler, ProviderResult, Registrar,
-            SlashCommand, StatusItemUpdatePayload, StopReason, ToolHandler,
-            UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+            SlashCommand, StatusItemUpdatePayload, StopReason, ToolContext, ToolDiscovery,
+            ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler, UserMessageEnvelopeContext,
+            UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
         },
-        manifest::validate_manifest,
-        s5r::effects::HandlerResult,
-        session::SessionToolSelectionDto,
+        host::{
+            ExtensionHost, ExtensionHttpClient, HostConfigureSessionToolsOutput,
+            HostConfigureSessionToolsRequest, HostError, HostErrorClass, HostLlmChatOutput,
+            HostLlmChatRequest, HostLlmCollectedStreamOutput, HostLlmTextDelta,
+            HostNetworkRedirectPolicy, HostNetworkRequest, HostNetworkResponse, HostProcessOutput,
+            HostProcessRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+            HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+            HostSessionSummariesOutput, HostSessionSummary, HostSessionTokenUsage,
+            HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
+            HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
+            HostWorkspaceGlobRequest, HostWorkspaceGrepMatch, HostWorkspaceGrepOutput,
+            HostWorkspaceGrepRequest, HostWorkspaceListEntry, HostWorkspaceListOutput,
+            HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
+            HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient, NetworkClient,
+            ProcessClient, SessionControlClient, SessionHistoryClient, SessionInspectClient,
+            WorkspaceClient,
+        },
+        llm::LlmMessage,
+        session::{
+            HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
+            HostRootSubmitTurnRequest, HostSessionEvent, HostSessionEventsPageOutput,
+            HostSessionEventsPageRequest, HostSessionReactivateOutput, HostSessionStateOutput,
+            HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
+            SessionToolSelectionDto,
+        },
         session_inspect::{
             SessionHistorySnapshotOutput, SessionInspectListItem, SessionInspectListOutput,
             SessionInspectProviderMessagesOutput, SessionInspectReadModel,
             SessionInspectReadModelOutput, SessionInspectSnapshot, SessionInspectSnapshotOutput,
         },
         tool::{
-            ExecutionMode, ExtensionToolContext, ToolCallScope, ToolCapabilities, ToolDefinition,
-            ToolResult,
+            ExecutionMode, ToolDefinition, ToolExecutionResult, ToolPromptMetadata, ToolResult,
         },
-        worker::{
-            HostClient, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
-            HostCreateSessionOutput, HostCreateSessionRequest, HostNetworkRequest,
-            HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostSessionDeliveryOutput,
-            HostSessionExecutionView, HostSessionInputRequest, HostSessionReactivateOutput,
-            HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
-            HostSubmitTurnRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
-            HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
-            HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
-            HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceWriteOutput,
-            HostWorkspaceWriteRequest, HttpHandlerFn, Worker, WorkerCallContext, tool_text,
-        },
+        types::{SessionId, ToolCallId},
     };
 }
 
 /// s5r 子进程磁盘扩展：[`Worker`]、handler 辅助函数、[`HostClient`]。
 pub mod worker_prelude {
     pub use crate::{
-        builder::tool,
+        builder::worker_tool as tool,
+        extension::{
+            ExtensionCapability, ExtensionEvent, ExtensionEventDecl, ExtensionHttpMethod,
+            ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, HookMode,
+        },
+        llm::LlmMessage,
         s5r::{
             ErrorPayload,
             effects::{CallContinuation, HandlerResult},
@@ -156,18 +159,27 @@ pub mod worker_prelude {
             SessionInspectReadModelOutput, SessionInspectSnapshot, SessionInspectSnapshotOutput,
         },
         worker::{
-            HostApi, HostClient, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
-            HostCreateSessionOutput, HostCreateSessionRequest, HostNetworkRequest,
-            HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostSessionDeliveryOutput,
-            HostSessionExecutionView, HostSessionInputRequest, HostSessionReactivateOutput,
-            HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
-            HostSubmitTurnRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
-            HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
-            HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
-            HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceWriteOutput,
-            HostWorkspaceWriteRequest, HttpHandlerFn, Worker, WorkerCallContext, command_handler,
-            handler_err, hook_handler, hook_handler_args, http_handler, inject_host_api,
-            parse_hook_input, parse_tool_arguments, tool_handler, tool_handler_args, tool_text,
+            ExtensionHttpClient, HostClient, HostConfigureSessionToolsOutput,
+            HostConfigureSessionToolsRequest, HostCreateSessionOutput, HostCreateSessionRequest,
+            HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmTextDelta,
+            HostNetworkRedirectPolicy, HostNetworkRequest, HostNetworkResponse, HostProcessOutput,
+            HostProcessRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
+            HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionEvent,
+            HostSessionEventsPageOutput, HostSessionEventsPageRequest, HostSessionExecutionView,
+            HostSessionInputRequest, HostSessionProviderMessagesOutput,
+            HostSessionReactivateOutput, HostSessionStateOutput, HostSessionSummariesOutput,
+            HostSessionSummary, HostSessionTargetRequest, HostSessionTokenUsage,
+            HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
+            HostSubmitTurnOutput, HostSubmitTurnRequest, HostWorkspaceEditOutput,
+            HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+            HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+            HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
+            HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
+            HostWorkspaceWriteRequest, HttpHandlerFn, ModelClient, NetworkClient, ProcessClient,
+            SessionControlClient, SessionHistoryClient, SessionInspectClient, Worker,
+            WorkerCallContext, WorkspaceClient, command_handler, handler_err, hook_handler,
+            hook_handler_args, http_handler, parse_hook_input, parse_tool_arguments, tool_handler,
+            tool_handler_args, tool_text,
         },
     };
 }

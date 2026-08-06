@@ -8,10 +8,11 @@ use std::{
 use astrcode_core::tool::{SessionOperations, Tool};
 
 use crate::extension::{
-    CompactContext, CompactEvent, CompactResult, ContinueAfterStopContext, ContinueAfterStopResult,
-    ExtensionError, ExtensionEvent, LifecycleContext, PostToolUseContext, PostToolUseResult,
-    PreToolUseContext, PreToolUseResult, PromptBuildContext, PromptContributions, ProviderContext,
-    ProviderEvent, ProviderResult, UserMessageEnvelopeContext, UserMessageEnvelopeResult,
+    CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, ExtensionEvent,
+    PostToolUseResult, PreToolUseResult, PromptContributions, ProviderEvent, ProviderResult,
+    RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
+    RuntimePostToolUseContext, RuntimePreToolUseContext, RuntimePromptBuildContext,
+    RuntimeProviderContext, RuntimeUserMessageEnvelopeContext, UserMessageEnvelopeResult,
 };
 
 /// Publication state shared by all runtime ports used to prepare one turn.
@@ -161,7 +162,7 @@ impl ToolCatalogProvider for CompositeToolCatalogProvider {
 pub trait PromptContributor: Send + Sync {
     async fn collect_prompt_contributions(
         &self,
-        _ctx: PromptBuildContext,
+        _ctx: RuntimePromptBuildContext,
     ) -> Result<PromptContributions, ExtensionError> {
         Ok(PromptContributions::default())
     }
@@ -172,14 +173,14 @@ pub trait PromptContributor: Send + Sync {
 pub trait TurnHooks: Send + Sync {
     async fn emit_pre_tool_use(
         &self,
-        _ctx: PreToolUseContext,
+        _ctx: RuntimePreToolUseContext,
     ) -> Result<PreToolUseResult, ExtensionError> {
         Ok(PreToolUseResult::Allow)
     }
 
     async fn emit_post_tool_use(
         &self,
-        _ctx: PostToolUseContext,
+        _ctx: RuntimePostToolUseContext,
     ) -> Result<PostToolUseResult, ExtensionError> {
         Ok(PostToolUseResult::Allow)
     }
@@ -187,7 +188,7 @@ pub trait TurnHooks: Send + Sync {
     async fn emit_provider(
         &self,
         _event: ProviderEvent,
-        _ctx: ProviderContext,
+        _ctx: RuntimeProviderContext,
     ) -> Result<ProviderResult, ExtensionError> {
         Ok(ProviderResult::Allow)
     }
@@ -195,21 +196,21 @@ pub trait TurnHooks: Send + Sync {
     async fn emit_compact(
         &self,
         _event: CompactEvent,
-        _ctx: CompactContext,
+        _ctx: RuntimeCompactContext,
     ) -> Result<CompactResult, ExtensionError> {
         Ok(CompactResult::Allow)
     }
 
     async fn emit_continue_after_stop(
         &self,
-        _ctx: ContinueAfterStopContext,
+        _ctx: RuntimeContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
         Ok(ContinueAfterStopResult::EndTurn)
     }
 
     async fn emit_user_message_envelope(
         &self,
-        _ctx: UserMessageEnvelopeContext,
+        _ctx: RuntimeUserMessageEnvelopeContext,
     ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
         Ok(UserMessageEnvelopeResult::Allow)
     }
@@ -217,7 +218,7 @@ pub trait TurnHooks: Send + Sync {
     async fn emit_lifecycle(
         &self,
         _event: ExtensionEvent,
-        _ctx: LifecycleContext,
+        _ctx: RuntimeLifecycleContext,
     ) -> Result<(), ExtensionError> {
         Ok(())
     }

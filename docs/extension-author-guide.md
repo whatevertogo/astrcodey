@@ -4,17 +4,23 @@
 
 ## 我该用哪个 prelude？
 
-| 模块 | 适用场景 |
-|------|----------|
-| `astrcode_extension_sdk::prelude` | **进程内** Rust 扩展：实现 `Extension` trait，用 `Registrar` 注册 |
-| `astrcode_extension_sdk::worker_prelude` | **磁盘** 扩展：独立可执行文件，`Worker::run_stdio()` |
+| 模块 | 运行边界 | 注册与上下文 | 宿主调用与错误 |
+|------|----------|--------------|----------------|
+| `astrcode_extension_sdk::prelude` | 仓库内、**进程内** bundled Rust 扩展 | 实现 `Extension`；用 `manifest()` + `Registrar`；handler 接收宿主构造的 `ToolContext` / hook context | `ctx.host()` 返回 owned typed domain clients；返回 `ExtensionError` / lossless `HostError` |
+| `astrcode_extension_sdk::worker_prelude` | `extension.json` 启动的**磁盘**独立进程 | `Worker` 同时生成握手 manifest 与 handler registry；handler 接收 `WorkerCallContext` 或 wire input | task-local 静态 `HostClient` 经 S5R invoke；返回 `ErrorPayload` |
 
-二者不要混用：磁盘扩展没有 `Extension` trait，只有 Worker + s5r 帧协议。
+边界由 SDK re-export 强制：bundled prelude 不导出 `Worker`、静态 `HostClient` 或 S5R wire 类型；
+worker prelude 不导出 `Extension`、`Registrar` 或 bundled 的生产 context。共享 DTO 从 SDK 稳定模块
+re-export，但两套 runtime 入口、context 和错误返回类型不能互换。
+
+测试入口也分开：bundled 使用 `astrcode_extension_sdk::testing` 的 context builders、
+`MockExtensionHost`、`RegistrationHarness` 与 `ExtensionLifecycleHarness`；worker 单元测试通过
+`worker::testing::with_host_api` 在异步作用域内注入 `HostApi`，协议验收使用真实子进程 E2E。
 
 ## 最小示例
 
 ```rust
-use astrcode_extension_sdk::{builder::tool, worker_prelude::*};
+use astrcode_extension_sdk::worker_prelude::*;
 
 #[tokio::main]
 async fn main() {
@@ -25,7 +31,8 @@ async fn main() {
 }
 
 async fn run() -> Result<(), ErrorPayload> {
-    let mut worker = Worker::new("my-ext").version("0.1.0");
+    let mut worker = Worker::new("my-ext");
+    worker.version("0.1.0");
 
     worker.tool(
         tool("ping")
@@ -33,7 +40,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(serde_json::json!({"type": "object"}))
             .build(),
         tool_handler(|_ctx| async { Ok(tool_text("pong", false)) }),
-    );
+    )?;
 
     worker.run_stdio().await
 }
@@ -43,7 +50,8 @@ async fn run() -> Result<(), ErrorPayload> {
 
 ```json
 {
-  "protocol": { "s5r": "1.0" },
+  "extension_id": "my-ext",
+  "protocol": { "s5r": "2.0" },
   "command": ["./my-ext"]
 }
 ```
@@ -92,53 +100,63 @@ worker.tool(
     tool_handler_args(|args: GreetArgs, _ctx| async move {
         Ok(tool_text(format!("hello, {}!", args.name), false))
     }),
-);
+)?;
 ```
 
 钩子同理：`hook_handler_args` + `parse_hook_input`（反序列化 `event["input"]`）。
 
 ## 调用宿主能力
 
+本节的静态 `HostClient` 只属于 `worker_prelude`，依赖当前 S5R handler 的 task-local 调用范围。
+bundled 扩展不要调用它；bundled handler 应从 `ctx.host()` 取得 `ModelClient`、
+`SessionControlClient`、`WorkspaceClient` 等 owned domain client。
+
 主模型与小模型分别声明、分别调用：
 
 ```rust
 // 主模型（当前 session 的 activeModel）
-worker.capability("main_model");
-let out = HostClient::main_chat(serde_json::json!([
-    { "role": "user", "content": "summarize this" }
-])).await?;
+worker.capability(ExtensionCapability::MainModel);
+let out = HostClient::models().main_chat(vec![
+    LlmMessage::user("summarize this"),
+]).await?;
 
 // 小模型（activeSmallModel）
-worker.capability("small_model");
-let out = HostClient::small_chat(serde_json::json!([
-    { "role": "user", "content": "tag this line" }
-])).await?;
+worker.capability(ExtensionCapability::SmallModel);
+let out = HostClient::models().small_chat(vec![
+    LlmMessage::user("tag this line"),
+]).await?;
 
 // 受限子进程（总超时包含并发排队，cwd 必须在 workspace 内）
-worker.capability("process_spawn");
-let output = HostClient::spawn_process(HostProcessRequest::new("rustc")).await?;
+worker.capability(ExtensionCapability::ProcessSpawn);
+let output = HostClient::process().spawn(HostProcessRequest::new("rustc")).await?;
 
 // 受限出站 HTTP(S)
-worker.capability("network_client");
-let response = HostClient::network_request(
+worker.capability(ExtensionCapability::NetworkClient);
+let response = HostClient::network().send(
     HostNetworkRequest::get("https://example.com")
 ).await?;
 // response.final_url 是完成受限重定向后的地址。
 
 // 创建或精确编辑工作区内的非敏感文件
-worker.capability("workspace_write");
-let written = HostClient::write_workspace_file(HostWorkspaceWriteRequest {
+worker.capability(ExtensionCapability::WorkspaceWrite);
+let written = HostClient::workspace().write(HostWorkspaceWriteRequest {
     path: "notes/result.txt".into(),
     content: "done".into(),
 }).await?;
 
 // 跨会话检查（返回 SDK 定义的稳定 DTO，不暴露内部 SessionReadModel）
-worker.capability("session_inspect");
-let sessions = HostClient::list_sessions().await?;
-let model = HostClient::inspect_session_read_model(&sessions.sessions[0].session_id).await?;
+worker.capability(ExtensionCapability::SessionInspect);
+let sessions = HostClient::session_inspect().list().await?;
+let model = HostClient::session_inspect()
+    .read_model(&sessions.sessions[0].session_id)
+    .await?;
+
+// 在当前 handler 的 workspace context 中创建独立 root session；不接受调用方路径参数
+worker.capability(ExtensionCapability::SessionControl);
+let root = HostClient::session_control().create_root().await?;
 
 // 注册公开 JSON 路由；路由和 handler 从同一注册调用生成 manifest
-worker.capability("public_http");
+worker.capability(ExtensionCapability::PublicHttp);
 worker.http_route(
     ExtensionHttpRoute::public(ExtensionHttpMethod::Post, "/my-plugin/{id}"),
     http_handler(|request, _ctx| async move {
@@ -150,31 +168,42 @@ worker.http_route(
 )?;
 
 // 调用另一插件的公开路由
-worker.capability("public_http_dispatch");
-let response = HostClient::dispatch_public_http(
+worker.capability(ExtensionCapability::PublicHttpDispatch);
+let response = HostClient::extension_http().dispatch_public(
     ExtensionHttpRequest::new(ExtensionHttpMethod::Post, "/other-plugin/run")
         .json_body(serde_json::json!({ "job": 1 }))
 ).await?;
 ```
 
-`network.client` 的响应 body 仅承载 UTF-8 文本，不提供二进制/base64 表示；同名响应头的
-重复值不会保留。worker 与 web-tools 共享宿主的全局并发上限，当前协议不提供 extension 级
-公平配额。
+`network.client` 的作者 API 以原始字节返回响应 body，S5R 线缆使用 base64。请求的
+`max_bytes` 不得超过 10 MiB，`timeout_ms` 必须位于 `1..=60_000`；`Manual` 不跟随重定向，
+但仍会返回受 `max_bytes` 限制的原始 3xx 响应 body。同名响应头的重复值不会保留。worker 与
+web-tools 共享宿主的全局并发上限，当前协议不提供 extension 级公平配额。
 
 `workspace_write`、`process_spawn` 与 `network_client` 都是敏感授权；只在插件确实需要时声明。前者拒绝越界、symlink 和密钥类路径；进程执行不是
 操作系统沙箱，后者允许访问宿主网络可达的 HTTP(S) 地址。两者均有并发、总超时和
 I/O 大小限制，并响应会话取消。
 
-扩展只支持公开 HTTP 路由，且不能注册在 `/api` 下。s5r 工具默认串行；显式声明
-`ExecutionMode::Parallel` 且 worker 广告 `parent_invoke_id` wire feature 时，宿主会在同一
-worker 内启用最多 8 个并行调用，并按 request id 隔离 session/working directory 上下文。旧
-worker 缺少该 feature 时自动降级串行。`public_http_dispatch` 仍拒绝同步调用自己的公开
+S5R 同时支持 `public_http` 和复用宿主 bearer token 的 `authenticated_http`；两者都不能
+注册在 `/api` 下。s5r 工具默认串行；显式声明 `ExecutionMode::Parallel` 时，宿主会在同一
+worker 内启用最多 8 个并行调用，并按 request id 隔离 session/working directory 上下文。
+S5R 2.0 握手必须声明 `parent_invoke_id` wire feature，不再为旧 worker 降级。
+`public_http_dispatch` 仍拒绝同步调用自己的公开
 路由，因为路由和非并行 handler 需要取得顺序执行通道，重入会形成等待环。
 
-进程内 bundled 工具还可读 `ToolExecutionContext.capabilities`：
+作为边界对照，进程内 bundled 工具通过私有字段 `ToolContext` 的 accessor 读取调用事实；这不是
+磁盘 worker 可导入或构造的 context：
 
-- `main_model_id` / `llm_models.main` — 需声明 `main_model`
-- `small_model_id` / `llm_models.small` — 需声明 `small_model`
+- `ctx.main_model_id()` — 需声明 `main_model`
+- `ctx.small_model_id()` — 需声明 `small_model`
+- `ctx.available_tools()` — 当前 turn 可见工具定义
+- `ctx.paths()` / `ctx.host()` — 已绑定 extension attribution 的路径与类型化宿主客户端
+
+它不会暴露 core `ToolExecutionContext`、裸 `SessionOperations` 或事件 sink。
+
+bundled host 错误使用 `HostError`：它无损保留 `code` / `message` / `hint` / `retryable` /
+`details`，并通过 `class()` 提供常见错误分类。worker 线缆边界继续使用同字段的
+`ErrorPayload`；不要在 worker handler 签名中改用 `ExtensionError`。
 
 完整 wire 名与能力对照见 [extension-system.md](extension-system.md)。
 
@@ -187,40 +216,63 @@ return Err(ErrorPayload::new("invalid_input", "name is required")
     .with_hint("pass {\"name\": \"...\"} in arguments"));
 ```
 
-`ErrorPayload` 提供 `with_hint` 若已实现；否则用 `new` 后手动设置字段。
+`ErrorPayload::with_hint()` 可链式补充可操作建议；可重试错误再使用
+`ErrorPayload::retryable(true)` 明确标记。
 
 ## 取消
 
-长时间 tool 应轮询 `ctx.cancel_token.is_cancelled()`；宿主 `stop()` 或 turn 取消会经 s5r `Cancel` 消息传递。
+worker 的长时间 tool 应轮询 `WorkerCallContext::cancel_token()`；宿主取消经 S5R `Cancel` 消息传递。
+bundled handler 则读取 `ctx.cancellation()`，后台循环使用 `ctx.tasks().cancellation()` 或把调用取消
+令牌克隆进受管任务。两种 token 来源不能跨 prelude 混用。
 
 ## 调试
 
-- **stderr**：子进程 stderr 由宿主读取并记录（可 `eprintln!` 调试，勿污染 stdout——stdout 用于 s5r 帧）。
-- **握手失败**：检查 `protocol.s5r` 是否为 `1.0`、`extension_id` 是否与目录名一致。
+- **stderr**：宿主会持续 drain 子进程 stderr 以避免阻塞，但当前不保存或转发这些行；
+  调试时不要向 stdout 写日志，stdout 专用于 S5R 帧。
+- **握手失败**：检查 `protocol.s5r` 是否为 `2.0`、`extension_id` 是否符合命名规则；
+  为了诊断清晰，建议与目录名一致，但宿主不强制两者相等。
 - **工具不出现**：确认 `worker.tool()` 已调用且 `run_stdio()` 未提前退出。
 - **E2E 参考**：`crates/astrcode-extensions/tests/s5r-guest/`
 
-## 测试 HostClient
+## 测试 Worker `HostClient`
 
 ```rust
 use std::sync::Arc;
-use astrcode_extension_sdk::worker::{HostApi, inject_host_api};
+use astrcode_extension_sdk::{
+    worker::testing::{HostApi, with_host_api},
+    worker_prelude::{ErrorPayload, HostClient, LlmMessage},
+};
+use serde_json::Value;
 
 struct MockHost;
 #[async_trait::async_trait]
 impl HostApi for MockHost {
     async fn call(&self, cap: &str, _input: Value) -> Result<Value, ErrorPayload> {
-        Ok(serde_json::json!({ "echo": cap }))
+        match cap {
+            "astrcode.llm.main_chat" => Ok(serde_json::json!({
+                "content": "mocked",
+                "model": "test-main"
+            })),
+            _ => Err(ErrorPayload::new("unexpected_call", cap)),
+        }
     }
     async fn call_stream(&self, cap: &str, input: Value) -> Result<Value, ErrorPayload> {
         self.call(cap, input).await
     }
 }
 
-let _ = inject_host_api(Arc::new(MockHost));
+let output = with_host_api(Arc::new(MockHost), async {
+    HostClient::models()
+        .main_chat(vec![LlmMessage::user("hello")])
+        .await
+}).await?;
 ```
 
-单元测试在调用 `HostClient::call` 前注入；集成测试用真实子进程 + `s5r_e2e_test`。
+单元测试把类型化领域 client 调用包在作用域内；并发测试各自持有 mock，不修改进程级全局状态。
+`tokio::spawn` 创建的新任务不会继承这个测试作用域；需要在新任务内再次调用 `with_host_api`。
+`HostApi` 和 raw invoke 只是
+`worker::testing` 的 transport seam，不在 `worker_prelude` 中。集成测试使用真实子进程 +
+`s5r_e2e_test`。
 
 ## 进一步阅读
 
@@ -231,7 +283,8 @@ let _ = inject_host_api(Arc::new(MockHost));
 
 ## 外置 agent-tool 类插件
 
-内置的 `astrcode-extension-agent-tools` 是**进程内**扩展（`Extension` trait + `session_ops` 直接调用）。  
+内置的 `astrcode-extension-agent-tools` 是**进程内**扩展（`Extension` trait +
+`ctx.host().session_control()` 类型化调用）。
 若你要做**磁盘外置**、独立二进制分发的 agent 委派插件，走 **s5r Worker**，通过 `HostClient` 调用 `astrcode.session.control.*`。
 
 ### 先选路径
@@ -255,11 +308,13 @@ let _ = inject_host_api(Arc::new(MockHost));
 
 项目级：`<repo>/.astrcode/extensions/my-agent-tools/`（同上）。
 
-`extension.json` 只负责启动，**不要**在这里重复写 tools 列表：
+`extension.json` 声明发现期身份与启动方式，**不要**在这里重复写 tools 列表。`extension_id`
+必须与 `Worker` 生成的握手 manifest 一致：
 
 ```json
 {
-  "protocol": { "s5r": "1.0" },
+  "extension_id": "my-agent-tools",
+  "protocol": { "s5r": "2.0" },
   "command": ["C:/path/to/my-agent-tools.exe"]
 }
 ```
@@ -298,14 +353,13 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ### 必须声明的能力与钩子
 
 ```rust
-let mut worker = Worker::new("my-agent-tools")
+let mut worker = Worker::new("my-agent-tools");
+worker
     .version("0.1.0")
-    .capability("session_control");   // wire: session_control → astrcode.session.control.*
+    .capability(ExtensionCapability::SessionControl);
 
 // 向主 Agent 注入 [Agents] 列表（等同内置 on_prompt_build）
-worker.hook(
-    "prompt_build",
-    "non_blocking",
+worker.on_prompt_build(
     hook_handler(|_ctx| async move {
         let agents_md = discover_agents_markdown(); // 自行扫描 .md
         Ok(HandlerResult::effect(
@@ -313,8 +367,13 @@ worker.hook(
             serde_json::json!({ "agents": [agents_md] }),
         ))
     }),
-);
+)?;
 ```
+
+固定模式 hook 不通过 `Worker::hook` 注册：`prompt_build`、`pre_compact`、`post_compact`
+固定为 `blocking`，`after_provider_response` 固定为 `advisory`，分别使用对应的 `on_*`
+方法；`continue_after_stop` 使用带 options 的 `on_continue_after_stop`。宿主会拒绝 mode
+与实际 dispatcher 语义不一致的手写 manifest。
 
 `prompt_build` 的 effect 名必须是 `prompt_contributions`（宿主 `parse_prompt_build_result` 约定）。
 
@@ -346,41 +405,42 @@ worker.tool(
         .parameters(/* 与内置 AGENT_TOOL_PARAMETERS 相同 */)
         .execution_mode(ExecutionMode::Parallel)
         .build(),
-    tool_handler_args(|args: AgentArgs, _ctx| async move {
-        run_agent_via_host(&args).await
+    tool_handler_args(|args: AgentArgs, ctx| async move {
+        run_agent_via_host(&args, &ctx).await
     }),
-);
+)?;
 ```
 
 ### 通过 HostClient 派生子会话
 
-tool handler 里从 `event` 取 `session_id` / `tool_call_id` / `working_dir`（宿主经 `handler.invoke` 传入）：
+`tool_handler_args` 在反序列化 arguments 的同时保留宿主经 `handler.invoke` 传入的调用事实，
+handler 可直接从 `WorkerCallContext` 读取：
 
-```rust
-fn tool_context_from_event(event: &serde_json::Value) -> (&str, &str, &str) {
-    let input = event.get("input").unwrap_or(event);
-    (
-        input["session_id"].as_str().unwrap_or(""),
-        input["tool_call_id"].as_str().unwrap_or(""),
-        input["working_dir"].as_str().unwrap_or("."),
-    )
-}
-```
+- `ctx.session_id()`：当前 session；
+- `ctx.tool_call_id()`：当前 tool call（线缆值本身可空）；
+- `ctx.working_dir()`：宿主校验后的工作目录；
+- `ctx.turn_id()`：仅当对应 wire event 实际携带 `turn_id` 时为 `Some`；当前 tool event 不伪造该值。
 
 创建子会话：
 
 ```rust
-let (_parent_id, tool_call_id, working_dir) = tool_context_from_event(&event);
+let _parent_session_id = ctx.session_id().ok_or_else(|| {
+    ErrorPayload::new("missing_call_context", "agent tool requires a session id")
+})?;
+let working_dir = ctx.working_dir().ok_or_else(|| {
+    ErrorPayload::new("missing_call_context", "agent tool requires a working directory")
+})?;
+let tool_call_id = ctx.tool_call_id().map(str::to_owned);
 
 let mut request = HostCreateSessionRequest::new(agent_name);
 request.system_prompt = Some(system_prompt);
 request.model_preference = Some(model);
 request.ephemeral = true;
-request.tool_call_id = Some(tool_call_id.into());
-request.working_dir = Some(working_dir.into());
+request.tool_call_id = tool_call_id.clone();
+request.working_dir = Some(working_dir.to_string_lossy().into_owned());
 request.tool_selection = Some(SessionToolSelectionDto::all_except(["agent"]));
 
-let created = HostClient::create_child_session(request).await?;
+let created = HostClient::session_control().create_child(request).await?;
 let child_id = created.session_id;
 ```
 
@@ -395,9 +455,9 @@ let mut request = HostSubmitTurnRequest::background(child_id, args.prompt);
 request.notify_parent_on_complete = Some(format!(
     "Subagent '{}' finished: {}", agent_name, args.description
 ));
-request.tool_call_id = Some(tool_call_id.into());
+request.tool_call_id = tool_call_id;
 
-let submitted = HostClient::submit_session_turn(request).await?;
+let submitted = HostClient::session_control().submit_turn(request).await?;
 // HostSubmitTurnOutput::Backgrounded { .. } → 返回说明文本给主 Agent
 ```
 

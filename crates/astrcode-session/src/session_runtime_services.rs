@@ -191,13 +191,6 @@ impl SessionRuntimeServices {
         })
     }
 
-    /// 直接读取当前 turn hooks，不等待 runtime 稳定窗口。
-    ///
-    /// 只用于生命周期事件等不需要固定 tool catalog / generation 的路径。
-    pub(crate) fn turn_hooks(&self) -> Arc<dyn TurnHooks> {
-        self.extension_ports.turn_extension_view().turn_hooks_arc()
-    }
-
     pub(crate) async fn turn_runtime_view(&self) -> Result<SessionRuntimeView, SessionError> {
         let mut stability = RuntimeStabilityBudget::new();
         loop {

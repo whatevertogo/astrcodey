@@ -18,13 +18,13 @@ use astrcode_extension_sdk::{
         SessionOperationsProvider, ToolCatalogProvider, ToolCatalogScope, ToolCatalogSnapshot,
         TurnExtensionView as RuntimeTurnExtensionView, TurnExtensionViewProvider, TurnHooks,
     },
-    tool::SessionOperations,
-    trusted::ExtensionHostServices,
+    tool::{SessionOperations, ToolPromptMetadata},
 };
-use tokio::sync::{Mutex as AsyncMutex, RwLock, mpsc};
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, RwLock, mpsc};
 
 mod commands;
 mod diagnostics;
+mod host_invoker;
 mod http;
 mod index;
 mod manifest;
@@ -34,7 +34,8 @@ mod snapshot;
 mod tool_adapter;
 
 pub use commands::{
-    CommandSource, RegisteredSlashCommand, ResolvedSlashCommand, ShadowedSlashCommand,
+    CommandRuntimeContext, CommandSource, ResolvedCommandSurface, ResolvedSlashCommand,
+    ShadowedSlashCommand,
 };
 use diagnostics::{
     ExtensionDiagnosticStage as DiagnosticStage, ExtensionStageOutcome as StageOutcome,
@@ -42,12 +43,15 @@ use diagnostics::{
 pub use diagnostics::{
     ExtensionDiagnostics, ExtensionHealthReport, ExtensionStageDiagnostics, ExtensionStageStatus,
 };
+use host_invoker::ExtensionCallContextFactory;
+pub(crate) use host_invoker::transport_invoke_context;
 pub use http::ExtensionHttpDispatchResult;
 use index::{HandlerIndex, build_handler_index, log_handler_dispatch_order};
 use manifest::ResolvedExtensionManifest;
-use registration::validate_registrations;
+use registration::validate_registration_conflicts;
 use retirement::{
-    ActiveTurnViewLease, ActiveTurnViews, ExtensionPublicationLease, RetirementSupervisor,
+    ActiveTurnViewLease, ActiveTurnViews, ExtensionPublicationLease, ExtensionRetirementError,
+    RetirementSupervisor, RetirementTicket,
 };
 pub use snapshot::{ExtensionDeclarationSnapshot, ExtensionRegistrySnapshot};
 
@@ -80,7 +84,14 @@ pub(crate) struct ExtensionView {
     index: Arc<HandlerIndex>,
     diagnostics: Arc<parking_lot::RwLock<BTreeMap<String, ExtensionDiagnostics>>>,
     operation_timeout: Duration,
+    pub(super) call_context_factory: ExtensionCallContextFactory,
     _active_turn_lease: Option<ActiveTurnViewLease>,
+}
+
+/// Keybinding and status declarations captured from one stable runtime generation.
+pub struct ExtensionUiContributions {
+    pub keybindings: Vec<Keybinding>,
+    pub status_items: Vec<StatusItem>,
 }
 
 struct LifecycleCoordination {
@@ -95,9 +106,10 @@ struct LifecycleCoordination {
 struct RuntimeRegistry {
     /// 已发布的扩展实例、清单与生命周期资源。
     extensions: RwLock<Vec<HostedExtension>>,
-    /// 预计算的 handler 索引，注册时重建，分发时直接读取快照。
+    /// 预计算的 handler 索引；writer 活跃时可能是释放旧代租约所需的批次中间态。
     index: ArcSwap<HandlerIndex>,
     publication: parking_lot::Mutex<RuntimePublication>,
+    publication_stable: Notify,
     active_turn_views: Arc<ActiveTurnViews>,
 }
 
@@ -106,38 +118,63 @@ struct HostBindings {
     session_ops: Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>>,
     /// 扩展 `start()` 阶段取得的进程级事件通道。
     startup_event_tx: Option<astrcode_core::event::EventSender>,
-    /// 统一注入给 bundled extension 的宿主运行态服务。
-    host_services: Option<Arc<ExtensionHostServices>>,
+    /// 进程内 SDK host 与磁盘扩展共同使用的能力路由。
+    host_router: Arc<crate::host_router::HostRouter>,
 }
 
 #[derive(Default)]
 struct RuntimePublication {
     generation: u64,
     active_writers: usize,
+    /// 已写入 `index`、等待最后一个 writer 退出后提交的 generation。
+    pending_generation: Option<u64>,
+}
+
+impl RuntimePublication {
+    fn is_stable_generation(&self, generation: u64) -> bool {
+        self.active_writers == 0 && self.generation == generation
+    }
 }
 
 struct RuntimePublicationGuard<'a> {
     publication: &'a parking_lot::Mutex<RuntimePublication>,
+    publication_stable: &'a Notify,
 }
 
 impl<'a> RuntimePublicationGuard<'a> {
-    fn begin(publication: &'a parking_lot::Mutex<RuntimePublication>) -> Self {
+    fn begin(
+        publication: &'a parking_lot::Mutex<RuntimePublication>,
+        publication_stable: &'a Notify,
+    ) -> Self {
         let mut state = publication.lock();
         state.active_writers = state.active_writers.saturating_add(1);
-        Self { publication }
+        Self {
+            publication,
+            publication_stable,
+        }
     }
 }
 
 impl Drop for RuntimePublicationGuard<'_> {
     fn drop(&mut self) {
-        let mut state = self.publication.lock();
-        if state.active_writers == 0 {
-            tracing::error!("runtime publication guard dropped without an active writer");
-            return;
-        }
-        state.active_writers -= 1;
-        if state.active_writers == 0 {
-            state.generation = state.generation.wrapping_add(1);
+        let became_stable = {
+            let mut state = self.publication.lock();
+            if state.active_writers == 0 {
+                tracing::error!("runtime publication guard dropped without an active writer");
+                return;
+            }
+            state.active_writers -= 1;
+            if state.active_writers != 0 {
+                false
+            } else {
+                if let Some(generation) = state.pending_generation.take() {
+                    state.generation = generation;
+                }
+                true
+            }
+        };
+        if became_stable {
+            self.publication_stable.notify_waiters();
         }
     }
 }
@@ -171,6 +208,16 @@ pub(crate) struct DeferredTaskActivation {
     tasks: Option<ExtensionTasks>,
 }
 
+enum RegistrationPublication {
+    Published(ExtensionTasks),
+    Skipped,
+    StartupFailed {
+        extension_id: String,
+        error: ExtensionError,
+        retirement: RetirementTicket,
+    },
+}
+
 impl DeferredTaskActivation {
     fn new(tasks: ExtensionTasks) -> Self {
         Self { tasks: Some(tasks) }
@@ -195,11 +242,8 @@ impl Drop for DeferredTaskActivation {
 
 /// 绑定了 extension_id 和声明校验的事件发射器。
 ///
-/// 由 `ExtensionRunner::make_extension_event_sink` 构造，传给扩展钩子上下文。
-/// `extension_id` 在构造时注入，调用方无法伪造身份。
-///
-/// TODO: 补单元测试覆盖校验逻辑——未声明的 event_type、schema_version 超限、
-/// payload 超过 max_payload_bytes、正常发射路径。
+/// 由 runtime call-context factory 构造并传给扩展钩子；`extension_id` 在构造时
+/// 注入，调用方无法伪造身份。
 struct BoundExtensionEventSink {
     extension_id: String,
     declarations: HashMap<String, ExtensionEventDecl>,
@@ -223,19 +267,6 @@ fn bind_extension_event_sink(
         declarations,
         event_tx,
     }))
-}
-
-fn attach_extension_event_sink(
-    index: &HandlerIndex,
-    extension_id: &str,
-    event_tx: &Option<astrcode_core::event::EventSender>,
-) -> Option<Arc<dyn ExtensionEventSink>> {
-    if !index.allows(extension_id, ExtensionCapability::EmitEvents) {
-        return None;
-    }
-    let tx = event_tx.as_ref()?;
-    let decls = index.extension_event_decls.get(extension_id)?;
-    bind_extension_event_sink(extension_id, decls, tx.clone())
 }
 
 impl ExtensionEventSink for BoundExtensionEventSink {
@@ -271,12 +302,15 @@ impl ExtensionRunner {
                 extensions: RwLock::new(Vec::new()),
                 index: ArcSwap::from_pointee(HandlerIndex::default()),
                 publication: parking_lot::Mutex::new(RuntimePublication::default()),
+                publication_stable: Notify::new(),
                 active_turn_views: ActiveTurnViews::new(),
             },
             bindings: parking_lot::RwLock::new(HostBindings {
                 session_ops: Arc::new(StdRwLock::new(None)),
                 startup_event_tx: None,
-                host_services: None,
+                host_router: Arc::new(crate::host_router::HostRouter::from_backends(
+                    crate::host_router::HostBackends::default(),
+                )),
             }),
             diagnostics: Arc::new(parking_lot::RwLock::new(BTreeMap::new())),
             extension_configs: parking_lot::RwLock::new(BTreeMap::new()),
@@ -297,11 +331,22 @@ impl ExtensionRunner {
         ext: Arc<dyn Extension>,
         startup_working_dir: Option<&str>,
     ) -> Result<bool, ExtensionError> {
-        let _lifecycle = self.coordination.registry.lock().await;
-        let Some(tasks) = self
-            .publish_registration_locked(ext, startup_working_dir, ExtensionOrigin::Direct)
-            .await?
-        else {
+        let manifest = ext.manifest();
+        let (operation_gate, operation_guard) =
+            self.lock_registration_operation(manifest.id()).await?;
+        let publication = {
+            let _lifecycle = self.coordination.registry.lock().await;
+            self.publish_registration_locked(
+                ext,
+                manifest,
+                operation_gate,
+                operation_guard,
+                startup_working_dir,
+                ExtensionOrigin::Direct,
+            )
+            .await
+        }?;
+        let Some(tasks) = self.finish_registration(publication).await? else {
             return Ok(false);
         };
         tasks.activate();
@@ -315,16 +360,26 @@ impl ExtensionRunner {
         source_key: String,
         source_fingerprint: String,
     ) -> Result<Option<DeferredTaskActivation>, ExtensionError> {
-        let _lifecycle = self.coordination.registry.lock().await;
-        Ok(self
-            .publish_registration_locked(
+        let manifest = ext.manifest();
+        let (operation_gate, operation_guard) =
+            self.lock_registration_operation(manifest.id()).await?;
+        let publication = {
+            let _lifecycle = self.coordination.registry.lock().await;
+            self.publish_registration_locked(
                 ext,
+                manifest,
+                operation_gate,
+                operation_guard,
                 startup_working_dir,
                 ExtensionOrigin::Source {
                     key: source_key,
                     fingerprint: source_fingerprint,
                 },
             )
+            .await
+        }?;
+        Ok(self
+            .finish_registration(publication)
             .await?
             .map(DeferredTaskActivation::new))
     }
@@ -332,16 +387,19 @@ impl ExtensionRunner {
     async fn publish_registration_locked(
         &self,
         ext: Arc<dyn Extension>,
+        manifest: ExtensionManifest,
+        operation_gate: Arc<AsyncMutex<()>>,
+        operation_guard: OwnedMutexGuard<()>,
         startup_working_dir: Option<&str>,
         origin: ExtensionOrigin,
-    ) -> Result<Option<ExtensionTasks>, ExtensionError> {
+    ) -> Result<RegistrationPublication, ExtensionError> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(ExtensionError::Internal(
                 "extension runner is shutting down".into(),
             ));
         }
-        let id = ext.id().to_string();
-        let capabilities = ext.capabilities().to_vec();
+        let id = manifest.id().to_owned();
+        let capabilities = manifest.capabilities().to_vec();
 
         if self
             .registry
@@ -349,7 +407,7 @@ impl ExtensionRunner {
             .read()
             .await
             .iter()
-            .any(|hosted| hosted.manifest.id == id)
+            .any(|hosted| hosted.manifest.id() == id)
         {
             tracing::warn!(extension_id = %id, "extension already registered, skipping duplicate");
             self.record_stage_result(
@@ -358,7 +416,7 @@ impl ExtensionRunner {
                 Some(Duration::ZERO),
                 StageOutcome::Skipped,
             );
-            return Ok(None);
+            return Ok(RegistrationPublication::Skipped);
         }
 
         // register() 只收集声明；start() 才进入运行态。
@@ -366,10 +424,22 @@ impl ExtensionRunner {
         let register_started = std::time::Instant::now();
         let mut reg = Registrar::new();
         ext.register(&mut reg);
-        if let Err(error) = validate_registrations(
+        let (manifest, registrations) = match reg.finish(manifest) {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                let error = ExtensionError::from(error);
+                self.record_stage_result(
+                    &id,
+                    DiagnosticStage::Register,
+                    Some(register_started.elapsed()),
+                    StageOutcome::Failed(error.to_string()),
+                );
+                return Err(error);
+            },
+        };
+        if let Err(error) = validate_registration_conflicts(
             &id,
-            &capabilities,
-            &reg,
+            &registrations,
             &self.registry.extensions.read().await,
         ) {
             self.record_stage_result(
@@ -390,24 +460,31 @@ impl ExtensionRunner {
         let tasks = ExtensionTasks::new_suspended(id.clone());
         let ext_config = extension_config(&self.extension_configs.read(), &id);
 
-        let (event_sink, host_services) = {
-            let bindings = self.bindings.read();
-            let event_sink = bindings.startup_event_tx.as_ref().and_then(|tx| {
-                bind_extension_event_sink(&id, reg.extension_event_decls(), tx.clone())
-            });
-            let host_services = bindings
-                .host_services
-                .as_ref()
-                .and_then(|services| services.scoped_to(&id, &capabilities))
-                .map(Arc::new);
-            (event_sink, host_services)
-        };
-        let ctx = ExtensionCtx::with_host_services(
+        let startup_event_tx = self.bindings.read().startup_event_tx.clone();
+        let call = self
+            .make_extension_call_context(
+                &id,
+                &capabilities,
+                None,
+                None,
+                startup_working_dir.map(std::path::PathBuf::from),
+                None,
+                startup_event_tx,
+                registrations.extension_event_decls(),
+                tasks.clone(),
+                tasks.cancellation(),
+            )?
+            .retain_cancellation_after_context_drop();
+        let ctx = ExtensionStartContext::from_runtime(
+            call,
+            ExtensionConfig::from_runtime(&id, ext_config.clone()),
+        );
+        let pending_registration = self.retirements.pending_registration(
+            id.clone(),
+            Arc::clone(&ext),
             tasks.clone(),
-            ExtensionConfig(ext_config.clone()),
-            startup_working_dir.map(str::to_string),
-            event_sink,
-            host_services,
+            operation_guard,
+            self.operation_timeout,
         );
         self.record_stage_running(&id, DiagnosticStage::Start);
         let start_started = std::time::Instant::now();
@@ -419,24 +496,22 @@ impl ExtensionRunner {
                 Some(start_started.elapsed()),
                 StageOutcome::Failed(error.to_string()),
             );
-            tasks.cancel();
-            if !tasks.wait(self.operation_timeout).await {
-                tracing::warn!(
-                    extension_id = %id,
-                    "extension startup tasks remained active after abort"
-                );
-            }
-            let rollback_result = self
-                .run_with_timeout(ext.stop(StopReason::StartupFailed))
-                .await;
-            if let Err(rollback_error) = rollback_result {
-                tracing::warn!(
-                    extension_id = %id,
-                    error = %rollback_error,
-                    "extension startup rollback failed"
-                );
-            }
-            return Err(error);
+            let retirement = match pending_registration.retire() {
+                Ok(retirement) => retirement,
+                Err(rollback_error) => {
+                    tracing::warn!(
+                        extension_id = %id,
+                        error = %rollback_error,
+                        "extension startup rollback handoff failed"
+                    );
+                    return Err(error);
+                },
+            };
+            return Ok(RegistrationPublication::StartupFailed {
+                extension_id: id,
+                error,
+                retirement,
+            });
         }
         self.record_stage_result(
             &id,
@@ -450,31 +525,67 @@ impl ExtensionRunner {
             extensions.push(HostedExtension {
                 extension: ext,
                 manifest: ResolvedExtensionManifest {
-                    id,
-                    capabilities,
-                    registrations: reg,
+                    author: manifest,
+                    registrations,
                 },
                 origin,
                 tasks: tasks.clone(),
                 config: ext_config,
-                operation_gate: Arc::new(AsyncMutex::new(())),
+                operation_gate,
                 publication_lease: ExtensionPublicationLease::new(),
             });
             self.rebuild_index(&extensions);
         }
-        Ok(Some(tasks))
+        pending_registration.disarm();
+        Ok(RegistrationPublication::Published(tasks))
+    }
+
+    async fn finish_registration(
+        &self,
+        publication: RegistrationPublication,
+    ) -> Result<Option<ExtensionTasks>, ExtensionError> {
+        match publication {
+            RegistrationPublication::Published(tasks) => Ok(Some(tasks)),
+            RegistrationPublication::Skipped => Ok(None),
+            RegistrationPublication::StartupFailed {
+                extension_id,
+                error,
+                retirement,
+            } => {
+                if let Err(rollback_error) = retirement.wait().await {
+                    tracing::warn!(
+                        %extension_id,
+                        error = %rollback_error,
+                        "extension startup rollback failed"
+                    );
+                }
+                Err(error)
+            },
+        }
+    }
+
+    async fn lock_registration_operation(
+        &self,
+        extension_id: &str,
+    ) -> Result<(Arc<AsyncMutex<()>>, OwnedMutexGuard<()>), ExtensionError> {
+        let operation_gate = self.retirements.operation_gate(extension_id);
+        let operation_guard = Arc::clone(&operation_gate).lock_owned().await;
+        if let Some(error) = self.retirements.take_completed_error(extension_id) {
+            return Err(ExtensionError::Internal(error.to_string()));
+        }
+        Ok((operation_gate, operation_guard))
     }
 
     /// 注销一个扩展，并重建分发表。
     ///
     /// 返回是否从当前分发表移除了该扩展。旧实例会在所有已发布视图释放后异步停止；
-    /// 停止失败会立即记录日志，并由 [`Self::shutdown`] 汇总。
+    /// 停止失败会记录日志，并由等待该退休结果的调用方或 [`Self::shutdown`] 汇总。
     pub async fn unregister(
         &self,
         extension_id: &str,
         reason: StopReason,
     ) -> Result<bool, ExtensionError> {
-        let (_operation_guard, _lifecycle) = loop {
+        let (operation_guard, _lifecycle) = loop {
             let operation_gate = self
                 .registry
                 .extensions
@@ -482,7 +593,8 @@ impl ExtensionRunner {
                 .await
                 .iter()
                 .find_map(|hosted| {
-                    (hosted.manifest.id == extension_id).then(|| Arc::clone(&hosted.operation_gate))
+                    (hosted.manifest.id() == extension_id)
+                        .then(|| Arc::clone(&hosted.operation_gate))
                 });
             let operation_guard = match &operation_gate {
                 Some(gate) => Some(Arc::clone(gate).lock_owned().await),
@@ -495,7 +607,7 @@ impl ExtensionRunner {
                 .read()
                 .await
                 .iter()
-                .find(|hosted| hosted.manifest.id == extension_id)
+                .find(|hosted| hosted.manifest.id() == extension_id)
                 .map(|hosted| {
                     operation_gate
                         .as_ref()
@@ -510,7 +622,7 @@ impl ExtensionRunner {
             let mut extensions = self.registry.extensions.write().await;
             let Some(position) = extensions
                 .iter()
-                .position(|hosted| hosted.manifest.id == extension_id)
+                .position(|hosted| hosted.manifest.id() == extension_id)
             else {
                 return Ok(false);
             };
@@ -519,10 +631,14 @@ impl ExtensionRunner {
             hosted
         };
 
+        let operation_guard = operation_guard.ok_or_else(|| {
+            ExtensionError::Internal(format!(
+                "extension {extension_id} lost its lifecycle gate during retirement"
+            ))
+        })?;
         self.diagnostics.write().remove(extension_id);
-        drop(_operation_guard);
         self.retirements
-            .retire(hosted, reason, self.operation_timeout);
+            .retire(hosted, reason, self.operation_timeout, operation_guard);
         drop(_lifecycle);
         Ok(true)
     }
@@ -558,7 +674,7 @@ impl ExtensionRunner {
             .read()
             .await
             .iter()
-            .map(|hosted| hosted.manifest.id.clone())
+            .map(|hosted| hosted.manifest.id().to_owned())
             .collect()
     }
 
@@ -571,7 +687,7 @@ impl ExtensionRunner {
             .filter_map(|hosted| match &hosted.origin {
                 ExtensionOrigin::Direct => None,
                 ExtensionOrigin::Source { key, fingerprint } => Some(RegisteredSourceExtension {
-                    id: hosted.manifest.id.clone(),
+                    id: hosted.manifest.id().to_owned(),
                     key: key.clone(),
                     fingerprint: fingerprint.clone(),
                 }),
@@ -581,6 +697,21 @@ impl ExtensionRunner {
 
     pub(crate) async fn lock_source_reconcile(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.coordination.source_reconcile.lock().await
+    }
+
+    /// 在完整来源批次协调结束前保持 `Updating`，并阻止新的外部 extension view。
+    pub(crate) fn begin_source_batch_publication(&self) -> impl Drop + '_ {
+        RuntimePublicationGuard::begin(
+            &self.registry.publication,
+            &self.registry.publication_stable,
+        )
+    }
+
+    pub(crate) async fn wait_for_retirement(
+        &self,
+        extension_id: &str,
+    ) -> Result<(), ExtensionRetirementError> {
+        self.retirements.wait_for(extension_id).await
     }
 
     pub(crate) async fn reorder_source_extensions(&self, desired_ids: &[String]) {
@@ -595,7 +726,7 @@ impl ExtensionRunner {
             .iter()
             .map(|hosted| {
                 order
-                    .get(hosted.manifest.id.as_str())
+                    .get(hosted.manifest.id())
                     .copied()
                     .unwrap_or(usize::MAX)
             })
@@ -605,7 +736,7 @@ impl ExtensionRunner {
         }
         extensions.sort_by_key(|hosted| {
             order
-                .get(hosted.manifest.id.as_str())
+                .get(hosted.manifest.id())
                 .copied()
                 .unwrap_or(usize::MAX)
         });
@@ -614,8 +745,16 @@ impl ExtensionRunner {
 
     fn rebuild_index(&self, extensions: &[HostedExtension]) {
         log_handler_dispatch_order(extensions);
-        let _publication = RuntimePublicationGuard::begin(&self.registry.publication);
-        let generation = self.registry.publication.lock().generation.wrapping_add(1);
+        let _publication = RuntimePublicationGuard::begin(
+            &self.registry.publication,
+            &self.registry.publication_stable,
+        );
+        let generation = {
+            let mut publication = self.registry.publication.lock();
+            let generation = publication.generation.wrapping_add(1);
+            publication.pending_generation = Some(generation);
+            generation
+        };
         let index = Arc::new(build_handler_index(extensions, generation));
         self.registry.index.store(index);
     }
@@ -626,22 +765,6 @@ impl ExtensionRunner {
         *session_ops
             .write()
             .unwrap_or_else(|error| error.into_inner()) = Some(ops);
-    }
-
-    /// 绑定扩展在标准 `start()` 生命周期中可取得的宿主服务。
-    pub fn bind_host_services(&self, services: Arc<ExtensionHostServices>) {
-        self.bindings.write().host_services = Some(services);
-    }
-
-    /// 返回进程内稳定复用的宿主出站网络服务。
-    pub fn outbound_network_service(
-        &self,
-    ) -> Option<Arc<dyn astrcode_extension_sdk::extension::OutboundNetworkService>> {
-        self.bindings
-            .read()
-            .host_services
-            .as_ref()
-            .and_then(|services| services.outbound_network.clone())
     }
 
     /// 获取共享的 session_ops 引用（供 HandlerTool 使用）。
@@ -671,10 +794,10 @@ impl ExtensionRunner {
             .await
             .iter()
             .filter_map(|hosted| {
-                let config = extension_config(&current_configs, &hosted.manifest.id);
+                let config = extension_config(&current_configs, hosted.manifest.id());
                 (hosted.config != config).then(|| {
                     (
-                        hosted.manifest.id.clone(),
+                        hosted.manifest.id().to_owned(),
                         Arc::clone(&hosted.extension),
                         config,
                         Arc::clone(&hosted.operation_gate),
@@ -685,7 +808,10 @@ impl ExtensionRunner {
         if pending.is_empty() {
             return Vec::new();
         }
-        let _publication = RuntimePublicationGuard::begin(&self.registry.publication);
+        let _publication = RuntimePublicationGuard::begin(
+            &self.registry.publication,
+            &self.registry.publication_stable,
+        );
 
         if let Err(active_views) = self
             .registry
@@ -707,7 +833,7 @@ impl ExtensionRunner {
             let _operation = operation_gate.lock().await;
             let extension_is_current =
                 self.registry.extensions.read().await.iter().any(|current| {
-                    current.manifest.id == extension_id
+                    current.manifest.id() == extension_id
                         && Arc::ptr_eq(&current.operation_gate, &operation_gate)
                         && Arc::ptr_eq(&current.extension, &extension)
                         && current.config != new_config
@@ -719,7 +845,10 @@ impl ExtensionRunner {
             }
 
             if let Err(error) = self
-                .run_with_timeout(extension.on_config_changed(ExtensionConfig(new_config.clone())))
+                .run_with_timeout(extension.on_config_changed(ExtensionConfig::from_runtime(
+                    &extension_id,
+                    new_config.clone(),
+                )))
                 .await
             {
                 errors.push(format!(
@@ -729,7 +858,7 @@ impl ExtensionRunner {
                 let mut extensions = self.registry.extensions.write().await;
                 if extension_config(&self.extension_configs.read(), &extension_id) == new_config {
                     if let Some(hosted) = extensions.iter_mut().find(|hosted| {
-                        hosted.manifest.id == extension_id
+                        hosted.manifest.id() == extension_id
                             && Arc::ptr_eq(&hosted.operation_gate, &operation_gate)
                             && Arc::ptr_eq(&hosted.extension, &extension)
                     }) {
@@ -782,6 +911,7 @@ impl ExtensionView {
         &self,
         extension_id: &str,
         hook_name: &'static str,
+        cancellation: tokio_util::sync::CancellationToken,
         future: impl std::future::Future<Output = Result<T, ExtensionError>>,
     ) -> Result<T, ExtensionError> {
         let started = std::time::Instant::now();
@@ -797,6 +927,7 @@ impl ExtensionView {
                 result
             },
             Err(_) => {
+                cancellation.cancel();
                 let error = ExtensionError::Timeout(self.operation_timeout.as_millis() as u64);
                 self.record_hook_result(
                     extension_id,
@@ -810,11 +941,24 @@ impl ExtensionView {
         }
     }
 
-    async fn run_with_timeout<T>(
+    fn make_hook_call_context(
         &self,
-        future: impl std::future::Future<Output = Result<T, ExtensionError>>,
-    ) -> Result<T, ExtensionError> {
-        run_with_timeout(self.operation_timeout, future).await
+        extension_id: &str,
+        runtime: &RuntimeHookCallContext,
+    ) -> Result<(ExtensionCallContext, tokio_util::sync::CancellationToken), ExtensionError> {
+        let cancellation = runtime.cancellation().child_token();
+        let call = self.make_registered_extension_call_context(
+            extension_id,
+            Some(runtime.session_id().clone()),
+            runtime.turn_id().map(str::to_owned),
+            Some(runtime.working_dir().to_path_buf()),
+            runtime
+                .session_store_dir()
+                .map(std::path::Path::to_path_buf),
+            runtime.event_tx().cloned(),
+            cancellation.clone(),
+        )?;
+        Ok((call, cancellation))
     }
 
     fn record_hook_result(
@@ -841,25 +985,25 @@ impl ExtensionView {
     /// PreToolUse 钩子分发。
     pub async fn emit_pre_tool_use(
         &self,
-        ctx: PreToolUseContext,
+        ctx: RuntimePreToolUseContext,
     ) -> Result<PreToolUseResult, ExtensionError> {
         let index = &self.index;
         let mut ctx = ctx;
         let mut modified = false;
 
         for (extension_id, mode, target, handler) in &index.pre_tool_use {
-            if !target.matches(&ctx.tool_name) {
+            if !target.matches(ctx.tool_name()) {
                 continue;
             }
-            let mut handler_ctx = ctx.clone();
-            handler_ctx.extension_event_sink =
-                attach_extension_event_sink(index, extension_id, &ctx.event_tx);
+            let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
+            let handler_ctx = PreToolUseContext::from_runtime(call, &ctx);
             match mode {
                 HookMode::Blocking => {
                     let result = self
                         .run_recorded_hook(
                             extension_id,
                             "pre_tool_use",
+                            cancellation,
                             handler.handle(handler_ctx),
                         )
                         .await?;
@@ -871,7 +1015,7 @@ impl ExtensionView {
                             return Ok(PreToolUseResult::Ask { prompt, rule_key });
                         },
                         PreToolUseResult::ModifyInput { tool_input } => {
-                            ctx = PreToolUseContext { tool_input, ..ctx };
+                            ctx.replace_tool_input(tool_input);
                             modified = true;
                         },
                         PreToolUseResult::Allow => {},
@@ -882,6 +1026,7 @@ impl ExtensionView {
                         .run_recorded_hook(
                             extension_id,
                             "pre_tool_use",
+                            cancellation,
                             handler.handle(handler_ctx),
                         )
                         .await
@@ -901,7 +1046,7 @@ impl ExtensionView {
         }
         if modified {
             Ok(PreToolUseResult::ModifyInput {
-                tool_input: ctx.tool_input,
+                tool_input: ctx.tool_input().clone(),
             })
         } else {
             Ok(PreToolUseResult::Allow)
@@ -911,25 +1056,25 @@ impl ExtensionView {
     /// PostToolUse 钩子分发。
     pub async fn emit_post_tool_use(
         &self,
-        ctx: PostToolUseContext,
+        ctx: RuntimePostToolUseContext,
     ) -> Result<PostToolUseResult, ExtensionError> {
         let index = &self.index;
         let mut ctx = ctx;
         let mut modified = false;
 
         for (extension_id, mode, target, handler) in &index.post_tool_use {
-            if !target.matches(&ctx.tool_name) {
+            if !target.matches(ctx.tool_name()) {
                 continue;
             }
-            let mut handler_ctx = ctx.clone();
-            handler_ctx.extension_event_sink =
-                attach_extension_event_sink(index, extension_id, &ctx.event_tx);
+            let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
+            let handler_ctx = PostToolUseContext::from_runtime(call, &ctx);
             match mode {
                 HookMode::Blocking => {
                     let result = self
                         .run_recorded_hook(
                             extension_id,
                             "post_tool_use",
+                            cancellation,
                             handler.handle(handler_ctx),
                         )
                         .await?;
@@ -938,9 +1083,7 @@ impl ExtensionView {
                             return Ok(PostToolUseResult::Block { reason });
                         },
                         PostToolUseResult::ModifyResult { content } => {
-                            let error = ctx.tool_result.is_error.then(|| content.clone());
-                            ctx.tool_result.content = content;
-                            ctx.tool_result.error = error;
+                            ctx.replace_result_content(content);
                             modified = true;
                         },
                         PostToolUseResult::Allow => {},
@@ -951,6 +1094,7 @@ impl ExtensionView {
                         .run_recorded_hook(
                             extension_id,
                             "post_tool_use",
+                            cancellation,
                             handler.handle(handler_ctx),
                         )
                         .await
@@ -970,7 +1114,7 @@ impl ExtensionView {
         }
         if modified {
             Ok(PostToolUseResult::ModifyResult {
-                content: ctx.tool_result.content,
+                content: ctx.tool_result().content.clone(),
             })
         } else {
             Ok(PostToolUseResult::Allow)
@@ -981,7 +1125,7 @@ impl ExtensionView {
     pub async fn emit_provider(
         &self,
         event: ProviderEvent,
-        ctx: ProviderContext,
+        ctx: RuntimeProviderContext,
     ) -> Result<ProviderResult, ExtensionError> {
         let index = &self.index;
         let handlers = index.provider.get(&event);
@@ -993,13 +1137,15 @@ impl ExtensionView {
         let mut ctx = ctx;
         let mut modified = false;
         for (extension_id, mode, handler) in handlers {
-            let handler_ctx = ctx.clone();
+            let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
+            let handler_ctx = ProviderContext::from_runtime(call, &ctx);
             match mode {
                 HookMode::Blocking => {
                     let result = self
                         .run_recorded_hook(
                             extension_id,
                             provider_hook_name(event),
+                            cancellation,
                             handler.handle(handler_ctx),
                         )
                         .await?;
@@ -1008,16 +1154,11 @@ impl ExtensionView {
                             return Ok(ProviderResult::Block { reason });
                         },
                         ProviderResult::ReplaceMessages { messages } => {
-                            ctx = ProviderContext { messages, ..ctx };
+                            ctx.replace_messages(messages);
                             modified = true;
                         },
                         ProviderResult::AppendMessages { messages } => {
-                            let mut new_messages = ctx.messages;
-                            new_messages.extend(messages);
-                            ctx = ProviderContext {
-                                messages: new_messages,
-                                ..ctx
-                            };
+                            ctx.append_messages(messages);
                             modified = true;
                         },
                         ProviderResult::Allow => {},
@@ -1028,6 +1169,7 @@ impl ExtensionView {
                         .run_recorded_hook(
                             extension_id,
                             provider_hook_name(event),
+                            cancellation,
                             handler.handle(handler_ctx),
                         )
                         .await
@@ -1047,7 +1189,7 @@ impl ExtensionView {
         }
         if modified {
             Ok(ProviderResult::ReplaceMessages {
-                messages: ctx.messages,
+                messages: ctx.messages().to_vec(),
             })
         } else {
             Ok(ProviderResult::Allow)
@@ -1057,13 +1199,22 @@ impl ExtensionView {
     /// PromptBuild 贡献收集。
     pub async fn collect_prompt_contributions_typed(
         &self,
-        ctx: PromptBuildContext,
+        ctx: RuntimePromptBuildContext,
     ) -> Result<PromptContributions, ExtensionError> {
         let index = &self.index;
 
         let mut collected = PromptContributions::default();
-        for handler in &index.prompt_build {
-            let contributions = self.run_with_timeout(handler.handle(ctx.clone())).await?;
+        for (extension_id, handler) in &index.prompt_build {
+            let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
+            let handler_ctx = PromptBuildContext::from_runtime(call, &ctx);
+            let contributions = self
+                .run_recorded_hook(
+                    extension_id,
+                    "prompt_build",
+                    cancellation,
+                    handler.handle(handler_ctx),
+                )
+                .await?;
             collected.merge(contributions);
         }
         Ok(collected)
@@ -1073,7 +1224,7 @@ impl ExtensionView {
     pub async fn emit_compact(
         &self,
         event: CompactEvent,
-        ctx: CompactContext,
+        ctx: RuntimeCompactContext,
     ) -> Result<CompactResult, ExtensionError> {
         let index = &self.index;
         let handlers = index.compact.get(&event);
@@ -1083,8 +1234,17 @@ impl ExtensionView {
         };
 
         let mut collected = CompactContributions::default();
-        for handler in handlers {
-            let result = self.run_with_timeout(handler.handle(ctx.clone())).await?;
+        for (extension_id, handler) in handlers {
+            let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
+            let handler_ctx = CompactContext::from_runtime(call, &ctx);
+            let result = self
+                .run_recorded_hook(
+                    extension_id,
+                    "compact",
+                    cancellation,
+                    handler.handle(handler_ctx),
+                )
+                .await?;
             match result {
                 CompactResult::Block { reason } => {
                     return Ok(CompactResult::Block { reason });
@@ -1108,19 +1268,28 @@ impl ExtensionView {
     /// handler 生效。每个 handler 的每轮预算由插件注册时声明。
     pub async fn emit_continue_after_stop(
         &self,
-        ctx: ContinueAfterStopContext,
+        ctx: RuntimeContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
         let index = &self.index;
         for (extension_id, options, handler) in &index.continue_after_stop {
-            if !options.allows(ctx.continuations_this_turn) {
+            if !options.allows(ctx.continuations_this_turn()) {
                 tracing::debug!(
                     extension_id = %extension_id,
-                    continuations_this_turn = ctx.continuations_this_turn,
+                    continuations_this_turn = ctx.continuations_this_turn(),
                     "ContinueAfterStop: extension continuation limit exhausted"
                 );
                 continue;
             }
-            let result = self.run_with_timeout(handler.handle(ctx.clone())).await?;
+            let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
+            let handler_ctx = ContinueAfterStopContext::from_runtime(call, &ctx);
+            let result = self
+                .run_recorded_hook(
+                    extension_id,
+                    "continue_after_stop",
+                    cancellation,
+                    handler.handle(handler_ctx),
+                )
+                .await?;
             if result == ContinueAfterStopResult::ContinueOneStep {
                 tracing::debug!(
                     extension_id = %extension_id,
@@ -1135,28 +1304,31 @@ impl ExtensionView {
     /// 用户消息写入 durable transcript 前的 envelope 变换。
     pub async fn emit_user_message_envelope(
         &self,
-        ctx: UserMessageEnvelopeContext,
+        ctx: RuntimeUserMessageEnvelopeContext,
     ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
         let index = &self.index;
         let mut ctx = ctx;
         let mut modified = false;
         for (extension_id, handler) in &index.user_message_envelope {
+            let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
+            let handler_ctx = UserMessageEnvelopeContext::from_runtime(call, &ctx);
             let result = self
                 .run_recorded_hook(
                     extension_id,
                     "user_message_envelope",
-                    handler.handle(ctx.clone()),
+                    cancellation,
+                    handler.handle(handler_ctx),
                 )
                 .await?;
 
             match result {
                 UserMessageEnvelopeResult::Allow => {},
                 UserMessageEnvelopeResult::ReplaceText { text } => {
-                    ctx.text = text;
+                    ctx.replace_text(text);
                     modified = true;
                 },
                 UserMessageEnvelopeResult::AppendText { text } => {
-                    append_user_message_text(&mut ctx.text, &text);
+                    ctx.append_text(&text);
                     modified = true;
                 },
                 UserMessageEnvelopeResult::Block { reason } => {
@@ -1166,7 +1338,9 @@ impl ExtensionView {
         }
 
         if modified {
-            Ok(UserMessageEnvelopeResult::ReplaceText { text: ctx.text })
+            Ok(UserMessageEnvelopeResult::ReplaceText {
+                text: ctx.text().to_owned(),
+            })
         } else {
             Ok(UserMessageEnvelopeResult::Allow)
         }
@@ -1181,7 +1355,7 @@ impl ExtensionView {
     pub async fn emit_lifecycle(
         &self,
         event: ExtensionEvent,
-        ctx: LifecycleContext,
+        ctx: RuntimeLifecycleContext,
     ) -> Result<(), ExtensionError> {
         let index = &self.index;
         let Some(handlers) = index.lifecycle.get(&event) else {
@@ -1189,13 +1363,17 @@ impl ExtensionView {
         };
 
         for (extension_id, mode, handler) in handlers {
-            let mut handler_ctx = ctx.clone();
-            handler_ctx.extension_event_sink =
-                attach_extension_event_sink(index, extension_id, &ctx.event_tx);
+            let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
+            let handler_ctx = LifecycleContext::from_runtime(call, &ctx);
             match mode {
                 HookMode::Blocking => {
                     let result = self
-                        .run_recorded_hook(extension_id, "lifecycle", handler.handle(handler_ctx))
+                        .run_recorded_hook(
+                            extension_id,
+                            "lifecycle",
+                            cancellation,
+                            handler.handle(handler_ctx),
+                        )
                         .await?;
                     if let HookResult::Block { reason } = result {
                         return Err(ExtensionError::Blocked { reason });
@@ -1203,7 +1381,12 @@ impl ExtensionView {
                 },
                 HookMode::Advisory => {
                     if let Err(e) = self
-                        .run_recorded_hook(extension_id, "lifecycle", handler.handle(handler_ctx))
+                        .run_recorded_hook(
+                            extension_id,
+                            "lifecycle",
+                            cancellation,
+                            handler.handle(handler_ctx),
+                        )
                         .await
                     {
                         tracing::warn!(error = %e, "advisory lifecycle handler failed");
@@ -1224,17 +1407,32 @@ impl ExtensionView {
 }
 
 impl ExtensionRunner {
-    /// Captures the exact handler index currently published by the runner.
-    pub(crate) fn extension_view(&self) -> Arc<ExtensionView> {
-        self.extension_view_for_index(self.load_index(), None)
+    /// Captures one stable handler index, waiting for an in-progress publication batch.
+    pub(crate) async fn extension_view(&self) -> Arc<ExtensionView> {
+        loop {
+            let publication_stable = self.registry.publication_stable.notified();
+            tokio::pin!(publication_stable);
+            publication_stable.as_mut().enable();
+            let stable_index = {
+                let publication = self.registry.publication.lock();
+                let index = self.load_index();
+                publication
+                    .is_stable_generation(index.generation)
+                    .then_some(index)
+            };
+            if let Some(index) = stable_index {
+                return self.extension_view_for_index(index, None);
+            }
+            publication_stable.await;
+        }
     }
 
     fn turn_extension_view_with_lease(&self) -> Arc<ExtensionView> {
         let (index, active_turn_lease) = {
             let publication = self.registry.publication.lock();
             let index = self.load_index();
-            let active_turn_lease = (publication.active_writers == 0
-                && publication.generation == index.generation)
+            let active_turn_lease = publication
+                .is_stable_generation(index.generation)
                 .then(|| self.registry.active_turn_views.acquire());
             (index, active_turn_lease)
         };
@@ -1251,6 +1449,7 @@ impl ExtensionRunner {
             index,
             diagnostics: Arc::clone(&self.diagnostics),
             operation_timeout: self.operation_timeout,
+            call_context_factory: self.extension_call_context_factory(),
             _active_turn_lease: active_turn_lease,
         })
     }
@@ -1264,31 +1463,32 @@ impl ExtensionRunner {
 
     pub async fn emit_pre_tool_use(
         &self,
-        ctx: PreToolUseContext,
+        ctx: RuntimePreToolUseContext,
     ) -> Result<PreToolUseResult, ExtensionError> {
-        self.extension_view().emit_pre_tool_use(ctx).await
+        self.extension_view().await.emit_pre_tool_use(ctx).await
     }
 
     pub async fn emit_post_tool_use(
         &self,
-        ctx: PostToolUseContext,
+        ctx: RuntimePostToolUseContext,
     ) -> Result<PostToolUseResult, ExtensionError> {
-        self.extension_view().emit_post_tool_use(ctx).await
+        self.extension_view().await.emit_post_tool_use(ctx).await
     }
 
     pub async fn emit_provider(
         &self,
         event: ProviderEvent,
-        ctx: ProviderContext,
+        ctx: RuntimeProviderContext,
     ) -> Result<ProviderResult, ExtensionError> {
-        self.extension_view().emit_provider(event, ctx).await
+        self.extension_view().await.emit_provider(event, ctx).await
     }
 
     pub async fn collect_prompt_contributions_typed(
         &self,
-        ctx: PromptBuildContext,
+        ctx: RuntimePromptBuildContext,
     ) -> Result<PromptContributions, ExtensionError> {
         self.extension_view()
+            .await
             .collect_prompt_contributions_typed(ctx)
             .await
     }
@@ -1296,55 +1496,41 @@ impl ExtensionRunner {
     pub async fn emit_compact(
         &self,
         event: CompactEvent,
-        ctx: CompactContext,
+        ctx: RuntimeCompactContext,
     ) -> Result<CompactResult, ExtensionError> {
-        self.extension_view().emit_compact(event, ctx).await
+        self.extension_view().await.emit_compact(event, ctx).await
     }
 
     pub async fn emit_continue_after_stop(
         &self,
-        ctx: ContinueAfterStopContext,
+        ctx: RuntimeContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
-        self.extension_view().emit_continue_after_stop(ctx).await
+        self.extension_view()
+            .await
+            .emit_continue_after_stop(ctx)
+            .await
     }
 
     pub async fn emit_user_message_envelope(
         &self,
-        ctx: UserMessageEnvelopeContext,
+        ctx: RuntimeUserMessageEnvelopeContext,
     ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
-        self.extension_view().emit_user_message_envelope(ctx).await
+        self.extension_view()
+            .await
+            .emit_user_message_envelope(ctx)
+            .await
     }
 
     pub async fn emit_lifecycle(
         &self,
         event: ExtensionEvent,
-        ctx: LifecycleContext,
+        ctx: RuntimeLifecycleContext,
     ) -> Result<(), ExtensionError> {
-        self.extension_view().emit_lifecycle(event, ctx).await
+        self.extension_view().await.emit_lifecycle(event, ctx).await
     }
 
-    pub async fn collect_tool_prompt_metadata_typed(
-        &self,
-    ) -> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
-        self.load_index().tool_metadata.clone()
-    }
-
-    pub fn collect_keybindings(&self) -> Vec<astrcode_extension_sdk::extension::Keybinding> {
-        self.load_index().keybindings.clone()
-    }
-
-    pub fn collect_status_items(&self) -> Vec<astrcode_extension_sdk::extension::StatusItem> {
-        self.load_index().status_items.clone()
-    }
-
-    pub fn make_extension_event_sink(
-        &self,
-        extension_id: &str,
-        event_tx: mpsc::UnboundedSender<EventPayload>,
-    ) -> Option<Arc<dyn ExtensionEventSink>> {
-        let index = self.load_index();
-        let decls = index.extension_event_decls.get(extension_id)?;
-        bind_extension_event_sink(extension_id, decls, event_tx.into())
+    pub async fn collect_tool_prompt_metadata_typed(&self) -> HashMap<String, ToolPromptMetadata> {
+        self.extension_view().await.index.tool_metadata.clone()
     }
 }
 
@@ -1367,14 +1553,14 @@ impl TurnExtensionViewProvider for ExtensionRunner {
 impl TurnHooks for ExtensionView {
     async fn emit_pre_tool_use(
         &self,
-        ctx: PreToolUseContext,
+        ctx: RuntimePreToolUseContext,
     ) -> Result<PreToolUseResult, ExtensionError> {
         ExtensionView::emit_pre_tool_use(self, ctx).await
     }
 
     async fn emit_post_tool_use(
         &self,
-        ctx: PostToolUseContext,
+        ctx: RuntimePostToolUseContext,
     ) -> Result<PostToolUseResult, ExtensionError> {
         ExtensionView::emit_post_tool_use(self, ctx).await
     }
@@ -1382,7 +1568,7 @@ impl TurnHooks for ExtensionView {
     async fn emit_provider(
         &self,
         event: ProviderEvent,
-        ctx: ProviderContext,
+        ctx: RuntimeProviderContext,
     ) -> Result<ProviderResult, ExtensionError> {
         ExtensionView::emit_provider(self, event, ctx).await
     }
@@ -1390,21 +1576,21 @@ impl TurnHooks for ExtensionView {
     async fn emit_compact(
         &self,
         event: CompactEvent,
-        ctx: CompactContext,
+        ctx: RuntimeCompactContext,
     ) -> Result<CompactResult, ExtensionError> {
         ExtensionView::emit_compact(self, event, ctx).await
     }
 
     async fn emit_continue_after_stop(
         &self,
-        ctx: ContinueAfterStopContext,
+        ctx: RuntimeContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
         ExtensionView::emit_continue_after_stop(self, ctx).await
     }
 
     async fn emit_user_message_envelope(
         &self,
-        ctx: UserMessageEnvelopeContext,
+        ctx: RuntimeUserMessageEnvelopeContext,
     ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
         ExtensionView::emit_user_message_envelope(self, ctx).await
     }
@@ -1412,7 +1598,7 @@ impl TurnHooks for ExtensionView {
     async fn emit_lifecycle(
         &self,
         event: ExtensionEvent,
-        ctx: LifecycleContext,
+        ctx: RuntimeLifecycleContext,
     ) -> Result<(), ExtensionError> {
         ExtensionView::emit_lifecycle(self, event, ctx).await
     }
@@ -1422,14 +1608,14 @@ impl TurnHooks for ExtensionView {
 impl TurnHooks for ExtensionRunner {
     async fn emit_pre_tool_use(
         &self,
-        ctx: PreToolUseContext,
+        ctx: RuntimePreToolUseContext,
     ) -> Result<PreToolUseResult, ExtensionError> {
         ExtensionRunner::emit_pre_tool_use(self, ctx).await
     }
 
     async fn emit_post_tool_use(
         &self,
-        ctx: PostToolUseContext,
+        ctx: RuntimePostToolUseContext,
     ) -> Result<PostToolUseResult, ExtensionError> {
         ExtensionRunner::emit_post_tool_use(self, ctx).await
     }
@@ -1437,7 +1623,7 @@ impl TurnHooks for ExtensionRunner {
     async fn emit_provider(
         &self,
         event: ProviderEvent,
-        ctx: ProviderContext,
+        ctx: RuntimeProviderContext,
     ) -> Result<ProviderResult, ExtensionError> {
         ExtensionRunner::emit_provider(self, event, ctx).await
     }
@@ -1445,21 +1631,21 @@ impl TurnHooks for ExtensionRunner {
     async fn emit_compact(
         &self,
         event: CompactEvent,
-        ctx: CompactContext,
+        ctx: RuntimeCompactContext,
     ) -> Result<CompactResult, ExtensionError> {
         ExtensionRunner::emit_compact(self, event, ctx).await
     }
 
     async fn emit_continue_after_stop(
         &self,
-        ctx: ContinueAfterStopContext,
+        ctx: RuntimeContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
         ExtensionRunner::emit_continue_after_stop(self, ctx).await
     }
 
     async fn emit_user_message_envelope(
         &self,
-        ctx: UserMessageEnvelopeContext,
+        ctx: RuntimeUserMessageEnvelopeContext,
     ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
         ExtensionRunner::emit_user_message_envelope(self, ctx).await
     }
@@ -1467,7 +1653,7 @@ impl TurnHooks for ExtensionRunner {
     async fn emit_lifecycle(
         &self,
         event: ExtensionEvent,
-        ctx: LifecycleContext,
+        ctx: RuntimeLifecycleContext,
     ) -> Result<(), ExtensionError> {
         ExtensionRunner::emit_lifecycle(self, event, ctx).await
     }
@@ -1477,7 +1663,7 @@ impl TurnHooks for ExtensionRunner {
 impl PromptContributor for ExtensionView {
     async fn collect_prompt_contributions(
         &self,
-        ctx: PromptBuildContext,
+        ctx: RuntimePromptBuildContext,
     ) -> Result<PromptContributions, ExtensionError> {
         ExtensionView::collect_prompt_contributions_typed(self, ctx).await
     }
@@ -1487,7 +1673,7 @@ impl PromptContributor for ExtensionView {
 impl PromptContributor for ExtensionRunner {
     async fn collect_prompt_contributions(
         &self,
-        ctx: PromptBuildContext,
+        ctx: RuntimePromptBuildContext,
     ) -> Result<PromptContributions, ExtensionError> {
         ExtensionRunner::collect_prompt_contributions_typed(self, ctx).await
     }
@@ -1503,7 +1689,7 @@ impl ToolCatalogProvider for ExtensionRunner {
         &self,
         scope: &ToolCatalogScope,
     ) -> Result<ToolCatalogSnapshot, ExtensionError> {
-        self.extension_view().tool_catalog(scope).await
+        self.extension_view().await.tool_catalog(scope).await
     }
 }
 
@@ -1540,16 +1726,6 @@ fn provider_hook_name(event: ProviderEvent) -> &'static str {
         ProviderEvent::BeforeRequest => "before_provider_request",
         ProviderEvent::AfterResponse => "after_provider_response",
     }
-}
-
-fn append_user_message_text(base: &mut String, addition: &str) {
-    if addition.is_empty() {
-        return;
-    }
-    if !base.is_empty() {
-        base.push_str("\n\n");
-    }
-    base.push_str(addition);
 }
 
 fn extension_config(

@@ -2,9 +2,12 @@
 
 use std::{sync::Arc, time::Instant};
 
-use astrcode_core::tool::{
-    FileObservation, FileObservationStore, LlmModelIds, ToolCapabilities, ToolDefinition,
-    ToolError, ToolExecutionContext, ToolResultArtifactReader,
+use astrcode_core::{
+    tool::{
+        FileObservation, FileObservationStore, LlmModelIds, ToolCapabilities, ToolDefinition,
+        ToolError, ToolExecutionContext, ToolResultArtifactReader,
+    },
+    types::TurnId,
 };
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -29,8 +32,10 @@ impl TurnToolContext {
     pub(crate) fn for_turn(
         session: &Session,
         session_state: &astrcode_session_projection::SessionReadModel,
+        turn_id: TurnId,
         tool_selection: astrcode_core::tool::SessionToolSelection,
         session_store_dir: Option<std::path::PathBuf>,
+        cancellation_token: CancellationToken,
     ) -> Self {
         let runtime_services = session.runtime_services();
         let effective = runtime_services.read_effective();
@@ -39,6 +44,7 @@ impl TurnToolContext {
             crate::permission::build_default_chain(&effective, Arc::clone(&approval_history));
         let shared = crate::turn_context::SharedTurnContext {
             session_id: session.id().clone(),
+            turn_id: Some(turn_id),
             working_dir: session_state.identity.working_dir.clone(),
             model_id: session_state.identity.model_id.clone(),
             session_store_dir,
@@ -47,6 +53,7 @@ impl TurnToolContext {
             tool_selection: Some(tool_selection),
             permission_chain,
             approval_history,
+            cancellation_token,
         };
         let capabilities = ToolRuntimeCapabilities::from_session(session, &shared);
         Self {
@@ -237,7 +244,8 @@ async fn execute_tool_call_blocking(
         Some(call_id.clone()),
         turn.shared.turn_event_tx(),
         capabilities,
-    );
+    )
+    .with_cancellation(cancellation_token.clone());
 
     let outcome = tokio::select! {
         _ = cancellation_token.cancelled() => ToolExecutionOutcome::cancelled(

@@ -135,7 +135,7 @@ impl SessionOperations for ServerSessionOperations {
     ) -> Result<SessionHandle, SessionApiError> {
         let session = self
             .session_manager
-            .create(&request.working_dir)
+            .create_for_extension(&request.working_dir, request.source_extension)
             .await
             .map_err(SessionApiError::internal)?;
 
@@ -180,7 +180,7 @@ impl SessionOperations for ServerSessionOperations {
             .await
     }
 
-    async fn cancel_turn(&self, access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+    async fn cancel_turn(&self, access: SessionAccess<'_>) -> Result<bool, SessionApiError> {
         let (_, target_sid) = self.verified_session_ids(access).await?;
         self.scheduler
             .abort(&target_sid)

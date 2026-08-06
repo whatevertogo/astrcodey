@@ -47,7 +47,7 @@ pub struct Config {
     /// 扩展专有配置。key 为扩展 id（如 `"astrcode.mcp"`），value 为任意 JSON。
     ///
     /// 通过此字段，用户可在配置文件中统一管理各扩展的参数，无需扩展各自从额外文件读取。
-    /// 扩展在 `start(ctx)` 时通过 `ctx.config.deserialize::<T>()` 获取。
+    /// 扩展在 `start(ctx)` 时通过 `ctx.config().deserialize::<T>()` 获取。
     ///
     /// 例：
     /// ```json

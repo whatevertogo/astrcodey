@@ -6,9 +6,12 @@
 //! 本模块只定义契约（trait、capability、hook 类型）：扩展的发现、加载、
 //! 路由与进程管理位于 `astrcode-extensions`。
 
+mod call_context;
 mod events;
 mod hooks;
 mod http;
+mod lifecycle;
+mod paths;
 mod registrar;
 mod runtime;
 mod tool_context;
@@ -17,11 +20,14 @@ pub use astrcode_core::{
     compaction::{CompactStrategy, CompactTrigger},
     tool::SessionToolSelection,
 };
+pub use call_context::*;
 pub use events::*;
 pub use hooks::*;
 pub use http::*;
+pub use lifecycle::*;
+pub use paths::*;
 pub use registrar::*;
 pub use runtime::*;
 pub use tool_context::*;
 
-pub use crate::authoring_runtime::{Extension, ExtensionCtx};
+pub use crate::manifest::{ExtensionManifest, ExtensionManifestError};

@@ -7,15 +7,14 @@ use std::{
 };
 
 use astrcode_extension_sdk::{
+    builder::{ExtensionToolDefinition, extension_event, manifest},
     extension::{
         Extension, ExtensionCapability, ExtensionError, ExtensionEvent, ExtensionHttpHandler,
-        ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        HookMode, HookResult, LifecycleContext, LifecycleHandler, Registrar, StopReason,
-        ToolHandler,
+        ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
+        HookMode, HookResult, HttpContext, LifecycleContext, LifecycleHandler, Registrar,
+        StopReason, ToolContext, ToolHandler,
     },
-    tool::{
-        ExtensionToolContext, ToolExecutionResult, ToolPromptMetadata, ToolPromptTag, ToolResult,
-    },
+    tool::{ToolExecutionResult, ToolPromptMetadata, ToolPromptTag, ToolResult},
 };
 use model::{
     ASK_USER_TOOL_NAME, AnswerRequest, AskUserInput, PendingQuestion, tool_definition,
@@ -28,11 +27,6 @@ const EXTENSION_ID: &str = "astrcode-ask-user";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);
 /// 用户在此时间内未响应时自动选择推荐选项（无推荐则继续等待到总超时）。
 const AUTO_SELECT_DELAY: Duration = Duration::from_secs(60);
-const CAPABILITIES: &[ExtensionCapability] = &[
-    ExtensionCapability::AuthenticatedHttp,
-    ExtensionCapability::EmitEvents,
-];
-
 pub fn extension() -> Arc<dyn Extension> {
     Arc::new(AskUserExtension::new(DEFAULT_TIMEOUT))
 }
@@ -53,34 +47,35 @@ impl AskUserExtension {
 
 #[async_trait::async_trait]
 impl Extension for AskUserExtension {
-    fn id(&self) -> &str {
-        EXTENSION_ID
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        CAPABILITIES
+    fn manifest(&self) -> ExtensionManifest {
+        manifest(EXTENSION_ID)
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::AuthenticatedHttp)
+            .capability(ExtensionCapability::EmitEvents)
+            .build()
     }
 
     fn register(&self, registrar: &mut Registrar) {
         registrar.tool(
-            tool_definition(),
+            ExtensionToolDefinition::from_definition(tool_definition()).with_prompt(
+                ToolPromptMetadata::new(String::new()).prompt_tag(ToolPromptTag::Planning),
+            ),
             Arc::new(AskUserToolHandler {
                 registry: Arc::clone(&self.registry),
                 timeout: self.timeout,
             }),
         );
-        registrar.tool_metadata(std::collections::HashMap::from([(
-            ASK_USER_TOOL_NAME.to_owned(),
-            ToolPromptMetadata::new(String::new()).prompt_tag(ToolPromptTag::Planning),
-        )]));
-        registrar
-            .extension_event(registry::PENDING_EVENT_TYPE)
-            .durable(false)
-            .register();
-        registrar
-            .extension_event(registry::RESOLVED_EVENT_TYPE)
-            .durable(false)
-            .register();
+        registrar.declare_event(
+            extension_event(registry::PENDING_EVENT_TYPE)
+                .durable(false)
+                .build(),
+        );
+        registrar.declare_event(
+            extension_event(registry::RESOLVED_EVENT_TYPE)
+                .durable(false)
+                .build(),
+        );
 
         let http = Arc::new(AskUserHttpHandler {
             registry: Arc::clone(&self.registry),
@@ -110,7 +105,7 @@ impl Extension for AskUserExtension {
             ),
             http,
         );
-        registrar.on_event(
+        registrar.on_lifecycle(
             ExtensionEvent::SessionShutdown,
             HookMode::Advisory,
             0,
@@ -133,38 +128,25 @@ struct AskUserToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for AskUserToolHandler {
-    async fn execute(
-        &self,
-        tool_name: &str,
-        arguments: serde_json::Value,
-        _working_dir: &str,
-        context: &ExtensionToolContext,
-    ) -> Result<ToolExecutionResult, ExtensionError> {
+    async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
+        let tool_name = context.tool_name();
         if tool_name != ASK_USER_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
-        let input: AskUserInput = match serde_json::from_value(arguments) {
-            Ok(input) => input,
-            Err(error) => {
-                return Ok(ToolResult::error(format!(
-                    "invalid args for {ASK_USER_TOOL_NAME}: {error}"
-                ))
-                .into());
-            },
-        };
+        let input: AskUserInput = context.arguments()?;
         if let Err(error) = validate_input(&input) {
             return Ok(ToolResult::error(error).into());
         }
 
-        let call_id =
-            context.scope.tool_call_id.clone().ok_or_else(|| {
-                ExtensionError::Internal("askUser requires a tool call id".into())
-            })?;
-        let session_id = context.scope.session_id.to_string();
-        let events = context
-            .events
-            .clone()
-            .ok_or_else(|| ExtensionError::Internal("askUser event sink unavailable".into()))?;
+        let call_id = context
+            .call_id()
+            .ok_or_else(|| ExtensionError::Internal("askUser requires a tool call id".into()))?
+            .to_owned();
+        let session_id = context
+            .session_id()
+            .ok_or_else(|| ExtensionError::Internal("askUser requires a session id".into()))?
+            .to_string();
+        let events = context.events().clone();
         let auto_select_at = if input
             .questions
             .iter()
@@ -266,7 +248,10 @@ struct AskUserSessionShutdown {
 #[async_trait::async_trait]
 impl LifecycleHandler for AskUserSessionShutdown {
     async fn handle(&self, context: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        self.registry.shutdown_session(&context.session_id);
+        let session_id = context.session_id().ok_or_else(|| {
+            ExtensionError::Internal("session shutdown hook requires a session id".into())
+        })?;
+        self.registry.shutdown_session(session_id.as_str());
         Ok(HookResult::Allow)
     }
 }
@@ -277,10 +262,8 @@ struct AskUserHttpHandler {
 
 #[async_trait::async_trait]
 impl ExtensionHttpHandler for AskUserHttpHandler {
-    async fn handle(
-        &self,
-        request: ExtensionHttpRequest,
-    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+    async fn handle(&self, ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError> {
+        let request = ctx.request();
         if request.method == ExtensionHttpMethod::Get && request.path == "/questions" {
             return Ok(ExtensionHttpResponse::json(
                 200,
@@ -307,7 +290,7 @@ impl ExtensionHttpHandler for AskUserHttpHandler {
                         "question not found",
                     ));
                 };
-                let answer_request = match serde_json::from_value::<AnswerRequest>(request.body) {
+                let answer_request = match ctx.json::<AnswerRequest>() {
                     Ok(answer_request) => answer_request,
                     Err(error) => {
                         return Ok(ExtensionHttpResponse::error(
@@ -373,9 +356,10 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     use astrcode_extension_sdk::{
-        extension::ExtensionEventSink,
-        tool::{ToolCapabilities, ToolExecutionContext},
-        types::SessionId,
+        extension::{
+            ExtensionEventDecl, ExtensionEventEmitter, ExtensionEventSink, ExtensionHttpRequest,
+        },
+        testing::{HttpContextBuilder, ToolContextBuilder},
     };
 
     use super::*;
@@ -397,6 +381,26 @@ mod tests {
                 .push((event_type.to_owned(), payload));
             Ok(())
         }
+    }
+
+    fn event_emitter(events: Arc<dyn ExtensionEventSink>) -> ExtensionEventEmitter {
+        ExtensionEventEmitter::from_runtime(
+            [
+                ExtensionEventDecl {
+                    event_type: registry::PENDING_EVENT_TYPE.into(),
+                    schema_version: 1,
+                    durable: false,
+                    max_payload_bytes: 64 * 1024,
+                },
+                ExtensionEventDecl {
+                    event_type: registry::RESOLVED_EVENT_TYPE.into(),
+                    schema_version: 1,
+                    durable: false,
+                    max_payload_bytes: 64 * 1024,
+                },
+            ],
+            Some(events),
+        )
     }
 
     fn pending(session_id: &str, call_id: &str) -> PendingQuestion {
@@ -429,10 +433,15 @@ mod tests {
         )
     }
 
+    fn http_context(request: ExtensionHttpRequest) -> HttpContext {
+        let route = ExtensionHttpRoute::public(request.method, request.path.clone());
+        HttpContextBuilder::new(EXTENSION_ID, route, request).build()
+    }
+
     #[tokio::test]
     async fn registry_auto_selects_recommended_option_on_timeout() {
         let registry = Arc::new(PendingRegistry::default());
-        let events: Arc<dyn ExtensionEventSink> = Arc::new(RecordingEvents::default());
+        let events = event_emitter(Arc::new(RecordingEvents::default()));
 
         let question = pending("session-1", "auto-ok");
         let (receiver, mut guard) = registry.register(question.clone(), events.clone()).unwrap();
@@ -542,7 +551,7 @@ mod tests {
     #[tokio::test]
     async fn answer_winning_before_auto_select_is_not_lost() {
         let registry = Arc::new(PendingRegistry::default());
-        let events: Arc<dyn ExtensionEventSink> = Arc::new(RecordingEvents::default());
+        let events = event_emitter(Arc::new(RecordingEvents::default()));
         let (receiver, mut guard) = registry
             .register(pending("session-1", "race"), events)
             .unwrap();
@@ -577,7 +586,7 @@ mod tests {
         let events = Arc::new(RecordingEvents::default());
         let event_sink: Arc<dyn ExtensionEventSink> = events.clone();
         let (receiver, mut guard) = registry
-            .register(pending("session-1", "call-1"), event_sink)
+            .register(pending("session-1", "call-1"), event_emitter(event_sink))
             .unwrap();
 
         assert_eq!(registry.list("session-1").len(), 1);
@@ -611,7 +620,7 @@ mod tests {
         let (reused, mut reused_guard) = registry
             .register(
                 pending("session-1", "call-1"),
-                Arc::new(RecordingEvents::default()),
+                event_emitter(Arc::new(RecordingEvents::default())),
             )
             .unwrap();
         drop(guard);
@@ -639,7 +648,7 @@ mod tests {
     #[tokio::test]
     async fn registry_resolves_reject_timeout_cancellation_and_shutdown() {
         let registry = Arc::new(PendingRegistry::default());
-        let events: Arc<dyn ExtensionEventSink> = Arc::new(RecordingEvents::default());
+        let events = event_emitter(Arc::new(RecordingEvents::default()));
 
         let (rejected, mut rejected_guard) = registry
             .register(pending("session-1", "reject"), events.clone())
@@ -683,28 +692,19 @@ mod tests {
     async fn authenticated_http_contract_uses_expected_statuses() {
         let registry = Arc::new(PendingRegistry::default());
         let events: Arc<dyn ExtensionEventSink> = Arc::new(RecordingEvents::default());
-        let context = ExtensionToolContext::new(
-            ToolExecutionContext::new(
-                SessionId::new("session-1"),
-                ".",
-                Some("call-1".into()),
-                None,
-                ToolCapabilities::default(),
-            ),
-            Some(events),
-        );
+        let context = ToolContextBuilder::new(EXTENSION_ID, ASK_USER_TOOL_NAME)
+            .session("session-1", ".", None)
+            .call_id("call-1")
+            .arguments(json!({ "questions": pending("session-1", "call-1").questions }))
+            .events(event_emitter(events))
+            .build();
         let tool_registry = Arc::clone(&registry);
         let tool_task = tokio::spawn(async move {
             AskUserToolHandler {
                 registry: tool_registry,
                 timeout: Duration::from_secs(1),
             }
-            .execute(
-                ASK_USER_TOOL_NAME,
-                json!({ "questions": pending("session-1", "call-1").questions }),
-                ".",
-                &context,
-            )
+            .execute(context)
             .await
         });
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -723,15 +723,15 @@ mod tests {
             ExtensionHttpRequest::new(ExtensionHttpMethod::Get, "/sessions/session-1/questions");
         list.path_params
             .insert("sessionId".into(), "session-1".into());
-        let listed = handler.handle(list).await.unwrap();
+        let listed = handler.handle(http_context(list)).await.unwrap();
         assert_eq!(listed.status, 200);
         assert_eq!(listed.body["questions"][0]["callId"], "call-1");
 
         let all = handler
-            .handle(ExtensionHttpRequest::new(
+            .handle(http_context(ExtensionHttpRequest::new(
                 ExtensionHttpMethod::Get,
                 "/questions",
-            ))
+            )))
             .await
             .unwrap();
         assert_eq!(all.status, 200);
@@ -747,7 +747,10 @@ mod tests {
             .path_params
             .insert("sessionId".into(), "session-1".into());
         invalid.path_params.insert("callId".into(), "call-1".into());
-        assert_eq!(handler.handle(invalid).await.unwrap().status, 400);
+        assert_eq!(
+            handler.handle(http_context(invalid)).await.unwrap().status,
+            400
+        );
 
         let mut wrong_session = ExtensionHttpRequest::new(
             ExtensionHttpMethod::Post,
@@ -759,7 +762,14 @@ mod tests {
         wrong_session
             .path_params
             .insert("callId".into(), "call-1".into());
-        assert_eq!(handler.handle(wrong_session).await.unwrap().status, 404);
+        assert_eq!(
+            handler
+                .handle(http_context(wrong_session))
+                .await
+                .unwrap()
+                .status,
+            404
+        );
 
         let mut answer = ExtensionHttpRequest::new(
             ExtensionHttpMethod::Post,
@@ -772,8 +782,18 @@ mod tests {
             .path_params
             .insert("sessionId".into(), "session-1".into());
         answer.path_params.insert("callId".into(), "call-1".into());
-        assert_eq!(handler.handle(answer.clone()).await.unwrap().status, 200);
-        assert_eq!(handler.handle(answer).await.unwrap().status, 409);
+        assert_eq!(
+            handler
+                .handle(http_context(answer.clone()))
+                .await
+                .unwrap()
+                .status,
+            200
+        );
+        assert_eq!(
+            handler.handle(http_context(answer)).await.unwrap().status,
+            409
+        );
         let result = tool_task.await.unwrap().unwrap();
         assert!(!result.is_error);
         assert!(result.content.contains("\"Which approach?\":\"A\""));

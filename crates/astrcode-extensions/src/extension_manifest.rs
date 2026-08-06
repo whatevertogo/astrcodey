@@ -1,30 +1,37 @@
 //! s5r 扩展握手 manifest 类型与解析。
 
+use std::collections::HashSet;
+
 use astrcode_extension_sdk::{
+    builder::manifest as extension_manifest,
     extension::{
         ContinueAfterStopOptions, ExtensionCapability, ExtensionEvent, ExtensionEventDecl,
-        ExtensionHttpRoute, HookMode, SlashCommand,
+        ExtensionHttpRoute, HookMode, SlashCommand, fixed_hook_mode, hook_mode_is_supported,
     },
     s5r::{
-        capability_from_wire, event_from_name,
+        HandlerDescriptor, WIRE_FEATURE_PARENT_INVOKE_ID, capability_from_wire, event_from_name,
+        event_to_name,
         manifest::{
             InitializeManifest, ManifestCommand, ManifestHook, ManifestHttpRoute, ManifestTool,
         },
-        mode_from_name,
+        mode_from_name, mode_to_name,
     },
     tool::{ExecutionMode, ToolDefinition, ToolOrigin},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
+
+use crate::remote_manifest::handler_id;
 
 /// `Initialize.metadata` 解析出的注册信息。
 #[derive(Debug, Clone)]
 pub(crate) struct ExtensionRegistration {
     extension_id: String,
-    wire_features: Vec<String>,
+    version: String,
     capabilities: Vec<ExtensionCapability>,
     tools: Vec<ToolDefinition>,
     commands: Vec<SlashCommand>,
     subscriptions: Vec<(ExtensionEvent, HookMode, ContinueAfterStopOptions)>,
+    continuation_hooks: Vec<String>,
     http_routes: Vec<RegisteredHttpRoute>,
     extension_events: Vec<ExtensionEventDecl>,
 }
@@ -40,10 +47,8 @@ impl ExtensionRegistration {
         &self.extension_id
     }
 
-    pub(crate) fn supports_wire_feature(&self, feature: &str) -> bool {
-        self.wire_features
-            .iter()
-            .any(|candidate| candidate == feature)
+    pub(crate) fn version(&self) -> &str {
+        &self.version
     }
 
     pub(crate) fn capabilities(&self) -> &[ExtensionCapability] {
@@ -60,6 +65,60 @@ impl ExtensionRegistration {
 
     pub(crate) fn subscriptions(&self) -> &[(ExtensionEvent, HookMode, ContinueAfterStopOptions)] {
         &self.subscriptions
+    }
+
+    pub(crate) fn expected_handler_descriptors(&self) -> Result<Vec<HandlerDescriptor>, String> {
+        let mut descriptors = Vec::new();
+        let mut handler_ids = HashSet::new();
+        let mut push = |descriptor: HandlerDescriptor| {
+            if !handler_ids.insert(descriptor.handler_id.clone()) {
+                return Err(format!(
+                    "initialize manifest declares duplicate handler {}",
+                    descriptor.handler_id
+                ));
+            }
+            descriptors.push(descriptor);
+            Ok(())
+        };
+
+        for tool in &self.tools {
+            push(HandlerDescriptor {
+                handler_id: handler_id(&self.extension_id, "tool", &tool.name),
+                description: tool.description.clone(),
+                input_schema: tool.parameters.clone(),
+            })?;
+        }
+        for (event, _, _) in &self.subscriptions {
+            let event_name = event_to_name(event);
+            push(HandlerDescriptor {
+                handler_id: handler_id(&self.extension_id, "hook", event_name),
+                description: format!("hook {event_name}"),
+                input_schema: json!({"type": "object"}),
+            })?;
+        }
+        for hook in &self.continuation_hooks {
+            push(HandlerDescriptor {
+                handler_id: handler_id(&self.extension_id, "hook", hook),
+                description: format!("continuation hook {hook}"),
+                input_schema: json!({"type": "object"}),
+            })?;
+        }
+        for command in &self.commands {
+            push(HandlerDescriptor {
+                handler_id: handler_id(&self.extension_id, "command", &command.name),
+                description: command.description.clone(),
+                input_schema: json!({"type": "object"}),
+            })?;
+        }
+        for route in &self.http_routes {
+            validate_handler_id_kind(&self.extension_id, &route.handler_id, "http")?;
+            push(HandlerDescriptor {
+                handler_id: route.handler_id.clone(),
+                description: route.route.description.clone(),
+                input_schema: json!({"type": "object"}),
+            })?;
+        }
+        Ok(descriptors)
     }
 
     pub(crate) fn http_routes(&self) -> &[RegisteredHttpRoute] {
@@ -83,19 +142,28 @@ pub(crate) fn registration_from_s5r_metadata(
             "initialize metadata protocol.s5r must be \"{expected_s5r_version}\""
         ));
     }
+    if !manifest
+        .wire_features
+        .iter()
+        .any(|feature| feature == WIRE_FEATURE_PARENT_INVOKE_ID)
+    {
+        return Err(format!(
+            "S5R {expected_s5r_version} requires wire feature {WIRE_FEATURE_PARENT_INVOKE_ID}"
+        ));
+    }
     registration_from_manifest(manifest)
 }
 
 fn registration_from_manifest(
     manifest: InitializeManifest,
 ) -> Result<ExtensionRegistration, String> {
-    let extension_id = manifest.extension_id.trim();
-    if extension_id.is_empty() {
-        return Err("initialize manifest missing extension_id".into());
-    }
-    let extension_id = extension_id.to_owned();
+    let identity = extension_manifest(manifest.extension_id.clone())
+        .version(manifest.version.trim())
+        .build_checked()
+        .map_err(|error| format!("invalid initialize manifest identity: {error}"))?;
+    let extension_id = identity.id().to_owned();
+    let version = identity.version().to_owned();
 
-    let wire_features = manifest.wire_features;
     let capabilities = manifest
         .capabilities
         .into_iter()
@@ -120,6 +188,7 @@ fn registration_from_manifest(
         .into_iter()
         .map(normalize_hook)
         .collect::<Result<_, _>>()?;
+    let continuation_hooks = manifest.continuation_hooks;
     let http_routes = manifest
         .http_routes
         .into_iter()
@@ -133,14 +202,38 @@ fn registration_from_manifest(
 
     Ok(ExtensionRegistration {
         extension_id,
-        wire_features,
+        version,
         capabilities,
         tools,
         commands,
         subscriptions,
+        continuation_hooks,
         http_routes,
         extension_events,
     })
+}
+
+fn validate_handler_id_kind(
+    extension_id: &str,
+    handler_id: &str,
+    expected_kind: &str,
+) -> Result<(), String> {
+    let prefix = format!("{extension_id}:");
+    let remainder = handler_id.strip_prefix(&prefix).ok_or_else(|| {
+        format!("handler {handler_id} must be attributed to extension {extension_id}")
+    })?;
+    let (kind, name) = remainder
+        .split_once(':')
+        .ok_or_else(|| format!("handler {handler_id} must use <extension>:<kind>:<name>"))?;
+    if kind != expected_kind {
+        return Err(format!(
+            "handler {handler_id} has kind {kind}, expected {expected_kind}"
+        ));
+    }
+    if name.is_empty() {
+        return Err(format!("handler {handler_id} must have a non-empty name"));
+    }
+    Ok(())
 }
 
 fn normalize_tool(tool: ManifestTool) -> Result<ToolDefinition, String> {
@@ -185,8 +278,11 @@ fn normalize_hook(
     if s5r_unsupported_typed_hook(&event) {
         return Err(format!("{} is not supported by s5r manifest", hook.on));
     }
-    if event == ExtensionEvent::ContinueAfterStop && mode != HookMode::Blocking {
-        return Err(format!("{} is a blocking-only hook", hook.on));
+    if !hook_mode_is_supported(&event, mode) {
+        return Err(match fixed_hook_mode(&event) {
+            Some(required) => format!("{} requires {} mode", hook.on, mode_to_name(required)),
+            None => format!("{} does not support {} mode", hook.on, hook.mode),
+        });
     }
     Ok((
         event,
@@ -220,7 +316,7 @@ fn s5r_unsupported_typed_hook(event: &ExtensionEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_sdk::tool::ExecutionMode;
+    use astrcode_extension_sdk::{s5r::manifest::ManifestHookOptions, tool::ExecutionMode};
     use serde_json::json;
 
     use super::*;
@@ -230,7 +326,16 @@ mod tests {
         let invalid_manifests = [
             (
                 json!({
+                    "extension_id": "../escape",
+                    "version": "test",
+                    "protocol": {"s5r": astrcode_extension_sdk::s5r::S5R_VERSION}
+                }),
+                "must start with an ASCII letter or digit",
+            ),
+            (
+                json!({
                     "extension_id": "bad-known-field",
+                    "version": "test",
                     "protocol": {"s5r": astrcode_extension_sdk::s5r::S5R_VERSION},
                     "tools": [{
                         "name": "tool",
@@ -244,13 +349,15 @@ mod tests {
             (
                 json!({
                     "extension_id": "bad-capability",
+                    "version": "test",
                     "protocol": {"s5r": astrcode_extension_sdk::s5r::S5R_VERSION},
                     "capabilities": ["not_a_capability"]
                 }),
                 "unknown capability",
             ),
         ];
-        for (manifest, expected) in invalid_manifests {
+        for (mut manifest, expected) in invalid_manifests {
+            manifest["wire_features"] = json!([WIRE_FEATURE_PARENT_INVOKE_ID]);
             let error =
                 registration_from_s5r_metadata(&manifest, astrcode_extension_sdk::s5r::S5R_VERSION)
                     .unwrap_err();
@@ -259,7 +366,8 @@ mod tests {
 
         let registration = registration_from_s5r_metadata(
             &json!({
-                "extension_id": "legacy-defaults",
+                "extension_id": "defaults",
+                "version": "test",
                 "protocol": {
                     "s5r": astrcode_extension_sdk::s5r::S5R_VERSION,
                     "future_protocol_field": true
@@ -269,7 +377,7 @@ mod tests {
                 "future_manifest_field": {"enabled": true},
                 "tools": [
                     {
-                        "name": "legacy",
+                        "name": "defaulted",
                         "description": "",
                         "parameters": {"type": "object"},
                         "future_tool_field": "ignored"
@@ -281,20 +389,15 @@ mod tests {
                         "strict": true
                     }
                 ],
-                "commands": [{"name": "legacy-command"}],
+                "commands": [{"name": "defaulted-command"}],
                 "hooks": [{"on": "turn_end", "mode": "non_blocking"}],
-                "extension_events": [{"event_type": "legacy.event"}]
+                "extension_events": [{"event_type": "defaulted.event"}]
             }),
             astrcode_extension_sdk::s5r::S5R_VERSION,
         )
         .expect("manifest should parse");
 
         assert!(!registration.tools()[0].strict);
-        assert!(
-            registration
-                .supports_wire_feature(astrcode_extension_sdk::s5r::WIRE_FEATURE_PARENT_INVOKE_ID)
-        );
-        assert!(registration.supports_wire_feature("future_feature"));
         assert_eq!(
             registration.tools()[0].execution_mode,
             ExecutionMode::Sequential
@@ -313,5 +416,69 @@ mod tests {
             registration.extension_events()[0].max_payload_bytes,
             64 * 1024
         );
+    }
+
+    #[test]
+    fn s5r_hook_modes_match_dispatch_contract() {
+        let cases = [
+            ("pre_tool_use", "blocking", None),
+            ("post_tool_use", "advisory", None),
+            ("before_provider_request", "non_blocking", None),
+            ("turn_start", "blocking", None),
+            ("user_prompt_submit", "blocking", None),
+            ("turn_end", "advisory", None),
+            (
+                "turn_end",
+                "blocking",
+                Some("turn_end does not support blocking mode"),
+            ),
+            ("after_provider_response", "advisory", None),
+            (
+                "after_provider_response",
+                "blocking",
+                Some("after_provider_response requires advisory mode"),
+            ),
+            ("prompt_build", "blocking", None),
+            (
+                "prompt_build",
+                "non_blocking",
+                Some("prompt_build requires blocking mode"),
+            ),
+            ("pre_compact", "blocking", None),
+            (
+                "pre_compact",
+                "advisory",
+                Some("pre_compact requires blocking mode"),
+            ),
+            ("post_compact", "blocking", None),
+            (
+                "post_compact",
+                "non_blocking",
+                Some("post_compact requires blocking mode"),
+            ),
+            ("continue_after_stop", "blocking", None),
+            (
+                "continue_after_stop",
+                "advisory",
+                Some("continue_after_stop requires blocking mode"),
+            ),
+            (
+                "user_message_envelope",
+                "blocking",
+                Some("user_message_envelope is not supported by s5r manifest"),
+            ),
+        ];
+
+        for (on, mode, expected_error) in cases {
+            let result = normalize_hook(ManifestHook {
+                on: on.into(),
+                mode: mode.into(),
+                options: ManifestHookOptions::default(),
+            });
+            match expected_error {
+                Some(expected_error) => assert_eq!(result.unwrap_err(), expected_error),
+                None => assert!(result.is_ok(), "{on}/{mode}: {result:?}"),
+            }
+        }
     }
 }

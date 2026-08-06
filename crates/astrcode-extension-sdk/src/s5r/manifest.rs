@@ -25,6 +25,8 @@ pub struct InitializeManifest {
     pub tools: Vec<ManifestTool>,
     #[serde(default)]
     pub hooks: Vec<ManifestHook>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continuation_hooks: Vec<String>,
     #[serde(default)]
     pub commands: Vec<ManifestCommand>,
     #[serde(default)]

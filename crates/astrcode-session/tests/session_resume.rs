@@ -16,7 +16,8 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        ExtensionError, ExtensionEvent, LifecycleContext, PromptBuildContext, PromptContributions,
+        ExtensionError, ExtensionEvent, PromptContributions, RuntimeLifecycleContext,
+        RuntimePromptBuildContext,
     },
     runtime_ports::{
         NoopRuntimePorts, PromptContributor, ToolCatalogProvider, ToolCatalogScope,
@@ -45,7 +46,7 @@ impl TurnHooks for RecordingLifecycleHooks {
     async fn emit_lifecycle(
         &self,
         event: ExtensionEvent,
-        _ctx: LifecycleContext,
+        _ctx: RuntimeLifecycleContext,
     ) -> Result<(), ExtensionError> {
         if event == ExtensionEvent::SessionStart {
             self.0.fetch_add(1, Ordering::SeqCst);
@@ -97,7 +98,7 @@ impl Tool for NamedTool {
 impl PromptContributor for FailingPromptContributor {
     async fn collect_prompt_contributions(
         &self,
-        _ctx: PromptBuildContext,
+        _ctx: RuntimePromptBuildContext,
     ) -> Result<PromptContributions, ExtensionError> {
         Err(ExtensionError::Internal(
             "intentional prompt failure".into(),

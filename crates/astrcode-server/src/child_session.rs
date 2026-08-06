@@ -4,6 +4,7 @@ mod completion;
 
 use std::{
     collections::{HashMap, HashSet},
+    path::Path,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -479,9 +480,10 @@ impl ChildSessionCoordinator {
             .await
             .map_err(SessionApiError::internal)?;
 
-        let working_dir = request
-            .working_dir
-            .unwrap_or_else(|| parent_model.identity.working_dir.clone());
+        let working_dir = resolve_child_working_dir(
+            &parent_model.identity.working_dir,
+            request.working_dir.as_deref(),
+        )?;
         let model_id = request
             .model_preference
             .filter(|m| m != "inherit" && !m.is_empty())
@@ -1174,26 +1176,27 @@ impl ChildSessionCoordinator {
         &self,
         scheduler: &TurnScheduler,
         parent_sid: &SessionId,
-    ) -> Result<(), TurnScheduleError> {
-        let claimed = self
+    ) -> Result<bool, TurnScheduleError> {
+        let ClaimedCompletionGuards { guards, error } = self
             .claim_guards_deep(scheduler, parent_sid, Duration::from_secs(10))
             .await;
-        let mut guarded_children: HashSet<SessionId> = claimed
-            .guards
+        let cancelled_guarded_child = !guards.is_empty();
+        let mut guarded_children: HashSet<SessionId> = guards
             .iter()
             .map(|claimed| claimed.guard.child_session_id().clone())
             .collect();
-        if let Some(error) = claimed.error {
-            self.restore_claimed_guards(claimed.guards);
+        if let Some(error) = error {
+            self.restore_claimed_guards(guards);
             return Err(error);
         }
-        if !claimed.guards.is_empty() {
-            self.finalize_aborted_children(scheduler, claimed.guards)
-                .await?;
+        if cancelled_guarded_child {
+            self.finalize_aborted_children(scheduler, guards).await?;
         }
         guarded_children.extend(self.registered_child_ids());
-        self.abort_unguarded_running_children(scheduler, parent_sid, &guarded_children)
-            .await
+        let cancelled_unguarded_child = self
+            .abort_unguarded_running_children(scheduler, parent_sid, &guarded_children)
+            .await?;
+        Ok(cancelled_guarded_child || cancelled_unguarded_child)
     }
 
     pub(crate) fn begin_tree_shutdown(&self, session_ids: &[SessionId]) -> ChildTreeShutdown {
@@ -1521,7 +1524,7 @@ impl ChildSessionCoordinator {
         scheduler: &TurnScheduler,
         root_sid: &SessionId,
         guarded_children: &HashSet<SessionId>,
-    ) -> Result<(), TurnScheduleError> {
+    ) -> Result<bool, TurnScheduleError> {
         let mut pending: Vec<(SessionId, SessionId)> = Vec::new();
         let mut stack = vec![root_sid.clone()];
 
@@ -1544,6 +1547,7 @@ impl ChildSessionCoordinator {
             }
         }
 
+        let mut cancelled = false;
         for (parent_sid, child_sid) in pending.into_iter().rev() {
             let operation = match scheduler.begin_session_operation(&child_sid).await {
                 Ok(operation) => operation,
@@ -1568,8 +1572,9 @@ impl ChildSessionCoordinator {
             scheduler
                 .recycle_settled_session_in_operation(operation)
                 .await?;
+            cancelled = true;
         }
-        Ok(())
+        Ok(cancelled)
     }
 }
 
@@ -1585,9 +1590,83 @@ fn map_recycled_access_error(error: SessionManagerError) -> SessionApiError {
     }
 }
 
+fn resolve_child_working_dir(
+    parent_working_dir: &str,
+    requested: Option<&str>,
+) -> Result<String, SessionApiError> {
+    let Some(requested) = requested else {
+        return Ok(parent_working_dir.to_owned());
+    };
+    let canonical_parent = Path::new(parent_working_dir)
+        .canonicalize()
+        .map_err(SessionApiError::internal)?;
+    let requested = Path::new(requested);
+    let candidate = if requested.is_absolute() {
+        requested.to_owned()
+    } else {
+        canonical_parent.join(requested)
+    };
+    let canonical_candidate = candidate.canonicalize().map_err(|_| {
+        SessionApiError::PermissionDenied(
+            "child working directory must be an existing directory within the parent workspace"
+                .into(),
+        )
+    })?;
+    if !canonical_candidate.is_dir() || !canonical_candidate.starts_with(&canonical_parent) {
+        return Err(SessionApiError::PermissionDenied(
+            "child working directory must be an existing directory within the parent workspace"
+                .into(),
+        ));
+    }
+    Ok(canonical_candidate.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn child_working_directory_stays_within_parent_workspace() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().join("workspace");
+        let nested = workspace.join("nested");
+        let sibling = temp.path().join("sibling");
+        std::fs::create_dir_all(&nested).expect("nested workspace");
+        std::fs::create_dir_all(&sibling).expect("sibling workspace");
+        let canonical_nested = nested.canonicalize().expect("canonical nested workspace");
+        let workspace = workspace.to_string_lossy();
+
+        assert_eq!(
+            resolve_child_working_dir(&workspace, None).expect("inherit workspace"),
+            workspace.as_ref()
+        );
+        for requested in ["nested".to_owned(), nested.to_string_lossy().into_owned()] {
+            assert_eq!(
+                resolve_child_working_dir(&workspace, Some(&requested))
+                    .expect("nested directory must be accepted"),
+                canonical_nested.to_string_lossy()
+            );
+        }
+        for requested in [
+            "../sibling".to_owned(),
+            sibling.to_string_lossy().into_owned(),
+        ] {
+            assert!(matches!(
+                resolve_child_working_dir(&workspace, Some(&requested)),
+                Err(SessionApiError::PermissionDenied(_))
+            ));
+        }
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&sibling, Path::new(workspace.as_ref()).join("escape"))
+                .expect("workspace escape symlink");
+            assert!(matches!(
+                resolve_child_working_dir(&workspace, Some("escape")),
+                Err(SessionApiError::PermissionDenied(_))
+            ));
+        }
+    }
 
     #[test]
     fn terminal_payload_uses_matching_child_and_final_session_ids() {

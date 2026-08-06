@@ -4,24 +4,25 @@
 
 mod store;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use astrcode_extension_sdk::{
+    builder::{ExtensionToolDefinition, manifest},
     extension::{
         CommandContext, CommandHandler, ContinueAfterStopContext, ContinueAfterStopHandler,
         ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCapability,
-        ExtensionCommandResult, ExtensionCtx, ExtensionError, HookMode, ProviderContext,
-        ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand, ToolHandler,
+        ExtensionCommandResult, ExtensionError, ExtensionManifest, HookMode, ProviderContext,
+        ProviderHandler, ProviderResult, Registrar, SlashCommand, ToolContext, ToolHandler,
     },
+    host::ExtensionHost,
     llm::LlmMessage,
-    session_query::SessionQuery,
-    state,
+    session::HostSessionTargetRequest,
     tool::{
-        ExecutionMode, ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolResult, tool_metadata,
+        ExecutionMode, ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
+        tool_metadata,
     },
     types::SessionId,
 };
-use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -33,12 +34,6 @@ const CREATE_GOAL_TOOL_NAME: &str = "createGoal";
 const UPDATE_GOAL_TOOL_NAME: &str = "updateGoal";
 const CONTINUATION_PROMPT_TEMPLATE: &str = include_str!("../templates/continuation.md");
 const BUDGET_LIMIT_PROMPT_TEMPLATE: &str = include_str!("../templates/budget_limit.md");
-
-const CAPABILITIES: &[ExtensionCapability] = &[
-    ExtensionCapability::SessionHistory,
-    ExtensionCapability::ProviderRequest,
-    ExtensionCapability::TurnContinuationControl,
-];
 
 const CREATE_GOAL_DESCRIPTION: &str =
     "Create a session goal for multi-turn autonomous work. Use this only when the user or \
@@ -63,133 +58,88 @@ const UPDATE_GOAL_DESCRIPTION: &str =
 
 /// Return the bundled goal extension.
 pub fn extension() -> Arc<dyn Extension> {
-    Arc::new(GoalExtension::default())
+    Arc::new(GoalExtension)
 }
 
-#[derive(Default)]
-struct GoalRuntime {
-    session_query: RwLock<Option<Arc<dyn SessionQuery>>>,
-}
-
-impl GoalRuntime {
-    fn set_session_query(&self, query: Option<Arc<dyn SessionQuery>>) {
-        *self.session_query.write() = query;
-    }
-
-    fn session_query(&self) -> Option<Arc<dyn SessionQuery>> {
-        self.session_query.read().clone()
-    }
-
-    async fn extension_data_dir(&self, session_id: &str) -> Result<Option<PathBuf>, String> {
-        let Some(query) = self.session_query() else {
-            return Ok(None);
-        };
-        query
-            .extension_data_dir(&SessionId::from(session_id))
-            .await
-            .map_err(|error| format!("read extension data dir: {error}"))
-    }
-
-    async fn total_token_usage(
-        &self,
-        session_id: &str,
-    ) -> Result<Option<TokenUsageSnapshot>, String> {
-        let Some(query) = self.session_query() else {
-            return Ok(None);
-        };
-        query
-            .token_usage(&SessionId::from(session_id))
-            .await
-            .map(|usage| {
-                usage.map(|usage| TokenUsageSnapshot {
-                    total_tokens: usage.total_tokens,
-                    model_context_window: usage.model_context_window,
-                })
+async fn total_token_usage(
+    host: &ExtensionHost,
+    session_id: &SessionId,
+) -> Result<Option<TokenUsageSnapshot>, String> {
+    host.session_history()
+        .map_err(|error| format!("open session history: {error}"))?
+        .token_usage(HostSessionTargetRequest {
+            target_session_id: session_id.to_string(),
+        })
+        .await
+        .map(|output| {
+            output.usage.map(|usage| TokenUsageSnapshot {
+                total_tokens: usage.total_tokens,
+                model_context_window: usage.model_context_window,
             })
-            .map_err(|error| format!("read session token usage: {error}"))
-    }
+        })
+        .map_err(|error| format!("read session token usage: {error}"))
+}
 
-    async fn usage_for_goal(&self, session_id: &str, goal: &GoalState) -> GoalUsage {
-        let snapshot = self.total_token_usage(session_id).await.ok().flatten();
-        let tokens_used = match (snapshot.as_ref(), goal.token_usage_baseline) {
-            (Some(snapshot), Some(baseline)) => {
-                Some(snapshot.total_tokens.saturating_sub(baseline))
-            },
-            _ => None,
-        };
-        let remaining_tokens = match (goal.token_budget, tokens_used) {
-            (Some(budget), Some(used)) => Some(budget.saturating_sub(used)),
-            _ => None,
-        };
+async fn usage_for_goal(
+    host: &ExtensionHost,
+    session_id: &SessionId,
+    goal: &GoalState,
+) -> GoalUsage {
+    let snapshot = total_token_usage(host, session_id).await.ok().flatten();
+    let tokens_used = match (snapshot.as_ref(), goal.token_usage_baseline) {
+        (Some(snapshot), Some(baseline)) => Some(snapshot.total_tokens.saturating_sub(baseline)),
+        _ => None,
+    };
+    let remaining_tokens = match (goal.token_budget, tokens_used) {
+        (Some(budget), Some(used)) => Some(budget.saturating_sub(used)),
+        _ => None,
+    };
 
-        GoalUsage {
-            tokens_used,
-            token_budget: goal.token_budget,
-            remaining_tokens,
-            model_context_window: snapshot.and_then(|snapshot| snapshot.model_context_window),
-            elapsed_seconds: goal.elapsed_seconds(),
-        }
+    GoalUsage {
+        tokens_used,
+        token_budget: goal.token_budget,
+        remaining_tokens,
+        model_context_window: snapshot.and_then(|snapshot| snapshot.model_context_window),
+        elapsed_seconds: goal.elapsed_seconds(),
     }
 }
 
-#[derive(Default)]
-struct GoalExtension {
-    runtime: Arc<GoalRuntime>,
-}
+struct GoalExtension;
 
 #[async_trait::async_trait]
 impl Extension for GoalExtension {
-    fn id(&self) -> &str {
-        EXTENSION_ID
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        CAPABILITIES
-    }
-
-    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
-        self.runtime.set_session_query(
-            ctx.host_services()
-                .and_then(|services| services.session_query.clone()),
-        );
-        Ok(())
+    fn manifest(&self) -> ExtensionManifest {
+        manifest(EXTENSION_ID)
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::SessionHistory)
+            .capability(ExtensionCapability::ProviderRequest)
+            .capability(ExtensionCapability::TurnContinuationControl)
+            .build()
     }
 
     fn register(&self, reg: &mut Registrar) {
-        let runtime = Arc::clone(&self.runtime);
+        let tool_prompt = goal_tool_prompt();
         reg.tool(
-            get_goal_tool_definition(),
-            Arc::new(GoalToolHandler {
-                runtime: Arc::clone(&runtime),
-            }),
-        );
-        reg.tool(
-            create_goal_tool_definition(),
-            Arc::new(GoalToolHandler {
-                runtime: Arc::clone(&runtime),
-            }),
+            ExtensionToolDefinition::from_definition(get_goal_tool_definition())
+                .with_prompt(tool_prompt.clone()),
+            Arc::new(GoalToolHandler),
         );
         reg.tool(
-            update_goal_tool_definition(),
-            Arc::new(GoalToolHandler {
-                runtime: Arc::clone(&runtime),
-            }),
+            ExtensionToolDefinition::from_definition(create_goal_tool_definition())
+                .with_prompt(tool_prompt.clone()),
+            Arc::new(GoalToolHandler),
         );
-        reg.tool_metadata(goal_tool_metadata());
-        reg.on_provider(
-            ProviderEvent::BeforeRequest,
-            HookMode::Blocking,
-            40,
-            Arc::new(GoalProviderHandler {
-                runtime: Arc::clone(&runtime),
-            }),
+        reg.tool(
+            ExtensionToolDefinition::from_definition(update_goal_tool_definition())
+                .with_prompt(tool_prompt),
+            Arc::new(GoalToolHandler),
         );
+        reg.on_before_provider_request(HookMode::Blocking, 40, Arc::new(GoalProviderHandler));
         reg.on_continue_after_stop(
             40,
             ContinueAfterStopOptions::unlimited(),
-            Arc::new(GoalContinueAfterStopHandler {
-                runtime: Arc::clone(&runtime),
-            }),
+            Arc::new(GoalContinueAfterStopHandler),
         );
         reg.command(
             SlashCommand {
@@ -200,85 +150,63 @@ impl Extension for GoalExtension {
                 argument_completions: false,
                 priority: 0,
             },
-            Arc::new(GoalSlashCommandHandler { runtime }),
+            Arc::new(GoalSlashCommandHandler),
         );
     }
 }
 
-struct GoalToolHandler {
-    runtime: Arc<GoalRuntime>,
-}
+struct GoalToolHandler;
 
 #[async_trait::async_trait]
 impl ToolHandler for GoalToolHandler {
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: Value,
-        _working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let root = ctx
-            .capabilities
-            .paths
-            .store_dir
-            .as_deref()
-            .map(goal_root_from_session_base)
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let root = goal_dir_from_base(
+            ctx.paths()
+                .session_data_dir()
+                .map_err(|error| ExtensionError::Internal(error.to_string()))?,
+        );
         let store = GoalStore::new(root);
+        let session_id = ctx
+            .session_id()
+            .ok_or_else(|| ExtensionError::Internal("session id not injected".into()))?;
+        let arguments = ctx.raw_arguments().clone();
 
-        Ok(match tool_name {
-            GET_GOAL_TOOL_NAME => {
-                handle_get_goal(
-                    &store,
-                    &self.runtime,
-                    ctx.scope.session_id.as_str(),
-                    arguments,
-                )
-                .await
-            },
+        Ok(match ctx.tool_name() {
+            GET_GOAL_TOOL_NAME => handle_get_goal(&store, ctx.host(), session_id, arguments).await,
             CREATE_GOAL_TOOL_NAME => {
-                handle_create_goal(
-                    &store,
-                    &self.runtime,
-                    ctx.scope.session_id.as_str(),
-                    arguments,
-                )
-                .await
+                handle_create_goal(&store, ctx.host(), session_id, arguments).await
             },
             UPDATE_GOAL_TOOL_NAME => {
-                handle_update_goal(
-                    &store,
-                    &self.runtime,
-                    ctx.scope.session_id.as_str(),
-                    arguments,
-                )
-                .await
+                handle_update_goal(&store, ctx.host(), session_id, arguments).await
             },
-            _ => return Err(ExtensionError::NotFound(tool_name.into())),
+            tool_name => return Err(ExtensionError::NotFound(tool_name.into())),
         }
         .into())
     }
 }
 
-struct GoalProviderHandler {
-    runtime: Arc<GoalRuntime>,
-}
+struct GoalProviderHandler;
 
 #[async_trait::async_trait]
 impl ProviderHandler for GoalProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let root = ctx
-            .session_store_dir
-            .as_deref()
-            .map(goal_root_from_session_base)
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let root = goal_dir_from_base(
+            ctx.paths()
+                .session_data_dir()
+                .map_err(|error| ExtensionError::Internal(error.to_string()))?,
+        );
         let store = GoalStore::new(root);
         let Some(mut goal) = store.load().map_err(ExtensionError::Internal)? else {
             return Ok(ProviderResult::Allow);
         };
 
-        let usage = self.runtime.usage_for_goal(&ctx.session_id, &goal).await;
+        let session_id = ctx
+            .session_id()
+            .ok_or_else(|| ExtensionError::Internal("goal provider requires a session".into()))?;
+        let usage = usage_for_goal(ctx.host(), session_id, &goal).await;
         if goal.status == GoalStatus::BudgetLimited {
             let should_prompt = goal.take_budget_limit_prompt_pending();
             if should_prompt {
@@ -317,9 +245,7 @@ impl ProviderHandler for GoalProviderHandler {
     }
 }
 
-struct GoalContinueAfterStopHandler {
-    runtime: Arc<GoalRuntime>,
-}
+struct GoalContinueAfterStopHandler;
 
 #[async_trait::async_trait]
 impl ContinueAfterStopHandler for GoalContinueAfterStopHandler {
@@ -327,15 +253,11 @@ impl ContinueAfterStopHandler for GoalContinueAfterStopHandler {
         &self,
         ctx: ContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
-        let Some(session_store_dir) = self
-            .runtime
-            .extension_data_dir(&ctx.session_id)
-            .await
-            .map_err(ExtensionError::Internal)?
-        else {
-            return Ok(ContinueAfterStopResult::EndTurn);
-        };
-        let store = GoalStore::new(goal_dir_from_base(&session_store_dir));
+        let extension_data_dir = ctx
+            .paths()
+            .session_data_dir()
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
+        let store = GoalStore::new(goal_dir_from_base(extension_data_dir));
         let Some(mut goal) = store.load().map_err(ExtensionError::Internal)? else {
             return Ok(ContinueAfterStopResult::EndTurn);
         };
@@ -343,7 +265,10 @@ impl ContinueAfterStopHandler for GoalContinueAfterStopHandler {
             return Ok(ContinueAfterStopResult::EndTurn);
         }
 
-        let usage = self.runtime.usage_for_goal(&ctx.session_id, &goal).await;
+        let session_id = ctx.session_id().ok_or_else(|| {
+            ExtensionError::Internal("goal continuation requires a session".into())
+        })?;
+        let usage = usage_for_goal(ctx.host(), session_id, &goal).await;
         if apply_budget_limit(&mut goal, &usage) {
             store.save(&goal).map_err(ExtensionError::Internal)?;
             return Ok(ContinueAfterStopResult::ContinueOneStep);
@@ -355,32 +280,26 @@ impl ContinueAfterStopHandler for GoalContinueAfterStopHandler {
     }
 }
 
-struct GoalSlashCommandHandler {
-    runtime: Arc<GoalRuntime>,
-}
+struct GoalSlashCommandHandler;
 
 #[async_trait::async_trait]
 impl CommandHandler for GoalSlashCommandHandler {
-    async fn execute(
-        &self,
-        _command_name: &str,
-        arguments: &str,
-        _working_dir: &str,
-        ctx: &CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let root = ctx
-            .session_store_dir
-            .as_deref()
-            .map(goal_root_from_session_base)
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+    async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError> {
+        let root = goal_dir_from_base(
+            ctx.paths()
+                .session_data_dir()
+                .map_err(|error| ExtensionError::Internal(error.to_string()))?,
+        );
         let store = GoalStore::new(root);
-        let args = arguments.trim();
+        let args = ctx.argument().trim();
+        let session_id = ctx
+            .session_id()
+            .ok_or_else(|| ExtensionError::Internal("goal command requires a session".into()))?;
 
         match args {
             "" | "show" => {
-                let content = goal_report_text(
-                    &build_goal_report(&store, &self.runtime, &ctx.session_id).await,
-                );
+                let content =
+                    goal_report_text(&build_goal_report(&store, ctx.host(), session_id).await);
                 Ok(ExtensionCommandResult::display(content, false))
             },
             "clear" => {
@@ -420,7 +339,7 @@ impl CommandHandler for GoalSlashCommandHandler {
             },
             "complete" => match store.update_status(GoalUpdateStatus::Complete) {
                 Ok(goal) => {
-                    let usage = self.runtime.usage_for_goal(&ctx.session_id, &goal).await;
+                    let usage = usage_for_goal(ctx.host(), session_id, &goal).await;
                     let content = goal_status_updated_text(&goal, &usage);
                     Ok(ExtensionCommandResult::display(content, false))
                 },
@@ -428,16 +347,14 @@ impl CommandHandler for GoalSlashCommandHandler {
             },
             "blocked" => match store.update_status(GoalUpdateStatus::Blocked) {
                 Ok(goal) => {
-                    let usage = self.runtime.usage_for_goal(&ctx.session_id, &goal).await;
+                    let usage = usage_for_goal(ctx.host(), session_id, &goal).await;
                     let content = goal_status_updated_text(&goal, &usage);
                     Ok(ExtensionCommandResult::display(content, false))
                 },
                 Err(error) => Ok(ExtensionCommandResult::display(error, true)),
             },
             objective => {
-                let baseline = self
-                    .runtime
-                    .total_token_usage(&ctx.session_id)
+                let baseline = total_token_usage(ctx.host(), session_id)
                     .await
                     .ok()
                     .flatten()
@@ -514,8 +431,8 @@ struct TokenUsageSnapshot {
 
 async fn handle_get_goal(
     store: &GoalStore,
-    runtime: &GoalRuntime,
-    session_id: &str,
+    host: &ExtensionHost,
+    session_id: &SessionId,
     arguments: Value,
 ) -> ToolResult {
     if let Err(error) = serde_json::from_value::<GetGoalArgs>(arguments) {
@@ -527,7 +444,7 @@ async fn handle_get_goal(
         );
     }
 
-    let report = build_goal_report(store, runtime, session_id).await;
+    let report = build_goal_report(store, host, session_id).await;
     ToolResult::text(
         goal_report_text(&report),
         false,
@@ -537,8 +454,8 @@ async fn handle_get_goal(
 
 async fn handle_create_goal(
     store: &GoalStore,
-    runtime: &GoalRuntime,
-    session_id: &str,
+    host: &ExtensionHost,
+    session_id: &SessionId,
     arguments: Value,
 ) -> ToolResult {
     let args = match serde_json::from_value::<CreateGoalArgs>(arguments) {
@@ -552,8 +469,7 @@ async fn handle_create_goal(
             );
         },
     };
-    let baseline = runtime
-        .total_token_usage(session_id)
+    let baseline = total_token_usage(host, session_id)
         .await
         .ok()
         .flatten()
@@ -561,7 +477,7 @@ async fn handle_create_goal(
 
     match store.create(args.objective, args.token_budget, baseline) {
         Ok(goal) => {
-            let usage = runtime.usage_for_goal(session_id, &goal).await;
+            let usage = usage_for_goal(host, session_id, &goal).await;
             let content = format!(
                 "Goal created: {}\n\nContinue working toward this objective. Call \
                  {UPDATE_GOAL_TOOL_NAME} with status complete only when it is fully achieved, or \
@@ -585,8 +501,8 @@ async fn handle_create_goal(
 
 async fn handle_update_goal(
     store: &GoalStore,
-    runtime: &GoalRuntime,
-    session_id: &str,
+    host: &ExtensionHost,
+    session_id: &SessionId,
     arguments: Value,
 ) -> ToolResult {
     let args = match serde_json::from_value::<UpdateGoalArgs>(arguments) {
@@ -603,7 +519,7 @@ async fn handle_update_goal(
 
     match store.update_status(args.status) {
         Ok(goal) => {
-            let usage = runtime.usage_for_goal(session_id, &goal).await;
+            let usage = usage_for_goal(host, session_id, &goal).await;
             let content = goal_status_updated_text(&goal, &usage);
             let report = GoalReport::for_goal(goal, usage);
             ToolResult::text(
@@ -622,12 +538,12 @@ async fn handle_update_goal(
 
 async fn build_goal_report(
     store: &GoalStore,
-    runtime: &GoalRuntime,
-    session_id: &str,
+    host: &ExtensionHost,
+    session_id: &SessionId,
 ) -> GoalReport {
     match store.load() {
         Ok(Some(goal)) => {
-            let usage = runtime.usage_for_goal(session_id, &goal).await;
+            let usage = usage_for_goal(host, session_id, &goal).await;
             GoalReport::for_goal(goal, usage)
         },
         _ => GoalReport::default(),
@@ -825,26 +741,8 @@ fn escape_xml_text(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// 统计 goal 消耗的 token 数量。
-///
-/// 口径：`non-cached input + output`（排除 reasoning_output_tokens，因为那不是
-/// 向模型实际计费的"增量"输入；排除 cached_input_tokens 的折扣）。这与
-/// `createGoal` 工具描述、`docs/crates.md` 中的预算口径保持一致。
-///
-/// 当 `input_tokens` 或 `output_tokens` 任一缺失时，分项无法可靠合成，整体回退
-/// 到 provider 的 `total_tokens`，并尽量扣除 reasoning 以保持口径一致。
-fn goal_root_from_session_base(session_base: &std::path::Path) -> PathBuf {
-    goal_dir_from_base(&state::session_data_dir(session_base, EXTENSION_ID))
-}
-
-fn goal_tool_metadata() -> HashMap<String, ToolPromptMetadata> {
-    let mut map = HashMap::new();
-    let planning = ToolPromptMetadata::new(String::new())
-        .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning);
-    map.insert(GET_GOAL_TOOL_NAME.to_string(), planning.clone());
-    map.insert(CREATE_GOAL_TOOL_NAME.to_string(), planning.clone());
-    map.insert(UPDATE_GOAL_TOOL_NAME.to_string(), planning);
-    map
+fn goal_tool_prompt() -> ToolPromptMetadata {
+    ToolPromptMetadata::new(String::new()).prompt_tag(ToolPromptTag::Planning)
 }
 
 fn get_goal_tool_definition() -> ToolDefinition {

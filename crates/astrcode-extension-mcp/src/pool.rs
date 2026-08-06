@@ -147,8 +147,26 @@ struct StdioPooledClient {
     next_id: AtomicU64,
     timeout: Duration,
     stderr_buffer: Arc<AsyncMutex<TailBuffer>>,
-    _stdout_task: JoinHandle<()>,
-    _stderr_task: JoinHandle<()>,
+    stdout_task: std::sync::Mutex<Option<JoinHandle<()>>>,
+    stderr_task: std::sync::Mutex<Option<JoinHandle<()>>>,
+}
+
+impl Drop for StdioPooledClient {
+    fn drop(&mut self) {
+        let child = self
+            .child
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(child) = child.as_mut() {
+            let _ = child.start_kill();
+        }
+        for task in [&mut self.stdout_task, &mut self.stderr_task] {
+            let task = task.get_mut().unwrap_or_else(|error| error.into_inner());
+            if let Some(task) = task.take() {
+                task.abort();
+            }
+        }
+    }
 }
 
 // ─── McpProcessPool ──────────────────────────────────────────────────────
@@ -429,9 +447,10 @@ fn error_invalidates_client(error: &McpPoolError) -> bool {
 
 async fn shutdown_stdio(client: &StdioPooledClient) {
     let child_opt = {
-        let Ok(mut guard) = client.child.lock() else {
-            return;
-        };
+        let mut guard = client
+            .child
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
         guard.take()
     };
     if let Some(mut child) = child_opt {
@@ -442,6 +461,38 @@ async fn shutdown_stdio(client: &StdioPooledClient) {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
+    }
+    let stdout_task = client
+        .stdout_task
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    let stderr_task = client
+        .stderr_task
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .take();
+    tokio::join!(
+        finish_stdio_task("stdout", stdout_task),
+        finish_stdio_task("stderr", stderr_task),
+    );
+}
+
+async fn finish_stdio_task(stream: &'static str, task: Option<JoinHandle<()>>) {
+    let Some(mut task) = task else {
+        return;
+    };
+    match tokio::time::timeout(SHUTDOWN_TIMEOUT, &mut task).await {
+        Ok(Ok(())) => {},
+        Ok(Err(error)) if !error.is_cancelled() => {
+            tracing::warn!(%error, stream, "MCP stdio task failed during shutdown");
+        },
+        Ok(Err(_)) => {},
+        Err(_) => {
+            tracing::warn!(stream, "MCP stdio task timed out during shutdown");
+            task.abort();
+            let _ = task.await;
+        },
     }
 }
 
@@ -467,7 +518,8 @@ async fn spawn_stdio(
         .envs(&server.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     hide_command_window(&mut command);
     if let Some(cwd) = &server.cwd {
         command.current_dir(cwd);
@@ -512,8 +564,8 @@ async fn spawn_stdio(
         next_id: AtomicU64::new(2),
         timeout,
         stderr_buffer,
-        _stdout_task: stdout_task,
-        _stderr_task: stderr_task,
+        stdout_task: std::sync::Mutex::new(Some(stdout_task)),
+        stderr_task: std::sync::Mutex::new(Some(stderr_task)),
     };
 
     initialize_stdio(&client).await?;

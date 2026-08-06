@@ -129,18 +129,10 @@ const fn default_max_redirects() -> usize {
     10
 }
 
-pub(crate) fn load_config(config: &ExtensionConfig) -> WebToolsConfig {
-    match config.deserialize() {
-        Ok(config) => config,
-        Err(error) => {
-            tracing::warn!(
-                extension_id = EXTENSION_ID,
-                %error,
-                "invalid web-tools config, falling back to defaults"
-            );
-            WebToolsConfig::default()
-        },
-    }
+pub(crate) fn load_config(
+    config: &ExtensionConfig,
+) -> Result<WebToolsConfig, astrcode_extension_sdk::extension::ExtensionConfigError> {
+    config.deserialize_or_default()
 }
 
 pub(crate) fn resolve_api_key(inline: Option<&str>, env_name: Option<&str>) -> Option<String> {
@@ -170,7 +162,7 @@ mod tests {
 
     #[test]
     fn empty_config_uses_defaults() {
-        let config = load_config(&ExtensionConfig::default());
+        let config = load_config(&ExtensionConfig::default()).unwrap();
         assert_eq!(config.search.provider, SearchProvider::DuckDuckGo);
         assert_eq!(config.search.default_max_results, 5);
         assert_eq!(config.fetch.max_output_chars, 100_000);

@@ -13,13 +13,12 @@ use std::{
 use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{config::ConfigStore, tool::SessionOperations};
 use astrcode_extensions::{
-    ExtensionHostServices, StorageSessionQueryFactory,
-    build_host_router_with_public_http_dispatcher,
+    host_router::{HostBackends, build_host_router_with_public_http_dispatcher},
     loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime},
     runner::ExtensionRunner,
 };
 use astrcode_session::SessionRuntimeServices;
-use astrcode_storage::{SessionStore, config_store::FileConfigStore};
+use astrcode_storage::{EventReader, SessionReader, SessionStore, config_store::FileConfigStore};
 
 use crate::session_resource_cleanup::SessionResourceCleanup;
 
@@ -246,25 +245,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     extension_runner.bind_session_ops(Arc::clone(&session_ops));
 
     // 8. 加载扩展。
-    //
-    // HostServices 从 runtime services 获取 LLM，并携带 session ops 给声明了
-    // SessionControl 的 trusted bundled extension。不传给磁盘 IPC 扩展。
-    let host_services = Arc::new(
-        ExtensionHostServices::new(
-            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&event_store))),
-            Some(runtime_services.live_llm()),
-            Some(runtime_services.live_small_llm()),
-        )
-        .with_session_ops(session_ops)
-        .with_outbound_network(
-            astrcode_extensions::host_router::default_outbound_network_service(),
-        ),
-    );
-    extension_runner.bind_host_services(Arc::clone(&host_services));
     let load_errors = load_extensions_into_runner(
         &extension_runner,
         &runtime_services,
-        &host_services,
         Arc::clone(&event_store),
         &cwd,
     )
@@ -331,34 +314,13 @@ impl ServerRuntime {
 
     /// 按当前配置重载扩展集合；新 turn 会直接解析新的工具快照。
     pub async fn reload_extensions(&self) -> Vec<String> {
-        let runtime_services = self.runtime_services();
-        let mut host_services = ExtensionHostServices::new(
-            Arc::new(StorageSessionQueryFactory::new(Arc::clone(
-                self.event_store(),
-            ))),
-            Some(runtime_services.live_llm()),
-            Some(runtime_services.live_small_llm()),
-        );
-        if let Some(session_ops) = runtime_services.session_ops() {
-            host_services = host_services.with_session_ops(session_ops);
-        }
-        let outbound_network = self
-            .extension_runner()
-            .outbound_network_service()
-            .unwrap_or_else(astrcode_extensions::host_router::default_outbound_network_service);
-        host_services = host_services.with_outbound_network(outbound_network);
-        let host_services = Arc::new(host_services);
-        self.extension_runner()
-            .bind_host_services(Arc::clone(&host_services));
-        let load_errors = load_extensions_into_runner(
+        load_extensions_into_runner(
             self.extension_runner(),
             self.runtime_services(),
-            &host_services,
             Arc::clone(self.event_store()),
             self.startup_working_dir(),
         )
-        .await;
-        load_errors
+        .await
     }
 }
 
@@ -366,7 +328,6 @@ impl ServerRuntime {
 async fn load_extensions_into_runner(
     runner: &Arc<ExtensionRunner>,
     runtime_services: &SessionRuntimeServices,
-    host_services: &Arc<ExtensionHostServices>,
     session_store: Arc<dyn SessionStore>,
     cwd: &std::path::Path,
 ) -> Vec<String> {
@@ -385,16 +346,30 @@ async fn load_extensions_into_runner(
         effective.extensions.extension_states.clone(),
     );
     let disk_source = DiskExtensionSource::new(effective.extensions.extension_states.clone());
+    let working_dir = cwd.to_string_lossy().into_owned();
+    let event_reader: Arc<dyn EventReader> = session_store.clone();
+    let session_reader: Arc<dyn SessionReader> = session_store;
+    let outbound_network = runner
+        .outbound_network_service()
+        .unwrap_or_else(astrcode_extensions::host_router::default_outbound_network_service);
+    let host_router = build_host_router_with_public_http_dispatcher(
+        HostBackends {
+            main_llm: Some(runtime_services.live_llm()),
+            small_llm: Some(runtime_services.live_small_llm()),
+            event_reader: Some(event_reader),
+            session_reader: Some(session_reader),
+            default_working_dir: Some(working_dir.clone()),
+            public_http_dispatcher: None,
+            outbound_network: Some(outbound_network),
+        },
+        runner.public_http_dispatcher(),
+    );
+    runner.bind_host_router(Arc::clone(&host_router));
     ExtensionRuntime::sync_sources(
         runner,
         &ExtensionLoadContext {
-            working_dir: Some(cwd.to_string_lossy().to_string()),
-            host_router: Some(build_host_router_with_public_http_dispatcher(
-                Arc::clone(host_services),
-                session_store,
-                Some(cwd.to_string_lossy().to_string()),
-                runner.clone(),
-            )),
+            working_dir: Some(working_dir),
+            host_router: Some(host_router),
         },
         &[&bundled_source, &disk_source],
     )

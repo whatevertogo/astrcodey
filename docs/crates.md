@@ -244,9 +244,9 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 
 主要模块：
 
-- `extension`：扩展 trait、hook、registrar、HTTP/event 契约、runtime context 和能力声明。
-- `tool`：core 工具契约与扩展专用 `ExtensionToolContext`。
-- `session_query`：扩展可见的窄查询接口，只暴露 summary、transcript、token usage 和 namespaced 数据目录。
+- `extension`：扩展 trait、hook、registrar、HTTP/event 契约、host-attributed call context、namespaced paths 和能力声明。
+- `tool`：core 工具契约与扩展专用的私有字段 `ToolContext`。
+- `host`：按能力和调用上下文裁剪的类型化宿主域，包括 model、session history/control、workspace、network、process 和 extension HTTP。
 - `runtime_ports`：Session 消费的 tool catalog、prompt contribution、turn hooks 和 session operations 窄端口；`ToolCatalogScope` 同时携带 working dir 与 session store dir。
 - `llm`、`permission`、`config`：按扩展需要 re-export 的稳定 core 契约。
 - `hostpaths`：扩展可用的相对路径解析和路径边界校验，并暴露产品级用户目录与数据目录。
@@ -257,10 +257,9 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 - `s5r`：s5r 子进程协议消息、capabilities、effects。
 - `worker`：s5r worker builder、host client、handler adapter、manifest catalog；提供 session 输入、状态和工具选择等类型化 host 请求。
 - `session`：扩展侧 session 相关 re-export。
-- `state`：`session_data_dir`，给扩展规范 session-local 数据目录。
 - `prelude`、`worker_prelude`：分别面向进程内扩展和 s5r worker 的便捷导入集合。
 
-依赖边界：只依赖 workspace 内的 `astrcode-core`。`trusted` 模块只是进程内 host service 的命名入口，不构成安全边界；磁盘/IPC 扩展的隔离由进程边界和 capability-gated host API 保证。
+依赖边界：只依赖 workspace 内的 `astrcode-core`。进程内扩展和磁盘/IPC 扩展都通过 capability-gated typed host API 访问宿主能力；运行时负责注入不可伪造的 extension/session/turn 归属。
 
 测试线索：`worker/*`、`builder.rs`、`manifest.rs`、`runtime/*` 有单元测试。修改 SDK 类型等同修改扩展 ABI，需要同步内置扩展和 s5r 测试。
 
@@ -406,7 +405,7 @@ Feature：
 
 能力声明：无。session-local todo state 使用默认 namespaced session state API。
 
-依赖边界：只依赖 `astrcode-extension-sdk`。session 数据目录通过 SDK `state::session_data_dir` 规范化。
+依赖边界：只依赖 `astrcode-extension-sdk`。session 数据目录由调用上下文的 `ctx.paths().session_data_dir()` 按扩展标识完成命名空间隔离。
 
 测试线索：单元测试覆盖替换、校验、清空、verification nudge、provider reminder、post-tool 重置。
 
@@ -500,8 +499,8 @@ Feature：
 
 关键行为：
 
-- 用户记忆：`~/.astrcode/memory/`，偏向跨项目用户偏好。
-- 项目记忆：`~/.astrcode/projects/<key>/extension_data/astrcode.memory/`。
+- 用户记忆：`~/.astrcode/extension_data/astrcode.memory/`，偏向跨项目用户偏好。
+- 项目记忆：`~/.astrcode/extension_data/astrcode.memory/projects/<key>/`。
 - `SessionStart` 和 `memory_save` 后可触发批量提取并更新 `MEMORY.md`。
 - `PromptBuild` 注入用户偏好，按 session 缓存。
 - `TurnEnd` 对当轮对话召回项目事实，下一 turn 首次 LLM 请求注入。

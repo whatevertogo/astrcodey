@@ -11,7 +11,9 @@ use astrcode_core::{
     types::*,
     user_input::UserInput,
 };
-use astrcode_extension_sdk::extension::{UserMessageEnvelopeContext, UserMessageEnvelopeResult};
+use astrcode_extension_sdk::extension::{
+    RuntimeHookCallContext, RuntimeUserMessageEnvelopeContext, UserMessageEnvelopeResult,
+};
 use astrcode_session_projection::SessionReadModel;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
@@ -26,6 +28,7 @@ use crate::{
     session::Session,
     session_error::SessionError,
     session_runtime_services::SessionRuntimeView,
+    tool_exec::TurnToolContext,
     turn_context::TurnError,
     turn_handle::{SharedTurnFinalization, TurnHandle},
     turn_runner::{RunTurnResult, TurnFinalization, TurnLoop, run_turn},
@@ -64,15 +67,14 @@ impl Session {
     ) -> Result<String, TurnError> {
         let state = self.read_model().await?;
         let original_text = text.clone();
-        let ctx = UserMessageEnvelopeContext {
-            session_id: self.id().to_string(),
-            turn_id: turn_id.to_string(),
-            working_dir: state.identity.working_dir.clone(),
-            model: ModelSelection::simple(&state.identity.model_id),
-            text,
-            attachments: attachments.to_vec(),
-            session_store_dir: self.session_store_dir().await,
-        };
+        let call = RuntimeHookCallContext::new(
+            self.id().to_string(),
+            state.identity.working_dir.clone(),
+            ModelSelection::simple(&state.identity.model_id),
+            self.session_store_dir().await,
+        )
+        .with_turn_id(turn_id.to_string());
+        let ctx = RuntimeUserMessageEnvelopeContext::new(call, text, attachments.to_vec());
         match runtime_view
             .turn_hooks()
             .emit_user_message_envelope(ctx)
@@ -95,6 +97,7 @@ impl Session {
     async fn prepare_turn_runner(
         &self,
         runtime_view: &SessionRuntimeView,
+        turn_id: &TurnId,
     ) -> Result<TurnLoop, TurnError> {
         let session_store_dir = self
             .runtime
@@ -161,12 +164,18 @@ impl Session {
         } else {
             pre_state
         };
-        TurnLoop::new_with_llm(
-            self.clone(),
+        let turn = TurnToolContext::for_turn(
+            self,
             &session_state,
+            turn_id.clone(),
             tool_selection.unwrap_or_default(),
             session_store_dir,
+            CancellationToken::new(),
+        );
+        TurnLoop::new_with_llm(
+            self.clone(),
             llm,
+            turn,
             registry,
             runtime_view.turn_hooks_arc(),
         )
@@ -212,7 +221,7 @@ impl Session {
             .await?;
         self.emit_turn_start_events(&text, &attachments, &turn_id, accepted_seq)
             .await?;
-        let agent = match self.prepare_turn_runner(&runtime_view).await {
+        let agent = match self.prepare_turn_runner(&runtime_view, &turn_id).await {
             Ok(agent) => agent,
             Err(error) => {
                 self.settle_failed_turn_setup(&turn_id, &error).await;
@@ -413,8 +422,9 @@ mod tests {
 
     use astrcode_extension_sdk::{
         extension::{
-            ExtensionError, ExtensionEvent, LifecycleContext, PromptBuildContext,
-            PromptContributions, UserMessageEnvelopeContext, UserMessageEnvelopeResult,
+            ExtensionError, ExtensionEvent, PromptContributions, RuntimeLifecycleContext,
+            RuntimePromptBuildContext, RuntimeUserMessageEnvelopeContext,
+            UserMessageEnvelopeResult,
         },
         runtime_ports::{
             PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
@@ -475,7 +485,7 @@ mod tests {
     impl PromptContributor for TaggedRuntimeView {
         async fn collect_prompt_contributions(
             &self,
-            _ctx: PromptBuildContext,
+            _ctx: RuntimePromptBuildContext,
         ) -> Result<PromptContributions, ExtensionError> {
             self.record("prompt");
             Ok(PromptContributions::default())
@@ -486,7 +496,7 @@ mod tests {
     impl TurnHooks for TaggedRuntimeView {
         async fn emit_user_message_envelope(
             &self,
-            _ctx: UserMessageEnvelopeContext,
+            _ctx: RuntimeUserMessageEnvelopeContext,
         ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
             self.record("envelope");
             self.state.current_generation.store(2, Ordering::Release);
@@ -496,7 +506,7 @@ mod tests {
         async fn emit_lifecycle(
             &self,
             event: ExtensionEvent,
-            _ctx: LifecycleContext,
+            _ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
             self.record(match event {
                 ExtensionEvent::TurnStart => "turn_start",

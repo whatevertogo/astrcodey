@@ -1,3 +1,5 @@
+use std::sync::{Arc, Weak};
+
 use astrcode_extension_sdk::extension::*;
 
 use super::{ExtensionRunner, ExtensionView};
@@ -104,11 +106,28 @@ impl ExtensionView {
             }
         };
         request.path_params = path_params;
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let call = self.make_registered_extension_call_context(
+            &entry.extension_id,
+            None,
+            None,
+            None,
+            None,
+            None,
+            cancellation.clone(),
+        )?;
+        let ctx = HttpContext::from_runtime(
+            call,
+            entry.route.clone(),
+            request,
+            caller_extension_id.map(str::to_owned),
+        );
         let response = self
             .run_recorded_hook(
                 &entry.extension_id,
                 "http_route",
-                entry.handler.handle(request),
+                cancellation,
+                entry.handler.handle(ctx),
             )
             .await?;
         if !(100..=599).contains(&response.status) {
@@ -131,12 +150,22 @@ impl ExtensionView {
 }
 
 impl ExtensionRunner {
+    /// Returns a dispatcher that does not keep the runner alive through its bound host router.
+    pub fn public_http_dispatcher(
+        self: &Arc<Self>,
+    ) -> Arc<dyn crate::host_router::PublicHttpDispatcher> {
+        Arc::new(WeakRunnerPublicHttpDispatcher {
+            runner: Arc::downgrade(self),
+        })
+    }
+
     pub async fn dispatch_public_http_route(
         &self,
         request: ExtensionHttpRequest,
         body: &[u8],
     ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
         self.extension_view()
+            .await
             .dispatch_public_http_route(request, body)
             .await
     }
@@ -148,6 +177,7 @@ impl ExtensionRunner {
         body: &[u8],
     ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
         self.extension_view()
+            .await
             .dispatch_authenticated_http_route(extension_id, request, body)
             .await
     }
@@ -159,8 +189,32 @@ impl ExtensionRunner {
         body: &[u8],
     ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
         self.extension_view()
+            .await
             .dispatch_public_http_route_from(caller_extension_id, request, body)
             .await
+    }
+}
+
+struct WeakRunnerPublicHttpDispatcher {
+    runner: Weak<ExtensionRunner>,
+}
+
+#[async_trait::async_trait]
+impl crate::host_router::PublicHttpDispatcher for WeakRunnerPublicHttpDispatcher {
+    async fn dispatch_public_http(
+        &self,
+        caller_extension_id: &str,
+        request: ExtensionHttpRequest,
+    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+        let runner = self.runner.upgrade().ok_or_else(|| {
+            ExtensionError::Internal("extension runner is no longer available".into())
+        })?;
+        crate::host_router::PublicHttpDispatcher::dispatch_public_http(
+            &*runner,
+            caller_extension_id,
+            request,
+        )
+        .await
     }
 }
 

@@ -18,24 +18,19 @@ impl CommandHandler {
                 return;
             },
         };
-        let commands = self
-            .command_list_for_working_dir(&working_dir)
-            .await
+        let command_list = self.command_list_for_working_dir(&working_dir).await;
+        let commands = command_list
             .commands
             .into_iter()
             .map(command_info_to_stdio_dto)
             .collect();
-        let keybindings = self
-            .runtime
-            .extension_runner()
-            .collect_keybindings()
+        let keybindings = command_list
+            .keybindings
             .into_iter()
             .map(keybinding_to_dto)
             .collect();
-        let status_items = self
-            .runtime
-            .extension_runner()
-            .collect_status_items()
+        let status_items = command_list
+            .status_items
             .into_iter()
             .map(status_item_to_info_dto)
             .collect();

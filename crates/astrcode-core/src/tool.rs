@@ -438,7 +438,7 @@ pub trait SessionOperations: Send + Sync {
     }
 
     /// 取消目标会话的活跃 turn。
-    async fn cancel_turn(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
+    async fn cancel_turn(&self, _access: SessionAccess<'_>) -> Result<bool, SessionApiError> {
         Err(SessionApiError::Unsupported(
             "cancel_turn is not supported by this host".into(),
         ))
@@ -872,6 +872,7 @@ pub struct ToolCallScope {
 pub struct ToolExecutionContext {
     pub scope: ToolCallScope,
     pub capabilities: ToolCapabilities,
+    cancellation: tokio_util::sync::CancellationToken,
 }
 
 impl ToolExecutionContext {
@@ -890,7 +891,19 @@ impl ToolExecutionContext {
                 event_tx,
             },
             capabilities,
+            cancellation: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    /// Attach the turn cancellation signal that owns this tool call.
+    pub fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    /// Cancellation of the turn or request that owns this tool invocation.
+    pub fn cancellation(&self) -> &tokio_util::sync::CancellationToken {
+        &self.cancellation
     }
 }
 
@@ -920,6 +933,7 @@ impl std::fmt::Debug for ToolExecutionContext {
         f.debug_struct("ToolExecutionContext")
             .field("scope", &self.scope)
             .field("capabilities", &self.capabilities)
+            .field("cancelled", &self.cancellation.is_cancelled())
             .finish()
     }
 }
