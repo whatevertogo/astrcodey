@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use astrcode_core::wire::WireErrorCode;
 use async_trait::async_trait;
 use serde_json::Value;
 
@@ -12,11 +13,10 @@ use serde_json::Value;
 use crate::{extension::ExtensionHttpDispatchRequest, llm::LlmMessage};
 use crate::{
     host::{
-        HOST_ERROR_CODE_HOST_NOT_READY, HOST_ERROR_CODE_PEER_BUSY, HOST_ERROR_CODE_PEER_CLOSED,
-        HOST_ERROR_CODE_TIMEOUT, HOST_ERROR_CODE_TRANSPORT, HostClientTransport, HostOperation,
-        TypedEventClient, TypedExtensionHttpClient, TypedModelClient, TypedNetworkClient,
-        TypedProcessClient, TypedSessionControlClient, TypedSessionHistoryClient,
-        TypedSessionInspectClient, TypedSessionStateClient, TypedWorkspaceClient,
+        HostClientTransport, HostOperation, TypedEventClient, TypedExtensionHttpClient,
+        TypedModelClient, TypedNetworkClient, TypedProcessClient, TypedSessionControlClient,
+        TypedSessionHistoryClient, TypedSessionInspectClient, TypedSessionStateClient,
+        TypedWorkspaceClient,
     },
     runtime::{OutboundInvokeControl, Peer, PeerError},
     s5r::ErrorPayload,
@@ -85,15 +85,15 @@ where
 
 fn peer_error_to_payload(err: PeerError) -> ErrorPayload {
     match err {
-        PeerError::Closed => ErrorPayload::new(HOST_ERROR_CODE_PEER_CLOSED, "host peer closed"),
-        PeerError::Timeout => ErrorPayload::new(HOST_ERROR_CODE_TIMEOUT, "host invoke timed out"),
+        PeerError::Closed => ErrorPayload::new(WireErrorCode::PeerClosed, "host peer closed"),
+        PeerError::Timeout => ErrorPayload::new(WireErrorCode::Timeout, "host invoke timed out"),
         PeerError::Busy => ErrorPayload::new(
-            HOST_ERROR_CODE_PEER_BUSY,
+            WireErrorCode::PeerBusy,
             "host invoke concurrency limit reached",
         )
         .retryable(true),
         PeerError::Payload(payload) => payload,
-        PeerError::Msg(msg) => ErrorPayload::new(HOST_ERROR_CODE_TRANSPORT, msg),
+        PeerError::Msg(msg) => ErrorPayload::new(WireErrorCode::Transport, msg),
     }
 }
 
@@ -136,7 +136,10 @@ impl HostClientTransport for WorkerHostTransport {
     }
 
     fn client_error(code: &'static str, message: String) -> Self::Error {
-        ErrorPayload::new(code, message)
+        ErrorPayload::new(
+            WireErrorCode::parse(code).unwrap_or(WireErrorCode::InvalidResponse),
+            message,
+        )
     }
 }
 
@@ -211,7 +214,7 @@ fn host_api() -> Result<Arc<dyn HostApi>, ErrorPayload> {
     HOST_API
         .get()
         .cloned()
-        .ok_or_else(|| ErrorPayload::new(HOST_ERROR_CODE_HOST_NOT_READY, "host peer not ready"))
+        .ok_or_else(|| ErrorPayload::new(WireErrorCode::HostNotReady, "host peer not ready"))
 }
 
 /// Invokes a raw host capability for transport or request-context integration tests.
@@ -245,15 +248,17 @@ mod host_tests {
         let Err(error) = future.await else {
             panic!("mock host unexpectedly succeeded");
         };
-        assert_eq!(error.code, "backend_unavailable");
+        assert_eq!(error.code_enum(), Some(WireErrorCode::BackendUnavailable));
     }
 
     #[test]
     fn peer_error_mapping_preserves_host_payload_and_transport_contracts() {
-        let mut expected =
-            ErrorPayload::new("provider_rate_limited", "provider rate limit reached")
-                .with_hint("retry after the provider backoff")
-                .retryable(true);
+        let mut expected = ErrorPayload::new(
+            WireErrorCode::ProviderRateLimited,
+            "provider rate limit reached",
+        )
+        .with_hint("retry after the provider backoff")
+        .retryable(true);
         expected.details = Some(json!({ "retry_after_ms": 250 }));
 
         let actual = peer_error_to_payload(PeerError::Payload(expected.clone()));
@@ -459,7 +464,7 @@ mod host_tests {
                     .unwrap_or_else(|| panic!("unknown host operation {capability}")),
             );
             Err(ErrorPayload::new(
-                "backend_unavailable",
+                WireErrorCode::BackendUnavailable,
                 "test backend unavailable",
             ))
         }
@@ -760,7 +765,11 @@ mod host_tests {
             })
             .await
             .unwrap_err();
-            assert_eq!(error.code, "invalid_host_response", "{marker}");
+            assert_eq!(
+                error.code_enum(),
+                Some(WireErrorCode::InvalidResponse),
+                "{marker}"
+            );
         }
     }
 }

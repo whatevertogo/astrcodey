@@ -1,5 +1,6 @@
 //! s5r 线缆消息类型（对齐 AstrBot `protocol/messages.py`）。
 
+use astrcode_core::wire::WireErrorCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -23,8 +24,78 @@ pub const WIRE_CODEC_METADATA_KEY: &str = "wire_codec";
 pub const WIRE_FEATURE_PARENT_INVOKE_ID: &str = "parent_invoke_id";
 
 /// Handler 标识的线缆格式：`<extension_id>:<kind>:<name>`。
-pub(crate) fn handler_id_for(extension_id: &str, kind: &str, name: &str) -> String {
-    format!("{extension_id}:{kind}:{name}")
+///
+/// 构造（注册/描述符）与解析（归属校验）都走这一类型，格式不可能在两处漂移。
+/// wire 上始终是稳定字符串（[`HandlerId::as_str`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandlerId(String);
+
+impl HandlerId {
+    pub fn new(extension_id: &str, kind: HandlerKind, name: &str) -> Self {
+        Self(format!("{extension_id}:{}:{name}", kind.as_str()))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// 解析 wire 字符串：校验 kind 白名单与 name 非空，非法返回 `None`。
+    pub fn parse(wire: &str) -> Option<Self> {
+        Self::split(wire).map(|_| Self(wire.to_owned()))
+    }
+
+    /// 分解为 `(extension_id, kind, name)`，全部借用输入；由 [`Self::parse`] 构造的
+    /// 标识经 [`Self::parts`] 恒为 `Some`。
+    pub fn split(wire: &str) -> Option<(&str, HandlerKind, &str)> {
+        let (extension_id, remainder) = wire.split_once(':')?;
+        let (kind, name) = remainder.split_once(':')?;
+        let kind = HandlerKind::parse(kind)?;
+        if name.is_empty() {
+            return None;
+        }
+        Some((extension_id, kind, name))
+    }
+
+    /// 分解为 `(extension_id, kind, name)`；由 [`Self::parse`] 构造的标识恒为 `Some`。
+    pub fn parts(&self) -> Option<(&str, HandlerKind, &str)> {
+        Self::split(&self.0)
+    }
+}
+
+impl From<HandlerId> for String {
+    fn from(id: HandlerId) -> Self {
+        id.0
+    }
+}
+
+/// Handler 的种类；wire 上是稳定字符串（[`HandlerKind::as_str`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandlerKind {
+    Tool,
+    Hook,
+    Command,
+    Http,
+}
+
+impl HandlerKind {
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Tool => "tool",
+            Self::Hook => "hook",
+            Self::Command => "command",
+            Self::Http => "http",
+        }
+    }
+
+    pub fn parse(kind: &str) -> Option<Self> {
+        Some(match kind {
+            "tool" => Self::Tool,
+            "hook" => Self::Hook,
+            "command" => Self::Command,
+            "http" => Self::Http,
+            _ => return None,
+        })
+    }
 }
 
 /// 五类线缆消息。
@@ -183,14 +254,32 @@ pub struct ErrorPayload {
 }
 
 impl ErrorPayload {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    /// 以类型化错误码构造；wire 上序列化为 [`"as_str"`]。
+    pub fn new(code: WireErrorCode, message: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
+            code: code.as_str().to_owned(),
             message: message.into(),
             hint: None,
             retryable: false,
             details: None,
         }
+    }
+
+    /// 返回类型化错误码；未知码（旧宿主/新扩展）返回 `None`。
+    pub fn code_enum(&self) -> Option<WireErrorCode> {
+        WireErrorCode::parse(&self.code)
+    }
+
+    pub fn io_error(error: impl std::fmt::Display) -> Self {
+        Self::new(WireErrorCode::IoError, error.to_string())
+    }
+
+    pub fn backend_unavailable(message: impl Into<String>) -> Self {
+        Self::new(WireErrorCode::BackendUnavailable, message)
+    }
+
+    pub fn cancelled(message: impl Into<String>) -> Self {
+        Self::new(WireErrorCode::Cancelled, message)
     }
 
     pub fn with_hint(mut self, hint: impl Into<String>) -> Self {

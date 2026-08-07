@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use astrcode_core::wire::WireErrorCode;
 use astrcode_extension_sdk::{extension::ExtensionCapability, s5r::ErrorPayload};
 use astrcode_extensions::host_router::{HostBackends, HostRouter, InvokeContext};
 use serde_json::{Value, json};
@@ -32,7 +33,7 @@ async fn read_workspace(root: &Path, path: &str) -> Result<Value, ErrorPayload> 
 async fn workspace_read_rejects_parent_traversal() {
     let (_dir, root) = temp_workspace();
     let err = read_workspace(&root, "../secret.txt").await.unwrap_err();
-    assert_eq!(err.code, "permission_denied");
+    assert_eq!(err.code_enum(), Some(WireErrorCode::PermissionDenied));
 }
 
 #[tokio::test]
@@ -58,7 +59,7 @@ async fn workspace_read_rejects_symlink_escape() {
     }
 
     let err = read_workspace(&root, "link.txt").await.unwrap_err();
-    assert_eq!(err.code, "permission_denied");
+    assert_eq!(err.code_enum(), Some(WireErrorCode::PermissionDenied));
 }
 
 #[tokio::test]
@@ -76,5 +77,5 @@ async fn workspace_read_rejects_oversize_file() {
     std::fs::write(&big, &data).unwrap();
 
     let err = read_workspace(&root, "huge.bin").await.unwrap_err();
-    assert_eq!(err.code, "file_too_large");
+    assert_eq!(err.code_enum(), Some(WireErrorCode::FileTooLarge));
 }

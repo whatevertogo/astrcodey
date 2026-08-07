@@ -17,18 +17,14 @@ use astrcode_core::{
     event::{DurableEventPayload, EventPayload, EventSender, ExtensionEventData, LiveEventPayload},
     llm::LlmProvider,
     tool::SessionOperations,
+    wire::{WireError, WireErrorCode},
 };
 use astrcode_extension_sdk::{
     extension::{
         ExtensionCapability, ExtensionError, ExtensionEventDecl, ExtensionHttpRequest,
         ExtensionHttpResponse, ExtensionTaskError, ExtensionTasks,
     },
-    host::{
-        HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CANCELLED,
-        HOST_ERROR_CODE_CONTEXT_UNAVAILABLE, HOST_ERROR_CODE_HOST_RUNTIME_FAILED,
-        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_IO_ERROR,
-        HOST_ERROR_CODE_SERIALIZATION_FAILED, internal::OutboundNetworkService,
-    },
+    host::internal::OutboundNetworkService,
     s5r::{CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage},
 };
 use astrcode_storage::{EventReader, SessionReader};
@@ -58,7 +54,7 @@ where
 {
     T::deserialize(input).map_err(|error| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             format!("invalid {capability} request: {error}"),
         )
     })
@@ -70,18 +66,22 @@ where
 {
     serde_json::to_value(output).map_err(|error| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_SERIALIZATION_FAILED,
+            WireErrorCode::SerializationFailed,
             format!("failed to serialize {capability} response: {error}"),
         )
     })
 }
 
+pub(super) fn wire_payload<E: WireError>(error: E) -> ErrorPayload {
+    ErrorPayload::new(error.wire_code(), error.to_string()).retryable(error.is_retryable())
+}
+
 pub(super) fn io_error(error: impl std::fmt::Display) -> ErrorPayload {
-    ErrorPayload::new(HOST_ERROR_CODE_IO_ERROR, error.to_string())
+    ErrorPayload::new(WireErrorCode::IoError, error.to_string())
 }
 
 pub(super) fn backend_unavailable(message: impl Into<String>) -> ErrorPayload {
-    ErrorPayload::new(HOST_ERROR_CODE_BACKEND_UNAVAILABLE, message)
+    ErrorPayload::new(WireErrorCode::BackendUnavailable, message)
 }
 
 /// deadline + 取消的 biased select 包装：取消优先于超时。并发语义（`biased` 顺序、
@@ -123,7 +123,7 @@ where
         .await
         .map_err(|error| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_HOST_RUNTIME_FAILED,
+                WireErrorCode::HostRuntimeFailed,
                 format!("blocking host I/O task failed: {error}"),
             )
         })?
@@ -139,7 +139,7 @@ where
 {
     let tasks = tasks.ok_or_else(|| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+            WireErrorCode::BackendUnavailable,
             "extension task owner is unavailable for persistent host I/O",
         )
     })?;
@@ -148,10 +148,10 @@ where
         .await
         .map_err(|error| match error {
             ExtensionTaskError::ShuttingDown { .. } => {
-                ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, error.to_string())
+                ErrorPayload::new(WireErrorCode::Cancelled, error.to_string())
             },
             ExtensionTaskError::Panicked { .. } | ExtensionTaskError::RuntimeStopped { .. } => {
-                ErrorPayload::new(HOST_ERROR_CODE_HOST_RUNTIME_FAILED, error.to_string())
+                ErrorPayload::new(WireErrorCode::HostRuntimeFailed, error.to_string())
             },
         })?
 }
@@ -163,7 +163,7 @@ fn ensure_invoke_active(ctx: &InvokeContext) -> Result<(), ErrorPayload> {
         .is_some_and(CancellationToken::is_cancelled)
     {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_CANCELLED,
+            WireErrorCode::Cancelled,
             "invoke cancelled",
         ));
     }
@@ -342,7 +342,7 @@ impl HostRouter {
                 return tokio::select! {
                     biased;
                     () = token.cancelled() => {
-                        Err(ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, "invoke cancelled"))
+                        Err(ErrorPayload::new(WireErrorCode::Cancelled, "invoke cancelled"))
                     },
                     output = invoke => output,
                 };
@@ -365,7 +365,7 @@ impl HostRouter {
         ensure_required_context(spec.operation, ctx)?;
         if !spec.supports_stream {
             return Err(ErrorPayload::new(
-                "stream_not_supported",
+                WireErrorCode::StreamNotSupported,
                 format!("stream not supported for {cap}"),
             ));
         }
@@ -424,7 +424,7 @@ impl HostRouter {
             | HostCapability::Process(_)
             | HostCapability::Network(_)
             | HostCapability::ExtensionHttp(_) => Err(ErrorPayload::new(
-                "invalid_capability_registry",
+                WireErrorCode::InvalidCapabilityRegistry,
                 format!("streaming capability {cap} has no stream handler"),
             )),
         }
@@ -437,7 +437,7 @@ fn ensure_required_context(
 ) -> Result<(), ErrorPayload> {
     if operation.requires_session_context() && ctx.session_id.is_none() {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+            WireErrorCode::ContextUnavailable,
             format!(
                 "{} requires a session-scoped call context",
                 operation.wire_name()
@@ -446,7 +446,7 @@ fn ensure_required_context(
     }
     if operation.requires_workspace_context() && ctx.working_dir.is_none() {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+            WireErrorCode::ContextUnavailable,
             format!(
                 "{} requires a workspace-scoped call context",
                 operation.wire_name()
@@ -563,9 +563,7 @@ mod tests {
         types::MessageId,
     };
     use astrcode_extension_sdk::host::{
-        HOST_ERROR_CODE_PERMISSION_DENIED, HOST_ERROR_CODE_STATE_TOO_LARGE,
-        HOST_ERROR_CODE_UNKNOWN_CAPABILITY, HOST_NETWORK_MAX_BYTES,
-        HOST_NETWORK_MAX_REQUEST_BODY_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS,
+        HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_REQUEST_BODY_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS,
         HOST_PROCESS_MAX_TIMEOUT_MS, HOST_SESSION_STATE_KEY_MAX_LENGTH,
         HOST_SESSION_STATE_VALUE_MAX_BYTES, HostLlmChatOutput, HostLlmChatRequest,
         HostLlmCollectedStreamOutput, HostNetworkRedirectPolicy, HostNetworkRequest,
@@ -873,7 +871,8 @@ mod tests {
                 .await
                 .expect_err("inspect input must match its published schema");
             assert_eq!(
-                error.code, HOST_ERROR_CODE_INVALID_INPUT,
+                error.code_enum(),
+                Some(WireErrorCode::InvalidInput),
                 "capability: {capability}"
             );
         }
@@ -938,7 +937,10 @@ mod tests {
             )
             .await
             .expect_err("missing recycled history must use the stable not-found code");
-        assert_eq!(missing_history.code, "session_not_found");
+        assert_eq!(
+            missing_history.code_enum(),
+            Some(WireErrorCode::SessionNotFound)
+        );
 
         let missing_attribution = router
             .invoke(
@@ -952,7 +954,10 @@ mod tests {
             )
             .await
             .expect_err("history reads require host-owned extension attribution");
-        assert_eq!(missing_attribution.code, "context_unavailable");
+        assert_eq!(
+            missing_attribution.code_enum(),
+            Some(WireErrorCode::ContextUnavailable)
+        );
     }
 
     #[test]
@@ -1092,7 +1097,11 @@ mod tests {
                 .invoke(operation, input.clone(), &ctx)
                 .await
                 .expect_err("unknown request fields must be rejected");
-            assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT, "{operation}");
+            assert_eq!(
+                error.code_enum(),
+                Some(WireErrorCode::InvalidInput),
+                "{operation}"
+            );
             assert!(
                 error.message.contains("unknown field"),
                 "{operation}: {}",
@@ -1210,7 +1219,8 @@ mod tests {
                 .await
                 .expect_err("out-of-range process timeouts must be rejected");
             assert_eq!(
-                error.code, HOST_ERROR_CODE_INVALID_INPUT,
+                error.code_enum(),
+                Some(WireErrorCode::InvalidInput),
                 "timeout_ms={timeout_ms}"
             );
         }
@@ -1240,7 +1250,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(err.code, HOST_ERROR_CODE_PERMISSION_DENIED);
+        assert_eq!(err.code_enum(), Some(WireErrorCode::PermissionDenied));
     }
 
     #[tokio::test]
@@ -1308,7 +1318,7 @@ mod tests {
                 )
                 .await
                 .expect_err("network bounds must match the published schema");
-            assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT);
+            assert_eq!(error.code_enum(), Some(WireErrorCode::InvalidInput));
         }
 
         let oversized_body = "AAAA".repeat(HOST_NETWORK_MAX_REQUEST_BODY_BYTES / 3 + 1);
@@ -1320,7 +1330,7 @@ mod tests {
             )
             .await
             .expect_err("oversized outbound body must be rejected before the network service");
-        assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT);
+        assert_eq!(error.code_enum(), Some(WireErrorCode::InvalidInput));
         assert_eq!(network.calls.load(Ordering::SeqCst), 1);
 
         let denied = router
@@ -1331,14 +1341,14 @@ mod tests {
             )
             .await
             .expect_err("missing network grant");
-        assert_eq!(denied.code, HOST_ERROR_CODE_PERMISSION_DENIED);
+        assert_eq!(denied.code_enum(), Some(WireErrorCode::PermissionDenied));
         assert_eq!(network.calls.load(Ordering::SeqCst), 1);
 
         let unknown = router
             .invoke("astrcode.network.unknown", json!({}), &allowed)
             .await
             .expect_err("unknown capability");
-        assert_eq!(unknown.code, HOST_ERROR_CODE_UNKNOWN_CAPABILITY);
+        assert_eq!(unknown.code_enum(), Some(WireErrorCode::UnknownCapability));
     }
 
     #[tokio::test]
@@ -1438,7 +1448,11 @@ mod tests {
                 .invoke(capability, input.clone(), &ctx)
                 .await
                 .expect_err("invalid state contract must be rejected");
-            assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT, "input: {input}");
+            assert_eq!(
+                error.code_enum(),
+                Some(WireErrorCode::InvalidInput),
+                "input: {input}"
+            );
         }
 
         router
@@ -1481,7 +1495,7 @@ mod tests {
             )
             .await
             .expect_err("persisted state must be revalidated at the read boundary");
-        assert_eq!(error.code, HOST_ERROR_CODE_STATE_TOO_LARGE);
+        assert_eq!(error.code_enum(), Some(WireErrorCode::StateTooLarge));
     }
 
     #[tokio::test]
@@ -1499,7 +1513,7 @@ mod tests {
             .invoke("astrcode.workspace.read", json!({ "path": "x" }), &ctx)
             .await
             .unwrap_err();
-        assert_eq!(err.code, HOST_ERROR_CODE_CANCELLED);
+        assert_eq!(err.code_enum(), Some(WireErrorCode::Cancelled));
     }
 
     #[cfg(unix)]
@@ -1554,7 +1568,7 @@ mod tests {
             .expect("cancelled host invoke should finish")
             .expect("host invoke task should not panic")
             .expect_err("process invoke should be cancelled");
-        assert_eq!(error.code, HOST_ERROR_CODE_CANCELLED);
+        assert_eq!(error.code_enum(), Some(WireErrorCode::Cancelled));
         heartbeat_started.expect("descendant process should start before cancellation");
 
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1594,7 +1608,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(err.code, "invalid_request");
+        assert_eq!(err.code_enum(), Some(WireErrorCode::InvalidRequest));
     }
 
     #[tokio::test]
@@ -1702,7 +1716,11 @@ mod tests {
                 .invoke(operation, input.clone(), &ctx)
                 .await
                 .expect_err("guest tool_call_id must be rejected");
-            assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT, "{operation}");
+            assert_eq!(
+                error.code_enum(),
+                Some(WireErrorCode::InvalidInput),
+                "{operation}"
+            );
         }
     }
 
@@ -1799,7 +1817,7 @@ mod tests {
             )
             .await
             .expect_err("cross-variant fields must be rejected");
-        assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT);
+        assert_eq!(error.code_enum(), Some(WireErrorCode::InvalidInput));
     }
 
     #[tokio::test]
@@ -1872,7 +1890,7 @@ mod tests {
                 )
                 .await
                 .expect_err("cancel_turn must enforce its strict request schema");
-            assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT);
+            assert_eq!(error.code_enum(), Some(WireErrorCode::InvalidInput));
         }
         assert_eq!(
             ops.lifecycle_calls
@@ -1932,7 +1950,7 @@ mod tests {
             )
             .await
             .expect_err("source attribution is host-owned");
-        assert_eq!(spoof.code, HOST_ERROR_CODE_INVALID_INPUT);
+        assert_eq!(spoof.code_enum(), Some(WireErrorCode::InvalidInput));
         let created = router
             .invoke("astrcode.session.root.create", json!({}), &root_ctx)
             .await
@@ -1965,7 +1983,7 @@ mod tests {
                 )
                 .await
                 .expect_err("foreign or child session must be rejected");
-            assert_eq!(error.code, HOST_ERROR_CODE_PERMISSION_DENIED);
+            assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
         }
 
         router
@@ -1998,7 +2016,7 @@ mod tests {
             )
             .await
             .expect_err("foreign root submit must be rejected");
-        assert_eq!(denied.code, HOST_ERROR_CODE_PERMISSION_DENIED);
+        assert_eq!(denied.code_enum(), Some(WireErrorCode::PermissionDenied));
         assert_eq!(ops.submits.lock().expect("submits lock").len(), 1);
 
         let missing_grant = router
@@ -2013,7 +2031,10 @@ mod tests {
             )
             .await
             .expect_err("root creation needs input_delivery");
-        assert_eq!(missing_grant.code, HOST_ERROR_CODE_PERMISSION_DENIED);
+        assert_eq!(
+            missing_grant.code_enum(),
+            Some(WireErrorCode::PermissionDenied)
+        );
 
         let missing_extension_identity = router
             .invoke(
@@ -2028,7 +2049,10 @@ mod tests {
             )
             .await
             .expect_err("root creation needs an attributed extension identity");
-        assert_eq!(missing_extension_identity.code, "context_unavailable");
+        assert_eq!(
+            missing_extension_identity.code_enum(),
+            Some(WireErrorCode::ContextUnavailable)
+        );
         let missing_root_backend = router
             .invoke(
                 "astrcode.session.root.create",
@@ -2043,8 +2067,8 @@ mod tests {
             .await
             .expect_err("root creation needs session operations");
         assert_eq!(
-            missing_root_backend.code,
-            HOST_ERROR_CODE_BACKEND_UNAVAILABLE
+            missing_root_backend.code_enum(),
+            Some(WireErrorCode::BackendUnavailable)
         );
 
         let history_ctx = InvokeContext {
@@ -2099,7 +2123,7 @@ mod tests {
             )
             .await
             .expect_err("zero event limit must be rejected");
-        assert_eq!(invalid_limit.code, HOST_ERROR_CODE_INVALID_INPUT);
+        assert_eq!(invalid_limit.code_enum(), Some(WireErrorCode::InvalidInput));
         let invalid_cursor = router
             .invoke(
                 "astrcode.session.read_events",
@@ -2108,7 +2132,10 @@ mod tests {
             )
             .await
             .expect_err("non-numeric event cursor must be rejected");
-        assert_eq!(invalid_cursor.code, HOST_ERROR_CODE_INVALID_INPUT);
+        assert_eq!(
+            invalid_cursor.code_enum(),
+            Some(WireErrorCode::InvalidInput)
+        );
         let missing_context = router
             .invoke(
                 "astrcode.session.read_events",
@@ -2120,7 +2147,10 @@ mod tests {
             )
             .await
             .expect_err("event history needs caller session context");
-        assert_eq!(missing_context.code, "context_unavailable");
+        assert_eq!(
+            missing_context.code_enum(),
+            Some(WireErrorCode::ContextUnavailable)
+        );
         let missing_backend = HostRouter::from_backends(HostBackends::default())
             .invoke(
                 "astrcode.session.read_events",
@@ -2129,7 +2159,10 @@ mod tests {
             )
             .await
             .expect_err("event history needs event reader");
-        assert_eq!(missing_backend.code, HOST_ERROR_CODE_BACKEND_UNAVAILABLE);
+        assert_eq!(
+            missing_backend.code_enum(),
+            Some(WireErrorCode::BackendUnavailable)
+        );
     }
 
     #[tokio::test]
@@ -2151,7 +2184,7 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert_eq!(err.code, HOST_ERROR_CODE_CANCELLED);
+        assert_eq!(err.code_enum(), Some(WireErrorCode::Cancelled));
     }
 
     #[tokio::test]
@@ -2236,7 +2269,7 @@ mod tests {
             )
             .await
             .expect_err("legacy string-only messages must not be silently coerced");
-        assert_eq!(legacy.code, HOST_ERROR_CODE_INVALID_INPUT);
+        assert_eq!(legacy.code_enum(), Some(WireErrorCode::InvalidInput));
     }
 
     #[tokio::test]
@@ -2303,7 +2336,7 @@ mod tests {
         let error = invoke
             .await
             .expect_err("cancellation should end the invoke");
-        assert_eq!(error.code, HOST_ERROR_CODE_CANCELLED);
+        assert_eq!(error.code_enum(), Some(WireErrorCode::Cancelled));
         assert!(
             llm_dropped.load(Ordering::SeqCst),
             "cancelling the caller must drop LlmProvider::generate"

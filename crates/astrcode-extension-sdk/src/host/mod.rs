@@ -7,6 +7,7 @@ pub(crate) mod schema;
 
 use std::sync::Arc;
 
+use astrcode_core::wire::WireErrorCode;
 pub use client::{
     ExtensionHttpClient, ModelClient, NetworkClient, ProcessClient, SessionControlClient,
     SessionHistoryClient, SessionInspectClient, SessionStateClient, WorkspaceClient,
@@ -85,7 +86,7 @@ impl ExtensionHost {
             )?;
         }
         Err(HostError::new(
-            HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+            WireErrorCode::BackendUnavailable,
             "session_control host domain is unavailable",
         ))
     }
@@ -114,7 +115,7 @@ impl ExtensionHost {
         .any(|operation| self.inner.scope.is_operation_available(operation));
         if !available {
             return Err(HostError::new(
-                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                WireErrorCode::BackendUnavailable,
                 "session_state host domain is unavailable",
             ));
         }
@@ -222,15 +223,14 @@ impl HostClientTransport for ExtensionHost {
 pub mod internal {
     use std::{any::Any, collections::BTreeMap, sync::Arc, time::Duration};
 
+    use astrcode_core::wire::WireErrorCode;
     use async_trait::async_trait;
     use serde_json::Value;
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        ExtensionCapability, ExtensionHost, ExtensionHostInner,
-        HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
-        HOST_ERROR_CODE_PERMISSION_DENIED, HOST_OPERATION_SPECS, HostError, HostOperation,
-        operation::HostContextRequirement,
+        ExtensionCapability, ExtensionHost, ExtensionHostInner, HOST_OPERATION_SPECS, HostError,
+        HostOperation, operation::HostContextRequirement,
     };
 
     /// Host-only redirect policy used by the outbound-network backend port.
@@ -333,7 +333,7 @@ pub mod internal {
             self.preflight_context(operation.context_requirement(), operation.wire_name())?;
             if !self.available[operation as usize] {
                 return Err(HostError::new(
-                    HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                    WireErrorCode::BackendUnavailable,
                     format!("{} backend is unavailable", operation.wire_name()),
                 ));
             }
@@ -398,7 +398,7 @@ pub mod internal {
                     .collect::<Vec<_>>()
                     .join(" or ");
                 return Err(HostError::new(
-                    HOST_ERROR_CODE_PERMISSION_DENIED,
+                    WireErrorCode::PermissionDenied,
                     format!("{target} requires declared capability {required}"),
                 ));
             }
@@ -411,7 +411,7 @@ pub mod internal {
                 Ok(())
             } else {
                 Err(HostError::new(
-                    HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                    WireErrorCode::BackendUnavailable,
                     format!("{target} host domain is unavailable"),
                 ))
             }
@@ -427,11 +427,11 @@ pub mod internal {
                 HostContextRequirement::Session if self.session_context_available => Ok(()),
                 HostContextRequirement::Workspace if self.workspace_context_available => Ok(()),
                 HostContextRequirement::Session => Err(HostError::new(
-                    HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                    WireErrorCode::ContextUnavailable,
                     format!("{target} requires a session-scoped call context"),
                 )),
                 HostContextRequirement::Workspace => Err(HostError::new(
-                    HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                    WireErrorCode::ContextUnavailable,
                     format!("{target} requires a workspace-scoped call context"),
                 )),
             }
@@ -454,7 +454,7 @@ pub mod internal {
                 return Ok(());
             }
             Err(HostError::new(
-                HOST_ERROR_CODE_PERMISSION_DENIED,
+                WireErrorCode::PermissionDenied,
                 format!(
                     "{target} requires declared capability {}",
                     crate::s5r::capability_to_wire(capability)

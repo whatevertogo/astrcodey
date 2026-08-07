@@ -2,10 +2,9 @@
 
 use std::io::Read as _;
 
-use astrcode_core::config::defaults::extension_data_dir;
+use astrcode_core::{config::defaults::extension_data_dir, wire::WireErrorCode};
 use astrcode_extension_sdk::{
     host::{
-        HOST_ERROR_CODE_EMIT_FAILED, HOST_ERROR_CODE_STATE_TOO_LARGE,
         HOST_SESSION_STATE_VALUE_MAX_BYTES, HostAcknowledgement, HostEventEmitRequest,
         HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
     },
@@ -68,7 +67,7 @@ async fn read_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPa
             .map_err(io_error)?;
         if bytes.len() > HOST_SESSION_STATE_VALUE_MAX_BYTES {
             return Err(ErrorPayload::new(
-                HOST_ERROR_CODE_STATE_TOO_LARGE,
+                WireErrorCode::StateTooLarge,
                 format!("stored session state exceeds {HOST_SESSION_STATE_VALUE_MAX_BYTES} bytes"),
             ));
         }
@@ -112,6 +111,6 @@ fn emit_event(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload>
         request.schema_version,
         request.payload,
     )
-    .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_EMIT_FAILED, error.to_string()))?;
+    .map_err(|error| ErrorPayload::new(WireErrorCode::EmitFailed, error.to_string()))?;
     serialize_wire_response(HostAcknowledgement::accepted(), "session.emit_event")
 }

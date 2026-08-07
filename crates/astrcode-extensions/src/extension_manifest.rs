@@ -9,8 +9,8 @@ use astrcode_extension_sdk::{
         ExtensionHttpRoute, HookMode, SlashCommand, fixed_hook_mode, hook_mode_is_supported,
     },
     s5r::{
-        HandlerDescriptor, WIRE_FEATURE_PARENT_INVOKE_ID, capability_from_wire, event_from_name,
-        event_to_name,
+        HandlerDescriptor, HandlerId, WIRE_FEATURE_PARENT_INVOKE_ID, capability_from_wire,
+        event_from_name, event_to_name,
         manifest::{
             InitializeManifest, ManifestCommand, ManifestHook, ManifestHttpRoute, ManifestTool,
         },
@@ -213,26 +213,21 @@ fn registration_from_manifest(
     })
 }
 
-/// 解析 `<extension_id>:<kind>:<name>` 形式的 handler 标识，校验归属、kind 白名单与
-/// 非空 name。构造端与解析端共用同一格式，避免两处漂移。
+/// 解析 `<extension_id>:<kind>:<name>` 形式的 handler 标识，校验归属与格式。
+/// 格式本身由 [`HandlerId`] 单点定义；这里只补充「必须归属调用方扩展」的宿主约束。
 pub(crate) fn parse_handler_id<'a>(
     extension_id: &str,
     handler_id: &'a str,
 ) -> Result<(&'a str, &'a str), String> {
-    let prefix = format!("{extension_id}:");
-    let remainder = handler_id.strip_prefix(&prefix).ok_or_else(|| {
-        format!("handler {handler_id} must be attributed to extension {extension_id}")
-    })?;
-    let (kind, name) = remainder
-        .split_once(':')
+    let parsed = HandlerId::split(handler_id)
         .ok_or_else(|| format!("handler {handler_id} must use <extension>:<kind>:<name>"))?;
-    if !matches!(kind, "tool" | "hook" | "command" | "http") {
-        return Err(format!("handler {handler_id} has unsupported kind {kind}"));
+    let (owner, kind, name) = parsed;
+    if owner != extension_id {
+        return Err(format!(
+            "handler {handler_id} must be attributed to extension {extension_id}"
+        ));
     }
-    if name.is_empty() {
-        return Err(format!("handler {handler_id} must have a non-empty name"));
-    }
-    Ok((kind, name))
+    Ok((kind.as_str(), name))
 }
 
 fn validate_handler_id_kind(

@@ -1,40 +1,7 @@
+use astrcode_core::wire::WireErrorCode;
 use serde_json::Value;
 
 use crate::s5r::ErrorPayload;
-
-pub const HOST_ERROR_CODE_PERMISSION_DENIED: &str = "permission_denied";
-pub const HOST_ERROR_CODE_BACKEND_UNAVAILABLE: &str = "backend_unavailable";
-pub const HOST_ERROR_CODE_CONTEXT_UNAVAILABLE: &str = "context_unavailable";
-pub const HOST_ERROR_CODE_INVALID_INPUT: &str = "invalid_input";
-pub const HOST_ERROR_CODE_CANCELLED: &str = "cancelled";
-pub const HOST_ERROR_CODE_TIMEOUT: &str = "timeout";
-pub const HOST_ERROR_CODE_HOST_NOT_READY: &str = "host_not_ready";
-pub const HOST_ERROR_CODE_PEER_BUSY: &str = "peer_busy";
-pub const HOST_ERROR_CODE_PEER_CLOSED: &str = "peer_closed";
-pub const HOST_ERROR_CODE_TRANSPORT: &str = "transport_error";
-pub const HOST_ERROR_CODE_IO_ERROR: &str = "io_error";
-pub const HOST_ERROR_CODE_UNKNOWN_CAPABILITY: &str = "unknown_capability";
-pub const HOST_ERROR_CODE_STATE_TOO_LARGE: &str = "state_too_large";
-pub const HOST_ERROR_CODE_READ_FAILED: &str = "read_failed";
-pub const HOST_ERROR_CODE_SESSION_NOT_FOUND: &str = "session_not_found";
-pub const HOST_ERROR_CODE_FILE_TOO_LARGE: &str = "file_too_large";
-pub const HOST_ERROR_CODE_INVALID_REQUEST: &str = "invalid_request";
-pub const HOST_ERROR_CODE_PROCESS_FAILED: &str = "process_failed";
-pub const HOST_ERROR_CODE_SPAWN_FAILED: &str = "spawn_failed";
-pub const HOST_ERROR_CODE_STDIN_FAILED: &str = "stdin_failed";
-pub const HOST_ERROR_CODE_STDOUT_FAILED: &str = "stdout_failed";
-pub const HOST_ERROR_CODE_STDERR_FAILED: &str = "stderr_failed";
-pub const HOST_ERROR_CODE_HOST_RUNTIME_FAILED: &str = "host_runtime_failed";
-pub const HOST_ERROR_CODE_INVALID_MANIFEST: &str = "invalid_manifest";
-pub const HOST_ERROR_CODE_NOT_INITIALIZED: &str = "not_initialized";
-pub const HOST_ERROR_CODE_EMIT_FAILED: &str = "emit_failed";
-pub const HOST_ERROR_CODE_DISPATCH_FAILED: &str = "dispatch_failed";
-pub const HOST_ERROR_CODE_UNKNOWN_PARENT_INVOKE: &str = "unknown_parent_invoke";
-pub const HOST_ERROR_CODE_REENTRANCY_EXCEEDED: &str = "reentrancy_exceeded";
-pub const HOST_ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION: &str = "unsupported_protocol_version";
-pub const HOST_ERROR_CODE_UNSUPPORTED: &str = "unsupported";
-pub const HOST_ERROR_CODE_SERIALIZATION_FAILED: &str = "serialization_failed";
-pub const HOST_ERROR_CODE_INVALID_RESPONSE: &str = "invalid_host_response";
 
 /// Stable high-level classification for common host failures.
 ///
@@ -90,19 +57,25 @@ impl HostError {
     }
 
     pub fn class(&self) -> HostErrorClass {
-        match self.code.as_str() {
-            HOST_ERROR_CODE_PERMISSION_DENIED => HostErrorClass::PermissionDenied,
-            HOST_ERROR_CODE_BACKEND_UNAVAILABLE => HostErrorClass::BackendUnavailable,
-            HOST_ERROR_CODE_CONTEXT_UNAVAILABLE => HostErrorClass::ContextUnavailable,
-            HOST_ERROR_CODE_INVALID_INPUT => HostErrorClass::InvalidInput,
-            HOST_ERROR_CODE_CANCELLED => HostErrorClass::Cancelled,
-            HOST_ERROR_CODE_TIMEOUT => HostErrorClass::Timeout,
-            HOST_ERROR_CODE_HOST_NOT_READY
-            | HOST_ERROR_CODE_PEER_BUSY
-            | HOST_ERROR_CODE_PEER_CLOSED
-            | HOST_ERROR_CODE_TRANSPORT => HostErrorClass::Transport,
+        match self.code_enum() {
+            Some(WireErrorCode::PermissionDenied) => HostErrorClass::PermissionDenied,
+            Some(WireErrorCode::BackendUnavailable) => HostErrorClass::BackendUnavailable,
+            Some(WireErrorCode::ContextUnavailable) => HostErrorClass::ContextUnavailable,
+            Some(WireErrorCode::InvalidInput) => HostErrorClass::InvalidInput,
+            Some(WireErrorCode::Cancelled) => HostErrorClass::Cancelled,
+            Some(WireErrorCode::Timeout) => HostErrorClass::Timeout,
+            Some(
+                WireErrorCode::HostNotReady
+                | WireErrorCode::PeerBusy
+                | WireErrorCode::PeerClosed
+                | WireErrorCode::Transport,
+            ) => HostErrorClass::Transport,
             _ => HostErrorClass::Other,
         }
+    }
+
+    pub fn code_enum(&self) -> Option<WireErrorCode> {
+        WireErrorCode::parse(&self.code)
     }
 
     pub fn is_permission_denied(&self) -> bool {
@@ -172,28 +145,28 @@ mod tests {
     fn common_boundary_failures_have_stable_classifications() {
         let cases = [
             (
-                HOST_ERROR_CODE_PERMISSION_DENIED,
+                WireErrorCode::PermissionDenied,
                 HostErrorClass::PermissionDenied,
             ),
             (
-                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                WireErrorCode::BackendUnavailable,
                 HostErrorClass::BackendUnavailable,
             ),
             (
-                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                WireErrorCode::ContextUnavailable,
                 HostErrorClass::ContextUnavailable,
             ),
-            (HOST_ERROR_CODE_INVALID_INPUT, HostErrorClass::InvalidInput),
-            (HOST_ERROR_CODE_CANCELLED, HostErrorClass::Cancelled),
-            (HOST_ERROR_CODE_TIMEOUT, HostErrorClass::Timeout),
-            (HOST_ERROR_CODE_HOST_NOT_READY, HostErrorClass::Transport),
-            (HOST_ERROR_CODE_PEER_BUSY, HostErrorClass::Transport),
-            (HOST_ERROR_CODE_PEER_CLOSED, HostErrorClass::Transport),
-            (HOST_ERROR_CODE_TRANSPORT, HostErrorClass::Transport),
+            (WireErrorCode::InvalidInput, HostErrorClass::InvalidInput),
+            (WireErrorCode::Cancelled, HostErrorClass::Cancelled),
+            (WireErrorCode::Timeout, HostErrorClass::Timeout),
+            (WireErrorCode::HostNotReady, HostErrorClass::Transport),
+            (WireErrorCode::PeerBusy, HostErrorClass::Transport),
+            (WireErrorCode::PeerClosed, HostErrorClass::Transport),
+            (WireErrorCode::Transport, HostErrorClass::Transport),
         ];
 
         for (code, expected) in cases {
-            assert_eq!(HostError::new(code, "failure").class(), expected);
+            assert_eq!(HostError::new(code.as_str(), "failure").class(), expected);
         }
     }
 }

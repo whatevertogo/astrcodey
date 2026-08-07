@@ -8,13 +8,11 @@ use std::{
     time::Duration,
 };
 
+use astrcode_core::wire::WireErrorCode;
 use astrcode_extension_sdk::{
     host::{
-        HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CANCELLED,
-        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_PERMISSION_DENIED,
-        HOST_ERROR_CODE_SERIALIZATION_FAILED, HOST_ERROR_CODE_TIMEOUT, HOST_NETWORK_MAX_BYTES,
-        HOST_NETWORK_MAX_TIMEOUT_MS, HostNetworkRedirectPolicy, HostNetworkRequest,
-        HostNetworkResponse,
+        HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS, HostNetworkRedirectPolicy,
+        HostNetworkRequest, HostNetworkResponse,
         internal::{
             NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkErrorKind,
             OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
@@ -82,13 +80,13 @@ impl NetworkGroup {
         let request: HostNetworkRequest = parse_wire_request(&input, "network.client")?;
         if !(1..=HOST_NETWORK_MAX_TIMEOUT_MS).contains(&request.timeout_ms) {
             return Err(ErrorPayload::new(
-                HOST_ERROR_CODE_INVALID_INPUT,
+                WireErrorCode::InvalidInput,
                 format!("timeout_ms must be between 1 and {HOST_NETWORK_MAX_TIMEOUT_MS}"),
             ));
         }
         if request.max_bytes > HOST_NETWORK_MAX_BYTES {
             return Err(ErrorPayload::new(
-                HOST_ERROR_CODE_INVALID_INPUT,
+                WireErrorCode::InvalidInput,
                 format!("max_bytes must not exceed {HOST_NETWORK_MAX_BYTES}"),
             ));
         }
@@ -120,31 +118,29 @@ impl NetworkGroup {
             headers: response.headers,
             body: response.body,
         })
-        .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_SERIALIZATION_FAILED, error.to_string()))
+        .map_err(|error| ErrorPayload::new(WireErrorCode::SerializationFailed, error.to_string()))
     }
 }
 
 fn network_error_payload(error: OutboundNetworkError) -> ErrorPayload {
     let (code, kind, retryable) = match error.kind {
         OutboundNetworkErrorKind::InvalidRequest => {
-            (HOST_ERROR_CODE_INVALID_INPUT, "invalid_request", false)
+            (WireErrorCode::InvalidInput, "invalid_request", false)
         },
-        OutboundNetworkErrorKind::PermissionDenied => (
-            HOST_ERROR_CODE_PERMISSION_DENIED,
-            "permission_denied",
-            false,
-        ),
+        OutboundNetworkErrorKind::PermissionDenied => {
+            (WireErrorCode::PermissionDenied, "permission_denied", false)
+        },
         OutboundNetworkErrorKind::Unavailable => {
-            (HOST_ERROR_CODE_BACKEND_UNAVAILABLE, "unavailable", true)
+            (WireErrorCode::BackendUnavailable, "unavailable", true)
         },
         OutboundNetworkErrorKind::RequestFailed => {
-            ("network_request_failed", "request_failed", true)
+            (WireErrorCode::NetworkRequestFailed, "request_failed", true)
         },
-        OutboundNetworkErrorKind::Timeout => (HOST_ERROR_CODE_TIMEOUT, "timeout", true),
+        OutboundNetworkErrorKind::Timeout => (WireErrorCode::Timeout, "timeout", true),
         OutboundNetworkErrorKind::ResponseTooLarge => {
-            ("response_too_large", "response_too_large", false)
+            (WireErrorCode::ResponseTooLarge, "response_too_large", false)
         },
-        OutboundNetworkErrorKind::Cancelled => (HOST_ERROR_CODE_CANCELLED, "cancelled", false),
+        OutboundNetworkErrorKind::Cancelled => (WireErrorCode::Cancelled, "cancelled", false),
     };
     let mut payload = ErrorPayload::new(code, error.message).retryable(retryable);
     payload.details = Some(serde_json::json!({ "kind": kind }));

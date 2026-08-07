@@ -1,3 +1,4 @@
+use astrcode_core::wire::WireErrorCode;
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -5,7 +6,6 @@ use serde_json::{Value, json};
 use crate::{
     extension::{ExtensionHttpDispatchRequest, ExtensionHttpResponse},
     host::{
-        HOST_ERROR_CODE_INVALID_RESPONSE, HOST_ERROR_CODE_SERIALIZATION_FAILED,
         HostAcknowledgement, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
         HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput, HostNetworkRequest,
         HostNetworkResponse, HostOperation, HostProcessOutput, HostProcessRequest,
@@ -529,7 +529,7 @@ where
 {
     serde_json::to_value(input).map_err(|error| {
         T::client_error(
-            HOST_ERROR_CODE_SERIALIZATION_FAILED,
+            WireErrorCode::SerializationFailed.as_str(),
             format!(
                 "failed to serialize {} request: {error}",
                 operation.wire_name()
@@ -545,7 +545,7 @@ where
 {
     serde_json::from_value(output).map_err(|error| {
         T::client_error(
-            HOST_ERROR_CODE_INVALID_RESPONSE,
+            WireErrorCode::InvalidResponse.as_str(),
             format!("invalid {} response: {error}", operation.wire_name()),
         )
     })

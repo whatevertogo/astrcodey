@@ -3,14 +3,16 @@ use std::{
     sync::{Arc, RwLock as StdRwLock},
 };
 
-use astrcode_core::{event::EventSender, tool::SessionOperations, types::SessionId};
+use astrcode_core::{
+    event::EventSender, tool::SessionOperations, types::SessionId, wire::WireErrorCode,
+};
 use astrcode_extension_sdk::{
     extension::{
         ExtensionCallContext, ExtensionCapability, ExtensionError, ExtensionEventDecl,
         ExtensionPaths, ExtensionTasks, RuntimeHookCallContext, internal::extension_event_emitter,
     },
     host::{
-        ExtensionHost, HOST_ERROR_CODE_INVALID_RESPONSE, HostError, HostOperation,
+        ExtensionHost, HostError, HostOperation,
         internal::{HostInvoker, HostScope, extension_host},
     },
     s5r::{EventPhase, WireMessage},
@@ -293,7 +295,7 @@ impl HostInvoker for RouterHostInvoker {
                 EventPhase::Failed => {
                     return Err(event.error.map(HostError::from).unwrap_or_else(|| {
                         HostError::new(
-                            HOST_ERROR_CODE_INVALID_RESPONSE,
+                            WireErrorCode::InvalidResponse,
                             format!(
                                 "{} stream failed without an error payload",
                                 operation.wire_name()
@@ -305,7 +307,7 @@ impl HostInvoker for RouterHostInvoker {
             }
         }
         Err(HostError::new(
-            HOST_ERROR_CODE_INVALID_RESPONSE,
+            WireErrorCode::InvalidResponse,
             format!(
                 "{} stream ended without a terminal event",
                 operation.wire_name()

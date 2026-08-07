@@ -2,14 +2,12 @@
 
 use std::sync::Arc;
 
-use astrcode_core::llm::{LlmError, LlmEvent, LlmMessage, LlmProvider};
+use astrcode_core::{
+    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider},
+    wire::WireErrorCode,
+};
 use astrcode_extension_sdk::{
-    host::{
-        HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CANCELLED,
-        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_TIMEOUT, HOST_ERROR_CODE_TRANSPORT,
-        HOST_ERROR_CODE_UNSUPPORTED, HostLlmChatOutput, HostLlmChatRequest,
-        HostLlmCollectedStreamOutput, HostLlmTextDelta,
-    },
+    host::{HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput, HostLlmTextDelta},
     s5r::ErrorPayload,
 };
 use serde_json::Value;
@@ -71,7 +69,7 @@ impl LlmGroup {
         };
         let provider = provider.ok_or_else(|| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                WireErrorCode::BackendUnavailable,
                 format!("{model_label} not configured"),
             )
         })?;
@@ -88,14 +86,14 @@ async fn invoke_llm_chat(
 ) -> Result<Value, ErrorPayload> {
     let request = serde_json::from_value::<HostLlmChatRequest>(input).map_err(|error| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             format!("invalid {model_label}.chat request: {error}"),
         )
     })?;
 
     if request.messages.is_empty() {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             "messages must contain at least one typed LLM message",
         ));
     }
@@ -107,11 +105,11 @@ async fn invoke_llm_chat(
         cancel_token,
         || {
             ErrorPayload::new(
-                HOST_ERROR_CODE_TIMEOUT,
+                WireErrorCode::Timeout,
                 format!("{model_label}.chat timed out"),
             )
         },
-        || ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, "invoke cancelled"),
+        || ErrorPayload::new(WireErrorCode::Cancelled, "invoke cancelled"),
     )
     .await
 }
@@ -141,7 +139,7 @@ async fn run_host_llm_chat(
             },
             LlmEvent::Done { .. } => break,
             LlmEvent::Error { message } => {
-                let mut payload = ErrorPayload::new("llm_stream_error", message);
+                let mut payload = ErrorPayload::new(WireErrorCode::LlmStreamError, message);
                 payload.details = Some(serde_json::json!({ "kind": "stream_error" }));
                 return Err(payload);
             },
@@ -169,27 +167,8 @@ async fn run_host_llm_chat(
 }
 
 fn llm_error_payload(error: LlmError) -> ErrorPayload {
-    let code = match &error {
-        LlmError::InvalidApiKey { .. } => "invalid_api_key",
-        LlmError::ModelNotFound { .. } => "model_not_found",
-        LlmError::InvalidParameter { .. } => "invalid_parameter",
-        LlmError::QuotaExceeded { .. } => "quota_exceeded",
-        LlmError::ContextWindowExceeded { .. } => "context_window_exceeded",
-        LlmError::RateLimited { .. } => "rate_limited",
-        LlmError::ClientError { .. } => "client_error",
-        LlmError::ServerError { .. } => "server_error",
-        LlmError::Transport { .. } => HOST_ERROR_CODE_TRANSPORT,
-        LlmError::StreamDisconnected { .. } => "stream_disconnected",
-        LlmError::StreamParse { .. } => "stream_parse",
-        LlmError::ContentFilter { .. } => "content_filtered",
-        LlmError::TokenLimit { .. } => "token_limit",
-        LlmError::EmptyResponse => "empty_response",
-        LlmError::Interrupted => HOST_ERROR_CODE_CANCELLED,
-        LlmError::Unsupported { .. } => HOST_ERROR_CODE_UNSUPPORTED,
-    };
-    let retryable = error.is_retryable();
     let details = serde_json::to_value(&error).ok();
-    let mut payload = ErrorPayload::new(code, error.to_string()).retryable(retryable);
+    let mut payload = super::wire_payload(error);
     payload.details = details;
     payload
 }
@@ -205,7 +184,7 @@ mod tests {
             retry_after_ms: Some(250),
             message: "slow down".into(),
         });
-        assert_eq!(rate_limited.code, "rate_limited");
+        assert_eq!(rate_limited.code_enum(), Some(WireErrorCode::RateLimited));
         assert!(rate_limited.retryable);
         assert_eq!(
             rate_limited.details.as_ref().unwrap()["retry_after_ms"],
@@ -213,14 +192,14 @@ mod tests {
         );
 
         let cancelled = llm_error_payload(LlmError::Interrupted);
-        assert_eq!(cancelled.code, HOST_ERROR_CODE_CANCELLED);
+        assert_eq!(cancelled.code_enum(), Some(WireErrorCode::Cancelled));
         assert!(!cancelled.retryable);
         assert_eq!(cancelled.details.as_ref().unwrap()["kind"], "interrupted");
 
         let unsupported = llm_error_payload(LlmError::Unsupported {
             message: "counting".into(),
         });
-        assert_eq!(unsupported.code, HOST_ERROR_CODE_UNSUPPORTED);
+        assert_eq!(unsupported.code_enum(), Some(WireErrorCode::Unsupported));
         assert!(!unsupported.retryable);
     }
 }

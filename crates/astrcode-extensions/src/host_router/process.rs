@@ -2,14 +2,9 @@
 
 use std::{process::Stdio, time::Duration};
 
+use astrcode_core::wire::WireErrorCode;
 use astrcode_extension_sdk::{
-    host::{
-        HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CANCELLED,
-        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_PROCESS_FAILED,
-        HOST_ERROR_CODE_SPAWN_FAILED, HOST_ERROR_CODE_STDERR_FAILED, HOST_ERROR_CODE_STDIN_FAILED,
-        HOST_ERROR_CODE_STDOUT_FAILED, HOST_ERROR_CODE_TIMEOUT, HOST_PROCESS_DEFAULT_TIMEOUT_MS,
-        HOST_PROCESS_MAX_TIMEOUT_MS, HostProcessRequest,
-    },
+    host::{HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS, HostProcessRequest},
     s5r::ErrorPayload,
 };
 use serde_json::{Value, json};
@@ -113,7 +108,7 @@ impl ProcessRunner {
         let _permit = self.acquire_permit(deadline, cancel_token).await?;
         if request.command.is_empty() {
             return Err(ErrorPayload::new(
-                HOST_ERROR_CODE_INVALID_INPUT,
+                WireErrorCode::InvalidInput,
                 "command must not be empty",
             ));
         }
@@ -155,18 +150,18 @@ impl ProcessRunner {
 
         let mut child = process
             .spawn()
-            .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_SPAWN_FAILED, error.to_string()))?;
+            .map_err(|error| ErrorPayload::new(WireErrorCode::SpawnFailed, error.to_string()))?;
         let child_pid = child.id();
         let mut child_stdin = child.stdin.take();
         let mut stdout = child.stdout.take().ok_or_else(|| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_PROCESS_FAILED,
+                WireErrorCode::ProcessFailed,
                 "child stdout pipe unavailable",
             )
         })?;
         let mut stderr = child.stderr.take().ok_or_else(|| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_PROCESS_FAILED,
+                WireErrorCode::ProcessFailed,
                 "child stderr pipe unavailable",
             )
         })?;
@@ -174,7 +169,7 @@ impl ProcessRunner {
         let write_stdin = async move {
             if let (Some(content), Some(mut pipe)) = (stdin, child_stdin.take()) {
                 pipe.write_all(content.as_bytes()).await.map_err(|error| {
-                    ErrorPayload::new(HOST_ERROR_CODE_STDIN_FAILED, error.to_string())
+                    ErrorPayload::new(WireErrorCode::StdinFailed, error.to_string())
                 })?;
             }
             Ok::<(), ErrorPayload>(())
@@ -208,7 +203,7 @@ impl ProcessRunner {
                                 );
                             },
                             Err(error) => {
-                                return Err(ErrorPayload::new(HOST_ERROR_CODE_STDOUT_FAILED, error.to_string()));
+                                return Err(ErrorPayload::new(WireErrorCode::StdoutFailed, error.to_string()));
                             },
                         }
                     },
@@ -228,7 +223,7 @@ impl ProcessRunner {
                                 );
                             },
                             Err(error) => {
-                                return Err(ErrorPayload::new(HOST_ERROR_CODE_STDERR_FAILED, error.to_string()));
+                                return Err(ErrorPayload::new(WireErrorCode::StderrFailed, error.to_string()));
                             },
                         }
                     },
@@ -246,7 +241,7 @@ impl ProcessRunner {
         let collect = async {
             let ((), output) = tokio::try_join!(write_stdin, collect_output)?;
             let status = child.wait().await.map_err(|error| {
-                ErrorPayload::new(HOST_ERROR_CODE_PROCESS_FAILED, error.to_string())
+                ErrorPayload::new(WireErrorCode::ProcessFailed, error.to_string())
             })?;
             Ok::<_, ErrorPayload>((output, status))
         };
@@ -255,7 +250,7 @@ impl ProcessRunner {
             collect,
             deadline,
             cancel_token,
-            || ErrorPayload::new(HOST_ERROR_CODE_TIMEOUT, "process timed out"),
+            || ErrorPayload::new(WireErrorCode::Timeout, "process timed out"),
             cancelled,
         )
         .await;
@@ -287,10 +282,7 @@ impl ProcessRunner {
     ) -> Result<SemaphorePermit<'a>, ErrorPayload> {
         let acquire = async {
             self.permits.acquire().await.map_err(|_| {
-                ErrorPayload::new(
-                    HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
-                    "process runner stopped",
-                )
+                ErrorPayload::new(WireErrorCode::BackendUnavailable, "process runner stopped")
             })
         };
         super::run_until_deadline(
@@ -299,7 +291,7 @@ impl ProcessRunner {
             cancel_token,
             || {
                 ErrorPayload::new(
-                    HOST_ERROR_CODE_TIMEOUT,
+                    WireErrorCode::Timeout,
                     "process timed out waiting for capacity",
                 )
             },
@@ -332,12 +324,12 @@ fn resolve_cwd(
     relative_cwd: Option<&str>,
 ) -> Result<std::path::PathBuf, ErrorPayload> {
     let root = working_dir.ok_or_else(|| {
-        ErrorPayload::new(HOST_ERROR_CODE_BACKEND_UNAVAILABLE, "working_dir not set")
+        ErrorPayload::new(WireErrorCode::BackendUnavailable, "working_dir not set")
     })?;
     let path = canonicalize_workspace_path(root, relative_cwd.unwrap_or("."))?;
     if !path.is_dir() {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             "process cwd must be an existing directory",
         ));
     }
@@ -348,7 +340,7 @@ fn validated_timeout(timeout_ms: Option<u64>) -> Result<Duration, ErrorPayload> 
     let timeout_ms = timeout_ms.unwrap_or(HOST_PROCESS_DEFAULT_TIMEOUT_MS);
     if !(1..=HOST_PROCESS_MAX_TIMEOUT_MS).contains(&timeout_ms) {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             format!("timeout_ms must be between 1 and {HOST_PROCESS_MAX_TIMEOUT_MS}"),
         ));
     }
@@ -364,7 +356,7 @@ fn ensure_spawn_active(
     }
     if Instant::now() >= deadline {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_TIMEOUT,
+            WireErrorCode::Timeout,
             "process timed out",
         ));
     }
@@ -383,7 +375,7 @@ fn safe_child_env() -> impl Iterator<Item = (String, String)> {
 }
 
 fn cancelled() -> ErrorPayload {
-    ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, "process cancelled")
+    ErrorPayload::new(WireErrorCode::Cancelled, "process cancelled")
 }
 
 #[cfg(unix)]
@@ -401,7 +393,6 @@ fn kill_process_group(_pid: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_sdk::host::HOST_ERROR_CODE_PERMISSION_DENIED;
     use tempfile::tempdir;
 
     use super::*;
@@ -412,11 +403,11 @@ mod tests {
         token.cancel();
         let cancelled = ensure_spawn_active(Instant::now() + Duration::from_secs(1), Some(&token))
             .expect_err("cancelled process must not spawn");
-        assert_eq!(cancelled.code, HOST_ERROR_CODE_CANCELLED);
+        assert_eq!(cancelled.code_enum(), Some(WireErrorCode::Cancelled));
 
         let timed_out = ensure_spawn_active(Instant::now() - Duration::from_secs(1), None)
             .expect_err("expired process must not spawn");
-        assert_eq!(timed_out.code, HOST_ERROR_CODE_TIMEOUT);
+        assert_eq!(timed_out.code_enum(), Some(WireErrorCode::Timeout));
     }
 
     #[cfg(unix)]
@@ -469,6 +460,6 @@ mod tests {
             .await
             .expect_err("parent cwd must be rejected");
 
-        assert_eq!(error.code, HOST_ERROR_CODE_PERMISSION_DENIED);
+        assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
     }
 }

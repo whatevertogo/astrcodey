@@ -2,12 +2,10 @@
 
 use std::ops::Deref;
 
+use astrcode_core::wire::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::ExtensionCapability,
-    host::{
-        HOST_ERROR_CODE_PERMISSION_DENIED, HOST_ERROR_CODE_UNKNOWN_CAPABILITY,
-        HOST_OPERATION_SPECS, HostOperation, HostOperationSpec,
-    },
+    host::{HOST_OPERATION_SPECS, HostOperation, HostOperationSpec},
     s5r::{CapabilityDescriptor, ErrorPayload},
 };
 
@@ -254,7 +252,7 @@ const HOST_CAPABILITY_SPECS: [HostCapabilitySpec; HostOperation::COUNT] = [
 pub(super) fn lookup(name: &str) -> Result<&'static HostCapabilitySpec, ErrorPayload> {
     let operation = HostOperation::from_wire_name(name).ok_or_else(|| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_UNKNOWN_CAPABILITY,
+            WireErrorCode::UnknownCapability,
             format!("unknown astrcode capability: {name}"),
         )
     })?;
@@ -330,7 +328,7 @@ pub(super) fn authorize(
         return Ok(());
     }
     Err(ErrorPayload::new(
-        HOST_ERROR_CODE_PERMISSION_DENIED,
+        WireErrorCode::PermissionDenied,
         format!(
             "{} requires declared capability {}",
             spec.name,
@@ -386,8 +384,8 @@ mod tests {
             if let Some(required) = spec.required {
                 assert!(authorize(spec, &[required]).is_ok());
                 assert_eq!(
-                    authorize(spec, &[]).expect_err("missing grant").code,
-                    "permission_denied"
+                    authorize(spec, &[]).expect_err("missing grant").code_enum(),
+                    Some(WireErrorCode::PermissionDenied)
                 );
             } else {
                 assert!(authorize(spec, &[]).is_ok());
@@ -446,8 +444,8 @@ mod tests {
         assert_eq!(
             lookup("astrcode.unknown")
                 .expect_err("unknown operation")
-                .code,
-            HOST_ERROR_CODE_UNKNOWN_CAPABILITY
+                .code_enum(),
+            Some(WireErrorCode::UnknownCapability)
         );
     }
 }

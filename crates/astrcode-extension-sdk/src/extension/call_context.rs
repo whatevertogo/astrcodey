@@ -8,11 +8,11 @@ use std::{
     },
 };
 
-use astrcode_core::types::SessionId;
+use astrcode_core::{types::SessionId, wire::WireErrorCode};
 use tokio_util::sync::CancellationToken;
 
 use super::{ExtensionConfig, ExtensionEventEmitter, ExtensionPaths, ExtensionTasks};
-use crate::host::{ExtensionHost, HOST_ERROR_CODE_CONTEXT_UNAVAILABLE, HostError};
+use crate::host::{ExtensionHost, HostError};
 
 /// Facts and scoped capabilities shared by extension calls.
 ///
@@ -98,7 +98,7 @@ impl ExtensionCallContext {
     pub fn require_session_id(&self) -> Result<&SessionId, HostError> {
         self.session_id().ok_or_else(|| {
             HostError::new(
-                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                WireErrorCode::ContextUnavailable,
                 "extension call requires a session-scoped context",
             )
         })
@@ -116,7 +116,7 @@ impl ExtensionCallContext {
     pub fn require_working_dir(&self) -> Result<&Path, HostError> {
         self.working_dir().ok_or_else(|| {
             HostError::new(
-                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                WireErrorCode::ContextUnavailable,
                 "extension call requires a workspace-scoped context",
             )
         })

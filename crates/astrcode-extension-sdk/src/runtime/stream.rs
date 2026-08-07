@@ -1,5 +1,6 @@
 //! 流式 invoke 事件流。
 
+use astrcode_core::wire::WireErrorCode;
 use tokio::sync::mpsc;
 
 use crate::s5r::{ErrorPayload, EventMsg, EventPhase};
@@ -42,7 +43,10 @@ impl EventStream {
                 },
                 EventPhase::Failed => {
                     return Err(event.error.unwrap_or_else(|| {
-                        ErrorPayload::new("stream_failed", "stream failed without error")
+                        ErrorPayload::new(
+                            WireErrorCode::StreamFailed,
+                            "stream failed without error",
+                        )
                     }));
                 },
                 EventPhase::Delta => {
@@ -54,7 +58,7 @@ impl EventStream {
             }
         }
         Err(ErrorPayload::new(
-            "stream_closed",
+            WireErrorCode::StreamClosed,
             "stream closed before completion",
         ))
     }

@@ -10,14 +10,10 @@ use std::{
     },
 };
 
+use astrcode_core::wire::WireErrorCode;
 use astrcode_extension_sdk::{
+    self,
     extension::ExtensionError,
-    host::{
-        HOST_ERROR_CODE_CANCELLED, HOST_ERROR_CODE_INVALID_MANIFEST,
-        HOST_ERROR_CODE_NOT_INITIALIZED, HOST_ERROR_CODE_REENTRANCY_EXCEEDED,
-        HOST_ERROR_CODE_UNKNOWN_CAPABILITY, HOST_ERROR_CODE_UNKNOWN_PARENT_INVOKE,
-        HOST_ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION,
-    },
     runtime::{
         CancelToken, InitializeHandler, InvokeHandler, InvokeReply, OutboundInvokeControl,
         OutboundInvokeTracker, Peer, StdioFrameTransport,
@@ -119,7 +115,7 @@ impl ReentrancyGuard {
         if depth >= MAX_REENTRANCY {
             counter.fetch_sub(1, Ordering::SeqCst);
             return Err(ErrorPayload::new(
-                HOST_ERROR_CODE_REENTRANCY_EXCEEDED,
+                WireErrorCode::ReentrancyExceeded,
                 "reentrancy depth exceeded",
             ));
         }
@@ -404,7 +400,7 @@ fn handle_initialize(
 ) -> Result<InitializeOutput, ErrorPayload> {
     if init.protocol_version != S5R_VERSION {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION,
+            WireErrorCode::UnsupportedProtocolVersion,
             format!(
                 "unsupported s5r protocol version {:?}; expected {S5R_VERSION:?}",
                 init.protocol_version
@@ -413,9 +409,9 @@ fn handle_initialize(
     }
     let resolved_registration =
         crate::extension_manifest::registration_from_s5r_metadata(&init.metadata, S5R_VERSION)
-            .map_err(|e| ErrorPayload::new(HOST_ERROR_CODE_INVALID_MANIFEST, e))?;
+            .map_err(|e| ErrorPayload::new(WireErrorCode::InvalidManifest, e))?;
     validate_initialize_handlers(&resolved_registration, &init.handlers)
-        .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_INVALID_MANIFEST, error))?;
+        .map_err(|error| ErrorPayload::new(WireErrorCode::InvalidManifest, error))?;
     let capabilities = HostRouter::catalog_for_grants(resolved_registration.capabilities());
     *registration.write() = Some(resolved_registration);
     Ok(InitializeOutput {
@@ -515,10 +511,10 @@ async fn handle_host_invoke(
 ) -> Result<InvokeReply, ErrorPayload> {
     token
         .raise_if_cancelled()
-        .map_err(|e| ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, e))?;
+        .map_err(|e| ErrorPayload::new(WireErrorCode::Cancelled, e))?;
     if !invoke.capability.starts_with("astrcode.") {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_UNKNOWN_CAPABILITY,
+            WireErrorCode::UnknownCapability,
             format!("host does not provide capability {}", invoke.capability),
         ));
     }
@@ -526,7 +522,7 @@ async fn handle_host_invoke(
     let registration = state.registration.read().clone();
     let Some(registration) = registration else {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_NOT_INITIALIZED,
+            WireErrorCode::NotInitialized,
             "extension not initialized",
         ));
     };
@@ -607,7 +603,7 @@ fn resolve_host_invoke_context(
     match parent_invoke_id {
         Some(parent_id) => parent_context.ok_or_else(|| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_UNKNOWN_PARENT_INVOKE,
+                WireErrorCode::UnknownParentInvoke,
                 format!("parent invoke {parent_id} is no longer active"),
             )
         }),
@@ -636,7 +632,7 @@ mod tests {
     };
     use astrcode_extension_sdk::{
         extension::{ExtensionCapability, ExtensionTasks},
-        host::{HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HostLlmChatRequest},
+        host::HostLlmChatRequest,
         s5r::{WIRE_FEATURE_PARENT_INVOKE_ID, capability_to_wire},
     };
     use serde_json::json;
@@ -706,13 +702,13 @@ mod tests {
             Ok(_) => panic!("finished parents must not fall back to a detached context"),
             Err(error) => error,
         };
-        assert_eq!(error.code, HOST_ERROR_CODE_UNKNOWN_PARENT_INVOKE);
+        assert_eq!(error.code_enum(), Some(WireErrorCode::UnknownParentInvoke));
 
         let error = match resolve_host_invoke_context(None, None, None) {
             Ok(_) => panic!("detached invokes must wait for the runner-owned startup context"),
             Err(error) => error,
         };
-        assert_eq!(error.code, HOST_ERROR_CODE_BACKEND_UNAVAILABLE);
+        assert_eq!(error.code_enum(), Some(WireErrorCode::BackendUnavailable));
     }
 
     #[test]
@@ -744,7 +740,7 @@ mod tests {
                 "1.0",
                 vec![valid.clone()],
                 Some((
-                    HOST_ERROR_CODE_UNSUPPORTED_PROTOCOL_VERSION,
+                    WireErrorCode::UnsupportedProtocolVersion.as_str(),
                     "unsupported s5r protocol",
                 )),
             ),
@@ -752,13 +748,13 @@ mod tests {
                 "missing",
                 S5R_VERSION,
                 Vec::new(),
-                Some((HOST_ERROR_CODE_INVALID_MANIFEST, "missing handler")),
+                Some((WireErrorCode::InvalidManifest.as_str(), "missing handler")),
             ),
             (
                 "duplicate",
                 S5R_VERSION,
                 vec![valid.clone(), valid.clone()],
-                Some((HOST_ERROR_CODE_INVALID_MANIFEST, "duplicate handler")),
+                Some((WireErrorCode::InvalidManifest.as_str(), "duplicate handler")),
             ),
             (
                 "extra",
@@ -771,7 +767,10 @@ mod tests {
                         json!({"type": "object"}),
                     ),
                 ],
-                Some((HOST_ERROR_CODE_INVALID_MANIFEST, "unexpected handler")),
+                Some((
+                    WireErrorCode::InvalidManifest.as_str(),
+                    "unexpected handler",
+                )),
             ),
             (
                 "kind mismatch",
@@ -782,7 +781,7 @@ mod tests {
                     valid.input_schema.clone(),
                 )],
                 Some((
-                    HOST_ERROR_CODE_INVALID_MANIFEST,
+                    WireErrorCode::InvalidManifest.as_str(),
                     "has kind command, expected tool",
                 )),
             ),
@@ -795,7 +794,7 @@ mod tests {
                     json!({"type": "string"}),
                 )],
                 Some((
-                    HOST_ERROR_CODE_INVALID_MANIFEST,
+                    WireErrorCode::InvalidManifest.as_str(),
                     "input schema does not match",
                 )),
             ),
@@ -936,7 +935,7 @@ mod tests {
             Ok(_) => panic!("detached host calls must wait until Extension::start"),
             Err(error) => error,
         };
-        assert_eq!(error.code, HOST_ERROR_CODE_BACKEND_UNAVAILABLE);
+        assert_eq!(error.code_enum(), Some(WireErrorCode::BackendUnavailable));
 
         let ops = Arc::new(RootSessionOps::default());
         *detached_invoke_context.write() = Some(InvokeContext {
@@ -1064,7 +1063,7 @@ mod tests {
                 Ok(_) => panic!("cancelled host call must not succeed"),
                 Err(error) => error,
             };
-            assert_eq!(error.code, HOST_ERROR_CODE_CANCELLED);
+            assert_eq!(error.code_enum(), Some(WireErrorCode::Cancelled));
             assert_eq!(
                 dropped.load(Ordering::SeqCst),
                 u32::try_from(case_index + 1).unwrap()
@@ -1086,7 +1085,7 @@ mod tests {
             .unwrap()
             .remove("wire_features");
         let error = handle_initialize(missing_feature, &registration).unwrap_err();
-        assert_eq!(error.code, HOST_ERROR_CODE_INVALID_MANIFEST);
+        assert_eq!(error.code_enum(), Some(WireErrorCode::InvalidManifest));
         assert!(registration.read().is_none());
 
         let invalid_metadata = [
@@ -1149,7 +1148,7 @@ mod tests {
             let registration = Arc::new(RwLock::new(None));
             let error = handle_initialize(initialize_message(metadata), &registration).unwrap_err();
 
-            assert_eq!(error.code, HOST_ERROR_CODE_INVALID_MANIFEST);
+            assert_eq!(error.code_enum(), Some(WireErrorCode::InvalidManifest));
             assert!(registration.read().is_none());
         }
 

@@ -7,20 +7,7 @@ mod registry;
 
 use std::sync::Arc;
 
-/// Worker 侧（guest）错误码：宿主收到后透传给扩展作者，属于 wire 契约的一部分。
-pub(crate) const WORKER_ERROR_CODE_UNKNOWN_HANDLER: &str = "unknown_handler";
-pub(crate) const WORKER_ERROR_CODE_DUPLICATE_REGISTRATION: &str = "duplicate_registration";
-pub(crate) const WORKER_ERROR_CODE_UNSUPPORTED_HOOK: &str = "unsupported_hook";
-pub(crate) const WORKER_ERROR_CODE_TYPED_HOOK_REQUIRED: &str = "typed_hook_required";
-pub(crate) const WORKER_ERROR_CODE_INVALID_HOOK_MODE: &str = "invalid_hook_mode";
-pub(crate) const WORKER_ERROR_CODE_INVALID_HOOK_REGISTRATION: &str = "invalid_hook_registration";
-pub(crate) const WORKER_ERROR_CODE_INVALID_HTTP_ROUTE: &str = "invalid_http_route";
-pub(crate) const WORKER_ERROR_CODE_INVALID_ARGUMENTS: &str = "invalid_arguments";
-pub(crate) const WORKER_ERROR_CODE_PEER_START_FAILED: &str = "peer_start_failed";
-pub(crate) const WORKER_ERROR_CODE_HOST_API_ALREADY_SET: &str = "host_api_already_set";
-pub(crate) const WORKER_ERROR_CODE_MANIFEST_SERIALIZE_FAILED: &str = "manifest_serialize_failed";
-pub(crate) const WORKER_ERROR_CODE_INITIALIZE_FAILED: &str = "initialize_failed";
-
+use astrcode_core::wire::WireErrorCode;
 pub use builder::{
     command_handler, handler_err, hook_handler, hook_handler_args, http_handler, parse_hook_input,
     parse_tool_arguments, tool_handler, tool_handler_args,
@@ -58,14 +45,13 @@ pub mod testing {
 
 use crate::{
     extension::{ContinueAfterStopOptions, ExtensionCapability, ExtensionEvent, HookMode},
-    host::HOST_ERROR_CODE_SERIALIZATION_FAILED,
     runtime::{CancelToken, InvokeHandler, InvokeReply, Peer, ProcessStdioTransport},
-    s5r::{HandlerDescriptor, HandlerResult, PeerInfo, S5R_STACK},
+    s5r::{HandlerDescriptor, HandlerId, HandlerKind, HandlerResult, PeerInfo, S5R_STACK},
     tool::ToolDefinition,
     worker::{
         host::{PeerHostApi, set_host_api},
         manifest::ManifestCatalog,
-        registry::{HandlerRegistry, handler_id_for, registration_metadata},
+        registry::{HandlerRegistry, registration_metadata},
     },
 };
 
@@ -215,11 +201,11 @@ impl Worker {
             },
         );
         peer.start().await.map_err(|e| {
-            crate::s5r::ErrorPayload::new(WORKER_ERROR_CODE_PEER_START_FAILED, e.to_string())
+            crate::s5r::ErrorPayload::new(WireErrorCode::PeerStartFailed, e.to_string())
         })?;
         set_host_api(Arc::new(PeerHostApi::new(Arc::clone(&peer)))).map_err(|_| {
             crate::s5r::ErrorPayload::new(
-                WORKER_ERROR_CODE_HOST_API_ALREADY_SET,
+                WireErrorCode::HostApiAlreadySet,
                 "host API already initialized",
             )
         })?;
@@ -237,13 +223,13 @@ impl Worker {
         let metadata = registration_metadata(&self.extension_id, &self.version, registry.catalog())
             .map_err(|error| {
                 ErrorPayload::new(
-                    WORKER_ERROR_CODE_MANIFEST_SERIALIZE_FAILED,
+                    WireErrorCode::ManifestSerializeFailed,
                     format!("failed to serialize initialize manifest: {error}"),
                 )
             })?;
         let handlers = build_handler_descriptors(registry.catalog(), &self.extension_id);
         peer.initialize(handlers, metadata).await.map_err(|e| {
-            crate::s5r::ErrorPayload::new(WORKER_ERROR_CODE_INITIALIZE_FAILED, e.to_string())
+            crate::s5r::ErrorPayload::new(WireErrorCode::InitializeFailed, e.to_string())
         })?;
 
         peer.wait_closed().await;
@@ -261,7 +247,7 @@ async fn handle_worker_invoke(
     let result = registry.dispatch_invoke(invoke, token).await?;
     let output = serde_json::to_value(result).map_err(|error| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_SERIALIZATION_FAILED,
+            WireErrorCode::SerializationFailed,
             format!("serialize handler result: {error}"),
         )
     })?;
@@ -275,28 +261,28 @@ fn build_handler_descriptors(
     let mut out = Vec::new();
     for tool in &catalog.tools {
         out.push(HandlerDescriptor {
-            handler_id: handler_id_for(extension_id, "tool", &tool.name),
+            handler_id: HandlerId::new(extension_id, HandlerKind::Tool, &tool.name).into(),
             description: tool.description.clone(),
             input_schema: tool.parameters.clone(),
         });
     }
     for hook in &catalog.hooks {
         out.push(HandlerDescriptor {
-            handler_id: handler_id_for(extension_id, "hook", &hook.on),
+            handler_id: HandlerId::new(extension_id, HandlerKind::Hook, &hook.on).into(),
             description: format!("hook {}", hook.on),
             input_schema: json!({"type":"object"}),
         });
     }
     for hook in &catalog.continuation_hooks {
         out.push(HandlerDescriptor {
-            handler_id: handler_id_for(extension_id, "hook", hook),
+            handler_id: HandlerId::new(extension_id, HandlerKind::Hook, hook).into(),
             description: format!("continuation hook {hook}"),
             input_schema: json!({"type":"object"}),
         });
     }
     for cmd in &catalog.commands {
         out.push(HandlerDescriptor {
-            handler_id: handler_id_for(extension_id, "command", &cmd.name),
+            handler_id: HandlerId::new(extension_id, HandlerKind::Command, &cmd.name).into(),
             description: cmd.description.clone(),
             input_schema: json!({"type":"object"}),
         });

@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+use astrcode_core::wire::WireErrorCode;
 use serde_json::Value;
 
 use crate::{
@@ -16,24 +17,14 @@ use crate::{
         ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, HookMode,
         extension_http_route_patterns_conflict, fixed_hook_mode, hook_mode_is_supported,
     },
-    host::{
-        HOST_ERROR_CODE_CANCELLED, HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
-        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_SERIALIZATION_FAILED,
-        HOST_ERROR_CODE_UNKNOWN_CAPABILITY,
-    },
     runtime::CancelToken,
     s5r::{
-        CAP_HANDLER_INVOKE, ErrorPayload, HandlerResult, InvokeMsg, capability_to_wire,
-        event_to_name,
+        CAP_HANDLER_INVOKE, ErrorPayload, HandlerId, HandlerKind, HandlerResult, InvokeMsg,
+        capability_to_wire, event_to_name,
         manifest::{ManifestCommand, ManifestHook, ManifestHookOptions, ManifestHttpRoute},
         mode_to_name,
     },
-    worker::{
-        WORKER_ERROR_CODE_DUPLICATE_REGISTRATION, WORKER_ERROR_CODE_INVALID_HOOK_MODE,
-        WORKER_ERROR_CODE_INVALID_HOOK_REGISTRATION, WORKER_ERROR_CODE_INVALID_HTTP_ROUTE,
-        WORKER_ERROR_CODE_TYPED_HOOK_REQUIRED, WORKER_ERROR_CODE_UNKNOWN_HANDLER,
-        WORKER_ERROR_CODE_UNSUPPORTED_HOOK, manifest::ManifestCatalog,
-    },
+    worker::manifest::ManifestCatalog,
 };
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -111,7 +102,7 @@ impl WorkerCallContext {
     pub fn require_session_id(&self) -> Result<&str, ErrorPayload> {
         self.session_id().ok_or_else(|| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                WireErrorCode::ContextUnavailable,
                 "worker call requires a session-scoped context",
             )
         })
@@ -136,7 +127,7 @@ impl WorkerCallContext {
     pub fn require_working_dir(&self) -> Result<&Path, ErrorPayload> {
         self.working_dir().ok_or_else(|| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                WireErrorCode::ContextUnavailable,
                 "worker call requires a workspace-scoped context",
             )
         })
@@ -150,10 +141,6 @@ impl WorkerCallContext {
 
 fn optional_string<'a>(input: &'a Value, field: &str) -> Option<&'a str> {
     input.get(field).and_then(Value::as_str)
-}
-
-pub(crate) fn handler_id_for(extension_id: &str, kind: &str, name: &str) -> String {
-    crate::s5r::messages::handler_id_for(extension_id, kind, name)
 }
 
 pub(crate) struct HandlerRegistry {
@@ -207,7 +194,7 @@ impl HandlerRegistry {
         let name = def.name.clone();
         if self.tools.contains_key(&name) {
             return Err(ErrorPayload::new(
-                WORKER_ERROR_CODE_DUPLICATE_REGISTRATION,
+                WireErrorCode::DuplicateRegistration,
                 format!("duplicate tool registration: {name}"),
             ));
         }
@@ -224,13 +211,13 @@ impl HandlerRegistry {
     ) -> Result<(), ErrorPayload> {
         if on == ExtensionEvent::UserMessageEnvelope {
             return Err(ErrorPayload::new(
-                WORKER_ERROR_CODE_UNSUPPORTED_HOOK,
+                WireErrorCode::UnsupportedHook,
                 "user_message_envelope is not supported by S5R workers",
             ));
         }
         if let Some(required) = fixed_hook_mode(&on) {
             return Err(ErrorPayload::new(
-                WORKER_ERROR_CODE_TYPED_HOOK_REQUIRED,
+                WireErrorCode::TypedHookRequired,
                 format!(
                     "{} has fixed {} mode; {}",
                     event_to_name(&on),
@@ -241,7 +228,7 @@ impl HandlerRegistry {
         }
         if !hook_mode_is_supported(&on, mode) {
             return Err(ErrorPayload::new(
-                WORKER_ERROR_CODE_INVALID_HOOK_MODE,
+                WireErrorCode::InvalidHookMode,
                 format!(
                     "{} does not support {} mode",
                     event_to_name(&on),
@@ -268,13 +255,13 @@ impl HandlerRegistry {
     ) -> Result<(), ErrorPayload> {
         if on == ExtensionEvent::UserMessageEnvelope {
             return Err(ErrorPayload::new(
-                WORKER_ERROR_CODE_UNSUPPORTED_HOOK,
+                WireErrorCode::UnsupportedHook,
                 "user_message_envelope is not supported by S5R workers",
             ));
         }
         let mode = fixed_hook_mode(&on).ok_or_else(|| {
             ErrorPayload::new(
-                WORKER_ERROR_CODE_INVALID_HOOK_REGISTRATION,
+                WireErrorCode::InvalidHookRegistration,
                 format!("{} is not a fixed-mode hook", event_to_name(&on)),
             )
         })?;
@@ -330,7 +317,7 @@ impl HandlerRegistry {
     ) -> Result<(), ErrorPayload> {
         if self.hooks.contains_key(&on) {
             return Err(ErrorPayload::new(
-                WORKER_ERROR_CODE_DUPLICATE_REGISTRATION,
+                WireErrorCode::DuplicateRegistration,
                 format!("duplicate hook registration: {on}"),
             ));
         }
@@ -347,7 +334,7 @@ impl HandlerRegistry {
         let name = name.into().trim().to_owned();
         if self.commands.contains_key(&name) {
             return Err(ErrorPayload::new(
-                WORKER_ERROR_CODE_DUPLICATE_REGISTRATION,
+                WireErrorCode::DuplicateRegistration,
                 format!("duplicate command registration: {name}"),
             ));
         }
@@ -366,19 +353,20 @@ impl HandlerRegistry {
     ) -> Result<(), ErrorPayload> {
         route
             .validate()
-            .map_err(|error| ErrorPayload::new(WORKER_ERROR_CODE_INVALID_HTTP_ROUTE, error))?;
+            .map_err(|error| ErrorPayload::new(WireErrorCode::InvalidHttpRoute, error))?;
         if self.catalog.http_routes.iter().any(|entry| {
             entry.route.access == route.access
                 && entry.route.method == route.method
                 && extension_http_route_patterns_conflict(&entry.route.path, &route.path)
         }) {
             return Err(ErrorPayload::new(
-                WORKER_ERROR_CODE_DUPLICATE_REGISTRATION,
+                WireErrorCode::DuplicateRegistration,
                 format!("conflicting HTTP route registration: {}", route.path),
             ));
         }
         let handler_name = format!("route_{}", self.catalog.http_routes.len());
-        let handler_id = handler_id_for(&self.extension_id, "http", &handler_name);
+        let handler_id =
+            HandlerId::new(&self.extension_id, HandlerKind::Http, &handler_name).into();
         self.catalog
             .http_routes
             .push(ManifestHttpRoute { route, handler_id });
@@ -393,16 +381,16 @@ impl HandlerRegistry {
     ) -> Result<HandlerResult, ErrorPayload> {
         if invoke.capability != CAP_HANDLER_INVOKE {
             return Err(ErrorPayload::new(
-                HOST_ERROR_CODE_UNKNOWN_CAPABILITY,
+                WireErrorCode::UnknownCapability,
                 format!("worker does not handle capability {}", invoke.capability),
             ));
         }
         token
             .raise_if_cancelled()
-            .map_err(|e| ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, e))?;
-        let handler_id = invoke.input["handler_id"].as_str().ok_or_else(|| {
-            ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, "handler_id required")
-        })?;
+            .map_err(|e| ErrorPayload::new(WireErrorCode::Cancelled, e))?;
+        let handler_id = invoke.input["handler_id"]
+            .as_str()
+            .ok_or_else(|| ErrorPayload::new(WireErrorCode::InvalidInput, "handler_id required"))?;
         let event = invoke.input.get("event").cloned().unwrap_or(Value::Null);
         let ctx = WorkerCallContext::from_event(self.extension_id.clone(), token, &event);
         self.dispatch_handler(handler_id, event, ctx).await
@@ -417,7 +405,7 @@ impl HandlerRegistry {
         let prefix = format!("{}:", self.extension_id);
         let Some(handler_name) = handler_id.strip_prefix(&prefix) else {
             return Err(ErrorPayload::new(
-                WORKER_ERROR_CODE_UNKNOWN_HANDLER,
+                WireErrorCode::UnknownHandler,
                 format!("unknown handler: {handler_id}"),
             ));
         };
@@ -426,7 +414,7 @@ impl HandlerRegistry {
             "tool" => {
                 let handler = self.tools.get(name).ok_or_else(|| {
                     ErrorPayload::new(
-                        WORKER_ERROR_CODE_UNKNOWN_HANDLER,
+                        WireErrorCode::UnknownHandler,
                         format!("unknown tool: {name}"),
                     )
                 })?;
@@ -435,7 +423,7 @@ impl HandlerRegistry {
             "hook" => {
                 let handler = self.hooks.get(name).ok_or_else(|| {
                     ErrorPayload::new(
-                        WORKER_ERROR_CODE_UNKNOWN_HANDLER,
+                        WireErrorCode::UnknownHandler,
                         format!("unknown hook: {name}"),
                     )
                 })?;
@@ -444,7 +432,7 @@ impl HandlerRegistry {
             "command" => {
                 let handler = self.commands.get(name).ok_or_else(|| {
                     ErrorPayload::new(
-                        WORKER_ERROR_CODE_UNKNOWN_HANDLER,
+                        WireErrorCode::UnknownHandler,
                         format!("unknown command: {name}"),
                     )
                 })?;
@@ -453,27 +441,27 @@ impl HandlerRegistry {
             "http" => {
                 let handler = self.http_routes.get(name).ok_or_else(|| {
                     ErrorPayload::new(
-                        WORKER_ERROR_CODE_UNKNOWN_HANDLER,
+                        WireErrorCode::UnknownHandler,
                         format!("unknown HTTP route: {name}"),
                     )
                 })?;
                 let request = serde_json::from_value(event).map_err(|error| {
                     ErrorPayload::new(
-                        HOST_ERROR_CODE_INVALID_INPUT,
+                        WireErrorCode::UnknownHandler,
                         format!("invalid HTTP request payload: {error}"),
                     )
                 })?;
                 let response = handler(request, ctx).await?;
                 let data = serde_json::to_value(response).map_err(|error| {
                     ErrorPayload::new(
-                        HOST_ERROR_CODE_SERIALIZATION_FAILED,
+                        WireErrorCode::UnknownHandler,
                         format!("serialize HTTP response: {error}"),
                     )
                 })?;
                 Ok(HandlerResult::effect("http_response", data))
             },
             _ => Err(ErrorPayload::new(
-                WORKER_ERROR_CODE_UNKNOWN_HANDLER,
+                WireErrorCode::UnknownHandler,
                 format!("unknown handler kind in {handler_id}"),
             )),
         }
@@ -572,7 +560,10 @@ mod tests {
             .expect_err("same-access conflicting route must be rejected");
 
         assert_eq!(registry.catalog.http_routes.len(), 2);
-        assert_eq!(error.code, WORKER_ERROR_CODE_DUPLICATE_REGISTRATION);
+        assert_eq!(
+            error.code_enum(),
+            Some(WireErrorCode::DuplicateRegistration)
+        );
     }
 
     #[test]
@@ -615,8 +606,8 @@ mod tests {
                     tool_handler,
                 )
                 .expect_err("canonical duplicate")
-                .code,
-            WORKER_ERROR_CODE_DUPLICATE_REGISTRATION
+                .code_enum(),
+            Some(WireErrorCode::DuplicateRegistration)
         );
     }
 
@@ -644,12 +635,12 @@ mod tests {
             &Value::Null,
         );
         assert_eq!(
-            unscoped.require_session_id().unwrap_err().code,
-            "context_unavailable"
+            unscoped.require_session_id().unwrap_err().code_enum(),
+            Some(WireErrorCode::ContextUnavailable)
         );
         assert_eq!(
-            unscoped.require_working_dir().unwrap_err().code,
-            "context_unavailable"
+            unscoped.require_working_dir().unwrap_err().code_enum(),
+            Some(WireErrorCode::ContextUnavailable)
         );
     }
 }

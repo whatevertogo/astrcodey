@@ -2,7 +2,7 @@
 
 use std::{path::Path, sync::Arc};
 
-use astrcode_core::{tool::ToolDefinition, types::SessionId};
+use astrcode_core::{tool::ToolDefinition, types::SessionId, wire::WireErrorCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     ExtensionCallContext, ExtensionError, ExtensionEventEmitter, ExtensionPaths, ExtensionTasks,
 };
-use crate::host::{ExtensionHost, HOST_ERROR_CODE_CONTEXT_UNAVAILABLE, HostError};
+use crate::host::{ExtensionHost, HostError};
 
 /// Immutable input and scoped host capabilities for one extension tool call.
 ///
@@ -102,7 +102,7 @@ impl ToolContext {
     pub fn require_call_id(&self) -> Result<&str, HostError> {
         self.call_id().ok_or_else(|| {
             HostError::new(
-                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                WireErrorCode::ContextUnavailable,
                 "tool handler requires a tool-call-scoped context",
             )
         })

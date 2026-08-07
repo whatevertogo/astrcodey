@@ -14,18 +14,15 @@ use astrcode_core::{
         SessionToolSelection, SubmitTurnRequest,
     },
     types::SessionId,
+    wire::WireErrorCode,
 };
 use astrcode_extension_sdk::{
     host::{
-        HOST_ERROR_CODE_CONTEXT_UNAVAILABLE, HOST_ERROR_CODE_INVALID_INPUT,
-        HOST_ERROR_CODE_INVALID_REQUEST, HOST_ERROR_CODE_PERMISSION_DENIED,
-        HOST_ERROR_CODE_READ_FAILED, HOST_ERROR_CODE_SERIALIZATION_FAILED,
-        HOST_ERROR_CODE_SESSION_NOT_FOUND, HOST_ERROR_CODE_UNSUPPORTED, HostAcknowledgement,
-        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostSessionCancelOutput,
-        HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
-        HostSessionProviderMessagesOutput, HostSessionSummariesOutput, HostSessionSummary,
-        HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
-        HostSessionTranscriptMessage,
+        HostAcknowledgement, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
+        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
+        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionSummariesOutput,
+        HostSessionSummary, HostSessionTokenUsage, HostSessionTokenUsageOutput,
+        HostSessionTranscript, HostSessionTranscriptMessage,
     },
     s5r::ErrorPayload,
     session::{
@@ -127,7 +124,7 @@ impl SessionGroup {
             parse_wire_request::<HostSessionEventsPageRequest>(input, "session.read_events")?;
         if !(1..=MAX_READ_EVENTS_LIMIT).contains(&request.limit) {
             return Err(ErrorPayload::new(
-                HOST_ERROR_CODE_INVALID_INPUT,
+                WireErrorCode::InvalidInput,
                 format!("limit must be between 1 and {MAX_READ_EVENTS_LIMIT}"),
             ));
         }
@@ -238,7 +235,7 @@ impl SessionGroup {
                 .is_some()
             {
                 return Err(ErrorPayload::new(
-                    HOST_ERROR_CODE_READ_FAILED,
+                    WireErrorCode::ReadFailed,
                     format!("duplicate session summary for {}", summary.session_id),
                 ));
             }
@@ -445,7 +442,7 @@ fn visible_history_sessions(
             }
             if !visited.insert(current.clone()) {
                 return Err(ErrorPayload::new(
-                    HOST_ERROR_CODE_READ_FAILED,
+                    WireErrorCode::ReadFailed,
                     format!("session parent chain contains a cycle at {current}"),
                 ));
             }
@@ -484,7 +481,7 @@ fn required_history_context(ctx: &InvokeContext) -> Result<&str, ErrorPayload> {
     required_extension_id(ctx)?;
     ctx.session_id.as_deref().ok_or_else(|| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+            WireErrorCode::ContextUnavailable,
             "session history requires a session-scoped invoke context",
         )
     })
@@ -498,7 +495,7 @@ async fn authorize_history_target(
         return Ok(());
     }
     Err(ErrorPayload::new(
-        HOST_ERROR_CODE_PERMISSION_DENIED,
+        WireErrorCode::PermissionDenied,
         "session history target is outside the caller session lineage",
     ))
 }
@@ -566,17 +563,15 @@ fn non_cached_token_count(usage: &LlmTokenUsage) -> Option<u64> {
 /// 统一为 `read_failed`（可重试）。
 fn storage_read_error(error: StorageError) -> ErrorPayload {
     match error {
-        StorageError::InvalidId(message) => {
-            ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, message)
-        },
+        StorageError::InvalidId(message) => ErrorPayload::new(WireErrorCode::InvalidInput, message),
         StorageError::NotFound(session_id) => ErrorPayload::new(
-            HOST_ERROR_CODE_SESSION_NOT_FOUND,
+            WireErrorCode::SessionNotFound,
             format!("session not found: {session_id}"),
         ),
         StorageError::Unsupported(message) => {
-            ErrorPayload::new(HOST_ERROR_CODE_UNSUPPORTED, message)
+            ErrorPayload::new(WireErrorCode::Unsupported, message)
         },
-        error => ErrorPayload::new(HOST_ERROR_CODE_READ_FAILED, error.to_string()).retryable(true),
+        error => ErrorPayload::new(WireErrorCode::ReadFailed, error.to_string()).retryable(true),
     }
 }
 
@@ -587,7 +582,7 @@ fn reject_wait_for_result_on_peer_thread(
 ) -> Result<(), ErrorPayload> {
     if ctx.on_peer_io_thread && wait_for_result {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_REQUEST,
+            WireErrorCode::InvalidRequest,
             "wait_for_result cannot be used from peer synchronous host invokes (deadlock risk); \
              set wait_for_result to false",
         ));
@@ -601,7 +596,7 @@ async fn create_root_session(input: &Value, ctx: &InvokeContext) -> Result<Value
     let request = CoreCreateRootSessionRequest {
         working_dir: ctx.working_dir.clone().ok_or_else(|| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                WireErrorCode::ContextUnavailable,
                 "session.root.create requires a workspace-scoped call context",
             )
         })?,
@@ -634,7 +629,7 @@ async fn authorize_owned_root(
         return Ok(());
     }
     Err(ErrorPayload::new(
-        HOST_ERROR_CODE_PERMISSION_DENIED,
+        WireErrorCode::PermissionDenied,
         "target session is not a top-level session owned by the calling extension",
     ))
 }
@@ -644,7 +639,7 @@ fn required_extension_id(ctx: &InvokeContext) -> Result<&str, ErrorPayload> {
         .then_some(ctx.extension_id.as_str())
         .ok_or_else(|| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                WireErrorCode::ContextUnavailable,
                 "host operation requires an attributed extension context",
             )
         })
@@ -654,19 +649,19 @@ fn host_session_event(stored: StoredEvent) -> Result<HostSessionEvent, ErrorPayl
     let StoredEvent { seq, event } = stored;
     let timestamp = serde_json::to_value(event.timestamp).map_err(|error| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_SERIALIZATION_FAILED,
+            WireErrorCode::SerializationFailed,
             format!("failed to serialize session event timestamp: {error}"),
         )
     })?;
     let timestamp = timestamp.as_str().map(str::to_owned).ok_or_else(|| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_SERIALIZATION_FAILED,
+            WireErrorCode::SerializationFailed,
             "session event timestamp did not serialize as a string",
         )
     })?;
     let payload = serde_json::to_value(event.payload).map_err(|error| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_SERIALIZATION_FAILED,
+            WireErrorCode::SerializationFailed,
             format!("failed to serialize session event payload: {error}"),
         )
     })?;
@@ -697,7 +692,7 @@ async fn create_session(input: &Value, ctx: &InvokeContext) -> Result<Value, Err
         tool_call_id: ctx.tool_call_id.clone(),
     };
     let parent = ctx.session_id.clone().ok_or_else(|| {
-        ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, "parent session_id required")
+        ErrorPayload::new(WireErrorCode::InvalidInput, "parent session_id required")
     })?;
     let handle = ops
         .create_session(&parent, request)
@@ -735,7 +730,7 @@ async fn submit_turn(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorP
     reject_wait_for_result_on_peer_thread(wire_request.wait_for_result, ctx)?;
     let ops = required_session_ops(ctx)?;
     let caller = ctx.session_id.clone().ok_or_else(|| {
-        ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, "caller session_id required")
+        ErrorPayload::new(WireErrorCode::InvalidInput, "caller session_id required")
     })?;
     let request = SubmitTurnRequest::for_child(
         caller,
@@ -828,7 +823,7 @@ async fn dispose_session(input: &Value, ctx: &InvokeContext) -> Result<Value, Er
     let access = SessionAccessPair::new(
         ctx.session_id.clone().ok_or_else(|| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                WireErrorCode::ContextUnavailable,
                 "caller session_id required",
             )
         })?,
@@ -895,11 +890,11 @@ fn session_access_from_id(
     ctx: &InvokeContext,
 ) -> Result<SessionAccessPair, ErrorPayload> {
     let caller = ctx.session_id.as_deref().ok_or_else(|| {
-        ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, "caller session_id required")
+        ErrorPayload::new(WireErrorCode::InvalidInput, "caller session_id required")
     })?;
     if target_session_id.is_empty() {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             "target session id must not be empty",
         ));
     }
@@ -922,37 +917,17 @@ fn history_access_from_target(
 }
 
 fn session_api_error(error: SessionApiError) -> ErrorPayload {
-    let code = match &error {
-        SessionApiError::NotFound(_) => HOST_ERROR_CODE_SESSION_NOT_FOUND,
-        SessionApiError::PermissionDenied(_) => HOST_ERROR_CODE_PERMISSION_DENIED,
-        SessionApiError::SessionBusy(_) => "session_busy",
-        SessionApiError::MaxDepthExceeded { .. } => "max_depth_exceeded",
-        SessionApiError::Unsupported(_) => HOST_ERROR_CODE_UNSUPPORTED,
-        SessionApiError::Internal(_) => "internal_error",
-    };
-    ErrorPayload::new(code, error.to_string())
+    super::wire_payload(error)
 }
 
 pub(super) fn storage_error(error: StorageError) -> ErrorPayload {
-    let retryable = error.is_retryable();
-    let code = match &error {
-        StorageError::NotFound(_) => HOST_ERROR_CODE_SESSION_NOT_FOUND,
-        StorageError::AlreadyExists(_) => "session_already_exists",
-        StorageError::InvalidId(_) => HOST_ERROR_CODE_INVALID_INPUT,
-        StorageError::Unsupported(_) => HOST_ERROR_CODE_UNSUPPORTED,
-        StorageError::Io(_) => "storage_io_error",
-        StorageError::Serialization(_)
-        | StorageError::InvalidEvent(_)
-        | StorageError::CorruptLog(_) => "corrupt_session_data",
-        StorageError::LockError(_) => "storage_lock_error",
-    };
-    ErrorPayload::new(code, error.to_string()).retryable(retryable)
+    super::wire_payload(error)
 }
 
 fn non_empty_session_content(content: String) -> Result<String, ErrorPayload> {
     if content.is_empty() {
         Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             "content must not be empty",
         ))
     } else {
@@ -970,7 +945,7 @@ fn require_empty_object(input: &Value, capability: &str) -> Result<(), ErrorPayl
         Ok(())
     } else {
         Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             format!("{capability} expects an empty object"),
         ))
     }
@@ -997,7 +972,7 @@ fn validated_tool_names(tools: Vec<String>, field: &str) -> Result<Vec<String>, 
             let tool = tool.trim();
             if tool.is_empty() {
                 Err(ErrorPayload::new(
-                    HOST_ERROR_CODE_INVALID_INPUT,
+                    WireErrorCode::InvalidInput,
                     format!("{field} must contain non-empty strings"),
                 ))
             } else {
@@ -1087,7 +1062,7 @@ mod tests {
         ] {
             let error = visible_history_sessions(&id("root"), &cycle)
                 .expect_err("corrupt lineage must not be exposed");
-            assert_eq!(error.code, HOST_ERROR_CODE_READ_FAILED);
+            assert_eq!(error.code_enum(), Some(WireErrorCode::ReadFailed));
         }
     }
 
@@ -1096,32 +1071,32 @@ mod tests {
         let cases = [
             (
                 SessionApiError::NotFound("child".into()),
-                HOST_ERROR_CODE_SESSION_NOT_FOUND,
+                WireErrorCode::SessionNotFound,
             ),
             (
                 SessionApiError::PermissionDenied("unrelated session".into()),
-                "permission_denied",
+                WireErrorCode::PermissionDenied,
             ),
             (
                 SessionApiError::SessionBusy("active turn".into()),
-                "session_busy",
+                WireErrorCode::SessionBusy,
             ),
             (
                 SessionApiError::MaxDepthExceeded { current: 4, max: 4 },
-                "max_depth_exceeded",
+                WireErrorCode::MaxDepthExceeded,
             ),
             (
                 SessionApiError::Unsupported("operation".into()),
-                HOST_ERROR_CODE_UNSUPPORTED,
+                WireErrorCode::Unsupported,
             ),
             (
                 SessionApiError::internal_msg("backend failed"),
-                "internal_error",
+                WireErrorCode::InternalError,
             ),
         ];
 
         for (error, expected) in cases {
-            assert_eq!(session_api_error(error).code, expected);
+            assert_eq!(session_api_error(error).code_enum(), Some(expected));
         }
     }
 }

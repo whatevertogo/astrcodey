@@ -2,9 +2,10 @@
 
 use std::sync::Arc;
 
+use astrcode_core::wire::WireErrorCode;
 use astrcode_extension_sdk::{
+    self,
     extension::{ExtensionError, ExtensionHttpDispatchRequest, ExtensionHttpRequest},
-    host::{HOST_ERROR_CODE_DISPATCH_FAILED, HOST_ERROR_CODE_TIMEOUT},
     s5r::ErrorPayload,
 };
 use serde_json::Value;
@@ -62,11 +63,11 @@ impl ExtensionHttpGroup {
             dispatcher.dispatch_public_http(caller_extension_id, request),
         )
         .await
-        .map_err(|_| ErrorPayload::new(HOST_ERROR_CODE_TIMEOUT, "public HTTP dispatch timed out"))?
+        .map_err(|_| ErrorPayload::new(WireErrorCode::Timeout, "public HTTP dispatch timed out"))?
         .and_then(|response| {
             serde_json::to_value(response)
                 .map_err(|error| ExtensionError::Internal(error.to_string()))
         })
-        .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_DISPATCH_FAILED, error.to_string()))
+        .map_err(|error| ErrorPayload::new(WireErrorCode::DispatchFailed, error.to_string()))
     }
 }

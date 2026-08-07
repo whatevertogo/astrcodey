@@ -1,9 +1,7 @@
 use std::path::{Component, Path, PathBuf};
 
-use astrcode_extension_sdk::{
-    host::{HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_PERMISSION_DENIED},
-    s5r::ErrorPayload,
-};
+use astrcode_core::wire::WireErrorCode;
+use astrcode_extension_sdk::{self, s5r::ErrorPayload};
 
 use super::io_error;
 
@@ -11,22 +9,19 @@ use super::io_error;
 /// 读写两侧共用同一校验，避免错误码与消息漂移。
 pub(super) fn validate_relative_path_components(relative: &Path) -> Result<(), ErrorPayload> {
     if relative.as_os_str().is_empty() {
-        return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
-            "empty path",
-        ));
+        return Err(ErrorPayload::new(WireErrorCode::InvalidInput, "empty path"));
     }
     for component in relative.components() {
         match component {
             Component::Prefix(_) | Component::RootDir => {
                 return Err(ErrorPayload::new(
-                    HOST_ERROR_CODE_INVALID_INPUT,
+                    WireErrorCode::InvalidInput,
                     "absolute path components are not allowed",
                 ));
             },
             Component::ParentDir => {
                 return Err(ErrorPayload::new(
-                    HOST_ERROR_CODE_PERMISSION_DENIED,
+                    WireErrorCode::PermissionDenied,
                     "path escapes workspace root",
                 ));
             },
@@ -42,7 +37,7 @@ pub(super) fn canonicalize_workspace_path(
 ) -> Result<PathBuf, ErrorPayload> {
     if relative.contains('\0') {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             "path contains NUL",
         ));
     }
@@ -50,7 +45,7 @@ pub(super) fn canonicalize_workspace_path(
     let relative = Path::new(relative);
     if relative.is_absolute() {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             "absolute paths are not allowed",
         ));
     }
@@ -60,7 +55,7 @@ pub(super) fn canonicalize_workspace_path(
     let path = root.join(relative).canonicalize().map_err(io_error)?;
     if !path.starts_with(&root) {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_PERMISSION_DENIED,
+            WireErrorCode::PermissionDenied,
             "path outside working directory",
         ));
     }

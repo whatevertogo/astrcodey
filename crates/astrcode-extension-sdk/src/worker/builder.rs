@@ -2,18 +2,15 @@
 
 use std::{future::Future, sync::Arc};
 
+use astrcode_core::wire::WireErrorCode;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::{
     extension::{ExtensionHttpRequest, ExtensionHttpResponse},
-    host::HOST_ERROR_CODE_INVALID_INPUT,
     s5r::{ErrorPayload, HandlerResult},
-    worker::{
-        WORKER_ERROR_CODE_INVALID_ARGUMENTS,
-        registry::{
-            CommandHandlerFn, HookHandlerFn, HttpHandlerFn, ToolHandlerFn, WorkerCallContext,
-        },
+    worker::registry::{
+        CommandHandlerFn, HookHandlerFn, HttpHandlerFn, ToolHandlerFn, WorkerCallContext,
     },
 };
 
@@ -27,7 +24,7 @@ pub fn parse_tool_arguments<T: DeserializeOwned>(event: &Value) -> Result<T, Err
         .unwrap_or(Value::Null);
     serde_json::from_value(args).map_err(|e| {
         ErrorPayload::new(
-            WORKER_ERROR_CODE_INVALID_ARGUMENTS,
+            WireErrorCode::InvalidArguments,
             format!("parse tool arguments: {e}"),
         )
     })
@@ -38,7 +35,7 @@ pub fn parse_hook_input<T: DeserializeOwned>(event: &Value) -> Result<T, ErrorPa
     let input = event.get("input").cloned().unwrap_or_else(|| event.clone());
     serde_json::from_value(input).map_err(|e| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             format!("parse hook input: {e}"),
         )
     })

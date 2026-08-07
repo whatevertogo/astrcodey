@@ -6,9 +6,9 @@ use astrcode_core::{
     compaction::CompactStrategy,
     llm::{LlmContent, LlmMessage},
     types::SessionId,
+    wire::WireErrorCode,
 };
 use astrcode_extension_sdk::{
-    host::HOST_ERROR_CODE_TIMEOUT,
     s5r::ErrorPayload,
     session_inspect::{
         SessionInspectAgentSession, SessionInspectAgentStatusDto, SessionInspectCompaction,
@@ -123,7 +123,7 @@ where
 {
     tokio::time::timeout(HOST_INVOKE_TIMEOUT, future)
         .await
-        .map_err(|_| ErrorPayload::new(HOST_ERROR_CODE_TIMEOUT, format!("{operation} timed out")))?
+        .map_err(|_| ErrorPayload::new(WireErrorCode::Timeout, format!("{operation} timed out")))?
         .map_err(storage_error)
 }
 

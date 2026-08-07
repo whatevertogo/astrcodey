@@ -1653,7 +1653,7 @@ mod tests {
 
         let key_schema = &HostSessionStateReadRequest::wire_schema()["properties"]["key"];
         assert_eq!(key_schema["maxLength"], HOST_SESSION_STATE_KEY_MAX_LENGTH);
-        assert_eq!(key_schema["not"]["enum"], json!([".", ".."]))
+        assert_eq!(key_schema["not"]["enum"], json!([".", ".."]));
     }
 
     #[test]

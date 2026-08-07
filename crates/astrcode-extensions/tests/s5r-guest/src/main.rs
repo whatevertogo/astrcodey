@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use astrcode_extension_sdk::{
+use astrcode_extension_sdk::{WireErrorCode,
     builder::tool,
     extension::{
         ExtensionEventDecl, ExtensionHttpDispatchRequest, ExtensionHttpMethod,
@@ -324,7 +324,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .await;
             if !matches!(&forged, Err(error) if error.code == "invalid_input") {
                 return Err(ErrorPayload::new(
-                    "spoof_not_rejected",
+                    WireErrorCode::InvalidInput,
                     format!("host accepted forged path params: {forged:?}"),
                 ));
             }
@@ -440,7 +440,7 @@ async fn run() -> Result<(), ErrorPayload> {
                     Ok(HandlerResult::ok())
                 },
                 _ => Err(ErrorPayload::new(
-                    "unknown_step",
+                    WireErrorCode::InvalidRequest,
                     format!("unknown pipeline step: {}", input.step),
                 )),
             }

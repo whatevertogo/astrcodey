@@ -70,6 +70,8 @@ pub mod runtime_ports;
 pub mod s5r;
 pub mod session;
 pub mod session_inspect;
+
+pub use astrcode_core::wire::{WireError, WireErrorCode};
 pub mod testing;
 pub mod worker;
 

@@ -11,6 +11,7 @@ use std::{
     },
 };
 
+use astrcode_core::wire::WireErrorCode;
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -21,7 +22,6 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    host::HOST_ERROR_CODE_CANCELLED,
     runtime::{cancel::CancelToken, stream::EventStream, transport::FrameTransport},
     s5r::{
         CAP_RUNTIME_PING, CancelMsg, ErrorPayload, EventMsg, EventPhase, InitializeMsg,
@@ -44,7 +44,6 @@ const STREAM_EVENT_BUFFER_CAPACITY: usize = 64;
 const OUTBOUND_INVOKE_LIMIT: usize = 64;
 const REJECTION_QUEUE_CAPACITY: usize = 32;
 const CANCEL_QUEUE_CAPACITY: usize = 64;
-const DUPLICATE_INITIALIZE_ERROR_CODE: &str = "duplicate_initialize";
 const DUPLICATE_INITIALIZE_ERROR_MESSAGE: &str =
     "initialize has already been attempted for this connection";
 
@@ -121,7 +120,9 @@ pub enum PeerError {
 }
 
 fn remote_payload_error(error: Option<ErrorPayload>, fallback_message: &'static str) -> PeerError {
-    PeerError::Payload(error.unwrap_or_else(|| ErrorPayload::new("host_error", fallback_message)))
+    PeerError::Payload(
+        error.unwrap_or_else(|| ErrorPayload::new(WireErrorCode::HostError, fallback_message)),
+    )
 }
 
 pub struct Peer<T: FrameTransport + 'static> {
@@ -762,7 +763,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                             if !self.queue_rejection(
                                 failure,
                                 ErrorPayload::new(
-                                    DUPLICATE_INITIALIZE_ERROR_CODE,
+                                    WireErrorCode::DuplicateRequestId,
                                     DUPLICATE_INITIALIZE_ERROR_MESSAGE,
                                 ),
                             ) {
@@ -782,7 +783,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                             if !self.queue_rejection(
                                 failure,
                                 ErrorPayload::new(
-                                    "duplicate_request_id",
+                                    WireErrorCode::DuplicateRequestId,
                                     "inbound invoke request id is already active",
                                 ),
                             ) {
@@ -821,7 +822,10 @@ impl<T: FrameTransport + 'static> Peer<T> {
                 tracing::error!(request_id = %failure.id, "inbound peer handler panicked");
                 self.send_work_failure(
                     failure,
-                    ErrorPayload::new("handler_panicked", "inbound peer handler panicked"),
+                    ErrorPayload::new(
+                        WireErrorCode::HandlerPanicked,
+                        "inbound peer handler panicked",
+                    ),
                 )
                 .await
                 .ok();
@@ -892,7 +896,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                 drop(work);
                 self.queue_rejection(
                     failure,
-                    ErrorPayload::new("peer_overloaded", "inbound work queue is full"),
+                    ErrorPayload::new(WireErrorCode::PeerOverloaded, "inbound work queue is full"),
                 )
             },
             Err(mpsc::error::TrySendError::Closed(_)) => false,
@@ -1082,7 +1086,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                 false,
                 None,
                 Some(ErrorPayload::new(
-                    "not_supported",
+                    WireErrorCode::NotSupported,
                     "initialize handler not configured",
                 )),
             )
@@ -1133,7 +1137,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                         data: Value::Null,
                         output: Value::Null,
                         error: Some(ErrorPayload::new(
-                            "invalid_request",
+                            WireErrorCode::InvalidRequest,
                             "runtime ping does not support streaming",
                         )),
                     }))
@@ -1157,7 +1161,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                         Some(ResultKind::InvokeResult),
                         false,
                         None,
-                        Some(ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, reason)),
+                        Some(ErrorPayload::new(WireErrorCode::Cancelled, reason)),
                     )
                     .await;
                 },
@@ -1172,7 +1176,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                 false,
                 None,
                 Some(ErrorPayload::new(
-                    "not_supported",
+                    WireErrorCode::NotSupported,
                     "invoke handler not configured",
                 )),
             )
@@ -1507,7 +1511,7 @@ mod tests {
         assert_structured_payload(
             error,
             &ErrorPayload::new(
-                DUPLICATE_INITIALIZE_ERROR_CODE,
+                WireErrorCode::DuplicateRequestId,
                 DUPLICATE_INITIALIZE_ERROR_MESSAGE,
             ),
         );
@@ -1548,7 +1552,7 @@ mod tests {
                         Ok(initialize_output("remote"))
                     } else {
                         Err(ErrorPayload::new(
-                            "invalid_manifest",
+                            WireErrorCode::InvalidManifest,
                             "test initialization failure",
                         ))
                     }
@@ -1563,7 +1567,10 @@ mod tests {
             } else {
                 assert_structured_payload(
                     first.unwrap_err(),
-                    &ErrorPayload::new("invalid_manifest", "test initialization failure"),
+                    &ErrorPayload::new(
+                        WireErrorCode::InvalidManifest,
+                        "test initialization failure",
+                    ),
                 );
             }
             assert_eq!(caller.is_remote_initialized(), first_succeeds);
@@ -1787,10 +1794,12 @@ mod tests {
         let (caller_transport, host_transport) = ChannelTransport::pair();
         let caller = test_peer(caller_transport, "caller");
         let host = test_peer(host_transport, "host");
-        let mut expected =
-            ErrorPayload::new("provider_rate_limited", "provider rate limit reached")
-                .with_hint("retry after the provider backoff")
-                .retryable(true);
+        let mut expected = ErrorPayload::new(
+            WireErrorCode::ProviderRateLimited,
+            "provider rate limit reached",
+        )
+        .with_hint("retry after the provider backoff")
+        .retryable(true);
         expected.details = Some(json!({
             "provider": "test",
             "retry_after_ms": 250
@@ -1847,7 +1856,10 @@ mod tests {
             Box::pin(async move {
                 token.cancellation_token().cancelled().await;
                 nested_cancelled.notify_one();
-                Err(ErrorPayload::new("cancelled", "nested call cancelled"))
+                Err(ErrorPayload::new(
+                    WireErrorCode::Cancelled,
+                    "nested call cancelled",
+                ))
             })
         }));
 
@@ -1861,7 +1873,9 @@ mod tests {
                     .invoke("test.nested", Value::Null, OutboundInvokeControl::default())
                     .await
                     .map(InvokeReply::Value)
-                    .map_err(|error| ErrorPayload::new("nested_failed", error.to_string()))
+                    .map_err(|error| {
+                        ErrorPayload::new(WireErrorCode::NestedFailed, error.to_string())
+                    })
             })
         }));
 

@@ -6,16 +6,15 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+use astrcode_core::wire::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::ExtensionTasks,
     host::{
-        HOST_ERROR_CODE_FILE_TOO_LARGE, HOST_ERROR_CODE_INVALID_INPUT,
-        HOST_ERROR_CODE_PERMISSION_DENIED, HOST_WORKSPACE_GLOB_DEFAULT_MAX_MATCHES,
-        HOST_WORKSPACE_GREP_DEFAULT_MAX_BYTES, HOST_WORKSPACE_GREP_DEFAULT_MAX_LINE_CHARS,
-        HOST_WORKSPACE_GREP_DEFAULT_MAX_MATCHES, HOST_WORKSPACE_LIST_DEFAULT_LIMIT,
-        HOST_WORKSPACE_MAX_FILE_BYTES, HostWorkspaceEditRequest, HostWorkspaceGlobRequest,
-        HostWorkspaceGrepRequest, HostWorkspaceListRequest, HostWorkspaceReadRequest,
-        HostWorkspaceWriteRequest,
+        HOST_WORKSPACE_GLOB_DEFAULT_MAX_MATCHES, HOST_WORKSPACE_GREP_DEFAULT_MAX_BYTES,
+        HOST_WORKSPACE_GREP_DEFAULT_MAX_LINE_CHARS, HOST_WORKSPACE_GREP_DEFAULT_MAX_MATCHES,
+        HOST_WORKSPACE_LIST_DEFAULT_LIMIT, HOST_WORKSPACE_MAX_FILE_BYTES, HostWorkspaceEditRequest,
+        HostWorkspaceGlobRequest, HostWorkspaceGrepRequest, HostWorkspaceListRequest,
+        HostWorkspaceReadRequest, HostWorkspaceWriteRequest,
     },
     s5r::ErrorPayload,
 };
@@ -127,7 +126,7 @@ fn read(root: &str, request: HostWorkspaceReadRequest) -> Result<Value, ErrorPay
     let metadata = std::fs::metadata(&path).map_err(io_error)?;
     if !metadata.is_file() {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             "workspace.read path must be a regular file",
         ));
     }
@@ -136,7 +135,7 @@ fn read(root: &str, request: HostWorkspaceReadRequest) -> Result<Value, ErrorPay
         .unwrap_or(HOST_WORKSPACE_MAX_FILE_BYTES as u64);
     if metadata.len() > max_bytes {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_FILE_TOO_LARGE,
+            WireErrorCode::FileTooLarge,
             format!("file size {} exceeds max_bytes {max_bytes}", metadata.len()),
         ));
     }
@@ -144,7 +143,7 @@ fn read(root: &str, request: HostWorkspaceReadRequest) -> Result<Value, ErrorPay
         .map_err(io_error)?
         .ok_or_else(|| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_FILE_TOO_LARGE,
+                WireErrorCode::FileTooLarge,
                 format!("file size exceeds max_bytes {max_bytes}"),
             )
         })?;
@@ -158,7 +157,7 @@ fn list(root: &str, request: HostWorkspaceListRequest) -> Result<Value, ErrorPay
     let path = resolve_existing_path(root, relative_path, "workspace.list")?;
     if !path.is_dir() {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             "workspace.list path must be a directory",
         ));
     }
@@ -215,7 +214,7 @@ fn grep(root: &str, request: HostWorkspaceGrepRequest) -> Result<Value, ErrorPay
     let pattern = required_non_empty(&request.pattern, "pattern")?;
     let regex = Regex::new(pattern).map_err(|error| {
         ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             format!("invalid regex: {error}"),
         )
     })?;
@@ -288,17 +287,17 @@ fn glob(root: &str, request: HostWorkspaceGlobRequest) -> Result<Value, ErrorPay
     let pattern = required_non_empty(&request.pattern, "pattern")?;
     if Path::new(pattern).is_absolute() {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_PERMISSION_DENIED,
+            WireErrorCode::PermissionDenied,
             "glob pattern must be relative to the workspace",
         ));
     }
     let matcher = Glob::new(pattern)
-        .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, error.to_string()))?
+        .map_err(|error| ErrorPayload::new(WireErrorCode::InvalidInput, error.to_string()))?
         .compile_matcher();
     let relative_root = request.root.as_deref().unwrap_or(".");
     if is_overly_broad_glob(pattern, relative_root) {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             "Use workspace.list to inspect workspace structure; workspace.glob is for targeted \
              file discovery (for example **/*.rs or crates/astrcode-core/**)",
         ));
@@ -307,7 +306,7 @@ fn glob(root: &str, request: HostWorkspaceGlobRequest) -> Result<Value, ErrorPay
     let search_root = resolve_existing_path(root, relative_root, "workspace.glob")?;
     if !search_root.is_dir() {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             "workspace.glob root must be a directory",
         ));
     }
@@ -412,7 +411,7 @@ fn edit(root: &str, request: HostWorkspaceEditRequest) -> Result<Value, ErrorPay
     let metadata = std::fs::metadata(&path).map_err(io_error)?;
     if !metadata.is_file() || metadata.len() > HOST_WORKSPACE_MAX_FILE_BYTES as u64 {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_FILE_TOO_LARGE,
+            WireErrorCode::FileTooLarge,
             format!(
                 "workspace.edit supports regular files up to {HOST_WORKSPACE_MAX_FILE_BYTES} bytes"
             ),
@@ -422,7 +421,7 @@ fn edit(root: &str, request: HostWorkspaceEditRequest) -> Result<Value, ErrorPay
         .map_err(io_error)?
         .ok_or_else(|| {
             ErrorPayload::new(
-                HOST_ERROR_CODE_FILE_TOO_LARGE,
+                WireErrorCode::FileTooLarge,
                 format!(
                     "workspace.edit supports regular files up to {HOST_WORKSPACE_MAX_FILE_BYTES} \
                      bytes"
@@ -433,13 +432,13 @@ fn edit(root: &str, request: HostWorkspaceEditRequest) -> Result<Value, ErrorPay
     let replacements = content.matches(old_text).count();
     if replacements == 0 {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             format!("old_text not found in {relative_path}"),
         ));
     }
     if !replace_all && replacements > 1 {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             format!(
                 "old_text matched {replacements} times in {relative_path}; set replace_all=true \
                  or provide more context"
@@ -480,7 +479,7 @@ fn resolve_write_target(
         .file_name()
         .filter(|name| *name != OsStr::new(".."))
         .ok_or_else(|| {
-            ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, "path must reference a file")
+            ErrorPayload::new(WireErrorCode::InvalidInput, "path must reference a file")
         })?
         .to_owned();
     let canonical_root = std::fs::canonicalize(root).map_err(io_error)?;
@@ -492,7 +491,7 @@ fn resolve_write_target(
     let canonical_parent = std::fs::canonicalize(parent).map_err(io_error)?;
     if !canonical_parent.starts_with(&canonical_root) {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_PERMISSION_DENIED,
+            WireErrorCode::PermissionDenied,
             "path escapes the workspace root",
         ));
     }
@@ -511,7 +510,7 @@ fn reject_symlink_components(
             Component::Normal(name) => current.push(name),
             Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
                 return Err(ErrorPayload::new(
-                    HOST_ERROR_CODE_PERMISSION_DENIED,
+                    WireErrorCode::PermissionDenied,
                     "path must be relative to the workspace",
                 ));
             },
@@ -519,7 +518,7 @@ fn reject_symlink_components(
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(ErrorPayload::new(
-                    HOST_ERROR_CODE_PERMISSION_DENIED,
+                    WireErrorCode::PermissionDenied,
                     format!("symlink paths are not accessible via {capability}"),
                 ));
             },
@@ -536,7 +535,7 @@ fn reject_symlink_components(
 fn reject_symlink_target(path: &Path, capability: &str) -> Result<(), ErrorPayload> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(ErrorPayload::new(
-            HOST_ERROR_CODE_PERMISSION_DENIED,
+            WireErrorCode::PermissionDenied,
             format!("symlink paths are not writable via {capability}"),
         )),
         Ok(_) => Ok(()),
@@ -555,7 +554,7 @@ fn reject_sensitive_path(relative_path: &str) -> Result<(), ErrorPayload> {
         .any(is_sensitive_component);
     if sensitive {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_PERMISSION_DENIED,
+            WireErrorCode::PermissionDenied,
             "workspace access to sensitive files is not allowed",
         ));
     }
@@ -586,7 +585,7 @@ fn is_sensitive_component(component: &str) -> bool {
 fn required_non_empty<'a>(value: &'a str, key: &str) -> Result<&'a str, ErrorPayload> {
     if value.is_empty() {
         Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
+            WireErrorCode::InvalidInput,
             format!("{key} must not be empty"),
         ))
     } else {
@@ -597,7 +596,7 @@ fn required_non_empty<'a>(value: &'a str, key: &str) -> Result<&'a str, ErrorPay
 fn enforce_content_limit(content: &str) -> Result<(), ErrorPayload> {
     if content.len() > HOST_WORKSPACE_MAX_FILE_BYTES {
         return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_FILE_TOO_LARGE,
+            WireErrorCode::FileTooLarge,
             format!("workspace writes are limited to {HOST_WORKSPACE_MAX_FILE_BYTES} bytes"),
         ));
     }
@@ -770,7 +769,7 @@ mod tests {
             },
         )
         .expect_err("parent traversal must fail");
-        assert_eq!(escape.code, HOST_ERROR_CODE_PERMISSION_DENIED);
+        assert_eq!(escape.code_enum(), Some(WireErrorCode::PermissionDenied));
 
         let sensitive = write(
             root,
@@ -780,7 +779,7 @@ mod tests {
             },
         )
         .expect_err("sensitive file must fail");
-        assert_eq!(sensitive.code, HOST_ERROR_CODE_PERMISSION_DENIED);
+        assert_eq!(sensitive.code_enum(), Some(WireErrorCode::PermissionDenied));
 
         std::fs::write(workspace.path().join("secret.pem"), "private")
             .expect("seed sensitive file");
@@ -792,7 +791,10 @@ mod tests {
             },
         )
         .expect_err("sensitive reads must fail");
-        assert_eq!(sensitive_read.code, HOST_ERROR_CODE_PERMISSION_DENIED);
+        assert_eq!(
+            sensitive_read.code_enum(),
+            Some(WireErrorCode::PermissionDenied)
+        );
     }
 
     #[cfg(unix)]
@@ -822,7 +824,10 @@ mod tests {
             },
         )
         .expect_err("intermediate symlink read must fail");
-        assert_eq!(read_error.code, HOST_ERROR_CODE_PERMISSION_DENIED);
+        assert_eq!(
+            read_error.code_enum(),
+            Some(WireErrorCode::PermissionDenied)
+        );
 
         let write_error = write(
             root,
@@ -832,7 +837,10 @@ mod tests {
             },
         )
         .expect_err("intermediate symlink write must fail");
-        assert_eq!(write_error.code, HOST_ERROR_CODE_PERMISSION_DENIED);
+        assert_eq!(
+            write_error.code_enum(),
+            Some(WireErrorCode::PermissionDenied)
+        );
         assert!(!outside.path().join("new").exists());
     }
 
@@ -908,7 +916,8 @@ mod tests {
             let error = glob(root, glob_request(pattern))
                 .expect_err("root catch-all glob must be rejected");
             assert_eq!(
-                error.code, HOST_ERROR_CODE_INVALID_INPUT,
+                error.code_enum(),
+                Some(WireErrorCode::InvalidInput),
                 "pattern: {pattern}"
             );
             assert!(error.message.contains("workspace.list"));
@@ -935,7 +944,10 @@ mod tests {
             },
         )
         .expect_err("root ./ must not bypass the catch-all guard");
-        assert_eq!(normalized_root_error.code, HOST_ERROR_CODE_INVALID_INPUT);
+        assert_eq!(
+            normalized_root_error.code_enum(),
+            Some(WireErrorCode::InvalidInput)
+        );
 
         let limited = list(
             root,
