@@ -6,31 +6,259 @@ use serde_json::{Value, json};
 
 use crate::{
     llm::{LlmContent, LlmMessage, LlmRole},
-    session::SessionToolSelectionDto,
+    session::{SessionPhaseDto, SessionToolSelectionDto},
     types::SessionId,
 };
 
 pub const HOST_PROCESS_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const HOST_PROCESS_MAX_TIMEOUT_MS: u64 = 120_000;
+pub const HOST_PROCESS_MAX_STDIN_BYTES: usize = 1024 * 1024;
 pub const HOST_NETWORK_MAX_BYTES: usize = 10 * 1024 * 1024;
+pub const HOST_NETWORK_MAX_REQUEST_BODY_BYTES: usize = 10 * 1024 * 1024;
 pub const HOST_NETWORK_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const HOST_NETWORK_MAX_TIMEOUT_MS: u64 = 60_000;
+pub const HOST_SESSION_STATE_KEY_MAX_LENGTH: usize = 128;
+pub const HOST_SESSION_STATE_VALUE_MAX_BYTES: usize = 1024 * 1024;
+pub const HOST_WORKSPACE_MAX_FILE_BYTES: usize = 1024 * 1024;
+pub const HOST_WORKSPACE_LIST_DEFAULT_DEPTH: usize = 1;
+pub const HOST_WORKSPACE_LIST_MAX_DEPTH: usize = 32;
+pub const HOST_WORKSPACE_LIST_DEFAULT_LIMIT: usize = 500;
+pub const HOST_WORKSPACE_LIST_MAX_ENTRIES: usize = 500;
+pub const HOST_WORKSPACE_GREP_DEFAULT_MAX_MATCHES: usize = 100;
+pub const HOST_WORKSPACE_GREP_DEFAULT_MAX_BYTES: usize = 64 * 1024;
+pub const HOST_WORKSPACE_GREP_DEFAULT_MAX_LINE_CHARS: usize = 500;
+pub const HOST_WORKSPACE_GLOB_DEFAULT_MAX_MATCHES: usize = 200;
+pub const HOST_WORKSPACE_SEARCH_MAX_MATCHES: usize = 1_000;
+pub const HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+pub const HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS: usize = 2_000;
+
+const HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS: usize =
+    HOST_NETWORK_MAX_REQUEST_BODY_BYTES.div_ceil(3) * 4;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct HostAcknowledgement {
-    #[serde(rename = "ok")]
-    pub(crate) _ok: bool,
+pub struct HostAcknowledgement {
+    #[serde(rename = "ok", deserialize_with = "deserialize_true")]
+    _ok: bool,
 }
 
 impl HostAcknowledgement {
+    pub const fn accepted() -> Self {
+        Self { _ok: true }
+    }
+
     pub(crate) fn wire_schema() -> Value {
         json!({
             "type": "object",
-            "properties": { "ok": { "type": "boolean" } },
+            "properties": { "ok": { "const": true } },
             "required": ["ok"],
             "additionalProperties": false
         })
+    }
+}
+
+fn deserialize_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = bool::deserialize(deserializer)?;
+    if value {
+        Ok(true)
+    } else {
+        Err(serde::de::Error::custom(
+            "acknowledgement `ok` must be true",
+        ))
+    }
+}
+
+/// Typed request used by worker extensions to emit a declared event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HostEventEmitRequest {
+    #[serde(deserialize_with = "deserialize_non_empty_event_type")]
+    pub event_type: String,
+    #[serde(deserialize_with = "deserialize_positive_schema_version")]
+    pub schema_version: u32,
+    pub payload: Value,
+}
+
+fn deserialize_non_empty_event_type<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let event_type = String::deserialize(deserializer)?;
+    if event_type.is_empty() {
+        Err(serde::de::Error::custom("event_type must not be empty"))
+    } else {
+        Ok(event_type)
+    }
+}
+
+fn deserialize_positive_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let schema_version = u32::deserialize(deserializer)?;
+    if schema_version == 0 {
+        Err(serde::de::Error::custom(
+            "schema_version must be greater than zero",
+        ))
+    } else {
+        Ok(schema_version)
+    }
+}
+
+impl HostEventEmitRequest {
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "event_type": { "type": "string", "minLength": 1 },
+                "schema_version": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": u32::MAX
+                },
+                "payload": {}
+            },
+            "required": ["event_type", "schema_version", "payload"],
+            "additionalProperties": false
+        })
+    }
+}
+
+/// Request for extension-namespaced state in the current session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSessionStateReadRequest {
+    #[serde(deserialize_with = "deserialize_session_state_key")]
+    pub key: String,
+}
+
+impl HostSessionStateReadRequest {
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": { "key": session_state_key_property_schema() },
+            "required": ["key"],
+            "additionalProperties": false
+        })
+    }
+}
+
+/// Value stored under an extension-namespaced key in the current session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSessionStateReadOutput {
+    pub content: Option<String>,
+}
+
+impl HostSessionStateReadOutput {
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "oneOf": [
+                        { "type": "string" },
+                        { "type": "null" }
+                    ]
+                }
+            },
+            "required": ["content"],
+            "additionalProperties": false
+        })
+    }
+}
+
+/// Write request for extension-namespaced state in the current session.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSessionStateWriteRequest {
+    #[serde(deserialize_with = "deserialize_session_state_key")]
+    pub key: String,
+    #[serde(
+        serialize_with = "serialize_session_state_content",
+        deserialize_with = "deserialize_session_state_content"
+    )]
+    pub content: String,
+}
+
+impl HostSessionStateWriteRequest {
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "key": session_state_key_property_schema(),
+                "content": {
+                    "type": "string",
+                    "maxLength": HOST_SESSION_STATE_VALUE_MAX_BYTES,
+                    "description": "Limited to this many UTF-8 bytes; the host byte limit is authoritative."
+                }
+            },
+            "required": ["key", "content"],
+            "additionalProperties": false
+        })
+    }
+}
+
+fn session_state_key_property_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": HOST_SESSION_STATE_KEY_MAX_LENGTH,
+        "pattern": "^[A-Za-z0-9_.-]+$",
+        "not": { "enum": [".", ".."] }
+    })
+}
+
+fn deserialize_session_state_key<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let key = String::deserialize(deserializer)?;
+    if valid_session_state_key(&key) {
+        Ok(key)
+    } else {
+        Err(serde::de::Error::custom("invalid session state key"))
+    }
+}
+
+fn valid_session_state_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= HOST_SESSION_STATE_KEY_MAX_LENGTH
+        && !matches!(key, "." | "..")
+        && key.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || character == '-'
+                || character == '_'
+                || character == '.'
+        })
+}
+
+fn serialize_session_state_content<S>(content: &str, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if content.len() > HOST_SESSION_STATE_VALUE_MAX_BYTES {
+        return Err(serde::ser::Error::custom(format_args!(
+            "session state content exceeds {HOST_SESSION_STATE_VALUE_MAX_BYTES} UTF-8 bytes"
+        )));
+    }
+    serializer.serialize_str(content)
+}
+
+fn deserialize_session_state_content<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let content = String::deserialize(deserializer)?;
+    if content.len() > HOST_SESSION_STATE_VALUE_MAX_BYTES {
+        Err(serde::de::Error::custom(format_args!(
+            "session state content exceeds {HOST_SESSION_STATE_VALUE_MAX_BYTES} UTF-8 bytes"
+        )))
+    } else {
+        Ok(content)
     }
 }
 
@@ -484,7 +712,8 @@ impl HostSessionTokenUsageOutput {
 
 /// `astrcode.process.spawn` 的线缆请求。
 ///
-/// `timeout_ms` 必须位于 `1..=HOST_PROCESS_MAX_TIMEOUT_MS`。
+/// `stdin` 最大为 [`HOST_PROCESS_MAX_STDIN_BYTES`] 个 UTF-8 字节，`timeout_ms` 必须位于
+/// `1..=HOST_PROCESS_MAX_TIMEOUT_MS`。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostProcessRequest {
@@ -493,7 +722,12 @@ pub struct HostProcessRequest {
     pub args: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_process_stdin",
+        deserialize_with = "deserialize_process_stdin"
+    )]
     pub stdin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
@@ -517,7 +751,11 @@ impl HostProcessRequest {
                 "command": { "type": "string", "minLength": 1 },
                 "args": { "type": "array", "items": { "type": "string" } },
                 "cwd": { "type": ["string", "null"] },
-                "stdin": { "type": ["string", "null"] },
+                "stdin": {
+                    "type": ["string", "null"],
+                    "maxLength": HOST_PROCESS_MAX_STDIN_BYTES,
+                    "description": "Limited to this many UTF-8 bytes; the host byte limit is authoritative."
+                },
                 "timeout_ms": {
                     "type": ["integer", "null"],
                     "minimum": 1,
@@ -527,6 +765,38 @@ impl HostProcessRequest {
             "required": ["command"],
             "additionalProperties": false
         })
+    }
+}
+
+fn serialize_process_stdin<S>(stdin: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if stdin
+        .as_ref()
+        .is_some_and(|value| value.len() > HOST_PROCESS_MAX_STDIN_BYTES)
+    {
+        return Err(serde::ser::Error::custom(format_args!(
+            "stdin exceeds {HOST_PROCESS_MAX_STDIN_BYTES} UTF-8 bytes"
+        )));
+    }
+    stdin.serialize(serializer)
+}
+
+fn deserialize_process_stdin<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let stdin = Option::<String>::deserialize(deserializer)?;
+    if stdin
+        .as_ref()
+        .is_some_and(|value| value.len() > HOST_PROCESS_MAX_STDIN_BYTES)
+    {
+        Err(serde::de::Error::custom(format_args!(
+            "stdin exceeds {HOST_PROCESS_MAX_STDIN_BYTES} UTF-8 bytes"
+        )))
+    } else {
+        Ok(stdin)
     }
 }
 
@@ -584,8 +854,9 @@ pub enum HostNetworkRedirectPolicy {
 
 /// `astrcode.network.client` 的线缆请求。
 ///
-/// `max_bytes` 最大为 [`HOST_NETWORK_MAX_BYTES`]，`timeout_ms` 必须位于
-/// `1..=HOST_NETWORK_MAX_TIMEOUT_MS`。`Manual` 重定向仍返回受大小限制的原始响应体。
+/// `body` 最大为 [`HOST_NETWORK_MAX_REQUEST_BODY_BYTES`]，`max_bytes` 最大为
+/// [`HOST_NETWORK_MAX_BYTES`]，`timeout_ms` 必须位于 `1..=HOST_NETWORK_MAX_TIMEOUT_MS`。
+/// `Manual` 重定向仍返回受大小限制的原始响应体。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostNetworkRequest {
@@ -594,7 +865,11 @@ pub struct HostNetworkRequest {
     pub method: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub headers: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty", with = "base64_bytes")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        with = "bounded_request_body"
+    )]
     pub body: Vec<u8>,
     #[serde(default = "default_network_max_bytes")]
     pub max_bytes: usize,
@@ -624,7 +899,12 @@ impl HostNetworkRequest {
                 "url": { "type": "string" },
                 "method": { "type": "string" },
                 "headers": { "type": "object", "additionalProperties": { "type": "string" } },
-                "body": { "type": "string", "contentEncoding": "base64" },
+                "body": {
+                    "type": "string",
+                    "contentEncoding": "base64",
+                    "maxLength": HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS,
+                    "description": "Decoded body is byte-limited; the host decoded-byte limit is authoritative."
+                },
                 "max_bytes": {
                     "type": "integer",
                     "minimum": 0,
@@ -704,7 +984,51 @@ mod base64_bytes {
         D: Deserializer<'de>,
     {
         let encoded = String::deserialize(deserializer)?;
-        STANDARD.decode(encoded).map_err(D::Error::custom)
+        decode(&encoded).map_err(D::Error::custom)
+    }
+
+    pub(super) fn decode(encoded: &str) -> Result<Vec<u8>, base64::DecodeError> {
+        STANDARD.decode(encoded)
+    }
+}
+
+mod bounded_request_body {
+    use serde::{Deserialize, Deserializer, Serializer, de::Error as _, ser::Error as _};
+
+    use super::{
+        HOST_NETWORK_MAX_REQUEST_BODY_BYTES, HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS, base64_bytes,
+    };
+
+    pub fn serialize<S>(bytes: &[u8], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if bytes.len() > HOST_NETWORK_MAX_REQUEST_BODY_BYTES {
+            return Err(S::Error::custom(format_args!(
+                "network request body exceeds {HOST_NETWORK_MAX_REQUEST_BODY_BYTES} bytes"
+            )));
+        }
+        base64_bytes::serialize(bytes, serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Vec<u8>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        if encoded.len() > HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS {
+            return Err(D::Error::custom(format_args!(
+                "encoded network request body exceeds {HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS} \
+                 characters"
+            )));
+        }
+        let bytes = base64_bytes::decode(&encoded).map_err(D::Error::custom)?;
+        if bytes.len() > HOST_NETWORK_MAX_REQUEST_BODY_BYTES {
+            return Err(D::Error::custom(format_args!(
+                "network request body exceeds {HOST_NETWORK_MAX_REQUEST_BODY_BYTES} bytes"
+            )));
+        }
+        Ok(bytes)
     }
 }
 
@@ -713,7 +1037,11 @@ mod base64_bytes {
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceReadRequest {
     pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_workspace_read_max_bytes"
+    )]
     pub max_bytes: Option<u64>,
 }
 
@@ -723,11 +1051,31 @@ impl HostWorkspaceReadRequest {
             "type": "object",
             "properties": {
                 "path": { "type": "string", "minLength": 1 },
-                "max_bytes": { "type": ["integer", "null"], "minimum": 0 }
+                "max_bytes": {
+                    "type": ["integer", "null"],
+                    "minimum": 0,
+                    "maximum": HOST_WORKSPACE_MAX_FILE_BYTES,
+                    "default": HOST_WORKSPACE_MAX_FILE_BYTES
+                }
             },
             "required": ["path"],
             "additionalProperties": false
         })
+    }
+}
+
+fn deserialize_workspace_read_max_bytes<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<u64>::deserialize(deserializer)?;
+    match value {
+        Some(value) if value > HOST_WORKSPACE_MAX_FILE_BYTES as u64 => {
+            Err(serde::de::Error::custom(format_args!(
+                "max_bytes must not exceed {HOST_WORKSPACE_MAX_FILE_BYTES}"
+            )))
+        },
+        value => Ok(value),
     }
 }
 
@@ -850,9 +1198,16 @@ impl HostWorkspaceEditOutput {
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceListRequest {
     pub path: String,
-    #[serde(default = "default_workspace_list_depth")]
+    #[serde(
+        default = "default_workspace_list_depth",
+        deserialize_with = "deserialize_workspace_list_depth"
+    )]
     pub depth: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_workspace_list_limit"
+    )]
     pub limit: Option<usize>,
 }
 
@@ -862,8 +1217,18 @@ impl HostWorkspaceListRequest {
             "type": "object",
             "properties": {
                 "path": { "type": "string" },
-                "depth": { "type": "integer", "minimum": 0, "default": 1 },
-                "limit": { "type": ["integer", "null"], "minimum": 0 }
+                "depth": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": HOST_WORKSPACE_LIST_MAX_DEPTH,
+                    "default": HOST_WORKSPACE_LIST_DEFAULT_DEPTH
+                },
+                "limit": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "maximum": HOST_WORKSPACE_LIST_MAX_ENTRIES,
+                    "default": HOST_WORKSPACE_LIST_DEFAULT_LIMIT
+                }
             },
             "required": ["path"],
             "additionalProperties": false
@@ -872,7 +1237,100 @@ impl HostWorkspaceListRequest {
 }
 
 const fn default_workspace_list_depth() -> usize {
-    1
+    HOST_WORKSPACE_LIST_DEFAULT_DEPTH
+}
+
+fn deserialize_workspace_list_depth<'de, D>(deserializer: D) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_bounded_usize(deserializer, 1, HOST_WORKSPACE_LIST_MAX_DEPTH, "depth")
+}
+
+fn deserialize_workspace_list_limit<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_bounded_usize(deserializer, 1, HOST_WORKSPACE_LIST_MAX_ENTRIES, "limit")
+}
+
+fn deserialize_workspace_search_max_matches<'de, D>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_bounded_usize(
+        deserializer,
+        1,
+        HOST_WORKSPACE_SEARCH_MAX_MATCHES,
+        "max_matches",
+    )
+}
+
+fn deserialize_workspace_search_max_bytes<'de, D>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_bounded_usize(
+        deserializer,
+        1,
+        HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES,
+        "max_bytes",
+    )
+}
+
+fn deserialize_workspace_search_max_line_chars<'de, D>(
+    deserializer: D,
+) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserialize_optional_bounded_usize(
+        deserializer,
+        1,
+        HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS,
+        "max_line_chars",
+    )
+}
+
+fn deserialize_bounded_usize<'de, D>(
+    deserializer: D,
+    min: usize,
+    max: usize,
+    field: &str,
+) -> Result<usize, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = usize::deserialize(deserializer)?;
+    if (min..=max).contains(&value) {
+        Ok(value)
+    } else {
+        Err(serde::de::Error::custom(format_args!(
+            "{field} must be between {min} and {max}"
+        )))
+    }
+}
+
+fn deserialize_optional_bounded_usize<'de, D>(
+    deserializer: D,
+    min: usize,
+    max: usize,
+    field: &str,
+) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<usize>::deserialize(deserializer)?;
+    match value {
+        Some(value) if !(min..=max).contains(&value) => Err(serde::de::Error::custom(
+            format_args!("{field} must be between {min} and {max}"),
+        )),
+        value => Ok(value),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -928,11 +1386,23 @@ pub struct HostWorkspaceGrepRequest {
     pub pattern: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_workspace_search_max_matches"
+    )]
     pub max_matches: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_workspace_search_max_bytes"
+    )]
     pub max_bytes: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_workspace_search_max_line_chars"
+    )]
     pub max_line_chars: Option<usize>,
 }
 
@@ -943,9 +1413,24 @@ impl HostWorkspaceGrepRequest {
             "properties": {
                 "pattern": { "type": "string", "minLength": 1 },
                 "path": { "type": ["string", "null"] },
-                "max_matches": { "type": ["integer", "null"], "minimum": 0 },
-                "max_bytes": { "type": ["integer", "null"], "minimum": 0 },
-                "max_line_chars": { "type": ["integer", "null"], "minimum": 0 }
+                "max_matches": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "maximum": HOST_WORKSPACE_SEARCH_MAX_MATCHES,
+                    "default": HOST_WORKSPACE_GREP_DEFAULT_MAX_MATCHES
+                },
+                "max_bytes": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "maximum": HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES,
+                    "default": HOST_WORKSPACE_GREP_DEFAULT_MAX_BYTES
+                },
+                "max_line_chars": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "maximum": HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS,
+                    "default": HOST_WORKSPACE_GREP_DEFAULT_MAX_LINE_CHARS
+                }
             },
             "required": ["pattern"],
             "additionalProperties": false
@@ -1006,7 +1491,11 @@ pub struct HostWorkspaceGlobRequest {
     pub pattern: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_workspace_search_max_matches"
+    )]
     pub max_matches: Option<usize>,
     #[serde(default)]
     pub include_ignored: bool,
@@ -1019,7 +1508,12 @@ impl HostWorkspaceGlobRequest {
             "properties": {
                 "pattern": { "type": "string", "minLength": 1 },
                 "root": { "type": ["string", "null"] },
-                "max_matches": { "type": ["integer", "null"], "minimum": 0 },
+                "max_matches": {
+                    "type": ["integer", "null"],
+                    "minimum": 1,
+                    "maximum": HOST_WORKSPACE_SEARCH_MAX_MATCHES,
+                    "default": HOST_WORKSPACE_GLOB_DEFAULT_MAX_MATCHES
+                },
                 "include_ignored": { "type": "boolean" }
             },
             "required": ["pattern"],
@@ -1139,7 +1633,7 @@ impl HostSessionCancelOutput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionExecutionView {
-    pub phase: String,
+    pub phase: SessionPhaseDto,
     pub active_turn_id: Option<String>,
     pub queued_inputs: usize,
 }
@@ -1149,7 +1643,7 @@ impl HostSessionExecutionView {
         json!({
             "type": "object",
             "properties": {
-                "phase": { "type": "string" },
+                "phase": SessionPhaseDto::wire_schema(),
                 "active_turn_id": { "type": ["string", "null"] },
                 "queued_inputs": { "type": "integer", "minimum": 0 }
             },
@@ -1227,7 +1721,7 @@ fn host_llm_message_schema() -> Value {
                                 "type": { "const": "image" },
                                 "base64": { "type": "string" },
                                 "media_type": { "type": "string" },
-                                "filename": { "type": "string" }
+                                "filename": { "type": ["string", "null"] }
                             },
                             "required": ["type", "base64", "media_type"],
                             "additionalProperties": false
@@ -1239,7 +1733,7 @@ fn host_llm_message_schema() -> Value {
                                 "call_id": { "type": "string" },
                                 "name": { "type": "string" },
                                 "arguments": {},
-                                "raw_arguments": { "type": "string" }
+                                "raw_arguments": { "type": ["string", "null"] }
                             },
                             "required": ["type", "call_id", "name", "arguments"],
                             "additionalProperties": false
@@ -1258,8 +1752,8 @@ fn host_llm_message_schema() -> Value {
                     ]
                 }
             },
-            "name": { "type": "string" },
-            "reasoning_content": { "type": "string" }
+            "name": { "type": ["string", "null"] },
+            "reasoning_content": { "type": ["string", "null"] }
         },
         "required": ["role", "content"],
         "additionalProperties": false
@@ -1320,6 +1814,10 @@ mod tests {
 
         for schema in [
             HostAcknowledgement::wire_schema(),
+            HostEventEmitRequest::wire_schema(),
+            HostSessionStateReadRequest::wire_schema(),
+            HostSessionStateReadOutput::wire_schema(),
+            HostSessionStateWriteRequest::wire_schema(),
             HostLlmChatRequest::wire_schema(),
             HostLlmChatOutput::wire_schema(),
             HostLlmCollectedStreamOutput::wire_schema(),
@@ -1354,7 +1852,21 @@ mod tests {
         }
 
         assert_contracts!(
-            HostAcknowledgement { _ok: true },
+            HostAcknowledgement::accepted(),
+            HostEventEmitRequest {
+                event_type: "review.completed".into(),
+                schema_version: 1,
+                payload: json!({ "status": "ok" }),
+            },
+            HostSessionStateReadRequest { key: "goal".into() },
+            HostSessionStateReadOutput {
+                content: Some("active".into()),
+            },
+            HostSessionStateReadOutput { content: None },
+            HostSessionStateWriteRequest {
+                key: "goal".into(),
+                content: "active".into(),
+            },
             HostLlmChatRequest::new(vec![LlmMessage::user("hello")]),
             HostLlmChatOutput {
                 content: "hello".into(),
@@ -1514,7 +2026,7 @@ mod tests {
             HostSessionDeliveryOutput::Queued { queue_len: 2 },
             HostSessionCancelOutput { cancelled: true },
             HostSessionExecutionView {
-                phase: "running".into(),
+                phase: SessionPhaseDto::Streaming,
                 active_turn_id: Some("turn-1".into()),
                 queued_inputs: 2,
             },
@@ -1525,6 +2037,304 @@ mod tests {
             HostConfigureSessionToolsOutput {
                 selection: SessionToolSelectionDto::no_tools(),
             },
+        );
+    }
+
+    #[test]
+    fn unit_and_context_contracts_reject_invalid_shapes() {
+        for value in [
+            json!({}),
+            json!({ "ok": false }),
+            json!({ "ok": true, "extra": 1 }),
+        ] {
+            assert!(
+                serde_json::from_value::<HostAcknowledgement>(value.clone()).is_err(),
+                "accepted invalid acknowledgement: {value}"
+            );
+        }
+        assert!(serde_json::from_value::<HostAcknowledgement>(json!({ "ok": true })).is_ok());
+
+        for value in [
+            json!({ "event_type": "review.completed", "payload": {} }),
+            json!({ "event_type": "review.completed", "schema_version": 1 }),
+            json!({ "event_type": "", "schema_version": 1, "payload": {} }),
+            json!({ "event_type": "review.completed", "schema_version": 0, "payload": {} }),
+            json!({
+                "event_type": "review.completed",
+                "schema_version": u64::from(u32::MAX) + 1,
+                "payload": {}
+            }),
+            json!({
+                "event_type": "review.completed",
+                "schema_version": 1,
+                "payload": {},
+                "extra": true
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<HostEventEmitRequest>(value.clone()).is_err(),
+                "accepted invalid event emit request: {value}"
+            );
+        }
+
+        for value in [
+            json!({}),
+            json!({ "key": "goal", "content": "active", "extra": true }),
+        ] {
+            assert!(
+                serde_json::from_value::<HostSessionStateWriteRequest>(value.clone()).is_err(),
+                "accepted invalid session state write: {value}"
+            );
+        }
+
+        let invalid_keys = [
+            String::new(),
+            ".".into(),
+            "..".into(),
+            "nested/key".into(),
+            "x".repeat(HOST_SESSION_STATE_KEY_MAX_LENGTH + 1),
+        ];
+        for key in invalid_keys {
+            assert!(
+                serde_json::from_value::<HostSessionStateReadRequest>(json!({ "key": key }))
+                    .is_err(),
+                "accepted invalid session state key"
+            );
+        }
+
+        let key_schema = &HostSessionStateReadRequest::wire_schema()["properties"]["key"];
+        assert_eq!(key_schema["maxLength"], HOST_SESSION_STATE_KEY_MAX_LENGTH);
+        assert_eq!(key_schema["not"]["enum"], json!([".", ".."]))
+    }
+
+    #[test]
+    fn workspace_request_bounds_match_schema_and_serde() {
+        assert!(
+            serde_json::from_value::<HostWorkspaceReadRequest>(json!({
+                "path": "notes.txt",
+                "max_bytes": HOST_WORKSPACE_MAX_FILE_BYTES as u64 + 1
+            }))
+            .is_err()
+        );
+        for max_bytes in [0, HOST_WORKSPACE_MAX_FILE_BYTES as u64] {
+            let request: HostWorkspaceReadRequest = serde_json::from_value(json!({
+                "path": "notes.txt",
+                "max_bytes": max_bytes
+            }))
+            .unwrap();
+            assert_eq!(request.max_bytes, Some(max_bytes));
+        }
+
+        for value in [
+            json!({ "path": ".", "depth": 0 }),
+            json!({ "path": ".", "depth": HOST_WORKSPACE_LIST_MAX_DEPTH + 1 }),
+            json!({ "path": ".", "limit": 0 }),
+            json!({ "path": ".", "limit": HOST_WORKSPACE_LIST_MAX_ENTRIES + 1 }),
+        ] {
+            assert!(
+                serde_json::from_value::<HostWorkspaceListRequest>(value.clone()).is_err(),
+                "accepted invalid workspace list request: {value}"
+            );
+        }
+        for value in [
+            json!({ "pattern": "x", "max_matches": 0 }),
+            json!({
+                "pattern": "x",
+                "max_matches": HOST_WORKSPACE_SEARCH_MAX_MATCHES + 1
+            }),
+            json!({ "pattern": "x", "max_bytes": 0 }),
+            json!({
+                "pattern": "x",
+                "max_bytes": HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES + 1
+            }),
+            json!({ "pattern": "x", "max_line_chars": 0 }),
+            json!({
+                "pattern": "x",
+                "max_line_chars": HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS + 1
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<HostWorkspaceGrepRequest>(value.clone()).is_err(),
+                "accepted invalid workspace grep request: {value}"
+            );
+        }
+        for value in [
+            json!({ "pattern": "*.rs", "max_matches": 0 }),
+            json!({
+                "pattern": "*.rs",
+                "max_matches": HOST_WORKSPACE_SEARCH_MAX_MATCHES + 1
+            }),
+        ] {
+            assert!(
+                serde_json::from_value::<HostWorkspaceGlobRequest>(value.clone()).is_err(),
+                "accepted invalid workspace glob request: {value}"
+            );
+        }
+
+        let list: HostWorkspaceListRequest = serde_json::from_value(json!({
+            "path": ".",
+            "depth": HOST_WORKSPACE_LIST_MAX_DEPTH,
+            "limit": HOST_WORKSPACE_LIST_MAX_ENTRIES
+        }))
+        .unwrap();
+        assert_eq!(list.depth, HOST_WORKSPACE_LIST_MAX_DEPTH);
+        assert_eq!(list.limit, Some(HOST_WORKSPACE_LIST_MAX_ENTRIES));
+        let grep: HostWorkspaceGrepRequest = serde_json::from_value(json!({
+            "pattern": "x",
+            "max_matches": HOST_WORKSPACE_SEARCH_MAX_MATCHES,
+            "max_bytes": HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES,
+            "max_line_chars": HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS
+        }))
+        .unwrap();
+        assert_eq!(grep.max_matches, Some(HOST_WORKSPACE_SEARCH_MAX_MATCHES));
+        assert_eq!(grep.max_bytes, Some(HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES));
+        assert_eq!(
+            grep.max_line_chars,
+            Some(HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS)
+        );
+        let glob: HostWorkspaceGlobRequest = serde_json::from_value(json!({
+            "pattern": "*.rs",
+            "max_matches": null
+        }))
+        .unwrap();
+        assert_eq!(glob.max_matches, None);
+
+        let list_schema = HostWorkspaceListRequest::wire_schema();
+        assert_eq!(
+            HostWorkspaceReadRequest::wire_schema()["properties"]["max_bytes"]["maximum"],
+            HOST_WORKSPACE_MAX_FILE_BYTES
+        );
+        assert_eq!(
+            HostWorkspaceReadRequest::wire_schema()["properties"]["max_bytes"]["default"],
+            HOST_WORKSPACE_MAX_FILE_BYTES
+        );
+        assert_eq!(
+            list_schema["properties"]["depth"]["maximum"],
+            HOST_WORKSPACE_LIST_MAX_DEPTH
+        );
+        assert_eq!(
+            list_schema["properties"]["limit"]["maximum"],
+            HOST_WORKSPACE_LIST_MAX_ENTRIES
+        );
+        assert_eq!(
+            list_schema["properties"]["depth"]["default"],
+            HOST_WORKSPACE_LIST_DEFAULT_DEPTH
+        );
+        assert_eq!(
+            list_schema["properties"]["limit"]["default"],
+            HOST_WORKSPACE_LIST_DEFAULT_LIMIT
+        );
+        let grep_schema = HostWorkspaceGrepRequest::wire_schema();
+        assert_eq!(
+            grep_schema["properties"]["max_matches"]["maximum"],
+            HOST_WORKSPACE_SEARCH_MAX_MATCHES
+        );
+        assert_eq!(
+            grep_schema["properties"]["max_bytes"]["maximum"],
+            HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES
+        );
+        assert_eq!(
+            grep_schema["properties"]["max_line_chars"]["maximum"],
+            HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS
+        );
+        assert_eq!(
+            grep_schema["properties"]["max_matches"]["default"],
+            HOST_WORKSPACE_GREP_DEFAULT_MAX_MATCHES
+        );
+        assert_eq!(
+            grep_schema["properties"]["max_bytes"]["default"],
+            HOST_WORKSPACE_GREP_DEFAULT_MAX_BYTES
+        );
+        assert_eq!(
+            grep_schema["properties"]["max_line_chars"]["default"],
+            HOST_WORKSPACE_GREP_DEFAULT_MAX_LINE_CHARS
+        );
+        assert_eq!(
+            HostWorkspaceGlobRequest::wire_schema()["properties"]["max_matches"]["maximum"],
+            HOST_WORKSPACE_SEARCH_MAX_MATCHES
+        );
+        assert_eq!(
+            HostWorkspaceGlobRequest::wire_schema()["properties"]["max_matches"]["default"],
+            HOST_WORKSPACE_GLOB_DEFAULT_MAX_MATCHES
+        );
+    }
+
+    #[test]
+    fn bounded_payload_contracts_enforce_byte_limits() {
+        let mut process = HostProcessRequest::new("printf");
+        process.stdin = Some("x".repeat(HOST_PROCESS_MAX_STDIN_BYTES));
+        assert!(serde_json::to_value(&process).is_ok());
+        process.stdin = Some("x".repeat(HOST_PROCESS_MAX_STDIN_BYTES + 1));
+        assert!(serde_json::to_value(&process).is_err());
+        for stdin in [
+            "x".repeat(HOST_PROCESS_MAX_STDIN_BYTES + 1),
+            "é".repeat(HOST_PROCESS_MAX_STDIN_BYTES / 2 + 1),
+        ] {
+            assert!(
+                serde_json::from_value::<HostProcessRequest>(json!({
+                    "command": "printf",
+                    "stdin": stdin
+                }))
+                .is_err()
+            );
+        }
+
+        let max_state_content = "x".repeat(HOST_SESSION_STATE_VALUE_MAX_BYTES);
+        assert!(
+            serde_json::from_value::<HostSessionStateWriteRequest>(json!({
+                "key": "goal",
+                "content": max_state_content
+            }))
+            .is_ok()
+        );
+        for content in [
+            "x".repeat(HOST_SESSION_STATE_VALUE_MAX_BYTES + 1),
+            "é".repeat(HOST_SESSION_STATE_VALUE_MAX_BYTES / 2 + 1),
+        ] {
+            assert!(
+                serde_json::from_value::<HostSessionStateWriteRequest>(json!({
+                    "key": "goal",
+                    "content": content
+                }))
+                .is_err()
+            );
+        }
+        assert!(
+            serde_json::to_value(HostSessionStateWriteRequest {
+                key: "goal".into(),
+                content: "x".repeat(HOST_SESSION_STATE_VALUE_MAX_BYTES + 1),
+            })
+            .is_err()
+        );
+
+        let mut network = HostNetworkRequest::get("https://example.com");
+        network.body = vec![0; HOST_NETWORK_MAX_REQUEST_BODY_BYTES];
+        assert!(serde_json::to_value(&network).is_ok());
+        network.body.push(0);
+        assert!(serde_json::to_value(&network).is_err());
+
+        let encoded_over_limit =
+            base64::Engine::encode(&STANDARD, vec![0; HOST_NETWORK_MAX_REQUEST_BODY_BYTES + 1]);
+        assert!(encoded_over_limit.len() <= HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS);
+        assert!(
+            serde_json::from_value::<HostNetworkRequest>(json!({
+                "url": "https://example.com",
+                "body": encoded_over_limit
+            }))
+            .is_err()
+        );
+
+        assert_eq!(
+            HostProcessRequest::wire_schema()["properties"]["stdin"]["maxLength"],
+            HOST_PROCESS_MAX_STDIN_BYTES
+        );
+        assert_eq!(
+            HostSessionStateWriteRequest::wire_schema()["properties"]["content"]["maxLength"],
+            HOST_SESSION_STATE_VALUE_MAX_BYTES
+        );
+        assert_eq!(
+            HostNetworkRequest::wire_schema()["properties"]["body"]["maxLength"],
+            HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS
         );
     }
 
@@ -1564,6 +2374,32 @@ mod tests {
         );
 
         let valid = serde_json::to_value(wire_message).unwrap();
+        let mut explicit_nulls = valid.clone();
+        explicit_nulls["name"] = Value::Null;
+        explicit_nulls["reasoning_content"] = Value::Null;
+        explicit_nulls["content"][1]["filename"] = Value::Null;
+        explicit_nulls["content"][2]["raw_arguments"] = Value::Null;
+        assert!(serde_json::from_value::<HostLlmMessage>(explicit_nulls).is_ok());
+
+        let schema = HostLlmMessage::wire_schema();
+        assert_eq!(
+            schema["properties"]["name"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(
+            schema["properties"]["reasoning_content"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(
+            schema["properties"]["content"]["items"]["oneOf"][1]["properties"]["filename"]["type"],
+            json!(["string", "null"])
+        );
+        assert_eq!(
+            schema["properties"]["content"]["items"]["oneOf"][2]["properties"]["raw_arguments"]
+                ["type"],
+            json!(["string", "null"])
+        );
+
         for pointer in ["", "/content/0", "/content/1", "/content/2", "/content/3"] {
             let mut invalid = valid.clone();
             let object = if pointer.is_empty() {

@@ -52,12 +52,12 @@ impl AgentSessionLinkDto {
     /// `AgentSessionSpawned` 事件投影。
     pub fn spawned(
         child_session_id: impl AsRef<str>,
-        tool_call_id: impl AsRef<str>,
+        tool_call_id: Option<&str>,
         agent_name: impl AsRef<str>,
         task: impl AsRef<str>,
     ) -> Self {
         Self {
-            tool_call_id: Some(tool_call_id.as_ref().to_string()),
+            tool_call_id: tool_call_id.map(str::to_owned),
             agent_name: Some(agent_name.as_ref().to_string()),
             task: Some(task.as_ref().to_string()),
             status: Some(AgentSessionStatusDto::Running),
@@ -149,10 +149,15 @@ mod tests {
     }
 
     #[test]
-    fn spawned_includes_running_status() {
-        let dto = AgentSessionLinkDto::spawned("child-1", "tool-1", "reviewer", "review diff");
-        assert_eq!(dto.status, Some(AgentSessionStatusDto::Running));
-        assert_eq!(dto.phase, Some(PhaseDto::Thinking));
+    fn spawned_preserves_optional_tool_call_and_running_status() {
+        let attributed =
+            AgentSessionLinkDto::spawned("child-1", Some("tool-1"), "reviewer", "review diff");
+        let unattributed = AgentSessionLinkDto::spawned("child-2", None, "worker", "run task");
+
+        assert_eq!(attributed.tool_call_id.as_deref(), Some("tool-1"));
+        assert_eq!(attributed.status, Some(AgentSessionStatusDto::Running));
+        assert_eq!(attributed.phase, Some(PhaseDto::Thinking));
+        assert!(unattributed.tool_call_id.is_none());
     }
 
     #[test]

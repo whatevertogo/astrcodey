@@ -169,9 +169,7 @@ impl ToolHandler for GoalToolHandler {
                 .map_err(|error| ExtensionError::Internal(error.to_string()))?,
         );
         let store = GoalStore::new(root);
-        let session_id = ctx
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("session id not injected".into()))?;
+        let session_id = ctx.call().require_session_id()?;
         let arguments = ctx.raw_arguments().clone();
 
         Ok(match ctx.tool_name() {
@@ -203,9 +201,7 @@ impl ProviderHandler for GoalProviderHandler {
             return Ok(ProviderResult::Allow);
         };
 
-        let session_id = ctx
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("goal provider requires a session".into()))?;
+        let session_id = ctx.call().require_session_id()?;
         let usage = usage_for_goal(ctx.host(), session_id, &goal).await;
         if goal.status == GoalStatus::BudgetLimited {
             let should_prompt = goal.take_budget_limit_prompt_pending();
@@ -265,9 +261,7 @@ impl ContinueAfterStopHandler for GoalContinueAfterStopHandler {
             return Ok(ContinueAfterStopResult::EndTurn);
         }
 
-        let session_id = ctx.session_id().ok_or_else(|| {
-            ExtensionError::Internal("goal continuation requires a session".into())
-        })?;
+        let session_id = ctx.call().require_session_id()?;
         let usage = usage_for_goal(ctx.host(), session_id, &goal).await;
         if apply_budget_limit(&mut goal, &usage) {
             store.save(&goal).map_err(ExtensionError::Internal)?;
@@ -292,9 +286,7 @@ impl CommandHandler for GoalSlashCommandHandler {
         );
         let store = GoalStore::new(root);
         let args = ctx.argument().trim();
-        let session_id = ctx
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("goal command requires a session".into()))?;
+        let session_id = ctx.call().require_session_id()?;
 
         match args {
             "" | "show" => {

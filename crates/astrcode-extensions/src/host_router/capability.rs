@@ -4,7 +4,9 @@ use std::ops::Deref;
 
 use astrcode_extension_sdk::{
     extension::ExtensionCapability,
-    host::{HOST_OPERATION_SPECS, HostOperation, HostOperationSpec},
+    host::{
+        HOST_ERROR_CODE_PERMISSION_DENIED, HOST_OPERATION_SPECS, HostOperation, HostOperationSpec,
+    },
     s5r::{CapabilityDescriptor, ErrorPayload},
 };
 
@@ -327,7 +329,7 @@ pub(super) fn authorize(
         return Ok(());
     }
     Err(ErrorPayload::new(
-        "permission_denied",
+        HOST_ERROR_CODE_PERMISSION_DENIED,
         format!(
             "{} requires declared capability {}",
             spec.name,

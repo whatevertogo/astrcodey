@@ -113,6 +113,10 @@ struct ToolRetirementProbeExtension {
     stopped: Arc<AtomicUsize>,
 }
 
+struct RetirementFailureExtension {
+    fail_stop: bool,
+}
+
 struct SlowToolDiscoveryExtension;
 
 struct SlowToolDiscovery;
@@ -135,6 +139,12 @@ struct HttpProbeBody {
 impl ExtensionHttpHandler for HttpProbeHandler {
     async fn handle(&self, ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError> {
         let request = ctx.request();
+        if request.query.as_deref() == Some("invalid-status") {
+            return Ok(ExtensionHttpResponse {
+                status: 99,
+                body: serde_json::Value::Null,
+            });
+        }
         let body_name = if request.body.is_null() {
             None
         } else {
@@ -372,6 +382,21 @@ impl Extension for ToolRetirementProbeExtension {
     async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
         self.stopped.fetch_add(1, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for RetirementFailureExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("retirement-failure-probe", &[])
+    }
+
+    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+        if self.fail_stop {
+            Err(ExtensionError::Internal("intentional stop failure".into()))
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -1457,6 +1482,50 @@ async fn cancelled_shutdown_does_not_abandon_pending_retirement() {
 }
 
 #[tokio::test]
+async fn retirement_tickets_isolate_reload_failures_by_generation() {
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    assert!(
+        runner
+            .register(Arc::new(RetirementFailureExtension { fail_stop: true }))
+            .await
+            .unwrap()
+    );
+    let failed_retirement = runner
+        .unregister_with_retirement("retirement-failure-probe", StopReason::Disabled)
+        .await
+        .unwrap()
+        .expect("v1 should begin retirement");
+    drop(failed_retirement);
+
+    assert!(
+        runner
+            .register(Arc::new(RetirementFailureExtension { fail_stop: false }))
+            .await
+            .expect("the replacement only waits for the retirement barrier")
+    );
+    let successful_retirement = runner
+        .unregister_with_retirement("retirement-failure-probe", StopReason::Reload)
+        .await
+        .unwrap()
+        .expect("v2 should begin retirement");
+    successful_retirement
+        .wait()
+        .await
+        .expect("v2 retirement must not consume v1's orphaned failure");
+
+    assert!(
+        runner
+            .register(Arc::new(RetirementFailureExtension { fail_stop: false }))
+            .await
+            .expect("v3 should start after v2 retirement")
+    );
+
+    let errors = runner.shutdown().await;
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("intentional stop failure"));
+}
+
+#[tokio::test]
 async fn deferred_task_handle_activates_published_registration_on_drop() {
     let task_started = Arc::new(AtomicBool::new(false));
     let runner = ExtensionRunner::new(Duration::from_secs(1));
@@ -2311,8 +2380,15 @@ async fn command_completion_dispatches_to_resolved_handler() {
         .await
         .unwrap();
 
+    let runtime = command_ctx();
+    let resolved = runner
+        .resolve_commands_for_typed(runtime.working_dir())
+        .await
+        .into_iter()
+        .find(|resolved| resolved.command.name == "pick")
+        .expect("pick command");
     let completions = runner
-        .complete_command_typed("pick", "de", 2, &command_ctx())
+        .complete_resolved_command_typed(&resolved, "de", 2, &runtime)
         .await
         .unwrap();
 
@@ -2456,6 +2532,20 @@ async fn public_http_route_dispatches_with_path_params() {
         error,
         ExtensionError::InvalidInput { code, hint: Some(_), .. }
             if code == "invalid_http_body"
+    ));
+
+    let error = runner
+        .dispatch_public_http_route(
+            ExtensionHttpRequest::new(ExtensionHttpMethod::Post, "/future-tasks/job-3")
+                .query("invalid-status"),
+            &[],
+        )
+        .await
+        .expect_err("in-process handlers must not bypass response status validation");
+    assert!(matches!(
+        error,
+        ExtensionError::Internal(message)
+            if message.contains("invalid HTTP status 99")
     ));
 }
 

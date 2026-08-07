@@ -7,6 +7,7 @@ use serde_json::Value;
 
 use crate::{
     extension::{ExtensionHttpRequest, ExtensionHttpResponse},
+    host::HOST_ERROR_CODE_INVALID_INPUT,
     s5r::{ErrorPayload, HandlerResult},
     worker::registry::{
         CommandHandlerFn, HookHandlerFn, HttpHandlerFn, ToolHandlerFn, WorkerCallContext,
@@ -28,8 +29,12 @@ pub fn parse_tool_arguments<T: DeserializeOwned>(event: &Value) -> Result<T, Err
 /// 从 hook 事件 JSON 反序列化 `input` 载荷。
 pub fn parse_hook_input<T: DeserializeOwned>(event: &Value) -> Result<T, ErrorPayload> {
     let input = event.get("input").cloned().unwrap_or_else(|| event.clone());
-    serde_json::from_value(input)
-        .map_err(|e| ErrorPayload::new("invalid_input", format!("parse hook input: {e}")))
+    serde_json::from_value(input).map_err(|e| {
+        ErrorPayload::new(
+            HOST_ERROR_CODE_INVALID_INPUT,
+            format!("parse hook input: {e}"),
+        )
+    })
 }
 
 /// 无参 tool handler：`async move |ctx| { ... }`。

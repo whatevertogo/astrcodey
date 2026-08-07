@@ -288,6 +288,10 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 - 用户偏好：`~/.astrcode/extension_data/astrcode.memory/`（`user_pref` 类别）
 - 项目记忆：`~/.astrcode/extension_data/astrcode.memory/projects/<project_key>/`
 
+> Breaking change：旧目录 `~/.astrcode/memory/` 和
+> `~/.astrcode/projects/<project_key>/extension_data/astrcode.memory/` 不再读取，也不会自动
+> 迁移。如需保留旧数据，升级前手动复制到上述新目录。
+
 ### 8.2 `astrcode-web-tools`
 
 | 工具 | 名称 |

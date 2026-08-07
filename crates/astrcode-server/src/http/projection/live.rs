@@ -100,7 +100,9 @@ fn durable_event_to_deltas(
         } => vec![ConversationDeltaDto::AgentSessionUpdated {
             agent_session: AgentSessionLinkDto::spawned(
                 child_session_id,
-                tool_call_id,
+                tool_call_id
+                    .as_ref()
+                    .map(astrcode_core::types::ToolCallId::as_str),
                 agent_name,
                 task,
             ),

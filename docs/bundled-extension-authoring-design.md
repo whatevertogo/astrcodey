@@ -143,6 +143,7 @@ aggregate、一套 context 构造和一条 host 授权路径。
 use std::sync::Arc;
 
 use astrcode_extension_sdk::prelude::*;
+use astrcode_extension_sdk::extension::ToolHookTarget;
 use serde::Deserialize;
 
 pub fn extension() -> Arc<dyn Extension> {
@@ -536,8 +537,10 @@ pub struct ExtensionCallContext { /* private */ }
 impl ExtensionCallContext {
     pub fn extension_id(&self) -> &str;
     pub fn session_id(&self) -> Option<&SessionId>;
+    pub fn require_session_id(&self) -> Result<&SessionId, HostError>;
     pub fn turn_id(&self) -> Option<&str>;
     pub fn working_dir(&self) -> Option<&Path>;
+    pub fn require_working_dir(&self) -> Result<&Path, HostError>;
     pub fn paths(&self) -> &ExtensionPaths;
     pub fn host(&self) -> &ExtensionHost;
     pub fn events(&self) -> &ExtensionEventEmitter;
@@ -550,7 +553,9 @@ impl ExtensionCallContext {
 |---|---|
 | `extension_id()` | 由 manifest attribution 注入，不能由请求覆盖。 |
 | `session_id()` / `turn_id()` | 只有 session/turn 范围调用存在；启动期和无会话 HTTP 请求返回 `None`。 |
+| `require_session_id()` | session 必须存在的 handler 使用；缺失时返回 `ContextUnavailable`，不用重复手写 `ok_or_else`。 |
 | `working_dir()` | 规范化后的宿主工作区；缺失时不回退进程 cwd。 |
+| `require_working_dir()` | workspace 必须存在的 handler 使用；缺失时返回 `ContextUnavailable`。 |
 | `paths()` | 只返回该 extension 已授权的数据目录，不让作者拼 extension id。 |
 | `host()` | 类型化、已按 capability 和调用范围裁剪的宿主客户端。 |
 | `events()` | 只能发射本 manifest 已声明事件；未声明时报结构化错误。 |
@@ -604,6 +609,7 @@ impl ExtensionHost {
     pub fn models(&self) -> ModelClient;
     pub fn session_control(&self) -> Result<SessionControlClient, HostError>;
     pub fn session_history(&self) -> Result<SessionHistoryClient, HostError>;
+    pub fn session_state(&self) -> Result<SessionStateClient, HostError>;
     pub fn session_inspect(&self) -> Result<SessionInspectClient, HostError>;
     pub fn workspace(&self) -> Result<WorkspaceClient, HostError>;
     pub fn process(&self) -> Result<ProcessClient, HostError>;
@@ -613,7 +619,8 @@ impl ExtensionHost {
 ```
 
 领域 accessor 返回持有 `ExtensionHost` 轻量克隆的 owned client，不返回借用。除 `models()` 外，
-accessor 先校验 capability、backend 和当前调用范围并返回 `Result`；`models()` 的主/小模型授权在
+accessor 先校验授权（若该领域需要）、backend 和当前调用范围并返回 `Result`；`session_state()`
+没有额外 capability，但仍要求 session context 和 state backend。`models()` 的主/小模型授权在
 `main_available` / `small_available` 与具体调用处分别校验：
 
 - manifest 未声明能力：`HostError::class() == HostErrorClass::PermissionDenied`；

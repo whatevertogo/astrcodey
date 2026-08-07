@@ -691,7 +691,7 @@ mod tests {
             HostError, HostOperation,
             internal::{HostInvoker, HostScope, extension_host},
         },
-        session::HostSessionStateOutput,
+        session::{HostSessionStateOutput, SessionPhaseDto},
     };
     use serde_json::Value;
 
@@ -769,7 +769,7 @@ mod tests {
                 },
                 HostOperation::SessionRootState => serde_json::to_value(HostSessionStateOutput {
                     lifecycle: SessionLifecycleStateDto::Active,
-                    phase: "idle".into(),
+                    phase: SessionPhaseDto::Idle,
                     active_turn_id: None,
                     queued_inputs: 0,
                     message_count: 0,

@@ -13,32 +13,6 @@ use super::{
 };
 use crate::host::ExtensionHost;
 
-// ─── Extension Manifest ──────────────────────────────────────────────────
-
-/// 磁盘扩展目录中的 `extension.json` 契约（发现阶段元数据）。
-///
-/// `extension_id` 是宿主在启动子进程前使用的权威身份；Worker 在
-/// `Initialize.metadata` 中上报的 id 必须与它一致。能力、工具与 hook 仍只由 Worker
-/// 在握手中声明。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ExtensionPackageManifest {
-    pub extension_id: String,
-    pub protocol: ExtensionPackageProtocol,
-    pub command: Vec<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub env: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct ExtensionPackageProtocol {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub s5r: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native: Option<String>,
-}
-
 // ─── Extension HTTP ─────────────────────────────────────────────────────
 
 pub const DEFAULT_EXTENSION_HTTP_BODY_BYTES: usize = 64 * 1024;
@@ -57,8 +31,8 @@ pub enum ExtensionHttpMethod {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionHttpAccess {
-    #[default]
     Public,
+    #[default]
     Authenticated,
 }
 
@@ -174,9 +148,75 @@ impl ExtensionHttpRequest {
     }
 }
 
+/// Outbound request for dispatching another extension's public HTTP route.
+///
+/// Route parameters are host-owned facts derived after route matching, so callers cannot supply
+/// them on this boundary.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtensionHttpDispatchRequest {
+    pub method: ExtensionHttpMethod,
+    pub path: String,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub body: serde_json::Value,
+}
+
+impl ExtensionHttpDispatchRequest {
+    pub fn new(method: ExtensionHttpMethod, path: impl Into<String>) -> Self {
+        Self {
+            method,
+            path: path.into(),
+            query: None,
+            body: serde_json::Value::Null,
+        }
+    }
+
+    pub fn query(mut self, query: impl Into<String>) -> Self {
+        self.query = Some(query.into());
+        self
+    }
+
+    pub fn json_body(mut self, body: serde_json::Value) -> Self {
+        self.body = body;
+        self
+    }
+
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+                "path": { "type": "string" },
+                "query": { "type": ["string", "null"] },
+                "body": {}
+            },
+            "required": ["method", "path"],
+            "additionalProperties": false
+        })
+    }
+}
+
+impl From<ExtensionHttpDispatchRequest> for ExtensionHttpRequest {
+    fn from(request: ExtensionHttpDispatchRequest) -> Self {
+        Self {
+            method: request.method,
+            path: request.path,
+            path_params: BTreeMap::new(),
+            query: request.query,
+            body: request.body,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionHttpResponse {
+    #[serde(
+        serialize_with = "serialize_extension_http_status",
+        deserialize_with = "deserialize_extension_http_status"
+    )]
     pub status: u16,
     pub body: serde_json::Value,
 }
@@ -199,12 +239,39 @@ impl ExtensionHttpResponse {
         json!({
             "type": "object",
             "properties": {
-                "status": { "type": "integer", "minimum": 0, "maximum": u16::MAX },
+                "status": { "type": "integer", "minimum": 100, "maximum": 599 },
                 "body": {}
             },
             "required": ["status", "body"],
             "additionalProperties": false
         })
+    }
+}
+
+fn serialize_extension_http_status<S>(status: &u16, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if (100..=599).contains(status) {
+        serializer.serialize_u16(*status)
+    } else {
+        Err(serde::ser::Error::custom(
+            "extension HTTP status must be between 100 and 599",
+        ))
+    }
+}
+
+fn deserialize_extension_http_status<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let status = u16::deserialize(deserializer)?;
+    if (100..=599).contains(&status) {
+        Ok(status)
+    } else {
+        Err(serde::de::Error::custom(
+            "extension HTTP status must be between 100 and 599",
+        ))
     }
 }
 
@@ -404,6 +471,10 @@ mod extension_http_tests {
 
     #[test]
     fn public_dispatch_contracts_reject_unknown_fields() {
+        assert_strict_wire::<ExtensionHttpDispatchRequest>(
+            json!({ "method": "GET", "path": "/health" }),
+            ExtensionHttpDispatchRequest::wire_schema(),
+        );
         assert_strict_wire::<ExtensionHttpRequest>(
             json!({ "method": "GET", "path": "/health" }),
             ExtensionHttpRequest::wire_schema(),
@@ -412,41 +483,42 @@ mod extension_http_tests {
             json!({ "status": 200, "body": { "ok": true } }),
             ExtensionHttpResponse::wire_schema(),
         );
+        assert!(
+            serde_json::from_value::<ExtensionHttpDispatchRequest>(json!({
+                "method": "GET",
+                "path": "/users/42",
+                "pathParams": { "id": "forged" }
+            }))
+            .is_err()
+        );
     }
 
     #[test]
-    fn package_manifest_matches_the_disk_discovery_contract() {
-        let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
-            "extension_id": "review-extension",
-            "protocol": { "s5r": "2.0" },
-            "command": ["./review-extension", "serve"],
-            "env": { "LOG_LEVEL": "info" }
-        }))
-        .expect("valid extension package manifest");
-        assert_eq!(manifest.extension_id, "review-extension");
-        assert_eq!(manifest.protocol.s5r.as_deref(), Some("2.0"));
-        assert_eq!(manifest.command, ["./review-extension", "serve"]);
-        assert_eq!(manifest.env["LOG_LEVEL"], "info");
-
-        assert!(
-            serde_json::from_value::<ExtensionPackageManifest>(serde_json::json!({
-                "extension_id": "review-extension",
-                "protocol": { "s5r": "2.0" },
-                "command": ["./review-extension"],
-                "capabilities": ["session_control"]
-            }))
-            .is_err(),
-            "runtime capabilities belong to the S5R initialize manifest"
-        );
-
-        assert!(
-            serde_json::from_value::<ExtensionPackageManifest>(serde_json::json!({
-                "protocol": { "s5r": "2.0" },
-                "command": ["./review-extension"]
-            }))
-            .is_err(),
-            "package identity is required before process startup"
-        );
+    fn response_status_schema_and_serde_share_http_bounds() {
+        for status in [99, 600] {
+            assert!(
+                serde_json::from_value::<ExtensionHttpResponse>(json!({
+                    "status": status,
+                    "body": null
+                }))
+                .is_err()
+            );
+            assert!(
+                serde_json::to_value(ExtensionHttpResponse::json(status, Value::Null)).is_err()
+            );
+        }
+        for status in [100, 599] {
+            assert!(
+                serde_json::from_value::<ExtensionHttpResponse>(json!({
+                    "status": status,
+                    "body": null
+                }))
+                .is_ok()
+            );
+        }
+        let schema = ExtensionHttpResponse::wire_schema();
+        assert_eq!(schema["properties"]["status"]["minimum"], 100);
+        assert_eq!(schema["properties"]["status"]["maximum"], 599);
     }
 
     #[test]
@@ -458,6 +530,17 @@ mod extension_http_tests {
             match_extension_http_route(&route.path, "/future-tasks/job-1").expect("matching route");
         assert_eq!(params.get("jobId").map(String::as_str), Some("job-1"));
         assert!(match_extension_http_route(&route.path, "/future-tasks/job-1/run").is_none());
+    }
+
+    #[test]
+    fn omitted_http_access_defaults_to_authenticated() {
+        let route: ExtensionHttpRoute = serde_json::from_value(json!({
+            "method": "POST",
+            "path": "/jobs"
+        }))
+        .expect("route without access");
+
+        assert_eq!(route.access, ExtensionHttpAccess::Authenticated);
     }
 
     #[test]

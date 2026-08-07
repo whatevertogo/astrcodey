@@ -139,9 +139,7 @@ impl ToolHandler for AgentToolHandler {
             return Err(ExtensionError::NotFound(ctx.tool_name().into()));
         }
 
-        let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| ExtensionError::Internal("agent tool requires a workspace".into()))?;
+        let working_dir = ctx.call().require_working_dir()?;
         let working_dir = working_dir.to_string_lossy();
         let agents = self.shared.get_or_discover(Some(&working_dir));
         let args: AgentArgs = ctx.arguments()?;
@@ -170,20 +168,17 @@ impl ToolHandler for AgentToolHandler {
         let model_preference = resolve_child_small_model(ctx.small_model_id())?;
         let model_label = model_preference.clone();
 
-        ctx.session_id()
-            .ok_or_else(|| ExtensionError::Internal("agent tool requires a session".into()))?;
+        ctx.call().require_session_id()?;
         let session_control = ctx.host().session_control()?;
 
         // 1. 创建子会话
         let handle = session_control
             .create_child(HostCreateSessionRequest {
                 name: matched.name.clone(),
-                working_dir: None,
                 system_prompt: Some(enhance_agent_prompt(&matched.body, &working_dir)),
                 model_preference: Some(model_preference),
                 tool_selection: matched.tool_selection.clone().map(Into::into),
                 ephemeral: true,
-                tool_call_id: ctx.call_id().map(str::to_owned),
             })
             .await?;
 
@@ -202,7 +197,6 @@ impl ToolHandler for AgentToolHandler {
                     ))
                 },
                 recycle_on_complete: !args.wait_for_result,
-                tool_call_id: ctx.call_id().map(str::to_owned),
             })
             .await;
         if let Err(ref e) = submit {

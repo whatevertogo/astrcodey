@@ -8,7 +8,10 @@ use astrcode_core::{config::ModelSelection, types::SessionId};
 use astrcode_extension_sdk::extension::*;
 use tokio_util::sync::CancellationToken;
 
-use super::{ExtensionRunner, ExtensionUiContributions, ExtensionView, HandlerIndex};
+use super::{
+    ExtensionCallContextInput, ExtensionRunner, ExtensionUiContributions, ExtensionView,
+    HandlerIndex,
+};
 
 /// Session facts supplied by the host before a command is resolved to an extension.
 ///
@@ -48,15 +51,6 @@ impl CommandRuntimeContext {
 
     pub fn working_dir(&self) -> &str {
         &self.working_dir
-    }
-
-    fn command_context(
-        &self,
-        call: ExtensionCallContext,
-        command_name: &str,
-        argument: &str,
-    ) -> CommandContext {
-        CommandContext::from_runtime(call, self.model.clone(), command_name, argument)
     }
 }
 
@@ -129,15 +123,15 @@ impl ExtensionView {
         let call = self.make_registered_extension_call_context_from_index(
             index,
             extension_id,
-            Some(SessionId::new(&runtime.session_id)),
-            None,
-            Some(PathBuf::from(&runtime.working_dir)),
-            runtime.session_store_dir.clone(),
-            None,
-            cancellation.clone(),
+            ExtensionCallContextInput {
+                session_id: Some(SessionId::new(&runtime.session_id)),
+                working_dir: Some(PathBuf::from(&runtime.working_dir)),
+                session_store_dir: runtime.session_store_dir.clone(),
+                ..ExtensionCallContextInput::unscoped(cancellation.clone())
+            },
         )?;
         Ok((
-            runtime.command_context(call, command_name, argument),
+            CommandContext::from_runtime(call, runtime.model.clone(), command_name, argument),
             cancellation,
         ))
     }
@@ -153,12 +147,10 @@ impl ExtensionView {
             let cancellation = CancellationToken::new();
             let call = self.make_registered_extension_call_context(
                 extension_id,
-                None,
-                None,
-                Some(PathBuf::from(working_dir)),
-                None,
-                None,
-                cancellation.clone(),
+                ExtensionCallContextInput {
+                    working_dir: Some(PathBuf::from(working_dir)),
+                    ..ExtensionCallContextInput::unscoped(cancellation.clone())
+                },
             );
             let discovered = match call {
                 Ok(call) => {
@@ -263,49 +255,13 @@ impl ExtensionView {
             arguments,
             runtime,
         )?;
-        let result = self
-            .run_recorded_hook(
-                &resolved.extension_id,
-                "command",
-                cancellation,
-                resolved.handler.execute(ctx),
-            )
-            .await;
-        drop(active_index);
-        result
-    }
-
-    /// 命令派发。兼容入口统一复用 resolved command 选择策略。
-    pub async fn dispatch_command_typed(
-        &self,
-        command_name: &str,
-        arguments: &str,
-        runtime: &CommandRuntimeContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        let resolved = self.resolve_commands_for_typed(runtime.working_dir()).await;
-        let command = resolved
-            .iter()
-            .find(|resolved| resolved.command.name == command_name)
-            .ok_or_else(|| ExtensionError::NotFound(command_name.into()))?;
-        self.invoke_resolved_command_typed(command, arguments, runtime)
-            .await
-    }
-
-    /// 命令参数补全派发。兼容入口统一复用 resolved command 选择策略。
-    pub async fn complete_command_typed(
-        &self,
-        command_name: &str,
-        argument: &str,
-        cursor: usize,
-        runtime: &CommandRuntimeContext,
-    ) -> Result<CommandCompletions, ExtensionError> {
-        let resolved = self.resolve_commands_for_typed(runtime.working_dir()).await;
-        let command = resolved
-            .iter()
-            .find(|resolved| resolved.command.name == command_name)
-            .ok_or_else(|| ExtensionError::NotFound(command_name.into()))?;
-        self.complete_resolved_command_typed(command, argument, cursor, runtime)
-            .await
+        self.run_recorded_hook(
+            &resolved.extension_id,
+            "command",
+            cancellation,
+            resolved.handler.execute(ctx),
+        )
+        .await
     }
 
     /// Complete arguments for an already-resolved slash command without re-reading the registry.
@@ -330,16 +286,13 @@ impl ExtensionView {
             runtime,
         )?;
         let ctx = CommandCompletionContext::for_runtime(ctx, cursor);
-        let result = self
-            .run_recorded_hook(
-                &resolved.extension_id,
-                "command_complete",
-                cancellation,
-                resolved.handler.complete(ctx),
-            )
-            .await;
-        drop(active_index);
-        result
+        self.run_recorded_hook(
+            &resolved.extension_id,
+            "command_complete",
+            cancellation,
+            resolved.handler.complete(ctx),
+        )
+        .await
     }
 }
 
@@ -367,31 +320,6 @@ impl ExtensionRunner {
         self.extension_view()
             .await
             .invoke_resolved_command_typed(resolved, arguments, runtime)
-            .await
-    }
-
-    pub async fn dispatch_command_typed(
-        &self,
-        command_name: &str,
-        arguments: &str,
-        runtime: &CommandRuntimeContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        self.extension_view()
-            .await
-            .dispatch_command_typed(command_name, arguments, runtime)
-            .await
-    }
-
-    pub async fn complete_command_typed(
-        &self,
-        command_name: &str,
-        argument: &str,
-        cursor: usize,
-        runtime: &CommandRuntimeContext,
-    ) -> Result<CommandCompletions, ExtensionError> {
-        self.extension_view()
-            .await
-            .complete_command_typed(command_name, argument, cursor, runtime)
             .await
     }
 

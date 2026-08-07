@@ -1625,7 +1625,7 @@ mod tests {
                 extra_system_prompt: None,
                 tool_selection: None,
                 source_extension: None,
-                tool_call_id: ToolCallId::new("call-compensation"),
+                tool_call_id: Some(ToolCallId::new("call-compensation")),
             })
             .await
         {
@@ -1655,7 +1655,7 @@ mod tests {
                 extra_system_prompt: None,
                 tool_selection: None,
                 source_extension: None,
-                tool_call_id: ToolCallId::new("call-sync-compensation"),
+                tool_call_id: Some(ToolCallId::new("call-sync-compensation")),
             })
             .await
         {
@@ -1706,7 +1706,7 @@ mod tests {
                 extra_system_prompt: None,
                 tool_selection: None,
                 source_extension: None,
-                tool_call_id: ToolCallId::new("call-lifecycle-compensation"),
+                tool_call_id: Some(ToolCallId::new("call-lifecycle-compensation")),
             })
             .await
         {
@@ -1951,7 +1951,7 @@ mod tests {
                         extra_system_prompt: None,
                         tool_selection: None,
                         source_extension: None,
-                        tool_call_id: ToolCallId::new("call-aborted-child"),
+                        tool_call_id: Some(ToolCallId::new("call-aborted-child")),
                     })
                     .await
             })
@@ -2106,7 +2106,7 @@ mod tests {
                     extra_system_prompt: None,
                     tool_selection: None,
                     source_extension: None,
-                    tool_call_id: ToolCallId::new("call-blocked-child"),
+                    tool_call_id: Some(ToolCallId::new("call-blocked-child")),
                 })
                 .await
         });

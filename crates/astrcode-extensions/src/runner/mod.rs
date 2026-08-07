@@ -12,13 +12,13 @@ use std::{
 use arc_swap::ArcSwap;
 use astrcode_core::event::EventPayload;
 use astrcode_extension_sdk::{
-    extension::*,
+    extension::{internal::ExtensionEventSink, *},
     runtime_ports::{
         PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
-        SessionOperationsProvider, ToolCatalogProvider, ToolCatalogScope, ToolCatalogSnapshot,
+        SessionOperationsProvider, ToolCatalogProvider,
         TurnExtensionView as RuntimeTurnExtensionView, TurnExtensionViewProvider, TurnHooks,
     },
-    tool::{SessionOperations, ToolPromptMetadata},
+    tool::SessionOperations,
 };
 use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, RwLock, mpsc};
 
@@ -43,15 +43,15 @@ use diagnostics::{
 pub use diagnostics::{
     ExtensionDiagnostics, ExtensionHealthReport, ExtensionStageDiagnostics, ExtensionStageStatus,
 };
-use host_invoker::ExtensionCallContextFactory;
 pub(crate) use host_invoker::transport_invoke_context;
+use host_invoker::{ExtensionCallContextFactory, ExtensionCallContextInput};
 pub use http::ExtensionHttpDispatchResult;
 use index::{HandlerIndex, build_handler_index, log_handler_dispatch_order};
 use manifest::ResolvedExtensionManifest;
 use registration::validate_registration_conflicts;
 use retirement::{
-    ActiveTurnViewLease, ActiveTurnViews, ExtensionPublicationLease, ExtensionRetirementError,
-    RetirementSupervisor, RetirementTicket,
+    ActiveTurnViewLease, ActiveTurnViews, ExtensionPublicationLease, RetirementSupervisor,
+    RetirementTicket,
 };
 pub use snapshot::{ExtensionDeclarationSnapshot, ExtensionRegistrySnapshot};
 
@@ -333,7 +333,7 @@ impl ExtensionRunner {
     ) -> Result<bool, ExtensionError> {
         let manifest = ext.manifest();
         let (operation_gate, operation_guard) =
-            self.lock_registration_operation(manifest.id()).await?;
+            self.lock_registration_operation(manifest.id()).await;
         let publication = {
             let _lifecycle = self.coordination.registry.lock().await;
             self.publish_registration_locked(
@@ -362,7 +362,7 @@ impl ExtensionRunner {
     ) -> Result<Option<DeferredTaskActivation>, ExtensionError> {
         let manifest = ext.manifest();
         let (operation_gate, operation_guard) =
-            self.lock_registration_operation(manifest.id()).await?;
+            self.lock_registration_operation(manifest.id()).await;
         let publication = {
             let _lifecycle = self.coordination.registry.lock().await;
             self.publish_registration_locked(
@@ -462,18 +462,18 @@ impl ExtensionRunner {
 
         let startup_event_tx = self.bindings.read().startup_event_tx.clone();
         let call = self
+            .extension_call_context_factory()
             .make_extension_call_context(
                 &id,
                 &capabilities,
-                None,
-                None,
-                startup_working_dir.map(std::path::PathBuf::from),
-                None,
-                startup_event_tx,
                 registrations.extension_event_decls(),
                 tasks.clone(),
-                tasks.cancellation(),
-            )?
+                ExtensionCallContextInput {
+                    working_dir: startup_working_dir.map(std::path::PathBuf::from),
+                    event_tx: startup_event_tx,
+                    ..ExtensionCallContextInput::unscoped(tasks.cancellation())
+                },
+            )
             .retain_cancellation_after_context_drop();
         let ctx = ExtensionStartContext::from_runtime(
             call,
@@ -567,13 +567,12 @@ impl ExtensionRunner {
     async fn lock_registration_operation(
         &self,
         extension_id: &str,
-    ) -> Result<(Arc<AsyncMutex<()>>, OwnedMutexGuard<()>), ExtensionError> {
+    ) -> (Arc<AsyncMutex<()>>, OwnedMutexGuard<()>) {
         let operation_gate = self.retirements.operation_gate(extension_id);
         let operation_guard = Arc::clone(&operation_gate).lock_owned().await;
-        if let Some(error) = self.retirements.take_completed_error(extension_id) {
-            return Err(ExtensionError::Internal(error.to_string()));
-        }
-        Ok((operation_gate, operation_guard))
+        // A completed stop failure belongs to the retirement waiter or shutdown report; crossing
+        // this barrier must not reclassify it as a failure of the replacement registration.
+        (operation_gate, operation_guard)
     }
 
     /// 注销一个扩展，并重建分发表。
@@ -585,6 +584,17 @@ impl ExtensionRunner {
         extension_id: &str,
         reason: StopReason,
     ) -> Result<bool, ExtensionError> {
+        Ok(self
+            .unregister_with_retirement(extension_id, reason)
+            .await?
+            .is_some())
+    }
+
+    pub(crate) async fn unregister_with_retirement(
+        &self,
+        extension_id: &str,
+        reason: StopReason,
+    ) -> Result<Option<RetirementTicket>, ExtensionError> {
         let (operation_guard, _lifecycle) = loop {
             let operation_gate = self
                 .registry
@@ -624,7 +634,7 @@ impl ExtensionRunner {
                 .iter()
                 .position(|hosted| hosted.manifest.id() == extension_id)
             else {
-                return Ok(false);
+                return Ok(None);
             };
             let hosted = extensions.remove(position);
             self.rebuild_index(&extensions);
@@ -637,10 +647,11 @@ impl ExtensionRunner {
             ))
         })?;
         self.diagnostics.write().remove(extension_id);
-        self.retirements
-            .retire(hosted, reason, self.operation_timeout, operation_guard);
+        let retirement =
+            self.retirements
+                .retire(hosted, reason, self.operation_timeout, operation_guard);
         drop(_lifecycle);
-        Ok(true)
+        Ok(Some(retirement))
     }
 
     /// 停止所有已注册扩展。用于宿主进程关闭。
@@ -705,13 +716,6 @@ impl ExtensionRunner {
             &self.registry.publication,
             &self.registry.publication_stable,
         )
-    }
-
-    pub(crate) async fn wait_for_retirement(
-        &self,
-        extension_id: &str,
-    ) -> Result<(), ExtensionRetirementError> {
-        self.retirements.wait_for(extension_id).await
     }
 
     pub(crate) async fn reorder_source_extensions(&self, desired_ids: &[String]) {
@@ -949,14 +953,7 @@ impl ExtensionView {
         let cancellation = runtime.cancellation().child_token();
         let call = self.make_registered_extension_call_context(
             extension_id,
-            Some(runtime.session_id().clone()),
-            runtime.turn_id().map(str::to_owned),
-            Some(runtime.working_dir().to_path_buf()),
-            runtime
-                .session_store_dir()
-                .map(std::path::Path::to_path_buf),
-            runtime.event_tx().cloned(),
-            cancellation.clone(),
+            ExtensionCallContextInput::from_hook(runtime, cancellation.clone()),
         )?;
         Ok((call, cancellation))
     }
@@ -1528,10 +1525,6 @@ impl ExtensionRunner {
     ) -> Result<(), ExtensionError> {
         self.extension_view().await.emit_lifecycle(event, ctx).await
     }
-
-    pub async fn collect_tool_prompt_metadata_typed(&self) -> HashMap<String, ToolPromptMetadata> {
-        self.extension_view().await.index.tool_metadata.clone()
-    }
 }
 
 impl TurnExtensionViewProvider for ExtensionRunner {
@@ -1605,91 +1598,12 @@ impl TurnHooks for ExtensionView {
 }
 
 #[async_trait::async_trait]
-impl TurnHooks for ExtensionRunner {
-    async fn emit_pre_tool_use(
-        &self,
-        ctx: RuntimePreToolUseContext,
-    ) -> Result<PreToolUseResult, ExtensionError> {
-        ExtensionRunner::emit_pre_tool_use(self, ctx).await
-    }
-
-    async fn emit_post_tool_use(
-        &self,
-        ctx: RuntimePostToolUseContext,
-    ) -> Result<PostToolUseResult, ExtensionError> {
-        ExtensionRunner::emit_post_tool_use(self, ctx).await
-    }
-
-    async fn emit_provider(
-        &self,
-        event: ProviderEvent,
-        ctx: RuntimeProviderContext,
-    ) -> Result<ProviderResult, ExtensionError> {
-        ExtensionRunner::emit_provider(self, event, ctx).await
-    }
-
-    async fn emit_compact(
-        &self,
-        event: CompactEvent,
-        ctx: RuntimeCompactContext,
-    ) -> Result<CompactResult, ExtensionError> {
-        ExtensionRunner::emit_compact(self, event, ctx).await
-    }
-
-    async fn emit_continue_after_stop(
-        &self,
-        ctx: RuntimeContinueAfterStopContext,
-    ) -> Result<ContinueAfterStopResult, ExtensionError> {
-        ExtensionRunner::emit_continue_after_stop(self, ctx).await
-    }
-
-    async fn emit_user_message_envelope(
-        &self,
-        ctx: RuntimeUserMessageEnvelopeContext,
-    ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
-        ExtensionRunner::emit_user_message_envelope(self, ctx).await
-    }
-
-    async fn emit_lifecycle(
-        &self,
-        event: ExtensionEvent,
-        ctx: RuntimeLifecycleContext,
-    ) -> Result<(), ExtensionError> {
-        ExtensionRunner::emit_lifecycle(self, event, ctx).await
-    }
-}
-
-#[async_trait::async_trait]
 impl PromptContributor for ExtensionView {
     async fn collect_prompt_contributions(
         &self,
         ctx: RuntimePromptBuildContext,
     ) -> Result<PromptContributions, ExtensionError> {
         ExtensionView::collect_prompt_contributions_typed(self, ctx).await
-    }
-}
-
-#[async_trait::async_trait]
-impl PromptContributor for ExtensionRunner {
-    async fn collect_prompt_contributions(
-        &self,
-        ctx: RuntimePromptBuildContext,
-    ) -> Result<PromptContributions, ExtensionError> {
-        ExtensionRunner::collect_prompt_contributions_typed(self, ctx).await
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolCatalogProvider for ExtensionRunner {
-    fn revision(&self) -> u64 {
-        self.load_index().generation
-    }
-
-    async fn tool_catalog(
-        &self,
-        scope: &ToolCatalogScope,
-    ) -> Result<ToolCatalogSnapshot, ExtensionError> {
-        self.extension_view().await.tool_catalog(scope).await
     }
 }
 

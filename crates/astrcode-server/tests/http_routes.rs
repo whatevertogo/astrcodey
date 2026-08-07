@@ -1762,7 +1762,7 @@ async fn stream_projects_tracked_child_events_to_parent_stream() {
                 agent_name: "worker".into(),
                 task: "check fanout routing".into(),
                 tool_selection: None,
-                tool_call_id: "child-call".into(),
+                tool_call_id: Some("child-call".into()),
             },
         ))
         .await

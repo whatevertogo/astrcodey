@@ -12,23 +12,25 @@ pub use builder::{
     parse_tool_arguments, tool_handler, tool_handler_args,
 };
 pub use host::{
-    ExtensionHttpClient, HostClient, HostConfigureSessionToolsOutput,
+    EventClient, ExtensionHttpClient, HostClient, HostConfigureSessionToolsOutput,
     HostConfigureSessionToolsRequest, HostCreateSessionOutput, HostCreateSessionRequest,
-    HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmTextDelta, HostNetworkRedirectPolicy,
-    HostNetworkRequest, HostNetworkResponse, HostProcessOutput, HostProcessRequest,
-    HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionCancelOutput,
-    HostSessionDeliveryOutput, HostSessionEvent, HostSessionEventsPageOutput,
-    HostSessionEventsPageRequest, HostSessionExecutionView, HostSessionInputRequest,
-    HostSessionProviderMessagesOutput, HostSessionReactivateOutput, HostSessionStateOutput,
-    HostSessionSummariesOutput, HostSessionSummary, HostSessionTargetRequest,
-    HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
-    HostSessionTranscriptMessage, HostSubmitTurnOutput, HostSubmitTurnRequest,
-    HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
-    HostWorkspaceGlobRequest, HostWorkspaceGrepMatch, HostWorkspaceGrepOutput,
-    HostWorkspaceGrepRequest, HostWorkspaceListEntry, HostWorkspaceListOutput,
-    HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
-    HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient, NetworkClient, ProcessClient,
-    SessionControlClient, SessionHistoryClient, SessionInspectClient, WorkspaceClient,
+    HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmContent,
+    HostLlmMessage, HostLlmRole, HostLlmTextDelta, HostNetworkRedirectPolicy, HostNetworkRequest,
+    HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostRecycleSessionRequest,
+    HostRootSubmitTurnRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+    HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
+    HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+    HostSessionReactivateOutput, HostSessionStateOutput, HostSessionStateReadOutput,
+    HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
+    HostSessionSummary, HostSessionTargetRequest, HostSessionTokenUsage,
+    HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
+    HostSubmitTurnOutput, HostSubmitTurnRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
+    HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
+    HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
+    HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
+    HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient,
+    NetworkClient, ProcessClient, SessionControlClient, SessionHistoryClient, SessionInspectClient,
+    SessionStateClient, WorkspaceClient,
 };
 pub use registry::{
     CommandHandlerFn, HookHandlerFn, HttpHandlerFn, ToolHandlerFn, WorkerCallContext,
@@ -42,6 +44,7 @@ pub mod testing {
 
 use crate::{
     extension::{ContinueAfterStopOptions, ExtensionCapability, ExtensionEvent, HookMode},
+    host::HOST_ERROR_CODE_SERIALIZATION_FAILED,
     runtime::{CancelToken, InvokeHandler, InvokeReply, Peer, ProcessStdioTransport},
     s5r::{HandlerDescriptor, HandlerResult, PeerInfo, S5R_STACK},
     tool::ToolDefinition,
@@ -200,11 +203,7 @@ impl Worker {
         peer.start()
             .await
             .map_err(|e| crate::s5r::ErrorPayload::new("peer_start_failed", e.to_string()))?;
-        set_host_api(Arc::new(PeerHostApi::new(
-            Arc::clone(&peer),
-            self.extension_id.clone(),
-        )))
-        .map_err(|_| {
+        set_host_api(Arc::new(PeerHostApi::new(Arc::clone(&peer)))).map_err(|_| {
             crate::s5r::ErrorPayload::new("host_api_already_set", "host API already initialized")
         })?;
 
@@ -245,7 +244,7 @@ async fn handle_worker_invoke(
     let result = registry.dispatch_invoke(invoke, token).await?;
     let output = serde_json::to_value(result).map_err(|error| {
         ErrorPayload::new(
-            "serialization_failed",
+            HOST_ERROR_CODE_SERIALIZATION_FAILED,
             format!("serialize handler result: {error}"),
         )
     })?;

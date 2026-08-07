@@ -1686,7 +1686,7 @@ async fn repair_stale_runs_marks_child_without_active_execution_interrupted() {
                 agent_name: "explorer".into(),
                 task: "inspect".into(),
                 tool_selection: None,
-                tool_call_id: "agent-call".into(),
+                tool_call_id: Some("agent-call".into()),
             },
         ))
         .await

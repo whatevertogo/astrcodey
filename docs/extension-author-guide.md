@@ -114,6 +114,8 @@ bundled 扩展不要调用它；bundled handler 应从 `ctx.host()` 取得 `Mode
 主模型与小模型分别声明、分别调用：
 
 ```rust
+use astrcode_extension_sdk::worker_prelude::*;
+
 // 主模型（当前 session 的 activeModel）
 worker.capability(ExtensionCapability::MainModel);
 let out = HostClient::models().main_chat(vec![
@@ -152,7 +154,7 @@ let model = HostClient::session_inspect()
     .await?;
 
 // 在当前 handler 的 workspace context 中创建独立 root session；不接受调用方路径参数
-worker.capability(ExtensionCapability::SessionControl);
+worker.capability(ExtensionCapability::InputDelivery);
 let root = HostClient::session_control().create_root().await?;
 
 // 注册公开 JSON 路由；路由和 handler 从同一注册调用生成 manifest
@@ -170,15 +172,17 @@ worker.http_route(
 // 调用另一插件的公开路由
 worker.capability(ExtensionCapability::PublicHttpDispatch);
 let response = HostClient::extension_http().dispatch_public(
-    ExtensionHttpRequest::new(ExtensionHttpMethod::Post, "/other-plugin/run")
+    ExtensionHttpDispatchRequest::new(ExtensionHttpMethod::Post, "/other-plugin/run")
         .json_body(serde_json::json!({ "job": 1 }))
 ).await?;
 ```
 
 `network.client` 的作者 API 以原始字节返回响应 body，S5R 线缆使用 base64。请求的
-`max_bytes` 不得超过 10 MiB，`timeout_ms` 必须位于 `1..=60_000`；`Manual` 不跟随重定向，
+body 解码后不得超过 10 MiB，`max_bytes` 不得超过 10 MiB，`timeout_ms` 必须位于
+`1..=60_000`；`Manual` 不跟随重定向，
 但仍会返回受 `max_bytes` 限制的原始 3xx 响应 body。同名响应头的重复值不会保留。worker 与
 web-tools 共享宿主的全局并发上限，当前协议不提供 extension 级公平配额。
+进程请求的 `stdin` 以 UTF-8 字节计最多 1 MiB。
 
 `workspace_write`、`process_spawn` 与 `network_client` 都是敏感授权；只在插件确实需要时声明。前者拒绝越界、symlink 和密钥类路径；进程执行不是
 操作系统沙箱，后者允许访问宿主网络可达的 HTTP(S) 地址。两者均有并发、总超时和
@@ -417,32 +421,27 @@ worker.tool(
 handler 可直接从 `WorkerCallContext` 读取：
 
 - `ctx.session_id()`：当前 session；
-- `ctx.tool_call_id()`：当前 tool call（线缆值本身可空）；
+- `ctx.require_session_id()`：要求 session 事实存在，否则返回稳定的 `context_unavailable`；
+- `ctx.tool_call_id()`：宿主归属的当前 tool call；非工具入口为 `None`；
 - `ctx.working_dir()`：宿主校验后的工作目录；
-- `ctx.turn_id()`：仅当对应 wire event 实际携带 `turn_id` 时为 `Some`；当前 tool event 不伪造该值。
+- `ctx.require_working_dir()`：要求 workspace 事实存在，否则返回稳定的 `context_unavailable`；
+- `ctx.turn_id()`：当前 tool call 所属 turn 的真实 ID；会话外调用为 `None`。
 
 创建子会话：
 
 ```rust
-let _parent_session_id = ctx.session_id().ok_or_else(|| {
-    ErrorPayload::new("missing_call_context", "agent tool requires a session id")
-})?;
-let working_dir = ctx.working_dir().ok_or_else(|| {
-    ErrorPayload::new("missing_call_context", "agent tool requires a working directory")
-})?;
-let tool_call_id = ctx.tool_call_id().map(str::to_owned);
-
+let _parent_session_id = ctx.require_session_id()?;
 let mut request = HostCreateSessionRequest::new(agent_name);
 request.system_prompt = Some(system_prompt);
 request.model_preference = Some(model);
 request.ephemeral = true;
-request.tool_call_id = tool_call_id.clone();
-request.working_dir = Some(working_dir.to_string_lossy().into_owned());
 request.tool_selection = Some(SessionToolSelectionDto::all_except(["agent"]));
 
 let created = HostClient::session_control().create_child(request).await?;
 let child_id = created.session_id;
 ```
+
+子会话始终继承父 session 的 workspace，创建请求不接受独立的工作目录。
 
 `tool_selection` 是子会话工具可见性策略。外置 agent 默认建议使用
 `SessionToolSelectionDto::all_except(["agent"])`，避免子 agent 继续嵌套创建 agent；若需要更严格的工具边界，可改用
@@ -455,13 +454,47 @@ let mut request = HostSubmitTurnRequest::background(child_id, args.prompt);
 request.notify_parent_on_complete = Some(format!(
     "Subagent '{}' finished: {}", agent_name, args.description
 ));
-request.tool_call_id = tool_call_id;
-
 let submitted = HostClient::session_control().submit_turn(request).await?;
 // HostSubmitTurnOutput::Backgrounded { .. } → 返回说明文本给主 Agent
 ```
 
 若用户传 `waitForResult: true`，外置实现应降级为 `false` 并说明「外置插件仅支持后台子 Agent」，或返回带 hint 的 `ErrorPayload`。
+
+`tool_call_id` 由宿主从当前调用上下文写入 create/submit 的内部请求，worker 不能在 wire 请求中指定或伪造。
+
+### 会话状态与扩展事件
+
+会话内的扩展私有状态使用 typed client；同一个 handler 可直接写后读：
+
+```rust
+HostClient::session_state()
+    .write(HostSessionStateWriteRequest {
+        key: "last-run".into(),
+        content: "complete".into(),
+    })
+    .await?;
+let state = HostClient::session_state()
+    .read(HostSessionStateReadRequest {
+        key: "last-run".into(),
+    })
+    .await?;
+```
+
+key 只接受 1–128 个 ASCII 字母、数字、`_`、`.`、`-`，且不能是 `.` 或 `..`；缺失值通过
+`state.content == None` 表达，state value 以 UTF-8 字节计最多 1 MiB。发射 manifest
+中已声明的事件同样使用 typed client：
+
+```rust
+HostClient::events()
+    .emit(HostEventEmitRequest {
+        event_type: "my_extension.completed".into(),
+        schema_version: 1,
+        payload: serde_json::json!({ "status": "ok" }),
+    })
+    .await?;
+```
+
+每个事件声明的 `max_payload_bytes` 必须位于 1 byte..=1 MiB，发射时仍按该声明值校验。
 
 ### Agent 定义文件从哪来？
 

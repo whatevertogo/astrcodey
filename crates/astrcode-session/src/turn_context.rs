@@ -61,9 +61,13 @@ pub(crate) struct SharedTurnContext {
 }
 
 impl SharedTurnContext {
-    /// **仅用于 lifecycle 事件发射**（`emit_lifecycle_for_read_model`）：本构造产出的
-    /// `permission_chain` 是空链（一切工具全拒）、`approval_history` 是未初始化默认 store，
-    /// 不能用于工具管线或审批决策——那些路径必须经由 `TurnToolContext::for_turn`。
+    /// 从 read model 重建共享上下文，用于**没有活跃 turn 管线**的 hook 场景：
+    /// lifecycle 事件发射（`emit_lifecycle_for_read_model`）、idle compaction、
+    /// turn 提交前的 envelope / prompt 准备（调用方覆写 `turn_id` 与 `cancellation_token`）。
+    ///
+    /// 本构造产出的 `permission_chain` 是空链（一切工具全拒）、`approval_history`
+    /// 是未初始化默认 store，不能用于工具管线或审批决策——那些路径必须经由
+    /// `TurnToolContext::for_turn`。
     pub(crate) fn from_read_model(
         session_id: &SessionId,
         model: &SessionReadModel,

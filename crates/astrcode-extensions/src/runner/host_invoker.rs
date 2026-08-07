@@ -7,10 +7,11 @@ use astrcode_core::{event::EventSender, tool::SessionOperations, types::SessionI
 use astrcode_extension_sdk::{
     extension::{
         ExtensionCallContext, ExtensionCapability, ExtensionError, ExtensionEventDecl,
-        ExtensionEventEmitter, ExtensionPaths, ExtensionTasks,
+        ExtensionPaths, ExtensionTasks, RuntimeHookCallContext, internal::extension_event_emitter,
     },
     host::{
-        ExtensionHost, HostError, HostOperation,
+        ExtensionHost, HOST_ERROR_CODE_INVALID_RESPONSE, HOST_ERROR_CODE_SERIALIZATION_FAILED,
+        HostError, HostOperation,
         internal::{HostInvoker, HostScope, extension_host},
     },
     s5r::{EventPhase, WireMessage},
@@ -20,6 +21,47 @@ use tokio_util::sync::CancellationToken;
 
 use super::{ExtensionRunner, ExtensionView, HandlerIndex, bind_extension_event_sink};
 use crate::host_router::{HostRouter, InvokeContext, decls_to_map};
+
+pub(crate) struct ExtensionCallContextInput {
+    pub(crate) session_id: Option<SessionId>,
+    pub(crate) turn_id: Option<String>,
+    pub(crate) tool_call_id: Option<String>,
+    pub(crate) working_dir: Option<PathBuf>,
+    pub(crate) session_store_dir: Option<PathBuf>,
+    pub(crate) event_tx: Option<EventSender>,
+    pub(crate) cancellation: CancellationToken,
+}
+
+impl ExtensionCallContextInput {
+    pub(crate) fn unscoped(cancellation: CancellationToken) -> Self {
+        Self {
+            session_id: None,
+            turn_id: None,
+            tool_call_id: None,
+            working_dir: None,
+            session_store_dir: None,
+            event_tx: None,
+            cancellation,
+        }
+    }
+
+    pub(super) fn from_hook(
+        runtime: &RuntimeHookCallContext,
+        cancellation: CancellationToken,
+    ) -> Self {
+        Self {
+            session_id: Some(runtime.session_id().clone()),
+            turn_id: runtime.turn_id().map(str::to_owned),
+            tool_call_id: None,
+            working_dir: Some(runtime.working_dir().to_path_buf()),
+            session_store_dir: runtime
+                .session_store_dir()
+                .map(std::path::Path::to_path_buf),
+            event_tx: runtime.event_tx().cloned(),
+            cancellation,
+        }
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct ExtensionCallContextFactory {
@@ -38,20 +80,23 @@ impl ExtensionCallContextFactory {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn make_extension_call_context(
         &self,
         extension_id: &str,
         capabilities: &[ExtensionCapability],
-        session_id: Option<SessionId>,
-        turn_id: Option<String>,
-        working_dir: Option<PathBuf>,
-        session_store_dir: Option<PathBuf>,
-        event_tx: Option<EventSender>,
         declarations: &[ExtensionEventDecl],
         tasks: ExtensionTasks,
-        cancellation: CancellationToken,
+        input: ExtensionCallContextInput,
     ) -> ExtensionCallContext {
+        let ExtensionCallContextInput {
+            session_id,
+            turn_id,
+            tool_call_id,
+            working_dir,
+            session_store_dir,
+            event_tx,
+            cancellation,
+        } = input;
         let cancellation = linked_call_cancellation(&tasks, cancellation);
         let event_tx = if capabilities.contains(&ExtensionCapability::EmitEvents) {
             event_tx
@@ -79,6 +124,7 @@ impl ExtensionCallContextFactory {
         let invoke_context = InvokeContext {
             extension_id: extension_id.to_owned(),
             session_id: session_id.as_ref().map(|session_id| session_id.to_string()),
+            tool_call_id,
             session_store_dir: session_store_dir.clone(),
             session_ops,
             event_tx,
@@ -110,7 +156,7 @@ impl ExtensionCallContextFactory {
             Some(&global_store_dir),
             session_store_dir.as_deref(),
         );
-        let events = ExtensionEventEmitter::from_runtime(declarations.iter().cloned(), event_sink);
+        let events = extension_event_emitter(declarations.iter().cloned(), event_sink);
 
         ExtensionCallContext::from_runtime(
             extension_id,
@@ -166,73 +212,22 @@ impl ExtensionRunner {
             Arc::clone(&bindings.session_ops),
         )
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn make_extension_call_context(
-        &self,
-        extension_id: &str,
-        capabilities: &[ExtensionCapability],
-        session_id: Option<SessionId>,
-        turn_id: Option<String>,
-        working_dir: Option<PathBuf>,
-        session_store_dir: Option<PathBuf>,
-        event_tx: Option<EventSender>,
-        declarations: &[ExtensionEventDecl],
-        tasks: ExtensionTasks,
-        cancellation: CancellationToken,
-    ) -> Result<ExtensionCallContext, ExtensionError> {
-        Ok(self
-            .extension_call_context_factory()
-            .make_extension_call_context(
-                extension_id,
-                capabilities,
-                session_id,
-                turn_id,
-                working_dir,
-                session_store_dir,
-                event_tx,
-                declarations,
-                tasks,
-                cancellation,
-            ))
-    }
 }
 
 impl ExtensionView {
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn make_registered_extension_call_context(
         &self,
         extension_id: &str,
-        session_id: Option<SessionId>,
-        turn_id: Option<String>,
-        working_dir: Option<PathBuf>,
-        session_store_dir: Option<PathBuf>,
-        event_tx: Option<EventSender>,
-        cancellation: CancellationToken,
+        input: ExtensionCallContextInput,
     ) -> Result<ExtensionCallContext, ExtensionError> {
-        self.make_registered_extension_call_context_from_index(
-            &self.index,
-            extension_id,
-            session_id,
-            turn_id,
-            working_dir,
-            session_store_dir,
-            event_tx,
-            cancellation,
-        )
+        self.make_registered_extension_call_context_from_index(&self.index, extension_id, input)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn make_registered_extension_call_context_from_index(
         &self,
         index: &HandlerIndex,
         extension_id: &str,
-        session_id: Option<SessionId>,
-        turn_id: Option<String>,
-        working_dir: Option<PathBuf>,
-        session_store_dir: Option<PathBuf>,
-        event_tx: Option<EventSender>,
-        cancellation: CancellationToken,
+        input: ExtensionCallContextInput,
     ) -> Result<ExtensionCallContext, ExtensionError> {
         let capabilities = index.capabilities.get(extension_id).ok_or_else(|| {
             ExtensionError::Internal(format!(
@@ -251,45 +246,12 @@ impl ExtensionView {
             .get(extension_id)
             .map(Vec::as_slice)
             .unwrap_or_default();
-        self.make_extension_call_context(
-            extension_id,
-            capabilities,
-            session_id,
-            turn_id,
-            working_dir,
-            session_store_dir,
-            event_tx,
-            declarations,
-            tasks,
-            cancellation,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn make_extension_call_context(
-        &self,
-        extension_id: &str,
-        capabilities: &[ExtensionCapability],
-        session_id: Option<SessionId>,
-        turn_id: Option<String>,
-        working_dir: Option<PathBuf>,
-        session_store_dir: Option<PathBuf>,
-        event_tx: Option<EventSender>,
-        declarations: &[ExtensionEventDecl],
-        tasks: ExtensionTasks,
-        cancellation: CancellationToken,
-    ) -> Result<ExtensionCallContext, ExtensionError> {
         Ok(self.call_context_factory.make_extension_call_context(
             extension_id,
             capabilities,
-            session_id,
-            turn_id,
-            working_dir,
-            session_store_dir,
-            event_tx,
             declarations,
             tasks,
-            cancellation,
+            input,
         ))
     }
 }
@@ -334,7 +296,7 @@ impl HostInvoker for RouterHostInvoker {
                 EventPhase::Failed => {
                     return Err(event.error.map(HostError::from).unwrap_or_else(|| {
                         HostError::new(
-                            "invalid_host_response",
+                            HOST_ERROR_CODE_INVALID_RESPONSE,
                             format!(
                                 "{} stream failed without an error payload",
                                 operation.wire_name()
@@ -346,7 +308,7 @@ impl HostInvoker for RouterHostInvoker {
             }
         }
         Err(HostError::new(
-            "invalid_host_response",
+            HOST_ERROR_CODE_INVALID_RESPONSE,
             format!(
                 "{} stream ended without a terminal event",
                 operation.wire_name()
@@ -362,7 +324,7 @@ impl HostInvoker for RouterHostInvoker {
 fn serialize_host_input(operation: HostOperation, input: &Value) -> Result<String, HostError> {
     serde_json::to_string(input).map_err(|error| {
         HostError::new(
-            "serialization_failed",
+            HOST_ERROR_CODE_SERIALIZATION_FAILED,
             format!(
                 "failed to serialize {} request: {error}",
                 operation.wire_name()
@@ -395,19 +357,22 @@ mod tests {
         let session_store_dir = PathBuf::from("/sessions/session-1");
         let cancellation = CancellationToken::new();
         let context = runner
+            .extension_call_context_factory()
             .make_extension_call_context(
                 "review-extension",
                 &[ExtensionCapability::SessionControl],
-                Some(session_id.clone()),
-                Some("turn-1".into()),
-                Some(PathBuf::from("/workspace")),
-                Some(session_store_dir.clone()),
-                None,
                 &[],
                 ExtensionTasks::new("review-extension"),
-                cancellation.clone(),
-            )
-            .expect("default runner builds an attributed context");
+                ExtensionCallContextInput {
+                    session_id: Some(session_id.clone()),
+                    turn_id: Some("turn-1".into()),
+                    tool_call_id: Some("call-1".into()),
+                    working_dir: Some(PathBuf::from("/workspace")),
+                    session_store_dir: Some(session_store_dir.clone()),
+                    event_tx: None,
+                    cancellation: cancellation.clone(),
+                },
+            );
 
         assert_eq!(context.extension_id(), "review-extension");
         assert_eq!(context.session_id(), Some(&session_id));
@@ -429,6 +394,7 @@ mod tests {
         let transport = transport_invoke_context(context.host())
             .expect("runner host should retain its internal S5R transport context");
         assert_eq!(transport.session_id.as_deref(), Some("session-1"));
+        assert_eq!(transport.tool_call_id.as_deref(), Some("call-1"));
         assert_eq!(transport.session_store_dir, Some(session_store_dir));
         assert!(
             transport

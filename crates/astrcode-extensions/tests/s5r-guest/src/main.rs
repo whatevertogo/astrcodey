@@ -8,14 +8,14 @@ use std::{
 use astrcode_extension_sdk::{
     builder::tool,
     extension::{
-        ExtensionEventDecl, ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute,
+        ExtensionEventDecl, ExtensionHttpDispatchRequest, ExtensionHttpMethod,
+        ExtensionHttpResponse, ExtensionHttpRoute,
     },
     s5r::{
         ErrorPayload,
         effects::{CallContinuation, HandlerResult},
     },
     tool::ExecutionMode,
-    worker::testing::invoke_host,
     worker_prelude::*,
 };
 use serde::Deserialize;
@@ -111,11 +111,64 @@ async fn run() -> Result<(), ErrorPayload> {
         tool_handler(|_ctx| async { Ok(tool_text("pong", false)) }),
     )?;
 
+    worker.tool(
+        tool("call_context")
+            .description("Return the host-attributed tool call context")
+            .parameters(json!({ "type": "object", "properties": {} }))
+            .build(),
+        tool_handler(|ctx| async move {
+            Ok(tool_text(
+                json!({
+                    "extension_id": ctx.extension_id(),
+                    "session_id": ctx.session_id(),
+                    "turn_id": ctx.turn_id(),
+                    "tool_call_id": ctx.tool_call_id(),
+                    "working_dir": ctx
+                        .working_dir()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                })
+                .to_string(),
+                false,
+            ))
+        }),
+    )?;
+
+    worker.tool(
+        tool("session_state_roundtrip")
+            .description("Write and read extension-scoped session state")
+            .parameters(json!({ "type": "object", "properties": {} }))
+            .build(),
+        tool_handler(|_ctx| async move {
+            HostClient::session_state()
+                .write(HostSessionStateWriteRequest {
+                    key: "typed-probe".into(),
+                    content: "state-roundtrip-ok".into(),
+                })
+                .await?;
+            let output = HostClient::session_state()
+                .read(HostSessionStateReadRequest {
+                    key: "typed-probe".into(),
+                })
+                .await?;
+            Ok(tool_text(
+                output.content.unwrap_or_else(|| "missing".into()),
+                false,
+            ))
+        }),
+    )?;
+
     worker.http_route(
         ExtensionHttpRoute::public(ExtensionHttpMethod::Post, "/s5r-probe/{id}"),
         http_handler(|request, _ctx| async move {
+            let status = if request.path_params.get("id").map(String::as_str)
+                == Some("invalid-status")
+            {
+                99
+            } else {
+                202
+            };
             Ok(ExtensionHttpResponse::json(
-                202,
+                status,
                 json!({
                     "id": request.path_params.get("id"),
                     "query": request.query,
@@ -258,9 +311,26 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(json!({ "type": "object" }))
             .build(),
         tool_handler(|_ctx| async move {
+            let forged = astrcode_extension_sdk::worker::testing::invoke_host(
+                "astrcode.extension.http.public",
+                json!({
+                    "method": "POST",
+                    "path": "/dispatch-target/42",
+                    "pathParams": { "id": "forged" },
+                    "query": "source=forged",
+                    "body": { "from": "forged" }
+                }),
+            )
+            .await;
+            if !matches!(&forged, Err(error) if error.code == "invalid_input") {
+                return Err(ErrorPayload::new(
+                    "spoof_not_rejected",
+                    format!("host accepted forged path params: {forged:?}"),
+                ));
+            }
             let response = HostClient::extension_http()
                 .dispatch_public(
-                    astrcode_extension_sdk::extension::ExtensionHttpRequest::new(
+                    ExtensionHttpDispatchRequest::new(
                         ExtensionHttpMethod::Post,
                         "/dispatch-target/42",
                     )
@@ -305,15 +375,13 @@ async fn run() -> Result<(), ErrorPayload> {
         hook_handler_args(|input: PreToolInput, _ctx| async move {
             if input.tool_name == "emit_hook_probe" {
                 // This probe must inherit the active hook's request-scoped event context.
-                let _ = invoke_host(
-                    "astrcode.event.emit",
-                    json!({
-                        "event_type": "s5r_guest.probe",
-                        "schema_version": 1,
-                        "payload": { "from": "pre_tool_use" }
-                    }),
-                )
-                .await;
+                HostClient::events()
+                    .emit(HostEventEmitRequest {
+                        event_type: "s5r_guest.probe".into(),
+                        schema_version: 1,
+                        payload: json!({ "from": "pre_tool_use" }),
+                    })
+                    .await?;
                 return Ok(HandlerResult::ok());
             }
             if input.tool_name == "bash" {

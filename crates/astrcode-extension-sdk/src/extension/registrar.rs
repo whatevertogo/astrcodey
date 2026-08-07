@@ -7,11 +7,11 @@ use super::{
     ContinueAfterStopHandler, ContinueAfterStopOptions, ContinueAfterStopRegistration,
     ExtensionCapability, ExtensionEvent, ExtensionEventDecl, ExtensionHttpAccess,
     ExtensionHttpHandler, ExtensionHttpRoute, ExtensionHttpRouteRegistration, ExtensionManifest,
-    HookMode, LifecycleHandler, PostToolUseHandler, PreToolUseHandler, PromptBuildHandler,
-    ProviderEvent, ProviderHandler, SlashCommand, ToolDiscoveryHandler, ToolHandler,
-    ToolHookRegistration, ToolHookTarget, UserMessageEnvelopeHandler,
-    UserMessageEnvelopeRegistration, extension_http_route_patterns_conflict,
-    lifecycle_event_allows_blocking,
+    HookMode, LifecycleHandler, MAX_EXTENSION_EVENT_PAYLOAD_BYTES, PostToolUseHandler,
+    PreToolUseHandler, PromptBuildHandler, ProviderEvent, ProviderHandler, SlashCommand,
+    ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
+    UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
+    extension_http_route_patterns_conflict, lifecycle_event_allows_blocking,
 };
 use crate::{
     builder::ExtensionToolDefinition,
@@ -90,7 +90,8 @@ impl Registrar {
         definition: impl Into<ExtensionToolDefinition>,
         handler: Arc<dyn ToolHandler>,
     ) {
-        let (definition, prompt) = definition.into().into_parts();
+        let (mut definition, prompt) = definition.into().into_parts();
+        definition.name = definition.name.trim().to_owned();
         self.registrations.tools.push(ToolRegistration {
             definition,
             prompt,
@@ -102,7 +103,8 @@ impl Registrar {
         self.registrations.tool_discovery.push(handler);
     }
 
-    pub fn command(&mut self, cmd: SlashCommand, handler: Arc<dyn CommandHandler>) {
+    pub fn command(&mut self, mut cmd: SlashCommand, handler: Arc<dyn CommandHandler>) {
+        cmd.name = cmd.name.trim().to_owned();
         self.registrations.commands.push((cmd, handler));
     }
 
@@ -120,15 +122,19 @@ impl Registrar {
             .push(ExtensionHttpRouteRegistration { route, handler });
     }
 
-    pub fn keybinding(&mut self, binding: Keybinding) {
+    pub fn keybinding(&mut self, mut binding: Keybinding) {
+        binding.key = binding.key.trim().to_owned();
+        binding.command = binding.command.trim().to_owned();
         self.registrations.keybindings.push(binding);
     }
 
-    pub fn status_item(&mut self, item: StatusItem) {
+    pub fn status_item(&mut self, mut item: StatusItem) {
+        item.id = item.id.trim().to_owned();
         self.registrations.status_items.push(item);
     }
 
-    pub fn declare_event(&mut self, declaration: ExtensionEventDecl) {
+    pub fn declare_event(&mut self, mut declaration: ExtensionEventDecl) {
+        declaration.event_type = declaration.event_type.trim().to_owned();
         self.registrations.extension_event_decls.push(declaration);
     }
 
@@ -407,7 +413,7 @@ impl ExtensionRegistrations {
 
         let mut tool_names = HashSet::new();
         for registration in &self.tools {
-            let name = registration.definition.name.trim();
+            let name = registration.definition.name.as_str();
             if name.is_empty() {
                 return Err(invalid_registration(
                     extension_id,
@@ -423,7 +429,7 @@ impl ExtensionRegistrations {
         }
         let mut command_names = HashSet::new();
         for (command, handler) in &self.commands {
-            let name = command.name.trim();
+            let name = command.name.as_str();
             if name.is_empty() {
                 return Err(invalid_registration(
                     extension_id,
@@ -453,7 +459,9 @@ impl ExtensionRegistrations {
                     "keybinding key cannot be empty",
                 ));
             }
-            if !command_names.contains(binding.command.as_str()) {
+            if !command_names.contains(binding.command.as_str())
+                && self.command_discovery.is_empty()
+            {
                 return Err(invalid_registration(
                     extension_id,
                     format!(
@@ -466,7 +474,7 @@ impl ExtensionRegistrations {
 
         let mut status_ids = HashSet::new();
         for item in &self.status_items {
-            let id = item.id.trim();
+            let id = item.id.as_str();
             if id.is_empty() || !status_ids.insert(id) {
                 return Err(invalid_registration(
                     extension_id,
@@ -477,19 +485,25 @@ impl ExtensionRegistrations {
 
         let mut event_types = HashSet::new();
         for event in &self.extension_event_decls {
-            let event_type = event.event_type.trim();
+            let event_type = event.event_type.as_str();
             if event_type.is_empty() || !event_types.insert(event_type) {
                 return Err(invalid_registration(
                     extension_id,
                     format!("invalid or duplicate extension event `{event_type}`"),
                 ));
             }
-            if event.schema_version == 0 || event.max_payload_bytes == 0 {
+            if event.schema_version == 0 {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!("extension event `{event_type}` requires a non-zero schema version"),
+                ));
+            }
+            if !(1..=MAX_EXTENSION_EVENT_PAYLOAD_BYTES).contains(&event.max_payload_bytes) {
                 return Err(invalid_registration(
                     extension_id,
                     format!(
-                        "extension event `{event_type}` requires non-zero schema version and \
-                         payload limit"
+                        "extension event `{event_type}` payload limit must be between 1 and \
+                         {MAX_EXTENSION_EVENT_PAYLOAD_BYTES} bytes"
                     ),
                 ));
             }
@@ -595,6 +609,131 @@ fn invalid_registration(extension_id: &str, reason: impl Into<String>) -> Regist
     RegistrationError::Invalid {
         extension_id: extension_id.to_owned(),
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        builder::{command, command_handler, manifest, tool, tool_handler},
+        extension::{
+            CommandDiscovery, CommandDiscoveryContext, ExtensionCommandResult, ExtensionError,
+        },
+        tool::ToolResult,
+    };
+
+    struct EmptyCommandDiscovery;
+
+    #[async_trait::async_trait]
+    impl CommandDiscoveryHandler for EmptyCommandDiscovery {
+        async fn discover(
+            &self,
+            _ctx: CommandDiscoveryContext,
+        ) -> Result<CommandDiscovery, ExtensionError> {
+            Ok(CommandDiscovery::new(Vec::new()))
+        }
+    }
+
+    fn finish_with_event_limit(max_payload_bytes: usize) -> Result<(), RegistrationError> {
+        let mut registrar = Registrar::new();
+        registrar.declare_event(ExtensionEventDecl {
+            event_type: "test.completed".into(),
+            schema_version: 1,
+            durable: true,
+            max_payload_bytes,
+        });
+        registrar
+            .finish(
+                manifest("event-limit-test")
+                    .version("1.0.0")
+                    .capability(ExtensionCapability::EmitEvents)
+                    .build(),
+            )
+            .map(|_| ())
+    }
+
+    #[test]
+    fn event_payload_limit_accepts_host_ceiling_only() {
+        for (max_payload_bytes, accepted) in [
+            (0, false),
+            (MAX_EXTENSION_EVENT_PAYLOAD_BYTES, true),
+            (MAX_EXTENSION_EVENT_PAYLOAD_BYTES + 1, false),
+        ] {
+            assert_eq!(
+                finish_with_event_limit(max_payload_bytes).is_ok(),
+                accepted,
+                "unexpected validation result for {max_payload_bytes} bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn registration_names_are_stored_in_canonical_form() {
+        let mut registrar = Registrar::new();
+        registrar.tool(
+            tool("  review  ")
+                .parameters(serde_json::json!({"type": "object"}))
+                .build(),
+            tool_handler(|_| async { Ok(ToolResult::success("ok")) }),
+        );
+        registrar.command(
+            command("  inspect  ").build(),
+            command_handler(|_| async { Ok(ExtensionCommandResult::handled("ok")) }),
+        );
+        registrar.keybinding(Keybinding {
+            key: "  ctrl+i  ".into(),
+            command: "  inspect  ".into(),
+            arguments: String::new(),
+            description: String::new(),
+        });
+        registrar.status_item(StatusItem {
+            id: "  state  ".into(),
+            text: String::new(),
+            priority: 0,
+            tooltip: None,
+        });
+        registrar.declare_event(ExtensionEventDecl {
+            event_type: "  review.completed  ".into(),
+            schema_version: 1,
+            durable: true,
+            max_payload_bytes: 1024,
+        });
+
+        let (_, registrations) = registrar
+            .finish(
+                manifest("canonical-registration-test")
+                    .version("1.0.0")
+                    .capability(ExtensionCapability::EmitEvents)
+                    .build(),
+            )
+            .expect("canonical registrations");
+
+        assert_eq!(registrations.tools()[0].definition().name, "review");
+        assert_eq!(registrations.commands()[0].0.name, "inspect");
+        assert_eq!(registrations.keybindings()[0].key, "ctrl+i");
+        assert_eq!(registrations.keybindings()[0].command, "inspect");
+        assert_eq!(registrations.status_items()[0].id, "state");
+        assert_eq!(
+            registrations.extension_event_decls()[0].event_type,
+            "review.completed"
+        );
+    }
+
+    #[test]
+    fn keybinding_may_target_a_dynamically_discovered_command() {
+        let mut registrar = Registrar::new();
+        registrar.command_discovery(Arc::new(EmptyCommandDiscovery));
+        registrar.keybinding(Keybinding {
+            key: "ctrl+d".into(),
+            command: "dynamic-command".into(),
+            arguments: String::new(),
+            description: String::new(),
+        });
+
+        registrar
+            .finish(manifest("dynamic-keybinding-test").version("1.0.0").build())
+            .expect("dynamic command target is validated at discovery time");
     }
 }
 

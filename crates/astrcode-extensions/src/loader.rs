@@ -318,14 +318,22 @@ async fn apply_reconcile_plan(
         replaced_ids.dedup();
 
         let mut replacement_blocked = false;
+        let mut retirements = Vec::new();
         for replaced_id in &replaced_ids {
-            if let Err(error) = runner.unregister(replaced_id, StopReason::Reload).await {
-                errors.push(format!("failed to reload extension {replaced_id}: {error}"));
-                replacement_blocked = true;
+            match runner
+                .unregister_with_retirement(replaced_id, StopReason::Reload)
+                .await
+            {
+                Ok(Some(retirement)) => retirements.push((*replaced_id, retirement)),
+                Ok(None) => {},
+                Err(error) => {
+                    errors.push(format!("failed to reload extension {replaced_id}: {error}"));
+                    replacement_blocked = true;
+                },
             }
         }
-        for replaced_id in &replaced_ids {
-            if let Err(error) = runner.wait_for_retirement(replaced_id).await {
+        for (replaced_id, retirement) in retirements {
+            if let Err(error) = retirement.wait().await {
                 errors.push(format!(
                     "failed to retire extension {replaced_id} before starting {id}: {error}"
                 ));
@@ -469,8 +477,7 @@ impl ExtensionLoader {
 
         let global_dir = astrcode_dir().join("extensions");
         if global_dir.exists() {
-            let global =
-                Self::discover_from_dir(&global_dir, host_router.clone(), working_dir).await;
+            let global = Self::discover_from_dir(&global_dir, host_router.clone()).await;
             result.candidates.extend(global.candidates);
             result.errors.extend(global.errors);
             result.failures.extend(global.failures);
@@ -479,7 +486,7 @@ impl ExtensionLoader {
         if let Some(wd) = working_dir {
             let project_dir = PathBuf::from(wd).join(".astrcode").join("extensions");
             if project_dir.exists() {
-                let project = Self::discover_from_dir(&project_dir, host_router, working_dir).await;
+                let project = Self::discover_from_dir(&project_dir, host_router).await;
                 result.candidates.splice(0..0, project.candidates);
                 result.errors.extend(project.errors);
                 result.failures.extend(project.failures);
@@ -493,9 +500,8 @@ impl ExtensionLoader {
     pub async fn load_from_dir_for_test(
         dir: &Path,
         host_router: &Option<Arc<HostRouter>>,
-        working_dir: Option<&str>,
     ) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
-        let discovery = Self::discover_from_dir(dir, host_router.clone(), working_dir).await;
+        let discovery = Self::discover_from_dir(dir, host_router.clone()).await;
         let loaded = Self::load_discovered(discovery).await;
         (loaded.extensions, loaded.errors)
     }
@@ -503,7 +509,6 @@ impl ExtensionLoader {
     async fn discover_from_dir(
         dir: &Path,
         host_router: Option<Arc<HostRouter>>,
-        working_dir: Option<&str>,
     ) -> DiscoverExtensionsResult {
         let mut result = DiscoverExtensionsResult::default();
         let paths = match Self::extension_dirs(dir).await {
@@ -522,7 +527,7 @@ impl ExtensionLoader {
 
         for path in paths {
             let started = Instant::now();
-            match Self::discover_extension(&path, host_router.clone(), working_dir).await {
+            match Self::discover_extension(&path, host_router.clone()).await {
                 Ok(candidate) => result.candidates.push(candidate),
                 Err(message) => {
                     result.failures.push(ExtensionLoadFailure {
@@ -607,7 +612,6 @@ impl ExtensionLoader {
     async fn discover_extension(
         ext_dir: &Path,
         host_router: Option<Arc<HostRouter>>,
-        working_dir: Option<&str>,
     ) -> Result<ExtensionCandidate, String> {
         let manifest_path = ext_dir.join("extension.json");
         let manifest_bytes = tokio::fs::read(&manifest_path)
@@ -647,7 +651,6 @@ impl ExtensionLoader {
         let fingerprint =
             Self::disk_source_fingerprint(&canonical_dir, manifest_bytes, &entry).await?;
         let extension_id = entry.extension_id.clone();
-        let working_dir = working_dir.map(str::to_string);
         let display_path = canonical_dir.display().to_string();
 
         Ok(ExtensionCandidate::lazy(
@@ -661,15 +664,10 @@ impl ExtensionLoader {
                          extensions"
                     )
                 })?;
-                crate::s5r_ext::S5rExtension::load(
-                    &canonical_dir,
-                    &entry,
-                    router,
-                    working_dir.as_deref(),
-                )
-                .await
-                .map(|extension| extension as Arc<dyn Extension>)
-                .map_err(|error| format!("{display_path}: {error}"))
+                crate::s5r_ext::S5rExtension::load(&canonical_dir, &entry, router)
+                    .await
+                    .map(|extension| extension as Arc<dyn Extension>)
+                    .map_err(|error| format!("{display_path}: {error}"))
             },
         ))
     }

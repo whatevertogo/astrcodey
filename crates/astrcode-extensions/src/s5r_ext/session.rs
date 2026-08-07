@@ -11,7 +11,8 @@ use std::{
 };
 
 use astrcode_extension_sdk::{
-    extension::{ExtensionCapability, ExtensionError, ExtensionEventDecl},
+    extension::ExtensionError,
+    host::{HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CANCELLED},
     runtime::{
         CancelToken, InitializeHandler, InvokeHandler, InvokeReply, OutboundInvokeControl,
         OutboundInvokeTracker, Peer, StdioFrameTransport,
@@ -252,22 +253,6 @@ impl S5rSession {
             .unwrap_or_default()
     }
 
-    pub fn declared_capabilities(&self) -> Vec<ExtensionCapability> {
-        self.registration
-            .read()
-            .as_ref()
-            .map(|r| r.capabilities().to_vec())
-            .unwrap_or_default()
-    }
-
-    pub fn event_decls(&self) -> HashMap<String, ExtensionEventDecl> {
-        self.registration
-            .read()
-            .as_ref()
-            .map(|r| decls_to_map(r.extension_events()))
-            .unwrap_or_default()
-    }
-
     pub async fn ping(&self) -> Result<(), S5rSessionError> {
         self.peer
             .ping()
@@ -334,7 +319,6 @@ impl S5rSession {
             tracker: Some(tracker),
             ..OutboundInvokeControl::default()
         };
-        let extension_id = self.extension_id();
         let output = tokio::time::timeout(
             INVOKE_TIMEOUT,
             self.peer.invoke(
@@ -342,9 +326,7 @@ impl S5rSession {
                 json!({
                     "handler_id": handler_id,
                     "event": event,
-                    "caller_extension_id": extension_id,
                 }),
-                Some(&extension_id),
                 control,
             ),
         )
@@ -437,7 +419,7 @@ fn handle_initialize(
             role: "core".into(),
             version: Some(S5R_STACK.into()),
         },
-        protocol_version: Some(S5R_VERSION.into()),
+        protocol_version: S5R_VERSION.into(),
         capabilities,
         metadata: json!({ "wire_codec": "json" }),
     })
@@ -541,7 +523,7 @@ async fn handle_host_invoke(
 ) -> Result<InvokeReply, ErrorPayload> {
     token
         .raise_if_cancelled()
-        .map_err(|e| ErrorPayload::new("cancelled", e))?;
+        .map_err(|e| ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, e))?;
     if !invoke.capability.starts_with("astrcode.") {
         return Err(ErrorPayload::new(
             "unknown_capability",
@@ -640,7 +622,7 @@ fn resolve_host_invoke_context(
         }),
         None => detached_context.ok_or_else(|| {
             ErrorPayload::new(
-                "backend_unavailable",
+                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
                 "extension host context is not ready until startup completes",
             )
         }),
@@ -665,7 +647,7 @@ mod tests {
         },
     };
     use astrcode_extension_sdk::{
-        extension::ExtensionTasks,
+        extension::{ExtensionCapability, ExtensionTasks},
         host::HostLlmChatRequest,
         s5r::{WIRE_FEATURE_PARENT_INVOKE_ID, capability_to_wire},
     };
@@ -950,7 +932,6 @@ mod tests {
             capability: "astrcode.session.root.create".into(),
             input: json!({}),
             stream: false,
-            caller_extension_id: Some("spoofed-extension".into()),
             parent_invoke_id: None,
         };
 
@@ -1055,7 +1036,6 @@ mod tests {
             input: serde_json::to_value(HostLlmChatRequest::new(vec![LlmMessage::user("hello")]))
                 .unwrap(),
             stream: false,
-            caller_extension_id: None,
             parent_invoke_id: None,
         };
 

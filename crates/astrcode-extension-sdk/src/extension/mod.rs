@@ -11,10 +11,36 @@ mod events;
 mod hooks;
 mod http;
 mod lifecycle;
+mod package_manifest;
 mod paths;
 mod registrar;
 mod runtime;
 mod tool_context;
+
+/// Runtime-only construction seam. This module is intentionally absent from author preludes.
+#[doc(hidden)]
+pub mod internal {
+    use std::sync::Arc;
+
+    use super::{ExtensionError, ExtensionEventDecl, ExtensionEventEmitter};
+
+    /// Host-bound event ingress. Extension authors emit through [`ExtensionEventEmitter`].
+    pub trait ExtensionEventSink: Send + Sync {
+        fn emit(
+            &self,
+            event_type: &str,
+            schema_version: u32,
+            payload: serde_json::Value,
+        ) -> Result<(), ExtensionError>;
+    }
+
+    pub fn extension_event_emitter(
+        declarations: impl IntoIterator<Item = ExtensionEventDecl>,
+        sink: Option<Arc<dyn ExtensionEventSink>>,
+    ) -> ExtensionEventEmitter {
+        ExtensionEventEmitter::from_runtime(declarations, sink)
+    }
+}
 
 pub use astrcode_core::{
     compaction::{CompactStrategy, CompactTrigger},
@@ -25,6 +51,7 @@ pub use events::*;
 pub use hooks::*;
 pub use http::*;
 pub use lifecycle::*;
+pub use package_manifest::*;
 pub use paths::*;
 pub use registrar::*;
 pub use runtime::*;

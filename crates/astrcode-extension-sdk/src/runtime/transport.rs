@@ -223,7 +223,7 @@ mod tests {
                         role: "core".into(),
                         version: Some("astrcode".into()),
                     },
-                    protocol_version: Some(S5R_VERSION.into()),
+                    protocol_version: S5R_VERSION.into(),
                     capabilities: Vec::new(),
                     metadata: serde_json::json!({ "wire_codec": "json" }),
                 })

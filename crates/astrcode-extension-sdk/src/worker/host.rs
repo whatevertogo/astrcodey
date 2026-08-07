@@ -6,35 +6,36 @@ use std::{
 };
 
 use async_trait::async_trait;
-use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde_json::Value;
 
+#[cfg(test)]
+use crate::{extension::ExtensionHttpDispatchRequest, llm::LlmMessage};
 use crate::{
-    extension::{ExtensionHttpRequest, ExtensionHttpResponse},
-    host::{HostAcknowledgement, HostLlmChatRequest, HostOperation},
-    llm::LlmMessage,
+    host::{
+        HOST_ERROR_CODE_HOST_NOT_READY, HOST_ERROR_CODE_PEER_BUSY, HOST_ERROR_CODE_PEER_CLOSED,
+        HOST_ERROR_CODE_TIMEOUT, HOST_ERROR_CODE_TRANSPORT, HostClientTransport, HostOperation,
+        TypedEventClient, TypedExtensionHttpClient, TypedModelClient, TypedNetworkClient,
+        TypedProcessClient, TypedSessionControlClient, TypedSessionHistoryClient,
+        TypedSessionInspectClient, TypedSessionStateClient, TypedWorkspaceClient,
+    },
     runtime::{OutboundInvokeControl, Peer, PeerError},
     s5r::ErrorPayload,
-    session_inspect::{
-        SessionHistorySnapshotOutput, SessionInspectListOutput,
-        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
-        SessionInspectSnapshotOutput,
-    },
 };
 pub use crate::{
     host::{
-        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostLlmChatOutput,
-        HostLlmCollectedStreamOutput, HostLlmTextDelta, HostNetworkRedirectPolicy,
-        HostNetworkRequest, HostNetworkResponse, HostProcessOutput, HostProcessRequest,
-        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
-        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionSummariesOutput,
-        HostSessionSummary, HostSessionTokenUsage, HostSessionTokenUsageOutput,
-        HostSessionTranscript, HostSessionTranscriptMessage, HostWorkspaceEditOutput,
-        HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
-        HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
-        HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
-        HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
-        HostWorkspaceWriteRequest,
+        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitRequest,
+        HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmContent, HostLlmMessage,
+        HostLlmRole, HostLlmTextDelta, HostNetworkRedirectPolicy, HostNetworkRequest,
+        HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostSessionCancelOutput,
+        HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
+        HostSessionProviderMessagesOutput, HostSessionStateReadOutput, HostSessionStateReadRequest,
+        HostSessionStateWriteRequest, HostSessionSummariesOutput, HostSessionSummary,
+        HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
+        HostSessionTranscriptMessage, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
+        HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
+        HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
+        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
+        HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
     },
     session::{
         HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
@@ -54,15 +55,11 @@ pub trait HostApi: Send + Sync {
 
 pub(crate) struct PeerHostApi<T: crate::runtime::FrameTransport + 'static> {
     peer: Arc<Peer<T>>,
-    caller_extension_id: String,
 }
 
 impl<T: crate::runtime::FrameTransport + 'static> PeerHostApi<T> {
-    pub fn new(peer: Arc<Peer<T>>, caller_extension_id: impl Into<String>) -> Self {
-        Self {
-            peer,
-            caller_extension_id: caller_extension_id.into(),
-        }
+    pub fn new(peer: Arc<Peer<T>>) -> Self {
+        Self { peer }
     }
 }
 
@@ -73,19 +70,14 @@ where
 {
     async fn call(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
         self.peer
-            .invoke(
-                capability,
-                input,
-                Some(self.caller_extension_id.as_str()),
-                OutboundInvokeControl::default(),
-            )
+            .invoke(capability, input, OutboundInvokeControl::default())
             .await
             .map_err(peer_error_to_payload)
     }
 
     async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
         self.peer
-            .invoke_stream_collect(capability, input, Some(self.caller_extension_id.as_str()))
+            .invoke_stream_collect(capability, input)
             .await
             .map_err(peer_error_to_payload)
     }
@@ -93,13 +85,15 @@ where
 
 fn peer_error_to_payload(err: PeerError) -> ErrorPayload {
     match err {
-        PeerError::Closed => ErrorPayload::new("peer_closed", "host peer closed"),
-        PeerError::Timeout => ErrorPayload::new("timeout", "host invoke timed out"),
-        PeerError::Busy => {
-            ErrorPayload::new("peer_busy", "host invoke concurrency limit reached").retryable(true)
-        },
+        PeerError::Closed => ErrorPayload::new(HOST_ERROR_CODE_PEER_CLOSED, "host peer closed"),
+        PeerError::Timeout => ErrorPayload::new(HOST_ERROR_CODE_TIMEOUT, "host invoke timed out"),
+        PeerError::Busy => ErrorPayload::new(
+            HOST_ERROR_CODE_PEER_BUSY,
+            "host invoke concurrency limit reached",
+        )
+        .retryable(true),
         PeerError::Payload(payload) => payload,
-        PeerError::Msg(msg) => ErrorPayload::new("transport_error", msg),
+        PeerError::Msg(msg) => ErrorPayload::new(HOST_ERROR_CODE_TRANSPORT, msg),
     }
 }
 
@@ -121,384 +115,85 @@ pub async fn with_host_api<T>(api: Arc<dyn HostApi>, future: impl Future<Output 
     SCOPED_HOST_API.scope(api, future).await
 }
 
-/// Worker-side entry point for typed host domains.
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy)]
+pub struct WorkerHostTransport;
+
+#[async_trait]
+impl HostClientTransport for WorkerHostTransport {
+    type Error = ErrorPayload;
+
+    async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, Self::Error> {
+        call_host(operation.wire_name(), input).await
+    }
+
+    async fn invoke_collected_stream(
+        &self,
+        operation: HostOperation,
+        input: Value,
+    ) -> Result<Value, Self::Error> {
+        call_host_stream(operation.wire_name(), input).await
+    }
+
+    fn client_error(code: &'static str, message: String) -> Self::Error {
+        ErrorPayload::new(code, message)
+    }
+}
+
+pub type ModelClient = TypedModelClient<WorkerHostTransport>;
+pub type EventClient = TypedEventClient<WorkerHostTransport>;
+pub type SessionControlClient = TypedSessionControlClient<WorkerHostTransport>;
+pub type SessionHistoryClient = TypedSessionHistoryClient<WorkerHostTransport>;
+pub type SessionStateClient = TypedSessionStateClient<WorkerHostTransport>;
+pub type SessionInspectClient = TypedSessionInspectClient<WorkerHostTransport>;
+pub type WorkspaceClient = TypedWorkspaceClient<WorkerHostTransport>;
+pub type ProcessClient = TypedProcessClient<WorkerHostTransport>;
+pub type NetworkClient = TypedNetworkClient<WorkerHostTransport>;
+pub type ExtensionHttpClient = TypedExtensionHttpClient<WorkerHostTransport>;
+
+/// Worker-side entry point for typed host domains.
 pub struct HostClient;
 
 impl HostClient {
+    pub const fn events() -> EventClient {
+        EventClient::new(WorkerHostTransport)
+    }
+
     pub const fn models() -> ModelClient {
-        ModelClient::new()
+        ModelClient::new(WorkerHostTransport)
     }
 
     pub const fn session_control() -> SessionControlClient {
-        SessionControlClient::new()
+        SessionControlClient::new(WorkerHostTransport)
     }
 
     pub const fn session_history() -> SessionHistoryClient {
-        SessionHistoryClient::new()
+        SessionHistoryClient::new(WorkerHostTransport)
+    }
+
+    pub const fn session_state() -> SessionStateClient {
+        SessionStateClient::new(WorkerHostTransport)
     }
 
     pub const fn session_inspect() -> SessionInspectClient {
-        SessionInspectClient::new()
+        SessionInspectClient::new(WorkerHostTransport)
     }
 
     pub const fn workspace() -> WorkspaceClient {
-        WorkspaceClient::new()
+        WorkspaceClient::new(WorkerHostTransport)
     }
 
     pub const fn process() -> ProcessClient {
-        ProcessClient::new()
+        ProcessClient::new(WorkerHostTransport)
     }
 
     pub const fn network() -> NetworkClient {
-        NetworkClient::new()
+        NetworkClient::new(WorkerHostTransport)
     }
 
     pub const fn extension_http() -> ExtensionHttpClient {
-        ExtensionHttpClient::new()
+        ExtensionHttpClient::new(WorkerHostTransport)
     }
-}
-
-macro_rules! domain_client {
-    ($name:ident) => {
-        #[derive(Debug, Clone, Copy)]
-        pub struct $name {
-            _private: (),
-        }
-
-        impl $name {
-            const fn new() -> Self {
-                Self { _private: () }
-            }
-        }
-    };
-}
-
-domain_client!(ModelClient);
-domain_client!(SessionControlClient);
-domain_client!(SessionHistoryClient);
-domain_client!(SessionInspectClient);
-domain_client!(WorkspaceClient);
-domain_client!(ProcessClient);
-domain_client!(NetworkClient);
-domain_client!(ExtensionHttpClient);
-
-impl ModelClient {
-    pub async fn main_chat(
-        &self,
-        messages: Vec<LlmMessage>,
-    ) -> Result<HostLlmChatOutput, ErrorPayload> {
-        invoke(
-            HostOperation::LlmMainChat,
-            &HostLlmChatRequest::new(messages),
-        )
-        .await
-    }
-
-    pub async fn small_chat(
-        &self,
-        messages: Vec<LlmMessage>,
-    ) -> Result<HostLlmChatOutput, ErrorPayload> {
-        invoke(
-            HostOperation::LlmSmallChat,
-            &HostLlmChatRequest::new(messages),
-        )
-        .await
-    }
-
-    /// Runs the main model stream and returns all ordered text deltas after completion.
-    pub async fn main_chat_stream(
-        &self,
-        messages: Vec<LlmMessage>,
-    ) -> Result<HostLlmCollectedStreamOutput, ErrorPayload> {
-        invoke_collected_stream(
-            HostOperation::LlmMainChat,
-            &HostLlmChatRequest::new(messages),
-        )
-        .await
-    }
-
-    /// Runs the small model stream and returns all ordered text deltas after completion.
-    pub async fn small_chat_stream(
-        &self,
-        messages: Vec<LlmMessage>,
-    ) -> Result<HostLlmCollectedStreamOutput, ErrorPayload> {
-        invoke_collected_stream(
-            HostOperation::LlmSmallChat,
-            &HostLlmChatRequest::new(messages),
-        )
-        .await
-    }
-}
-
-impl SessionControlClient {
-    pub async fn create_root(&self) -> Result<HostCreateSessionOutput, ErrorPayload> {
-        invoke(HostOperation::SessionRootCreate, &json!({})).await
-    }
-
-    pub async fn submit_root_turn(
-        &self,
-        request: HostRootSubmitTurnRequest,
-    ) -> Result<HostSubmitTurnOutput, ErrorPayload> {
-        invoke(HostOperation::SessionRootSubmitTurn, &request).await
-    }
-
-    pub async fn root_state(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionStateOutput, ErrorPayload> {
-        invoke(HostOperation::SessionRootState, &request).await
-    }
-
-    pub async fn inject_or_start(
-        &self,
-        request: HostSessionInputRequest,
-    ) -> Result<HostSessionDeliveryOutput, ErrorPayload> {
-        invoke(HostOperation::SessionControlInjectOrStart, &request).await
-    }
-
-    pub async fn interrupt_and_submit(
-        &self,
-        request: HostSessionInputRequest,
-    ) -> Result<HostSessionDeliveryOutput, ErrorPayload> {
-        invoke(HostOperation::SessionControlInterruptAndSubmit, &request).await
-    }
-
-    pub async fn cancel_turn(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionCancelOutput, ErrorPayload> {
-        invoke(HostOperation::SessionControlCancelTurn, &request).await
-    }
-
-    pub async fn execution_view(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionExecutionView, ErrorPayload> {
-        invoke(HostOperation::SessionControlExecutionView, &request).await
-    }
-
-    pub async fn state(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionStateOutput, ErrorPayload> {
-        invoke(HostOperation::SessionControlState, &request).await
-    }
-
-    pub async fn reactivate(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionReactivateOutput, ErrorPayload> {
-        invoke(HostOperation::SessionControlReactivate, &request).await
-    }
-
-    pub async fn create_child(
-        &self,
-        request: HostCreateSessionRequest,
-    ) -> Result<HostCreateSessionOutput, ErrorPayload> {
-        invoke(HostOperation::SessionControlCreate, &request).await
-    }
-
-    pub async fn submit_turn(
-        &self,
-        request: HostSubmitTurnRequest,
-    ) -> Result<HostSubmitTurnOutput, ErrorPayload> {
-        invoke(HostOperation::SessionControlSubmitTurn, &request).await
-    }
-
-    pub async fn configure_tools(
-        &self,
-        request: HostConfigureSessionToolsRequest,
-    ) -> Result<HostConfigureSessionToolsOutput, ErrorPayload> {
-        invoke(HostOperation::SessionControlConfigureTools, &request).await
-    }
-
-    pub async fn recycle(&self, request: HostRecycleSessionRequest) -> Result<(), ErrorPayload> {
-        invoke_unit(HostOperation::SessionControlDispose, &request).await
-    }
-}
-
-impl SessionHistoryClient {
-    pub async fn list_summaries(&self) -> Result<HostSessionSummariesOutput, ErrorPayload> {
-        invoke(HostOperation::SessionHistoryList, &json!({})).await
-    }
-
-    pub async fn transcript(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionTranscript, ErrorPayload> {
-        invoke(HostOperation::SessionHistoryTranscript, &request).await
-    }
-
-    pub async fn provider_messages(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionProviderMessagesOutput, ErrorPayload> {
-        invoke(HostOperation::SessionHistoryProviderMessages, &request).await
-    }
-
-    pub async fn token_usage(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionTokenUsageOutput, ErrorPayload> {
-        invoke(HostOperation::SessionHistoryTokenUsage, &request).await
-    }
-
-    pub async fn events_page(
-        &self,
-        request: HostSessionEventsPageRequest,
-    ) -> Result<HostSessionEventsPageOutput, ErrorPayload> {
-        invoke(HostOperation::SessionReadEvents, &request).await
-    }
-
-    pub async fn snapshot(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<SessionHistorySnapshotOutput, ErrorPayload> {
-        invoke(HostOperation::SessionHistorySnapshot, &request).await
-    }
-}
-
-impl SessionInspectClient {
-    pub async fn list(&self) -> Result<SessionInspectListOutput, ErrorPayload> {
-        invoke(HostOperation::SessionInspectList, &json!({})).await
-    }
-
-    pub async fn snapshot(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionInspectSnapshotOutput, ErrorPayload> {
-        self.inspect(HostOperation::SessionInspectSnapshot, session_id)
-            .await
-    }
-
-    pub async fn read_model(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionInspectReadModelOutput, ErrorPayload> {
-        self.inspect(HostOperation::SessionInspectReadModel, session_id)
-            .await
-    }
-
-    pub async fn provider_messages(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionInspectProviderMessagesOutput, ErrorPayload> {
-        self.inspect(HostOperation::SessionInspectProviderMessages, session_id)
-            .await
-    }
-
-    async fn inspect<T>(
-        &self,
-        operation: HostOperation,
-        session_id: &str,
-    ) -> Result<T, ErrorPayload>
-    where
-        T: DeserializeOwned,
-    {
-        invoke(operation, &json!({ "session_id": session_id })).await
-    }
-}
-
-impl WorkspaceClient {
-    pub async fn read(
-        &self,
-        request: HostWorkspaceReadRequest,
-    ) -> Result<HostWorkspaceReadOutput, ErrorPayload> {
-        invoke(HostOperation::WorkspaceRead, &request).await
-    }
-
-    pub async fn write(
-        &self,
-        request: HostWorkspaceWriteRequest,
-    ) -> Result<HostWorkspaceWriteOutput, ErrorPayload> {
-        invoke(HostOperation::WorkspaceWrite, &request).await
-    }
-
-    pub async fn edit(
-        &self,
-        request: HostWorkspaceEditRequest,
-    ) -> Result<HostWorkspaceEditOutput, ErrorPayload> {
-        invoke(HostOperation::WorkspaceEdit, &request).await
-    }
-
-    pub async fn list(
-        &self,
-        request: HostWorkspaceListRequest,
-    ) -> Result<HostWorkspaceListOutput, ErrorPayload> {
-        invoke(HostOperation::WorkspaceList, &request).await
-    }
-
-    pub async fn grep(
-        &self,
-        request: HostWorkspaceGrepRequest,
-    ) -> Result<HostWorkspaceGrepOutput, ErrorPayload> {
-        invoke(HostOperation::WorkspaceGrep, &request).await
-    }
-
-    pub async fn glob(
-        &self,
-        request: HostWorkspaceGlobRequest,
-    ) -> Result<HostWorkspaceGlobOutput, ErrorPayload> {
-        invoke(HostOperation::WorkspaceGlob, &request).await
-    }
-}
-
-impl ProcessClient {
-    pub async fn spawn(
-        &self,
-        request: HostProcessRequest,
-    ) -> Result<HostProcessOutput, ErrorPayload> {
-        invoke(HostOperation::ProcessSpawn, &request).await
-    }
-}
-
-impl NetworkClient {
-    pub async fn send(
-        &self,
-        request: HostNetworkRequest,
-    ) -> Result<HostNetworkResponse, ErrorPayload> {
-        invoke(HostOperation::NetworkClient, &request).await
-    }
-}
-
-impl ExtensionHttpClient {
-    pub async fn dispatch_public(
-        &self,
-        request: ExtensionHttpRequest,
-    ) -> Result<ExtensionHttpResponse, ErrorPayload> {
-        invoke(HostOperation::ExtensionHttpPublic, &request).await
-    }
-}
-
-async fn invoke<I, O>(operation: HostOperation, input: &I) -> Result<O, ErrorPayload>
-where
-    I: Serialize + ?Sized,
-    O: DeserializeOwned,
-{
-    let output = call_host(operation.wire_name(), serialize_request(input)?).await?;
-    deserialize_response(output, operation.wire_name())
-}
-
-async fn invoke_collected_stream<I, O>(
-    operation: HostOperation,
-    input: &I,
-) -> Result<O, ErrorPayload>
-where
-    I: Serialize + ?Sized,
-    O: DeserializeOwned,
-{
-    let output = call_host_stream(operation.wire_name(), serialize_request(input)?).await?;
-    deserialize_response(output, operation.wire_name())
-}
-
-async fn invoke_unit<I>(operation: HostOperation, input: &I) -> Result<(), ErrorPayload>
-where
-    I: Serialize + ?Sized,
-{
-    invoke::<I, HostAcknowledgement>(operation, input)
-        .await
-        .map(|_| ())
 }
 
 async fn call_host(capability: &str, input: Value) -> Result<Value, ErrorPayload> {
@@ -516,38 +211,20 @@ fn host_api() -> Result<Arc<dyn HostApi>, ErrorPayload> {
     HOST_API
         .get()
         .cloned()
-        .ok_or_else(|| ErrorPayload::new("host_not_ready", "host peer not ready"))
+        .ok_or_else(|| ErrorPayload::new(HOST_ERROR_CODE_HOST_NOT_READY, "host peer not ready"))
 }
 
 /// Invokes a raw host capability for transport or request-context integration tests.
 pub async fn invoke_host(capability: &str, input: Value) -> Result<Value, ErrorPayload> {
     call_host(capability, input).await
 }
-
-fn serialize_request<T: Serialize + ?Sized>(request: &T) -> Result<Value, ErrorPayload> {
-    serde_json::to_value(request).map_err(|error| {
-        ErrorPayload::new(
-            "serialization_failed",
-            format!("failed to serialize host request: {error}"),
-        )
-    })
-}
-
-fn deserialize_response<T: DeserializeOwned>(
-    output: Value,
-    capability: &str,
-) -> Result<T, ErrorPayload> {
-    serde_json::from_value(output).map_err(|error| {
-        ErrorPayload::new(
-            "invalid_host_response",
-            format!("invalid {capability} response: {error}"),
-        )
-    })
-}
-
 #[cfg(test)]
 mod host_tests {
-    use std::sync::Arc;
+    use std::{
+        collections::HashSet,
+        future::Future,
+        sync::{Arc, Mutex},
+    };
 
     use async_trait::async_trait;
     use serde_json::{Value, json};
@@ -557,6 +234,18 @@ mod host_tests {
 
     struct MockHost {
         marker: &'static str,
+    }
+
+    #[derive(Default)]
+    struct RecordingHost {
+        operations: Mutex<Vec<HostOperation>>,
+    }
+
+    async fn expect_backend_error<T>(future: impl Future<Output = Result<T, ErrorPayload>>) {
+        let Err(error) = future.await else {
+            panic!("mock host unexpectedly succeeded");
+        };
+        assert_eq!(error.code, "backend_unavailable");
     }
 
     #[test]
@@ -610,7 +299,7 @@ mod host_tests {
         let mut process = HostProcessRequest::new("rustc");
         process.args.push("--version".into());
         process.timeout_ms = Some(1_000);
-        let value = serialize_request(&process).expect("serialize process request");
+        let value = serde_json::to_value(&process).expect("serialize process request");
         assert_eq!(value["command"], "rustc");
         assert_eq!(value["args"], json!(["--version"]));
         assert_eq!(value["timeout_ms"], 1_000);
@@ -618,20 +307,17 @@ mod host_tests {
         let mut network = HostNetworkRequest::get("https://example.com");
         network.body = vec![0, 255];
         network.redirect_policy = HostNetworkRedirectPolicy::Manual;
-        let value = serialize_request(&network).expect("serialize binary network request");
+        let value = serde_json::to_value(&network).expect("serialize binary network request");
         assert_eq!(value["body"], "AP8=");
         assert_eq!(value["redirect_policy"], "manual");
         assert_eq!(value["max_bytes"], 10 * 1024 * 1024);
 
-        let response = deserialize_response::<HostNetworkResponse>(
-            json!({
-                "final_url": "https://example.com/final",
-                "status": 200,
-                "headers": {},
-                "body": "b2s="
-            }),
-            "network.client",
-        )
+        let response: HostNetworkResponse = serde_json::from_value(json!({
+            "final_url": "https://example.com/final",
+            "status": 200,
+            "headers": {},
+            "body": "b2s="
+        }))
         .expect("deserialize network response");
         assert_eq!(response.final_url, "https://example.com/final");
         assert_eq!(response.status, 200);
@@ -643,15 +329,14 @@ mod host_tests {
         let mut create = HostCreateSessionRequest::new("reviewer");
         create.tool_selection = Some(SessionToolSelectionDto::only(["read", "grep"]));
         create.ephemeral = true;
-        let value = serialize_request(&create).expect("serialize create session request");
+        let value = serde_json::to_value(&create).expect("serialize create session request");
         assert_eq!(value["name"], "reviewer");
         assert_eq!(value["tool_selection"]["mode"], "only");
         assert_eq!(value["tool_selection"]["names"], json!(["read", "grep"]));
         assert_eq!(value["ephemeral"], true);
-        assert!(value.get("working_dir").is_none());
 
         let submit = HostSubmitTurnRequest::background("child-1", "review this");
-        let value = serialize_request(&submit).expect("serialize submit turn request");
+        let value = serde_json::to_value(&submit).expect("serialize submit turn request");
         assert_eq!(value["target_session_id"], "child-1");
         assert_eq!(value["wait_for_result"], false);
         assert_eq!(value["recycle_on_complete"], true);
@@ -671,14 +356,11 @@ mod host_tests {
             .is_err()
         );
 
-        let output = deserialize_response::<HostSubmitTurnOutput>(
-            json!({
-                "status": "backgrounded",
-                "task_id": "turn-1",
-                "session_id": "child-1"
-            }),
-            "session.control.submit_turn",
-        )
+        let output: HostSubmitTurnOutput = serde_json::from_value(json!({
+            "status": "backgrounded",
+            "task_id": "turn-1",
+            "session_id": "child-1"
+        }))
         .expect("deserialize submit turn response");
         assert_eq!(
             output,
@@ -725,10 +407,30 @@ mod host_tests {
                     "task_id": "turn-1",
                     "session_id": "child-1"
                 })),
-                "astrcode.session.control.dispose" if self.marker == "invalid_ack" => {
+                "astrcode.session.state.read" => Ok(json!({ "content": "active" })),
+                capability
+                    if matches!(
+                        capability,
+                        "astrcode.event.emit"
+                            | "astrcode.session.control.dispose"
+                            | "astrcode.session.state.write"
+                    ) && self.marker == "invalid_ack" =>
+                {
                     Ok(json!({ "ok": true, "unexpected": true }))
                 },
-                "astrcode.session.control.dispose" => Ok(json!({ "ok": true })),
+                capability
+                    if matches!(
+                        capability,
+                        "astrcode.event.emit"
+                            | "astrcode.session.control.dispose"
+                            | "astrcode.session.state.write"
+                    ) && self.marker == "false_ack" =>
+                {
+                    Ok(json!({ "ok": false }))
+                },
+                "astrcode.event.emit"
+                | "astrcode.session.control.dispose"
+                | "astrcode.session.state.write" => Ok(json!({ "ok": true })),
                 _ => Ok(json!({
                     "capability": capability,
                     "host": self.marker,
@@ -747,6 +449,217 @@ mod host_tests {
             }
             self.call(capability, input).await
         }
+    }
+
+    #[async_trait]
+    impl HostApi for RecordingHost {
+        async fn call(&self, capability: &str, _input: Value) -> Result<Value, ErrorPayload> {
+            self.operations.lock().unwrap().push(
+                HostOperation::from_wire_name(capability)
+                    .unwrap_or_else(|| panic!("unknown host operation {capability}")),
+            );
+            Err(ErrorPayload::new(
+                "backend_unavailable",
+                "test backend unavailable",
+            ))
+        }
+
+        async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
+            self.call(capability, input).await
+        }
+    }
+
+    #[tokio::test]
+    async fn worker_clients_route_every_typed_host_operation() {
+        let expected_operations = [
+            HostOperation::EventEmit,
+            HostOperation::LlmMainChat,
+            HostOperation::LlmSmallChat,
+            HostOperation::LlmMainChat,
+            HostOperation::LlmSmallChat,
+            HostOperation::ProcessSpawn,
+            HostOperation::NetworkClient,
+            HostOperation::ExtensionHttpPublic,
+            HostOperation::SessionRootCreate,
+            HostOperation::SessionRootSubmitTurn,
+            HostOperation::SessionRootState,
+            HostOperation::SessionControlInjectOrStart,
+            HostOperation::SessionControlInterruptAndSubmit,
+            HostOperation::SessionControlCancelTurn,
+            HostOperation::SessionControlExecutionView,
+            HostOperation::SessionControlState,
+            HostOperation::SessionControlReactivate,
+            HostOperation::SessionControlCreate,
+            HostOperation::SessionControlSubmitTurn,
+            HostOperation::SessionControlConfigureTools,
+            HostOperation::SessionControlDispose,
+            HostOperation::SessionHistoryList,
+            HostOperation::SessionHistoryTranscript,
+            HostOperation::SessionHistoryProviderMessages,
+            HostOperation::SessionHistoryTokenUsage,
+            HostOperation::SessionHistorySnapshot,
+            HostOperation::SessionReadEvents,
+            HostOperation::SessionStateRead,
+            HostOperation::SessionStateWrite,
+            HostOperation::WorkspaceRead,
+            HostOperation::WorkspaceWrite,
+            HostOperation::WorkspaceEdit,
+            HostOperation::WorkspaceList,
+            HostOperation::WorkspaceGrep,
+            HostOperation::WorkspaceGlob,
+            HostOperation::SessionInspectList,
+            HostOperation::SessionInspectSnapshot,
+            HostOperation::SessionInspectReadModel,
+            HostOperation::SessionInspectProviderMessages,
+        ];
+        let covered = expected_operations.iter().copied().collect::<HashSet<_>>();
+        let expected = crate::host::HOST_OPERATION_SPECS
+            .iter()
+            .map(|spec| spec.operation)
+            .collect::<HashSet<_>>();
+        assert_eq!(covered, expected, "worker client operation coverage");
+
+        let host = Arc::new(RecordingHost::default());
+        with_host_api(host.clone(), async {
+            let target = || HostSessionTargetRequest {
+                target_session_id: "child-1".into(),
+            };
+            let input = || HostSessionInputRequest {
+                target_session_id: "child-1".into(),
+                content: "continue".into(),
+            };
+            let messages = || vec![LlmMessage::user("hello")];
+
+            expect_backend_error(HostClient::events().emit(HostEventEmitRequest {
+                event_type: "review.completed".into(),
+                schema_version: 1,
+                payload: json!({ "status": "ok" }),
+            }))
+            .await;
+            expect_backend_error(HostClient::models().main_chat(messages())).await;
+            expect_backend_error(HostClient::models().small_chat(messages())).await;
+            expect_backend_error(HostClient::models().main_chat_stream(messages())).await;
+            expect_backend_error(HostClient::models().small_chat_stream(messages())).await;
+            expect_backend_error(HostClient::process().spawn(HostProcessRequest::new("true")))
+                .await;
+            expect_backend_error(
+                HostClient::network().send(HostNetworkRequest::get("https://example.com")),
+            )
+            .await;
+            expect_backend_error(HostClient::extension_http().dispatch_public(
+                ExtensionHttpDispatchRequest::new(
+                    crate::extension::ExtensionHttpMethod::Get,
+                    "/health",
+                ),
+            ))
+            .await;
+            expect_backend_error(HostClient::session_control().create_root()).await;
+            expect_backend_error(
+                HostClient::session_control()
+                    .submit_root_turn(HostRootSubmitTurnRequest::new("root-1", "continue")),
+            )
+            .await;
+            expect_backend_error(HostClient::session_control().root_state(
+                HostSessionTargetRequest {
+                    target_session_id: "root-1".into(),
+                },
+            ))
+            .await;
+            expect_backend_error(HostClient::session_control().inject_or_start(input())).await;
+            expect_backend_error(HostClient::session_control().interrupt_and_submit(input())).await;
+            expect_backend_error(HostClient::session_control().cancel_turn(target())).await;
+            expect_backend_error(HostClient::session_control().execution_view(target())).await;
+            expect_backend_error(HostClient::session_control().state(target())).await;
+            expect_backend_error(HostClient::session_control().reactivate(target())).await;
+            expect_backend_error(
+                HostClient::session_control().create_child(HostCreateSessionRequest::new("child")),
+            )
+            .await;
+            expect_backend_error(
+                HostClient::session_control()
+                    .submit_turn(HostSubmitTurnRequest::background("child-1", "review")),
+            )
+            .await;
+            expect_backend_error(HostClient::session_control().configure_tools(
+                HostConfigureSessionToolsRequest {
+                    session_id: "child-1".into(),
+                    selection: SessionToolSelectionDto::no_tools(),
+                },
+            ))
+            .await;
+            expect_backend_error(
+                HostClient::session_control().recycle(HostRecycleSessionRequest::new("child-1")),
+            )
+            .await;
+            expect_backend_error(HostClient::session_history().list_summaries()).await;
+            expect_backend_error(HostClient::session_history().transcript(target())).await;
+            expect_backend_error(HostClient::session_history().provider_messages(target())).await;
+            expect_backend_error(HostClient::session_history().token_usage(target())).await;
+            expect_backend_error(HostClient::session_history().snapshot(target())).await;
+            expect_backend_error(
+                HostClient::session_history()
+                    .events_page(HostSessionEventsPageRequest::new("child-1")),
+            )
+            .await;
+            expect_backend_error(
+                HostClient::session_state()
+                    .read(HostSessionStateReadRequest { key: "goal".into() }),
+            )
+            .await;
+            expect_backend_error(
+                HostClient::session_state().write(HostSessionStateWriteRequest {
+                    key: "goal".into(),
+                    content: "active".into(),
+                }),
+            )
+            .await;
+            expect_backend_error(HostClient::workspace().read(HostWorkspaceReadRequest {
+                path: "notes.txt".into(),
+                max_bytes: None,
+            }))
+            .await;
+            expect_backend_error(HostClient::workspace().write(HostWorkspaceWriteRequest {
+                path: "notes.txt".into(),
+                content: "hello".into(),
+            }))
+            .await;
+            expect_backend_error(HostClient::workspace().edit(HostWorkspaceEditRequest {
+                path: "notes.txt".into(),
+                old_text: "hello".into(),
+                new_text: "hi".into(),
+                replace_all: false,
+            }))
+            .await;
+            expect_backend_error(HostClient::workspace().list(HostWorkspaceListRequest {
+                path: ".".into(),
+                depth: 1,
+                limit: None,
+            }))
+            .await;
+            expect_backend_error(HostClient::workspace().grep(HostWorkspaceGrepRequest {
+                pattern: "hello".into(),
+                path: None,
+                max_matches: None,
+                max_bytes: None,
+                max_line_chars: None,
+            }))
+            .await;
+            expect_backend_error(HostClient::workspace().glob(HostWorkspaceGlobRequest {
+                pattern: "**/*.rs".into(),
+                root: None,
+                max_matches: None,
+                include_ignored: false,
+            }))
+            .await;
+            expect_backend_error(HostClient::session_inspect().list()).await;
+            expect_backend_error(HostClient::session_inspect().snapshot("session-1")).await;
+            expect_backend_error(HostClient::session_inspect().read_model("session-1")).await;
+            expect_backend_error(HostClient::session_inspect().provider_messages("session-1"))
+                .await;
+        })
+        .await;
+
+        assert_eq!(*host.operations.lock().unwrap(), expected_operations);
     }
 
     #[tokio::test]
@@ -783,6 +696,15 @@ mod host_tests {
                 .unwrap();
             assert_eq!(network.body, vec![0, 255]);
 
+            HostClient::events()
+                .emit(HostEventEmitRequest {
+                    event_type: "review.completed".into(),
+                    schema_version: 1,
+                    payload: json!({ "status": "ok" }),
+                })
+                .await
+                .unwrap();
+
             let history = HostClient::session_history()
                 .list_summaries()
                 .await
@@ -814,21 +736,31 @@ mod host_tests {
                 .recycle(HostRecycleSessionRequest::new("child-1"))
                 .await
                 .unwrap();
+
+            HostClient::session_state()
+                .write(HostSessionStateWriteRequest {
+                    key: "goal".into(),
+                    content: "active".into(),
+                })
+                .await
+                .unwrap();
+            let state = HostClient::session_state()
+                .read(HostSessionStateReadRequest { key: "goal".into() })
+                .await
+                .unwrap();
+            assert_eq!(state.content.as_deref(), Some("active"));
         })
         .await;
 
-        let invalid_ack = with_host_api(
-            Arc::new(MockHost {
-                marker: "invalid_ack",
-            }),
-            async {
+        for marker in ["false_ack", "invalid_ack"] {
+            let error = with_host_api(Arc::new(MockHost { marker }), async {
                 HostClient::session_control()
                     .recycle(HostRecycleSessionRequest::new("child-1"))
                     .await
-            },
-        )
-        .await
-        .unwrap_err();
-        assert_eq!(invalid_ack.code, "invalid_host_response");
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, "invalid_host_response", "{marker}");
+        }
     }
 }

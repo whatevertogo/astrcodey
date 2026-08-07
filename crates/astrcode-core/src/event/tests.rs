@@ -86,3 +86,22 @@ fn session_started_rejects_incomplete_initial_state() {
 
     assert!(serde_json::from_value::<DurableEventPayload>(missing_prompt).is_err());
 }
+
+#[test]
+fn agent_session_spawned_accepts_missing_tool_call_id() {
+    let payload = serde_json::json!({
+        "type": "agent_session_spawned",
+        "child_session_id": "child-1",
+        "agent_name": "worker",
+        "task": "run",
+    });
+
+    let decoded = serde_json::from_value::<DurableEventPayload>(payload).unwrap();
+    assert!(matches!(
+        decoded,
+        DurableEventPayload::AgentSessionSpawned {
+            tool_call_id: None,
+            ..
+        }
+    ));
+}

@@ -16,6 +16,10 @@ use crate::{
         ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, HookMode,
         extension_http_route_patterns_conflict, fixed_hook_mode, hook_mode_is_supported,
     },
+    host::{
+        HOST_ERROR_CODE_CANCELLED, HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_SERIALIZATION_FAILED,
+    },
     runtime::CancelToken,
     s5r::{
         CAP_HANDLER_INVOKE, ErrorPayload, HandlerResult, InvokeMsg, capability_to_wire,
@@ -97,6 +101,16 @@ impl WorkerCallContext {
         self.session_id.as_deref()
     }
 
+    /// Returns the host-attributed session or a stable context error for session-only handlers.
+    pub fn require_session_id(&self) -> Result<&str, ErrorPayload> {
+        self.session_id().ok_or_else(|| {
+            ErrorPayload::new(
+                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                "worker call requires a session-scoped context",
+            )
+        })
+    }
+
     /// 当前调用所属 turn；仅在线缆事件携带该事实时存在。
     pub fn turn_id(&self) -> Option<&str> {
         self.turn_id.as_deref()
@@ -110,6 +124,16 @@ impl WorkerCallContext {
     /// 当前调用的工作目录；仅在线缆事件携带该事实时存在。
     pub fn working_dir(&self) -> Option<&Path> {
         self.working_dir.as_deref()
+    }
+
+    /// Returns the validated workspace or a stable context error for workspace-only handlers.
+    pub fn require_working_dir(&self) -> Result<&Path, ErrorPayload> {
+        self.working_dir().ok_or_else(|| {
+            ErrorPayload::new(
+                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                "worker call requires a workspace-scoped context",
+            )
+        })
     }
 
     /// 当前 S5R 调用的取消令牌。
@@ -163,15 +187,17 @@ impl HandlerRegistry {
         }
     }
 
-    pub(crate) fn declare_extension_event(&mut self, event: ExtensionEventDecl) {
+    pub(crate) fn declare_extension_event(&mut self, mut event: ExtensionEventDecl) {
+        event.event_type = event.event_type.trim().to_owned();
         self.catalog.extension_events.push(event);
     }
 
     pub(crate) fn register_tool(
         &mut self,
-        def: crate::tool::ToolDefinition,
+        mut def: crate::tool::ToolDefinition,
         handler: ToolHandlerFn,
     ) -> Result<(), ErrorPayload> {
+        def.name = def.name.trim().to_owned();
         let name = def.name.clone();
         if self.tools.contains_key(&name) {
             return Err(ErrorPayload::new(
@@ -312,7 +338,7 @@ impl HandlerRegistry {
         description: impl Into<String>,
         handler: CommandHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        let name = name.into();
+        let name = name.into().trim().to_owned();
         if self.commands.contains_key(&name) {
             return Err(ErrorPayload::new(
                 "duplicate_registration",
@@ -367,10 +393,10 @@ impl HandlerRegistry {
         }
         token
             .raise_if_cancelled()
-            .map_err(|e| ErrorPayload::new("cancelled", e))?;
-        let handler_id = invoke.input["handler_id"]
-            .as_str()
-            .ok_or_else(|| ErrorPayload::new("invalid_input", "handler_id required"))?;
+            .map_err(|e| ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, e))?;
+        let handler_id = invoke.input["handler_id"].as_str().ok_or_else(|| {
+            ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, "handler_id required")
+        })?;
         let event = invoke.input.get("event").cloned().unwrap_or(Value::Null);
         let ctx = WorkerCallContext::from_event(self.extension_id.clone(), token, &event);
         self.dispatch_handler(handler_id, event, ctx).await
@@ -415,14 +441,14 @@ impl HandlerRegistry {
                 })?;
                 let request = serde_json::from_value(event).map_err(|error| {
                     ErrorPayload::new(
-                        "invalid_input",
+                        HOST_ERROR_CODE_INVALID_INPUT,
                         format!("invalid HTTP request payload: {error}"),
                     )
                 })?;
                 let response = handler(request, ctx).await?;
                 let data = serde_json::to_value(response).map_err(|error| {
                     ErrorPayload::new(
-                        "serialization_failed",
+                        HOST_ERROR_CODE_SERIALIZATION_FAILED,
                         format!("serialize HTTP response: {error}"),
                     )
                 })?;
@@ -492,7 +518,6 @@ mod tests {
                         "event": {}
                     }),
                     stream: false,
-                    caller_extension_id: None,
                     parent_invoke_id: None,
                 },
                 CancelToken::default(),
@@ -530,5 +555,83 @@ mod tests {
 
         assert_eq!(registry.catalog.http_routes.len(), 2);
         assert_eq!(error.code, "duplicate_registration");
+    }
+
+    #[test]
+    fn worker_registration_names_use_the_same_canonical_form_as_the_host() {
+        let mut registry = HandlerRegistry::new("test-extension");
+        let tool_handler =
+            crate::worker::tool_handler(|_| async { Ok(HandlerResult::effect("ok", json!({}))) });
+        registry
+            .register_tool(
+                crate::builder::worker_tool("  review  ").build().into(),
+                Arc::clone(&tool_handler),
+            )
+            .unwrap();
+        registry
+            .register_command(
+                "  inspect  ",
+                "Inspect state",
+                crate::worker::command_handler(|_| async {
+                    Ok(HandlerResult::effect("ok", json!({})))
+                }),
+            )
+            .unwrap();
+        registry.declare_extension_event(ExtensionEventDecl {
+            event_type: "  review.completed  ".into(),
+            schema_version: 1,
+            durable: true,
+            max_payload_bytes: 1024,
+        });
+
+        assert_eq!(registry.catalog.tools[0].name, "review");
+        assert_eq!(registry.catalog.commands[0].name, "inspect");
+        assert_eq!(
+            registry.catalog.extension_events[0].event_type,
+            "review.completed"
+        );
+        assert_eq!(
+            registry
+                .register_tool(
+                    crate::builder::worker_tool("review").build().into(),
+                    tool_handler,
+                )
+                .expect_err("canonical duplicate")
+                .code,
+            "duplicate_registration"
+        );
+    }
+
+    #[test]
+    fn worker_call_context_requires_scoped_facts_with_stable_errors() {
+        let scoped = WorkerCallContext::from_event(
+            "test-extension".into(),
+            CancelToken::default(),
+            &json!({
+                "input": {
+                    "session_id": "session-1",
+                    "working_dir": "/workspace"
+                }
+            }),
+        );
+        assert_eq!(scoped.require_session_id().unwrap(), "session-1");
+        assert_eq!(
+            scoped.require_working_dir().unwrap(),
+            Path::new("/workspace")
+        );
+
+        let unscoped = WorkerCallContext::from_event(
+            "test-extension".into(),
+            CancelToken::default(),
+            &Value::Null,
+        );
+        assert_eq!(
+            unscoped.require_session_id().unwrap_err().code,
+            "context_unavailable"
+        );
+        assert_eq!(
+            unscoped.require_working_dir().unwrap_err().code,
+            "context_unavailable"
+        );
     }
 }

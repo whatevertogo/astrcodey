@@ -2,6 +2,19 @@ use serde_json::Value;
 
 use crate::s5r::ErrorPayload;
 
+pub const HOST_ERROR_CODE_PERMISSION_DENIED: &str = "permission_denied";
+pub const HOST_ERROR_CODE_BACKEND_UNAVAILABLE: &str = "backend_unavailable";
+pub const HOST_ERROR_CODE_CONTEXT_UNAVAILABLE: &str = "context_unavailable";
+pub const HOST_ERROR_CODE_INVALID_INPUT: &str = "invalid_input";
+pub const HOST_ERROR_CODE_CANCELLED: &str = "cancelled";
+pub const HOST_ERROR_CODE_TIMEOUT: &str = "timeout";
+pub const HOST_ERROR_CODE_HOST_NOT_READY: &str = "host_not_ready";
+pub const HOST_ERROR_CODE_PEER_BUSY: &str = "peer_busy";
+pub const HOST_ERROR_CODE_PEER_CLOSED: &str = "peer_closed";
+pub const HOST_ERROR_CODE_TRANSPORT: &str = "transport_error";
+pub const HOST_ERROR_CODE_SERIALIZATION_FAILED: &str = "serialization_failed";
+pub const HOST_ERROR_CODE_INVALID_RESPONSE: &str = "invalid_host_response";
+
 /// Stable high-level classification for common host failures.
 ///
 /// The original wire `code` remains available on [`HostError`], so unknown and future
@@ -57,15 +70,16 @@ impl HostError {
 
     pub fn class(&self) -> HostErrorClass {
         match self.code.as_str() {
-            "permission_denied" => HostErrorClass::PermissionDenied,
-            "backend_unavailable" => HostErrorClass::BackendUnavailable,
-            "context_unavailable" => HostErrorClass::ContextUnavailable,
-            "invalid_input" => HostErrorClass::InvalidInput,
-            "cancelled" => HostErrorClass::Cancelled,
-            "timeout" => HostErrorClass::Timeout,
-            "host_not_ready" | "peer_busy" | "peer_closed" | "transport_error" => {
-                HostErrorClass::Transport
-            },
+            HOST_ERROR_CODE_PERMISSION_DENIED => HostErrorClass::PermissionDenied,
+            HOST_ERROR_CODE_BACKEND_UNAVAILABLE => HostErrorClass::BackendUnavailable,
+            HOST_ERROR_CODE_CONTEXT_UNAVAILABLE => HostErrorClass::ContextUnavailable,
+            HOST_ERROR_CODE_INVALID_INPUT => HostErrorClass::InvalidInput,
+            HOST_ERROR_CODE_CANCELLED => HostErrorClass::Cancelled,
+            HOST_ERROR_CODE_TIMEOUT => HostErrorClass::Timeout,
+            HOST_ERROR_CODE_HOST_NOT_READY
+            | HOST_ERROR_CODE_PEER_BUSY
+            | HOST_ERROR_CODE_PEER_CLOSED
+            | HOST_ERROR_CODE_TRANSPORT => HostErrorClass::Transport,
             _ => HostErrorClass::Other,
         }
     }
@@ -136,13 +150,25 @@ mod tests {
     #[test]
     fn common_boundary_failures_have_stable_classifications() {
         let cases = [
-            ("permission_denied", HostErrorClass::PermissionDenied),
-            ("backend_unavailable", HostErrorClass::BackendUnavailable),
-            ("context_unavailable", HostErrorClass::ContextUnavailable),
-            ("invalid_input", HostErrorClass::InvalidInput),
-            ("cancelled", HostErrorClass::Cancelled),
-            ("timeout", HostErrorClass::Timeout),
-            ("transport_error", HostErrorClass::Transport),
+            (
+                HOST_ERROR_CODE_PERMISSION_DENIED,
+                HostErrorClass::PermissionDenied,
+            ),
+            (
+                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                HostErrorClass::BackendUnavailable,
+            ),
+            (
+                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                HostErrorClass::ContextUnavailable,
+            ),
+            (HOST_ERROR_CODE_INVALID_INPUT, HostErrorClass::InvalidInput),
+            (HOST_ERROR_CODE_CANCELLED, HostErrorClass::Cancelled),
+            (HOST_ERROR_CODE_TIMEOUT, HostErrorClass::Timeout),
+            (HOST_ERROR_CODE_HOST_NOT_READY, HostErrorClass::Transport),
+            (HOST_ERROR_CODE_PEER_BUSY, HostErrorClass::Transport),
+            (HOST_ERROR_CODE_PEER_CLOSED, HostErrorClass::Transport),
+            (HOST_ERROR_CODE_TRANSPORT, HostErrorClass::Transport),
         ];
 
         for (code, expected) in cases {

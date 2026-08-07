@@ -4,7 +4,12 @@ use std::sync::Arc;
 
 use astrcode_core::llm::{LlmError, LlmEvent, LlmMessage, LlmProvider};
 use astrcode_extension_sdk::{
-    host::{HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput, HostLlmTextDelta},
+    host::{
+        HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CANCELLED,
+        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_SERIALIZATION_FAILED,
+        HOST_ERROR_CODE_TIMEOUT, HOST_ERROR_CODE_TRANSPORT, HostLlmChatOutput, HostLlmChatRequest,
+        HostLlmCollectedStreamOutput, HostLlmTextDelta,
+    },
     s5r::ErrorPayload,
 };
 use serde_json::Value;
@@ -65,7 +70,7 @@ impl LlmGroup {
         };
         let provider = provider.ok_or_else(|| {
             ErrorPayload::new(
-                "backend_unavailable",
+                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
                 format!("{model_label} not configured"),
             )
         })?;
@@ -82,14 +87,14 @@ async fn invoke_llm_chat(
 ) -> Result<Value, ErrorPayload> {
     let request = serde_json::from_value::<HostLlmChatRequest>(input).map_err(|error| {
         ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             format!("invalid {model_label}.chat request: {error}"),
         )
     })?;
 
     if request.messages.is_empty() {
         return Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             "messages must contain at least one typed LLM message",
         ));
     }
@@ -103,16 +108,22 @@ async fn invoke_llm_chat(
         tokio::select! {
             biased;
             () = token.cancelled() => {
-                Err(ErrorPayload::new("cancelled", "invoke cancelled"))
+                Err(ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, "invoke cancelled"))
             },
             output = invoke => output.map_err(|_| {
-                ErrorPayload::new("timeout", format!("{model_label}.chat timed out"))
+                ErrorPayload::new(
+                    HOST_ERROR_CODE_TIMEOUT,
+                    format!("{model_label}.chat timed out"),
+                )
             })?,
         }
     } else {
-        invoke
-            .await
-            .map_err(|_| ErrorPayload::new("timeout", format!("{model_label}.chat timed out")))?
+        invoke.await.map_err(|_| {
+            ErrorPayload::new(
+                HOST_ERROR_CODE_TIMEOUT,
+                format!("{model_label}.chat timed out"),
+            )
+        })?
     }
 }
 
@@ -174,7 +185,7 @@ fn serialize_output(
 ) -> Result<Value, ErrorPayload> {
     serde_json::to_value(output).map_err(|error| {
         ErrorPayload::new(
-            "serialization_failed",
+            HOST_ERROR_CODE_SERIALIZATION_FAILED,
             format!("failed to serialize {model_label}.chat response: {error}"),
         )
     })
@@ -190,13 +201,13 @@ fn llm_error_payload(error: LlmError) -> ErrorPayload {
         LlmError::RateLimited { .. } => "rate_limited",
         LlmError::ClientError { .. } => "client_error",
         LlmError::ServerError { .. } => "server_error",
-        LlmError::Transport { .. } => "transport_error",
+        LlmError::Transport { .. } => HOST_ERROR_CODE_TRANSPORT,
         LlmError::StreamDisconnected { .. } => "stream_disconnected",
         LlmError::StreamParse { .. } => "stream_parse",
         LlmError::ContentFilter { .. } => "content_filtered",
         LlmError::TokenLimit { .. } => "token_limit",
         LlmError::EmptyResponse => "empty_response",
-        LlmError::Interrupted => "cancelled",
+        LlmError::Interrupted => HOST_ERROR_CODE_CANCELLED,
         LlmError::Unsupported { .. } => "unsupported",
     };
     let retryable = error.is_retryable();

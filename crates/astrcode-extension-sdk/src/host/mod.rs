@@ -1,5 +1,6 @@
 mod client;
 mod contracts;
+mod domain_client;
 mod error;
 mod operation;
 
@@ -7,13 +8,19 @@ use std::sync::Arc;
 
 pub use client::{
     ExtensionHttpClient, ModelClient, NetworkClient, ProcessClient, SessionControlClient,
-    SessionHistoryClient, SessionInspectClient, WorkspaceClient,
+    SessionHistoryClient, SessionInspectClient, SessionStateClient, WorkspaceClient,
 };
-pub(crate) use contracts::HostAcknowledgement;
 pub use contracts::*;
-pub use error::{HostError, HostErrorClass};
+pub(crate) use domain_client::{
+    EventClient as TypedEventClient, ExtensionHttpClient as TypedExtensionHttpClient,
+    HostClientTransport, ModelClient as TypedModelClient, NetworkClient as TypedNetworkClient,
+    ProcessClient as TypedProcessClient, SessionControlClient as TypedSessionControlClient,
+    SessionHistoryClient as TypedSessionHistoryClient,
+    SessionInspectClient as TypedSessionInspectClient,
+    SessionStateClient as TypedSessionStateClient, WorkspaceClient as TypedWorkspaceClient,
+};
+pub use error::*;
 pub use operation::{HOST_OPERATION_SPECS, HostOperation, HostOperationSpec};
-use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
 use crate::extension::ExtensionCapability;
@@ -31,7 +38,7 @@ struct ExtensionHostInner {
 
 impl ExtensionHost {
     pub fn models(&self) -> ModelClient {
-        ModelClient::new(self)
+        ModelClient::new(self.clone())
     }
 
     pub fn session_control(&self) -> Result<SessionControlClient, HostError> {
@@ -52,24 +59,33 @@ impl ExtensionHost {
                 "session_control",
             )?;
         }
-        if input_delivery
-            && self
+        if self
+            .inner
+            .scope
+            .has_callable_operation_for(ExtensionCapability::SessionControl)
+            || self
                 .inner
                 .scope
-                .has_available_operation_for(ExtensionCapability::InputDelivery)
+                .has_callable_operation_for(ExtensionCapability::InputDelivery)
         {
-            return Ok(SessionControlClient::new(self));
+            return Ok(SessionControlClient::new(self.clone()));
         }
         if session_control {
             self.inner.scope.preflight_context(
                 operation::HostContextRequirement::Session,
                 "session_control",
             )?;
-            self.preflight_capability(ExtensionCapability::SessionControl)?;
-        } else {
-            self.preflight_capability(ExtensionCapability::InputDelivery)?;
         }
-        Ok(SessionControlClient::new(self))
+        if input_delivery {
+            self.inner.scope.preflight_available_operation_context(
+                ExtensionCapability::InputDelivery,
+                "session_control",
+            )?;
+        }
+        Err(HostError::new(
+            HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+            "session_control host domain is unavailable",
+        ))
     }
 
     pub fn session_history(&self) -> Result<SessionHistoryClient, HostError> {
@@ -81,12 +97,31 @@ impl ExtensionHost {
             "session_history",
         )?;
         self.preflight_capability(ExtensionCapability::SessionHistory)?;
-        Ok(SessionHistoryClient::new(self))
+        Ok(SessionHistoryClient::new(self.clone()))
+    }
+
+    pub fn session_state(&self) -> Result<SessionStateClient, HostError> {
+        self.inner
+            .scope
+            .preflight_context(operation::HostContextRequirement::Session, "session_state")?;
+        let available = [
+            HostOperation::SessionStateRead,
+            HostOperation::SessionStateWrite,
+        ]
+        .into_iter()
+        .any(|operation| self.inner.scope.is_operation_available(operation));
+        if !available {
+            return Err(HostError::new(
+                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                "session_state host domain is unavailable",
+            ));
+        }
+        Ok(SessionStateClient::new(self.clone()))
     }
 
     pub fn session_inspect(&self) -> Result<SessionInspectClient, HostError> {
         self.preflight_capability(ExtensionCapability::SessionInspect)?;
-        Ok(SessionInspectClient::new(self))
+        Ok(SessionInspectClient::new(self.clone()))
     }
 
     pub fn workspace(&self) -> Result<WorkspaceClient, HostError> {
@@ -109,7 +144,7 @@ impl ExtensionHost {
         self.inner
             .scope
             .preflight_any_capability(&capabilities, "workspace")?;
-        Ok(WorkspaceClient::new(self))
+        Ok(WorkspaceClient::new(self.clone()))
     }
 
     pub fn process(&self) -> Result<ProcessClient, HostError> {
@@ -120,56 +155,17 @@ impl ExtensionHost {
             .scope
             .preflight_context(operation::HostContextRequirement::Workspace, "process")?;
         self.preflight(HostOperation::ProcessSpawn)?;
-        Ok(ProcessClient::new(self))
+        Ok(ProcessClient::new(self.clone()))
     }
 
     pub fn network(&self) -> Result<NetworkClient, HostError> {
         self.preflight(HostOperation::NetworkClient)?;
-        Ok(NetworkClient::new(self))
+        Ok(NetworkClient::new(self.clone()))
     }
 
     pub fn extension_http(&self) -> Result<ExtensionHttpClient, HostError> {
         self.preflight(HostOperation::ExtensionHttpPublic)?;
-        Ok(ExtensionHttpClient::new(self))
-    }
-
-    async fn invoke<I, O>(&self, operation: HostOperation, input: &I) -> Result<O, HostError>
-    where
-        I: Serialize + ?Sized,
-        O: DeserializeOwned,
-    {
-        self.preflight(operation)?;
-        let input = serialize_request(operation, input)?;
-        let output = self.inner.invoker.invoke(operation, input).await?;
-        deserialize_response(operation, output)
-    }
-
-    async fn invoke_collected_stream<I, O>(
-        &self,
-        operation: HostOperation,
-        input: &I,
-    ) -> Result<O, HostError>
-    where
-        I: Serialize + ?Sized,
-        O: DeserializeOwned,
-    {
-        self.preflight(operation)?;
-        let input = serialize_request(operation, input)?;
-        let output = self
-            .inner
-            .invoker
-            .invoke_collected_stream(operation, input)
-            .await?;
-        deserialize_response(operation, output)
-    }
-
-    async fn invoke_unit<I>(&self, operation: HostOperation, input: &I) -> Result<(), HostError>
-    where
-        I: Serialize + ?Sized,
-    {
-        self.invoke::<I, contracts::HostAcknowledgement>(operation, input)
-            .await
-            .map(|_| ())
+        Ok(ExtensionHttpClient::new(self.clone()))
     }
 
     fn preflight(&self, operation: HostOperation) -> Result<(), HostError> {
@@ -193,31 +189,30 @@ impl ExtensionHost {
     }
 }
 
-fn serialize_request<I>(operation: HostOperation, input: &I) -> Result<Value, HostError>
-where
-    I: Serialize + ?Sized,
-{
-    serde_json::to_value(input).map_err(|error| {
-        HostError::new(
-            "serialization_failed",
-            format!(
-                "failed to serialize {} request: {error}",
-                operation.wire_name()
-            ),
-        )
-    })
-}
+#[async_trait::async_trait]
+impl HostClientTransport for ExtensionHost {
+    type Error = HostError;
 
-fn deserialize_response<O>(operation: HostOperation, output: Value) -> Result<O, HostError>
-where
-    O: DeserializeOwned,
-{
-    serde_json::from_value(output).map_err(|error| {
-        HostError::new(
-            "invalid_host_response",
-            format!("invalid {} response: {error}", operation.wire_name()),
-        )
-    })
+    async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, Self::Error> {
+        self.preflight(operation)?;
+        self.inner.invoker.invoke(operation, input).await
+    }
+
+    async fn invoke_collected_stream(
+        &self,
+        operation: HostOperation,
+        input: Value,
+    ) -> Result<Value, Self::Error> {
+        self.preflight(operation)?;
+        self.inner
+            .invoker
+            .invoke_collected_stream(operation, input)
+            .await
+    }
+
+    fn client_error(code: &'static str, message: String) -> Self::Error {
+        HostError::new(code, message)
+    }
 }
 
 /// Runtime construction boundary. This module is intentionally absent from author preludes.
@@ -230,8 +225,10 @@ pub mod internal {
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        ExtensionCapability, ExtensionHost, ExtensionHostInner, HOST_OPERATION_SPECS, HostError,
-        HostOperation, operation::HostContextRequirement,
+        ExtensionCapability, ExtensionHost, ExtensionHostInner,
+        HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+        HOST_ERROR_CODE_PERMISSION_DENIED, HOST_OPERATION_SPECS, HostError, HostOperation,
+        operation::HostContextRequirement,
     };
 
     /// Host-only redirect policy used by the outbound-network backend port.
@@ -331,13 +328,14 @@ pub mod internal {
             if let Some(required) = operation.required_capability() {
                 self.require_grant(required, operation.wire_name())?;
             }
+            self.preflight_context(operation.context_requirement(), operation.wire_name())?;
             if !self.available[operation as usize] {
                 return Err(HostError::new(
-                    "backend_unavailable",
+                    HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
                     format!("{} backend is unavailable", operation.wire_name()),
                 ));
             }
-            self.preflight_context(operation.context_requirement(), operation.wire_name())
+            Ok(())
         }
 
         pub(super) fn preflight_capability(
@@ -351,10 +349,30 @@ pub mod internal {
             self.granted.contains(&capability)
         }
 
-        pub(super) fn has_available_operation_for(&self, capability: ExtensionCapability) -> bool {
-            HOST_OPERATION_SPECS.iter().any(|spec| {
-                spec.required == Some(capability) && self.available[spec.operation as usize]
-            })
+        pub(super) fn has_callable_operation_for(&self, capability: ExtensionCapability) -> bool {
+            self.is_granted(capability)
+                && HOST_OPERATION_SPECS.iter().any(|spec| {
+                    spec.required == Some(capability)
+                        && self.available[spec.operation as usize]
+                        && self.is_context_available(spec.operation.context_requirement())
+                })
+        }
+
+        pub(super) fn preflight_available_operation_context(
+            &self,
+            capability: ExtensionCapability,
+            target: &str,
+        ) -> Result<(), HostError> {
+            let Some(operation) = HOST_OPERATION_SPECS
+                .iter()
+                .find(|spec| {
+                    spec.required == Some(capability) && self.available[spec.operation as usize]
+                })
+                .map(|spec| spec.operation)
+            else {
+                return Ok(());
+            };
+            self.preflight_context(operation.context_requirement(), target)
         }
 
         pub(super) fn is_operation_available(&self, operation: HostOperation) -> bool {
@@ -378,7 +396,7 @@ pub mod internal {
                     .collect::<Vec<_>>()
                     .join(" or ");
                 return Err(HostError::new(
-                    "permission_denied",
+                    HOST_ERROR_CODE_PERMISSION_DENIED,
                     format!("{target} requires declared capability {required}"),
                 ));
             }
@@ -391,7 +409,7 @@ pub mod internal {
                 Ok(())
             } else {
                 Err(HostError::new(
-                    "backend_unavailable",
+                    HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
                     format!("{target} host domain is unavailable"),
                 ))
             }
@@ -407,13 +425,21 @@ pub mod internal {
                 HostContextRequirement::Session if self.session_context_available => Ok(()),
                 HostContextRequirement::Workspace if self.workspace_context_available => Ok(()),
                 HostContextRequirement::Session => Err(HostError::new(
-                    "context_unavailable",
+                    HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
                     format!("{target} requires a session-scoped call context"),
                 )),
                 HostContextRequirement::Workspace => Err(HostError::new(
-                    "context_unavailable",
+                    HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
                     format!("{target} requires a workspace-scoped call context"),
                 )),
+            }
+        }
+
+        fn is_context_available(&self, requirement: HostContextRequirement) -> bool {
+            match requirement {
+                HostContextRequirement::None => true,
+                HostContextRequirement::Session => self.session_context_available,
+                HostContextRequirement::Workspace => self.workspace_context_available,
             }
         }
 
@@ -426,7 +452,7 @@ pub mod internal {
                 return Ok(());
             }
             Err(HostError::new(
-                "permission_denied",
+                HOST_ERROR_CODE_PERMISSION_DENIED,
                 format!(
                     "{target} requires declared capability {}",
                     crate::s5r::capability_to_wire(capability)

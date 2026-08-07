@@ -2,17 +2,19 @@ use serde_json::{Value, json};
 
 use super::contracts::HostAcknowledgement;
 use crate::{
-    extension::{ExtensionCapability, ExtensionHttpRequest, ExtensionHttpResponse},
+    extension::{ExtensionCapability, ExtensionHttpDispatchRequest, ExtensionHttpResponse},
     host::{
-        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostLlmChatRequest,
-        HostNetworkRequest, HostNetworkResponse, HostProcessOutput, HostProcessRequest,
-        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
-        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionSummariesOutput,
-        HostSessionTokenUsageOutput, HostSessionTranscript, HostWorkspaceEditOutput,
-        HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
-        HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListOutput,
-        HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
-        HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, host_llm_chat_response_schema,
+        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitRequest,
+        HostLlmChatRequest, HostNetworkRequest, HostNetworkResponse, HostProcessOutput,
+        HostProcessRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+        HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+        HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
+        HostSessionSummariesOutput, HostSessionTokenUsageOutput, HostSessionTranscript,
+        HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
+        HostWorkspaceGlobRequest, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
+        HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
+        host_llm_chat_response_schema,
     },
     s5r::CapabilityDescriptor,
     session::{
@@ -22,7 +24,7 @@ use crate::{
         HostSubmitTurnOutput, HostSubmitTurnRequest,
     },
     session_inspect::{
-        SessionHistorySnapshotOutput, SessionInspectListOutput,
+        HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
         SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
         SessionInspectSnapshotOutput,
     },
@@ -158,11 +160,10 @@ pub(super) enum HostContextRequirement {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CapabilitySchema {
-    Object,
     EmptyObject,
     Acknowledgement,
     EventEmitRequest,
-    ExtensionHttpRequest,
+    ExtensionHttpDispatchRequest,
     ExtensionHttpResponse,
     LlmChatRequest,
     LlmChatOutput,
@@ -170,7 +171,7 @@ enum CapabilitySchema {
     NetworkResponse,
     ProcessSpawn,
     ProcessSpawnOutput,
-    SessionId,
+    SessionInspectRequest,
     SessionEventsPage,
     SessionEventsPageOutput,
     SessionCancelOutput,
@@ -190,6 +191,9 @@ enum CapabilitySchema {
     SessionCreateOutput,
     SessionTarget,
     SessionStateOutput,
+    SessionStateReadRequest,
+    SessionStateReadOutput,
+    SessionStateWriteRequest,
     SessionReactivateOutput,
     SessionSubmitTurn,
     SessionSubmitTurnOutput,
@@ -284,7 +288,7 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
         "astrcode.extension.http.public",
         Some(ExtensionCapability::PublicHttpDispatch),
         "Dispatch a request to another extension's public HTTP route",
-        ExtensionHttpRequest,
+        ExtensionHttpDispatchRequest,
         ExtensionHttpResponse
     ),
     HostOperationSpec {
@@ -464,7 +468,7 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
         "astrcode.session.inspect.provider_messages",
         Some(ExtensionCapability::SessionInspect),
         "Read provider-visible messages for any host-visible session",
-        SessionId,
+        SessionInspectRequest,
         SessionInspectProviderMessagesOutput
     ),
     spec!(
@@ -472,7 +476,7 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
         "astrcode.session.inspect.read_model",
         Some(ExtensionCapability::SessionInspect),
         "Read any host-visible projected session model through a stable wire DTO",
-        SessionId,
+        SessionInspectRequest,
         SessionInspectReadModelOutput
     ),
     spec!(
@@ -480,7 +484,7 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
         "astrcode.session.inspect.snapshot",
         Some(ExtensionCapability::SessionInspect),
         "Read any host-visible session snapshot (global privileged access)",
-        SessionId,
+        SessionInspectRequest,
         SessionInspectSnapshotOutput
     ),
     spec!(
@@ -515,28 +519,22 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
         SessionRootSubmitTurn,
         SessionSubmitTurnOutput
     ),
-    HostOperationSpec {
-        operation: HostOperation::SessionStateRead,
-        name: "astrcode.session.state.read",
-        required: None,
-        description: "Read extension-namespaced session state",
-        input_schema: CapabilitySchema::Object,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: false,
-        catalog: false,
-    },
-    HostOperationSpec {
-        operation: HostOperation::SessionStateWrite,
-        name: "astrcode.session.state.write",
-        required: None,
-        description: "Write extension-namespaced session state",
-        input_schema: CapabilitySchema::Object,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: false,
-        catalog: false,
-    },
+    spec!(
+        SessionStateRead,
+        "astrcode.session.state.read",
+        None,
+        "Read extension-namespaced session state",
+        SessionStateReadRequest,
+        SessionStateReadOutput
+    ),
+    spec!(
+        SessionStateWrite,
+        "astrcode.session.state.write",
+        None,
+        "Write extension-namespaced session state",
+        SessionStateWriteRequest,
+        Acknowledgement
+    ),
     spec!(
         WorkspaceEdit,
         "astrcode.workspace.edit",
@@ -589,24 +587,16 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
 
 fn capability_schema(schema: CapabilitySchema) -> Value {
     match schema {
-        CapabilitySchema::Object => json!({ "type": "object" }),
         CapabilitySchema::EmptyObject => json!({
             "type": "object",
             "properties": {},
             "additionalProperties": false
         }),
         CapabilitySchema::Acknowledgement => HostAcknowledgement::wire_schema(),
-        CapabilitySchema::EventEmitRequest => json!({
-            "type": "object",
-            "properties": {
-                "event_type": { "type": "string" },
-                "schema_version": { "type": "integer", "minimum": 1, "default": 1 },
-                "payload": {}
-            },
-            "required": ["event_type"],
-            "additionalProperties": false
-        }),
-        CapabilitySchema::ExtensionHttpRequest => ExtensionHttpRequest::wire_schema(),
+        CapabilitySchema::EventEmitRequest => HostEventEmitRequest::wire_schema(),
+        CapabilitySchema::ExtensionHttpDispatchRequest => {
+            ExtensionHttpDispatchRequest::wire_schema()
+        },
         CapabilitySchema::ExtensionHttpResponse => ExtensionHttpResponse::wire_schema(),
         CapabilitySchema::LlmChatRequest => HostLlmChatRequest::wire_schema(),
         CapabilitySchema::LlmChatOutput => host_llm_chat_response_schema(),
@@ -614,12 +604,7 @@ fn capability_schema(schema: CapabilitySchema) -> Value {
         CapabilitySchema::NetworkResponse => HostNetworkResponse::wire_schema(),
         CapabilitySchema::ProcessSpawn => HostProcessRequest::wire_schema(),
         CapabilitySchema::ProcessSpawnOutput => HostProcessOutput::wire_schema(),
-        CapabilitySchema::SessionId => json!({
-            "type": "object",
-            "properties": { "session_id": { "type": "string" } },
-            "required": ["session_id"],
-            "additionalProperties": false
-        }),
+        CapabilitySchema::SessionInspectRequest => HostSessionInspectRequest::wire_schema(),
         CapabilitySchema::SessionEventsPage => HostSessionEventsPageRequest::wire_schema(),
         CapabilitySchema::SessionEventsPageOutput => HostSessionEventsPageOutput::wire_schema(),
         CapabilitySchema::SessionCancelOutput => HostSessionCancelOutput::wire_schema(),
@@ -649,6 +634,9 @@ fn capability_schema(schema: CapabilitySchema) -> Value {
         CapabilitySchema::SessionCreateOutput => HostCreateSessionOutput::wire_schema(),
         CapabilitySchema::SessionTarget => HostSessionTargetRequest::wire_schema(),
         CapabilitySchema::SessionStateOutput => HostSessionStateOutput::wire_schema(),
+        CapabilitySchema::SessionStateReadRequest => HostSessionStateReadRequest::wire_schema(),
+        CapabilitySchema::SessionStateReadOutput => HostSessionStateReadOutput::wire_schema(),
+        CapabilitySchema::SessionStateWriteRequest => HostSessionStateWriteRequest::wire_schema(),
         CapabilitySchema::SessionReactivateOutput => HostSessionReactivateOutput::wire_schema(),
         CapabilitySchema::SessionSubmitTurn => HostSubmitTurnRequest::wire_schema(),
         CapabilitySchema::SessionSubmitTurnOutput => HostSubmitTurnOutput::wire_schema(),
@@ -798,7 +786,7 @@ mod tests {
             (EventEmit, EventEmitRequest, Acknowledgement),
             (
                 ExtensionHttpPublic,
-                ExtensionHttpRequest,
+                ExtensionHttpDispatchRequest,
                 ExtensionHttpResponse,
             ),
             (LlmMainChat, LlmChatRequest, LlmChatOutput),
@@ -867,17 +855,17 @@ mod tests {
             (SessionInspectList, EmptyObject, SessionInspectListOutput),
             (
                 SessionInspectProviderMessages,
-                SessionId,
+                SessionInspectRequest,
                 SessionInspectProviderMessagesOutput,
             ),
             (
                 SessionInspectReadModel,
-                SessionId,
+                SessionInspectRequest,
                 SessionInspectReadModelOutput,
             ),
             (
                 SessionInspectSnapshot,
-                SessionId,
+                SessionInspectRequest,
                 SessionInspectSnapshotOutput,
             ),
             (
@@ -895,6 +883,16 @@ mod tests {
                 HostOperation::SessionRootSubmitTurn,
                 CapabilitySchema::SessionRootSubmitTurn,
                 SessionSubmitTurnOutput,
+            ),
+            (
+                HostOperation::SessionStateRead,
+                CapabilitySchema::SessionStateReadRequest,
+                SessionStateReadOutput,
+            ),
+            (
+                HostOperation::SessionStateWrite,
+                CapabilitySchema::SessionStateWriteRequest,
+                Acknowledgement,
             ),
             (
                 HostOperation::WorkspaceEdit,
@@ -1131,8 +1129,8 @@ mod tests {
                 Some(ExtensionCapability::InputDelivery),
                 None
             ),
-            policy!(SessionStateRead, None, Session, false, false, false),
-            policy!(SessionStateWrite, None, Session, false, false, false),
+            policy!(SessionStateRead, None, Session),
+            policy!(SessionStateWrite, None, Session),
             policy!(
                 WorkspaceEdit,
                 Some(ExtensionCapability::WorkspaceWrite),

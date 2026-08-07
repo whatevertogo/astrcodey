@@ -5,7 +5,39 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::session::{SessionLifecycleStateDto, SessionToolSelectionDto};
+use crate::session::{SessionLifecycleStateDto, SessionPhaseDto, SessionToolSelectionDto};
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HostSessionInspectRequest {
+    #[serde(deserialize_with = "deserialize_non_empty_session_id")]
+    pub session_id: String,
+}
+
+fn deserialize_non_empty_session_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let session_id = String::deserialize(deserializer)?;
+    if session_id.is_empty() {
+        Err(serde::de::Error::custom("session_id must not be empty"))
+    } else {
+        Ok(session_id)
+    }
+}
+
+impl HostSessionInspectRequest {
+    pub fn wire_schema() -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string", "minLength": 1 }
+            },
+            "required": ["session_id"],
+            "additionalProperties": false
+        })
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -17,7 +49,7 @@ pub struct SessionInspectListItem {
     pub source_extension: Option<String>,
     pub created_at: String,
     pub updated_at: String,
-    pub phase: String,
+    pub phase: SessionPhaseDto,
     pub latest_cursor: String,
     pub first_user_message: Option<String>,
 }
@@ -48,7 +80,7 @@ pub struct SessionInspectSnapshot {
     pub cursor: String,
     pub working_dir: String,
     pub model_id: String,
-    pub phase: String,
+    pub phase: SessionPhaseDto,
     pub parent_session_id: Option<String>,
     pub source_extension: Option<String>,
     pub message_count: usize,
@@ -125,6 +157,24 @@ pub struct SessionInspectPendingApproval {
     pub rule_key: Option<String>,
 }
 
+/// Child-agent lifecycle state at the session-inspect wire boundary.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionInspectAgentStatusDto {
+    Running,
+    Completed,
+    Failed,
+}
+
+impl SessionInspectAgentStatusDto {
+    fn wire_schema() -> Value {
+        json!({
+            "type": "string",
+            "enum": ["running", "completed", "failed"]
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectAgentSession {
@@ -132,12 +182,10 @@ pub struct SessionInspectAgentSession {
     pub tool_call_id: Option<String>,
     pub agent_name: String,
     pub task: String,
-    pub status: String,
+    pub status: SessionInspectAgentStatusDto,
     pub final_session_id: Option<String>,
     pub summary: Option<String>,
     pub error: Option<String>,
-    pub phase: Option<String>,
-    pub current_tool: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -161,7 +209,7 @@ pub struct SessionInspectReadModel {
     pub messages: Vec<SessionInspectSequencedMessage>,
     pub working_dir: String,
     pub model_id: String,
-    pub phase: String,
+    pub phase: SessionPhaseDto,
     pub system_prompt: Option<String>,
     pub extra_system_prompt: Option<String>,
     pub system_prompt_fingerprint: Option<String>,
@@ -246,7 +294,7 @@ fn session_inspect_list_item_schema() -> Value {
             "sourceExtension": { "type": ["string", "null"] },
             "createdAt": { "type": "string" },
             "updatedAt": { "type": "string" },
-            "phase": { "type": "string" },
+            "phase": SessionPhaseDto::wire_schema(),
             "latestCursor": { "type": "string" },
             "firstUserMessage": { "type": ["string", "null"] }
         },
@@ -274,7 +322,7 @@ fn session_inspect_snapshot_schema() -> Value {
             "cursor": { "type": "string" },
             "workingDir": { "type": "string" },
             "modelId": { "type": "string" },
-            "phase": { "type": "string" },
+            "phase": SessionPhaseDto::wire_schema(),
             "parentSessionId": { "type": ["string", "null"] },
             "sourceExtension": { "type": ["string", "null"] },
             "messageCount": { "type": "integer", "minimum": 0 },
@@ -305,7 +353,7 @@ fn session_inspect_read_model_schema() -> Value {
             "messages": { "type": "array", "items": session_inspect_sequenced_message_schema() },
             "workingDir": { "type": "string" },
             "modelId": { "type": "string" },
-            "phase": { "type": "string" },
+            "phase": SessionPhaseDto::wire_schema(),
             "systemPrompt": { "type": ["string", "null"] },
             "extraSystemPrompt": { "type": ["string", "null"] },
             "systemPromptFingerprint": { "type": ["string", "null"] },
@@ -448,12 +496,10 @@ fn session_inspect_agent_session_schema() -> Value {
             "toolCallId": { "type": ["string", "null"] },
             "agentName": { "type": "string" },
             "task": { "type": "string" },
-            "status": { "type": "string" },
+            "status": SessionInspectAgentStatusDto::wire_schema(),
             "finalSessionId": { "type": ["string", "null"] },
             "summary": { "type": ["string", "null"] },
-            "error": { "type": ["string", "null"] },
-            "phase": { "type": ["string", "null"] },
-            "currentTool": { "type": ["string", "null"] }
+            "error": { "type": ["string", "null"] }
         },
         "required": [
             "childSessionId",
@@ -463,9 +509,7 @@ fn session_inspect_agent_session_schema() -> Value {
             "status",
             "finalSessionId",
             "summary",
-            "error",
-            "phase",
-            "currentTool"
+            "error"
         ],
         "additionalProperties": false
     })
@@ -588,9 +632,7 @@ mod tests {
                 "status": "completed",
                 "finalSessionId": null,
                 "summary": null,
-                "error": null,
-                "phase": null,
-                "currentTool": null
+                "error": null
             }],
             "compactions": [{
                 "trigger": "manual",
@@ -609,6 +651,14 @@ mod tests {
 
     #[test]
     fn session_inspect_wire_contracts_are_nested_strict() {
+        let request = json!({ "session_id": "session-1" });
+        assert_unknown_fields_rejected::<HostSessionInspectRequest>(&request, &[""]);
+        assert!(serde_json::from_value::<HostSessionInspectRequest>(json!({})).is_err());
+        assert!(
+            serde_json::from_value::<HostSessionInspectRequest>(json!({ "session_id": "" }))
+                .is_err()
+        );
+
         let list = json!({
             "sessions": [{
                 "sessionId": "session-1",
@@ -661,6 +711,19 @@ mod tests {
                 "/readModel/compactions/0",
             ],
         );
+        let mut unknown_agent_status = read_model.clone();
+        unknown_agent_status["readModel"]["agentSessions"][0]["status"] = json!("paused");
+        assert!(
+            serde_json::from_value::<SessionInspectReadModelOutput>(unknown_agent_status).is_err()
+        );
+        for removed_field in ["phase", "currentTool"] {
+            let mut stale_agent_shape = read_model.clone();
+            stale_agent_shape["readModel"]["agentSessions"][0][removed_field] = Value::Null;
+            assert!(
+                serde_json::from_value::<SessionInspectReadModelOutput>(stale_agent_shape).is_err(),
+                "removed agent-session field {removed_field} was accepted"
+            );
+        }
 
         let history = json!({ "lifecycle": "active", "readModel": read_model_wire() });
         assert_unknown_fields_rejected::<SessionHistorySnapshotOutput>(&history, &[""]);

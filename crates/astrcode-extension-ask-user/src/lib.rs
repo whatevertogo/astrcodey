@@ -138,14 +138,8 @@ impl ToolHandler for AskUserToolHandler {
             return Ok(ToolResult::error(error).into());
         }
 
-        let call_id = context
-            .call_id()
-            .ok_or_else(|| ExtensionError::Internal("askUser requires a tool call id".into()))?
-            .to_owned();
-        let session_id = context
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("askUser requires a session id".into()))?
-            .to_string();
+        let call_id = context.require_call_id()?.to_owned();
+        let session_id = context.call().require_session_id()?.to_string();
         let events = context.events().clone();
         let auto_select_at = if input
             .questions
@@ -248,9 +242,7 @@ struct AskUserSessionShutdown {
 #[async_trait::async_trait]
 impl LifecycleHandler for AskUserSessionShutdown {
     async fn handle(&self, context: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        let session_id = context.session_id().ok_or_else(|| {
-            ExtensionError::Internal("session shutdown hook requires a session id".into())
-        })?;
+        let session_id = context.call().require_session_id()?;
         self.registry.shutdown_session(session_id.as_str());
         Ok(HookResult::Allow)
     }
@@ -357,7 +349,8 @@ mod tests {
 
     use astrcode_extension_sdk::{
         extension::{
-            ExtensionEventDecl, ExtensionEventEmitter, ExtensionEventSink, ExtensionHttpRequest,
+            ExtensionEventDecl, ExtensionEventEmitter, ExtensionHttpRequest,
+            internal::{ExtensionEventSink, extension_event_emitter},
         },
         testing::{HttpContextBuilder, ToolContextBuilder},
     };
@@ -384,7 +377,7 @@ mod tests {
     }
 
     fn event_emitter(events: Arc<dyn ExtensionEventSink>) -> ExtensionEventEmitter {
-        ExtensionEventEmitter::from_runtime(
+        extension_event_emitter(
             [
                 ExtensionEventDecl {
                     event_type: registry::PENDING_EVENT_TYPE.into(),

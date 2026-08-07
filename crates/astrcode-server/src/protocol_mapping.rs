@@ -21,7 +21,7 @@ use crate::session_command_contract::{CommandInfo, CommandSource};
 pub(crate) fn agent_session_link_to_dto(link: &AgentSessionLinkView) -> AgentSessionLinkDto {
     AgentSessionLinkDto {
         child_session_id: link.child_session_id.to_string(),
-        tool_call_id: Some(link.tool_call_id.to_string()),
+        tool_call_id: link.tool_call_id.as_ref().map(ToString::to_string),
         agent_name: Some(link.agent_name.clone()),
         task: Some(link.task.clone()),
         status: Some(agent_session_status_to_dto(link.status)),
@@ -226,7 +226,7 @@ mod tests {
     fn agent_session_mapping_preserves_snapshot_fields() {
         let link = AgentSessionLinkView {
             child_session_id: SessionId::from("child-1"),
-            tool_call_id: ToolCallId::from("tool-1"),
+            tool_call_id: Some(ToolCallId::from("tool-1")),
             agent_name: "reviewer".into(),
             task: "review changes".into(),
             status: AgentSessionStatus::Completed,

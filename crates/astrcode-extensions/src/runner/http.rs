@@ -2,7 +2,7 @@ use std::sync::{Arc, Weak};
 
 use astrcode_extension_sdk::extension::*;
 
-use super::{ExtensionRunner, ExtensionView};
+use super::{ExtensionCallContextInput, ExtensionRunner, ExtensionView};
 
 #[derive(Debug, Clone)]
 pub enum ExtensionHttpDispatchResult {
@@ -109,12 +109,7 @@ impl ExtensionView {
         let cancellation = tokio_util::sync::CancellationToken::new();
         let call = self.make_registered_extension_call_context(
             &entry.extension_id,
-            None,
-            None,
-            None,
-            None,
-            None,
-            cancellation.clone(),
+            ExtensionCallContextInput::unscoped(cancellation.clone()),
         )?;
         let ctx = HttpContext::from_runtime(
             call,

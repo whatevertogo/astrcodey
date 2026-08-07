@@ -17,7 +17,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::SessionId;
+use crate::types::{SessionId, TurnId};
 
 pub mod access;
 pub mod read_image;
@@ -537,8 +537,6 @@ pub struct CreateRootSessionRequest {
 pub struct CreateSessionRequest {
     /// 子会话显示名称。
     pub name: String,
-    /// 工作目录。`None` 表示继承父 session。
-    pub working_dir: Option<String>,
     /// 额外系统提示词。
     pub system_prompt: Option<String>,
     /// 模型偏好。`None` 表示继承父 session。
@@ -549,8 +547,8 @@ pub struct CreateSessionRequest {
     pub source_extension: Option<String>,
     /// 一次性子 session，首个 turn 完成后自动回收。
     pub ephemeral: bool,
-    /// 触发创建子 session 的工具调用 ID，写入 AgentSessionSpawned 供 TUI 路由。
-    pub tool_call_id: String,
+    /// 触发创建子 session 的工具调用 ID。
+    pub tool_call_id: Option<String>,
 }
 
 /// 创建成功后返回的句柄。
@@ -856,6 +854,8 @@ pub struct ToolCapabilities {
 #[derive(Clone)]
 pub struct ToolCallScope {
     pub session_id: SessionId,
+    /// 当前工具调用所属 turn；会话外调用不存在该事实。
+    pub turn_id: Option<TurnId>,
     pub working_dir: String,
     /// 当前工具调用 ID，用于工具发出隶属于自身调用的进度事件。
     pub tool_call_id: Option<String>,
@@ -886,6 +886,7 @@ impl ToolExecutionContext {
         Self {
             scope: ToolCallScope {
                 session_id,
+                turn_id: None,
                 working_dir: working_dir.into(),
                 tool_call_id,
                 event_tx,
@@ -899,6 +900,16 @@ impl ToolExecutionContext {
     pub fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
         self.cancellation = cancellation;
         self
+    }
+
+    /// Attach the strongly typed turn that owns this tool invocation.
+    pub fn with_turn_id(mut self, turn_id: TurnId) -> Self {
+        self.scope.turn_id = Some(turn_id);
+        self
+    }
+
+    pub fn turn_id(&self) -> Option<&TurnId> {
+        self.scope.turn_id.as_ref()
     }
 
     /// Cancellation of the turn or request that owns this tool invocation.
@@ -921,6 +932,7 @@ impl std::fmt::Debug for ToolCallScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolCallScope")
             .field("session_id", &self.session_id)
+            .field("turn_id", &self.turn_id)
             .field("working_dir", &self.working_dir)
             .field("tool_call_id", &self.tool_call_id)
             .field("event_tx", &self.event_tx.as_ref().map(|_| "<event_tx>"))

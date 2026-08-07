@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
-use super::{ExtensionError, HookMode};
+use super::{ExtensionError, HookMode, internal::ExtensionEventSink};
 
 // ─── Lifecycle Events ────────────────────────────────────────────────────
 
@@ -123,13 +123,14 @@ pub fn hook_mode_is_supported(event: &ExtensionEvent, mode: HookMode) -> bool {
 /// 插件在 [`Registrar`] 中声明的事件类型。
 ///
 /// 声明是 emit 时校验的依据：未声明的事件类型会被拒绝，payload 超限也会被拒绝。
-/// `extension_id` 不在声明中——它由 runtime 在构造 [`ExtensionEventSink`] 时注入。
+/// `extension_id` 不在声明中——它由 runtime internal event sink 注入。
 pub const DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_EXTENSION_EVENT_DURABLE: bool = true;
 pub const DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+pub const MAX_EXTENSION_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionEventDecl {
     pub event_type: String,
     #[serde(default = "default_extension_event_schema_version")]
@@ -152,16 +153,6 @@ const fn default_extension_event_max_payload_bytes() -> usize {
     DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES
 }
 
-/// 插件事件发射器。`extension_id` 在构造时由 runtime 绑定，调用方无法伪造身份。
-pub trait ExtensionEventSink: Send + Sync {
-    fn emit(
-        &self,
-        event_type: &str,
-        schema_version: u32,
-        payload: serde_json::Value,
-    ) -> Result<(), ExtensionError>;
-}
-
 /// Extension-scoped event emitter with immutable declaration attribution.
 ///
 /// The runtime constructs this value from the same registration aggregate used by dispatch.
@@ -174,8 +165,7 @@ pub struct ExtensionEventEmitter {
 }
 
 impl ExtensionEventEmitter {
-    #[doc(hidden)]
-    pub fn from_runtime(
+    pub(super) fn from_runtime(
         declarations: impl IntoIterator<Item = ExtensionEventDecl>,
         sink: Option<Arc<dyn ExtensionEventSink>>,
     ) -> Self {

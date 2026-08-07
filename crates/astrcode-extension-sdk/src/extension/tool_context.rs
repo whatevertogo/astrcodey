@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use super::{
     ExtensionCallContext, ExtensionError, ExtensionEventEmitter, ExtensionPaths, ExtensionTasks,
 };
-use crate::host::ExtensionHost;
+use crate::host::{ExtensionHost, HOST_ERROR_CODE_CONTEXT_UNAVAILABLE, HostError};
 
 /// Immutable input and scoped host capabilities for one extension tool call.
 ///
@@ -96,6 +96,16 @@ impl ToolContext {
 
     pub fn call_id(&self) -> Option<&str> {
         self.call_id.as_deref()
+    }
+
+    /// Returns the host-attributed tool call id or a stable context error.
+    pub fn require_call_id(&self) -> Result<&str, HostError> {
+        self.call_id().ok_or_else(|| {
+            HostError::new(
+                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                "tool handler requires a tool-call-scoped context",
+            )
+        })
     }
 
     pub fn raw_arguments(&self) -> &Value {

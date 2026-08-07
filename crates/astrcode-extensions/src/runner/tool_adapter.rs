@@ -16,7 +16,10 @@ use astrcode_extension_sdk::{
     },
 };
 
-use super::{ExtensionCallContextFactory, ExtensionRunner, ExtensionView, HandlerIndex};
+use super::{
+    ExtensionCallContextFactory, ExtensionCallContextInput, ExtensionRunner, ExtensionView,
+    HandlerIndex,
+};
 
 impl ExtensionView {
     /// 从 HandlerIndex 缓存收集工具适配器。
@@ -52,12 +55,10 @@ impl ExtensionView {
             let cancellation = tokio_util::sync::CancellationToken::new();
             let call = self.make_registered_extension_call_context(
                 ext_id,
-                None,
-                None,
-                Some(PathBuf::from(working_dir)),
-                None,
-                None,
-                cancellation.clone(),
+                ExtensionCallContextInput {
+                    working_dir: Some(PathBuf::from(working_dir)),
+                    ..ExtensionCallContextInput::unscoped(cancellation.clone())
+                },
             );
             let discovered = match call {
                 Ok(call) => {
@@ -294,14 +295,17 @@ impl Tool for HandlerTool {
         let call = self.call_context_factory.make_extension_call_context(
             &self.extension_id,
             &self.capabilities,
-            Some(ctx.scope.session_id.clone()),
-            None,
-            Some(PathBuf::from(&self.working_dir)),
-            ctx.capabilities.paths.store_dir.clone(),
-            ctx.scope.event_tx.clone(),
             &self.event_declarations,
             tasks,
-            ctx.cancellation().clone(),
+            ExtensionCallContextInput {
+                session_id: Some(ctx.scope.session_id.clone()),
+                turn_id: ctx.turn_id().map(ToString::to_string),
+                tool_call_id: ctx.scope.tool_call_id.clone(),
+                working_dir: Some(PathBuf::from(&self.working_dir)),
+                session_store_dir: ctx.capabilities.paths.store_dir.clone(),
+                event_tx: ctx.scope.event_tx.clone(),
+                cancellation: ctx.cancellation().clone(),
+            },
         );
         let main_model_id = self
             .capabilities

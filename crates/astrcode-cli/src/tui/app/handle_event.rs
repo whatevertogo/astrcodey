@@ -488,9 +488,10 @@ fn apply_event(app: &mut App, event: &Event) {
             );
             app.status_text = format!("● Agent: {agent_name}");
 
-            // 精确建立 child_session_id → call_id 映射。
-            app.child_session_map
-                .insert(child_session_id.to_string(), tool_call_id.to_string());
+            if let Some(tool_call_id) = tool_call_id {
+                app.child_session_map
+                    .insert(child_session_id.to_string(), tool_call_id.to_string());
+            }
         },
         EventPayload::Durable(DurableEventPayload::AgentSessionCompleted {
             child_session_id,

@@ -133,10 +133,7 @@ struct McpWorkspaceLifecycleHandler {
 #[async_trait::async_trait]
 impl LifecycleHandler for McpWorkspaceLifecycleHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| ExtensionError::Internal("working directory not injected".into()))?
-            .to_string_lossy();
+        let working_dir = ctx.call().require_working_dir()?.to_string_lossy();
         self.shared.refresh_workspace(&working_dir).await;
         Ok(HookResult::Allow)
     }
@@ -346,9 +343,7 @@ struct McpToolDiscovery {
 #[async_trait::async_trait]
 impl ToolDiscoveryHandler for McpToolDiscovery {
     async fn discover(&self, ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError> {
-        let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| ExtensionError::Internal("MCP discovery requires a workspace".into()))?;
+        let working_dir = ctx.call().require_working_dir()?;
         let working_dir = working_dir.to_string_lossy();
         self.shared.await_initial_warm(&working_dir).await;
         // 后台预热若尚未完成，则首个 turn 在此同步等待同一次加载以保证工具完整；
@@ -404,8 +399,8 @@ impl ToolHandler for McpToolHandler {
         let tool_name = ctx.tool_name();
         let arguments = ctx.raw_arguments().clone();
         let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| ExtensionError::Internal("working directory not injected".into()))?
+            .call()
+            .require_working_dir()?
             .to_string_lossy()
             .into_owned();
         if tool_name == TOOL_SEARCH_TOOL_NAME {

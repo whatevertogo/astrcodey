@@ -9,8 +9,13 @@ use std::{
 use astrcode_extension_sdk::{
     extension::ExtensionTasks,
     host::{
-        HostWorkspaceEditRequest, HostWorkspaceGlobRequest, HostWorkspaceGrepRequest,
-        HostWorkspaceListRequest, HostWorkspaceReadRequest, HostWorkspaceWriteRequest,
+        HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_INVALID_INPUT,
+        HOST_ERROR_CODE_PERMISSION_DENIED, HOST_WORKSPACE_GLOB_DEFAULT_MAX_MATCHES,
+        HOST_WORKSPACE_GREP_DEFAULT_MAX_BYTES, HOST_WORKSPACE_GREP_DEFAULT_MAX_LINE_CHARS,
+        HOST_WORKSPACE_GREP_DEFAULT_MAX_MATCHES, HOST_WORKSPACE_LIST_DEFAULT_LIMIT,
+        HOST_WORKSPACE_MAX_FILE_BYTES, HostWorkspaceEditRequest, HostWorkspaceGlobRequest,
+        HostWorkspaceGrepRequest, HostWorkspaceListRequest, HostWorkspaceReadRequest,
+        HostWorkspaceWriteRequest,
     },
     s5r::ErrorPayload,
 };
@@ -25,12 +30,7 @@ use super::{
     run_blocking_io, run_blocking_io_to_completion,
 };
 
-const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_WALK_ENTRIES: usize = 5_000;
-const MAX_LIST_ENTRIES: usize = 500;
-const MAX_SEARCH_MATCHES: usize = 1_000;
-const MAX_SEARCH_OUTPUT_BYTES: usize = 1024 * 1024;
-const MAX_SEARCH_LINE_CHARS: usize = 2_000;
 const MAX_SEARCH_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const IGNORED_DIRECTORIES: &[&str] = &[".git", "node_modules"];
 
@@ -87,7 +87,9 @@ impl WorkspaceGroup {
     fn root<'a>(&'a self, working_dir: Option<&'a str>) -> Result<&'a str, ErrorPayload> {
         working_dir
             .or(self.default_working_dir.as_deref())
-            .ok_or_else(|| ErrorPayload::new("backend_unavailable", "working_dir not set"))
+            .ok_or_else(|| {
+                ErrorPayload::new(HOST_ERROR_CODE_BACKEND_UNAVAILABLE, "working_dir not set")
+            })
     }
 }
 
@@ -125,14 +127,13 @@ fn read(root: &str, request: HostWorkspaceReadRequest) -> Result<Value, ErrorPay
         .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
     if !metadata.is_file() {
         return Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             "workspace.read path must be a regular file",
         ));
     }
     let max_bytes = request
         .max_bytes
-        .unwrap_or(MAX_FILE_BYTES as u64)
-        .min(MAX_FILE_BYTES as u64);
+        .unwrap_or(HOST_WORKSPACE_MAX_FILE_BYTES as u64);
     if metadata.len() > max_bytes {
         return Err(ErrorPayload::new(
             "file_too_large",
@@ -158,12 +159,12 @@ fn list(root: &str, request: HostWorkspaceListRequest) -> Result<Value, ErrorPay
     let path = resolve_existing_path(root, relative_path, "workspace.list")?;
     if !path.is_dir() {
         return Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             "workspace.list path must be a directory",
         ));
     }
-    let depth = request.depth.clamp(1, 32);
-    let limit = bounded_limit(request.limit, MAX_LIST_ENTRIES, MAX_LIST_ENTRIES);
+    let depth = request.depth;
+    let limit = request.limit.unwrap_or(HOST_WORKSPACE_LIST_DEFAULT_LIMIT);
     let canonical_root = canonical_root(root)?;
     let mut entries = Vec::new();
     let mut scanned = 0usize;
@@ -213,15 +214,25 @@ fn list(root: &str, request: HostWorkspaceListRequest) -> Result<Value, ErrorPay
 
 fn grep(root: &str, request: HostWorkspaceGrepRequest) -> Result<Value, ErrorPayload> {
     let pattern = required_non_empty(&request.pattern, "pattern")?;
-    let regex = Regex::new(pattern)
-        .map_err(|error| ErrorPayload::new("invalid_input", format!("invalid regex: {error}")))?;
+    let regex = Regex::new(pattern).map_err(|error| {
+        ErrorPayload::new(
+            HOST_ERROR_CODE_INVALID_INPUT,
+            format!("invalid regex: {error}"),
+        )
+    })?;
     let relative_path = request.path.as_deref().unwrap_or(".");
     reject_sensitive_path(relative_path)?;
     let search_root = resolve_existing_path(root, relative_path, "workspace.grep")?;
     let canonical_root = canonical_root(root)?;
-    let max_matches = bounded_limit(request.max_matches, 100, MAX_SEARCH_MATCHES);
-    let max_bytes = bounded_limit(request.max_bytes, 64 * 1024, MAX_SEARCH_OUTPUT_BYTES);
-    let max_line_chars = bounded_limit(request.max_line_chars, 500, MAX_SEARCH_LINE_CHARS);
+    let max_matches = request
+        .max_matches
+        .unwrap_or(HOST_WORKSPACE_GREP_DEFAULT_MAX_MATCHES);
+    let max_bytes = request
+        .max_bytes
+        .unwrap_or(HOST_WORKSPACE_GREP_DEFAULT_MAX_BYTES);
+    let max_line_chars = request
+        .max_line_chars
+        .unwrap_or(HOST_WORKSPACE_GREP_DEFAULT_MAX_LINE_CHARS);
     let searchable = searchable_files_with_limit(&canonical_root, &search_root, MAX_WALK_ENTRIES)?;
     let mut matches = Vec::new();
     let mut output_bytes = 0usize;
@@ -229,7 +240,7 @@ fn grep(root: &str, request: HostWorkspaceGrepRequest) -> Result<Value, ErrorPay
     let mut scanned_bytes = 0usize;
     let mut scan_truncated = false;
     for path in searchable.files {
-        let content = match read_bounded_file(&path, MAX_FILE_BYTES) {
+        let content = match read_bounded_file(&path, HOST_WORKSPACE_MAX_FILE_BYTES) {
             Ok(Some(content)) => content,
             Ok(None) => {
                 scan_truncated = true;
@@ -278,17 +289,17 @@ fn glob(root: &str, request: HostWorkspaceGlobRequest) -> Result<Value, ErrorPay
     let pattern = required_non_empty(&request.pattern, "pattern")?;
     if Path::new(pattern).is_absolute() {
         return Err(ErrorPayload::new(
-            "permission_denied",
+            HOST_ERROR_CODE_PERMISSION_DENIED,
             "glob pattern must be relative to the workspace",
         ));
     }
     let matcher = Glob::new(pattern)
-        .map_err(|error| ErrorPayload::new("invalid_input", error.to_string()))?
+        .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, error.to_string()))?
         .compile_matcher();
     let relative_root = request.root.as_deref().unwrap_or(".");
     if is_overly_broad_glob(pattern, relative_root) {
         return Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             "Use workspace.list to inspect workspace structure; workspace.glob is for targeted \
              file discovery (for example **/*.rs or crates/astrcode-core/**)",
         ));
@@ -297,12 +308,14 @@ fn glob(root: &str, request: HostWorkspaceGlobRequest) -> Result<Value, ErrorPay
     let search_root = resolve_existing_path(root, relative_root, "workspace.glob")?;
     if !search_root.is_dir() {
         return Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             "workspace.glob root must be a directory",
         ));
     }
     let canonical_root = canonical_root(root)?;
-    let max_matches = bounded_limit(request.max_matches, 200, MAX_SEARCH_MATCHES);
+    let max_matches = request
+        .max_matches
+        .unwrap_or(HOST_WORKSPACE_GLOB_DEFAULT_MAX_MATCHES);
     let include_ignored = request.include_ignored;
     let mut paths = Vec::new();
     let mut scanned = 0usize;
@@ -400,18 +413,23 @@ fn edit(root: &str, request: HostWorkspaceEditRequest) -> Result<Value, ErrorPay
     let path = resolve_existing_path(root, relative_path, "workspace.edit")?;
     let metadata = std::fs::metadata(&path)
         .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
-    if !metadata.is_file() || metadata.len() > MAX_FILE_BYTES as u64 {
+    if !metadata.is_file() || metadata.len() > HOST_WORKSPACE_MAX_FILE_BYTES as u64 {
         return Err(ErrorPayload::new(
             "file_too_large",
-            format!("workspace.edit supports regular files up to {MAX_FILE_BYTES} bytes"),
+            format!(
+                "workspace.edit supports regular files up to {HOST_WORKSPACE_MAX_FILE_BYTES} bytes"
+            ),
         ));
     }
-    let content = read_bounded_file(&path, MAX_FILE_BYTES)
+    let content = read_bounded_file(&path, HOST_WORKSPACE_MAX_FILE_BYTES)
         .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?
         .ok_or_else(|| {
             ErrorPayload::new(
                 "file_too_large",
-                format!("workspace.edit supports regular files up to {MAX_FILE_BYTES} bytes"),
+                format!(
+                    "workspace.edit supports regular files up to {HOST_WORKSPACE_MAX_FILE_BYTES} \
+                     bytes"
+                ),
             )
         })?;
     let content = String::from_utf8(content)
@@ -419,13 +437,13 @@ fn edit(root: &str, request: HostWorkspaceEditRequest) -> Result<Value, ErrorPay
     let replacements = content.matches(old_text).count();
     if replacements == 0 {
         return Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             format!("old_text not found in {relative_path}"),
         ));
     }
     if !replace_all && replacements > 1 {
         return Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             format!(
                 "old_text matched {replacements} times in {relative_path}; set replace_all=true \
                  or provide more context"
@@ -471,14 +489,16 @@ fn resolve_write_target(
         })
     {
         return Err(ErrorPayload::new(
-            "permission_denied",
+            HOST_ERROR_CODE_PERMISSION_DENIED,
             "path must be relative to the workspace",
         ));
     }
     let file_name = relative
         .file_name()
         .filter(|name| *name != OsStr::new(".."))
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "path must reference a file"))?
+        .ok_or_else(|| {
+            ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, "path must reference a file")
+        })?
         .to_owned();
     let canonical_root = std::fs::canonicalize(root)
         .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
@@ -492,7 +512,7 @@ fn resolve_write_target(
         .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
     if !canonical_parent.starts_with(&canonical_root) {
         return Err(ErrorPayload::new(
-            "permission_denied",
+            HOST_ERROR_CODE_PERMISSION_DENIED,
             "path escapes the workspace root",
         ));
     }
@@ -511,7 +531,7 @@ fn reject_symlink_components(
             Component::Normal(name) => current.push(name),
             Component::Prefix(_) | Component::RootDir | Component::ParentDir => {
                 return Err(ErrorPayload::new(
-                    "permission_denied",
+                    HOST_ERROR_CODE_PERMISSION_DENIED,
                     "path must be relative to the workspace",
                 ));
             },
@@ -519,7 +539,7 @@ fn reject_symlink_components(
         match std::fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(ErrorPayload::new(
-                    "permission_denied",
+                    HOST_ERROR_CODE_PERMISSION_DENIED,
                     format!("symlink paths are not accessible via {capability}"),
                 ));
             },
@@ -534,7 +554,7 @@ fn reject_symlink_components(
 fn reject_symlink_target(path: &Path, capability: &str) -> Result<(), ErrorPayload> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(ErrorPayload::new(
-            "permission_denied",
+            HOST_ERROR_CODE_PERMISSION_DENIED,
             format!("symlink paths are not writable via {capability}"),
         )),
         Ok(_) => Ok(()),
@@ -553,7 +573,7 @@ fn reject_sensitive_path(relative_path: &str) -> Result<(), ErrorPayload> {
         .any(is_sensitive_component);
     if sensitive {
         return Err(ErrorPayload::new(
-            "permission_denied",
+            HOST_ERROR_CODE_PERMISSION_DENIED,
             "workspace access to sensitive files is not allowed",
         ));
     }
@@ -584,7 +604,7 @@ fn is_sensitive_component(component: &str) -> bool {
 fn required_non_empty<'a>(value: &'a str, key: &str) -> Result<&'a str, ErrorPayload> {
     if value.is_empty() {
         Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             format!("{key} must not be empty"),
         ))
     } else {
@@ -593,17 +613,13 @@ fn required_non_empty<'a>(value: &'a str, key: &str) -> Result<&'a str, ErrorPay
 }
 
 fn enforce_content_limit(content: &str) -> Result<(), ErrorPayload> {
-    if content.len() > MAX_FILE_BYTES {
+    if content.len() > HOST_WORKSPACE_MAX_FILE_BYTES {
         return Err(ErrorPayload::new(
             "file_too_large",
-            format!("workspace writes are limited to {MAX_FILE_BYTES} bytes"),
+            format!("workspace writes are limited to {HOST_WORKSPACE_MAX_FILE_BYTES} bytes"),
         ));
     }
     Ok(())
-}
-
-fn bounded_limit(value: Option<usize>, default: usize, max: usize) -> usize {
-    value.unwrap_or(default).clamp(1, max)
 }
 
 fn canonical_root(root: &str) -> Result<PathBuf, ErrorPayload> {

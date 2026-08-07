@@ -238,7 +238,7 @@ async fn execute_tool_call_blocking(
         ..
     } = runtime;
     let capabilities = tool_capabilities_from_runtime(&turn, tools, tool_result_reader);
-    let tool_ctx = ToolExecutionContext::new(
+    let mut tool_ctx = ToolExecutionContext::new(
         turn.shared.session_id.clone(),
         turn.shared.working_dir.clone(),
         Some(call_id.clone()),
@@ -246,6 +246,9 @@ async fn execute_tool_call_blocking(
         capabilities,
     )
     .with_cancellation(cancellation_token.clone());
+    if let Some(turn_id) = &turn.shared.turn_id {
+        tool_ctx = tool_ctx.with_turn_id(turn_id.clone());
+    }
 
     let outcome = tokio::select! {
         _ = cancellation_token.cancelled() => ToolExecutionOutcome::cancelled(
@@ -348,9 +351,118 @@ impl FileObservationStore for InMemoryFileObservationStore {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::tool::ToolError;
+    use astrcode_core::{
+        permission::ApprovalMode,
+        tool::{ExecutionMode, SessionToolSelection, Tool, ToolError, ToolOrigin, ToolResult},
+        types::SessionId,
+    };
 
     use super::*;
+    use crate::{
+        permission::{ApprovalHistoryStore, PermissionChain},
+        turn_context::SharedTurnContext,
+    };
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CapturedContext {
+        session_id: String,
+        turn_id: String,
+        tool_call_id: String,
+        working_dir: String,
+    }
+
+    struct ContextCaptureTool(Arc<Mutex<Option<CapturedContext>>>);
+
+    #[async_trait::async_trait]
+    impl Tool for ContextCaptureTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "capture_context".into(),
+                description: String::new(),
+                parameters: serde_json::json!({ "type": "object" }),
+                strict: false,
+                origin: ToolOrigin::Extension,
+                execution_mode: ExecutionMode::Sequential,
+            }
+        }
+
+        async fn execute(
+            &self,
+            _arguments: serde_json::Value,
+            ctx: &ToolExecutionContext,
+        ) -> Result<astrcode_core::tool::ToolExecutionResult, ToolError> {
+            *self.0.lock() = Some(CapturedContext {
+                session_id: ctx.scope.session_id.to_string(),
+                turn_id: ctx.turn_id().expect("turn attribution").to_string(),
+                tool_call_id: ctx
+                    .scope
+                    .tool_call_id
+                    .clone()
+                    .expect("tool call attribution"),
+                working_dir: ctx.scope.working_dir.clone(),
+            });
+            Ok(ToolResult::success("captured").into())
+        }
+    }
+
+    #[tokio::test]
+    async fn turn_tool_context_reaches_tool_execution_context() {
+        let captured = Arc::new(Mutex::new(None));
+        let tool = Arc::new(ContextCaptureTool(Arc::clone(&captured)));
+        let definition = tool.definition();
+        let mut registry = ToolRegistry::new();
+        registry.register(tool).expect("register capture tool");
+        let runtime = ToolCallRuntimeContext {
+            turn: TurnToolContext {
+                shared: SharedTurnContext {
+                    session_id: SessionId::new("session-source"),
+                    turn_id: Some(TurnId::new("turn-source")),
+                    working_dir: "/workspace".into(),
+                    model_id: "model".into(),
+                    session_store_dir: None,
+                    turn_event_sender: None,
+                    approval_mode: ApprovalMode::default(),
+                    tool_selection: Some(SessionToolSelection::default()),
+                    permission_chain: Arc::new(PermissionChain::new(Vec::new())),
+                    approval_history: Arc::new(ApprovalHistoryStore::default()),
+                    cancellation_token: CancellationToken::new(),
+                },
+                capabilities: ToolRuntimeCapabilities {
+                    file_observation_store: None,
+                    session_ops: None,
+                    llm_models: LlmModelIds::default(),
+                    session_store_dir: None,
+                },
+            },
+            tools: Arc::from([definition]),
+            tool_result_reader: None,
+            cancellation_token: CancellationToken::new(),
+        };
+
+        let (index, outcome) = execute_tool_call(
+            Arc::new(registry),
+            runtime,
+            ExecutableToolInvocation {
+                index: 7,
+                call_id: "call-source".into(),
+                name: "capture_context".into(),
+                tool_input: serde_json::json!({}),
+            },
+        )
+        .await;
+
+        assert_eq!(index, 7);
+        assert!(matches!(outcome, ToolExecutionOutcome::Completed(_)));
+        assert_eq!(
+            captured.lock().as_ref(),
+            Some(&CapturedContext {
+                session_id: "session-source".into(),
+                turn_id: "turn-source".into(),
+                tool_call_id: "call-source".into(),
+                working_dir: "/workspace".into(),
+            })
+        );
+    }
 
     #[test]
     fn tool_failures_preserve_guidance_and_metadata() {

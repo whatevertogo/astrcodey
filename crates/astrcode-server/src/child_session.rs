@@ -4,7 +4,6 @@ mod completion;
 
 use std::{
     collections::{HashMap, HashSet},
-    path::Path,
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -180,11 +179,19 @@ struct ClaimedCompletionGuard {
     guard: Arc<ChildSessionCompletionGuard>,
     operation: SessionOperationGuard,
     claim: CompletionClaimLease,
+    action: ClaimedCompletionAction,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimedCompletionAction {
+    DrainCompleted,
+    AbortRunning,
 }
 
 struct ClaimedCompletionGuards {
     guards: Vec<ClaimedCompletionGuard>,
     error: Option<TurnScheduleError>,
+    shutdown_requested_by_cascade: bool,
 }
 
 #[derive(Default)]
@@ -480,10 +487,7 @@ impl ChildSessionCoordinator {
             .await
             .map_err(SessionApiError::internal)?;
 
-        let working_dir = resolve_child_working_dir(
-            &parent_model.identity.working_dir,
-            request.working_dir.as_deref(),
-        )?;
+        let working_dir = parent_model.identity.working_dir.clone();
         let model_id = request
             .model_preference
             .filter(|m| m != "inherit" && !m.is_empty())
@@ -500,7 +504,7 @@ impl ChildSessionCoordinator {
                         extra_system_prompt: request.system_prompt,
                         tool_selection: request.tool_selection,
                         source_extension: request.source_extension,
-                        tool_call_id: request.tool_call_id.into(),
+                        tool_call_id: request.tool_call_id.map(Into::into),
                     })
                     .await;
                 drop(parent_operation);
@@ -801,7 +805,7 @@ impl ChildSessionCoordinator {
                 continue;
             };
             #[cfg(any(test, feature = "testing"))]
-            self.pause_after_claim_for_test().await;
+            self.pause_completion_claim_for_test().await;
 
             let completion = guard.completion().await;
             if !guard.child_is_settled() {
@@ -1029,6 +1033,11 @@ impl ChildSessionCoordinator {
     }
 
     #[cfg(any(test, feature = "testing"))]
+    pub(crate) fn completed_guard_count(&self, parent_sid: &SessionId) -> usize {
+        self.completed_guard_candidates(parent_sid).len()
+    }
+
+    #[cfg(any(test, feature = "testing"))]
     fn install_pause(
         target: &Mutex<Option<CompletionGuardPause>>,
     ) -> (
@@ -1050,7 +1059,7 @@ impl ChildSessionCoordinator {
     }
 
     #[cfg(any(test, feature = "testing"))]
-    async fn pause_after_claim_for_test(&self) {
+    async fn pause_completion_claim_for_test(&self) {
         Self::wait_for_pause(&self.claim_pause).await;
     }
 
@@ -1177,10 +1186,17 @@ impl ChildSessionCoordinator {
         scheduler: &TurnScheduler,
         parent_sid: &SessionId,
     ) -> Result<bool, TurnScheduleError> {
-        let ClaimedCompletionGuards { guards, error } = self
+        let ClaimedCompletionGuards {
+            guards,
+            error,
+            shutdown_requested_by_cascade,
+        } = self
             .claim_guards_deep(scheduler, parent_sid, Duration::from_secs(10))
             .await;
-        let cancelled_guarded_child = !guards.is_empty();
+        let cancelled_guarded_child = shutdown_requested_by_cascade
+            || guards
+                .iter()
+                .any(|claimed| claimed.action == ClaimedCompletionAction::AbortRunning);
         let mut guarded_children: HashSet<SessionId> = guards
             .iter()
             .map(|claimed| claimed.guard.child_session_id().clone())
@@ -1189,8 +1205,8 @@ impl ChildSessionCoordinator {
             self.restore_claimed_guards(guards);
             return Err(error);
         }
-        if cancelled_guarded_child {
-            self.finalize_aborted_children(scheduler, guards).await?;
+        if !guards.is_empty() {
+            self.finalize_claimed_children(scheduler, guards).await?;
         }
         guarded_children.extend(self.registered_child_ids());
         let cancelled_unguarded_child = self
@@ -1375,13 +1391,20 @@ impl ChildSessionCoordinator {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut claimed = Vec::new();
         let mut first_error = None;
+        let mut any_shutdown_requested_by_cascade = false;
         let mut stack: Vec<SessionId> = vec![root_sid.clone()];
         let mut visited = HashSet::from([root_sid.clone()]);
 
         while let Some(sid) = stack.pop() {
             for candidate in self.guard_candidates(&sid) {
                 let child_session_id = candidate.child_session_id().clone();
-                candidate.request_shutdown();
+                let shutdown_requested_by_cascade = !candidate.is_complete();
+                if shutdown_requested_by_cascade {
+                    any_shutdown_requested_by_cascade = true;
+                    candidate.request_shutdown();
+                    #[cfg(any(test, feature = "testing"))]
+                    self.pause_completion_claim_for_test().await;
+                }
                 if visited.insert(child_session_id.clone()) {
                     stack.push(child_session_id.clone());
                 }
@@ -1412,11 +1435,17 @@ impl ChildSessionCoordinator {
                     drop(operation);
                     continue;
                 };
-                guard.force_recycle_on_completion();
+                let action = if shutdown_requested_by_cascade {
+                    guard.force_recycle_on_completion();
+                    ClaimedCompletionAction::AbortRunning
+                } else {
+                    ClaimedCompletionAction::DrainCompleted
+                };
                 claimed.push(ClaimedCompletionGuard {
                     guard,
                     operation,
                     claim,
+                    action,
                 });
             }
         }
@@ -1439,10 +1468,11 @@ impl ChildSessionCoordinator {
         ClaimedCompletionGuards {
             guards: claimed,
             error: first_error,
+            shutdown_requested_by_cascade: any_shutdown_requested_by_cascade,
         }
     }
 
-    async fn finalize_aborted_children(
+    async fn finalize_claimed_children(
         &self,
         scheduler: &TurnScheduler,
         mut guards: Vec<ClaimedCompletionGuard>,
@@ -1452,6 +1482,7 @@ impl ChildSessionCoordinator {
                 guard,
                 operation,
                 mut claim,
+                action,
             } = claimed;
             let child_sid = guard.child_session_id();
             let parent_sid = guard.parent_session_id();
@@ -1486,22 +1517,41 @@ impl ChildSessionCoordinator {
                     },
                 }
             }
-            let terminal_error = if completion.outcome == ChildOutcome::TimedOut {
-                "abort timed out"
+            let terminal_result = if action == ClaimedCompletionAction::DrainCompleted {
+                self.write_terminal_for_guard(&guard, &completion).await
             } else {
-                "aborted"
+                let terminal_error = if completion.outcome == ChildOutcome::TimedOut {
+                    "abort timed out"
+                } else {
+                    "aborted"
+                };
+                self.record_failed(parent_sid, child_sid, terminal_error)
+                    .await
             };
-            if let Err(error) = self
-                .record_failed(parent_sid, child_sid, terminal_error)
-                .await
-            {
+            if let Err(error) = terminal_result {
                 guard.finish_terminal(Err(error.to_string()));
                 self.restore_completion_guard(Arc::clone(&guard));
                 claim.commit();
                 self.restore_claimed_guards(guards);
                 return Err(error);
             }
-            if let Err(error) = scheduler
+            if action == ClaimedCompletionAction::DrainCompleted
+                && guard.cleanup_policy() == ChildCleanup::Keep
+            {
+                match scheduler
+                    .start_next_after_settle_in_operation(operation)
+                    .await
+                {
+                    Ok(next) => scheduler.watch_queued_if_any(child_sid.clone(), next),
+                    Err(error) => {
+                        guard.finish_terminal(Err(error.to_string()));
+                        self.restore_completion_guard(Arc::clone(&guard));
+                        claim.commit();
+                        self.restore_claimed_guards(guards);
+                        return Err(error);
+                    },
+                }
+            } else if let Err(error) = scheduler
                 .recycle_settled_session_in_operation(operation)
                 .await
             {
@@ -1514,6 +1564,38 @@ impl ChildSessionCoordinator {
             }
             guard.finish_terminal(Ok(()));
             claim.commit();
+
+            if action == ClaimedCompletionAction::DrainCompleted && guard.notify_text().is_some() {
+                let message = build_background_agent_notification(&guard).await;
+                let notification_scheduler = TurnScheduler::clone(scheduler);
+                let parent_session_id = parent_sid.clone();
+                let child_session_id = child_sid.clone();
+                if let Err(error) =
+                    scheduler.spawn_owned_named("child_completion_notification", async move {
+                        if let Err(error) = notification_scheduler
+                            .deliver_child_completion_notification(
+                                parent_session_id.clone(),
+                                astrcode_core::user_input::UserInput::text_only(message),
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                parent_session_id = %parent_session_id,
+                                child_session_id = %child_session_id,
+                                %error,
+                                "failed to deliver deferred child completion notification"
+                            );
+                        }
+                    })
+                {
+                    tracing::warn!(
+                        parent_session_id = %parent_sid,
+                        child_session_id = %child_sid,
+                        %error,
+                        "failed to schedule deferred child completion notification"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -1590,83 +1672,9 @@ fn map_recycled_access_error(error: SessionManagerError) -> SessionApiError {
     }
 }
 
-fn resolve_child_working_dir(
-    parent_working_dir: &str,
-    requested: Option<&str>,
-) -> Result<String, SessionApiError> {
-    let Some(requested) = requested else {
-        return Ok(parent_working_dir.to_owned());
-    };
-    let canonical_parent = Path::new(parent_working_dir)
-        .canonicalize()
-        .map_err(SessionApiError::internal)?;
-    let requested = Path::new(requested);
-    let candidate = if requested.is_absolute() {
-        requested.to_owned()
-    } else {
-        canonical_parent.join(requested)
-    };
-    let canonical_candidate = candidate.canonicalize().map_err(|_| {
-        SessionApiError::PermissionDenied(
-            "child working directory must be an existing directory within the parent workspace"
-                .into(),
-        )
-    })?;
-    if !canonical_candidate.is_dir() || !canonical_candidate.starts_with(&canonical_parent) {
-        return Err(SessionApiError::PermissionDenied(
-            "child working directory must be an existing directory within the parent workspace"
-                .into(),
-        ));
-    }
-    Ok(canonical_candidate.to_string_lossy().into_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn child_working_directory_stays_within_parent_workspace() {
-        let temp = tempfile::tempdir().expect("tempdir");
-        let workspace = temp.path().join("workspace");
-        let nested = workspace.join("nested");
-        let sibling = temp.path().join("sibling");
-        std::fs::create_dir_all(&nested).expect("nested workspace");
-        std::fs::create_dir_all(&sibling).expect("sibling workspace");
-        let canonical_nested = nested.canonicalize().expect("canonical nested workspace");
-        let workspace = workspace.to_string_lossy();
-
-        assert_eq!(
-            resolve_child_working_dir(&workspace, None).expect("inherit workspace"),
-            workspace.as_ref()
-        );
-        for requested in ["nested".to_owned(), nested.to_string_lossy().into_owned()] {
-            assert_eq!(
-                resolve_child_working_dir(&workspace, Some(&requested))
-                    .expect("nested directory must be accepted"),
-                canonical_nested.to_string_lossy()
-            );
-        }
-        for requested in [
-            "../sibling".to_owned(),
-            sibling.to_string_lossy().into_owned(),
-        ] {
-            assert!(matches!(
-                resolve_child_working_dir(&workspace, Some(&requested)),
-                Err(SessionApiError::PermissionDenied(_))
-            ));
-        }
-
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&sibling, Path::new(workspace.as_ref()).join("escape"))
-                .expect("workspace escape symlink");
-            assert!(matches!(
-                resolve_child_working_dir(&workspace, Some("escape")),
-                Err(SessionApiError::PermissionDenied(_))
-            ));
-        }
-    }
 
     #[test]
     fn terminal_payload_uses_matching_child_and_final_session_ids() {

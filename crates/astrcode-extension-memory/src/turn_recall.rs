@@ -114,15 +114,12 @@ impl LifecycleHandler for MemoryProjectRecallTurnEndHandler {
 
         let store_pool = self.store_pool.clone();
         let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| ExtensionError::Internal("memory recall requires a workspace".into()))?
+            .call()
+            .require_working_dir()?
             .to_string_lossy()
             .into_owned();
         let buffer = self.buffer.clone();
-        let session_id = ctx
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("memory recall requires a session".into()))?
-            .to_string();
+        let session_id = ctx.call().require_session_id()?.to_string();
 
         let lines = tokio::task::spawn_blocking(move || {
             recall_project_lines(
@@ -155,9 +152,7 @@ impl ProviderHandler for MemoryProjectRecallDeliveryProvider {
         if !self.config.read().inject_project_memories_per_turn {
             return Ok(ProviderResult::Allow);
         }
-        let session_id = ctx
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("memory recall requires a session".into()))?;
+        let session_id = ctx.call().require_session_id()?;
         let Some(lines) = self.buffer.take(session_id.as_str()) else {
             return Ok(ProviderResult::Allow);
         };

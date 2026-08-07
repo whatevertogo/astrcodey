@@ -9,10 +9,7 @@ use std::{collections::HashMap, sync::OnceLock};
 use astrcode_context::prompt_engine::{
     ExtensionPromptBlock, ExtensionSection, PromptEngine, SystemPromptInput, load_prompt_files,
 };
-use astrcode_core::{
-    config::ModelSelection,
-    tool::{ToolDefinition, ToolPromptMetadata},
-};
+use astrcode_core::tool::{ToolDefinition, ToolPromptMetadata};
 use astrcode_extension_sdk::{
     extension::{ExtensionError, RuntimeHookCallContext, RuntimePromptBuildContext},
     runtime_ports::{
@@ -67,10 +64,7 @@ pub(crate) async fn build_base_tool_registry(
 
 pub(crate) struct SystemPromptSnapshotInput<'a> {
     pub prompt_contributor: &'a dyn PromptContributor,
-    pub session_id: &'a str,
-    pub working_dir: &'a str,
-    pub session_store_dir: Option<std::path::PathBuf>,
-    pub model_id: &'a str,
+    pub call: RuntimeHookCallContext,
     pub tools: &'a [ToolDefinition],
     pub extra_system_prompt: Option<&'a str>,
     pub tool_prompt_metadata: HashMap<String, ToolPromptMetadata>,
@@ -80,20 +74,11 @@ pub(crate) struct SystemPromptSnapshotInput<'a> {
 /// 收集扩展的 prompt 贡献。
 ///
 /// 纯数据收集函数，不组装 prompt。调用方可自行决定如何与稳定前缀组合。
-/// 参数与 [`SystemPromptSnapshotInput`] 的前 5 个字段完全重叠，直接收整个
-/// 输入结构体，避免两处字段列表各自演变导致不一致。
+/// 直接使用调用方提供的 hook call，避免在 prompt 层重新构造并丢失 turn 归属或取消信号。
 async fn collect_extension_prompt_blocks(
     input: &SystemPromptSnapshotInput<'_>,
 ) -> Result<Vec<ExtensionPromptBlock>, ExtensionError> {
-    let prompt_ctx = RuntimePromptBuildContext::new(
-        RuntimeHookCallContext::new(
-            input.session_id,
-            input.working_dir,
-            ModelSelection::simple(input.model_id),
-            input.session_store_dir.clone(),
-        ),
-        input.tools.to_vec(),
-    );
+    let prompt_ctx = RuntimePromptBuildContext::new(input.call.clone(), input.tools.to_vec());
     let contributions = input
         .prompt_contributor
         .collect_prompt_contributions(prompt_ctx)
@@ -132,7 +117,7 @@ pub(crate) async fn build_system_prompt_snapshot(
     let extension_blocks = collect_extension_prompt_blocks(&input).await?;
 
     let SystemPromptSnapshotInput {
-        working_dir,
+        call,
         tools,
         extra_system_prompt,
         tool_prompt_metadata,
@@ -140,11 +125,12 @@ pub(crate) async fn build_system_prompt_snapshot(
         ..
     } = input;
 
+    let working_dir = call.working_dir().to_string_lossy().into_owned();
     let extra_instructions = extra_system_prompt.map(str::to_owned);
-    let prompt_files = load_prompt_files(working_dir, include_agents_rules).await;
+    let prompt_files = load_prompt_files(&working_dir, include_agents_rules).await;
 
     let prompt_input = SystemPromptInput {
-        working_dir: working_dir.to_string(),
+        working_dir,
         os: std::env::consts::OS.into(),
         shell: resolve_shell().name,
         gh_cli_available: is_gh_cli_available(),

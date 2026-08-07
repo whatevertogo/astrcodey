@@ -18,7 +18,6 @@ pub const CAP_HANDLER_INVOKE: &str = "handler.invoke";
 pub const CAP_RUNTIME_PING: &str = "s5r.runtime.ping";
 
 pub const WIRE_CODEC_JSON: &str = "json";
-pub const SUPPORTED_PROTOCOL_VERSIONS_KEY: &str = "supported_protocol_versions";
 pub const WIRE_CODEC_METADATA_KEY: &str = "wire_codec";
 /// Wire feature: nested invokes carry the id of the inbound invoke that created them.
 pub const WIRE_FEATURE_PARENT_INVOKE_ID: &str = "parent_invoke_id";
@@ -61,10 +60,10 @@ pub struct InitializeMsg {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InitializeOutput {
     pub peer: PeerInfo,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub protocol_version: Option<String>,
+    pub protocol_version: String,
     #[serde(default)]
     pub capabilities: Vec<CapabilityDescriptor>,
     #[serde(default)]
@@ -130,8 +129,6 @@ pub struct InvokeMsg {
     pub input: Value,
     #[serde(default)]
     pub stream: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub caller_extension_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_invoke_id: Option<String>,
 }
@@ -316,7 +313,6 @@ mod tests {
             capability: "handler.invoke".into(),
             input: serde_json::json!({}),
             stream: false,
-            caller_extension_id: Some("ext".into()),
             parent_invoke_id: Some("req-parent".into()),
         });
         let json = serde_json::to_string(&msg).unwrap();
@@ -353,6 +349,28 @@ mod tests {
                 "{boundary} returned an unexpected parse error: {error}"
             );
         }
+    }
+
+    #[test]
+    fn initialize_output_requires_the_negotiated_version_and_rejects_unknown_fields() {
+        let valid = serde_json::json!({
+            "peer": { "name": "host", "role": "host" },
+            "protocol_version": S5R_VERSION,
+            "capabilities": [],
+            "metadata": {}
+        });
+        assert!(serde_json::from_value::<InitializeOutput>(valid.clone()).is_ok());
+
+        let mut missing_version = valid.clone();
+        missing_version
+            .as_object_mut()
+            .unwrap()
+            .remove("protocol_version");
+        assert!(serde_json::from_value::<InitializeOutput>(missing_version).is_err());
+
+        let mut unknown_field = valid;
+        unknown_field["unexpected"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<InitializeOutput>(unknown_field).is_err());
     }
 
     #[test]

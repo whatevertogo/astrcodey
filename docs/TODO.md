@@ -12,10 +12,10 @@
   - [ ] **外置扩展与内置能力对齐**
     - [x] `S5rToolHandler` 透传 turn 取消 → `InvokeContext.cancel_token`（`peer.rs` → `registry.rs` → `host_router.rs` → `session.rs` 全链路已打通）
     - [ ] s5r 支持 `tool_metadata` / `ToolDiscovery`（对标 MCP 动态工具、agent prompt 元数据）— 内置扩展完整支持，s5r wire 协议尚无 `tool_metadata` / `ToolDiscovery` 字段
-    - [ ] 进程内专属 API 评估：`extension_event_sink` 等是否经 `astrcode.*` 暴露给 Worker — 当前仅内部 API，无 wire 暴露
+    - [x] extension event 统一经声明校验后的 `EventClient::emit` / `ExtensionEventEmitter::emit` 发射；裸 sink 仅留在 doc-hidden runtime internal boundary
   - [ ] **SDK 开发体验（Worker）**
     - [x] `tool_handler` / `tool_handler_args`、manifest 与 handler 一体注册（`Worker::tool`）
-    - [x] Handler 错误类型 `ErrorPayload`；`HostApi` + `inject_host_api` 可测
+    - [x] Handler 错误类型 `ErrorPayload`；`HostApi` + task-scoped `with_host_api` transport seam 可测
     - [x] [`extension-author-guide.md`](extension-author-guide.md)（含外置 agent-tool 指引）
     - [ ] `#[handler]` 过程宏（可选，进一步减样板）
     - [ ] Handler 运行时进度 / 日志上报通道（协议 + SDK API）

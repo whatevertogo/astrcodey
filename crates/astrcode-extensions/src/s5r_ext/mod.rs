@@ -52,7 +52,6 @@ impl S5rExtension {
         ext_dir: &Path,
         manifest: &ExtensionPackageManifest,
         host_router: Arc<HostRouter>,
-        _working_dir: Option<&str>,
     ) -> Result<Arc<Self>, String> {
         let (program, args) = parse_command(manifest, ext_dir)?;
         let env = parse_env(manifest);
@@ -292,7 +291,7 @@ struct S5rHttpHandler {
 #[async_trait::async_trait]
 impl ExtensionHttpHandler for S5rHttpHandler {
     async fn handle(&self, ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError> {
-        let invoke_ctx = transport_invoke_ctx_or_fallback(&self.session, ctx.call());
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
         let event = serde_json::to_value(ctx.request()).map_err(|error| {
             ExtensionError::Internal(format!("serialize HTTP request: {error}"))
         })?;
@@ -304,28 +303,12 @@ impl ExtensionHttpHandler for S5rHttpHandler {
     }
 }
 
-fn transport_invoke_ctx_or_fallback(
-    session: &Arc<S5rSession>,
+fn require_transport_invoke_ctx(
     call: &ExtensionCallContext,
-) -> InvokeContext {
-    crate::runner::transport_invoke_context(call.host()).unwrap_or_else(|| InvokeContext {
-        extension_id: call.extension_id().to_owned(),
-        session_id: call.session_id().map(ToString::to_string),
-        working_dir: call
-            .working_dir()
-            .map(|path| path.to_string_lossy().into_owned()),
-        cancel_token: Some(call.cancellation().clone()),
-        tasks: Some(call.tasks().clone()),
-        event_declarations: session.event_decls(),
-        declared_capabilities: session.declared_capabilities(),
-        ..InvokeContext::default()
-    })
-}
-
-fn transport_hook_invoke_ctx(call: &ExtensionCallContext) -> Result<InvokeContext, ExtensionError> {
+) -> Result<InvokeContext, ExtensionError> {
     crate::runner::transport_invoke_context(call.host()).ok_or_else(|| {
         ExtensionError::Internal(
-            "s5r hook requires the runner-provided transport context".to_owned(),
+            "s5r invocation requires the runner-provided transport context".to_owned(),
         )
     })
 }
@@ -374,7 +357,8 @@ impl ToolHandler for S5rToolHandler {
             .to_string_lossy()
             .into_owned();
         let tool_call_id = ctx.call_id().map(str::to_owned);
-        let invoke_ctx = transport_invoke_ctx_or_fallback(&self.session, ctx.call());
+        let turn_id = ctx.turn_id().map(str::to_owned);
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
         let event = json!({
             "on": "tool",
             "name": &tool_name,
@@ -383,6 +367,7 @@ impl ToolHandler for S5rToolHandler {
                 "arguments": arguments,
                 "working_dir": working_dir,
                 "session_id": session_id,
+                "turn_id": turn_id,
                 "tool_call_id": tool_call_id,
             }
         });
@@ -403,7 +388,7 @@ struct S5rCommandHandler {
 #[async_trait::async_trait]
 impl CommandHandler for S5rCommandHandler {
     async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError> {
-        let invoke_ctx = transport_invoke_ctx_or_fallback(&self.session, ctx.call());
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
         let event = json!({
             "on": "command",
             "name": ctx.command_name(),
@@ -432,7 +417,7 @@ struct S5rPreToolUseHandler {
 #[async_trait::async_trait]
 impl PreToolUseHandler for S5rPreToolUseHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
-        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
         let input = json!({
             "session_id": ctx.session_id().map(ToString::to_string),
             "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
@@ -463,7 +448,7 @@ struct S5rPostToolUseHandler {
 impl PostToolUseHandler for S5rPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
         let is_error = ctx.tool_result().is_error;
-        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
         let input = json!({
             "session_id": ctx.session_id().map(ToString::to_string),
             "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
@@ -495,7 +480,7 @@ struct S5rProviderHandler {
 #[async_trait::async_trait]
 impl ProviderHandler for S5rProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
         let input = json!({
             "session_id": ctx.session_id().map(ToString::to_string),
             "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
@@ -518,7 +503,7 @@ impl ContinueAfterStopHandler for S5rContinueAfterStopHandler {
         &self,
         ctx: ContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
-        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
         let input = json!({
             "session_id": ctx.session_id().map(ToString::to_string),
             "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
@@ -547,7 +532,7 @@ struct S5rPromptBuildHandler {
 #[async_trait::async_trait]
 impl PromptBuildHandler for S5rPromptBuildHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
-        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
         let input = json!({
             "session_id": ctx.session_id().map(ToString::to_string),
             "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
@@ -574,7 +559,7 @@ struct S5rCompactHandler {
 #[async_trait::async_trait]
 impl CompactHandler for S5rCompactHandler {
     async fn handle(&self, ctx: CompactContext) -> Result<CompactResult, ExtensionError> {
-        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
         let input = json!({
             "session_id": ctx.session_id().map(ToString::to_string),
             "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
@@ -599,7 +584,7 @@ struct S5rLifecycleHandler {
 #[async_trait::async_trait]
 impl LifecycleHandler for S5rLifecycleHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        let invoke_ctx = transport_hook_invoke_ctx(ctx.call())?;
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
         let input = json!({
             "session_id": ctx.session_id().map(ToString::to_string),
             "working_dir": ctx.working_dir().map(|path| path.display().to_string()),

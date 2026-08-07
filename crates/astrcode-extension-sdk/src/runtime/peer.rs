@@ -21,12 +21,12 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    host::HOST_ERROR_CODE_CANCELLED,
     runtime::{cancel::CancelToken, stream::EventStream, transport::FrameTransport},
     s5r::{
-        CAP_HANDLER_INVOKE, CAP_RUNTIME_PING, CancelMsg, ErrorPayload, EventMsg, EventPhase,
-        InitializeMsg, InitializeOutput, InvokeMsg, PeerInfo, ResultKind, ResultMsg, S5R_VERSION,
-        WIRE_CODEC_JSON, WIRE_CODEC_METADATA_KEY, WireMessage, encode_wire_message,
-        parse_wire_message,
+        CAP_RUNTIME_PING, CancelMsg, ErrorPayload, EventMsg, EventPhase, InitializeMsg,
+        InitializeOutput, InvokeMsg, PeerInfo, ResultKind, ResultMsg, S5R_VERSION, WIRE_CODEC_JSON,
+        WIRE_CODEC_METADATA_KEY, WireMessage, encode_wire_message, parse_wire_message,
     },
 };
 
@@ -519,6 +519,12 @@ impl<T: FrameTransport + 'static> Peer<T> {
         }
         let output: InitializeOutput = serde_json::from_value(result.output.unwrap_or(Value::Null))
             .map_err(|e| PeerError::Msg(format!("parse InitializeOutput: {e}")))?;
+        if output.protocol_version != self.protocol_version {
+            return Err(PeerError::Msg(format!(
+                "initialize response protocol_version mismatch: expected {}, got {}",
+                self.protocol_version, output.protocol_version
+            )));
+        }
         self.remote_initialized.store(true, Ordering::SeqCst);
         Ok(output)
     }
@@ -527,7 +533,6 @@ impl<T: FrameTransport + 'static> Peer<T> {
         self: &Arc<Self>,
         capability: &str,
         input: Value,
-        caller_extension_id: Option<&str>,
         control: OutboundInvokeControl,
     ) -> Result<Value, PeerError> {
         let OutboundRequestPrep {
@@ -542,7 +547,6 @@ impl<T: FrameTransport + 'static> Peer<T> {
             capability: capability.to_string(),
             input,
             stream: false,
-            caller_extension_id: caller_extension_id.map(str::to_string),
             parent_invoke_id,
         });
         let result = self.request_result(id, msg, DEFAULT_INVOKE_TIMEOUT).await;
@@ -558,7 +562,6 @@ impl<T: FrameTransport + 'static> Peer<T> {
         self.invoke(
             CAP_RUNTIME_PING,
             Value::Null,
-            None,
             OutboundInvokeControl::default(),
         )
         .await
@@ -569,7 +572,6 @@ impl<T: FrameTransport + 'static> Peer<T> {
         self: &Arc<Self>,
         capability: &str,
         input: Value,
-        caller_extension_id: Option<&str>,
         control: OutboundInvokeControl,
     ) -> Result<EventStream, PeerError> {
         let OutboundRequestPrep {
@@ -591,7 +593,6 @@ impl<T: FrameTransport + 'static> Peer<T> {
             capability: capability.to_string(),
             input,
             stream: true,
-            caller_extension_id: caller_extension_id.map(str::to_string),
             parent_invoke_id,
         });
         self.send_message(&msg).await?;
@@ -617,41 +618,27 @@ impl<T: FrameTransport + 'static> Peer<T> {
         self: &Arc<Self>,
         capability: &str,
         input: Value,
-        caller_extension_id: Option<&str>,
     ) -> Result<EventStream, PeerError> {
-        self.invoke_stream_with_control(
-            capability,
-            input,
-            caller_extension_id,
-            OutboundInvokeControl::default(),
-        )
-        .await
+        self.invoke_stream_with_control(capability, input, OutboundInvokeControl::default())
+            .await
     }
 
     pub async fn invoke_stream_with_control(
         self: &Arc<Self>,
         capability: &str,
         input: Value,
-        caller_extension_id: Option<&str>,
         control: OutboundInvokeControl,
     ) -> Result<EventStream, PeerError> {
-        self.begin_invoke_stream(capability, input, caller_extension_id, control)
-            .await
+        self.begin_invoke_stream(capability, input, control).await
     }
 
     pub async fn invoke_stream_collect(
         self: &Arc<Self>,
         capability: &str,
         input: Value,
-        caller_extension_id: Option<&str>,
     ) -> Result<Value, PeerError> {
         let mut stream = self
-            .begin_invoke_stream(
-                capability,
-                input,
-                caller_extension_id,
-                OutboundInvokeControl::default(),
-            )
+            .begin_invoke_stream(capability, input, OutboundInvokeControl::default())
             .await?;
         let mut last_output = Value::Null;
         let deadline = tokio::time::Instant::now() + DEFAULT_STREAM_TIMEOUT;
@@ -741,27 +728,6 @@ impl<T: FrameTransport + 'static> Peer<T> {
                 tokio::sync::TryAcquireError::Closed => self.close_error(),
                 tokio::sync::TryAcquireError::NoPermits => PeerError::Busy,
             })
-    }
-
-    pub async fn invoke_handler(
-        self: &Arc<Self>,
-        handler_id: &str,
-        event: Value,
-        caller_extension_id: &str,
-    ) -> Result<Value, PeerError> {
-        let output = self
-            .invoke(
-                CAP_HANDLER_INVOKE,
-                json!({
-                    "handler_id": handler_id,
-                    "event": event,
-                    "caller_extension_id": caller_extension_id,
-                }),
-                Some(caller_extension_id),
-                OutboundInvokeControl::default(),
-            )
-            .await?;
-        Ok(output)
     }
 
     async fn read_loop(self: Arc<Self>, work_tx: mpsc::Sender<InboundWork>) {
@@ -1191,7 +1157,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                         Some(ResultKind::InvokeResult),
                         false,
                         None,
-                        Some(ErrorPayload::new("cancelled", reason)),
+                        Some(ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, reason)),
                     )
                     .await;
                 },
@@ -1514,7 +1480,6 @@ mod tests {
             capability: "test.block".into(),
             input: Value::Null,
             stream: false,
-            caller_extension_id: None,
             parent_invoke_id: None,
         })
     }
@@ -1555,7 +1520,7 @@ mod tests {
                 role: "test".into(),
                 version: None,
             },
-            protocol_version: Some(S5R_VERSION.into()),
+            protocol_version: S5R_VERSION.into(),
             capabilities: Vec::new(),
             metadata: Value::Null,
         }
@@ -1618,6 +1583,34 @@ mod tests {
             caller.stop().await;
             remote.stop().await;
         }
+    }
+
+    #[tokio::test]
+    async fn initialize_rejects_a_mismatched_response_protocol_before_readiness() {
+        let (caller_transport, remote_transport) = ChannelTransport::pair();
+        let caller = test_peer(caller_transport, "caller");
+        let remote = test_peer(remote_transport, "remote");
+        remote.set_initialize_handler(Arc::new(|_init| {
+            Box::pin(async {
+                let mut output = initialize_output("remote");
+                output.protocol_version = "1.0".into();
+                Ok(output)
+            })
+        }));
+        caller.start().await.unwrap();
+        remote.start().await.unwrap();
+
+        let error = caller
+            .initialize(Vec::new(), Value::Null)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, PeerError::Msg(message) if message.contains("protocol_version mismatch") && message.contains(S5R_VERSION) && message.contains("1.0"))
+        );
+        assert!(!caller.is_remote_initialized());
+
+        caller.stop().await;
+        remote.stop().await;
     }
 
     #[tokio::test]
@@ -1815,7 +1808,6 @@ mod tests {
             .invoke(
                 "astrcode.llm.main_chat",
                 Value::Null,
-                Some("test-extension"),
                 OutboundInvokeControl::default(),
             )
             .await
@@ -1823,11 +1815,7 @@ mod tests {
         assert_structured_payload(error, &expected);
 
         let error = caller
-            .invoke_stream_collect(
-                "astrcode.llm.main_chat",
-                Value::Null,
-                Some("test-extension"),
-            )
+            .invoke_stream_collect("astrcode.llm.main_chat", Value::Null)
             .await
             .unwrap_err();
         assert_structured_payload(error, &expected);
@@ -1870,12 +1858,7 @@ mod tests {
             let nested_peer = Arc::clone(&nested_peer);
             Box::pin(async move {
                 nested_peer
-                    .invoke(
-                        "test.nested",
-                        Value::Null,
-                        None,
-                        OutboundInvokeControl::default(),
-                    )
+                    .invoke("test.nested", Value::Null, OutboundInvokeControl::default())
                     .await
                     .map(InvokeReply::Value)
                     .map_err(|error| ErrorPayload::new("nested_failed", error.to_string()))
@@ -1891,7 +1874,6 @@ mod tests {
                 .invoke(
                     "test.outer",
                     Value::Null,
-                    None,
                     OutboundInvokeControl {
                         external_cancel: Some(cancellation.clone()),
                         ..Default::default()
@@ -1951,7 +1933,6 @@ mod tests {
                 .invoke(
                     "test.pending",
                     Value::Null,
-                    None,
                     OutboundInvokeControl {
                         tracker: Some(invoke_tracker),
                         ..Default::default()
@@ -1985,7 +1966,6 @@ mod tests {
             .invoke_stream_with_control(
                 "test.stream",
                 Value::Null,
-                None,
                 OutboundInvokeControl {
                     tracker: Some(tracker.clone()),
                     ..Default::default()
@@ -2034,7 +2014,6 @@ mod tests {
             peer.invoke(
                 "test.overloaded",
                 Value::Null,
-                None,
                 OutboundInvokeControl::default()
             )
             .await,
@@ -2059,7 +2038,6 @@ mod tests {
                 .invoke(
                     "test.pending",
                     Value::Null,
-                    None,
                     OutboundInvokeControl::default(),
                 )
                 .await
@@ -2069,7 +2047,7 @@ mod tests {
         };
 
         let mut stream = peer
-            .invoke_stream("test.stream", Value::Null, None)
+            .invoke_stream("test.stream", Value::Null)
             .await
             .unwrap();
         let WireMessage::Invoke(_) = next_wire(&mut outgoing).await else {
@@ -2168,7 +2146,6 @@ mod tests {
                 .invoke(
                     "test.outbound",
                     Value::Null,
-                    None,
                     OutboundInvokeControl::default(),
                 )
                 .await
@@ -2295,7 +2272,6 @@ mod tests {
                 .invoke(
                     "test.outbound",
                     Value::Null,
-                    None,
                     OutboundInvokeControl::default(),
                 )
                 .await

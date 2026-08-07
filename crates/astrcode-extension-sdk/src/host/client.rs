@@ -1,413 +1,52 @@
+#[cfg(test)]
 use serde_json::json;
 
+use crate::host::{
+    ExtensionHost, HostError, HostOperation, TypedExtensionHttpClient, TypedModelClient,
+    TypedNetworkClient, TypedProcessClient, TypedSessionControlClient, TypedSessionHistoryClient,
+    TypedSessionInspectClient, TypedSessionStateClient, TypedWorkspaceClient,
+};
+#[cfg(test)]
 use crate::{
-    extension::{ExtensionHttpRequest, ExtensionHttpResponse},
+    extension::ExtensionHttpDispatchRequest,
     host::{
-        ExtensionHost, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
-        HostError, HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput,
-        HostNetworkRequest, HostNetworkResponse, HostOperation, HostProcessOutput,
-        HostProcessRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
-        HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
-        HostSessionSummariesOutput, HostSessionTokenUsageOutput, HostSessionTranscript,
-        HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
-        HostWorkspaceGlobRequest, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
-        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
-        HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
+        HostConfigureSessionToolsRequest, HostNetworkRequest, HostProcessRequest,
+        HostSessionInputRequest, HostSessionStateReadRequest, HostSessionStateWriteRequest,
+        HostWorkspaceEditRequest, HostWorkspaceGlobRequest, HostWorkspaceGrepRequest,
+        HostWorkspaceListRequest, HostWorkspaceReadRequest, HostWorkspaceWriteRequest,
     },
     llm::LlmMessage,
     session::{
-        HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
-        HostRootSubmitTurnRequest, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
-        HostSessionReactivateOutput, HostSessionStateOutput, HostSessionTargetRequest,
-        HostSubmitTurnOutput, HostSubmitTurnRequest,
-    },
-    session_inspect::{
-        SessionHistorySnapshotOutput, SessionInspectListOutput,
-        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
-        SessionInspectSnapshotOutput,
+        HostCreateSessionRequest, HostRecycleSessionRequest, HostRootSubmitTurnRequest,
+        HostSessionEventsPageRequest, HostSessionTargetRequest, HostSubmitTurnRequest,
     },
 };
 
-macro_rules! domain_client {
-    ($name:ident) => {
-        #[derive(Clone)]
-        pub struct $name {
-            host: ExtensionHost,
-        }
+pub type ModelClient = TypedModelClient<ExtensionHost>;
+pub type SessionControlClient = TypedSessionControlClient<ExtensionHost>;
+pub type SessionHistoryClient = TypedSessionHistoryClient<ExtensionHost>;
+pub type SessionStateClient = TypedSessionStateClient<ExtensionHost>;
+pub type SessionInspectClient = TypedSessionInspectClient<ExtensionHost>;
+pub type WorkspaceClient = TypedWorkspaceClient<ExtensionHost>;
+pub type ProcessClient = TypedProcessClient<ExtensionHost>;
+pub type NetworkClient = TypedNetworkClient<ExtensionHost>;
+pub type ExtensionHttpClient = TypedExtensionHttpClient<ExtensionHost>;
 
-        impl $name {
-            pub(super) fn new(host: &ExtensionHost) -> Self {
-                Self { host: host.clone() }
-            }
-        }
-    };
-}
-
-domain_client!(ModelClient);
-domain_client!(SessionControlClient);
-domain_client!(SessionHistoryClient);
-domain_client!(SessionInspectClient);
-domain_client!(WorkspaceClient);
-domain_client!(ProcessClient);
-domain_client!(NetworkClient);
-domain_client!(ExtensionHttpClient);
-
-impl ModelClient {
+impl TypedModelClient<ExtensionHost> {
     pub fn main_available(&self) -> Result<bool, HostError> {
-        self.host.operation_available(HostOperation::LlmMainChat)
+        self.transport()
+            .operation_available(HostOperation::LlmMainChat)
     }
 
     pub fn small_available(&self) -> Result<bool, HostError> {
-        self.host.operation_available(HostOperation::LlmSmallChat)
-    }
-
-    pub async fn main_chat(
-        &self,
-        messages: Vec<LlmMessage>,
-    ) -> Result<HostLlmChatOutput, HostError> {
-        self.host
-            .invoke(
-                HostOperation::LlmMainChat,
-                &HostLlmChatRequest::new(messages),
-            )
-            .await
-    }
-
-    pub async fn small_chat(
-        &self,
-        messages: Vec<LlmMessage>,
-    ) -> Result<HostLlmChatOutput, HostError> {
-        self.host
-            .invoke(
-                HostOperation::LlmSmallChat,
-                &HostLlmChatRequest::new(messages),
-            )
-            .await
-    }
-
-    /// Runs the main model stream and returns all ordered text deltas after completion.
-    pub async fn main_chat_stream(
-        &self,
-        messages: Vec<LlmMessage>,
-    ) -> Result<HostLlmCollectedStreamOutput, HostError> {
-        self.host
-            .invoke_collected_stream(
-                HostOperation::LlmMainChat,
-                &HostLlmChatRequest::new(messages),
-            )
-            .await
-    }
-
-    /// Runs the small model stream and returns all ordered text deltas after completion.
-    pub async fn small_chat_stream(
-        &self,
-        messages: Vec<LlmMessage>,
-    ) -> Result<HostLlmCollectedStreamOutput, HostError> {
-        self.host
-            .invoke_collected_stream(
-                HostOperation::LlmSmallChat,
-                &HostLlmChatRequest::new(messages),
-            )
-            .await
+        self.transport()
+            .operation_available(HostOperation::LlmSmallChat)
     }
 }
-
-impl ProcessClient {
-    pub async fn spawn(&self, request: HostProcessRequest) -> Result<HostProcessOutput, HostError> {
-        self.host
-            .invoke(HostOperation::ProcessSpawn, &request)
-            .await
-    }
-}
-
-impl NetworkClient {
-    pub async fn send(
-        &self,
-        request: HostNetworkRequest,
-    ) -> Result<HostNetworkResponse, HostError> {
-        self.host
-            .invoke(HostOperation::NetworkClient, &request)
-            .await
-    }
-}
-
-impl ExtensionHttpClient {
-    pub async fn dispatch_public(
-        &self,
-        request: ExtensionHttpRequest,
-    ) -> Result<ExtensionHttpResponse, HostError> {
-        self.host
-            .invoke(HostOperation::ExtensionHttpPublic, &request)
-            .await
-    }
-}
-
-impl SessionControlClient {
-    pub async fn create_root(&self) -> Result<HostCreateSessionOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionRootCreate, &json!({}))
-            .await
-    }
-
-    pub async fn submit_root_turn(
-        &self,
-        request: HostRootSubmitTurnRequest,
-    ) -> Result<HostSubmitTurnOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionRootSubmitTurn, &request)
-            .await
-    }
-
-    pub async fn root_state(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionStateOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionRootState, &request)
-            .await
-    }
-
-    pub async fn inject_or_start(
-        &self,
-        request: HostSessionInputRequest,
-    ) -> Result<HostSessionDeliveryOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionControlInjectOrStart, &request)
-            .await
-    }
-
-    pub async fn interrupt_and_submit(
-        &self,
-        request: HostSessionInputRequest,
-    ) -> Result<HostSessionDeliveryOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionControlInterruptAndSubmit, &request)
-            .await
-    }
-
-    pub async fn cancel_turn(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionCancelOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionControlCancelTurn, &request)
-            .await
-    }
-
-    pub async fn execution_view(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionExecutionView, HostError> {
-        self.host
-            .invoke(HostOperation::SessionControlExecutionView, &request)
-            .await
-    }
-
-    pub async fn state(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionStateOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionControlState, &request)
-            .await
-    }
-
-    pub async fn reactivate(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionReactivateOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionControlReactivate, &request)
-            .await
-    }
-
-    pub async fn create_child(
-        &self,
-        request: HostCreateSessionRequest,
-    ) -> Result<HostCreateSessionOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionControlCreate, &request)
-            .await
-    }
-
-    pub async fn submit_turn(
-        &self,
-        request: HostSubmitTurnRequest,
-    ) -> Result<HostSubmitTurnOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionControlSubmitTurn, &request)
-            .await
-    }
-
-    pub async fn configure_tools(
-        &self,
-        request: HostConfigureSessionToolsRequest,
-    ) -> Result<HostConfigureSessionToolsOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionControlConfigureTools, &request)
-            .await
-    }
-
-    pub async fn recycle(&self, request: HostRecycleSessionRequest) -> Result<(), HostError> {
-        self.host
-            .invoke_unit(HostOperation::SessionControlDispose, &request)
-            .await
-    }
-}
-
-impl SessionHistoryClient {
-    pub async fn list_summaries(&self) -> Result<HostSessionSummariesOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionHistoryList, &json!({}))
-            .await
-    }
-
-    pub async fn transcript(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionTranscript, HostError> {
-        self.host
-            .invoke(HostOperation::SessionHistoryTranscript, &request)
-            .await
-    }
-
-    pub async fn provider_messages(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionProviderMessagesOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionHistoryProviderMessages, &request)
-            .await
-    }
-
-    pub async fn token_usage(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionTokenUsageOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionHistoryTokenUsage, &request)
-            .await
-    }
-
-    pub async fn events_page(
-        &self,
-        request: HostSessionEventsPageRequest,
-    ) -> Result<HostSessionEventsPageOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionReadEvents, &request)
-            .await
-    }
-
-    pub async fn snapshot(
-        &self,
-        request: HostSessionTargetRequest,
-    ) -> Result<SessionHistorySnapshotOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionHistorySnapshot, &request)
-            .await
-    }
-}
-
-impl WorkspaceClient {
-    pub async fn read(
-        &self,
-        request: HostWorkspaceReadRequest,
-    ) -> Result<HostWorkspaceReadOutput, HostError> {
-        self.host
-            .invoke(HostOperation::WorkspaceRead, &request)
-            .await
-    }
-
-    pub async fn write(
-        &self,
-        request: HostWorkspaceWriteRequest,
-    ) -> Result<HostWorkspaceWriteOutput, HostError> {
-        self.host
-            .invoke(HostOperation::WorkspaceWrite, &request)
-            .await
-    }
-
-    pub async fn edit(
-        &self,
-        request: HostWorkspaceEditRequest,
-    ) -> Result<HostWorkspaceEditOutput, HostError> {
-        self.host
-            .invoke(HostOperation::WorkspaceEdit, &request)
-            .await
-    }
-
-    pub async fn list(
-        &self,
-        request: HostWorkspaceListRequest,
-    ) -> Result<HostWorkspaceListOutput, HostError> {
-        self.host
-            .invoke(HostOperation::WorkspaceList, &request)
-            .await
-    }
-
-    pub async fn grep(
-        &self,
-        request: HostWorkspaceGrepRequest,
-    ) -> Result<HostWorkspaceGrepOutput, HostError> {
-        self.host
-            .invoke(HostOperation::WorkspaceGrep, &request)
-            .await
-    }
-
-    pub async fn glob(
-        &self,
-        request: HostWorkspaceGlobRequest,
-    ) -> Result<HostWorkspaceGlobOutput, HostError> {
-        self.host
-            .invoke(HostOperation::WorkspaceGlob, &request)
-            .await
-    }
-}
-
-impl SessionInspectClient {
-    pub async fn list(&self) -> Result<SessionInspectListOutput, HostError> {
-        self.host
-            .invoke(HostOperation::SessionInspectList, &json!({}))
-            .await
-    }
-
-    pub async fn snapshot(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionInspectSnapshotOutput, HostError> {
-        self.inspect(HostOperation::SessionInspectSnapshot, session_id)
-            .await
-    }
-
-    pub async fn read_model(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionInspectReadModelOutput, HostError> {
-        self.inspect(HostOperation::SessionInspectReadModel, session_id)
-            .await
-    }
-
-    pub async fn provider_messages(
-        &self,
-        session_id: &str,
-    ) -> Result<SessionInspectProviderMessagesOutput, HostError> {
-        self.inspect(HostOperation::SessionInspectProviderMessages, session_id)
-            .await
-    }
-
-    async fn inspect<T>(&self, operation: HostOperation, session_id: &str) -> Result<T, HostError>
-    where
-        T: serde::de::DeserializeOwned,
-    {
-        self.host
-            .invoke(operation, &json!({ "session_id": session_id }))
-            .await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         future::Future,
         sync::{Arc, Mutex},
     };
@@ -425,6 +64,8 @@ mod tests {
     struct RecordingInvoker {
         operations: Mutex<Vec<HostOperation>>,
     }
+
+    struct StaticResponseInvoker(Value);
 
     #[async_trait]
     impl internal::HostInvoker for RecordingInvoker {
@@ -450,6 +91,21 @@ mod tests {
                 "backend_unavailable",
                 "test backend unavailable",
             ))
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    }
+
+    #[async_trait]
+    impl internal::HostInvoker for StaticResponseInvoker {
+        async fn invoke(
+            &self,
+            _operation: HostOperation,
+            _input: Value,
+        ) -> Result<Value, HostError> {
+            Ok(self.0.clone())
         }
 
         fn as_any(&self) -> &dyn std::any::Any {
@@ -508,6 +164,8 @@ mod tests {
             HostOperation::SessionHistoryTokenUsage,
             HostOperation::SessionHistorySnapshot,
             HostOperation::SessionReadEvents,
+            HostOperation::SessionStateRead,
+            HostOperation::SessionStateWrite,
             HostOperation::WorkspaceRead,
             HostOperation::WorkspaceWrite,
             HostOperation::WorkspaceEdit,
@@ -519,6 +177,13 @@ mod tests {
             HostOperation::SessionInspectReadModel,
             HostOperation::SessionInspectProviderMessages,
         ];
+        let covered = expected_operations.iter().copied().collect::<HashSet<_>>();
+        let expected = crate::host::HOST_OPERATION_SPECS
+            .iter()
+            .map(|spec| spec.operation)
+            .filter(|operation| *operation != HostOperation::EventEmit)
+            .collect::<HashSet<_>>();
+        assert_eq!(covered, expected, "in-process client operation coverage");
         let invoker = Arc::new(RecordingInvoker {
             operations: Mutex::new(Vec::new()),
         });
@@ -569,7 +234,7 @@ mod tests {
         )
         .await;
         expect_backend_error(host.extension_http().unwrap().dispatch_public(
-            ExtensionHttpRequest::new(ExtensionHttpMethod::Get, "/health"),
+            ExtensionHttpDispatchRequest::new(ExtensionHttpMethod::Get, "/health"),
         ))
         .await;
         expect_backend_error(host.session_control().unwrap().create_root()).await;
@@ -632,6 +297,21 @@ mod tests {
                 .events_page(HostSessionEventsPageRequest::new("child-1")),
         )
         .await;
+        expect_backend_error(
+            host.session_state()
+                .unwrap()
+                .read(HostSessionStateReadRequest { key: "goal".into() }),
+        )
+        .await;
+        expect_backend_error(
+            host.session_state()
+                .unwrap()
+                .write(HostSessionStateWriteRequest {
+                    key: "goal".into(),
+                    content: "active".into(),
+                }),
+        )
+        .await;
         expect_backend_error(host.workspace().unwrap().read(HostWorkspaceReadRequest {
             path: "notes.txt".into(),
             max_bytes: None,
@@ -681,6 +361,33 @@ mod tests {
         .await;
 
         assert_eq!(*invoker.operations.lock().unwrap(), expected_operations);
+    }
+
+    #[tokio::test]
+    async fn unit_responses_require_a_strict_success_acknowledgement() {
+        let request = || HostSessionStateWriteRequest {
+            key: "goal".into(),
+            content: "active".into(),
+        };
+
+        for (response, expected_code) in [
+            (json!({ "ok": true }), None),
+            (json!({ "ok": false }), Some("invalid_host_response")),
+            (
+                json!({ "ok": true, "extra": true }),
+                Some("invalid_host_response"),
+            ),
+        ] {
+            let host = internal::extension_host(
+                Arc::new(StaticResponseInvoker(response)),
+                internal::HostScope::new([], [HostOperation::SessionStateWrite], true, false),
+            );
+            let result = host.session_state().unwrap().write(request()).await;
+            match expected_code {
+                Some(code) => assert_eq!(result.unwrap_err().code, code),
+                None => result.unwrap(),
+            }
+        }
     }
 
     #[tokio::test]
@@ -736,9 +443,33 @@ mod tests {
         );
         expect_access_error(host.session_control(), HostErrorClass::ContextUnavailable);
         expect_access_error(host.session_history(), HostErrorClass::ContextUnavailable);
+        expect_access_error(host.session_state(), HostErrorClass::ContextUnavailable);
         expect_access_error(host.workspace(), HostErrorClass::ContextUnavailable);
         expect_access_error(host.process(), HostErrorClass::ContextUnavailable);
 
+        let host = internal::extension_host(
+            invoker.clone(),
+            internal::HostScope::new(
+                [crate::extension::ExtensionCapability::SessionControl],
+                [],
+                false,
+                true,
+            ),
+        );
+        expect_access_error(host.session_control(), HostErrorClass::ContextUnavailable);
+
+        assert!(invoker.operations.lock().unwrap().is_empty());
+
+        let host = internal::extension_host(
+            invoker.clone(),
+            internal::HostScope::new(
+                [crate::extension::ExtensionCapability::InputDelivery],
+                [HostOperation::SessionRootCreate],
+                false,
+                false,
+            ),
+        );
+        expect_access_error(host.session_control(), HostErrorClass::ContextUnavailable);
         assert!(invoker.operations.lock().unwrap().is_empty());
 
         let host = internal::extension_host(

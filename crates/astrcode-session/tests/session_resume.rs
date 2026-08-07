@@ -236,7 +236,7 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
                 except: vec!["read".into()],
             }),
             source_extension: None,
-            tool_call_id: ToolCallId::new("call-1"),
+            tool_call_id: Some(ToolCallId::new("call-1")),
         })
         .await
         .unwrap();
@@ -327,7 +327,7 @@ async fn parent_and_spawned_child_each_emit_session_start_once() {
             extra_system_prompt: None,
             tool_selection: None,
             source_extension: None,
-            tool_call_id: ToolCallId::new("call-lifecycle"),
+            tool_call_id: Some(ToolCallId::new("call-lifecycle")),
         })
         .await
         .unwrap();

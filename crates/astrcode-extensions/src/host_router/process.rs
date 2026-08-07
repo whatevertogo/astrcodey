@@ -3,7 +3,11 @@
 use std::{future::Future, process::Stdio, time::Duration};
 
 use astrcode_extension_sdk::{
-    host::{HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS, HostProcessRequest},
+    host::{
+        HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CANCELLED,
+        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_TIMEOUT, HOST_PROCESS_DEFAULT_TIMEOUT_MS,
+        HOST_PROCESS_MAX_TIMEOUT_MS, HostProcessRequest,
+    },
     s5r::ErrorPayload,
 };
 use serde_json::{Value, json};
@@ -22,7 +26,6 @@ use super::{
 const MAX_CONCURRENT_PROCESSES: usize = 8;
 const MAX_STREAM_BYTES: usize = 1024 * 1024;
 const MAX_COMBINED_BYTES: usize = 1024 * 1024;
-const MAX_STDIN_BYTES: usize = 1024 * 1024;
 
 const NONINTERACTIVE_ENV: &[(&str, &str)] = &[
     ("PAGER", "cat"),
@@ -108,18 +111,8 @@ impl ProcessRunner {
         let _permit = self.acquire_permit(deadline, cancel_token).await?;
         if request.command.is_empty() {
             return Err(ErrorPayload::new(
-                "invalid_input",
+                HOST_ERROR_CODE_INVALID_INPUT,
                 "command must not be empty",
-            ));
-        }
-        if request
-            .stdin
-            .as_ref()
-            .is_some_and(|value| value.len() > MAX_STDIN_BYTES)
-        {
-            return Err(ErrorPayload::new(
-                "input_too_large",
-                format!("stdin exceeds {MAX_STDIN_BYTES} bytes"),
             ));
         }
         let HostProcessRequest {
@@ -284,9 +277,17 @@ impl ProcessRunner {
             timeout_at(deadline, self.permits.acquire())
                 .await
                 .map_err(|_| {
-                    ErrorPayload::new("timeout", "process timed out waiting for capacity")
+                    ErrorPayload::new(
+                        HOST_ERROR_CODE_TIMEOUT,
+                        "process timed out waiting for capacity",
+                    )
                 })?
-                .map_err(|_| ErrorPayload::new("backend_unavailable", "process runner stopped"))
+                .map_err(|_| {
+                    ErrorPayload::new(
+                        HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                        "process runner stopped",
+                    )
+                })
         };
         match cancel_token {
             Some(token) => {
@@ -312,7 +313,7 @@ where
     let timed = async {
         timeout_at(deadline, operation)
             .await
-            .map_err(|_| ErrorPayload::new("timeout", "process timed out"))
+            .map_err(|_| ErrorPayload::new(HOST_ERROR_CODE_TIMEOUT, "process timed out"))
     };
     match cancel_token {
         Some(token) => {
@@ -348,12 +349,13 @@ fn resolve_cwd(
     working_dir: Option<&str>,
     relative_cwd: Option<&str>,
 ) -> Result<std::path::PathBuf, ErrorPayload> {
-    let root = working_dir
-        .ok_or_else(|| ErrorPayload::new("backend_unavailable", "working_dir not set"))?;
+    let root = working_dir.ok_or_else(|| {
+        ErrorPayload::new(HOST_ERROR_CODE_BACKEND_UNAVAILABLE, "working_dir not set")
+    })?;
     let path = canonicalize_workspace_path(root, relative_cwd.unwrap_or("."))?;
     if !path.is_dir() {
         return Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             "process cwd must be an existing directory",
         ));
     }
@@ -364,7 +366,7 @@ fn validated_timeout(timeout_ms: Option<u64>) -> Result<Duration, ErrorPayload> 
     let timeout_ms = timeout_ms.unwrap_or(HOST_PROCESS_DEFAULT_TIMEOUT_MS);
     if !(1..=HOST_PROCESS_MAX_TIMEOUT_MS).contains(&timeout_ms) {
         return Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             format!("timeout_ms must be between 1 and {HOST_PROCESS_MAX_TIMEOUT_MS}"),
         ));
     }
@@ -379,7 +381,10 @@ fn ensure_spawn_active(
         return Err(cancelled());
     }
     if Instant::now() >= deadline {
-        return Err(ErrorPayload::new("timeout", "process timed out"));
+        return Err(ErrorPayload::new(
+            HOST_ERROR_CODE_TIMEOUT,
+            "process timed out",
+        ));
     }
     Ok(())
 }
@@ -396,7 +401,7 @@ fn safe_child_env() -> impl Iterator<Item = (String, String)> {
 }
 
 fn cancelled() -> ErrorPayload {
-    ErrorPayload::new("cancelled", "process cancelled")
+    ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, "process cancelled")
 }
 
 #[cfg(unix)]

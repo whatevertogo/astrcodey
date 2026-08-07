@@ -12,7 +12,6 @@ use astrcode_context::{
 };
 use astrcode_core::{
     compaction::{CompactStrategy, CompactTrigger},
-    config::ModelSelection,
     event::LiveEventPayload,
     llm::{self, LlmMessage, LlmProvider, LlmRequest},
     tool::ToolDefinition,
@@ -380,12 +379,8 @@ fn manual_hook_context(
     message_count: usize,
 ) -> CompactHookContext {
     CompactHookContext {
-        call: RuntimeHookCallContext::new(
-            session.id().to_string(),
-            state.identity.working_dir.clone(),
-            ModelSelection::simple(&state.identity.model_id),
-            session_store_dir,
-        ),
+        call: SharedTurnContext::from_read_model(session.id(), state, session_store_dir)
+            .hook_call_context(),
         trigger: CompactTrigger::ManualCommand,
         message_count,
     }

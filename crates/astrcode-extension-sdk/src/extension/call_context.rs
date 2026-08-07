@@ -12,7 +12,7 @@ use astrcode_core::types::SessionId;
 use tokio_util::sync::CancellationToken;
 
 use super::{ExtensionConfig, ExtensionEventEmitter, ExtensionPaths, ExtensionTasks};
-use crate::host::ExtensionHost;
+use crate::host::{ExtensionHost, HOST_ERROR_CODE_CONTEXT_UNAVAILABLE, HostError};
 
 /// Facts and scoped capabilities shared by extension calls.
 ///
@@ -94,12 +94,32 @@ impl ExtensionCallContext {
         self.session_id.as_ref()
     }
 
+    /// Returns the host-attributed session or a stable context error for session-only handlers.
+    pub fn require_session_id(&self) -> Result<&SessionId, HostError> {
+        self.session_id().ok_or_else(|| {
+            HostError::new(
+                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                "extension call requires a session-scoped context",
+            )
+        })
+    }
+
     pub fn turn_id(&self) -> Option<&str> {
         self.turn_id.as_deref()
     }
 
     pub fn working_dir(&self) -> Option<&Path> {
         self.working_dir.as_deref()
+    }
+
+    /// Returns the validated workspace or a stable context error for workspace-only handlers.
+    pub fn require_working_dir(&self) -> Result<&Path, HostError> {
+        self.working_dir().ok_or_else(|| {
+            HostError::new(
+                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                "extension call requires a workspace-scoped context",
+            )
+        })
     }
 
     pub fn paths(&self) -> &ExtensionPaths {
@@ -267,6 +287,11 @@ mod tests {
         assert_eq!(ctx.extension_id(), "startup-probe");
         assert_eq!(ctx.startup_working_dir(), Some(Path::new("/workspace")));
         assert_eq!(
+            ctx.call().require_working_dir().unwrap(),
+            Path::new("/workspace")
+        );
+        assert!(ctx.call().require_session_id().is_err());
+        assert_eq!(
             ctx.paths().global_data_dir(),
             Some(Path::new("/global/extension_data/startup-probe"))
         );
@@ -297,7 +322,7 @@ mod tests {
         let observer = cancellation.clone();
         let call = ExtensionCallContext::from_runtime(
             "drop-probe",
-            None,
+            Some(SessionId::new("session-1")),
             None,
             None,
             ExtensionPaths::default(),
@@ -306,6 +331,9 @@ mod tests {
             ExtensionTasks::new("drop-probe"),
             cancellation,
         );
+
+        assert_eq!(call.require_session_id().unwrap().as_str(), "session-1");
+        assert!(call.require_working_dir().is_err());
 
         let clone = call.clone();
         drop(call);

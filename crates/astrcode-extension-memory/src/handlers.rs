@@ -89,9 +89,11 @@ fn ok_text(content: String) -> ToolResult {
 }
 
 fn tool_working_dir(ctx: &ToolContext) -> Result<String, ExtensionError> {
-    ctx.working_dir()
-        .map(|path| path.to_string_lossy().into_owned())
-        .ok_or_else(|| ExtensionError::Internal("working directory not injected".into()))
+    Ok(ctx
+        .call()
+        .require_working_dir()?
+        .to_string_lossy()
+        .into_owned())
 }
 
 async fn with_scoped_stores<T: Send + 'static>(
@@ -152,10 +154,7 @@ impl ToolHandler for MemorySaveHandler {
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let args: SaveArgs = ctx.arguments()?;
         let working_dir = tool_working_dir(&ctx)?;
-        let session_id = ctx
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("session id not injected".into()))?
-            .to_string();
+        let session_id = ctx.call().require_session_id()?.to_string();
         let content = args.content;
         let category = args.category;
         let replace = args.replace_match.filter(|s| !s.trim().is_empty());
@@ -340,14 +339,11 @@ impl PromptBuildHandler for MemoryRecallHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
         let store_pool = self.store_pool.clone();
         let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| ExtensionError::Internal("memory prompt requires a workspace".into()))?
+            .call()
+            .require_working_dir()?
             .to_string_lossy()
             .into_owned();
-        let session_id = ctx
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("memory prompt requires a session".into()))?
-            .to_string();
+        let session_id = ctx.call().require_session_id()?.to_string();
         let session_prefs = self.session_prefs.clone();
 
         let global_prefs = tokio::task::spawn_blocking(move || {
@@ -521,10 +517,7 @@ pub(crate) struct MemorySessionStartHandler {
 #[async_trait::async_trait]
 impl LifecycleHandler for MemorySessionStartHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        let session_id = ctx
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("memory lifecycle requires a session".into()))?
-            .to_string();
+        let session_id = ctx.call().require_session_id()?.to_string();
         let tasks = ctx.tasks();
         if tasks.cancellation().is_cancelled() {
             return Ok(HookResult::Allow);
@@ -537,10 +530,8 @@ impl LifecycleHandler for MemorySessionStartHandler {
         let store_pool = self.store_pool.clone();
         let session_prefs = self.session_prefs.clone();
         let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| {
-                ExtensionError::Internal("memory lifecycle requires a workspace".into())
-            })?
+            .call()
+            .require_working_dir()?
             .to_string_lossy()
             .into_owned();
         let preload_working_dir = working_dir.clone();

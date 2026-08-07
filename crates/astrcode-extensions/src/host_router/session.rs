@@ -13,14 +13,17 @@ use astrcode_core::{
         SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionOperations,
         SessionToolSelection, SubmitTurnRequest,
     },
+    types::SessionId,
 };
 use astrcode_extension_sdk::{
     host::{
-        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostSessionCancelOutput,
-        HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
-        HostSessionProviderMessagesOutput, HostSessionSummariesOutput, HostSessionSummary,
-        HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
-        HostSessionTranscriptMessage,
+        HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_PERMISSION_DENIED,
+        HOST_ERROR_CODE_SERIALIZATION_FAILED, HostAcknowledgement, HostConfigureSessionToolsOutput,
+        HostConfigureSessionToolsRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+        HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+        HostSessionSummariesOutput, HostSessionSummary, HostSessionTokenUsage,
+        HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
     },
     s5r::ErrorPayload,
     session::{
@@ -30,10 +33,10 @@ use astrcode_extension_sdk::{
         HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
         SessionLifecycleStateDto, SessionToolSelectionDto,
     },
-    session_inspect::SessionHistorySnapshotOutput,
+    session_inspect::{HostSessionInspectRequest, SessionHistorySnapshotOutput},
 };
 use astrcode_storage::{EventReader, SessionReader, StorageError};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::{InvokeContext, capability::SessionCapability, session_inspect};
 
@@ -93,11 +96,11 @@ impl SessionGroup {
             SessionCapability::HistoryTranscript => {
                 Box::pin(self.history_transcript(&input, ctx)).await
             },
-            SessionCapability::InspectList => Box::pin(self.inspect_list()).await,
-            SessionCapability::InspectSnapshot => Box::pin(self.inspect_snapshot(input)).await,
-            SessionCapability::InspectReadModel => Box::pin(self.inspect_read_model(input)).await,
+            SessionCapability::InspectList => Box::pin(self.inspect_list(&input)).await,
+            SessionCapability::InspectSnapshot => Box::pin(self.inspect_snapshot(&input)).await,
+            SessionCapability::InspectReadModel => Box::pin(self.inspect_read_model(&input)).await,
             SessionCapability::InspectProviderMessages => {
-                Box::pin(self.inspect_provider_messages(input)).await
+                Box::pin(self.inspect_provider_messages(&input)).await
             },
         }
     }
@@ -112,13 +115,16 @@ impl SessionGroup {
 
     async fn read_events(&self, input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
         let reader = self.event_reader.as_ref().ok_or_else(|| {
-            ErrorPayload::new("backend_unavailable", "session_read not configured")
+            ErrorPayload::new(
+                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                "session_read not configured",
+            )
         })?;
         let request =
             parse_wire_request::<HostSessionEventsPageRequest>(input, "session.read_events")?;
         if !(1..=MAX_READ_EVENTS_LIMIT).contains(&request.limit) {
             return Err(ErrorPayload::new(
-                "invalid_input",
+                HOST_ERROR_CODE_INVALID_INPUT,
                 format!("limit must be between 1 and {MAX_READ_EVENTS_LIMIT}"),
             ));
         }
@@ -151,24 +157,28 @@ impl SessionGroup {
         )
     }
 
-    async fn inspect_list(&self) -> Result<Value, ErrorPayload> {
+    async fn inspect_list(&self, input: &Value) -> Result<Value, ErrorPayload> {
+        require_empty_object(input, "session.inspect.list")?;
         let reader = self.session_reader()?;
         session_inspect::list(reader).await
     }
 
-    async fn inspect_snapshot(&self, input: Value) -> Result<Value, ErrorPayload> {
+    async fn inspect_snapshot(&self, input: &Value) -> Result<Value, ErrorPayload> {
+        let session_id = inspect_session_id(input, "session.inspect.snapshot")?;
         let reader = self.session_reader()?;
-        session_inspect::snapshot(reader, input).await
+        session_inspect::snapshot(reader, session_id).await
     }
 
-    async fn inspect_read_model(&self, input: Value) -> Result<Value, ErrorPayload> {
+    async fn inspect_read_model(&self, input: &Value) -> Result<Value, ErrorPayload> {
+        let session_id = inspect_session_id(input, "session.inspect.read_model")?;
         let reader = self.session_reader()?;
-        session_inspect::read_model(reader, input).await
+        session_inspect::read_model(reader, session_id).await
     }
 
-    async fn inspect_provider_messages(&self, input: Value) -> Result<Value, ErrorPayload> {
+    async fn inspect_provider_messages(&self, input: &Value) -> Result<Value, ErrorPayload> {
+        let session_id = inspect_session_id(input, "session.inspect.provider_messages")?;
         let reader = self.session_reader()?;
-        session_inspect::provider_messages(reader, input).await
+        session_inspect::provider_messages(reader, session_id).await
     }
 
     async fn history_snapshot(
@@ -211,7 +221,7 @@ impl SessionGroup {
         let caller_session_id = required_history_context(ctx)?.to_owned();
         if !input.as_object().is_some_and(serde_json::Map::is_empty) {
             return Err(ErrorPayload::new(
-                "invalid_input",
+                HOST_ERROR_CODE_INVALID_INPUT,
                 "session.history.list expects an empty object",
             ));
         }
@@ -330,7 +340,10 @@ impl SessionGroup {
             parse_wire_request::<HostSessionTargetRequest>(input, "session.history.token_usage")?;
         let access = history_access_from_target(request, ctx)?;
         let reader = self.event_reader.as_ref().ok_or_else(|| {
-            ErrorPayload::new("backend_unavailable", "session event reader not configured")
+            ErrorPayload::new(
+                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                "session event reader not configured",
+            )
         })?;
         authorize_history_target(ctx.session_ops.as_deref(), &access).await?;
         let session_id = astrcode_core::types::SessionId::new(access.target_session_id);
@@ -410,18 +423,19 @@ impl SessionGroup {
             .session_state(access.as_access())
             .await
             .map_err(session_api_error)?;
-        let phase = session_inspect::phase_name(state.phase).into();
         serialize_wire_response(
-            HostSessionStateOutput::from_state(state, phase),
+            HostSessionStateOutput::from_state(state),
             "session.root.state",
         )
     }
 
     fn session_reader(&self) -> Result<Arc<dyn SessionReader>, ErrorPayload> {
-        self.session_reader
-            .as_ref()
-            .map(Arc::clone)
-            .ok_or_else(|| ErrorPayload::new("backend_unavailable", "session_read not configured"))
+        self.session_reader.as_ref().map(Arc::clone).ok_or_else(|| {
+            ErrorPayload::new(
+                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                "session_read not configured",
+            )
+        })
     }
 }
 
@@ -482,7 +496,7 @@ fn required_history_context(ctx: &InvokeContext) -> Result<&str, ErrorPayload> {
     required_extension_id(ctx)?;
     ctx.session_id.as_deref().ok_or_else(|| {
         ErrorPayload::new(
-            "context_unavailable",
+            HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
             "session history requires a session-scoped invoke context",
         )
     })
@@ -496,7 +510,7 @@ async fn authorize_history_target(
         return Ok(());
     }
     Err(ErrorPayload::new(
-        "permission_denied",
+        HOST_ERROR_CODE_PERMISSION_DENIED,
         "session history target is outside the caller session lineage",
     ))
 }
@@ -546,7 +560,7 @@ fn non_cached_token_count(usage: &LlmTokenUsage) -> Option<u64> {
         ),
         _ => usage
             .total_tokens
-            .map(|total| total.saturating_sub(usage.reasoning_output_tokens.unwrap_or_default()))
+            .map(|total| total.saturating_sub(usage.cached_input_tokens.unwrap_or_default()))
             .or_else(|| {
                 let input = usage.input_tokens.map(|input| {
                     input.saturating_sub(usage.cached_input_tokens.unwrap_or_default())
@@ -562,7 +576,9 @@ fn non_cached_token_count(usage: &LlmTokenUsage) -> Option<u64> {
 
 fn history_storage_error(error: StorageError) -> ErrorPayload {
     match error {
-        StorageError::InvalidId(message) => ErrorPayload::new("invalid_input", message),
+        StorageError::InvalidId(message) => {
+            ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, message)
+        },
         StorageError::NotFound(session_id) => ErrorPayload::new(
             "session_not_found",
             format!("session not found: {session_id}"),
@@ -578,7 +594,7 @@ async fn create_root_session(input: &Value, ctx: &InvokeContext) -> Result<Value
     let request = CoreCreateRootSessionRequest {
         working_dir: ctx.working_dir.clone().ok_or_else(|| {
             ErrorPayload::new(
-                "context_unavailable",
+                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
                 "session.root.create requires a workspace-scoped call context",
             )
         })?,
@@ -611,7 +627,7 @@ async fn authorize_owned_root(
         return Ok(());
     }
     Err(ErrorPayload::new(
-        "permission_denied",
+        HOST_ERROR_CODE_PERMISSION_DENIED,
         "target session is not a top-level session owned by the calling extension",
     ))
 }
@@ -628,7 +644,9 @@ fn root_session_read_error(error: StorageError) -> ErrorPayload {
 
 fn event_read_error(error: StorageError) -> ErrorPayload {
     match error {
-        StorageError::InvalidId(message) => ErrorPayload::new("invalid_input", message),
+        StorageError::InvalidId(message) => {
+            ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, message)
+        },
         StorageError::NotFound(session_id) => ErrorPayload::new(
             "session_not_found",
             format!("session not found: {session_id}"),
@@ -642,7 +660,7 @@ fn required_extension_id(ctx: &InvokeContext) -> Result<&str, ErrorPayload> {
         .then_some(ctx.extension_id.as_str())
         .ok_or_else(|| {
             ErrorPayload::new(
-                "context_unavailable",
+                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
                 "host operation requires an attributed extension context",
             )
         })
@@ -652,19 +670,19 @@ fn host_session_event(stored: StoredEvent) -> Result<HostSessionEvent, ErrorPayl
     let StoredEvent { seq, event } = stored;
     let timestamp = serde_json::to_value(event.timestamp).map_err(|error| {
         ErrorPayload::new(
-            "serialization_failed",
+            HOST_ERROR_CODE_SERIALIZATION_FAILED,
             format!("failed to serialize session event timestamp: {error}"),
         )
     })?;
     let timestamp = timestamp.as_str().map(str::to_owned).ok_or_else(|| {
         ErrorPayload::new(
-            "serialization_failed",
+            HOST_ERROR_CODE_SERIALIZATION_FAILED,
             "session event timestamp did not serialize as a string",
         )
     })?;
     let payload = serde_json::to_value(event.payload).map_err(|error| {
         ErrorPayload::new(
-            "serialization_failed",
+            HOST_ERROR_CODE_SERIALIZATION_FAILED,
             format!("failed to serialize session event payload: {error}"),
         )
     })?;
@@ -684,7 +702,6 @@ async fn create_session(input: &Value, ctx: &InvokeContext) -> Result<Value, Err
         parse_wire_request::<HostCreateSessionRequest>(input, "session.control.create")?;
     let request = CreateSessionRequest {
         name: wire_request.name,
-        working_dir: wire_request.working_dir,
         system_prompt: wire_request.system_prompt,
         model_preference: wire_request.model_preference,
         tool_selection: wire_request
@@ -693,12 +710,11 @@ async fn create_session(input: &Value, ctx: &InvokeContext) -> Result<Value, Err
             .transpose()?,
         source_extension: Some(ctx.extension_id.clone()),
         ephemeral: wire_request.ephemeral,
-        tool_call_id: wire_request.tool_call_id.unwrap_or_default(),
+        tool_call_id: ctx.tool_call_id.clone(),
     };
-    let parent = ctx
-        .session_id
-        .clone()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "parent session_id required"))?;
+    let parent = ctx.session_id.clone().ok_or_else(|| {
+        ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, "parent session_id required")
+    })?;
     let handle = ops
         .create_session(&parent, request)
         .await
@@ -740,10 +756,9 @@ async fn submit_turn(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorP
         ));
     }
     let ops = required_session_ops(ctx)?;
-    let caller = ctx
-        .session_id
-        .clone()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "caller session_id required"))?;
+    let caller = ctx.session_id.clone().ok_or_else(|| {
+        ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, "caller session_id required")
+    })?;
     let request = SubmitTurnRequest::for_child(
         caller,
         wire_request.target_session_id,
@@ -752,7 +767,7 @@ async fn submit_turn(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorP
     .wait_for_result(wire_request.wait_for_result)
     .notify_parent_on_complete(wire_request.notify_parent_on_complete)
     .recycle_on_complete(wire_request.recycle_on_complete)
-    .tool_call_id(wire_request.tool_call_id);
+    .tool_call_id(ctx.tool_call_id.clone());
     let result = ops.submit_turn(request).await.map_err(session_api_error)?;
     serialize_wire_response(
         HostSubmitTurnOutput::from(result),
@@ -820,7 +835,7 @@ async fn execution_view(input: &Value, ctx: &InvokeContext) -> Result<Value, Err
         .map_err(session_api_error)?;
     serialize_wire_response(
         HostSessionExecutionView {
-            phase: session_inspect::phase_name(view.phase).into(),
+            phase: view.phase.into(),
             active_turn_id: view.active_turn_id,
             queued_inputs: view.queued_inputs,
         },
@@ -834,14 +849,17 @@ async fn dispose_session(input: &Value, ctx: &InvokeContext) -> Result<Value, Er
     let ops = required_session_ops(ctx)?;
     let access = SessionAccessPair::new(
         ctx.session_id.clone().ok_or_else(|| {
-            ErrorPayload::new("context_unavailable", "caller session_id required")
+            ErrorPayload::new(
+                HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
+                "caller session_id required",
+            )
         })?,
         request.session_id,
     );
     ops.recycle_session(access.as_access())
         .await
-        .map(|()| json!({ "ok": true }))
-        .map_err(session_api_error)
+        .map_err(session_api_error)?;
+    serialize_wire_response(HostAcknowledgement::accepted(), "session.control.dispose")
 }
 
 async fn session_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
@@ -852,9 +870,8 @@ async fn session_state(input: &Value, ctx: &InvokeContext) -> Result<Value, Erro
         .session_state(access.as_access())
         .await
         .map_err(session_api_error)?;
-    let phase = session_inspect::phase_name(state.phase).into();
     serialize_wire_response(
-        HostSessionStateOutput::from_state(state, phase),
+        HostSessionStateOutput::from_state(state),
         "session.control.state",
     )
 }
@@ -890,22 +907,24 @@ fn session_delivery_outcome(outcome: SessionDeliveryOutcome) -> HostSessionDeliv
 }
 
 fn required_session_ops(ctx: &InvokeContext) -> Result<&dyn SessionOperations, ErrorPayload> {
-    ctx.session_ops
-        .as_deref()
-        .ok_or_else(|| ErrorPayload::new("backend_unavailable", "session_ops not available"))
+    ctx.session_ops.as_deref().ok_or_else(|| {
+        ErrorPayload::new(
+            HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+            "session_ops not available",
+        )
+    })
 }
 
 fn session_access_from_id(
     target_session_id: String,
     ctx: &InvokeContext,
 ) -> Result<SessionAccessPair, ErrorPayload> {
-    let caller = ctx
-        .session_id
-        .as_deref()
-        .ok_or_else(|| ErrorPayload::new("invalid_input", "caller session_id required"))?;
+    let caller = ctx.session_id.as_deref().ok_or_else(|| {
+        ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, "caller session_id required")
+    })?;
     if target_session_id.is_empty() {
         return Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             "target session id must not be empty",
         ));
     }
@@ -930,22 +949,35 @@ fn history_access_from_target(
 fn session_api_error(error: SessionApiError) -> ErrorPayload {
     let code = match &error {
         SessionApiError::NotFound(_) => "session_not_found",
-        SessionApiError::PermissionDenied(_) => "permission_denied",
+        SessionApiError::PermissionDenied(_) => HOST_ERROR_CODE_PERMISSION_DENIED,
         SessionApiError::SessionBusy(_) => "session_busy",
+        SessionApiError::MaxDepthExceeded { .. } => "max_depth_exceeded",
         SessionApiError::Unsupported(_) => "unsupported",
-        _ => "session_error",
+        SessionApiError::Internal(_) => "internal_error",
     };
     ErrorPayload::new(code, error.to_string())
 }
 
-fn storage_error(error: StorageError) -> ErrorPayload {
-    ErrorPayload::new("session_error", error.to_string())
+pub(super) fn storage_error(error: StorageError) -> ErrorPayload {
+    let retryable = error.is_retryable();
+    let code = match &error {
+        StorageError::NotFound(_) => "session_not_found",
+        StorageError::AlreadyExists(_) => "session_already_exists",
+        StorageError::InvalidId(_) => HOST_ERROR_CODE_INVALID_INPUT,
+        StorageError::Unsupported(_) => "unsupported",
+        StorageError::Io(_) => "storage_io_error",
+        StorageError::Serialization(_)
+        | StorageError::InvalidEvent(_)
+        | StorageError::CorruptLog(_) => "corrupt_session_data",
+        StorageError::LockError(_) => "storage_lock_error",
+    };
+    ErrorPayload::new(code, error.to_string()).retryable(retryable)
 }
 
 fn non_empty_session_content(content: String) -> Result<String, ErrorPayload> {
     if content.is_empty() {
         Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             "content must not be empty",
         ))
     } else {
@@ -953,12 +985,17 @@ fn non_empty_session_content(content: String) -> Result<String, ErrorPayload> {
     }
 }
 
+fn inspect_session_id(input: &Value, capability: &str) -> Result<SessionId, ErrorPayload> {
+    let request = parse_wire_request::<HostSessionInspectRequest>(input, capability)?;
+    Ok(SessionId::new(request.session_id))
+}
+
 fn require_empty_object(input: &Value, capability: &str) -> Result<(), ErrorPayload> {
     if input.as_object().is_some_and(serde_json::Map::is_empty) {
         Ok(())
     } else {
         Err(ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             format!("{capability} expects an empty object"),
         ))
     }
@@ -985,7 +1022,7 @@ fn validated_tool_names(tools: Vec<String>, field: &str) -> Result<Vec<String>, 
             let tool = tool.trim();
             if tool.is_empty() {
                 Err(ErrorPayload::new(
-                    "invalid_input",
+                    HOST_ERROR_CODE_INVALID_INPUT,
                     format!("{field} must contain non-empty strings"),
                 ))
             } else {
@@ -1002,7 +1039,7 @@ where
 {
     T::deserialize(input).map_err(|error| {
         ErrorPayload::new(
-            "invalid_input",
+            HOST_ERROR_CODE_INVALID_INPUT,
             format!("invalid {capability} request: {error}"),
         )
     })
@@ -1014,7 +1051,7 @@ where
 {
     serde_json::to_value(output).map_err(|error| {
         ErrorPayload::new(
-            "serialization_failed",
+            HOST_ERROR_CODE_SERIALIZATION_FAILED,
             format!("failed to serialize {capability} response: {error}"),
         )
     })
@@ -1023,6 +1060,53 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn non_cached_token_count_handles_complete_and_partial_usage() {
+        let cases = [
+            (
+                LlmTokenUsage {
+                    input_tokens: Some(100),
+                    cached_input_tokens: Some(20),
+                    cache_creation_input_tokens: None,
+                    output_tokens: Some(20),
+                    reasoning_output_tokens: Some(5),
+                    total_tokens: Some(120),
+                    source: None,
+                },
+                Some(100),
+            ),
+            (
+                LlmTokenUsage {
+                    cached_input_tokens: Some(20),
+                    reasoning_output_tokens: Some(5),
+                    total_tokens: Some(120),
+                    ..Default::default()
+                },
+                Some(100),
+            ),
+            (
+                LlmTokenUsage {
+                    input_tokens: Some(100),
+                    cached_input_tokens: Some(20),
+                    ..Default::default()
+                },
+                Some(80),
+            ),
+            (
+                LlmTokenUsage {
+                    output_tokens: Some(20),
+                    ..Default::default()
+                },
+                Some(20),
+            ),
+            (LlmTokenUsage::default(), None),
+        ];
+
+        for (usage, expected) in cases {
+            assert_eq!(non_cached_token_count(&usage), expected, "usage: {usage:?}");
+        }
+    }
 
     #[test]
     fn history_visibility_uses_lineage_and_rejects_cycles() {
@@ -1053,6 +1137,40 @@ mod tests {
             let error = visible_history_sessions(&id("root"), &cycle)
                 .expect_err("corrupt lineage must not be exposed");
             assert_eq!(error.code, "read_failed");
+        }
+    }
+
+    #[test]
+    fn session_api_errors_keep_stable_wire_codes() {
+        let cases = [
+            (
+                SessionApiError::NotFound("child".into()),
+                "session_not_found",
+            ),
+            (
+                SessionApiError::PermissionDenied("unrelated session".into()),
+                "permission_denied",
+            ),
+            (
+                SessionApiError::SessionBusy("active turn".into()),
+                "session_busy",
+            ),
+            (
+                SessionApiError::MaxDepthExceeded { current: 4, max: 4 },
+                "max_depth_exceeded",
+            ),
+            (
+                SessionApiError::Unsupported("operation".into()),
+                "unsupported",
+            ),
+            (
+                SessionApiError::internal_msg("backend failed"),
+                "internal_error",
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(session_api_error(error).code, expected);
         }
     }
 }

@@ -104,13 +104,11 @@ impl ToolHandler for SkillToolHandler {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
         let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| ExtensionError::Internal("working directory not injected".into()))?
+            .call()
+            .require_working_dir()?
             .to_string_lossy()
             .into_owned();
-        let session_id = ctx
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("session id not injected".into()))?;
+        let session_id = ctx.call().require_session_id()?;
 
         Ok(handle_skill_tool(
             ctx.raw_arguments().clone(),
@@ -134,9 +132,7 @@ impl PromptBuildHandler for SkillPromptBuildHandler {
             return Ok(PromptContributions::default());
         }
 
-        let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| ExtensionError::Internal("skill prompt requires a workspace".into()))?;
+        let working_dir = ctx.call().require_working_dir()?;
         let working_dir = working_dir.to_string_lossy();
         let skills = self.shared.get_or_discover(&working_dir);
         Ok(PromptContributions {
@@ -156,9 +152,7 @@ impl CommandDiscoveryHandler for SkillCommandDiscovery {
         &self,
         ctx: CommandDiscoveryContext,
     ) -> Result<CommandDiscovery, ExtensionError> {
-        let working_dir = ctx.working_dir().ok_or_else(|| {
-            ExtensionError::Internal("skill discovery requires a workspace".into())
-        })?;
+        let working_dir = ctx.call().require_working_dir()?;
         let working_dir = working_dir.to_string_lossy();
         let commands = self
             .shared
@@ -196,12 +190,8 @@ struct SkillCommandHandler {
 #[async_trait::async_trait]
 impl CommandHandler for SkillCommandHandler {
     async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError> {
-        let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| ExtensionError::Internal("skill command requires a workspace".into()))?;
-        let session_id = ctx
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("skill command requires a session".into()))?;
+        let working_dir = ctx.call().require_working_dir()?;
+        let session_id = ctx.call().require_session_id()?;
         let working_dir = working_dir.to_string_lossy();
         let skills = self.shared.get_or_discover(&working_dir);
         let Some(skill) = skills
