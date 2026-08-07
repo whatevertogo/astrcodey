@@ -3,7 +3,6 @@ mod contracts;
 mod domain_client;
 mod error;
 mod operation;
-pub(crate) mod schema;
 
 use std::sync::Arc;
 

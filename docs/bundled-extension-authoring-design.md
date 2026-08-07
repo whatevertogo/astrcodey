@@ -871,11 +871,11 @@ replacement 的纯 discovery 与包 manifest 校验可以提前完成，但进�
 必须同时完成：
 
 1. 在 SDK capability enum 中加入领域名称和稳定 wire name；
-2. 定义请求/响应领域类型；只有跨 S5R/HTTP 时派生 serde；
-3. 在唯一 capability catalog 中登记 schema、取消、stream 和授权元数据；
+2. 定义请求/响应领域类型；跨 S5R/HTTP 的 wire DTO 派生 serde 并以 `deny_unknown_fields` 封闭契约；
+3. 在唯一 capability catalog 中登记取消、stream 和授权元数据；
 4. 在正确的 HostRouter capability group 实现；
 5. 在 `ExtensionHost` 增加领域 client 方法，而不是暴露 raw invoke；
-6. 决定 worker 是否可用；可用则补 HostClient adapter 与 schema consistency test，不可用则明确原因；
+6. 决定 worker 是否可用；可用则补 HostClient adapter 与 serde round-trip/严格性测试，不可用则明确原因；
 7. 增加 permission denied、backend unavailable、cancel/timeout 和成功路径测试；
 8. 更新 capability 文档。
 
@@ -1007,7 +1007,7 @@ compatibility 层。
 - registration validation、batch publication、generation pinning 和 retirement 测试保持通过。
 - reload 不在 must-finish write 完成前发布会访问同一状态的新 extension generation。
 - 取消可以从 turn/HTTP/S5R 传到 handler；must-finish 临界区除外且有明确诊断。
-- bundled 与 worker 对共享 host API 的 schema、错误 code 和关键行为测试一致。
+- bundled 与 worker 对共享 host API 的 wire DTO、错误 code 和关键行为测试一致。
 
 ### API 可维护性
 

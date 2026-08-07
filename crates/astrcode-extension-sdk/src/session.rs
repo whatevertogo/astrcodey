@@ -4,16 +4,11 @@
 //! 方便插件侧使用。
 
 use astrcode_core::event::Phase;
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 
-use crate::host::schema::{
-    create_session_tool_selection_schema, derived_wire_schema, json_object_schema,
-    nullable_string_schema,
-};
 pub use crate::{
     extension::SessionToolSelection,
     tool::{
@@ -24,7 +19,7 @@ pub use crate::{
 };
 
 /// 插件 session API 共用的工具选择线缆契约。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionToolSelectionDto {
     All {
@@ -69,15 +64,6 @@ impl SessionToolSelectionDto {
     pub const fn no_tools() -> Self {
         Self::Only { names: Vec::new() }
     }
-
-    /// 返回该线缆类型的 JSON Schema。description 随调用点语境变化,derive 生成后在
-    /// 边界注入描述,而不是为每个调用点重复手写。
-    pub fn wire_schema(description: &str) -> Value {
-        let mut schema = derived_wire_schema::<Self>();
-        schema["type"] = Value::String("object".into());
-        schema["description"] = Value::String(description.into());
-        schema
-    }
 }
 
 impl From<SessionToolSelection> for SessionToolSelectionDto {
@@ -90,7 +76,7 @@ impl From<SessionToolSelection> for SessionToolSelectionDto {
 }
 
 /// `astrcode.session.control.create` 的线缆请求。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostCreateSessionRequest {
     pub name: String,
@@ -99,7 +85,6 @@ pub struct HostCreateSessionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_preference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(schema_with = "create_session_tool_selection_schema")]
     pub tool_selection: Option<SessionToolSelectionDto>,
     #[serde(default)]
     pub ephemeral: bool,
@@ -115,23 +100,13 @@ impl HostCreateSessionRequest {
             ephemeral: false,
         }
     }
-
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
 }
 
 /// `astrcode.session.control.create` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostCreateSessionOutput {
     pub session_id: String,
-}
-
-impl HostCreateSessionOutput {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
 }
 
 impl From<SessionHandle> for HostCreateSessionOutput {
@@ -143,20 +118,14 @@ impl From<SessionHandle> for HostCreateSessionOutput {
 }
 
 /// 插件 session control 操作的目标。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionTargetRequest {
     pub target_session_id: String,
 }
 
-impl HostSessionTargetRequest {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
-}
-
 /// `astrcode.session.control.dispose` request. The operation recycles rather than deletes.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostRecycleSessionRequest {
     pub session_id: String,
@@ -168,14 +137,10 @@ impl HostRecycleSessionRequest {
             session_id: session_id.into(),
         }
     }
-
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
 }
 
 /// Session 生命周期的稳定线缆表示。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLifecycleStateDto {
     Active,
@@ -192,7 +157,7 @@ impl From<SessionLifecycleState> for SessionLifecycleStateDto {
 }
 
 /// Session execution phase at the extension wire boundary.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionPhaseDto {
     Idle,
@@ -201,12 +166,6 @@ pub enum SessionPhaseDto {
     CallingTool,
     Compacting,
     Error,
-}
-
-impl SessionPhaseDto {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
 }
 
 impl From<Phase> for SessionPhaseDto {
@@ -223,12 +182,11 @@ impl From<Phase> for SessionPhaseDto {
 }
 
 /// `astrcode.session.control.state` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionStateOutput {
     pub lifecycle: SessionLifecycleStateDto,
     pub phase: SessionPhaseDto,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub active_turn_id: Option<String>,
     pub queued_inputs: usize,
     pub message_count: usize,
@@ -244,14 +202,10 @@ impl HostSessionStateOutput {
             message_count: state.message_count,
         }
     }
-
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
 }
 
 /// `astrcode.session.control.reactivate` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionReactivateOutput {
     pub session_id: String,
@@ -259,10 +213,6 @@ pub struct HostSessionReactivateOutput {
 }
 
 impl HostSessionReactivateOutput {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
-
     pub fn from_result(session_id: String, result: SessionReactivation) -> Self {
         Self {
             session_id,
@@ -272,7 +222,7 @@ impl HostSessionReactivateOutput {
 }
 
 /// `astrcode.session.control.submit_turn` 的线缆请求。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSubmitTurnRequest {
     pub target_session_id: String,
@@ -303,14 +253,10 @@ impl HostSubmitTurnRequest {
             recycle_on_complete: true,
         }
     }
-
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
 }
 
 /// Submit a turn to a top-level session owned by the calling source extension.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostRootSubmitTurnRequest {
     pub target_session_id: String,
@@ -327,21 +273,16 @@ impl HostRootSubmitTurnRequest {
             wait_for_result: true,
         }
     }
-
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
 }
 
 /// Cursor page request for `astrcode.session.read_events`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionEventsPageRequest {
     pub session_id: String,
     #[serde(default = "default_session_events_cursor")]
     pub cursor: String,
     #[serde(default = "default_session_events_limit")]
-    #[schemars(range(min = 1, max = 500))]
     pub limit: usize,
 }
 
@@ -352,10 +293,6 @@ impl HostSessionEventsPageRequest {
             cursor: default_session_events_cursor(),
             limit: default_session_events_limit(),
         }
-    }
-
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
     }
 }
 
@@ -368,7 +305,7 @@ const fn default_session_events_limit() -> usize {
 }
 
 /// Stable event envelope returned by `astrcode.session.read_events`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionEvent {
     pub seq: u64,
@@ -377,12 +314,11 @@ pub struct HostSessionEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     pub timestamp: String,
-    #[schemars(schema_with = "json_object_schema")]
     pub payload: Value,
 }
 
 /// Cursor page response for `astrcode.session.read_events`.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionEventsPageOutput {
     pub events: Vec<HostSessionEvent>,
@@ -390,24 +326,12 @@ pub struct HostSessionEventsPageOutput {
     pub has_more: bool,
 }
 
-impl HostSessionEventsPageOutput {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
-}
-
 /// `astrcode.session.control.submit_turn` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostSubmitTurnOutput {
     Completed { content: String },
     Backgrounded { task_id: String, session_id: String },
-}
-
-impl HostSubmitTurnOutput {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
 }
 
 impl From<SubmitTurnResult> for HostSubmitTurnOutput {
@@ -426,8 +350,6 @@ impl From<SubmitTurnResult> for HostSubmitTurnOutput {
 }
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-
     use serde::de::DeserializeOwned;
 
     use super::*;
@@ -480,7 +402,7 @@ mod tests {
     }
 
     #[test]
-    fn session_control_schemas_cover_every_serialized_field() {
+    fn session_control_contracts_round_trip_and_reject_unknown_fields() {
         let create = HostCreateSessionRequest {
             name: "reviewer".into(),
             system_prompt: Some("review".into()),
@@ -488,40 +410,25 @@ mod tests {
             tool_selection: Some(SessionToolSelectionDto::no_tools()),
             ephemeral: true,
         };
-        assert_schema_fields(&create, &HostCreateSessionRequest::wire_schema());
-        assert_schema_fields(
-            &HostCreateSessionOutput {
-                session_id: "child-1".into(),
-            },
-            &HostCreateSessionOutput::wire_schema(),
-        );
-        assert_schema_fields(
-            &HostSessionTargetRequest {
-                target_session_id: "child-1".into(),
-            },
-            &HostSessionTargetRequest::wire_schema(),
-        );
-        assert_schema_fields(
-            &HostRecycleSessionRequest::new("child-1"),
-            &HostRecycleSessionRequest::wire_schema(),
-        );
-        assert_schema_fields(
-            &HostSessionStateOutput {
-                lifecycle: SessionLifecycleStateDto::Recycled,
-                phase: SessionPhaseDto::Idle,
-                active_turn_id: None,
-                queued_inputs: 0,
-                message_count: 2,
-            },
-            &HostSessionStateOutput::wire_schema(),
-        );
-        assert_schema_fields(
-            &HostSessionReactivateOutput {
-                session_id: "child-1".into(),
-                reactivated: true,
-            },
-            &HostSessionReactivateOutput::wire_schema(),
-        );
+        assert_strict_round_trip(&create);
+        assert_strict_round_trip(&HostCreateSessionOutput {
+            session_id: "child-1".into(),
+        });
+        assert_strict_round_trip(&HostSessionTargetRequest {
+            target_session_id: "child-1".into(),
+        });
+        assert_strict_round_trip(&HostRecycleSessionRequest::new("child-1"));
+        assert_strict_round_trip(&HostSessionStateOutput {
+            lifecycle: SessionLifecycleStateDto::Recycled,
+            phase: SessionPhaseDto::Idle,
+            active_turn_id: None,
+            queued_inputs: 0,
+            message_count: 2,
+        });
+        assert_strict_round_trip(&HostSessionReactivateOutput {
+            session_id: "child-1".into(),
+            reactivated: true,
+        });
 
         let submit = HostSubmitTurnRequest {
             target_session_id: "child-1".into(),
@@ -530,58 +437,42 @@ mod tests {
             notify_parent_on_complete: Some("done".into()),
             recycle_on_complete: true,
         };
-        assert_schema_fields(&submit, &HostSubmitTurnRequest::wire_schema());
-        assert_schema_fields(
-            &HostRootSubmitTurnRequest::new("root-1", "review"),
-            &HostRootSubmitTurnRequest::wire_schema(),
-        );
+        assert_strict_round_trip(&submit);
+        assert_strict_round_trip(&HostRootSubmitTurnRequest::new("root-1", "review"));
 
         let events_request: HostSessionEventsPageRequest =
             serde_json::from_value(json!({ "session_id": "root-1" })).unwrap();
         assert_eq!(events_request.cursor, "0");
         assert_eq!(events_request.limit, 100);
-        assert_schema_fields(
-            &events_request,
-            &HostSessionEventsPageRequest::wire_schema(),
-        );
-        assert_schema_fields(
-            &HostSessionEventsPageOutput {
-                events: vec![HostSessionEvent {
-                    seq: 1,
-                    id: "event-1".into(),
-                    session_id: "root-1".into(),
-                    turn_id: None,
-                    timestamp: "2026-08-06T00:00:00Z".into(),
-                    payload: json!({ "type": "turn_started" }),
-                }],
-                next_cursor: "1".into(),
-                has_more: true,
-            },
-            &HostSessionEventsPageOutput::wire_schema(),
-        );
+        assert_strict_round_trip(&events_request);
+        assert_strict_round_trip(&HostSessionEventsPageOutput {
+            events: vec![HostSessionEvent {
+                seq: 1,
+                id: "event-1".into(),
+                session_id: "root-1".into(),
+                turn_id: None,
+                timestamp: "2026-08-06T00:00:00Z".into(),
+                payload: json!({ "type": "turn_started" }),
+            }],
+            next_cursor: "1".into(),
+            has_more: true,
+        });
 
-        let output_schema = HostSubmitTurnOutput::wire_schema();
-        for (output, variant) in [
-            (
-                HostSubmitTurnOutput::Completed {
-                    content: "done".into(),
-                },
-                &output_schema["oneOf"][0],
-            ),
-            (
-                HostSubmitTurnOutput::Backgrounded {
-                    task_id: "turn-1".into(),
-                    session_id: "child-1".into(),
-                },
-                &output_schema["oneOf"][1],
-            ),
+        for output in [
+            HostSubmitTurnOutput::Completed {
+                content: "done".into(),
+            },
+            HostSubmitTurnOutput::Backgrounded {
+                task_id: "turn-1".into(),
+                session_id: "child-1".into(),
+            },
         ] {
-            assert_schema_fields(&output, variant);
+            assert_strict_round_trip(&output);
         }
     }
 
     #[test]
-    fn optional_session_fields_accept_explicit_nulls_in_schema_and_serde() {
+    fn optional_session_fields_accept_explicit_nulls() {
         let create: HostCreateSessionRequest = serde_json::from_value(json!({
             "name": "reviewer",
             "system_prompt": null,
@@ -600,47 +491,14 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(submit.notify_parent_on_complete, None);
-
-        let create_schema = HostCreateSessionRequest::wire_schema();
-        for field in ["system_prompt", "model_preference"] {
-            assert_eq!(
-                create_schema["properties"][field]["type"],
-                json!(["string", "null"])
-            );
-        }
-        assert!(
-            create_schema["properties"]["tool_selection"]["anyOf"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|schema| schema["type"] == "null")
-        );
-        assert_eq!(
-            HostSubmitTurnRequest::wire_schema()["properties"]["notify_parent_on_complete"]["type"],
-            json!(["string", "null"])
-        );
     }
 
-    fn assert_schema_fields<T>(value: &T, schema: &Value)
+    fn assert_strict_round_trip<T>(value: &T)
     where
         T: Serialize + DeserializeOwned,
     {
         let serialized = serde_json::to_value(value).unwrap();
         serde_json::from_value::<T>(serialized.clone()).unwrap();
-        let serialized_fields = serialized
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        let schema_fields = schema["properties"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        assert_eq!(serialized_fields, schema_fields);
-        assert_eq!(schema["additionalProperties"], false);
 
         let mut invalid = serialized;
         invalid

@@ -169,10 +169,6 @@ pub struct CapabilityDescriptor {
     pub name: String,
     pub description: String,
     #[serde(default)]
-    pub input_schema: Value,
-    #[serde(default)]
-    pub output_schema: Value,
-    #[serde(default)]
     pub supports_stream: bool,
     #[serde(default)]
     pub cancelable: bool,

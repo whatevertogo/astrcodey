@@ -2,28 +2,20 @@
 
 use std::collections::BTreeMap;
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 
 use crate::{
-    host::{
-        deserialize_non_empty_string,
-        schema::{
-            derived_wire_schema, nullable_nonnegative_integer_schema, nullable_string_schema,
-            read_model_tool_selection_schema,
-        },
-    },
+    host::deserialize_non_empty_string,
     session::{SessionLifecycleStateDto, SessionPhaseDto, SessionToolSelectionDto},
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionInspectRequest {
     #[serde(deserialize_with = "deserialize_non_empty_session_id")]
-    #[schemars(length(min = 1))]
     pub session_id: String,
 }
 
@@ -34,43 +26,28 @@ where
     deserialize_non_empty_string(deserializer, "session_id")
 }
 
-impl HostSessionInspectRequest {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectListItem {
     pub session_id: String,
     pub working_dir: String,
     pub model_id: String,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub parent_session_id: Option<String>,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub source_extension: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub phase: SessionPhaseDto,
     pub latest_cursor: String,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub first_user_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectListOutput {
     pub sessions: Vec<SessionInspectListItem>,
 }
 
-impl SessionInspectListOutput {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectSnapshot {
     pub session_id: String,
@@ -78,39 +55,29 @@ pub struct SessionInspectSnapshot {
     pub working_dir: String,
     pub model_id: String,
     pub phase: SessionPhaseDto,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub parent_session_id: Option<String>,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub source_extension: Option<String>,
     pub message_count: usize,
     pub pending_tool_call_ids: Vec<String>,
     pub agent_session_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectSnapshotOutput {
     pub snapshot: SessionInspectSnapshot,
 }
 
-impl SessionInspectSnapshotOutput {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectMessage {
     pub role: String,
     pub content: Vec<SessionInspectContent>,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub name: Option<String>,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub reasoning_content: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -123,10 +90,8 @@ pub enum SessionInspectContent {
     },
     Image {
         base64: String,
-        // schemars 0.8 不识别 `rename_all_fields`,显式 rename 与容器规则产出一致。
         #[serde(rename = "mediaType")]
         media_type: String,
-        #[schemars(required, schema_with = "nullable_string_schema")]
         filename: Option<String>,
     },
     ToolCall {
@@ -144,25 +109,23 @@ pub enum SessionInspectContent {
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectSequencedMessage {
     pub message: SessionInspectMessage,
     pub updated_seq: u64,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub source: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectPendingApproval {
     pub prompt: String,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub rule_key: Option<String>,
 }
 
 /// Child-agent lifecycle state at the session-inspect wire boundary.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionInspectAgentStatusDto {
     Running,
@@ -170,40 +133,34 @@ pub enum SessionInspectAgentStatusDto {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectAgentSession {
     pub child_session_id: String,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub tool_call_id: Option<String>,
     pub agent_name: String,
     pub task: String,
     pub status: SessionInspectAgentStatusDto,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub final_session_id: Option<String>,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub summary: Option<String>,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectCompaction {
     pub trigger: String,
     pub pre_tokens: usize,
     pub post_tokens: usize,
     pub summary: String,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub transcript_path: Option<String>,
     pub seq: u64,
     pub source_seq: u64,
     pub strategy: String,
-    #[schemars(required, schema_with = "nullable_nonnegative_integer_schema")]
     pub keep_recent_turns: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectReadModel {
     pub session_id: String,
@@ -211,64 +168,39 @@ pub struct SessionInspectReadModel {
     pub working_dir: String,
     pub model_id: String,
     pub phase: SessionPhaseDto,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub system_prompt: Option<String>,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub extra_system_prompt: Option<String>,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub system_prompt_fingerprint: Option<String>,
     pub pending_tool_call_ids: Vec<String>,
     pub pending_tool_approvals: BTreeMap<String, SessionInspectPendingApproval>,
     pub created_at: String,
     pub updated_at: String,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub parent_session_id: Option<String>,
-    #[schemars(required, schema_with = "read_model_tool_selection_schema")]
     pub tool_selection: Option<SessionToolSelectionDto>,
-    #[schemars(required, schema_with = "nullable_string_schema")]
     pub source_extension: Option<String>,
     pub agent_sessions: Vec<SessionInspectAgentSession>,
     pub compactions: Vec<SessionInspectCompaction>,
-    #[schemars(required, schema_with = "nullable_nonnegative_integer_schema")]
     pub latest_seq: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectReadModelOutput {
     pub read_model: SessionInspectReadModel,
 }
 
-impl SessionInspectReadModelOutput {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
-}
-
 /// `astrcode.session.history.snapshot` 的作用域受限只读响应。
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionHistorySnapshotOutput {
     pub lifecycle: SessionLifecycleStateDto,
     pub read_model: SessionInspectReadModel,
 }
 
-impl SessionHistorySnapshotOutput {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectProviderMessagesOutput {
     pub messages: Vec<SessionInspectMessage>,
-}
-
-impl SessionInspectProviderMessagesOutput {
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
 }
 
 #[cfg(test)]

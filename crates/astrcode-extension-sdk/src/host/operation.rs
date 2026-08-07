@@ -1,34 +1,4 @@
-use serde_json::{Value, json};
-
-use super::contracts::HostAcknowledgement;
-use crate::{
-    extension::{ExtensionCapability, ExtensionHttpDispatchRequest, ExtensionHttpResponse},
-    host::{
-        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitRequest,
-        HostLlmChatRequest, HostNetworkRequest, HostNetworkResponse, HostProcessOutput,
-        HostProcessRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
-        HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
-        HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
-        HostSessionSummariesOutput, HostSessionTokenUsageOutput, HostSessionTranscript,
-        HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
-        HostWorkspaceGlobRequest, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
-        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
-        HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
-        host_llm_chat_response_schema,
-    },
-    s5r::CapabilityDescriptor,
-    session::{
-        HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
-        HostRootSubmitTurnRequest, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
-        HostSessionReactivateOutput, HostSessionStateOutput, HostSessionTargetRequest,
-        HostSubmitTurnOutput, HostSubmitTurnRequest,
-    },
-    session_inspect::{
-        HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
-        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
-        SessionInspectSnapshotOutput,
-    },
-};
+use crate::{extension::ExtensionCapability, s5r::CapabilityDescriptor};
 
 /// Stable identity for every host operation currently accepted by the HostRouter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -158,63 +128,6 @@ pub(super) enum HostContextRequirement {
     Workspace,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CapabilitySchema {
-    EmptyObject,
-    Acknowledgement,
-    EventEmitRequest,
-    ExtensionHttpDispatchRequest,
-    ExtensionHttpResponse,
-    LlmChatRequest,
-    LlmChatOutput,
-    NetworkRequest,
-    NetworkResponse,
-    ProcessSpawn,
-    ProcessSpawnOutput,
-    SessionInspectRequest,
-    SessionEventsPage,
-    SessionEventsPageOutput,
-    SessionCancelOutput,
-    SessionDeliveryOutput,
-    SessionExecutionView,
-    SessionHistorySnapshotOutput,
-    SessionInput,
-    SessionInspectListOutput,
-    SessionInspectProviderMessagesOutput,
-    SessionInspectReadModelOutput,
-    SessionInspectSnapshotOutput,
-    SessionSummariesOutput,
-    SessionTranscriptOutput,
-    SessionProviderMessagesOutput,
-    SessionTokenUsageOutput,
-    SessionCreate,
-    SessionCreateOutput,
-    SessionTarget,
-    SessionStateOutput,
-    SessionStateReadRequest,
-    SessionStateReadOutput,
-    SessionStateWriteRequest,
-    SessionReactivateOutput,
-    SessionSubmitTurn,
-    SessionSubmitTurnOutput,
-    SessionRootSubmitTurn,
-    SessionRecycle,
-    SessionToolSelection,
-    SessionToolSelectionOutput,
-    WorkspaceEdit,
-    WorkspaceEditOutput,
-    WorkspaceGlob,
-    WorkspaceGlobOutput,
-    WorkspaceGrep,
-    WorkspaceGrepOutput,
-    WorkspaceList,
-    WorkspaceListOutput,
-    WorkspaceRead,
-    WorkspaceReadOutput,
-    WorkspaceWrite,
-    WorkspaceWriteOutput,
-}
-
 /// Metadata shared by authoring clients, authorization, and the S5R capability catalog.
 #[derive(Debug, Clone, Copy)]
 pub struct HostOperationSpec {
@@ -222,28 +135,16 @@ pub struct HostOperationSpec {
     pub name: &'static str,
     pub required: Option<ExtensionCapability>,
     pub description: &'static str,
-    input_schema: CapabilitySchema,
-    output_schema: CapabilitySchema,
     pub supports_stream: bool,
     pub cancelable: bool,
     pub catalog: bool,
 }
 
 impl HostOperationSpec {
-    pub fn input_schema(self) -> Value {
-        capability_schema(self.input_schema)
-    }
-
-    pub fn output_schema(self) -> Value {
-        capability_schema(self.output_schema)
-    }
-
     pub fn descriptor(self) -> CapabilityDescriptor {
         CapabilityDescriptor {
             name: self.name.into(),
             description: self.description.into(),
-            input_schema: self.input_schema(),
-            output_schema: self.output_schema(),
             supports_stream: self.supports_stream,
             cancelable: self.cancelable,
         }
@@ -251,21 +152,12 @@ impl HostOperationSpec {
 }
 
 macro_rules! spec {
-    (
-        $operation:ident,
-        $name:literal,
-        $required:expr,
-        $description:literal,
-        $input_schema:ident,
-        $output_schema:ident
-    ) => {
+    ($operation:ident, $name:literal, $required:expr, $description:literal $(,)?) => {
         HostOperationSpec {
             operation: HostOperation::$operation,
             name: $name,
             required: $required,
             description: $description,
-            input_schema: CapabilitySchema::$input_schema,
-            output_schema: CapabilitySchema::$output_schema,
             supports_stream: false,
             cancelable: false,
             catalog: true,
@@ -280,24 +172,18 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
         "astrcode.event.emit",
         Some(ExtensionCapability::EmitEvents),
         "Emit a declared extension event",
-        EventEmitRequest,
-        Acknowledgement
     ),
     spec!(
         ExtensionHttpPublic,
         "astrcode.extension.http.public",
         Some(ExtensionCapability::PublicHttpDispatch),
         "Dispatch a request to another extension's public HTTP route",
-        ExtensionHttpDispatchRequest,
-        ExtensionHttpResponse
     ),
     HostOperationSpec {
         operation: HostOperation::LlmMainChat,
         name: "astrcode.llm.main_chat",
         required: Some(ExtensionCapability::MainModel),
         description: "Chat with the host-configured live main LLM provider",
-        input_schema: CapabilitySchema::LlmChatRequest,
-        output_schema: CapabilitySchema::LlmChatOutput,
         supports_stream: true,
         cancelable: true,
         catalog: true,
@@ -307,8 +193,6 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
         name: "astrcode.llm.small_chat",
         required: Some(ExtensionCapability::SmallModel),
         description: "Chat with the host-configured small LLM",
-        input_schema: CapabilitySchema::LlmChatRequest,
-        output_schema: CapabilitySchema::LlmChatOutput,
         supports_stream: true,
         cancelable: true,
         catalog: true,
@@ -318,8 +202,6 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
         name: "astrcode.network.client",
         required: Some(ExtensionCapability::NetworkClient),
         description: "Send a bounded outbound HTTP or HTTPS request with a binary body",
-        input_schema: CapabilitySchema::NetworkRequest,
-        output_schema: CapabilitySchema::NetworkResponse,
         supports_stream: false,
         cancelable: true,
         catalog: true,
@@ -329,8 +211,6 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
         name: "astrcode.process.spawn",
         required: Some(ExtensionCapability::ProcessSpawn),
         description: "Run a bounded subprocess with an optional workspace-relative cwd",
-        input_schema: CapabilitySchema::ProcessSpawn,
-        output_schema: CapabilitySchema::ProcessSpawnOutput,
         supports_stream: false,
         cancelable: true,
         catalog: true,
@@ -340,414 +220,194 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
         "astrcode.session.control.cancel_turn",
         Some(ExtensionCapability::SessionControl),
         "Cancel the active turn",
-        SessionTarget,
-        SessionCancelOutput
     ),
     spec!(
         SessionControlConfigureTools,
         "astrcode.session.control.configure_tools",
         Some(ExtensionCapability::SessionControl),
         "Configure the tool-name boundary used by subsequent session turns",
-        SessionToolSelection,
-        SessionToolSelectionOutput
     ),
     spec!(
         SessionControlCreate,
         "astrcode.session.control.create",
         Some(ExtensionCapability::SessionControl),
         "Create a child session",
-        SessionCreate,
-        SessionCreateOutput
     ),
     spec!(
         SessionControlDispose,
         "astrcode.session.control.dispose",
         Some(ExtensionCapability::SessionControl),
         "Recycle a session while preserving its durable data",
-        SessionRecycle,
-        Acknowledgement
     ),
     spec!(
         SessionControlExecutionView,
         "astrcode.session.control.execution_view",
         Some(ExtensionCapability::SessionControl),
         "Read active turn and queued-input state",
-        SessionTarget,
-        SessionExecutionView
     ),
     spec!(
         SessionControlInjectOrStart,
         "astrcode.session.control.inject_or_start",
         Some(ExtensionCapability::SessionControl),
         "Inject input into a running turn or start when idle",
-        SessionInput,
-        SessionDeliveryOutput
     ),
     spec!(
         SessionControlInterruptAndSubmit,
         "astrcode.session.control.interrupt_and_submit",
         Some(ExtensionCapability::SessionControl),
         "Interrupt the active turn and submit new input",
-        SessionInput,
-        SessionDeliveryOutput
     ),
     spec!(
         SessionControlReactivate,
         "astrcode.session.control.reactivate",
         Some(ExtensionCapability::SessionControl),
         "Reactivate a recycled direct child session",
-        SessionTarget,
-        SessionReactivateOutput
     ),
     spec!(
         SessionControlState,
         "astrcode.session.control.state",
         Some(ExtensionCapability::SessionControl),
         "Read active or recycled session lifecycle state",
-        SessionTarget,
-        SessionStateOutput
     ),
     spec!(
         SessionControlSubmitTurn,
         "astrcode.session.control.submit_turn",
         Some(ExtensionCapability::SessionControl),
         "Submit a turn to a session",
-        SessionSubmitTurn,
-        SessionSubmitTurnOutput
     ),
     spec!(
         SessionHistoryList,
         "astrcode.session.history.list",
         Some(ExtensionCapability::SessionHistory),
         "List stable session summaries visible to session-history consumers",
-        EmptyObject,
-        SessionSummariesOutput
     ),
     spec!(
         SessionHistoryProviderMessages,
         "astrcode.session.history.provider_messages",
         Some(ExtensionCapability::SessionHistory),
         "Read provider-visible messages from a session transcript",
-        SessionTarget,
-        SessionProviderMessagesOutput
     ),
     spec!(
         SessionHistorySnapshot,
         "astrcode.session.history.snapshot",
         Some(ExtensionCapability::SessionHistory),
         "Read an authorized active or recycled session snapshot",
-        SessionTarget,
-        SessionHistorySnapshotOutput
     ),
     spec!(
         SessionHistoryTokenUsage,
         "astrcode.session.history.token_usage",
         Some(ExtensionCapability::SessionHistory),
         "Read accumulated non-cached token usage for a session",
-        SessionTarget,
-        SessionTokenUsageOutput
     ),
     spec!(
         SessionHistoryTranscript,
         "astrcode.session.history.transcript",
         Some(ExtensionCapability::SessionHistory),
         "Read the extension-visible transcript for a session",
-        SessionTarget,
-        SessionTranscriptOutput
     ),
     spec!(
         SessionInspectList,
         "astrcode.session.inspect.list",
         Some(ExtensionCapability::SessionInspect),
         "List all sessions visible to the host (global privileged access)",
-        EmptyObject,
-        SessionInspectListOutput
     ),
     spec!(
         SessionInspectProviderMessages,
         "astrcode.session.inspect.provider_messages",
         Some(ExtensionCapability::SessionInspect),
         "Read provider-visible messages for any host-visible session",
-        SessionInspectRequest,
-        SessionInspectProviderMessagesOutput
     ),
     spec!(
         SessionInspectReadModel,
         "astrcode.session.inspect.read_model",
         Some(ExtensionCapability::SessionInspect),
         "Read any host-visible projected session model through a stable wire DTO",
-        SessionInspectRequest,
-        SessionInspectReadModelOutput
     ),
     spec!(
         SessionInspectSnapshot,
         "astrcode.session.inspect.snapshot",
         Some(ExtensionCapability::SessionInspect),
         "Read any host-visible session snapshot (global privileged access)",
-        SessionInspectRequest,
-        SessionInspectSnapshotOutput
     ),
     spec!(
         SessionReadEvents,
         "astrcode.session.read_events",
         Some(ExtensionCapability::SessionHistory),
         "Read a cursor page from the durable session event log",
-        SessionEventsPage,
-        SessionEventsPageOutput
     ),
     spec!(
         SessionRootCreate,
         "astrcode.session.root.create",
         Some(ExtensionCapability::InputDelivery),
         "Create a top-level session attributed to the calling extension",
-        EmptyObject,
-        SessionCreateOutput
     ),
     spec!(
         SessionRootState,
         "astrcode.session.root.state",
         Some(ExtensionCapability::InputDelivery),
         "Read an owned top-level session lifecycle state",
-        SessionTarget,
-        SessionStateOutput
     ),
     spec!(
         SessionRootSubmitTurn,
         "astrcode.session.root.submit_turn",
         Some(ExtensionCapability::InputDelivery),
         "Submit a turn to an owned top-level session",
-        SessionRootSubmitTurn,
-        SessionSubmitTurnOutput
     ),
     spec!(
         SessionStateRead,
         "astrcode.session.state.read",
         None,
         "Read extension-namespaced session state",
-        SessionStateReadRequest,
-        SessionStateReadOutput
     ),
     spec!(
         SessionStateWrite,
         "astrcode.session.state.write",
         None,
         "Write extension-namespaced session state",
-        SessionStateWriteRequest,
-        Acknowledgement
     ),
     spec!(
         WorkspaceEdit,
         "astrcode.workspace.edit",
         Some(ExtensionCapability::WorkspaceWrite),
         "Replace an exact text fragment in a non-sensitive workspace file",
-        WorkspaceEdit,
-        WorkspaceEditOutput
     ),
     spec!(
         WorkspaceGlob,
         "astrcode.workspace.glob",
         Some(ExtensionCapability::WorkspaceRead),
         "Match bounded workspace paths by glob",
-        WorkspaceGlob,
-        WorkspaceGlobOutput
     ),
     spec!(
         WorkspaceGrep,
         "astrcode.workspace.grep",
         Some(ExtensionCapability::WorkspaceRead),
         "Regex-search bounded UTF-8 workspace files",
-        WorkspaceGrep,
-        WorkspaceGrepOutput
     ),
     spec!(
         WorkspaceList,
         "astrcode.workspace.list",
         Some(ExtensionCapability::WorkspaceRead),
         "List a bounded workspace directory tree",
-        WorkspaceList,
-        WorkspaceListOutput
     ),
     spec!(
         WorkspaceRead,
         "astrcode.workspace.read",
         Some(ExtensionCapability::WorkspaceRead),
         "Read a bounded UTF-8 workspace file",
-        WorkspaceRead,
-        WorkspaceReadOutput
     ),
     spec!(
         WorkspaceWrite,
         "astrcode.workspace.write",
         Some(ExtensionCapability::WorkspaceWrite),
         "Create or replace a non-sensitive file under the working directory",
-        WorkspaceWrite,
-        WorkspaceWriteOutput
     ),
 ];
-
-fn capability_schema(schema: CapabilitySchema) -> Value {
-    match schema {
-        CapabilitySchema::EmptyObject => json!({
-            "type": "object",
-            "properties": {},
-            "additionalProperties": false
-        }),
-        CapabilitySchema::Acknowledgement => HostAcknowledgement::wire_schema(),
-        CapabilitySchema::EventEmitRequest => HostEventEmitRequest::wire_schema(),
-        CapabilitySchema::ExtensionHttpDispatchRequest => {
-            ExtensionHttpDispatchRequest::wire_schema()
-        },
-        CapabilitySchema::ExtensionHttpResponse => ExtensionHttpResponse::wire_schema(),
-        CapabilitySchema::LlmChatRequest => HostLlmChatRequest::wire_schema(),
-        CapabilitySchema::LlmChatOutput => host_llm_chat_response_schema(),
-        CapabilitySchema::NetworkRequest => HostNetworkRequest::wire_schema(),
-        CapabilitySchema::NetworkResponse => HostNetworkResponse::wire_schema(),
-        CapabilitySchema::ProcessSpawn => HostProcessRequest::wire_schema(),
-        CapabilitySchema::ProcessSpawnOutput => HostProcessOutput::wire_schema(),
-        CapabilitySchema::SessionInspectRequest => HostSessionInspectRequest::wire_schema(),
-        CapabilitySchema::SessionEventsPage => HostSessionEventsPageRequest::wire_schema(),
-        CapabilitySchema::SessionEventsPageOutput => HostSessionEventsPageOutput::wire_schema(),
-        CapabilitySchema::SessionCancelOutput => HostSessionCancelOutput::wire_schema(),
-        CapabilitySchema::SessionDeliveryOutput => HostSessionDeliveryOutput::wire_schema(),
-        CapabilitySchema::SessionExecutionView => HostSessionExecutionView::wire_schema(),
-        CapabilitySchema::SessionHistorySnapshotOutput => {
-            SessionHistorySnapshotOutput::wire_schema()
-        },
-        CapabilitySchema::SessionInput => HostSessionInputRequest::wire_schema(),
-        CapabilitySchema::SessionInspectListOutput => SessionInspectListOutput::wire_schema(),
-        CapabilitySchema::SessionInspectProviderMessagesOutput => {
-            SessionInspectProviderMessagesOutput::wire_schema()
-        },
-        CapabilitySchema::SessionInspectReadModelOutput => {
-            SessionInspectReadModelOutput::wire_schema()
-        },
-        CapabilitySchema::SessionInspectSnapshotOutput => {
-            SessionInspectSnapshotOutput::wire_schema()
-        },
-        CapabilitySchema::SessionSummariesOutput => HostSessionSummariesOutput::wire_schema(),
-        CapabilitySchema::SessionTranscriptOutput => HostSessionTranscript::wire_schema(),
-        CapabilitySchema::SessionProviderMessagesOutput => {
-            HostSessionProviderMessagesOutput::wire_schema()
-        },
-        CapabilitySchema::SessionTokenUsageOutput => HostSessionTokenUsageOutput::wire_schema(),
-        CapabilitySchema::SessionCreate => HostCreateSessionRequest::wire_schema(),
-        CapabilitySchema::SessionCreateOutput => HostCreateSessionOutput::wire_schema(),
-        CapabilitySchema::SessionTarget => HostSessionTargetRequest::wire_schema(),
-        CapabilitySchema::SessionStateOutput => HostSessionStateOutput::wire_schema(),
-        CapabilitySchema::SessionStateReadRequest => HostSessionStateReadRequest::wire_schema(),
-        CapabilitySchema::SessionStateReadOutput => HostSessionStateReadOutput::wire_schema(),
-        CapabilitySchema::SessionStateWriteRequest => HostSessionStateWriteRequest::wire_schema(),
-        CapabilitySchema::SessionReactivateOutput => HostSessionReactivateOutput::wire_schema(),
-        CapabilitySchema::SessionSubmitTurn => HostSubmitTurnRequest::wire_schema(),
-        CapabilitySchema::SessionSubmitTurnOutput => HostSubmitTurnOutput::wire_schema(),
-        CapabilitySchema::SessionRootSubmitTurn => HostRootSubmitTurnRequest::wire_schema(),
-        CapabilitySchema::SessionRecycle => HostRecycleSessionRequest::wire_schema(),
-        CapabilitySchema::SessionToolSelection => HostConfigureSessionToolsRequest::wire_schema(),
-        CapabilitySchema::SessionToolSelectionOutput => {
-            HostConfigureSessionToolsOutput::wire_schema()
-        },
-        CapabilitySchema::WorkspaceEdit => HostWorkspaceEditRequest::wire_schema(),
-        CapabilitySchema::WorkspaceEditOutput => HostWorkspaceEditOutput::wire_schema(),
-        CapabilitySchema::WorkspaceGlob => HostWorkspaceGlobRequest::wire_schema(),
-        CapabilitySchema::WorkspaceGlobOutput => HostWorkspaceGlobOutput::wire_schema(),
-        CapabilitySchema::WorkspaceGrep => HostWorkspaceGrepRequest::wire_schema(),
-        CapabilitySchema::WorkspaceGrepOutput => HostWorkspaceGrepOutput::wire_schema(),
-        CapabilitySchema::WorkspaceList => HostWorkspaceListRequest::wire_schema(),
-        CapabilitySchema::WorkspaceListOutput => HostWorkspaceListOutput::wire_schema(),
-        CapabilitySchema::WorkspaceRead => HostWorkspaceReadRequest::wire_schema(),
-        CapabilitySchema::WorkspaceReadOutput => HostWorkspaceReadOutput::wire_schema(),
-        CapabilitySchema::WorkspaceWrite => HostWorkspaceWriteRequest::wire_schema(),
-        CapabilitySchema::WorkspaceWriteOutput => HostWorkspaceWriteOutput::wire_schema(),
-    }
-}
 
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
     use super::*;
-
-    fn assert_closed_record_schema(
-        schema: &Value,
-        operation: HostOperation,
-        boundary: &str,
-        path: &str,
-    ) {
-        let Some(object) = schema.as_object() else {
-            return;
-        };
-        if let Some(properties) = object.get("properties").and_then(Value::as_object) {
-            assert_eq!(
-                object.get("additionalProperties"),
-                Some(&Value::Bool(false)),
-                "{operation:?} {boundary} record at {path} must reject unknown fields"
-            );
-            for (name, property) in properties {
-                assert_closed_record_schema(
-                    property,
-                    operation,
-                    boundary,
-                    &format!("{path}/properties/{name}"),
-                );
-            }
-        }
-        if let Some(required) = object.get("required").and_then(Value::as_array) {
-            let mut names = HashSet::new();
-            for name in required {
-                let name = name.as_str().unwrap_or_else(|| {
-                    panic!("{operation:?} {boundary} required entry at {path} must be a string")
-                });
-                assert!(
-                    names.insert(name),
-                    "{operation:?} {boundary} schema at {path} repeats required field {name}"
-                );
-                if let Some(properties) = object.get("properties").and_then(Value::as_object) {
-                    assert!(
-                        properties.contains_key(name),
-                        "{operation:?} {boundary} schema at {path} requires unknown field {name}"
-                    );
-                }
-            }
-        }
-        if let Some(items) = object.get("items") {
-            assert_closed_record_schema(items, operation, boundary, &format!("{path}/items"));
-        }
-        for keyword in ["oneOf", "anyOf", "allOf"] {
-            if let Some(variants) = object.get(keyword).and_then(Value::as_array) {
-                for (index, variant) in variants.iter().enumerate() {
-                    assert_closed_record_schema(
-                        variant,
-                        operation,
-                        boundary,
-                        &format!("{path}/{keyword}/{index}"),
-                    );
-                }
-            }
-        }
-        for definitions_key in ["$defs", "definitions"] {
-            if let Some(definitions) = object.get(definitions_key).and_then(Value::as_object) {
-                for (name, definition) in definitions {
-                    assert_closed_record_schema(
-                        definition,
-                        operation,
-                        boundary,
-                        &format!("{path}/{definitions_key}/{name}"),
-                    );
-                }
-            }
-        }
-        if let Some(value_schema) = object
-            .get("additionalProperties")
-            .filter(|value| value.is_object())
-        {
-            assert_closed_record_schema(
-                value_schema,
-                operation,
-                boundary,
-                &format!("{path}/additionalProperties"),
-            );
-        }
-    }
 
     #[test]
     fn operation_catalog_is_exhaustive_sorted_and_round_trips() {
@@ -777,179 +437,6 @@ mod tests {
         }
         assert_eq!(operations.len(), HostOperation::COUNT);
         assert_eq!(HostOperation::from_wire_name("astrcode.unknown"), None);
-    }
-
-    #[test]
-    fn catalog_operations_use_their_typed_wire_schemas() {
-        use CapabilitySchema::*;
-        use HostOperation::*;
-
-        let cases = [
-            (EventEmit, EventEmitRequest, Acknowledgement),
-            (
-                ExtensionHttpPublic,
-                ExtensionHttpDispatchRequest,
-                ExtensionHttpResponse,
-            ),
-            (LlmMainChat, LlmChatRequest, LlmChatOutput),
-            (LlmSmallChat, LlmChatRequest, LlmChatOutput),
-            (NetworkClient, NetworkRequest, NetworkResponse),
-            (
-                HostOperation::ProcessSpawn,
-                CapabilitySchema::ProcessSpawn,
-                ProcessSpawnOutput,
-            ),
-            (SessionControlCancelTurn, SessionTarget, SessionCancelOutput),
-            (
-                SessionControlConfigureTools,
-                SessionToolSelection,
-                SessionToolSelectionOutput,
-            ),
-            (SessionControlCreate, SessionCreate, SessionCreateOutput),
-            (SessionControlDispose, SessionRecycle, Acknowledgement),
-            (
-                SessionControlExecutionView,
-                SessionTarget,
-                SessionExecutionView,
-            ),
-            (
-                SessionControlInjectOrStart,
-                SessionInput,
-                SessionDeliveryOutput,
-            ),
-            (
-                SessionControlInterruptAndSubmit,
-                SessionInput,
-                SessionDeliveryOutput,
-            ),
-            (
-                SessionControlReactivate,
-                SessionTarget,
-                SessionReactivateOutput,
-            ),
-            (SessionControlState, SessionTarget, SessionStateOutput),
-            (
-                SessionControlSubmitTurn,
-                SessionSubmitTurn,
-                SessionSubmitTurnOutput,
-            ),
-            (SessionHistoryList, EmptyObject, SessionSummariesOutput),
-            (
-                SessionHistoryProviderMessages,
-                SessionTarget,
-                SessionProviderMessagesOutput,
-            ),
-            (
-                SessionHistorySnapshot,
-                SessionTarget,
-                SessionHistorySnapshotOutput,
-            ),
-            (
-                SessionHistoryTokenUsage,
-                SessionTarget,
-                SessionTokenUsageOutput,
-            ),
-            (
-                SessionHistoryTranscript,
-                SessionTarget,
-                SessionTranscriptOutput,
-            ),
-            (SessionInspectList, EmptyObject, SessionInspectListOutput),
-            (
-                SessionInspectProviderMessages,
-                SessionInspectRequest,
-                SessionInspectProviderMessagesOutput,
-            ),
-            (
-                SessionInspectReadModel,
-                SessionInspectRequest,
-                SessionInspectReadModelOutput,
-            ),
-            (
-                SessionInspectSnapshot,
-                SessionInspectRequest,
-                SessionInspectSnapshotOutput,
-            ),
-            (
-                SessionReadEvents,
-                SessionEventsPage,
-                SessionEventsPageOutput,
-            ),
-            (
-                HostOperation::SessionRootCreate,
-                CapabilitySchema::EmptyObject,
-                SessionCreateOutput,
-            ),
-            (SessionRootState, SessionTarget, SessionStateOutput),
-            (
-                HostOperation::SessionRootSubmitTurn,
-                CapabilitySchema::SessionRootSubmitTurn,
-                SessionSubmitTurnOutput,
-            ),
-            (
-                HostOperation::SessionStateRead,
-                CapabilitySchema::SessionStateReadRequest,
-                SessionStateReadOutput,
-            ),
-            (
-                HostOperation::SessionStateWrite,
-                CapabilitySchema::SessionStateWriteRequest,
-                Acknowledgement,
-            ),
-            (
-                HostOperation::WorkspaceEdit,
-                CapabilitySchema::WorkspaceEdit,
-                WorkspaceEditOutput,
-            ),
-            (
-                HostOperation::WorkspaceGlob,
-                CapabilitySchema::WorkspaceGlob,
-                WorkspaceGlobOutput,
-            ),
-            (
-                HostOperation::WorkspaceGrep,
-                CapabilitySchema::WorkspaceGrep,
-                WorkspaceGrepOutput,
-            ),
-            (
-                HostOperation::WorkspaceList,
-                CapabilitySchema::WorkspaceList,
-                WorkspaceListOutput,
-            ),
-            (
-                HostOperation::WorkspaceRead,
-                CapabilitySchema::WorkspaceRead,
-                WorkspaceReadOutput,
-            ),
-            (
-                HostOperation::WorkspaceWrite,
-                CapabilitySchema::WorkspaceWrite,
-                WorkspaceWriteOutput,
-            ),
-        ];
-
-        let catalog_operations = HOST_OPERATION_SPECS
-            .iter()
-            .filter(|spec| spec.catalog)
-            .map(|spec| spec.operation)
-            .collect::<HashSet<_>>();
-        assert_eq!(cases.len(), catalog_operations.len());
-
-        let mut covered = HashSet::new();
-        for (operation, input_schema, output_schema) in cases {
-            let spec = operation.spec();
-            assert!(spec.catalog);
-            assert!(covered.insert(operation), "duplicate case: {operation:?}");
-            assert_eq!(spec.input_schema, input_schema, "{operation:?} input");
-            assert_eq!(spec.output_schema, output_schema, "{operation:?} output");
-            let input_schema = spec.input_schema();
-            let output_schema = spec.output_schema();
-            assert_eq!(input_schema, capability_schema(spec.input_schema));
-            assert_eq!(output_schema, capability_schema(spec.output_schema));
-            assert_closed_record_schema(&input_schema, operation, "input", "$");
-            assert_closed_record_schema(&output_schema, operation, "output", "$");
-        }
-        assert_eq!(covered, catalog_operations);
     }
 
     #[test]

@@ -4,26 +4,22 @@ use std::{
     sync::Arc,
 };
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::Value;
 #[cfg(test)]
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use super::{
     ExtensionCallContext, ExtensionError, ExtensionEventEmitter, ExtensionPaths, ExtensionTasks,
 };
-use crate::host::{ExtensionHost, schema::derived_wire_schema};
+use crate::host::ExtensionHost;
 
 // ─── Extension HTTP ─────────────────────────────────────────────────────
 
 pub const DEFAULT_EXTENSION_HTTP_BODY_BYTES: usize = 64 * 1024;
 pub const MAX_EXTENSION_HTTP_BODY_BYTES: usize = 1024 * 1024;
 
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum ExtensionHttpMethod {
     Get,
@@ -103,7 +99,7 @@ impl ExtensionHttpRoute {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionHttpRequest {
     pub method: ExtensionHttpMethod,
@@ -136,17 +132,13 @@ impl ExtensionHttpRequest {
         self.body = body;
         self
     }
-
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
 }
 
 /// Outbound request for dispatching another extension's public HTTP route.
 ///
 /// Route parameters are host-owned facts derived after route matching, so callers cannot supply
 /// them on this boundary.
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionHttpDispatchRequest {
     pub method: ExtensionHttpMethod,
@@ -176,10 +168,6 @@ impl ExtensionHttpDispatchRequest {
         self.body = body;
         self
     }
-
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
-    }
 }
 
 impl From<ExtensionHttpDispatchRequest> for ExtensionHttpRequest {
@@ -194,14 +182,13 @@ impl From<ExtensionHttpDispatchRequest> for ExtensionHttpRequest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionHttpResponse {
     #[serde(
         serialize_with = "serialize_extension_http_status",
         deserialize_with = "deserialize_extension_http_status"
     )]
-    #[schemars(range(min = 100, max = 599))]
     pub status: u16,
     pub body: serde_json::Value,
 }
@@ -218,10 +205,6 @@ impl ExtensionHttpResponse {
                 "error": { "code": code.into(), "message": message.into() }
             }),
         )
-    }
-
-    pub fn wire_schema() -> Value {
-        derived_wire_schema::<Self>()
     }
 }
 
@@ -433,7 +416,7 @@ fn extension_http_param_name(segment: &str) -> Option<&str> {
 mod extension_http_tests {
     use super::*;
 
-    fn assert_strict_wire<T>(valid: Value, schema: Value)
+    fn assert_strict_wire<T>(valid: Value)
     where
         T: Serialize + DeserializeOwned,
     {
@@ -443,22 +426,16 @@ mod extension_http_tests {
             .unwrap()
             .insert("unexpected".into(), Value::Bool(true));
         assert!(serde_json::from_value::<T>(wire).is_err());
-        assert_eq!(schema["additionalProperties"], false);
     }
 
     #[test]
     fn public_dispatch_contracts_reject_unknown_fields() {
         assert_strict_wire::<ExtensionHttpDispatchRequest>(
             json!({ "method": "GET", "path": "/health" }),
-            ExtensionHttpDispatchRequest::wire_schema(),
         );
-        assert_strict_wire::<ExtensionHttpRequest>(
-            json!({ "method": "GET", "path": "/health" }),
-            ExtensionHttpRequest::wire_schema(),
-        );
+        assert_strict_wire::<ExtensionHttpRequest>(json!({ "method": "GET", "path": "/health" }));
         assert_strict_wire::<ExtensionHttpResponse>(
             json!({ "status": 200, "body": { "ok": true } }),
-            ExtensionHttpResponse::wire_schema(),
         );
         assert!(
             serde_json::from_value::<ExtensionHttpDispatchRequest>(json!({
@@ -471,7 +448,7 @@ mod extension_http_tests {
     }
 
     #[test]
-    fn response_status_schema_and_serde_share_http_bounds() {
+    fn response_status_serde_enforces_http_bounds() {
         for status in [99, 600] {
             assert!(
                 serde_json::from_value::<ExtensionHttpResponse>(json!({
@@ -493,9 +470,6 @@ mod extension_http_tests {
                 .is_ok()
             );
         }
-        let schema = ExtensionHttpResponse::wire_schema();
-        assert_eq!(schema["properties"]["status"]["minimum"], 100);
-        assert_eq!(schema["properties"]["status"]["maximum"], 599);
     }
 
     #[test]

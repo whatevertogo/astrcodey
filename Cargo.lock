@@ -460,7 +460,6 @@ dependencies = [
  "base64 0.22.1",
  "futures-util",
  "parking_lot",
- "schemars 0.8.22",
  "serde",
  "serde_json",
  "serde_path_to_error",

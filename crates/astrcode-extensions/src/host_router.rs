@@ -717,16 +717,6 @@ mod tests {
         ] {
             assert!(names.contains(&expected), "missing {expected}");
         }
-        let snapshot = caps
-            .iter()
-            .find(|descriptor| descriptor.name == "astrcode.session.history.snapshot")
-            .expect("history snapshot capability");
-
-        assert_eq!(
-            snapshot.input_schema["required"],
-            json!(["target_session_id"])
-        );
-        assert_eq!(snapshot.input_schema["additionalProperties"], false);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -961,40 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn session_control_schemas_match_strict_wire_contracts() {
-        let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionControl]);
-        let create = caps
-            .iter()
-            .find(|cap| cap.name == "astrcode.session.control.create")
-            .expect("create capability");
-
-        let tool_selection = &create.input_schema["properties"]["tool_selection"]["anyOf"];
-        assert_eq!(tool_selection[1]["type"], "null");
-        let variants = tool_selection[0]["oneOf"]
-            .as_array()
-            .expect("tool selection variants");
-        assert_eq!(variants.len(), 2);
-        assert!(
-            variants
-                .iter()
-                .all(|variant| variant["additionalProperties"] == false)
-        );
-        assert_eq!(create.input_schema["additionalProperties"], false);
-        assert_eq!(create.output_schema["additionalProperties"], false);
-
-        let submit = caps
-            .iter()
-            .find(|cap| cap.name == "astrcode.session.control.submit_turn")
-            .expect("submit turn capability");
-        assert_eq!(submit.input_schema["additionalProperties"], false);
-        assert_eq!(
-            submit.output_schema["oneOf"]
-                .as_array()
-                .expect("submit output variants")
-                .len(),
-            2
-        );
-
+    fn input_delivery_catalog_lists_root_session_operations() {
         let root_caps = HostRouter::catalog_for_grants(&[ExtensionCapability::InputDelivery]);
         let root_names = root_caps
             .iter()
@@ -1010,22 +967,10 @@ mod tests {
                 "astrcode.session.state.write",
             ]
         );
-        let create_root = root_caps
-            .iter()
-            .find(|descriptor| descriptor.name == "astrcode.session.root.create")
-            .expect("root create capability");
-        assert_eq!(create_root.input_schema["properties"], json!({}));
-        assert_eq!(create_root.input_schema["additionalProperties"], false);
     }
 
     #[tokio::test]
     async fn bounded_io_contracts_reject_unknown_fields() {
-        let caps = HostRouter::catalog_for_grants(&[
-            ExtensionCapability::WorkspaceRead,
-            ExtensionCapability::WorkspaceWrite,
-            ExtensionCapability::NetworkClient,
-            ExtensionCapability::ProcessSpawn,
-        ]);
         let workspace = tempfile::tempdir().expect("workspace");
         std::fs::write(workspace.path().join("edit.txt"), "old value").expect("seed workspace");
         let router = HostRouter::from_backends(HostBackends {
@@ -1084,15 +1029,6 @@ mod tests {
         ];
 
         for (operation, input) in cases {
-            let descriptor = caps
-                .iter()
-                .find(|descriptor| descriptor.name == operation)
-                .unwrap_or_else(|| panic!("missing {operation} from catalog"));
-            assert_eq!(
-                descriptor.input_schema["additionalProperties"], false,
-                "{operation} must publish a strict input schema"
-            );
-
             let error = router
                 .invoke(operation, input.clone(), &ctx)
                 .await
@@ -1106,62 +1042,6 @@ mod tests {
                 error.message.contains("unknown field"),
                 "{operation}: {}",
                 error.message
-            );
-        }
-
-        let process_schema = &caps
-            .iter()
-            .find(|descriptor| descriptor.name == "astrcode.process.spawn")
-            .expect("process capability")
-            .input_schema;
-        assert_eq!(process_schema["properties"]["timeout_ms"]["minimum"], 1);
-        assert_eq!(
-            process_schema["properties"]["timeout_ms"]["maximum"],
-            HOST_PROCESS_MAX_TIMEOUT_MS
-        );
-
-        for (operation, property) in [
-            ("astrcode.process.spawn", "command"),
-            ("astrcode.workspace.read", "path"),
-            ("astrcode.workspace.write", "path"),
-            ("astrcode.workspace.edit", "path"),
-            ("astrcode.workspace.edit", "old_text"),
-            ("astrcode.workspace.grep", "pattern"),
-            ("astrcode.workspace.glob", "pattern"),
-        ] {
-            let schema = &caps
-                .iter()
-                .find(|descriptor| descriptor.name == operation)
-                .unwrap_or_else(|| panic!("missing {operation} from catalog"))
-                .input_schema;
-            assert_eq!(
-                schema["properties"][property]["minLength"], 1,
-                "{operation}.{property} must describe the runtime's non-empty constraint"
-            );
-        }
-
-        for (operation, property, scalar_type) in [
-            ("astrcode.process.spawn", "cwd", "string"),
-            ("astrcode.process.spawn", "stdin", "string"),
-            ("astrcode.process.spawn", "timeout_ms", "integer"),
-            ("astrcode.workspace.read", "max_bytes", "integer"),
-            ("astrcode.workspace.list", "limit", "integer"),
-            ("astrcode.workspace.grep", "path", "string"),
-            ("astrcode.workspace.grep", "max_matches", "integer"),
-            ("astrcode.workspace.grep", "max_bytes", "integer"),
-            ("astrcode.workspace.grep", "max_line_chars", "integer"),
-            ("astrcode.workspace.glob", "root", "string"),
-            ("astrcode.workspace.glob", "max_matches", "integer"),
-        ] {
-            let schema = &caps
-                .iter()
-                .find(|descriptor| descriptor.name == operation)
-                .unwrap_or_else(|| panic!("missing {operation} from catalog"))
-                .input_schema;
-            assert_eq!(
-                schema["properties"][property]["type"],
-                json!([scalar_type, "null"]),
-                "{operation}.{property} must accept the null decoded by Option"
             );
         }
 
