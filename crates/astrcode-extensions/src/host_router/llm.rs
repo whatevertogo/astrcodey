@@ -6,16 +6,17 @@ use astrcode_core::llm::{LlmError, LlmEvent, LlmMessage, LlmProvider};
 use astrcode_extension_sdk::{
     host::{
         HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CANCELLED,
-        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_SERIALIZATION_FAILED,
-        HOST_ERROR_CODE_TIMEOUT, HOST_ERROR_CODE_TRANSPORT, HostLlmChatOutput, HostLlmChatRequest,
+        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_TIMEOUT, HOST_ERROR_CODE_TRANSPORT,
+        HOST_ERROR_CODE_UNSUPPORTED, HostLlmChatOutput, HostLlmChatRequest,
         HostLlmCollectedStreamOutput, HostLlmTextDelta,
     },
     s5r::ErrorPayload,
 };
 use serde_json::Value;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{HOST_INVOKE_TIMEOUT, capability::LlmCapability};
+use super::{HOST_INVOKE_TIMEOUT, capability::LlmCapability, serialize_wire_response};
 
 pub(super) struct LlmGroup {
     main: Option<Arc<dyn LlmProvider>>,
@@ -100,31 +101,19 @@ async fn invoke_llm_chat(
     }
     let messages = request.into_messages();
 
-    let invoke = tokio::time::timeout(
-        HOST_INVOKE_TIMEOUT,
+    super::run_until_deadline(
         run_host_llm_chat(&**provider, model_label, messages, collect_chunks),
-    );
-    if let Some(token) = cancel_token {
-        tokio::select! {
-            biased;
-            () = token.cancelled() => {
-                Err(ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, "invoke cancelled"))
-            },
-            output = invoke => output.map_err(|_| {
-                ErrorPayload::new(
-                    HOST_ERROR_CODE_TIMEOUT,
-                    format!("{model_label}.chat timed out"),
-                )
-            })?,
-        }
-    } else {
-        invoke.await.map_err(|_| {
+        Instant::now() + HOST_INVOKE_TIMEOUT,
+        cancel_token,
+        || {
             ErrorPayload::new(
                 HOST_ERROR_CODE_TIMEOUT,
                 format!("{model_label}.chat timed out"),
             )
-        })?
-    }
+        },
+        || ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, "invoke cancelled"),
+    )
+    .await
 }
 
 async fn run_host_llm_chat(
@@ -160,7 +149,7 @@ async fn run_host_llm_chat(
         }
     }
     if collect_chunks {
-        serialize_output(
+        serialize_wire_response(
             HostLlmCollectedStreamOutput {
                 content: text,
                 model: model_label.to_owned(),
@@ -169,7 +158,7 @@ async fn run_host_llm_chat(
             model_label,
         )
     } else {
-        serialize_output(
+        serialize_wire_response(
             HostLlmChatOutput {
                 content: text,
                 model: model_label.to_owned(),
@@ -177,18 +166,6 @@ async fn run_host_llm_chat(
             model_label,
         )
     }
-}
-
-fn serialize_output(
-    output: impl serde::Serialize,
-    model_label: &str,
-) -> Result<Value, ErrorPayload> {
-    serde_json::to_value(output).map_err(|error| {
-        ErrorPayload::new(
-            HOST_ERROR_CODE_SERIALIZATION_FAILED,
-            format!("failed to serialize {model_label}.chat response: {error}"),
-        )
-    })
 }
 
 fn llm_error_payload(error: LlmError) -> ErrorPayload {
@@ -208,7 +185,7 @@ fn llm_error_payload(error: LlmError) -> ErrorPayload {
         LlmError::TokenLimit { .. } => "token_limit",
         LlmError::EmptyResponse => "empty_response",
         LlmError::Interrupted => HOST_ERROR_CODE_CANCELLED,
-        LlmError::Unsupported { .. } => "unsupported",
+        LlmError::Unsupported { .. } => HOST_ERROR_CODE_UNSUPPORTED,
     };
     let retryable = error.is_retryable();
     let details = serde_json::to_value(&error).ok();
@@ -236,14 +213,14 @@ mod tests {
         );
 
         let cancelled = llm_error_payload(LlmError::Interrupted);
-        assert_eq!(cancelled.code, "cancelled");
+        assert_eq!(cancelled.code, HOST_ERROR_CODE_CANCELLED);
         assert!(!cancelled.retryable);
         assert_eq!(cancelled.details.as_ref().unwrap()["kind"], "interrupted");
 
         let unsupported = llm_error_payload(LlmError::Unsupported {
             message: "counting".into(),
         });
-        assert_eq!(unsupported.code, "unsupported");
+        assert_eq!(unsupported.code, HOST_ERROR_CODE_UNSUPPORTED);
         assert!(!unsupported.retryable);
     }
 }

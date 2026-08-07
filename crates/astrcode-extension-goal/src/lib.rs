@@ -4,15 +4,16 @@
 
 mod store;
 
-use std::sync::Arc;
+use std::{path::Path, sync::Arc};
 
 use astrcode_extension_sdk::{
     builder::{ExtensionToolDefinition, manifest},
     extension::{
         CommandContext, CommandHandler, ContinueAfterStopContext, ContinueAfterStopHandler,
         ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCapability,
-        ExtensionCommandResult, ExtensionError, ExtensionManifest, HookMode, ProviderContext,
-        ProviderHandler, ProviderResult, Registrar, SlashCommand, ToolContext, ToolHandler,
+        ExtensionCommandResult, ExtensionError, ExtensionManifest, ExtensionPaths, HookMode,
+        ProviderContext, ProviderHandler, ProviderResult, Registrar, SlashCommand, ToolContext,
+        ToolHandler,
     },
     host::ExtensionHost,
     llm::LlmMessage,
@@ -24,9 +25,15 @@ use astrcode_extension_sdk::{
     types::SessionId,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::store::{GoalState, GoalStatus, GoalStore, GoalUpdateStatus, goal_dir_from_base};
+
+fn session_data_dir(paths: &ExtensionPaths) -> Result<&Path, ExtensionError> {
+    paths
+        .session_data_dir()
+        .map_err(|error| ExtensionError::Internal(error.to_string()))
+}
 
 const EXTENSION_ID: &str = "astrcode-goal";
 const GET_GOAL_TOOL_NAME: &str = "getGoal";
@@ -163,22 +170,19 @@ impl ToolHandler for GoalToolHandler {
         &self,
         ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        let root = goal_dir_from_base(
-            ctx.paths()
-                .session_data_dir()
-                .map_err(|error| ExtensionError::Internal(error.to_string()))?,
-        );
-        let store = GoalStore::new(root);
+        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
         let session_id = ctx.call().require_session_id()?;
-        let arguments = ctx.raw_arguments().clone();
 
         Ok(match ctx.tool_name() {
-            GET_GOAL_TOOL_NAME => handle_get_goal(&store, ctx.host(), session_id, arguments).await,
+            GET_GOAL_TOOL_NAME => {
+                ctx.arguments::<GetGoalArgs>()?;
+                handle_get_goal(&store, ctx.host(), session_id).await
+            },
             CREATE_GOAL_TOOL_NAME => {
-                handle_create_goal(&store, ctx.host(), session_id, arguments).await
+                handle_create_goal(&store, ctx.host(), session_id, ctx.arguments()?).await
             },
             UPDATE_GOAL_TOOL_NAME => {
-                handle_update_goal(&store, ctx.host(), session_id, arguments).await
+                handle_update_goal(&store, ctx.host(), session_id, ctx.arguments()?).await
             },
             tool_name => return Err(ExtensionError::NotFound(tool_name.into())),
         }
@@ -191,12 +195,7 @@ struct GoalProviderHandler;
 #[async_trait::async_trait]
 impl ProviderHandler for GoalProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let root = goal_dir_from_base(
-            ctx.paths()
-                .session_data_dir()
-                .map_err(|error| ExtensionError::Internal(error.to_string()))?,
-        );
-        let store = GoalStore::new(root);
+        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
         let Some(mut goal) = store.load().map_err(ExtensionError::Internal)? else {
             return Ok(ProviderResult::Allow);
         };
@@ -249,11 +248,7 @@ impl ContinueAfterStopHandler for GoalContinueAfterStopHandler {
         &self,
         ctx: ContinueAfterStopContext,
     ) -> Result<ContinueAfterStopResult, ExtensionError> {
-        let extension_data_dir = ctx
-            .paths()
-            .session_data_dir()
-            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
-        let store = GoalStore::new(goal_dir_from_base(extension_data_dir));
+        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
         let Some(mut goal) = store.load().map_err(ExtensionError::Internal)? else {
             return Ok(ContinueAfterStopResult::EndTurn);
         };
@@ -279,12 +274,7 @@ struct GoalSlashCommandHandler;
 #[async_trait::async_trait]
 impl CommandHandler for GoalSlashCommandHandler {
     async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError> {
-        let root = goal_dir_from_base(
-            ctx.paths()
-                .session_data_dir()
-                .map_err(|error| ExtensionError::Internal(error.to_string()))?,
-        );
-        let store = GoalStore::new(root);
+        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
         let args = ctx.argument().trim();
         let session_id = ctx.call().require_session_id()?;
 
@@ -425,17 +415,7 @@ async fn handle_get_goal(
     store: &GoalStore,
     host: &ExtensionHost,
     session_id: &SessionId,
-    arguments: Value,
 ) -> ToolResult {
-    if let Err(error) = serde_json::from_value::<GetGoalArgs>(arguments) {
-        let message = format!("invalid args for {GET_GOAL_TOOL_NAME}: {error}");
-        return ToolResult::text(
-            message.clone(),
-            true,
-            tool_metadata([("error", json!(message))]),
-        );
-    }
-
     let report = build_goal_report(store, host, session_id).await;
     ToolResult::text(
         goal_report_text(&report),
@@ -448,19 +428,8 @@ async fn handle_create_goal(
     store: &GoalStore,
     host: &ExtensionHost,
     session_id: &SessionId,
-    arguments: Value,
+    args: CreateGoalArgs,
 ) -> ToolResult {
-    let args = match serde_json::from_value::<CreateGoalArgs>(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            let message = format!("invalid args for {CREATE_GOAL_TOOL_NAME}: {error}");
-            return ToolResult::text(
-                message.clone(),
-                true,
-                tool_metadata([("error", json!(message))]),
-            );
-        },
-    };
     let baseline = total_token_usage(host, session_id)
         .await
         .ok()
@@ -495,20 +464,8 @@ async fn handle_update_goal(
     store: &GoalStore,
     host: &ExtensionHost,
     session_id: &SessionId,
-    arguments: Value,
+    args: UpdateGoalArgs,
 ) -> ToolResult {
-    let args = match serde_json::from_value::<UpdateGoalArgs>(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            let message = format!("invalid args for {UPDATE_GOAL_TOOL_NAME}: {error}");
-            return ToolResult::text(
-                message.clone(),
-                true,
-                tool_metadata([("error", json!(message))]),
-            );
-        },
-    };
-
     match store.update_status(args.status) {
         Ok(goal) => {
             let usage = usage_for_goal(host, session_id, &goal).await;

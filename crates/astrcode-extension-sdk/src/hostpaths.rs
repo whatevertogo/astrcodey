@@ -29,6 +29,23 @@ pub fn write_file_atomic(path: &Path, content: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// 读取 JSON 状态文件；文件不存在时返回 `Ok(None)`。解析失败以 io::Error 返回。
+pub fn read_json_state<T: serde::de::DeserializeOwned>(path: &Path) -> std::io::Result<Option<T>> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => serde_json::from_str(&content)
+            .map(Some)
+            .map_err(std::io::Error::other),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// 以 pretty JSON 原子写入状态文件（内部使用 [`write_file_atomic`]）。
+pub fn write_json_state<T: serde::Serialize>(path: &Path, state: &T) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
+    write_file_atomic(path, &json)
+}
+
 /// Return whether `candidate` stays inside `root`.
 ///
 /// Existing paths are canonicalized so symlink escapes are rejected. For a path

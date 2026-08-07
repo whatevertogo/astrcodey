@@ -213,11 +213,12 @@ fn registration_from_manifest(
     })
 }
 
-fn validate_handler_id_kind(
+/// 解析 `<extension_id>:<kind>:<name>` 形式的 handler 标识，校验归属、kind 白名单与
+/// 非空 name。构造端与解析端共用同一格式，避免两处漂移。
+pub(crate) fn parse_handler_id<'a>(
     extension_id: &str,
-    handler_id: &str,
-    expected_kind: &str,
-) -> Result<(), String> {
+    handler_id: &'a str,
+) -> Result<(&'a str, &'a str), String> {
     let prefix = format!("{extension_id}:");
     let remainder = handler_id.strip_prefix(&prefix).ok_or_else(|| {
         format!("handler {handler_id} must be attributed to extension {extension_id}")
@@ -225,13 +226,25 @@ fn validate_handler_id_kind(
     let (kind, name) = remainder
         .split_once(':')
         .ok_or_else(|| format!("handler {handler_id} must use <extension>:<kind>:<name>"))?;
+    if !matches!(kind, "tool" | "hook" | "command" | "http") {
+        return Err(format!("handler {handler_id} has unsupported kind {kind}"));
+    }
+    if name.is_empty() {
+        return Err(format!("handler {handler_id} must have a non-empty name"));
+    }
+    Ok((kind, name))
+}
+
+fn validate_handler_id_kind(
+    extension_id: &str,
+    handler_id: &str,
+    expected_kind: &str,
+) -> Result<(), String> {
+    let (kind, _) = parse_handler_id(extension_id, handler_id)?;
     if kind != expected_kind {
         return Err(format!(
             "handler {handler_id} has kind {kind}, expected {expected_kind}"
         ));
-    }
-    if name.is_empty() {
-        return Err(format!("handler {handler_id} must have a non-empty name"));
     }
     Ok(())
 }

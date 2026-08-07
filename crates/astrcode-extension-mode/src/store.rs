@@ -48,20 +48,14 @@ pub(crate) fn plan_dir_from_base(base: &Path) -> PathBuf {
 
 pub(crate) fn load_mode_state(root: &Path) -> Result<ModeState, String> {
     let path = root.join(MODE_STATE_FILE);
-    match std::fs::read_to_string(&path) {
-        Ok(content) => serde_json::from_str(&content).map_err(|e| format!("parse mode state: {e}")),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ModeState::initial()),
-        Err(e) => Err(format!("read mode state: {e}")),
-    }
+    Ok(hostpaths::read_json_state(&path)
+        .map_err(|e| format!("read mode state: {e}"))?
+        .unwrap_or_else(ModeState::initial))
 }
 
 pub(crate) fn save_mode_state(root: &Path, state: &ModeState) -> Result<(), String> {
-    std::fs::create_dir_all(root).map_err(|e| format!("create mode directory: {e}"))?;
-    let path = root.join(MODE_STATE_FILE);
-    let json =
-        serde_json::to_string_pretty(state).map_err(|e| format!("serialize mode state: {e}"))?;
-    hostpaths::write_file_atomic(&path, &json).map_err(|e| format!("save mode state: {e}"))?;
-    Ok(())
+    hostpaths::write_json_state(&root.join(MODE_STATE_FILE), state)
+        .map_err(|e| format!("save mode state: {e}"))
 }
 
 pub(crate) fn plan_file_path(plan_dir: &Path) -> PathBuf {

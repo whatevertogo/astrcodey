@@ -646,15 +646,7 @@ impl MemoryStore {
     }
 
     pub(crate) fn list_processed(&self) -> std::io::Result<BTreeMap<String, String>> {
-        let content = match std::fs::read_to_string(self.processed_path()) {
-            Ok(content) => content,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(BTreeMap::new());
-            },
-            Err(error) => return Err(error),
-        };
-        serde_json::from_str(&content)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        Ok(hostpaths::read_json_state(&self.processed_path())?.unwrap_or_default())
     }
 
     /// Pipeline 写入 contexts/ 文件 + 更新 processed_sessions.json。
@@ -675,14 +667,11 @@ impl MemoryStore {
         }
 
         // 更新 processed_sessions.json
-        let path = self.processed_path();
         let mut existing = self.list_processed()?;
         for entry in processed {
             existing.insert(entry.session_id.clone(), entry.updated_at.clone());
         }
-        let json = serde_json::to_string_pretty(&existing)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        hostpaths::write_file_atomic(&path, &json)?;
+        hostpaths::write_json_state(&self.processed_path(), &existing)?;
 
         Ok(())
     }

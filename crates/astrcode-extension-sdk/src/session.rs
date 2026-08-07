@@ -4,9 +4,16 @@
 //! 方便插件侧使用。
 
 use astrcode_core::event::Phase;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
+use crate::host::schema::{
+    create_session_tool_selection_schema, derived_wire_schema, json_object_schema,
+    nullable_string_schema,
+};
 pub use crate::{
     extension::SessionToolSelection,
     tool::{
@@ -17,7 +24,7 @@ pub use crate::{
 };
 
 /// 插件 session API 共用的工具选择线缆契约。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionToolSelectionDto {
     All {
@@ -63,32 +70,13 @@ impl SessionToolSelectionDto {
         Self::Only { names: Vec::new() }
     }
 
-    /// 返回该线缆类型的 JSON Schema。
+    /// 返回该线缆类型的 JSON Schema。description 随调用点语境变化,derive 生成后在
+    /// 边界注入描述,而不是为每个调用点重复手写。
     pub fn wire_schema(description: &str) -> Value {
-        json!({
-            "type": "object",
-            "description": description,
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "mode": { "const": "all" },
-                        "except": { "type": "array", "items": { "type": "string" } }
-                    },
-                    "required": ["mode"],
-                    "additionalProperties": false
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "mode": { "const": "only" },
-                        "names": { "type": "array", "items": { "type": "string" } }
-                    },
-                    "required": ["mode"],
-                    "additionalProperties": false
-                }
-            ]
-        })
+        let mut schema = derived_wire_schema::<Self>();
+        schema["type"] = Value::String("object".into());
+        schema["description"] = Value::String(description.into());
+        schema
     }
 }
 
@@ -102,7 +90,7 @@ impl From<SessionToolSelection> for SessionToolSelectionDto {
 }
 
 /// `astrcode.session.control.create` 的线缆请求。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostCreateSessionRequest {
     pub name: String,
@@ -111,6 +99,7 @@ pub struct HostCreateSessionRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_preference: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "create_session_tool_selection_schema")]
     pub tool_selection: Option<SessionToolSelectionDto>,
     #[serde(default)]
     pub ephemeral: bool,
@@ -128,30 +117,12 @@ impl HostCreateSessionRequest {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string" },
-                "system_prompt": { "type": ["string", "null"] },
-                "model_preference": { "type": ["string", "null"] },
-                "ephemeral": { "type": "boolean" },
-                "tool_selection": {
-                    "anyOf": [
-                        SessionToolSelectionDto::wire_schema(
-                            "Child session tool visibility for subsequent turns."
-                        ),
-                        { "type": "null" }
-                    ]
-                }
-            },
-            "required": ["name"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// `astrcode.session.control.create` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostCreateSessionOutput {
     pub session_id: String,
@@ -159,14 +130,7 @@ pub struct HostCreateSessionOutput {
 
 impl HostCreateSessionOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "session_id": { "type": "string" }
-            },
-            "required": ["session_id"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -179,7 +143,7 @@ impl From<SessionHandle> for HostCreateSessionOutput {
 }
 
 /// 插件 session control 操作的目标。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionTargetRequest {
     pub target_session_id: String,
@@ -187,19 +151,12 @@ pub struct HostSessionTargetRequest {
 
 impl HostSessionTargetRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "target_session_id": { "type": "string" }
-            },
-            "required": ["target_session_id"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// `astrcode.session.control.dispose` request. The operation recycles rather than deletes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostRecycleSessionRequest {
     pub session_id: String,
@@ -213,19 +170,12 @@ impl HostRecycleSessionRequest {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "session_id": { "type": "string" }
-            },
-            "required": ["session_id"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// Session 生命周期的稳定线缆表示。
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionLifecycleStateDto {
     Active,
@@ -242,7 +192,7 @@ impl From<SessionLifecycleState> for SessionLifecycleStateDto {
 }
 
 /// Session execution phase at the extension wire boundary.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionPhaseDto {
     Idle,
@@ -255,10 +205,7 @@ pub enum SessionPhaseDto {
 
 impl SessionPhaseDto {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "string",
-            "enum": ["idle", "thinking", "streaming", "calling_tool", "compacting", "error"]
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -276,11 +223,12 @@ impl From<Phase> for SessionPhaseDto {
 }
 
 /// `astrcode.session.control.state` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionStateOutput {
     pub lifecycle: SessionLifecycleStateDto,
     pub phase: SessionPhaseDto,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub active_turn_id: Option<String>,
     pub queued_inputs: usize,
     pub message_count: usize,
@@ -298,29 +246,12 @@ impl HostSessionStateOutput {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "lifecycle": { "type": "string", "enum": ["active", "recycled"] },
-                "phase": SessionPhaseDto::wire_schema(),
-                "active_turn_id": { "type": ["string", "null"] },
-                "queued_inputs": { "type": "integer", "minimum": 0 },
-                "message_count": { "type": "integer", "minimum": 0 }
-            },
-            "required": [
-                "lifecycle",
-                "phase",
-                "active_turn_id",
-                "queued_inputs",
-                "message_count"
-            ],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// `astrcode.session.control.reactivate` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionReactivateOutput {
     pub session_id: String,
@@ -329,15 +260,7 @@ pub struct HostSessionReactivateOutput {
 
 impl HostSessionReactivateOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "session_id": { "type": "string" },
-                "reactivated": { "type": "boolean" }
-            },
-            "required": ["session_id", "reactivated"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 
     pub fn from_result(session_id: String, result: SessionReactivation) -> Self {
@@ -349,7 +272,7 @@ impl HostSessionReactivateOutput {
 }
 
 /// `astrcode.session.control.submit_turn` 的线缆请求。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSubmitTurnRequest {
     pub target_session_id: String,
@@ -382,23 +305,12 @@ impl HostSubmitTurnRequest {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "target_session_id": { "type": "string" },
-                "user_prompt": { "type": "string" },
-                "wait_for_result": { "type": "boolean" },
-                "notify_parent_on_complete": { "type": ["string", "null"] },
-                "recycle_on_complete": { "type": "boolean" }
-            },
-            "required": ["target_session_id", "user_prompt"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// Submit a turn to a top-level session owned by the calling source extension.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostRootSubmitTurnRequest {
     pub target_session_id: String,
@@ -417,27 +329,19 @@ impl HostRootSubmitTurnRequest {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "target_session_id": { "type": "string" },
-                "user_prompt": { "type": "string" },
-                "wait_for_result": { "type": "boolean" }
-            },
-            "required": ["target_session_id", "user_prompt"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// Cursor page request for `astrcode.session.read_events`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionEventsPageRequest {
     pub session_id: String,
     #[serde(default = "default_session_events_cursor")]
     pub cursor: String,
     #[serde(default = "default_session_events_limit")]
+    #[schemars(range(min = 1, max = 500))]
     pub limit: usize,
 }
 
@@ -451,16 +355,7 @@ impl HostSessionEventsPageRequest {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "session_id": { "type": "string" },
-                "cursor": { "type": "string", "default": "0" },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 500, "default": 100 }
-            },
-            "required": ["session_id"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -473,7 +368,7 @@ const fn default_session_events_limit() -> usize {
 }
 
 /// Stable event envelope returned by `astrcode.session.read_events`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionEvent {
     pub seq: u64,
@@ -482,11 +377,12 @@ pub struct HostSessionEvent {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
     pub timestamp: String,
+    #[schemars(schema_with = "json_object_schema")]
     pub payload: Value,
 }
 
 /// Cursor page response for `astrcode.session.read_events`.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionEventsPageOutput {
     pub events: Vec<HostSessionEvent>,
@@ -496,36 +392,12 @@ pub struct HostSessionEventsPageOutput {
 
 impl HostSessionEventsPageOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "events": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "seq": { "type": "integer", "minimum": 0 },
-                            "id": { "type": "string" },
-                            "session_id": { "type": "string" },
-                            "turn_id": { "type": ["string", "null"] },
-                            "timestamp": { "type": "string" },
-                            "payload": { "type": "object" }
-                        },
-                        "required": ["seq", "id", "session_id", "timestamp", "payload"],
-                        "additionalProperties": false
-                    }
-                },
-                "next_cursor": { "type": "string" },
-                "has_more": { "type": "boolean" }
-            },
-            "required": ["events", "next_cursor", "has_more"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// `astrcode.session.control.submit_turn` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostSubmitTurnOutput {
     Completed { content: String },
@@ -534,29 +406,7 @@ pub enum HostSubmitTurnOutput {
 
 impl HostSubmitTurnOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "status": { "const": "completed" },
-                        "content": { "type": "string" }
-                    },
-                    "required": ["status", "content"],
-                    "additionalProperties": false
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "status": { "const": "backgrounded" },
-                        "task_id": { "type": "string" },
-                        "session_id": { "type": "string" }
-                    },
-                    "required": ["status", "task_id", "session_id"],
-                    "additionalProperties": false
-                }
-            ]
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -574,7 +424,6 @@ impl From<SubmitTurnResult> for HostSubmitTurnOutput {
         }
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;

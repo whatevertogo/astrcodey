@@ -4,14 +4,14 @@ use std::sync::Arc;
 
 use astrcode_extension_sdk::{
     extension::{ExtensionError, ExtensionHttpDispatchRequest, ExtensionHttpRequest},
-    host::{HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_TIMEOUT},
+    host::{HOST_ERROR_CODE_DISPATCH_FAILED, HOST_ERROR_CODE_TIMEOUT},
     s5r::ErrorPayload,
 };
 use serde_json::Value;
 
 use super::{
-    HOST_INVOKE_TIMEOUT, PublicHttpDispatcher, capability::ExtensionHttpCapability,
-    decode_host_input,
+    HOST_INVOKE_TIMEOUT, PublicHttpDispatcher, backend_unavailable,
+    capability::ExtensionHttpCapability, parse_wire_request,
 };
 
 #[derive(Default)]
@@ -50,13 +50,12 @@ impl ExtensionHttpGroup {
         input: Value,
         caller_extension_id: &str,
     ) -> Result<Value, ErrorPayload> {
-        let dispatcher = self.dispatcher.as_ref().ok_or_else(|| {
-            ErrorPayload::new(
-                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
-                "public HTTP dispatcher is not configured",
-            )
-        })?;
-        let request: ExtensionHttpDispatchRequest = decode_host_input(input)?;
+        let dispatcher = self
+            .dispatcher
+            .as_ref()
+            .ok_or_else(|| backend_unavailable("public HTTP dispatcher is not configured"))?;
+        let request: ExtensionHttpDispatchRequest =
+            parse_wire_request(&input, "extension_http.dispatch")?;
         let request = ExtensionHttpRequest::from(request);
         tokio::time::timeout(
             HOST_INVOKE_TIMEOUT,
@@ -68,6 +67,6 @@ impl ExtensionHttpGroup {
             serde_json::to_value(response)
                 .map_err(|error| ExtensionError::Internal(error.to_string()))
         })
-        .map_err(|error| ErrorPayload::new("dispatch_failed", error.to_string()))
+        .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_DISPATCH_FAILED, error.to_string()))
     }
 }

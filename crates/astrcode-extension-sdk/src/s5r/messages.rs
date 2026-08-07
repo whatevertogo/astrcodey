@@ -22,6 +22,11 @@ pub const WIRE_CODEC_METADATA_KEY: &str = "wire_codec";
 /// Wire feature: nested invokes carry the id of the inbound invoke that created them.
 pub const WIRE_FEATURE_PARENT_INVOKE_ID: &str = "parent_invoke_id";
 
+/// Handler 标识的线缆格式：`<extension_id>:<kind>:<name>`。
+pub(crate) fn handler_id_for(extension_id: &str, kind: &str, name: &str) -> String {
+    format!("{extension_id}:{kind}:{name}")
+}
+
 /// 五类线缆消息。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

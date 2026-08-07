@@ -5,7 +5,8 @@ use std::ops::Deref;
 use astrcode_extension_sdk::{
     extension::ExtensionCapability,
     host::{
-        HOST_ERROR_CODE_PERMISSION_DENIED, HOST_OPERATION_SPECS, HostOperation, HostOperationSpec,
+        HOST_ERROR_CODE_PERMISSION_DENIED, HOST_ERROR_CODE_UNKNOWN_CAPABILITY,
+        HOST_OPERATION_SPECS, HostOperation, HostOperationSpec,
     },
     s5r::{CapabilityDescriptor, ErrorPayload},
 };
@@ -253,7 +254,7 @@ const HOST_CAPABILITY_SPECS: [HostCapabilitySpec; HostOperation::COUNT] = [
 pub(super) fn lookup(name: &str) -> Result<&'static HostCapabilitySpec, ErrorPayload> {
     let operation = HostOperation::from_wire_name(name).ok_or_else(|| {
         ErrorPayload::new(
-            "unknown_capability",
+            HOST_ERROR_CODE_UNKNOWN_CAPABILITY,
             format!("unknown astrcode capability: {name}"),
         )
     })?;
@@ -446,7 +447,7 @@ mod tests {
             lookup("astrcode.unknown")
                 .expect_err("unknown operation")
                 .code,
-            "unknown_capability"
+            HOST_ERROR_CODE_UNKNOWN_CAPABILITY
         );
     }
 }

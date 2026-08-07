@@ -6,7 +6,7 @@ use std::{
 };
 
 use astrcode_core::{
-    config::ContextSettings,
+    config::{ContextSettings, defaults::extension_data_dir},
     llm::LlmMessage,
     tool::{ToolDefinition, ToolOrigin},
 };
@@ -135,10 +135,7 @@ fn fresh_read_file(working_dir: &Path, requested_path: &str) -> Option<PostCompa
 
 fn latest_plan_note(session_store_dir: Option<&Path>) -> Option<PostCompactNote> {
     let session_dir = session_store_dir?;
-    let plans_dir = session_dir
-        .join("extension_data")
-        .join("astrcode-mode")
-        .join("plan");
+    let plans_dir = extension_data_dir(session_dir, "astrcode-mode").join("plan");
     let plans_dir = plans_dir.canonicalize().ok()?;
     let latest_plan = fs::read_dir(&plans_dir)
         .ok()?
@@ -343,10 +340,7 @@ mod tests {
         let home = temp.join("home");
         std::env::set_var("ASTRCODE_TEST_HOME", &home);
         let session_dir = temp.join("session-store");
-        let plans = session_dir
-            .join("extension_data")
-            .join("astrcode-mode")
-            .join("plan");
+        let plans = extension_data_dir(&session_dir, "astrcode-mode").join("plan");
         fs::create_dir_all(&plans).unwrap();
         fs::write(plans.join("work.md"), "plan body").unwrap();
         let messages = vec![

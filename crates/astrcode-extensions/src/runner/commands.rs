@@ -4,7 +4,6 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use astrcode_core::{config::ModelSelection, types::SessionId};
 use astrcode_extension_sdk::extension::*;
 use tokio_util::sync::CancellationToken;
 
@@ -12,47 +11,6 @@ use super::{
     ExtensionCallContextInput, ExtensionRunner, ExtensionUiContributions, ExtensionView,
     HandlerIndex,
 };
-
-/// Session facts supplied by the host before a command is resolved to an extension.
-///
-/// This runtime-only input deliberately excludes extension and command attribution. The runner
-/// binds those facts from the resolved registration when constructing the author-facing context.
-#[doc(hidden)]
-#[derive(Debug, Clone)]
-pub struct CommandRuntimeContext {
-    session_id: String,
-    working_dir: String,
-    model: ModelSelection,
-    session_store_dir: Option<PathBuf>,
-    cancellation: CancellationToken,
-}
-
-impl CommandRuntimeContext {
-    #[doc(hidden)]
-    pub fn new(
-        session_id: impl Into<String>,
-        working_dir: impl Into<String>,
-        model: ModelSelection,
-        session_store_dir: Option<PathBuf>,
-    ) -> Self {
-        Self {
-            session_id: session_id.into(),
-            working_dir: working_dir.into(),
-            model,
-            session_store_dir,
-            cancellation: CancellationToken::new(),
-        }
-    }
-
-    pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
-        self.cancellation = cancellation;
-        self
-    }
-
-    pub fn working_dir(&self) -> &str {
-        &self.working_dir
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CommandSource {
@@ -117,21 +75,16 @@ impl ExtensionView {
         extension_id: &str,
         command_name: &str,
         argument: &str,
-        runtime: &CommandRuntimeContext,
+        runtime: &RuntimeHookCallContext,
     ) -> Result<(CommandContext, CancellationToken), ExtensionError> {
-        let cancellation = runtime.cancellation.child_token();
+        let cancellation = runtime.cancellation().child_token();
         let call = self.make_registered_extension_call_context_from_index(
             index,
             extension_id,
-            ExtensionCallContextInput {
-                session_id: Some(SessionId::new(&runtime.session_id)),
-                working_dir: Some(PathBuf::from(&runtime.working_dir)),
-                session_store_dir: runtime.session_store_dir.clone(),
-                ..ExtensionCallContextInput::unscoped(cancellation.clone())
-            },
+            ExtensionCallContextInput::from_hook(runtime, cancellation.clone()),
         )?;
         Ok((
-            CommandContext::from_runtime(call, runtime.model.clone(), command_name, argument),
+            CommandContext::from_runtime(call, runtime.model().clone(), command_name, argument),
             cancellation,
         ))
     }
@@ -240,7 +193,7 @@ impl ExtensionView {
         &self,
         resolved: &ResolvedSlashCommand,
         arguments: &str,
-        runtime: &CommandRuntimeContext,
+        runtime: &RuntimeHookCallContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
         let active_index = resolved.index.upgrade().ok_or_else(|| {
             ExtensionError::NotFound(format!(
@@ -270,7 +223,7 @@ impl ExtensionView {
         resolved: &ResolvedSlashCommand,
         argument: &str,
         cursor: usize,
-        runtime: &CommandRuntimeContext,
+        runtime: &RuntimeHookCallContext,
     ) -> Result<CommandCompletions, ExtensionError> {
         let active_index = resolved.index.upgrade().ok_or_else(|| {
             ExtensionError::NotFound(format!(
@@ -315,7 +268,7 @@ impl ExtensionRunner {
         &self,
         resolved: &ResolvedSlashCommand,
         arguments: &str,
-        runtime: &CommandRuntimeContext,
+        runtime: &RuntimeHookCallContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
         self.extension_view()
             .await
@@ -328,7 +281,7 @@ impl ExtensionRunner {
         resolved: &ResolvedSlashCommand,
         argument: &str,
         cursor: usize,
-        runtime: &CommandRuntimeContext,
+        runtime: &RuntimeHookCallContext,
     ) -> Result<CommandCompletions, ExtensionError> {
         self.extension_view()
             .await

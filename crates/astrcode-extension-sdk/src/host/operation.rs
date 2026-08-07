@@ -724,14 +724,16 @@ mod tests {
                 }
             }
         }
-        if let Some(definitions) = object.get("$defs").and_then(Value::as_object) {
-            for (name, definition) in definitions {
-                assert_closed_record_schema(
-                    definition,
-                    operation,
-                    boundary,
-                    &format!("{path}/$defs/{name}"),
-                );
+        for definitions_key in ["$defs", "definitions"] {
+            if let Some(definitions) = object.get(definitions_key).and_then(Value::as_object) {
+                for (name, definition) in definitions {
+                    assert_closed_record_schema(
+                        definition,
+                        operation,
+                        boundary,
+                        &format!("{path}/{definitions_key}/{name}"),
+                    );
+                }
             }
         }
         if let Some(value_schema) = object

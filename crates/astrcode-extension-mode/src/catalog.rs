@@ -40,9 +40,6 @@ const PLAN_RESTRICTED_TOOLS: &[&str] = &["write", "edit", "patch", "shell", "ter
 pub(crate) struct ModeSpec {
     pub id: ModeId,
     pub name: String,
-    // 模式声明的一部分,当前仅在定义处写入、尚无读取方。
-    #[allow(dead_code)]
-    pub description: String,
     /// Tool names that are blocked in this mode.
     pub restricted_tools: HashSet<String>,
     /// Mode IDs this mode can transition to.
@@ -105,7 +102,6 @@ pub(crate) fn builtin_mode_specs() -> Vec<ModeSpec> {
         ModeSpec {
             id: ModeId::code(),
             name: "Code".into(),
-            description: "Default execution mode with full capabilities.".into(),
             restricted_tools: HashSet::new(),
             allowed_transitions: transitions.clone(),
             requires_plan_artifact: false,
@@ -113,8 +109,6 @@ pub(crate) fn builtin_mode_specs() -> Vec<ModeSpec> {
         ModeSpec {
             id: ModeId::plan(),
             name: "Plan".into(),
-            description: "Planning mode with full tool access for producing a structured plan."
-                .into(),
             restricted_tools: PLAN_RESTRICTED_TOOLS
                 .iter()
                 .map(|s| (*s).to_string())

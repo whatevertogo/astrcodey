@@ -10,8 +10,7 @@ use astrcode_extension_sdk::{
         ExtensionPaths, ExtensionTasks, RuntimeHookCallContext, internal::extension_event_emitter,
     },
     host::{
-        ExtensionHost, HOST_ERROR_CODE_INVALID_RESPONSE, HOST_ERROR_CODE_SERIALIZATION_FAILED,
-        HostError, HostOperation,
+        ExtensionHost, HOST_ERROR_CODE_INVALID_RESPONSE, HostError, HostOperation,
         internal::{HostInvoker, HostScope, extension_host},
     },
     s5r::{EventPhase, WireMessage},
@@ -264,9 +263,8 @@ struct RouterHostInvoker {
 #[async_trait::async_trait]
 impl HostInvoker for RouterHostInvoker {
     async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, HostError> {
-        let input = serialize_host_input(operation, &input)?;
         self.router
-            .invoke(operation.wire_name(), &input, &self.invoke_context)
+            .invoke(operation.wire_name(), input, &self.invoke_context)
             .await
             .map_err(HostError::from)
     }
@@ -276,12 +274,11 @@ impl HostInvoker for RouterHostInvoker {
         operation: HostOperation,
         input: Value,
     ) -> Result<Value, HostError> {
-        let input = serialize_host_input(operation, &input)?;
         let events = self
             .router
             .invoke_stream(
                 operation.wire_name(),
-                &input,
+                input,
                 "bundled-collected-stream",
                 &self.invoke_context,
             )
@@ -319,18 +316,6 @@ impl HostInvoker for RouterHostInvoker {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
-}
-
-fn serialize_host_input(operation: HostOperation, input: &Value) -> Result<String, HostError> {
-    serde_json::to_string(input).map_err(|error| {
-        HostError::new(
-            HOST_ERROR_CODE_SERIALIZATION_FAILED,
-            format!(
-                "failed to serialize {} request: {error}",
-                operation.wire_name()
-            ),
-        )
-    })
 }
 
 pub(crate) fn transport_invoke_context(host: &ExtensionHost) -> Option<InvokeContext> {

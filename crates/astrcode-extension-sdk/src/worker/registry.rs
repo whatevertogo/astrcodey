@@ -19,6 +19,7 @@ use crate::{
     host::{
         HOST_ERROR_CODE_CANCELLED, HOST_ERROR_CODE_CONTEXT_UNAVAILABLE,
         HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_SERIALIZATION_FAILED,
+        HOST_ERROR_CODE_UNKNOWN_CAPABILITY,
     },
     runtime::CancelToken,
     s5r::{
@@ -27,7 +28,12 @@ use crate::{
         manifest::{ManifestCommand, ManifestHook, ManifestHookOptions, ManifestHttpRoute},
         mode_to_name,
     },
-    worker::manifest::ManifestCatalog,
+    worker::{
+        WORKER_ERROR_CODE_DUPLICATE_REGISTRATION, WORKER_ERROR_CODE_INVALID_HOOK_MODE,
+        WORKER_ERROR_CODE_INVALID_HOOK_REGISTRATION, WORKER_ERROR_CODE_INVALID_HTTP_ROUTE,
+        WORKER_ERROR_CODE_TYPED_HOOK_REQUIRED, WORKER_ERROR_CODE_UNKNOWN_HANDLER,
+        WORKER_ERROR_CODE_UNSUPPORTED_HOOK, manifest::ManifestCatalog,
+    },
 };
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -147,7 +153,7 @@ fn optional_string<'a>(input: &'a Value, field: &str) -> Option<&'a str> {
 }
 
 pub(crate) fn handler_id_for(extension_id: &str, kind: &str, name: &str) -> String {
-    format!("{extension_id}:{kind}:{name}")
+    crate::s5r::messages::handler_id_for(extension_id, kind, name)
 }
 
 pub(crate) struct HandlerRegistry {
@@ -201,7 +207,7 @@ impl HandlerRegistry {
         let name = def.name.clone();
         if self.tools.contains_key(&name) {
             return Err(ErrorPayload::new(
-                "duplicate_registration",
+                WORKER_ERROR_CODE_DUPLICATE_REGISTRATION,
                 format!("duplicate tool registration: {name}"),
             ));
         }
@@ -218,13 +224,13 @@ impl HandlerRegistry {
     ) -> Result<(), ErrorPayload> {
         if on == ExtensionEvent::UserMessageEnvelope {
             return Err(ErrorPayload::new(
-                "unsupported_hook",
+                WORKER_ERROR_CODE_UNSUPPORTED_HOOK,
                 "user_message_envelope is not supported by S5R workers",
             ));
         }
         if let Some(required) = fixed_hook_mode(&on) {
             return Err(ErrorPayload::new(
-                "typed_hook_required",
+                WORKER_ERROR_CODE_TYPED_HOOK_REQUIRED,
                 format!(
                     "{} has fixed {} mode; {}",
                     event_to_name(&on),
@@ -235,7 +241,7 @@ impl HandlerRegistry {
         }
         if !hook_mode_is_supported(&on, mode) {
             return Err(ErrorPayload::new(
-                "invalid_hook_mode",
+                WORKER_ERROR_CODE_INVALID_HOOK_MODE,
                 format!(
                     "{} does not support {} mode",
                     event_to_name(&on),
@@ -262,13 +268,13 @@ impl HandlerRegistry {
     ) -> Result<(), ErrorPayload> {
         if on == ExtensionEvent::UserMessageEnvelope {
             return Err(ErrorPayload::new(
-                "unsupported_hook",
+                WORKER_ERROR_CODE_UNSUPPORTED_HOOK,
                 "user_message_envelope is not supported by S5R workers",
             ));
         }
         let mode = fixed_hook_mode(&on).ok_or_else(|| {
             ErrorPayload::new(
-                "invalid_hook_registration",
+                WORKER_ERROR_CODE_INVALID_HOOK_REGISTRATION,
                 format!("{} is not a fixed-mode hook", event_to_name(&on)),
             )
         })?;
@@ -324,7 +330,7 @@ impl HandlerRegistry {
     ) -> Result<(), ErrorPayload> {
         if self.hooks.contains_key(&on) {
             return Err(ErrorPayload::new(
-                "duplicate_registration",
+                WORKER_ERROR_CODE_DUPLICATE_REGISTRATION,
                 format!("duplicate hook registration: {on}"),
             ));
         }
@@ -341,7 +347,7 @@ impl HandlerRegistry {
         let name = name.into().trim().to_owned();
         if self.commands.contains_key(&name) {
             return Err(ErrorPayload::new(
-                "duplicate_registration",
+                WORKER_ERROR_CODE_DUPLICATE_REGISTRATION,
                 format!("duplicate command registration: {name}"),
             ));
         }
@@ -360,14 +366,14 @@ impl HandlerRegistry {
     ) -> Result<(), ErrorPayload> {
         route
             .validate()
-            .map_err(|error| ErrorPayload::new("invalid_http_route", error))?;
+            .map_err(|error| ErrorPayload::new(WORKER_ERROR_CODE_INVALID_HTTP_ROUTE, error))?;
         if self.catalog.http_routes.iter().any(|entry| {
             entry.route.access == route.access
                 && entry.route.method == route.method
                 && extension_http_route_patterns_conflict(&entry.route.path, &route.path)
         }) {
             return Err(ErrorPayload::new(
-                "duplicate_registration",
+                WORKER_ERROR_CODE_DUPLICATE_REGISTRATION,
                 format!("conflicting HTTP route registration: {}", route.path),
             ));
         }
@@ -387,7 +393,7 @@ impl HandlerRegistry {
     ) -> Result<HandlerResult, ErrorPayload> {
         if invoke.capability != CAP_HANDLER_INVOKE {
             return Err(ErrorPayload::new(
-                "unknown_capability",
+                HOST_ERROR_CODE_UNKNOWN_CAPABILITY,
                 format!("worker does not handle capability {}", invoke.capability),
             ));
         }
@@ -411,7 +417,7 @@ impl HandlerRegistry {
         let prefix = format!("{}:", self.extension_id);
         let Some(handler_name) = handler_id.strip_prefix(&prefix) else {
             return Err(ErrorPayload::new(
-                "unknown_handler",
+                WORKER_ERROR_CODE_UNKNOWN_HANDLER,
                 format!("unknown handler: {handler_id}"),
             ));
         };
@@ -419,25 +425,37 @@ impl HandlerRegistry {
         match kind {
             "tool" => {
                 let handler = self.tools.get(name).ok_or_else(|| {
-                    ErrorPayload::new("unknown_handler", format!("unknown tool: {name}"))
+                    ErrorPayload::new(
+                        WORKER_ERROR_CODE_UNKNOWN_HANDLER,
+                        format!("unknown tool: {name}"),
+                    )
                 })?;
                 handler(event, ctx).await
             },
             "hook" => {
                 let handler = self.hooks.get(name).ok_or_else(|| {
-                    ErrorPayload::new("unknown_handler", format!("unknown hook: {name}"))
+                    ErrorPayload::new(
+                        WORKER_ERROR_CODE_UNKNOWN_HANDLER,
+                        format!("unknown hook: {name}"),
+                    )
                 })?;
                 handler(event, ctx).await
             },
             "command" => {
                 let handler = self.commands.get(name).ok_or_else(|| {
-                    ErrorPayload::new("unknown_handler", format!("unknown command: {name}"))
+                    ErrorPayload::new(
+                        WORKER_ERROR_CODE_UNKNOWN_HANDLER,
+                        format!("unknown command: {name}"),
+                    )
                 })?;
                 handler(event, ctx).await
             },
             "http" => {
                 let handler = self.http_routes.get(name).ok_or_else(|| {
-                    ErrorPayload::new("unknown_handler", format!("unknown HTTP route: {name}"))
+                    ErrorPayload::new(
+                        WORKER_ERROR_CODE_UNKNOWN_HANDLER,
+                        format!("unknown HTTP route: {name}"),
+                    )
                 })?;
                 let request = serde_json::from_value(event).map_err(|error| {
                     ErrorPayload::new(
@@ -455,7 +473,7 @@ impl HandlerRegistry {
                 Ok(HandlerResult::effect("http_response", data))
             },
             _ => Err(ErrorPayload::new(
-                "unknown_handler",
+                WORKER_ERROR_CODE_UNKNOWN_HANDLER,
                 format!("unknown handler kind in {handler_id}"),
             )),
         }
@@ -554,7 +572,7 @@ mod tests {
             .expect_err("same-access conflicting route must be rejected");
 
         assert_eq!(registry.catalog.http_routes.len(), 2);
-        assert_eq!(error.code, "duplicate_registration");
+        assert_eq!(error.code, WORKER_ERROR_CODE_DUPLICATE_REGISTRATION);
     }
 
     #[test]
@@ -598,7 +616,7 @@ mod tests {
                 )
                 .expect_err("canonical duplicate")
                 .code,
-            "duplicate_registration"
+            WORKER_ERROR_CODE_DUPLICATE_REGISTRATION
         );
     }
 

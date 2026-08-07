@@ -18,7 +18,7 @@ async fn read_workspace(root: &Path, path: &str) -> Result<Value, ErrorPayload> 
     HostRouter::from_backends(HostBackends::default())
         .invoke(
             "astrcode.workspace.read",
-            &json!({ "path": path }).to_string(),
+            json!({ "path": path }),
             &InvokeContext {
                 working_dir: Some(root.to_string_lossy().into_owned()),
                 declared_capabilities: vec![ExtensionCapability::WorkspaceRead],

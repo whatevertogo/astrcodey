@@ -5,28 +5,15 @@ use astrcode_extension_sdk::{
     s5r::ErrorPayload,
 };
 
-pub(super) fn canonicalize_workspace_path(
-    root: impl AsRef<Path>,
-    relative: &str,
-) -> Result<PathBuf, ErrorPayload> {
-    if relative.is_empty() {
+use super::io_error;
+
+/// 校验相对路径的组件：拒绝空路径、绝对路径组件与父目录穿越。
+/// 读写两侧共用同一校验，避免错误码与消息漂移。
+pub(super) fn validate_relative_path_components(relative: &Path) -> Result<(), ErrorPayload> {
+    if relative.as_os_str().is_empty() {
         return Err(ErrorPayload::new(
             HOST_ERROR_CODE_INVALID_INPUT,
             "empty path",
-        ));
-    }
-    if relative.contains('\0') {
-        return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
-            "path contains NUL",
-        ));
-    }
-
-    let relative = Path::new(relative);
-    if relative.is_absolute() {
-        return Err(ErrorPayload::new(
-            HOST_ERROR_CODE_INVALID_INPUT,
-            "absolute paths are not allowed",
         ));
     }
     for component in relative.components() {
@@ -46,15 +33,31 @@ pub(super) fn canonicalize_workspace_path(
             Component::CurDir | Component::Normal(_) => {},
         }
     }
+    Ok(())
+}
 
-    let root = root
-        .as_ref()
-        .canonicalize()
-        .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
-    let path = root
-        .join(relative)
-        .canonicalize()
-        .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
+pub(super) fn canonicalize_workspace_path(
+    root: impl AsRef<Path>,
+    relative: &str,
+) -> Result<PathBuf, ErrorPayload> {
+    if relative.contains('\0') {
+        return Err(ErrorPayload::new(
+            HOST_ERROR_CODE_INVALID_INPUT,
+            "path contains NUL",
+        ));
+    }
+
+    let relative = Path::new(relative);
+    if relative.is_absolute() {
+        return Err(ErrorPayload::new(
+            HOST_ERROR_CODE_INVALID_INPUT,
+            "absolute paths are not allowed",
+        ));
+    }
+    validate_relative_path_components(relative)?;
+
+    let root = root.as_ref().canonicalize().map_err(io_error)?;
+    let path = root.join(relative).canonicalize().map_err(io_error)?;
     if !path.starts_with(&root) {
         return Err(ErrorPayload::new(
             HOST_ERROR_CODE_PERMISSION_DENIED,

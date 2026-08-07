@@ -8,7 +8,7 @@ use astrcode_core::{
     types::SessionId,
 };
 use astrcode_extension_sdk::{
-    host::{HOST_ERROR_CODE_SERIALIZATION_FAILED, HOST_ERROR_CODE_TIMEOUT},
+    host::HOST_ERROR_CODE_TIMEOUT,
     s5r::ErrorPayload,
     session_inspect::{
         SessionInspectAgentSession, SessionInspectAgentStatusDto, SessionInspectCompaction,
@@ -22,16 +22,18 @@ use astrcode_session_projection::{
     AgentSessionLinkView, AgentSessionStatus, SequencedLlmMessage, SessionReadModel, SessionSummary,
 };
 use astrcode_storage::{SessionReader, StorageError};
-use serde::Serialize;
 use serde_json::Value;
 
-use super::{HOST_INVOKE_TIMEOUT, session::storage_error};
+use super::{HOST_INVOKE_TIMEOUT, serialize_wire_response, session::storage_error};
 
 pub(super) async fn list(reader: Arc<dyn SessionReader>) -> Result<Value, ErrorPayload> {
     let summaries = storage_call("session.inspect.list", reader.list_session_summaries()).await?;
-    to_value(SessionInspectListOutput {
-        sessions: summaries.into_iter().map(list_item).collect(),
-    })
+    serialize_wire_response(
+        SessionInspectListOutput {
+            sessions: summaries.into_iter().map(list_item).collect(),
+        },
+        "session.inspect.list",
+    )
 }
 
 pub(super) async fn snapshot(
@@ -50,24 +52,27 @@ pub(super) async fn snapshot(
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     pending_tool_call_ids.sort();
-    to_value(SessionInspectSnapshotOutput {
-        snapshot: SessionInspectSnapshot {
-            session_id: model.identity.session_id.to_string(),
-            cursor: model.cursor(),
-            working_dir: model.identity.working_dir.clone(),
-            model_id: model.identity.model_id.clone(),
-            phase: model.execution.phase.into(),
-            parent_session_id: model
-                .identity
-                .parent
-                .as_ref()
-                .map(|parent| parent.session_id.to_string()),
-            source_extension: model.identity.source_extension.clone(),
-            message_count: model.transcript.messages.len(),
-            pending_tool_call_ids,
-            agent_session_count: model.agent_sessions.len(),
+    serialize_wire_response(
+        SessionInspectSnapshotOutput {
+            snapshot: SessionInspectSnapshot {
+                session_id: model.identity.session_id.to_string(),
+                cursor: model.cursor(),
+                working_dir: model.identity.working_dir.clone(),
+                model_id: model.identity.model_id.clone(),
+                phase: model.execution.phase.into(),
+                parent_session_id: model
+                    .identity
+                    .parent
+                    .as_ref()
+                    .map(|parent| parent.session_id.to_string()),
+                source_extension: model.identity.source_extension.clone(),
+                message_count: model.transcript.messages.len(),
+                pending_tool_call_ids,
+                agent_session_count: model.agent_sessions.len(),
+            },
         },
-    })
+        "session.inspect.snapshot",
+    )
 }
 
 pub(super) async fn read_model(
@@ -79,9 +84,12 @@ pub(super) async fn read_model(
         reader.session_read_model(&session_id),
     )
     .await?;
-    to_value(SessionInspectReadModelOutput {
-        read_model: read_model_dto((*model).clone()),
-    })
+    serialize_wire_response(
+        SessionInspectReadModelOutput {
+            read_model: read_model_dto((*model).clone()),
+        },
+        "session.inspect.read_model",
+    )
 }
 
 pub(super) async fn provider_messages(
@@ -101,9 +109,12 @@ pub(super) async fn provider_messages(
             .map(|message| message.message.clone())
             .collect(),
     );
-    to_value(SessionInspectProviderMessagesOutput {
-        messages: messages.into_iter().map(message_dto).collect(),
-    })
+    serialize_wire_response(
+        SessionInspectProviderMessagesOutput {
+            messages: messages.into_iter().map(message_dto).collect(),
+        },
+        "session.inspect.provider_messages",
+    )
 }
 
 async fn storage_call<T, F>(operation: &str, future: F) -> Result<T, ErrorPayload>
@@ -277,15 +288,6 @@ fn compact_strategy(strategy: CompactStrategy) -> (&'static str, Option<usize>) 
         CompactStrategy::Manual { keep_recent_turns } => ("manual", keep_recent_turns),
         CompactStrategy::ReactivePromptTooLong => ("reactive_prompt_too_long", None),
     }
-}
-
-fn to_value(value: impl Serialize) -> Result<Value, ErrorPayload> {
-    serde_json::to_value(value).map_err(|error| {
-        ErrorPayload::new(
-            HOST_ERROR_CODE_SERIALIZATION_FAILED,
-            format!("failed to serialize session inspect response: {error}"),
-        )
-    })
 }
 
 #[cfg(test)]

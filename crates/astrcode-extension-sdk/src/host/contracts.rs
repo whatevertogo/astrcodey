@@ -1,9 +1,20 @@
 use std::collections::BTreeMap;
 
 use base64::engine::general_purpose::STANDARD;
+use schemars::{JsonSchema, gen::SchemaGenerator, schema::Schema};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::schema::{
+    configure_tools_output_selection_schema, configure_tools_selection_schema, const_true_schema,
+    derived_wire_schema, event_schema_version_schema, glob_max_matches_schema,
+    grep_max_bytes_schema, grep_max_line_chars_schema, grep_max_matches_schema, http_status_schema,
+    network_max_bytes_schema, network_request_body_schema, network_response_body_schema,
+    network_timeout_schema, nullable_integer_schema, nullable_nonnegative_integer_schema,
+    nullable_string_schema, nullable_subschema, process_stdin_schema, process_timeout_schema,
+    session_state_content_schema, session_state_key_schema, workspace_list_depth_schema,
+    workspace_list_limit_schema, workspace_read_max_bytes_schema,
+};
 use crate::{
     llm::{LlmContent, LlmMessage, LlmRole},
     session::{SessionPhaseDto, SessionToolSelectionDto},
@@ -32,13 +43,14 @@ pub const HOST_WORKSPACE_SEARCH_MAX_MATCHES: usize = 1_000;
 pub const HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 pub const HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS: usize = 2_000;
 
-const HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS: usize =
+pub(crate) const HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS: usize =
     HOST_NETWORK_MAX_REQUEST_BODY_BYTES.div_ceil(3) * 4;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostAcknowledgement {
     #[serde(rename = "ok", deserialize_with = "deserialize_true")]
+    #[schemars(schema_with = "const_true_schema")]
     _ok: bool,
 }
 
@@ -48,12 +60,7 @@ impl HostAcknowledgement {
     }
 
     pub(crate) fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": { "ok": { "const": true } },
-            "required": ["ok"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -72,26 +79,41 @@ where
 }
 
 /// Typed request used by worker extensions to emit a declared event.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HostEventEmitRequest {
     #[serde(deserialize_with = "deserialize_non_empty_event_type")]
+    #[schemars(length(min = 1))]
     pub event_type: String,
     #[serde(deserialize_with = "deserialize_positive_schema_version")]
+    #[schemars(schema_with = "event_schema_version_schema")]
     pub schema_version: u32,
     pub payload: Value,
+}
+
+/// 共享的非空字符串校验核心，`deserialize_with` 需要无参函数路径，故各字段保留薄包装。
+pub(crate) fn deserialize_non_empty_string<'de, D>(
+    deserializer: D,
+    field: &'static str,
+) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.is_empty() {
+        Err(serde::de::Error::custom(format_args!(
+            "{field} must not be empty"
+        )))
+    } else {
+        Ok(value)
+    }
 }
 
 fn deserialize_non_empty_event_type<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let event_type = String::deserialize(deserializer)?;
-    if event_type.is_empty() {
-        Err(serde::de::Error::custom("event_type must not be empty"))
-    } else {
-        Ok(event_type)
-    }
+    deserialize_non_empty_string(deserializer, "event_type")
 }
 
 fn deserialize_positive_schema_version<'de, D>(deserializer: D) -> Result<u32, D::Error>
@@ -110,106 +132,58 @@ where
 
 impl HostEventEmitRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "event_type": { "type": "string", "minLength": 1 },
-                "schema_version": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": u32::MAX
-                },
-                "payload": {}
-            },
-            "required": ["event_type", "schema_version", "payload"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// Request for extension-namespaced state in the current session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionStateReadRequest {
     #[serde(deserialize_with = "deserialize_session_state_key")]
+    #[schemars(schema_with = "session_state_key_schema")]
     pub key: String,
 }
 
 impl HostSessionStateReadRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": { "key": session_state_key_property_schema() },
-            "required": ["key"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// Value stored under an extension-namespaced key in the current session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionStateReadOutput {
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub content: Option<String>,
 }
 
 impl HostSessionStateReadOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "content": {
-                    "oneOf": [
-                        { "type": "string" },
-                        { "type": "null" }
-                    ]
-                }
-            },
-            "required": ["content"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// Write request for extension-namespaced state in the current session.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionStateWriteRequest {
     #[serde(deserialize_with = "deserialize_session_state_key")]
+    #[schemars(schema_with = "session_state_key_schema")]
     pub key: String,
     #[serde(
         serialize_with = "serialize_session_state_content",
         deserialize_with = "deserialize_session_state_content"
     )]
+    #[schemars(schema_with = "session_state_content_schema")]
     pub content: String,
 }
 
 impl HostSessionStateWriteRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "key": session_state_key_property_schema(),
-                "content": {
-                    "type": "string",
-                    "maxLength": HOST_SESSION_STATE_VALUE_MAX_BYTES,
-                    "description": "Limited to this many UTF-8 bytes; the host byte limit is authoritative."
-                }
-            },
-            "required": ["key", "content"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
-}
-
-fn session_state_key_property_schema() -> Value {
-    json!({
-        "type": "string",
-        "minLength": 1,
-        "maxLength": HOST_SESSION_STATE_KEY_MAX_LENGTH,
-        "pattern": "^[A-Za-z0-9_.-]+$",
-        "not": { "enum": [".", ".."] }
-    })
 }
 
 fn deserialize_session_state_key<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -236,36 +210,88 @@ fn valid_session_state_key(key: &str) -> bool {
         })
 }
 
+/// 共享的 UTF-8 字节上限校验核心；serde 的 `with`/`deserialize_with` 需要固定签名的
+/// 函数路径，故 session state 与 stdin 字段保留各自的薄包装。
+fn serialize_bounded_utf8<S>(
+    value: &str,
+    max_bytes: usize,
+    field: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if value.len() > max_bytes {
+        return Err(serde::ser::Error::custom(format_args!(
+            "{field} exceeds {max_bytes} UTF-8 bytes"
+        )));
+    }
+    serializer.serialize_str(value)
+}
+
+fn deserialize_bounded_utf8<'de, D>(
+    deserializer: D,
+    max_bytes: usize,
+    field: &str,
+) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    if value.len() > max_bytes {
+        Err(serde::de::Error::custom(format_args!(
+            "{field} exceeds {max_bytes} UTF-8 bytes"
+        )))
+    } else {
+        Ok(value)
+    }
+}
+
+fn deserialize_optional_bounded_utf8<'de, D>(
+    deserializer: D,
+    max_bytes: usize,
+    field: &str,
+) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value {
+        Some(value) if value.len() > max_bytes => Err(serde::de::Error::custom(format_args!(
+            "{field} exceeds {max_bytes} UTF-8 bytes"
+        ))),
+        value => Ok(value),
+    }
+}
+
 fn serialize_session_state_content<S>(content: &str, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: serde::Serializer,
 {
-    if content.len() > HOST_SESSION_STATE_VALUE_MAX_BYTES {
-        return Err(serde::ser::Error::custom(format_args!(
-            "session state content exceeds {HOST_SESSION_STATE_VALUE_MAX_BYTES} UTF-8 bytes"
-        )));
-    }
-    serializer.serialize_str(content)
+    serialize_bounded_utf8(
+        content,
+        HOST_SESSION_STATE_VALUE_MAX_BYTES,
+        "session state content",
+        serializer,
+    )
 }
 
 fn deserialize_session_state_content<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let content = String::deserialize(deserializer)?;
-    if content.len() > HOST_SESSION_STATE_VALUE_MAX_BYTES {
-        Err(serde::de::Error::custom(format_args!(
-            "session state content exceeds {HOST_SESSION_STATE_VALUE_MAX_BYTES} UTF-8 bytes"
-        )))
-    } else {
-        Ok(content)
-    }
+    deserialize_bounded_utf8(
+        deserializer,
+        HOST_SESSION_STATE_VALUE_MAX_BYTES,
+        "session state content",
+    )
 }
 
 /// Typed request shared by bundled and worker model clients.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HostLlmChatRequest {
+    #[schemars(length(min = 1))]
     pub messages: Vec<HostLlmMessage>,
 }
 
@@ -281,22 +307,11 @@ impl HostLlmChatRequest {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "messages": {
-                    "type": "array",
-                    "items": HostLlmMessage::wire_schema(),
-                    "minItems": 1
-                }
-            },
-            "required": ["messages"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostLlmRole {
     System,
@@ -327,7 +342,7 @@ impl From<HostLlmRole> for LlmRole {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostLlmContent {
     Text {
@@ -427,7 +442,7 @@ impl From<HostLlmContent> for LlmContent {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HostLlmMessage {
     pub role: HostLlmRole,
@@ -440,7 +455,7 @@ pub struct HostLlmMessage {
 
 impl HostLlmMessage {
     pub fn wire_schema() -> Value {
-        host_llm_message_schema()
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -471,7 +486,7 @@ impl From<HostLlmMessage> for LlmMessage {
 }
 
 /// Completed non-streaming model response.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostLlmChatOutput {
     pub content: String,
@@ -480,41 +495,22 @@ pub struct HostLlmChatOutput {
 
 impl HostLlmChatOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string" },
-                "model": { "type": "string" }
-            },
-            "required": ["content", "model"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// One ordered text delta emitted by a model stream.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostLlmTextDelta {
     pub delta: String,
-}
-
-impl HostLlmTextDelta {
-    fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": { "delta": { "type": "string" } },
-            "required": ["delta"],
-            "additionalProperties": false
-        })
-    }
 }
 
 /// Explicit collected-stream response used by the current unified host invoker.
 ///
 /// Deltas preserve provider order, but the call completes before this value is returned. The
 /// transport may later expose progressive delivery without changing the non-streaming output.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostLlmCollectedStreamOutput {
     pub content: String,
@@ -524,22 +520,11 @@ pub struct HostLlmCollectedStreamOutput {
 
 impl HostLlmCollectedStreamOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "content": { "type": "string" },
-                "model": { "type": "string" },
-                "chunks": {
-                    "type": "array",
-                    "items": HostLlmTextDelta::wire_schema()
-                }
-            },
-            "required": ["content", "model", "chunks"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
+// 两种响应形状的 oneOf 合并没有对应的 Rust 类型,保留手写组合。
 pub(crate) fn host_llm_chat_response_schema() -> Value {
     json!({
         "oneOf": [
@@ -550,11 +535,14 @@ pub(crate) fn host_llm_chat_response_schema() -> Value {
 }
 
 /// Stable summary returned by the narrow session-history domain.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionSummary {
+    #[schemars(with = "String")]
     pub session_id: SessionId,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub parent_session_id: Option<SessionId>,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub source_extension: Option<String>,
     pub working_dir: String,
     pub model_id: String,
@@ -563,7 +551,7 @@ pub struct HostSessionSummary {
     pub latest_cursor: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionSummariesOutput {
     pub sessions: Vec<HostSessionSummary>,
@@ -571,142 +559,68 @@ pub struct HostSessionSummariesOutput {
 
 impl HostSessionSummariesOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "sessions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "session_id": { "type": "string" },
-                            "parent_session_id": { "type": ["string", "null"] },
-                            "source_extension": { "type": ["string", "null"] },
-                            "working_dir": { "type": "string" },
-                            "model_id": { "type": "string" },
-                            "created_at": { "type": "string" },
-                            "updated_at": { "type": "string" },
-                            "latest_cursor": { "type": "string" }
-                        },
-                        "required": [
-                            "session_id",
-                            "parent_session_id",
-                            "source_extension",
-                            "working_dir",
-                            "model_id",
-                            "created_at",
-                            "updated_at",
-                            "latest_cursor"
-                        ],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["sessions"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionTranscriptMessage {
     pub message: HostLlmMessage,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub source: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionTranscript {
+    #[schemars(with = "String")]
     pub session_id: SessionId,
     pub messages: Vec<HostSessionTranscriptMessage>,
 }
 
 impl HostSessionTranscript {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "session_id": { "type": "string" },
-                "messages": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "message": HostLlmMessage::wire_schema(),
-                            "source": { "type": ["string", "null"] }
-                        },
-                        "required": ["message", "source"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["session_id", "messages"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionProviderMessagesOutput {
+    #[schemars(with = "String")]
     pub session_id: SessionId,
     pub messages: Vec<HostLlmMessage>,
 }
 
 impl HostSessionProviderMessagesOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "session_id": { "type": "string" },
-                "messages": {
-                    "type": "array",
-                    "items": HostLlmMessage::wire_schema()
-                }
-            },
-            "required": ["session_id", "messages"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionTokenUsage {
     pub total_tokens: u64,
+    #[schemars(required, schema_with = "nullable_nonnegative_integer_schema")]
     pub model_context_window: Option<usize>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionTokenUsageOutput {
+    #[schemars(required, schema_with = "nullable_usage_schema")]
     pub usage: Option<HostSessionTokenUsage>,
+}
+
+fn nullable_usage_schema(generator: &mut SchemaGenerator) -> Schema {
+    nullable_subschema::<HostSessionTokenUsage>(generator)
 }
 
 impl HostSessionTokenUsageOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "usage": {
-                    "anyOf": [
-                        {
-                            "type": "object",
-                            "properties": {
-                                "total_tokens": { "type": "integer", "minimum": 0 },
-                                "model_context_window": { "type": ["integer", "null"], "minimum": 0 }
-                            },
-                            "required": ["total_tokens", "model_context_window"],
-                            "additionalProperties": false
-                        },
-                        { "type": "null" }
-                    ]
-                }
-            },
-            "required": ["usage"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -714,9 +628,10 @@ impl HostSessionTokenUsageOutput {
 ///
 /// `stdin` 最大为 [`HOST_PROCESS_MAX_STDIN_BYTES`] 个 UTF-8 字节，`timeout_ms` 必须位于
 /// `1..=HOST_PROCESS_MAX_TIMEOUT_MS`。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostProcessRequest {
+    #[schemars(length(min = 1))]
     pub command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
@@ -728,8 +643,10 @@ pub struct HostProcessRequest {
         serialize_with = "serialize_process_stdin",
         deserialize_with = "deserialize_process_stdin"
     )]
+    #[schemars(schema_with = "process_stdin_schema")]
     pub stdin: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "process_timeout_schema")]
     pub timeout_ms: Option<u64>,
 }
 
@@ -745,26 +662,7 @@ impl HostProcessRequest {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "command": { "type": "string", "minLength": 1 },
-                "args": { "type": "array", "items": { "type": "string" } },
-                "cwd": { "type": ["string", "null"] },
-                "stdin": {
-                    "type": ["string", "null"],
-                    "maxLength": HOST_PROCESS_MAX_STDIN_BYTES,
-                    "description": "Limited to this many UTF-8 bytes; the host byte limit is authoritative."
-                },
-                "timeout_ms": {
-                    "type": ["integer", "null"],
-                    "minimum": 1,
-                    "maximum": HOST_PROCESS_MAX_TIMEOUT_MS
-                }
-            },
-            "required": ["command"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -772,38 +670,26 @@ fn serialize_process_stdin<S>(stdin: &Option<String>, serializer: S) -> Result<S
 where
     S: serde::Serializer,
 {
-    if stdin
-        .as_ref()
-        .is_some_and(|value| value.len() > HOST_PROCESS_MAX_STDIN_BYTES)
-    {
-        return Err(serde::ser::Error::custom(format_args!(
-            "stdin exceeds {HOST_PROCESS_MAX_STDIN_BYTES} UTF-8 bytes"
-        )));
+    match stdin {
+        Some(value) => {
+            serialize_bounded_utf8(value, HOST_PROCESS_MAX_STDIN_BYTES, "stdin", serializer)
+        },
+        None => serializer.serialize_none(),
     }
-    stdin.serialize(serializer)
 }
 
 fn deserialize_process_stdin<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    let stdin = Option::<String>::deserialize(deserializer)?;
-    if stdin
-        .as_ref()
-        .is_some_and(|value| value.len() > HOST_PROCESS_MAX_STDIN_BYTES)
-    {
-        Err(serde::de::Error::custom(format_args!(
-            "stdin exceeds {HOST_PROCESS_MAX_STDIN_BYTES} UTF-8 bytes"
-        )))
-    } else {
-        Ok(stdin)
-    }
+    deserialize_optional_bounded_utf8(deserializer, HOST_PROCESS_MAX_STDIN_BYTES, "stdin")
 }
 
 /// `astrcode.process.spawn` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostProcessOutput {
+    #[schemars(required, schema_with = "nullable_integer_schema")]
     pub status: Option<i32>,
     pub success: bool,
     pub stdout: String,
@@ -816,35 +702,12 @@ pub struct HostProcessOutput {
 
 impl HostProcessOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "status": { "type": ["integer", "null"] },
-                "success": { "type": "boolean" },
-                "stdout": { "type": "string" },
-                "stderr": { "type": "string" },
-                "combined": { "type": "string" },
-                "stdout_truncated": { "type": "boolean" },
-                "stderr_truncated": { "type": "boolean" },
-                "combined_truncated": { "type": "boolean" }
-            },
-            "required": [
-                "status",
-                "success",
-                "stdout",
-                "stderr",
-                "combined",
-                "stdout_truncated",
-                "stderr_truncated",
-                "combined_truncated"
-            ],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// Redirect behavior for `astrcode.network.client`.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum HostNetworkRedirectPolicy {
     #[default]
@@ -857,7 +720,7 @@ pub enum HostNetworkRedirectPolicy {
 /// `body` 最大为 [`HOST_NETWORK_MAX_REQUEST_BODY_BYTES`]，`max_bytes` 最大为
 /// [`HOST_NETWORK_MAX_BYTES`]，`timeout_ms` 必须位于 `1..=HOST_NETWORK_MAX_TIMEOUT_MS`。
 /// `Manual` 重定向仍返回受大小限制的原始响应体。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostNetworkRequest {
     pub url: String,
@@ -870,10 +733,13 @@ pub struct HostNetworkRequest {
         skip_serializing_if = "Vec::is_empty",
         with = "bounded_request_body"
     )]
+    #[schemars(schema_with = "network_request_body_schema")]
     pub body: Vec<u8>,
     #[serde(default = "default_network_max_bytes")]
+    #[schemars(schema_with = "network_max_bytes_schema")]
     pub max_bytes: usize,
     #[serde(default = "default_network_timeout_ms")]
+    #[schemars(schema_with = "network_timeout_schema")]
     pub timeout_ms: u64,
     #[serde(default)]
     pub redirect_policy: HostNetworkRedirectPolicy,
@@ -893,33 +759,7 @@ impl HostNetworkRequest {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "url": { "type": "string" },
-                "method": { "type": "string" },
-                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
-                "body": {
-                    "type": "string",
-                    "contentEncoding": "base64",
-                    "maxLength": HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS,
-                    "description": "Decoded body is byte-limited; the host decoded-byte limit is authoritative."
-                },
-                "max_bytes": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "maximum": HOST_NETWORK_MAX_BYTES
-                },
-                "timeout_ms": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": HOST_NETWORK_MAX_TIMEOUT_MS
-                },
-                "redirect_policy": { "type": "string", "enum": ["follow", "manual"] }
-            },
-            "required": ["url"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -939,30 +779,22 @@ const fn default_network_timeout_ms() -> u64 {
 ///
 /// `body` 在线缆上使用 base64，作者 API 始终接收原始字节。`headers` 不保留同名响应头
 /// 的重复值。宿主限制全局共享并发，但线缆协议不承诺 extension 级公平配额。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostNetworkResponse {
     /// 完成所有受限重定向后的最终 URL。
     pub final_url: String,
+    #[schemars(schema_with = "http_status_schema")]
     pub status: u16,
     pub headers: BTreeMap<String, String>,
     #[serde(with = "base64_bytes")]
+    #[schemars(schema_with = "network_response_body_schema")]
     pub body: Vec<u8>,
 }
 
 impl HostNetworkResponse {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "final_url": { "type": "string" },
-                "status": { "type": "integer", "minimum": 0, "maximum": u16::MAX },
-                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
-                "body": { "type": "string", "contentEncoding": "base64" }
-            },
-            "required": ["final_url", "status", "headers", "body"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -1033,34 +865,23 @@ mod bounded_request_body {
 }
 
 /// `astrcode.workspace.read` 的线缆请求。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceReadRequest {
+    #[schemars(length(min = 1))]
     pub path: String,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_workspace_read_max_bytes"
     )]
+    #[schemars(schema_with = "workspace_read_max_bytes_schema")]
     pub max_bytes: Option<u64>,
 }
 
 impl HostWorkspaceReadRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "minLength": 1 },
-                "max_bytes": {
-                    "type": ["integer", "null"],
-                    "minimum": 0,
-                    "maximum": HOST_WORKSPACE_MAX_FILE_BYTES,
-                    "default": HOST_WORKSPACE_MAX_FILE_BYTES
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -1080,7 +901,7 @@ where
 }
 
 /// `astrcode.workspace.read` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceReadOutput {
     pub content: String,
@@ -1088,39 +909,27 @@ pub struct HostWorkspaceReadOutput {
 
 impl HostWorkspaceReadOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": { "content": { "type": "string" } },
-            "required": ["content"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// `astrcode.workspace.write` 的线缆请求。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceWriteRequest {
+    #[schemars(length(min = 1))]
     pub path: String,
     pub content: String,
 }
 
 impl HostWorkspaceWriteRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "minLength": 1 },
-                "content": { "type": "string" }
-            },
-            "required": ["path", "content"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// `astrcode.workspace.write` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceWriteOutput {
     pub path: String,
@@ -1130,24 +939,17 @@ pub struct HostWorkspaceWriteOutput {
 
 impl HostWorkspaceWriteOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "bytes_written": { "type": "integer", "minimum": 0 },
-                "parent_created": { "type": "boolean" }
-            },
-            "required": ["path", "bytes_written", "parent_created"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// `astrcode.workspace.edit` 的线缆请求。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceEditRequest {
+    #[schemars(length(min = 1))]
     pub path: String,
+    #[schemars(length(min = 1))]
     pub old_text: String,
     pub new_text: String,
     #[serde(default)]
@@ -1156,22 +958,12 @@ pub struct HostWorkspaceEditRequest {
 
 impl HostWorkspaceEditRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "minLength": 1 },
-                "old_text": { "type": "string", "minLength": 1 },
-                "new_text": { "type": "string" },
-                "replace_all": { "type": "boolean" }
-            },
-            "required": ["path", "old_text", "new_text"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// `astrcode.workspace.edit` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceEditOutput {
     pub path: String,
@@ -1181,20 +973,11 @@ pub struct HostWorkspaceEditOutput {
 
 impl HostWorkspaceEditOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "replacements": { "type": "integer", "minimum": 0 },
-                "bytes_written": { "type": "integer", "minimum": 0 }
-            },
-            "required": ["path", "replacements", "bytes_written"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceListRequest {
     pub path: String,
@@ -1202,37 +985,20 @@ pub struct HostWorkspaceListRequest {
         default = "default_workspace_list_depth",
         deserialize_with = "deserialize_workspace_list_depth"
     )]
+    #[schemars(schema_with = "workspace_list_depth_schema")]
     pub depth: usize,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_workspace_list_limit"
     )]
+    #[schemars(schema_with = "workspace_list_limit_schema")]
     pub limit: Option<usize>,
 }
 
 impl HostWorkspaceListRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "depth": {
-                    "type": "integer",
-                    "minimum": 1,
-                    "maximum": HOST_WORKSPACE_LIST_MAX_DEPTH,
-                    "default": HOST_WORKSPACE_LIST_DEFAULT_DEPTH
-                },
-                "limit": {
-                    "type": ["integer", "null"],
-                    "minimum": 1,
-                    "maximum": HOST_WORKSPACE_LIST_MAX_ENTRIES,
-                    "default": HOST_WORKSPACE_LIST_DEFAULT_LIMIT
-                }
-            },
-            "required": ["path"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -1333,16 +1099,17 @@ where
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceListEntry {
     pub name: String,
     pub path: String,
     pub kind: String,
+    #[schemars(required, schema_with = "nullable_nonnegative_integer_schema")]
     pub bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceListOutput {
     pub path: String,
@@ -1353,36 +1120,14 @@ pub struct HostWorkspaceListOutput {
 
 impl HostWorkspaceListOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "entries": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "name": { "type": "string" },
-                            "path": { "type": "string" },
-                            "kind": { "type": "string" },
-                            "bytes": { "type": ["integer", "null"], "minimum": 0 }
-                        },
-                        "required": ["name", "path", "kind", "bytes"],
-                        "additionalProperties": false
-                    }
-                },
-                "returned_entries": { "type": "integer", "minimum": 0 },
-                "truncated": { "type": "boolean" }
-            },
-            "required": ["path", "entries", "returned_entries", "truncated"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceGrepRequest {
+    #[schemars(length(min = 1))]
     pub pattern: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
@@ -1391,63 +1136,41 @@ pub struct HostWorkspaceGrepRequest {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_workspace_search_max_matches"
     )]
+    #[schemars(schema_with = "grep_max_matches_schema")]
     pub max_matches: Option<usize>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_workspace_search_max_bytes"
     )]
+    #[schemars(schema_with = "grep_max_bytes_schema")]
     pub max_bytes: Option<usize>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_workspace_search_max_line_chars"
     )]
+    #[schemars(schema_with = "grep_max_line_chars_schema")]
     pub max_line_chars: Option<usize>,
 }
 
 impl HostWorkspaceGrepRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "pattern": { "type": "string", "minLength": 1 },
-                "path": { "type": ["string", "null"] },
-                "max_matches": {
-                    "type": ["integer", "null"],
-                    "minimum": 1,
-                    "maximum": HOST_WORKSPACE_SEARCH_MAX_MATCHES,
-                    "default": HOST_WORKSPACE_GREP_DEFAULT_MAX_MATCHES
-                },
-                "max_bytes": {
-                    "type": ["integer", "null"],
-                    "minimum": 1,
-                    "maximum": HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES,
-                    "default": HOST_WORKSPACE_GREP_DEFAULT_MAX_BYTES
-                },
-                "max_line_chars": {
-                    "type": ["integer", "null"],
-                    "minimum": 1,
-                    "maximum": HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS,
-                    "default": HOST_WORKSPACE_GREP_DEFAULT_MAX_LINE_CHARS
-                }
-            },
-            "required": ["pattern"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceGrepMatch {
     pub path: String,
+    #[schemars(range(min = 1))]
     pub line_number: usize,
     pub line: String,
     pub line_truncated: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceGrepOutput {
     pub pattern: String,
@@ -1458,36 +1181,14 @@ pub struct HostWorkspaceGrepOutput {
 
 impl HostWorkspaceGrepOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "pattern": { "type": "string" },
-                "root": { "type": "string" },
-                "matches": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": { "type": "string" },
-                            "line_number": { "type": "integer", "minimum": 1 },
-                            "line": { "type": "string" },
-                            "line_truncated": { "type": "boolean" }
-                        },
-                        "required": ["path", "line_number", "line", "line_truncated"],
-                        "additionalProperties": false
-                    }
-                },
-                "truncated": { "type": "boolean" }
-            },
-            "required": ["pattern", "root", "matches", "truncated"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceGlobRequest {
+    #[schemars(length(min = 1))]
     pub pattern: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root: Option<String>,
@@ -1496,6 +1197,7 @@ pub struct HostWorkspaceGlobRequest {
         skip_serializing_if = "Option::is_none",
         deserialize_with = "deserialize_workspace_search_max_matches"
     )]
+    #[schemars(schema_with = "glob_max_matches_schema")]
     pub max_matches: Option<usize>,
     #[serde(default)]
     pub include_ignored: bool,
@@ -1503,26 +1205,11 @@ pub struct HostWorkspaceGlobRequest {
 
 impl HostWorkspaceGlobRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "pattern": { "type": "string", "minLength": 1 },
-                "root": { "type": ["string", "null"] },
-                "max_matches": {
-                    "type": ["integer", "null"],
-                    "minimum": 1,
-                    "maximum": HOST_WORKSPACE_SEARCH_MAX_MATCHES,
-                    "default": HOST_WORKSPACE_GLOB_DEFAULT_MAX_MATCHES
-                },
-                "include_ignored": { "type": "boolean" }
-            },
-            "required": ["pattern"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostWorkspaceGlobOutput {
     pub pattern: String,
@@ -1533,42 +1220,26 @@ pub struct HostWorkspaceGlobOutput {
 
 impl HostWorkspaceGlobOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "pattern": { "type": "string" },
-                "root": { "type": "string" },
-                "paths": { "type": "array", "items": { "type": "string" } },
-                "truncated": { "type": "boolean" }
-            },
-            "required": ["pattern", "root", "paths", "truncated"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionInputRequest {
+    #[schemars(length(min = 1))]
     pub target_session_id: String,
+    #[schemars(length(min = 1))]
     pub content: String,
 }
 
 impl HostSessionInputRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "target_session_id": { "type": "string", "minLength": 1 },
-                "content": { "type": "string", "minLength": 1 }
-            },
-            "required": ["target_session_id", "content"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HostSessionDeliveryOutput {
     Started { turn_id: String },
@@ -1578,42 +1249,12 @@ pub enum HostSessionDeliveryOutput {
 
 impl HostSessionDeliveryOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "oneOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "status": { "const": "started" },
-                        "turn_id": { "type": "string" }
-                    },
-                    "required": ["status", "turn_id"],
-                    "additionalProperties": false
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "status": { "const": "injected" },
-                        "turn_id": { "type": "string" }
-                    },
-                    "required": ["status", "turn_id"],
-                    "additionalProperties": false
-                },
-                {
-                    "type": "object",
-                    "properties": {
-                        "status": { "const": "queued" },
-                        "queue_len": { "type": "integer", "minimum": 0 }
-                    },
-                    "required": ["status", "queue_len"],
-                    "additionalProperties": false
-                }
-            ]
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// Result of idempotently requesting cancellation of the active turn.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionCancelOutput {
     pub cancelled: bool,
@@ -1621,143 +1262,51 @@ pub struct HostSessionCancelOutput {
 
 impl HostSessionCancelOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": { "cancelled": { "type": "boolean" } },
-            "required": ["cancelled"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionExecutionView {
     pub phase: SessionPhaseDto,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub active_turn_id: Option<String>,
     pub queued_inputs: usize,
 }
 
 impl HostSessionExecutionView {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "phase": SessionPhaseDto::wire_schema(),
-                "active_turn_id": { "type": ["string", "null"] },
-                "queued_inputs": { "type": "integer", "minimum": 0 }
-            },
-            "required": ["phase", "active_turn_id", "queued_inputs"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostConfigureSessionToolsRequest {
+    #[schemars(length(min = 1))]
     pub session_id: String,
+    #[schemars(schema_with = "configure_tools_selection_schema")]
     pub selection: SessionToolSelectionDto,
 }
 
 impl HostConfigureSessionToolsRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "session_id": { "type": "string", "minLength": 1 },
-                "selection": SessionToolSelectionDto::wire_schema(
-                    "Session tool visibility for subsequent turns."
-                )
-            },
-            "required": ["session_id", "selection"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostConfigureSessionToolsOutput {
+    #[schemars(schema_with = "configure_tools_output_selection_schema")]
     pub selection: SessionToolSelectionDto,
 }
 
 impl HostConfigureSessionToolsOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "selection": SessionToolSelectionDto::wire_schema(
-                    "Effective session tool visibility for subsequent turns."
-                )
-            },
-            "required": ["selection"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
-}
-
-fn host_llm_message_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "role": { "type": "string", "enum": ["system", "user", "assistant", "tool"] },
-            "content": {
-                "type": "array",
-                "items": {
-                    "oneOf": [
-                        {
-                            "type": "object",
-                            "properties": {
-                                "type": { "const": "text" },
-                                "text": { "type": "string" }
-                            },
-                            "required": ["type", "text"],
-                            "additionalProperties": false
-                        },
-                        {
-                            "type": "object",
-                            "properties": {
-                                "type": { "const": "image" },
-                                "base64": { "type": "string" },
-                                "media_type": { "type": "string" },
-                                "filename": { "type": ["string", "null"] }
-                            },
-                            "required": ["type", "base64", "media_type"],
-                            "additionalProperties": false
-                        },
-                        {
-                            "type": "object",
-                            "properties": {
-                                "type": { "const": "tool_call" },
-                                "call_id": { "type": "string" },
-                                "name": { "type": "string" },
-                                "arguments": {},
-                                "raw_arguments": { "type": ["string", "null"] }
-                            },
-                            "required": ["type", "call_id", "name", "arguments"],
-                            "additionalProperties": false
-                        },
-                        {
-                            "type": "object",
-                            "properties": {
-                                "type": { "const": "tool_result" },
-                                "tool_call_id": { "type": "string" },
-                                "content": { "type": "string" },
-                                "is_error": { "type": "boolean" }
-                            },
-                            "required": ["type", "tool_call_id", "content", "is_error"],
-                            "additionalProperties": false
-                        }
-                    ]
-                }
-            },
-            "name": { "type": ["string", "null"] },
-            "reasoning_content": { "type": ["string", "null"] }
-        },
-        "required": ["role", "content"],
-        "additionalProperties": false
-    })
 }
 
 #[cfg(test)]
@@ -2391,11 +1940,11 @@ mod tests {
             json!(["string", "null"])
         );
         assert_eq!(
-            schema["properties"]["content"]["items"]["oneOf"][1]["properties"]["filename"]["type"],
+            schema["definitions"]["HostLlmContent"]["oneOf"][1]["properties"]["filename"]["type"],
             json!(["string", "null"])
         );
         assert_eq!(
-            schema["properties"]["content"]["items"]["oneOf"][2]["properties"]["raw_arguments"]
+            schema["definitions"]["HostLlmContent"]["oneOf"][2]["properties"]["raw_arguments"]
                 ["type"],
             json!(["string", "null"])
         );

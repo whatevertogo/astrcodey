@@ -81,16 +81,14 @@ impl ToolHandler for TodoWriteToolHandler {
         }
         let root = todo_root(ctx.paths())?;
         let store = ProgressListStore::new(root);
-        Ok(
-            match handle_todo_write(ctx.raw_arguments().clone(), &store) {
-                Ok(result) => result,
-                Err(error) => {
-                    let meta = tool_metadata([("error", json!(&error))]);
-                    ToolResult::text(error, true, meta)
-                },
-            }
-            .into(),
-        )
+        Ok(match handle_todo_write(ctx.arguments()?, &store) {
+            Ok(result) => result,
+            Err(error) => {
+                let meta = tool_metadata([("error", json!(&error))]);
+                ToolResult::text(error, true, meta)
+            },
+        }
+        .into())
     }
 }
 
@@ -256,10 +254,10 @@ impl ProgressListStore {
 
     fn load_progress(&self) -> Result<ProgressList, String> {
         let path = self.root.join(PROGRESS_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                let progress = serde_json::from_str::<ProgressList>(&content)
-                    .map_err(|error| format!("parse progress list: {error}"))?;
+        let progress = astrcode_extension_sdk::hostpaths::read_json_state::<ProgressList>(&path)
+            .map_err(|error| format!("read progress list: {error}"))?;
+        match progress {
+            Some(progress) => {
                 if progress.schema_version != PROGRESS_SCHEMA_VERSION {
                     return Err(format!(
                         "unsupported progress list schema version {}",
@@ -268,12 +266,11 @@ impl ProgressListStore {
                 }
                 Ok(progress)
             },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ProgressList {
+            None => Ok(ProgressList {
                 schema_version: PROGRESS_SCHEMA_VERSION,
                 items: Vec::new(),
                 updated_at: now_utc(),
             }),
-            Err(error) => Err(format!("read progress list: {error}")),
         }
     }
 
@@ -284,17 +281,11 @@ impl ProgressListStore {
             items: items.to_vec(),
             updated_at: now_utc(),
         };
-        self.write_json(PROGRESS_FILE, &progress)
-    }
-
-    fn write_json<T: Serialize>(&self, file_name: &str, value: &T) -> Result<(), String> {
-        let path = self.root.join(file_name);
-        let tmp = self.root.join(format!("{file_name}.tmp"));
-        let json = serde_json::to_string_pretty(value)
-            .map_err(|error| format!("serialize {file_name}: {error}"))?;
-        std::fs::write(&tmp, json).map_err(|error| format!("write {file_name}: {error}"))?;
-        std::fs::rename(&tmp, &path).map_err(|error| format!("save {file_name}: {error}"))?;
-        Ok(())
+        astrcode_extension_sdk::hostpaths::write_json_state(
+            &self.root.join(PROGRESS_FILE),
+            &progress,
+        )
+        .map_err(|error| format!("save progress list: {error}"))
     }
 
     fn ensure_dir(&self) -> Result<(), String> {
@@ -354,30 +345,17 @@ impl ProgressReminder {
 
     fn load_state(&self) -> Result<ProgressReminderState, String> {
         let path = self.root.join(REMINDER_STATE_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content)
-                .map_err(|error| format!("parse reminder state: {error}")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(ProgressReminderState::default())
-            },
-            Err(error) => Err(format!("read reminder state: {error}")),
-        }
+        Ok(astrcode_extension_sdk::hostpaths::read_json_state(&path)
+            .map_err(|error| format!("read reminder state: {error}"))?
+            .unwrap_or_default())
     }
 
     fn save_state(&self, state: &ProgressReminderState) -> Result<(), String> {
-        std::fs::create_dir_all(&self.root).map_err(|error| {
-            format!(
-                "create todo reminder directory {}: {error}",
-                self.root.display()
-            )
-        })?;
-        let path = self.root.join(REMINDER_STATE_FILE);
-        let tmp = self.root.join(format!("{REMINDER_STATE_FILE}.tmp"));
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|error| format!("serialize reminder state: {error}"))?;
-        std::fs::write(&tmp, json).map_err(|error| format!("write reminder state: {error}"))?;
-        std::fs::rename(&tmp, &path).map_err(|error| format!("save reminder state: {error}"))?;
-        Ok(())
+        astrcode_extension_sdk::hostpaths::write_json_state(
+            &self.root.join(REMINDER_STATE_FILE),
+            state,
+        )
+        .map_err(|error| format!("save reminder state: {error}"))
     }
 }
 
@@ -403,9 +381,7 @@ fn reminder_message(items: &[ProgressItem]) -> String {
     )
 }
 
-fn handle_todo_write(arguments: Value, store: &ProgressListStore) -> Result<ToolResult, String> {
-    let args = serde_json::from_value::<TodoWriteArgs>(arguments)
-        .map_err(|error| format!("invalid args for {TODO_WRITE_TOOL_NAME}: {error}"))?;
+fn handle_todo_write(args: TodoWriteArgs, store: &ProgressListStore) -> Result<ToolResult, String> {
     let items = args
         .todos
         .into_iter()
@@ -646,7 +622,7 @@ mod tests {
     fn todo_write_replaces_list_and_returns_metadata() {
         let store = test_store("replace");
         let first = handle_todo_write(
-            json!({
+            serde_json::from_value(json!({
                 "todos": [
                     {
                         "content": "Inspect files",
@@ -655,7 +631,8 @@ mod tests {
                         "executor": "self"
                     }
                 ]
-            }),
+            }))
+            .expect("parse args"),
             &store,
         )
         .expect("write should succeed");
@@ -664,7 +641,7 @@ mod tests {
         assert_eq!(first.metadata["newTodos"][0]["executor"], "self");
 
         let second = handle_todo_write(
-            json!({
+            serde_json::from_value(json!({
                 "todos": [
                     {
                         "content": "Run tests",
@@ -675,7 +652,8 @@ mod tests {
                         "mode": "serial"
                     }
                 ]
-            }),
+            }))
+            .expect("parse args"),
             &store,
         )
         .expect("replace should succeed");
@@ -769,24 +747,17 @@ mod tests {
 
     #[test]
     fn rejects_todo_without_executor_field() {
-        let store = test_store("missing-executor");
-        let result = handle_todo_write(
-            json!({
-                "todos": [
-                    {
-                        "content": "Inspect files",
-                        "activeForm": "Inspecting files",
-                        "status": "in_progress"
-                    }
-                ]
-            }),
-            &store,
-        );
-        assert!(
-            result
-                .expect_err("missing executor should fail")
-                .contains("executor")
-        );
+        let error = serde_json::from_value::<TodoWriteArgs>(json!({
+            "todos": [
+                {
+                    "content": "Inspect files",
+                    "activeForm": "Inspecting files",
+                    "status": "in_progress"
+                }
+            ]
+        }))
+        .expect_err("missing executor must fail");
+        assert!(error.to_string().contains("executor"));
     }
 
     #[test]

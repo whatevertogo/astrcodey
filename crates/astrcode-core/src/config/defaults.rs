@@ -2,7 +2,7 @@
 //!
 //! 集中定义配置常量和 serde 默认值函数，便于统一管理和修改。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const TEST_HOME_ENV: &str = "ASTRCODE_TEST_HOME";
 const USER_HOME_ENV: &str = "ASTRCODE_HOME_DIR";
@@ -20,6 +20,11 @@ pub fn user_home_dir() -> PathBuf {
 /// 返回 AstrCode 的进程级数据目录，默认是 `~/.astrcode`。
 pub fn astrcode_dir() -> PathBuf {
     user_home_dir().join(".astrcode")
+}
+
+/// 返回扩展在指定存储基目录下的数据目录：`<base>/extension_data/<extension_id>`。
+pub fn extension_data_dir(base: &Path, extension_id: &str) -> PathBuf {
+    base.join("extension_data").join(extension_id)
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {

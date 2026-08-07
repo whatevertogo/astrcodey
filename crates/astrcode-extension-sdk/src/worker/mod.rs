@@ -7,6 +7,20 @@ mod registry;
 
 use std::sync::Arc;
 
+/// Worker 侧（guest）错误码：宿主收到后透传给扩展作者，属于 wire 契约的一部分。
+pub(crate) const WORKER_ERROR_CODE_UNKNOWN_HANDLER: &str = "unknown_handler";
+pub(crate) const WORKER_ERROR_CODE_DUPLICATE_REGISTRATION: &str = "duplicate_registration";
+pub(crate) const WORKER_ERROR_CODE_UNSUPPORTED_HOOK: &str = "unsupported_hook";
+pub(crate) const WORKER_ERROR_CODE_TYPED_HOOK_REQUIRED: &str = "typed_hook_required";
+pub(crate) const WORKER_ERROR_CODE_INVALID_HOOK_MODE: &str = "invalid_hook_mode";
+pub(crate) const WORKER_ERROR_CODE_INVALID_HOOK_REGISTRATION: &str = "invalid_hook_registration";
+pub(crate) const WORKER_ERROR_CODE_INVALID_HTTP_ROUTE: &str = "invalid_http_route";
+pub(crate) const WORKER_ERROR_CODE_INVALID_ARGUMENTS: &str = "invalid_arguments";
+pub(crate) const WORKER_ERROR_CODE_PEER_START_FAILED: &str = "peer_start_failed";
+pub(crate) const WORKER_ERROR_CODE_HOST_API_ALREADY_SET: &str = "host_api_already_set";
+pub(crate) const WORKER_ERROR_CODE_MANIFEST_SERIALIZE_FAILED: &str = "manifest_serialize_failed";
+pub(crate) const WORKER_ERROR_CODE_INITIALIZE_FAILED: &str = "initialize_failed";
+
 pub use builder::{
     command_handler, handler_err, hook_handler, hook_handler_args, http_handler, parse_hook_input,
     parse_tool_arguments, tool_handler, tool_handler_args,
@@ -200,11 +214,14 @@ impl Worker {
                 version: Some(S5R_STACK.into()),
             },
         );
-        peer.start()
-            .await
-            .map_err(|e| crate::s5r::ErrorPayload::new("peer_start_failed", e.to_string()))?;
+        peer.start().await.map_err(|e| {
+            crate::s5r::ErrorPayload::new(WORKER_ERROR_CODE_PEER_START_FAILED, e.to_string())
+        })?;
         set_host_api(Arc::new(PeerHostApi::new(Arc::clone(&peer)))).map_err(|_| {
-            crate::s5r::ErrorPayload::new("host_api_already_set", "host API already initialized")
+            crate::s5r::ErrorPayload::new(
+                WORKER_ERROR_CODE_HOST_API_ALREADY_SET,
+                "host API already initialized",
+            )
         })?;
 
         let registry = Arc::new(self.registry);
@@ -220,14 +237,14 @@ impl Worker {
         let metadata = registration_metadata(&self.extension_id, &self.version, registry.catalog())
             .map_err(|error| {
                 ErrorPayload::new(
-                    "manifest_serialize_failed",
+                    WORKER_ERROR_CODE_MANIFEST_SERIALIZE_FAILED,
                     format!("failed to serialize initialize manifest: {error}"),
                 )
             })?;
         let handlers = build_handler_descriptors(registry.catalog(), &self.extension_id);
-        peer.initialize(handlers, metadata)
-            .await
-            .map_err(|e| crate::s5r::ErrorPayload::new("initialize_failed", e.to_string()))?;
+        peer.initialize(handlers, metadata).await.map_err(|e| {
+            crate::s5r::ErrorPayload::new(WORKER_ERROR_CODE_INITIALIZE_FAILED, e.to_string())
+        })?;
 
         peer.wait_closed().await;
         Ok(())

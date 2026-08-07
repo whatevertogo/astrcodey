@@ -34,8 +34,7 @@ mod snapshot;
 mod tool_adapter;
 
 pub use commands::{
-    CommandRuntimeContext, CommandSource, ResolvedCommandSurface, ResolvedSlashCommand,
-    ShadowedSlashCommand,
+    CommandSource, ResolvedCommandSurface, ResolvedSlashCommand, ShadowedSlashCommand,
 };
 use diagnostics::{
     ExtensionDiagnosticStage as DiagnosticStage, ExtensionStageOutcome as StageOutcome,

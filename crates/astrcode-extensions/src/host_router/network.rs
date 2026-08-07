@@ -3,7 +3,6 @@
 use std::{
     collections::BTreeMap,
     error::Error,
-    future::Future,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
     sync::Arc,
     time::Duration,
@@ -32,11 +31,11 @@ use reqwest::{
 };
 use tokio::{
     sync::{Semaphore, SemaphorePermit},
-    time::{Instant, timeout_at},
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 
-use super::{capability::NetworkCapability, decode_host_input};
+use super::{backend_unavailable, capability::NetworkCapability, parse_wire_request};
 
 #[cfg(test)]
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -80,7 +79,7 @@ impl NetworkGroup {
         input: serde_json::Value,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<serde_json::Value, ErrorPayload> {
-        let request: HostNetworkRequest = decode_host_input(input)?;
+        let request: HostNetworkRequest = parse_wire_request(&input, "network.client")?;
         if !(1..=HOST_NETWORK_MAX_TIMEOUT_MS).contains(&request.timeout_ms) {
             return Err(ErrorPayload::new(
                 HOST_ERROR_CODE_INVALID_INPUT,
@@ -93,12 +92,10 @@ impl NetworkGroup {
                 format!("max_bytes must not exceed {HOST_NETWORK_MAX_BYTES}"),
             ));
         }
-        let service = self.service.as_ref().ok_or_else(|| {
-            ErrorPayload::new(
-                HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
-                "outbound network is not configured",
-            )
-        })?;
+        let service = self
+            .service
+            .as_ref()
+            .ok_or_else(|| backend_unavailable("outbound network is not configured"))?;
         let response = service
             .request(
                 OutboundNetworkRequest {
@@ -273,7 +270,19 @@ impl OutboundNetworkService for RestrictedNetworkService {
             })
         };
 
-        run_until_deadline(operation, deadline, cancel_token.as_ref()).await
+        super::run_until_deadline(
+            operation,
+            deadline,
+            cancel_token.as_ref(),
+            || {
+                OutboundNetworkError::new(
+                    OutboundNetworkErrorKind::Timeout,
+                    "network request timed out",
+                )
+            },
+            cancelled,
+        )
+        .await
     }
 }
 
@@ -284,31 +293,26 @@ impl RestrictedNetworkService {
         cancel_token: Option<&CancellationToken>,
     ) -> Result<SemaphorePermit<'a>, OutboundNetworkError> {
         let acquire = async {
-            timeout_at(deadline, self.permits.acquire())
-                .await
-                .map_err(|_| {
-                    OutboundNetworkError::new(
-                        OutboundNetworkErrorKind::Timeout,
-                        "network request timed out waiting for capacity",
-                    )
-                })?
-                .map_err(|_| {
-                    OutboundNetworkError::new(
-                        OutboundNetworkErrorKind::Unavailable,
-                        "network client stopped",
-                    )
-                })
+            self.permits.acquire().await.map_err(|_| {
+                OutboundNetworkError::new(
+                    OutboundNetworkErrorKind::Unavailable,
+                    "network client stopped",
+                )
+            })
         };
-        match cancel_token {
-            Some(token) => {
-                tokio::select! {
-                    biased;
-                    () = token.cancelled() => Err(cancelled()),
-                    result = acquire => result,
-                }
+        super::run_until_deadline(
+            acquire,
+            deadline,
+            cancel_token,
+            || {
+                OutboundNetworkError::new(
+                    OutboundNetworkErrorKind::Timeout,
+                    "network request timed out waiting for capacity",
+                )
             },
-            None => acquire.await,
-        }
+            cancelled,
+        )
+        .await
     }
 }
 
@@ -445,34 +449,6 @@ fn error_chain_contains_policy_error(error: &(dyn Error + 'static)) -> bool {
         current = source.source();
     }
     false
-}
-
-async fn run_until_deadline<F, T>(
-    operation: F,
-    deadline: Instant,
-    cancel_token: Option<&CancellationToken>,
-) -> Result<T, OutboundNetworkError>
-where
-    F: Future<Output = Result<T, OutboundNetworkError>>,
-{
-    let timed = async {
-        timeout_at(deadline, operation).await.map_err(|_| {
-            OutboundNetworkError::new(
-                OutboundNetworkErrorKind::Timeout,
-                "network request timed out",
-            )
-        })?
-    };
-    match cancel_token {
-        Some(token) => {
-            tokio::select! {
-                biased;
-                () = token.cancelled() => Err(cancelled()),
-                result = timed => result,
-            }
-        },
-        None => timed.await,
-    }
 }
 
 async fn read_limited_body(

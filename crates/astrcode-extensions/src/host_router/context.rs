@@ -1,13 +1,11 @@
 //! Extension-scoped state and event capabilities.
 
-use std::{
-    io::Read as _,
-    path::{Path, PathBuf},
-};
+use std::io::Read as _;
 
+use astrcode_core::config::defaults::extension_data_dir;
 use astrcode_extension_sdk::{
     host::{
-        HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_SERIALIZATION_FAILED,
+        HOST_ERROR_CODE_EMIT_FAILED, HOST_ERROR_CODE_STATE_TOO_LARGE,
         HOST_SESSION_STATE_VALUE_MAX_BYTES, HostAcknowledgement, HostEventEmitRequest,
         HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
     },
@@ -16,8 +14,8 @@ use astrcode_extension_sdk::{
 use serde_json::Value;
 
 use super::{
-    InvokeContext, capability::ContextCapability, decode_host_input, emit_for_sink,
-    run_blocking_io, run_blocking_io_to_completion,
+    InvokeContext, backend_unavailable, capability::ContextCapability, emit_for_sink, io_error,
+    parse_wire_request, run_blocking_io, run_blocking_io_to_completion, serialize_wire_response,
 };
 
 #[derive(Default)]
@@ -47,76 +45,65 @@ impl ContextGroup {
 }
 
 async fn read_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request: HostSessionStateReadRequest = decode_host_input(input.clone())?;
+    let request: HostSessionStateReadRequest = parse_wire_request(input, "session.state.read")?;
     let key = request.key;
-    let base = ctx.session_store_dir.as_ref().cloned().ok_or_else(|| {
-        ErrorPayload::new(
-            HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
-            "session_store_dir missing",
-        )
-    })?;
+    let base = ctx
+        .session_store_dir
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| backend_unavailable("session_store_dir missing"))?;
     let extension_id = ctx.extension_id.clone();
     let content = run_blocking_io(move || {
-        let path = extension_state_dir(&base, &extension_id).join(key);
+        let path = extension_data_dir(&base, &extension_id).join(key);
         let file = match std::fs::File::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(ErrorPayload::new("io_error", error.to_string())),
+            Err(error) => {
+                return Err(io_error(error));
+            },
         };
         let mut bytes = Vec::new();
         file.take((HOST_SESSION_STATE_VALUE_MAX_BYTES + 1) as u64)
             .read_to_end(&mut bytes)
-            .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
+            .map_err(io_error)?;
         if bytes.len() > HOST_SESSION_STATE_VALUE_MAX_BYTES {
             return Err(ErrorPayload::new(
-                "state_too_large",
+                HOST_ERROR_CODE_STATE_TOO_LARGE,
                 format!("stored session state exceeds {HOST_SESSION_STATE_VALUE_MAX_BYTES} bytes"),
             ));
         }
-        String::from_utf8(bytes)
-            .map(Some)
-            .map_err(|error| ErrorPayload::new("io_error", error.to_string()))
+        String::from_utf8(bytes).map(Some).map_err(io_error)
     })
     .await?;
-    serde_json::to_value(HostSessionStateReadOutput { content }).map_err(|error| {
-        ErrorPayload::new(
-            HOST_ERROR_CODE_SERIALIZATION_FAILED,
-            format!("serialize session state response: {error}"),
-        )
-    })
+    serialize_wire_response(HostSessionStateReadOutput { content }, "session.state.read")
 }
 
 async fn write_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request: HostSessionStateWriteRequest = decode_host_input(input.clone())?;
+    let request: HostSessionStateWriteRequest = parse_wire_request(input, "session.state.write")?;
     let key = request.key;
-    let base = ctx.session_store_dir.as_ref().cloned().ok_or_else(|| {
-        ErrorPayload::new(
-            HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
-            "session_store_dir missing",
-        )
-    })?;
+    let base = ctx
+        .session_store_dir
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| backend_unavailable("session_store_dir missing"))?;
     let content = request.content;
     let extension_id = ctx.extension_id.clone();
     run_blocking_io_to_completion(ctx.tasks.as_ref(), "session-state-write", move || {
-        let dir = extension_state_dir(&base, &extension_id);
-        std::fs::create_dir_all(&dir)
-            .map_err(|error| ErrorPayload::new("io_error", error.to_string()))?;
+        let dir = extension_data_dir(&base, &extension_id);
+        std::fs::create_dir_all(&dir).map_err(io_error)?;
         let path = dir.join(key);
-        std::fs::write(path, content)
-            .map_err(|error| ErrorPayload::new("io_error", error.to_string()))
+        std::fs::write(path, content).map_err(io_error)
     })
     .await?;
-    acknowledgement_response()
+    serialize_wire_response(HostAcknowledgement::accepted(), "session.state.write")
 }
 
 fn emit_event(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request: HostEventEmitRequest = decode_host_input(input.clone())?;
-    let event_tx = ctx.event_tx.as_ref().ok_or_else(|| {
-        ErrorPayload::new(
-            HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
-            "event_tx not configured in context",
-        )
-    })?;
+    let request: HostEventEmitRequest = parse_wire_request(input, "session.emit_event")?;
+    let event_tx = ctx
+        .event_tx
+        .as_ref()
+        .ok_or_else(|| backend_unavailable("event_tx not configured in context"))?;
     emit_for_sink(
         &ctx.extension_id,
         &ctx.event_declarations,
@@ -125,19 +112,6 @@ fn emit_event(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload>
         request.schema_version,
         request.payload,
     )
-    .map_err(|error| ErrorPayload::new("emit_failed", error.to_string()))?;
-    acknowledgement_response()
-}
-
-fn acknowledgement_response() -> Result<Value, ErrorPayload> {
-    serde_json::to_value(HostAcknowledgement::accepted()).map_err(|error| {
-        ErrorPayload::new(
-            HOST_ERROR_CODE_SERIALIZATION_FAILED,
-            format!("serialize host acknowledgement: {error}"),
-        )
-    })
-}
-
-fn extension_state_dir(session_store_dir: &Path, extension_id: &str) -> PathBuf {
-    session_store_dir.join("extension_data").join(extension_id)
+    .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_EMIT_FAILED, error.to_string()))?;
+    serialize_wire_response(HostAcknowledgement::accepted(), "session.emit_event")
 }

@@ -26,9 +26,7 @@ use astrcode_extension_sdk::{
 };
 use astrcode_extensions::{
     HostBackends, build_host_router, build_host_router_with_public_http_dispatcher,
-    loader::ExtensionLoader,
-    runner::{CommandRuntimeContext, ExtensionRunner},
-    s5r_ext::S5rExtension,
+    loader::ExtensionLoader, runner::ExtensionRunner, s5r_ext::S5rExtension,
 };
 use astrcode_storage::{EventReader, SessionReader, in_memory::InMemoryEventStore};
 use async_trait::async_trait;
@@ -603,9 +601,9 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
 async fn s5r_demo_command() {
     let runner = runner_with_s5r(minimal_router()).await;
     let runtime =
-        CommandRuntimeContext::new("e2e-session", "/tmp", ModelSelection::simple("test"), None);
+        RuntimeHookCallContext::new("e2e-session", "/tmp", ModelSelection::simple("test"), None);
     let resolved = runner
-        .resolve_commands_for_typed(runtime.working_dir())
+        .resolve_commands_for_typed(&runtime.working_dir().to_string_lossy())
         .await
         .into_iter()
         .find(|resolved| resolved.command.name == "demo")

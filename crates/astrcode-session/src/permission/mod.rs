@@ -16,7 +16,7 @@ mod yolo_mode_approve;
 
 use std::{path::Path, sync::Arc};
 
-use astrcode_core::config::EffectiveConfig;
+use astrcode_core::config::{EffectiveConfig, defaults::extension_data_dir};
 pub(crate) use runtime::{
     PermissionChain, PermissionContext, PermissionDecision, PermissionPolicy,
 };
@@ -69,10 +69,7 @@ pub(crate) const APPROVAL_TIMEOUT_SECS: u64 = 300;
 
 /// 从 session 存储目录解析审批历史文件路径。
 pub(crate) fn approval_history_path(session_store_dir: &Path) -> std::path::PathBuf {
-    session_store_dir
-        .join("extension_data")
-        .join("astrcode-session")
-        .join("approval-history.json")
+    extension_data_dir(session_store_dir, "astrcode-session").join("approval-history.json")
 }
 
 #[cfg(test)]

@@ -94,11 +94,11 @@ impl CallContinuation {
     pub fn handler_id_for_extension(&self, extension_id: &str) -> (String, Value) {
         match self {
             Self::Hook { on, input } => (
-                format!("{extension_id}:hook:{on}"),
+                crate::s5r::messages::handler_id_for(extension_id, "hook", on),
                 serde_json::json!({ "on": on, "input": input }),
             ),
             Self::Tool { name, input } => (
-                format!("{extension_id}:tool:{name}"),
+                crate::s5r::messages::handler_id_for(extension_id, "tool", name),
                 serde_json::json!({ "on": "tool", "name": name, "input": input }),
             ),
         }

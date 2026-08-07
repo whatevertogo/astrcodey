@@ -4,21 +4,26 @@ use std::{
     sync::Arc,
 };
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use super::{
     ExtensionCallContext, ExtensionError, ExtensionEventEmitter, ExtensionPaths, ExtensionTasks,
 };
-use crate::host::ExtensionHost;
+use crate::host::{ExtensionHost, schema::derived_wire_schema};
 
 // ─── Extension HTTP ─────────────────────────────────────────────────────
 
 pub const DEFAULT_EXTENSION_HTTP_BODY_BYTES: usize = 64 * 1024;
 pub const MAX_EXTENSION_HTTP_BODY_BYTES: usize = 1024 * 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize, JsonSchema,
+)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum ExtensionHttpMethod {
     Get,
@@ -98,7 +103,7 @@ impl ExtensionHttpRoute {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionHttpRequest {
     pub method: ExtensionHttpMethod,
@@ -133,18 +138,7 @@ impl ExtensionHttpRequest {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-                "path": { "type": "string" },
-                "pathParams": { "type": "object", "additionalProperties": { "type": "string" } },
-                "query": { "type": ["string", "null"] },
-                "body": {}
-            },
-            "required": ["method", "path"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -152,7 +146,7 @@ impl ExtensionHttpRequest {
 ///
 /// Route parameters are host-owned facts derived after route matching, so callers cannot supply
 /// them on this boundary.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionHttpDispatchRequest {
     pub method: ExtensionHttpMethod,
@@ -184,17 +178,7 @@ impl ExtensionHttpDispatchRequest {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-                "path": { "type": "string" },
-                "query": { "type": ["string", "null"] },
-                "body": {}
-            },
-            "required": ["method", "path"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
@@ -210,13 +194,14 @@ impl From<ExtensionHttpDispatchRequest> for ExtensionHttpRequest {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionHttpResponse {
     #[serde(
         serialize_with = "serialize_extension_http_status",
         deserialize_with = "deserialize_extension_http_status"
     )]
+    #[schemars(range(min = 100, max = 599))]
     pub status: u16,
     pub body: serde_json::Value,
 }
@@ -236,15 +221,7 @@ impl ExtensionHttpResponse {
     }
 
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "status": { "type": "integer", "minimum": 100, "maximum": 599 },
-                "body": {}
-            },
-            "required": ["status", "body"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 

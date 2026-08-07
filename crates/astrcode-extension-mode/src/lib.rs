@@ -141,13 +141,12 @@ impl ToolHandler for ModeToolHandler {
         let mode_root = store::mode_dir_from_base(extension_data_dir);
         let plan_dir = store::plan_dir_from_base(extension_data_dir);
         let tool_name = ctx.tool_name();
-        let arguments = ctx.raw_arguments().clone();
 
         let result = match tool_name {
             SWITCH_MODE_TOOL_NAME => {
-                handle_switch_mode(arguments, &mode_root, &plan_dir, &self.catalog)
+                handle_switch_mode(ctx.arguments()?, &mode_root, &plan_dir, &self.catalog)
             },
-            UPSERT_PLAN_TOOL_NAME => handle_upsert_plan(arguments, &mode_root, &plan_dir),
+            UPSERT_PLAN_TOOL_NAME => handle_upsert_plan(ctx.arguments()?, &mode_root, &plan_dir),
             _ => return Err(ExtensionError::NotFound(tool_name.into())),
         };
 

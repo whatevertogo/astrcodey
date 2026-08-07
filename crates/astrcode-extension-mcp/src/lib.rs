@@ -397,14 +397,15 @@ struct McpToolHandler {
 impl ToolHandler for McpToolHandler {
     async fn execute(&self, ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
         let tool_name = ctx.tool_name();
-        let arguments = ctx.raw_arguments().clone();
         let working_dir = ctx
             .call()
             .require_working_dir()?
             .to_string_lossy()
             .into_owned();
         if tool_name == TOOL_SEARCH_TOOL_NAME {
-            return Ok(self.handle_tool_search(arguments, &working_dir).await);
+            return Ok(self
+                .handle_tool_search(ctx.arguments()?, &working_dir)
+                .await);
         }
 
         let entry = self.shared.get_entry(&working_dir);
@@ -416,7 +417,7 @@ impl ToolHandler for McpToolHandler {
         match self
             .shared
             .pool
-            .call_tool(server, original_tool, arguments)
+            .call_tool(server, original_tool, ctx.raw_arguments().clone())
             .await
         {
             Ok(result) => Ok(call_result(&server.name, original_tool, result).into()),
@@ -433,24 +434,18 @@ impl ToolHandler for McpToolHandler {
 }
 
 impl McpToolHandler {
-    async fn handle_tool_search(&self, arguments: Value, working_dir: &str) -> ToolExecutionResult {
-        let args = match serde_json::from_value::<ToolSearchArgs>(arguments) {
-            Ok(args) if !args.query.trim().is_empty() => args,
-            Ok(_) => {
-                return error_result(
-                    "invalid tool_search_tool input: query must not be empty".into(),
-                    BTreeMap::new(),
-                )
-                .into();
-            },
-            Err(error) => {
-                return error_result(
-                    format!("invalid tool_search_tool input: {error}"),
-                    BTreeMap::new(),
-                )
-                .into();
-            },
-        };
+    async fn handle_tool_search(
+        &self,
+        args: ToolSearchArgs,
+        working_dir: &str,
+    ) -> ToolExecutionResult {
+        if args.query.trim().is_empty() {
+            return error_result(
+                "invalid tool_search_tool input: query must not be empty".into(),
+                BTreeMap::new(),
+            )
+            .into();
+        }
 
         let (candidates, diagnostics) = if let Some(entry) = self.shared.get_entry(working_dir) {
             (entry.candidates.clone(), entry.diagnostics.clone())

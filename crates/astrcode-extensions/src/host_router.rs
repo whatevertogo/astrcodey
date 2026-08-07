@@ -11,7 +11,7 @@ mod session;
 mod session_inspect;
 mod workspace;
 
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::{DurableEventPayload, EventPayload, EventSender, ExtensionEventData, LiveEventPayload},
@@ -25,13 +25,15 @@ use astrcode_extension_sdk::{
     },
     host::{
         HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CANCELLED,
-        HOST_ERROR_CODE_CONTEXT_UNAVAILABLE, HOST_ERROR_CODE_INVALID_INPUT,
-        internal::OutboundNetworkService,
+        HOST_ERROR_CODE_CONTEXT_UNAVAILABLE, HOST_ERROR_CODE_HOST_RUNTIME_FAILED,
+        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_IO_ERROR,
+        HOST_ERROR_CODE_SERIALIZATION_FAILED, internal::OutboundNetworkService,
     },
     s5r::{CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage},
 };
 use astrcode_storage::{EventReader, SessionReader};
 use serde_json::Value;
+use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 
 use self::{
@@ -47,12 +49,68 @@ use self::{
 
 pub(super) const HOST_INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub(super) fn decode_host_input<T>(input: Value) -> Result<T, ErrorPayload>
+pub(super) fn parse_wire_request<'de, T>(
+    input: &'de Value,
+    capability: &str,
+) -> Result<T, ErrorPayload>
 where
-    T: serde::de::DeserializeOwned,
+    T: serde::Deserialize<'de>,
 {
-    serde_json::from_value(input)
-        .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, error.to_string()))
+    T::deserialize(input).map_err(|error| {
+        ErrorPayload::new(
+            HOST_ERROR_CODE_INVALID_INPUT,
+            format!("invalid {capability} request: {error}"),
+        )
+    })
+}
+
+pub(super) fn serialize_wire_response<T>(output: T, capability: &str) -> Result<Value, ErrorPayload>
+where
+    T: serde::Serialize,
+{
+    serde_json::to_value(output).map_err(|error| {
+        ErrorPayload::new(
+            HOST_ERROR_CODE_SERIALIZATION_FAILED,
+            format!("failed to serialize {capability} response: {error}"),
+        )
+    })
+}
+
+pub(super) fn io_error(error: impl std::fmt::Display) -> ErrorPayload {
+    ErrorPayload::new(HOST_ERROR_CODE_IO_ERROR, error.to_string())
+}
+
+pub(super) fn backend_unavailable(message: impl Into<String>) -> ErrorPayload {
+    ErrorPayload::new(HOST_ERROR_CODE_BACKEND_UNAVAILABLE, message)
+}
+
+/// deadline + 取消的 biased select 包装：取消优先于超时。并发语义（`biased` 顺序、
+/// 超时/取消的先后）必须所有调用点一致，故收敛为共享实现。
+pub(super) async fn run_until_deadline<F, T, E>(
+    operation: F,
+    deadline: Instant,
+    cancel_token: Option<&CancellationToken>,
+    timeout_err: impl FnOnce() -> E,
+    cancel_err: impl FnOnce() -> E,
+) -> Result<T, E>
+where
+    F: Future<Output = Result<T, E>>,
+{
+    let timed = async {
+        timeout_at(deadline, operation)
+            .await
+            .map_err(|_| timeout_err())?
+    };
+    match cancel_token {
+        Some(token) => {
+            tokio::select! {
+                biased;
+                () = token.cancelled() => Err(cancel_err()),
+                result = timed => result,
+            }
+        },
+        None => timed.await,
+    }
 }
 
 pub(super) async fn run_blocking_io<T>(
@@ -65,7 +123,7 @@ where
         .await
         .map_err(|error| {
             ErrorPayload::new(
-                "host_runtime_failed",
+                HOST_ERROR_CODE_HOST_RUNTIME_FAILED,
                 format!("blocking host I/O task failed: {error}"),
             )
         })?
@@ -93,7 +151,7 @@ where
                 ErrorPayload::new(HOST_ERROR_CODE_CANCELLED, error.to_string())
             },
             ExtensionTaskError::Panicked { .. } | ExtensionTaskError::RuntimeStopped { .. } => {
-                ErrorPayload::new("host_runtime_failed", error.to_string())
+                ErrorPayload::new(HOST_ERROR_CODE_HOST_RUNTIME_FAILED, error.to_string())
             },
         })?
 }
@@ -211,27 +269,17 @@ impl HostRouter {
         self.network.service()
     }
 
-    pub fn authorize_astrcode(
-        cap: &str,
-        declared: &[ExtensionCapability],
-    ) -> Result<(), ErrorPayload> {
-        capability::authorize(capability::lookup(cap)?, declared)
-    }
-
     /// Executes one guest-to-host operation on the caller's async task.
     pub async fn invoke(
         &self,
         cap: &str,
-        input: &str,
+        input: Value,
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
         ensure_invoke_active(ctx)?;
         let spec = capability::lookup(cap)?;
         capability::authorize(spec, &ctx.declared_capabilities)?;
         ensure_required_context(spec.operation, ctx)?;
-
-        let input: Value = serde_json::from_str(input)
-            .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, error.to_string()))?;
 
         // Keep the router future bounded: each capability group has a distinct async state machine.
         let invoke = async {
@@ -307,7 +355,7 @@ impl HostRouter {
     pub async fn invoke_stream(
         &self,
         cap: &str,
-        input: &str,
+        input: Value,
         request_id: &str,
         ctx: &InvokeContext,
     ) -> Result<Vec<WireMessage>, ErrorPayload> {
@@ -321,8 +369,6 @@ impl HostRouter {
                 format!("stream not supported for {cap}"),
             ));
         }
-        let input: Value = serde_json::from_str(input)
-            .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_INVALID_INPUT, error.to_string()))?;
         let request_id = request_id.to_string();
 
         match spec.capability {
@@ -517,7 +563,9 @@ mod tests {
         types::MessageId,
     };
     use astrcode_extension_sdk::host::{
-        HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_REQUEST_BODY_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS,
+        HOST_ERROR_CODE_PERMISSION_DENIED, HOST_ERROR_CODE_STATE_TOO_LARGE,
+        HOST_ERROR_CODE_UNKNOWN_CAPABILITY, HOST_NETWORK_MAX_BYTES,
+        HOST_NETWORK_MAX_REQUEST_BODY_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS,
         HOST_PROCESS_MAX_TIMEOUT_MS, HOST_SESSION_STATE_KEY_MAX_LENGTH,
         HOST_SESSION_STATE_VALUE_MAX_BYTES, HostLlmChatOutput, HostLlmChatRequest,
         HostLlmCollectedStreamOutput, HostNetworkRedirectPolicy, HostNetworkRequest,
@@ -754,7 +802,7 @@ mod tests {
         };
 
         let list = router
-            .invoke("astrcode.session.inspect.list", "{}", &ctx)
+            .invoke("astrcode.session.inspect.list", json!({}), &ctx)
             .await
             .expect("list sessions");
         assert_eq!(list["sessions"][0]["sessionId"], "inspect-session");
@@ -762,7 +810,7 @@ mod tests {
         let model = router
             .invoke(
                 "astrcode.session.inspect.read_model",
-                &json!({ "session_id": "inspect-session" }).to_string(),
+                json!({ "session_id": "inspect-session" }),
                 &ctx,
             )
             .await
@@ -773,7 +821,7 @@ mod tests {
         let snapshot = router
             .invoke(
                 "astrcode.session.inspect.snapshot",
-                &json!({ "session_id": "inspect-session" }).to_string(),
+                json!({ "session_id": "inspect-session" }),
                 &ctx,
             )
             .await
@@ -783,7 +831,7 @@ mod tests {
         let inspect_messages = router
             .invoke(
                 "astrcode.session.inspect.provider_messages",
-                &json!({ "session_id": "inspect-session" }).to_string(),
+                json!({ "session_id": "inspect-session" }),
                 &ctx,
             )
             .await
@@ -821,16 +869,19 @@ mod tests {
             ),
         ] {
             let error = router
-                .invoke(capability, &input.to_string(), &ctx)
+                .invoke(capability, input.clone(), &ctx)
                 .await
                 .expect_err("inspect input must match its published schema");
-            assert_eq!(error.code, "invalid_input", "capability: {capability}");
+            assert_eq!(
+                error.code, HOST_ERROR_CODE_INVALID_INPUT,
+                "capability: {capability}"
+            );
         }
 
         let history = router
             .invoke(
                 "astrcode.session.history.snapshot",
-                &json!({ "target_session_id": "inspect-session" }).to_string(),
+                json!({ "target_session_id": "inspect-session" }),
                 &ctx,
             )
             .await
@@ -839,28 +890,32 @@ mod tests {
         assert_eq!(history["readModel"]["modelId"], "test-model");
 
         let summaries = router
-            .invoke("astrcode.session.history.list", "{}", &ctx)
+            .invoke("astrcode.session.history.list", json!({}), &ctx)
             .await
             .expect("list session history summaries");
         assert_eq!(summaries["sessions"][0]["session_id"], "inspect-session");
         assert_eq!(summaries["sessions"][0]["latest_cursor"], "4");
 
-        let target = json!({ "target_session_id": "inspect-session" }).to_string();
+        let target = json!({ "target_session_id": "inspect-session" });
         let transcript = router
-            .invoke("astrcode.session.history.transcript", &target, &ctx)
+            .invoke("astrcode.session.history.transcript", target.clone(), &ctx)
             .await
             .expect("read extension-visible transcript");
         assert_eq!(transcript["messages"][0]["message"]["role"], "user");
         assert_eq!(transcript["messages"][1]["message"]["role"], "assistant");
 
         let provider_messages = router
-            .invoke("astrcode.session.history.provider_messages", &target, &ctx)
+            .invoke(
+                "astrcode.session.history.provider_messages",
+                target.clone(),
+                &ctx,
+            )
             .await
             .expect("read provider-visible history");
         assert_eq!(provider_messages["messages"].as_array().unwrap().len(), 2);
 
         let usage = router
-            .invoke("astrcode.session.history.token_usage", &target, &ctx)
+            .invoke("astrcode.session.history.token_usage", target.clone(), &ctx)
             .await
             .expect("read token usage");
         assert_eq!(usage["usage"]["total_tokens"], 130);
@@ -873,7 +928,7 @@ mod tests {
         let missing_history = missing_router
             .invoke(
                 "astrcode.session.history.snapshot",
-                &json!({ "target_session_id": "missing-session" }).to_string(),
+                json!({ "target_session_id": "missing-session" }),
                 &InvokeContext {
                     extension_id: "memory".into(),
                     session_id: Some("missing-session".into()),
@@ -888,7 +943,7 @@ mod tests {
         let missing_attribution = router
             .invoke(
                 "astrcode.session.history.transcript",
-                &target,
+                target.clone(),
                 &InvokeContext {
                     session_id: Some("inspect-session".into()),
                     declared_capabilities: vec![ExtensionCapability::SessionHistory],
@@ -1034,10 +1089,10 @@ mod tests {
             );
 
             let error = router
-                .invoke(operation, &input.to_string(), &ctx)
+                .invoke(operation, input.clone(), &ctx)
                 .await
                 .expect_err("unknown request fields must be rejected");
-            assert_eq!(error.code, "invalid_input", "{operation}");
+            assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT, "{operation}");
             assert!(
                 error.message.contains("unknown field"),
                 "{operation}: {}",
@@ -1149,12 +1204,15 @@ mod tests {
             let error = router
                 .invoke(
                     "astrcode.process.spawn",
-                    &json!({ "command": "rustc", "timeout_ms": timeout_ms }).to_string(),
+                    json!({ "command": "rustc", "timeout_ms": timeout_ms }),
                     &ctx,
                 )
                 .await
                 .expect_err("out-of-range process timeouts must be rejected");
-            assert_eq!(error.code, "invalid_input", "timeout_ms={timeout_ms}");
+            assert_eq!(
+                error.code, HOST_ERROR_CODE_INVALID_INPUT,
+                "timeout_ms={timeout_ms}"
+            );
         }
 
         assert!(!workspace.path().join("new.txt").exists());
@@ -1177,12 +1235,12 @@ mod tests {
         let err = router
             .invoke(
                 "astrcode.network.client",
-                &json!({ "url": "file:///etc/passwd" }).to_string(),
+                json!({ "url": "file:///etc/passwd" }),
                 &ctx,
             )
             .await
             .unwrap_err();
-        assert_eq!(err.code, "permission_denied");
+        assert_eq!(err.code, HOST_ERROR_CODE_PERMISSION_DENIED);
     }
 
     #[tokio::test]
@@ -1199,14 +1257,14 @@ mod tests {
         request.max_bytes = HOST_NETWORK_MAX_BYTES;
         request.timeout_ms = 55_000;
         request.redirect_policy = HostNetworkRedirectPolicy::Manual;
-        let request = serde_json::to_string(&request).expect("serialize network request");
+        let request = serde_json::to_value(&request).expect("serialize network request");
         let allowed = InvokeContext {
             declared_capabilities: vec![ExtensionCapability::NetworkClient],
             ..Default::default()
         };
 
         let response = router
-            .invoke("astrcode.network.client", &request, &allowed)
+            .invoke("astrcode.network.client", request.clone(), &allowed)
             .await
             .expect("declared network capability");
         let response = serde_json::from_value::<HostNetworkResponse>(response)
@@ -1245,42 +1303,42 @@ mod tests {
             let error = router
                 .invoke(
                     "astrcode.network.client",
-                    &serde_json::to_string(&invalid).expect("serialize invalid request"),
+                    serde_json::to_value(&invalid).expect("serialize invalid request"),
                     &allowed,
                 )
                 .await
                 .expect_err("network bounds must match the published schema");
-            assert_eq!(error.code, "invalid_input");
+            assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT);
         }
 
         let oversized_body = "AAAA".repeat(HOST_NETWORK_MAX_REQUEST_BODY_BYTES / 3 + 1);
         let error = router
             .invoke(
                 "astrcode.network.client",
-                &json!({ "url": "https://example.com", "body": oversized_body }).to_string(),
+                json!({ "url": "https://example.com", "body": oversized_body }),
                 &allowed,
             )
             .await
             .expect_err("oversized outbound body must be rejected before the network service");
-        assert_eq!(error.code, "invalid_input");
+        assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT);
         assert_eq!(network.calls.load(Ordering::SeqCst), 1);
 
         let denied = router
             .invoke(
                 "astrcode.network.client",
-                &request,
+                request.clone(),
                 &InvokeContext::default(),
             )
             .await
             .expect_err("missing network grant");
-        assert_eq!(denied.code, "permission_denied");
+        assert_eq!(denied.code, HOST_ERROR_CODE_PERMISSION_DENIED);
         assert_eq!(network.calls.load(Ordering::SeqCst), 1);
 
         let unknown = router
-            .invoke("astrcode.network.unknown", "{}", &allowed)
+            .invoke("astrcode.network.unknown", json!({}), &allowed)
             .await
             .expect_err("unknown capability");
-        assert_eq!(unknown.code, "unknown_capability");
+        assert_eq!(unknown.code, HOST_ERROR_CODE_UNKNOWN_CAPABILITY);
     }
 
     #[tokio::test]
@@ -1299,7 +1357,7 @@ mod tests {
         router
             .invoke(
                 "astrcode.session.state.write",
-                &json!({ "key": "goal", "content": "active" }).to_string(),
+                json!({ "key": "goal", "content": "active" }),
                 &ctx,
             )
             .await
@@ -1307,7 +1365,7 @@ mod tests {
         let read = router
             .invoke(
                 "astrcode.session.state.read",
-                &json!({ "key": "goal" }).to_string(),
+                json!({ "key": "goal" }),
                 &ctx,
             )
             .await
@@ -1318,7 +1376,7 @@ mod tests {
         let missing = router
             .invoke(
                 "astrcode.session.state.read",
-                &json!({ "key": "missing" }).to_string(),
+                json!({ "key": "missing" }),
                 &ctx,
             )
             .await
@@ -1328,7 +1386,7 @@ mod tests {
         router
             .invoke(
                 "astrcode.session.state.write",
-                &json!({ "key": "empty", "content": "" }).to_string(),
+                json!({ "key": "empty", "content": "" }),
                 &ctx,
             )
             .await
@@ -1336,7 +1394,7 @@ mod tests {
         let empty = router
             .invoke(
                 "astrcode.session.state.read",
-                &json!({ "key": "empty" }).to_string(),
+                json!({ "key": "empty" }),
                 &ctx,
             )
             .await
@@ -1377,26 +1435,22 @@ mod tests {
             ),
         ] {
             let error = router
-                .invoke(capability, &input.to_string(), &ctx)
+                .invoke(capability, input.clone(), &ctx)
                 .await
                 .expect_err("invalid state contract must be rejected");
-            assert_eq!(error.code, "invalid_input", "input: {input}");
+            assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT, "input: {input}");
         }
 
         router
             .invoke(
                 "astrcode.session.state.write",
-                &json!({ "key": "a_b", "content": "distinct" }).to_string(),
+                json!({ "key": "a_b", "content": "distinct" }),
                 &ctx,
             )
             .await
             .expect("valid normalized-looking key");
         let distinct = router
-            .invoke(
-                "astrcode.session.state.read",
-                &json!({ "key": "a_b" }).to_string(),
-                &ctx,
-            )
+            .invoke("astrcode.session.state.read", json!({ "key": "a_b" }), &ctx)
             .await
             .expect("read valid key");
         assert_eq!(distinct["content"], "distinct");
@@ -1404,7 +1458,7 @@ mod tests {
         let unchanged = router
             .invoke(
                 "astrcode.session.state.read",
-                &json!({ "key": "goal" }).to_string(),
+                json!({ "key": "goal" }),
                 &ctx,
             )
             .await
@@ -1422,12 +1476,12 @@ mod tests {
         let error = router
             .invoke(
                 "astrcode.session.state.read",
-                &json!({ "key": "oversized-existing" }).to_string(),
+                json!({ "key": "oversized-existing" }),
                 &ctx,
             )
             .await
             .expect_err("persisted state must be revalidated at the read boundary");
-        assert_eq!(error.code, "state_too_large");
+        assert_eq!(error.code, HOST_ERROR_CODE_STATE_TOO_LARGE);
     }
 
     #[tokio::test]
@@ -1442,14 +1496,10 @@ mod tests {
             ..Default::default()
         };
         let err = router
-            .invoke(
-                "astrcode.workspace.read",
-                &json!({ "path": "x" }).to_string(),
-                &ctx,
-            )
+            .invoke("astrcode.workspace.read", json!({ "path": "x" }), &ctx)
             .await
             .unwrap_err();
-        assert_eq!(err.code, "cancelled");
+        assert_eq!(err.code, HOST_ERROR_CODE_CANCELLED);
     }
 
     #[cfg(unix)]
@@ -1472,15 +1522,14 @@ mod tests {
             router
                 .invoke(
                     "astrcode.process.spawn",
-                    &json!({
+                    json!({
                         "command": "/bin/sh",
                         "args": [
                             "-c",
                             "while :; do printf x >> heartbeat; sleep 0.05; done & wait"
                         ],
                         "timeout_ms": 10_000
-                    })
-                    .to_string(),
+                    }),
                     &ctx,
                 )
                 .await
@@ -1505,7 +1554,7 @@ mod tests {
             .expect("cancelled host invoke should finish")
             .expect("host invoke task should not panic")
             .expect_err("process invoke should be cancelled");
-        assert_eq!(error.code, "cancelled");
+        assert_eq!(error.code, HOST_ERROR_CODE_CANCELLED);
         heartbeat_started.expect("descendant process should start before cancellation");
 
         tokio::time::sleep(Duration::from_millis(150)).await;
@@ -1536,12 +1585,11 @@ mod tests {
         let err = router
             .invoke(
                 "astrcode.session.control.submit_turn",
-                &json!({
+                json!({
                     "target_session_id": "child",
                     "user_prompt": "hello",
                     "wait_for_result": true
-                })
-                .to_string(),
+                }),
                 &ctx,
             )
             .await
@@ -1564,14 +1612,13 @@ mod tests {
         let output = router
             .invoke(
                 "astrcode.session.control.create",
-                &json!({
+                json!({
                     "name": "worker",
                     "tool_selection": {
                         "mode": "all",
                         "except": ["agent"]
                     }
-                })
-                .to_string(),
+                }),
                 &ctx,
             )
             .await
@@ -1605,7 +1652,7 @@ mod tests {
         router
             .invoke(
                 "astrcode.session.control.create",
-                &json!({ "name": "worker" }).to_string(),
+                json!({ "name": "worker" }),
                 &ctx,
             )
             .await
@@ -1613,12 +1660,11 @@ mod tests {
         router
             .invoke(
                 "astrcode.session.control.submit_turn",
-                &json!({
+                json!({
                     "target_session_id": "child-1",
                     "user_prompt": "run",
                     "wait_for_result": false
-                })
-                .to_string(),
+                }),
                 &ctx,
             )
             .await
@@ -1653,10 +1699,10 @@ mod tests {
             ),
         ] {
             let error = router
-                .invoke(operation, &input.to_string(), &ctx)
+                .invoke(operation, input.clone(), &ctx)
                 .await
                 .expect_err("guest tool_call_id must be rejected");
-            assert_eq!(error.code, "invalid_input", "{operation}");
+            assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT, "{operation}");
         }
     }
 
@@ -1674,14 +1720,13 @@ mod tests {
         let output = router
             .invoke(
                 "astrcode.session.control.create",
-                &json!({
+                json!({
                     "name": "worker",
                     "tool_selection": {
                         "mode": "only",
                         "names": []
                     }
-                })
-                .to_string(),
+                }),
                 &ctx,
             )
             .await
@@ -1709,14 +1754,13 @@ mod tests {
         let output = router
             .invoke(
                 "astrcode.session.control.configure_tools",
-                &json!({
+                json!({
                     "session_id": "child",
                     "selection": {
                         "mode": "only",
                         "names": ["write", " read ", "write"]
                     }
-                })
-                .to_string(),
+                }),
                 &ctx,
             )
             .await
@@ -1743,20 +1787,19 @@ mod tests {
         let error = router
             .invoke(
                 "astrcode.session.control.configure_tools",
-                &json!({
+                json!({
                     "session_id": "child",
                     "selection": {
                         "mode": "only",
                         "names": ["read"],
                         "except": ["write"]
                     }
-                })
-                .to_string(),
+                }),
                 &ctx,
             )
             .await
             .expect_err("cross-variant fields must be rejected");
-        assert_eq!(error.code, "invalid_input");
+        assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT);
     }
 
     #[tokio::test]
@@ -1772,11 +1815,10 @@ mod tests {
         let output = router
             .invoke(
                 "astrcode.session.control.inject_or_start",
-                &json!({
+                json!({
                     "target_session_id": "child",
                     "content": "continue"
-                })
-                .to_string(),
+                }),
                 &ctx,
             )
             .await
@@ -1796,24 +1838,24 @@ mod tests {
             declared_capabilities: vec![ExtensionCapability::SessionControl],
             ..Default::default()
         };
-        let input = json!({ "target_session_id": "child" }).to_string();
+        let input = json!({ "target_session_id": "child" });
 
         let state = router
-            .invoke("astrcode.session.control.state", &input, &ctx)
+            .invoke("astrcode.session.control.state", input.clone(), &ctx)
             .await
             .expect("read lifecycle state");
         assert_eq!(state["lifecycle"], "recycled");
         assert_eq!(state["message_count"], 2);
 
         let reactivation = router
-            .invoke("astrcode.session.control.reactivate", &input, &ctx)
+            .invoke("astrcode.session.control.reactivate", input.clone(), &ctx)
             .await
             .expect("reactivate session");
         assert_eq!(reactivation["session_id"], "child");
         assert_eq!(reactivation["reactivated"], true);
 
         let cancellation = router
-            .invoke("astrcode.session.control.cancel_turn", &input, &ctx)
+            .invoke("astrcode.session.control.cancel_turn", input.clone(), &ctx)
             .await
             .expect("cancel active turn");
         assert_eq!(cancellation, json!({ "cancelled": true }));
@@ -1825,12 +1867,12 @@ mod tests {
             let error = router
                 .invoke(
                     "astrcode.session.control.cancel_turn",
-                    &invalid.to_string(),
+                    invalid.clone(),
                     &ctx,
                 )
                 .await
                 .expect_err("cancel_turn must enforce its strict request schema");
-            assert_eq!(error.code, "invalid_input");
+            assert_eq!(error.code, HOST_ERROR_CODE_INVALID_INPUT);
         }
         assert_eq!(
             ops.lifecycle_calls
@@ -1885,18 +1927,14 @@ mod tests {
         let spoof = router
             .invoke(
                 "astrcode.session.root.create",
-                &json!({ "source_extension": "channel-b" }).to_string(),
+                json!({ "source_extension": "channel-b" }),
                 &root_ctx,
             )
             .await
             .expect_err("source attribution is host-owned");
-        assert_eq!(spoof.code, "invalid_input");
+        assert_eq!(spoof.code, HOST_ERROR_CODE_INVALID_INPUT);
         let created = router
-            .invoke(
-                "astrcode.session.root.create",
-                &json!({}).to_string(),
-                &root_ctx,
-            )
+            .invoke("astrcode.session.root.create", json!({}), &root_ctx)
             .await
             .expect("create attributed root");
         assert_eq!(created["session_id"], "root");
@@ -1912,7 +1950,7 @@ mod tests {
         let state = router
             .invoke(
                 "astrcode.session.root.state",
-                &json!({ "target_session_id": "owned-root" }).to_string(),
+                json!({ "target_session_id": "owned-root" }),
                 &root_ctx,
             )
             .await
@@ -1922,23 +1960,22 @@ mod tests {
             let error = router
                 .invoke(
                     "astrcode.session.root.state",
-                    &json!({ "target_session_id": target }).to_string(),
+                    json!({ "target_session_id": target }),
                     &root_ctx,
                 )
                 .await
                 .expect_err("foreign or child session must be rejected");
-            assert_eq!(error.code, "permission_denied");
+            assert_eq!(error.code, HOST_ERROR_CODE_PERMISSION_DENIED);
         }
 
         router
             .invoke(
                 "astrcode.session.root.submit_turn",
-                &json!({
+                json!({
                     "target_session_id": "owned-root",
                     "user_prompt": "hello",
                     "wait_for_result": false
-                })
-                .to_string(),
+                }),
                 &root_ctx,
             )
             .await
@@ -1952,23 +1989,22 @@ mod tests {
         let denied = router
             .invoke(
                 "astrcode.session.root.submit_turn",
-                &json!({
+                json!({
                     "target_session_id": "foreign-root",
                     "user_prompt": "hello",
                     "wait_for_result": false
-                })
-                .to_string(),
+                }),
                 &root_ctx,
             )
             .await
             .expect_err("foreign root submit must be rejected");
-        assert_eq!(denied.code, "permission_denied");
+        assert_eq!(denied.code, HOST_ERROR_CODE_PERMISSION_DENIED);
         assert_eq!(ops.submits.lock().expect("submits lock").len(), 1);
 
         let missing_grant = router
             .invoke(
                 "astrcode.session.root.create",
-                &json!({}).to_string(),
+                json!({}),
                 &InvokeContext {
                     extension_id: "channel-a".into(),
                     session_ops: Some(ops),
@@ -1977,12 +2013,12 @@ mod tests {
             )
             .await
             .expect_err("root creation needs input_delivery");
-        assert_eq!(missing_grant.code, "permission_denied");
+        assert_eq!(missing_grant.code, HOST_ERROR_CODE_PERMISSION_DENIED);
 
         let missing_extension_identity = router
             .invoke(
                 "astrcode.session.root.create",
-                &json!({}).to_string(),
+                json!({}),
                 &InvokeContext {
                     working_dir: Some("/workspace".into()),
                     session_ops: root_ctx.session_ops.clone(),
@@ -1996,7 +2032,7 @@ mod tests {
         let missing_root_backend = router
             .invoke(
                 "astrcode.session.root.create",
-                &json!({}).to_string(),
+                json!({}),
                 &InvokeContext {
                     extension_id: "channel-a".into(),
                     working_dir: Some("/workspace".into()),
@@ -2006,7 +2042,10 @@ mod tests {
             )
             .await
             .expect_err("root creation needs session operations");
-        assert_eq!(missing_root_backend.code, "backend_unavailable");
+        assert_eq!(
+            missing_root_backend.code,
+            HOST_ERROR_CODE_BACKEND_UNAVAILABLE
+        );
 
         let history_ctx = InvokeContext {
             extension_id: "history-test".into(),
@@ -2017,7 +2056,7 @@ mod tests {
         let first = router
             .invoke(
                 "astrcode.session.read_events",
-                &json!({ "session_id": "owned-root", "limit": 2 }).to_string(),
+                json!({ "session_id": "owned-root", "limit": 2 }),
                 &history_ctx,
             )
             .await
@@ -2030,7 +2069,7 @@ mod tests {
         let next = router
             .invoke(
                 "astrcode.session.read_events",
-                &json!({ "session_id": "owned-root", "cursor": "2", "limit": 2 }).to_string(),
+                json!({ "session_id": "owned-root", "cursor": "2", "limit": 2 }),
                 &history_ctx,
             )
             .await
@@ -2043,7 +2082,7 @@ mod tests {
         let empty = router
             .invoke(
                 "astrcode.session.read_events",
-                &json!({ "session_id": "owned-root", "cursor": "3", "limit": 2 }).to_string(),
+                json!({ "session_id": "owned-root", "cursor": "3", "limit": 2 }),
                 &history_ctx,
             )
             .await
@@ -2055,25 +2094,25 @@ mod tests {
         let invalid_limit = router
             .invoke(
                 "astrcode.session.read_events",
-                &json!({ "session_id": "owned-root", "limit": 0 }).to_string(),
+                json!({ "session_id": "owned-root", "limit": 0 }),
                 &history_ctx,
             )
             .await
             .expect_err("zero event limit must be rejected");
-        assert_eq!(invalid_limit.code, "invalid_input");
+        assert_eq!(invalid_limit.code, HOST_ERROR_CODE_INVALID_INPUT);
         let invalid_cursor = router
             .invoke(
                 "astrcode.session.read_events",
-                &json!({ "session_id": "owned-root", "cursor": "not-a-sequence" }).to_string(),
+                json!({ "session_id": "owned-root", "cursor": "not-a-sequence" }),
                 &history_ctx,
             )
             .await
             .expect_err("non-numeric event cursor must be rejected");
-        assert_eq!(invalid_cursor.code, "invalid_input");
+        assert_eq!(invalid_cursor.code, HOST_ERROR_CODE_INVALID_INPUT);
         let missing_context = router
             .invoke(
                 "astrcode.session.read_events",
-                &json!({ "session_id": "owned-root" }).to_string(),
+                json!({ "session_id": "owned-root" }),
                 &InvokeContext {
                     declared_capabilities: vec![ExtensionCapability::SessionHistory],
                     ..Default::default()
@@ -2085,12 +2124,12 @@ mod tests {
         let missing_backend = HostRouter::from_backends(HostBackends::default())
             .invoke(
                 "astrcode.session.read_events",
-                &json!({ "session_id": "owned-root" }).to_string(),
+                json!({ "session_id": "owned-root" }),
                 &history_ctx,
             )
             .await
             .expect_err("event history needs event reader");
-        assert_eq!(missing_backend.code, "backend_unavailable");
+        assert_eq!(missing_backend.code, HOST_ERROR_CODE_BACKEND_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -2106,13 +2145,13 @@ mod tests {
         let err = router
             .invoke_stream(
                 "astrcode.llm.small_chat",
-                &json!({ "messages": [] }).to_string(),
+                json!({ "messages": [] }),
                 "req-1",
                 &ctx,
             )
             .await
             .unwrap_err();
-        assert_eq!(err.code, "cancelled");
+        assert_eq!(err.code, HOST_ERROR_CODE_CANCELLED);
     }
 
     #[tokio::test]
@@ -2151,7 +2190,7 @@ mod tests {
             },
             LlmMessage::tool("lookup", "call-1", "done", false),
         ];
-        let input = serde_json::to_string(&HostLlmChatRequest::new(messages.clone()))
+        let input = serde_json::to_value(HostLlmChatRequest::new(messages.clone()))
             .expect("serialize typed model request");
         let ctx = InvokeContext {
             declared_capabilities: vec![ExtensionCapability::MainModel],
@@ -2159,7 +2198,7 @@ mod tests {
         };
 
         let output = router
-            .invoke("astrcode.llm.main_chat", &input, &ctx)
+            .invoke("astrcode.llm.main_chat", input.clone(), &ctx)
             .await
             .expect("invoke typed main model");
         let output = serde_json::from_value::<HostLlmChatOutput>(output)
@@ -2168,7 +2207,7 @@ mod tests {
         assert_eq!(output.model, "main_llm");
 
         let events = router
-            .invoke_stream("astrcode.llm.main_chat", &input, "stream-1", &ctx)
+            .invoke_stream("astrcode.llm.main_chat", input.clone(), "stream-1", &ctx)
             .await
             .expect("collect typed model stream");
         assert_eq!(events.len(), 4);
@@ -2192,12 +2231,12 @@ mod tests {
         let legacy = router
             .invoke(
                 "astrcode.llm.main_chat",
-                &json!({ "messages": [{ "role": "user", "content": "legacy" }] }).to_string(),
+                json!({ "messages": [{ "role": "user", "content": "legacy" }] }),
                 &ctx,
             )
             .await
             .expect_err("legacy string-only messages must not be silently coerced");
-        assert_eq!(legacy.code, "invalid_input");
+        assert_eq!(legacy.code, HOST_ERROR_CODE_INVALID_INPUT);
     }
 
     #[tokio::test]
@@ -2214,13 +2253,13 @@ mod tests {
             declared_capabilities: vec![ExtensionCapability::SessionControl],
             ..Default::default()
         };
-        let session_input = json!({ "target_session_id": "child" }).to_string();
+        let session_input = json!({ "target_session_id": "child" });
 
         let timed = tokio::time::timeout(
             Duration::from_millis(20),
             session_router.invoke(
                 "astrcode.session.control.state",
-                &session_input,
+                session_input,
                 &session_ctx,
             ),
         )
@@ -2251,9 +2290,9 @@ mod tests {
             ..Default::default()
         };
         let llm_input =
-            serde_json::to_string(&HostLlmChatRequest::new(vec![LlmMessage::user("hello")]))
+            serde_json::to_value(HostLlmChatRequest::new(vec![LlmMessage::user("hello")]))
                 .expect("serialize LLM request");
-        let invoke = llm_router.invoke("astrcode.llm.main_chat", &llm_input, &llm_ctx);
+        let invoke = llm_router.invoke("astrcode.llm.main_chat", llm_input, &llm_ctx);
         tokio::pin!(invoke);
         tokio::select! {
             () = llm_started.notified() => {},
@@ -2264,7 +2303,7 @@ mod tests {
         let error = invoke
             .await
             .expect_err("cancellation should end the invoke");
-        assert_eq!(error.code, "cancelled");
+        assert_eq!(error.code, HOST_ERROR_CODE_CANCELLED);
         assert!(
             llm_dropped.load(Ordering::SeqCst),
             "cancelling the caller must drop LlmProvider::generate"

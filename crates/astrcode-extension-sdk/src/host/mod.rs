@@ -3,6 +3,7 @@ mod contracts;
 mod domain_client;
 mod error;
 mod operation;
+pub(crate) mod schema;
 
 use std::sync::Arc;
 
@@ -10,6 +11,7 @@ pub use client::{
     ExtensionHttpClient, ModelClient, NetworkClient, ProcessClient, SessionControlClient,
     SessionHistoryClient, SessionInspectClient, SessionStateClient, WorkspaceClient,
 };
+pub(crate) use contracts::deserialize_non_empty_string;
 pub use contracts::*;
 pub(crate) use domain_client::{
     EventClient as TypedEventClient, ExtensionHttpClient as TypedExtensionHttpClient,

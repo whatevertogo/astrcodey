@@ -2,15 +2,28 @@
 
 use std::collections::BTreeMap;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
+#[cfg(test)]
+use serde_json::json;
 
-use crate::session::{SessionLifecycleStateDto, SessionPhaseDto, SessionToolSelectionDto};
+use crate::{
+    host::{
+        deserialize_non_empty_string,
+        schema::{
+            derived_wire_schema, nullable_nonnegative_integer_schema, nullable_string_schema,
+            read_model_tool_selection_schema,
+        },
+    },
+    session::{SessionLifecycleStateDto, SessionPhaseDto, SessionToolSelectionDto},
+};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostSessionInspectRequest {
     #[serde(deserialize_with = "deserialize_non_empty_session_id")]
+    #[schemars(length(min = 1))]
     pub session_id: String,
 }
 
@@ -18,43 +31,34 @@ fn deserialize_non_empty_session_id<'de, D>(deserializer: D) -> Result<String, D
 where
     D: serde::Deserializer<'de>,
 {
-    let session_id = String::deserialize(deserializer)?;
-    if session_id.is_empty() {
-        Err(serde::de::Error::custom("session_id must not be empty"))
-    } else {
-        Ok(session_id)
-    }
+    deserialize_non_empty_string(deserializer, "session_id")
 }
 
 impl HostSessionInspectRequest {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "session_id": { "type": "string", "minLength": 1 }
-            },
-            "required": ["session_id"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectListItem {
     pub session_id: String,
     pub working_dir: String,
     pub model_id: String,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub parent_session_id: Option<String>,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub source_extension: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub phase: SessionPhaseDto,
     pub latest_cursor: String,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub first_user_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectListOutput {
     pub sessions: Vec<SessionInspectListItem>,
@@ -62,18 +66,11 @@ pub struct SessionInspectListOutput {
 
 impl SessionInspectListOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "sessions": { "type": "array", "items": session_inspect_list_item_schema() }
-            },
-            "required": ["sessions"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectSnapshot {
     pub session_id: String,
@@ -81,14 +78,16 @@ pub struct SessionInspectSnapshot {
     pub working_dir: String,
     pub model_id: String,
     pub phase: SessionPhaseDto,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub parent_session_id: Option<String>,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub source_extension: Option<String>,
     pub message_count: usize,
     pub pending_tool_call_ids: Vec<String>,
     pub agent_session_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectSnapshotOutput {
     pub snapshot: SessionInspectSnapshot,
@@ -96,25 +95,22 @@ pub struct SessionInspectSnapshotOutput {
 
 impl SessionInspectSnapshotOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": { "snapshot": session_inspect_snapshot_schema() },
-            "required": ["snapshot"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectMessage {
     pub role: String,
     pub content: Vec<SessionInspectContent>,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub name: Option<String>,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub reasoning_content: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(
     tag = "type",
     rename_all = "snake_case",
@@ -127,38 +123,46 @@ pub enum SessionInspectContent {
     },
     Image {
         base64: String,
+        // schemars 0.8 不识别 `rename_all_fields`,显式 rename 与容器规则产出一致。
+        #[serde(rename = "mediaType")]
         media_type: String,
+        #[schemars(required, schema_with = "nullable_string_schema")]
         filename: Option<String>,
     },
     ToolCall {
+        #[serde(rename = "callId")]
         call_id: String,
         name: String,
         arguments: Value,
     },
     ToolResult {
+        #[serde(rename = "toolCallId")]
         tool_call_id: String,
         content: String,
+        #[serde(rename = "isError")]
         is_error: bool,
     },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectSequencedMessage {
     pub message: SessionInspectMessage,
     pub updated_seq: u64,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub source: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectPendingApproval {
     pub prompt: String,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub rule_key: Option<String>,
 }
 
 /// Child-agent lifecycle state at the session-inspect wire boundary.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionInspectAgentStatusDto {
     Running,
@@ -166,43 +170,40 @@ pub enum SessionInspectAgentStatusDto {
     Failed,
 }
 
-impl SessionInspectAgentStatusDto {
-    fn wire_schema() -> Value {
-        json!({
-            "type": "string",
-            "enum": ["running", "completed", "failed"]
-        })
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectAgentSession {
     pub child_session_id: String,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub tool_call_id: Option<String>,
     pub agent_name: String,
     pub task: String,
     pub status: SessionInspectAgentStatusDto,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub final_session_id: Option<String>,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub summary: Option<String>,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectCompaction {
     pub trigger: String,
     pub pre_tokens: usize,
     pub post_tokens: usize,
     pub summary: String,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub transcript_path: Option<String>,
     pub seq: u64,
     pub source_seq: u64,
     pub strategy: String,
+    #[schemars(required, schema_with = "nullable_nonnegative_integer_schema")]
     pub keep_recent_turns: Option<usize>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectReadModel {
     pub session_id: String,
@@ -210,22 +211,29 @@ pub struct SessionInspectReadModel {
     pub working_dir: String,
     pub model_id: String,
     pub phase: SessionPhaseDto,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub system_prompt: Option<String>,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub extra_system_prompt: Option<String>,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub system_prompt_fingerprint: Option<String>,
     pub pending_tool_call_ids: Vec<String>,
     pub pending_tool_approvals: BTreeMap<String, SessionInspectPendingApproval>,
     pub created_at: String,
     pub updated_at: String,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub parent_session_id: Option<String>,
+    #[schemars(required, schema_with = "read_model_tool_selection_schema")]
     pub tool_selection: Option<SessionToolSelectionDto>,
+    #[schemars(required, schema_with = "nullable_string_schema")]
     pub source_extension: Option<String>,
     pub agent_sessions: Vec<SessionInspectAgentSession>,
     pub compactions: Vec<SessionInspectCompaction>,
+    #[schemars(required, schema_with = "nullable_nonnegative_integer_schema")]
     pub latest_seq: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectReadModelOutput {
     pub read_model: SessionInspectReadModel,
@@ -233,17 +241,12 @@ pub struct SessionInspectReadModelOutput {
 
 impl SessionInspectReadModelOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": { "readModel": session_inspect_read_model_schema() },
-            "required": ["readModel"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
 /// `astrcode.session.history.snapshot` 的作用域受限只读响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionHistorySnapshotOutput {
     pub lifecycle: SessionLifecycleStateDto,
@@ -252,19 +255,11 @@ pub struct SessionHistorySnapshotOutput {
 
 impl SessionHistorySnapshotOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "lifecycle": { "type": "string", "enum": ["active", "recycled"] },
-                "readModel": session_inspect_read_model_schema()
-            },
-            "required": ["lifecycle", "readModel"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SessionInspectProviderMessagesOutput {
     pub messages: Vec<SessionInspectMessage>,
@@ -272,276 +267,8 @@ pub struct SessionInspectProviderMessagesOutput {
 
 impl SessionInspectProviderMessagesOutput {
     pub fn wire_schema() -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "messages": { "type": "array", "items": session_inspect_message_schema() }
-            },
-            "required": ["messages"],
-            "additionalProperties": false
-        })
+        derived_wire_schema::<Self>()
     }
-}
-
-fn session_inspect_list_item_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "sessionId": { "type": "string" },
-            "workingDir": { "type": "string" },
-            "modelId": { "type": "string" },
-            "parentSessionId": { "type": ["string", "null"] },
-            "sourceExtension": { "type": ["string", "null"] },
-            "createdAt": { "type": "string" },
-            "updatedAt": { "type": "string" },
-            "phase": SessionPhaseDto::wire_schema(),
-            "latestCursor": { "type": "string" },
-            "firstUserMessage": { "type": ["string", "null"] }
-        },
-        "required": [
-            "sessionId",
-            "workingDir",
-            "modelId",
-            "parentSessionId",
-            "sourceExtension",
-            "createdAt",
-            "updatedAt",
-            "phase",
-            "latestCursor",
-            "firstUserMessage"
-        ],
-        "additionalProperties": false
-    })
-}
-
-fn session_inspect_snapshot_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "sessionId": { "type": "string" },
-            "cursor": { "type": "string" },
-            "workingDir": { "type": "string" },
-            "modelId": { "type": "string" },
-            "phase": SessionPhaseDto::wire_schema(),
-            "parentSessionId": { "type": ["string", "null"] },
-            "sourceExtension": { "type": ["string", "null"] },
-            "messageCount": { "type": "integer", "minimum": 0 },
-            "pendingToolCallIds": { "type": "array", "items": { "type": "string" } },
-            "agentSessionCount": { "type": "integer", "minimum": 0 }
-        },
-        "required": [
-            "sessionId",
-            "cursor",
-            "workingDir",
-            "modelId",
-            "phase",
-            "parentSessionId",
-            "sourceExtension",
-            "messageCount",
-            "pendingToolCallIds",
-            "agentSessionCount"
-        ],
-        "additionalProperties": false
-    })
-}
-
-fn session_inspect_read_model_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "sessionId": { "type": "string" },
-            "messages": { "type": "array", "items": session_inspect_sequenced_message_schema() },
-            "workingDir": { "type": "string" },
-            "modelId": { "type": "string" },
-            "phase": SessionPhaseDto::wire_schema(),
-            "systemPrompt": { "type": ["string", "null"] },
-            "extraSystemPrompt": { "type": ["string", "null"] },
-            "systemPromptFingerprint": { "type": ["string", "null"] },
-            "pendingToolCallIds": { "type": "array", "items": { "type": "string" } },
-            "pendingToolApprovals": {
-                "type": "object",
-                "additionalProperties": session_inspect_pending_approval_schema()
-            },
-            "createdAt": { "type": "string" },
-            "updatedAt": { "type": "string" },
-            "parentSessionId": { "type": ["string", "null"] },
-            "toolSelection": {
-                "anyOf": [
-                    SessionToolSelectionDto::wire_schema("Effective session tool visibility."),
-                    { "type": "null" }
-                ]
-            },
-            "sourceExtension": { "type": ["string", "null"] },
-            "agentSessions": { "type": "array", "items": session_inspect_agent_session_schema() },
-            "compactions": { "type": "array", "items": session_inspect_compaction_schema() },
-            "latestSeq": { "type": ["integer", "null"], "minimum": 0 }
-        },
-        "required": [
-            "sessionId",
-            "messages",
-            "workingDir",
-            "modelId",
-            "phase",
-            "systemPrompt",
-            "extraSystemPrompt",
-            "systemPromptFingerprint",
-            "pendingToolCallIds",
-            "pendingToolApprovals",
-            "createdAt",
-            "updatedAt",
-            "parentSessionId",
-            "toolSelection",
-            "sourceExtension",
-            "agentSessions",
-            "compactions",
-            "latestSeq"
-        ],
-        "additionalProperties": false
-    })
-}
-
-fn session_inspect_sequenced_message_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "message": session_inspect_message_schema(),
-            "updatedSeq": { "type": "integer", "minimum": 0 },
-            "source": { "type": ["string", "null"] }
-        },
-        "required": ["message", "updatedSeq", "source"],
-        "additionalProperties": false
-    })
-}
-
-fn session_inspect_message_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "role": { "type": "string" },
-            "content": { "type": "array", "items": session_inspect_content_schema() },
-            "name": { "type": ["string", "null"] },
-            "reasoningContent": { "type": ["string", "null"] }
-        },
-        "required": ["role", "content", "name", "reasoningContent"],
-        "additionalProperties": false
-    })
-}
-
-fn session_inspect_content_schema() -> Value {
-    json!({
-        "oneOf": [
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "const": "text" },
-                    "text": { "type": "string" }
-                },
-                "required": ["type", "text"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "const": "image" },
-                    "base64": { "type": "string" },
-                    "mediaType": { "type": "string" },
-                    "filename": { "type": ["string", "null"] }
-                },
-                "required": ["type", "base64", "mediaType", "filename"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "const": "tool_call" },
-                    "callId": { "type": "string" },
-                    "name": { "type": "string" },
-                    "arguments": {}
-                },
-                "required": ["type", "callId", "name", "arguments"],
-                "additionalProperties": false
-            },
-            {
-                "type": "object",
-                "properties": {
-                    "type": { "const": "tool_result" },
-                    "toolCallId": { "type": "string" },
-                    "content": { "type": "string" },
-                    "isError": { "type": "boolean" }
-                },
-                "required": ["type", "toolCallId", "content", "isError"],
-                "additionalProperties": false
-            }
-        ]
-    })
-}
-
-fn session_inspect_pending_approval_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "prompt": { "type": "string" },
-            "ruleKey": { "type": ["string", "null"] }
-        },
-        "required": ["prompt", "ruleKey"],
-        "additionalProperties": false
-    })
-}
-
-fn session_inspect_agent_session_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "childSessionId": { "type": "string" },
-            "toolCallId": { "type": ["string", "null"] },
-            "agentName": { "type": "string" },
-            "task": { "type": "string" },
-            "status": SessionInspectAgentStatusDto::wire_schema(),
-            "finalSessionId": { "type": ["string", "null"] },
-            "summary": { "type": ["string", "null"] },
-            "error": { "type": ["string", "null"] }
-        },
-        "required": [
-            "childSessionId",
-            "toolCallId",
-            "agentName",
-            "task",
-            "status",
-            "finalSessionId",
-            "summary",
-            "error"
-        ],
-        "additionalProperties": false
-    })
-}
-
-fn session_inspect_compaction_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "trigger": { "type": "string" },
-            "preTokens": { "type": "integer", "minimum": 0 },
-            "postTokens": { "type": "integer", "minimum": 0 },
-            "summary": { "type": "string" },
-            "transcriptPath": { "type": ["string", "null"] },
-            "seq": { "type": "integer", "minimum": 0 },
-            "sourceSeq": { "type": "integer", "minimum": 0 },
-            "strategy": { "type": "string" },
-            "keepRecentTurns": { "type": ["integer", "null"], "minimum": 0 }
-        },
-        "required": [
-            "trigger",
-            "preTokens",
-            "postTokens",
-            "summary",
-            "transcriptPath",
-            "seq",
-            "sourceSeq",
-            "strategy",
-            "keepRecentTurns"
-        ],
-        "additionalProperties": false
-    })
 }
 
 #[cfg(test)]

@@ -1,11 +1,13 @@
 //! 受并发、时间和输出上限约束的扩展子进程执行器。
 
-use std::{future::Future, process::Stdio, time::Duration};
+use std::{process::Stdio, time::Duration};
 
 use astrcode_extension_sdk::{
     host::{
         HOST_ERROR_CODE_BACKEND_UNAVAILABLE, HOST_ERROR_CODE_CANCELLED,
-        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_TIMEOUT, HOST_PROCESS_DEFAULT_TIMEOUT_MS,
+        HOST_ERROR_CODE_INVALID_INPUT, HOST_ERROR_CODE_PROCESS_FAILED,
+        HOST_ERROR_CODE_SPAWN_FAILED, HOST_ERROR_CODE_STDERR_FAILED, HOST_ERROR_CODE_STDIN_FAILED,
+        HOST_ERROR_CODE_STDOUT_FAILED, HOST_ERROR_CODE_TIMEOUT, HOST_PROCESS_DEFAULT_TIMEOUT_MS,
         HOST_PROCESS_MAX_TIMEOUT_MS, HostProcessRequest,
     },
     s5r::ErrorPayload,
@@ -14,12 +16,12 @@ use serde_json::{Value, json};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{Semaphore, SemaphorePermit},
-    time::{Instant, timeout_at},
+    time::Instant,
 };
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    capability::ProcessCapability, decode_host_input, path::canonicalize_workspace_path,
+    capability::ProcessCapability, parse_wire_request, path::canonicalize_workspace_path,
     run_blocking_io,
 };
 
@@ -71,7 +73,7 @@ impl ProcessGroup {
     ) -> Result<Value, ErrorPayload> {
         match capability {
             ProcessCapability::Spawn => {
-                let request = decode_host_input(input)?;
+                let request = parse_wire_request(&input, "process.spawn")?;
                 let working_dir = working_dir
                     .map(str::to_owned)
                     .or_else(|| self.default_working_dir.clone());
@@ -153,23 +155,27 @@ impl ProcessRunner {
 
         let mut child = process
             .spawn()
-            .map_err(|error| ErrorPayload::new("spawn_failed", error.to_string()))?;
+            .map_err(|error| ErrorPayload::new(HOST_ERROR_CODE_SPAWN_FAILED, error.to_string()))?;
         let child_pid = child.id();
         let mut child_stdin = child.stdin.take();
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ErrorPayload::new("process_failed", "child stdout pipe unavailable"))?;
-        let mut stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ErrorPayload::new("process_failed", "child stderr pipe unavailable"))?;
+        let mut stdout = child.stdout.take().ok_or_else(|| {
+            ErrorPayload::new(
+                HOST_ERROR_CODE_PROCESS_FAILED,
+                "child stdout pipe unavailable",
+            )
+        })?;
+        let mut stderr = child.stderr.take().ok_or_else(|| {
+            ErrorPayload::new(
+                HOST_ERROR_CODE_PROCESS_FAILED,
+                "child stderr pipe unavailable",
+            )
+        })?;
 
         let write_stdin = async move {
             if let (Some(content), Some(mut pipe)) = (stdin, child_stdin.take()) {
-                pipe.write_all(content.as_bytes())
-                    .await
-                    .map_err(|error| ErrorPayload::new("stdin_failed", error.to_string()))?;
+                pipe.write_all(content.as_bytes()).await.map_err(|error| {
+                    ErrorPayload::new(HOST_ERROR_CODE_STDIN_FAILED, error.to_string())
+                })?;
             }
             Ok::<(), ErrorPayload>(())
         };
@@ -202,7 +208,7 @@ impl ProcessRunner {
                                 );
                             },
                             Err(error) => {
-                                return Err(ErrorPayload::new("stdout_failed", error.to_string()));
+                                return Err(ErrorPayload::new(HOST_ERROR_CODE_STDOUT_FAILED, error.to_string()));
                             },
                         }
                     },
@@ -222,7 +228,7 @@ impl ProcessRunner {
                                 );
                             },
                             Err(error) => {
-                                return Err(ErrorPayload::new("stderr_failed", error.to_string()));
+                                return Err(ErrorPayload::new(HOST_ERROR_CODE_STDERR_FAILED, error.to_string()));
                             },
                         }
                     },
@@ -239,19 +245,25 @@ impl ProcessRunner {
         };
         let collect = async {
             let ((), output) = tokio::try_join!(write_stdin, collect_output)?;
-            let status = child
-                .wait()
-                .await
-                .map_err(|error| ErrorPayload::new("process_failed", error.to_string()))?;
+            let status = child.wait().await.map_err(|error| {
+                ErrorPayload::new(HOST_ERROR_CODE_PROCESS_FAILED, error.to_string())
+            })?;
             Ok::<_, ErrorPayload>((output, status))
         };
 
-        let outcome = run_until_deadline(collect, deadline, cancel_token).await;
+        let outcome = super::run_until_deadline(
+            collect,
+            deadline,
+            cancel_token,
+            || ErrorPayload::new(HOST_ERROR_CODE_TIMEOUT, "process timed out"),
+            cancelled,
+        )
+        .await;
         match outcome {
-            Ok(Ok((
+            Ok((
                 (stdout, stderr, combined, stdout_truncated, stderr_truncated, combined_truncated),
                 status,
-            ))) => Ok(json!({
+            )) => Ok(json!({
                 "status": status.code(),
                 "success": status.success(),
                 "stdout": String::from_utf8_lossy(&stdout),
@@ -261,7 +273,7 @@ impl ProcessRunner {
                 "stderr_truncated": stderr_truncated,
                 "combined_truncated": combined_truncated,
             })),
-            Ok(Err(error)) | Err(error) => {
+            Err(error) => {
                 terminate_child(&mut child, child_pid).await;
                 Err(error)
             },
@@ -274,56 +286,26 @@ impl ProcessRunner {
         cancel_token: Option<&CancellationToken>,
     ) -> Result<SemaphorePermit<'a>, ErrorPayload> {
         let acquire = async {
-            timeout_at(deadline, self.permits.acquire())
-                .await
-                .map_err(|_| {
-                    ErrorPayload::new(
-                        HOST_ERROR_CODE_TIMEOUT,
-                        "process timed out waiting for capacity",
-                    )
-                })?
-                .map_err(|_| {
-                    ErrorPayload::new(
-                        HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
-                        "process runner stopped",
-                    )
-                })
+            self.permits.acquire().await.map_err(|_| {
+                ErrorPayload::new(
+                    HOST_ERROR_CODE_BACKEND_UNAVAILABLE,
+                    "process runner stopped",
+                )
+            })
         };
-        match cancel_token {
-            Some(token) => {
-                tokio::select! {
-                    biased;
-                    () = token.cancelled() => Err(cancelled()),
-                    result = acquire => result,
-                }
+        super::run_until_deadline(
+            acquire,
+            deadline,
+            cancel_token,
+            || {
+                ErrorPayload::new(
+                    HOST_ERROR_CODE_TIMEOUT,
+                    "process timed out waiting for capacity",
+                )
             },
-            None => acquire.await,
-        }
-    }
-}
-
-async fn run_until_deadline<F, T>(
-    operation: F,
-    deadline: Instant,
-    cancel_token: Option<&CancellationToken>,
-) -> Result<Result<T, ErrorPayload>, ErrorPayload>
-where
-    F: Future<Output = Result<T, ErrorPayload>>,
-{
-    let timed = async {
-        timeout_at(deadline, operation)
-            .await
-            .map_err(|_| ErrorPayload::new(HOST_ERROR_CODE_TIMEOUT, "process timed out"))
-    };
-    match cancel_token {
-        Some(token) => {
-            tokio::select! {
-                biased;
-                () = token.cancelled() => Err(cancelled()),
-                result = timed => result,
-            }
-        },
-        None => timed.await,
+            cancelled,
+        )
+        .await
     }
 }
 
@@ -419,6 +401,7 @@ fn kill_process_group(_pid: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {
+    use astrcode_extension_sdk::host::HOST_ERROR_CODE_PERMISSION_DENIED;
     use tempfile::tempdir;
 
     use super::*;
@@ -429,11 +412,11 @@ mod tests {
         token.cancel();
         let cancelled = ensure_spawn_active(Instant::now() + Duration::from_secs(1), Some(&token))
             .expect_err("cancelled process must not spawn");
-        assert_eq!(cancelled.code, "cancelled");
+        assert_eq!(cancelled.code, HOST_ERROR_CODE_CANCELLED);
 
         let timed_out = ensure_spawn_active(Instant::now() - Duration::from_secs(1), None)
             .expect_err("expired process must not spawn");
-        assert_eq!(timed_out.code, "timeout");
+        assert_eq!(timed_out.code, HOST_ERROR_CODE_TIMEOUT);
     }
 
     #[cfg(unix)]
@@ -486,6 +469,6 @@ mod tests {
             .await
             .expect_err("parent cwd must be rejected");
 
-        assert_eq!(error.code, "permission_denied");
+        assert_eq!(error.code, HOST_ERROR_CODE_PERMISSION_DENIED);
     }
 }

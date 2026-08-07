@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use astrcode_core::config::defaults::extension_data_dir;
+
 /// Persistence locations already namespaced to one extension.
 ///
 /// Authors never provide an extension id when asking for a path. The runtime derives both
@@ -21,10 +23,8 @@ impl ExtensionPaths {
         session_store_dir: Option<&Path>,
     ) -> Self {
         Self {
-            global_data_dir: global_store_dir
-                .map(|base| namespaced_extension_dir(base, extension_id)),
-            session_data_dir: session_store_dir
-                .map(|base| namespaced_extension_dir(base, extension_id)),
+            global_data_dir: global_store_dir.map(|base| extension_data_dir(base, extension_id)),
+            session_data_dir: session_store_dir.map(|base| extension_data_dir(base, extension_id)),
         }
     }
 
@@ -37,10 +37,6 @@ impl ExtensionPaths {
             .as_deref()
             .ok_or(ExtensionPathError::SessionContextUnavailable)
     }
-}
-
-fn namespaced_extension_dir(base: &Path, extension_id: &str) -> PathBuf {
-    base.join("extension_data").join(extension_id)
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]

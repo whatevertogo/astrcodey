@@ -5,7 +5,6 @@
 //! `SKILL.md` content only when a matching task appears.
 
 use std::{
-    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
@@ -28,7 +27,7 @@ use astrcode_extension_sdk::{
 };
 use noyalib::compat::serde_yaml as yaml;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::json;
 
 const SKILL_TOOL_NAME: &str = "Skill";
 const SKILL_FILE_NAME: &str = "SKILL.md";
@@ -111,7 +110,7 @@ impl ToolHandler for SkillToolHandler {
         let session_id = ctx.call().require_session_id()?;
 
         Ok(handle_skill_tool(
-            ctx.raw_arguments().clone(),
+            ctx.arguments()?,
             &working_dir,
             session_id.as_str(),
             &self.shared,
@@ -321,26 +320,11 @@ fn skill_tool_definition() -> ToolDefinition {
 }
 
 fn handle_skill_tool(
-    arguments: Value,
+    args: SkillToolArgs,
     working_dir: &str,
     session_id: &str,
     shared: &SkillShared,
 ) -> ToolResult {
-    let args = match serde_json::from_value::<SkillToolArgs>(arguments) {
-        Ok(args) => args,
-        Err(error) => {
-            let msg = format!("invalid Skill input: {error}");
-            return ToolResult {
-                // content 必须非空,LLM 只读 content,不读 error 字段。
-                content: msg.clone(),
-                is_error: true,
-                error: Some(msg),
-                metadata: BTreeMap::new(),
-                duration_ms: None,
-            };
-        },
-    };
-
     let skills = shared.get_or_discover(working_dir);
     let Some(skill) = skills
         .iter()
@@ -505,10 +489,7 @@ fn trimmed_nonempty(value: Option<String>) -> Option<String> {
 }
 
 fn normalize_skill_content(content: &str) -> String {
-    content
-        .trim_start_matches('\u{feff}')
-        .replace("\r\n", "\n")
-        .replace('\r', "\n")
+    astrcode_extension_sdk::frontmatter::normalize_markdown(content)
 }
 
 fn extract_description_from_markdown(markdown: &str) -> Option<String> {
@@ -788,7 +769,8 @@ mod tests {
 
         let shared = SkillShared::new();
         let result = handle_skill_tool(
-            json!({ "skill": "/review", "args": "src/lib.rs" }),
+            serde_json::from_value(json!({ "skill": "/review", "args": "src/lib.rs" }))
+                .expect("parse args"),
             &workspace.to_string_lossy(),
             "session-123",
             &shared,

@@ -9,8 +9,11 @@ use crate::{
     extension::{ExtensionHttpRequest, ExtensionHttpResponse},
     host::HOST_ERROR_CODE_INVALID_INPUT,
     s5r::{ErrorPayload, HandlerResult},
-    worker::registry::{
-        CommandHandlerFn, HookHandlerFn, HttpHandlerFn, ToolHandlerFn, WorkerCallContext,
+    worker::{
+        WORKER_ERROR_CODE_INVALID_ARGUMENTS,
+        registry::{
+            CommandHandlerFn, HookHandlerFn, HttpHandlerFn, ToolHandlerFn, WorkerCallContext,
+        },
     },
 };
 
@@ -22,8 +25,12 @@ pub fn parse_tool_arguments<T: DeserializeOwned>(event: &Value) -> Result<T, Err
         .or_else(|| event.get("arguments"))
         .cloned()
         .unwrap_or(Value::Null);
-    serde_json::from_value(args)
-        .map_err(|e| ErrorPayload::new("invalid_arguments", format!("parse tool arguments: {e}")))
+    serde_json::from_value(args).map_err(|e| {
+        ErrorPayload::new(
+            WORKER_ERROR_CODE_INVALID_ARGUMENTS,
+            format!("parse tool arguments: {e}"),
+        )
+    })
 }
 
 /// 从 hook 事件 JSON 反序列化 `input` 载荷。

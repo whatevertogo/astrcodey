@@ -44,7 +44,7 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
 
-use super::{CommandRuntimeContext, CommandSource, ExtensionHttpDispatchResult, ExtensionRunner};
+use super::{CommandSource, ExtensionHttpDispatchResult, ExtensionRunner};
 use crate::runner::tool_adapter::normalize_stringified_booleans;
 
 fn extension_manifest(
@@ -2382,7 +2382,7 @@ async fn command_completion_dispatches_to_resolved_handler() {
 
     let runtime = command_ctx();
     let resolved = runner
-        .resolve_commands_for_typed(runtime.working_dir())
+        .resolve_commands_for_typed(&runtime.working_dir().to_string_lossy())
         .await
         .into_iter()
         .find(|resolved| resolved.command.name == "pick")
@@ -2644,8 +2644,8 @@ async fn conflicting_public_routes_are_rejected() {
     assert!(error.to_string().contains("conflicts"));
 }
 
-fn command_ctx() -> CommandRuntimeContext {
-    CommandRuntimeContext::new(
+fn command_ctx() -> RuntimeHookCallContext {
+    RuntimeHookCallContext::new(
         "session",
         ".",
         ModelSelection::simple("mock"),
