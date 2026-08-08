@@ -1,8 +1,12 @@
 use std::{collections::HashMap, sync::Arc};
 
+use astrcode_core::event::{EventPublishReceipt, EventSendError};
 use serde::{Deserialize, Serialize};
 
-use super::{ExtensionError, HookMode, internal::ExtensionEventSink};
+use super::{HookMode, internal::ExtensionEventSink};
+
+/// Host-reported state for one extension event emission.
+pub type ExtensionEventReceipt = EventPublishReceipt;
 
 // ─── Lifecycle Events ────────────────────────────────────────────────────
 
@@ -180,48 +184,89 @@ impl ExtensionEventEmitter {
         }
     }
 
+    /// Emit an event and wait until the host reports its publication state.
+    ///
+    /// Session-scoped durable events return [`EventPublishReceipt::Published`] only after they
+    /// have a storage sequence. Unscoped hosts that cannot expose completion return
+    /// [`EventPublishReceipt::Queued`].
     pub async fn emit<T: Serialize + ?Sized>(
         &self,
         event_type: &str,
         payload: &T,
-    ) -> Result<(), ExtensionEventError> {
-        self.emit_now(event_type, payload)
+    ) -> Result<ExtensionEventReceipt, ExtensionEventError> {
+        let (declaration, payload) = self.prepare(event_type, payload)?;
+        self.sink()?
+            .emit(
+                event_type,
+                declaration.schema_version,
+                declaration.durable,
+                payload,
+            )
+            .await
+            .map_err(|error| map_send_error(event_type, error))
     }
 
-    /// Emit from a synchronous lifecycle boundary such as a cancellation guard's `Drop`.
+    /// Try to enqueue an event from a synchronous lifecycle boundary such as a cancellation
+    /// guard's `Drop`.
     ///
-    /// This shares the exact declaration and attribution checks used by [`Self::emit`]. The
-    /// underlying ingress is synchronous, so callers do not need an untracked task merely to
-    /// finish cancellation cleanup.
+    /// Success confirms queue admission only. Async handlers should use [`Self::emit`] so queue
+    /// pressure and publication failures are observable.
     pub fn emit_now<T: Serialize + ?Sized>(
         &self,
         event_type: &str,
         payload: &T,
     ) -> Result<(), ExtensionEventError> {
+        let (declaration, payload) = self.prepare(event_type, payload)?;
+        self.sink()?
+            .emit_now(
+                event_type,
+                declaration.schema_version,
+                declaration.durable,
+                payload,
+            )
+            .map_err(|error| map_send_error(event_type, error))
+    }
+
+    pub fn is_declared(&self, event_type: &str) -> bool {
+        self.declarations.contains_key(event_type)
+    }
+
+    fn prepare<T: Serialize + ?Sized>(
+        &self,
+        event_type: &str,
+        payload: &T,
+    ) -> Result<(&ExtensionEventDecl, serde_json::Value), ExtensionEventError> {
         let declaration =
             self.declarations
                 .get(event_type)
                 .ok_or_else(|| ExtensionEventError::Undeclared {
                     event_type: event_type.to_owned(),
                 })?;
-        let sink = self
-            .sink
-            .as_ref()
-            .ok_or(ExtensionEventError::ContextUnavailable)?;
         let payload =
             serde_json::to_value(payload).map_err(|error| ExtensionEventError::InvalidPayload {
                 event_type: event_type.to_owned(),
                 message: error.to_string(),
             })?;
-        sink.emit(event_type, declaration.schema_version, payload)
-            .map_err(|error| ExtensionEventError::Emission {
+        let payload_bytes = serde_json::to_vec(&payload)
+            .map_err(|error| ExtensionEventError::InvalidPayload {
                 event_type: event_type.to_owned(),
-                source: Box::new(error),
-            })
+                message: error.to_string(),
+            })?
+            .len();
+        if payload_bytes > declaration.max_payload_bytes {
+            return Err(ExtensionEventError::PayloadTooLarge {
+                event_type: event_type.to_owned(),
+                actual_bytes: payload_bytes,
+                max_bytes: declaration.max_payload_bytes,
+            });
+        }
+        Ok((declaration, payload))
     }
 
-    pub fn is_declared(&self, event_type: &str) -> bool {
-        self.declarations.contains_key(event_type)
+    fn sink(&self) -> Result<&dyn ExtensionEventSink, ExtensionEventError> {
+        self.sink
+            .as_deref()
+            .ok_or(ExtensionEventError::ContextUnavailable)
     }
 }
 
@@ -243,12 +288,36 @@ pub enum ExtensionEventError {
     ContextUnavailable,
     #[error("extension event `{event_type}` payload is invalid: {message}")]
     InvalidPayload { event_type: String, message: String },
-    #[error("failed to emit extension event `{event_type}`: {source}")]
-    Emission {
+    #[error(
+        "extension event `{event_type}` payload is {actual_bytes} bytes, exceeding {max_bytes} \
+         bytes"
+    )]
+    PayloadTooLarge {
         event_type: String,
-        #[source]
-        source: Box<ExtensionError>,
+        actual_bytes: usize,
+        max_bytes: usize,
     },
+    #[error("extension event `{event_type}` ingress is full")]
+    QueueFull { event_type: String },
+    #[error("extension event `{event_type}` ingress is closed")]
+    IngressClosed { event_type: String },
+    #[error("extension event `{event_type}` publication failed: {message}")]
+    Publication { event_type: String, message: String },
+}
+
+fn map_send_error(event_type: &str, error: EventSendError) -> ExtensionEventError {
+    match error {
+        EventSendError::Full => ExtensionEventError::QueueFull {
+            event_type: event_type.to_owned(),
+        },
+        EventSendError::Closed => ExtensionEventError::IngressClosed {
+            event_type: event_type.to_owned(),
+        },
+        EventSendError::PublishFailed(message) => ExtensionEventError::Publication {
+            event_type: event_type.to_owned(),
+            message,
+        },
+    }
 }
 
 #[cfg(test)]
@@ -260,17 +329,36 @@ mod emitter_tests {
     #[derive(Default)]
     struct RecordingSink(Mutex<Vec<(String, u32, serde_json::Value)>>);
 
-    impl ExtensionEventSink for RecordingSink {
-        fn emit(
-            &self,
-            event_type: &str,
-            schema_version: u32,
-            payload: serde_json::Value,
-        ) -> Result<(), ExtensionError> {
+    impl RecordingSink {
+        fn record(&self, event_type: &str, schema_version: u32, payload: serde_json::Value) {
             self.0
                 .lock()
                 .unwrap()
                 .push((event_type.to_owned(), schema_version, payload));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExtensionEventSink for RecordingSink {
+        async fn emit(
+            &self,
+            event_type: &str,
+            schema_version: u32,
+            _durable: bool,
+            payload: serde_json::Value,
+        ) -> Result<EventPublishReceipt, EventSendError> {
+            self.record(event_type, schema_version, payload);
+            Ok(EventPublishReceipt::Queued)
+        }
+
+        fn emit_now(
+            &self,
+            event_type: &str,
+            schema_version: u32,
+            _durable: bool,
+            payload: serde_json::Value,
+        ) -> Result<(), EventSendError> {
+            self.record(event_type, schema_version, payload);
             Ok(())
         }
     }
@@ -287,14 +375,23 @@ mod emitter_tests {
             }],
             Some(sink.clone()),
         );
-        emitter
-            .emit("review.completed", &serde_json::json!({ "status": "ok" }))
-            .await
-            .unwrap();
+        assert_eq!(
+            emitter
+                .emit("review.completed", &serde_json::json!({ "status": "ok" }))
+                .await
+                .unwrap(),
+            EventPublishReceipt::Queued
+        );
         emitter
             .emit_now(
                 "review.completed",
                 &serde_json::json!({ "status": "cancelled" }),
+            )
+            .unwrap();
+        emitter
+            .emit_now(
+                "review.completed",
+                &serde_json::json!({ "status": "published" }),
             )
             .unwrap();
         assert_eq!(
@@ -309,11 +406,16 @@ mod emitter_tests {
                     "review.completed".into(),
                     3,
                     serde_json::json!({ "status": "cancelled" })
+                ),
+                (
+                    "review.completed".into(),
+                    3,
+                    serde_json::json!({ "status": "published" })
                 )
             ]
         );
         assert!(matches!(
-            emitter.emit("review.failed", &()).await,
+            emitter.emit_now("review.failed", &()),
             Err(ExtensionEventError::Undeclared { .. })
         ));
 
@@ -327,8 +429,40 @@ mod emitter_tests {
             None,
         );
         assert!(matches!(
-            detached.emit("review.completed", &()).await,
+            detached.emit_now("review.completed", &()),
             Err(ExtensionEventError::ContextUnavailable)
+        ));
+
+        let bounded = ExtensionEventEmitter::from_runtime(
+            [ExtensionEventDecl {
+                event_type: "review.completed".into(),
+                schema_version: 1,
+                durable: false,
+                max_payload_bytes: 2,
+            }],
+            Some(sink),
+        );
+        assert!(matches!(
+            bounded.emit_now(
+                "review.completed",
+                &serde_json::json!({ "status": "too-large" })
+            ),
+            Err(ExtensionEventError::PayloadTooLarge { .. })
+        ));
+        assert!(matches!(
+            map_send_error("review.completed", EventSendError::Full),
+            ExtensionEventError::QueueFull { .. }
+        ));
+        assert!(matches!(
+            map_send_error("review.completed", EventSendError::Closed),
+            ExtensionEventError::IngressClosed { .. }
+        ));
+        assert!(matches!(
+            map_send_error(
+                "review.completed",
+                EventSendError::PublishFailed("storage unavailable".into())
+            ),
+            ExtensionEventError::Publication { .. }
         ));
     }
 }

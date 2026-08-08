@@ -4,6 +4,7 @@
 
 use std::{collections::BTreeSet, sync::Arc};
 
+use astrcode_core::event::EventSendError;
 use serde::{Deserialize, Serialize};
 
 // ─── Hook mode ─────────────────────────────────────────────────────────
@@ -136,6 +137,8 @@ pub enum ExtensionError {
     Path(#[from] crate::extension::ExtensionPathError),
     #[error(transparent)]
     Host(#[from] crate::host::HostError),
+    #[error(transparent)]
+    EventSend(#[from] EventSendError),
     #[error("invalid extension input `{code}`: {message}")]
     InvalidInput {
         code: String,

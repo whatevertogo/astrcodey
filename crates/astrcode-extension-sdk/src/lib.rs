@@ -22,7 +22,9 @@ pub mod llm {
 }
 
 pub mod event {
-    pub use astrcode_core::event::{Event, EventPayload, EventSendError, EventSender};
+    pub use astrcode_core::event::{
+        Event, EventPayload, EventPublishReceipt, EventSendError, EventSender,
+    };
 }
 
 pub mod tool {
@@ -169,26 +171,27 @@ pub mod worker_prelude {
         worker::{
             EventClient, ExtensionHttpClient, HostClient, HostConfigureSessionToolsOutput,
             HostConfigureSessionToolsRequest, HostCreateSessionOutput, HostCreateSessionRequest,
-            HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmContent,
-            HostLlmMessage, HostLlmRole, HostLlmTextDelta, HostNetworkRedirectPolicy,
-            HostNetworkRequest, HostNetworkResponse, HostProcessOutput, HostProcessRequest,
-            HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionCancelOutput,
-            HostSessionDeliveryOutput, HostSessionEvent, HostSessionEventsPageOutput,
-            HostSessionEventsPageRequest, HostSessionExecutionView, HostSessionInputRequest,
-            HostSessionProviderMessagesOutput, HostSessionReactivateOutput, HostSessionStateOutput,
-            HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
-            HostSessionSummariesOutput, HostSessionSummary, HostSessionTargetRequest,
-            HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
-            HostSessionTranscriptMessage, HostSubmitTurnOutput, HostSubmitTurnRequest,
-            HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
-            HostWorkspaceGlobRequest, HostWorkspaceGrepMatch, HostWorkspaceGrepOutput,
-            HostWorkspaceGrepRequest, HostWorkspaceListEntry, HostWorkspaceListOutput,
-            HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
-            HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, HttpHandlerFn, ModelClient,
-            NetworkClient, ProcessClient, SessionControlClient, SessionHistoryClient,
-            SessionInspectClient, SessionStateClient, Worker, WorkerCallContext, WorkspaceClient,
-            command_handler, handler_err, hook_handler, hook_handler_args, http_handler,
-            parse_hook_input, parse_tool_arguments, tool_handler, tool_handler_args, tool_text,
+            HostEventEmitOutput, HostEventEmitRequest, HostLlmChatOutput,
+            HostLlmCollectedStreamOutput, HostLlmContent, HostLlmMessage, HostLlmRole,
+            HostLlmTextDelta, HostNetworkRedirectPolicy, HostNetworkRequest, HostNetworkResponse,
+            HostProcessOutput, HostProcessRequest, HostRecycleSessionRequest,
+            HostRootSubmitTurnRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+            HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
+            HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+            HostSessionReactivateOutput, HostSessionStateOutput, HostSessionStateReadOutput,
+            HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
+            HostSessionSummary, HostSessionTargetRequest, HostSessionTokenUsage,
+            HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
+            HostSubmitTurnOutput, HostSubmitTurnRequest, HostWorkspaceEditOutput,
+            HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+            HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+            HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
+            HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
+            HostWorkspaceWriteRequest, HttpHandlerFn, ModelClient, NetworkClient, ProcessClient,
+            SessionControlClient, SessionHistoryClient, SessionInspectClient, SessionStateClient,
+            Worker, WorkerCallContext, WorkspaceClient, command_handler, handler_err, hook_handler,
+            hook_handler_args, http_handler, parse_hook_input, parse_tool_arguments, tool_handler,
+            tool_handler_args, tool_text,
         },
     };
 }

@@ -14,7 +14,10 @@ mod workspace;
 use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_core::{
-    event::{DurableEventPayload, EventPayload, EventSender, ExtensionEventData, LiveEventPayload},
+    event::{
+        DurableEventPayload, EventPayload, EventPublishReceipt, EventSender, ExtensionEventData,
+        LiveEventPayload,
+    },
     llm::LlmProvider,
     tool::SessionOperations,
     wire::{WireError, WireErrorCode},
@@ -456,15 +459,34 @@ fn ensure_required_context(
     Ok(())
 }
 
-/// 供 runner 内 `ExtensionEventSink` 与 IPC 路径复用。
-pub fn emit_for_sink(
+pub async fn emit_for_sink_confirmed(
     extension_id: &str,
     declarations: &HashMap<String, ExtensionEventDecl>,
     event_tx: &EventSender,
     event_type: &str,
     schema_version: u32,
     payload: Value,
-) -> Result<(), ExtensionError> {
+) -> Result<EventPublishReceipt, ExtensionError> {
+    let payload = validated_extension_event_payload(
+        extension_id,
+        declarations,
+        event_type,
+        schema_version,
+        payload,
+    )?;
+    event_tx
+        .send_confirmed(payload)
+        .await
+        .map_err(ExtensionError::from)
+}
+
+fn validated_extension_event_payload(
+    extension_id: &str,
+    declarations: &HashMap<String, ExtensionEventDecl>,
+    event_type: &str,
+    schema_version: u32,
+    payload: Value,
+) -> Result<EventPayload, ExtensionError> {
     validate_emit(declarations, event_type, schema_version, &payload)?;
     let durable = declarations
         .get(event_type)
@@ -478,14 +500,11 @@ pub fn emit_for_sink(
         schema_version,
         payload,
     };
-    let payload = if durable {
+    Ok(if durable {
         EventPayload::Durable(DurableEventPayload::ExtensionEvent(event))
     } else {
         EventPayload::Live(LiveEventPayload::ExtensionEvent(event))
-    };
-    event_tx
-        .send(payload)
-        .map_err(|_| ExtensionError::Internal("event channel closed".into()))
+    })
 }
 
 fn validate_emit(

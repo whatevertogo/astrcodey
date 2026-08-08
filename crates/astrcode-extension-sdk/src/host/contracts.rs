@@ -7,6 +7,7 @@ use serde_json::Value;
 use serde_json::json;
 
 use crate::{
+    event::EventPublishReceipt,
     llm::{LlmContent, LlmMessage, LlmRole},
     session::{SessionPhaseDto, SessionToolSelectionDto},
     types::SessionId,
@@ -73,6 +74,35 @@ pub struct HostEventEmitRequest {
     #[serde(deserialize_with = "deserialize_positive_schema_version")]
     pub schema_version: u32,
     pub payload: Value,
+}
+
+/// Publication state returned by the host after an extension event emit request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    tag = "status",
+    content = "publication",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub enum HostEventEmitOutput {
+    Queued,
+    Published {
+        event_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        seq: Option<u64>,
+    },
+}
+
+impl From<EventPublishReceipt> for HostEventEmitOutput {
+    fn from(receipt: EventPublishReceipt) -> Self {
+        match receipt {
+            EventPublishReceipt::Queued => Self::Queued,
+            EventPublishReceipt::Published { event_id, seq } => Self::Published {
+                event_id: event_id.to_string(),
+                seq,
+            },
+        }
+    }
 }
 
 /// 共享的非空字符串校验核心，`deserialize_with` 需要无参函数路径，故各字段保留薄包装。
@@ -1087,6 +1117,11 @@ mod tests {
                 schema_version: 1,
                 payload: json!({ "status": "ok" }),
             },
+            HostEventEmitOutput::Published {
+                event_id: "event-1".into(),
+                seq: Some(7),
+            },
+            HostEventEmitOutput::Queued,
             HostSessionStateReadRequest { key: "goal".into() },
             HostSessionStateReadOutput {
                 content: Some("active".into()),

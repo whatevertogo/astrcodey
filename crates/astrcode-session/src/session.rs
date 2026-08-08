@@ -174,13 +174,14 @@ impl Session {
         &self,
         turn_id: Option<&TurnId>,
         payload: LiveEventPayload,
-    ) -> Result<(), SessionError> {
+    ) -> Result<astrcode_core::types::EventId, SessionError> {
         let event = LiveEvent::new(self.id().clone(), turn_id.cloned(), payload);
+        let event_id = event.id.clone();
         self.runtime
             .event_sink()
             .publish_live_required(self.runtime.store().clone(), event)
             .await?;
-        Ok(())
+        Ok(event_id)
     }
 
     pub async fn emit_durable(

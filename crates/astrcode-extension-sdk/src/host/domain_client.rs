@@ -7,16 +7,16 @@ use crate::{
     extension::{ExtensionHttpDispatchRequest, ExtensionHttpResponse},
     host::{
         HostAcknowledgement, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
-        HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput, HostNetworkRequest,
-        HostNetworkResponse, HostOperation, HostProcessOutput, HostProcessRequest,
-        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
-        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionStateReadOutput,
-        HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
-        HostSessionTokenUsageOutput, HostSessionTranscript, HostWorkspaceEditOutput,
-        HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
-        HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListOutput,
-        HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
-        HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
+        HostEventEmitOutput, HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput,
+        HostNetworkRequest, HostNetworkResponse, HostOperation, HostProcessOutput,
+        HostProcessRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+        HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+        HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
+        HostSessionSummariesOutput, HostSessionTokenUsageOutput, HostSessionTranscript,
+        HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
+        HostWorkspaceGlobRequest, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
+        HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
     },
     llm::LlmMessage,
     session::{
@@ -80,8 +80,11 @@ impl<T> ModelClient<T> {
 }
 
 impl<T: HostClientTransport> EventClient<T> {
-    pub async fn emit(&self, request: crate::host::HostEventEmitRequest) -> Result<(), T::Error> {
-        invoke_unit(&self.transport, HostOperation::EventEmit, &request).await
+    pub async fn emit(
+        &self,
+        request: crate::host::HostEventEmitRequest,
+    ) -> Result<HostEventEmitOutput, T::Error> {
+        invoke(&self.transport, HostOperation::EventEmit, &request).await
     }
 }
 

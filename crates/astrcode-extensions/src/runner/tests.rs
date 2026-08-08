@@ -979,6 +979,7 @@ impl Extension for StartupEventExtension {
         ctx.events()
             .emit("startup_ready", &json!({"ready": true}))
             .await
+            .map(|_| ())
             .map_err(|error| ExtensionError::Internal(error.to_string()))
     }
 }

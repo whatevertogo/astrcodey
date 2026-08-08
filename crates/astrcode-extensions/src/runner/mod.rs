@@ -10,7 +10,10 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use astrcode_core::event::EventPayload;
+use astrcode_core::event::{
+    DurableEventPayload, EventPayload, EventPublishReceipt, EventSendError, ExtensionEventData,
+    LiveEventPayload,
+};
 use astrcode_extension_sdk::{
     extension::{internal::ExtensionEventSink, *},
     runtime_ports::{
@@ -239,13 +242,12 @@ impl Drop for DeferredTaskActivation {
 
 // ─── BoundExtensionEventSink ──────────────────────────────────────────────
 
-/// 绑定了 extension_id 和声明校验的事件发射器。
+/// 绑定了 extension_id 的事件发射器。
 ///
 /// 由 runtime call-context factory 构造并传给扩展钩子；`extension_id` 在构造时
 /// 注入，调用方无法伪造身份。
 struct BoundExtensionEventSink {
     extension_id: String,
-    declarations: HashMap<String, ExtensionEventDecl>,
     event_tx: astrcode_core::event::EventSender,
 }
 
@@ -257,32 +259,66 @@ fn bind_extension_event_sink(
     if declarations.is_empty() {
         return None;
     }
-    let declarations = declarations
-        .iter()
-        .map(|decl| (decl.event_type.clone(), decl.clone()))
-        .collect();
     Some(Arc::new(BoundExtensionEventSink {
         extension_id: extension_id.to_owned(),
-        declarations,
         event_tx,
     }))
 }
 
+#[async_trait::async_trait]
 impl ExtensionEventSink for BoundExtensionEventSink {
-    fn emit(
+    async fn emit(
         &self,
         event_type: &str,
         schema_version: u32,
+        durable: bool,
         payload: serde_json::Value,
-    ) -> Result<(), ExtensionError> {
-        crate::host_router::emit_for_sink(
+    ) -> Result<EventPublishReceipt, EventSendError> {
+        self.event_tx
+            .send_confirmed(extension_event_payload(
+                &self.extension_id,
+                event_type,
+                schema_version,
+                durable,
+                payload,
+            ))
+            .await
+    }
+
+    fn emit_now(
+        &self,
+        event_type: &str,
+        schema_version: u32,
+        durable: bool,
+        payload: serde_json::Value,
+    ) -> Result<(), EventSendError> {
+        self.event_tx.send(extension_event_payload(
             &self.extension_id,
-            &self.declarations,
-            &self.event_tx,
             event_type,
             schema_version,
+            durable,
             payload,
-        )
+        ))
+    }
+}
+
+fn extension_event_payload(
+    extension_id: &str,
+    event_type: &str,
+    schema_version: u32,
+    durable: bool,
+    payload: serde_json::Value,
+) -> EventPayload {
+    let event = ExtensionEventData {
+        extension_id: extension_id.to_owned(),
+        event_type: event_type.to_owned(),
+        schema_version,
+        payload,
+    };
+    if durable {
+        EventPayload::Durable(DurableEventPayload::ExtensionEvent(event))
+    } else {
+        EventPayload::Live(LiveEventPayload::ExtensionEvent(event))
     }
 }
 

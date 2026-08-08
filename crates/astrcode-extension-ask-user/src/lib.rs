@@ -348,6 +348,7 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     use astrcode_extension_sdk::{
+        event::{EventPublishReceipt, EventSendError},
         extension::{
             ExtensionEventDecl, ExtensionEventEmitter, ExtensionHttpRequest,
             internal::{ExtensionEventSink, extension_event_emitter},
@@ -361,13 +362,29 @@ mod tests {
     #[derive(Default)]
     struct RecordingEvents(Mutex<Vec<(String, serde_json::Value)>>);
 
+    #[async_trait::async_trait]
     impl ExtensionEventSink for RecordingEvents {
-        fn emit(
+        async fn emit(
             &self,
             event_type: &str,
             _schema_version: u32,
+            _durable: bool,
             payload: serde_json::Value,
-        ) -> Result<(), ExtensionError> {
+        ) -> Result<EventPublishReceipt, EventSendError> {
+            self.0
+                .lock()
+                .unwrap()
+                .push((event_type.to_owned(), payload));
+            Ok(EventPublishReceipt::Queued)
+        }
+
+        fn emit_now(
+            &self,
+            event_type: &str,
+            _schema_version: u32,
+            _durable: bool,
+            payload: serde_json::Value,
+        ) -> Result<(), EventSendError> {
             self.0
                 .lock()
                 .unwrap()

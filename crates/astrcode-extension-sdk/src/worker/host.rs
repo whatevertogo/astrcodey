@@ -23,19 +23,20 @@ use crate::{
 };
 pub use crate::{
     host::{
-        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitRequest,
-        HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmContent, HostLlmMessage,
-        HostLlmRole, HostLlmTextDelta, HostNetworkRedirectPolicy, HostNetworkRequest,
-        HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostSessionCancelOutput,
-        HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
-        HostSessionProviderMessagesOutput, HostSessionStateReadOutput, HostSessionStateReadRequest,
-        HostSessionStateWriteRequest, HostSessionSummariesOutput, HostSessionSummary,
-        HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
-        HostSessionTranscriptMessage, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
-        HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
-        HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
-        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
-        HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
+        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitOutput,
+        HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmContent,
+        HostLlmMessage, HostLlmRole, HostLlmTextDelta, HostNetworkRedirectPolicy,
+        HostNetworkRequest, HostNetworkResponse, HostProcessOutput, HostProcessRequest,
+        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
+        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionStateReadOutput,
+        HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
+        HostSessionSummary, HostSessionTokenUsage, HostSessionTokenUsageOutput,
+        HostSessionTranscript, HostSessionTranscriptMessage, HostWorkspaceEditOutput,
+        HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+        HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+        HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
+        HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
+        HostWorkspaceWriteRequest,
     },
     session::{
         HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
@@ -416,9 +417,7 @@ mod host_tests {
                 capability
                     if matches!(
                         capability,
-                        "astrcode.event.emit"
-                            | "astrcode.session.control.dispose"
-                            | "astrcode.session.state.write"
+                        "astrcode.session.control.dispose" | "astrcode.session.state.write"
                     ) && self.marker == "invalid_ack" =>
                 {
                     Ok(json!({ "ok": true, "unexpected": true }))
@@ -426,16 +425,15 @@ mod host_tests {
                 capability
                     if matches!(
                         capability,
-                        "astrcode.event.emit"
-                            | "astrcode.session.control.dispose"
-                            | "astrcode.session.state.write"
+                        "astrcode.session.control.dispose" | "astrcode.session.state.write"
                     ) && self.marker == "false_ack" =>
                 {
                     Ok(json!({ "ok": false }))
                 },
-                "astrcode.event.emit"
-                | "astrcode.session.control.dispose"
-                | "astrcode.session.state.write" => Ok(json!({ "ok": true })),
+                "astrcode.event.emit" => Ok(json!({ "status": "queued" })),
+                "astrcode.session.control.dispose" | "astrcode.session.state.write" => {
+                    Ok(json!({ "ok": true }))
+                },
                 _ => Ok(json!({
                     "capability": capability,
                     "host": self.marker,
@@ -701,7 +699,7 @@ mod host_tests {
                 .unwrap();
             assert_eq!(network.body, vec![0, 255]);
 
-            HostClient::events()
+            let receipt = HostClient::events()
                 .emit(HostEventEmitRequest {
                     event_type: "review.completed".into(),
                     schema_version: 1,
@@ -709,6 +707,7 @@ mod host_tests {
                 })
                 .await
                 .unwrap();
+            assert_eq!(receipt, HostEventEmitOutput::Queued);
 
             let history = HostClient::session_history()
                 .list_summaries()

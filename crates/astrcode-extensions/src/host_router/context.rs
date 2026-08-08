@@ -2,19 +2,24 @@
 
 use std::io::Read as _;
 
-use astrcode_core::{config::defaults::extension_data_dir, wire::WireErrorCode};
+use astrcode_core::{
+    config::defaults::extension_data_dir, event::EventSendError, wire::WireErrorCode,
+};
 use astrcode_extension_sdk::{
+    extension::ExtensionError,
     host::{
-        HOST_SESSION_STATE_VALUE_MAX_BYTES, HostAcknowledgement, HostEventEmitRequest,
-        HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
+        HOST_SESSION_STATE_VALUE_MAX_BYTES, HostAcknowledgement, HostEventEmitOutput,
+        HostEventEmitRequest, HostSessionStateReadOutput, HostSessionStateReadRequest,
+        HostSessionStateWriteRequest,
     },
     s5r::ErrorPayload,
 };
 use serde_json::Value;
 
 use super::{
-    InvokeContext, backend_unavailable, capability::ContextCapability, emit_for_sink, io_error,
-    parse_wire_request, run_blocking_io, run_blocking_io_to_completion, serialize_wire_response,
+    InvokeContext, backend_unavailable, capability::ContextCapability, emit_for_sink_confirmed,
+    io_error, parse_wire_request, run_blocking_io, run_blocking_io_to_completion,
+    serialize_wire_response,
 };
 
 #[derive(Default)]
@@ -30,7 +35,7 @@ impl ContextGroup {
         match capability {
             ContextCapability::StateRead => read_state(input, ctx).await,
             ContextCapability::StateWrite => write_state(input, ctx).await,
-            ContextCapability::EmitEvent => emit_event(input, ctx),
+            ContextCapability::EmitEvent => emit_event(input, ctx).await,
         }
     }
 
@@ -97,13 +102,13 @@ async fn write_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorP
     serialize_wire_response(HostAcknowledgement::accepted(), "session.state.write")
 }
 
-fn emit_event(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
+async fn emit_event(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
     let request: HostEventEmitRequest = parse_wire_request(input, "session.emit_event")?;
     let event_tx = ctx
         .event_tx
         .as_ref()
         .ok_or_else(|| backend_unavailable("event_tx not configured in context"))?;
-    emit_for_sink(
+    let receipt = emit_for_sink_confirmed(
         &ctx.extension_id,
         &ctx.event_declarations,
         event_tx,
@@ -111,6 +116,22 @@ fn emit_event(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload>
         request.schema_version,
         request.payload,
     )
-    .map_err(|error| ErrorPayload::new(WireErrorCode::EmitFailed, error.to_string()))?;
-    serialize_wire_response(HostAcknowledgement::accepted(), "session.emit_event")
+    .await
+    .map_err(event_emit_error)?;
+    serialize_wire_response(HostEventEmitOutput::from(receipt), "session.emit_event")
+}
+
+fn event_emit_error(error: ExtensionError) -> ErrorPayload {
+    match error {
+        ExtensionError::EventSend(EventSendError::Full) => {
+            ErrorPayload::new(WireErrorCode::PeerBusy, error.to_string()).retryable(true)
+        },
+        ExtensionError::EventSend(EventSendError::Closed) => {
+            ErrorPayload::new(WireErrorCode::BackendUnavailable, error.to_string())
+        },
+        ExtensionError::EventSend(EventSendError::PublishFailed(_)) => {
+            ErrorPayload::new(WireErrorCode::EmitFailed, error.to_string())
+        },
+        error => ErrorPayload::new(WireErrorCode::EmitFailed, error.to_string()),
+    }
 }

@@ -259,7 +259,9 @@ impl ToolHandler for MemoryDeleteHandler {
                 "match": pattern_for_emit,
                 "deleted_count": removed.len(),
             });
-            let _ = ctx.events().emit("memory.deleted", &payload).await;
+            if let Err(error) = ctx.events().emit("memory.deleted", &payload).await {
+                tracing::warn!(%error, "memory deletion event was not published");
+            }
         }
 
         if removed.is_empty() {

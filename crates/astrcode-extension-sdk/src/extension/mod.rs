@@ -22,16 +22,29 @@ mod tool_context;
 pub mod internal {
     use std::sync::Arc;
 
-    use super::{ExtensionError, ExtensionEventDecl, ExtensionEventEmitter};
+    use astrcode_core::event::{EventPublishReceipt, EventSendError};
+    use async_trait::async_trait;
+
+    use super::{ExtensionEventDecl, ExtensionEventEmitter};
 
     /// Host-bound event ingress. Extension authors emit through [`ExtensionEventEmitter`].
+    #[async_trait]
     pub trait ExtensionEventSink: Send + Sync {
-        fn emit(
+        async fn emit(
             &self,
             event_type: &str,
             schema_version: u32,
+            durable: bool,
             payload: serde_json::Value,
-        ) -> Result<(), ExtensionError>;
+        ) -> Result<EventPublishReceipt, EventSendError>;
+
+        fn emit_now(
+            &self,
+            event_type: &str,
+            schema_version: u32,
+            durable: bool,
+            payload: serde_json::Value,
+        ) -> Result<(), EventSendError>;
     }
 
     pub fn extension_event_emitter(
