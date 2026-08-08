@@ -265,7 +265,7 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 
 ## 8. `extensions` 段（按扩展 id）
 
-键为扩展 ID，值为扩展自行反序列化的配置值（`ExtensionCtx::config.deserialize()`）。TOML 中无法表达 `null`，需要“未设置”语义时请省略字段。
+键为扩展 ID，值为扩展自行反序列化的配置值（`ExtensionStartContext::config().deserialize()`）。TOML 中无法表达 `null`，需要“未设置”语义时请省略字段。
 
 ### 8.1 `astrcode.memory`
 
@@ -285,8 +285,12 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 
 **数据目录**（与 config 分离）：
 
-- 用户偏好：`~/.astrcode/memory/`（`user_pref` 类别）
-- 项目记忆：`~/.astrcode/projects/<project_key>/extension_data/astrcode.memory/`
+- 用户偏好：`~/.astrcode/extension_data/astrcode.memory/`（`user_pref` 类别）
+- 项目记忆：`~/.astrcode/extension_data/astrcode.memory/projects/<project_key>/`
+
+> Breaking change：旧目录 `~/.astrcode/memory/` 和
+> `~/.astrcode/projects/<project_key>/extension_data/astrcode.memory/` 不再读取，也不会自动
+> 迁移。如需保留旧数据，升级前手动复制到上述新目录。
 
 ### 8.2 `astrcode-web-tools`
 
@@ -330,13 +334,12 @@ allowedChatIds = ["123456789"]
 allowAllChats = false
 registerCommands = false
 streaming = false
-workingDir = "D:/my-project"
 requestTimeoutSecs = 30
 pollTimeoutSecs = 25
 maxReplyChars = 3500
 ```
 
-未设置 `allowAllChats: true` 时应配置 `allowedChatIds` 白名单。`botToken` 可直接写 token，更推荐 `botTokenEnv`。
+未设置 `allowAllChats: true` 时应配置 `allowedChatIds` 白名单。`botToken` 可直接写 token，更推荐 `botTokenEnv`。Telegram 创建的顶层 session 绑定扩展启动时的宿主 workspace，通道配置不能覆盖该路径。
 
 ### 8.4 MCP（**不在** `extensions` 内）
 

@@ -5,10 +5,11 @@ use std::{
     time::Duration,
 };
 
-use astrcode_extension_sdk::{
+use astrcode_extension_sdk::{WireErrorCode,
     builder::tool,
     extension::{
-        ExtensionEventDecl, ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute,
+        ExtensionEventDecl, ExtensionHttpDispatchRequest, ExtensionHttpMethod,
+        ExtensionHttpResponse, ExtensionHttpRoute,
     },
     s5r::{
         ErrorPayload,
@@ -85,16 +86,17 @@ async fn main() {
 }
 
 async fn run() -> Result<(), ErrorPayload> {
-    let mut worker = Worker::new(EXT_ID)
+    let mut worker = Worker::new(EXT_ID);
+    worker
         .version("0.1.0")
-        .capability("small_model")
-        .capability("emit_events")
-        .capability("workspace_read")
-        .capability("session_inspect")
-        .capability("public_http")
-        .capability("public_http_dispatch")
-        .capability("tool_intercept")
-        .extension_event_decl(ExtensionEventDecl {
+        .capability(ExtensionCapability::SmallModel)
+        .capability(ExtensionCapability::EmitEvents)
+        .capability(ExtensionCapability::WorkspaceRead)
+        .capability(ExtensionCapability::SessionInspect)
+        .capability(ExtensionCapability::PublicHttp)
+        .capability(ExtensionCapability::PublicHttpDispatch)
+        .capability(ExtensionCapability::ToolIntercept)
+        .extension_event(ExtensionEventDecl {
             event_type: "s5r_guest.probe".into(),
             schema_version: 1,
             durable: true,
@@ -109,11 +111,64 @@ async fn run() -> Result<(), ErrorPayload> {
         tool_handler(|_ctx| async { Ok(tool_text("pong", false)) }),
     )?;
 
+    worker.tool(
+        tool("call_context")
+            .description("Return the host-attributed tool call context")
+            .parameters(json!({ "type": "object", "properties": {} }))
+            .build(),
+        tool_handler(|ctx| async move {
+            Ok(tool_text(
+                json!({
+                    "extension_id": ctx.extension_id(),
+                    "session_id": ctx.session_id(),
+                    "turn_id": ctx.turn_id(),
+                    "tool_call_id": ctx.tool_call_id(),
+                    "working_dir": ctx
+                        .working_dir()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                })
+                .to_string(),
+                false,
+            ))
+        }),
+    )?;
+
+    worker.tool(
+        tool("session_state_roundtrip")
+            .description("Write and read extension-scoped session state")
+            .parameters(json!({ "type": "object", "properties": {} }))
+            .build(),
+        tool_handler(|_ctx| async move {
+            HostClient::session_state()
+                .write(HostSessionStateWriteRequest {
+                    key: "typed-probe".into(),
+                    content: "state-roundtrip-ok".into(),
+                })
+                .await?;
+            let output = HostClient::session_state()
+                .read(HostSessionStateReadRequest {
+                    key: "typed-probe".into(),
+                })
+                .await?;
+            Ok(tool_text(
+                output.content.unwrap_or_else(|| "missing".into()),
+                false,
+            ))
+        }),
+    )?;
+
     worker.http_route(
         ExtensionHttpRoute::public(ExtensionHttpMethod::Post, "/s5r-probe/{id}"),
         http_handler(|request, _ctx| async move {
+            let status = if request.path_params.get("id").map(String::as_str)
+                == Some("invalid-status")
+            {
+                99
+            } else {
+                202
+            };
             Ok(ExtensionHttpResponse::json(
-                202,
+                status,
                 json!({
                     "id": request.path_params.get("id"),
                     "query": request.query,
@@ -167,13 +222,10 @@ async fn run() -> Result<(), ErrorPayload> {
             }))
             .build(),
         tool_handler_args(|args: AskLlmArgs, _ctx| async move {
-            let out = HostClient::call(
-                "astrcode.llm.small_chat",
-                json!({ "messages": [{ "role": "user", "content": args.prompt }] }),
-            )
-            .await?;
-            let content = out["content"].as_str().unwrap_or("(no content)");
-            Ok(tool_text(content, false))
+            let output = HostClient::models()
+                .small_chat(vec![LlmMessage::user(args.prompt)])
+                .await?;
+            Ok(tool_text(output.content, false))
         }),
     )?;
 
@@ -187,9 +239,7 @@ async fn run() -> Result<(), ErrorPayload> {
             let step_2_calls = PIPELINE_STEP_2_CALLS.load(Ordering::SeqCst);
             let llm_ok = PIPELINE_LLM_OK.load(Ordering::SeqCst);
             Ok(tool_text(
-                format!(
-                    "step_1_calls={step_1_calls} step_2_calls={step_2_calls} llm_ok={llm_ok}"
-                ),
+                format!("step_1_calls={step_1_calls} step_2_calls={step_2_calls} llm_ok={llm_ok}"),
                 false,
             ))
         }),
@@ -201,10 +251,16 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(json!({ "type": "object" }))
             .build(),
         tool_handler(|_ctx| async move {
-            let out =
-                HostClient::call("astrcode.workspace.read", json!({ "path": "probe.txt" })).await?;
-            let content = out["content"].as_str().unwrap_or("");
-            Ok(tool_text(format!("read probe.txt: {content}"), false))
+            let output = HostClient::workspace()
+                .read(HostWorkspaceReadRequest {
+                    path: "probe.txt".into(),
+                    max_bytes: None,
+                })
+                .await?;
+            Ok(tool_text(
+                format!("read probe.txt: {}", output.content),
+                false,
+            ))
         }),
     )?;
 
@@ -221,12 +277,17 @@ async fn run() -> Result<(), ErrorPayload> {
         tool_handler_args(|args: ParallelReadArgs, _ctx| async move {
             let _active = ParallelCallGuard::enter();
             tokio::time::sleep(Duration::from_millis(args.delay_ms)).await;
-            let output =
-                HostClient::call("astrcode.workspace.read", json!({ "path": "probe.txt" }))
-                    .await?;
-            let content = output["content"].as_str().unwrap_or("");
+            let output = HostClient::workspace()
+                .read(HostWorkspaceReadRequest {
+                    path: "probe.txt".into(),
+                    max_bytes: None,
+                })
+                .await?;
             let peak = PARALLEL_PEAK.load(Ordering::SeqCst);
-            Ok(tool_text(format!("content={content} peak={peak}"), false))
+            Ok(tool_text(
+                format!("content={} peak={peak}", output.content),
+                false,
+            ))
         }),
     )?;
 
@@ -236,7 +297,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(json!({ "type": "object" }))
             .build(),
         tool_handler(|_ctx| async move {
-            let output = HostClient::list_sessions().await?;
+            let output = HostClient::session_inspect().list().await?;
             Ok(tool_text(
                 format!("session_count={}", output.sessions.len()),
                 false,
@@ -250,15 +311,33 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(json!({ "type": "object" }))
             .build(),
         tool_handler(|_ctx| async move {
-            let response = HostClient::dispatch_public_http(
-                astrcode_extension_sdk::extension::ExtensionHttpRequest::new(
-                    ExtensionHttpMethod::Post,
-                    "/dispatch-target/42",
-                )
-                .query("source=s5r")
-                .json_body(json!({ "from": "guest" })),
+            let forged = astrcode_extension_sdk::worker::testing::invoke_host(
+                "astrcode.extension.http.public",
+                json!({
+                    "method": "POST",
+                    "path": "/dispatch-target/42",
+                    "pathParams": { "id": "forged" },
+                    "query": "source=forged",
+                    "body": { "from": "forged" }
+                }),
             )
-            .await?;
+            .await;
+            if !matches!(&forged, Err(error) if error.code == "invalid_input") {
+                return Err(ErrorPayload::new(
+                    WireErrorCode::InvalidInput,
+                    format!("host accepted forged path params: {forged:?}"),
+                ));
+            }
+            let response = HostClient::extension_http()
+                .dispatch_public(
+                    ExtensionHttpDispatchRequest::new(
+                        ExtensionHttpMethod::Post,
+                        "/dispatch-target/42",
+                    )
+                    .query("source=s5r")
+                    .json_body(json!({ "from": "guest" })),
+                )
+                .await?;
             Ok(tool_text(response.body.to_string(), response.status >= 400))
         }),
     )?;
@@ -270,7 +349,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .build(),
         tool_handler(|ctx| async move {
             for _ in 0..200 {
-                if ctx.cancel_token.is_cancelled() {
+                if ctx.cancel_token().is_cancelled() {
                     return Ok(tool_text("cancelled", true));
                 }
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -291,19 +370,18 @@ async fn run() -> Result<(), ErrorPayload> {
     )?;
 
     worker.hook(
-        "pre_tool_use",
-        "blocking",
+        ExtensionEvent::PreToolUse,
+        HookMode::Blocking,
         hook_handler_args(|input: PreToolInput, _ctx| async move {
             if input.tool_name == "emit_hook_probe" {
-                let _ = HostClient::call(
-                    "astrcode.event.emit",
-                    json!({
-                        "event_type": "s5r_guest.probe",
-                        "schema_version": 1,
-                        "payload": { "from": "pre_tool_use" }
-                    }),
-                )
-                .await;
+                // This probe must inherit the active hook's request-scoped event context.
+                HostClient::events()
+                    .emit(HostEventEmitRequest {
+                        event_type: "s5r_guest.probe".into(),
+                        schema_version: 1,
+                        payload: json!({ "from": "pre_tool_use" }),
+                    })
+                    .await?;
                 return Ok(HandlerResult::ok());
             }
             if input.tool_name == "bash" {
@@ -320,8 +398,8 @@ async fn run() -> Result<(), ErrorPayload> {
     )?;
 
     worker.hook(
-        "turn_end",
-        "non_blocking",
+        ExtensionEvent::TurnEnd,
+        HookMode::NonBlocking,
         hook_handler(|_ctx| async {
             Ok(HandlerResult {
                 ok: true,
@@ -352,19 +430,17 @@ async fn run() -> Result<(), ErrorPayload> {
                             input: json!({ "step": 2 }),
                         }],
                     })
-                }
+                },
                 2 => {
                     PIPELINE_STEP_2_CALLS.fetch_add(1, Ordering::SeqCst);
-                    let _ = HostClient::call_stream(
-                        "astrcode.llm.small_chat",
-                        json!({ "messages": [{ "role": "user", "content": "continuation pipeline" }] }),
-                    )
-                    .await?;
+                    let _ = HostClient::models()
+                        .small_chat_stream(vec![LlmMessage::user("continuation pipeline")])
+                        .await?;
                     PIPELINE_LLM_OK.store(true, Ordering::SeqCst);
                     Ok(HandlerResult::ok())
-                }
+                },
                 _ => Err(ErrorPayload::new(
-                    "unknown_step",
+                    WireErrorCode::InvalidRequest,
                     format!("unknown pipeline step: {}", input.step),
                 )),
             }

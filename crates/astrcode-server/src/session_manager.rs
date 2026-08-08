@@ -136,6 +136,7 @@ impl SessionManager {
         Ok(effective)
     }
 
+    #[cfg(test)]
     pub(crate) async fn create(&self, working_dir: &str) -> Result<Session, SessionManagerError> {
         self.create_with_tool_selection(working_dir, None).await
     }
@@ -144,6 +145,25 @@ impl SessionManager {
         &self,
         working_dir: &str,
         tool_selection: Option<&SessionToolSelection>,
+    ) -> Result<Session, SessionManagerError> {
+        self.create_root_with_options(working_dir, tool_selection, None)
+            .await
+    }
+
+    pub(crate) async fn create_for_extension(
+        &self,
+        working_dir: &str,
+        source_extension: Option<String>,
+    ) -> Result<Session, SessionManagerError> {
+        self.create_root_with_options(working_dir, None, source_extension)
+            .await
+    }
+
+    async fn create_root_with_options(
+        &self,
+        working_dir: &str,
+        tool_selection: Option<&SessionToolSelection>,
+        source_extension: Option<String>,
     ) -> Result<Session, SessionManagerError> {
         let manager = self.clone();
         let working_dir = working_dir.to_owned();
@@ -154,6 +174,7 @@ impl SessionManager {
                 sid.clone(),
                 working_dir,
                 tool_selection,
+                source_extension,
             ))
             .catch_unwind()
             .await
@@ -181,6 +202,7 @@ impl SessionManager {
         sid: SessionId,
         working_dir: String,
         tool_selection: Option<SessionToolSelection>,
+        source_extension: Option<String>,
     ) -> Result<Session, SessionManagerError> {
         let runtime = self.runtime_for(&sid);
         let creation = runtime.begin_creation();
@@ -193,7 +215,7 @@ impl SessionManager {
             model_id: self.runtime_services.read_effective().llm.model_id.clone(),
             parent_session_id: None,
             tool_selection,
-            source_extension: None,
+            source_extension,
             extra_system_prompt: None,
             initial_system_prompt: None,
             runtime,
@@ -300,10 +322,12 @@ impl SessionManager {
         session_id: &SessionId,
     ) -> Result<(), SessionManagerError> {
         let model = self.event_store.session_read_model(session_id).await?;
+        let session_store_dir = self.session_store_dir(session_id).await?;
         emit_lifecycle_for_read_model(
             &self.runtime_services,
             session_id,
             &model,
+            session_store_dir,
             ExtensionEvent::SessionShutdown,
         )
         .await
@@ -945,7 +969,7 @@ mod tests {
         types::ToolCallId,
     };
     use astrcode_extension_sdk::{
-        extension::{ExtensionError, ExtensionEvent, LifecycleContext},
+        extension::{ExtensionError, ExtensionEvent, RuntimeLifecycleContext},
         runtime_ports::{NoopRuntimePorts, TurnHooks},
     };
     use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices, SpawnChildParams};
@@ -1040,9 +1064,11 @@ mod tests {
         async fn emit_lifecycle(
             &self,
             event: ExtensionEvent,
-            ctx: LifecycleContext,
+            ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
-            self.events.lock().push((event.clone(), ctx.session_id));
+            self.events
+                .lock()
+                .push((event.clone(), ctx.call().session_id().to_string()));
             if event == ExtensionEvent::SessionStart {
                 let start = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
                 if start == self.fail_start_at {
@@ -1118,9 +1144,11 @@ mod tests {
         async fn emit_lifecycle(
             &self,
             event: ExtensionEvent,
-            ctx: LifecycleContext,
+            ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
-            self.events.lock().push((event.clone(), ctx.session_id));
+            self.events
+                .lock()
+                .push((event.clone(), ctx.call().session_id().to_string()));
             if event != ExtensionEvent::SessionStart {
                 return Ok(());
             }
@@ -1597,7 +1625,7 @@ mod tests {
                 extra_system_prompt: None,
                 tool_selection: None,
                 source_extension: None,
-                tool_call_id: ToolCallId::new("call-compensation"),
+                tool_call_id: Some(ToolCallId::new("call-compensation")),
             })
             .await
         {
@@ -1627,7 +1655,7 @@ mod tests {
                 extra_system_prompt: None,
                 tool_selection: None,
                 source_extension: None,
-                tool_call_id: ToolCallId::new("call-sync-compensation"),
+                tool_call_id: Some(ToolCallId::new("call-sync-compensation")),
             })
             .await
         {
@@ -1678,7 +1706,7 @@ mod tests {
                 extra_system_prompt: None,
                 tool_selection: None,
                 source_extension: None,
-                tool_call_id: ToolCallId::new("call-lifecycle-compensation"),
+                tool_call_id: Some(ToolCallId::new("call-lifecycle-compensation")),
             })
             .await
         {
@@ -1923,7 +1951,7 @@ mod tests {
                         extra_system_prompt: None,
                         tool_selection: None,
                         source_extension: None,
-                        tool_call_id: ToolCallId::new("call-aborted-child"),
+                        tool_call_id: Some(ToolCallId::new("call-aborted-child")),
                     })
                     .await
             })
@@ -2078,7 +2106,7 @@ mod tests {
                     extra_system_prompt: None,
                     tool_selection: None,
                     source_extension: None,
-                    tool_call_id: ToolCallId::new("call-blocked-child"),
+                    tool_call_id: Some(ToolCallId::new("call-blocked-child")),
                 })
                 .await
         });

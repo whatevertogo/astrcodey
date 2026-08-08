@@ -1,3 +1,13 @@
+## Unreleased
+
+### ⚠️ Breaking changes
+
+- memory 扩展不再读取旧数据目录 `~/.astrcode/memory/` 和
+  `~/.astrcode/projects/<key>/extension_data/astrcode.memory/`。新目录统一为
+  `~/.astrcode/extension_data/astrcode.memory/`，项目记忆放在其 `projects/<key>/`
+  子目录。这是刻意的不兼容变更，没有旧目录双读或自动迁移；如需保留尚未迁移的
+  数据，升级前手动复制到新目录。
+
 ## v0.3.13
 
 Released: 2026-08-03

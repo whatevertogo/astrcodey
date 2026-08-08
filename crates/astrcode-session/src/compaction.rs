@@ -12,7 +12,6 @@ use astrcode_context::{
 };
 use astrcode_core::{
     compaction::{CompactStrategy, CompactTrigger},
-    config::ModelSelection,
     event::LiveEventPayload,
     llm::{self, LlmMessage, LlmProvider, LlmRequest},
     tool::ToolDefinition,
@@ -20,7 +19,8 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        CompactContext, CompactEvent, CompactResult as TypedCompactResult, ExtensionError,
+        CompactEvent, CompactResult as TypedCompactResult, ExtensionError, RuntimeCompactContext,
+        RuntimeHookCallContext,
     },
     runtime_ports::TurnHooks,
 };
@@ -363,26 +363,24 @@ fn compact_hook_context(
     shared: &SharedTurnContext,
     message_count: usize,
     trigger: CompactTrigger,
-) -> CompactHookContext<'_> {
+) -> CompactHookContext {
     CompactHookContext {
-        session_id: shared.session_id.as_str(),
-        working_dir: &shared.working_dir,
-        model_id: &shared.model_id,
+        call: shared.hook_call_context(),
         trigger,
         message_count,
     }
 }
 
 /// idle compact 的 Pre/Post hook 上下文（trigger 固定为 ManualCommand）。
-fn manual_hook_context<'a>(
-    session: &'a Session,
-    state: &'a SessionReadModel,
+fn manual_hook_context(
+    session: &Session,
+    state: &SessionReadModel,
+    session_store_dir: Option<std::path::PathBuf>,
     message_count: usize,
-) -> CompactHookContext<'a> {
+) -> CompactHookContext {
     CompactHookContext {
-        session_id: session.id().as_str(),
-        working_dir: &state.identity.working_dir,
-        model_id: &state.identity.model_id,
+        call: SharedTurnContext::from_read_model(session.id(), state, session_store_dir)
+            .hook_call_context(),
         trigger: CompactTrigger::ManualCommand,
         message_count,
     }
@@ -468,32 +466,28 @@ fn record_breaker_attempt(host: &CompactionHost<'_>, plan: &CompactionPlan, llm_
 
 // ── Shared hook and persistence ──
 
-struct CompactHookContext<'a> {
-    session_id: &'a str,
-    working_dir: &'a str,
-    model_id: &'a str,
+struct CompactHookContext {
+    call: RuntimeHookCallContext,
     trigger: CompactTrigger,
     message_count: usize,
 }
 
-impl CompactHookContext<'_> {
-    fn build_context(&self, compaction: Option<&CompactResult>) -> CompactContext {
-        CompactContext {
-            session_id: self.session_id.to_string(),
-            working_dir: self.working_dir.to_string(),
-            model: ModelSelection::simple(self.model_id),
-            trigger: self.trigger,
-            message_count: self.message_count,
-            pre_tokens: compaction.map(|compaction| compaction.pre_tokens),
-            post_tokens: compaction.map(|compaction| compaction.post_tokens),
-            summary: compaction.map(|compaction| compaction.summary.clone()),
-        }
+impl CompactHookContext {
+    fn build_context(&self, compaction: Option<&CompactResult>) -> RuntimeCompactContext {
+        RuntimeCompactContext::new(
+            self.call.clone(),
+            self.trigger,
+            self.message_count,
+            compaction.map(|compaction| compaction.pre_tokens),
+            compaction.map(|compaction| compaction.post_tokens),
+            compaction.map(|compaction| compaction.summary.clone()),
+        )
     }
 }
 
 async fn collect_compact_instructions(
     extension_runner: &dyn TurnHooks,
-    input: CompactHookContext<'_>,
+    input: CompactHookContext,
 ) -> Result<Vec<String>, ExtensionError> {
     let result = extension_runner
         .emit_compact(CompactEvent::PreCompact, input.build_context(None))
@@ -512,7 +506,7 @@ async fn collect_compact_instructions(
 
 async fn dispatch_post_compact(
     extension_runner: &dyn TurnHooks,
-    input: CompactHookContext<'_>,
+    input: CompactHookContext,
     compaction: &CompactResult,
 ) -> Result<(), ExtensionError> {
     extension_runner
@@ -585,16 +579,27 @@ pub async fn compact_idle_session(
     let runtime_view = runtime_services.turn_runtime_view().await?;
     let extension_runner = runtime_view.turn_hooks_arc();
     let context_assembler = runtime_services.context_assembler_arc();
+    let session_store_dir = session.session_store_dir().await;
 
     let state = session.read_model().await?;
-    let pre_hook = manual_hook_context(session, &state, state.transcript.messages.len());
+    let pre_hook = manual_hook_context(
+        session,
+        &state,
+        session_store_dir.clone(),
+        state.transcript.messages.len(),
+    );
     let custom_instructions =
         collect_compact_instructions(extension_runner.as_ref(), pre_hook).await?;
 
     let state = session.read_model().await?;
     let snapshot = context_snapshot(&state);
     let llm = runtime_services.llm();
-    let post_hook = manual_hook_context(session, &state, snapshot.messages.len());
+    let post_hook = manual_hook_context(
+        session,
+        &state,
+        session_store_dir.clone(),
+        snapshot.messages.len(),
+    );
     let tool_registry = session
         .tool_registry_snapshot_for_view(&runtime_view, &state.identity.working_dir)
         .await?;
@@ -634,7 +639,6 @@ pub async fn compact_idle_session(
         Ok(compaction) => compaction.result,
     };
 
-    let session_store_dir = session.session_store_dir().await;
     session
         .runtime_services()
         .post_compact_enricher()

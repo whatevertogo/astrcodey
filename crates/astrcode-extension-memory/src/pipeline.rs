@@ -1,11 +1,10 @@
 //! Memory pipeline — SessionStart / post-`memory_save` batch extraction from changed rollouts.
 
-use std::sync::Arc;
-
 use astrcode_extension_sdk::{
     extension::ExtensionError,
-    llm::{LlmContent, LlmMessage, LlmProvider, LlmRole},
-    session_query::{SessionQuery, SessionSummary, SessionTranscript},
+    host::{ModelClient, SessionInspectClient},
+    llm::{LlmContent, LlmMessage, LlmRole},
+    session_inspect::{SessionInspectContent, SessionInspectListItem, SessionInspectReadModel},
 };
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
@@ -19,7 +18,7 @@ use crate::{
 
 #[derive(Clone)]
 struct Candidate {
-    summary: SessionSummary,
+    summary: SessionInspectListItem,
     updated_at: DateTime<Utc>,
 }
 
@@ -38,8 +37,8 @@ struct SessionExtraction {
 
 pub async fn run(
     scoped: &ScopedMemoryStores,
-    session_query: Arc<dyn SessionQuery>,
-    small_llm: &dyn LlmProvider,
+    session_inspect: SessionInspectClient,
+    small_model: &ModelClient,
     current_session_id: &str,
     config: &MemoryConfig,
 ) -> Result<(), ExtensionError> {
@@ -52,7 +51,7 @@ pub async fn run(
     }
 
     let candidates = find_changed_candidates(
-        Arc::clone(&session_query),
+        session_inspect.clone(),
         store,
         current_session_id,
         config.max_changed_sessions,
@@ -72,8 +71,8 @@ pub async fn run(
     .map_err(|e| ExtensionError::Internal(e.to_string()))?;
 
     let extractions = extract_batch(
-        Arc::clone(&session_query),
-        small_llm,
+        session_inspect,
+        small_model,
         &candidates,
         &existing_memory,
         config.min_conversation_chars,
@@ -123,15 +122,16 @@ fn format_existing_memories(
 }
 
 async fn find_changed_candidates(
-    session_query: Arc<dyn SessionQuery>,
+    session_inspect: SessionInspectClient,
     store: &MemoryStore,
     current_session_id: &str,
     max_candidates: usize,
 ) -> Result<Vec<Candidate>, ExtensionError> {
-    let summaries = session_query
-        .list_summaries()
+    let summaries = session_inspect
+        .list()
         .await
-        .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+        .map_err(|e| ExtensionError::Internal(e.to_string()))?
+        .sessions;
     let processed = store
         .list_processed()
         .map_err(|e| ExtensionError::Internal(e.to_string()))?;
@@ -139,7 +139,7 @@ async fn find_changed_candidates(
     let mut candidates: Vec<Candidate> = summaries
         .into_iter()
         .filter_map(|s| {
-            if s.session_id.as_ref() == current_session_id {
+            if s.session_id == current_session_id {
                 return None;
             }
             if s.parent_session_id.is_some() {
@@ -148,7 +148,7 @@ async fn find_changed_candidates(
             if s.source_extension.is_some() {
                 return None;
             }
-            if processed.get(s.session_id.as_ref()) == Some(&s.updated_at) {
+            if processed.get(s.session_id.as_str()) == Some(&s.updated_at) {
                 return None;
             }
             let updated = DateTime::parse_from_rfc3339(&s.updated_at).ok()?;
@@ -165,8 +165,8 @@ async fn find_changed_candidates(
 }
 
 async fn extract_batch(
-    session_query: Arc<dyn SessionQuery>,
-    small_llm: &dyn LlmProvider,
+    session_inspect: SessionInspectClient,
+    small_model: &ModelClient,
     candidates: &[Candidate],
     existing_memories: &str,
     min_conversation_chars: usize,
@@ -176,19 +176,20 @@ async fn extract_batch(
 
     for candidate in candidates {
         let session_id = &candidate.summary.session_id;
-        let transcript = session_query
-            .transcript(session_id)
+        let read_model = session_inspect
+            .read_model(session_id)
             .await
-            .map_err(|e| ExtensionError::Internal(e.to_string()))?;
+            .map_err(|e| ExtensionError::Internal(e.to_string()))?
+            .read_model;
 
-        let conversation = extract_conversation(&transcript);
+        let conversation = extract_conversation(&read_model);
         if conversation.chars().count() < min_conversation_chars {
             continue;
         }
 
         blocks.push(format!(
             "### session_id: {}\n{conversation}",
-            session_id.as_ref()
+            session_id.as_str()
         ));
         eligible.push(candidate.clone());
     }
@@ -217,17 +218,14 @@ async fn extract_batch(
         },
     ];
 
-    let rx = small_llm
-        .generate(messages, vec![])
+    let text = small_model
+        .small_chat_stream(messages)
         .await
-        .map_err(|e| ExtensionError::Internal(e.to_string()))?;
-
-    let text = astrcode_extension_sdk::llm::collect_stream_text(rx)
-        .await
-        .unwrap_or_default();
+        .map_err(|e| ExtensionError::Internal(e.to_string()))?
+        .content;
 
     let batch = parse_batch_output(&text)?;
-    map_batch_to_candidates(&eligible, batch)
+    Ok(map_batch_to_candidates(&eligible, batch))
 }
 
 fn parse_batch_output(text: &str) -> Result<BatchPhase1Output, ExtensionError> {
@@ -244,40 +242,45 @@ fn parse_batch_output(text: &str) -> Result<BatchPhase1Output, ExtensionError> {
 fn map_batch_to_candidates(
     candidates: &[Candidate],
     batch: BatchPhase1Output,
-) -> Result<Vec<(Candidate, Phase1Output)>, ExtensionError> {
+) -> Vec<(Candidate, Phase1Output)> {
     let mut by_id: std::collections::BTreeMap<String, Vec<MemoryEntry>> =
         std::collections::BTreeMap::new();
     for session in batch.sessions {
-        if session.memories.is_empty() {
-            by_id.insert(session.session_id, Vec::new());
-        } else {
-            by_id.insert(session.session_id, session.memories);
-        }
+        by_id.insert(session.session_id, session.memories);
     }
 
     let mut results = Vec::new();
     for candidate in candidates {
-        let sid = candidate.summary.session_id.as_ref();
+        let sid = candidate.summary.session_id.as_str();
         let memories = by_id.remove(sid).unwrap_or_default();
         results.push((candidate.clone(), Phase1Output { memories }));
     }
-    Ok(results)
+    results
 }
 
-fn extract_conversation(transcript: &SessionTranscript) -> String {
+fn extract_conversation(read_model: &SessionInspectReadModel) -> String {
     const MAX_BYTES: usize = 2000;
     const MAX_TURNS: usize = 15;
 
-    let turns: Vec<String> = transcript
+    let turns: Vec<String> = read_model
         .messages
         .iter()
         .filter_map(|msg| {
-            let role = match msg.message.role {
-                astrcode_extension_sdk::llm::LlmRole::User => "User",
-                astrcode_extension_sdk::llm::LlmRole::Assistant => "Assistant",
+            let role = match msg.message.role.as_str() {
+                "user" => "User",
+                "assistant" => "Assistant",
                 _ => return None,
             };
-            let text = msg.message.joined_text("\n");
+            let text = msg
+                .message
+                .content
+                .iter()
+                .filter_map(|content| match content {
+                    SessionInspectContent::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
             if text.is_empty() {
                 None
             } else {
@@ -333,7 +336,7 @@ fn mark_processed(store: &MemoryStore, candidates: &[Candidate]) -> Result<(), E
     let processed: Vec<ProcessedSession> = candidates
         .iter()
         .map(|c| ProcessedSession {
-            session_id: c.summary.session_id.as_ref().to_string(),
+            session_id: c.summary.session_id.clone(),
             updated_at: c.summary.updated_at.clone(),
         })
         .collect();
@@ -362,7 +365,7 @@ fn write_contexts(
                 .map(|m| format!("- [{}] {}", m.category, m.content))
                 .collect::<Vec<_>>()
                 .join("\n");
-            let filename = format!("{}.md", candidate.summary.session_id.as_ref());
+            let filename = format!("{}.md", candidate.summary.session_id);
             let content = format!(
                 "# Session {}\n\n## Extracted Memories\n{}",
                 candidate.summary.session_id, memories
@@ -390,7 +393,7 @@ fn ingest_pipeline_extractions(
         if output.memories.is_empty() {
             continue;
         }
-        let session_id = candidate.summary.session_id.as_ref();
+        let session_id = candidate.summary.session_id.as_str();
         scoped
             .ingest_extracted_entries(
                 &output.memories,

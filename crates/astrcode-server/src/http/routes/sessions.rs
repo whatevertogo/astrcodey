@@ -356,19 +356,13 @@ pub(in crate::http) async fn list_commands(
         .await
     {
         Ok(command_list) => {
-            let keybindings = state
-                .app
-                .runtime()
-                .extension_runner()
-                .collect_keybindings()
+            let keybindings = command_list
+                .keybindings
                 .into_iter()
                 .map(keybinding_to_dto)
                 .collect();
-            let status_items = state
-                .app
-                .runtime()
-                .extension_runner()
-                .collect_status_items()
+            let status_items = command_list
+                .status_items
                 .into_iter()
                 .map(status_item_to_dto)
                 .collect();

@@ -1,6 +1,12 @@
+use std::{collections::HashMap, sync::Arc};
+
+use astrcode_core::event::{EventPublishReceipt, EventSendError};
 use serde::{Deserialize, Serialize};
 
-use super::{ExtensionError, Registrar};
+use super::{HookMode, internal::ExtensionEventSink};
+
+/// Host-reported state for one extension event emission.
+pub type ExtensionEventReceipt = EventPublishReceipt;
 
 // ─── Lifecycle Events ────────────────────────────────────────────────────
 
@@ -82,18 +88,53 @@ pub fn lifecycle_event_allows_blocking(event: &ExtensionEvent) -> bool {
     )
 }
 
+/// Returns the mode encoded by hook families whose dispatcher semantics are fixed.
+///
+/// Variable-mode hooks return `None`; their accepted modes are described by
+/// [`hook_mode_is_supported`].
+#[doc(hidden)]
+pub fn fixed_hook_mode(event: &ExtensionEvent) -> Option<HookMode> {
+    match event {
+        ExtensionEvent::AfterProviderResponse => Some(HookMode::Advisory),
+        ExtensionEvent::ContinueAfterStop
+        | ExtensionEvent::UserMessageEnvelope
+        | ExtensionEvent::PromptBuild
+        | ExtensionEvent::PreCompact
+        | ExtensionEvent::PostCompact => Some(HookMode::Blocking),
+        _ => None,
+    }
+}
+
+/// Returns whether the runtime dispatcher implements `mode` for `event`.
+#[doc(hidden)]
+pub fn hook_mode_is_supported(event: &ExtensionEvent, mode: HookMode) -> bool {
+    if let Some(required) = fixed_hook_mode(event) {
+        return mode == required;
+    }
+
+    mode != HookMode::Blocking
+        || matches!(
+            event,
+            ExtensionEvent::PreToolUse
+                | ExtensionEvent::PostToolUse
+                | ExtensionEvent::BeforeProviderRequest
+        )
+        || lifecycle_event_allows_blocking(event)
+}
+
 // ─── extension Event System ────────────────────────────────────────────────
 
 /// 插件在 [`Registrar`] 中声明的事件类型。
 ///
 /// 声明是 emit 时校验的依据：未声明的事件类型会被拒绝，payload 超限也会被拒绝。
-/// `extension_id` 不在声明中——它由 runtime 在构造 [`ExtensionEventSink`] 时注入。
+/// `extension_id` 不在声明中——它由 runtime internal event sink 注入。
 pub const DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION: u32 = 1;
 pub const DEFAULT_EXTENSION_EVENT_DURABLE: bool = true;
 pub const DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
+pub const MAX_EXTENSION_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionEventDecl {
     pub event_type: String,
     #[serde(default = "default_extension_event_schema_version")]
@@ -116,55 +157,312 @@ const fn default_extension_event_max_payload_bytes() -> usize {
     DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES
 }
 
-/// [`Registrar::extension_event`] 返回的构建器。
-pub struct ExtensionEventDeclBuilder<'a> {
-    registrar: &'a mut Registrar,
-    event_type: String,
-    schema_version: u32,
-    durable: bool,
-    max_payload_bytes: usize,
+/// Extension-scoped event emitter with immutable declaration attribution.
+///
+/// The runtime constructs this value from the same registration aggregate used by dispatch.
+/// Authors choose only the event name and payload; schema version and durability come from the
+/// declaration and cannot be changed per emission.
+#[derive(Clone, Default)]
+pub struct ExtensionEventEmitter {
+    declarations: Arc<HashMap<String, ExtensionEventDecl>>,
+    sink: Option<Arc<dyn ExtensionEventSink>>,
 }
 
-impl<'a> ExtensionEventDeclBuilder<'a> {
-    pub(super) fn new(registrar: &'a mut Registrar, event_type: &str) -> Self {
+impl ExtensionEventEmitter {
+    pub(super) fn from_runtime(
+        declarations: impl IntoIterator<Item = ExtensionEventDecl>,
+        sink: Option<Arc<dyn ExtensionEventSink>>,
+    ) -> Self {
         Self {
-            registrar,
-            event_type: event_type.to_owned(),
-            schema_version: DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION,
-            durable: DEFAULT_EXTENSION_EVENT_DURABLE,
-            max_payload_bytes: DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES,
+            declarations: Arc::new(
+                declarations
+                    .into_iter()
+                    .map(|declaration| (declaration.event_type.clone(), declaration))
+                    .collect(),
+            ),
+            sink,
         }
     }
 
-    pub fn schema_version(mut self, v: u32) -> Self {
-        self.schema_version = v;
-        self
+    /// Emit an event and wait until the host reports its publication state.
+    ///
+    /// Session-scoped durable events return [`EventPublishReceipt::Published`] only after they
+    /// have a storage sequence. Unscoped hosts that cannot expose completion return
+    /// [`EventPublishReceipt::Queued`].
+    pub async fn emit<T: Serialize + ?Sized>(
+        &self,
+        event_type: &str,
+        payload: &T,
+    ) -> Result<ExtensionEventReceipt, ExtensionEventError> {
+        let (declaration, payload) = self.prepare(event_type, payload)?;
+        self.sink()?
+            .emit(
+                event_type,
+                declaration.schema_version,
+                declaration.durable,
+                payload,
+            )
+            .await
+            .map_err(|error| map_send_error(event_type, error))
     }
-    pub fn durable(mut self, d: bool) -> Self {
-        self.durable = d;
-        self
+
+    /// Try to enqueue an event from a synchronous lifecycle boundary such as a cancellation
+    /// guard's `Drop`.
+    ///
+    /// Success confirms queue admission only. Async handlers should use [`Self::emit`] so queue
+    /// pressure and publication failures are observable.
+    pub fn emit_now<T: Serialize + ?Sized>(
+        &self,
+        event_type: &str,
+        payload: &T,
+    ) -> Result<(), ExtensionEventError> {
+        let (declaration, payload) = self.prepare(event_type, payload)?;
+        self.sink()?
+            .emit_now(
+                event_type,
+                declaration.schema_version,
+                declaration.durable,
+                payload,
+            )
+            .map_err(|error| map_send_error(event_type, error))
     }
-    pub fn max_payload_bytes(mut self, n: usize) -> Self {
-        self.max_payload_bytes = n;
-        self
+
+    pub fn is_declared(&self, event_type: &str) -> bool {
+        self.declarations.contains_key(event_type)
     }
-    pub fn register(self) {
-        self.registrar
-            .register_extension_event_decl(ExtensionEventDecl {
-                event_type: self.event_type,
-                schema_version: self.schema_version,
-                durable: self.durable,
-                max_payload_bytes: self.max_payload_bytes,
+
+    fn prepare<T: Serialize + ?Sized>(
+        &self,
+        event_type: &str,
+        payload: &T,
+    ) -> Result<(&ExtensionEventDecl, serde_json::Value), ExtensionEventError> {
+        let declaration =
+            self.declarations
+                .get(event_type)
+                .ok_or_else(|| ExtensionEventError::Undeclared {
+                    event_type: event_type.to_owned(),
+                })?;
+        let payload =
+            serde_json::to_value(payload).map_err(|error| ExtensionEventError::InvalidPayload {
+                event_type: event_type.to_owned(),
+                message: error.to_string(),
+            })?;
+        let payload_bytes = serde_json::to_vec(&payload)
+            .map_err(|error| ExtensionEventError::InvalidPayload {
+                event_type: event_type.to_owned(),
+                message: error.to_string(),
+            })?
+            .len();
+        if payload_bytes > declaration.max_payload_bytes {
+            return Err(ExtensionEventError::PayloadTooLarge {
+                event_type: event_type.to_owned(),
+                actual_bytes: payload_bytes,
+                max_bytes: declaration.max_payload_bytes,
             });
+        }
+        Ok((declaration, payload))
+    }
+
+    fn sink(&self) -> Result<&dyn ExtensionEventSink, ExtensionEventError> {
+        self.sink
+            .as_deref()
+            .ok_or(ExtensionEventError::ContextUnavailable)
     }
 }
 
-/// 插件事件发射器。`extension_id` 在构造时由 runtime 绑定，调用方无法伪造身份。
-pub trait ExtensionEventSink: Send + Sync {
-    fn emit(
-        &self,
-        event_type: &str,
-        schema_version: u32,
-        payload: serde_json::Value,
-    ) -> Result<(), ExtensionError>;
+impl std::fmt::Debug for ExtensionEventEmitter {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ExtensionEventEmitter")
+            .field("declarations", &self.declarations.keys())
+            .field("sink", &self.sink.as_ref().map(|_| "<event_sink>"))
+            .finish()
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExtensionEventError {
+    #[error("extension event `{event_type}` was not declared")]
+    Undeclared { event_type: String },
+    #[error("extension event emission is unavailable in this call context")]
+    ContextUnavailable,
+    #[error("extension event `{event_type}` payload is invalid: {message}")]
+    InvalidPayload { event_type: String, message: String },
+    #[error(
+        "extension event `{event_type}` payload is {actual_bytes} bytes, exceeding {max_bytes} \
+         bytes"
+    )]
+    PayloadTooLarge {
+        event_type: String,
+        actual_bytes: usize,
+        max_bytes: usize,
+    },
+    #[error("extension event `{event_type}` ingress is full")]
+    QueueFull { event_type: String },
+    #[error("extension event `{event_type}` ingress is closed")]
+    IngressClosed { event_type: String },
+    #[error("extension event `{event_type}` publication failed: {message}")]
+    Publication { event_type: String, message: String },
+}
+
+fn map_send_error(event_type: &str, error: EventSendError) -> ExtensionEventError {
+    match error {
+        EventSendError::Full => ExtensionEventError::QueueFull {
+            event_type: event_type.to_owned(),
+        },
+        EventSendError::Closed => ExtensionEventError::IngressClosed {
+            event_type: event_type.to_owned(),
+        },
+        EventSendError::PublishFailed(message) => ExtensionEventError::Publication {
+            event_type: event_type.to_owned(),
+            message,
+        },
+    }
+}
+
+#[cfg(test)]
+mod emitter_tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    #[derive(Default)]
+    struct RecordingSink(Mutex<Vec<(String, u32, serde_json::Value)>>);
+
+    impl RecordingSink {
+        fn record(&self, event_type: &str, schema_version: u32, payload: serde_json::Value) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((event_type.to_owned(), schema_version, payload));
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExtensionEventSink for RecordingSink {
+        async fn emit(
+            &self,
+            event_type: &str,
+            schema_version: u32,
+            _durable: bool,
+            payload: serde_json::Value,
+        ) -> Result<EventPublishReceipt, EventSendError> {
+            self.record(event_type, schema_version, payload);
+            Ok(EventPublishReceipt::Queued)
+        }
+
+        fn emit_now(
+            &self,
+            event_type: &str,
+            schema_version: u32,
+            _durable: bool,
+            payload: serde_json::Value,
+        ) -> Result<(), EventSendError> {
+            self.record(event_type, schema_version, payload);
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn emitter_owns_declaration_version_and_reports_missing_declaration_or_sink() {
+        let sink = Arc::new(RecordingSink::default());
+        let emitter = ExtensionEventEmitter::from_runtime(
+            [ExtensionEventDecl {
+                event_type: "review.completed".into(),
+                schema_version: 3,
+                durable: true,
+                max_payload_bytes: 1024,
+            }],
+            Some(sink.clone()),
+        );
+        assert_eq!(
+            emitter
+                .emit("review.completed", &serde_json::json!({ "status": "ok" }))
+                .await
+                .unwrap(),
+            EventPublishReceipt::Queued
+        );
+        emitter
+            .emit_now(
+                "review.completed",
+                &serde_json::json!({ "status": "cancelled" }),
+            )
+            .unwrap();
+        emitter
+            .emit_now(
+                "review.completed",
+                &serde_json::json!({ "status": "published" }),
+            )
+            .unwrap();
+        assert_eq!(
+            sink.0.lock().unwrap().as_slice(),
+            &[
+                (
+                    "review.completed".into(),
+                    3,
+                    serde_json::json!({ "status": "ok" })
+                ),
+                (
+                    "review.completed".into(),
+                    3,
+                    serde_json::json!({ "status": "cancelled" })
+                ),
+                (
+                    "review.completed".into(),
+                    3,
+                    serde_json::json!({ "status": "published" })
+                )
+            ]
+        );
+        assert!(matches!(
+            emitter.emit_now("review.failed", &()),
+            Err(ExtensionEventError::Undeclared { .. })
+        ));
+
+        let detached = ExtensionEventEmitter::from_runtime(
+            [ExtensionEventDecl {
+                event_type: "review.completed".into(),
+                schema_version: 1,
+                durable: false,
+                max_payload_bytes: 1024,
+            }],
+            None,
+        );
+        assert!(matches!(
+            detached.emit_now("review.completed", &()),
+            Err(ExtensionEventError::ContextUnavailable)
+        ));
+
+        let bounded = ExtensionEventEmitter::from_runtime(
+            [ExtensionEventDecl {
+                event_type: "review.completed".into(),
+                schema_version: 1,
+                durable: false,
+                max_payload_bytes: 2,
+            }],
+            Some(sink),
+        );
+        assert!(matches!(
+            bounded.emit_now(
+                "review.completed",
+                &serde_json::json!({ "status": "too-large" })
+            ),
+            Err(ExtensionEventError::PayloadTooLarge { .. })
+        ));
+        assert!(matches!(
+            map_send_error("review.completed", EventSendError::Full),
+            ExtensionEventError::QueueFull { .. }
+        ));
+        assert!(matches!(
+            map_send_error("review.completed", EventSendError::Closed),
+            ExtensionEventError::IngressClosed { .. }
+        ));
+        assert!(matches!(
+            map_send_error(
+                "review.completed",
+                EventSendError::PublishFailed("storage unavailable".into())
+            ),
+            ExtensionEventError::Publication { .. }
+        ));
+    }
 }

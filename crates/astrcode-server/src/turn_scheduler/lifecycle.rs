@@ -72,27 +72,30 @@ impl FrozenSessionTree {
 
 impl TurnScheduler {
     /// 中止活跃 turn（含级联子 session）。
-    pub async fn abort(&self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
+    pub async fn abort(&self, session_id: &SessionId) -> Result<bool, TurnScheduleError> {
         let operation = self.begin_session_operation(session_id).await?;
         operation.wait_for_starts().await;
-        self.abort_in_operation(session_id).await?;
+        let had_active = self.registry.has_active(session_id);
+        let cancelled_descendant = self.abort_in_operation(session_id).await?;
         let next = self.reserve_next_pending(&operation).await?;
         drop(operation);
         if let Some((reserved, entry)) = next {
             self.start_reserved_pending_detached(reserved, entry, "abort-queue-drain")
                 .await?;
         }
-        Ok(())
+        Ok(had_active || cancelled_descendant)
     }
 
     pub(crate) async fn abort_in_operation(
         &self,
         session_id: &SessionId,
-    ) -> Result<(), TurnScheduleError> {
-        self.child_sessions
+    ) -> Result<bool, TurnScheduleError> {
+        let cancelled_descendant = self
+            .child_sessions
             .cascade_abort_children(self, session_id)
             .await?;
-        self.abort_current_in_operation(session_id).await
+        self.abort_current_in_operation(session_id).await?;
+        Ok(cancelled_descendant)
     }
 
     pub(crate) async fn abort_current_in_operation(

@@ -32,8 +32,8 @@ pub(super) struct HandlerIndex {
     pub(super) pre_tool_use: Vec<ToolExtensionHandler<dyn PreToolUseHandler>>,
     pub(super) post_tool_use: Vec<ToolExtensionHandler<dyn PostToolUseHandler>>,
     pub(super) provider: HashMap<ProviderEvent, Vec<ExtensionHandler<dyn ProviderHandler>>>,
-    pub(super) prompt_build: Vec<Arc<dyn PromptBuildHandler>>,
-    pub(super) compact: HashMap<CompactEvent, Vec<Arc<dyn CompactHandler>>>,
+    pub(super) prompt_build: Vec<SimpleExtensionHandler<dyn PromptBuildHandler>>,
+    pub(super) compact: HashMap<CompactEvent, Vec<SimpleExtensionHandler<dyn CompactHandler>>>,
     pub(super) continue_after_stop:
         Vec<ContinueAfterStopExtensionHandler<dyn ContinueAfterStopHandler>>,
     pub(super) user_message_envelope: Vec<SimpleExtensionHandler<dyn UserMessageEnvelopeHandler>>,
@@ -62,14 +62,6 @@ pub(super) struct HandlerIndex {
     _publication_leases: Vec<ExtensionIndexLease>,
 }
 
-impl HandlerIndex {
-    pub(super) fn allows(&self, extension_id: &str, capability: ExtensionCapability) -> bool {
-        self.capabilities
-            .get(extension_id)
-            .is_some_and(|capabilities| capabilities.contains(&capability))
-    }
-}
-
 pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u64) -> HandlerIndex {
     let mut pre_tool_use = Vec::new();
     let mut post_tool_use = Vec::new();
@@ -95,14 +87,16 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
     for hosted in extensions {
         let manifest = &hosted.manifest;
         let registrations = &manifest.registrations;
-        capabilities.insert(manifest.id.clone(), manifest.capabilities.clone());
-        extension_tasks.insert(manifest.id.clone(), hosted.tasks.clone());
+        let extension_id = manifest.id().to_owned();
+        let extension_capabilities = manifest.capabilities().to_vec();
+        capabilities.insert(extension_id.clone(), extension_capabilities.clone());
+        extension_tasks.insert(extension_id.clone(), hosted.tasks.clone());
         publication_leases.push(hosted.publication_lease.acquire());
         for registration in registrations.pre_tool_use() {
             pre_tool_use.push((
                 registration.priority,
                 (
-                    manifest.id.clone(),
+                    extension_id.clone(),
                     registration.mode,
                     registration.target.clone(),
                     Arc::clone(&registration.handler),
@@ -113,7 +107,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
             post_tool_use.push((
                 registration.priority,
                 (
-                    manifest.id.clone(),
+                    extension_id.clone(),
                     registration.mode,
                     registration.target.clone(),
                     Arc::clone(&registration.handler),
@@ -124,20 +118,24 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
             provider.push((
                 *event,
                 *priority,
-                (manifest.id.clone(), *mode, Arc::clone(handler)),
+                (extension_id.clone(), *mode, Arc::clone(handler)),
             ));
         }
         for (priority, handler) in registrations.prompt_build() {
-            prompt_build.push((*priority, Arc::clone(handler)));
+            prompt_build.push((*priority, (extension_id.clone(), Arc::clone(handler))));
         }
         for (event, priority, handler) in registrations.compact() {
-            compact.push((*event, *priority, Arc::clone(handler)));
+            compact.push((
+                *event,
+                *priority,
+                (extension_id.clone(), Arc::clone(handler)),
+            ));
         }
         for registration in registrations.continue_after_stop() {
             continue_after_stop.push((
                 registration.priority,
                 (
-                    manifest.id.clone(),
+                    extension_id.clone(),
                     registration.options,
                     Arc::clone(&registration.handler),
                 ),
@@ -146,45 +144,46 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         for registration in registrations.user_message_envelope() {
             user_message_envelope.push((
                 registration.priority,
-                (manifest.id.clone(), Arc::clone(&registration.handler)),
+                (extension_id.clone(), Arc::clone(&registration.handler)),
             ));
         }
         for (event, mode, priority, handler) in registrations.lifecycle() {
             lifecycle.push((
                 event.clone(),
                 *priority,
-                (manifest.id.clone(), *mode, Arc::clone(handler)),
+                (extension_id.clone(), *mode, Arc::clone(handler)),
             ));
         }
-        for (name, metadata) in registrations.all_tool_metadata() {
-            tool_metadata.insert(name.clone(), metadata.clone());
-        }
-        for (definition, handler) in registrations.tools() {
+        for registration in registrations.tools() {
+            let definition = registration.definition();
+            if registration.prompt() != &ToolPromptMetadata::default() {
+                tool_metadata.insert(definition.name.clone(), registration.prompt().clone());
+            }
             static_tools.push((
                 definition.clone(),
-                Arc::clone(handler),
-                manifest.id.clone(),
-                manifest.capabilities.clone(),
+                Arc::clone(registration.handler()),
+                extension_id.clone(),
+                extension_capabilities.clone(),
             ));
         }
         for discovery in registrations.tool_discoveries() {
             tool_discoveries.push((
-                manifest.id.clone(),
+                extension_id.clone(),
                 Arc::clone(discovery),
-                manifest.capabilities.clone(),
+                extension_capabilities.clone(),
             ));
         }
         for (command, handler) in registrations.commands() {
-            static_commands.push((manifest.id.clone(), command.clone(), Arc::clone(handler)));
+            static_commands.push((extension_id.clone(), command.clone(), Arc::clone(handler)));
         }
         for discovery in registrations.command_discoveries() {
-            command_discoveries.push((manifest.id.clone(), Arc::clone(discovery)));
+            command_discoveries.push((extension_id.clone(), Arc::clone(discovery)));
         }
         keybindings.extend_from_slice(registrations.keybindings());
         status_items.extend_from_slice(registrations.status_items());
         if !registrations.extension_event_decls().is_empty() {
             extension_event_decls.insert(
-                manifest.id.clone(),
+                extension_id.clone(),
                 registrations.extension_event_decls().to_vec(),
             );
         }
@@ -193,7 +192,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
                 .http_routes()
                 .iter()
                 .map(|registration| HttpRouteEntry {
-                    extension_id: manifest.id.clone(),
+                    extension_id: extension_id.clone(),
                     route: registration.route.clone(),
                     handler: Arc::clone(&registration.handler),
                 }),
@@ -262,7 +261,7 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
     for hosted in extensions {
         let manifest = &hosted.manifest;
         let registrations = &manifest.registrations;
-        let id = manifest.id.as_str();
+        let id = manifest.id();
         for registration in registrations.pre_tool_use() {
             pre.push((
                 id,

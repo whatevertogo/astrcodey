@@ -1,7 +1,7 @@
 //! Bundled external channel extension.
 //!
 //! Channel-specific transport, config, and runtime state live in this crate.
-//! The host only grants the extension explicit session-control capability.
+//! The host grants only the input-delivery and network capabilities needed by the channel.
 
 use std::{
     collections::{HashMap, hash_map::RandomState},
@@ -11,13 +11,15 @@ use std::{
 };
 
 use astrcode_extension_sdk::{
+    builder::manifest,
     extension::{
-        Extension, ExtensionCapability, ExtensionConfig, ExtensionCtx, ExtensionError, Registrar,
-        StopReason,
+        Extension, ExtensionCapability, ExtensionConfig, ExtensionError, ExtensionManifest,
+        ExtensionStartContext, Registrar, StopReason,
     },
-    tool::{
-        CreateRootSessionRequest, SessionAccess, SessionOperations, SubmitTurnRequest,
-        SubmitTurnResult,
+    host::SessionControlClient,
+    session::{
+        HostRootSubmitTurnRequest, HostSessionTargetRequest, HostSubmitTurnOutput,
+        SessionLifecycleStateDto,
     },
 };
 use parking_lot::Mutex as ParkingMutex;
@@ -57,8 +59,6 @@ pub(crate) struct TelegramChannelConfig {
     pub register_commands: bool,
     #[serde(default)]
     pub streaming: bool,
-    #[serde(default)]
-    pub working_dir: Option<String>,
     #[serde(default = "default_request_timeout_secs")]
     pub request_timeout_secs: u64,
     #[serde(default = "default_poll_timeout_secs")]
@@ -77,7 +77,6 @@ impl Default for TelegramChannelConfig {
             allow_all_chats: false,
             register_commands: false,
             streaming: false,
-            working_dir: None,
             request_timeout_secs: default_request_timeout_secs(),
             poll_timeout_secs: default_poll_timeout_secs(),
             max_reply_chars: default_max_reply_chars(),
@@ -118,55 +117,36 @@ impl TelegramChannelsExtension {
     }
 
     fn load_config(config: &ExtensionConfig) -> Result<ChannelsConfig, ExtensionError> {
-        config
-            .deserialize::<ChannelsConfig>()
-            .map_err(|e| ExtensionError::Internal(format!("invalid channels config: {e}")))
-    }
-
-    fn startup_working_dir(ctx: &ExtensionCtx) -> String {
-        ctx.startup_working_dir()
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| ".".into())
+        config.deserialize_or_default().map_err(Into::into)
     }
 }
 
 #[async_trait::async_trait]
 impl Extension for TelegramChannelsExtension {
-    fn id(&self) -> &str {
-        EXTENSION_ID
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::SessionControl,
-            ExtensionCapability::NetworkClient,
-        ]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest(EXTENSION_ID)
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::InputDelivery)
+            .capability(ExtensionCapability::NetworkClient)
+            .build()
     }
 
     fn register(&self, _: &mut Registrar) {}
 
-    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
-        let config = Self::load_config(&ctx.config)?;
-        let startup_working_dir = Self::startup_working_dir(&ctx);
-        let session_ops = ctx
-            .host_services()
-            .and_then(|services| services.session_ops.clone())
-            .ok_or_else(|| {
-                ExtensionError::Internal(
-                    "telegram channel extension requires session_control host service".into(),
-                )
-            })?;
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        let config = Self::load_config(ctx.config())?;
+        let session_control = ctx.host().session_control().map_err(|error| {
+            ExtensionError::Internal(format!(
+                "telegram channel extension requires the input-delivery host API: {error}"
+            ))
+        })?;
 
         let api = Arc::new(HttpTelegramApi::new());
-        let runtime = Arc::new(TelegramRuntime::new(
-            config,
-            startup_working_dir,
-            session_ops,
-            api,
-        ));
+        let runtime = Arc::new(TelegramRuntime::new(config, session_control, api));
         ctx.tasks().spawn(
             "telegram-channel-poll",
-            poll_telegram(Arc::clone(&runtime), ctx.shutdown()),
+            poll_telegram(Arc::clone(&runtime), ctx.cancellation().clone()),
         );
         *self.runtime.lock() = Some(runtime);
         tracing::info!(
@@ -192,24 +172,21 @@ impl Extension for TelegramChannelsExtension {
 
 struct TelegramRuntime {
     config: ParkingMutex<ChannelsConfig>,
-    startup_working_dir: String,
     sessions_by_chat: ParkingMutex<HashMap<String, String>>,
-    session_ops: Arc<dyn SessionOperations>,
+    session_control: SessionControlClient,
     telegram: Arc<dyn TelegramApi>,
 }
 
 impl TelegramRuntime {
     fn new(
         config: ChannelsConfig,
-        startup_working_dir: String,
-        session_ops: Arc<dyn SessionOperations>,
+        session_control: SessionControlClient,
         telegram: Arc<dyn TelegramApi>,
     ) -> Self {
         Self {
             config: ParkingMutex::new(config),
-            startup_working_dir,
             sessions_by_chat: ParkingMutex::new(HashMap::new()),
-            session_ops,
+            session_control,
             telegram,
         }
     }
@@ -222,7 +199,7 @@ impl TelegramRuntime {
         self.config.lock().clone()
     }
 
-    fn is_allowed(&self, cfg: &TelegramChannelConfig, chat_id: &str) -> bool {
+    fn is_allowed(cfg: &TelegramChannelConfig, chat_id: &str) -> bool {
         cfg.allow_all_chats
             || cfg
                 .allowed_chat_ids
@@ -235,7 +212,7 @@ impl TelegramRuntime {
         cfg: &TelegramChannelConfig,
         inbound: InboundMessage,
     ) -> Result<(), ExtensionError> {
-        if !self.is_allowed(cfg, &inbound.chat_id) {
+        if !Self::is_allowed(cfg, &inbound.chat_id) {
             tracing::warn!(
                 extension_id = EXTENSION_ID,
                 chat_id = %inbound.chat_id,
@@ -247,15 +224,15 @@ impl TelegramRuntime {
             return self.send_reply(cfg, &inbound.chat_id, reply).await;
         }
 
-        let session_id = self.session_for_chat(&inbound.chat_id, cfg).await?;
+        let session_id = self.session_for_chat(&inbound.chat_id).await?;
         let result = self
-            .session_ops
-            .submit_turn(SubmitTurnRequest::for_session(session_id, inbound.text))
+            .session_control
+            .submit_root_turn(HostRootSubmitTurnRequest::new(session_id, inbound.text))
             .await;
 
         let reply = match result {
-            Ok(SubmitTurnResult::Completed { content }) => content,
-            Ok(SubmitTurnResult::Backgrounded { task_id, .. }) => {
+            Ok(HostSubmitTurnOutput::Completed { content }) => content,
+            Ok(HostSubmitTurnOutput::Backgrounded { task_id, .. }) => {
                 format!("AstrCode task started in background: {task_id}")
             },
             Err(error) => format!("AstrCode failed to handle the message: {error}"),
@@ -263,11 +240,7 @@ impl TelegramRuntime {
         self.send_reply(cfg, &inbound.chat_id, &reply).await
     }
 
-    async fn session_for_chat(
-        &self,
-        chat_id: &str,
-        cfg: &TelegramChannelConfig,
-    ) -> Result<String, ExtensionError> {
+    async fn session_for_chat(&self, chat_id: &str) -> Result<String, ExtensionError> {
         let cached_session_id = self.sessions_by_chat.lock().get(chat_id).cloned();
         if let Some(session_id) = cached_session_id {
             if self.cached_session_alive(&session_id).await {
@@ -275,17 +248,9 @@ impl TelegramRuntime {
             }
             self.sessions_by_chat.lock().remove(chat_id);
         }
-        let working_dir = cfg
-            .working_dir
-            .clone()
-            .unwrap_or_else(|| self.startup_working_dir.clone());
-
         let handle = self
-            .session_ops
-            .create_root_session(CreateRootSessionRequest {
-                working_dir,
-                source_extension: Some(EXTENSION_ID.into()),
-            })
+            .session_control
+            .create_root()
             .await
             .map_err(|e| ExtensionError::Internal(format!("create telegram session: {e}")))?;
 
@@ -297,10 +262,12 @@ impl TelegramRuntime {
 
     async fn cached_session_alive(&self, session_id: &str) -> bool {
         matches!(
-            self.session_ops
-                .query_session(SessionAccess::same(session_id))
+            self.session_control
+                .root_state(HostSessionTargetRequest {
+                    target_session_id: session_id.to_owned(),
+                })
                 .await,
-            Ok(status) if status.alive
+            Ok(status) if status.lifecycle == SessionLifecycleStateDto::Active
         )
     }
 
@@ -719,9 +686,14 @@ fn resolve_env_token(raw_env_name: &str) -> Result<String, ExtensionError> {
 mod tests {
     use std::sync::Mutex;
 
-    use astrcode_extension_sdk::tool::{
-        SessionApiError, SessionDeliveryOutcome, SessionHandle, SessionStatus,
+    use astrcode_extension_sdk::{
+        host::{
+            HostError, HostOperation,
+            internal::{HostInvoker, HostScope, extension_host},
+        },
+        session::{HostSessionStateOutput, SessionPhaseDto},
     };
+    use serde_json::Value;
 
     use super::*;
 
@@ -769,98 +741,75 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeSessionOps {
-        root_creates: Mutex<Vec<CreateRootSessionRequest>>,
+    struct FakeSessionHost {
+        root_creates: Mutex<usize>,
         submitted_prompts: Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
-    impl SessionOperations for FakeSessionOps {
-        async fn create_root_session(
-            &self,
-            request: CreateRootSessionRequest,
-        ) -> Result<SessionHandle, SessionApiError> {
-            let mut creates = self.root_creates.lock().unwrap();
-            creates.push(request);
-            Ok(SessionHandle {
-                session_id: format!("session-{}", creates.len()),
-            })
+    impl HostInvoker for FakeSessionHost {
+        async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, HostError> {
+            match operation {
+                HostOperation::SessionRootCreate => {
+                    assert_eq!(input, json!({}));
+                    let mut creates = self.root_creates.lock().unwrap();
+                    *creates += 1;
+                    Ok(json!({ "session_id": format!("session-{creates}") }))
+                },
+                HostOperation::SessionRootSubmitTurn => {
+                    let request: HostRootSubmitTurnRequest = serde_json::from_value(input).unwrap();
+                    self.submitted_prompts
+                        .lock()
+                        .unwrap()
+                        .push(request.user_prompt.clone());
+                    serde_json::to_value(HostSubmitTurnOutput::Completed {
+                        content: format!("reply: {}", request.user_prompt),
+                    })
+                    .map_err(|error| HostError::new("serialization_failed", error.to_string()))
+                },
+                HostOperation::SessionRootState => serde_json::to_value(HostSessionStateOutput {
+                    lifecycle: SessionLifecycleStateDto::Active,
+                    phase: SessionPhaseDto::Idle,
+                    active_turn_id: None,
+                    queued_inputs: 0,
+                    message_count: 0,
+                })
+                .map_err(|error| HostError::new("serialization_failed", error.to_string())),
+                operation => Err(HostError::new(
+                    "unexpected_operation",
+                    format!("unexpected operation: {}", operation.wire_name()),
+                )),
+            }
         }
 
-        async fn submit_turn(
-            &self,
-            request: SubmitTurnRequest,
-        ) -> Result<SubmitTurnResult, SessionApiError> {
-            self.submitted_prompts
-                .lock()
-                .unwrap()
-                .push(request.user_prompt.clone());
-            Ok(SubmitTurnResult::Completed {
-                content: format!("reply: {}", request.user_prompt),
-            })
-        }
-
-        async fn query_session(
-            &self,
-            _access: SessionAccess<'_>,
-        ) -> Result<SessionStatus, SessionApiError> {
-            Ok(SessionStatus {
-                alive: true,
-                has_active_turn: false,
-                last_finish_reason: None,
-                message_count: 0,
-            })
-        }
-
-        async fn create_session(
-            &self,
-            _parent_session_id: &str,
-            _request: astrcode_extension_sdk::tool::CreateSessionRequest,
-        ) -> Result<SessionHandle, SessionApiError> {
-            Err(SessionApiError::internal_msg("unused in channels tests"))
-        }
-
-        async fn inject_message(
-            &self,
-            _access: SessionAccess<'_>,
-            _content: String,
-        ) -> Result<SessionDeliveryOutcome, SessionApiError> {
-            Ok(SessionDeliveryOutcome::Started {
-                turn_id: "test-turn".into(),
-            })
-        }
-
-        async fn recycle_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
-            Ok(())
-        }
-
-        async fn delete_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
-            Ok(())
-        }
-
-        async fn restore_session(&self, _access: SessionAccess<'_>) -> Result<(), SessionApiError> {
-            Ok(())
-        }
-
-        async fn resolve_tool_approval(
-            &self,
-            _target_session_id: &str,
-            _call_id: &str,
-            _decision: astrcode_extension_sdk::permission::ApprovalDecision,
-        ) -> Result<(), SessionApiError> {
-            Ok(())
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
         }
     }
 
     struct TestHarness {
         runtime: TelegramRuntime,
-        session_ops: Arc<FakeSessionOps>,
+        session_host: Arc<FakeSessionHost>,
         telegram: Arc<FakeTelegram>,
     }
 
     impl TestHarness {
         fn new(allowed_chat_ids: &[&str], allow_all_chats: bool) -> Self {
-            let session_ops = Arc::new(FakeSessionOps::default());
+            let session_host = Arc::new(FakeSessionHost::default());
+            let host = extension_host(
+                session_host.clone(),
+                HostScope::new(
+                    [ExtensionCapability::InputDelivery],
+                    [
+                        HostOperation::SessionRootCreate,
+                        HostOperation::SessionRootSubmitTurn,
+                        HostOperation::SessionRootState,
+                    ],
+                    false,
+                    true,
+                ),
+            );
+            let session_control = host.session_control().unwrap();
             let telegram = Arc::new(FakeTelegram::default());
             let runtime = TelegramRuntime::new(
                 ChannelsConfig {
@@ -876,13 +825,12 @@ mod tests {
                         ..Default::default()
                     },
                 },
-                "D:/workspace".into(),
-                session_ops.clone(),
+                session_control,
                 telegram.clone(),
             );
             Self {
                 runtime,
-                session_ops,
+                session_host,
                 telegram,
             }
         }
@@ -902,11 +850,11 @@ mod tests {
         }
 
         fn root_create_count(&self) -> usize {
-            self.session_ops.root_creates.lock().unwrap().len()
+            *self.session_host.root_creates.lock().unwrap()
         }
 
         fn submitted_prompts(&self) -> Vec<String> {
-            self.session_ops.submitted_prompts.lock().unwrap().clone()
+            self.session_host.submitted_prompts.lock().unwrap().clone()
         }
 
         fn sent_messages(&self) -> Vec<(String, String)> {
@@ -922,8 +870,7 @@ mod tests {
                 "botToken": "env:TELEGRAM_BOT_TOKEN",
                 "allowedChatIds": ["1"],
                 "registerCommands": true,
-                "streaming": true,
-                "workingDir": "C:/tmp"
+                "streaming": true
             }
         }))
         .unwrap();
@@ -942,11 +889,14 @@ mod tests {
 
     #[test]
     fn flat_config_is_rejected() {
-        let result = TelegramChannelsExtension::load_config(&ExtensionConfig(json!({
-            "enabled": true,
-            "botToken": "x",
-            "allowedChatIds": ["1"]
-        })));
+        let result = TelegramChannelsExtension::load_config(&ExtensionConfig::from_runtime(
+            "test",
+            json!({
+                "enabled": true,
+                "botToken": "x",
+                "allowedChatIds": ["1"]
+            }),
+        ));
 
         assert!(result.is_err());
     }

@@ -1,19 +1,18 @@
 //! astrcode-extension-todo-tool — session-local progress todo list.
 
-use std::{
-    collections::BTreeMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
 use astrcode_extension_sdk::{
+    builder::{ExtensionToolDefinition, manifest},
     extension::{
-        Extension, ExtensionCapability, ExtensionError, HookMode, PostToolUseContext,
-        PostToolUseHandler, PostToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
-        ProviderResult, Registrar, ToolHandler,
+        Extension, ExtensionCapability, ExtensionError, ExtensionManifest, ExtensionPaths,
+        HookMode, PostToolUseContext, PostToolUseHandler, PostToolUseResult, ProviderContext,
+        ProviderHandler, ProviderResult, Registrar, ToolContext, ToolHandler,
     },
-    state,
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
+    tool::{
+        ExecutionMode, ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
+        tool_metadata,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -39,11 +38,6 @@ const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;
 const REMINDER_STATE_FILE: &str = ".reminder-state.json";
 
-/// Compute todo storage root from a known session base directory.
-pub(crate) fn todo_dir_from_base(base: &Path) -> PathBuf {
-    state::session_data_dir(base, "astrcode-todo-tool").join("todos")
-}
-
 /// Return bundled todo extension.
 pub fn extension() -> Arc<dyn Extension> {
     Arc::new(TodoToolExtension)
@@ -53,26 +47,22 @@ struct TodoToolExtension;
 
 #[async_trait::async_trait]
 impl Extension for TodoToolExtension {
-    fn id(&self) -> &str {
-        "astrcode-todo-tool"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[
-            ExtensionCapability::ProviderRequest,
-            ExtensionCapability::ToolIntercept,
-        ]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("astrcode-todo-tool")
+            .version(env!("CARGO_PKG_VERSION"))
+            .description(env!("CARGO_PKG_DESCRIPTION"))
+            .capability(ExtensionCapability::ProviderRequest)
+            .capability(ExtensionCapability::ToolIntercept)
+            .build()
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.tool(todo_write_tool_definition(), Arc::new(TodoWriteToolHandler));
-        reg.tool_metadata(todo_write_metadata());
-        reg.on_provider(
-            ProviderEvent::BeforeRequest,
-            HookMode::Blocking,
-            0,
-            Arc::new(TodoReminderHandler),
+        reg.tool(
+            ExtensionToolDefinition::from_definition(todo_write_tool_definition())
+                .with_prompt(todo_write_prompt()),
+            Arc::new(TodoWriteToolHandler),
         );
+        reg.on_before_provider_request(HookMode::Blocking, 0, Arc::new(TodoReminderHandler));
         reg.on_post_tool_use(HookMode::Blocking, 0, Arc::new(TodoPostToolUseHandler));
     }
 }
@@ -83,23 +73,15 @@ struct TodoWriteToolHandler;
 impl ToolHandler for TodoWriteToolHandler {
     async fn execute(
         &self,
-        tool_name: &str,
-        arguments: Value,
-        _working_dir: &str,
-        ctx: &astrcode_extension_sdk::tool::ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
+        let tool_name = ctx.tool_name();
         if tool_name != TODO_WRITE_TOOL_NAME {
             return Err(ExtensionError::NotFound(tool_name.into()));
         }
-        let root = ctx
-            .capabilities
-            .paths
-            .store_dir
-            .as_deref()
-            .map(todo_dir_from_base)
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let root = todo_root(ctx.paths())?;
         let store = ProgressListStore::new(root);
-        Ok(match handle_todo_write(arguments, &store) {
+        Ok(match handle_todo_write(ctx.arguments()?, &store) {
             Ok(result) => result,
             Err(error) => {
                 let meta = tool_metadata([("error", json!(&error))]);
@@ -115,11 +97,7 @@ struct TodoReminderHandler;
 #[async_trait::async_trait]
 impl ProviderHandler for TodoReminderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
-        let root = ctx
-            .session_store_dir
-            .as_deref()
-            .map(todo_dir_from_base)
-            .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        let root = todo_root(ctx.paths())?;
         ProgressReminder::new(root)
             .before_provider_request()
             .map_err(ExtensionError::Internal)
@@ -131,12 +109,8 @@ struct TodoPostToolUseHandler;
 #[async_trait::async_trait]
 impl PostToolUseHandler for TodoPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
-        if ctx.tool_name == TODO_WRITE_TOOL_NAME {
-            let root = ctx
-                .session_store_dir
-                .as_deref()
-                .map(todo_dir_from_base)
-                .ok_or_else(|| ExtensionError::Internal("session_store_dir not injected".into()))?;
+        if ctx.tool_name() == TODO_WRITE_TOOL_NAME {
+            let root = todo_root(ctx.paths())?;
             ProgressReminder::new(root)
                 .record_todo_write()
                 .map_err(ExtensionError::Internal)?;
@@ -145,21 +119,22 @@ impl PostToolUseHandler for TodoPostToolUseHandler {
     }
 }
 
-fn todo_write_metadata()
--> std::collections::HashMap<String, astrcode_extension_sdk::tool::ToolPromptMetadata> {
-    let mut map = std::collections::HashMap::new();
-    map.insert(
-        TODO_WRITE_TOOL_NAME.to_string(),
-        astrcode_extension_sdk::tool::ToolPromptMetadata::new(String::new())
-            .example(
-                "{ todos: [{ content: \"分析现有代码结构\", executor: \"self\", status: \
-                 \"in_progress\", activeForm: \"正在分析现有代码结构\" }, { content: \
-                 \"审查安全相关改动\", executor: \"agent\", agentType: \"reviewer\", mode: \
-                 \"parallel\", status: \"pending\", activeForm: \"准备审查安全相关改动\" }] }",
-            )
-            .prompt_tag(astrcode_extension_sdk::tool::ToolPromptTag::Planning),
-    );
-    map
+fn todo_root(paths: &ExtensionPaths) -> Result<PathBuf, ExtensionError> {
+    paths
+        .session_data_dir()
+        .map(|path| path.join("todos"))
+        .map_err(|error| ExtensionError::Internal(error.to_string()))
+}
+
+fn todo_write_prompt() -> ToolPromptMetadata {
+    ToolPromptMetadata::new(String::new())
+        .example(
+            "{ todos: [{ content: \"分析现有代码结构\", executor: \"self\", status: \
+             \"in_progress\", activeForm: \"正在分析现有代码结构\" }, { content: \
+             \"审查安全相关改动\", executor: \"agent\", agentType: \"reviewer\", mode: \
+             \"parallel\", status: \"pending\", activeForm: \"准备审查安全相关改动\" }] }",
+        )
+        .prompt_tag(ToolPromptTag::Planning)
 }
 
 #[derive(Debug, Deserialize)]
@@ -279,10 +254,10 @@ impl ProgressListStore {
 
     fn load_progress(&self) -> Result<ProgressList, String> {
         let path = self.root.join(PROGRESS_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                let progress = serde_json::from_str::<ProgressList>(&content)
-                    .map_err(|error| format!("parse progress list: {error}"))?;
+        let progress = astrcode_extension_sdk::hostpaths::read_json_state::<ProgressList>(&path)
+            .map_err(|error| format!("read progress list: {error}"))?;
+        match progress {
+            Some(progress) => {
                 if progress.schema_version != PROGRESS_SCHEMA_VERSION {
                     return Err(format!(
                         "unsupported progress list schema version {}",
@@ -291,12 +266,11 @@ impl ProgressListStore {
                 }
                 Ok(progress)
             },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(ProgressList {
+            None => Ok(ProgressList {
                 schema_version: PROGRESS_SCHEMA_VERSION,
                 items: Vec::new(),
                 updated_at: now_utc(),
             }),
-            Err(error) => Err(format!("read progress list: {error}")),
         }
     }
 
@@ -307,17 +281,11 @@ impl ProgressListStore {
             items: items.to_vec(),
             updated_at: now_utc(),
         };
-        self.write_json(PROGRESS_FILE, &progress)
-    }
-
-    fn write_json<T: Serialize>(&self, file_name: &str, value: &T) -> Result<(), String> {
-        let path = self.root.join(file_name);
-        let tmp = self.root.join(format!("{file_name}.tmp"));
-        let json = serde_json::to_string_pretty(value)
-            .map_err(|error| format!("serialize {file_name}: {error}"))?;
-        std::fs::write(&tmp, json).map_err(|error| format!("write {file_name}: {error}"))?;
-        std::fs::rename(&tmp, &path).map_err(|error| format!("save {file_name}: {error}"))?;
-        Ok(())
+        astrcode_extension_sdk::hostpaths::write_json_state(
+            &self.root.join(PROGRESS_FILE),
+            &progress,
+        )
+        .map_err(|error| format!("save progress list: {error}"))
     }
 
     fn ensure_dir(&self) -> Result<(), String> {
@@ -377,30 +345,17 @@ impl ProgressReminder {
 
     fn load_state(&self) -> Result<ProgressReminderState, String> {
         let path = self.root.join(REMINDER_STATE_FILE);
-        match std::fs::read_to_string(&path) {
-            Ok(content) => serde_json::from_str(&content)
-                .map_err(|error| format!("parse reminder state: {error}")),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(ProgressReminderState::default())
-            },
-            Err(error) => Err(format!("read reminder state: {error}")),
-        }
+        Ok(astrcode_extension_sdk::hostpaths::read_json_state(&path)
+            .map_err(|error| format!("read reminder state: {error}"))?
+            .unwrap_or_default())
     }
 
     fn save_state(&self, state: &ProgressReminderState) -> Result<(), String> {
-        std::fs::create_dir_all(&self.root).map_err(|error| {
-            format!(
-                "create todo reminder directory {}: {error}",
-                self.root.display()
-            )
-        })?;
-        let path = self.root.join(REMINDER_STATE_FILE);
-        let tmp = self.root.join(format!("{REMINDER_STATE_FILE}.tmp"));
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|error| format!("serialize reminder state: {error}"))?;
-        std::fs::write(&tmp, json).map_err(|error| format!("write reminder state: {error}"))?;
-        std::fs::rename(&tmp, &path).map_err(|error| format!("save reminder state: {error}"))?;
-        Ok(())
+        astrcode_extension_sdk::hostpaths::write_json_state(
+            &self.root.join(REMINDER_STATE_FILE),
+            state,
+        )
+        .map_err(|error| format!("save reminder state: {error}"))
     }
 }
 
@@ -426,9 +381,7 @@ fn reminder_message(items: &[ProgressItem]) -> String {
     )
 }
 
-fn handle_todo_write(arguments: Value, store: &ProgressListStore) -> Result<ToolResult, String> {
-    let args = serde_json::from_value::<TodoWriteArgs>(arguments)
-        .map_err(|error| format!("invalid args for {TODO_WRITE_TOOL_NAME}: {error}"))?;
+fn handle_todo_write(args: TodoWriteArgs, store: &ProgressListStore) -> Result<ToolResult, String> {
     let items = args
         .todos
         .into_iter()
@@ -669,7 +622,7 @@ mod tests {
     fn todo_write_replaces_list_and_returns_metadata() {
         let store = test_store("replace");
         let first = handle_todo_write(
-            json!({
+            serde_json::from_value(json!({
                 "todos": [
                     {
                         "content": "Inspect files",
@@ -678,7 +631,8 @@ mod tests {
                         "executor": "self"
                     }
                 ]
-            }),
+            }))
+            .expect("parse args"),
             &store,
         )
         .expect("write should succeed");
@@ -687,7 +641,7 @@ mod tests {
         assert_eq!(first.metadata["newTodos"][0]["executor"], "self");
 
         let second = handle_todo_write(
-            json!({
+            serde_json::from_value(json!({
                 "todos": [
                     {
                         "content": "Run tests",
@@ -698,7 +652,8 @@ mod tests {
                         "mode": "serial"
                     }
                 ]
-            }),
+            }))
+            .expect("parse args"),
             &store,
         )
         .expect("replace should succeed");
@@ -792,24 +747,17 @@ mod tests {
 
     #[test]
     fn rejects_todo_without_executor_field() {
-        let store = test_store("missing-executor");
-        let result = handle_todo_write(
-            json!({
-                "todos": [
-                    {
-                        "content": "Inspect files",
-                        "activeForm": "Inspecting files",
-                        "status": "in_progress"
-                    }
-                ]
-            }),
-            &store,
-        );
-        assert!(
-            result
-                .expect_err("missing executor should fail")
-                .contains("executor")
-        );
+        let error = serde_json::from_value::<TodoWriteArgs>(json!({
+            "todos": [
+                {
+                    "content": "Inspect files",
+                    "activeForm": "Inspecting files",
+                    "status": "in_progress"
+                }
+            ]
+        }))
+        .expect_err("missing executor must fail");
+        assert!(error.to_string().contains("executor"));
     }
 
     #[test]

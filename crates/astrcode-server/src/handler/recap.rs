@@ -78,20 +78,14 @@ impl CommandHandler {
             .map_err(HandlerError::Session)?;
 
         // PostRecap hook (non-blocking)
-        let lifecycle_ctx = astrcode_extension_sdk::extension::LifecycleContext {
-            session_id: sid.to_string(),
-            working_dir: state.identity.working_dir.clone(),
-            model: astrcode_core::config::ModelSelection::simple(state.identity.model_id.clone()),
-            event_tx: None,
-            extension_event_sink: None,
-            last_exchange: None,
-            mid_turn_user_messages_synced: 0,
-        };
-        if let Err(e) = self
-            .runtime
-            .extension_runner
-            .emit_lifecycle(ExtensionEvent::PostRecap, lifecycle_ctx)
-            .await
+        if let Err(e) = astrcode_session::emit_lifecycle_for_read_model(
+            self.runtime.runtime_services(),
+            &sid,
+            &state,
+            session.session_store_dir().await,
+            ExtensionEvent::PostRecap,
+        )
+        .await
         {
             tracing::warn!(error = %e, "PostRecap hook failed");
         }

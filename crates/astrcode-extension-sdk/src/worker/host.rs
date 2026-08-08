@@ -1,25 +1,48 @@
 //! Worker 侧调用宿主的抽象（可注入 mock）。
 
-use std::collections::BTreeMap;
+use std::{
+    future::Future,
+    sync::{Arc, OnceLock},
+};
 
+use astrcode_core::wire::WireErrorCode;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub use crate::session::HostSessionTargetRequest;
+#[cfg(test)]
+use crate::{extension::ExtensionHttpDispatchRequest, llm::LlmMessage};
 use crate::{
-    extension::{ExtensionHttpRequest, ExtensionHttpResponse},
+    host::{
+        HostClientTransport, HostOperation, TypedEventClient, TypedExtensionHttpClient,
+        TypedModelClient, TypedNetworkClient, TypedProcessClient, TypedSessionControlClient,
+        TypedSessionHistoryClient, TypedSessionInspectClient, TypedSessionStateClient,
+        TypedWorkspaceClient,
+    },
     runtime::{OutboundInvokeControl, Peer, PeerError},
     s5r::ErrorPayload,
-    session::{
-        HostCreateSessionOutput, HostCreateSessionRequest, HostSessionReactivateOutput,
-        HostSessionStateOutput, HostSubmitTurnOutput, HostSubmitTurnRequest,
-        SessionToolSelectionDto,
+};
+pub use crate::{
+    host::{
+        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitOutput,
+        HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmContent,
+        HostLlmMessage, HostLlmRole, HostLlmTextDelta, HostNetworkRedirectPolicy,
+        HostNetworkRequest, HostNetworkResponse, HostProcessOutput, HostProcessRequest,
+        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
+        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionStateReadOutput,
+        HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
+        HostSessionSummary, HostSessionTokenUsage, HostSessionTokenUsageOutput,
+        HostSessionTranscript, HostSessionTranscriptMessage, HostWorkspaceEditOutput,
+        HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+        HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+        HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
+        HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
+        HostWorkspaceWriteRequest,
     },
-    session_inspect::{
-        SessionHistorySnapshotOutput, SessionInspectListOutput,
-        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
-        SessionInspectSnapshotOutput,
+    session::{
+        HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
+        HostRootSubmitTurnRequest, HostSessionEvent, HostSessionEventsPageOutput,
+        HostSessionEventsPageRequest, HostSessionReactivateOutput, HostSessionStateOutput,
+        HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
     },
 };
 
@@ -32,16 +55,12 @@ pub trait HostApi: Send + Sync {
 }
 
 pub(crate) struct PeerHostApi<T: crate::runtime::FrameTransport + 'static> {
-    peer: std::sync::Arc<Peer<T>>,
-    caller_extension_id: Option<String>,
+    peer: Arc<Peer<T>>,
 }
 
 impl<T: crate::runtime::FrameTransport + 'static> PeerHostApi<T> {
-    pub fn new(peer: std::sync::Arc<Peer<T>>, caller_extension_id: impl Into<String>) -> Self {
-        Self {
-            peer,
-            caller_extension_id: Some(caller_extension_id.into()),
-        }
+    pub fn new(peer: Arc<Peer<T>>) -> Self {
+        Self { peer }
     }
 }
 
@@ -51,17 +70,15 @@ where
     T: crate::runtime::FrameTransport + Send + Sync + 'static,
 {
     async fn call(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-        let caller = self.caller_extension_id.as_deref();
         self.peer
-            .invoke(capability, input, caller, OutboundInvokeControl::default())
+            .invoke(capability, input, OutboundInvokeControl::default())
             .await
             .map_err(peer_error_to_payload)
     }
 
     async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-        let caller = self.caller_extension_id.as_deref();
         self.peer
-            .invoke_stream_collect(capability, input, caller)
+            .invoke_stream_collect(capability, input)
             .await
             .map_err(peer_error_to_payload)
     }
@@ -69,568 +86,248 @@ where
 
 fn peer_error_to_payload(err: PeerError) -> ErrorPayload {
     match err {
-        PeerError::Closed => ErrorPayload::new("peer_closed", "host peer closed"),
-        PeerError::Timeout => ErrorPayload::new("timeout", "host invoke timed out"),
-        PeerError::Busy => {
-            ErrorPayload::new("peer_busy", "host invoke concurrency limit reached").retryable(true)
-        },
-        PeerError::Payload(msg) => ErrorPayload::new("host_error", msg),
-        PeerError::Msg(msg) => ErrorPayload::new("transport_error", msg),
+        PeerError::Closed => ErrorPayload::new(WireErrorCode::PeerClosed, "host peer closed"),
+        PeerError::Timeout => ErrorPayload::new(WireErrorCode::Timeout, "host invoke timed out"),
+        PeerError::Busy => ErrorPayload::new(
+            WireErrorCode::PeerBusy,
+            "host invoke concurrency limit reached",
+        )
+        .retryable(true),
+        PeerError::Payload(payload) => payload,
+        PeerError::Msg(msg) => ErrorPayload::new(WireErrorCode::Transport, msg),
     }
 }
 
-static HOST_API: std::sync::OnceLock<std::sync::Arc<dyn HostApi>> = std::sync::OnceLock::new();
+static HOST_API: OnceLock<Arc<dyn HostApi>> = OnceLock::new();
 
-/// 在 `Worker::run_stdio` 启动前由运行时注入；测试可调用 [`inject_host_api`].
-pub(crate) fn set_host_api(api: std::sync::Arc<dyn HostApi>) -> Result<(), ()> {
+tokio::task_local! {
+    static SCOPED_HOST_API: Arc<dyn HostApi>;
+}
+
+/// 在 `Worker::run_stdio` 启动前由运行时注入。
+pub(crate) fn set_host_api(api: Arc<dyn HostApi>) -> Result<(), ()> {
     HOST_API.set(api).map_err(|_| ())
 }
 
-/// 测试或自定义运行时注入 mock 宿主 API。
-#[allow(clippy::result_unit_err)]
-pub fn inject_host_api(api: std::sync::Arc<dyn HostApi>) -> Result<(), ()> {
-    HOST_API.set(api).map_err(|_| ())
+/// 在一个异步作用域内使用指定宿主 API，供 worker 单元测试隔离 mock。
+///
+/// 该作用域不会自动传播到 `tokio::spawn` 创建的新任务。
+pub async fn with_host_api<T>(api: Arc<dyn HostApi>, future: impl Future<Output = T>) -> T {
+    SCOPED_HOST_API.scope(api, future).await
 }
 
-/// Worker 侧调用宿主能力（委托给已注入的 [`HostApi`]）。
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerHostTransport;
+
+#[async_trait]
+impl HostClientTransport for WorkerHostTransport {
+    type Error = ErrorPayload;
+
+    async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, Self::Error> {
+        call_host(operation.wire_name(), input).await
+    }
+
+    async fn invoke_collected_stream(
+        &self,
+        operation: HostOperation,
+        input: Value,
+    ) -> Result<Value, Self::Error> {
+        call_host_stream(operation.wire_name(), input).await
+    }
+
+    fn client_error(code: &'static str, message: String) -> Self::Error {
+        ErrorPayload::new(
+            WireErrorCode::parse(code).unwrap_or(WireErrorCode::InvalidResponse),
+            message,
+        )
+    }
+}
+
+pub type ModelClient = TypedModelClient<WorkerHostTransport>;
+pub type EventClient = TypedEventClient<WorkerHostTransport>;
+pub type SessionControlClient = TypedSessionControlClient<WorkerHostTransport>;
+pub type SessionHistoryClient = TypedSessionHistoryClient<WorkerHostTransport>;
+pub type SessionStateClient = TypedSessionStateClient<WorkerHostTransport>;
+pub type SessionInspectClient = TypedSessionInspectClient<WorkerHostTransport>;
+pub type WorkspaceClient = TypedWorkspaceClient<WorkerHostTransport>;
+pub type ProcessClient = TypedProcessClient<WorkerHostTransport>;
+pub type NetworkClient = TypedNetworkClient<WorkerHostTransport>;
+pub type ExtensionHttpClient = TypedExtensionHttpClient<WorkerHostTransport>;
+
+/// Worker-side entry point for typed host domains.
 pub struct HostClient;
 
-/// `astrcode.process.spawn` 的线缆请求。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostProcessRequest {
-    pub command: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub args: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stdin: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
-}
-
-impl HostProcessRequest {
-    pub fn new(command: impl Into<String>) -> Self {
-        Self {
-            command: command.into(),
-            args: Vec::new(),
-            cwd: None,
-            stdin: None,
-            timeout_ms: None,
-        }
-    }
-}
-
-/// `astrcode.process.spawn` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostProcessOutput {
-    pub status: Option<i32>,
-    pub success: bool,
-    pub stdout: String,
-    pub stderr: String,
-    pub combined: String,
-    pub stdout_truncated: bool,
-    pub stderr_truncated: bool,
-    pub combined_truncated: bool,
-}
-
-/// `astrcode.network.client` 的线缆请求。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostNetworkRequest {
-    pub url: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub method: Option<String>,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub headers: BTreeMap<String, String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_ms: Option<u64>,
-}
-
-impl HostNetworkRequest {
-    pub fn get(url: impl Into<String>) -> Self {
-        Self {
-            url: url.into(),
-            method: None,
-            headers: BTreeMap::new(),
-            body: None,
-            max_bytes: None,
-            timeout_ms: None,
-        }
-    }
-}
-
-/// `astrcode.network.client` 的线缆响应。
-///
-/// `body` 仅承载 UTF-8 文本，不提供二进制/base64 表示；二进制响应由宿主拒绝。
-/// `headers` 不保留同名响应头的重复值。宿主限制全局共享并发，但线缆协议不承诺
-/// extension 级公平配额。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostNetworkResponse {
-    /// 完成所有受限重定向后的最终 URL。
-    pub final_url: String,
-    pub status: u16,
-    pub headers: BTreeMap<String, String>,
-    pub body: String,
-}
-
-/// `astrcode.workspace.write` 的线缆请求。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceWriteRequest {
-    pub path: String,
-    pub content: String,
-}
-
-/// `astrcode.workspace.write` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceWriteOutput {
-    pub path: String,
-    pub bytes_written: usize,
-    pub parent_created: bool,
-}
-
-/// `astrcode.workspace.edit` 的线缆请求。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceEditRequest {
-    pub path: String,
-    pub old_text: String,
-    pub new_text: String,
-    #[serde(default)]
-    pub replace_all: bool,
-}
-
-/// `astrcode.workspace.edit` 的线缆响应。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceEditOutput {
-    pub path: String,
-    pub replacements: usize,
-    pub bytes_written: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceListRequest {
-    pub path: String,
-    #[serde(default = "default_workspace_list_depth")]
-    pub depth: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub limit: Option<usize>,
-}
-
-const fn default_workspace_list_depth() -> usize {
-    1
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceListEntry {
-    pub name: String,
-    pub path: String,
-    pub kind: String,
-    pub bytes: Option<u64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceListOutput {
-    pub path: String,
-    pub entries: Vec<HostWorkspaceListEntry>,
-    pub returned_entries: usize,
-    pub truncated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceGrepRequest {
-    pub pattern: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_matches: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_bytes: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_line_chars: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceGrepMatch {
-    pub path: String,
-    pub line_number: usize,
-    pub line: String,
-    pub line_truncated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceGrepOutput {
-    pub pattern: String,
-    pub root: String,
-    pub matches: Vec<HostWorkspaceGrepMatch>,
-    pub truncated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceGlobRequest {
-    pub pattern: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub root: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_matches: Option<usize>,
-    #[serde(default)]
-    pub include_ignored: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostWorkspaceGlobOutput {
-    pub pattern: String,
-    pub root: String,
-    pub paths: Vec<String>,
-    pub truncated: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostSessionInputRequest {
-    pub target_session_id: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostSessionDeliveryOutput {
-    pub status: String,
-    #[serde(default)]
-    pub turn_id: Option<String>,
-    #[serde(default)]
-    pub queue_len: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostSessionExecutionView {
-    pub phase: String,
-    pub active_turn_id: Option<String>,
-    pub queued_inputs: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostConfigureSessionToolsRequest {
-    pub session_id: String,
-    pub selection: SessionToolSelectionDto,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct HostConfigureSessionToolsOutput {
-    pub selection: SessionToolSelectionDto,
-}
-
 impl HostClient {
-    /// 调用宿主主模型（manifest 须声明 `main_model`）。
-    pub async fn main_chat(messages: Value) -> Result<Value, ErrorPayload> {
-        Self::call(
-            "astrcode.llm.main_chat",
-            serde_json::json!({ "messages": messages }),
-        )
-        .await
+    pub const fn events() -> EventClient {
+        EventClient::new(WorkerHostTransport)
     }
 
-    /// 调用宿主小模型（manifest 须声明 `small_model`）。
-    pub async fn small_chat(messages: Value) -> Result<Value, ErrorPayload> {
-        Self::call(
-            "astrcode.llm.small_chat",
-            serde_json::json!({ "messages": messages }),
-        )
-        .await
+    pub const fn models() -> ModelClient {
+        ModelClient::new(WorkerHostTransport)
     }
 
-    /// 运行受限子进程（manifest 须声明 `process_spawn`）。
-    pub async fn spawn_process(
-        request: HostProcessRequest,
-    ) -> Result<HostProcessOutput, ErrorPayload> {
-        let input = serialize_request(request)?;
-        let output = Self::call("astrcode.process.spawn", input).await?;
-        deserialize_response(output, "process.spawn")
+    pub const fn session_control() -> SessionControlClient {
+        SessionControlClient::new(WorkerHostTransport)
     }
 
-    /// 发起受限 HTTP 请求（manifest 须声明 `network_client`）。
-    pub async fn network_request(
-        request: HostNetworkRequest,
-    ) -> Result<HostNetworkResponse, ErrorPayload> {
-        let input = serialize_request(request)?;
-        let output = Self::call("astrcode.network.client", input).await?;
-        deserialize_response(output, "network.client")
+    pub const fn session_history() -> SessionHistoryClient {
+        SessionHistoryClient::new(WorkerHostTransport)
     }
 
-    /// 调用其他插件的公开 HTTP 路由（manifest 须声明 `public_http_dispatch`）。
-    pub async fn dispatch_public_http(
-        request: ExtensionHttpRequest,
-    ) -> Result<ExtensionHttpResponse, ErrorPayload> {
-        let input = serialize_request(request)?;
-        let output = Self::call("astrcode.extension.http.public", input).await?;
-        deserialize_response(output, "extension.http.public")
+    pub const fn session_state() -> SessionStateClient {
+        SessionStateClient::new(WorkerHostTransport)
     }
 
-    pub async fn inject_session_input(
-        request: HostSessionInputRequest,
-    ) -> Result<HostSessionDeliveryOutput, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.control.inject_or_start",
-            serialize_request(request)?,
-        )
-        .await?;
-        deserialize_response(output, "session.control.inject_or_start")
+    pub const fn session_inspect() -> SessionInspectClient {
+        SessionInspectClient::new(WorkerHostTransport)
     }
 
-    pub async fn interrupt_and_submit_session_input(
-        request: HostSessionInputRequest,
-    ) -> Result<HostSessionDeliveryOutput, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.control.interrupt_and_submit",
-            serialize_request(request)?,
-        )
-        .await?;
-        deserialize_response(output, "session.control.interrupt_and_submit")
+    pub const fn workspace() -> WorkspaceClient {
+        WorkspaceClient::new(WorkerHostTransport)
     }
 
-    pub async fn cancel_session_turn(
-        request: HostSessionTargetRequest,
-    ) -> Result<(), ErrorPayload> {
-        Self::call(
-            "astrcode.session.control.cancel_turn",
-            serialize_request(request)?,
-        )
-        .await
-        .map(|_| ())
+    pub const fn process() -> ProcessClient {
+        ProcessClient::new(WorkerHostTransport)
     }
 
-    pub async fn session_execution_view(
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionExecutionView, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.control.execution_view",
-            serialize_request(request)?,
-        )
-        .await?;
-        deserialize_response(output, "session.control.execution_view")
+    pub const fn network() -> NetworkClient {
+        NetworkClient::new(WorkerHostTransport)
     }
 
-    pub async fn session_state(
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionStateOutput, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.control.state",
-            serialize_request(request)?,
-        )
-        .await?;
-        deserialize_response(output, "session.control.state")
-    }
-
-    pub async fn reactivate_session(
-        request: HostSessionTargetRequest,
-    ) -> Result<HostSessionReactivateOutput, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.control.reactivate",
-            serialize_request(request)?,
-        )
-        .await?;
-        deserialize_response(output, "session.control.reactivate")
-    }
-
-    pub async fn session_history_snapshot(
-        request: HostSessionTargetRequest,
-    ) -> Result<SessionHistorySnapshotOutput, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.history.snapshot",
-            serialize_request(request)?,
-        )
-        .await?;
-        deserialize_response(output, "session.history.snapshot")
-    }
-
-    /// 创建子 session（manifest 须声明 `session_control`）。
-    pub async fn create_child_session(
-        request: HostCreateSessionRequest,
-    ) -> Result<HostCreateSessionOutput, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.control.create",
-            serialize_request(request)?,
-        )
-        .await?;
-        deserialize_response(output, "session.control.create")
-    }
-
-    /// 向子 session 提交 turn（manifest 须声明 `session_control`）。
-    pub async fn submit_session_turn(
-        request: HostSubmitTurnRequest,
-    ) -> Result<HostSubmitTurnOutput, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.control.submit_turn",
-            serialize_request(request)?,
-        )
-        .await?;
-        deserialize_response(output, "session.control.submit_turn")
-    }
-
-    /// 配置 session 后续 turn 使用的工具边界（manifest 须声明 `session_control`）。
-    pub async fn configure_session_tools(
-        request: HostConfigureSessionToolsRequest,
-    ) -> Result<HostConfigureSessionToolsOutput, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.control.configure_tools",
-            serialize_request(request)?,
-        )
-        .await?;
-        deserialize_response(output, "session.control.configure_tools")
-    }
-
-    /// 创建或替换工作区文件（manifest 须声明 `workspace_write`）。
-    pub async fn write_workspace_file(
-        request: HostWorkspaceWriteRequest,
-    ) -> Result<HostWorkspaceWriteOutput, ErrorPayload> {
-        let input = serialize_request(request)?;
-        let output = Self::call("astrcode.workspace.write", input).await?;
-        deserialize_response(output, "workspace.write")
-    }
-
-    /// 精确替换工作区文件片段（manifest 须声明 `workspace_write`）。
-    pub async fn edit_workspace_file(
-        request: HostWorkspaceEditRequest,
-    ) -> Result<HostWorkspaceEditOutput, ErrorPayload> {
-        let input = serialize_request(request)?;
-        let output = Self::call("astrcode.workspace.edit", input).await?;
-        deserialize_response(output, "workspace.edit")
-    }
-
-    pub async fn list_workspace(
-        request: HostWorkspaceListRequest,
-    ) -> Result<HostWorkspaceListOutput, ErrorPayload> {
-        let output = Self::call("astrcode.workspace.list", serialize_request(request)?).await?;
-        deserialize_response(output, "workspace.list")
-    }
-
-    pub async fn grep_workspace(
-        request: HostWorkspaceGrepRequest,
-    ) -> Result<HostWorkspaceGrepOutput, ErrorPayload> {
-        let output = Self::call("astrcode.workspace.grep", serialize_request(request)?).await?;
-        deserialize_response(output, "workspace.grep")
-    }
-
-    pub async fn glob_workspace(
-        request: HostWorkspaceGlobRequest,
-    ) -> Result<HostWorkspaceGlobOutput, ErrorPayload> {
-        let output = Self::call("astrcode.workspace.glob", serialize_request(request)?).await?;
-        deserialize_response(output, "workspace.glob")
-    }
-
-    /// 列出宿主可见的全部会话（manifest 须声明宿主级全局权限 `session_inspect`）。
-    pub async fn list_sessions() -> Result<SessionInspectListOutput, ErrorPayload> {
-        let output = Self::call("astrcode.session.inspect.list", serde_json::json!({})).await?;
-        deserialize_response(output, "session.inspect.list")
-    }
-
-    /// 跨会话读取轻量快照（manifest 须声明宿主级全局权限 `session_inspect`）。
-    pub async fn inspect_session_snapshot(
-        session_id: &str,
-    ) -> Result<SessionInspectSnapshotOutput, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.inspect.snapshot",
-            serde_json::json!({ "session_id": session_id }),
-        )
-        .await?;
-        deserialize_response(output, "session.inspect.snapshot")
-    }
-
-    /// 跨会话读取稳定映射后的完整投影（manifest 须声明宿主级全局权限 `session_inspect`）。
-    pub async fn inspect_session_read_model(
-        session_id: &str,
-    ) -> Result<SessionInspectReadModelOutput, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.inspect.read_model",
-            serde_json::json!({ "session_id": session_id }),
-        )
-        .await?;
-        deserialize_response(output, "session.inspect.read_model")
-    }
-
-    /// 跨会话读取 provider 可见消息（manifest 须声明宿主级全局权限 `session_inspect`）。
-    pub async fn inspect_provider_messages(
-        session_id: &str,
-    ) -> Result<SessionInspectProviderMessagesOutput, ErrorPayload> {
-        let output = Self::call(
-            "astrcode.session.inspect.provider_messages",
-            serde_json::json!({ "session_id": session_id }),
-        )
-        .await?;
-        deserialize_response(output, "session.inspect.provider_messages")
-    }
-
-    pub async fn call(capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-        let api = HOST_API
-            .get()
-            .ok_or_else(|| ErrorPayload::new("host_not_ready", "host peer not ready"))?;
-        api.call(capability, input).await
-    }
-
-    pub async fn call_stream(capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-        let api = HOST_API
-            .get()
-            .ok_or_else(|| ErrorPayload::new("host_not_ready", "host peer not ready"))?;
-        api.call_stream(capability, input).await
+    pub const fn extension_http() -> ExtensionHttpClient {
+        ExtensionHttpClient::new(WorkerHostTransport)
     }
 }
 
-fn serialize_request<T: Serialize>(request: T) -> Result<Value, ErrorPayload> {
-    serde_json::to_value(request).map_err(|error| {
-        ErrorPayload::new(
-            "serialization_failed",
-            format!("failed to serialize host request: {error}"),
-        )
-    })
+async fn call_host(capability: &str, input: Value) -> Result<Value, ErrorPayload> {
+    host_api()?.call(capability, input).await
 }
 
-fn deserialize_response<T: serde::de::DeserializeOwned>(
-    output: Value,
-    capability: &str,
-) -> Result<T, ErrorPayload> {
-    serde_json::from_value(output).map_err(|error| {
-        ErrorPayload::new(
-            "invalid_host_response",
-            format!("invalid {capability} response: {error}"),
-        )
-    })
+async fn call_host_stream(capability: &str, input: Value) -> Result<Value, ErrorPayload> {
+    host_api()?.call_stream(capability, input).await
 }
 
+fn host_api() -> Result<Arc<dyn HostApi>, ErrorPayload> {
+    if let Ok(api) = SCOPED_HOST_API.try_with(Arc::clone) {
+        return Ok(api);
+    }
+    HOST_API
+        .get()
+        .cloned()
+        .ok_or_else(|| ErrorPayload::new(WireErrorCode::HostNotReady, "host peer not ready"))
+}
+
+/// Invokes a raw host capability for transport or request-context integration tests.
+pub async fn invoke_host(capability: &str, input: Value) -> Result<Value, ErrorPayload> {
+    call_host(capability, input).await
+}
 #[cfg(test)]
 mod host_tests {
-    use std::sync::Arc;
+    use std::{
+        collections::HashSet,
+        future::Future,
+        sync::{Arc, Mutex},
+    };
 
     use async_trait::async_trait;
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::s5r::ErrorPayload;
+    use crate::{s5r::ErrorPayload, session::SessionToolSelectionDto};
 
-    struct MockHost;
+    struct MockHost {
+        marker: &'static str,
+    }
+
+    #[derive(Default)]
+    struct RecordingHost {
+        operations: Mutex<Vec<HostOperation>>,
+    }
+
+    async fn expect_backend_error<T>(future: impl Future<Output = Result<T, ErrorPayload>>) {
+        let Err(error) = future.await else {
+            panic!("mock host unexpectedly succeeded");
+        };
+        assert_eq!(error.code_enum(), Some(WireErrorCode::BackendUnavailable));
+    }
+
+    #[test]
+    fn peer_error_mapping_preserves_host_payload_and_transport_contracts() {
+        let mut expected = ErrorPayload::new(
+            WireErrorCode::ProviderRateLimited,
+            "provider rate limit reached",
+        )
+        .with_hint("retry after the provider backoff")
+        .retryable(true);
+        expected.details = Some(json!({ "retry_after_ms": 250 }));
+
+        let actual = peer_error_to_payload(PeerError::Payload(expected.clone()));
+        assert_eq!(actual.code, expected.code);
+        assert_eq!(actual.message, expected.message);
+        assert_eq!(actual.hint, expected.hint);
+        assert_eq!(actual.retryable, expected.retryable);
+        assert_eq!(actual.details, expected.details);
+
+        let transport_errors = [
+            (PeerError::Closed, "peer_closed", "host peer closed", false),
+            (
+                PeerError::Timeout,
+                "timeout",
+                "host invoke timed out",
+                false,
+            ),
+            (
+                PeerError::Busy,
+                "peer_busy",
+                "host invoke concurrency limit reached",
+                true,
+            ),
+            (
+                PeerError::Msg("invalid frame".into()),
+                "transport_error",
+                "invalid frame",
+                false,
+            ),
+        ];
+        for (error, code, message, retryable) in transport_errors {
+            let payload = peer_error_to_payload(error);
+            assert_eq!(payload.code, code);
+            assert_eq!(payload.message, message);
+            assert_eq!(payload.retryable, retryable);
+            assert!(payload.hint.is_none());
+            assert!(payload.details.is_none());
+        }
+    }
 
     #[test]
     fn bounded_io_contracts_match_wire_shape() {
         let mut process = HostProcessRequest::new("rustc");
         process.args.push("--version".into());
         process.timeout_ms = Some(1_000);
-        let value = serialize_request(process).expect("serialize process request");
+        let value = serde_json::to_value(&process).expect("serialize process request");
         assert_eq!(value["command"], "rustc");
         assert_eq!(value["args"], json!(["--version"]));
         assert_eq!(value["timeout_ms"], 1_000);
 
-        let response = deserialize_response::<HostNetworkResponse>(
-            json!({
-                "final_url": "https://example.com/final",
-                "status": 200,
-                "headers": {},
-                "body": "ok"
-            }),
-            "network.client",
-        )
+        let mut network = HostNetworkRequest::get("https://example.com");
+        network.body = vec![0, 255];
+        network.redirect_policy = HostNetworkRedirectPolicy::Manual;
+        let value = serde_json::to_value(&network).expect("serialize binary network request");
+        assert_eq!(value["body"], "AP8=");
+        assert_eq!(value["redirect_policy"], "manual");
+        assert_eq!(value["max_bytes"], 10 * 1024 * 1024);
+
+        let response: HostNetworkResponse = serde_json::from_value(json!({
+            "final_url": "https://example.com/final",
+            "status": 200,
+            "headers": {},
+            "body": "b2s="
+        }))
         .expect("deserialize network response");
         assert_eq!(response.final_url, "https://example.com/final");
         assert_eq!(response.status, 200);
-        assert_eq!(response.body, "ok");
+        assert_eq!(response.body, b"ok");
     }
 
     #[test]
@@ -638,15 +335,14 @@ mod host_tests {
         let mut create = HostCreateSessionRequest::new("reviewer");
         create.tool_selection = Some(SessionToolSelectionDto::only(["read", "grep"]));
         create.ephemeral = true;
-        let value = serialize_request(create).expect("serialize create session request");
+        let value = serde_json::to_value(&create).expect("serialize create session request");
         assert_eq!(value["name"], "reviewer");
         assert_eq!(value["tool_selection"]["mode"], "only");
         assert_eq!(value["tool_selection"]["names"], json!(["read", "grep"]));
         assert_eq!(value["ephemeral"], true);
-        assert!(value.get("working_dir").is_none());
 
         let submit = HostSubmitTurnRequest::background("child-1", "review this");
-        let value = serialize_request(submit).expect("serialize submit turn request");
+        let value = serde_json::to_value(&submit).expect("serialize submit turn request");
         assert_eq!(value["target_session_id"], "child-1");
         assert_eq!(value["wait_for_result"], false);
         assert_eq!(value["recycle_on_complete"], true);
@@ -666,14 +362,11 @@ mod host_tests {
             .is_err()
         );
 
-        let output = deserialize_response::<HostSubmitTurnOutput>(
-            json!({
-                "status": "backgrounded",
-                "task_id": "turn-1",
-                "session_id": "child-1"
-            }),
-            "session.control.submit_turn",
-        )
+        let output: HostSubmitTurnOutput = serde_json::from_value(json!({
+            "status": "backgrounded",
+            "task_id": "turn-1",
+            "session_id": "child-1"
+        }))
         .expect("deserialize submit turn response");
         assert_eq!(
             output,
@@ -686,16 +379,92 @@ mod host_tests {
 
     #[async_trait]
     impl HostApi for MockHost {
-        async fn call(&self, capability: &str, _input: Value) -> Result<Value, ErrorPayload> {
+        async fn call(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
             match capability {
+                "astrcode.llm.main_chat" => {
+                    assert_eq!(input["messages"][0]["role"], "user");
+                    Ok(json!({ "content": "typed", "model": "main_llm" }))
+                },
+                "astrcode.network.client" => Ok(json!({
+                    "final_url": "https://example.com/final",
+                    "status": 200,
+                    "headers": {},
+                    "body": "AP8="
+                })),
+                "astrcode.session.history.list" => Ok(json!({
+                    "sessions": [{
+                        "session_id": "session-1",
+                        "parent_session_id": null,
+                        "source_extension": null,
+                        "working_dir": "/workspace",
+                        "model_id": "model",
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "latest_cursor": "1"
+                    }]
+                })),
                 "astrcode.session.control.create" => Ok(json!({ "session_id": "child-1" })),
+                "astrcode.session.root.create" => {
+                    assert_eq!(input, json!({}));
+                    Ok(json!({ "session_id": "root-1" }))
+                },
                 "astrcode.session.control.submit_turn" => Ok(json!({
                     "status": "backgrounded",
                     "task_id": "turn-1",
                     "session_id": "child-1"
                 })),
-                _ => Ok(json!({ "capability": capability })),
+                "astrcode.session.state.read" => Ok(json!({ "content": "active" })),
+                capability
+                    if matches!(
+                        capability,
+                        "astrcode.session.control.dispose" | "astrcode.session.state.write"
+                    ) && self.marker == "invalid_ack" =>
+                {
+                    Ok(json!({ "ok": true, "unexpected": true }))
+                },
+                capability
+                    if matches!(
+                        capability,
+                        "astrcode.session.control.dispose" | "astrcode.session.state.write"
+                    ) && self.marker == "false_ack" =>
+                {
+                    Ok(json!({ "ok": false }))
+                },
+                "astrcode.event.emit" => Ok(json!({ "status": "queued" })),
+                "astrcode.session.control.dispose" | "astrcode.session.state.write" => {
+                    Ok(json!({ "ok": true }))
+                },
+                _ => Ok(json!({
+                    "capability": capability,
+                    "host": self.marker,
+                })),
             }
+        }
+
+        async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
+            if capability == "astrcode.llm.main_chat" {
+                assert_eq!(input["messages"][0]["role"], "user");
+                return Ok(json!({
+                    "content": "typed",
+                    "model": "main_llm",
+                    "chunks": [{ "delta": "ty" }, { "delta": "ped" }]
+                }));
+            }
+            self.call(capability, input).await
+        }
+    }
+
+    #[async_trait]
+    impl HostApi for RecordingHost {
+        async fn call(&self, capability: &str, _input: Value) -> Result<Value, ErrorPayload> {
+            self.operations.lock().unwrap().push(
+                HostOperation::from_wire_name(capability)
+                    .unwrap_or_else(|| panic!("unknown host operation {capability}")),
+            );
+            Err(ErrorPayload::new(
+                WireErrorCode::BackendUnavailable,
+                "test backend unavailable",
+            ))
         }
 
         async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
@@ -704,26 +473,302 @@ mod host_tests {
     }
 
     #[tokio::test]
-    async fn inject_host_api_allows_host_client_call() {
-        let _ = inject_host_api(Arc::new(MockHost));
-        let out = HostClient::call("astrcode.test", json!({})).await.unwrap();
-        assert_eq!(out["capability"], "astrcode.test");
+    async fn worker_clients_route_every_typed_host_operation() {
+        let expected_operations = [
+            HostOperation::EventEmit,
+            HostOperation::LlmMainChat,
+            HostOperation::LlmSmallChat,
+            HostOperation::LlmMainChat,
+            HostOperation::LlmSmallChat,
+            HostOperation::ProcessSpawn,
+            HostOperation::NetworkClient,
+            HostOperation::ExtensionHttpPublic,
+            HostOperation::SessionRootCreate,
+            HostOperation::SessionRootSubmitTurn,
+            HostOperation::SessionRootState,
+            HostOperation::SessionControlInjectOrStart,
+            HostOperation::SessionControlInterruptAndSubmit,
+            HostOperation::SessionControlCancelTurn,
+            HostOperation::SessionControlExecutionView,
+            HostOperation::SessionControlState,
+            HostOperation::SessionControlReactivate,
+            HostOperation::SessionControlCreate,
+            HostOperation::SessionControlSubmitTurn,
+            HostOperation::SessionControlConfigureTools,
+            HostOperation::SessionControlDispose,
+            HostOperation::SessionHistoryList,
+            HostOperation::SessionHistoryTranscript,
+            HostOperation::SessionHistoryProviderMessages,
+            HostOperation::SessionHistoryTokenUsage,
+            HostOperation::SessionHistorySnapshot,
+            HostOperation::SessionReadEvents,
+            HostOperation::SessionStateRead,
+            HostOperation::SessionStateWrite,
+            HostOperation::WorkspaceRead,
+            HostOperation::WorkspaceWrite,
+            HostOperation::WorkspaceEdit,
+            HostOperation::WorkspaceList,
+            HostOperation::WorkspaceGrep,
+            HostOperation::WorkspaceGlob,
+            HostOperation::SessionInspectList,
+            HostOperation::SessionInspectSnapshot,
+            HostOperation::SessionInspectReadModel,
+            HostOperation::SessionInspectProviderMessages,
+        ];
+        let covered = expected_operations.iter().copied().collect::<HashSet<_>>();
+        let expected = crate::host::HOST_OPERATION_SPECS
+            .iter()
+            .map(|spec| spec.operation)
+            .collect::<HashSet<_>>();
+        assert_eq!(covered, expected, "worker client operation coverage");
 
-        let created = HostClient::create_child_session(HostCreateSessionRequest::new("reviewer"))
-            .await
-            .unwrap();
-        assert_eq!(created.session_id, "child-1");
+        let host = Arc::new(RecordingHost::default());
+        with_host_api(host.clone(), async {
+            let target = || HostSessionTargetRequest {
+                target_session_id: "child-1".into(),
+            };
+            let input = || HostSessionInputRequest {
+                target_session_id: "child-1".into(),
+                content: "continue".into(),
+            };
+            let messages = || vec![LlmMessage::user("hello")];
 
-        let submitted =
-            HostClient::submit_session_turn(HostSubmitTurnRequest::background("child-1", "review"))
+            expect_backend_error(HostClient::events().emit(HostEventEmitRequest {
+                event_type: "review.completed".into(),
+                schema_version: 1,
+                payload: json!({ "status": "ok" }),
+            }))
+            .await;
+            expect_backend_error(HostClient::models().main_chat(messages())).await;
+            expect_backend_error(HostClient::models().small_chat(messages())).await;
+            expect_backend_error(HostClient::models().main_chat_stream(messages())).await;
+            expect_backend_error(HostClient::models().small_chat_stream(messages())).await;
+            expect_backend_error(HostClient::process().spawn(HostProcessRequest::new("true")))
+                .await;
+            expect_backend_error(
+                HostClient::network().send(HostNetworkRequest::get("https://example.com")),
+            )
+            .await;
+            expect_backend_error(HostClient::extension_http().dispatch_public(
+                ExtensionHttpDispatchRequest::new(
+                    crate::extension::ExtensionHttpMethod::Get,
+                    "/health",
+                ),
+            ))
+            .await;
+            expect_backend_error(HostClient::session_control().create_root()).await;
+            expect_backend_error(
+                HostClient::session_control()
+                    .submit_root_turn(HostRootSubmitTurnRequest::new("root-1", "continue")),
+            )
+            .await;
+            expect_backend_error(HostClient::session_control().root_state(
+                HostSessionTargetRequest {
+                    target_session_id: "root-1".into(),
+                },
+            ))
+            .await;
+            expect_backend_error(HostClient::session_control().inject_or_start(input())).await;
+            expect_backend_error(HostClient::session_control().interrupt_and_submit(input())).await;
+            expect_backend_error(HostClient::session_control().cancel_turn(target())).await;
+            expect_backend_error(HostClient::session_control().execution_view(target())).await;
+            expect_backend_error(HostClient::session_control().state(target())).await;
+            expect_backend_error(HostClient::session_control().reactivate(target())).await;
+            expect_backend_error(
+                HostClient::session_control().create_child(HostCreateSessionRequest::new("child")),
+            )
+            .await;
+            expect_backend_error(
+                HostClient::session_control()
+                    .submit_turn(HostSubmitTurnRequest::background("child-1", "review")),
+            )
+            .await;
+            expect_backend_error(HostClient::session_control().configure_tools(
+                HostConfigureSessionToolsRequest {
+                    session_id: "child-1".into(),
+                    selection: SessionToolSelectionDto::no_tools(),
+                },
+            ))
+            .await;
+            expect_backend_error(
+                HostClient::session_control().recycle(HostRecycleSessionRequest::new("child-1")),
+            )
+            .await;
+            expect_backend_error(HostClient::session_history().list_summaries()).await;
+            expect_backend_error(HostClient::session_history().transcript(target())).await;
+            expect_backend_error(HostClient::session_history().provider_messages(target())).await;
+            expect_backend_error(HostClient::session_history().token_usage(target())).await;
+            expect_backend_error(HostClient::session_history().snapshot(target())).await;
+            expect_backend_error(
+                HostClient::session_history()
+                    .events_page(HostSessionEventsPageRequest::new("child-1")),
+            )
+            .await;
+            expect_backend_error(
+                HostClient::session_state()
+                    .read(HostSessionStateReadRequest { key: "goal".into() }),
+            )
+            .await;
+            expect_backend_error(
+                HostClient::session_state().write(HostSessionStateWriteRequest {
+                    key: "goal".into(),
+                    content: "active".into(),
+                }),
+            )
+            .await;
+            expect_backend_error(HostClient::workspace().read(HostWorkspaceReadRequest {
+                path: "notes.txt".into(),
+                max_bytes: None,
+            }))
+            .await;
+            expect_backend_error(HostClient::workspace().write(HostWorkspaceWriteRequest {
+                path: "notes.txt".into(),
+                content: "hello".into(),
+            }))
+            .await;
+            expect_backend_error(HostClient::workspace().edit(HostWorkspaceEditRequest {
+                path: "notes.txt".into(),
+                old_text: "hello".into(),
+                new_text: "hi".into(),
+                replace_all: false,
+            }))
+            .await;
+            expect_backend_error(HostClient::workspace().list(HostWorkspaceListRequest {
+                path: ".".into(),
+                depth: 1,
+                limit: None,
+            }))
+            .await;
+            expect_backend_error(HostClient::workspace().grep(HostWorkspaceGrepRequest {
+                pattern: "hello".into(),
+                path: None,
+                max_matches: None,
+                max_bytes: None,
+                max_line_chars: None,
+            }))
+            .await;
+            expect_backend_error(HostClient::workspace().glob(HostWorkspaceGlobRequest {
+                pattern: "**/*.rs".into(),
+                root: None,
+                max_matches: None,
+                include_ignored: false,
+            }))
+            .await;
+            expect_backend_error(HostClient::session_inspect().list()).await;
+            expect_backend_error(HostClient::session_inspect().snapshot("session-1")).await;
+            expect_backend_error(HostClient::session_inspect().read_model("session-1")).await;
+            expect_backend_error(HostClient::session_inspect().provider_messages("session-1"))
+                .await;
+        })
+        .await;
+
+        assert_eq!(*host.operations.lock().unwrap(), expected_operations);
+    }
+
+    #[tokio::test]
+    async fn scoped_host_api_is_concurrent_and_serves_typed_domain_clients() {
+        let (left, right) = tokio::join!(
+            with_host_api(
+                Arc::new(MockHost { marker: "left" }),
+                invoke_host("astrcode.test", json!({})),
+            ),
+            with_host_api(
+                Arc::new(MockHost { marker: "right" }),
+                invoke_host("astrcode.test", json!({})),
+            ),
+        );
+        assert_eq!(left.unwrap()["host"], "left");
+        assert_eq!(right.unwrap()["host"], "right");
+
+        with_host_api(Arc::new(MockHost { marker: "typed" }), async {
+            let chat = HostClient::models()
+                .main_chat(vec![LlmMessage::user("hello")])
                 .await
                 .unwrap();
-        assert_eq!(
-            submitted,
-            HostSubmitTurnOutput::Backgrounded {
-                task_id: "turn-1".into(),
-                session_id: "child-1".into()
-            }
-        );
+            assert_eq!(chat.content, "typed");
+            let stream = HostClient::models()
+                .main_chat_stream(vec![LlmMessage::user("hello")])
+                .await
+                .unwrap();
+            assert_eq!(stream.chunks[0].delta, "ty");
+            assert_eq!(stream.chunks[1].delta, "ped");
+
+            let network = HostClient::network()
+                .send(HostNetworkRequest::get("https://example.com"))
+                .await
+                .unwrap();
+            assert_eq!(network.body, vec![0, 255]);
+
+            let receipt = HostClient::events()
+                .emit(HostEventEmitRequest {
+                    event_type: "review.completed".into(),
+                    schema_version: 1,
+                    payload: json!({ "status": "ok" }),
+                })
+                .await
+                .unwrap();
+            assert_eq!(receipt, HostEventEmitOutput::Queued);
+
+            let history = HostClient::session_history()
+                .list_summaries()
+                .await
+                .unwrap();
+            assert_eq!(history.sessions[0].session_id.as_str(), "session-1");
+
+            let root = HostClient::session_control().create_root().await.unwrap();
+            assert_eq!(root.session_id, "root-1");
+
+            let created = HostClient::session_control()
+                .create_child(HostCreateSessionRequest::new("reviewer"))
+                .await
+                .unwrap();
+            assert_eq!(created.session_id, "child-1");
+
+            let submitted = HostClient::session_control()
+                .submit_turn(HostSubmitTurnRequest::background("child-1", "review"))
+                .await
+                .unwrap();
+            assert_eq!(
+                submitted,
+                HostSubmitTurnOutput::Backgrounded {
+                    task_id: "turn-1".into(),
+                    session_id: "child-1".into()
+                }
+            );
+
+            HostClient::session_control()
+                .recycle(HostRecycleSessionRequest::new("child-1"))
+                .await
+                .unwrap();
+
+            HostClient::session_state()
+                .write(HostSessionStateWriteRequest {
+                    key: "goal".into(),
+                    content: "active".into(),
+                })
+                .await
+                .unwrap();
+            let state = HostClient::session_state()
+                .read(HostSessionStateReadRequest { key: "goal".into() })
+                .await
+                .unwrap();
+            assert_eq!(state.content.as_deref(), Some("active"));
+        })
+        .await;
+
+        for marker in ["false_ack", "invalid_ack"] {
+            let error = with_host_api(Arc::new(MockHost { marker }), async {
+                HostClient::session_control()
+                    .recycle(HostRecycleSessionRequest::new("child-1"))
+                    .await
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error.code_enum(),
+                Some(WireErrorCode::InvalidResponse),
+                "{marker}"
+            );
+        }
     }
 }

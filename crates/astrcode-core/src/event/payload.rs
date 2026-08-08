@@ -89,7 +89,8 @@ pub enum DurableEventPayload {
         task: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_selection: Option<SessionToolSelection>,
-        tool_call_id: ToolCallId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<ToolCallId>,
     },
     AgentSessionCompleted {
         child_session_id: SessionId,

@@ -13,7 +13,7 @@ use astrcode_core::{
     user_input::UserInput,
 };
 use astrcode_extension_sdk::extension::{
-    CommandCompletions, ExtensionCommandResult, ExtensionError,
+    CommandCompletions, ExtensionCommandResult, ExtensionError, RuntimeHookCallContext,
 };
 use astrcode_extensions::runner::CommandSource as ExtensionCommandSource;
 use astrcode_session::compaction::{
@@ -236,6 +236,7 @@ impl SessionCommandService {
         self.scheduler
             .abort(session_id)
             .await
+            .map(|_| ())
             .map_err(HandlerError::from)
     }
 
@@ -378,11 +379,11 @@ impl SessionCommandService {
         session_id: &SessionId,
         command: ParsedSlashCommand,
     ) -> Result<CommandOperation, HandlerError> {
-        let (working_dir, context) = self.command_context(session_id).await?;
+        let context = self.command_context(session_id).await?;
         let resolved = self
             .runtime
             .extension_runner()
-            .resolve_commands_for_typed(&working_dir)
+            .resolve_commands_for_typed(&context.working_dir().to_string_lossy())
             .await
             .into_iter()
             .find(|resolved| resolved.command.name == command.name)
@@ -395,7 +396,7 @@ impl SessionCommandService {
         match self
             .runtime
             .extension_runner()
-            .invoke_resolved_command_typed(&resolved, &command.arguments, &working_dir, &context)
+            .invoke_resolved_command_typed(&resolved, &command.arguments, &context)
             .await
         {
             Ok(ExtensionCommandResult::Display {
@@ -491,11 +492,11 @@ impl SessionCommandService {
             return Ok(CommandCompletions::default());
         }
 
-        let (working_dir, context) = self.command_context(&session_id).await?;
+        let context = self.command_context(&session_id).await?;
         let resolved = self
             .runtime
             .extension_runner()
-            .resolve_commands_for_typed(&working_dir)
+            .resolve_commands_for_typed(&context.working_dir().to_string_lossy())
             .await
             .into_iter()
             .find(|resolved| resolved.command.name == command_name)
@@ -507,7 +508,7 @@ impl SessionCommandService {
         let cursor = cursor.unwrap_or_else(|| argument.chars().count());
         self.runtime
             .extension_runner()
-            .complete_resolved_command_typed(&resolved, &argument, cursor, &working_dir, &context)
+            .complete_resolved_command_typed(&resolved, &argument, cursor, &context)
             .await
             .map_err(HandlerError::Extension)
     }
@@ -534,12 +535,12 @@ impl SessionCommandService {
         include_interactive: bool,
     ) -> CommandList {
         let mut commands = builtin_commands(include_interactive);
-        for resolved in self
+        let extension_surface = self
             .runtime
             .extension_runner()
-            .resolve_commands_for_typed(working_dir)
-            .await
-        {
+            .resolve_command_surface(working_dir)
+            .await;
+        for resolved in extension_surface.commands {
             if commands
                 .iter()
                 .any(|command| command.name == resolved.command.name)
@@ -556,13 +557,17 @@ impl SessionCommandService {
                 source: command_source(resolved.source),
             });
         }
-        CommandList { commands }
+        CommandList {
+            commands,
+            keybindings: extension_surface.ui.keybindings,
+            status_items: extension_surface.ui.status_items,
+        }
     }
 
     async fn command_context(
         &self,
         session_id: &SessionId,
-    ) -> Result<(String, astrcode_extension_sdk::extension::CommandContext), HandlerError> {
+    ) -> Result<RuntimeHookCallContext, HandlerError> {
         let state = self
             .runtime
             .session_manager()
@@ -570,10 +575,10 @@ impl SessionCommandService {
             .await
             .map_err(HandlerError::SessionManager)?;
         let working_dir = state.identity.working_dir.clone();
-        let context = astrcode_extension_sdk::extension::CommandContext {
-            session_id: session_id.to_string(),
-            working_dir: working_dir.clone(),
-            model: ModelSelection::simple(
+        Ok(RuntimeHookCallContext::new(
+            session_id.to_string(),
+            working_dir,
+            ModelSelection::simple(
                 self.runtime
                     .config_manager()
                     .read_effective()
@@ -581,15 +586,13 @@ impl SessionCommandService {
                     .model_id
                     .clone(),
             ),
-            session_store_dir: self
-                .runtime
+            self.runtime
                 .session_manager()
                 .session_store_dir(session_id)
                 .await
                 .ok()
                 .flatten(),
-        };
-        Ok((working_dir, context))
+        ))
     }
 
     async fn session_is_busy(&self, session_id: &SessionId) -> bool {

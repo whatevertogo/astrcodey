@@ -459,7 +459,7 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
                 agent_name: "researcher".into(),
                 task: "inspect".into(),
                 tool_selection: None,
-                tool_call_id: ToolCallId::new("agent-call-completed"),
+                tool_call_id: Some(ToolCallId::new("agent-call-completed")),
             },
         ),
         event(
@@ -479,7 +479,7 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
                 agent_name: "reviewer".into(),
                 task: "review".into(),
                 tool_selection: None,
-                tool_call_id: ToolCallId::new("agent-call-failed"),
+                tool_call_id: Some(ToolCallId::new("agent-call-failed")),
             },
         ),
         event(

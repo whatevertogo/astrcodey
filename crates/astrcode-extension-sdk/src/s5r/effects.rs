@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::s5r::messages::{HandlerId, HandlerKind};
+
 /// `handler.invoke` 成功时的 output 形状（与旧 s6r `CallResponse` 对齐）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandlerResult {
@@ -94,11 +96,11 @@ impl CallContinuation {
     pub fn handler_id_for_extension(&self, extension_id: &str) -> (String, Value) {
         match self {
             Self::Hook { on, input } => (
-                format!("{extension_id}:hook:{on}"),
+                HandlerId::new(extension_id, HandlerKind::Hook, on).into(),
                 serde_json::json!({ "on": on, "input": input }),
             ),
             Self::Tool { name, input } => (
-                format!("{extension_id}:tool:{name}"),
+                HandlerId::new(extension_id, HandlerKind::Tool, name).into(),
                 serde_json::json!({ "on": "tool", "name": name, "input": input }),
             ),
         }

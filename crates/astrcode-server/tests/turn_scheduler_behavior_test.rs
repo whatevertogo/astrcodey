@@ -18,9 +18,12 @@ use astrcode_core::{
     tool::ToolDefinition,
     types::{SessionId, new_session_id},
 };
-use astrcode_extension_sdk::extension::{
-    Extension, ExtensionCapability, ExtensionError, Registrar, UserMessageEnvelopeContext,
-    UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+use astrcode_extension_sdk::{
+    builder::manifest,
+    extension::{
+        Extension, ExtensionCapability, ExtensionError, ExtensionManifest, Registrar,
+        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+    },
 };
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
@@ -133,12 +136,12 @@ impl LlmProvider for GateFirstLlm {
 
 #[async_trait::async_trait]
 impl Extension for FailSecondEnvelope {
-    fn id(&self) -> &str {
-        "fail-second-envelope"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::ProviderRequest]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("fail-second-envelope")
+            .version("test")
+            .description("Turn scheduler envelope failure test extension")
+            .capability(ExtensionCapability::ProviderRequest)
+            .build()
     }
 
     fn register(&self, registrar: &mut Registrar) {
@@ -774,7 +777,7 @@ async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish(
         .await
         .unwrap();
 
-    scheduler.abort(&sid).await.unwrap();
+    assert!(scheduler.abort(&sid).await.unwrap());
     assert!(
         !scheduler.registry().has_active(&sid),
         "abort must not return before durable finalization releases ownership"
@@ -788,6 +791,7 @@ async fn abort_requests_cooperative_cancel_and_registry_waits_for_runner_finish(
 
     let reasons = turn_completed_reasons(&store.replay_events(&sid).await.unwrap());
     assert_eq!(reasons, vec!["aborted"]);
+    assert!(!scheduler.abort(&sid).await.unwrap());
 }
 
 #[tokio::test]

@@ -187,7 +187,6 @@ Telegram channels are configured under `extensions.astrcode-channels.telegram`; 
 enabled = true
 botTokenEnv = "TELEGRAM_BOT_TOKEN"
 allowedChatIds = ["123456789"]
-workingDir = "D:/astrcode"
 ```
 
 ### Built-in Extensions
@@ -454,7 +453,7 @@ The extension system (`astrcode-extensions`) is a core architectural pillar, not
 
 - **Extension trait** — each extension declares hook subscriptions, contributes tools and slash commands, handles lifecycle events
 - **Extension SDK** — bundled extensions and extension authors depend on `astrcode-extension-sdk` rather than coupling to host-internal `astrcode-core`
-- **Capability declarations** — bundled extensions use `Extension::capabilities()`; disk IPC extensions declare `capabilities` during `extension/initialize`; the runtime authorizes `astrcode.*` invokes via `HostRouter`
+- **Capability declarations** — bundled extensions declare capabilities in `Extension::manifest()`; disk IPC extensions declare them during `extension/initialize`; the runtime authorizes `astrcode.*` invokes via `HostRouter`
 - **Namespaced session state** — session-scoped extension state is stored under `<session>/extension_data/<extension-id>/`, keeping the session root owned by the host
 - **Hook modes** — `Blocking` (can modify input/output), `NonBlocking` (fire-and-forget), `Advisory` (observe-only); lifecycle Blocking is limited to turn-entry gates
 - **Keybinding registration** — extensions register keyboard shortcuts (e.g. `Shift+Tab` for mode toggle) via `Registrar::keybinding()`
@@ -462,7 +461,7 @@ The extension system (`astrcode-extensions`) is a core architectural pillar, not
 - **Disk s5r extensions** — stdio length-prefixed frames + JSON `WireMessage` (`protocol.s5r` + `command` in `extension.json`); worker `Initialize`, `handler.invoke`, and capability-scoped `astrcode.*` invoke. See [docs/extension-system.md](docs/extension-system.md)
 - **Extension runtime** — session spawning with depth limits, tool registration queue, priority-based dispatch
 - **Lifecycle hooks** — `SessionStart` / `SessionResume` / `SessionShutdown`, `TurnStart` / `TurnEnd` / `TurnAborted`, `PreToolUse` / `PostToolUse`, `BeforeProviderRequest` / `AfterProviderResponse`, `PreCompact` / `PostCompact`, `PromptBuild`, `UserPromptSubmit`
-- **Extension runtime APIs** — `Extension::start()` (receives `ExtensionCtx` with `startup_working_dir`, `event_sink`, and capability-scoped host services), `Extension::stop()` (with `StopReason`), `Extension::health()` (health probe), `Extension::on_config_changed()` (hot config reload)
+- **Extension runtime APIs** — `Extension::start()` receives an extension-scoped `ExtensionStartContext` with config, attributed paths, typed host clients, events, managed tasks, and cancellation; session-only operations remain unavailable until a session-scoped handler call. `Extension::stop()` receives `StopReason`; `health()` and `on_config_changed()` support health probes and hot config reloads
 - **Active health checks** — `ExtensionRunner::check_health()` provides an on-demand sampling API; polling strategy is decided by the host
 - **Startup event channel** — `bind_startup_event_channel()` binds a process-level event channel so extensions can emit custom events during `start()`
 

@@ -168,3 +168,10 @@ pub fn registered_completion_guard_count_for_test(
 ) -> usize {
     coordinator.registered_guard_count(parent_session_id)
 }
+
+pub fn completed_completion_guard_count_for_test(
+    coordinator: &ChildSessionCoordinator,
+    parent_session_id: &astrcode_core::types::SessionId,
+) -> usize {
+    coordinator.completed_guard_count(parent_session_id)
+}

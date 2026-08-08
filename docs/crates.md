@@ -244,9 +244,9 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 
 主要模块：
 
-- `extension`：扩展 trait、hook、registrar、HTTP/event 契约、runtime context 和能力声明。
-- `tool`：core 工具契约与扩展专用 `ExtensionToolContext`。
-- `session_query`：扩展可见的窄查询接口，只暴露 summary、transcript、token usage 和 namespaced 数据目录。
+- `extension`：扩展 trait、hook、registrar、HTTP/event 契约、host-attributed call context、namespaced paths 和能力声明。
+- `tool`：core 工具契约与扩展专用的私有字段 `ToolContext`。
+- `host`：按能力和调用上下文裁剪的类型化宿主域，包括 model、session history/control、workspace、network、process 和 extension HTTP。
 - `runtime_ports`：Session 消费的 tool catalog、prompt contribution、turn hooks 和 session operations 窄端口；`ToolCatalogScope` 同时携带 working dir 与 session store dir。
 - `llm`、`permission`、`config`：按扩展需要 re-export 的稳定 core 契约。
 - `hostpaths`：扩展可用的相对路径解析和路径边界校验，并暴露产品级用户目录与数据目录。
@@ -257,10 +257,9 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 - `s5r`：s5r 子进程协议消息、capabilities、effects。
 - `worker`：s5r worker builder、host client、handler adapter、manifest catalog；提供 session 输入、状态和工具选择等类型化 host 请求。
 - `session`：扩展侧 session 相关 re-export。
-- `state`：`session_data_dir`，给扩展规范 session-local 数据目录。
 - `prelude`、`worker_prelude`：分别面向进程内扩展和 s5r worker 的便捷导入集合。
 
-依赖边界：只依赖 workspace 内的 `astrcode-core`。`trusted` 模块只是进程内 host service 的命名入口，不构成安全边界；磁盘/IPC 扩展的隔离由进程边界和 capability-gated host API 保证。
+依赖边界：只依赖 workspace 内的 `astrcode-core`。进程内扩展和磁盘/IPC 扩展都通过 capability-gated typed host API 访问宿主能力；运行时负责注入不可伪造的 extension/session/turn 归属。
 
 测试线索：`worker/*`、`builder.rs`、`manifest.rs`、`runtime/*` 有单元测试。修改 SDK 类型等同修改扩展 ABI，需要同步内置扩展和 s5r 测试。
 
@@ -404,9 +403,10 @@ Feature：
 - 所有项目完成时清空存储。
 - 多步骤列表全部完成但没有 verification/test/check 语义时，返回验证提醒。
 
-能力声明：无。session-local todo state 使用默认 namespaced session state API。
+能力声明：`ProviderRequest`、`ToolIntercept`。session-local todo state 使用默认 namespaced
+session data path，不需要额外持久化 capability。
 
-依赖边界：只依赖 `astrcode-extension-sdk`。session 数据目录通过 SDK `state::session_data_dir` 规范化。
+依赖边界：只依赖 `astrcode-extension-sdk`。session 数据目录由调用上下文的 `ctx.paths().session_data_dir()` 按扩展标识完成命名空间隔离。
 
 测试线索：单元测试覆盖替换、校验、清空、verification nudge、provider reminder、post-tool 重置。
 
@@ -434,7 +434,8 @@ Feature：
 - plan 模式的工具限制由 `PreToolUse` blocking hook 执行；yolo mode 下放行。
 - 模式切换指令通过 `BeforeProviderRequest` 追加 user message，而不是改变 system prompt，利于 KV cache 稳定。
 
-能力声明：无。session-local mode state 使用默认 namespaced session state API。
+能力声明：`ProviderRequest`、`ToolIntercept`。session-local mode state 使用默认 namespaced
+session data path，不需要额外持久化 capability。
 
 依赖边界：只依赖 `astrcode-extension-sdk`。
 
@@ -473,9 +474,10 @@ Feature：
 - Slash command：`/goal`，可显示、创建、暂停、恢复、清空、complete 或 blocked 当前 goal；`/goal budget <n>` 在预算耗尽后调整总额并恢复 active。
 - 持久化：`<session>/extension_data/astrcode-goal/goal/goal-state.json`。
 - 续跑：注册 `ContinueAfterStopOptions::unlimited()` 的 blocking-only `ContinueAfterStop` decision hook；hook 只设置下一步续跑意图，真正的目标上下文由 `BeforeProviderRequest` 以非持久 provider-visible user message 注入，避免写入 durable transcript。
-- Token 预算：声明 `SessionHistory` 后通过 SDK `EventReader` 汇总 `TokenUsageRecorded`，按 non-cached input + output 统计 goal token（分项任一缺失时整体 fallback 到 provider `total_tokens`，并扣除 reasoning 保持口径一致）；达到 `tokenBudget` 时系统把 goal 标为 `budget_limited`，再通过一次非持久 hidden provider message 让模型收尾，随后停止自动续跑。`budget_limited` 与 `paused` 的 goal 都可经 `/goal resume` 或 `/goal budget <n>` 恢复。
+- Token 预算：声明 `SessionHistory` 后通过类型化 host client 汇总 `TokenUsageRecorded`，按 non-cached input + output 统计 goal token（分项缺失时从 provider `total_tokens` 扣除 cached input）；达到 `tokenBudget` 时系统把 goal 标为 `budget_limited`，再通过一次非持久 hidden provider message 让模型收尾，随后停止自动续跑。`budget_limited` 与 `paused` 的 goal 都可经 `/goal resume` 或 `/goal budget <n>` 恢复。
 
-能力声明：`SessionHistory`。session-local goal state 使用默认 namespaced session state API。
+能力声明：`SessionHistory`、`ProviderRequest`、`TurnContinuationControl`。session-local goal
+state 使用默认 namespaced session data path。
 
 依赖边界：只依赖 `astrcode-extension-sdk`。session 数据目录、事件读取和 LLM/tool 类型都通过 SDK re-export 使用。
 
@@ -500,19 +502,23 @@ Feature：
 
 关键行为：
 
-- 用户记忆：`~/.astrcode/memory/`，偏向跨项目用户偏好。
-- 项目记忆：`~/.astrcode/projects/<key>/extension_data/astrcode.memory/`。
+- 用户记忆：`~/.astrcode/extension_data/astrcode.memory/`，偏向跨项目用户偏好。
+- 项目记忆：`~/.astrcode/extension_data/astrcode.memory/projects/<key>/`。
 - `SessionStart` 和 `memory_save` 后可触发批量提取并更新 `MEMORY.md`。
 - `PromptBuild` 注入用户偏好，按 session 缓存。
 - `TurnEnd` 对当轮对话召回项目事实，下一 turn 首次 LLM 请求注入。
 - 工具：`memory_save`、`memory_delete`、`memory_list`。
 - 事件：注册 `memory.created`、`memory.deleted`。
 
-能力声明：`SmallModel`、`SessionHistory`、`EmitEvents`。启动时如果没有 small model 或 session history host service 会失败。
+能力声明：`SmallModel`、`SessionInspect`、`EmitEvents`、`ProviderRequest`。启动时如果没有
+small model 会失败；跨 session 的历史读取通过 `SessionInspect` client 完成。
 
 依赖边界：只依赖 `astrcode-extension-sdk`。
 
-测试线索：各子模块有单元测试，重点覆盖索引、store、pipeline、handler 和 recall。改记忆格式需要注意兼容已持久化的 `MEMORY.md` 和 `memory_index.json`。
+测试线索：各子模块有单元测试，重点覆盖索引、store、pipeline、handler 和 recall。当前
+authoring API 重构把数据根目录从旧的 `~/.astrcode/memory/` 与
+`~/.astrcode/projects/<key>/extension_data/astrcode.memory/` 统一迁到上面的 extension-owned
+目录；这是明确的不兼容变更，不做旧目录双读或自动迁移。
 
 ## `astrcode-extension-channels`
 
@@ -530,9 +536,10 @@ Feature：
 - `TelegramApi` trait 和 `HttpTelegramApi` 实现。
 - inbound 处理：鉴权 chat id，处理 `/start`/`/help`，创建或复用 chat session，提交 turn，拆分回复。
 
-能力声明：`SessionControl`、`NetworkClient`。
+能力声明：`InputDelivery`、`NetworkClient`。
 
-依赖边界：只依赖 `astrcode-extension-sdk`。网络访问和 session control 都通过扩展能力声明体现。
+依赖边界：只依赖 `astrcode-extension-sdk`。网络访问和 root session 输入投递分别由
+`NetworkClient` 和 `InputDelivery` 授权。
 
 测试线索：单元/异步测试覆盖 nested config、拒绝 flat config、token env 引用、命令、回复拆分、session 复用、未授权 chat 拒绝等。
 

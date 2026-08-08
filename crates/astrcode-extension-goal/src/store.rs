@@ -167,37 +167,22 @@ impl GoalStore {
     }
 
     pub(crate) fn load(&self) -> Result<Option<GoalState>, String> {
-        let path = self.state_path();
-        match std::fs::read_to_string(&path) {
-            Ok(content) => {
-                let state = serde_json::from_str::<GoalState>(&content)
-                    .map_err(|error| format!("parse goal state: {error}"))?;
-                if state.schema_version != GOAL_SCHEMA_VERSION {
-                    return Err(format!(
-                        "unsupported goal state schema version {}",
-                        state.schema_version
-                    ));
-                }
-                Ok(Some(state))
-            },
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(error) => Err(format!("read goal state: {error}")),
+        let state = hostpaths::read_json_state::<GoalState>(&self.state_path())
+            .map_err(|error| format!("read goal state: {error}"))?;
+        if let Some(state) = &state {
+            if state.schema_version != GOAL_SCHEMA_VERSION {
+                return Err(format!(
+                    "unsupported goal state schema version {}",
+                    state.schema_version
+                ));
+            }
         }
+        Ok(state)
     }
 
     pub(crate) fn save(&self, state: &GoalState) -> Result<(), String> {
-        std::fs::create_dir_all(&self.root).map_err(|error| {
-            format!(
-                "create goal state directory {}: {error}",
-                self.root.display()
-            )
-        })?;
-        let path = self.state_path();
-        let json = serde_json::to_string_pretty(state)
-            .map_err(|error| format!("serialize goal state: {error}"))?;
-        hostpaths::write_file_atomic(&path, &json)
-            .map_err(|error| format!("save goal state: {error}"))?;
-        Ok(())
+        hostpaths::write_json_state(&self.state_path(), state)
+            .map_err(|error| format!("save goal state: {error}"))
     }
 
     pub(crate) fn clear(&self) -> Result<(), String> {

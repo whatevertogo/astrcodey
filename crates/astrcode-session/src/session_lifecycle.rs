@@ -157,7 +157,7 @@ pub struct SpawnChildParams {
     pub extra_system_prompt: Option<String>,
     pub tool_selection: Option<SessionToolSelection>,
     pub source_extension: Option<String>,
-    pub tool_call_id: ToolCallId,
+    pub tool_call_id: Option<ToolCallId>,
 }
 
 impl Session {

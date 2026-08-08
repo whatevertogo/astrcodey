@@ -10,7 +10,11 @@ use std::{
 };
 
 use astrcode_core::config::defaults::astrcode_dir;
-use astrcode_extension_sdk::extension::{Extension, StopReason};
+use astrcode_extension_sdk::{
+    extension::{Extension, ExtensionPackageManifest, StopReason},
+    manifest::validate_extension_id,
+    s5r::S5R_VERSION,
+};
 use sha2::{Digest, Sha256};
 
 use crate::{
@@ -25,11 +29,11 @@ type CurrentSourceMap<'a> = HashMap<&'a str, &'a RegisteredSourceExtension>;
 /// 来源发现出的扩展候选。构造候选不会启动扩展。
 ///
 /// `source_key` 必须在所有来源间稳定且唯一；`fingerprint` 必须覆盖会改变扩展
-/// 运行行为的来源内容。
+/// 运行行为的来源内容；`extension_id` 必须是无需执行 loader 即可读取的权威身份。
 pub struct ExtensionCandidate {
     source_key: String,
     fingerprint: String,
-    extension_id_hint: Option<String>,
+    extension_id: String,
     load: CandidateLoader,
 }
 
@@ -40,20 +44,17 @@ impl ExtensionCandidate {
         fingerprint: impl Into<String>,
         extension: Arc<dyn Extension>,
     ) -> Self {
-        let extension_id = extension.id().to_string();
-        Self::lazy(
-            source_key,
-            fingerprint,
-            Some(extension_id),
-            move || async move { Ok(extension) },
-        )
+        let extension_id = extension.manifest().id().to_owned();
+        Self::lazy(source_key, fingerprint, extension_id, move || async move {
+            Ok(extension)
+        })
     }
 
-    /// 构造仅在 reconcile 判定来源新增或变化时才执行 loader 的候选。
+    /// 构造仅在 reconcile 判定来源已启用且新增或变化时才执行 loader 的候选。
     pub fn lazy<F, Fut>(
         source_key: impl Into<String>,
         fingerprint: impl Into<String>,
-        extension_id_hint: Option<String>,
+        extension_id: impl Into<String>,
         load: F,
     ) -> Self
     where
@@ -63,7 +64,7 @@ impl ExtensionCandidate {
         Self {
             source_key: source_key.into(),
             fingerprint: fingerprint.into(),
-            extension_id_hint,
+            extension_id: extension_id.into(),
             load: Box::new(move || Box::pin(load())),
         }
     }
@@ -230,17 +231,20 @@ async fn build_reconcile_plan(
             let ExtensionCandidate {
                 source_key,
                 fingerprint,
-                extension_id_hint,
+                extension_id,
                 load,
             } = candidate;
             if !source_keys.insert(source_key.clone()) {
                 errors.push(format!("duplicate extension source key: {source_key}"));
                 continue;
             }
+            if !source.is_enabled(&extension_id) {
+                continue;
+            }
             let current_source = current_by_source.get(source_key.as_str()).copied();
-            if let Some(current) = current_source.filter(|current| {
-                current.fingerprint == fingerprint && source.is_enabled(&current.id)
-            }) {
+            if let Some(current) = current_source
+                .filter(|current| current.id == extension_id && current.fingerprint == fingerprint)
+            {
                 if desired_ids.insert(current.id.clone()) {
                     desired_extensions.push(DesiredExtension::retain(
                         current.id.clone(),
@@ -250,40 +254,14 @@ async fn build_reconcile_plan(
                 }
                 continue;
             }
-            if current_source.is_some_and(|current| !source.is_enabled(&current.id)) {
-                continue;
-            }
 
-            let started = Instant::now();
-            match load().await {
-                Ok(extension) if source.is_enabled(extension.id()) => {
-                    let id = extension.id().to_string();
-                    let load_duration = started.elapsed();
-                    if desired_ids.insert(id.clone()) {
-                        desired_extensions.push(DesiredExtension::start(
-                            id,
-                            source_key,
-                            fingerprint,
-                            extension,
-                            load_duration,
-                        ));
-                    }
-                },
-                Ok(_) => {},
-                Err(error) => {
-                    let protected_id = current_source
-                        .map(|current| current.id.clone())
-                        .or(extension_id_hint);
-                    if let Some(extension_id) = protected_id {
-                        protected_ids.insert(extension_id.clone());
-                        runner.record_extension_load_failure(
-                            &extension_id,
-                            error.clone(),
-                            Some(started.elapsed()),
-                        );
-                    }
-                    errors.push(error);
-                },
+            if desired_ids.insert(extension_id.clone()) {
+                desired_extensions.push(DesiredExtension::start(
+                    extension_id,
+                    source_key,
+                    fingerprint,
+                    load,
+                ));
             }
         }
     }
@@ -315,6 +293,7 @@ async fn apply_reconcile_plan(
         .map(|desired| desired.id.clone())
         .collect::<Vec<_>>();
     let mut pending_task_activations = Vec::new();
+    let batch_publication = runner.begin_source_batch_publication();
 
     for desired in desired_extensions {
         let DesiredExtension {
@@ -323,11 +302,7 @@ async fn apply_reconcile_plan(
             fingerprint,
             state,
         } = desired;
-        let DesiredExtensionState::Start {
-            extension,
-            load_duration,
-        } = state
-        else {
+        let DesiredExtensionState::Start { load } = state else {
             continue;
         };
         let mut replaced_ids = Vec::new();
@@ -342,12 +317,45 @@ async fn apply_reconcile_plan(
         replaced_ids.sort_unstable();
         replaced_ids.dedup();
 
-        for replaced_id in replaced_ids {
-            if let Err(error) = runner.unregister(replaced_id, StopReason::Reload).await {
-                errors.push(format!("failed to reload extension {replaced_id}: {error}"));
+        let mut replacement_blocked = false;
+        let mut retirements = Vec::new();
+        for replaced_id in &replaced_ids {
+            match runner
+                .unregister_with_retirement(replaced_id, StopReason::Reload)
+                .await
+            {
+                Ok(Some(retirement)) => retirements.push((*replaced_id, retirement)),
+                Ok(None) => {},
+                Err(error) => {
+                    errors.push(format!("failed to reload extension {replaced_id}: {error}"));
+                    replacement_blocked = true;
+                },
             }
         }
-        runner.record_extension_load_success(&id, Some(load_duration));
+        for (replaced_id, retirement) in retirements {
+            if let Err(error) = retirement.wait().await {
+                errors.push(format!(
+                    "failed to retire extension {replaced_id} before starting {id}: {error}"
+                ));
+                replacement_blocked = true;
+            }
+        }
+        if replacement_blocked {
+            continue;
+        }
+        let started = Instant::now();
+        let extension = match load()
+            .await
+            .and_then(|extension| ensure_candidate_identity(&id, extension))
+        {
+            Ok(extension) => extension,
+            Err(error) => {
+                runner.record_extension_load_failure(&id, error.clone(), Some(started.elapsed()));
+                errors.push(error);
+                continue;
+            },
+        };
+        runner.record_extension_load_success(&id, Some(started.elapsed()));
         match runner
             .register_deferred(
                 extension,
@@ -381,6 +389,7 @@ async fn apply_reconcile_plan(
             .cloned(),
     );
     runner.reorder_source_extensions(&publication_order).await;
+    drop(batch_publication);
     for activation in pending_task_activations {
         activation.activate();
     }
@@ -419,10 +428,7 @@ impl ExtensionSource for DiskExtensionSource {
 
 enum DesiredExtensionState {
     Retain,
-    Start {
-        extension: Arc<dyn Extension>,
-        load_duration: Duration,
-    },
+    Start { load: CandidateLoader },
 }
 
 struct DesiredExtension {
@@ -442,21 +448,12 @@ impl DesiredExtension {
         }
     }
 
-    fn start(
-        id: String,
-        source_key: String,
-        fingerprint: String,
-        extension: Arc<dyn Extension>,
-        load_duration: Duration,
-    ) -> Self {
+    fn start(id: String, source_key: String, fingerprint: String, load: CandidateLoader) -> Self {
         Self {
             id,
             source_key,
             fingerprint,
-            state: DesiredExtensionState::Start {
-                extension,
-                load_duration,
-            },
+            state: DesiredExtensionState::Start { load },
         }
     }
 }
@@ -480,8 +477,7 @@ impl ExtensionLoader {
 
         let global_dir = astrcode_dir().join("extensions");
         if global_dir.exists() {
-            let global =
-                Self::discover_from_dir(&global_dir, host_router.clone(), working_dir).await;
+            let global = Self::discover_from_dir(&global_dir, host_router.clone()).await;
             result.candidates.extend(global.candidates);
             result.errors.extend(global.errors);
             result.failures.extend(global.failures);
@@ -490,7 +486,7 @@ impl ExtensionLoader {
         if let Some(wd) = working_dir {
             let project_dir = PathBuf::from(wd).join(".astrcode").join("extensions");
             if project_dir.exists() {
-                let project = Self::discover_from_dir(&project_dir, host_router, working_dir).await;
+                let project = Self::discover_from_dir(&project_dir, host_router).await;
                 result.candidates.splice(0..0, project.candidates);
                 result.errors.extend(project.errors);
                 result.failures.extend(project.failures);
@@ -504,9 +500,8 @@ impl ExtensionLoader {
     pub async fn load_from_dir_for_test(
         dir: &Path,
         host_router: &Option<Arc<HostRouter>>,
-        working_dir: Option<&str>,
     ) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
-        let discovery = Self::discover_from_dir(dir, host_router.clone(), working_dir).await;
+        let discovery = Self::discover_from_dir(dir, host_router.clone()).await;
         let loaded = Self::load_discovered(discovery).await;
         (loaded.extensions, loaded.errors)
     }
@@ -514,7 +509,6 @@ impl ExtensionLoader {
     async fn discover_from_dir(
         dir: &Path,
         host_router: Option<Arc<HostRouter>>,
-        working_dir: Option<&str>,
     ) -> DiscoverExtensionsResult {
         let mut result = DiscoverExtensionsResult::default();
         let paths = match Self::extension_dirs(dir).await {
@@ -533,12 +527,12 @@ impl ExtensionLoader {
 
         for path in paths {
             let started = Instant::now();
-            match Self::discover_extension(&path, host_router.clone(), working_dir).await {
+            match Self::discover_extension(&path, host_router.clone()).await {
                 Ok(candidate) => result.candidates.push(candidate),
                 Err(message) => {
                     result.failures.push(ExtensionLoadFailure {
                         source_key: Self::disk_source_key(&path).await,
-                        extension_id: Self::extension_id_hint(&path).await,
+                        extension_id: None,
                         message: message.clone(),
                         duration_ms: Some(started.elapsed().as_millis() as u64),
                     });
@@ -559,22 +553,25 @@ impl ExtensionLoader {
         for candidate in discovery.candidates {
             let ExtensionCandidate {
                 source_key,
-                extension_id_hint,
+                extension_id,
                 load,
                 ..
             } = candidate;
             let started = Instant::now();
-            match load().await {
+            match load()
+                .await
+                .and_then(|extension| ensure_candidate_identity(&extension_id, extension))
+            {
                 Ok(extension) => {
                     result
                         .load_success_durations
-                        .insert(extension.id().to_string(), started.elapsed());
+                        .insert(extension_id.clone(), started.elapsed());
                     result.extensions.push(extension);
                 },
                 Err(message) => {
                     result.load_failures.push(ExtensionLoadFailure {
                         source_key: Some(source_key),
-                        extension_id: extension_id_hint,
+                        extension_id: Some(extension_id),
                         message: message.clone(),
                         duration_ms: Some(started.elapsed().as_millis() as u64),
                     });
@@ -615,41 +612,34 @@ impl ExtensionLoader {
     async fn discover_extension(
         ext_dir: &Path,
         host_router: Option<Arc<HostRouter>>,
-        working_dir: Option<&str>,
     ) -> Result<ExtensionCandidate, String> {
         let manifest_path = ext_dir.join("extension.json");
         let manifest_bytes = tokio::fs::read(&manifest_path)
             .await
             .map_err(|e| format!("{}: read manifest: {e}", ext_dir.display()))?;
-        let entry: serde_json::Value = serde_json::from_slice(&manifest_bytes)
+        let entry: ExtensionPackageManifest = serde_json::from_slice(&manifest_bytes)
             .map_err(|e| format!("{}: parse manifest: {e}", ext_dir.display()))?;
+        validate_extension_id(&entry.extension_id)
+            .map_err(|error| format!("{}: {error}", ext_dir.display()))?;
 
-        if entry
-            .get("protocol")
-            .and_then(|p| p.get("native"))
-            .is_some()
-        {
+        if entry.protocol.native.is_some() {
             return Err(format!(
                 "{}: protocol.native is not implemented yet; use protocol.s5r",
                 ext_dir.display()
             ));
         }
 
-        let s5r_proto = entry
-            .get("protocol")
-            .and_then(|p| p.get("s5r"))
-            .and_then(|v| v.as_str());
-        if s5r_proto != Some(crate::s5r_ext::S5R_PROTOCOL_VERSION) {
+        if entry.protocol.s5r.as_deref() != Some(S5R_VERSION) {
             return Err(format!(
                 "{}: extension.json must set protocol.s5r to \"{}\"",
                 ext_dir.display(),
-                crate::s5r_ext::S5R_PROTOCOL_VERSION
+                S5R_VERSION
             ));
         }
 
-        if entry.get("command").is_none() {
+        if entry.command.is_empty() {
             return Err(format!(
-                "{}: extension.json missing 'command' array for s5r extension",
+                "{}: extension.json 'command' must contain an executable",
                 ext_dir.display()
             ));
         }
@@ -660,14 +650,13 @@ impl ExtensionLoader {
         let source_key = format!("disk:{}", canonical_dir.display());
         let fingerprint =
             Self::disk_source_fingerprint(&canonical_dir, manifest_bytes, &entry).await?;
-        let extension_id_hint = extension_id_hint_from_manifest(&entry, &canonical_dir);
-        let working_dir = working_dir.map(str::to_string);
+        let extension_id = entry.extension_id.clone();
         let display_path = canonical_dir.display().to_string();
 
         Ok(ExtensionCandidate::lazy(
             source_key,
             fingerprint,
-            extension_id_hint,
+            extension_id,
             move || async move {
                 let router = host_router.ok_or_else(|| {
                     format!(
@@ -675,15 +664,10 @@ impl ExtensionLoader {
                          extensions"
                     )
                 })?;
-                crate::s5r_ext::S5rExtension::load(
-                    &canonical_dir,
-                    &entry,
-                    router,
-                    working_dir.as_deref(),
-                )
-                .await
-                .map(|extension| extension as Arc<dyn Extension>)
-                .map_err(|error| format!("{display_path}: {error}"))
+                crate::s5r_ext::S5rExtension::load(&canonical_dir, &entry, router)
+                    .await
+                    .map(|extension| extension as Arc<dyn Extension>)
+                    .map_err(|error| format!("{display_path}: {error}"))
             },
         ))
     }
@@ -691,7 +675,7 @@ impl ExtensionLoader {
     async fn disk_source_fingerprint(
         ext_dir: &Path,
         manifest_bytes: Vec<u8>,
-        manifest: &serde_json::Value,
+        manifest: &ExtensionPackageManifest,
     ) -> Result<String, String> {
         let (program, args) = crate::s5r_ext::parse_command(manifest, ext_dir)
             .map_err(|error| format!("{}: {error}", ext_dir.display()))?;
@@ -705,18 +689,6 @@ impl ExtensionLoader {
         .map_err(|error| format!("{display_path}: {error}"))
     }
 
-    async fn extension_id_hint(ext_dir: &Path) -> Option<String> {
-        if let Ok(bytes) = tokio::fs::read(ext_dir.join("extension.json")).await {
-            if let Ok(entry) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                return extension_id_hint_from_manifest(&entry, ext_dir);
-            }
-        }
-        ext_dir
-            .file_name()
-            .and_then(|name| name.to_str())
-            .map(str::to_string)
-    }
-
     async fn disk_source_key(ext_dir: &Path) -> Option<String> {
         tokio::fs::canonicalize(ext_dir)
             .await
@@ -725,20 +697,17 @@ impl ExtensionLoader {
     }
 }
 
-fn extension_id_hint_from_manifest(manifest: &serde_json::Value, ext_dir: &Path) -> Option<String> {
-    manifest
-        .get("id")
-        .or_else(|| manifest.get("extension_id"))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            ext_dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(str::to_string)
-        })
+fn ensure_candidate_identity(
+    expected_id: &str,
+    extension: Arc<dyn Extension>,
+) -> Result<Arc<dyn Extension>, String> {
+    let actual_id = extension.manifest().id().to_owned();
+    if actual_id != expected_id {
+        return Err(format!(
+            "extension loader returned manifest id {actual_id:?}, expected {expected_id:?}"
+        ));
+    }
+    Ok(extension)
 }
 
 fn hash_disk_source(
@@ -823,7 +792,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let program = root.path().join("extension");
         fs::write(&program, b"binary-v1").unwrap();
-        let manifest = br#"{"protocol":{"s5r":"1.0"},"command":["./extension"]}"#;
+        let manifest =
+            br#"{"extension_id":"test","protocol":{"s5r":"2.0"},"command":["./extension"]}"#;
 
         let first =
             hash_disk_source(root.path(), manifest, program.to_str().unwrap(), &[]).unwrap();
@@ -834,7 +804,7 @@ mod tests {
             hash_disk_source(root.path(), manifest, program.to_str().unwrap(), &[]).unwrap();
         let changed_manifest = hash_disk_source(
             root.path(),
-            br#"{"protocol":{"s5r":"1.0"},"command":["./extension"],"env":{"MODE":"test"}}"#,
+            br#"{"extension_id":"test","protocol":{"s5r":"2.0"},"command":["./extension"],"env":{"MODE":"test"}}"#,
             program.to_str().unwrap(),
             &[],
         )

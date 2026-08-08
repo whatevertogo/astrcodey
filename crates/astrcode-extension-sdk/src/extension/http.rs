@@ -1,39 +1,18 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    path::Path,
     sync::Arc,
 };
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+#[cfg(test)]
+use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 
-use super::{ExtensionCapability, ExtensionError};
-
-// ─── Extension Manifest ──────────────────────────────────────────────────
-
-/// 磁盘扩展目录中的 `extension.json` 契约（发现阶段元数据）。
-///
-/// **当前 loader 行为（s5r）**：`protocol.s5r`（须为 `"1.0"`）与 **`command`**
-/// （启动子进程的 argv 数组）为必填。扩展的真实 `id`、能力、工具与 hook 均由
-/// Worker 在 `Initialize.metadata` 中上报。本结构中的 `id` / `name` / `capabilities` 等字段
-/// 可被 serde 解析，供 UI、诊断或未来校验使用，但**不会**替代 s5r 握手 manifest。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ExtensionManifest {
-    /// 扩展唯一标识符。
-    pub id: String,
-    /// 扩展显示名称。
-    pub name: String,
-    /// 可选的扩展版本号，用于诊断/UI 展示。
-    #[serde(default)]
-    pub version: Option<String>,
-    /// 可选的人类可读描述。
-    #[serde(default)]
-    pub description: Option<String>,
-    /// 可选的宿主版本提示。目前仅作为元数据，不做硬性校验。
-    #[serde(default)]
-    pub astrcode_version: Option<String>,
-    /// 宿主必须授予此扩展的能力。
-    #[serde(default)]
-    pub capabilities: Vec<ExtensionCapability>,
-}
+use super::{
+    ExtensionCallContext, ExtensionError, ExtensionEventEmitter, ExtensionPaths, ExtensionTasks,
+};
+use crate::host::ExtensionHost;
 
 // ─── Extension HTTP ─────────────────────────────────────────────────────
 
@@ -53,8 +32,8 @@ pub enum ExtensionHttpMethod {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionHttpAccess {
-    #[default]
     Public,
+    #[default]
     Authenticated,
 }
 
@@ -121,7 +100,7 @@ impl ExtensionHttpRoute {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionHttpRequest {
     pub method: ExtensionHttpMethod,
     pub path: String,
@@ -155,9 +134,61 @@ impl ExtensionHttpRequest {
     }
 }
 
+/// Outbound request for dispatching another extension's public HTTP route.
+///
+/// Route parameters are host-owned facts derived after route matching, so callers cannot supply
+/// them on this boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExtensionHttpDispatchRequest {
+    pub method: ExtensionHttpMethod,
+    pub path: String,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub body: serde_json::Value,
+}
+
+impl ExtensionHttpDispatchRequest {
+    pub fn new(method: ExtensionHttpMethod, path: impl Into<String>) -> Self {
+        Self {
+            method,
+            path: path.into(),
+            query: None,
+            body: serde_json::Value::Null,
+        }
+    }
+
+    pub fn query(mut self, query: impl Into<String>) -> Self {
+        self.query = Some(query.into());
+        self
+    }
+
+    pub fn json_body(mut self, body: serde_json::Value) -> Self {
+        self.body = body;
+        self
+    }
+}
+
+impl From<ExtensionHttpDispatchRequest> for ExtensionHttpRequest {
+    fn from(request: ExtensionHttpDispatchRequest) -> Self {
+        Self {
+            method: request.method,
+            path: request.path,
+            path_params: BTreeMap::new(),
+            query: request.query,
+            body: request.body,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ExtensionHttpResponse {
+    #[serde(
+        serialize_with = "serialize_extension_http_status",
+        deserialize_with = "deserialize_extension_http_status"
+    )]
     pub status: u16,
     pub body: serde_json::Value,
 }
@@ -177,12 +208,131 @@ impl ExtensionHttpResponse {
     }
 }
 
+fn serialize_extension_http_status<S>(status: &u16, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if (100..=599).contains(status) {
+        serializer.serialize_u16(*status)
+    } else {
+        Err(serde::ser::Error::custom(
+            "extension HTTP status must be between 100 and 599",
+        ))
+    }
+}
+
+fn deserialize_extension_http_status<'de, D>(deserializer: D) -> Result<u16, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let status = u16::deserialize(deserializer)?;
+    if (100..=599).contains(&status) {
+        Ok(status)
+    } else {
+        Err(serde::de::Error::custom(
+            "extension HTTP status must be between 100 and 599",
+        ))
+    }
+}
+
+/// Validated request context for one extension HTTP route invocation.
+///
+/// The runtime constructs this only after route matching, path parameter extraction, body-size
+/// enforcement, and JSON parsing have succeeded.
+#[derive(Clone)]
+pub struct HttpContext {
+    call: ExtensionCallContext,
+    route: ExtensionHttpRoute,
+    request: ExtensionHttpRequest,
+    caller_extension_id: Option<String>,
+}
+
+impl HttpContext {
+    #[doc(hidden)]
+    pub fn from_runtime(
+        call: ExtensionCallContext,
+        route: ExtensionHttpRoute,
+        request: ExtensionHttpRequest,
+        caller_extension_id: Option<String>,
+    ) -> Self {
+        Self {
+            call,
+            route,
+            request,
+            caller_extension_id,
+        }
+    }
+
+    pub fn call(&self) -> &ExtensionCallContext {
+        &self.call
+    }
+
+    pub fn extension_id(&self) -> &str {
+        self.call.extension_id()
+    }
+
+    pub fn caller_extension_id(&self) -> Option<&str> {
+        self.caller_extension_id.as_deref()
+    }
+
+    pub fn working_dir(&self) -> Option<&Path> {
+        self.call.working_dir()
+    }
+
+    pub fn paths(&self) -> &ExtensionPaths {
+        self.call.paths()
+    }
+
+    pub fn host(&self) -> &ExtensionHost {
+        self.call.host()
+    }
+
+    pub fn events(&self) -> &ExtensionEventEmitter {
+        self.call.events()
+    }
+
+    pub fn tasks(&self) -> &ExtensionTasks {
+        self.call.tasks()
+    }
+
+    pub fn cancellation(&self) -> &CancellationToken {
+        self.call.cancellation()
+    }
+
+    pub fn route(&self) -> &ExtensionHttpRoute {
+        &self.route
+    }
+
+    pub fn request(&self) -> &ExtensionHttpRequest {
+        &self.request
+    }
+
+    pub fn json<T: DeserializeOwned>(&self) -> Result<T, ExtensionError> {
+        serde_json::from_value(self.request.body.clone()).map_err(|error| {
+            ExtensionError::InvalidInput {
+                code: "invalid_http_body".into(),
+                message: error.to_string(),
+                hint: Some("check the JSON body against this route's request schema".into()),
+            }
+        })
+    }
+}
+
+impl std::fmt::Debug for HttpContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HttpContext")
+            .field("call", &self.call)
+            .field("route", &self.route)
+            .field("request", &self.request)
+            .field("caller_extension_id", &self.caller_extension_id)
+            .finish()
+    }
+}
+
 #[async_trait::async_trait]
 pub trait ExtensionHttpHandler: Send + Sync {
-    async fn handle(
-        &self,
-        request: ExtensionHttpRequest,
-    ) -> Result<ExtensionHttpResponse, ExtensionError>;
+    async fn handle(&self, ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError>;
 }
 
 #[derive(Clone)]
@@ -266,6 +416,62 @@ fn extension_http_param_name(segment: &str) -> Option<&str> {
 mod extension_http_tests {
     use super::*;
 
+    fn assert_strict_wire<T>(valid: Value)
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        let decoded: T = serde_json::from_value(valid).unwrap();
+        let mut wire = serde_json::to_value(decoded).unwrap();
+        wire.as_object_mut()
+            .unwrap()
+            .insert("unexpected".into(), Value::Bool(true));
+        assert!(serde_json::from_value::<T>(wire).is_err());
+    }
+
+    #[test]
+    fn public_dispatch_contracts_reject_unknown_fields() {
+        assert_strict_wire::<ExtensionHttpDispatchRequest>(
+            json!({ "method": "GET", "path": "/health" }),
+        );
+        assert_strict_wire::<ExtensionHttpRequest>(json!({ "method": "GET", "path": "/health" }));
+        assert_strict_wire::<ExtensionHttpResponse>(
+            json!({ "status": 200, "body": { "ok": true } }),
+        );
+        assert!(
+            serde_json::from_value::<ExtensionHttpDispatchRequest>(json!({
+                "method": "GET",
+                "path": "/users/42",
+                "pathParams": { "id": "forged" }
+            }))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn response_status_serde_enforces_http_bounds() {
+        for status in [99, 600] {
+            assert!(
+                serde_json::from_value::<ExtensionHttpResponse>(json!({
+                    "status": status,
+                    "body": null
+                }))
+                .is_err()
+            );
+            assert!(
+                serde_json::to_value(ExtensionHttpResponse::json(status, Value::Null)).is_err()
+            );
+        }
+        for status in [100, 599] {
+            assert!(
+                serde_json::from_value::<ExtensionHttpResponse>(json!({
+                    "status": status,
+                    "body": null
+                }))
+                .is_ok()
+            );
+        }
+    }
+
     #[test]
     fn route_validation_and_matching_are_segment_scoped() {
         let route = ExtensionHttpRoute::public(ExtensionHttpMethod::Patch, "/future-tasks/{jobId}");
@@ -275,6 +481,17 @@ mod extension_http_tests {
             match_extension_http_route(&route.path, "/future-tasks/job-1").expect("matching route");
         assert_eq!(params.get("jobId").map(String::as_str), Some("job-1"));
         assert!(match_extension_http_route(&route.path, "/future-tasks/job-1/run").is_none());
+    }
+
+    #[test]
+    fn omitted_http_access_defaults_to_authenticated() {
+        let route: ExtensionHttpRoute = serde_json::from_value(json!({
+            "method": "POST",
+            "path": "/jobs"
+        }))
+        .expect("route without access");
+
+        assert_eq!(route.access, ExtensionHttpAccess::Authenticated);
     }
 
     #[test]

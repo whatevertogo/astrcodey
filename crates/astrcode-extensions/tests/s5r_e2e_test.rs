@@ -1,6 +1,7 @@
 //! E2E：s5r 子进程扩展 — 覆盖 initialize / handler.invoke / host/invoke / ping / 全量 API。
 
 use std::{
+    collections::BTreeMap,
     fs,
     sync::{Arc, OnceLock},
     time::Duration,
@@ -9,24 +10,25 @@ use std::{
 use astrcode_core::{
     event::{DurableEventPayload, EventPayload, ExtensionEventData},
     llm::{LlmEvent, LlmMessage, LlmProvider},
-    tool::{ExecutionMode, ToolDefinition, ToolExecutionContext},
+    tool::{ExecutionMode, Tool, ToolCapabilities, ToolDefinition, ToolExecutionContext},
+    types::TurnId,
 };
 use astrcode_extension_sdk::{
+    builder::manifest,
     config::ModelSelection,
     extension::{
-        CommandContext, Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
-        ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest,
-        ExtensionHttpResponse, ExtensionHttpRoute, HookMode, LifecycleContext, PreToolUseContext,
-        PreToolUseResult, Registrar, StopReason,
+        Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionEvent,
+        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
+        ExtensionHttpRoute, ExtensionManifest, ExtensionPackageManifest, HookMode, HttpContext,
+        PreToolUseResult, Registrar, RuntimeHookCallContext, RuntimeLifecycleContext,
+        RuntimePreToolUseContext, StopReason,
     },
-    tool::ExtensionToolContext,
-    trusted::ExtensionHostServices,
 };
 use astrcode_extensions::{
-    StorageSessionQueryFactory, build_host_router, build_host_router_with_public_http_dispatcher,
+    HostBackends, build_host_router, build_host_router_with_public_http_dispatcher,
     loader::ExtensionLoader, runner::ExtensionRunner, s5r_ext::S5rExtension,
 };
-use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
+use astrcode_storage::{EventReader, SessionReader, in_memory::InMemoryEventStore};
 use async_trait::async_trait;
 
 fn guest_binary_path() -> std::path::PathBuf {
@@ -78,16 +80,14 @@ fn ensure_guest_built() -> std::path::PathBuf {
 }
 
 fn minimal_router() -> Arc<astrcode_extensions::HostRouter> {
-    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    build_host_router(
-        Arc::new(ExtensionHostServices::new(
-            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
-            None,
-            None,
-        )),
-        store,
-        None,
-    )
+    let store = Arc::new(InMemoryEventStore::new());
+    let event_reader: Arc<dyn EventReader> = store.clone();
+    let session_reader: Arc<dyn SessionReader> = store;
+    build_host_router(HostBackends {
+        event_reader: Some(event_reader),
+        session_reader: Some(session_reader),
+        ..HostBackends::default()
+    })
 }
 
 struct MockLlm;
@@ -98,10 +98,8 @@ struct DispatchTargetHandler;
 
 #[async_trait]
 impl ExtensionHttpHandler for DispatchTargetHandler {
-    async fn handle(
-        &self,
-        request: ExtensionHttpRequest,
-    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+    async fn handle(&self, ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError> {
+        let request = ctx.request();
         Ok(ExtensionHttpResponse::json(
             200,
             serde_json::json!({
@@ -115,12 +113,12 @@ impl ExtensionHttpHandler for DispatchTargetHandler {
 
 #[async_trait]
 impl Extension for DispatchTargetExtension {
-    fn id(&self) -> &str {
-        "dispatch-target"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::PublicHttp]
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("dispatch-target")
+            .version("test")
+            .description("S5R public HTTP dispatch test target")
+            .capability(ExtensionCapability::PublicHttp)
+            .build()
     }
 
     fn register(&self, registrar: &mut Registrar) {
@@ -159,16 +157,16 @@ impl LlmProvider for MockLlm {
 }
 
 fn mock_router() -> Arc<astrcode_extensions::HostRouter> {
-    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    build_host_router(
-        Arc::new(ExtensionHostServices::new(
-            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
-            Some(Arc::new(MockLlm)),
-            Some(Arc::new(MockLlm)),
-        )),
-        store,
-        None,
-    )
+    let store = Arc::new(InMemoryEventStore::new());
+    let event_reader: Arc<dyn EventReader> = store.clone();
+    let session_reader: Arc<dyn SessionReader> = store;
+    build_host_router(HostBackends {
+        main_llm: Some(Arc::new(MockLlm)),
+        small_llm: Some(Arc::new(MockLlm)),
+        event_reader: Some(event_reader),
+        session_reader: Some(session_reader),
+        ..HostBackends::default()
+    })
 }
 
 async fn load_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<S5rExtension> {
@@ -179,91 +177,142 @@ async fn load_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<S5rExtens
         .as_nanos();
     let ext_dir = std::env::temp_dir().join(format!("astrcode-s5r-e2e-{suffix}"));
     fs::create_dir_all(&ext_dir).unwrap();
-    let manifest = serde_json::json!({
-        "protocol": { "s5r": "1.0" },
+    let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
+        "extension_id": "s5r-guest-demo",
+        "protocol": { "s5r": "2.0" },
         "command": [guest.to_string_lossy()]
-    });
+    }))
+    .unwrap();
     fs::write(
         ext_dir.join("extension.json"),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
-    S5rExtension::load(&ext_dir, &manifest, router, None)
+    S5rExtension::load(&ext_dir, &manifest, router)
         .await
         .expect("load s5r extension")
 }
 
-fn tool_ctx(working_dir: &str) -> ExtensionToolContext {
-    ExtensionToolContext::new(
-        ToolExecutionContext::new(
-            "e2e-session".into(),
-            working_dir,
-            None,
-            None,
-            Default::default(),
-        ),
+async fn register_s5r(
+    runner: &Arc<ExtensionRunner>,
+    router: Arc<astrcode_extensions::HostRouter>,
+) -> Arc<S5rExtension> {
+    runner.bind_host_router(Arc::clone(&router));
+    let extension = load_s5r(router).await;
+    runner.register(extension.clone()).await.unwrap();
+    extension
+}
+
+async fn runner_with_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<ExtensionRunner> {
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
+    register_s5r(&runner, router).await;
+    runner
+}
+
+async fn runner_tool(
+    runner: &ExtensionRunner,
+    tool_name: &str,
+    working_dir: &str,
+) -> Arc<dyn Tool> {
+    runner
+        .tool_catalog_snapshot_typed(working_dir)
+        .await
+        .tools
+        .into_iter()
+        .find(|tool| tool.definition().name == tool_name)
+        .unwrap_or_else(|| panic!("missing {tool_name} tool"))
+}
+
+fn core_tool_ctx(working_dir: &str) -> ToolExecutionContext {
+    ToolExecutionContext::new(
+        "e2e-session".into(),
+        working_dir,
         None,
+        None,
+        Default::default(),
     )
 }
 
-fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> PreToolUseContext {
-    PreToolUseContext {
-        session_id: "e2e-session".into(),
-        working_dir: "/tmp".into(),
-        model: ModelSelection::simple("test"),
-        call_id: "call-1".into(),
-        tool_name: tool_name.into(),
+fn attributed_tool_ctx(working_dir: &str) -> ToolExecutionContext {
+    ToolExecutionContext::new(
+        "e2e-session".into(),
+        working_dir,
+        Some("call-e2e".into()),
+        None,
+        Default::default(),
+    )
+    .with_turn_id(TurnId::new("turn-e2e"))
+}
+
+fn runtime_hook_call() -> RuntimeHookCallContext {
+    RuntimeHookCallContext::new("e2e-session", "/tmp", ModelSelection::simple("test"), None)
+}
+
+fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> RuntimePreToolUseContext {
+    RuntimePreToolUseContext::new(
+        runtime_hook_call(),
+        "call-1".into(),
+        tool_name,
         tool_input,
-        approval_mode: astrcode_core::permission::ApprovalMode::Manual,
-        available_tools: vec![],
-        event_tx: None,
-        extension_event_sink: None,
-        session_store_dir: None,
-    }
+        astrcode_core::permission::ApprovalMode::Manual,
+        Vec::new(),
+    )
 }
 
 #[tokio::test]
 async fn s5r_manifest_registers_tools_hooks_and_capabilities() {
     let ext = load_s5r(minimal_router()).await;
-    assert_eq!(ext.id(), "s5r-guest-demo");
-    assert!(ext.capabilities().iter().any(|c| {
+    let manifest = ext.manifest();
+    assert_eq!(manifest.id(), "s5r-guest-demo");
+    assert!(manifest.capabilities().iter().any(|c| {
         matches!(
             c,
             astrcode_extension_sdk::extension::ExtensionCapability::SmallModel
         )
     }));
-    assert!(ext.capabilities().iter().any(|capability| matches!(
+    assert!(manifest.capabilities().iter().any(|capability| matches!(
         capability,
         astrcode_extension_sdk::extension::ExtensionCapability::SessionInspect
     )));
 
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    assert!(reg.tools().iter().any(|(d, _)| d.name == "ping"));
-    assert!(reg.tools().iter().any(|(d, _)| d.name == "greet"));
-    assert_eq!(reg.pre_tool_use().len(), 1);
-    assert_eq!(reg.pre_tool_use()[0].mode, HookMode::Blocking);
+    let mut registrar = Registrar::new();
+    ext.register(&mut registrar);
+    let (_, registrations) = registrar
+        .finish(manifest)
+        .expect("valid s5r extension registrations");
+    assert!(
+        registrations
+            .tools()
+            .iter()
+            .any(|tool| tool.definition().name == "ping")
+    );
+    assert!(
+        registrations
+            .tools()
+            .iter()
+            .any(|tool| tool.definition().name == "greet")
+    );
+    assert_eq!(registrations.pre_tool_use().len(), 1);
+    assert_eq!(registrations.pre_tool_use()[0].mode, HookMode::Blocking);
     assert!(matches!(
-        reg.pre_tool_use()[0].target,
+        registrations.pre_tool_use()[0].target,
         astrcode_extension_sdk::extension::ToolHookTarget::All
     ));
-    assert_eq!(reg.commands().len(), 1);
-    assert_eq!(reg.http_routes().len(), 1);
-    assert_eq!(reg.http_routes()[0].route.path, "/s5r-probe/{id}");
+    assert_eq!(registrations.commands().len(), 1);
+    assert_eq!(registrations.http_routes().len(), 1);
+    assert_eq!(registrations.http_routes()[0].route.path, "/s5r-probe/{id}");
 }
 
 #[tokio::test]
 async fn s5r_http_route_dispatches_through_worker_handler() {
-    let ext = load_s5r(minimal_router()).await;
-    let runner = ExtensionRunner::new(Duration::from_secs(5));
-    runner.register(ext).await.unwrap();
+    let runner = runner_with_s5r(minimal_router()).await;
 
     let result = runner
         .dispatch_public_http_route(
             ExtensionHttpRequest {
                 method: ExtensionHttpMethod::Post,
                 path: "/s5r-probe/99".into(),
-                path_params: Default::default(),
+                path_params: BTreeMap::from([("id".into(), "forged".into())]),
                 query: Some("source=e2e".into()),
                 body: serde_json::Value::Null,
             },
@@ -280,6 +329,15 @@ async fn s5r_http_route_dispatches_through_worker_handler() {
     assert_eq!(response.body["id"], "99");
     assert_eq!(response.body["query"], "source=e2e");
     assert_eq!(response.body["body"]["hello"], "worker");
+
+    let error = runner
+        .dispatch_public_http_route(
+            ExtensionHttpRequest::new(ExtensionHttpMethod::Post, "/s5r-probe/invalid-status"),
+            &[],
+        )
+        .await
+        .expect_err("S5R responses must enforce the same HTTP status bounds");
+    assert!(error.to_string().contains("status"), "{error}");
 }
 
 #[tokio::test]
@@ -289,33 +347,21 @@ async fn s5r_host_client_dispatches_to_another_extensions_public_route() {
         .register(Arc::new(DispatchTargetExtension))
         .await
         .unwrap();
-    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let store = Arc::new(InMemoryEventStore::new());
+    let event_reader: Arc<dyn EventReader> = store.clone();
+    let session_reader: Arc<dyn SessionReader> = store;
     let router = build_host_router_with_public_http_dispatcher(
-        Arc::new(ExtensionHostServices::new(
-            Arc::new(StorageSessionQueryFactory::new(Arc::clone(&store))),
-            None,
-            None,
-        )),
-        store,
-        None,
+        HostBackends {
+            event_reader: Some(event_reader),
+            session_reader: Some(session_reader),
+            ..HostBackends::default()
+        },
         runner.clone(),
     );
-    let ext = load_s5r(router).await;
-    let mut registrar = Registrar::new();
-    ext.register(&mut registrar);
-    let (_, handler) = registrar
-        .tools()
-        .iter()
-        .find(|(definition, _)| definition.name == "dispatch_public_http")
-        .expect("dispatch_public_http tool");
-
-    let result = handler
-        .execute(
-            "dispatch_public_http",
-            serde_json::json!({}),
-            "/tmp",
-            &tool_ctx("/tmp"),
-        )
+    register_s5r(&runner, router).await;
+    let tool = runner_tool(&runner, "dispatch_public_http", "/tmp").await;
+    let result = tool
+        .execute(serde_json::json!({}), &core_tool_ctx("/tmp"))
         .await
         .unwrap();
 
@@ -334,43 +380,43 @@ async fn s5r_ping_health() {
 
 #[tokio::test]
 async fn s5r_ping_tool_returns_pong() {
-    let ext = load_s5r(minimal_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let (_, handler) = reg.tools().iter().find(|(d, _)| d.name == "ping").unwrap();
-    let result = handler
-        .execute("ping", serde_json::json!({}), "/tmp", &tool_ctx("/tmp"))
+    let runner = runner_with_s5r(minimal_router()).await;
+    let tool = runner_tool(&runner, "ping", "/tmp").await;
+    let result = tool
+        .execute(serde_json::json!({}), &core_tool_ctx("/tmp"))
         .await
         .unwrap();
     assert!(!result.is_error);
     assert_eq!(result.content, "pong");
+
+    let context_tool = runner_tool(&runner, "call_context", "/tmp").await;
+    let attributed = context_tool
+        .execute(serde_json::json!({}), &attributed_tool_ctx("/tmp"))
+        .await
+        .unwrap();
+    let context: serde_json::Value = serde_json::from_str(&attributed.content).unwrap();
+    assert_eq!(context["extension_id"], "s5r-guest-demo");
+    assert_eq!(context["session_id"], "e2e-session");
+    assert_eq!(context["turn_id"], "turn-e2e");
+    assert_eq!(context["tool_call_id"], "call-e2e");
+    assert_eq!(context["working_dir"], "/tmp");
 }
 
 #[tokio::test]
 async fn s5r_greet_and_add_tools() {
-    let ext = load_s5r(minimal_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-
-    let (_, greet) = reg.tools().iter().find(|(d, _)| d.name == "greet").unwrap();
+    let runner = runner_with_s5r(minimal_router()).await;
+    let greet = runner_tool(&runner, "greet", "/tmp").await;
     let r = greet
-        .execute(
-            "greet",
-            serde_json::json!({ "name": "s5r" }),
-            "/tmp",
-            &tool_ctx("/tmp"),
-        )
+        .execute(serde_json::json!({ "name": "s5r" }), &core_tool_ctx("/tmp"))
         .await
         .unwrap();
     assert_eq!(r.content, "hello, s5r!");
 
-    let (_, add) = reg.tools().iter().find(|(d, _)| d.name == "add").unwrap();
+    let add = runner_tool(&runner, "add", "/tmp").await;
     let r = add
         .execute(
-            "add",
             serde_json::json!({ "a": 3, "b": 4 }),
-            "/tmp",
-            &tool_ctx("/tmp"),
+            &core_tool_ctx("/tmp"),
         )
         .await
         .unwrap();
@@ -379,20 +425,12 @@ async fn s5r_greet_and_add_tools() {
 
 #[tokio::test]
 async fn s5r_ask_llm_via_host_invoke() {
-    let ext = load_s5r(mock_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let (_, handler) = reg
-        .tools()
-        .iter()
-        .find(|(d, _)| d.name == "ask_llm")
-        .unwrap();
-    let result = handler
+    let runner = runner_with_s5r(mock_router()).await;
+    let tool = runner_tool(&runner, "ask_llm", "/tmp").await;
+    let result = tool
         .execute(
-            "ask_llm",
             serde_json::json!({ "prompt": "hello" }),
-            "/tmp",
-            &tool_ctx("/tmp"),
+            &core_tool_ctx("/tmp"),
         )
         .await
         .unwrap();
@@ -414,33 +452,28 @@ async fn s5r_workspace_read_via_host_invoke() {
     let guest = ensure_guest_built();
     let ext_dir = wd.join("ext");
     fs::create_dir_all(&ext_dir).unwrap();
-    let manifest = serde_json::json!({
-        "protocol": { "s5r": "1.0" },
+    let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
+        "extension_id": "s5r-guest-demo",
+        "protocol": { "s5r": "2.0" },
         "command": [guest.to_string_lossy()]
-    });
+    }))
+    .unwrap();
     fs::write(
         ext_dir.join("extension.json"),
         serde_json::to_string_pretty(&manifest).unwrap(),
     )
     .unwrap();
 
-    let ext = S5rExtension::load(&ext_dir, &manifest, mock_router(), Some(wd_str.as_ref()))
+    let router = mock_router();
+    let ext = S5rExtension::load(&ext_dir, &manifest, Arc::clone(&router))
         .await
         .expect("load");
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let (_, handler) = reg
-        .tools()
-        .iter()
-        .find(|(d, _)| d.name == "read_workspace")
-        .unwrap();
-    let result = handler
-        .execute(
-            "read_workspace",
-            serde_json::json!({}),
-            &wd_str,
-            &tool_ctx(&wd_str),
-        )
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
+    runner.bind_host_router(router);
+    runner.register(ext).await.unwrap();
+    let tool = runner_tool(&runner, "read_workspace", &wd_str).await;
+    let result = tool
+        .execute(serde_json::json!({}), &core_tool_ctx(&wd_str))
         .await
         .unwrap();
     assert!(
@@ -465,32 +498,17 @@ async fn s5r_parallel_tools_keep_request_scoped_workspace_contexts() {
     fs::write(workspace_a.join("probe.txt"), "workspace-a").unwrap();
     fs::write(workspace_b.join("probe.txt"), "workspace-b").unwrap();
 
-    let ext = load_s5r(mock_router()).await;
-    let mut registrar = Registrar::new();
-    ext.register(&mut registrar);
-    let (definition, handler) = registrar
-        .tools()
-        .iter()
-        .find(|(definition, _)| definition.name == "parallel_read_workspace")
-        .expect("parallel_read_workspace tool");
-    assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
+    let runner = runner_with_s5r(mock_router()).await;
 
     let workspace_a = workspace_a.to_string_lossy().into_owned();
     let workspace_b = workspace_b.to_string_lossy().into_owned();
-    let context_a = tool_ctx(&workspace_a);
-    let context_b = tool_ctx(&workspace_b);
-    let call_a = handler.execute(
-        "parallel_read_workspace",
-        serde_json::json!({ "delay_ms": 150 }),
-        &workspace_a,
-        &context_a,
-    );
-    let call_b = handler.execute(
-        "parallel_read_workspace",
-        serde_json::json!({ "delay_ms": 150 }),
-        &workspace_b,
-        &context_b,
-    );
+    let tool_a = runner_tool(&runner, "parallel_read_workspace", &workspace_a).await;
+    let tool_b = runner_tool(&runner, "parallel_read_workspace", &workspace_b).await;
+    assert_eq!(tool_a.execution_mode(), ExecutionMode::Parallel);
+    let context_a = core_tool_ctx(&workspace_a);
+    let context_b = core_tool_ctx(&workspace_b);
+    let call_a = tool_a.execute(serde_json::json!({ "delay_ms": 150 }), &context_a);
+    let call_b = tool_b.execute(serde_json::json!({ "delay_ms": 150 }), &context_b);
     let (result_a, result_b) = tokio::join!(call_a, call_b);
     let result_a = result_a.expect("workspace A invocation");
     let result_b = result_b.expect("workspace B invocation");
@@ -498,28 +516,16 @@ async fn s5r_parallel_tools_keep_request_scoped_workspace_contexts() {
     assert_eq!(result_a.content, "content=workspace-a peak=2");
     assert_eq!(result_b.content, "content=workspace-b peak=2");
 
-    ext.stop(StopReason::Disabled).await.expect("stop");
+    assert!(runner.shutdown().await.is_empty());
     let _ = fs::remove_dir_all(root);
 }
 
 #[tokio::test]
 async fn s5r_session_inspect_via_typed_host_client() {
-    let ext = load_s5r(minimal_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let (_, handler) = reg
-        .tools()
-        .iter()
-        .find(|(definition, _)| definition.name == "inspect_sessions")
-        .expect("inspect_sessions tool");
-
-    let result = handler
-        .execute(
-            "inspect_sessions",
-            serde_json::json!({}),
-            "/tmp",
-            &tool_ctx("/tmp"),
-        )
+    let runner = runner_with_s5r(minimal_router()).await;
+    let tool = runner_tool(&runner, "inspect_sessions", "/tmp").await;
+    let result = tool
+        .execute(serde_json::json!({}), &core_tool_ctx("/tmp"))
         .await
         .expect("invoke inspect_sessions");
 
@@ -527,25 +533,39 @@ async fn s5r_session_inspect_via_typed_host_client() {
 }
 
 #[tokio::test]
+async fn s5r_session_state_roundtrips_via_typed_host_client() {
+    let runner = runner_with_s5r(minimal_router()).await;
+    let tool = runner_tool(&runner, "session_state_roundtrip", "/tmp").await;
+    let store = tempfile::tempdir().unwrap();
+    let mut capabilities = ToolCapabilities::default();
+    capabilities.paths.store_dir = Some(store.path().to_path_buf());
+    let ctx = ToolExecutionContext::new(
+        "e2e-session".into(),
+        "/tmp",
+        Some("call-state".into()),
+        None,
+        capabilities,
+    );
+
+    let result = tool.execute(serde_json::json!({}), &ctx).await.unwrap();
+
+    assert!(!result.is_error);
+    assert_eq!(result.content, "state-roundtrip-ok");
+}
+
+#[tokio::test]
 async fn s5r_pre_tool_use_blocks_and_emits_event() {
-    let ext = load_s5r(mock_router()).await;
-    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
-    runner.register(ext).await.unwrap();
+    let runner = runner_with_s5r(mock_router()).await;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let ctx = PreToolUseContext {
-        session_id: "e2e-session".into(),
-        working_dir: "/tmp".into(),
-        model: ModelSelection::simple("test"),
-        call_id: "call-1".into(),
-        tool_name: "emit_hook_probe".into(),
-        tool_input: serde_json::json!({}),
-        approval_mode: astrcode_core::permission::ApprovalMode::Manual,
-        available_tools: vec![],
-        event_tx: Some(tx.into()),
-        extension_event_sink: None,
-        session_store_dir: None,
-    };
+    let ctx = RuntimePreToolUseContext::new(
+        runtime_hook_call().with_event_tx(Some(tx.into())),
+        "call-1".into(),
+        "emit_hook_probe",
+        serde_json::json!({}),
+        astrcode_core::permission::ApprovalMode::Manual,
+        Vec::new(),
+    );
     let result = runner.emit_pre_tool_use(ctx).await.unwrap();
     assert!(matches!(result, PreToolUseResult::Allow));
 
@@ -579,26 +599,17 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
 
 #[tokio::test]
 async fn s5r_demo_command() {
-    let ext = load_s5r(minimal_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let (_, handler) = reg
-        .commands()
-        .iter()
-        .find(|(c, _)| c.name == "demo")
-        .unwrap();
-    let result = handler
-        .execute(
-            "demo",
-            "",
-            "/tmp",
-            &CommandContext {
-                session_id: "e2e-session".into(),
-                working_dir: "/tmp".into(),
-                model: ModelSelection::simple("test"),
-                session_store_dir: None,
-            },
-        )
+    let runner = runner_with_s5r(minimal_router()).await;
+    let runtime =
+        RuntimeHookCallContext::new("e2e-session", "/tmp", ModelSelection::simple("test"), None);
+    let resolved = runner
+        .resolve_commands_for_typed(&runtime.working_dir().to_string_lossy())
+        .await
+        .into_iter()
+        .find(|resolved| resolved.command.name == "demo")
+        .expect("demo command");
+    let result = runner
+        .invoke_resolved_command_typed(&resolved, "", &runtime)
         .await
         .unwrap();
     match result {
@@ -616,22 +627,13 @@ async fn s5r_demo_command() {
 
 #[tokio::test]
 async fn s5r_turn_end_continuations_and_pipeline() {
-    let ext = load_s5r(mock_router()).await;
     let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
-    runner.register(ext).await.unwrap();
+    register_s5r(&runner, mock_router()).await;
 
     runner
         .emit_lifecycle(
             ExtensionEvent::TurnEnd,
-            LifecycleContext {
-                session_id: "e2e-session".into(),
-                working_dir: "/tmp".into(),
-                model: ModelSelection::simple("test"),
-                event_tx: None,
-                extension_event_sink: None,
-                last_exchange: None,
-                mid_turn_user_messages_synced: 0,
-            },
+            RuntimeLifecycleContext::new(runtime_hook_call(), None),
         )
         .await
         .unwrap();
@@ -647,7 +649,7 @@ async fn s5r_turn_end_continuations_and_pipeline() {
         .expect("pipeline_status");
 
     let result = tool
-        .execute(serde_json::json!({}), &tool_ctx("/tmp"))
+        .execute(serde_json::json!({}), &core_tool_ctx("/tmp"))
         .await
         .unwrap();
 
@@ -667,7 +669,8 @@ async fn s5r_loader_discovers_manifest() {
     fs::write(
         ext_dir.join("extension.json"),
         serde_json::json!({
-            "protocol": { "s5r": "1.0" },
+            "extension_id": "s5r-guest-demo",
+            "protocol": { "s5r": "2.0" },
             "command": [guest.to_string_lossy()]
         })
         .to_string(),
@@ -675,11 +678,32 @@ async fn s5r_loader_discovers_manifest() {
     .unwrap();
 
     let (exts, errors) =
-        ExtensionLoader::load_from_dir_for_test(&root, &Some(minimal_router()), None).await;
+        ExtensionLoader::load_from_dir_for_test(&root, &Some(minimal_router())).await;
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(exts.len(), 1);
-    assert_eq!(exts[0].id(), "s5r-guest-demo");
+    assert_eq!(exts[0].manifest().id(), "s5r-guest-demo");
     let _ = fs::remove_dir_all(&root);
+}
+
+#[tokio::test]
+async fn s5r_load_rejects_package_and_handshake_id_mismatch() {
+    let guest = ensure_guest_built();
+    let root = tempfile::tempdir().unwrap();
+    let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
+        "extension_id": "different-extension",
+        "protocol": { "s5r": "2.0" },
+        "command": [guest.to_string_lossy()]
+    }))
+    .unwrap();
+
+    let error = match S5rExtension::load(root.path(), &manifest, minimal_router()).await {
+        Ok(_) => panic!("mismatched package and handshake ids must be rejected"),
+        Err(error) => error,
+    };
+
+    assert!(error.contains("extension id mismatch"), "{error}");
+    assert!(error.contains("different-extension"), "{error}");
+    assert!(error.contains("s5r-guest-demo"), "{error}");
 }
 
 #[tokio::test]
@@ -691,19 +715,12 @@ async fn s5r_stop_shuts_down_process() {
 
 #[tokio::test]
 async fn s5r_cancel_on_stop_during_slow_tool() {
-    let ext = load_s5r(minimal_router()).await;
-    let mut reg = Registrar::new();
-    ext.register(&mut reg);
-    let handler = reg
-        .tools()
-        .iter()
-        .find(|(d, _)| d.name == "slow")
-        .map(|(_, handler)| Arc::clone(handler))
-        .expect("slow tool");
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
+    let ext = register_s5r(&runner, minimal_router()).await;
+    let tool = runner_tool(&runner, "slow", "/tmp").await;
 
     let slow_task = tokio::spawn(async move {
-        handler
-            .execute("slow", serde_json::json!({}), "/tmp", &tool_ctx("/tmp"))
+        tool.execute(serde_json::json!({}), &core_tool_ctx("/tmp"))
             .await
     });
 
@@ -723,7 +740,7 @@ async fn s5r_cancel_on_stop_during_slow_tool() {
                 tool_result.content
             );
             assert!(
-                tool_result.content.contains("cancel"),
+                tool_result.content.contains("cancel") || tool_result.content.contains("closed"),
                 "unexpected content: {}",
                 tool_result.content
             );

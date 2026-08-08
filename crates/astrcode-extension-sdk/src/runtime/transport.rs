@@ -8,7 +8,8 @@ use tokio::{
     sync::Mutex as AsyncMutex,
 };
 
-const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+// A 10 MiB network body expands to roughly 13.4 MiB as base64 inside the JSON envelope.
+const MAX_FRAME_BYTES: usize = 16 * 1024 * 1024;
 
 pub fn frame_payload(payload: &[u8]) -> Vec<u8> {
     let mut out = format!("{}\n", payload.len()).into_bytes();
@@ -222,7 +223,7 @@ mod tests {
                         role: "core".into(),
                         version: Some("astrcode".into()),
                     },
-                    protocol_version: Some(S5R_VERSION.into()),
+                    protocol_version: S5R_VERSION.into(),
                     capabilities: Vec::new(),
                     metadata: serde_json::json!({ "wire_codec": "json" }),
                 })
@@ -235,7 +236,7 @@ mod tests {
         let metadata = serde_json::json!({
             "extension_id": "s5r-guest-demo",
             "version": "0.1.0",
-            "protocol": { "s5r": "1.0" },
+            "protocol": { "s5r": "2.0" },
         });
         let worker = Arc::clone(&worker);
         let init_task = tokio::spawn(async move { worker.initialize(Vec::new(), metadata).await });

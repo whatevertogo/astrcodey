@@ -1,5 +1,5 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
     sync::{Arc, Weak},
 };
 
@@ -11,12 +11,15 @@ use astrcode_extension_sdk::{
         ToolCatalogSnapshot,
     },
     tool::{
-        ExecutionMode, ExtensionToolContext, Tool, ToolDefinition, ToolError, ToolExecutionContext,
-        ToolExecutionResult, ToolResult,
+        ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionResult,
+        ToolResult,
     },
 };
 
-use super::{ExtensionRunner, ExtensionView, HandlerIndex, bind_extension_event_sink};
+use super::{
+    ExtensionCallContextFactory, ExtensionCallContextInput, ExtensionRunner, ExtensionView,
+    HandlerIndex,
+};
 
 impl ExtensionView {
     /// 从 HandlerIndex 缓存收集工具适配器。
@@ -33,53 +36,60 @@ impl ExtensionView {
         scope: &ToolCatalogScope,
     ) -> ToolCatalogSnapshot {
         let working_dir = &scope.working_dir;
-        let index = Arc::clone(&self.index);
+        let index = &self.index;
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut diagnostics = Vec::new();
         for (def, handler, ext_id, capabilities) in &index.static_tools {
             let prompt_metadata = index.tool_metadata.get(&def.name).cloned();
-            tools.push(Arc::new(HandlerTool {
-                definition: def.clone(),
-                handler: Arc::clone(handler),
+            tools.push(Arc::new(HandlerTool::new(
+                def.clone(),
+                Arc::clone(handler),
                 prompt_metadata,
-                working_dir: working_dir.to_string(),
-                extension_id: ext_id.clone(),
-                capabilities: capabilities.clone(),
-                event_declarations: index
-                    .extension_event_decls
-                    .get(ext_id)
-                    .cloned()
-                    .unwrap_or_default(),
-                index: Arc::downgrade(&index),
-            }));
+                working_dir,
+                ext_id,
+                capabilities,
+                self,
+            )));
         }
         for (ext_id, discovery, capabilities) in &index.tool_discoveries {
-            match tokio::time::timeout(self.operation_timeout, discovery.discover(working_dir))
-                .await
-            {
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            let call = self.make_registered_extension_call_context(
+                ext_id,
+                ExtensionCallContextInput {
+                    working_dir: Some(PathBuf::from(working_dir)),
+                    ..ExtensionCallContextInput::unscoped(cancellation.clone())
+                },
+            );
+            let discovered = match call {
+                Ok(call) => {
+                    let ctx = ToolDiscoveryContext::from_runtime(call, self.generation());
+                    self.run_recorded_hook(
+                        ext_id,
+                        "tool_discovery",
+                        cancellation,
+                        discovery.discover(ctx),
+                    )
+                    .await
+                },
+                Err(error) => Err(error),
+            };
+            match discovered {
                 Ok(discovered) => {
-                    for discovered_tool in discovered {
-                        tools.push(Arc::new(HandlerTool {
-                            definition: discovered_tool.definition,
-                            handler: discovered_tool.handler,
-                            prompt_metadata: discovered_tool.prompt_metadata,
-                            working_dir: working_dir.to_string(),
-                            extension_id: ext_id.clone(),
-                            capabilities: capabilities.clone(),
-                            event_declarations: index
-                                .extension_event_decls
-                                .get(ext_id)
-                                .cloned()
-                                .unwrap_or_default(),
-                            index: Arc::downgrade(&index),
-                        }));
+                    for discovered_tool in discovered.into_tools() {
+                        let (definition, handler, prompt_metadata) = discovered_tool.into_parts();
+                        tools.push(Arc::new(HandlerTool::new(
+                            definition,
+                            handler,
+                            prompt_metadata,
+                            working_dir,
+                            ext_id,
+                            capabilities,
+                            self,
+                        )));
                     }
                 },
-                Err(_) => {
-                    let message = format!(
-                        "tool discovery timed out after {} ms",
-                        self.operation_timeout.as_millis()
-                    );
+                Err(error) => {
+                    let message = error.to_string();
                     tracing::warn!(extension_id = %ext_id, error = %message);
                     diagnostics.push(ToolCatalogDiagnostic {
                         source: ext_id.clone(),
@@ -104,6 +114,7 @@ impl ExtensionView {
 impl ExtensionRunner {
     pub async fn tool_catalog_snapshot_typed(&self, working_dir: &str) -> ToolCatalogSnapshot {
         self.extension_view()
+            .await
             .tool_catalog_snapshot_typed(working_dir)
             .await
     }
@@ -132,7 +143,37 @@ struct HandlerTool {
     extension_id: String,
     capabilities: Vec<ExtensionCapability>,
     event_declarations: Vec<ExtensionEventDecl>,
+    call_context_factory: ExtensionCallContextFactory,
     index: Weak<HandlerIndex>,
+}
+
+impl HandlerTool {
+    fn new(
+        definition: ToolDefinition,
+        handler: Arc<dyn ToolHandler>,
+        prompt_metadata: Option<astrcode_extension_sdk::tool::ToolPromptMetadata>,
+        working_dir: &str,
+        extension_id: &str,
+        capabilities: &[ExtensionCapability],
+        view: &ExtensionView,
+    ) -> Self {
+        Self {
+            definition,
+            handler,
+            prompt_metadata,
+            working_dir: working_dir.to_owned(),
+            extension_id: extension_id.to_owned(),
+            capabilities: capabilities.to_vec(),
+            event_declarations: view
+                .index
+                .extension_event_decls
+                .get(extension_id)
+                .cloned()
+                .unwrap_or_default(),
+            call_context_factory: view.call_context_factory.clone(),
+            index: Arc::downgrade(&view.index),
+        }
+    }
 }
 
 // Providers occasionally stringify booleans despite the declared tool schema.
@@ -239,35 +280,64 @@ impl Tool for HandlerTool {
                 "normalized stringified boolean extension tool arguments"
             );
         }
-        let mut ctx = ctx.clone();
-        if !self
-            .capabilities
-            .contains(&ExtensionCapability::SessionControl)
-        {
-            ctx.capabilities.session.ops = None;
-        }
-        if !self.capabilities.contains(&ExtensionCapability::MainModel) {
-            ctx.capabilities.models.tiers.main = None;
-        }
-        if !self.capabilities.contains(&ExtensionCapability::SmallModel) {
-            ctx.capabilities.models.tiers.small = None;
-        }
-        let event_sink = if self.capabilities.contains(&ExtensionCapability::EmitEvents) {
-            ctx.scope.event_tx.clone().and_then(|event_tx| {
-                bind_extension_event_sink(&self.extension_id, &self.event_declarations, event_tx)
-            })
-        } else {
-            None
+        let Some(tasks) = active_index
+            .extension_tasks
+            .get(&self.extension_id)
+            .cloned()
+        else {
+            return Ok(extension_error_result(
+                &self.definition.name,
+                &self.extension_id,
+                ExtensionError::Internal("extension task scope is unavailable".into()),
+            )
+            .into());
         };
-        let ctx = ExtensionToolContext::new(ctx, event_sink);
-        let result = match self
-            .handler
-            .execute(&self.definition.name, arguments, &self.working_dir, &ctx)
-            .await
-        {
+        let call = self.call_context_factory.make_extension_call_context(
+            &self.extension_id,
+            &self.capabilities,
+            &self.event_declarations,
+            tasks,
+            ExtensionCallContextInput {
+                session_id: Some(ctx.scope.session_id.clone()),
+                turn_id: ctx.turn_id().map(ToString::to_string),
+                tool_call_id: ctx.scope.tool_call_id.clone(),
+                working_dir: Some(PathBuf::from(&self.working_dir)),
+                session_store_dir: ctx.capabilities.paths.store_dir.clone(),
+                event_tx: ctx.scope.event_tx.clone(),
+                cancellation: ctx.cancellation().clone(),
+            },
+        );
+        let main_model_id = self
+            .capabilities
+            .contains(&ExtensionCapability::MainModel)
+            .then(|| ctx.capabilities.models.tiers.main.clone())
+            .flatten();
+        let small_model_id = self
+            .capabilities
+            .contains(&ExtensionCapability::SmallModel)
+            .then(|| ctx.capabilities.models.tiers.small.clone())
+            .flatten();
+        let available_tools = ctx
+            .capabilities
+            .host
+            .available_tools
+            .clone()
+            .unwrap_or_default();
+        let ctx = ToolContext::from_runtime(
+            call,
+            self.definition.name.clone(),
+            ctx.scope.tool_call_id.clone(),
+            arguments,
+            main_model_id,
+            small_model_id,
+            available_tools,
+        );
+        let result = match self.handler.execute(ctx).await {
             Ok(result) => result,
             Err(err) => {
-                return Ok(extension_error_result(&self.definition.name, "handler", err).into());
+                return Ok(
+                    extension_error_result(&self.definition.name, &self.extension_id, err).into(),
+                );
             },
         };
 
@@ -295,6 +365,23 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
             format!("Tool `{tool_name}` was blocked: {reason}"),
             "A hook policy prevented this. Read the reason and adjust your approach.",
         ),
+        ExtensionError::InvalidInput { message, hint, .. } => (
+            format!("Tool `{tool_name}` received invalid input: {message}"),
+            hint.as_deref()
+                .unwrap_or("Check the tool arguments against its declared schema."),
+        ),
+        ExtensionError::Host(error) => (
+            format!("Tool `{tool_name}` host call failed: {}", error.message),
+            error.hint.as_deref().unwrap_or(if error.retryable {
+                "The host marked this failure retryable; verify current state before retrying."
+            } else {
+                "Check the extension capability and current call context before retrying."
+            }),
+        ),
+        ExtensionError::Path(error) => (
+            format!("Tool `{tool_name}` path is unavailable: {error}"),
+            "Run the tool from the session context required by this extension.",
+        ),
         ExtensionError::Internal(message) => (
             format!("Tool `{tool_name}` failed: {message}"),
             "Try different arguments or use a builtin tool as an alternative. Do not retry the \
@@ -316,6 +403,19 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
     ]);
     if let ExtensionError::Timeout(ms) = &err {
         metadata.insert("timeoutMs".into(), serde_json::json!(ms));
+    }
+    if let ExtensionError::InvalidInput { code, hint, .. } = &err {
+        metadata.insert("errorCode".into(), serde_json::json!(code));
+        if let Some(hint) = hint {
+            metadata.insert("hint".into(), serde_json::json!(hint));
+        }
+    }
+    if let ExtensionError::Host(error) = &err {
+        metadata.insert("errorCode".into(), serde_json::json!(error.code));
+        metadata.insert("retryable".into(), serde_json::json!(error.retryable));
+        if let Some(hint) = &error.hint {
+            metadata.insert("hint".into(), serde_json::json!(hint));
+        }
     }
 
     ToolResult::text(content, true, metadata)

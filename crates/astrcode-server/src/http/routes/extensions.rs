@@ -174,14 +174,13 @@ fn extension_http_method(method: &Method) -> Option<ExtensionHttpMethod> {
 async fn collect_extensions(state: &HttpState) -> Vec<ExtensionStateDto> {
     let effective = state.app.runtime().config_manager().read_effective();
     let runner = state.app.runtime().extension_runner();
-    let loaded_ids = runner.registered_extension_ids().await;
-    let loaded_set: BTreeSet<_> = loaded_ids.iter().cloned().collect();
     let registry = runner.registry_snapshot().await;
     let declarations: BTreeMap<_, _> = registry
         .extensions
         .into_iter()
         .map(|declaration| (declaration.id.clone(), declaration))
         .collect();
+    let loaded_set: BTreeSet<_> = declarations.keys().cloned().collect();
     let diagnostics = runner.diagnostics_snapshot();
     let bundled_set: BTreeSet<_> = astrcode_bundled_extensions::bundled_extension_ids()
         .into_iter()

@@ -103,19 +103,23 @@ impl LifecycleHandler for MemoryProjectRecallTurnEndHandler {
         if !cfg.inject_project_memories_per_turn {
             return Ok(HookResult::Allow);
         }
-        let Some(exchange) = ctx.last_exchange else {
+        let Some(exchange) = ctx.last_exchange() else {
             return Ok(HookResult::Allow);
         };
 
-        let query = recall_query_from_exchange(&exchange);
+        let query = recall_query_from_exchange(exchange);
         if query.chars().count() < cfg.min_recall_query_chars {
             return Ok(HookResult::Allow);
         }
 
         let store_pool = self.store_pool.clone();
-        let working_dir = ctx.working_dir.clone();
+        let working_dir = ctx
+            .call()
+            .require_working_dir()?
+            .to_string_lossy()
+            .into_owned();
         let buffer = self.buffer.clone();
-        let session_id = ctx.session_id.clone();
+        let session_id = ctx.call().require_session_id()?.to_string();
 
         let lines = tokio::task::spawn_blocking(move || {
             recall_project_lines(
@@ -148,7 +152,8 @@ impl ProviderHandler for MemoryProjectRecallDeliveryProvider {
         if !self.config.read().inject_project_memories_per_turn {
             return Ok(ProviderResult::Allow);
         }
-        let Some(lines) = self.buffer.take(&ctx.session_id) else {
+        let session_id = ctx.call().require_session_id()?;
+        let Some(lines) = self.buffer.take(session_id.as_str()) else {
             return Ok(ProviderResult::Allow);
         };
         if lines.is_empty() {

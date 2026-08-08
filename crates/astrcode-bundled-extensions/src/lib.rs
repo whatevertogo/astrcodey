@@ -34,7 +34,7 @@ impl ExtensionSource for BundledExtensionSource {
         let candidates = extensions
             .into_iter()
             .map(|extension| {
-                let extension_id = extension.id().to_string();
+                let extension_id = extension.manifest().id().to_owned();
                 ExtensionCandidate::ready(
                     format!("bundled:{extension_id}"),
                     format!("{}:{extension_id}", env!("CARGO_PKG_VERSION")),
@@ -183,17 +183,24 @@ mod tests {
 
         let mut non_strict = Vec::new();
         for extension in extensions {
-            if extension.id() == "astrcode-mcp" {
+            let manifest = extension.manifest();
+            let extension_id = manifest.id().to_owned();
+            if extension_id == "astrcode-mcp" {
                 continue;
             }
             let mut registrar = Registrar::new();
             extension.register(&mut registrar);
+            let (_, registrations) = registrar
+                .finish(manifest)
+                .expect("bundled extension registrations should match its manifest");
             non_strict.extend(
-                registrar
+                registrations
                     .tools()
                     .iter()
-                    .filter(|(definition, _)| !definition.strict)
-                    .map(|(definition, _)| format!("{}:{}", extension.id(), definition.name)),
+                    .filter(|registration| !registration.definition().strict)
+                    .map(|registration| {
+                        format!("{extension_id}:{}", registration.definition().name)
+                    }),
             );
         }
 

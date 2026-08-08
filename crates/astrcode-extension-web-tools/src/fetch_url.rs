@@ -5,11 +5,11 @@ use std::{
 };
 
 use astrcode_extension_sdk::{
-    llm::{LlmContent, LlmMessage, LlmProvider, LlmRole, collect_stream_text},
-    network::{
-        NetworkRedirectPolicy, OutboundNetworkErrorKind, OutboundNetworkRequest,
-        OutboundNetworkResponse, OutboundNetworkService,
+    host::{
+        HOST_NETWORK_MAX_BYTES, HostNetworkRedirectPolicy, HostNetworkRequest, HostNetworkResponse,
+        ModelClient, NetworkClient,
     },
+    llm::{LlmContent, LlmMessage, LlmRole},
 };
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -18,6 +18,7 @@ use url::Url;
 use crate::{
     cache::{FetchCacheEntry, FetchUrlCache},
     config::FetchConfig,
+    host_timeout_ms,
     preapproved::is_preapproved_url,
     url_guard::{UrlGuardError, is_permitted_redirect, upgrade_http_to_https, validate_fetch_url},
 };
@@ -34,7 +35,7 @@ struct FinalizeInput<'a> {
     markdown: &'a str,
     is_preapproved: bool,
     max_output_chars: usize,
-    small_llm: Option<&'a dyn LlmProvider>,
+    small_llm: Option<&'a ModelClient>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,8 +97,8 @@ pub(crate) enum FetchError {
 pub(crate) async fn run_fetch_url(
     config: &FetchConfig,
     cache: &Arc<Mutex<FetchUrlCache>>,
-    network: Arc<dyn OutboundNetworkService>,
-    small_llm: Option<Arc<dyn LlmProvider>>,
+    network: NetworkClient,
+    small_llm: Option<ModelClient>,
     args: FetchUrlArgs,
 ) -> Result<FetchUrlResult, FetchError> {
     let started = Instant::now();
@@ -118,7 +119,7 @@ pub(crate) async fn run_fetch_url(
             markdown: &entry.content,
             is_preapproved: is_preapproved_url(&request_url),
             max_output_chars: config.max_output_chars,
-            small_llm: small_llm.as_deref(),
+            small_llm: small_llm.as_ref(),
         })
         .await?;
         return Ok(FetchUrlResult::Content(FetchUrlOutcome {
@@ -134,7 +135,7 @@ pub(crate) async fn run_fetch_url(
     }
 
     let fetched = fetch_with_redirect_policy(
-        &*network,
+        &network,
         &request_url,
         config.request_timeout_secs,
         &config.user_agent,
@@ -194,7 +195,7 @@ pub(crate) async fn run_fetch_url(
                     .as_ref()
                     .is_some_and(is_preapproved_url),
                 max_output_chars: config.max_output_chars,
-                small_llm: small_llm.as_deref(),
+                small_llm: small_llm.as_ref(),
             })
             .await?;
             Ok(FetchUrlResult::Content(FetchUrlOutcome {
@@ -227,7 +228,7 @@ enum FetchResponse {
 }
 
 async fn fetch_with_redirect_policy(
-    network: &dyn OutboundNetworkService,
+    network: &NetworkClient,
     url: &Url,
     timeout_secs: u64,
     user_agent: &str,
@@ -236,34 +237,32 @@ async fn fetch_with_redirect_policy(
 ) -> Result<FetchResponse, FetchError> {
     let mut current = url.clone();
     let deadline = Instant::now() + Duration::from_secs(timeout_secs.clamp(1, 60));
+    let response_limit = max_content_bytes.min(HOST_NETWORK_MAX_BYTES);
     for depth in 0..=max_redirects {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(FetchError::Timeout);
         }
         let response = network
-            .request(
-                OutboundNetworkRequest {
-                    url: current.to_string(),
-                    method: "GET".into(),
-                    headers: BTreeMap::from([
-                        (
-                            "accept".into(),
-                            "text/markdown, text/html, text/plain, application/json, */*".into(),
-                        ),
-                        ("user-agent".into(), user_agent.into()),
-                    ]),
-                    body: Vec::new(),
-                    max_bytes: max_content_bytes,
-                    timeout: remaining,
-                    redirect_policy: NetworkRedirectPolicy::Manual,
-                },
-                None,
-            )
+            .send(HostNetworkRequest {
+                url: current.to_string(),
+                method: "GET".into(),
+                headers: BTreeMap::from([
+                    (
+                        "accept".into(),
+                        "text/markdown, text/html, text/plain, application/json, */*".into(),
+                    ),
+                    ("user-agent".into(), user_agent.into()),
+                ]),
+                body: Vec::new(),
+                max_bytes: response_limit,
+                timeout_ms: host_timeout_ms(remaining),
+                redirect_policy: HostNetworkRedirectPolicy::Manual,
+            })
             .await
-            .map_err(|error| match error.kind {
-                OutboundNetworkErrorKind::ResponseTooLarge => FetchError::ResponseTooLarge {
-                    limit: max_content_bytes,
+            .map_err(|error| match error.code.as_str() {
+                "response_too_large" => FetchError::ResponseTooLarge {
+                    limit: response_limit,
                 },
                 _ => FetchError::Http(error.to_string()),
             })?;
@@ -358,7 +357,7 @@ async fn finalize_result(input: FinalizeInput<'_>) -> Result<String, FetchError>
 }
 
 async fn apply_prompt_to_markdown(
-    small_llm: &dyn LlmProvider,
+    small_llm: &ModelClient,
     prompt: &str,
     markdown: &str,
     is_preapproved: bool,
@@ -372,14 +371,11 @@ async fn apply_prompt_to_markdown(
         name: None,
         reasoning_content: None,
     }];
-    let rx = small_llm
-        .generate(messages, vec![])
+    let output = small_llm
+        .small_chat_stream(messages)
         .await
         .map_err(|error| FetchError::PromptProcessing(error.to_string()))?;
-    let text = collect_stream_text(rx)
-        .await
-        .unwrap_or_else(|_| "No response from model".into());
-    Ok(text)
+    Ok(output.content)
 }
 
 fn make_secondary_model_prompt(
@@ -408,7 +404,7 @@ fn truncate_markdown(markdown: &str, max_chars: usize) -> String {
     format!("{truncated}\n\n[Content truncated due to length...]")
 }
 
-fn content_type(response: &OutboundNetworkResponse) -> String {
+fn content_type(response: &HostNetworkResponse) -> String {
     response
         .headers
         .get("content-type")

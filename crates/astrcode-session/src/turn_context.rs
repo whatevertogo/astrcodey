@@ -3,11 +3,13 @@
 use astrcode_core::{config::ModelSelection, llm::LlmMessage, types::*};
 use astrcode_extension_sdk::{
     extension::{
-        ExchangeSummary, ExtensionError, ExtensionEvent, LifecycleContext, ProviderContext,
+        ExchangeSummary, ExtensionError, ExtensionEvent, RuntimeHookCallContext,
+        RuntimeLifecycleContext, RuntimeProviderContext,
     },
     runtime_ports::TurnHooks,
 };
 use astrcode_session_projection::SessionReadModel;
+use tokio_util::sync::CancellationToken;
 // ─── Turn event channel ──────────────────────────────────────────────────
 
 /// Turn 内扩展/工具 → event bridge 的入口（unbounded，不丢事件、durable 由单 worker 保序）。
@@ -16,7 +18,7 @@ pub type TurnEventTx = astrcode_core::event::EventSender;
 /// StepEnd 生命周期钩子：失败只记录 warn，不中断 turn。
 pub(crate) async fn on_step_end_best_effort(
     extension_runner: &dyn TurnHooks,
-    ctx: &LifecycleContext,
+    ctx: &RuntimeLifecycleContext,
 ) {
     if let Err(error) = extension_runner
         .emit_lifecycle(ExtensionEvent::StepEnd, ctx.clone())
@@ -45,6 +47,7 @@ where
 #[derive(Clone)]
 pub(crate) struct SharedTurnContext {
     pub(crate) session_id: SessionId,
+    pub(crate) turn_id: Option<TurnId>,
     pub(crate) working_dir: String,
     pub(crate) model_id: String,
     pub(crate) session_store_dir: Option<std::path::PathBuf>,
@@ -54,20 +57,28 @@ pub(crate) struct SharedTurnContext {
     pub(crate) tool_selection: Option<astrcode_core::tool::SessionToolSelection>,
     pub(crate) permission_chain: std::sync::Arc<crate::permission::PermissionChain>,
     pub(crate) approval_history: std::sync::Arc<crate::permission::ApprovalHistoryStore>,
+    pub(crate) cancellation_token: CancellationToken,
 }
 
 impl SharedTurnContext {
-    /// 从 session 读模型构造共享上下文（不含 session_store_dir）。
+    /// 从 read model 重建共享上下文，用于**没有活跃 turn 管线**的 hook 场景：
+    /// lifecycle 事件发射（`emit_lifecycle_for_read_model`）、idle compaction、
+    /// turn 提交前的 envelope / prompt 准备（调用方覆写 `turn_id` 与 `cancellation_token`）。
     ///
-    /// **仅用于 lifecycle 事件发射**（`emit_lifecycle_for_read_model`）：本构造产出的
-    /// `permission_chain` 是空链（一切工具全拒）、`approval_history` 是未初始化默认 store，
-    /// 不能用于工具管线或审批决策——那些路径必须经由 `TurnToolContext::for_turn`。
-    pub(crate) fn from_read_model(session_id: &SessionId, model: &SessionReadModel) -> Self {
+    /// 本构造产出的 `permission_chain` 是空链（一切工具全拒）、`approval_history`
+    /// 是未初始化默认 store，不能用于工具管线或审批决策——那些路径必须经由
+    /// `TurnToolContext::for_turn`。
+    pub(crate) fn from_read_model(
+        session_id: &SessionId,
+        model: &SessionReadModel,
+        session_store_dir: Option<std::path::PathBuf>,
+    ) -> Self {
         Self {
             session_id: session_id.clone(),
+            turn_id: None,
             working_dir: model.identity.working_dir.clone(),
             model_id: model.identity.model_id.clone(),
-            session_store_dir: None,
+            session_store_dir,
             turn_event_sender: None,
             approval_mode: astrcode_core::permission::ApprovalMode::default(),
             tool_selection: Some(model.identity.tool_selection.clone()),
@@ -75,6 +86,7 @@ impl SharedTurnContext {
             approval_history: std::sync::Arc::new(
                 crate::permission::ApprovalHistoryStore::default(),
             ),
+            cancellation_token: CancellationToken::new(),
         }
     }
 
@@ -86,11 +98,8 @@ impl SharedTurnContext {
     }
 
     /// 构造扩展 lifecycle hook 的 ctx。
-    pub(crate) fn lifecycle_ctx(&self) -> LifecycleContext {
-        LifecycleContext {
-            last_exchange: None,
-            ..self.base_lifecycle_ctx()
-        }
+    pub(crate) fn lifecycle_ctx(&self) -> RuntimeLifecycleContext {
+        RuntimeLifecycleContext::new(self.hook_call_context(), None)
     }
 
     /// 构造带当轮消息摘要的 lifecycle hook ctx（用于 TurnEnd）。
@@ -98,37 +107,34 @@ impl SharedTurnContext {
         &self,
         user_message: String,
         assistant_message: String,
-    ) -> LifecycleContext {
-        LifecycleContext {
-            last_exchange: Some(ExchangeSummary {
+    ) -> RuntimeLifecycleContext {
+        RuntimeLifecycleContext::new(
+            self.hook_call_context(),
+            Some(ExchangeSummary {
                 user_message,
                 assistant_message,
             }),
-            ..self.base_lifecycle_ctx()
-        }
+        )
     }
 
-    fn base_lifecycle_ctx(&self) -> LifecycleContext {
-        LifecycleContext {
-            session_id: self.session_id.to_string(),
-            working_dir: self.working_dir.clone(),
-            model: self.model_selection(),
-            event_tx: self.turn_event_tx(),
-            extension_event_sink: None,
-            last_exchange: None,
-            mid_turn_user_messages_synced: 0,
+    pub(crate) fn hook_call_context(&self) -> RuntimeHookCallContext {
+        let call = RuntimeHookCallContext::new(
+            self.session_id.to_string(),
+            self.working_dir.clone(),
+            self.model_selection(),
+            self.session_store_dir.clone(),
+        )
+        .with_event_tx(self.turn_event_tx())
+        .with_cancellation(self.cancellation_token.clone());
+        match &self.turn_id {
+            Some(turn_id) => call.with_turn_id(turn_id.to_string()),
+            None => call,
         }
     }
 
     /// 构造 provider hook 的 ctx，附带本次 LLM 请求的 messages。
-    pub(crate) fn provider_ctx(&self, messages: Vec<LlmMessage>) -> ProviderContext {
-        ProviderContext {
-            session_id: self.session_id.to_string(),
-            working_dir: self.working_dir.clone(),
-            model: self.model_selection(),
-            messages,
-            session_store_dir: self.session_store_dir.clone(),
-        }
+    pub(crate) fn provider_ctx(&self, messages: Vec<LlmMessage>) -> RuntimeProviderContext {
+        RuntimeProviderContext::new(self.hook_call_context(), messages)
     }
 
     /// 构造各 tool hook ctx 共用的 `ModelSelection`。

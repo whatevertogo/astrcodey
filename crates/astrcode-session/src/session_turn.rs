@@ -1,9 +1,8 @@
 //! Session turn submission and finalization service.
 
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 
 use astrcode_core::{
-    config::ModelSelection,
     event::{DurableEventPayload, LiveEventPayload, Phase},
     llm::TURN_ABORTED_SOURCE,
     message_attachment::MessageAttachment,
@@ -11,7 +10,9 @@ use astrcode_core::{
     types::*,
     user_input::UserInput,
 };
-use astrcode_extension_sdk::extension::{UserMessageEnvelopeContext, UserMessageEnvelopeResult};
+use astrcode_extension_sdk::extension::{
+    RuntimeHookCallContext, RuntimeUserMessageEnvelopeContext, UserMessageEnvelopeResult,
+};
 use astrcode_session_projection::SessionReadModel;
 use parking_lot::Mutex;
 use tokio::sync::oneshot;
@@ -26,12 +27,26 @@ use crate::{
     session::Session,
     session_error::SessionError,
     session_runtime_services::SessionRuntimeView,
-    turn_context::TurnError,
+    tool_exec::TurnToolContext,
+    turn_context::{SharedTurnContext, TurnError},
     turn_handle::{SharedTurnFinalization, TurnHandle},
     turn_runner::{RunTurnResult, TurnFinalization, TurnLoop, run_turn},
 };
 
 impl Session {
+    fn turn_hook_call_context(
+        &self,
+        state: &SessionReadModel,
+        session_store_dir: Option<PathBuf>,
+        turn_id: &TurnId,
+        cancellation: &CancellationToken,
+    ) -> RuntimeHookCallContext {
+        let mut shared = SharedTurnContext::from_read_model(self.id(), state, session_store_dir);
+        shared.turn_id = Some(turn_id.clone());
+        shared.cancellation_token = cancellation.clone();
+        shared.hook_call_context()
+    }
+
     async fn emit_turn_start_events(
         &self,
         text: &str,
@@ -60,19 +75,10 @@ impl Session {
         runtime_view: &SessionRuntimeView,
         text: String,
         attachments: &[MessageAttachment],
-        turn_id: &TurnId,
+        call: RuntimeHookCallContext,
     ) -> Result<String, TurnError> {
-        let state = self.read_model().await?;
         let original_text = text.clone();
-        let ctx = UserMessageEnvelopeContext {
-            session_id: self.id().to_string(),
-            turn_id: turn_id.to_string(),
-            working_dir: state.identity.working_dir.clone(),
-            model: ModelSelection::simple(&state.identity.model_id),
-            text,
-            attachments: attachments.to_vec(),
-            session_store_dir: self.session_store_dir().await,
-        };
+        let ctx = RuntimeUserMessageEnvelopeContext::new(call, text, attachments.to_vec());
         match runtime_view
             .turn_hooks()
             .emit_user_message_envelope(ctx)
@@ -95,6 +101,8 @@ impl Session {
     async fn prepare_turn_runner(
         &self,
         runtime_view: &SessionRuntimeView,
+        turn_id: &TurnId,
+        cancellation_token: CancellationToken,
     ) -> Result<TurnLoop, TurnError> {
         let session_store_dir = self
             .runtime
@@ -146,8 +154,14 @@ impl Session {
             (tool_snapshot.registry, tool_selection, false)
         } else {
             let stored_fingerprint = pre_state.system_prompt.fingerprint.clone();
+            let hook_call = self.turn_hook_call_context(
+                &pre_state,
+                session_store_dir.clone(),
+                turn_id,
+                &cancellation_token,
+            );
             let prepared = self
-                .prepare_runtime_snapshot(runtime_view, &working_dir, &pre_state, &model_id)
+                .prepare_runtime_snapshot(runtime_view, &pre_state, hook_call)
                 .await?;
             let prompt_changed = self
                 .persist_system_prompt(prepared.prompt, Some(&stored_fingerprint))
@@ -161,12 +175,18 @@ impl Session {
         } else {
             pre_state
         };
-        TurnLoop::new_with_llm(
-            self.clone(),
+        let turn = TurnToolContext::for_turn(
+            self,
             &session_state,
+            turn_id.clone(),
             tool_selection.unwrap_or_default(),
             session_store_dir,
+            cancellation_token,
+        );
+        TurnLoop::new_with_llm(
+            self.clone(),
             llm,
+            turn,
             registry,
             runtime_view.turn_hooks_arc(),
         )
@@ -205,20 +225,33 @@ impl Session {
         turn_id: TurnId,
         accepted_seq: Option<u64>,
     ) -> Result<TurnHandle, TurnError> {
+        let cancellation_token = CancellationToken::new();
+        let setup_cancellation = cancellation_token.clone().drop_guard();
         let runtime_view = self.runtime_services.turn_runtime_view().await?;
         let UserInput { text, attachments } = input;
+        let envelope_state = self.read_model().await?;
+        let envelope_call = self.turn_hook_call_context(
+            &envelope_state,
+            self.session_store_dir().await,
+            &turn_id,
+            &cancellation_token,
+        );
         let text = self
-            .apply_user_message_envelope(&runtime_view, text, &attachments, &turn_id)
+            .apply_user_message_envelope(&runtime_view, text, &attachments, envelope_call)
             .await?;
         self.emit_turn_start_events(&text, &attachments, &turn_id, accepted_seq)
             .await?;
-        let agent = match self.prepare_turn_runner(&runtime_view).await {
+        let agent = match self
+            .prepare_turn_runner(&runtime_view, &turn_id, cancellation_token.clone())
+            .await
+        {
             Ok(agent) => agent,
             Err(error) => {
                 self.settle_failed_turn_setup(&turn_id, &error).await;
                 return Err(error);
             },
         };
+        setup_cancellation.disarm();
         let cancellation_token = agent.cancellation_token();
         let (completion_tx, completion_rx) = oneshot::channel();
         let turn_id_for_task = turn_id.clone();
@@ -413,8 +446,9 @@ mod tests {
 
     use astrcode_extension_sdk::{
         extension::{
-            ExtensionError, ExtensionEvent, LifecycleContext, PromptBuildContext,
-            PromptContributions, UserMessageEnvelopeContext, UserMessageEnvelopeResult,
+            ExtensionError, ExtensionEvent, PromptContributions, RuntimeLifecycleContext,
+            RuntimePromptBuildContext, RuntimeUserMessageEnvelopeContext,
+            UserMessageEnvelopeResult,
         },
         runtime_ports::{
             PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
@@ -439,6 +473,13 @@ mod tests {
     struct SwitchingState {
         current_generation: AtomicU64,
         calls: Mutex<Vec<String>>,
+        hook_calls: Mutex<Vec<RecordedHookCall>>,
+    }
+
+    struct RecordedHookCall {
+        operation: String,
+        turn_id: Option<String>,
+        cancellation: CancellationToken,
     }
 
     struct TaggedRuntimeView {
@@ -453,6 +494,19 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("{}:{operation}", self.generation));
+        }
+
+        fn record_hook(&self, operation: &str, call: &RuntimeHookCallContext) {
+            self.record(operation);
+            self.state
+                .hook_calls
+                .lock()
+                .unwrap()
+                .push(RecordedHookCall {
+                    operation: operation.to_owned(),
+                    turn_id: call.turn_id().map(str::to_owned),
+                    cancellation: call.cancellation().clone(),
+                });
         }
     }
 
@@ -475,9 +529,9 @@ mod tests {
     impl PromptContributor for TaggedRuntimeView {
         async fn collect_prompt_contributions(
             &self,
-            _ctx: PromptBuildContext,
+            ctx: RuntimePromptBuildContext,
         ) -> Result<PromptContributions, ExtensionError> {
-            self.record("prompt");
+            self.record_hook("prompt", ctx.call());
             Ok(PromptContributions::default())
         }
     }
@@ -486,9 +540,9 @@ mod tests {
     impl TurnHooks for TaggedRuntimeView {
         async fn emit_user_message_envelope(
             &self,
-            _ctx: UserMessageEnvelopeContext,
+            ctx: RuntimeUserMessageEnvelopeContext,
         ) -> Result<UserMessageEnvelopeResult, ExtensionError> {
-            self.record("envelope");
+            self.record_hook("envelope", ctx.call());
             self.state.current_generation.store(2, Ordering::Release);
             Ok(UserMessageEnvelopeResult::Allow)
         }
@@ -496,14 +550,17 @@ mod tests {
         async fn emit_lifecycle(
             &self,
             event: ExtensionEvent,
-            _ctx: LifecycleContext,
+            ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
-            self.record(match event {
-                ExtensionEvent::TurnStart => "turn_start",
-                ExtensionEvent::UserPromptSubmit => "prompt_submit",
-                ExtensionEvent::TurnEnd => "turn_end",
-                _ => "other_lifecycle",
-            });
+            self.record_hook(
+                match event {
+                    ExtensionEvent::TurnStart => "turn_start",
+                    ExtensionEvent::UserPromptSubmit => "prompt_submit",
+                    ExtensionEvent::TurnEnd => "turn_end",
+                    _ => "other_lifecycle",
+                },
+                ctx.call(),
+            );
             if event == ExtensionEvent::TurnStart {
                 Err(ExtensionError::Internal("stop before provider call".into()))
             } else {
@@ -535,10 +592,11 @@ mod tests {
     impl SessionOperationsProvider for SwitchingRuntime {}
 
     #[tokio::test]
-    async fn one_turn_keeps_the_extension_generation_captured_before_envelope() {
+    async fn one_turn_pins_extension_generation_and_hook_context() {
         let state = Arc::new(SwitchingState {
             current_generation: AtomicU64::new(9),
             calls: Mutex::new(Vec::new()),
+            hook_calls: Mutex::new(Vec::new()),
         });
         let extension_runtime = Arc::new(SwitchingRuntime {
             state: Arc::clone(&state),
@@ -573,9 +631,15 @@ mod tests {
         .unwrap();
 
         state.calls.lock().unwrap().clear();
+        state.hook_calls.lock().unwrap().clear();
         state.current_generation.store(1, Ordering::Release);
+        let turn_id = new_turn_id();
         let handle = session
-            .submit(UserInput::text_only("pin generation"), new_turn_id(), None)
+            .submit(
+                UserInput::text_only("pin generation"),
+                turn_id.clone(),
+                None,
+            )
             .await
             .unwrap();
         let result = handle.wait().await.unwrap();
@@ -600,5 +664,24 @@ mod tests {
             calls.iter().all(|call| call.starts_with("1:")),
             "turn mixed extension generations: {calls:?}"
         );
+
+        let hook_calls = state.hook_calls.lock().unwrap();
+        for operation in [
+            "envelope",
+            "prompt",
+            "turn_start",
+            "prompt_submit",
+            "turn_end",
+        ] {
+            let call = hook_calls
+                .iter()
+                .find(|call| call.operation == operation)
+                .unwrap_or_else(|| panic!("missing {operation} hook context"));
+            assert_eq!(call.turn_id.as_deref(), Some(turn_id.as_str()));
+            assert!(
+                call.cancellation.is_cancelled(),
+                "{operation} did not observe turn cancellation"
+            );
+        }
     }
 }

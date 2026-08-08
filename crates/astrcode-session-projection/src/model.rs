@@ -35,7 +35,8 @@ pub struct AgentSessionLinkView {
     /// 最初委托的子 session（`AgentSessionSpawned`；compact 不修改此 id）。
     pub child_session_id: SessionId,
     /// 触发此子会话的工具调用 ID。
-    pub tool_call_id: ToolCallId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<ToolCallId>,
     /// 子 Agent 名称（来自 RunSession 的 name）。
     pub agent_name: String,
     /// 子 Agent 任务描述（来自 RunSession 的 user_prompt）。

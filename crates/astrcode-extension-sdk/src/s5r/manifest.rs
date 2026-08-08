@@ -25,6 +25,8 @@ pub struct InitializeManifest {
     pub tools: Vec<ManifestTool>,
     #[serde(default)]
     pub hooks: Vec<ManifestHook>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub continuation_hooks: Vec<String>,
     #[serde(default)]
     pub commands: Vec<ManifestCommand>,
     #[serde(default)]
@@ -87,6 +89,7 @@ pub struct ManifestHttpRoute {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ManifestExtensionEvent {
     pub event_type: String,
     #[serde(default = "default_schema_version")]
@@ -128,5 +131,21 @@ impl From<&ExtensionEventDecl> for ManifestExtensionEvent {
             durable: event.durable,
             max_payload_bytes: event.max_payload_bytes,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extension_event_declaration_rejects_unknown_wire_fields() {
+        assert!(
+            serde_json::from_value::<ManifestExtensionEvent>(serde_json::json!({
+                "event_type": "test.completed",
+                "unexpected": true
+            }))
+            .is_err()
+        );
     }
 }

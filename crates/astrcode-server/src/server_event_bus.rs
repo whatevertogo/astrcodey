@@ -521,7 +521,7 @@ mod tests {
                 agent_name: "explore".into(),
                 task: "inspect".into(),
                 tool_selection: None,
-                tool_call_id: ToolCallId::new("agent-call"),
+                tool_call_id: Some(ToolCallId::new("agent-call")),
             },
         ));
         assert!(matches!(

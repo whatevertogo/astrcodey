@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -14,33 +14,54 @@ use astrcode_core::{
     tool::access::ResourceAccess,
 };
 use astrcode_extension_sdk::{
+    builder::{extension_event, manifest},
     extension::{
-        CommandCompletionItem, CommandCompletions, CommandContext, CommandHandler, CompactContext,
-        CompactEvent, CompactHandler, CompactResult, ContinueAfterStopContext,
-        ContinueAfterStopHandler, ContinueAfterStopOptions, ContinueAfterStopResult,
-        DiscoveredTool, Extension, ExtensionCapability, ExtensionCommandResult, ExtensionConfig,
-        ExtensionCtx, ExtensionError, ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod,
-        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, HookMode, HookResult,
-        LifecycleContext, LifecycleHandler, PostToolUseContext, PostToolUseHandler,
-        PostToolUseResult, PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext,
-        ProviderEvent, ProviderHandler, ProviderResult, Registrar, SlashCommand, StatusItem,
-        StopReason, ToolDiscoveryHandler, ToolHandler, ToolHookTarget, UserMessageEnvelopeContext,
-        UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+        CommandCompletionContext, CommandCompletionItem, CommandCompletions, CommandContext,
+        CommandHandler, CompactContext, CompactEvent, CompactHandler, CompactResult,
+        ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
+        ContinueAfterStopResult, Extension, ExtensionCapability, ExtensionCommandResult,
+        ExtensionConfig, ExtensionError, ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
+        ExtensionStartContext, ExtensionTasks, HookMode, HookResult, HttpContext, LifecycleContext,
+        LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
+        PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderEvent,
+        ProviderHandler, ProviderResult, Registrar, RuntimeContinueAfterStopContext,
+        RuntimeHookCallContext, RuntimePreToolUseContext, RuntimeProviderContext,
+        RuntimeUserMessageEnvelopeContext, SlashCommand, StatusItem, StopReason, ToolContext,
+        ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler, ToolHookTarget,
+        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
     },
     runtime_ports::{
         RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness,
         TurnExtensionViewProvider,
     },
     tool::{
-        ExecutionMode, ExtensionToolContext, ToolCapabilities, ToolDefinition,
-        ToolExecutionContext, ToolOrigin, ToolResult,
+        ExecutionMode, ToolCapabilities, ToolDefinition, ToolExecutionContext, ToolOrigin,
+        ToolResult,
     },
 };
+use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
 
 use super::{CommandSource, ExtensionHttpDispatchResult, ExtensionRunner};
 use crate::runner::tool_adapter::normalize_stringified_booleans;
+
+fn extension_manifest(
+    id: impl Into<String>,
+    capabilities: &[ExtensionCapability],
+) -> ExtensionManifest {
+    capabilities
+        .iter()
+        .copied()
+        .fold(
+            manifest(id)
+                .version("test")
+                .description("Extension runner test probe"),
+            |manifest, capability| manifest.capability(capability),
+        )
+        .build()
+}
 
 struct ManagedTaskExtension {
     started: Arc<AtomicUsize>,
@@ -54,7 +75,17 @@ struct DeferredTaskExtension {
 }
 
 struct StartupDirectoryExtension {
-    received: Arc<Mutex<Option<String>>>,
+    received: Arc<Mutex<Option<StartupContextSnapshot>>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct StartupContextSnapshot {
+    extension_id: String,
+    startup_working_dir: Option<PathBuf>,
+    global_data_dir: Option<PathBuf>,
+    session_context_available: bool,
+    config_version: u64,
+    cancelled: bool,
 }
 
 struct StartupEventExtension;
@@ -82,6 +113,10 @@ struct ToolRetirementProbeExtension {
     stopped: Arc<AtomicUsize>,
 }
 
+struct RetirementFailureExtension {
+    fail_stop: bool,
+}
+
 struct SlowToolDiscoveryExtension;
 
 struct SlowToolDiscovery;
@@ -94,18 +129,37 @@ struct HttpProbeExtension {
 
 struct HttpProbeHandler;
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpProbeBody {
+    name: String,
+}
+
 #[async_trait::async_trait]
 impl ExtensionHttpHandler for HttpProbeHandler {
-    async fn handle(
-        &self,
-        request: ExtensionHttpRequest,
-    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+    async fn handle(&self, ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError> {
+        let request = ctx.request();
+        if request.query.as_deref() == Some("invalid-status") {
+            return Ok(ExtensionHttpResponse {
+                status: 99,
+                body: serde_json::Value::Null,
+            });
+        }
+        let body_name = if request.body.is_null() {
+            None
+        } else {
+            Some(ctx.json::<HttpProbeBody>()?.name)
+        };
         Ok(ExtensionHttpResponse::json(
             201,
             json!({
+                "extensionId": ctx.extension_id(),
+                "routePath": ctx.route().path,
+                "requestPath": request.path,
                 "pathParams": request.path_params,
                 "query": request.query,
                 "body": request.body,
+                "bodyName": body_name,
             }),
         ))
     }
@@ -113,12 +167,8 @@ impl ExtensionHttpHandler for HttpProbeHandler {
 
 #[async_trait::async_trait]
 impl Extension for HttpProbeExtension {
-    fn id(&self) -> &str {
-        self.id
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &self.capabilities
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest(self.id, &self.capabilities)
     }
 
     fn register(&self, registrar: &mut Registrar) {
@@ -144,10 +194,24 @@ struct CountingPreHook {
 struct GenerationProbeExtension {
     label: &'static str,
     stopped: Arc<AtomicUsize>,
+    call_started: Option<Arc<Notify>>,
+    lifecycle: Option<Arc<Mutex<Vec<&'static str>>>>,
 }
 
 struct GenerationProbeHook {
     label: &'static str,
+    call_started: Option<Arc<Notify>>,
+}
+
+struct CancelledStartupExtension {
+    tasks: Arc<Mutex<Option<ExtensionTasks>>>,
+    write_started: Arc<Notify>,
+    write_release: Arc<Notify>,
+    stop_entered: Arc<Notify>,
+    stop_release: Arc<Notify>,
+    stop_reason: Arc<Mutex<Option<StopReason>>>,
+    stops: Arc<AtomicUsize>,
+    lifecycle: Arc<Mutex<Vec<&'static str>>>,
 }
 
 struct StartFailingExtension;
@@ -224,8 +288,8 @@ struct CommandProbe {
 
 #[async_trait::async_trait]
 impl Extension for ConfigChangeProbeExtension {
-    fn id(&self) -> &str {
-        "config-change-probe"
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("config-change-probe", &[])
     }
 
     fn register(&self, registrar: &mut Registrar) {
@@ -239,7 +303,8 @@ impl Extension for ConfigChangeProbeExtension {
 
     async fn on_config_changed(&self, config: ExtensionConfig) -> Result<(), ExtensionError> {
         self.0.calls.fetch_add(1, Ordering::SeqCst);
-        let version = config.0["version"].as_u64().unwrap() as usize;
+        let value: serde_json::Value = config.deserialize().unwrap();
+        let version = value["version"].as_u64().unwrap() as usize;
         if self.0.block_version.load(Ordering::SeqCst) == version {
             self.0.entered.notify_one();
             self.0.release.notified().await;
@@ -260,8 +325,8 @@ impl Extension for ConfigChangeProbeExtension {
 
 #[async_trait::async_trait]
 impl Extension for StateProbeExtension {
-    fn id(&self) -> &str {
-        "state-probe"
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("state-probe", &[])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -283,13 +348,10 @@ impl Extension for StateProbeExtension {
 impl ToolHandler for StateProbeTool {
     async fn execute(
         &self,
-        _tool_name: &str,
-        _arguments: serde_json::Value,
-        _working_dir: &str,
-        ctx: &ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         Ok(ToolResult::text(
-            ctx.capabilities.paths.store_dir.is_some().to_string(),
+            ctx.paths().session_data_dir().is_ok().to_string(),
             false,
             Default::default(),
         )
@@ -299,8 +361,8 @@ impl ToolHandler for StateProbeTool {
 
 #[async_trait::async_trait]
 impl Extension for ToolRetirementProbeExtension {
-    fn id(&self) -> &str {
-        "tool-retirement-probe"
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("tool-retirement-probe", &[])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -324,9 +386,24 @@ impl Extension for ToolRetirementProbeExtension {
 }
 
 #[async_trait::async_trait]
+impl Extension for RetirementFailureExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("retirement-failure-probe", &[])
+    }
+
+    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+        if self.fail_stop {
+            Err(ExtensionError::Internal("intentional stop failure".into()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[async_trait::async_trait]
 impl Extension for SlowToolDiscoveryExtension {
-    fn id(&self) -> &str {
-        "slow-discovery"
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("slow-discovery", &[])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -336,15 +413,15 @@ impl Extension for SlowToolDiscoveryExtension {
 
 #[async_trait::async_trait]
 impl ToolDiscoveryHandler for SlowToolDiscovery {
-    async fn discover(&self, _working_dir: &str) -> Vec<DiscoveredTool> {
+    async fn discover(&self, _ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError> {
         std::future::pending().await
     }
 }
 
 #[async_trait::async_trait]
 impl Extension for CommandProbeExtension {
-    fn id(&self) -> &str {
-        self.id
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest(self.id, &[])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -369,52 +446,74 @@ impl Extension for CommandProbeExtension {
 impl CommandHandler for CommandProbe {
     async fn execute(
         &self,
-        _command_name: &str,
-        _args: &str,
-        _working_dir: &str,
-        _ctx: &CommandContext,
+        _ctx: CommandContext,
     ) -> Result<ExtensionCommandResult, ExtensionError> {
         Ok(ExtensionCommandResult::handled(self.label))
     }
 
     async fn complete(
         &self,
-        _command_name: &str,
-        argument: &str,
-        cursor: usize,
-        _working_dir: &str,
-        _ctx: &CommandContext,
+        ctx: CommandCompletionContext,
     ) -> Result<CommandCompletions, ExtensionError> {
         if !self.argument_completions {
             return Ok(CommandCompletions::default());
         }
         Ok(CommandCompletions {
             items: vec![CommandCompletionItem {
-                label: format!("{}:{argument}:{cursor}", self.label),
+                label: format!("{}:{}:{}", self.label, ctx.argument(), ctx.cursor()),
                 insert_text: self.label.into(),
-                detail: Some("probe".into()),
+                detail: Some(format!(
+                    "{}:{}:{}:{}:{}:{}",
+                    ctx.extension_id(),
+                    ctx.session_id()
+                        .map(ToString::to_string)
+                        .unwrap_or_default(),
+                    ctx.command_name(),
+                    ctx.working_dir()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                    ctx.model().model,
+                    ctx.paths()
+                        .session_data_dir()
+                        .ok()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_default(),
+                )),
             }],
             truncated: false,
         })
+    }
+
+    fn supports_argument_completions(&self) -> bool {
+        self.argument_completions
+    }
+}
+
+struct ExecuteOnlyCommandProbe;
+
+#[async_trait::async_trait]
+impl CommandHandler for ExecuteOnlyCommandProbe {
+    async fn execute(
+        &self,
+        _ctx: CommandContext,
+    ) -> Result<ExtensionCommandResult, ExtensionError> {
+        Ok(ExtensionCommandResult::handled("execute-only"))
     }
 }
 
 #[async_trait::async_trait]
 impl Extension for SmallModelProbeExtension {
-    fn id(&self) -> &str {
-        "small-model-probe"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        match (self.small_model_allowed, self.session_control_allowed) {
+    fn manifest(&self) -> ExtensionManifest {
+        let capabilities = match (self.small_model_allowed, self.session_control_allowed) {
             (true, true) => &[
                 ExtensionCapability::SmallModel,
                 ExtensionCapability::SessionControl,
-            ],
-            (true, false) => &[ExtensionCapability::SmallModel],
-            (false, true) => &[ExtensionCapability::SessionControl],
+            ][..],
+            (true, false) => &[ExtensionCapability::SmallModel][..],
+            (false, true) => &[ExtensionCapability::SessionControl][..],
             (false, false) => &[],
-        }
+        };
+        extension_manifest("small-model-probe", capabilities)
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -436,13 +535,10 @@ impl Extension for SmallModelProbeExtension {
 impl ToolHandler for SmallModelProbeTool {
     async fn execute(
         &self,
-        _tool_name: &str,
-        _arguments: serde_json::Value,
-        _working_dir: &str,
-        ctx: &ExtensionToolContext,
+        ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         Ok(ToolResult::text(
-            ctx.capabilities.models.tiers.small.is_some().to_string(),
+            ctx.small_model_id().is_some().to_string(),
             false,
             Default::default(),
         )
@@ -452,12 +548,8 @@ impl ToolHandler for SmallModelProbeTool {
 
 #[async_trait::async_trait]
 impl Extension for TargetedPreHookExtension {
-    fn id(&self) -> &str {
-        "targeted-pre-hook"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::ToolIntercept]
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("targeted-pre-hook", &[ExtensionCapability::ToolIntercept])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -482,31 +574,80 @@ impl PreToolUseHandler for CountingPreHook {
 
 #[async_trait::async_trait]
 impl Extension for GenerationProbeExtension {
-    fn id(&self) -> &str {
-        "generation-probe"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::ToolIntercept]
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("generation-probe", &[ExtensionCapability::ToolIntercept])
     }
 
     fn register(&self, reg: &mut Registrar) {
         reg.on_pre_tool_use(
             HookMode::Blocking,
             0,
-            Arc::new(GenerationProbeHook { label: self.label }),
+            Arc::new(GenerationProbeHook {
+                label: self.label,
+                call_started: self.call_started.clone(),
+            }),
         );
     }
 
+    async fn start(&self, _ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.lock().unwrap().push(self.label);
+        }
+        Ok(())
+    }
+
     async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+        if let Some(lifecycle) = &self.lifecycle {
+            lifecycle.lock().unwrap().push(match self.label {
+                "v1" => "v1_stop",
+                "v2" => "v2_stop",
+                label => label,
+            });
+        }
         self.stopped.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 }
 
 #[async_trait::async_trait]
+impl Extension for CancelledStartupExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("generation-probe", &[])
+    }
+
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        let tasks = ctx.tasks().clone();
+        *self.tasks.lock().unwrap() = Some(tasks.clone());
+        let write_started = Arc::clone(&self.write_started);
+        let write_release = Arc::clone(&self.write_release);
+        let lifecycle = Arc::clone(&self.lifecycle);
+        tasks
+            .run_to_completion("startup-write", async move {
+                write_started.notify_one();
+                write_release.notified().await;
+                lifecycle.lock().unwrap().push("write_done");
+            })
+            .await
+            .map_err(|error| ExtensionError::Internal(error.to_string()))
+    }
+
+    async fn stop(&self, reason: StopReason) -> Result<(), ExtensionError> {
+        *self.stop_reason.lock().unwrap() = Some(reason);
+        self.stop_entered.notify_one();
+        self.stop_release.notified().await;
+        self.lifecycle.lock().unwrap().push("v1_stop");
+        self.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
 impl PreToolUseHandler for GenerationProbeHook {
-    async fn handle(&self, _ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
+    async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
+        if let Some(call_started) = &self.call_started {
+            call_started.notify_one();
+            ctx.cancellation().cancelled().await;
+        }
         Ok(PreToolUseResult::ModifyInput {
             tool_input: json!({ "generation": self.label }),
         })
@@ -515,11 +656,11 @@ impl PreToolUseHandler for GenerationProbeHook {
 
 #[async_trait::async_trait]
 impl Extension for StartFailingExtension {
-    fn id(&self) -> &str {
-        "start-failing"
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("start-failing", &[])
     }
 
-    async fn start(&self, _ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+    async fn start(&self, _ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
         Err(ExtensionError::Internal(
             "startup dependency missing".into(),
         ))
@@ -528,12 +669,12 @@ impl Extension for StartFailingExtension {
 
 #[async_trait::async_trait]
 impl Extension for StartupTimeoutExtension {
-    fn id(&self) -> &str {
-        "startup-timeout"
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("startup-timeout", &[])
     }
 
-    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
-        let shutdown = ctx.shutdown();
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        let shutdown = ctx.cancellation().clone();
         let task_started = Arc::clone(&self.task_started);
         ctx.tasks().spawn("startup-task", async move {
             task_started.store(true, Ordering::SeqCst);
@@ -550,21 +691,15 @@ impl Extension for StartupTimeoutExtension {
 
 #[async_trait::async_trait]
 impl Extension for BlockingProviderResponseExtension {
-    fn id(&self) -> &str {
-        "provider-response-observer"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::ProviderRequest]
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest(
+            "provider-response-observer",
+            &[ExtensionCapability::ProviderRequest],
+        )
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.on_provider(
-            ProviderEvent::AfterResponse,
-            HookMode::Blocking,
-            0,
-            Arc::new(BlockingProviderHook),
-        );
+        reg.on_after_provider_response(0, Arc::new(BlockingProviderHook));
     }
 }
 
@@ -579,12 +714,8 @@ impl ProviderHandler for BlockingProviderHook {
 
 #[async_trait::async_trait]
 impl Extension for OperationTimeoutExtension {
-    fn id(&self) -> &str {
-        "operation-timeout"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::ProviderRequest]
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("operation-timeout", &[ExtensionCapability::ProviderRequest])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -605,12 +736,8 @@ impl ProviderHandler for PendingProviderHook {
 
 #[async_trait::async_trait]
 impl Extension for ContinueAfterStopProbeExtension {
-    fn id(&self) -> &str {
-        self.id
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::TurnContinuationControl]
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest(self.id, &[ExtensionCapability::TurnContinuationControl])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -637,12 +764,8 @@ impl ContinueAfterStopHandler for ContinueAfterStopProbe {
 
 #[async_trait::async_trait]
 impl Extension for UserMessageEnvelopeProbeExtension {
-    fn id(&self) -> &str {
-        self.id
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::ProviderRequest]
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest(self.id, &[ExtensionCapability::ProviderRequest])
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -669,18 +792,14 @@ impl UserMessageEnvelopeHandler for UserMessageEnvelopeProbe {
 
 #[async_trait::async_trait]
 impl Extension for RegistrationProbeExtension {
-    fn id(&self) -> &str {
-        "registration-probe"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &self.capabilities
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("registration-probe", &self.capabilities)
     }
 
     fn register(&self, reg: &mut Registrar) {
         match self.registration {
             CapabilityRegistration::Event => {
-                reg.extension_event("probe").register();
+                reg.declare_event(extension_event("probe").build());
             },
             CapabilityRegistration::Compact => {
                 reg.on_compact(
@@ -776,12 +895,12 @@ impl LifecycleHandler for RegistrationProbeHandler {
 
 #[async_trait::async_trait]
 impl Extension for LifecycleModeProbeExtension {
-    fn id(&self) -> &str {
-        "lifecycle-mode-probe"
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("lifecycle-mode-probe", &[])
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.on_event(
+        reg.on_lifecycle(
             self.event.clone(),
             HookMode::Blocking,
             0,
@@ -790,67 +909,85 @@ impl Extension for LifecycleModeProbeExtension {
     }
 }
 
-fn continue_after_stop_ctx(continuations_this_turn: u32) -> ContinueAfterStopContext {
-    ContinueAfterStopContext {
-        session_id: "session".into(),
-        working_dir: "D:/workspace".into(),
-        model: ModelSelection::simple("model"),
-        assistant_text: "done".into(),
-        finish_reason: "stop".into(),
-        continuations_this_turn,
-    }
+fn runtime_hook_call() -> RuntimeHookCallContext {
+    RuntimeHookCallContext::new(
+        "session",
+        "D:/workspace",
+        ModelSelection::simple("model"),
+        None,
+    )
+    .with_turn_id("turn")
 }
 
-fn user_message_envelope_ctx(text: &str) -> UserMessageEnvelopeContext {
-    UserMessageEnvelopeContext {
-        session_id: "session".into(),
-        turn_id: "turn".into(),
-        working_dir: "D:/workspace".into(),
-        model: ModelSelection::simple("model"),
-        text: text.into(),
-        attachments: Vec::new(),
-        session_store_dir: None,
-    }
+fn continue_after_stop_ctx(continuations_this_turn: u32) -> RuntimeContinueAfterStopContext {
+    RuntimeContinueAfterStopContext::new(
+        runtime_hook_call(),
+        "done",
+        "stop",
+        continuations_this_turn,
+    )
+}
+
+fn user_message_envelope_ctx(text: &str) -> RuntimeUserMessageEnvelopeContext {
+    RuntimeUserMessageEnvelopeContext::new(runtime_hook_call(), text, Vec::new())
+}
+
+fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> RuntimePreToolUseContext {
+    RuntimePreToolUseContext::new(
+        runtime_hook_call(),
+        "call-1".into(),
+        tool_name,
+        tool_input,
+        astrcode_core::permission::ApprovalMode::Manual,
+        Vec::new(),
+    )
 }
 
 #[async_trait::async_trait]
 impl Extension for StartupDirectoryExtension {
-    fn id(&self) -> &str {
-        "startup-directory"
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("startup-directory", &[])
     }
 
-    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
-        *self.received.lock().unwrap() = ctx.startup_working_dir().map(str::to_string);
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        let config: serde_json::Value = ctx.config().deserialize()?;
+        *self.received.lock().unwrap() = Some(StartupContextSnapshot {
+            extension_id: ctx.extension_id().to_owned(),
+            startup_working_dir: ctx.startup_working_dir().map(Path::to_path_buf),
+            global_data_dir: ctx.paths().global_data_dir().map(Path::to_path_buf),
+            session_context_available: ctx.call().session_id().is_some()
+                || ctx.call().turn_id().is_some()
+                || ctx.paths().session_data_dir().is_ok(),
+            config_version: config["version"].as_u64().unwrap(),
+            cancelled: ctx.cancellation().is_cancelled(),
+        });
         Ok(())
     }
 }
 
 #[async_trait::async_trait]
 impl Extension for StartupEventExtension {
-    fn id(&self) -> &str {
-        "startup-event"
-    }
-
-    fn capabilities(&self) -> &[ExtensionCapability] {
-        &[ExtensionCapability::EmitEvents]
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("startup-event", &[ExtensionCapability::EmitEvents])
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.extension_event("startup_ready").register();
+        reg.declare_event(extension_event("startup_ready").build());
     }
 
-    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
-        let sink = ctx
-            .event_sink()
-            .ok_or_else(|| ExtensionError::Internal("missing startup event sink".into()))?;
-        sink.emit("startup_ready", 1, json!({"ready": true}))
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        ctx.events()
+            .emit("startup_ready", &json!({"ready": true}))
+            .await
+            .map(|_| ())
+            .map_err(|error| ExtensionError::Internal(error.to_string()))
     }
 }
 
 #[async_trait::async_trait]
 impl Extension for UnhealthyExtension {
-    fn id(&self) -> &str {
-        "unhealthy"
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("unhealthy", &[])
     }
 
     async fn health(&self) -> Result<(), ExtensionError> {
@@ -860,15 +997,15 @@ impl Extension for UnhealthyExtension {
 
 #[async_trait::async_trait]
 impl Extension for ManagedTaskExtension {
-    fn id(&self) -> &str {
-        "managed-task"
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("managed-task", &[])
     }
 
     fn register(&self, _reg: &mut Registrar) {}
 
-    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
         self.started.fetch_add(1, Ordering::SeqCst);
-        let shutdown = ctx.shutdown();
+        let shutdown = ctx.cancellation().clone();
         let task_stopped = Arc::clone(&self.task_stopped);
         ctx.tasks().spawn("wait-for-stop", async move {
             shutdown.cancelled().await;
@@ -887,11 +1024,11 @@ impl Extension for ManagedTaskExtension {
 
 #[async_trait::async_trait]
 impl Extension for DeferredTaskExtension {
-    fn id(&self) -> &str {
-        "deferred-task"
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("deferred-task", &[])
     }
 
-    async fn start(&self, ctx: ExtensionCtx) -> Result<(), ExtensionError> {
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
         let task_started = Arc::clone(&self.task_started);
         ctx.tasks().spawn("deferred", async move {
             task_started.store(true, Ordering::SeqCst);
@@ -920,12 +1057,12 @@ async fn privileged_registrations_require_their_declared_capabilities() {
         ),
         (
             CapabilityRegistration::BeforeProvider,
-            "before_provider_request",
+            "provider",
             ExtensionCapability::ProviderRequest,
         ),
         (
             CapabilityRegistration::AfterProvider,
-            "after_provider_response",
+            "provider",
             ExtensionCapability::ProviderRequest,
         ),
         (
@@ -1091,20 +1228,34 @@ async fn cached_extension_tool_does_not_hold_retired_generation_alive() {
 }
 
 #[tokio::test]
-async fn extension_view_pins_one_generation_until_retirement() {
+async fn reload_cancels_active_call_before_pinned_generation_retires() {
     let version_one_stops = Arc::new(AtomicUsize::new(0));
     let version_two_stops = Arc::new(AtomicUsize::new(0));
-    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    let version_one_call_started = Arc::new(Notify::new());
+    let lifecycle = Arc::new(Mutex::new(Vec::new()));
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
 
     runner
         .register(Arc::new(GenerationProbeExtension {
             label: "v1",
             stopped: Arc::clone(&version_one_stops),
+            call_started: Some(Arc::clone(&version_one_call_started)),
+            lifecycle: Some(Arc::clone(&lifecycle)),
         }))
         .await
         .unwrap();
-    let version_one_view = runner.extension_view();
+    let version_one_view = runner.extension_view().await;
     let version_one_generation = version_one_view.generation();
+    let active_call_view = runner.extension_view().await;
+    assert_eq!(active_call_view.generation(), version_one_generation);
+    let mut active_call = tokio::spawn(async move {
+        active_call_view
+            .emit_pre_tool_use(pre_tool_use_ctx("probe", json!({})))
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(1), version_one_call_started.notified())
+        .await
+        .expect("v1 handler should begin before reload");
 
     let removed = tokio::time::timeout(
         Duration::from_secs(1),
@@ -1115,62 +1266,173 @@ async fn extension_view_pins_one_generation_until_retirement() {
     .unwrap();
     assert!(removed);
 
-    runner
-        .register(Arc::new(GenerationProbeExtension {
-            label: "v2",
-            stopped: Arc::clone(&version_two_stops),
-        }))
+    let mut register_version_two = {
+        let runner = Arc::clone(&runner);
+        let lifecycle = Arc::clone(&lifecycle);
+        let version_two_stops = Arc::clone(&version_two_stops);
+        tokio::spawn(async move {
+            runner
+                .register(Arc::new(GenerationProbeExtension {
+                    label: "v2",
+                    stopped: version_two_stops,
+                    call_started: None,
+                    lifecycle: Some(lifecycle),
+                }))
+                .await
+        })
+    };
+
+    let version_one_result = tokio::time::timeout(Duration::from_secs(1), &mut active_call)
         .await
+        .expect("reload must cancel the active v1 call before its pinned view is released")
+        .unwrap()
         .unwrap();
-    let version_two_view = runner.extension_view();
-    assert!(version_two_view.generation() > version_one_generation);
+    assert!(matches!(
+        version_one_result,
+        PreToolUseResult::ModifyInput { tool_input }
+            if tool_input == json!({ "generation": "v1" })
+    ));
     assert_eq!(version_one_stops.load(Ordering::SeqCst), 0);
+    assert_eq!(lifecycle.lock().unwrap().as_slice(), &["v1"]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut register_version_two)
+            .await
+            .is_err(),
+        "replacement must wait for the old published view"
+    );
+
+    drop(version_one_view);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut register_version_two)
+            .await
+            .expect("v2 registration should resume after v1 retirement")
+            .unwrap()
+            .unwrap()
+    );
+    assert_eq!(version_one_stops.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        lifecycle.lock().unwrap().as_slice(),
+        &["v1", "v1_stop", "v2"]
+    );
+
+    let context = || pre_tool_use_ctx("probe", json!({}));
+    let version_two_view = runner.extension_view().await;
+    assert!(version_two_view.generation() > version_one_generation);
     let turn_view = runner.turn_extension_view();
     assert_eq!(turn_view.generation(), version_two_view.generation());
     assert_eq!(
         turn_view.tool_catalog().revision(),
         version_two_view.generation()
     );
-
-    let context = || PreToolUseContext {
-        session_id: "session".into(),
-        working_dir: "D:/workspace".into(),
-        model: ModelSelection::simple("model"),
-        call_id: "call-1".into(),
-        tool_name: "probe".into(),
-        tool_input: json!({}),
-        approval_mode: astrcode_core::permission::ApprovalMode::Manual,
-        available_tools: Vec::new(),
-        event_tx: None,
-        extension_event_sink: None,
-        session_store_dir: None,
-    };
-    let version_one_result = version_one_view.emit_pre_tool_use(context()).await.unwrap();
     let version_two_result = version_two_view.emit_pre_tool_use(context()).await.unwrap();
-    assert!(matches!(
-        version_one_result,
-        PreToolUseResult::ModifyInput { tool_input }
-            if tool_input == json!({ "generation": "v1" })
-    ));
     assert!(matches!(
         version_two_result,
         PreToolUseResult::ModifyInput { tool_input }
             if tool_input == json!({ "generation": "v2" })
     ));
-    assert_eq!(version_one_stops.load(Ordering::SeqCst), 0);
-
-    drop(version_one_view);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while version_one_stops.load(Ordering::SeqCst) == 0 {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("retired generation should stop after its final view is dropped");
-    assert_eq!(version_one_stops.load(Ordering::SeqCst), 1);
 
     drop(version_two_view);
     drop(turn_view);
+    assert!(runner.shutdown().await.is_empty());
+    assert_eq!(version_one_stops.load(Ordering::SeqCst), 1);
+    assert_eq!(version_two_stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn cancelled_start_hands_registration_to_the_retirement_barrier() {
+    let startup_tasks = Arc::new(Mutex::new(None));
+    let write_started = Arc::new(Notify::new());
+    let write_release = Arc::new(Notify::new());
+    let stop_entered = Arc::new(Notify::new());
+    let stop_release = Arc::new(Notify::new());
+    let stop_reason = Arc::new(Mutex::new(None));
+    let version_one_stops = Arc::new(AtomicUsize::new(0));
+    let version_two_stops = Arc::new(AtomicUsize::new(0));
+    let lifecycle = Arc::new(Mutex::new(Vec::new()));
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+
+    let registration = {
+        let runner = Arc::clone(&runner);
+        let extension = CancelledStartupExtension {
+            tasks: Arc::clone(&startup_tasks),
+            write_started: Arc::clone(&write_started),
+            write_release: Arc::clone(&write_release),
+            stop_entered: Arc::clone(&stop_entered),
+            stop_release: Arc::clone(&stop_release),
+            stop_reason: Arc::clone(&stop_reason),
+            stops: Arc::clone(&version_one_stops),
+            lifecycle: Arc::clone(&lifecycle),
+        };
+        tokio::spawn(async move { runner.register(Arc::new(extension)).await })
+    };
+    tokio::time::timeout(Duration::from_secs(1), write_started.notified())
+        .await
+        .expect("startup must-finish write should begin");
+    registration.abort();
+    assert!(registration.await.unwrap_err().is_cancelled());
+
+    let mut replacement = {
+        let runner = Arc::clone(&runner);
+        let lifecycle = Arc::clone(&lifecycle);
+        let version_two_stops = Arc::clone(&version_two_stops);
+        tokio::spawn(async move {
+            runner
+                .register(Arc::new(GenerationProbeExtension {
+                    label: "v2",
+                    stopped: version_two_stops,
+                    call_started: None,
+                    lifecycle: Some(lifecycle),
+                }))
+                .await
+        })
+    };
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut replacement)
+            .await
+            .is_err(),
+        "replacement must wait for the cancelled start's must-finish write"
+    );
+
+    write_release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), stop_entered.notified())
+        .await
+        .expect("cancelled registration should run StartupFailed cleanup");
+    assert_eq!(
+        *stop_reason.lock().unwrap(),
+        Some(StopReason::StartupFailed)
+    );
+    assert_eq!(lifecycle.lock().unwrap().as_slice(), &["write_done"]);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut replacement)
+            .await
+            .is_err(),
+        "replacement must wait until StartupFailed stop finishes"
+    );
+
+    stop_release.notify_one();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), &mut replacement)
+            .await
+            .expect("replacement should resume after startup retirement")
+            .unwrap()
+            .unwrap()
+    );
+    assert_eq!(version_one_stops.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        lifecycle.lock().unwrap().as_slice(),
+        &["write_done", "v1_stop", "v2"]
+    );
+    let tasks = startup_tasks
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("startup should expose its task owner");
+    assert!(tasks.wait(Duration::from_millis(10)).await);
+    assert!(matches!(
+        tasks.run_to_completion("late-write", async {}).await,
+        Err(astrcode_extension_sdk::extension::ExtensionTaskError::ShuttingDown { .. })
+    ));
+
     assert!(runner.shutdown().await.is_empty());
     assert_eq!(version_one_stops.load(Ordering::SeqCst), 1);
     assert_eq!(version_two_stops.load(Ordering::SeqCst), 1);
@@ -1184,10 +1446,12 @@ async fn cancelled_shutdown_does_not_abandon_pending_retirement() {
         .register(Arc::new(GenerationProbeExtension {
             label: "v1",
             stopped: Arc::clone(&stopped),
+            call_started: None,
+            lifecycle: None,
         }))
         .await
         .unwrap();
-    let active_view = runner.extension_view();
+    let active_view = runner.extension_view().await;
     assert!(
         runner
             .unregister("generation-probe", StopReason::Reload)
@@ -1216,6 +1480,50 @@ async fn cancelled_shutdown_does_not_abandon_pending_retirement() {
             .is_empty()
     );
     assert_eq!(stopped.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn retirement_tickets_isolate_reload_failures_by_generation() {
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    assert!(
+        runner
+            .register(Arc::new(RetirementFailureExtension { fail_stop: true }))
+            .await
+            .unwrap()
+    );
+    let failed_retirement = runner
+        .unregister_with_retirement("retirement-failure-probe", StopReason::Disabled)
+        .await
+        .unwrap()
+        .expect("v1 should begin retirement");
+    drop(failed_retirement);
+
+    assert!(
+        runner
+            .register(Arc::new(RetirementFailureExtension { fail_stop: false }))
+            .await
+            .expect("the replacement only waits for the retirement barrier")
+    );
+    let successful_retirement = runner
+        .unregister_with_retirement("retirement-failure-probe", StopReason::Reload)
+        .await
+        .unwrap()
+        .expect("v2 should begin retirement");
+    successful_retirement
+        .wait()
+        .await
+        .expect("v2 retirement must not consume v1's orphaned failure");
+
+    assert!(
+        runner
+            .register(Arc::new(RetirementFailureExtension { fail_stop: false }))
+            .await
+            .expect("v3 should start after v2 retirement")
+    );
+
+    let errors = runner.shutdown().await;
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("intentional stop failure"));
 }
 
 #[tokio::test]
@@ -1291,9 +1599,13 @@ async fn shutdown_is_terminal_and_idempotent() {
 }
 
 #[tokio::test]
-async fn register_passes_startup_working_dir_to_extension() {
+async fn register_builds_attributed_startup_context() {
     let received = Arc::new(Mutex::new(None));
     let runner = ExtensionRunner::new(Duration::from_secs(1));
+    runner.update_extension_configs(BTreeMap::from([(
+        "startup-directory".into(),
+        json!({ "version": 7 }),
+    )]));
 
     runner
         .register_with_startup_working_dir(
@@ -1305,7 +1617,21 @@ async fn register_passes_startup_working_dir_to_extension() {
         .await
         .unwrap();
 
-    assert_eq!(received.lock().unwrap().as_deref(), Some("D:/workspace"));
+    assert_eq!(
+        received.lock().unwrap().as_ref(),
+        Some(&StartupContextSnapshot {
+            extension_id: "startup-directory".into(),
+            startup_working_dir: Some(PathBuf::from("D:/workspace")),
+            global_data_dir: Some(
+                astrcode_core::config::defaults::astrcode_dir()
+                    .join("extension_data")
+                    .join("startup-directory")
+            ),
+            session_context_available: false,
+            config_version: 7,
+            cancelled: false,
+        })
+    );
 }
 
 #[tokio::test]
@@ -1461,19 +1787,7 @@ async fn targeted_pre_tool_hook_only_runs_for_matching_tool() {
         .await
         .unwrap();
 
-    let base_ctx = |tool_name: &str| PreToolUseContext {
-        session_id: "session".into(),
-        working_dir: "D:/workspace".into(),
-        model: astrcode_core::config::ModelSelection::simple("model"),
-        call_id: "call-1".into(),
-        tool_name: tool_name.into(),
-        tool_input: json!({}),
-        approval_mode: astrcode_core::permission::ApprovalMode::Manual,
-        available_tools: Vec::new(),
-        event_tx: None,
-        extension_event_sink: None,
-        session_store_dir: None,
-    };
+    let base_ctx = |tool_name: &str| pre_tool_use_ctx(tool_name, json!({}));
 
     runner
         .emit_pre_tool_use(base_ctx("otherTool"))
@@ -1675,12 +1989,15 @@ async fn config_update_waits_for_turn_views_and_recovers_after_wait_timeout() {
 #[tokio::test]
 async fn recorded_hook_tracks_error_and_timeout() {
     let runner = ExtensionRunner::new(Duration::from_millis(10));
-    let view = runner.extension_view();
+    let view = runner.extension_view().await;
 
     assert!(
-        view.run_recorded_hook::<()>("probe", "pre_tool_use", async {
-            Err(ExtensionError::Internal("injected failure".into()))
-        })
+        view.run_recorded_hook::<()>(
+            "probe",
+            "pre_tool_use",
+            tokio_util::sync::CancellationToken::new(),
+            async { Err(ExtensionError::Internal("injected failure".into())) },
+        )
         .await
         .is_err()
     );
@@ -1688,6 +2005,7 @@ async fn recorded_hook_tracks_error_and_timeout() {
         view.run_recorded_hook(
             "probe",
             "pre_tool_use",
+            tokio_util::sync::CancellationToken::new(),
             std::future::pending::<Result<(), ExtensionError>>(),
         )
         .await,
@@ -1717,13 +2035,7 @@ async fn operation_timeout_bounds_advisory_hooks_and_stop() {
     let result = runner
         .emit_provider(
             ProviderEvent::AfterResponse,
-            ProviderContext {
-                session_id: "session".into(),
-                working_dir: "D:/workspace".into(),
-                model: astrcode_core::config::ModelSelection::simple("model"),
-                messages: Vec::new(),
-                session_store_dir: None,
-            },
+            RuntimeProviderContext::new(runtime_hook_call(), Vec::new()),
         )
         .await
         .unwrap();
@@ -1812,13 +2124,7 @@ async fn provider_response_hook_observes_without_blocking() {
     let result = runner
         .emit_provider(
             ProviderEvent::AfterResponse,
-            ProviderContext {
-                session_id: "session".into(),
-                working_dir: "D:/workspace".into(),
-                model: astrcode_core::config::ModelSelection::simple("model"),
-                messages: Vec::new(),
-                session_store_dir: None,
-            },
+            RuntimeProviderContext::new(runtime_hook_call(), Vec::new()),
         )
         .await
         .unwrap();
@@ -2037,6 +2343,24 @@ async fn command_resolution_uses_source_priority_then_declared_priority() {
 
 #[tokio::test]
 async fn command_completion_dispatches_to_resolved_handler() {
+    let mut invalid = Registrar::new();
+    invalid.command(
+        SlashCommand {
+            name: "missing-completion".into(),
+            description: "invalid declaration probe".into(),
+            args_schema: None,
+            requires_idle: false,
+            argument_completions: true,
+            priority: 0,
+        },
+        Arc::new(ExecuteOnlyCommandProbe),
+    );
+    let invalid = invalid.finish(extension_manifest("missing-completion", &[]));
+    assert!(matches!(
+        invalid,
+        Err(error) if error.to_string().contains("handler does not support")
+    ));
+
     let runner = ExtensionRunner::new(Duration::from_secs(1));
     runner
         .register(Arc::new(CommandProbeExtension {
@@ -2057,14 +2381,25 @@ async fn command_completion_dispatches_to_resolved_handler() {
         .await
         .unwrap();
 
+    let runtime = command_ctx();
+    let resolved = runner
+        .resolve_commands_for_typed(&runtime.working_dir().to_string_lossy())
+        .await
+        .into_iter()
+        .find(|resolved| resolved.command.name == "pick")
+        .expect("pick command");
     let completions = runner
-        .complete_command_typed("pick", "de", 2, ".", &command_ctx())
+        .complete_resolved_command_typed(&resolved, "de", 2, &runtime)
         .await
         .unwrap();
 
     assert_eq!(completions.items.len(), 1);
     assert_eq!(completions.items[0].label, "complete-high:de:2");
     assert_eq!(completions.items[0].insert_text, "complete-high");
+    assert_eq!(
+        completions.items[0].detail.as_deref(),
+        Some("complete-high:session:pick:.:mock:/tmp/session-store/extension_data/complete-high")
+    );
 }
 
 #[tokio::test]
@@ -2100,7 +2435,7 @@ async fn cached_command_does_not_block_retirement_and_becomes_unavailable() {
     );
     assert!(matches!(
         runner
-            .invoke_resolved_command_typed(&command, "", ".", &command_ctx())
+            .invoke_resolved_command_typed(&command, "", &command_ctx())
             .await,
         Err(ExtensionError::NotFound(message))
             if message.contains("generation is no longer available")
@@ -2180,8 +2515,39 @@ async fn public_http_route_dispatches_with_path_params() {
         panic!("expected response");
     };
     assert_eq!(response.status, 201);
+    assert_eq!(response.body["extensionId"], "public-http");
+    assert_eq!(response.body["routePath"], "/future-tasks/{jobId}");
+    assert_eq!(response.body["requestPath"], "/future-tasks/job-1");
     assert_eq!(response.body["pathParams"]["jobId"], "job-1");
     assert_eq!(response.body["query"], "run=true");
+    assert_eq!(response.body["bodyName"], "probe");
+
+    let error = runner
+        .dispatch_public_http_route(
+            ExtensionHttpRequest::new(ExtensionHttpMethod::Post, "/future-tasks/job-2"),
+            br#"{"unexpected":true}"#,
+        )
+        .await
+        .expect_err("typed body validation should return a structured input error");
+    assert!(matches!(
+        error,
+        ExtensionError::InvalidInput { code, hint: Some(_), .. }
+            if code == "invalid_http_body"
+    ));
+
+    let error = runner
+        .dispatch_public_http_route(
+            ExtensionHttpRequest::new(ExtensionHttpMethod::Post, "/future-tasks/job-3")
+                .query("invalid-status"),
+            &[],
+        )
+        .await
+        .expect_err("in-process handlers must not bypass response status validation");
+    assert!(matches!(
+        error,
+        ExtensionError::Internal(message)
+            if message.contains("invalid HTTP status 99")
+    ));
 }
 
 #[tokio::test]
@@ -2279,11 +2645,11 @@ async fn conflicting_public_routes_are_rejected() {
     assert!(error.to_string().contains("conflicts"));
 }
 
-fn command_ctx() -> CommandContext {
-    CommandContext {
-        session_id: "session".into(),
-        working_dir: ".".into(),
-        model: ModelSelection::simple("mock"),
-        session_store_dir: None,
-    }
+fn command_ctx() -> RuntimeHookCallContext {
+    RuntimeHookCallContext::new(
+        "session",
+        ".",
+        ModelSelection::simple("mock"),
+        Some(PathBuf::from("/tmp/session-store")),
+    )
 }

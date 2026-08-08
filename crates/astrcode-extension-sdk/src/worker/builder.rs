@@ -2,6 +2,7 @@
 
 use std::{future::Future, sync::Arc};
 
+use astrcode_core::wire::WireErrorCode;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
@@ -21,15 +22,23 @@ pub fn parse_tool_arguments<T: DeserializeOwned>(event: &Value) -> Result<T, Err
         .or_else(|| event.get("arguments"))
         .cloned()
         .unwrap_or(Value::Null);
-    serde_json::from_value(args)
-        .map_err(|e| ErrorPayload::new("invalid_arguments", format!("parse tool arguments: {e}")))
+    serde_json::from_value(args).map_err(|e| {
+        ErrorPayload::new(
+            WireErrorCode::InvalidArguments,
+            format!("parse tool arguments: {e}"),
+        )
+    })
 }
 
 /// 从 hook 事件 JSON 反序列化 `input` 载荷。
 pub fn parse_hook_input<T: DeserializeOwned>(event: &Value) -> Result<T, ErrorPayload> {
     let input = event.get("input").cloned().unwrap_or_else(|| event.clone());
-    serde_json::from_value(input)
-        .map_err(|e| ErrorPayload::new("invalid_input", format!("parse hook input: {e}")))
+    serde_json::from_value(input).map_err(|e| {
+        ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            format!("parse hook input: {e}"),
+        )
+    })
 }
 
 /// 无参 tool handler：`async move |ctx| { ... }`。
@@ -121,31 +130,48 @@ mod tests {
         name: String,
     }
 
-    #[test]
-    fn parse_tool_arguments_from_nested_input() {
-        let event = serde_json::json!({
-            "input": { "arguments": { "name": "s5r" } }
-        });
-        let args: GreetArgs = parse_tool_arguments(&event).unwrap();
-        assert_eq!(args.name, "s5r");
-    }
-
     #[tokio::test]
-    async fn tool_handler_args_deserializes() {
-        let handler = tool_handler_args(|args: GreetArgs, _ctx| async move {
+    async fn typed_tool_handler_preserves_arguments_and_call_facts() {
+        let handler = tool_handler_args(|args: GreetArgs, ctx| async move {
+            assert_eq!(ctx.extension_id(), "ext");
+            assert_eq!(ctx.session_id(), Some("session-1"));
+            assert_eq!(ctx.turn_id(), None);
+            assert_eq!(ctx.tool_call_id(), Some("tool-call-1"));
+            assert_eq!(ctx.working_dir(), Some(std::path::Path::new("/workspace")));
+            assert!(!ctx.cancel_token().is_cancelled());
             Ok(HandlerResult::effect(
                 "ok",
                 serde_json::json!({ "content": format!("hi {}", args.name) }),
             ))
         });
         let event = serde_json::json!({
-            "input": { "arguments": { "name": "world" } }
+            "input": {
+                "arguments": { "name": "world" },
+                "session_id": "session-1",
+                "tool_call_id": "tool-call-1",
+                "working_dir": "/workspace"
+            }
         });
-        let ctx = WorkerCallContext {
-            extension_id: "ext".into(),
-            cancel_token: crate::runtime::CancelToken::default(),
-        };
+        let ctx = WorkerCallContext::from_event(
+            "ext".into(),
+            crate::runtime::CancelToken::default(),
+            &event,
+        );
         let out = handler(event, ctx).await.unwrap();
         assert!(out.ok);
+        assert_eq!(
+            out.data_value("content"),
+            Some(&serde_json::json!("hi world"))
+        );
+
+        let hook_event = serde_json::json!({
+            "input": { "call_id": "hook-tool-call-1" }
+        });
+        let hook_ctx = WorkerCallContext::from_event(
+            "ext".into(),
+            crate::runtime::CancelToken::default(),
+            &hook_event,
+        );
+        assert_eq!(hook_ctx.tool_call_id(), Some("hook-tool-call-1"));
     }
 }

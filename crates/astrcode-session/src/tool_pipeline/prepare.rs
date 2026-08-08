@@ -4,7 +4,7 @@ use astrcode_core::{
     permission::ApprovalSource,
     tool::{ExecutionMode, ToolDefinition, access::ResourceAccess},
 };
-use astrcode_extension_sdk::extension::{PreToolUseContext, PreToolUseResult};
+use astrcode_extension_sdk::extension::{PreToolUseResult, RuntimePreToolUseContext};
 
 use super::{ToolCalls, events::declare_tool_batch};
 use crate::{
@@ -53,19 +53,15 @@ impl ToolCalls {
             });
         }
 
-        let pre_ctx = PreToolUseContext {
-            session_id: self.turn.shared.session_id.to_string(),
-            working_dir: self.turn.shared.working_dir.clone(),
-            model: self.turn.shared.model_selection(),
-            call_id: tc.call_id.clone().into(),
-            tool_name: tc.name.clone(),
-            tool_input: args.clone(),
-            approval_mode: self.turn.shared.approval_mode,
-            available_tools: tools.to_vec(),
-            event_tx: self.turn.shared.turn_event_tx(),
-            extension_event_sink: None,
-            session_store_dir: self.turn.shared.session_store_dir.clone(),
-        };
+        let call = self.turn.shared.hook_call_context();
+        let pre_ctx = RuntimePreToolUseContext::new(
+            call,
+            tc.call_id.clone().into(),
+            tc.name.clone(),
+            args.clone(),
+            self.turn.shared.approval_mode,
+            tools.to_vec(),
+        );
 
         let pre_hook_result = self.extension_runner.emit_pre_tool_use(pre_ctx).await?;
 

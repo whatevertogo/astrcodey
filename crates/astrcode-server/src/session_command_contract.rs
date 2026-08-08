@@ -20,9 +20,11 @@ pub enum CommandSource {
     Skill,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CommandList {
     pub commands: Vec<CommandInfo>,
+    pub keybindings: Vec<astrcode_extension_sdk::extension::Keybinding>,
+    pub status_items: Vec<astrcode_extension_sdk::extension::StatusItem>,
 }
 
 /// 用户输入提交结果：被接受进入 Turn，或被斜杠命令处理。

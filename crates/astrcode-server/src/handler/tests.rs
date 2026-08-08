@@ -22,9 +22,12 @@ use astrcode_core::{
     tool::ToolDefinition,
     types::{SessionId, ToolCallId, new_session_id},
 };
-use astrcode_extension_sdk::extension::{
-    CommandContext, ExtensionCommandResult, ExtensionError, ExtensionEvent, HookMode, HookResult,
-    LifecycleContext, Registrar, SlashCommand,
+use astrcode_extension_sdk::{
+    builder::manifest,
+    extension::{
+        CommandContext, ExtensionCommandResult, ExtensionError, ExtensionEvent, ExtensionManifest,
+        HookMode, HookResult, LifecycleContext, Registrar, SlashCommand,
+    },
 };
 use astrcode_extensions::Extension;
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
@@ -35,6 +38,13 @@ use tokio::sync::{broadcast, mpsc};
 
 use super::*;
 use crate::session_command_contract::CommandSource;
+
+fn test_extension_manifest(id: impl Into<String>) -> ExtensionManifest {
+    manifest(id)
+        .version("test")
+        .description("Server handler test extension")
+        .build()
+}
 
 trait ProviderMessages {
     fn provider_messages(&self) -> Vec<LlmMessage>;
@@ -317,8 +327,8 @@ struct StaticCommandExtension {
 
 #[async_trait::async_trait]
 impl Extension for RecordingLifecycleExtension {
-    fn id(&self) -> &str {
-        "recording-lifecycle"
+    fn manifest(&self) -> ExtensionManifest {
+        test_extension_manifest("recording-lifecycle")
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -326,7 +336,7 @@ impl Extension for RecordingLifecycleExtension {
             ExtensionEvent::AfterProviderResponse,
             ExtensionEvent::TurnEnd,
         ] {
-            reg.on_event(
+            reg.on_lifecycle(
                 event.clone(),
                 HookMode::Advisory,
                 0,
@@ -354,8 +364,8 @@ impl astrcode_extension_sdk::extension::LifecycleHandler for RecordingLifecycleH
 
 #[async_trait::async_trait]
 impl Extension for StaticCommandExtension {
-    fn id(&self) -> &str {
-        self.id
+    fn manifest(&self) -> ExtensionManifest {
+        test_extension_manifest(self.id)
     }
 
     fn register(&self, reg: &mut Registrar) {
@@ -382,28 +392,22 @@ struct StaticCommandHandler {
 
 #[async_trait::async_trait]
 impl astrcode_extension_sdk::extension::CommandHandler for StaticCommandHandler {
-    async fn execute(
-        &self,
-        command_name: &str,
-        _args: &str,
-        _working_dir: &str,
-        _ctx: &CommandContext,
-    ) -> Result<ExtensionCommandResult, ExtensionError> {
-        if command_name == self.command_name {
+    async fn execute(&self, ctx: CommandContext) -> Result<ExtensionCommandResult, ExtensionError> {
+        if ctx.command_name() == self.command_name {
             return Ok(ExtensionCommandResult::display("extension command", false));
         }
-        Err(ExtensionError::NotFound(command_name.into()))
+        Err(ExtensionError::NotFound(ctx.command_name().into()))
     }
 }
 
 #[async_trait::async_trait]
 impl Extension for FailingSessionStartObserver {
-    fn id(&self) -> &str {
-        "failing-session-start-observer"
+    fn manifest(&self) -> ExtensionManifest {
+        test_extension_manifest("failing-session-start-observer")
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.on_event(
+        reg.on_lifecycle(
             ExtensionEvent::SessionStart,
             HookMode::Advisory,
             0,
@@ -416,12 +420,12 @@ impl Extension for FailingSessionStartObserver {
 
 #[async_trait::async_trait]
 impl Extension for RecordSessionResumeExtension {
-    fn id(&self) -> &str {
-        "record-session-resume"
+    fn manifest(&self) -> ExtensionManifest {
+        test_extension_manifest("record-session-resume")
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.on_event(
+        reg.on_lifecycle(
             ExtensionEvent::SessionResume,
             HookMode::Advisory,
             0,
@@ -435,12 +439,12 @@ impl Extension for RecordSessionResumeExtension {
 
 #[async_trait::async_trait]
 impl Extension for FailingSessionResumeObserver {
-    fn id(&self) -> &str {
-        "failing-session-resume-observer"
+    fn manifest(&self) -> ExtensionManifest {
+        test_extension_manifest("failing-session-resume-observer")
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.on_event(
+        reg.on_lifecycle(
             ExtensionEvent::SessionResume,
             HookMode::Advisory,
             0,
@@ -453,12 +457,12 @@ impl Extension for FailingSessionResumeObserver {
 
 #[async_trait::async_trait]
 impl Extension for AwaitedSessionResumeObserver {
-    fn id(&self) -> &str {
-        "awaited-session-resume-observer"
+    fn manifest(&self) -> ExtensionManifest {
+        test_extension_manifest("awaited-session-resume-observer")
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.on_event(
+        reg.on_lifecycle(
             ExtensionEvent::SessionResume,
             HookMode::Advisory,
             0,
@@ -1682,7 +1686,7 @@ async fn repair_stale_runs_marks_child_without_active_execution_interrupted() {
                 agent_name: "explorer".into(),
                 task: "inspect".into(),
                 tool_selection: None,
-                tool_call_id: "agent-call".into(),
+                tool_call_id: Some("agent-call".into()),
             },
         ))
         .await

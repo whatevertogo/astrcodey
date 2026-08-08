@@ -1,15 +1,13 @@
-//! Host capability 的类型化标识与单一元数据注册表。
+//! HostRouter dispatch mapping over the SDK-owned operation catalog.
 
+use std::ops::Deref;
+
+use astrcode_core::wire::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::ExtensionCapability,
+    host::{HOST_OPERATION_SPECS, HostOperation, HostOperationSpec},
     s5r::{CapabilityDescriptor, ErrorPayload},
-    session::{
-        HostCreateSessionOutput, HostCreateSessionRequest, HostSessionReactivateOutput,
-        HostSessionStateOutput, HostSessionTargetRequest, HostSubmitTurnOutput,
-        HostSubmitTurnRequest, SessionToolSelectionDto,
-    },
 };
-use serde_json::{Value, json};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum HostCapability {
@@ -53,11 +51,18 @@ capability_enum!(SessionCapability {
     Dispose,
     Reactivate,
     State,
+    HistoryList,
+    HistoryProviderMessages,
     HistorySnapshot,
+    HistoryTokenUsage,
+    HistoryTranscript,
     InspectList,
     InspectSnapshot,
     InspectReadModel,
     InspectProviderMessages,
+    RootCreate,
+    RootState,
+    RootSubmitTurn,
 });
 
 capability_enum!(ContextCapability {
@@ -80,355 +85,236 @@ capability_enum!(NetworkCapability { Client });
 capability_enum!(ExtensionHttpCapability { PublicDispatch });
 
 #[derive(Debug, Clone, Copy)]
-enum CapabilitySchema {
-    Object,
-    LlmMessages,
-    SessionId,
-    SessionCreate,
-    SessionCreateOutput,
-    SessionTarget,
-    SessionStateOutput,
-    SessionReactivateOutput,
-    SessionSubmitTurn,
-    SessionSubmitTurnOutput,
-    SessionToolSelection,
-    SessionToolSelectionOutput,
-    WorkspaceWrite,
-    WorkspaceEdit,
-    ProcessSpawn,
-    NetworkRequest,
-    NetworkResponse,
-    PublicHttpDispatch,
-}
-
-#[derive(Debug, Clone, Copy)]
 pub(super) struct HostCapabilitySpec {
     pub(super) capability: HostCapability,
-    pub(super) name: &'static str,
-    pub(super) required: Option<ExtensionCapability>,
-    description: &'static str,
-    input_schema: CapabilitySchema,
-    output_schema: CapabilitySchema,
-    pub(super) supports_stream: bool,
-    cancelable: bool,
-    catalog: bool,
+    operation: HostOperation,
 }
 
-macro_rules! spec {
-    ($capability:expr, $name:literal, $required:expr, $description:literal) => {
-        HostCapabilitySpec {
-            capability: $capability,
-            name: $name,
-            required: $required,
-            description: $description,
-            input_schema: CapabilitySchema::Object,
-            output_schema: CapabilitySchema::Object,
-            supports_stream: false,
-            cancelable: false,
-            catalog: true,
-        }
-    };
+impl Deref for HostCapabilitySpec {
+    type Target = HostOperationSpec;
+
+    fn deref(&self) -> &Self::Target {
+        self.operation.spec()
+    }
 }
 
-pub(super) const HOST_CAPABILITY_SPECS: &[HostCapabilitySpec] = &[
-    spec!(
-        HostCapability::Context(ContextCapability::EmitEvent),
-        "astrcode.event.emit",
-        Some(ExtensionCapability::EmitEvents),
-        "Emit a declared extension event"
-    ),
+const HOST_CAPABILITY_SPECS: [HostCapabilitySpec; HostOperation::COUNT] = [
+    HostCapabilitySpec {
+        capability: HostCapability::Context(ContextCapability::EmitEvent),
+        operation: HostOperation::EventEmit,
+    },
     HostCapabilitySpec {
         capability: HostCapability::ExtensionHttp(ExtensionHttpCapability::PublicDispatch),
-        name: "astrcode.extension.http.public",
-        required: Some(ExtensionCapability::PublicHttpDispatch),
-        description: "Dispatch a request to another extension's public HTTP route",
-        input_schema: CapabilitySchema::PublicHttpDispatch,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: true,
-        catalog: true,
+        operation: HostOperation::ExtensionHttpPublic,
     },
     HostCapabilitySpec {
         capability: HostCapability::Llm(LlmCapability::MainChat),
-        name: "astrcode.llm.main_chat",
-        required: Some(ExtensionCapability::MainModel),
-        description: "Chat with the host-configured main LLM (session active model)",
-        input_schema: CapabilitySchema::LlmMessages,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: true,
-        cancelable: true,
-        catalog: true,
+        operation: HostOperation::LlmMainChat,
     },
     HostCapabilitySpec {
         capability: HostCapability::Llm(LlmCapability::SmallChat),
-        name: "astrcode.llm.small_chat",
-        required: Some(ExtensionCapability::SmallModel),
-        description: "Chat with the host-configured small LLM",
-        input_schema: CapabilitySchema::LlmMessages,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: true,
-        cancelable: true,
-        catalog: true,
+        operation: HostOperation::LlmSmallChat,
     },
     HostCapabilitySpec {
         capability: HostCapability::Network(NetworkCapability::Client),
-        name: "astrcode.network.client",
-        required: Some(ExtensionCapability::NetworkClient),
-        description: "Send a bounded outbound HTTP or HTTPS request with a UTF-8 text body",
-        input_schema: CapabilitySchema::NetworkRequest,
-        output_schema: CapabilitySchema::NetworkResponse,
-        supports_stream: false,
-        cancelable: true,
-        catalog: true,
+        operation: HostOperation::NetworkClient,
     },
     HostCapabilitySpec {
         capability: HostCapability::Process(ProcessCapability::Spawn),
-        name: "astrcode.process.spawn",
-        required: Some(ExtensionCapability::ProcessSpawn),
-        description: "Run a bounded subprocess with an optional workspace-relative cwd",
-        input_schema: CapabilitySchema::ProcessSpawn,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: true,
-        catalog: true,
+        operation: HostOperation::ProcessSpawn,
     },
     HostCapabilitySpec {
         capability: HostCapability::Session(SessionCapability::CancelTurn),
-        name: "astrcode.session.control.cancel_turn",
-        required: Some(ExtensionCapability::SessionControl),
-        description: "Cancel the active turn",
-        input_schema: CapabilitySchema::Object,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: true,
-        catalog: true,
+        operation: HostOperation::SessionControlCancelTurn,
     },
     HostCapabilitySpec {
         capability: HostCapability::Session(SessionCapability::ConfigureTools),
-        name: "astrcode.session.control.configure_tools",
-        required: Some(ExtensionCapability::SessionControl),
-        description: "Configure the tool-name boundary used by subsequent session turns",
-        input_schema: CapabilitySchema::SessionToolSelection,
-        output_schema: CapabilitySchema::SessionToolSelectionOutput,
-        supports_stream: false,
-        cancelable: false,
-        catalog: true,
+        operation: HostOperation::SessionControlConfigureTools,
     },
     HostCapabilitySpec {
         capability: HostCapability::Session(SessionCapability::Create),
-        name: "astrcode.session.control.create",
-        required: Some(ExtensionCapability::SessionControl),
-        description: "Create a child session",
-        input_schema: CapabilitySchema::SessionCreate,
-        output_schema: CapabilitySchema::SessionCreateOutput,
-        supports_stream: false,
-        cancelable: false,
-        catalog: true,
+        operation: HostOperation::SessionControlCreate,
     },
-    spec!(
-        HostCapability::Session(SessionCapability::Dispose),
-        "astrcode.session.control.dispose",
-        Some(ExtensionCapability::SessionControl),
-        "Dispose a session"
-    ),
-    spec!(
-        HostCapability::Session(SessionCapability::ExecutionView),
-        "astrcode.session.control.execution_view",
-        Some(ExtensionCapability::SessionControl),
-        "Read active turn and queued-input state"
-    ),
-    spec!(
-        HostCapability::Session(SessionCapability::Inject),
-        "astrcode.session.control.inject_input",
-        Some(ExtensionCapability::SessionControl),
-        "Inject input into a running turn or start when idle"
-    ),
-    spec!(
-        HostCapability::Session(SessionCapability::Inject),
-        "astrcode.session.control.inject_or_start",
-        Some(ExtensionCapability::SessionControl),
-        "Inject input into a running turn or start when idle"
-    ),
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::Dispose),
+        operation: HostOperation::SessionControlDispose,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::ExecutionView),
+        operation: HostOperation::SessionControlExecutionView,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::Inject),
+        operation: HostOperation::SessionControlInjectOrStart,
+    },
     HostCapabilitySpec {
         capability: HostCapability::Session(SessionCapability::InterruptAndSubmit),
-        name: "astrcode.session.control.interrupt_and_submit",
-        required: Some(ExtensionCapability::SessionControl),
-        description: "Interrupt the active turn and submit new input",
-        input_schema: CapabilitySchema::Object,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: true,
-        catalog: true,
+        operation: HostOperation::SessionControlInterruptAndSubmit,
     },
     HostCapabilitySpec {
         capability: HostCapability::Session(SessionCapability::Reactivate),
-        name: "astrcode.session.control.reactivate",
-        required: Some(ExtensionCapability::SessionControl),
-        description: "Reactivate a recycled direct child session",
-        input_schema: CapabilitySchema::SessionTarget,
-        output_schema: CapabilitySchema::SessionReactivateOutput,
-        supports_stream: false,
-        cancelable: false,
-        catalog: true,
+        operation: HostOperation::SessionControlReactivate,
     },
     HostCapabilitySpec {
         capability: HostCapability::Session(SessionCapability::State),
-        name: "astrcode.session.control.state",
-        required: Some(ExtensionCapability::SessionControl),
-        description: "Read active or recycled session lifecycle state",
-        input_schema: CapabilitySchema::SessionTarget,
-        output_schema: CapabilitySchema::SessionStateOutput,
-        supports_stream: false,
-        cancelable: false,
-        catalog: true,
+        operation: HostOperation::SessionControlState,
     },
     HostCapabilitySpec {
         capability: HostCapability::Session(SessionCapability::SubmitTurn),
-        name: "astrcode.session.control.submit_turn",
-        required: Some(ExtensionCapability::SessionControl),
-        description: "Submit a turn to a session",
-        input_schema: CapabilitySchema::SessionSubmitTurn,
-        output_schema: CapabilitySchema::SessionSubmitTurnOutput,
-        supports_stream: false,
-        cancelable: false,
-        catalog: true,
+        operation: HostOperation::SessionControlSubmitTurn,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::HistoryList),
+        operation: HostOperation::SessionHistoryList,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::HistoryProviderMessages),
+        operation: HostOperation::SessionHistoryProviderMessages,
     },
     HostCapabilitySpec {
         capability: HostCapability::Session(SessionCapability::HistorySnapshot),
-        name: "astrcode.session.history.snapshot",
-        required: Some(ExtensionCapability::SessionHistory),
-        description: "Read an authorized active or recycled session snapshot",
-        input_schema: CapabilitySchema::SessionTarget,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: false,
-        catalog: true,
+        operation: HostOperation::SessionHistorySnapshot,
     },
-    spec!(
-        HostCapability::Session(SessionCapability::InspectList),
-        "astrcode.session.inspect.list",
-        Some(ExtensionCapability::SessionInspect),
-        "List all sessions visible to the host (global privileged access)"
-    ),
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::HistoryTokenUsage),
+        operation: HostOperation::SessionHistoryTokenUsage,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::HistoryTranscript),
+        operation: HostOperation::SessionHistoryTranscript,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::InspectList),
+        operation: HostOperation::SessionInspectList,
+    },
     HostCapabilitySpec {
         capability: HostCapability::Session(SessionCapability::InspectProviderMessages),
-        name: "astrcode.session.inspect.provider_messages",
-        required: Some(ExtensionCapability::SessionInspect),
-        description: "Read provider-visible messages for any host-visible session",
-        input_schema: CapabilitySchema::SessionId,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: false,
-        catalog: true,
+        operation: HostOperation::SessionInspectProviderMessages,
     },
     HostCapabilitySpec {
         capability: HostCapability::Session(SessionCapability::InspectReadModel),
-        name: "astrcode.session.inspect.read_model",
-        required: Some(ExtensionCapability::SessionInspect),
-        description: "Read any host-visible projected session model through a stable wire DTO",
-        input_schema: CapabilitySchema::SessionId,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: false,
-        catalog: true,
+        operation: HostOperation::SessionInspectReadModel,
     },
     HostCapabilitySpec {
         capability: HostCapability::Session(SessionCapability::InspectSnapshot),
-        name: "astrcode.session.inspect.snapshot",
-        required: Some(ExtensionCapability::SessionInspect),
-        description: "Read any host-visible session snapshot (global privileged access)",
-        input_schema: CapabilitySchema::SessionId,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: false,
-        catalog: true,
+        operation: HostOperation::SessionInspectSnapshot,
     },
-    spec!(
-        HostCapability::Session(SessionCapability::ReadEvents),
-        "astrcode.session.read_events",
-        Some(ExtensionCapability::SessionHistory),
-        "Read session event log"
-    ),
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::ReadEvents),
+        operation: HostOperation::SessionReadEvents,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::RootCreate),
+        operation: HostOperation::SessionRootCreate,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::RootState),
+        operation: HostOperation::SessionRootState,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Session(SessionCapability::RootSubmitTurn),
+        operation: HostOperation::SessionRootSubmitTurn,
+    },
     HostCapabilitySpec {
         capability: HostCapability::Context(ContextCapability::StateRead),
-        name: "astrcode.session.state.read",
-        required: None,
-        description: "Read extension-namespaced session state",
-        input_schema: CapabilitySchema::Object,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: false,
-        catalog: false,
+        operation: HostOperation::SessionStateRead,
     },
     HostCapabilitySpec {
         capability: HostCapability::Context(ContextCapability::StateWrite),
-        name: "astrcode.session.state.write",
-        required: None,
-        description: "Write extension-namespaced session state",
-        input_schema: CapabilitySchema::Object,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: false,
-        catalog: false,
+        operation: HostOperation::SessionStateWrite,
     },
     HostCapabilitySpec {
         capability: HostCapability::Workspace(WorkspaceCapability::Edit),
-        name: "astrcode.workspace.edit",
-        required: Some(ExtensionCapability::WorkspaceWrite),
-        description: "Replace an exact text fragment in a non-sensitive workspace file",
-        input_schema: CapabilitySchema::WorkspaceEdit,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: false,
-        catalog: true,
+        operation: HostOperation::WorkspaceEdit,
     },
-    spec!(
-        HostCapability::Workspace(WorkspaceCapability::Glob),
-        "astrcode.workspace.glob",
-        Some(ExtensionCapability::WorkspaceRead),
-        "Match bounded workspace paths by glob"
-    ),
-    spec!(
-        HostCapability::Workspace(WorkspaceCapability::Grep),
-        "astrcode.workspace.grep",
-        Some(ExtensionCapability::WorkspaceRead),
-        "Regex-search bounded UTF-8 workspace files"
-    ),
-    spec!(
-        HostCapability::Workspace(WorkspaceCapability::List),
-        "astrcode.workspace.list",
-        Some(ExtensionCapability::WorkspaceRead),
-        "List a bounded workspace directory tree"
-    ),
-    spec!(
-        HostCapability::Workspace(WorkspaceCapability::Read),
-        "astrcode.workspace.read",
-        Some(ExtensionCapability::WorkspaceRead),
-        "Read a bounded UTF-8 workspace file"
-    ),
+    HostCapabilitySpec {
+        capability: HostCapability::Workspace(WorkspaceCapability::Glob),
+        operation: HostOperation::WorkspaceGlob,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Workspace(WorkspaceCapability::Grep),
+        operation: HostOperation::WorkspaceGrep,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Workspace(WorkspaceCapability::List),
+        operation: HostOperation::WorkspaceList,
+    },
+    HostCapabilitySpec {
+        capability: HostCapability::Workspace(WorkspaceCapability::Read),
+        operation: HostOperation::WorkspaceRead,
+    },
     HostCapabilitySpec {
         capability: HostCapability::Workspace(WorkspaceCapability::Write),
-        name: "astrcode.workspace.write",
-        required: Some(ExtensionCapability::WorkspaceWrite),
-        description: "Create or replace a non-sensitive file under the working directory",
-        input_schema: CapabilitySchema::WorkspaceWrite,
-        output_schema: CapabilitySchema::Object,
-        supports_stream: false,
-        cancelable: false,
-        catalog: true,
+        operation: HostOperation::WorkspaceWrite,
     },
 ];
 
 pub(super) fn lookup(name: &str) -> Result<&'static HostCapabilitySpec, ErrorPayload> {
+    let operation = HostOperation::from_wire_name(name).ok_or_else(|| {
+        ErrorPayload::new(
+            WireErrorCode::UnknownCapability,
+            format!("unknown astrcode capability: {name}"),
+        )
+    })?;
+    Ok(&HOST_CAPABILITY_SPECS[operation as usize])
+}
+
+pub(super) fn available_operations(
+    router: &super::HostRouter,
+    ctx: &super::InvokeContext,
+) -> Vec<HostOperation> {
     HOST_CAPABILITY_SPECS
-        .binary_search_by(|spec| spec.name.cmp(name))
-        .map(|index| &HOST_CAPABILITY_SPECS[index])
-        .map_err(|_| {
-            ErrorPayload::new(
-                "unknown_capability",
-                format!("unknown astrcode capability: {name}"),
-            )
+        .iter()
+        .filter_map(|spec| {
+            backend_available(router, spec.capability, ctx).then_some(spec.operation)
         })
+        .collect()
+}
+
+fn backend_available(
+    router: &super::HostRouter,
+    capability: HostCapability,
+    ctx: &super::InvokeContext,
+) -> bool {
+    match capability {
+        HostCapability::Llm(capability) => router.llm.is_available(capability),
+        HostCapability::Session(capability) => match capability {
+            SessionCapability::ReadEvents | SessionCapability::HistoryTokenUsage => {
+                router.session.has_event_reader()
+            },
+            SessionCapability::HistoryList
+            | SessionCapability::HistoryProviderMessages
+            | SessionCapability::HistorySnapshot
+            | SessionCapability::HistoryTranscript
+            | SessionCapability::InspectList
+            | SessionCapability::InspectSnapshot
+            | SessionCapability::InspectReadModel
+            | SessionCapability::InspectProviderMessages => router.session.has_session_reader(),
+            SessionCapability::RootState | SessionCapability::RootSubmitTurn => {
+                ctx.session_ops.is_some() && router.session.has_session_reader()
+            },
+            SessionCapability::RootCreate
+            | SessionCapability::Create
+            | SessionCapability::ConfigureTools
+            | SessionCapability::SubmitTurn
+            | SessionCapability::InterruptAndSubmit
+            | SessionCapability::Inject
+            | SessionCapability::CancelTurn
+            | SessionCapability::ExecutionView
+            | SessionCapability::Dispose
+            | SessionCapability::Reactivate
+            | SessionCapability::State => ctx.session_ops.is_some(),
+        },
+        HostCapability::Context(capability) => router.context.is_available(capability, ctx),
+        HostCapability::Workspace(capability) => router.workspace.is_available(
+            capability,
+            ctx.working_dir.as_deref(),
+            ctx.tasks.as_ref(),
+        ),
+        HostCapability::Process(_) => router.process.is_available(ctx.working_dir.as_deref()),
+        HostCapability::Network(_) => router.network.is_available(),
+        HostCapability::ExtensionHttp(_) => router.extension_http.is_available(),
+    }
 }
 
 pub(super) fn authorize(
@@ -442,7 +328,7 @@ pub(super) fn authorize(
         return Ok(());
     }
     Err(ErrorPayload::new(
-        "permission_denied",
+        WireErrorCode::PermissionDenied,
         format!(
             "{} requires declared capability {}",
             spec.name,
@@ -454,128 +340,16 @@ pub(super) fn authorize(
 pub(super) fn catalog_for_grants(
     capabilities: &[ExtensionCapability],
 ) -> Vec<CapabilityDescriptor> {
-    HOST_CAPABILITY_SPECS
+    HOST_OPERATION_SPECS
         .iter()
         .filter(|spec| spec.catalog)
         .filter(|spec| match spec.required {
             Some(required) => capabilities.contains(&required),
             None => true,
         })
-        .map(capability_descriptor)
+        .copied()
+        .map(HostOperationSpec::descriptor)
         .collect()
-}
-
-fn capability_descriptor(spec: &HostCapabilitySpec) -> CapabilityDescriptor {
-    CapabilityDescriptor {
-        name: spec.name.into(),
-        description: spec.description.into(),
-        input_schema: capability_schema(spec.input_schema),
-        output_schema: capability_schema(spec.output_schema),
-        supports_stream: spec.supports_stream,
-        cancelable: spec.cancelable,
-    }
-}
-
-fn capability_schema(schema: CapabilitySchema) -> Value {
-    match schema {
-        CapabilitySchema::Object => json!({ "type": "object" }),
-        CapabilitySchema::LlmMessages => json!({
-            "type": "object",
-            "properties": { "messages": { "type": "array" } }
-        }),
-        CapabilitySchema::SessionId => json!({
-            "type": "object",
-            "properties": { "session_id": { "type": "string" } },
-            "required": ["session_id"]
-        }),
-        CapabilitySchema::SessionCreate => HostCreateSessionRequest::wire_schema(),
-        CapabilitySchema::SessionCreateOutput => HostCreateSessionOutput::wire_schema(),
-        CapabilitySchema::SessionTarget => HostSessionTargetRequest::wire_schema(),
-        CapabilitySchema::SessionStateOutput => HostSessionStateOutput::wire_schema(),
-        CapabilitySchema::SessionReactivateOutput => HostSessionReactivateOutput::wire_schema(),
-        CapabilitySchema::SessionSubmitTurn => HostSubmitTurnRequest::wire_schema(),
-        CapabilitySchema::SessionSubmitTurnOutput => HostSubmitTurnOutput::wire_schema(),
-        CapabilitySchema::SessionToolSelection => json!({
-            "type": "object",
-            "properties": {
-                "session_id": { "type": "string" },
-                "selection": SessionToolSelectionDto::wire_schema(
-                    "Session tool visibility for subsequent turns."
-                )
-            },
-            "required": ["session_id", "selection"]
-        }),
-        CapabilitySchema::SessionToolSelectionOutput => json!({
-            "type": "object",
-            "properties": {
-                "selection": SessionToolSelectionDto::wire_schema(
-                    "Effective session tool visibility for subsequent turns."
-                )
-            },
-            "required": ["selection"]
-        }),
-        CapabilitySchema::WorkspaceWrite => json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "content": { "type": "string" }
-            },
-            "required": ["path", "content"]
-        }),
-        CapabilitySchema::WorkspaceEdit => json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string" },
-                "old_text": { "type": "string" },
-                "new_text": { "type": "string" },
-                "replace_all": { "type": "boolean" }
-            },
-            "required": ["path", "old_text", "new_text"]
-        }),
-        CapabilitySchema::ProcessSpawn => json!({
-            "type": "object",
-            "properties": {
-                "command": { "type": "string" },
-                "args": { "type": "array", "items": { "type": "string" } },
-                "cwd": { "type": "string" },
-                "stdin": { "type": "string" },
-                "timeout_ms": { "type": "integer", "minimum": 1 }
-            },
-            "required": ["command"]
-        }),
-        CapabilitySchema::NetworkRequest => json!({
-            "type": "object",
-            "properties": {
-                "method": { "type": "string" },
-                "url": { "type": "string" },
-                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
-                "body": { "type": "string", "description": "UTF-8 request body" },
-                "max_bytes": { "type": "integer", "minimum": 0 },
-                "timeout_ms": { "type": "integer", "minimum": 1 }
-            },
-            "required": ["url"]
-        }),
-        CapabilitySchema::NetworkResponse => json!({
-            "type": "object",
-            "properties": {
-                "final_url": { "type": "string" },
-                "status": { "type": "integer" },
-                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
-                "body": { "type": "string", "description": "UTF-8 response body" }
-            },
-            "required": ["final_url", "status", "headers", "body"]
-        }),
-        CapabilitySchema::PublicHttpDispatch => json!({
-            "type": "object",
-            "properties": {
-                "method": { "type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-                "path": { "type": "string" },
-                "query": { "type": "string" },
-                "body": {}
-            },
-            "required": ["method", "path"]
-        }),
-    }
 }
 
 #[cfg(test)]
@@ -585,24 +359,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_names_are_unique_and_round_trip() {
-        let mut names = HashSet::new();
+    fn dispatch_mapping_covers_the_sdk_catalog_and_preserves_authorization() {
         let mut capabilities = HashSet::new();
 
-        assert!(
-            HOST_CAPABILITY_SPECS
-                .windows(2)
-                .all(|pair| pair[0].name < pair[1].name),
-            "registry must remain sorted by wire name"
-        );
-
-        for spec in HOST_CAPABILITY_SPECS {
-            assert!(names.insert(spec.name), "duplicate name: {}", spec.name);
+        for (index, operation_spec) in HOST_OPERATION_SPECS.iter().enumerate() {
+            let spec = &HOST_CAPABILITY_SPECS[index];
+            assert_eq!(spec.operation, operation_spec.operation);
             capabilities.insert(spec.capability);
-            assert_eq!(
-                lookup(spec.name).expect("registered capability").capability,
-                spec.capability
-            );
+            assert_eq!(lookup(spec.name).unwrap().capability, spec.capability);
 
             let granted_catalog = match spec.required {
                 Some(required) => catalog_for_grants(&[required]),
@@ -620,15 +384,8 @@ mod tests {
             if let Some(required) = spec.required {
                 assert!(authorize(spec, &[required]).is_ok());
                 assert_eq!(
-                    authorize(spec, &[]).expect_err("missing grant").code,
-                    "permission_denied"
-                );
-                assert!(
-                    !catalog_for_grants(&[])
-                        .iter()
-                        .any(|descriptor| descriptor.name == spec.name),
-                    "capability visible without grant: {}",
-                    spec.name
+                    authorize(spec, &[]).expect_err("missing grant").code_enum(),
+                    Some(WireErrorCode::PermissionDenied)
                 );
             } else {
                 assert!(authorize(spec, &[]).is_ok());
@@ -684,5 +441,11 @@ mod tests {
             )
             .collect::<HashSet<_>>();
         assert_eq!(capabilities, expected_capabilities);
+        assert_eq!(
+            lookup("astrcode.unknown")
+                .expect_err("unknown operation")
+                .code_enum(),
+            Some(WireErrorCode::UnknownCapability)
+        );
     }
 }

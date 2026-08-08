@@ -1,0 +1,499 @@
+mod client;
+mod contracts;
+mod domain_client;
+mod error;
+mod operation;
+
+use std::sync::Arc;
+
+use astrcode_core::wire::WireErrorCode;
+pub use client::{
+    ExtensionHttpClient, ModelClient, NetworkClient, ProcessClient, SessionControlClient,
+    SessionHistoryClient, SessionInspectClient, SessionStateClient, WorkspaceClient,
+};
+pub(crate) use contracts::deserialize_non_empty_string;
+pub use contracts::*;
+pub(crate) use domain_client::{
+    EventClient as TypedEventClient, ExtensionHttpClient as TypedExtensionHttpClient,
+    HostClientTransport, ModelClient as TypedModelClient, NetworkClient as TypedNetworkClient,
+    ProcessClient as TypedProcessClient, SessionControlClient as TypedSessionControlClient,
+    SessionHistoryClient as TypedSessionHistoryClient,
+    SessionInspectClient as TypedSessionInspectClient,
+    SessionStateClient as TypedSessionStateClient, WorkspaceClient as TypedWorkspaceClient,
+};
+pub use error::*;
+pub use operation::{HOST_OPERATION_SPECS, HostOperation, HostOperationSpec};
+use serde_json::Value;
+
+use crate::extension::ExtensionCapability;
+
+/// Instance-scoped access to typed host domains.
+#[derive(Clone)]
+pub struct ExtensionHost {
+    inner: Arc<ExtensionHostInner>,
+}
+
+struct ExtensionHostInner {
+    invoker: Arc<dyn internal::HostInvoker>,
+    scope: internal::HostScope,
+}
+
+impl ExtensionHost {
+    pub fn models(&self) -> ModelClient {
+        ModelClient::new(self.clone())
+    }
+
+    pub fn session_control(&self) -> Result<SessionControlClient, HostError> {
+        let session_control = self
+            .inner
+            .scope
+            .is_granted(ExtensionCapability::SessionControl);
+        let input_delivery = self
+            .inner
+            .scope
+            .is_granted(ExtensionCapability::InputDelivery);
+        if !session_control && !input_delivery {
+            self.inner.scope.preflight_any_capability(
+                &[
+                    ExtensionCapability::SessionControl,
+                    ExtensionCapability::InputDelivery,
+                ],
+                "session_control",
+            )?;
+        }
+        if self
+            .inner
+            .scope
+            .has_callable_operation_for(ExtensionCapability::SessionControl)
+            || self
+                .inner
+                .scope
+                .has_callable_operation_for(ExtensionCapability::InputDelivery)
+        {
+            return Ok(SessionControlClient::new(self.clone()));
+        }
+        if session_control {
+            self.inner.scope.preflight_context(
+                operation::HostContextRequirement::Session,
+                "session_control",
+            )?;
+        }
+        if input_delivery {
+            self.inner.scope.preflight_available_operation_context(
+                ExtensionCapability::InputDelivery,
+                "session_control",
+            )?;
+        }
+        Err(HostError::new(
+            WireErrorCode::BackendUnavailable,
+            "session_control host domain is unavailable",
+        ))
+    }
+
+    pub fn session_history(&self) -> Result<SessionHistoryClient, HostError> {
+        self.inner
+            .scope
+            .require_grant(ExtensionCapability::SessionHistory, "session_history")?;
+        self.inner.scope.preflight_context(
+            operation::HostContextRequirement::Session,
+            "session_history",
+        )?;
+        self.preflight_capability(ExtensionCapability::SessionHistory)?;
+        Ok(SessionHistoryClient::new(self.clone()))
+    }
+
+    pub fn session_state(&self) -> Result<SessionStateClient, HostError> {
+        self.inner
+            .scope
+            .preflight_context(operation::HostContextRequirement::Session, "session_state")?;
+        let available = [
+            HostOperation::SessionStateRead,
+            HostOperation::SessionStateWrite,
+        ]
+        .into_iter()
+        .any(|operation| self.inner.scope.is_operation_available(operation));
+        if !available {
+            return Err(HostError::new(
+                WireErrorCode::BackendUnavailable,
+                "session_state host domain is unavailable",
+            ));
+        }
+        Ok(SessionStateClient::new(self.clone()))
+    }
+
+    pub fn session_inspect(&self) -> Result<SessionInspectClient, HostError> {
+        self.preflight_capability(ExtensionCapability::SessionInspect)?;
+        Ok(SessionInspectClient::new(self.clone()))
+    }
+
+    pub fn workspace(&self) -> Result<WorkspaceClient, HostError> {
+        let capabilities = [
+            ExtensionCapability::WorkspaceRead,
+            ExtensionCapability::WorkspaceWrite,
+        ];
+        if !capabilities
+            .iter()
+            .copied()
+            .any(|capability| self.inner.scope.is_granted(capability))
+        {
+            self.inner
+                .scope
+                .preflight_any_capability(&capabilities, "workspace")?;
+        }
+        self.inner
+            .scope
+            .preflight_context(operation::HostContextRequirement::Workspace, "workspace")?;
+        self.inner
+            .scope
+            .preflight_any_capability(&capabilities, "workspace")?;
+        Ok(WorkspaceClient::new(self.clone()))
+    }
+
+    pub fn process(&self) -> Result<ProcessClient, HostError> {
+        self.inner
+            .scope
+            .require_grant(ExtensionCapability::ProcessSpawn, "process")?;
+        self.inner
+            .scope
+            .preflight_context(operation::HostContextRequirement::Workspace, "process")?;
+        self.preflight(HostOperation::ProcessSpawn)?;
+        Ok(ProcessClient::new(self.clone()))
+    }
+
+    pub fn network(&self) -> Result<NetworkClient, HostError> {
+        self.preflight(HostOperation::NetworkClient)?;
+        Ok(NetworkClient::new(self.clone()))
+    }
+
+    pub fn extension_http(&self) -> Result<ExtensionHttpClient, HostError> {
+        self.preflight(HostOperation::ExtensionHttpPublic)?;
+        Ok(ExtensionHttpClient::new(self.clone()))
+    }
+
+    fn preflight(&self, operation: HostOperation) -> Result<(), HostError> {
+        self.inner.scope.preflight(operation)
+    }
+
+    fn operation_available(&self, operation: HostOperation) -> Result<bool, HostError> {
+        if let Some(required) = operation.required_capability() {
+            self.inner
+                .scope
+                .require_grant(required, operation.wire_name())?;
+        }
+        self.inner
+            .scope
+            .preflight_context(operation.context_requirement(), operation.wire_name())?;
+        Ok(self.inner.scope.is_operation_available(operation))
+    }
+
+    fn preflight_capability(&self, capability: ExtensionCapability) -> Result<(), HostError> {
+        self.inner.scope.preflight_capability(capability)
+    }
+}
+
+#[async_trait::async_trait]
+impl HostClientTransport for ExtensionHost {
+    type Error = HostError;
+
+    async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, Self::Error> {
+        self.preflight(operation)?;
+        self.inner.invoker.invoke(operation, input).await
+    }
+
+    async fn invoke_collected_stream(
+        &self,
+        operation: HostOperation,
+        input: Value,
+    ) -> Result<Value, Self::Error> {
+        self.preflight(operation)?;
+        self.inner
+            .invoker
+            .invoke_collected_stream(operation, input)
+            .await
+    }
+
+    fn client_error(code: &'static str, message: String) -> Self::Error {
+        HostError::new(code, message)
+    }
+}
+
+/// Runtime construction boundary. This module is intentionally absent from author preludes.
+#[doc(hidden)]
+pub mod internal {
+    use std::{any::Any, collections::BTreeMap, sync::Arc, time::Duration};
+
+    use astrcode_core::wire::WireErrorCode;
+    use async_trait::async_trait;
+    use serde_json::Value;
+    use tokio_util::sync::CancellationToken;
+
+    use super::{
+        ExtensionCapability, ExtensionHost, ExtensionHostInner, HOST_OPERATION_SPECS, HostError,
+        HostOperation, operation::HostContextRequirement,
+    };
+
+    /// Host-only redirect policy used by the outbound-network backend port.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum NetworkRedirectPolicy {
+        Follow,
+        Manual,
+    }
+
+    /// Host-only request passed to the single restricted outbound-network backend.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct OutboundNetworkRequest {
+        pub url: String,
+        pub method: String,
+        pub headers: BTreeMap<String, String>,
+        pub body: Vec<u8>,
+        pub max_bytes: usize,
+        pub timeout: Duration,
+        pub redirect_policy: NetworkRedirectPolicy,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct OutboundNetworkResponse {
+        pub final_url: String,
+        pub status: u16,
+        pub headers: BTreeMap<String, String>,
+        pub body: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum OutboundNetworkErrorKind {
+        InvalidRequest,
+        PermissionDenied,
+        Unavailable,
+        RequestFailed,
+        Timeout,
+        ResponseTooLarge,
+        Cancelled,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("{message}")]
+    pub struct OutboundNetworkError {
+        pub kind: OutboundNetworkErrorKind,
+        pub message: String,
+    }
+
+    impl OutboundNetworkError {
+        pub fn new(kind: OutboundNetworkErrorKind, message: impl Into<String>) -> Self {
+            Self {
+                kind,
+                message: message.into(),
+            }
+        }
+    }
+
+    /// Host-only port for the single restricted outbound-network implementation.
+    #[async_trait]
+    pub trait OutboundNetworkService: Send + Sync {
+        async fn request(
+            &self,
+            request: OutboundNetworkRequest,
+            cancellation: Option<CancellationToken>,
+        ) -> Result<OutboundNetworkResponse, OutboundNetworkError>;
+    }
+
+    /// Runtime-owned facts used only for synchronous, best-effort early failure.
+    /// HostRouter remains authoritative and rechecks authorization during invoke.
+    #[derive(Clone)]
+    pub struct HostScope {
+        granted: Arc<[ExtensionCapability]>,
+        available: Arc<[bool; HostOperation::COUNT]>,
+        session_context_available: bool,
+        workspace_context_available: bool,
+    }
+
+    impl HostScope {
+        pub fn new(
+            granted: impl IntoIterator<Item = ExtensionCapability>,
+            available: impl IntoIterator<Item = HostOperation>,
+            session_context_available: bool,
+            workspace_context_available: bool,
+        ) -> Self {
+            let mut operation_availability = [false; HostOperation::COUNT];
+            for operation in available {
+                operation_availability[operation as usize] = true;
+            }
+            Self {
+                granted: granted.into_iter().collect::<Vec<_>>().into(),
+                available: Arc::new(operation_availability),
+                session_context_available,
+                workspace_context_available,
+            }
+        }
+
+        pub(super) fn preflight(&self, operation: HostOperation) -> Result<(), HostError> {
+            if let Some(required) = operation.required_capability() {
+                self.require_grant(required, operation.wire_name())?;
+            }
+            self.preflight_context(operation.context_requirement(), operation.wire_name())?;
+            if !self.available[operation as usize] {
+                return Err(HostError::new(
+                    WireErrorCode::BackendUnavailable,
+                    format!("{} backend is unavailable", operation.wire_name()),
+                ));
+            }
+            Ok(())
+        }
+
+        pub(super) fn preflight_capability(
+            &self,
+            capability: ExtensionCapability,
+        ) -> Result<(), HostError> {
+            self.preflight_any_capability(&[capability], crate::s5r::capability_to_wire(capability))
+        }
+
+        pub(super) fn is_granted(&self, capability: ExtensionCapability) -> bool {
+            self.granted.contains(&capability)
+        }
+
+        pub(super) fn has_callable_operation_for(&self, capability: ExtensionCapability) -> bool {
+            self.is_granted(capability)
+                && HOST_OPERATION_SPECS.iter().any(|spec| {
+                    spec.required == Some(capability)
+                        && self.available[spec.operation as usize]
+                        && self.is_context_available(spec.operation.context_requirement())
+                })
+        }
+
+        pub(super) fn preflight_available_operation_context(
+            &self,
+            capability: ExtensionCapability,
+            target: &str,
+        ) -> Result<(), HostError> {
+            let Some(operation) = HOST_OPERATION_SPECS
+                .iter()
+                .find(|spec| {
+                    spec.required == Some(capability) && self.available[spec.operation as usize]
+                })
+                .map(|spec| spec.operation)
+            else {
+                return Ok(());
+            };
+            self.preflight_context(operation.context_requirement(), target)
+        }
+
+        pub(super) fn is_operation_available(&self, operation: HostOperation) -> bool {
+            self.available[operation as usize]
+        }
+
+        pub(super) fn preflight_any_capability(
+            &self,
+            capabilities: &[ExtensionCapability],
+            target: &str,
+        ) -> Result<(), HostError> {
+            let granted = capabilities
+                .iter()
+                .copied()
+                .filter(|capability| self.granted.contains(capability))
+                .collect::<Vec<_>>();
+            if granted.is_empty() {
+                let required = capabilities
+                    .iter()
+                    .map(|capability| crate::s5r::capability_to_wire(*capability))
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                return Err(HostError::new(
+                    WireErrorCode::PermissionDenied,
+                    format!("{target} requires declared capability {required}"),
+                ));
+            }
+            let available = HOST_OPERATION_SPECS.iter().any(|spec| {
+                spec.required
+                    .is_some_and(|required| granted.contains(&required))
+                    && self.available[spec.operation as usize]
+            });
+            if available {
+                Ok(())
+            } else {
+                Err(HostError::new(
+                    WireErrorCode::BackendUnavailable,
+                    format!("{target} host domain is unavailable"),
+                ))
+            }
+        }
+
+        pub(super) fn preflight_context(
+            &self,
+            requirement: HostContextRequirement,
+            target: &str,
+        ) -> Result<(), HostError> {
+            match requirement {
+                HostContextRequirement::None => Ok(()),
+                HostContextRequirement::Session if self.session_context_available => Ok(()),
+                HostContextRequirement::Workspace if self.workspace_context_available => Ok(()),
+                HostContextRequirement::Session => Err(HostError::new(
+                    WireErrorCode::ContextUnavailable,
+                    format!("{target} requires a session-scoped call context"),
+                )),
+                HostContextRequirement::Workspace => Err(HostError::new(
+                    WireErrorCode::ContextUnavailable,
+                    format!("{target} requires a workspace-scoped call context"),
+                )),
+            }
+        }
+
+        fn is_context_available(&self, requirement: HostContextRequirement) -> bool {
+            match requirement {
+                HostContextRequirement::None => true,
+                HostContextRequirement::Session => self.session_context_available,
+                HostContextRequirement::Workspace => self.workspace_context_available,
+            }
+        }
+
+        pub(super) fn require_grant(
+            &self,
+            capability: ExtensionCapability,
+            target: &str,
+        ) -> Result<(), HostError> {
+            if self.granted.contains(&capability) {
+                return Ok(());
+            }
+            Err(HostError::new(
+                WireErrorCode::PermissionDenied,
+                format!(
+                    "{target} requires declared capability {}",
+                    crate::s5r::capability_to_wire(capability)
+                ),
+            ))
+        }
+    }
+
+    #[async_trait]
+    pub trait HostInvoker: Send + Sync {
+        async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, HostError>;
+
+        async fn invoke_collected_stream(
+            &self,
+            operation: HostOperation,
+            _input: Value,
+        ) -> Result<Value, HostError> {
+            Err(HostError::new(
+                "stream_unavailable",
+                format!(
+                    "{} transport does not support collected streaming",
+                    operation.wire_name()
+                ),
+            ))
+        }
+
+        fn as_any(&self) -> &dyn Any;
+    }
+
+    pub fn extension_host(invoker: Arc<dyn HostInvoker>, scope: HostScope) -> ExtensionHost {
+        ExtensionHost {
+            inner: Arc::new(ExtensionHostInner { invoker, scope }),
+        }
+    }
+
+    /// Returns the runtime transport behind a scoped host handle.
+    ///
+    /// This is intentionally confined to the runtime-only module so transport adapters can
+    /// preserve invocation context without exposing raw host operations in author contexts.
+    pub fn invoker(host: &ExtensionHost) -> &dyn HostInvoker {
+        host.inner.invoker.as_ref()
+    }
+}

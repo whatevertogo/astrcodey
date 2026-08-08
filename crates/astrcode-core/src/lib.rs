@@ -27,3 +27,4 @@ pub mod permission;
 pub mod tool;
 pub mod types;
 pub mod user_input;
+pub mod wire;

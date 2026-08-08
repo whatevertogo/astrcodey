@@ -7,33 +7,47 @@ mod registry;
 
 use std::sync::Arc;
 
+use astrcode_core::wire::WireErrorCode;
 pub use builder::{
     command_handler, handler_err, hook_handler, hook_handler_args, http_handler, parse_hook_input,
     parse_tool_arguments, tool_handler, tool_handler_args,
 };
 pub use host::{
-    HostApi, HostClient, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
+    EventClient, ExtensionHttpClient, HostClient, HostConfigureSessionToolsOutput,
+    HostConfigureSessionToolsRequest, HostCreateSessionOutput, HostCreateSessionRequest,
+    HostEventEmitOutput, HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput,
+    HostLlmContent, HostLlmMessage, HostLlmRole, HostLlmTextDelta, HostNetworkRedirectPolicy,
     HostNetworkRequest, HostNetworkResponse, HostProcessOutput, HostProcessRequest,
-    HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
-    HostSessionTargetRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
-    HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
-    HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
-    HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceWriteOutput,
-    HostWorkspaceWriteRequest, inject_host_api,
+    HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionCancelOutput,
+    HostSessionDeliveryOutput, HostSessionEvent, HostSessionEventsPageOutput,
+    HostSessionEventsPageRequest, HostSessionExecutionView, HostSessionInputRequest,
+    HostSessionProviderMessagesOutput, HostSessionReactivateOutput, HostSessionStateOutput,
+    HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
+    HostSessionSummariesOutput, HostSessionSummary, HostSessionTargetRequest,
+    HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
+    HostSessionTranscriptMessage, HostSubmitTurnOutput, HostSubmitTurnRequest,
+    HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
+    HostWorkspaceGlobRequest, HostWorkspaceGrepMatch, HostWorkspaceGrepOutput,
+    HostWorkspaceGrepRequest, HostWorkspaceListEntry, HostWorkspaceListOutput,
+    HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
+    HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient, NetworkClient, ProcessClient,
+    SessionControlClient, SessionHistoryClient, SessionInspectClient, SessionStateClient,
+    WorkspaceClient,
 };
 pub use registry::{
     CommandHandlerFn, HookHandlerFn, HttpHandlerFn, ToolHandlerFn, WorkerCallContext,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
-pub use crate::session::{
-    HostCreateSessionOutput, HostCreateSessionRequest, HostSessionReactivateOutput,
-    HostSessionStateOutput, HostSubmitTurnOutput, HostSubmitTurnRequest,
-};
+/// Explicit transport seam for worker integration tests. Not part of the author prelude.
+pub mod testing {
+    pub use super::host::{HostApi, invoke_host, with_host_api};
+}
+
 use crate::{
-    extension::ContinueAfterStopOptions,
+    extension::{ContinueAfterStopOptions, ExtensionCapability, ExtensionEvent, HookMode},
     runtime::{CancelToken, InvokeHandler, InvokeReply, Peer, ProcessStdioTransport},
-    s5r::{HandlerDescriptor, HandlerResult, PeerInfo, S5R_STACK},
+    s5r::{HandlerDescriptor, HandlerId, HandlerKind, HandlerResult, PeerInfo, S5R_STACK},
     tool::ToolDefinition,
     worker::{
         host::{PeerHostApi, set_host_api},
@@ -58,25 +72,19 @@ impl Worker {
         }
     }
 
-    pub fn version(mut self, version: impl Into<String>) -> Self {
+    pub fn version(&mut self, version: impl Into<String>) -> &mut Self {
         self.version = version.into();
         self
     }
 
-    /// 声明 manifest 能力（wire 名，如 `small_model`）。
-    pub fn capability(mut self, cap: impl Into<String>) -> Self {
+    /// 声明 manifest 能力。
+    pub fn capability(&mut self, cap: ExtensionCapability) -> &mut Self {
         self.registry.declare_capability(cap);
         self
     }
 
-    /// 声明可发射的扩展事件 schema（兼容旧版 JSON authoring API）。
-    pub fn extension_event(mut self, event: Value) -> Self {
-        self.registry.declare_legacy_extension_event(event);
-        self
-    }
-
-    /// 使用强类型契约声明可发射的扩展事件 schema。
-    pub fn extension_event_decl(mut self, event: crate::extension::ExtensionEventDecl) -> Self {
+    /// 声明可发射的扩展事件 schema。
+    pub fn extension_event(&mut self, event: crate::extension::ExtensionEventDecl) -> &mut Self {
         self.registry.declare_extension_event(event);
         self
     }
@@ -84,21 +92,54 @@ impl Worker {
     /// 注册 tool：manifest 定义与 handler 一次完成，避免两处手动对齐。
     pub fn tool(
         &mut self,
-        def: ToolDefinition,
+        def: impl Into<ToolDefinition>,
         handler: ToolHandlerFn,
     ) -> Result<&mut Self, ErrorPayload> {
-        self.registry.register_tool(def, handler)?;
+        self.registry.register_tool(def.into(), handler)?;
         Ok(self)
     }
 
-    /// 注册 hook（`on` 为事件名，`mode` 为 `blocking` / `non_blocking`）。
+    /// 注册模式可选的宿主事件 hook。
+    ///
+    /// 固定模式 hook 使用对应的 `on_*` 方法，避免声明一个运行时不会执行的模式。
     pub fn hook(
         &mut self,
-        on: impl Into<String>,
-        mode: impl Into<String>,
+        on: ExtensionEvent,
+        mode: HookMode,
         handler: HookHandlerFn,
     ) -> Result<&mut Self, ErrorPayload> {
         self.registry.register_hook(on, mode, handler)?;
+        Ok(self)
+    }
+
+    /// 注册 provider response observer。该 hook 固定为 advisory。
+    pub fn on_after_provider_response(
+        &mut self,
+        handler: HookHandlerFn,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_fixed_hook(ExtensionEvent::AfterProviderResponse, handler)?;
+        Ok(self)
+    }
+
+    /// 注册同步收集 prompt contributions 的 hook。
+    pub fn on_prompt_build(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_fixed_hook(ExtensionEvent::PromptBuild, handler)?;
+        Ok(self)
+    }
+
+    /// 注册 pre-compact 决策与 contributions hook。
+    pub fn on_pre_compact(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_fixed_hook(ExtensionEvent::PreCompact, handler)?;
+        Ok(self)
+    }
+
+    /// 注册 post-compact 同步通知与 contributions hook。
+    pub fn on_post_compact(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_fixed_hook(ExtensionEvent::PostCompact, handler)?;
         Ok(self)
     }
 
@@ -160,15 +201,14 @@ impl Worker {
                 version: Some(S5R_STACK.into()),
             },
         );
-        peer.start()
-            .await
-            .map_err(|e| crate::s5r::ErrorPayload::new("peer_start_failed", e.to_string()))?;
-        set_host_api(Arc::new(PeerHostApi::new(
-            Arc::clone(&peer),
-            self.extension_id.clone(),
-        )))
-        .map_err(|_| {
-            crate::s5r::ErrorPayload::new("host_api_already_set", "host API already initialized")
+        peer.start().await.map_err(|e| {
+            crate::s5r::ErrorPayload::new(WireErrorCode::PeerStartFailed, e.to_string())
+        })?;
+        set_host_api(Arc::new(PeerHostApi::new(Arc::clone(&peer)))).map_err(|_| {
+            crate::s5r::ErrorPayload::new(
+                WireErrorCode::HostApiAlreadySet,
+                "host API already initialized",
+            )
         })?;
 
         let registry = Arc::new(self.registry);
@@ -176,7 +216,7 @@ impl Worker {
             let registry = Arc::clone(&registry);
             Arc::new(move |invoke, token| {
                 let registry = Arc::clone(&registry);
-                Box::pin(async move { handle_worker_invoke(registry, invoke, token).await })
+                Box::pin(handle_worker_invoke(registry, invoke, token))
             })
         };
         peer.set_invoke_handler(invoke_handler);
@@ -184,14 +224,14 @@ impl Worker {
         let metadata = registration_metadata(&self.extension_id, &self.version, registry.catalog())
             .map_err(|error| {
                 ErrorPayload::new(
-                    "manifest_serialize_failed",
+                    WireErrorCode::ManifestSerializeFailed,
                     format!("failed to serialize initialize manifest: {error}"),
                 )
             })?;
         let handlers = build_handler_descriptors(registry.catalog(), &self.extension_id);
-        peer.initialize(handlers, metadata)
-            .await
-            .map_err(|e| crate::s5r::ErrorPayload::new("initialize_failed", e.to_string()))?;
+        peer.initialize(handlers, metadata).await.map_err(|e| {
+            crate::s5r::ErrorPayload::new(WireErrorCode::InitializeFailed, e.to_string())
+        })?;
 
         peer.wait_closed().await;
         Ok(())
@@ -208,7 +248,7 @@ async fn handle_worker_invoke(
     let result = registry.dispatch_invoke(invoke, token).await?;
     let output = serde_json::to_value(result).map_err(|error| {
         ErrorPayload::new(
-            "serialization_failed",
+            WireErrorCode::SerializationFailed,
             format!("serialize handler result: {error}"),
         )
     })?;
@@ -219,32 +259,31 @@ fn build_handler_descriptors(
     catalog: &ManifestCatalog,
     extension_id: &str,
 ) -> Vec<HandlerDescriptor> {
-    let registry = HandlerRegistry::new(extension_id);
     let mut out = Vec::new();
     for tool in &catalog.tools {
         out.push(HandlerDescriptor {
-            handler_id: registry.handler_id_for("tool", &tool.name),
+            handler_id: HandlerId::new(extension_id, HandlerKind::Tool, &tool.name).into(),
             description: tool.description.clone(),
             input_schema: tool.parameters.clone(),
         });
     }
     for hook in &catalog.hooks {
         out.push(HandlerDescriptor {
-            handler_id: registry.handler_id_for("hook", &hook.on),
+            handler_id: HandlerId::new(extension_id, HandlerKind::Hook, &hook.on).into(),
             description: format!("hook {}", hook.on),
             input_schema: json!({"type":"object"}),
         });
     }
     for hook in &catalog.continuation_hooks {
         out.push(HandlerDescriptor {
-            handler_id: registry.handler_id_for("hook", hook),
+            handler_id: HandlerId::new(extension_id, HandlerKind::Hook, hook).into(),
             description: format!("continuation hook {hook}"),
             input_schema: json!({"type":"object"}),
         });
     }
     for cmd in &catalog.commands {
         out.push(HandlerDescriptor {
-            handler_id: registry.handler_id_for("command", &cmd.name),
+            handler_id: HandlerId::new(extension_id, HandlerKind::Command, &cmd.name).into(),
             description: cmd.description.clone(),
             input_schema: json!({"type":"object"}),
         });

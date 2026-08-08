@@ -19,10 +19,9 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_extension_sdk::extension::{
-    ContinueAfterStopContext, ContinueAfterStopResult, ExtensionEvent, ProviderEvent,
-    ProviderResult,
+    ContinueAfterStopResult, ExtensionEvent, ProviderEvent, ProviderResult,
+    RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
 };
-use astrcode_session_projection::SessionReadModel;
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -74,7 +73,7 @@ pub(crate) struct TurnLoop {
 /// Step 阶段间共享的 hook/publisher/lifecycle 上下文。
 struct StepHooks<'a> {
     extension_runner: &'a dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
-    lifecycle_ctx: &'a astrcode_extension_sdk::extension::LifecycleContext,
+    lifecycle_ctx: &'a RuntimeLifecycleContext,
     publisher: &'a Arc<TurnEvents>,
 }
 
@@ -126,17 +125,13 @@ impl TurnLoop {
 
     pub(crate) fn new_with_llm(
         session: Session,
-        session_state: &SessionReadModel,
-        tool_selection: astrcode_core::tool::SessionToolSelection,
-        session_store_dir: Option<std::path::PathBuf>,
         llm: Arc<dyn astrcode_core::llm::LlmProvider>,
+        turn: TurnToolContext,
         tool_registry: Arc<crate::ToolRegistry>,
         extension_hooks: Arc<dyn astrcode_extension_sdk::runtime_ports::TurnHooks>,
     ) -> Result<Self, TurnError> {
         let runtime_services = session.runtime_services();
-        let cancellation_token = CancellationToken::new();
-        let turn =
-            TurnToolContext::for_turn(&session, session_state, tool_selection, session_store_dir);
+        let cancellation_token = turn.shared.cancellation_token.clone();
         let tools = ToolCalls::new(
             turn,
             tool_registry,
@@ -261,7 +256,7 @@ impl TurnLoop {
         &mut self,
         state: &mut TurnState,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
-        lifecycle_ctx: &astrcode_extension_sdk::extension::LifecycleContext,
+        lifecycle_ctx: &RuntimeLifecycleContext,
         turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
         user_text: &str,
@@ -285,7 +280,7 @@ impl TurnLoop {
         &mut self,
         state: &mut TurnState,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
-        lifecycle_ctx: &astrcode_extension_sdk::extension::LifecycleContext,
+        lifecycle_ctx: &RuntimeLifecycleContext,
         turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
         user_text: &str,
@@ -921,14 +916,13 @@ impl TurnLoop {
         finish_reason: &str,
         state: &mut TurnState,
     ) -> Result<bool, TurnError> {
-        let ctx = ContinueAfterStopContext {
-            session_id: self.shared().session_id.to_string(),
-            working_dir: self.shared().working_dir.clone(),
-            model: self.shared().model_selection(),
-            assistant_text: assistant_text.to_string(),
-            finish_reason: finish_reason.to_string(),
-            continuations_this_turn: state.continue_after_stop_count(),
-        };
+        let call = self.shared().hook_call_context();
+        let ctx = RuntimeContinueAfterStopContext::new(
+            call,
+            assistant_text,
+            finish_reason,
+            state.continue_after_stop_count(),
+        );
         let decision = extension_runner.emit_continue_after_stop(ctx).await?;
         if decision == ContinueAfterStopResult::ContinueOneStep {
             state.record_continue_after_stop();

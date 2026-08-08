@@ -11,6 +11,7 @@ use std::{
     },
 };
 
+use astrcode_core::wire::WireErrorCode;
 use futures_util::FutureExt;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -23,13 +24,15 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     runtime::{cancel::CancelToken, stream::EventStream, transport::FrameTransport},
     s5r::{
-        CAP_HANDLER_INVOKE, CancelMsg, ErrorPayload, EventMsg, EventPhase, InitializeMsg,
+        CAP_RUNTIME_PING, CancelMsg, ErrorPayload, EventMsg, EventPhase, InitializeMsg,
         InitializeOutput, InvokeMsg, PeerInfo, ResultKind, ResultMsg, S5R_VERSION, WIRE_CODEC_JSON,
         WIRE_CODEC_METADATA_KEY, WireMessage, encode_wire_message, parse_wire_message,
     },
 };
 
-const DEFAULT_INVOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+// This transport envelope must outlive the longest host operation so the backend can report its
+// own timeout and finish cancellation cleanup before the caller drops the request.
+const DEFAULT_INVOKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(130);
 const DEFAULT_STREAM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const TASK_ABORT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
@@ -41,6 +44,8 @@ const STREAM_EVENT_BUFFER_CAPACITY: usize = 64;
 const OUTBOUND_INVOKE_LIMIT: usize = 64;
 const REJECTION_QUEUE_CAPACITY: usize = 32;
 const CANCEL_QUEUE_CAPACITY: usize = 64;
+const DUPLICATE_INITIALIZE_ERROR_MESSAGE: &str =
+    "initialize has already been attempted for this connection";
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -110,8 +115,14 @@ pub enum PeerError {
     Timeout,
     #[error("peer outbound request limit reached")]
     Busy,
-    #[error("payload error: {0}")]
-    Payload(String),
+    #[error("payload error: {}", .0.message)]
+    Payload(ErrorPayload),
+}
+
+fn remote_payload_error(error: Option<ErrorPayload>, fallback_message: &'static str) -> PeerError {
+    PeerError::Payload(
+        error.unwrap_or_else(|| ErrorPayload::new(WireErrorCode::HostError, fallback_message)),
+    )
 }
 
 pub struct Peer<T: FrameTransport + 'static> {
@@ -120,11 +131,13 @@ pub struct Peer<T: FrameTransport + 'static> {
     protocol_version: String,
     next_id: AtomicU64,
     closed: AtomicBool,
+    protocol_error: Mutex<Option<String>>,
     close_complete: AtomicBool,
     closed_notify: Notify,
     close_request: CancellationToken,
     close_lock: AsyncMutex<()>,
     remote_initialized: Arc<AtomicBool>,
+    inbound_initialize_claimed: AtomicBool,
     pending_results: Arc<Mutex<PendingResults>>,
     pending_stream_events: Arc<Mutex<PendingStreamEvents>>,
     initialize_handler: Mutex<Option<InitializeHandler>>,
@@ -302,11 +315,13 @@ impl<T: FrameTransport + 'static> Peer<T> {
             protocol_version: S5R_VERSION.to_string(),
             next_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
+            protocol_error: Mutex::new(None),
             close_complete: AtomicBool::new(false),
             closed_notify: Notify::new(),
             close_request: CancellationToken::new(),
             close_lock: AsyncMutex::new(()),
             remote_initialized: Arc::new(AtomicBool::new(false)),
+            inbound_initialize_claimed: AtomicBool::new(false),
             pending_results: Arc::new(Mutex::new(HashMap::new())),
             pending_stream_events: Arc::new(Mutex::new(HashMap::new())),
             initialize_handler: Mutex::new(None),
@@ -335,7 +350,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
 
     pub async fn start(self: &Arc<Self>) -> Result<(), PeerError> {
         if self.closed.load(Ordering::Acquire) {
-            return Err(PeerError::Closed);
+            return Err(self.close_error());
         }
         if self.read_task.lock().is_some() {
             return Err(PeerError::Msg("peer already started".into()));
@@ -420,7 +435,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
         let start = std::time::Instant::now();
         while !self.is_remote_initialized() {
             if self.closed.load(Ordering::SeqCst) {
-                return Err(PeerError::Closed);
+                return Err(self.close_error());
             }
             if start.elapsed() > timeout {
                 return Err(PeerError::Timeout);
@@ -436,7 +451,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
 
     async fn send_message(&self, msg: &WireMessage) -> Result<(), PeerError> {
         if self.closed.load(Ordering::Acquire) {
-            return Err(PeerError::Closed);
+            return Err(self.close_error());
         }
         let payload = encode_wire_message(msg).map_err(PeerError::Msg)?;
         match tokio::time::timeout(WRITE_TIMEOUT, self.transport.write_frame(&payload)).await {
@@ -472,7 +487,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                 pending.complete();
                 result
             },
-            Ok(Err(_)) => Err(PeerError::Closed),
+            Ok(Err(_)) => Err(self.close_error()),
             Err(_) => {
                 pending.cancel_as("request_timeout");
                 Err(PeerError::Timeout)
@@ -501,15 +516,16 @@ impl<T: FrameTransport + 'static> Peer<T> {
         });
         let result = self.request_result(id, msg, DEFAULT_INVOKE_TIMEOUT).await?;
         if !result.success {
-            return Err(PeerError::Payload(
-                result
-                    .error
-                    .map(|e| e.message)
-                    .unwrap_or_else(|| "initialize failed".into()),
-            ));
+            return Err(remote_payload_error(result.error, "initialize failed"));
         }
         let output: InitializeOutput = serde_json::from_value(result.output.unwrap_or(Value::Null))
             .map_err(|e| PeerError::Msg(format!("parse InitializeOutput: {e}")))?;
+        if output.protocol_version != self.protocol_version {
+            return Err(PeerError::Msg(format!(
+                "initialize response protocol_version mismatch: expected {}, got {}",
+                self.protocol_version, output.protocol_version
+            )));
+        }
         self.remote_initialized.store(true, Ordering::SeqCst);
         Ok(output)
     }
@@ -518,7 +534,6 @@ impl<T: FrameTransport + 'static> Peer<T> {
         self: &Arc<Self>,
         capability: &str,
         input: Value,
-        caller_extension_id: Option<&str>,
         control: OutboundInvokeControl,
     ) -> Result<Value, PeerError> {
         let OutboundRequestPrep {
@@ -533,27 +548,31 @@ impl<T: FrameTransport + 'static> Peer<T> {
             capability: capability.to_string(),
             input,
             stream: false,
-            caller_extension_id: caller_extension_id.map(str::to_string),
             parent_invoke_id,
         });
         let result = self.request_result(id, msg, DEFAULT_INVOKE_TIMEOUT).await;
         let result = result?;
         if !result.success {
-            return Err(PeerError::Payload(
-                result
-                    .error
-                    .map(|e| e.message)
-                    .unwrap_or_else(|| "invoke failed".into()),
-            ));
+            return Err(remote_payload_error(result.error, "invoke failed"));
         }
         Ok(result.output.unwrap_or(Value::Null))
+    }
+
+    /// Round-trips through the remote peer runtime without invoking extension code.
+    pub async fn ping(self: &Arc<Self>) -> Result<(), PeerError> {
+        self.invoke(
+            CAP_RUNTIME_PING,
+            Value::Null,
+            OutboundInvokeControl::default(),
+        )
+        .await
+        .map(|_| ())
     }
 
     async fn begin_invoke_stream(
         self: &Arc<Self>,
         capability: &str,
         input: Value,
-        caller_extension_id: Option<&str>,
         control: OutboundInvokeControl,
     ) -> Result<EventStream, PeerError> {
         let OutboundRequestPrep {
@@ -575,7 +594,6 @@ impl<T: FrameTransport + 'static> Peer<T> {
             capability: capability.to_string(),
             input,
             stream: true,
-            caller_extension_id: caller_extension_id.map(str::to_string),
             parent_invoke_id,
         });
         self.send_message(&msg).await?;
@@ -601,41 +619,27 @@ impl<T: FrameTransport + 'static> Peer<T> {
         self: &Arc<Self>,
         capability: &str,
         input: Value,
-        caller_extension_id: Option<&str>,
     ) -> Result<EventStream, PeerError> {
-        self.invoke_stream_with_control(
-            capability,
-            input,
-            caller_extension_id,
-            OutboundInvokeControl::default(),
-        )
-        .await
+        self.invoke_stream_with_control(capability, input, OutboundInvokeControl::default())
+            .await
     }
 
     pub async fn invoke_stream_with_control(
         self: &Arc<Self>,
         capability: &str,
         input: Value,
-        caller_extension_id: Option<&str>,
         control: OutboundInvokeControl,
     ) -> Result<EventStream, PeerError> {
-        self.begin_invoke_stream(capability, input, caller_extension_id, control)
-            .await
+        self.begin_invoke_stream(capability, input, control).await
     }
 
     pub async fn invoke_stream_collect(
         self: &Arc<Self>,
         capability: &str,
         input: Value,
-        caller_extension_id: Option<&str>,
     ) -> Result<Value, PeerError> {
         let mut stream = self
-            .begin_invoke_stream(
-                capability,
-                input,
-                caller_extension_id,
-                OutboundInvokeControl::default(),
-            )
+            .begin_invoke_stream(capability, input, OutboundInvokeControl::default())
             .await?;
         let mut last_output = Value::Null;
         let deadline = tokio::time::Instant::now() + DEFAULT_STREAM_TIMEOUT;
@@ -644,7 +648,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
             let event = tokio::time::timeout(remaining, stream.next_event())
                 .await
                 .map_err(|_| PeerError::Timeout)?
-                .ok_or(PeerError::Closed)?;
+                .ok_or_else(|| self.close_error())?;
             match event.phase {
                 EventPhase::Completed => {
                     if !event.output.is_null() {
@@ -653,12 +657,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                     return Ok(last_output);
                 },
                 EventPhase::Failed => {
-                    return Err(PeerError::Payload(
-                        event
-                            .error
-                            .map(|e| e.message)
-                            .unwrap_or_else(|| "stream failed".into()),
-                    ));
+                    return Err(remote_payload_error(event.error, "stream failed"));
                 },
                 EventPhase::Delta => {
                     if !event.data.is_null() {
@@ -727,30 +726,9 @@ impl<T: FrameTransport + 'static> Peer<T> {
         Arc::clone(&self.outbound_invoke_permits)
             .try_acquire_owned()
             .map_err(|error| match error {
-                tokio::sync::TryAcquireError::Closed => PeerError::Closed,
+                tokio::sync::TryAcquireError::Closed => self.close_error(),
                 tokio::sync::TryAcquireError::NoPermits => PeerError::Busy,
             })
-    }
-
-    pub async fn invoke_handler(
-        self: &Arc<Self>,
-        handler_id: &str,
-        event: Value,
-        caller_extension_id: &str,
-    ) -> Result<Value, PeerError> {
-        let output = self
-            .invoke(
-                CAP_HANDLER_INVOKE,
-                json!({
-                    "handler_id": handler_id,
-                    "event": event,
-                    "caller_extension_id": caller_extension_id,
-                }),
-                Some(caller_extension_id),
-                OutboundInvokeControl::default(),
-            )
-            .await?;
-        Ok(output)
     }
 
     async fn read_loop(self: Arc<Self>, work_tx: mpsc::Sender<InboundWork>) {
@@ -769,8 +747,9 @@ impl<T: FrameTransport + 'static> Peer<T> {
             let msg = match parse_wire_message(&frame) {
                 Ok(m) => m,
                 Err(error) => {
-                    let _ = error;
-                    continue;
+                    self.record_protocol_error(error);
+                    self.begin_close();
+                    break;
                 },
             };
             match msg {
@@ -778,7 +757,22 @@ impl<T: FrameTransport + 'static> Peer<T> {
                 WireMessage::Event(event) => self.dispatch_event(event),
                 WireMessage::Cancel(cancel) => self.cancel_inbound(cancel),
                 WireMessage::Initialize(init) => {
-                    if !self.enqueue_inbound_work(&work_tx, InboundWork::Initialize(init)) {
+                    let work = match self.admit_inbound_initialize(init) {
+                        Ok(work) => work,
+                        Err(failure) => {
+                            if !self.queue_rejection(
+                                failure,
+                                ErrorPayload::new(
+                                    WireErrorCode::DuplicateRequestId,
+                                    DUPLICATE_INITIALIZE_ERROR_MESSAGE,
+                                ),
+                            ) {
+                                break;
+                            }
+                            continue;
+                        },
+                    };
+                    if !self.enqueue_inbound_work(&work_tx, work) {
                         break;
                     }
                 },
@@ -789,7 +783,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                             if !self.queue_rejection(
                                 failure,
                                 ErrorPayload::new(
-                                    "duplicate_request_id",
+                                    WireErrorCode::DuplicateRequestId,
                                     "inbound invoke request id is already active",
                                 ),
                             ) {
@@ -828,7 +822,10 @@ impl<T: FrameTransport + 'static> Peer<T> {
                 tracing::error!(request_id = %failure.id, "inbound peer handler panicked");
                 self.send_work_failure(
                     failure,
-                    ErrorPayload::new("handler_panicked", "inbound peer handler panicked"),
+                    ErrorPayload::new(
+                        WireErrorCode::HandlerPanicked,
+                        "inbound peer handler panicked",
+                    ),
                 )
                 .await
                 .ok();
@@ -899,11 +896,26 @@ impl<T: FrameTransport + 'static> Peer<T> {
                 drop(work);
                 self.queue_rejection(
                     failure,
-                    ErrorPayload::new("peer_overloaded", "inbound work queue is full"),
+                    ErrorPayload::new(WireErrorCode::PeerOverloaded, "inbound work queue is full"),
                 )
             },
             Err(mpsc::error::TrySendError::Closed(_)) => false,
         }
+    }
+
+    fn admit_inbound_initialize(&self, init: InitializeMsg) -> Result<InboundWork, WorkFailure> {
+        if self
+            .inbound_initialize_claimed
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(WorkFailure {
+                id: init.id,
+                kind: ResultKind::InitializeResult,
+                stream: false,
+            });
+        }
+        Ok(InboundWork::Initialize(init))
     }
 
     fn register_inbound_invoke(&self, invoke: InvokeMsg) -> Result<InboundWork, WorkFailure> {
@@ -1029,7 +1041,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
         }
         self.inbound_work_tx.lock().take();
         for (_, tx) in self.pending_results.lock().drain() {
-            let _ = tx.send(Err(PeerError::Closed));
+            let _ = tx.send(Err(self.close_error()));
         }
         self.pending_stream_events.lock().clear();
         for (_, entry) in self.inbound_cancel.lock().drain() {
@@ -1050,6 +1062,21 @@ impl<T: FrameTransport + 'static> Peer<T> {
         self.close_request.cancel();
     }
 
+    fn record_protocol_error(&self, error: String) {
+        let mut recorded = self.protocol_error.lock();
+        if recorded.is_none() {
+            tracing::warn!(%error, "invalid s5r wire message; closing peer");
+            *recorded = Some(error);
+        }
+    }
+
+    fn close_error(&self) -> PeerError {
+        match self.protocol_error.lock().clone() {
+            Some(error) => PeerError::Msg(format!("s5r protocol error: {error}")),
+            None => PeerError::Closed,
+        }
+    }
+
     async fn handle_initialize(self: Arc<Self>, init: InitializeMsg) {
         let handler = self.initialize_handler.lock().clone();
         let Some(handler) = handler else {
@@ -1059,7 +1086,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                 false,
                 None,
                 Some(ErrorPayload::new(
-                    "not_supported",
+                    WireErrorCode::NotSupported,
                     "initialize handler not configured",
                 )),
             )
@@ -1069,15 +1096,23 @@ impl<T: FrameTransport + 'static> Peer<T> {
         let init_id = init.id.clone();
         match handler(init).await {
             Ok(output) => {
+                let write_result = self
+                    .send_result_frame(
+                        &init_id,
+                        Some(ResultKind::InitializeResult),
+                        true,
+                        Some(serde_json::to_value(output).unwrap_or(Value::Null)),
+                        None,
+                    )
+                    .await;
+                if let Err(error) = write_result {
+                    self.begin_close();
+                    if !matches!(error, PeerError::Closed) {
+                        tracing::warn!(%error, request_id = %init_id, "failed to send initialize result");
+                    }
+                    return;
+                }
                 self.remote_initialized.store(true, Ordering::SeqCst);
-                self.send_result(
-                    &init_id,
-                    Some(ResultKind::InitializeResult),
-                    true,
-                    Some(serde_json::to_value(output).unwrap_or(Value::Null)),
-                    None,
-                )
-                .await;
             },
             Err(err) => {
                 self.send_result(
@@ -1093,6 +1128,46 @@ impl<T: FrameTransport + 'static> Peer<T> {
     }
 
     async fn handle_invoke(self: Arc<Self>, invoke: InvokeMsg, cancel_token: CancelToken) {
+        if invoke.capability == CAP_RUNTIME_PING {
+            if invoke.stream {
+                let _ = self
+                    .send_message(&WireMessage::Event(EventMsg {
+                        id: invoke.id,
+                        phase: EventPhase::Failed,
+                        data: Value::Null,
+                        output: Value::Null,
+                        error: Some(ErrorPayload::new(
+                            WireErrorCode::InvalidRequest,
+                            "runtime ping does not support streaming",
+                        )),
+                    }))
+                    .await;
+                return;
+            }
+            match cancel_token.raise_if_cancelled() {
+                Ok(()) => {
+                    self.send_result(
+                        &invoke.id,
+                        Some(ResultKind::InvokeResult),
+                        true,
+                        Some(json!({ "ok": true })),
+                        None,
+                    )
+                    .await;
+                },
+                Err(reason) => {
+                    self.send_result(
+                        &invoke.id,
+                        Some(ResultKind::InvokeResult),
+                        false,
+                        None,
+                        Some(ErrorPayload::new(WireErrorCode::Cancelled, reason)),
+                    )
+                    .await;
+                },
+            }
+            return;
+        }
         let handler = self.invoke_handler.lock().clone();
         let Some(handler) = handler else {
             self.send_result(
@@ -1101,7 +1176,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
                 false,
                 None,
                 Some(ErrorPayload::new(
-                    "not_supported",
+                    WireErrorCode::NotSupported,
                     "invoke handler not configured",
                 )),
             )
@@ -1166,6 +1241,19 @@ impl<T: FrameTransport + 'static> Peer<T> {
         output: Option<Value>,
         error: Option<ErrorPayload>,
     ) {
+        let _ = self
+            .send_result_frame(id, kind, success, output, error)
+            .await;
+    }
+
+    async fn send_result_frame(
+        &self,
+        id: &str,
+        kind: Option<ResultKind>,
+        success: bool,
+        output: Option<Value>,
+        error: Option<ErrorPayload>,
+    ) -> Result<(), PeerError> {
         let msg = WireMessage::Result(ResultMsg {
             id: id.to_string(),
             kind,
@@ -1173,7 +1261,7 @@ impl<T: FrameTransport + 'static> Peer<T> {
             output,
             error,
         });
-        let _ = self.send_message(&msg).await;
+        self.send_message(&msg).await
     }
 }
 
@@ -1266,13 +1354,26 @@ mod tests {
         time::Duration,
     };
 
-    use tokio::sync::{Notify, mpsc, oneshot};
+    use tokio::sync::{Barrier, Notify, mpsc, oneshot};
 
     use super::*;
+
+    #[derive(Default)]
+    struct WriteControl {
+        started: Notify,
+        release: Notify,
+        fail: AtomicBool,
+    }
 
     struct ChannelTransport {
         incoming: AsyncMutex<mpsc::Receiver<Vec<u8>>>,
         outgoing: mpsc::Sender<Vec<u8>>,
+    }
+
+    struct ControlledWriteTransport {
+        incoming: AsyncMutex<mpsc::Receiver<Vec<u8>>>,
+        outgoing: mpsc::Sender<Vec<u8>>,
+        write_control: Arc<WriteControl>,
     }
 
     impl ChannelTransport {
@@ -1309,6 +1410,24 @@ mod tests {
                 },
             )
         }
+
+        fn pair_with_controlled_remote() -> (Self, ControlledWriteTransport, Arc<WriteControl>) {
+            let (caller_to_remote_tx, caller_to_remote_rx) = mpsc::channel(256);
+            let (remote_to_caller_tx, remote_to_caller_rx) = mpsc::channel(256);
+            let write_control = Arc::new(WriteControl::default());
+            (
+                Self {
+                    incoming: AsyncMutex::new(remote_to_caller_rx),
+                    outgoing: caller_to_remote_tx,
+                },
+                ControlledWriteTransport {
+                    incoming: AsyncMutex::new(caller_to_remote_rx),
+                    outgoing: remote_to_caller_tx,
+                    write_control: Arc::clone(&write_control),
+                },
+                write_control,
+            )
+        }
     }
 
     #[async_trait::async_trait]
@@ -1327,7 +1446,28 @@ mod tests {
         }
     }
 
-    fn test_peer(transport: ChannelTransport, name: &str) -> Arc<Peer<ChannelTransport>> {
+    #[async_trait::async_trait]
+    impl FrameTransport for ControlledWriteTransport {
+        async fn read_frame(&self) -> Result<Vec<u8>, io::Error> {
+            self.incoming.lock().await.recv().await.ok_or_else(|| {
+                io::Error::new(io::ErrorKind::UnexpectedEof, "test transport closed")
+            })
+        }
+
+        async fn write_frame(&self, payload: &[u8]) -> Result<(), io::Error> {
+            self.write_control.started.notify_one();
+            self.write_control.release.notified().await;
+            if self.write_control.fail.load(Ordering::Acquire) {
+                return Err(io::Error::other("controlled write failure"));
+            }
+            self.outgoing
+                .send(payload.to_vec())
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "test transport closed"))
+        }
+    }
+
+    fn test_peer<T: FrameTransport + 'static>(transport: T, name: &str) -> Arc<Peer<T>> {
         Peer::new(
             transport,
             PeerInfo {
@@ -1344,7 +1484,6 @@ mod tests {
             capability: "test.block".into(),
             input: Value::Null,
             stream: false,
-            caller_extension_id: None,
             parent_invoke_id: None,
         })
     }
@@ -1355,6 +1494,343 @@ mod tests {
             .expect("wire message timeout")
             .expect("wire channel closed");
         parse_wire_message(&payload).unwrap()
+    }
+
+    fn assert_structured_payload(error: PeerError, expected: &ErrorPayload) {
+        let PeerError::Payload(actual) = error else {
+            panic!("expected payload error, got {error:?}");
+        };
+        assert_eq!(actual.code, expected.code);
+        assert_eq!(actual.message, expected.message);
+        assert_eq!(actual.hint, expected.hint);
+        assert_eq!(actual.retryable, expected.retryable);
+        assert_eq!(actual.details, expected.details);
+    }
+
+    fn assert_duplicate_initialize(error: PeerError) {
+        assert_structured_payload(
+            error,
+            &ErrorPayload::new(
+                WireErrorCode::DuplicateRequestId,
+                DUPLICATE_INITIALIZE_ERROR_MESSAGE,
+            ),
+        );
+    }
+
+    fn initialize_output(peer_name: &str) -> InitializeOutput {
+        InitializeOutput {
+            peer: PeerInfo {
+                name: peer_name.into(),
+                role: "test".into(),
+                version: None,
+            },
+            protocol_version: S5R_VERSION.into(),
+            capabilities: Vec::new(),
+            metadata: Value::Null,
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_is_single_shot_per_inbound_direction_after_success_or_failure() {
+        for first_succeeds in [true, false] {
+            let (caller_transport, remote_transport) = ChannelTransport::pair();
+            let caller = test_peer(caller_transport, "caller");
+            let remote = test_peer(remote_transport, "remote");
+            let caller_handler_calls = Arc::new(AtomicUsize::new(0));
+            let remote_handler_calls = Arc::new(AtomicUsize::new(0));
+
+            let calls = Arc::clone(&caller_handler_calls);
+            caller.set_initialize_handler(Arc::new(move |_init| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(initialize_output("caller")) })
+            }));
+            let calls = Arc::clone(&remote_handler_calls);
+            remote.set_initialize_handler(Arc::new(move |_init| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if first_succeeds {
+                        Ok(initialize_output("remote"))
+                    } else {
+                        Err(ErrorPayload::new(
+                            WireErrorCode::InvalidManifest,
+                            "test initialization failure",
+                        ))
+                    }
+                })
+            }));
+            caller.start().await.unwrap();
+            remote.start().await.unwrap();
+
+            let first = caller.initialize(Vec::new(), Value::Null).await;
+            if first_succeeds {
+                assert_eq!(first.unwrap().peer.name, "remote");
+            } else {
+                assert_structured_payload(
+                    first.unwrap_err(),
+                    &ErrorPayload::new(
+                        WireErrorCode::InvalidManifest,
+                        "test initialization failure",
+                    ),
+                );
+            }
+            assert_eq!(caller.is_remote_initialized(), first_succeeds);
+            assert_eq!(remote.is_remote_initialized(), first_succeeds);
+
+            let reverse = remote.initialize(Vec::new(), Value::Null).await.unwrap();
+            assert_eq!(reverse.peer.name, "caller");
+            assert_eq!(caller_handler_calls.load(Ordering::SeqCst), 1);
+
+            let duplicate = caller
+                .initialize(Vec::new(), Value::Null)
+                .await
+                .unwrap_err();
+            assert_duplicate_initialize(duplicate);
+            assert_eq!(remote_handler_calls.load(Ordering::SeqCst), 1);
+
+            caller.stop().await;
+            remote.stop().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn initialize_rejects_a_mismatched_response_protocol_before_readiness() {
+        let (caller_transport, remote_transport) = ChannelTransport::pair();
+        let caller = test_peer(caller_transport, "caller");
+        let remote = test_peer(remote_transport, "remote");
+        remote.set_initialize_handler(Arc::new(|_init| {
+            Box::pin(async {
+                let mut output = initialize_output("remote");
+                output.protocol_version = "1.0".into();
+                Ok(output)
+            })
+        }));
+        caller.start().await.unwrap();
+        remote.start().await.unwrap();
+
+        let error = caller
+            .initialize(Vec::new(), Value::Null)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, PeerError::Msg(message) if message.contains("protocol_version mismatch") && message.contains(S5R_VERSION) && message.contains("1.0"))
+        );
+        assert!(!caller.is_remote_initialized());
+
+        caller.stop().await;
+        remote.stop().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_initializes_claim_before_worker_dispatch() {
+        let (caller_transport, remote_transport) = ChannelTransport::pair();
+        let caller = test_peer(caller_transport, "caller");
+        let remote = test_peer(remote_transport, "remote");
+        let handler_calls = Arc::new(AtomicUsize::new(0));
+        let handler_started = Arc::new(Notify::new());
+        let release_handler = Arc::new(Notify::new());
+        let calls = Arc::clone(&handler_calls);
+        let started = Arc::clone(&handler_started);
+        let release = Arc::clone(&release_handler);
+        remote.set_initialize_handler(Arc::new(move |_init| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            started.notify_one();
+            let release = Arc::clone(&release);
+            Box::pin(async move {
+                release.notified().await;
+                Ok(initialize_output("remote"))
+            })
+        }));
+        caller.start().await.unwrap();
+        remote.start().await.unwrap();
+
+        let barrier = Arc::new(Barrier::new(3));
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel();
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let caller = Arc::clone(&caller);
+            let barrier = Arc::clone(&barrier);
+            let result_tx = result_tx.clone();
+            tasks.push(tokio::spawn(async move {
+                barrier.wait().await;
+                let result = caller.initialize(Vec::new(), Value::Null).await;
+                result_tx.send(result).unwrap();
+            }));
+        }
+        drop(result_tx);
+        barrier.wait().await;
+        tokio::time::timeout(Duration::from_secs(1), handler_started.notified())
+            .await
+            .expect("one initialize handler should start");
+
+        let rejected = tokio::time::timeout(Duration::from_secs(1), result_rx.recv())
+            .await
+            .expect("the duplicate initialize should be rejected while the first is pending")
+            .expect("an initialize result should be sent")
+            .unwrap_err();
+        assert_duplicate_initialize(rejected);
+        assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
+
+        release_handler.notify_one();
+        let accepted = tokio::time::timeout(Duration::from_secs(1), result_rx.recv())
+            .await
+            .expect("the admitted initialize should complete after its handler is released")
+            .expect("an initialize result should be sent")
+            .unwrap();
+        assert_eq!(accepted.peer.name, "remote");
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(handler_calls.load(Ordering::SeqCst), 1);
+
+        caller.stop().await;
+        remote.stop().await;
+    }
+
+    #[tokio::test]
+    async fn initialize_readiness_waits_for_the_result_frame_write() {
+        let (caller_transport, remote_transport, write_control) =
+            ChannelTransport::pair_with_controlled_remote();
+        let caller = test_peer(caller_transport, "caller");
+        let remote = test_peer(remote_transport, "remote");
+        remote.set_initialize_handler(Arc::new(|_init| {
+            Box::pin(async { Ok(initialize_output("remote")) })
+        }));
+        caller.start().await.unwrap();
+        remote.start().await.unwrap();
+
+        let init_peer = Arc::clone(&caller);
+        let init_task =
+            tokio::spawn(async move { init_peer.initialize(Vec::new(), Value::Null).await });
+        tokio::time::timeout(Duration::from_secs(1), write_control.started.notified())
+            .await
+            .expect("initialize result write should start");
+
+        assert!(!remote.is_remote_initialized());
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(50),
+                remote.wait_remote_initialized(Duration::from_secs(1)),
+            )
+            .await
+            .is_err(),
+            "initialize readiness must remain pending while its result frame is blocked"
+        );
+
+        write_control.release.notify_one();
+        remote
+            .wait_remote_initialized(Duration::from_secs(1))
+            .await
+            .unwrap();
+        init_task.await.unwrap().unwrap();
+
+        caller.stop().await;
+        remote.stop().await;
+    }
+
+    #[tokio::test]
+    async fn failed_initialize_result_write_closes_without_publishing_readiness() {
+        let (caller_transport, remote_transport, write_control) =
+            ChannelTransport::pair_with_controlled_remote();
+        write_control.fail.store(true, Ordering::Release);
+        let caller = test_peer(caller_transport, "caller");
+        let remote = test_peer(remote_transport, "remote");
+        remote.set_initialize_handler(Arc::new(|_init| {
+            Box::pin(async { Ok(initialize_output("remote")) })
+        }));
+        caller.start().await.unwrap();
+        remote.start().await.unwrap();
+
+        let init_peer = Arc::clone(&caller);
+        let init_task =
+            tokio::spawn(async move { init_peer.initialize(Vec::new(), Value::Null).await });
+        tokio::time::timeout(Duration::from_secs(1), write_control.started.notified())
+            .await
+            .expect("initialize result write should start");
+        let wait_peer = Arc::clone(&remote);
+        let waiter = tokio::spawn(async move {
+            wait_peer
+                .wait_remote_initialized(Duration::from_secs(5))
+                .await
+        });
+
+        write_control.release.notify_one();
+        let wait_result = tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("failed result write should wake the initialize waiter")
+            .unwrap();
+        assert!(matches!(wait_result, Err(PeerError::Closed)));
+        assert!(!remote.is_remote_initialized());
+
+        init_task.abort();
+        let _ = init_task.await;
+        caller.stop().await;
+        remote.stop().await;
+    }
+
+    #[test]
+    fn invoke_transport_timeout_outlives_the_longest_host_operation() {
+        assert!(
+            DEFAULT_INVOKE_TIMEOUT
+                > Duration::from_millis(crate::host::HOST_PROCESS_MAX_TIMEOUT_MS)
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_ping_does_not_require_an_invoke_handler() {
+        let (caller_transport, remote_transport) = ChannelTransport::pair();
+        let caller = test_peer(caller_transport, "caller");
+        let remote = test_peer(remote_transport, "remote");
+        caller.start().await.unwrap();
+        remote.start().await.unwrap();
+
+        caller.ping().await.unwrap();
+
+        caller.stop().await;
+        remote.stop().await;
+    }
+
+    #[tokio::test]
+    async fn invoke_errors_preserve_structured_payloads() {
+        let (caller_transport, host_transport) = ChannelTransport::pair();
+        let caller = test_peer(caller_transport, "caller");
+        let host = test_peer(host_transport, "host");
+        let mut expected = ErrorPayload::new(
+            WireErrorCode::ProviderRateLimited,
+            "provider rate limit reached",
+        )
+        .with_hint("retry after the provider backoff")
+        .retryable(true);
+        expected.details = Some(json!({
+            "provider": "test",
+            "retry_after_ms": 250
+        }));
+        let handler_error = expected.clone();
+        host.set_invoke_handler(Arc::new(move |_invoke, _token| {
+            let error = handler_error.clone();
+            Box::pin(async move { Err(error) })
+        }));
+
+        caller.start().await.unwrap();
+        host.start().await.unwrap();
+
+        let error = caller
+            .invoke(
+                "astrcode.llm.main_chat",
+                Value::Null,
+                OutboundInvokeControl::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_structured_payload(error, &expected);
+
+        let error = caller
+            .invoke_stream_collect("astrcode.llm.main_chat", Value::Null)
+            .await
+            .unwrap_err();
+        assert_structured_payload(error, &expected);
+
+        caller.stop().await;
+        host.stop().await;
     }
 
     #[tokio::test]
@@ -1380,7 +1856,10 @@ mod tests {
             Box::pin(async move {
                 token.cancellation_token().cancelled().await;
                 nested_cancelled.notify_one();
-                Err(ErrorPayload::new("cancelled", "nested call cancelled"))
+                Err(ErrorPayload::new(
+                    WireErrorCode::Cancelled,
+                    "nested call cancelled",
+                ))
             })
         }));
 
@@ -1391,15 +1870,12 @@ mod tests {
             let nested_peer = Arc::clone(&nested_peer);
             Box::pin(async move {
                 nested_peer
-                    .invoke(
-                        "test.nested",
-                        Value::Null,
-                        None,
-                        OutboundInvokeControl::default(),
-                    )
+                    .invoke("test.nested", Value::Null, OutboundInvokeControl::default())
                     .await
                     .map(InvokeReply::Value)
-                    .map_err(|error| ErrorPayload::new("nested_failed", error.to_string()))
+                    .map_err(|error| {
+                        ErrorPayload::new(WireErrorCode::NestedFailed, error.to_string())
+                    })
             })
         }));
 
@@ -1412,7 +1888,6 @@ mod tests {
                 .invoke(
                     "test.outer",
                     Value::Null,
-                    None,
                     OutboundInvokeControl {
                         external_cancel: Some(cancellation.clone()),
                         ..Default::default()
@@ -1472,7 +1947,6 @@ mod tests {
                 .invoke(
                     "test.pending",
                     Value::Null,
-                    None,
                     OutboundInvokeControl {
                         tracker: Some(invoke_tracker),
                         ..Default::default()
@@ -1506,7 +1980,6 @@ mod tests {
             .invoke_stream_with_control(
                 "test.stream",
                 Value::Null,
-                None,
                 OutboundInvokeControl {
                     tracker: Some(tracker.clone()),
                     ..Default::default()
@@ -1555,7 +2028,6 @@ mod tests {
             peer.invoke(
                 "test.overloaded",
                 Value::Null,
-                None,
                 OutboundInvokeControl::default()
             )
             .await,
@@ -1580,7 +2052,6 @@ mod tests {
                 .invoke(
                     "test.pending",
                     Value::Null,
-                    None,
                     OutboundInvokeControl::default(),
                 )
                 .await
@@ -1590,7 +2061,7 @@ mod tests {
         };
 
         let mut stream = peer
-            .invoke_stream("test.stream", Value::Null, None)
+            .invoke_stream("test.stream", Value::Null)
             .await
             .unwrap();
         let WireMessage::Invoke(_) = next_wire(&mut outgoing).await else {
@@ -1622,6 +2093,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn malformed_initialize_boundaries_close_with_a_protocol_error() {
+        let cases: [(&str, &[u8]); 3] = [
+            (
+                "initialize",
+                br#"{"type":"initialize","id":"req-1","protocol_version":"2.0","peer":{"name":"worker","role":"plugin"},"unexpected":true}"#,
+            ),
+            (
+                "peer",
+                br#"{"type":"initialize","id":"req-1","protocol_version":"2.0","peer":{"name":"worker","role":"plugin","unexpected":true}}"#,
+            ),
+            (
+                "handler",
+                br#"{"type":"initialize","id":"req-1","protocol_version":"2.0","peer":{"name":"worker","role":"plugin"},"handlers":[{"handler_id":"ext:tool:test","description":"test","unexpected":true}]}"#,
+            ),
+        ];
+
+        for (boundary, payload) in cases {
+            let (transport, incoming, _outgoing) = ChannelTransport::harness();
+            let peer = test_peer(transport, boundary);
+            peer.start().await.unwrap();
+            incoming.send(payload.to_vec()).await.unwrap();
+
+            let error = tokio::time::timeout(
+                Duration::from_secs(1),
+                peer.wait_remote_initialized(Duration::from_secs(30)),
+            )
+            .await
+            .expect("malformed initialize must not wait for the handshake timeout")
+            .unwrap_err();
+            let PeerError::Msg(message) = error else {
+                panic!("{boundary} returned a non-diagnostic close: {error:?}");
+            };
+            assert!(
+                message.contains("s5r protocol error")
+                    && message.contains("unknown field")
+                    && message.contains("unexpected"),
+                "{boundary} returned an unexpected protocol error: {message}"
+            );
+            tokio::time::timeout(Duration::from_secs(1), peer.wait_closed())
+                .await
+                .expect("protocol failure should close the peer runtime");
+            peer.stop().await;
+        }
+    }
+
+    #[tokio::test]
     async fn rejection_backpressure_does_not_block_result_dispatch() {
         let (transport, incoming, mut outgoing) =
             ChannelTransport::harness_with_outgoing_capacity(1);
@@ -1643,7 +2160,6 @@ mod tests {
                 .invoke(
                     "test.outbound",
                     Value::Null,
-                    None,
                     OutboundInvokeControl::default(),
                 )
                 .await
@@ -1770,7 +2286,6 @@ mod tests {
                 .invoke(
                     "test.outbound",
                     Value::Null,
-                    None,
                     OutboundInvokeControl::default(),
                 )
                 .await

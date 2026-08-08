@@ -1,10 +1,11 @@
 //! `astrcode.workspace.read` 路径穿越与符号链接防御。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use astrcode_extension_sdk::extension::ExtensionCapability;
+use astrcode_core::wire::WireErrorCode;
+use astrcode_extension_sdk::{extension::ExtensionCapability, s5r::ErrorPayload};
 use astrcode_extensions::host_router::{HostBackends, HostRouter, InvokeContext};
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn temp_workspace() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
@@ -14,29 +15,31 @@ fn temp_workspace() -> (tempfile::TempDir, PathBuf) {
     (dir, root)
 }
 
-#[test]
-fn workspace_read_rejects_parent_traversal() {
-    let (_dir, root) = temp_workspace();
-    let router = HostRouter::from_backends(HostBackends::default());
-    let ctx = InvokeContext {
-        working_dir: Some(root.to_string_lossy().into_owned()),
-        declared_capabilities: vec![ExtensionCapability::WorkspaceRead],
-        ..Default::default()
-    };
-    let err = router
-        .invoke_sync(
+async fn read_workspace(root: &Path, path: &str) -> Result<Value, ErrorPayload> {
+    HostRouter::from_backends(HostBackends::default())
+        .invoke(
             "astrcode.workspace.read",
-            &json!({ "path": "../secret.txt" }).to_string(),
-            &ctx,
+            json!({ "path": path }),
+            &InvokeContext {
+                working_dir: Some(root.to_string_lossy().into_owned()),
+                declared_capabilities: vec![ExtensionCapability::WorkspaceRead],
+                ..Default::default()
+            },
         )
-        .unwrap_err();
-    assert_eq!(err.code, "permission_denied");
+        .await
 }
 
-#[test]
-fn workspace_read_rejects_symlink_escape() {
+#[tokio::test]
+async fn workspace_read_rejects_parent_traversal() {
     let (_dir, root) = temp_workspace();
-    let outside = _dir.path().join("outside.txt");
+    let err = read_workspace(&root, "../secret.txt").await.unwrap_err();
+    assert_eq!(err.code_enum(), Some(WireErrorCode::PermissionDenied));
+}
+
+#[tokio::test]
+async fn workspace_read_rejects_symlink_escape() {
+    let (dir, root) = temp_workspace();
+    let outside = dir.path().join("outside.txt");
     std::fs::write(&outside, "leak").unwrap();
     let link = root.join("link.txt");
     let linked = {
@@ -55,60 +58,24 @@ fn workspace_read_rejects_symlink_escape() {
         return;
     }
 
-    let router = HostRouter::from_backends(HostBackends::default());
-    let ctx = InvokeContext {
-        working_dir: Some(root.to_string_lossy().into_owned()),
-        declared_capabilities: vec![ExtensionCapability::WorkspaceRead],
-        ..Default::default()
-    };
-    let err = router
-        .invoke_sync(
-            "astrcode.workspace.read",
-            &json!({ "path": "link.txt" }).to_string(),
-            &ctx,
-        )
-        .unwrap_err();
-    assert_eq!(err.code, "permission_denied");
+    let err = read_workspace(&root, "link.txt").await.unwrap_err();
+    assert_eq!(err.code_enum(), Some(WireErrorCode::PermissionDenied));
 }
 
-#[test]
-fn workspace_read_allows_file_under_root() {
+#[tokio::test]
+async fn workspace_read_allows_file_under_root() {
     let (_dir, root) = temp_workspace();
-    let router = HostRouter::from_backends(HostBackends::default());
-    let ctx = InvokeContext {
-        working_dir: Some(root.to_string_lossy().into_owned()),
-        declared_capabilities: vec![ExtensionCapability::WorkspaceRead],
-        ..Default::default()
-    };
-    let out = router
-        .invoke_sync(
-            "astrcode.workspace.read",
-            &json!({ "path": "note.txt" }).to_string(),
-            &ctx,
-        )
-        .unwrap();
+    let out = read_workspace(&root, "note.txt").await.unwrap();
     assert_eq!(out["content"], "inside");
 }
 
-#[test]
-fn workspace_read_rejects_oversize_file() {
+#[tokio::test]
+async fn workspace_read_rejects_oversize_file() {
     let (_dir, root) = temp_workspace();
     let big = root.join("huge.bin");
     let data = vec![b'x'; 1024 * 1024 + 1];
     std::fs::write(&big, &data).unwrap();
 
-    let router = HostRouter::from_backends(HostBackends::default());
-    let ctx = InvokeContext {
-        working_dir: Some(root.to_string_lossy().into_owned()),
-        declared_capabilities: vec![ExtensionCapability::WorkspaceRead],
-        ..Default::default()
-    };
-    let err = router
-        .invoke_sync(
-            "astrcode.workspace.read",
-            &json!({ "path": "huge.bin" }).to_string(),
-            &ctx,
-        )
-        .unwrap_err();
-    assert_eq!(err.code, "file_too_large");
+    let err = read_workspace(&root, "huge.bin").await.unwrap_err();
+    assert_eq!(err.code_enum(), Some(WireErrorCode::FileTooLarge));
 }

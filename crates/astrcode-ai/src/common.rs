@@ -838,7 +838,10 @@ mod tests {
 
     fn test_request(addr: String) -> HttpPostRequest {
         HttpPostRequest {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("build local test client"),
             endpoint: addr,
             headers: vec![],
             body: serde_json::json!({}),

@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::HashMap,
     future::Future,
     panic::AssertUnwindSafe,
     sync::{Arc, Mutex},
@@ -7,9 +7,9 @@ use std::{
 };
 
 use futures_util::FutureExt;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::IntoDeserializer};
 use tokio::{
-    sync::{Notify, watch},
+    sync::{Notify, oneshot, watch},
     task::AbortHandle,
 };
 use tokio_util::sync::CancellationToken;
@@ -64,10 +64,30 @@ pub enum ExtensionCapability {
 ///
 /// 包装用户 `config.toml` 中 `extensions.<id>` 下的扩展配置，
 /// 扩展在 `start()` 或 `on_config_changed()` 时通过 `deserialize::<T>()` 获取。
-#[derive(Clone, Debug, Default)]
-pub struct ExtensionConfig(pub serde_json::Value);
+#[derive(Clone, Debug)]
+pub struct ExtensionConfig {
+    extension_id: Arc<str>,
+    value: serde_json::Value,
+}
+
+impl Default for ExtensionConfig {
+    fn default() -> Self {
+        Self {
+            extension_id: Arc::from("unknown-extension"),
+            value: serde_json::Value::Null,
+        }
+    }
+}
 
 impl ExtensionConfig {
+    #[doc(hidden)]
+    pub fn from_runtime(extension_id: impl Into<String>, value: serde_json::Value) -> Self {
+        Self {
+            extension_id: Arc::from(extension_id.into()),
+            value,
+        }
+    }
+
     /// 将配置反序列化为具体类型。
     ///
     /// # 示例
@@ -75,15 +95,55 @@ impl ExtensionConfig {
     /// ```ignore
     /// #[derive(Deserialize)]
     /// struct MyConfig { timeout: u64, retry: bool }
-    /// let cfg: MyConfig = ctx.config.deserialize()?;
+    /// let cfg: MyConfig = ctx.config().deserialize()?;
     /// ```
-    pub fn deserialize<T: serde::de::DeserializeOwned>(&self) -> Result<T, serde_json::Error> {
-        serde_json::from_value(self.0.clone())
+    pub fn deserialize<T: serde::de::DeserializeOwned>(&self) -> Result<T, ExtensionConfigError> {
+        serde_path_to_error::deserialize(self.value.clone().into_deserializer()).map_err(|error| {
+            ExtensionConfigError {
+                extension_id: self.extension_id.to_string(),
+                path: error.path().to_string(),
+                source: error.into_inner(),
+            }
+        })
     }
 
-    /// 如果配置为空对象 `{}` 则返回 `true`。
+    pub fn deserialize_or_default<T>(&self) -> Result<T, ExtensionConfigError>
+    where
+        T: serde::de::DeserializeOwned + Default,
+    {
+        if self.is_empty() {
+            Ok(T::default())
+        } else {
+            self.deserialize()
+        }
+    }
+
+    /// 如果配置为 `null` 或空对象 `{}` 则返回 `true`。
     pub fn is_empty(&self) -> bool {
-        self.0.as_object().is_some_and(|o| o.is_empty())
+        self.value.is_null()
+            || self
+                .value
+                .as_object()
+                .is_some_and(|object| object.is_empty())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("extension {extension_id} config at {path}: {source}")]
+pub struct ExtensionConfigError {
+    extension_id: String,
+    path: String,
+    #[source]
+    source: serde_json::Error,
+}
+
+impl ExtensionConfigError {
+    pub fn extension_id(&self) -> &str {
+        &self.extension_id
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
     }
 }
 
@@ -123,9 +183,27 @@ enum ExtensionTaskLifecycle {
     Shutdown { was_active: bool },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExtensionTaskKind {
+    Background,
+    MustFinish,
+}
+
 struct ExtensionTask {
     name: String,
+    kind: ExtensionTaskKind,
     abort_handle: AbortHandle,
+}
+
+/// `run_to_completion` 无法启动或取得结果时的结构化错误。
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ExtensionTaskError {
+    #[error("extension {extension_id} is shutting down; task `{task}` was not started")]
+    ShuttingDown { extension_id: String, task: String },
+    #[error("extension task `{task}` panicked for {extension_id}")]
+    Panicked { extension_id: String, task: String },
+    #[error("extension task `{task}` stopped before producing a result for {extension_id}")]
+    RuntimeStopped { extension_id: String, task: String },
 }
 
 struct ExtensionTaskCompletion {
@@ -165,7 +243,8 @@ impl ExtensionTasks {
         }
     }
 
-    pub fn shutdown(&self) -> CancellationToken {
+    /// Returns the shared signal used by extension tasks to observe lifecycle cancellation.
+    pub fn cancellation(&self) -> CancellationToken {
         self.shutdown.clone()
     }
 
@@ -246,13 +325,91 @@ impl ExtensionTasks {
             task_id,
             ExtensionTask {
                 name,
+                kind: ExtensionTaskKind::Background,
                 abort_handle: handle.abort_handle(),
             },
         );
     }
 
+    /// 运行不可取消的持久化临界区，并等待其结果。
+    ///
+    /// 与 [`Self::spawn`] 不同，任务即使在扩展仍处于 suspended 状态也会立即开始。调用方被取消
+    /// 只会放弃等待结果；任务仍由扩展生命周期持有，并在 retirement 时完成后才允许继续。
+    pub async fn run_to_completion<F, T>(
+        &self,
+        name: impl Into<String>,
+        future: F,
+    ) -> Result<T, ExtensionTaskError>
+    where
+        F: Future<Output = T> + Send + 'static,
+        T: Send + 'static,
+    {
+        let name = name.into();
+        let extension_id = self.extension_id.to_string();
+        let result_rx = {
+            let mut state = self.lock_state();
+            if matches!(
+                *self.lifecycle.borrow(),
+                ExtensionTaskLifecycle::Shutdown { .. }
+            ) {
+                return Err(ExtensionTaskError::ShuttingDown {
+                    extension_id,
+                    task: name,
+                });
+            }
+
+            let task_id = state.next_task_id;
+            state.next_task_id = state.next_task_id.wrapping_add(1);
+            let task_state = Arc::clone(&self.state);
+            let completed = Arc::clone(&self.completed);
+            let completion = ExtensionTaskCompletion {
+                task_id,
+                state: task_state,
+                completed,
+            };
+            let (result_tx, result_rx) = oneshot::channel();
+            let panic_extension_id = extension_id.clone();
+            let panic_task_name = name.clone();
+            let handle = tokio::spawn(async move {
+                let result = match AssertUnwindSafe(future).catch_unwind().await {
+                    Ok(value) => Ok(value),
+                    Err(_) => {
+                        tracing::error!(
+                            extension_id = %panic_extension_id,
+                            task = %panic_task_name,
+                            "extension must-finish task panicked"
+                        );
+                        Err(ExtensionTaskError::Panicked {
+                            extension_id: panic_extension_id,
+                            task: panic_task_name,
+                        })
+                    },
+                };
+                drop(completion);
+                let _ = result_tx.send(result);
+            });
+            state.tasks.insert(
+                task_id,
+                ExtensionTask {
+                    name: name.clone(),
+                    kind: ExtensionTaskKind::MustFinish,
+                    abort_handle: handle.abort_handle(),
+                },
+            );
+            result_rx
+        };
+
+        result_rx
+            .await
+            .map_err(|_| ExtensionTaskError::RuntimeStopped {
+                extension_id,
+                task: name,
+            })?
+    }
+
     pub fn cancel(&self) {
-        let _state = self.lock_state();
+        // Keep the state-first lock order used by `spawn` so shutdown and admission linearize.
+        let _state_guard = self.lock_state();
         self.shutdown.cancel();
         self.lifecycle.send_if_modified(|lifecycle| {
             let shutdown = match lifecycle {
@@ -269,24 +426,34 @@ impl ExtensionTasks {
         });
     }
 
-    /// 等待所有托管任务退出，超时后请求中止并短暂等待回收。
+    /// 等待所有托管任务退出，超时后只中止普通后台任务，并短暂等待回收。
     ///
-    /// 仅在任务集合确实清空时返回 `true`；`false` 表示中止后仍有任务未回收。
+    /// must-finish 任务会在超过共享预算后继续等待；普通后台任务只使用同一个绝对截止时间的
+    /// 剩余预算。调用方应先调用 [`Self::cancel`]，使等待期间不能再登记新任务。
+    /// 仅在任务集合确实清空时返回 `true`；`false` 表示中止后仍有后台任务未回收。
     pub async fn wait(&self, timeout: Duration) -> bool {
-        if self
-            .wait_until_empty(tokio::time::Instant::now() + timeout)
+        let deadline = tokio::time::Instant::now() + timeout;
+        if !self
+            .wait_until_no_tasks(Some(ExtensionTaskKind::MustFinish), Some(deadline))
             .await
         {
+            let remaining = self.remaining_tasks(ExtensionTaskKind::MustFinish);
+            for (name, _) in remaining {
+                tracing::warn!(
+                    extension_id = %self.extension_id,
+                    task = %name,
+                    "extension must-finish task overran the shutdown budget; continuing to wait"
+                );
+            }
+            self.wait_until_no_tasks(Some(ExtensionTaskKind::MustFinish), None)
+                .await;
+        }
+
+        if self.wait_until_no_tasks(None, Some(deadline)).await {
             return true;
         }
 
-        let remaining = self
-            .lock_state()
-            .tasks
-            .values()
-            .map(|task| (task.name.clone(), task.abort_handle.clone()))
-            .collect::<Vec<_>>();
-        for (name, abort_handle) in remaining {
+        for (name, abort_handle) in self.remaining_tasks(ExtensionTaskKind::Background) {
             tracing::warn!(
                 extension_id = %self.extension_id,
                 task = %name,
@@ -295,22 +462,48 @@ impl ExtensionTasks {
             abort_handle.abort();
         }
 
-        self.wait_until_empty(tokio::time::Instant::now() + Duration::from_millis(100))
-            .await
+        self.wait_until_no_tasks(
+            None,
+            Some(tokio::time::Instant::now() + Duration::from_millis(100)),
+        )
+        .await
     }
 
-    async fn wait_until_empty(&self, deadline: tokio::time::Instant) -> bool {
+    async fn wait_until_no_tasks(
+        &self,
+        kind: Option<ExtensionTaskKind>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> bool {
         loop {
             let notified = self.completed.notified();
-            if self.lock_state().tasks.is_empty() {
+            if !self.has_tasks(kind) {
                 return true;
             }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return self.lock_state().tasks.is_empty();
+            let Some(deadline) = deadline else {
+                notified.await;
+                continue;
+            };
+            if tokio::time::Instant::now() >= deadline {
+                return !self.has_tasks(kind);
             }
-            let _ = tokio::time::timeout(deadline - now, notified).await;
+            let _ = tokio::time::timeout_at(deadline, notified).await;
         }
+    }
+
+    fn has_tasks(&self, kind: Option<ExtensionTaskKind>) -> bool {
+        self.lock_state()
+            .tasks
+            .values()
+            .any(|task| kind.is_none_or(|kind| task.kind == kind))
+    }
+
+    fn remaining_tasks(&self, kind: ExtensionTaskKind) -> Vec<(String, AbortHandle)> {
+        self.lock_state()
+            .tasks
+            .values()
+            .filter(|task| task.kind == kind)
+            .map(|task| (task.name.clone(), task.abort_handle.clone()))
+            .collect()
     }
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, ExtensionTaskState> {
@@ -318,83 +511,46 @@ impl ExtensionTasks {
     }
 }
 
-// ─── Host Services ──────────────────────────────────────────────────────
-
-/// 宿主出站网络请求的跳转处理方式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NetworkRedirectPolicy {
-    /// 由统一网络服务在每次跳转前重新执行目标地址校验。
-    Follow,
-    /// 返回 3xx 响应，由调用方实现产品层的跳转规则。
-    Manual,
-}
-
-/// 可信内置扩展调用宿主出站网络服务时使用的请求。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutboundNetworkRequest {
-    pub url: String,
-    pub method: String,
-    pub headers: BTreeMap<String, String>,
-    pub body: Vec<u8>,
-    pub max_bytes: usize,
-    pub timeout: Duration,
-    pub redirect_policy: NetworkRedirectPolicy,
-}
-
-/// 宿主出站网络服务的响应。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OutboundNetworkResponse {
-    pub final_url: String,
-    pub status: u16,
-    pub headers: BTreeMap<String, String>,
-    pub body: Vec<u8>,
-}
-
-/// 宿主出站网络服务的稳定错误分类。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OutboundNetworkErrorKind {
-    InvalidRequest,
-    PermissionDenied,
-    Unavailable,
-    RequestFailed,
-    Timeout,
-    ResponseTooLarge,
-    Cancelled,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("{message}")]
-pub struct OutboundNetworkError {
-    pub kind: OutboundNetworkErrorKind,
-    pub message: String,
-}
-
-impl OutboundNetworkError {
-    pub fn new(kind: OutboundNetworkErrorKind, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-        }
-    }
-}
-
-/// 宿主唯一的受限出站网络执行边界。
-#[async_trait::async_trait]
-pub trait OutboundNetworkService: Send + Sync {
-    async fn request(
-        &self,
-        request: OutboundNetworkRequest,
-        cancellation: Option<CancellationToken>,
-    ) -> Result<OutboundNetworkResponse, OutboundNetworkError>;
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    use serde::Deserialize;
     use tokio::sync::oneshot;
 
     use super::*;
+
+    #[test]
+    fn extension_config_defaults_only_when_empty_and_reports_attributed_field_paths() {
+        #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+        struct Config {
+            #[serde(default)]
+            enabled: bool,
+            #[serde(default)]
+            nested: Nested,
+        }
+
+        #[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+        struct Nested {
+            #[serde(default)]
+            count: u64,
+        }
+
+        let empty = ExtensionConfig::from_runtime("config-probe", serde_json::Value::Null);
+        assert!(empty.is_empty());
+        assert_eq!(
+            empty.deserialize_or_default::<Config>().unwrap(),
+            Config::default()
+        );
+
+        let invalid = ExtensionConfig::from_runtime(
+            "config-probe",
+            serde_json::json!({ "nested": { "count": "many" } }),
+        );
+        let error = invalid.deserialize::<Config>().unwrap_err();
+        assert_eq!(error.extension_id(), "config-probe");
+        assert_eq!(error.path(), "nested.count");
+    }
 
     #[tokio::test]
     async fn spawn_after_cancel_is_skipped() {
@@ -432,15 +588,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn wait_completes_when_task_observes_shutdown() {
+    async fn wait_completes_when_task_observes_cancellation() {
         let tasks = ExtensionTasks::new("ext");
-        let shutdown = tasks.shutdown();
+        let cancellation = tasks.cancellation();
         let finished = Arc::new(AtomicBool::new(false));
         let finished_clone = finished.clone();
         tasks.spawn("cooperative", async move {
             loop {
                 tokio::select! {
-                    _ = shutdown.cancelled() => break,
+                    _ = cancellation.cancelled() => break,
                     _ = tokio::time::sleep(Duration::from_millis(5)) => {}
                 }
             }
@@ -452,6 +608,70 @@ mod tests {
             finished.load(Ordering::SeqCst),
             "cooperative task should run to completion before the timeout"
         );
+    }
+
+    #[tokio::test]
+    async fn must_finish_work_outlives_its_caller_and_shutdown_budget() {
+        let tasks = ExtensionTasks::new("ext");
+        let panic_error = tasks
+            .run_to_completion("panic", async { panic!("critical write exploded") })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            panic_error,
+            ExtensionTaskError::Panicked {
+                extension_id: "ext".into(),
+                task: "panic".into(),
+            }
+        );
+
+        tasks.spawn("stalled-background", std::future::pending());
+
+        let finished = Arc::new(AtomicBool::new(false));
+        let (started_tx, started_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let tracked_tasks = tasks.clone();
+        let tracked_finished = Arc::clone(&finished);
+        let caller = tokio::spawn(async move {
+            tracked_tasks
+                .run_to_completion("write-transaction", async move {
+                    let _ = started_tx.send(());
+                    let _ = release_rx.await;
+                    tracked_finished.store(true, Ordering::SeqCst);
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        caller.abort();
+        assert!(caller.await.unwrap_err().is_cancelled());
+
+        tasks.cancel();
+        let late_work_ran = Arc::new(AtomicBool::new(false));
+        let late_work_ran_in_task = Arc::clone(&late_work_ran);
+        assert!(matches!(
+            tasks
+                .run_to_completion("late-write", async move {
+                    late_work_ran_in_task.store(true, Ordering::SeqCst);
+                })
+                .await,
+            Err(ExtensionTaskError::ShuttingDown { .. })
+        ));
+        assert!(!late_work_ran.load(Ordering::SeqCst));
+
+        let draining_tasks = tasks.clone();
+        let drain =
+            tokio::spawn(async move { draining_tasks.wait(Duration::from_millis(20)).await });
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert!(
+            !drain.is_finished(),
+            "must-finish work must not be aborted when the budget expires"
+        );
+        assert!(!finished.load(Ordering::SeqCst));
+
+        release_tx.send(()).unwrap();
+        assert!(drain.await.unwrap());
+        assert!(finished.load(Ordering::SeqCst));
+        assert!(tasks.lock_state().tasks.is_empty());
     }
 
     #[tokio::test]
