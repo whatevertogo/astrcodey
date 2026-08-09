@@ -6,17 +6,17 @@ use serde_json::{Value, json};
 use crate::{
     extension::{ExtensionHttpDispatchRequest, ExtensionHttpResponse},
     host::{
-        HostAcknowledgement, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
-        HostEventEmitOutput, HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput,
-        HostNetworkRequest, HostNetworkResponse, HostOperation, HostProcessOutput,
-        HostProcessRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
-        HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
-        HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
-        HostSessionSummariesOutput, HostSessionTokenUsageOutput, HostSessionTranscript,
-        HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
-        HostWorkspaceGlobRequest, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
-        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
-        HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
+        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitOutput,
+        HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput, HostNetworkRequest,
+        HostNetworkResponse, HostOperation, HostProcessOutput, HostProcessRequest,
+        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
+        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionStateReadOutput,
+        HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
+        HostSessionTokenUsageOutput, HostSessionTranscript, HostWorkspaceEditOutput,
+        HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+        HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListOutput,
+        HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
+        HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
     },
     llm::LlmMessage,
     session::{
@@ -44,7 +44,7 @@ pub trait HostClientTransport: Clone + Send + Sync {
         input: Value,
     ) -> Result<Value, Self::Error>;
 
-    fn client_error(code: &'static str, message: String) -> Self::Error;
+    fn client_error(code: WireErrorCode, message: String) -> Self::Error;
 }
 
 macro_rules! domain_client {
@@ -520,9 +520,17 @@ where
     T: HostClientTransport,
     I: Serialize + ?Sized,
 {
-    invoke::<T, I, HostAcknowledgement>(transport, operation, input)
-        .await
-        .map(|_| ())
+    let output: Value = invoke(transport, operation, input).await?;
+    if output == json!({ "ok": true }) {
+        return Ok(());
+    }
+    Err(T::client_error(
+        WireErrorCode::InvalidResponse,
+        format!(
+            "invalid {} response: expected an `ok: true` acknowledgement",
+            operation.wire_name()
+        ),
+    ))
 }
 
 fn serialize_request<T, I>(operation: HostOperation, input: &I) -> Result<Value, T::Error>
@@ -532,7 +540,7 @@ where
 {
     serde_json::to_value(input).map_err(|error| {
         T::client_error(
-            WireErrorCode::SerializationFailed.as_str(),
+            WireErrorCode::SerializationFailed,
             format!(
                 "failed to serialize {} request: {error}",
                 operation.wire_name()
@@ -548,7 +556,7 @@ where
 {
     serde_json::from_value(output).map_err(|error| {
         T::client_error(
-            WireErrorCode::InvalidResponse.as_str(),
+            WireErrorCode::InvalidResponse,
             format!("invalid {} response: {error}", operation.wire_name()),
         )
     })

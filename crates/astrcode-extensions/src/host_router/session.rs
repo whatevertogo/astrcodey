@@ -1,13 +1,16 @@
 //! Session history, control, and inspection capabilities.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
+    convert::Infallible,
+    future::Future,
     sync::Arc,
 };
 
 use astrcode_core::{
     event::{DurableEventPayload, StoredEvent},
     llm::LlmTokenUsage,
+    session_lineage::{ParentChainWalkError, collect_parent_chain},
     tool::{
         CreateRootSessionRequest as CoreCreateRootSessionRequest, CreateSessionRequest,
         SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionOperations,
@@ -18,11 +21,11 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     host::{
-        HostAcknowledgement, HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest,
-        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
-        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionSummariesOutput,
-        HostSessionSummary, HostSessionTokenUsage, HostSessionTokenUsageOutput,
-        HostSessionTranscript, HostSessionTranscriptMessage,
+        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostOperation,
+        HostOperationGroup, HostSessionCancelOutput, HostSessionDeliveryOutput,
+        HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+        HostSessionSummariesOutput, HostSessionSummary, HostSessionTokenUsage,
+        HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
     },
     s5r::ErrorPayload,
     session::{
@@ -32,14 +35,18 @@ use astrcode_extension_sdk::{
         HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
         SessionLifecycleStateDto, SessionToolSelectionDto,
     },
-    session_inspect::{HostSessionInspectRequest, SessionHistorySnapshotOutput},
+    session_inspect::{
+        HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
+        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
+        SessionInspectSnapshotOutput,
+    },
 };
 use astrcode_storage::{EventReader, SessionReader, StorageError};
 use serde_json::Value;
 
 use super::{
-    InvokeContext, backend_unavailable, capability::SessionCapability, parse_wire_request,
-    serialize_wire_response, session_inspect,
+    InvokeContext, acknowledgement, backend_unavailable, dispatch, dispatch_empty,
+    invalid_group_operation, session_inspect,
 };
 
 const MAX_READ_EVENTS_LIMIT: usize = 500;
@@ -62,48 +69,152 @@ impl SessionGroup {
 
     pub(super) async fn invoke(
         &self,
-        capability: SessionCapability,
+        operation: HostOperation,
         input: Value,
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
         // Session operations vary widely in state size; boxing the selected branch avoids one
         // oversized enum-like future for the entire surface.
-        match capability {
-            SessionCapability::ReadEvents => Box::pin(self.read_events(&input, ctx)).await,
-            SessionCapability::RootCreate => Box::pin(create_root_session(&input, ctx)).await,
-            SessionCapability::RootState => Box::pin(self.root_session_state(&input, ctx)).await,
-            SessionCapability::RootSubmitTurn => Box::pin(self.submit_root_turn(&input, ctx)).await,
-            SessionCapability::Create => Box::pin(create_session(&input, ctx)).await,
-            SessionCapability::ConfigureTools => Box::pin(configure_tools(&input, ctx)).await,
-            SessionCapability::SubmitTurn => Box::pin(submit_turn(&input, ctx)).await,
-            SessionCapability::InterruptAndSubmit => {
-                Box::pin(interrupt_and_submit(&input, ctx)).await
+        match operation {
+            HostOperation::SessionReadEvents => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.read_events(request, ctx)
+                }))
+                .await
             },
-            SessionCapability::Inject => Box::pin(inject_input(&input, ctx)).await,
-            SessionCapability::CancelTurn => Box::pin(cancel_turn(&input, ctx)).await,
-            SessionCapability::ExecutionView => Box::pin(execution_view(&input, ctx)).await,
-            SessionCapability::Dispose => Box::pin(dispose_session(&input, ctx)).await,
-            SessionCapability::Reactivate => Box::pin(reactivate_session(&input, ctx)).await,
-            SessionCapability::State => Box::pin(session_state(&input, ctx)).await,
-            SessionCapability::HistoryList => Box::pin(self.history_list(&input, ctx)).await,
-            SessionCapability::HistoryProviderMessages => {
-                Box::pin(self.history_provider_messages(&input, ctx)).await
+            HostOperation::SessionRootCreate => {
+                Box::pin(dispatch_empty(operation, &input, || {
+                    create_root_session(operation, ctx)
+                }))
+                .await
             },
-            SessionCapability::HistorySnapshot => {
-                Box::pin(self.history_snapshot(&input, ctx)).await
+            HostOperation::SessionRootState => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.root_session_state(request, ctx)
+                }))
+                .await
             },
-            SessionCapability::HistoryTokenUsage => {
-                Box::pin(self.history_token_usage(&input, ctx)).await
+            HostOperation::SessionRootSubmitTurn => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.submit_root_turn(request, ctx)
+                }))
+                .await
             },
-            SessionCapability::HistoryTranscript => {
-                Box::pin(self.history_transcript(&input, ctx)).await
+            HostOperation::SessionControlCreate => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    create_session(request, ctx)
+                }))
+                .await
             },
-            SessionCapability::InspectList => Box::pin(self.inspect_list(&input)).await,
-            SessionCapability::InspectSnapshot => Box::pin(self.inspect_snapshot(&input)).await,
-            SessionCapability::InspectReadModel => Box::pin(self.inspect_read_model(&input)).await,
-            SessionCapability::InspectProviderMessages => {
-                Box::pin(self.inspect_provider_messages(&input)).await
+            HostOperation::SessionControlConfigureTools => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    configure_tools(request, ctx)
+                }))
+                .await
             },
+            HostOperation::SessionControlSubmitTurn => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    submit_turn(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionControlInterruptAndSubmit => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    interrupt_and_submit(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionControlInjectOrStart => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    inject_input(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionControlCancelTurn => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    cancel_turn(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionControlExecutionView => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    execution_view(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionControlDispose => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    dispose_session(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionControlReactivate => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    reactivate_session(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionControlState => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    session_state(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionHistoryList => {
+                Box::pin(dispatch_empty(operation, &input, || self.history_list(ctx))).await
+            },
+            HostOperation::SessionHistoryProviderMessages => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.history_provider_messages(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionHistorySnapshot => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.history_snapshot(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionHistoryTokenUsage => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.history_token_usage(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionHistoryTranscript => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.history_transcript(request, ctx)
+                }))
+                .await
+            },
+            HostOperation::SessionInspectList => {
+                Box::pin(dispatch_empty(operation, &input, || {
+                    self.inspect_list(operation)
+                }))
+                .await
+            },
+            HostOperation::SessionInspectSnapshot => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.inspect_snapshot(operation, request)
+                }))
+                .await
+            },
+            HostOperation::SessionInspectReadModel => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.inspect_read_model(operation, request)
+                }))
+                .await
+            },
+            HostOperation::SessionInspectProviderMessages => {
+                Box::pin(dispatch(operation, &input, |request| {
+                    self.inspect_provider_messages(operation, request)
+                }))
+                .await
+            },
+            _ => Err(invalid_group_operation(
+                operation,
+                HostOperationGroup::Session,
+            )),
         }
     }
 
@@ -115,13 +226,15 @@ impl SessionGroup {
         self.session_reader.is_some()
     }
 
-    async fn read_events(&self, input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
+    async fn read_events(
+        &self,
+        request: HostSessionEventsPageRequest,
+        ctx: &InvokeContext,
+    ) -> Result<HostSessionEventsPageOutput, ErrorPayload> {
         let reader = self
             .event_reader
             .as_ref()
             .ok_or_else(|| backend_unavailable("session_read not configured"))?;
-        let request =
-            parse_wire_request::<HostSessionEventsPageRequest>(input, "session.read_events")?;
         if !(1..=MAX_READ_EVENTS_LIMIT).contains(&request.limit) {
             return Err(ErrorPayload::new(
                 WireErrorCode::InvalidInput,
@@ -147,47 +260,54 @@ impl SessionGroup {
             .into_iter()
             .map(host_session_event)
             .collect::<Result<Vec<_>, _>>()?;
-        serialize_wire_response(
-            HostSessionEventsPageOutput {
-                events,
-                next_cursor,
-                has_more,
-            },
-            "session.read_events",
-        )
+        Ok(HostSessionEventsPageOutput {
+            events,
+            next_cursor,
+            has_more,
+        })
     }
 
-    async fn inspect_list(&self, input: &Value) -> Result<Value, ErrorPayload> {
-        require_empty_object(input, "session.inspect.list")?;
+    async fn inspect_list(
+        &self,
+        operation: HostOperation,
+    ) -> Result<SessionInspectListOutput, ErrorPayload> {
         let reader = self.session_reader()?;
-        session_inspect::list(reader).await
+        session_inspect::list(operation, reader).await
     }
 
-    async fn inspect_snapshot(&self, input: &Value) -> Result<Value, ErrorPayload> {
-        let session_id = inspect_session_id(input, "session.inspect.snapshot")?;
+    async fn inspect_snapshot(
+        &self,
+        operation: HostOperation,
+        request: HostSessionInspectRequest,
+    ) -> Result<SessionInspectSnapshotOutput, ErrorPayload> {
         let reader = self.session_reader()?;
-        session_inspect::snapshot(reader, session_id).await
+        session_inspect::snapshot(operation, reader, SessionId::new(request.session_id)).await
     }
 
-    async fn inspect_read_model(&self, input: &Value) -> Result<Value, ErrorPayload> {
-        let session_id = inspect_session_id(input, "session.inspect.read_model")?;
+    async fn inspect_read_model(
+        &self,
+        operation: HostOperation,
+        request: HostSessionInspectRequest,
+    ) -> Result<SessionInspectReadModelOutput, ErrorPayload> {
         let reader = self.session_reader()?;
-        session_inspect::read_model(reader, session_id).await
+        session_inspect::read_model(operation, reader, SessionId::new(request.session_id)).await
     }
 
-    async fn inspect_provider_messages(&self, input: &Value) -> Result<Value, ErrorPayload> {
-        let session_id = inspect_session_id(input, "session.inspect.provider_messages")?;
+    async fn inspect_provider_messages(
+        &self,
+        operation: HostOperation,
+        request: HostSessionInspectRequest,
+    ) -> Result<SessionInspectProviderMessagesOutput, ErrorPayload> {
         let reader = self.session_reader()?;
-        session_inspect::provider_messages(reader, session_id).await
+        session_inspect::provider_messages(operation, reader, SessionId::new(request.session_id))
+            .await
     }
 
     async fn history_snapshot(
         &self,
-        input: &Value,
+        request: HostSessionTargetRequest,
         ctx: &InvokeContext,
-    ) -> Result<Value, ErrorPayload> {
-        let request =
-            parse_wire_request::<HostSessionTargetRequest>(input, "session.history.snapshot")?;
+    ) -> Result<SessionHistorySnapshotOutput, ErrorPayload> {
         let access = history_access_from_target(request, ctx)?;
         let reader = self.session_reader()?;
         authorize_history_target(ctx.session_ops.as_deref(), &access).await?;
@@ -204,22 +324,17 @@ impl SessionGroup {
             ),
             Err(error) => return Err(storage_error(error)),
         };
-        serialize_wire_response(
-            SessionHistorySnapshotOutput {
-                lifecycle,
-                read_model: session_inspect::read_model_dto((*model).clone()),
-            },
-            "session.history.snapshot",
-        )
+        Ok(SessionHistorySnapshotOutput {
+            lifecycle,
+            read_model: session_inspect::read_model_dto((*model).clone()),
+        })
     }
 
     async fn history_list(
         &self,
-        input: &Value,
         ctx: &InvokeContext,
-    ) -> Result<Value, ErrorPayload> {
+    ) -> Result<HostSessionSummariesOutput, ErrorPayload> {
         let caller_session_id = required_history_context(ctx)?.to_owned();
-        require_empty_object(input, "session.history.list")?;
         let reader = self.session_reader()?;
         let summaries = reader
             .list_session_summaries()
@@ -243,7 +358,8 @@ impl SessionGroup {
         let visible = visible_history_sessions(
             &astrcode_core::types::SessionId::new(caller_session_id),
             &parents,
-        )?;
+        )
+        .await?;
         let mut sessions = Vec::new();
         for summary in summaries {
             if !visible.contains(&summary.session_id) {
@@ -260,19 +376,14 @@ impl SessionGroup {
                 latest_cursor: summary.latest_cursor,
             });
         }
-        serialize_wire_response(
-            HostSessionSummariesOutput { sessions },
-            "session.history.list",
-        )
+        Ok(HostSessionSummariesOutput { sessions })
     }
 
     async fn history_transcript(
         &self,
-        input: &Value,
+        request: HostSessionTargetRequest,
         ctx: &InvokeContext,
-    ) -> Result<Value, ErrorPayload> {
-        let request =
-            parse_wire_request::<HostSessionTargetRequest>(input, "session.history.transcript")?;
+    ) -> Result<HostSessionTranscript, ErrorPayload> {
         let access = history_access_from_target(request, ctx)?;
         let reader = self.session_reader()?;
         authorize_history_target(ctx.session_ops.as_deref(), &access).await?;
@@ -287,24 +398,17 @@ impl SessionGroup {
                 source: message.source.clone(),
             })
             .collect();
-        serialize_wire_response(
-            HostSessionTranscript {
-                session_id: model.identity.session_id.clone(),
-                messages,
-            },
-            "session.history.transcript",
-        )
+        Ok(HostSessionTranscript {
+            session_id: model.identity.session_id.clone(),
+            messages,
+        })
     }
 
     async fn history_provider_messages(
         &self,
-        input: &Value,
+        request: HostSessionTargetRequest,
         ctx: &InvokeContext,
-    ) -> Result<Value, ErrorPayload> {
-        let request = parse_wire_request::<HostSessionTargetRequest>(
-            input,
-            "session.history.provider_messages",
-        )?;
+    ) -> Result<HostSessionProviderMessagesOutput, ErrorPayload> {
         let access = history_access_from_target(request, ctx)?;
         let reader = self.session_reader()?;
         authorize_history_target(ctx.session_ops.as_deref(), &access).await?;
@@ -317,22 +421,17 @@ impl SessionGroup {
                 .map(|message| message.message.clone())
                 .collect(),
         );
-        serialize_wire_response(
-            HostSessionProviderMessagesOutput {
-                session_id: model.identity.session_id.clone(),
-                messages: messages.into_iter().map(Into::into).collect(),
-            },
-            "session.history.provider_messages",
-        )
+        Ok(HostSessionProviderMessagesOutput {
+            session_id: model.identity.session_id.clone(),
+            messages: messages.into_iter().map(Into::into).collect(),
+        })
     }
 
     async fn history_token_usage(
         &self,
-        input: &Value,
+        request: HostSessionTargetRequest,
         ctx: &InvokeContext,
-    ) -> Result<Value, ErrorPayload> {
-        let request =
-            parse_wire_request::<HostSessionTargetRequest>(input, "session.history.token_usage")?;
+    ) -> Result<HostSessionTokenUsageOutput, ErrorPayload> {
         let access = history_access_from_target(request, ctx)?;
         let reader = self
             .event_reader
@@ -360,24 +459,19 @@ impl SessionGroup {
                 model_context_window = Some(window);
             }
         }
-        serialize_wire_response(
-            HostSessionTokenUsageOutput {
-                usage: saw_usage.then_some(HostSessionTokenUsage {
-                    total_tokens,
-                    model_context_window,
-                }),
-            },
-            "session.history.token_usage",
-        )
+        Ok(HostSessionTokenUsageOutput {
+            usage: saw_usage.then_some(HostSessionTokenUsage {
+                total_tokens,
+                model_context_window,
+            }),
+        })
     }
 
     async fn submit_root_turn(
         &self,
-        input: &Value,
+        wire_request: HostRootSubmitTurnRequest,
         ctx: &InvokeContext,
-    ) -> Result<Value, ErrorPayload> {
-        let wire_request =
-            parse_wire_request::<HostRootSubmitTurnRequest>(input, "session.root.submit_turn")?;
+    ) -> Result<HostSubmitTurnOutput, ErrorPayload> {
         reject_wait_for_result_on_peer_thread(wire_request.wait_for_result, ctx)?;
         let reader = self.session_reader()?;
         let ops = required_session_ops(ctx)?;
@@ -389,18 +483,14 @@ impl SessionGroup {
         )
         .wait_for_result(wire_request.wait_for_result);
         let result = ops.submit_turn(request).await.map_err(session_api_error)?;
-        serialize_wire_response(
-            HostSubmitTurnOutput::from(result),
-            "session.root.submit_turn",
-        )
+        Ok(HostSubmitTurnOutput::from(result))
     }
 
     async fn root_session_state(
         &self,
-        input: &Value,
+        request: HostSessionTargetRequest,
         ctx: &InvokeContext,
-    ) -> Result<Value, ErrorPayload> {
-        let request = parse_wire_request::<HostSessionTargetRequest>(input, "session.root.state")?;
+    ) -> Result<HostSessionStateOutput, ErrorPayload> {
         let reader = self.session_reader()?;
         let ops = required_session_ops(ctx)?;
         let extension_id = required_extension_id(ctx)?.to_owned();
@@ -410,10 +500,7 @@ impl SessionGroup {
             .session_state(access.as_access())
             .await
             .map_err(session_api_error)?;
-        serialize_wire_response(
-            HostSessionStateOutput::from_state(state),
-            "session.root.state",
-        )
+        Ok(HostSessionStateOutput::from_state(state))
     }
 
     fn session_reader(&self) -> Result<Arc<dyn SessionReader>, ErrorPayload> {
@@ -424,34 +511,31 @@ impl SessionGroup {
     }
 }
 
-fn visible_history_sessions(
+async fn visible_history_sessions(
     caller_session_id: &astrcode_core::types::SessionId,
     parents: &HashMap<astrcode_core::types::SessionId, Option<astrcode_core::types::SessionId>>,
 ) -> Result<HashSet<astrcode_core::types::SessionId>, ErrorPayload> {
+    // 已确认无环的后缀无需重复遍历；新路径的环检测在 collect_parent_chain 内完成。
     let mut resolved = HashSet::with_capacity(parents.len());
     for session_id in parents.keys() {
         if resolved.contains(session_id) {
             continue;
         }
-        let mut current = session_id.clone();
-        let mut path = Vec::new();
-        let mut visited = HashSet::new();
-        loop {
-            if resolved.contains(&current) {
-                break;
-            }
-            if !visited.insert(current.clone()) {
-                return Err(ErrorPayload::new(
-                    WireErrorCode::ReadFailed,
-                    format!("session parent chain contains a cycle at {current}"),
-                ));
-            }
-            path.push(current.clone());
-            let Some(parent) = parents.get(&current).and_then(Option::as_ref) else {
-                break;
+        let path = collect_parent_chain(session_id, |current: astrcode_core::types::SessionId| {
+            let parent = if resolved.contains(&current) {
+                None
+            } else {
+                parents.get(&current).and_then(Option::as_ref).cloned()
             };
-            current = parent.clone();
-        }
+            async move { Ok::<Option<astrcode_core::types::SessionId>, Infallible>(parent) }
+        })
+        .await
+        .map_err(|error| match error {
+            ParentChainWalkError::Cycle(cycle) => {
+                ErrorPayload::new(WireErrorCode::ReadFailed, cycle.to_string())
+            },
+            ParentChainWalkError::Resolve(error) => match error {},
+        })?;
         resolved.extend(path);
     }
 
@@ -522,14 +606,10 @@ async fn history_read_model(
     target_session_id: &str,
 ) -> Result<Arc<astrcode_session_projection::SessionReadModel>, ErrorPayload> {
     let session_id = astrcode_core::types::SessionId::new(target_session_id);
-    match reader.session_read_model(&session_id).await {
-        Ok(model) => Ok(model),
-        Err(StorageError::NotFound(_)) => reader
-            .recycled_session_read_model(&session_id)
-            .await
-            .map_err(storage_read_error),
-        Err(error) => Err(storage_read_error(error)),
-    }
+    reader
+        .session_read_model_active_or_recycled(&session_id)
+        .await
+        .map_err(storage_read_error)
 }
 
 fn extension_visible_message(message: &astrcode_core::llm::LlmMessage) -> bool {
@@ -590,14 +670,19 @@ fn reject_wait_for_result_on_peer_thread(
     Ok(())
 }
 
-async fn create_root_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    require_empty_object(input, "session.root.create")?;
+async fn create_root_session(
+    operation: HostOperation,
+    ctx: &InvokeContext,
+) -> Result<HostCreateSessionOutput, ErrorPayload> {
     let ops = required_session_ops(ctx)?;
     let request = CoreCreateRootSessionRequest {
         working_dir: ctx.working_dir.clone().ok_or_else(|| {
             ErrorPayload::new(
                 WireErrorCode::ContextUnavailable,
-                "session.root.create requires a workspace-scoped call context",
+                format!(
+                    "{} requires a workspace-scoped call context",
+                    operation.wire_name()
+                ),
             )
         })?,
         source_extension: Some(required_extension_id(ctx)?.to_owned()),
@@ -606,7 +691,7 @@ async fn create_root_session(input: &Value, ctx: &InvokeContext) -> Result<Value
         .create_root_session(request)
         .await
         .map_err(session_api_error)?;
-    serialize_wire_response(HostCreateSessionOutput::from(handle), "session.root.create")
+    Ok(HostCreateSessionOutput::from(handle))
 }
 
 async fn authorize_owned_root(
@@ -615,14 +700,10 @@ async fn authorize_owned_root(
     extension_id: &str,
 ) -> Result<(), ErrorPayload> {
     let session_id = astrcode_core::types::SessionId::new(target_session_id);
-    let model = match reader.session_read_model(&session_id).await {
-        Ok(model) => model,
-        Err(StorageError::NotFound(_)) => reader
-            .recycled_session_read_model(&session_id)
-            .await
-            .map_err(storage_read_error)?,
-        Err(error) => return Err(storage_read_error(error)),
-    };
+    let model = reader
+        .session_read_model_active_or_recycled(&session_id)
+        .await
+        .map_err(storage_read_error)?;
     if model.identity.parent.is_none()
         && model.identity.source_extension.as_deref() == Some(extension_id)
     {
@@ -675,10 +756,11 @@ fn host_session_event(stored: StoredEvent) -> Result<HostSessionEvent, ErrorPayl
     })
 }
 
-async fn create_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
+async fn create_session(
+    wire_request: HostCreateSessionRequest,
+    ctx: &InvokeContext,
+) -> Result<HostCreateSessionOutput, ErrorPayload> {
     let ops = required_session_ops(ctx)?;
-    let wire_request =
-        parse_wire_request::<HostCreateSessionRequest>(input, "session.control.create")?;
     let request = CreateSessionRequest {
         name: wire_request.name,
         system_prompt: wire_request.system_prompt,
@@ -698,17 +780,13 @@ async fn create_session(input: &Value, ctx: &InvokeContext) -> Result<Value, Err
         .create_session(&parent, request)
         .await
         .map_err(session_api_error)?;
-    serialize_wire_response(
-        HostCreateSessionOutput::from(handle),
-        "session.control.create",
-    )
+    Ok(HostCreateSessionOutput::from(handle))
 }
 
-async fn configure_tools(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request = parse_wire_request::<HostConfigureSessionToolsRequest>(
-        input,
-        "session.control.configure_tools",
-    )?;
+async fn configure_tools(
+    request: HostConfigureSessionToolsRequest,
+    ctx: &InvokeContext,
+) -> Result<HostConfigureSessionToolsOutput, ErrorPayload> {
     let ops = required_session_ops(ctx)?;
     let access = session_access_from_id(request.session_id, ctx)?;
     let selection = map_tool_selection(request.selection, "selection")?;
@@ -716,17 +794,15 @@ async fn configure_tools(input: &Value, ctx: &InvokeContext) -> Result<Value, Er
         .configure_tools(access.as_access(), selection)
         .await
         .map_err(session_api_error)?;
-    serialize_wire_response(
-        HostConfigureSessionToolsOutput {
-            selection: effective.into(),
-        },
-        "session.control.configure_tools",
-    )
+    Ok(HostConfigureSessionToolsOutput {
+        selection: effective.into(),
+    })
 }
 
-async fn submit_turn(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let wire_request =
-        parse_wire_request::<HostSubmitTurnRequest>(input, "session.control.submit_turn")?;
+async fn submit_turn(
+    wire_request: HostSubmitTurnRequest,
+    ctx: &InvokeContext,
+) -> Result<HostSubmitTurnOutput, ErrorPayload> {
     reject_wait_for_result_on_peer_thread(wire_request.wait_for_result, ctx)?;
     let ops = required_session_ops(ctx)?;
     let caller = ctx.session_id.clone().ok_or_else(|| {
@@ -742,83 +818,63 @@ async fn submit_turn(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorP
     .recycle_on_complete(wire_request.recycle_on_complete)
     .tool_call_id(ctx.tool_call_id.clone());
     let result = ops.submit_turn(request).await.map_err(session_api_error)?;
-    serialize_wire_response(
-        HostSubmitTurnOutput::from(result),
-        "session.control.submit_turn",
-    )
+    Ok(HostSubmitTurnOutput::from(result))
 }
 
-async fn inject_input(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request =
-        parse_wire_request::<HostSessionInputRequest>(input, "session.control.inject_or_start")?;
-    let ops = required_session_ops(ctx)?;
-    let access = session_access_from_id(request.target_session_id, ctx)?;
-    let content = non_empty_session_content(request.content)?;
-    let outcome = ops
-        .inject_message(access.as_access(), content)
-        .await
-        .map_err(session_api_error)?;
-    serialize_wire_response(
-        session_delivery_outcome(outcome),
-        "session.control.inject_or_start",
-    )
+async fn inject_input(
+    request: HostSessionInputRequest,
+    ctx: &InvokeContext,
+) -> Result<HostSessionDeliveryOutput, ErrorPayload> {
+    deliver_session_input(ctx, request, |ops, access, content| async move {
+        ops.inject_message(access.as_access(), content).await
+    })
+    .await
 }
 
-async fn interrupt_and_submit(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request = parse_wire_request::<HostSessionInputRequest>(
-        input,
-        "session.control.interrupt_and_submit",
-    )?;
-    let ops = required_session_ops(ctx)?;
-    let access = session_access_from_id(request.target_session_id, ctx)?;
-    let content = non_empty_session_content(request.content)?;
-    let outcome = ops
-        .interrupt_and_submit(access.as_access(), content)
-        .await
-        .map_err(session_api_error)?;
-    serialize_wire_response(
-        session_delivery_outcome(outcome),
-        "session.control.interrupt_and_submit",
-    )
+async fn interrupt_and_submit(
+    request: HostSessionInputRequest,
+    ctx: &InvokeContext,
+) -> Result<HostSessionDeliveryOutput, ErrorPayload> {
+    deliver_session_input(ctx, request, |ops, access, content| async move {
+        ops.interrupt_and_submit(access.as_access(), content).await
+    })
+    .await
 }
 
-async fn cancel_turn(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request =
-        parse_wire_request::<HostSessionTargetRequest>(input, "session.control.cancel_turn")?;
-    let ops = required_session_ops(ctx)?;
-    let access = session_access_from_target(request, ctx)?;
-    let cancelled = ops
-        .cancel_turn(access.as_access())
-        .await
-        .map_err(session_api_error)?;
-    serialize_wire_response(
-        HostSessionCancelOutput { cancelled },
-        "session.control.cancel_turn",
+async fn cancel_turn(
+    request: HostSessionTargetRequest,
+    ctx: &InvokeContext,
+) -> Result<HostSessionCancelOutput, ErrorPayload> {
+    session_target_call(
+        ctx,
+        request.target_session_id,
+        |ops, access| async move { ops.cancel_turn(access.as_access()).await },
+        |cancelled| HostSessionCancelOutput { cancelled },
     )
+    .await
 }
 
-async fn execution_view(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request =
-        parse_wire_request::<HostSessionTargetRequest>(input, "session.control.execution_view")?;
-    let ops = required_session_ops(ctx)?;
-    let access = session_access_from_target(request, ctx)?;
-    let view = ops
-        .execution_view(access.as_access())
-        .await
-        .map_err(session_api_error)?;
-    serialize_wire_response(
-        HostSessionExecutionView {
+async fn execution_view(
+    request: HostSessionTargetRequest,
+    ctx: &InvokeContext,
+) -> Result<HostSessionExecutionView, ErrorPayload> {
+    session_target_call(
+        ctx,
+        request.target_session_id,
+        |ops, access| async move { ops.execution_view(access.as_access()).await },
+        |view| HostSessionExecutionView {
             phase: view.phase.into(),
             active_turn_id: view.active_turn_id,
             queued_inputs: view.queued_inputs,
         },
-        "session.control.execution_view",
     )
+    .await
 }
 
-async fn dispose_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request =
-        parse_wire_request::<HostRecycleSessionRequest>(input, "session.control.dispose")?;
+async fn dispose_session(
+    request: HostRecycleSessionRequest,
+    ctx: &InvokeContext,
+) -> Result<Value, ErrorPayload> {
     let ops = required_session_ops(ctx)?;
     let access = SessionAccessPair::new(
         ctx.session_id.clone().ok_or_else(|| {
@@ -832,37 +888,73 @@ async fn dispose_session(input: &Value, ctx: &InvokeContext) -> Result<Value, Er
     ops.recycle_session(access.as_access())
         .await
         .map_err(session_api_error)?;
-    serialize_wire_response(HostAcknowledgement::accepted(), "session.control.dispose")
+    Ok(acknowledgement())
 }
 
-async fn session_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request = parse_wire_request::<HostSessionTargetRequest>(input, "session.control.state")?;
-    let ops = required_session_ops(ctx)?;
-    let access = session_access_from_target(request, ctx)?;
-    let state = ops
-        .session_state(access.as_access())
-        .await
-        .map_err(session_api_error)?;
-    serialize_wire_response(
-        HostSessionStateOutput::from_state(state),
-        "session.control.state",
+async fn session_state(
+    request: HostSessionTargetRequest,
+    ctx: &InvokeContext,
+) -> Result<HostSessionStateOutput, ErrorPayload> {
+    session_target_call(
+        ctx,
+        request.target_session_id,
+        |ops, access| async move { ops.session_state(access.as_access()).await },
+        HostSessionStateOutput::from_state,
     )
+    .await
 }
 
-async fn reactivate_session(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request =
-        parse_wire_request::<HostSessionTargetRequest>(input, "session.control.reactivate")?;
+async fn reactivate_session(
+    request: HostSessionTargetRequest,
+    ctx: &InvokeContext,
+) -> Result<HostSessionReactivateOutput, ErrorPayload> {
     let target_session_id = request.target_session_id.clone();
-    let ops = required_session_ops(ctx)?;
-    let access = session_access_from_target(request, ctx)?;
-    let result = ops
-        .reactivate_session(access.as_access())
+    session_target_call(
+        ctx,
+        request.target_session_id,
+        |ops, access| async move { ops.reactivate_session(access.as_access()).await },
+        move |result| HostSessionReactivateOutput::from_result(target_session_id, result),
+    )
+    .await
+}
+
+/// `session.control` 目标型操作的固定管线：取 session_ops、按 target session 提取访问对、
+/// 调用给定 ops 方法并映射为契约输出。ops 方法与输出映射由调用点给出。
+/// `call` 收 owned `Arc` 与 `SessionAccessPair`：借用形式要求 higher-ranked 生命周期，
+/// 而方法引用/闭包无法对其泛化；拥有所有权的签名让返回的 future 类型与生命周期解耦。
+async fn session_target_call<T, Output, Fut>(
+    ctx: &InvokeContext,
+    target_session_id: String,
+    call: impl FnOnce(Arc<dyn SessionOperations>, SessionAccessPair) -> Fut,
+    map_output: impl FnOnce(T) -> Output,
+) -> Result<Output, ErrorPayload>
+where
+    Fut: Future<Output = Result<T, SessionApiError>>,
+{
+    let ops = required_session_ops_arc(ctx)?;
+    let access = session_access_from_id(target_session_id, ctx)?;
+    let result = call(ops, access).await.map_err(session_api_error)?;
+    Ok(map_output(result))
+}
+
+/// `inject_or_start`/`interrupt_and_submit` 共用的输入投递管线：校验顺序、访问对与
+/// delivery outcome 映射完全一致，仅 ops 方法不同。owned 参数的原因同
+/// `session_target_call`。
+async fn deliver_session_input<Fut>(
+    ctx: &InvokeContext,
+    request: HostSessionInputRequest,
+    deliver: impl FnOnce(Arc<dyn SessionOperations>, SessionAccessPair, String) -> Fut,
+) -> Result<HostSessionDeliveryOutput, ErrorPayload>
+where
+    Fut: Future<Output = Result<SessionDeliveryOutcome, SessionApiError>>,
+{
+    let ops = required_session_ops_arc(ctx)?;
+    let access = session_access_from_id(request.target_session_id, ctx)?;
+    let content = non_empty_session_content(request.content)?;
+    let outcome = deliver(ops, access, content)
         .await
         .map_err(session_api_error)?;
-    serialize_wire_response(
-        HostSessionReactivateOutput::from_result(target_session_id, result),
-        "session.control.reactivate",
-    )
+    Ok(session_delivery_outcome(outcome))
 }
 
 fn session_delivery_outcome(outcome: SessionDeliveryOutcome) -> HostSessionDeliveryOutput {
@@ -885,6 +977,14 @@ fn required_session_ops(ctx: &InvokeContext) -> Result<&dyn SessionOperations, E
         .ok_or_else(|| backend_unavailable("session_ops not available"))
 }
 
+fn required_session_ops_arc(
+    ctx: &InvokeContext,
+) -> Result<Arc<dyn SessionOperations>, ErrorPayload> {
+    ctx.session_ops
+        .clone()
+        .ok_or_else(|| backend_unavailable("session_ops not available"))
+}
+
 fn session_access_from_id(
     target_session_id: String,
     ctx: &InvokeContext,
@@ -899,13 +999,6 @@ fn session_access_from_id(
         ));
     }
     Ok(SessionAccessPair::new(caller, target_session_id))
-}
-
-fn session_access_from_target(
-    request: HostSessionTargetRequest,
-    ctx: &InvokeContext,
-) -> Result<SessionAccessPair, ErrorPayload> {
-    session_access_from_id(request.target_session_id, ctx)
 }
 
 fn history_access_from_target(
@@ -935,22 +1028,6 @@ fn non_empty_session_content(content: String) -> Result<String, ErrorPayload> {
     }
 }
 
-fn inspect_session_id(input: &Value, capability: &str) -> Result<SessionId, ErrorPayload> {
-    let request = parse_wire_request::<HostSessionInspectRequest>(input, capability)?;
-    Ok(SessionId::new(request.session_id))
-}
-
-fn require_empty_object(input: &Value, capability: &str) -> Result<(), ErrorPayload> {
-    if input.as_object().is_some_and(serde_json::Map::is_empty) {
-        Ok(())
-    } else {
-        Err(ErrorPayload::new(
-            WireErrorCode::InvalidInput,
-            format!("{capability} expects an empty object"),
-        ))
-    }
-}
-
 fn map_tool_selection(
     selection: SessionToolSelectionDto,
     field: &str,
@@ -966,21 +1043,12 @@ fn map_tool_selection(
 }
 
 fn validated_tool_names(tools: Vec<String>, field: &str) -> Result<Vec<String>, ErrorPayload> {
-    let tools = tools
-        .into_iter()
-        .map(|tool| {
-            let tool = tool.trim();
-            if tool.is_empty() {
-                Err(ErrorPayload::new(
-                    WireErrorCode::InvalidInput,
-                    format!("{field} must contain non-empty strings"),
-                ))
-            } else {
-                Ok(tool.to_owned())
-            }
-        })
-        .collect::<Result<BTreeSet<_>, _>>()?;
-    Ok(tools.into_iter().collect())
+    astrcode_core::tool::validated_tool_names(tools).map_err(|_| {
+        ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            format!("{field} must contain non-empty strings"),
+        )
+    })
 }
 
 #[cfg(test)]
@@ -1034,8 +1102,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn history_visibility_uses_lineage_and_rejects_cycles() {
+    #[tokio::test]
+    async fn history_visibility_uses_lineage_and_rejects_cycles() {
         let id = astrcode_core::types::SessionId::new;
         let parents = HashMap::from([
             (id("root"), None),
@@ -1045,7 +1113,9 @@ mod tests {
         ]);
 
         assert_eq!(
-            visible_history_sessions(&id("root"), &parents).expect("valid lineage"),
+            visible_history_sessions(&id("root"), &parents)
+                .await
+                .expect("valid lineage"),
             HashSet::from([id("root"), id("child"), id("grandchild")])
         );
 
@@ -1061,6 +1131,7 @@ mod tests {
             ]),
         ] {
             let error = visible_history_sessions(&id("root"), &cycle)
+                .await
                 .expect_err("corrupt lineage must not be exposed");
             assert_eq!(error.code_enum(), Some(WireErrorCode::ReadFailed));
         }

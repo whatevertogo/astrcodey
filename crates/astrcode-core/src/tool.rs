@@ -24,7 +24,7 @@ pub mod read_image;
 pub mod selection;
 
 use access::ResourceAccess;
-pub use selection::SessionToolSelection;
+pub use selection::{EmptyToolNameError, SessionToolSelection, validated_tool_names};
 
 /// 工具来源分类，影响诊断日志和策略优先级，不改变执行路径。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -15,7 +15,8 @@ use crate::{
     extension::{
         CompactEvent, ContinueAfterStopOptions, CustomEventDeclaration, CustomEventSubscription,
         ExtensionCapability, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        HookMode, LifecycleEvent, extension_http_route_patterns_conflict, fixed_hook_mode,
+        HookMode, LifecycleEvent, canonical_registration_name,
+        extension_http_route_patterns_conflict, fixed_hook_mode, has_duplicate_registration_name,
         hook_mode_is_supported,
     },
     runtime::CancelToken,
@@ -184,7 +185,7 @@ impl HandlerRegistry {
     }
 
     pub(crate) fn declare_custom_event(&mut self, mut event: CustomEventDeclaration) {
-        event.event_type = event.event_type.trim().to_owned();
+        canonical_registration_name(&mut event.event_type);
         self.catalog.custom_events.push(event);
     }
 
@@ -197,7 +198,10 @@ impl HandlerRegistry {
         if let Err(reason) = subscription.validate() {
             return Err(ErrorPayload::new(WireErrorCode::InvalidInput, reason));
         }
-        if self.custom_events.contains_key(&subscription.id) {
+        if has_duplicate_registration_name(
+            self.custom_events.keys().map(String::as_str),
+            &subscription.id,
+        ) {
             return Err(ErrorPayload::new(
                 WireErrorCode::DuplicateRegistration,
                 format!("duplicate custom event subscription: {}", subscription.id),
@@ -213,9 +217,9 @@ impl HandlerRegistry {
         mut def: crate::tool::ToolDefinition,
         handler: ToolHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        def.name = def.name.trim().to_owned();
+        canonical_registration_name(&mut def.name);
         let name = def.name.clone();
-        if self.tools.contains_key(&name) {
+        if has_duplicate_registration_name(self.tools.keys().map(String::as_str), &name) {
             return Err(ErrorPayload::new(
                 WireErrorCode::DuplicateRegistration,
                 format!("duplicate tool registration: {name}"),
@@ -360,7 +364,7 @@ impl HandlerRegistry {
         on: String,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        if self.hooks.contains_key(&on) {
+        if has_duplicate_registration_name(self.hooks.keys().map(String::as_str), &on) {
             return Err(ErrorPayload::new(
                 WireErrorCode::DuplicateRegistration,
                 format!("duplicate hook registration: {on}"),
@@ -376,8 +380,9 @@ impl HandlerRegistry {
         description: impl Into<String>,
         handler: CommandHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        let name = name.into().trim().to_owned();
-        if self.commands.contains_key(&name) {
+        let mut name = name.into();
+        canonical_registration_name(&mut name);
+        if has_duplicate_registration_name(self.commands.keys().map(String::as_str), &name) {
             return Err(ErrorPayload::new(
                 WireErrorCode::DuplicateRegistration,
                 format!("duplicate command registration: {name}"),

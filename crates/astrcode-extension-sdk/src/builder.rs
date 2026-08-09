@@ -576,8 +576,9 @@ mod tests {
     use super::*;
     use crate::{
         extension::{
-            ContinueAfterStopContext, ContinueAfterStopResult, ExtensionHttpRequest,
-            RuntimeContinueAfterStopContext, RuntimeHookCallContext,
+            ContinueAfterStopContext, ContinueAfterStopPayload, ContinueAfterStopResult,
+            ExtensionCall, ExtensionHttpRequest, RuntimeContinueAfterStopContext,
+            RuntimeHookCallContext,
         },
         testing::{CommandContextBuilder, HttpContextBuilder, ToolContextBuilder},
         tool::ToolResult,
@@ -807,9 +808,7 @@ mod tests {
             .clone();
         let input = RuntimeContinueAfterStopContext::new(
             RuntimeHookCallContext::new("s1", "/tmp", ModelSelection::simple("test"), None),
-            "done",
-            "stop",
-            0,
+            ContinueAfterStopPayload::new("done", "stop", 0),
         );
         let ctx = ContinueAfterStopContext::from_runtime(call, &input);
         let result = handler.handle(ctx).await.unwrap();

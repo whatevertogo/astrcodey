@@ -16,7 +16,7 @@ accessors and use `astrcode_extension_sdk::testing` builders in tests.
 | Optional normalized workspace | `working_dir()` |
 | Extension-namespaced storage | `paths()` |
 | Scoped typed host clients | `host()` |
-| Declared extension events | `events()` |
+| Declared custom events | `events()` |
 | Generation-owned tasks | `tasks()` |
 | Call/lifecycle cancellation | `cancellation()` |
 
@@ -66,8 +66,8 @@ The runner rejects privileged registrations that omit their capability:
 | Tool discovery | `tool_discovery(handler)` | `ToolDiscoveryContext` | `tool_catalog_snapshot_typed` | Contributes complete `DiscoveredTool` aggregates for one workspace/generation pass. |
 | Command discovery | `command_discovery(handler)` | `CommandDiscoveryContext` | `resolve_commands_for_typed` | Contributes complete command/handler aggregates for one workspace/generation pass. |
 
-Lifecycle registration has one name: `on_lifecycle`. Extension event declaration and emission are a
-separate family (`declare_event` and `ctx.events()`), so lifecycle callbacks cannot be confused with
+Lifecycle registration has one name: `on_lifecycle`. Custom-event declaration and emission are a
+separate family (`declare_custom_event` and `ctx.events()`), so lifecycle callbacks cannot be confused with
 extension-authored events.
 
 ## Decision Hooks

@@ -72,6 +72,20 @@ pub trait SessionReader: Send + Sync {
         ))
     }
 
+    /// Read the active read model, falling back to the recycled record when no active
+    /// session exists for `session_id`. Only `NotFound` triggers the fallback; other
+    /// errors propagate unchanged.
+    async fn session_read_model_active_or_recycled(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<Arc<SessionReadModel>, StorageError> {
+        match self.session_read_model(session_id).await {
+            Ok(model) => Ok(model),
+            Err(StorageError::NotFound(_)) => self.recycled_session_read_model(session_id).await,
+            Err(error) => Err(error),
+        }
+    }
+
     async fn session_has_messages(&self, session_id: &SessionId) -> Result<bool, StorageError> {
         Ok(self.session_read_model(session_id).await?.has_messages())
     }

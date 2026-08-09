@@ -51,15 +51,12 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use astrcode_core::wire::WireErrorCode;
     use async_trait::async_trait;
     use serde_json::Value;
 
     use super::*;
-    use crate::{
-        extension::ExtensionHttpMethod,
-        host::{HostErrorClass, internal},
-        session::SessionToolSelectionDto,
-    };
+    use crate::{extension::ExtensionHttpMethod, host::internal, session::SessionToolSelectionDto};
 
     struct RecordingInvoker {
         operations: Mutex<Vec<HostOperation>>,
@@ -113,26 +110,26 @@ mod tests {
         }
     }
 
-    async fn expect_error_class<T>(
+    async fn expect_error_code<T>(
         future: impl Future<Output = Result<T, HostError>>,
-        expected: HostErrorClass,
+        expected: WireErrorCode,
     ) {
         let result = future.await;
         let Err(error) = result else {
             panic!("mock invoker unexpectedly succeeded");
         };
-        assert_eq!(error.class(), expected);
+        assert_eq!(error.code_enum(), Some(expected));
     }
 
     async fn expect_backend_error<T>(future: impl Future<Output = Result<T, HostError>>) {
-        expect_error_class(future, HostErrorClass::BackendUnavailable).await;
+        expect_error_code(future, WireErrorCode::BackendUnavailable).await;
     }
 
-    fn expect_access_error<T>(result: Result<T, HostError>, expected: HostErrorClass) {
+    fn expect_access_error<T>(result: Result<T, HostError>, expected: WireErrorCode) {
         let Err(error) = result else {
             panic!("host access unexpectedly succeeded");
         };
-        assert_eq!(error.class(), expected);
+        assert_eq!(error.code_enum(), Some(expected));
     }
 
     #[tokio::test]
@@ -405,10 +402,10 @@ mod tests {
                 true,
             ),
         );
-        expect_access_error(host.network(), HostErrorClass::PermissionDenied);
-        expect_error_class(
+        expect_access_error(host.network(), WireErrorCode::PermissionDenied);
+        expect_error_code(
             host.models().main_chat(vec![LlmMessage::user("hello")]),
-            HostErrorClass::PermissionDenied,
+            WireErrorCode::PermissionDenied,
         )
         .await;
 
@@ -421,7 +418,7 @@ mod tests {
                 true,
             ),
         );
-        expect_access_error(host.network(), HostErrorClass::BackendUnavailable);
+        expect_access_error(host.network(), WireErrorCode::BackendUnavailable);
 
         let host = internal::extension_host(
             invoker.clone(),
@@ -441,11 +438,11 @@ mod tests {
                 false,
             ),
         );
-        expect_access_error(host.session_control(), HostErrorClass::ContextUnavailable);
-        expect_access_error(host.session_history(), HostErrorClass::ContextUnavailable);
-        expect_access_error(host.session_state(), HostErrorClass::ContextUnavailable);
-        expect_access_error(host.workspace(), HostErrorClass::ContextUnavailable);
-        expect_access_error(host.process(), HostErrorClass::ContextUnavailable);
+        expect_access_error(host.session_control(), WireErrorCode::ContextUnavailable);
+        expect_access_error(host.session_history(), WireErrorCode::ContextUnavailable);
+        expect_access_error(host.session_state(), WireErrorCode::ContextUnavailable);
+        expect_access_error(host.workspace(), WireErrorCode::ContextUnavailable);
+        expect_access_error(host.process(), WireErrorCode::ContextUnavailable);
 
         let host = internal::extension_host(
             invoker.clone(),
@@ -456,7 +453,7 @@ mod tests {
                 true,
             ),
         );
-        expect_access_error(host.session_control(), HostErrorClass::ContextUnavailable);
+        expect_access_error(host.session_control(), WireErrorCode::ContextUnavailable);
 
         assert!(invoker.operations.lock().unwrap().is_empty());
 
@@ -469,7 +466,7 @@ mod tests {
                 false,
             ),
         );
-        expect_access_error(host.session_control(), HostErrorClass::ContextUnavailable);
+        expect_access_error(host.session_control(), WireErrorCode::ContextUnavailable);
         assert!(invoker.operations.lock().unwrap().is_empty());
 
         let host = internal::extension_host(

@@ -397,7 +397,7 @@ mod tests {
     use astrcode_extension_sdk::{
         extension::{
             CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, LifecycleEvent,
-            PostToolUseResult, PreToolUseResult, ProviderEvent, ProviderResult,
+            PostToolUseResult, PreToolUsePayload, PreToolUseResult, ProviderEvent, ProviderResult,
             RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
             RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
             RuntimeProviderContext, RuntimeUserMessageEnvelopeContext, UserMessageEnvelopeResult,
@@ -786,11 +786,13 @@ mod tests {
         .with_event_tx(shared.turn_event_tx());
         let ctx = RuntimePreToolUseContext::new(
             call,
-            "call-1".into(),
-            "any",
-            serde_json::json!({}),
-            shared.approval_mode,
-            vec![],
+            PreToolUsePayload::new(
+                "call-1".into(),
+                "any",
+                serde_json::json!({}),
+                shared.approval_mode,
+                vec![],
+            ),
         );
         runtime_services
             .turn_runtime_view()

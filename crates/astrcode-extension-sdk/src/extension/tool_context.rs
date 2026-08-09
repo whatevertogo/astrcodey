@@ -1,16 +1,13 @@
 //! Host-attributed context for one extension tool invocation.
 
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
-use astrcode_core::{tool::ToolDefinition, types::SessionId, wire::WireErrorCode};
+use astrcode_core::{tool::ToolDefinition, wire::WireErrorCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use tokio_util::sync::CancellationToken;
 
-use super::{
-    CustomEventEmitter, ExtensionCallContext, ExtensionError, ExtensionPaths, ExtensionTasks,
-};
-use crate::host::{ExtensionHost, HostError};
+use super::{ExtensionCall, ExtensionCallContext, ExtensionError};
+use crate::host::HostError;
 
 /// Immutable input and scoped host capabilities for one extension tool call.
 ///
@@ -48,46 +45,6 @@ impl ToolContext {
             small_model_id: small_model_id.map(Arc::from),
             available_tools: available_tools.into(),
         }
-    }
-
-    pub fn call(&self) -> &ExtensionCallContext {
-        &self.call
-    }
-
-    pub fn extension_id(&self) -> &str {
-        self.call.extension_id()
-    }
-
-    pub fn session_id(&self) -> Option<&SessionId> {
-        self.call.session_id()
-    }
-
-    pub fn turn_id(&self) -> Option<&str> {
-        self.call.turn_id()
-    }
-
-    pub fn working_dir(&self) -> Option<&Path> {
-        self.call.working_dir()
-    }
-
-    pub fn paths(&self) -> &ExtensionPaths {
-        self.call.paths()
-    }
-
-    pub fn host(&self) -> &ExtensionHost {
-        self.call.host()
-    }
-
-    pub fn events(&self) -> &CustomEventEmitter {
-        self.call.events()
-    }
-
-    pub fn tasks(&self) -> &ExtensionTasks {
-        self.call.tasks()
-    }
-
-    pub fn cancellation(&self) -> &CancellationToken {
-        self.call.cancellation()
     }
 
     pub fn tool_name(&self) -> &str {
@@ -141,6 +98,12 @@ impl ToolContext {
 
     pub fn available_tools(&self) -> &[ToolDefinition] {
         &self.available_tools
+    }
+}
+
+impl ExtensionCall for ToolContext {
+    fn call(&self) -> &ExtensionCallContext {
+        &self.call
     }
 }
 

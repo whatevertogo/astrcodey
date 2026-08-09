@@ -7,7 +7,10 @@ use astrcode_core::{
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use super::{ExtensionCallContext, ExtensionError, HookMode, internal::CustomEventSink};
+use super::{
+    ExtensionCall, ExtensionCallContext, ExtensionError, HookMode, canonical_registration_name,
+    internal::CustomEventSink,
+};
 
 // ─── Lifecycle Events ────────────────────────────────────────────────────
 
@@ -37,7 +40,7 @@ pub enum LifecycleEvent {
     /// Step 开始（loop 迭代顶部，prepare_stage 之前）。
     ///
     /// 若本 step 前有 mid-turn inject 刚并入上下文，见
-    /// [`LifecycleContext::mid_turn_user_messages_synced`]。
+    /// [`LifecyclePayload::mid_turn_user_messages_synced`]。
     StepStart,
     /// Step 结束（loop 迭代末尾，tool_calls 执行完毕或 LLM 返回 Complete 后）。
     StepEnd,
@@ -191,10 +194,10 @@ impl CustomEventSubscription {
 
     /// 注册路径共用的规范化：裁剪作者侧可能带入的空白。
     pub(crate) fn normalize(&mut self) {
-        self.id = self.id.trim().to_owned();
-        self.event_type = self.event_type.trim().to_owned();
+        canonical_registration_name(&mut self.id);
+        canonical_registration_name(&mut self.event_type);
         if let CustomEventSourceFilter::Extension { extension_id } = &mut self.source {
-            *extension_id = extension_id.trim().to_owned();
+            canonical_registration_name(extension_id);
         }
     }
 
@@ -273,20 +276,12 @@ impl CustomEventContext {
         }
     }
 
-    pub fn call(&self) -> &ExtensionCallContext {
-        &self.call
-    }
-
     pub fn event_id(&self) -> &EventId {
         &self.event_id
     }
 
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
-    }
-
-    pub fn turn_id(&self) -> Option<&str> {
-        self.call.turn_id()
     }
 
     pub fn seq(&self) -> Option<u64> {
@@ -320,9 +315,11 @@ impl CustomEventContext {
     pub fn payload(&self) -> &serde_json::Value {
         &self.payload
     }
+}
 
-    pub fn events(&self) -> &CustomEventEmitter {
-        self.call.events()
+impl ExtensionCall for CustomEventContext {
+    fn call(&self) -> &ExtensionCallContext {
+        &self.call
     }
 }
 

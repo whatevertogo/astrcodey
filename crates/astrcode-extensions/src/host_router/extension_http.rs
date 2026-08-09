@@ -6,13 +6,14 @@ use astrcode_core::wire::WireErrorCode;
 use astrcode_extension_sdk::{
     self,
     extension::{ExtensionError, ExtensionHttpDispatchRequest, ExtensionHttpRequest},
+    host::{HostOperation, HostOperationGroup},
     s5r::ErrorPayload,
 };
 use serde_json::Value;
 
 use super::{
-    HOST_INVOKE_TIMEOUT, PublicHttpDispatcher, backend_unavailable,
-    capability::ExtensionHttpCapability, parse_wire_request,
+    HOST_INVOKE_TIMEOUT, PublicHttpDispatcher, backend_unavailable, invalid_group_operation,
+    parse_wire_request,
 };
 
 #[derive(Default)]
@@ -31,14 +32,19 @@ impl ExtensionHttpGroup {
 
     pub(super) async fn invoke(
         &self,
-        capability: ExtensionHttpCapability,
+        operation: HostOperation,
         input: Value,
         caller_extension_id: &str,
     ) -> Result<Value, ErrorPayload> {
-        match capability {
-            ExtensionHttpCapability::PublicDispatch => {
-                self.dispatch_public(input, caller_extension_id).await
+        match operation {
+            HostOperation::ExtensionHttpPublic => {
+                self.dispatch_public(operation, input, caller_extension_id)
+                    .await
             },
+            _ => Err(invalid_group_operation(
+                operation,
+                HostOperationGroup::ExtensionHttp,
+            )),
         }
     }
 
@@ -48,6 +54,7 @@ impl ExtensionHttpGroup {
 
     async fn dispatch_public(
         &self,
+        operation: HostOperation,
         input: Value,
         caller_extension_id: &str,
     ) -> Result<Value, ErrorPayload> {
@@ -56,7 +63,7 @@ impl ExtensionHttpGroup {
             .as_ref()
             .ok_or_else(|| backend_unavailable("public HTTP dispatcher is not configured"))?;
         let request: ExtensionHttpDispatchRequest =
-            parse_wire_request(&input, "extension_http.dispatch")?;
+            parse_wire_request(&input, operation.wire_name())?;
         let request = ExtensionHttpRequest::from(request);
         tokio::time::timeout(
             HOST_INVOKE_TIMEOUT,

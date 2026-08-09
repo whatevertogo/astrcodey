@@ -16,8 +16,8 @@ use std::{sync::Arc, time::Duration};
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        Extension, ExtensionCapability, ExtensionConfig, ExtensionError, ExtensionManifest,
-        ExtensionStartContext, Registrar, ToolContext, ToolHandler,
+        Extension, ExtensionCall, ExtensionCapability, ExtensionConfig, ExtensionError,
+        ExtensionManifest, ExtensionStartContext, Registrar, ToolContext, ToolHandler,
     },
     host::{HOST_NETWORK_MAX_TIMEOUT_MS, ModelClient, NetworkClient},
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},

@@ -8,8 +8,8 @@ use astrcode_core::{
 use astrcode_extension_sdk::{
     extension::ExtensionError,
     host::{
-        HOST_SESSION_STATE_VALUE_MAX_BYTES, HostAcknowledgement, HostEventEmitOutput,
-        HostEventEmitRequest, HostSessionStateReadOutput, HostSessionStateReadRequest,
+        HOST_SESSION_STATE_VALUE_MAX_BYTES, HostEventEmitOutput, HostEventEmitRequest,
+        HostOperation, HostOperationGroup, HostSessionStateReadOutput, HostSessionStateReadRequest,
         HostSessionStateWriteRequest,
     },
     s5r::ErrorPayload,
@@ -17,9 +17,8 @@ use astrcode_extension_sdk::{
 use serde_json::Value;
 
 use super::{
-    InvokeContext, backend_unavailable, capability::ContextCapability, emit_for_sink_confirmed,
-    io_error, parse_wire_request, run_blocking_io, run_blocking_io_to_completion,
-    serialize_wire_response,
+    InvokeContext, acknowledgement, backend_unavailable, dispatch, emit_for_sink_confirmed,
+    invalid_group_operation, io_error, run_blocking_io, run_blocking_io_to_completion,
 };
 
 #[derive(Default)]
@@ -28,28 +27,32 @@ pub(super) struct ContextGroup;
 impl ContextGroup {
     pub(super) async fn invoke(
         &self,
-        capability: ContextCapability,
+        operation: HostOperation,
         input: &Value,
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
-        match capability {
-            ContextCapability::StateRead => read_state(input, ctx).await,
-            ContextCapability::StateWrite => write_state(input, ctx).await,
-            ContextCapability::EmitEvent => emit_event(input, ctx).await,
-        }
-    }
-
-    pub(super) fn is_available(&self, capability: ContextCapability, ctx: &InvokeContext) -> bool {
-        match capability {
-            ContextCapability::StateRead => ctx.session_store_dir.is_some(),
-            ContextCapability::StateWrite => ctx.session_store_dir.is_some() && ctx.tasks.is_some(),
-            ContextCapability::EmitEvent => ctx.event_tx.is_some(),
+        match operation {
+            HostOperation::SessionStateRead => {
+                dispatch(operation, input, |request| read_state(request, ctx)).await
+            },
+            HostOperation::SessionStateWrite => {
+                dispatch(operation, input, |request| write_state(request, ctx)).await
+            },
+            HostOperation::EventEmit => {
+                dispatch(operation, input, |request| emit_event(request, ctx)).await
+            },
+            _ => Err(invalid_group_operation(
+                operation,
+                HostOperationGroup::Context,
+            )),
         }
     }
 }
 
-async fn read_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request: HostSessionStateReadRequest = parse_wire_request(input, "session.state.read")?;
+async fn read_state(
+    request: HostSessionStateReadRequest,
+    ctx: &InvokeContext,
+) -> Result<HostSessionStateReadOutput, ErrorPayload> {
     let key = request.key;
     let base = ctx
         .session_store_dir
@@ -79,11 +82,13 @@ async fn read_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPa
         String::from_utf8(bytes).map(Some).map_err(io_error)
     })
     .await?;
-    serialize_wire_response(HostSessionStateReadOutput { content }, "session.state.read")
+    Ok(HostSessionStateReadOutput { content })
 }
 
-async fn write_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request: HostSessionStateWriteRequest = parse_wire_request(input, "session.state.write")?;
+async fn write_state(
+    request: HostSessionStateWriteRequest,
+    ctx: &InvokeContext,
+) -> Result<Value, ErrorPayload> {
     let key = request.key;
     let base = ctx
         .session_store_dir
@@ -99,11 +104,13 @@ async fn write_state(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorP
         std::fs::write(path, content).map_err(io_error)
     })
     .await?;
-    serialize_wire_response(HostAcknowledgement::accepted(), "session.state.write")
+    Ok(acknowledgement())
 }
 
-async fn emit_event(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPayload> {
-    let request: HostEventEmitRequest = parse_wire_request(input, "session.emit_event")?;
+async fn emit_event(
+    request: HostEventEmitRequest,
+    ctx: &InvokeContext,
+) -> Result<HostEventEmitOutput, ErrorPayload> {
     let event_tx = ctx
         .event_tx
         .as_ref()
@@ -119,7 +126,7 @@ async fn emit_event(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPa
     )
     .await
     .map_err(event_emit_error)?;
-    serialize_wire_response(HostEventEmitOutput::from(receipt), "session.emit_event")
+    Ok(HostEventEmitOutput::from(receipt))
 }
 
 fn event_emit_error(error: ExtensionError) -> ErrorPayload {

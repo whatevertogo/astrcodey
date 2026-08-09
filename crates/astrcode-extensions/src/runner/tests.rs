@@ -23,18 +23,20 @@ use astrcode_extension_sdk::{
         CommandCompletionContext, CommandCompletionItem, CommandCompletions, CommandContext,
         CommandHandler, CompactContext, CompactEvent, CompactHandler, CompactResult,
         ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
-        ContinueAfterStopResult, CustomEventContext, CustomEventHandler, CustomEventSubscription,
-        Extension, ExtensionCapability, ExtensionCommandResult, ExtensionConfig, ExtensionError,
-        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
-        ExtensionHttpRoute, ExtensionManifest, ExtensionStartContext, ExtensionTasks, HookMode,
-        HookResult, HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler,
-        PostToolUseContext, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
-        PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
-        ProviderResult, Registrar, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
-        RuntimePreToolUseContext, RuntimeProviderContext, RuntimeUserMessageEnvelopeContext,
-        SlashCommand, StatusItem, StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext,
-        ToolDiscoveryHandler, ToolHandler, ToolHookTarget, UserMessageEnvelopeContext,
-        UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+        ContinueAfterStopPayload, ContinueAfterStopResult, CustomEventContext, CustomEventHandler,
+        CustomEventSubscription, Extension, ExtensionCall, ExtensionCapability,
+        ExtensionCommandResult, ExtensionConfig, ExtensionError, ExtensionHttpHandler,
+        ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
+        ExtensionManifest, ExtensionStartContext, ExtensionTasks, HookMode, HookResult,
+        HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler, PostToolUseContext,
+        PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
+        PreToolUsePayload, PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
+        ProviderPayload, ProviderResult, Registrar, RuntimeContinueAfterStopContext,
+        RuntimeHookCallContext, RuntimePreToolUseContext, RuntimeProviderContext,
+        RuntimeUserMessageEnvelopeContext, SlashCommand, StatusItem, StopReason, ToolContext,
+        ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler, ToolHookTarget,
+        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopePayload,
+        UserMessageEnvelopeResult,
     },
     runtime_ports::{
         RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness,
@@ -931,24 +933,27 @@ fn runtime_hook_call() -> RuntimeHookCallContext {
 fn continue_after_stop_ctx(continuations_this_turn: u32) -> RuntimeContinueAfterStopContext {
     RuntimeContinueAfterStopContext::new(
         runtime_hook_call(),
-        "done",
-        "stop",
-        continuations_this_turn,
+        ContinueAfterStopPayload::new("done", "stop", continuations_this_turn),
     )
 }
 
 fn user_message_envelope_ctx(text: &str) -> RuntimeUserMessageEnvelopeContext {
-    RuntimeUserMessageEnvelopeContext::new(runtime_hook_call(), text, Vec::new())
+    RuntimeUserMessageEnvelopeContext::new(
+        runtime_hook_call(),
+        UserMessageEnvelopePayload::new(text, Vec::new()),
+    )
 }
 
 fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> RuntimePreToolUseContext {
     RuntimePreToolUseContext::new(
         runtime_hook_call(),
-        "call-1".into(),
-        tool_name,
-        tool_input,
-        astrcode_core::permission::ApprovalMode::Manual,
-        Vec::new(),
+        PreToolUsePayload::new(
+            "call-1".into(),
+            tool_name,
+            tool_input,
+            astrcode_core::permission::ApprovalMode::Manual,
+            Vec::new(),
+        ),
     )
 }
 
@@ -2045,7 +2050,7 @@ async fn operation_timeout_bounds_advisory_hooks_and_stop() {
     let result = runner
         .emit_provider(
             ProviderEvent::AfterResponse,
-            RuntimeProviderContext::new(runtime_hook_call(), Vec::new()),
+            RuntimeProviderContext::new(runtime_hook_call(), ProviderPayload::new(Vec::new())),
         )
         .await
         .unwrap();
@@ -2134,7 +2139,7 @@ async fn provider_response_hook_observes_without_blocking() {
     let result = runner
         .emit_provider(
             ProviderEvent::AfterResponse,
-            RuntimeProviderContext::new(runtime_hook_call(), Vec::new()),
+            RuntimeProviderContext::new(runtime_hook_call(), ProviderPayload::new(Vec::new())),
         )
         .await
         .unwrap();

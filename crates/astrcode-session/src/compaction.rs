@@ -19,8 +19,8 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        CompactEvent, CompactResult as TypedCompactResult, ExtensionError, RuntimeCompactContext,
-        RuntimeHookCallContext,
+        CompactEvent, CompactPayload, CompactResult as TypedCompactResult, ExtensionError,
+        RuntimeCompactContext, RuntimeHookCallContext,
     },
     runtime_ports::TurnHooks,
 };
@@ -476,11 +476,13 @@ impl CompactHookContext {
     fn build_context(&self, compaction: Option<&CompactResult>) -> RuntimeCompactContext {
         RuntimeCompactContext::new(
             self.call.clone(),
-            self.trigger,
-            self.message_count,
-            compaction.map(|compaction| compaction.pre_tokens),
-            compaction.map(|compaction| compaction.post_tokens),
-            compaction.map(|compaction| compaction.summary.clone()),
+            CompactPayload::new(
+                self.trigger,
+                self.message_count,
+                compaction.map(|compaction| compaction.pre_tokens),
+                compaction.map(|compaction| compaction.post_tokens),
+                compaction.map(|compaction| compaction.summary.clone()),
+            ),
         )
     }
 }

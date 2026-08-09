@@ -11,7 +11,8 @@ use astrcode_core::{
     user_input::UserInput,
 };
 use astrcode_extension_sdk::extension::{
-    RuntimeHookCallContext, RuntimeUserMessageEnvelopeContext, UserMessageEnvelopeResult,
+    RuntimeHookCallContext, RuntimeUserMessageEnvelopeContext, UserMessageEnvelopePayload,
+    UserMessageEnvelopeResult,
 };
 use astrcode_session_projection::SessionReadModel;
 use parking_lot::Mutex;
@@ -78,7 +79,10 @@ impl Session {
         call: RuntimeHookCallContext,
     ) -> Result<String, TurnError> {
         let original_text = text.clone();
-        let ctx = RuntimeUserMessageEnvelopeContext::new(call, text, attachments.to_vec());
+        let ctx = RuntimeUserMessageEnvelopeContext::new(
+            call,
+            UserMessageEnvelopePayload::new(text, attachments.to_vec()),
+        );
         match runtime_view
             .turn_hooks()
             .emit_user_message_envelope(ctx)

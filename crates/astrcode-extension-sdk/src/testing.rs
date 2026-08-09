@@ -15,14 +15,16 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::ModelSelection,
     extension::{
-        CommandCompletionContext, CommandContext, CompactContext, ContinueAfterStopContext,
-        CustomEventEmitter, ExchangeSummary, ExtensionCallContext, ExtensionCapability,
-        ExtensionHttpRequest, ExtensionHttpRoute, ExtensionPaths, ExtensionTasks, HttpContext,
-        LifecycleContext, PostToolUseContext, PreToolUseContext, PromptBuildContext,
-        ProviderContext, RuntimeCompactContext, RuntimeContinueAfterStopContext,
-        RuntimeHookCallContext, RuntimeLifecycleContext, RuntimePostToolUseContext,
-        RuntimePreToolUseContext, RuntimePromptBuildContext, RuntimeProviderContext,
-        RuntimeUserMessageEnvelopeContext, ToolContext, UserMessageEnvelopeContext,
+        CommandCompletionContext, CommandContext, CompactContext, CompactPayload,
+        ContinueAfterStopContext, ContinueAfterStopPayload, CustomEventEmitter, ExchangeSummary,
+        ExtensionCallContext, ExtensionCapability, ExtensionHttpRequest, ExtensionHttpRoute,
+        ExtensionPaths, ExtensionTasks, HttpContext, LifecycleContext, LifecyclePayload,
+        PostToolUseContext, PostToolUsePayload, PreToolUseContext, PreToolUsePayload,
+        PromptBuildContext, PromptBuildPayload, ProviderContext, ProviderPayload,
+        RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
+        RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
+        RuntimePromptBuildContext, RuntimeProviderContext, RuntimeUserMessageEnvelopeContext,
+        ToolContext, UserMessageEnvelopeContext, UserMessageEnvelopePayload,
     },
     host::{
         ExtensionHost, HostError, HostOperation,
@@ -326,9 +328,7 @@ impl HookContextBuilder {
         let (call, runtime_call) = self.into_parts();
         let input = RuntimeContinueAfterStopContext::new(
             runtime_call,
-            assistant_text,
-            finish_reason,
-            continuations_this_turn,
+            ContinueAfterStopPayload::new(assistant_text, finish_reason, continuations_this_turn),
         );
         ContinueAfterStopContext::from_runtime(call, &input)
     }
@@ -339,7 +339,10 @@ impl HookContextBuilder {
         attachments: Vec<MessageAttachment>,
     ) -> UserMessageEnvelopeContext {
         let (call, runtime_call) = self.into_parts();
-        let input = RuntimeUserMessageEnvelopeContext::new(runtime_call, text, attachments);
+        let input = RuntimeUserMessageEnvelopeContext::new(
+            runtime_call,
+            UserMessageEnvelopePayload::new(text, attachments),
+        );
         UserMessageEnvelopeContext::from_runtime(call, &input)
     }
 
@@ -354,11 +357,13 @@ impl HookContextBuilder {
         let (call, runtime_call) = self.into_parts();
         let input = RuntimePreToolUseContext::new(
             runtime_call,
-            ToolCallId::new(call_id),
-            tool_name,
-            tool_input,
-            approval_mode,
-            available_tools,
+            PreToolUsePayload::new(
+                ToolCallId::new(call_id),
+                tool_name,
+                tool_input,
+                approval_mode,
+                available_tools,
+            ),
         );
         PreToolUseContext::from_runtime(call, &input)
     }
@@ -373,23 +378,20 @@ impl HookContextBuilder {
         let (call, runtime_call) = self.into_parts();
         let input = RuntimePostToolUseContext::new(
             runtime_call,
-            ToolCallId::new(call_id),
-            tool_name,
-            tool_input,
-            tool_result,
+            PostToolUsePayload::new(ToolCallId::new(call_id), tool_name, tool_input, tool_result),
         );
         PostToolUseContext::from_runtime(call, &input)
     }
 
     pub fn build_provider(self, messages: Vec<LlmMessage>) -> ProviderContext {
         let (call, runtime_call) = self.into_parts();
-        let input = RuntimeProviderContext::new(runtime_call, messages);
+        let input = RuntimeProviderContext::new(runtime_call, ProviderPayload::new(messages));
         ProviderContext::from_runtime(call, &input)
     }
 
     pub fn build_prompt(self, tools: Vec<ToolDefinition>) -> PromptBuildContext {
         let (call, runtime_call) = self.into_parts();
-        let input = RuntimePromptBuildContext::new(runtime_call, tools);
+        let input = RuntimePromptBuildContext::new(runtime_call, PromptBuildPayload::new(tools));
         PromptBuildContext::from_runtime(call, &input)
     }
 
@@ -404,11 +406,7 @@ impl HookContextBuilder {
         let (call, runtime_call) = self.into_parts();
         let input = RuntimeCompactContext::new(
             runtime_call,
-            trigger,
-            message_count,
-            pre_tokens,
-            post_tokens,
-            summary,
+            CompactPayload::new(trigger, message_count, pre_tokens, post_tokens, summary),
         );
         CompactContext::from_runtime(call, &input)
     }
@@ -419,8 +417,10 @@ impl HookContextBuilder {
         mid_turn_user_messages_synced: u32,
     ) -> LifecycleContext {
         let (call, runtime_call) = self.into_parts();
-        let input = RuntimeLifecycleContext::new(runtime_call, last_exchange)
-            .for_step_start(mid_turn_user_messages_synced);
+        let input = RuntimeLifecycleContext::new(
+            runtime_call,
+            LifecyclePayload::new(last_exchange).for_step_start(mid_turn_user_messages_synced),
+        );
         LifecycleContext::from_runtime(call, &input)
     }
 
@@ -544,7 +544,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::builder::tool;
+    use crate::{builder::tool, extension::ExtensionCall};
 
     fn scoped_hook_builder() -> HookContextBuilder {
         HookContextBuilder::new("hook-fixture")

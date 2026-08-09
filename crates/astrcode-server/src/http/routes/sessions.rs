@@ -1,7 +1,5 @@
 //! Session 生命周期与对话快照路由。
 
-use std::collections::BTreeSet;
-
 use astrcode_core::{
     tool::{SessionApiError, SessionToolSelection},
     types::SessionId,
@@ -105,18 +103,7 @@ fn map_tool_selection(selection: ToolSelectionDto) -> Result<SessionToolSelectio
 }
 
 fn normalized_tool_names(names: Vec<String>) -> Result<Vec<String>, String> {
-    names
-        .into_iter()
-        .map(|name| {
-            let name = name.trim();
-            if name.is_empty() {
-                Err("tool names must not be empty".to_string())
-            } else {
-                Ok(name.to_owned())
-            }
-        })
-        .collect::<Result<BTreeSet<_>, _>>()
-        .map(|names| names.into_iter().collect())
+    astrcode_core::tool::validated_tool_names(names).map_err(|error| error.to_string())
 }
 
 pub(in crate::http) async fn list_sessions(State(state): State<HttpState>) -> Response {

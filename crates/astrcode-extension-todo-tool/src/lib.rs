@@ -5,9 +5,9 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 use astrcode_extension_sdk::{
     builder::{ExtensionToolDefinition, manifest},
     extension::{
-        Extension, ExtensionCapability, ExtensionError, ExtensionManifest, ExtensionPaths,
-        HookMode, PostToolUseContext, PostToolUseHandler, PostToolUseResult, ProviderContext,
-        ProviderHandler, ProviderResult, Registrar, ToolContext, ToolHandler,
+        Extension, ExtensionCall, ExtensionCapability, ExtensionError, ExtensionManifest,
+        ExtensionPaths, HookMode, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
+        ProviderContext, ProviderHandler, ProviderResult, Registrar, ToolContext, ToolHandler,
     },
     tool::{
         ExecutionMode, ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,

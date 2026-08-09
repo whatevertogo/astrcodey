@@ -384,16 +384,16 @@ mod tests {
     use super::*;
     use crate::{
         config::ModelSelection,
-        extension::{RuntimeHookCallContext, RuntimeLifecycleContext},
+        extension::{LifecyclePayload, RuntimeHookCallContext, RuntimeLifecycleContext},
     };
 
     #[test]
     fn lifecycle_context_for_step_start_carries_sync_count() {
         let ctx = RuntimeLifecycleContext::new(
             RuntimeHookCallContext::new("s1", "/tmp", ModelSelection::simple("m"), None),
-            None,
+            LifecyclePayload::new(None),
         );
-        let step = ctx.for_step_start(2);
+        let step = ctx.map_payload(|payload| payload.for_step_start(2));
         assert_eq!(step.mid_turn_user_messages_synced(), 2);
     }
 

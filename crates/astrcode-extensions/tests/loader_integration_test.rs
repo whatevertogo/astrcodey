@@ -11,7 +11,7 @@ use astrcode_extension_sdk::{
         tool, tool_handler,
     },
     extension::{
-        Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
+        Extension, ExtensionCall, ExtensionCapability, ExtensionCommandResult, ExtensionError,
         ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionManifest,
         ExtensionStartContext, Registrar,
     },

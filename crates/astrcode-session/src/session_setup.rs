@@ -11,7 +11,9 @@ use astrcode_context::prompt_engine::{
 };
 use astrcode_core::tool::{ToolDefinition, ToolPromptMetadata};
 use astrcode_extension_sdk::{
-    extension::{ExtensionError, RuntimeHookCallContext, RuntimePromptBuildContext},
+    extension::{
+        ExtensionError, PromptBuildPayload, RuntimeHookCallContext, RuntimePromptBuildContext,
+    },
     runtime_ports::{
         PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider, ToolCatalogScope,
     },
@@ -78,7 +80,10 @@ pub(crate) struct SystemPromptSnapshotInput<'a> {
 async fn collect_extension_prompt_blocks(
     input: &SystemPromptSnapshotInput<'_>,
 ) -> Result<Vec<ExtensionPromptBlock>, ExtensionError> {
-    let prompt_ctx = RuntimePromptBuildContext::new(input.call.clone(), input.tools.to_vec());
+    let prompt_ctx = RuntimePromptBuildContext::new(
+        input.call.clone(),
+        PromptBuildPayload::new(input.tools.to_vec()),
+    );
     let contributions = input
         .prompt_contributor
         .collect_prompt_contributions(prompt_ctx)

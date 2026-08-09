@@ -143,6 +143,61 @@ impl ExtensionCallContext {
     }
 }
 
+/// Read-only access to the host-attributed call shared by every extension context.
+///
+/// Each context type implements only [`ExtensionCall::call`]; all delegating accessors are
+/// provided methods, so names, return types, and error codes/messages cannot drift between
+/// contexts.
+pub trait ExtensionCall {
+    fn call(&self) -> &ExtensionCallContext;
+
+    fn extension_id(&self) -> &str {
+        self.call().extension_id()
+    }
+
+    fn session_id(&self) -> Option<&SessionId> {
+        self.call().session_id()
+    }
+
+    /// Returns the host-attributed session or a stable context error for session-only handlers.
+    fn require_session_id(&self) -> Result<&SessionId, HostError> {
+        self.call().require_session_id()
+    }
+
+    fn turn_id(&self) -> Option<&str> {
+        self.call().turn_id()
+    }
+
+    fn working_dir(&self) -> Option<&Path> {
+        self.call().working_dir()
+    }
+
+    /// Returns the validated workspace or a stable context error for workspace-only handlers.
+    fn require_working_dir(&self) -> Result<&Path, HostError> {
+        self.call().require_working_dir()
+    }
+
+    fn paths(&self) -> &ExtensionPaths {
+        self.call().paths()
+    }
+
+    fn host(&self) -> &ExtensionHost {
+        self.call().host()
+    }
+
+    fn events(&self) -> &CustomEventEmitter {
+        self.call().events()
+    }
+
+    fn tasks(&self) -> &ExtensionTasks {
+        self.call().tasks()
+    }
+
+    fn cancellation(&self) -> &CancellationToken {
+        self.call().cancellation()
+    }
+}
+
 impl std::fmt::Debug for ExtensionCallContext {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -175,40 +230,18 @@ impl ExtensionStartContext {
         Self { call, config }
     }
 
-    pub fn call(&self) -> &ExtensionCallContext {
-        &self.call
-    }
-
     pub fn config(&self) -> &ExtensionConfig {
         &self.config
-    }
-
-    pub fn extension_id(&self) -> &str {
-        self.call.extension_id()
     }
 
     pub fn startup_working_dir(&self) -> Option<&Path> {
         self.call.working_dir()
     }
+}
 
-    pub fn paths(&self) -> &ExtensionPaths {
-        self.call.paths()
-    }
-
-    pub fn host(&self) -> &ExtensionHost {
-        self.call.host()
-    }
-
-    pub fn events(&self) -> &CustomEventEmitter {
-        self.call.events()
-    }
-
-    pub fn tasks(&self) -> &ExtensionTasks {
-        self.call.tasks()
-    }
-
-    pub fn cancellation(&self) -> &CancellationToken {
-        self.call.cancellation()
+impl ExtensionCall for ExtensionStartContext {
+    fn call(&self) -> &ExtensionCallContext {
+        &self.call
     }
 }
 

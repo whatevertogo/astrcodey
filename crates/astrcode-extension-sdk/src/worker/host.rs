@@ -136,11 +136,8 @@ impl HostClientTransport for WorkerHostTransport {
         call_host_stream(operation.wire_name(), input).await
     }
 
-    fn client_error(code: &'static str, message: String) -> Self::Error {
-        ErrorPayload::new(
-            WireErrorCode::parse(code).unwrap_or(WireErrorCode::InvalidResponse),
-            message,
-        )
+    fn client_error(code: WireErrorCode, message: String) -> Self::Error {
+        ErrorPayload::new(code, message)
     }
 }
 

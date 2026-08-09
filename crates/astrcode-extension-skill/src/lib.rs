@@ -15,9 +15,9 @@ use astrcode_extension_sdk::{
     discovery::DiscoveryCache,
     extension::{
         CommandContext, CommandDiscovery, CommandDiscoveryContext, CommandDiscoveryHandler,
-        CommandHandler, DiscoveredCommand, Extension, ExtensionCapability, ExtensionCommandResult,
-        ExtensionError, ExtensionManifest, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, Registrar, ToolContext, ToolHandler,
+        CommandHandler, DiscoveredCommand, Extension, ExtensionCall, ExtensionCapability,
+        ExtensionCommandResult, ExtensionError, ExtensionManifest, PromptBuildContext,
+        PromptBuildHandler, PromptContributions, Registrar, ToolContext, ToolHandler,
     },
     frontmatter, hostpaths,
     tool::{
@@ -647,7 +647,7 @@ fn truncate_for_index(text: &str, max_chars: usize) -> String {
 mod tests {
     use astrcode_extension_sdk::{
         config::ModelSelection,
-        extension::{RuntimeHookCallContext, RuntimePromptBuildContext},
+        extension::{PromptBuildPayload, RuntimeHookCallContext, RuntimePromptBuildContext},
         testing::{CommandContextBuilder, ToolContextBuilder},
     };
 
@@ -838,7 +838,7 @@ mod tests {
             .clone();
         let input = RuntimePromptBuildContext::new(
             RuntimeHookCallContext::new("test", &workspace, ModelSelection::simple("mock"), None),
-            vec![skill_tool_definition()],
+            PromptBuildPayload::new(vec![skill_tool_definition()]),
         );
         let ctx = PromptBuildContext::from_runtime(call, &input);
         let contributions = handler.handle(ctx).await.expect("prompt build");

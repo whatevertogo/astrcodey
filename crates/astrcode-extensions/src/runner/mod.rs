@@ -1588,6 +1588,64 @@ impl ExtensionView {
         }
     }
 
+    /// 按 [`HookMode`] 分发单个 handler 调用。
+    ///
+    /// Blocking 记录诊断并返回 `Ok(Some(result))`;Advisory 记录诊断但仅告警吞错;
+    /// NonBlocking 派生扩展任务即发即弃。后两者返回 `Ok(None)`。
+    /// `names` 是 `(诊断记录的 hook 名, 派生任务与告警文案的 task 名)`——provider
+    /// 钩子两者不同(诊断按事件区分,任务沿用 "provider")。
+    async fn dispatch_hook_by_mode<H, F, Fut, R>(
+        &self,
+        extension_id: &str,
+        names: (&'static str, &'static str),
+        mode: HookMode,
+        handler: &Arc<H>,
+        invoke: F,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<Option<R>, ExtensionError>
+    where
+        H: ?Sized + Send + Sync + 'static,
+        F: FnOnce(Arc<H>) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = Result<R, ExtensionError>> + Send + 'static,
+        R: Send + 'static,
+    {
+        let (hook_name, task_name) = names;
+        match mode {
+            HookMode::Blocking => self
+                .run_recorded_hook(
+                    extension_id,
+                    hook_name,
+                    cancellation,
+                    invoke(Arc::clone(handler)),
+                )
+                .await
+                .map(Some),
+            HookMode::Advisory => {
+                if let Err(e) = self
+                    .run_recorded_hook(
+                        extension_id,
+                        hook_name,
+                        cancellation,
+                        invoke(Arc::clone(handler)),
+                    )
+                    .await
+                {
+                    tracing::warn!(error = %e, "advisory {} handler failed", task_name);
+                }
+                Ok(None)
+            },
+            HookMode::NonBlocking => {
+                let handler = Arc::clone(handler);
+                self.spawn_extension_task(extension_id, task_name, async move {
+                    if let Err(e) = invoke(handler).await {
+                        tracing::warn!(error = %e, "non-blocking {} handler failed", task_name);
+                    }
+                });
+                Ok(None)
+            },
+        }
+    }
+
     fn make_hook_call_context(
         &self,
         extension_id: &str,
@@ -1637,51 +1695,33 @@ impl ExtensionView {
             }
             let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
             let handler_ctx = PreToolUseContext::from_runtime(call, &ctx);
-            match mode {
-                HookMode::Blocking => {
-                    let result = self
-                        .run_recorded_hook(
-                            extension_id,
-                            "pre_tool_use",
-                            cancellation,
-                            handler.handle(handler_ctx),
-                        )
-                        .await?;
-                    match result {
-                        PreToolUseResult::Block { reason } => {
-                            return Ok(PreToolUseResult::Block { reason });
-                        },
-                        PreToolUseResult::Ask { prompt, rule_key } => {
-                            return Ok(PreToolUseResult::Ask { prompt, rule_key });
-                        },
-                        PreToolUseResult::ModifyInput { tool_input } => {
-                            ctx.replace_tool_input(tool_input);
-                            modified = true;
-                        },
-                        PreToolUseResult::Allow => {},
-                    }
+            let Some(result) = self
+                .dispatch_hook_by_mode(
+                    extension_id,
+                    ("pre_tool_use", "pre_tool_use"),
+                    *mode,
+                    handler,
+                    move |handler: Arc<dyn PreToolUseHandler>| async move {
+                        handler.handle(handler_ctx).await
+                    },
+                    cancellation,
+                )
+                .await?
+            else {
+                continue;
+            };
+            match result {
+                PreToolUseResult::Block { reason } => {
+                    return Ok(PreToolUseResult::Block { reason });
                 },
-                HookMode::Advisory => {
-                    if let Err(e) = self
-                        .run_recorded_hook(
-                            extension_id,
-                            "pre_tool_use",
-                            cancellation,
-                            handler.handle(handler_ctx),
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "advisory pre_tool_use handler failed");
-                    }
+                PreToolUseResult::Ask { prompt, rule_key } => {
+                    return Ok(PreToolUseResult::Ask { prompt, rule_key });
                 },
-                HookMode::NonBlocking => {
-                    let handler = Arc::clone(handler);
-                    self.spawn_extension_task(extension_id, "pre_tool_use", async move {
-                        if let Err(e) = handler.handle(handler_ctx).await {
-                            tracing::warn!(error = %e, "non-blocking pre_tool_use handler failed");
-                        }
-                    });
+                PreToolUseResult::ModifyInput { tool_input } => {
+                    ctx.replace_tool_input(tool_input);
+                    modified = true;
                 },
+                PreToolUseResult::Allow => {},
             }
         }
         if modified {
@@ -1708,48 +1748,30 @@ impl ExtensionView {
             }
             let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
             let handler_ctx = PostToolUseContext::from_runtime(call, &ctx);
-            match mode {
-                HookMode::Blocking => {
-                    let result = self
-                        .run_recorded_hook(
-                            extension_id,
-                            "post_tool_use",
-                            cancellation,
-                            handler.handle(handler_ctx),
-                        )
-                        .await?;
-                    match result {
-                        PostToolUseResult::Block { reason } => {
-                            return Ok(PostToolUseResult::Block { reason });
-                        },
-                        PostToolUseResult::ModifyResult { content } => {
-                            ctx.replace_result_content(content);
-                            modified = true;
-                        },
-                        PostToolUseResult::Allow => {},
-                    }
+            let Some(result) = self
+                .dispatch_hook_by_mode(
+                    extension_id,
+                    ("post_tool_use", "post_tool_use"),
+                    *mode,
+                    handler,
+                    move |handler: Arc<dyn PostToolUseHandler>| async move {
+                        handler.handle(handler_ctx).await
+                    },
+                    cancellation,
+                )
+                .await?
+            else {
+                continue;
+            };
+            match result {
+                PostToolUseResult::Block { reason } => {
+                    return Ok(PostToolUseResult::Block { reason });
                 },
-                HookMode::Advisory => {
-                    if let Err(e) = self
-                        .run_recorded_hook(
-                            extension_id,
-                            "post_tool_use",
-                            cancellation,
-                            handler.handle(handler_ctx),
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "advisory post_tool_use handler failed");
-                    }
+                PostToolUseResult::ModifyResult { content } => {
+                    ctx.replace_result_content(content);
+                    modified = true;
                 },
-                HookMode::NonBlocking => {
-                    let handler = Arc::clone(handler);
-                    self.spawn_extension_task(extension_id, "post_tool_use", async move {
-                        if let Err(e) = handler.handle(handler_ctx).await {
-                            tracing::warn!(error = %e, "non-blocking post_tool_use handler failed");
-                        }
-                    });
-                },
+                PostToolUseResult::Allow => {},
             }
         }
         if modified {
@@ -1779,52 +1801,34 @@ impl ExtensionView {
         for (extension_id, mode, handler) in handlers {
             let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
             let handler_ctx = ProviderContext::from_runtime(call, &ctx);
-            match mode {
-                HookMode::Blocking => {
-                    let result = self
-                        .run_recorded_hook(
-                            extension_id,
-                            provider_hook_name(event),
-                            cancellation,
-                            handler.handle(handler_ctx),
-                        )
-                        .await?;
-                    match result {
-                        ProviderResult::Block { reason } => {
-                            return Ok(ProviderResult::Block { reason });
-                        },
-                        ProviderResult::ReplaceMessages { messages } => {
-                            ctx.replace_messages(messages);
-                            modified = true;
-                        },
-                        ProviderResult::AppendMessages { messages } => {
-                            ctx.append_messages(messages);
-                            modified = true;
-                        },
-                        ProviderResult::Allow => {},
-                    }
+            let Some(result) = self
+                .dispatch_hook_by_mode(
+                    extension_id,
+                    (provider_hook_name(event), "provider"),
+                    *mode,
+                    handler,
+                    move |handler: Arc<dyn ProviderHandler>| async move {
+                        handler.handle(handler_ctx).await
+                    },
+                    cancellation,
+                )
+                .await?
+            else {
+                continue;
+            };
+            match result {
+                ProviderResult::Block { reason } => {
+                    return Ok(ProviderResult::Block { reason });
                 },
-                HookMode::Advisory => {
-                    if let Err(e) = self
-                        .run_recorded_hook(
-                            extension_id,
-                            provider_hook_name(event),
-                            cancellation,
-                            handler.handle(handler_ctx),
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "advisory provider handler failed");
-                    }
+                ProviderResult::ReplaceMessages { messages } => {
+                    ctx.replace_messages(messages);
+                    modified = true;
                 },
-                HookMode::NonBlocking => {
-                    let handler = Arc::clone(handler);
-                    self.spawn_extension_task(extension_id, "provider", async move {
-                        if let Err(e) = handler.handle(handler_ctx).await {
-                            tracing::warn!(error = %e, "non-blocking provider handler failed");
-                        }
-                    });
+                ProviderResult::AppendMessages { messages } => {
+                    ctx.append_messages(messages);
+                    modified = true;
                 },
+                ProviderResult::Allow => {},
             }
         }
         if modified {
@@ -2005,41 +2009,23 @@ impl ExtensionView {
         for (extension_id, mode, handler) in handlers {
             let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
             let handler_ctx = LifecycleContext::from_runtime(call, &ctx);
-            match mode {
-                HookMode::Blocking => {
-                    let result = self
-                        .run_recorded_hook(
-                            extension_id,
-                            "lifecycle",
-                            cancellation,
-                            handler.handle(handler_ctx),
-                        )
-                        .await?;
-                    if let HookResult::Block { reason } = result {
-                        return Err(ExtensionError::Blocked { reason });
-                    }
-                },
-                HookMode::Advisory => {
-                    if let Err(e) = self
-                        .run_recorded_hook(
-                            extension_id,
-                            "lifecycle",
-                            cancellation,
-                            handler.handle(handler_ctx),
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "advisory lifecycle handler failed");
-                    }
-                },
-                HookMode::NonBlocking => {
-                    let handler = Arc::clone(handler);
-                    self.spawn_extension_task(extension_id, "lifecycle", async move {
-                        if let Err(e) = handler.handle(handler_ctx).await {
-                            tracing::warn!(error = %e, "non-blocking lifecycle handler failed");
-                        }
-                    });
-                },
+            let Some(result) = self
+                .dispatch_hook_by_mode(
+                    extension_id,
+                    ("lifecycle", "lifecycle"),
+                    *mode,
+                    handler,
+                    move |handler: Arc<dyn LifecycleHandler>| async move {
+                        handler.handle(handler_ctx).await
+                    },
+                    cancellation,
+                )
+                .await?
+            else {
+                continue;
+            };
+            if let HookResult::Block { reason } = result {
+                return Err(ExtensionError::Blocked { reason });
             }
         }
         Ok(())

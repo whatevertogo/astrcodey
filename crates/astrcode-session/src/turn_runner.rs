@@ -19,8 +19,8 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_extension_sdk::extension::{
-    ContinueAfterStopResult, LifecycleEvent, ProviderEvent, ProviderResult,
-    RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
+    ContinueAfterStopPayload, ContinueAfterStopResult, LifecycleEvent, ProviderEvent,
+    ProviderResult, RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
 };
 use parking_lot::Mutex;
 use tokio::sync::mpsc;
@@ -286,7 +286,9 @@ impl TurnLoop {
         user_text: &str,
     ) -> Result<StepOutcome, TurnError> {
         let mid_turn_synced = self.sync_mid_turn_user_messages(publisher, state).await?;
-        let step_ctx = lifecycle_ctx.clone().for_step_start(mid_turn_synced);
+        let step_ctx = lifecycle_ctx
+            .clone()
+            .map_payload(|payload| payload.for_step_start(mid_turn_synced));
 
         extension_runner
             .emit_lifecycle(LifecycleEvent::StepStart, step_ctx)
@@ -919,9 +921,11 @@ impl TurnLoop {
         let call = self.shared().hook_call_context();
         let ctx = RuntimeContinueAfterStopContext::new(
             call,
-            assistant_text,
-            finish_reason,
-            state.continue_after_stop_count(),
+            ContinueAfterStopPayload::new(
+                assistant_text,
+                finish_reason,
+                state.continue_after_stop_count(),
+            ),
         );
         let decision = extension_runner.emit_continue_after_stop(ctx).await?;
         if decision == ContinueAfterStopResult::ContinueOneStep {

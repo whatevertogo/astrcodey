@@ -4,7 +4,9 @@ use astrcode_core::{
     permission::ApprovalSource,
     tool::{ExecutionMode, ToolDefinition, access::ResourceAccess},
 };
-use astrcode_extension_sdk::extension::{PreToolUseResult, RuntimePreToolUseContext};
+use astrcode_extension_sdk::extension::{
+    PreToolUsePayload, PreToolUseResult, RuntimePreToolUseContext,
+};
 
 use super::{ToolCalls, events::declare_tool_batch};
 use crate::{
@@ -56,11 +58,13 @@ impl ToolCalls {
         let call = self.turn.shared.hook_call_context();
         let pre_ctx = RuntimePreToolUseContext::new(
             call,
-            tc.call_id.clone().into(),
-            tc.name.clone(),
-            args.clone(),
-            self.turn.shared.approval_mode,
-            tools.to_vec(),
+            PreToolUsePayload::new(
+                tc.call_id.clone().into(),
+                tc.name.clone(),
+                args.clone(),
+                self.turn.shared.approval_mode,
+                tools.to_vec(),
+            ),
         );
 
         let pre_hook_result = self.extension_runner.emit_pre_tool_use(pre_ctx).await?;

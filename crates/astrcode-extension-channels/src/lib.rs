@@ -13,8 +13,8 @@ use std::{
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        Extension, ExtensionCapability, ExtensionConfig, ExtensionError, ExtensionManifest,
-        ExtensionStartContext, Registrar, StopReason,
+        Extension, ExtensionCall, ExtensionCapability, ExtensionConfig, ExtensionError,
+        ExtensionManifest, ExtensionStartContext, Registrar, StopReason,
     },
     host::SessionControlClient,
     session::{

@@ -22,7 +22,9 @@ pub(crate) use domain_client::{
     SessionStateClient as TypedSessionStateClient, WorkspaceClient as TypedWorkspaceClient,
 };
 pub use error::*;
-pub use operation::{HOST_OPERATION_SPECS, HostOperation, HostOperationSpec};
+#[doc(hidden)]
+pub use operation::HostBackendRequirement;
+pub use operation::{HOST_OPERATION_SPECS, HostOperation, HostOperationGroup, HostOperationSpec};
 use serde_json::Value;
 
 use crate::extension::ExtensionCapability;
@@ -127,25 +129,16 @@ impl ExtensionHost {
     }
 
     pub fn workspace(&self) -> Result<WorkspaceClient, HostError> {
-        let capabilities = [
-            ExtensionCapability::WorkspaceRead,
-            ExtensionCapability::WorkspaceWrite,
-        ];
-        if !capabilities
-            .iter()
-            .copied()
-            .any(|capability| self.inner.scope.is_granted(capability))
-        {
-            self.inner
-                .scope
-                .preflight_any_capability(&capabilities, "workspace")?;
-        }
+        self.inner.scope.preflight_any_capability(
+            &[
+                ExtensionCapability::WorkspaceRead,
+                ExtensionCapability::WorkspaceWrite,
+            ],
+            "workspace",
+        )?;
         self.inner
             .scope
             .preflight_context(operation::HostContextRequirement::Workspace, "workspace")?;
-        self.inner
-            .scope
-            .preflight_any_capability(&capabilities, "workspace")?;
         Ok(WorkspaceClient::new(self.clone()))
     }
 
@@ -182,7 +175,7 @@ impl ExtensionHost {
         }
         self.inner
             .scope
-            .preflight_context(operation.context_requirement(), operation.wire_name())?;
+            .preflight_context(operation.spec().context, operation.wire_name())?;
         Ok(self.inner.scope.is_operation_available(operation))
     }
 
@@ -212,7 +205,7 @@ impl HostClientTransport for ExtensionHost {
             .await
     }
 
-    fn client_error(code: &'static str, message: String) -> Self::Error {
+    fn client_error(code: WireErrorCode, message: String) -> Self::Error {
         HostError::new(code, message)
     }
 }
@@ -222,7 +215,7 @@ impl HostClientTransport for ExtensionHost {
 pub mod internal {
     use std::{any::Any, collections::BTreeMap, sync::Arc, time::Duration};
 
-    use astrcode_core::wire::WireErrorCode;
+    use astrcode_core::wire::{WireError, WireErrorCode};
     use async_trait::async_trait;
     use serde_json::Value;
     use tokio_util::sync::CancellationToken;
@@ -259,30 +252,31 @@ pub mod internal {
         pub body: Vec<u8>,
     }
 
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub enum OutboundNetworkErrorKind {
-        InvalidRequest,
-        PermissionDenied,
-        Unavailable,
-        RequestFailed,
-        Timeout,
-        ResponseTooLarge,
-        Cancelled,
-    }
-
     #[derive(Debug, thiserror::Error)]
     #[error("{message}")]
     pub struct OutboundNetworkError {
-        pub kind: OutboundNetworkErrorKind,
+        pub code: WireErrorCode,
+        pub retryable: bool,
         pub message: String,
     }
 
     impl OutboundNetworkError {
-        pub fn new(kind: OutboundNetworkErrorKind, message: impl Into<String>) -> Self {
+        pub fn new(code: WireErrorCode, retryable: bool, message: impl Into<String>) -> Self {
             Self {
-                kind,
+                code,
+                retryable,
                 message: message.into(),
             }
+        }
+    }
+
+    impl WireError for OutboundNetworkError {
+        fn wire_code(&self) -> WireErrorCode {
+            self.code
+        }
+
+        fn is_retryable(&self) -> bool {
+            self.retryable
         }
     }
 
@@ -329,7 +323,7 @@ pub mod internal {
             if let Some(required) = operation.required_capability() {
                 self.require_grant(required, operation.wire_name())?;
             }
-            self.preflight_context(operation.context_requirement(), operation.wire_name())?;
+            self.preflight_context(operation.spec().context, operation.wire_name())?;
             if !self.available[operation as usize] {
                 return Err(HostError::new(
                     WireErrorCode::BackendUnavailable,
@@ -355,7 +349,7 @@ pub mod internal {
                 && HOST_OPERATION_SPECS.iter().any(|spec| {
                     spec.required == Some(capability)
                         && self.available[spec.operation as usize]
-                        && self.is_context_available(spec.operation.context_requirement())
+                        && self.is_context_available(spec.context)
                 })
         }
 
@@ -373,7 +367,7 @@ pub mod internal {
             else {
                 return Ok(());
             };
-            self.preflight_context(operation.context_requirement(), target)
+            self.preflight_context(operation.spec().context, target)
         }
 
         pub(super) fn is_operation_available(&self, operation: HostOperation) -> bool {

@@ -1,143 +1,447 @@
 use crate::{extension::ExtensionCapability, s5r::CapabilityDescriptor};
 
-/// Stable identity for every host operation currently accepted by the HostRouter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(usize)]
-pub enum HostOperation {
-    EventEmit,
-    ExtensionHttpPublic,
-    LlmMainChat,
-    LlmSmallChat,
-    NetworkClient,
-    ProcessSpawn,
-    SessionControlCancelTurn,
-    SessionControlConfigureTools,
-    SessionControlCreate,
-    SessionControlDispose,
-    SessionControlExecutionView,
-    SessionControlInjectOrStart,
-    SessionControlInterruptAndSubmit,
-    SessionControlReactivate,
-    SessionControlState,
-    SessionControlSubmitTurn,
-    SessionHistoryList,
-    SessionHistoryProviderMessages,
-    SessionHistorySnapshot,
-    SessionHistoryTokenUsage,
-    SessionHistoryTranscript,
-    SessionInspectList,
-    SessionInspectProviderMessages,
-    SessionInspectReadModel,
-    SessionInspectSnapshot,
-    SessionReadEvents,
-    SessionRootCreate,
-    SessionRootState,
-    SessionRootSubmitTurn,
-    SessionStateRead,
-    SessionStateWrite,
-    WorkspaceEdit,
-    WorkspaceGlob,
-    WorkspaceGrep,
-    WorkspaceList,
-    WorkspaceRead,
-    WorkspaceWrite,
-}
-
-impl HostOperation {
-    pub const COUNT: usize = Self::WorkspaceWrite as usize + 1;
-
-    pub fn from_wire_name(name: &str) -> Option<Self> {
-        HOST_OPERATION_SPECS
-            .binary_search_by(|spec| spec.name.cmp(name))
-            .ok()
-            .map(|index| HOST_OPERATION_SPECS[index].operation)
-    }
-
-    pub const fn spec(self) -> &'static HostOperationSpec {
-        &HOST_OPERATION_SPECS[self as usize]
-    }
-
-    pub const fn wire_name(self) -> &'static str {
-        self.spec().name
-    }
-
-    pub const fn required_capability(self) -> Option<ExtensionCapability> {
-        self.spec().required
-    }
-
-    pub(super) const fn context_requirement(self) -> HostContextRequirement {
-        match self {
-            Self::SessionControlCancelTurn
-            | Self::SessionControlConfigureTools
-            | Self::SessionControlCreate
-            | Self::SessionControlDispose
-            | Self::SessionControlExecutionView
-            | Self::SessionControlInjectOrStart
-            | Self::SessionControlInterruptAndSubmit
-            | Self::SessionControlReactivate
-            | Self::SessionControlState
-            | Self::SessionControlSubmitTurn
-            | Self::SessionHistoryList
-            | Self::SessionHistoryProviderMessages
-            | Self::SessionHistorySnapshot
-            | Self::SessionHistoryTokenUsage
-            | Self::SessionHistoryTranscript
-            | Self::SessionReadEvents
-            | Self::SessionStateRead
-            | Self::SessionStateWrite => HostContextRequirement::Session,
-            Self::ProcessSpawn
-            | Self::SessionRootCreate
-            | Self::WorkspaceEdit
-            | Self::WorkspaceGlob
-            | Self::WorkspaceGrep
-            | Self::WorkspaceList
-            | Self::WorkspaceRead
-            | Self::WorkspaceWrite => HostContextRequirement::Workspace,
-            Self::EventEmit
-            | Self::ExtensionHttpPublic
-            | Self::LlmMainChat
-            | Self::LlmSmallChat
-            | Self::NetworkClient
-            | Self::SessionInspectList
-            | Self::SessionInspectProviderMessages
-            | Self::SessionInspectReadModel
-            | Self::SessionInspectSnapshot
-            | Self::SessionRootState
-            | Self::SessionRootSubmitTurn => HostContextRequirement::None,
+macro_rules! host_operations {
+    (@count $operation:ident) => {
+        ()
+    };
+    (@flag) => {
+        false
+    };
+    (@flag $value:expr) => {
+        $value
+    };
+    (
+        $(
+            $operation:ident {
+                name: $name:literal,
+                required: $required:expr,
+                context: $context:ident,
+                group: $group:ident,
+                backend: $backend:ident,
+                description: $description:literal
+                $(, supports_stream: $stream:expr)?
+                $(, cancelable: $cancelable:expr)?
+                $(,)?
+            }
+        )*
+    ) => {
+        /// Stable identity for every host operation currently accepted by the HostRouter.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        #[repr(usize)]
+        pub enum HostOperation {
+            $($operation),*
         }
-    }
 
-    #[doc(hidden)]
-    pub const fn requires_session_context(self) -> bool {
-        matches!(self.context_requirement(), HostContextRequirement::Session)
-    }
+        impl HostOperation {
+            pub const COUNT: usize = [$(host_operations!(@count $operation)),*].len();
 
-    #[doc(hidden)]
-    pub const fn requires_workspace_context(self) -> bool {
-        matches!(
-            self.context_requirement(),
-            HostContextRequirement::Workspace
-        )
+            pub fn from_wire_name(name: &str) -> Option<Self> {
+                HOST_OPERATION_SPECS
+                    .binary_search_by(|spec| spec.name.cmp(name))
+                    .ok()
+                    .map(|index| HOST_OPERATION_SPECS[index].operation)
+            }
+
+            pub const fn spec(self) -> &'static HostOperationSpec {
+                &HOST_OPERATION_SPECS[self as usize]
+            }
+
+            pub const fn wire_name(self) -> &'static str {
+                self.spec().name
+            }
+
+            pub const fn required_capability(self) -> Option<ExtensionCapability> {
+                self.spec().required
+            }
+
+            #[doc(hidden)]
+            pub const fn requires_session_context(self) -> bool {
+                matches!(self.spec().context, HostContextRequirement::Session)
+            }
+
+            #[doc(hidden)]
+            pub const fn requires_workspace_context(self) -> bool {
+                matches!(self.spec().context, HostContextRequirement::Workspace)
+            }
+        }
+
+        /// The canonical operation catalog, sorted by wire name.
+        pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
+            $(
+                HostOperationSpec {
+                    operation: HostOperation::$operation,
+                    name: $name,
+                    required: $required,
+                    context: HostContextRequirement::$context,
+                    group: HostOperationGroup::$group,
+                    backend: HostBackendRequirement::$backend,
+                    description: $description,
+                    supports_stream: host_operations!(@flag $($stream)?),
+                    cancelable: host_operations!(@flag $($cancelable)?),
+                }
+            ),*
+        ];
+    };
+}
+
+host_operations! {
+    EventEmit {
+        name: "astrcode.event.emit",
+        required: Some(ExtensionCapability::EmitCustomEvents),
+        context: None,
+        group: Context,
+        backend: EventSender,
+        description: "Emit a declared extension event",
+    }
+    ExtensionHttpPublic {
+        name: "astrcode.extension.http.public",
+        required: Some(ExtensionCapability::PublicHttpDispatch),
+        context: None,
+        group: ExtensionHttp,
+        backend: PublicHttpDispatcher,
+        description: "Dispatch a request to another extension's public HTTP route",
+    }
+    LlmMainChat {
+        name: "astrcode.llm.main_chat",
+        required: Some(ExtensionCapability::MainModel),
+        context: None,
+        group: Llm,
+        backend: MainLlm,
+        description: "Chat with the host-configured live main LLM provider",
+        supports_stream: true,
+        cancelable: true,
+    }
+    LlmSmallChat {
+        name: "astrcode.llm.small_chat",
+        required: Some(ExtensionCapability::SmallModel),
+        context: None,
+        group: Llm,
+        backend: SmallLlm,
+        description: "Chat with the host-configured small LLM",
+        supports_stream: true,
+        cancelable: true,
+    }
+    NetworkClient {
+        name: "astrcode.network.client",
+        required: Some(ExtensionCapability::NetworkClient),
+        context: None,
+        group: Network,
+        backend: NetworkService,
+        description: "Send a bounded outbound HTTP or HTTPS request with a binary body",
+        cancelable: true,
+    }
+    ProcessSpawn {
+        name: "astrcode.process.spawn",
+        required: Some(ExtensionCapability::ProcessSpawn),
+        context: Workspace,
+        group: Process,
+        backend: ProcessWorkingDir,
+        description: "Run a bounded subprocess with an optional workspace-relative cwd",
+        cancelable: true,
+    }
+    SessionControlCancelTurn {
+        name: "astrcode.session.control.cancel_turn",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        description: "Cancel the active turn",
+    }
+    SessionControlConfigureTools {
+        name: "astrcode.session.control.configure_tools",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        description: "Configure the tool-name boundary used by subsequent session turns",
+    }
+    SessionControlCreate {
+        name: "astrcode.session.control.create",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        description: "Create a child session",
+    }
+    SessionControlDispose {
+        name: "astrcode.session.control.dispose",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        description: "Recycle a session while preserving its durable data",
+    }
+    SessionControlExecutionView {
+        name: "astrcode.session.control.execution_view",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        description: "Read active turn and queued-input state",
+    }
+    SessionControlInjectOrStart {
+        name: "astrcode.session.control.inject_or_start",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        description: "Inject input into a running turn or start when idle",
+    }
+    SessionControlInterruptAndSubmit {
+        name: "astrcode.session.control.interrupt_and_submit",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        description: "Interrupt the active turn and submit new input",
+    }
+    SessionControlReactivate {
+        name: "astrcode.session.control.reactivate",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        description: "Reactivate a recycled direct child session",
+    }
+    SessionControlState {
+        name: "astrcode.session.control.state",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        description: "Read active or recycled session lifecycle state",
+    }
+    SessionControlSubmitTurn {
+        name: "astrcode.session.control.submit_turn",
+        required: Some(ExtensionCapability::SessionControl),
+        context: Session,
+        group: Session,
+        backend: SessionOperations,
+        description: "Submit a turn to a session",
+    }
+    SessionHistoryList {
+        name: "astrcode.session.history.list",
+        required: Some(ExtensionCapability::SessionHistory),
+        context: Session,
+        group: Session,
+        backend: SessionReader,
+        description: "List stable session summaries visible to session-history consumers",
+    }
+    SessionHistoryProviderMessages {
+        name: "astrcode.session.history.provider_messages",
+        required: Some(ExtensionCapability::SessionHistory),
+        context: Session,
+        group: Session,
+        backend: SessionReader,
+        description: "Read provider-visible messages from a session transcript",
+    }
+    SessionHistorySnapshot {
+        name: "astrcode.session.history.snapshot",
+        required: Some(ExtensionCapability::SessionHistory),
+        context: Session,
+        group: Session,
+        backend: SessionReader,
+        description: "Read an authorized active or recycled session snapshot",
+    }
+    SessionHistoryTokenUsage {
+        name: "astrcode.session.history.token_usage",
+        required: Some(ExtensionCapability::SessionHistory),
+        context: Session,
+        group: Session,
+        backend: SessionEventReader,
+        description: "Read accumulated non-cached token usage for a session",
+    }
+    SessionHistoryTranscript {
+        name: "astrcode.session.history.transcript",
+        required: Some(ExtensionCapability::SessionHistory),
+        context: Session,
+        group: Session,
+        backend: SessionReader,
+        description: "Read the extension-visible transcript for a session",
+    }
+    SessionInspectList {
+        name: "astrcode.session.inspect.list",
+        required: Some(ExtensionCapability::SessionInspect),
+        context: None,
+        group: Session,
+        backend: SessionReader,
+        description: "List all sessions visible to the host (global privileged access)",
+    }
+    SessionInspectProviderMessages {
+        name: "astrcode.session.inspect.provider_messages",
+        required: Some(ExtensionCapability::SessionInspect),
+        context: None,
+        group: Session,
+        backend: SessionReader,
+        description: "Read provider-visible messages for any host-visible session",
+    }
+    SessionInspectReadModel {
+        name: "astrcode.session.inspect.read_model",
+        required: Some(ExtensionCapability::SessionInspect),
+        context: None,
+        group: Session,
+        backend: SessionReader,
+        description: "Read any host-visible projected session model through a stable wire DTO",
+    }
+    SessionInspectSnapshot {
+        name: "astrcode.session.inspect.snapshot",
+        required: Some(ExtensionCapability::SessionInspect),
+        context: None,
+        group: Session,
+        backend: SessionReader,
+        description: "Read any host-visible session snapshot (global privileged access)",
+    }
+    SessionReadEvents {
+        name: "astrcode.session.read_events",
+        required: Some(ExtensionCapability::SessionHistory),
+        context: Session,
+        group: Session,
+        backend: SessionEventReader,
+        description: "Read a cursor page from the durable session event log",
+    }
+    SessionRootCreate {
+        name: "astrcode.session.root.create",
+        required: Some(ExtensionCapability::InputDelivery),
+        context: Workspace,
+        group: Session,
+        backend: SessionOperations,
+        description: "Create a top-level session attributed to the calling extension",
+    }
+    SessionRootState {
+        name: "astrcode.session.root.state",
+        required: Some(ExtensionCapability::InputDelivery),
+        context: None,
+        group: Session,
+        backend: SessionOperationsAndReader,
+        description: "Read an owned top-level session lifecycle state",
+    }
+    SessionRootSubmitTurn {
+        name: "astrcode.session.root.submit_turn",
+        required: Some(ExtensionCapability::InputDelivery),
+        context: None,
+        group: Session,
+        backend: SessionOperationsAndReader,
+        description: "Submit a turn to an owned top-level session",
+    }
+    SessionStateRead {
+        name: "astrcode.session.state.read",
+        required: None,
+        context: Session,
+        group: Context,
+        backend: SessionStoreDir,
+        description: "Read extension-namespaced session state",
+    }
+    SessionStateWrite {
+        name: "astrcode.session.state.write",
+        required: None,
+        context: Session,
+        group: Context,
+        backend: SessionStoreDirAndTasks,
+        description: "Write extension-namespaced session state",
+    }
+    WorkspaceEdit {
+        name: "astrcode.workspace.edit",
+        required: Some(ExtensionCapability::WorkspaceWrite),
+        context: Workspace,
+        group: Workspace,
+        backend: WorkspaceDirAndTasks,
+        description: "Replace an exact text fragment in a non-sensitive workspace file",
+    }
+    WorkspaceGlob {
+        name: "astrcode.workspace.glob",
+        required: Some(ExtensionCapability::WorkspaceRead),
+        context: Workspace,
+        group: Workspace,
+        backend: WorkspaceDir,
+        description: "Match bounded workspace paths by glob",
+    }
+    WorkspaceGrep {
+        name: "astrcode.workspace.grep",
+        required: Some(ExtensionCapability::WorkspaceRead),
+        context: Workspace,
+        group: Workspace,
+        backend: WorkspaceDir,
+        description: "Regex-search bounded UTF-8 workspace files",
+    }
+    WorkspaceList {
+        name: "astrcode.workspace.list",
+        required: Some(ExtensionCapability::WorkspaceRead),
+        context: Workspace,
+        group: Workspace,
+        backend: WorkspaceDir,
+        description: "List a bounded workspace directory tree",
+    }
+    WorkspaceRead {
+        name: "astrcode.workspace.read",
+        required: Some(ExtensionCapability::WorkspaceRead),
+        context: Workspace,
+        group: Workspace,
+        backend: WorkspaceDir,
+        description: "Read a bounded UTF-8 workspace file",
+    }
+    WorkspaceWrite {
+        name: "astrcode.workspace.write",
+        required: Some(ExtensionCapability::WorkspaceWrite),
+        context: Workspace,
+        group: Workspace,
+        backend: WorkspaceDirAndTasks,
+        description: "Create or replace a non-sensitive file under the working directory",
     }
 }
 
+#[doc(hidden)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum HostContextRequirement {
+pub enum HostContextRequirement {
     None,
     Session,
     Workspace,
 }
 
-/// Metadata shared by authoring clients, authorization, and the S5R capability catalog.
+/// Dispatch group the HostRouter routes an operation to; one arm per backend state machine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HostOperationGroup {
+    Llm,
+    Session,
+    Context,
+    Workspace,
+    Process,
+    Network,
+    ExtensionHttp,
+}
+
+/// Concrete backend dependency an operation needs before it can run.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostBackendRequirement {
+    MainLlm,
+    SmallLlm,
+    SessionEventReader,
+    SessionReader,
+    SessionOperations,
+    SessionOperationsAndReader,
+    SessionStoreDir,
+    SessionStoreDirAndTasks,
+    EventSender,
+    WorkspaceDir,
+    WorkspaceDirAndTasks,
+    ProcessWorkingDir,
+    NetworkService,
+    PublicHttpDispatcher,
+}
+
+/// Metadata shared by authoring clients, authorization, host dispatch, and the S5R capability
+/// catalog.
 #[derive(Debug, Clone, Copy)]
 pub struct HostOperationSpec {
     pub operation: HostOperation,
     pub name: &'static str,
     pub required: Option<ExtensionCapability>,
+    pub context: HostContextRequirement,
+    pub group: HostOperationGroup,
+    pub backend: HostBackendRequirement,
     pub description: &'static str,
     pub supports_stream: bool,
     pub cancelable: bool,
-    pub catalog: bool,
 }
 
 impl HostOperationSpec {
@@ -150,258 +454,6 @@ impl HostOperationSpec {
         }
     }
 }
-
-macro_rules! spec {
-    ($operation:ident, $name:literal, $required:expr, $description:literal $(,)?) => {
-        HostOperationSpec {
-            operation: HostOperation::$operation,
-            name: $name,
-            required: $required,
-            description: $description,
-            supports_stream: false,
-            cancelable: false,
-            catalog: true,
-        }
-    };
-}
-
-/// The canonical operation catalog, sorted by wire name.
-pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
-    spec!(
-        EventEmit,
-        "astrcode.event.emit",
-        Some(ExtensionCapability::EmitCustomEvents),
-        "Emit a declared extension event",
-    ),
-    spec!(
-        ExtensionHttpPublic,
-        "astrcode.extension.http.public",
-        Some(ExtensionCapability::PublicHttpDispatch),
-        "Dispatch a request to another extension's public HTTP route",
-    ),
-    HostOperationSpec {
-        operation: HostOperation::LlmMainChat,
-        name: "astrcode.llm.main_chat",
-        required: Some(ExtensionCapability::MainModel),
-        description: "Chat with the host-configured live main LLM provider",
-        supports_stream: true,
-        cancelable: true,
-        catalog: true,
-    },
-    HostOperationSpec {
-        operation: HostOperation::LlmSmallChat,
-        name: "astrcode.llm.small_chat",
-        required: Some(ExtensionCapability::SmallModel),
-        description: "Chat with the host-configured small LLM",
-        supports_stream: true,
-        cancelable: true,
-        catalog: true,
-    },
-    HostOperationSpec {
-        operation: HostOperation::NetworkClient,
-        name: "astrcode.network.client",
-        required: Some(ExtensionCapability::NetworkClient),
-        description: "Send a bounded outbound HTTP or HTTPS request with a binary body",
-        supports_stream: false,
-        cancelable: true,
-        catalog: true,
-    },
-    HostOperationSpec {
-        operation: HostOperation::ProcessSpawn,
-        name: "astrcode.process.spawn",
-        required: Some(ExtensionCapability::ProcessSpawn),
-        description: "Run a bounded subprocess with an optional workspace-relative cwd",
-        supports_stream: false,
-        cancelable: true,
-        catalog: true,
-    },
-    spec!(
-        SessionControlCancelTurn,
-        "astrcode.session.control.cancel_turn",
-        Some(ExtensionCapability::SessionControl),
-        "Cancel the active turn",
-    ),
-    spec!(
-        SessionControlConfigureTools,
-        "astrcode.session.control.configure_tools",
-        Some(ExtensionCapability::SessionControl),
-        "Configure the tool-name boundary used by subsequent session turns",
-    ),
-    spec!(
-        SessionControlCreate,
-        "astrcode.session.control.create",
-        Some(ExtensionCapability::SessionControl),
-        "Create a child session",
-    ),
-    spec!(
-        SessionControlDispose,
-        "astrcode.session.control.dispose",
-        Some(ExtensionCapability::SessionControl),
-        "Recycle a session while preserving its durable data",
-    ),
-    spec!(
-        SessionControlExecutionView,
-        "astrcode.session.control.execution_view",
-        Some(ExtensionCapability::SessionControl),
-        "Read active turn and queued-input state",
-    ),
-    spec!(
-        SessionControlInjectOrStart,
-        "astrcode.session.control.inject_or_start",
-        Some(ExtensionCapability::SessionControl),
-        "Inject input into a running turn or start when idle",
-    ),
-    spec!(
-        SessionControlInterruptAndSubmit,
-        "astrcode.session.control.interrupt_and_submit",
-        Some(ExtensionCapability::SessionControl),
-        "Interrupt the active turn and submit new input",
-    ),
-    spec!(
-        SessionControlReactivate,
-        "astrcode.session.control.reactivate",
-        Some(ExtensionCapability::SessionControl),
-        "Reactivate a recycled direct child session",
-    ),
-    spec!(
-        SessionControlState,
-        "astrcode.session.control.state",
-        Some(ExtensionCapability::SessionControl),
-        "Read active or recycled session lifecycle state",
-    ),
-    spec!(
-        SessionControlSubmitTurn,
-        "astrcode.session.control.submit_turn",
-        Some(ExtensionCapability::SessionControl),
-        "Submit a turn to a session",
-    ),
-    spec!(
-        SessionHistoryList,
-        "astrcode.session.history.list",
-        Some(ExtensionCapability::SessionHistory),
-        "List stable session summaries visible to session-history consumers",
-    ),
-    spec!(
-        SessionHistoryProviderMessages,
-        "astrcode.session.history.provider_messages",
-        Some(ExtensionCapability::SessionHistory),
-        "Read provider-visible messages from a session transcript",
-    ),
-    spec!(
-        SessionHistorySnapshot,
-        "astrcode.session.history.snapshot",
-        Some(ExtensionCapability::SessionHistory),
-        "Read an authorized active or recycled session snapshot",
-    ),
-    spec!(
-        SessionHistoryTokenUsage,
-        "astrcode.session.history.token_usage",
-        Some(ExtensionCapability::SessionHistory),
-        "Read accumulated non-cached token usage for a session",
-    ),
-    spec!(
-        SessionHistoryTranscript,
-        "astrcode.session.history.transcript",
-        Some(ExtensionCapability::SessionHistory),
-        "Read the extension-visible transcript for a session",
-    ),
-    spec!(
-        SessionInspectList,
-        "astrcode.session.inspect.list",
-        Some(ExtensionCapability::SessionInspect),
-        "List all sessions visible to the host (global privileged access)",
-    ),
-    spec!(
-        SessionInspectProviderMessages,
-        "astrcode.session.inspect.provider_messages",
-        Some(ExtensionCapability::SessionInspect),
-        "Read provider-visible messages for any host-visible session",
-    ),
-    spec!(
-        SessionInspectReadModel,
-        "astrcode.session.inspect.read_model",
-        Some(ExtensionCapability::SessionInspect),
-        "Read any host-visible projected session model through a stable wire DTO",
-    ),
-    spec!(
-        SessionInspectSnapshot,
-        "astrcode.session.inspect.snapshot",
-        Some(ExtensionCapability::SessionInspect),
-        "Read any host-visible session snapshot (global privileged access)",
-    ),
-    spec!(
-        SessionReadEvents,
-        "astrcode.session.read_events",
-        Some(ExtensionCapability::SessionHistory),
-        "Read a cursor page from the durable session event log",
-    ),
-    spec!(
-        SessionRootCreate,
-        "astrcode.session.root.create",
-        Some(ExtensionCapability::InputDelivery),
-        "Create a top-level session attributed to the calling extension",
-    ),
-    spec!(
-        SessionRootState,
-        "astrcode.session.root.state",
-        Some(ExtensionCapability::InputDelivery),
-        "Read an owned top-level session lifecycle state",
-    ),
-    spec!(
-        SessionRootSubmitTurn,
-        "astrcode.session.root.submit_turn",
-        Some(ExtensionCapability::InputDelivery),
-        "Submit a turn to an owned top-level session",
-    ),
-    spec!(
-        SessionStateRead,
-        "astrcode.session.state.read",
-        None,
-        "Read extension-namespaced session state",
-    ),
-    spec!(
-        SessionStateWrite,
-        "astrcode.session.state.write",
-        None,
-        "Write extension-namespaced session state",
-    ),
-    spec!(
-        WorkspaceEdit,
-        "astrcode.workspace.edit",
-        Some(ExtensionCapability::WorkspaceWrite),
-        "Replace an exact text fragment in a non-sensitive workspace file",
-    ),
-    spec!(
-        WorkspaceGlob,
-        "astrcode.workspace.glob",
-        Some(ExtensionCapability::WorkspaceRead),
-        "Match bounded workspace paths by glob",
-    ),
-    spec!(
-        WorkspaceGrep,
-        "astrcode.workspace.grep",
-        Some(ExtensionCapability::WorkspaceRead),
-        "Regex-search bounded UTF-8 workspace files",
-    ),
-    spec!(
-        WorkspaceList,
-        "astrcode.workspace.list",
-        Some(ExtensionCapability::WorkspaceRead),
-        "List a bounded workspace directory tree",
-    ),
-    spec!(
-        WorkspaceRead,
-        "astrcode.workspace.read",
-        Some(ExtensionCapability::WorkspaceRead),
-        "Read a bounded UTF-8 workspace file",
-    ),
-    spec!(
-        WorkspaceWrite,
-        "astrcode.workspace.write",
-        Some(ExtensionCapability::WorkspaceWrite),
-        "Create or replace a non-sensitive file under the working directory",
-    ),
-];
 
 #[cfg(test)]
 mod tests {
@@ -440,248 +492,35 @@ mod tests {
     }
 
     #[test]
-    fn operation_policy_matrix_is_exhaustive() {
-        macro_rules! policy {
-            ($operation:ident, $required:expr, $context:ident) => {
-                policy!($operation, $required, $context, false, false, true)
-            };
-            (
-                $operation:ident,
-                $required:expr,
-                $context:ident,
-                $supports_stream:expr,
-                $cancelable:expr,
-                $catalog:expr
-            ) => {
-                (
-                    HostOperation::$operation,
-                    $required,
-                    HostContextRequirement::$context,
-                    $supports_stream,
-                    $cancelable,
-                    $catalog,
-                )
-            };
-        }
-
-        let cases = [
-            policy!(EventEmit, Some(ExtensionCapability::EmitCustomEvents), None),
-            policy!(
-                ExtensionHttpPublic,
-                Some(ExtensionCapability::PublicHttpDispatch),
-                None
-            ),
-            policy!(
-                LlmMainChat,
-                Some(ExtensionCapability::MainModel),
-                None,
-                true,
-                true,
-                true
-            ),
-            policy!(
-                LlmSmallChat,
-                Some(ExtensionCapability::SmallModel),
-                None,
-                true,
-                true,
-                true
-            ),
-            policy!(
-                NetworkClient,
-                Some(ExtensionCapability::NetworkClient),
-                None,
-                false,
-                true,
-                true
-            ),
-            policy!(
-                ProcessSpawn,
-                Some(ExtensionCapability::ProcessSpawn),
-                Workspace,
-                false,
-                true,
-                true
-            ),
-            policy!(
-                SessionControlCancelTurn,
-                Some(ExtensionCapability::SessionControl),
-                Session
-            ),
-            policy!(
-                SessionControlConfigureTools,
-                Some(ExtensionCapability::SessionControl),
-                Session
-            ),
-            policy!(
-                SessionControlCreate,
-                Some(ExtensionCapability::SessionControl),
-                Session
-            ),
-            policy!(
-                SessionControlDispose,
-                Some(ExtensionCapability::SessionControl),
-                Session
-            ),
-            policy!(
-                SessionControlExecutionView,
-                Some(ExtensionCapability::SessionControl),
-                Session
-            ),
-            policy!(
-                SessionControlInjectOrStart,
-                Some(ExtensionCapability::SessionControl),
-                Session
-            ),
-            policy!(
-                SessionControlInterruptAndSubmit,
-                Some(ExtensionCapability::SessionControl),
-                Session
-            ),
-            policy!(
-                SessionControlReactivate,
-                Some(ExtensionCapability::SessionControl),
-                Session
-            ),
-            policy!(
-                SessionControlState,
-                Some(ExtensionCapability::SessionControl),
-                Session
-            ),
-            policy!(
-                SessionControlSubmitTurn,
-                Some(ExtensionCapability::SessionControl),
-                Session
-            ),
-            policy!(
-                SessionHistoryList,
-                Some(ExtensionCapability::SessionHistory),
-                Session
-            ),
-            policy!(
-                SessionHistoryProviderMessages,
-                Some(ExtensionCapability::SessionHistory),
-                Session
-            ),
-            policy!(
-                SessionHistorySnapshot,
-                Some(ExtensionCapability::SessionHistory),
-                Session
-            ),
-            policy!(
-                SessionHistoryTokenUsage,
-                Some(ExtensionCapability::SessionHistory),
-                Session
-            ),
-            policy!(
-                SessionHistoryTranscript,
-                Some(ExtensionCapability::SessionHistory),
-                Session
-            ),
-            policy!(
-                SessionInspectList,
-                Some(ExtensionCapability::SessionInspect),
-                None
-            ),
-            policy!(
-                SessionInspectProviderMessages,
-                Some(ExtensionCapability::SessionInspect),
-                None
-            ),
-            policy!(
-                SessionInspectReadModel,
-                Some(ExtensionCapability::SessionInspect),
-                None
-            ),
-            policy!(
-                SessionInspectSnapshot,
-                Some(ExtensionCapability::SessionInspect),
-                None
-            ),
-            policy!(
-                SessionReadEvents,
-                Some(ExtensionCapability::SessionHistory),
-                Session
-            ),
-            policy!(
-                SessionRootCreate,
-                Some(ExtensionCapability::InputDelivery),
-                Workspace
-            ),
-            policy!(
-                SessionRootState,
-                Some(ExtensionCapability::InputDelivery),
-                None
-            ),
-            policy!(
-                SessionRootSubmitTurn,
-                Some(ExtensionCapability::InputDelivery),
-                None
-            ),
-            policy!(SessionStateRead, None, Session),
-            policy!(SessionStateWrite, None, Session),
-            policy!(
-                WorkspaceEdit,
-                Some(ExtensionCapability::WorkspaceWrite),
-                Workspace
-            ),
-            policy!(
-                WorkspaceGlob,
-                Some(ExtensionCapability::WorkspaceRead),
-                Workspace
-            ),
-            policy!(
-                WorkspaceGrep,
-                Some(ExtensionCapability::WorkspaceRead),
-                Workspace
-            ),
-            policy!(
-                WorkspaceList,
-                Some(ExtensionCapability::WorkspaceRead),
-                Workspace
-            ),
-            policy!(
-                WorkspaceRead,
-                Some(ExtensionCapability::WorkspaceRead),
-                Workspace
-            ),
-            policy!(
-                WorkspaceWrite,
-                Some(ExtensionCapability::WorkspaceWrite),
-                Workspace
-            ),
-        ];
-
-        assert_eq!(cases.len(), HostOperation::COUNT);
-        for (index, (operation, required, context, stream, cancelable, catalog)) in
-            cases.into_iter().enumerate()
-        {
-            assert_eq!(operation as usize, index, "matrix order for {operation:?}");
-            let spec = operation.spec();
-            assert_eq!(spec.required, required, "{operation:?} capability");
+    fn operation_spec_policy_fields_are_consistent() {
+        for spec in HOST_OPERATION_SPECS {
+            let operation = spec.operation;
+            assert!(!spec.name.is_empty(), "{operation:?} wire name");
+            assert!(!spec.description.is_empty(), "{operation:?} description");
             assert_eq!(
                 operation.required_capability(),
-                required,
+                spec.required,
                 "{operation:?} capability accessor"
             );
             assert_eq!(
-                operation.context_requirement(),
-                context,
-                "{operation:?} context"
-            );
-            assert_eq!(
                 operation.requires_session_context(),
-                context == HostContextRequirement::Session,
+                spec.context == HostContextRequirement::Session,
                 "{operation:?} hidden session-context helper"
             );
             assert_eq!(
                 operation.requires_workspace_context(),
-                context == HostContextRequirement::Workspace,
+                spec.context == HostContextRequirement::Workspace,
                 "{operation:?} hidden workspace-context helper"
             );
-            assert_eq!(spec.supports_stream, stream, "{operation:?} streaming");
-            assert_eq!(spec.cancelable, cancelable, "{operation:?} cancellation");
-            assert_eq!(spec.catalog, catalog, "{operation:?} catalog visibility");
+            assert!(
+                !spec.supports_stream || spec.cancelable,
+                "{operation:?} streaming operations must be cancelable"
+            );
+            assert_eq!(
+                spec.supports_stream,
+                spec.group == HostOperationGroup::Llm,
+                "{operation:?} only the llm group has a stream handler"
+            );
         }
     }
 }

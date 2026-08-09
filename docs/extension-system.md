@@ -144,7 +144,7 @@ builder。
 
 | 入口 | Capability | 调用范围与示例 |
 |------|------------|----------------|
-| `host.models()` | `main_model` / `small_model` | `main_chat`、`small_chat`；各模型独立校验。`*_chat_stream` 当前返回完成后的 collected stream（最终 content、model、按序 chunks），不是渐进式 `Stream`。 |
+| `host.models()` | `main_model` / `small_model` | `main_chat`、`small_chat`；各模型独立校验。`*_chat_stream` 当前返回完成后的收集结果（最终 content、model），不是渐进式 `Stream`。 |
 | `host.session_control()?` | `session_control` 或 `input_delivery` | `create_root`、`submit_root_turn`、`root_state` 使用 `input_delivery`；子 session 的创建、提交、注入、中断、取消、状态、工具配置、回收与重新激活使用 session-scoped `session_control`。`cancel_turn` 返回 `HostSessionCancelOutput { cancelled }`。 |
 | `host.session_history()?` | `session_history` | 当前 session 及其已授权后代的 `list_summaries`、`transcript`、`provider_messages`、`token_usage`、`events_page` 与 `snapshot`。 |
 | `host.session_inspect()?` | `session_inspect` | 全局跨 session 只读能力；只授予确需全局观察的扩展。 |

@@ -13,6 +13,7 @@ use std::{
 
 use astrcode_core::{
     event::DurableEventPayload,
+    session_lineage::{ParentChainWalkError, collect_parent_chain},
     tool::{CreateSessionRequest, SessionApiError},
     types::{SessionId, TurnId},
 };
@@ -386,33 +387,22 @@ impl ChildSessionCoordinator {
         if caller == target {
             return Ok(());
         }
-        let mut current = target.clone();
-        let mut visited = HashSet::new();
-        let mut caller_is_ancestor = false;
-        loop {
-            if !visited.insert(current.clone()) {
-                return Err(SessionApiError::internal_msg(format!(
-                    "session parent chain contains a cycle at {current}"
-                )));
-            }
+        let chain = collect_parent_chain(target, |current: SessionId| async move {
             let model = self.read_access_model(&current, scope).await?;
-            match &model.identity.parent {
-                Some(parent) => {
-                    if &parent.session_id == caller {
-                        caller_is_ancestor = true;
-                    }
-                    current = parent.session_id.clone();
-                },
-                None => {
-                    return if caller_is_ancestor {
-                        Ok(())
-                    } else {
-                        Err(SessionApiError::PermissionDenied(format!(
-                            "session {target} is not a descendant of {caller}"
-                        )))
-                    };
-                },
-            }
+            Ok(model
+                .identity
+                .parent
+                .as_ref()
+                .map(|parent| parent.session_id.clone()))
+        })
+        .await
+        .map_err(parent_chain_walk_api_error)?;
+        if chain[1..].contains(caller) {
+            Ok(())
+        } else {
+            Err(SessionApiError::PermissionDenied(format!(
+                "session {target} is not a descendant of {caller}"
+            )))
         }
     }
 
@@ -436,29 +426,21 @@ impl ChildSessionCoordinator {
     }
 
     pub async fn session_depth(&self, session_id: &SessionId) -> Result<usize, SessionApiError> {
-        let mut depth = 0;
-        let mut current = session_id.clone();
-        let mut visited = HashSet::new();
-        loop {
-            if !visited.insert(current.clone()) {
-                return Err(SessionApiError::internal_msg(format!(
-                    "session parent chain contains a cycle at {current}"
-                )));
-            }
+        let chain = collect_parent_chain(session_id, |current: SessionId| async move {
             let model = self
                 .session_manager
                 .read_model(&current)
                 .await
                 .map_err(SessionApiError::internal)?;
-            match &model.identity.parent {
-                Some(parent) => {
-                    depth += 1;
-                    current = parent.session_id.clone();
-                },
-                None => break,
-            }
-        }
-        Ok(depth)
+            Ok(model
+                .identity
+                .parent
+                .as_ref()
+                .map(|parent| parent.session_id.clone()))
+        })
+        .await
+        .map_err(parent_chain_walk_api_error)?;
+        Ok(chain.len() - 1)
     }
 
     pub(crate) async fn spawn_child(
@@ -1657,6 +1639,14 @@ impl ChildSessionCoordinator {
             cancelled = true;
         }
         Ok(cancelled)
+    }
+}
+
+/// 谱系遍历错误映射到鉴权 API 错误:环是元数据损坏(internal),parent 解析错误原样透传。
+fn parent_chain_walk_api_error(error: ParentChainWalkError<SessionApiError>) -> SessionApiError {
+    match error {
+        ParentChainWalkError::Cycle(cycle) => SessionApiError::internal_msg(cycle.to_string()),
+        ParentChainWalkError::Resolve(error) => error,
     }
 }
 

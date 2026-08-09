@@ -4,8 +4,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::{
-        ExchangeSummary, ExtensionError, HookResult, LifecycleContext, LifecycleHandler,
-        ProviderContext, ProviderHandler, ProviderResult,
+        ExchangeSummary, ExtensionCall, ExtensionError, HookResult, LifecycleContext,
+        LifecycleHandler, ProviderContext, ProviderHandler, ProviderResult,
     },
     llm::LlmMessage,
 };

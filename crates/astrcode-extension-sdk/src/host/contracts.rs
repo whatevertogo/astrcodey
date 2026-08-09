@@ -38,33 +38,6 @@ pub const HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS: usize = 2_000;
 pub(crate) const HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS: usize =
     HOST_NETWORK_MAX_REQUEST_BODY_BYTES.div_ceil(3) * 4;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct HostAcknowledgement {
-    #[serde(rename = "ok", deserialize_with = "deserialize_true")]
-    _ok: bool,
-}
-
-impl HostAcknowledgement {
-    pub const fn accepted() -> Self {
-        Self { _ok: true }
-    }
-}
-
-fn deserialize_true<'de, D>(deserializer: D) -> Result<bool, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = bool::deserialize(deserializer)?;
-    if value {
-        Ok(true)
-    } else {
-        Err(serde::de::Error::custom(
-            "acknowledgement `ok` must be true",
-        ))
-    }
-}
-
 /// Typed request used by worker extensions to emit a declared event.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -197,7 +170,7 @@ fn valid_session_state_key(key: &str) -> bool {
 }
 
 /// 共享的 UTF-8 字节上限校验核心；serde 的 `with`/`deserialize_with` 需要固定签名的
-/// 函数路径，故 session state 与 stdin 字段保留各自的薄包装。
+/// 函数路径，各字段的薄包装由下面的 `bounded_utf8_serde_fns!` 生成。
 fn serialize_bounded_utf8<S>(
     value: &str,
     max_bytes: usize,
@@ -250,28 +223,73 @@ where
     }
 }
 
-fn serialize_session_state_content<S>(content: &str, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    serialize_bounded_utf8(
-        content,
-        HOST_SESSION_STATE_VALUE_MAX_BYTES,
-        "session state content",
-        serializer,
-    )
+/// serde 的 `serialize_with`/`deserialize_with` 需要固定签名的函数路径，无法直接向共享
+/// 校验核心传参；按字段类型生成委托给共享核心的薄包装对。
+macro_rules! bounded_utf8_serde_fns {
+    ($serialize:ident, $deserialize:ident,String, $max:expr, $field:literal) => {
+        fn $serialize<S>(value: &str, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            serialize_bounded_utf8(value, $max, $field, serializer)
+        }
+
+        fn $deserialize<'de, D>(deserializer: D) -> Result<String, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserialize_bounded_utf8(deserializer, $max, $field)
+        }
+    };
+    ($serialize:ident, $deserialize:ident,Option < String > , $max:expr, $field:literal) => {
+        fn $serialize<S>(value: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
+        where
+            S: serde::Serializer,
+        {
+            match value {
+                Some(value) => serialize_bounded_utf8(value, $max, $field, serializer),
+                None => serializer.serialize_none(),
+            }
+        }
+
+        fn $deserialize<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserialize_optional_bounded_utf8(deserializer, $max, $field)
+        }
+    };
 }
 
-fn deserialize_session_state_content<'de, D>(deserializer: D) -> Result<String, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_bounded_utf8(
-        deserializer,
-        HOST_SESSION_STATE_VALUE_MAX_BYTES,
-        "session state content",
-    )
+/// 同 `bounded_utf8_serde_fns!`，为 `usize`/`Option<usize>` 字段生成委托给
+/// `deserialize_bounded_usize`/`deserialize_optional_bounded_usize` 的薄包装；当前所有
+/// 字段下界均为 1。
+macro_rules! bounded_usize_deserializer {
+    ($deserialize:ident,usize, $max:expr, $field:literal) => {
+        fn $deserialize<'de, D>(deserializer: D) -> Result<usize, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserialize_bounded_usize(deserializer, 1, $max, $field)
+        }
+    };
+    ($deserialize:ident,Option < usize > , $max:expr, $field:literal) => {
+        fn $deserialize<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+        where
+            D: serde::Deserializer<'de>,
+        {
+            deserialize_optional_bounded_usize(deserializer, 1, $max, $field)
+        }
+    };
 }
+
+bounded_utf8_serde_fns!(
+    serialize_session_state_content,
+    deserialize_session_state_content,
+    String,
+    HOST_SESSION_STATE_VALUE_MAX_BYTES,
+    "session state content"
+);
 
 /// Typed request shared by bundled and worker model clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -475,10 +493,7 @@ pub struct HostLlmTextDelta {
     pub delta: String,
 }
 
-/// Explicit collected-stream response used by the current unified host invoker.
-///
-/// Deltas preserve provider order, but the call completes before this value is returned. The
-/// transport may later expose progressive delivery without changing the non-streaming output.
+/// Collected model stream returned after generation completes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HostLlmCollectedStreamOutput {
@@ -576,24 +591,13 @@ impl HostProcessRequest {
     }
 }
 
-fn serialize_process_stdin<S>(stdin: &Option<String>, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    match stdin {
-        Some(value) => {
-            serialize_bounded_utf8(value, HOST_PROCESS_MAX_STDIN_BYTES, "stdin", serializer)
-        },
-        None => serializer.serialize_none(),
-    }
-}
-
-fn deserialize_process_stdin<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_optional_bounded_utf8(deserializer, HOST_PROCESS_MAX_STDIN_BYTES, "stdin")
-}
+bounded_utf8_serde_fns!(
+    serialize_process_stdin,
+    deserialize_process_stdin,
+    Option<String>,
+    HOST_PROCESS_MAX_STDIN_BYTES,
+    "stdin"
+);
 
 /// `astrcode.process.spawn` 的线缆响应。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -845,61 +849,40 @@ const fn default_workspace_list_depth() -> usize {
     HOST_WORKSPACE_LIST_DEFAULT_DEPTH
 }
 
-fn deserialize_workspace_list_depth<'de, D>(deserializer: D) -> Result<usize, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_bounded_usize(deserializer, 1, HOST_WORKSPACE_LIST_MAX_DEPTH, "depth")
-}
+bounded_usize_deserializer!(
+    deserialize_workspace_list_depth,
+    usize,
+    HOST_WORKSPACE_LIST_MAX_DEPTH,
+    "depth"
+);
 
-fn deserialize_workspace_list_limit<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_optional_bounded_usize(deserializer, 1, HOST_WORKSPACE_LIST_MAX_ENTRIES, "limit")
-}
+bounded_usize_deserializer!(
+    deserialize_workspace_list_limit,
+    Option<usize>,
+    HOST_WORKSPACE_LIST_MAX_ENTRIES,
+    "limit"
+);
 
-fn deserialize_workspace_search_max_matches<'de, D>(
-    deserializer: D,
-) -> Result<Option<usize>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_optional_bounded_usize(
-        deserializer,
-        1,
-        HOST_WORKSPACE_SEARCH_MAX_MATCHES,
-        "max_matches",
-    )
-}
+bounded_usize_deserializer!(
+    deserialize_workspace_search_max_matches,
+    Option<usize>,
+    HOST_WORKSPACE_SEARCH_MAX_MATCHES,
+    "max_matches"
+);
 
-fn deserialize_workspace_search_max_bytes<'de, D>(
-    deserializer: D,
-) -> Result<Option<usize>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_optional_bounded_usize(
-        deserializer,
-        1,
-        HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES,
-        "max_bytes",
-    )
-}
+bounded_usize_deserializer!(
+    deserialize_workspace_search_max_bytes,
+    Option<usize>,
+    HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES,
+    "max_bytes"
+);
 
-fn deserialize_workspace_search_max_line_chars<'de, D>(
-    deserializer: D,
-) -> Result<Option<usize>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_optional_bounded_usize(
-        deserializer,
-        1,
-        HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS,
-        "max_line_chars",
-    )
-}
+bounded_usize_deserializer!(
+    deserialize_workspace_search_max_line_chars,
+    Option<usize>,
+    HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS,
+    "max_line_chars"
+);
 
 fn deserialize_bounded_usize<'de, D>(
     deserializer: D,
@@ -1111,7 +1094,6 @@ mod tests {
         let session_id = || crate::types::SessionId::new("session-1");
 
         assert_contracts!(
-            HostAcknowledgement::accepted(),
             HostEventEmitRequest {
                 event_type: "review.completed".into(),
                 schema_version: 1,
@@ -1305,19 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn unit_and_context_contracts_reject_invalid_shapes() {
-        for value in [
-            json!({}),
-            json!({ "ok": false }),
-            json!({ "ok": true, "extra": 1 }),
-        ] {
-            assert!(
-                serde_json::from_value::<HostAcknowledgement>(value.clone()).is_err(),
-                "accepted invalid acknowledgement: {value}"
-            );
-        }
-        assert!(serde_json::from_value::<HostAcknowledgement>(json!({ "ok": true })).is_ok());
-
+    fn context_contracts_reject_invalid_shapes() {
         for value in [
             json!({ "event_type": "review.completed", "payload": {} }),
             json!({ "event_type": "review.completed", "schema_version": 1 }),

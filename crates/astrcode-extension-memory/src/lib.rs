@@ -22,8 +22,8 @@ use std::sync::Arc;
 use astrcode_extension_sdk::{
     builder::{custom_event, manifest},
     extension::{
-        Extension, ExtensionCapability, ExtensionConfig, ExtensionError, ExtensionManifest,
-        ExtensionStartContext, HookMode, LifecycleEvent, Registrar, StopReason,
+        Extension, ExtensionCall, ExtensionCapability, ExtensionConfig, ExtensionError,
+        ExtensionManifest, ExtensionStartContext, HookMode, LifecycleEvent, Registrar, StopReason,
     },
 };
 use handlers::{

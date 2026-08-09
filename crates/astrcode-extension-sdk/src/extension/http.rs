@@ -1,18 +1,13 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
-    path::Path,
     sync::Arc,
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 #[cfg(test)]
 use serde_json::{Value, json};
-use tokio_util::sync::CancellationToken;
 
-use super::{
-    CustomEventEmitter, ExtensionCallContext, ExtensionError, ExtensionPaths, ExtensionTasks,
-};
-use crate::host::ExtensionHost;
+use super::{ExtensionCall, ExtensionCallContext, ExtensionError};
 
 // ─── Extension HTTP ─────────────────────────────────────────────────────
 
@@ -263,40 +258,8 @@ impl HttpContext {
         }
     }
 
-    pub fn call(&self) -> &ExtensionCallContext {
-        &self.call
-    }
-
-    pub fn extension_id(&self) -> &str {
-        self.call.extension_id()
-    }
-
     pub fn caller_extension_id(&self) -> Option<&str> {
         self.caller_extension_id.as_deref()
-    }
-
-    pub fn working_dir(&self) -> Option<&Path> {
-        self.call.working_dir()
-    }
-
-    pub fn paths(&self) -> &ExtensionPaths {
-        self.call.paths()
-    }
-
-    pub fn host(&self) -> &ExtensionHost {
-        self.call.host()
-    }
-
-    pub fn events(&self) -> &CustomEventEmitter {
-        self.call.events()
-    }
-
-    pub fn tasks(&self) -> &ExtensionTasks {
-        self.call.tasks()
-    }
-
-    pub fn cancellation(&self) -> &CancellationToken {
-        self.call.cancellation()
     }
 
     pub fn route(&self) -> &ExtensionHttpRoute {
@@ -315,6 +278,12 @@ impl HttpContext {
                 hint: Some("check the JSON body against this route's request schema".into()),
             }
         })
+    }
+}
+
+impl ExtensionCall for HttpContext {
+    fn call(&self) -> &ExtensionCallContext {
+        &self.call
     }
 }
 

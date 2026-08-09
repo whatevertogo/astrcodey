@@ -4,10 +4,13 @@ use std::{process::Stdio, time::Duration};
 
 use astrcode_core::wire::WireErrorCode;
 use astrcode_extension_sdk::{
-    host::{HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS, HostProcessRequest},
+    host::{
+        HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS, HostOperation,
+        HostOperationGroup, HostProcessOutput, HostProcessRequest,
+    },
     s5r::ErrorPayload,
 };
-use serde_json::{Value, json};
+use serde_json::Value;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     sync::{Semaphore, SemaphorePermit},
@@ -16,8 +19,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    capability::ProcessCapability, parse_wire_request, path::canonicalize_workspace_path,
-    run_blocking_io,
+    dispatch, invalid_group_operation, path::canonicalize_workspace_path, run_blocking_io,
 };
 
 const MAX_CONCURRENT_PROCESSES: usize = 8;
@@ -61,21 +63,26 @@ impl ProcessGroup {
 
     pub(super) async fn invoke(
         &self,
-        capability: ProcessCapability,
+        operation: HostOperation,
         input: Value,
         working_dir: Option<&str>,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<Value, ErrorPayload> {
-        match capability {
-            ProcessCapability::Spawn => {
-                let request = parse_wire_request(&input, "process.spawn")?;
+        match operation {
+            HostOperation::ProcessSpawn => {
                 let working_dir = working_dir
                     .map(str::to_owned)
                     .or_else(|| self.default_working_dir.clone());
-                self.runner
-                    .spawn(request, working_dir.as_deref(), cancel_token)
-                    .await
+                dispatch(operation, &input, |request| {
+                    self.runner
+                        .spawn(request, working_dir.as_deref(), cancel_token)
+                })
+                .await
             },
+            _ => Err(invalid_group_operation(
+                operation,
+                HostOperationGroup::Process,
+            )),
         }
     }
 
@@ -102,7 +109,7 @@ impl ProcessRunner {
         request: HostProcessRequest,
         working_dir: Option<&str>,
         cancel_token: Option<&CancellationToken>,
-    ) -> Result<Value, ErrorPayload> {
+    ) -> Result<HostProcessOutput, ErrorPayload> {
         let timeout = validated_timeout(request.timeout_ms)?;
         let deadline = Instant::now() + timeout;
         let _permit = self.acquire_permit(deadline, cancel_token).await?;
@@ -258,16 +265,16 @@ impl ProcessRunner {
             Ok((
                 (stdout, stderr, combined, stdout_truncated, stderr_truncated, combined_truncated),
                 status,
-            )) => Ok(json!({
-                "status": status.code(),
-                "success": status.success(),
-                "stdout": String::from_utf8_lossy(&stdout),
-                "stderr": String::from_utf8_lossy(&stderr),
-                "combined": String::from_utf8_lossy(&combined),
-                "stdout_truncated": stdout_truncated,
-                "stderr_truncated": stderr_truncated,
-                "combined_truncated": combined_truncated,
-            })),
+            )) => Ok(HostProcessOutput {
+                status: status.code(),
+                success: status.success(),
+                stdout: String::from_utf8_lossy(&stdout).into_owned(),
+                stderr: String::from_utf8_lossy(&stderr).into_owned(),
+                combined: String::from_utf8_lossy(&combined).into_owned(),
+                stdout_truncated,
+                stderr_truncated,
+                combined_truncated,
+            }),
             Err(error) => {
                 terminate_child(&mut child, child_pid).await;
                 Err(error)
@@ -426,8 +433,8 @@ mod tests {
             .await
             .expect("process should not deadlock on full stdin and stdout pipes");
 
-        assert_eq!(output["success"], true);
-        assert_eq!(output["stdout"].as_str().expect("stdout").len(), 128 * 1024);
+        assert!(output.success);
+        assert_eq!(output.stdout.len(), 128 * 1024);
     }
 
     #[tokio::test]
@@ -441,12 +448,8 @@ mod tests {
             .await
             .expect("rustc should run");
 
-        assert_eq!(output["success"], true);
-        assert!(
-            output["stdout"]
-                .as_str()
-                .is_some_and(|text| text.contains("rustc"))
-        );
+        assert!(output.success);
+        assert!(output.stdout.contains("rustc"));
     }
 
     #[tokio::test]

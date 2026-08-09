@@ -404,7 +404,7 @@ mod tests {
             Ok(_) => panic!("an unbound default router must not expose session control"),
             Err(error) => error,
         };
-        assert!(error.is_backend_unavailable());
+        assert_eq!(error.code_enum(), Some(WireErrorCode::BackendUnavailable));
     }
 
     struct DelayedLlm;

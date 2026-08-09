@@ -14,6 +14,7 @@ mod lifecycle;
 mod package_manifest;
 mod paths;
 mod registrar;
+mod registration_validation;
 mod runtime;
 mod tool_context;
 
@@ -67,6 +68,9 @@ pub use lifecycle::*;
 pub use package_manifest::*;
 pub use paths::*;
 pub use registrar::*;
+pub(crate) use registration_validation::{
+    canonical_registration_name, has_duplicate_registration_name,
+};
 pub use runtime::*;
 pub use tool_context::*;
 

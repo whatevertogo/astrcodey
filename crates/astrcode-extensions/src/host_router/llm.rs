@@ -7,14 +7,17 @@ use astrcode_core::{
     wire::WireErrorCode,
 };
 use astrcode_extension_sdk::{
-    host::{HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput, HostLlmTextDelta},
+    host::{
+        HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput, HostLlmTextDelta,
+        HostOperation, HostOperationGroup,
+    },
     s5r::ErrorPayload,
 };
 use serde_json::Value;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use super::{HOST_INVOKE_TIMEOUT, capability::LlmCapability, serialize_wire_response};
+use super::{HOST_INVOKE_TIMEOUT, invalid_group_operation, serialize_wire_response};
 
 pub(super) struct LlmGroup {
     main: Option<Arc<dyn LlmProvider>>,
@@ -31,41 +34,37 @@ impl LlmGroup {
 
     pub(super) async fn invoke(
         &self,
-        capability: LlmCapability,
+        operation: HostOperation,
         input: Value,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<Value, ErrorPayload> {
-        self.invoke_with_mode(capability, input, false, cancel_token)
+        self.invoke_with_mode(operation, input, false, cancel_token)
             .await
-    }
-
-    pub(super) fn is_available(&self, capability: LlmCapability) -> bool {
-        match capability {
-            LlmCapability::MainChat => self.main.is_some(),
-            LlmCapability::SmallChat => self.small.is_some(),
-        }
     }
 
     pub(super) async fn invoke_stream(
         &self,
-        capability: LlmCapability,
+        operation: HostOperation,
         input: Value,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<Value, ErrorPayload> {
-        self.invoke_with_mode(capability, input, true, cancel_token)
+        self.invoke_with_mode(operation, input, true, cancel_token)
             .await
     }
 
     async fn invoke_with_mode(
         &self,
-        capability: LlmCapability,
+        operation: HostOperation,
         input: Value,
         collect_chunks: bool,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<Value, ErrorPayload> {
-        let (provider, model_label) = match capability {
-            LlmCapability::MainChat => (self.main.as_ref(), "main_llm"),
-            LlmCapability::SmallChat => (self.small.as_ref(), "small_llm"),
+        let (provider, model_label) = match operation {
+            HostOperation::LlmMainChat => (self.main.as_ref(), "main_llm"),
+            HostOperation::LlmSmallChat => (self.small.as_ref(), "small_llm"),
+            _ => {
+                return Err(invalid_group_operation(operation, HostOperationGroup::Llm));
+            },
         };
         let provider = provider.ok_or_else(|| {
             ErrorPayload::new(
@@ -74,6 +73,14 @@ impl LlmGroup {
             )
         })?;
         invoke_llm_chat(provider, model_label, input, collect_chunks, cancel_token).await
+    }
+
+    pub(super) fn has_main(&self) -> bool {
+        self.main.is_some()
+    }
+
+    pub(super) fn has_small(&self) -> bool {
+        self.small.is_some()
     }
 }
 

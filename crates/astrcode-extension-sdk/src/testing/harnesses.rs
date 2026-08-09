@@ -363,12 +363,13 @@ impl ExtensionLifecycleHarness {
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::wire::WireErrorCode;
     use serde_json::json;
 
     use super::*;
     use crate::{
         builder::manifest,
-        extension::ExtensionCapability,
+        extension::{ExtensionCall, ExtensionCapability},
         host::{HostWorkspaceReadOutput, HostWorkspaceReadRequest},
     };
 
@@ -416,7 +417,7 @@ mod tests {
             .workspace()
             .err()
             .expect("ungranted workspace domain must fail");
-        assert!(error.is_permission_denied());
+        assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
 
         let allowed = MockExtensionHost::new()
             .grant(ExtensionCapability::WorkspaceRead)

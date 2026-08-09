@@ -10,8 +10,9 @@ use super::{
     ExtensionManifest, HookMode, LifecycleEvent, LifecycleHandler, MAX_CUSTOM_EVENT_PAYLOAD_BYTES,
     PostToolUseHandler, PreToolUseHandler, PromptBuildHandler, ProviderEvent, ProviderHandler,
     SlashCommand, ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
-    UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
-    extension_http_route_patterns_conflict, lifecycle_event_allows_blocking,
+    UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration, canonical_registration_name,
+    extension_http_route_patterns_conflict, has_duplicate_registration_name,
+    lifecycle_event_allows_blocking,
 };
 use crate::{
     builder::ExtensionToolDefinition,
@@ -99,7 +100,7 @@ impl Registrar {
         handler: Arc<dyn ToolHandler>,
     ) {
         let (mut definition, prompt) = definition.into().into_parts();
-        definition.name = definition.name.trim().to_owned();
+        canonical_registration_name(&mut definition.name);
         self.registrations.tools.push(ToolRegistration {
             definition,
             prompt,
@@ -112,7 +113,7 @@ impl Registrar {
     }
 
     pub fn command(&mut self, mut cmd: SlashCommand, handler: Arc<dyn CommandHandler>) {
-        cmd.name = cmd.name.trim().to_owned();
+        canonical_registration_name(&mut cmd.name);
         self.registrations.commands.push((cmd, handler));
     }
 
@@ -131,18 +132,18 @@ impl Registrar {
     }
 
     pub fn keybinding(&mut self, mut binding: Keybinding) {
-        binding.key = binding.key.trim().to_owned();
-        binding.command = binding.command.trim().to_owned();
+        canonical_registration_name(&mut binding.key);
+        canonical_registration_name(&mut binding.command);
         self.registrations.keybindings.push(binding);
     }
 
     pub fn status_item(&mut self, mut item: StatusItem) {
-        item.id = item.id.trim().to_owned();
+        canonical_registration_name(&mut item.id);
         self.registrations.status_items.push(item);
     }
 
     pub fn declare_custom_event(&mut self, mut declaration: CustomEventDeclaration) {
-        declaration.event_type = declaration.event_type.trim().to_owned();
+        canonical_registration_name(&mut declaration.event_type);
         self.registrations
             .custom_event_declarations
             .push(declaration);
@@ -457,12 +458,13 @@ impl ExtensionRegistrations {
                     "tool name cannot be empty",
                 ));
             }
-            if !tool_names.insert(name) {
+            if has_duplicate_registration_name(tool_names.iter().copied(), name) {
                 return Err(invalid_registration(
                     extension_id,
                     format!("duplicate tool `{name}`"),
                 ));
             }
+            tool_names.insert(name);
         }
         let mut command_names = HashSet::new();
         for (command, handler) in &self.commands {
@@ -473,12 +475,13 @@ impl ExtensionRegistrations {
                     "command name cannot be empty",
                 ));
             }
-            if !command_names.insert(name) {
+            if has_duplicate_registration_name(command_names.iter().copied(), name) {
                 return Err(invalid_registration(
                     extension_id,
                     format!("duplicate command `{name}`"),
                 ));
             }
+            command_names.insert(name);
             if command.argument_completions && !handler.supports_argument_completions() {
                 return Err(invalid_registration(
                     extension_id,
@@ -512,23 +515,27 @@ impl ExtensionRegistrations {
         let mut status_ids = HashSet::new();
         for item in &self.status_items {
             let id = item.id.as_str();
-            if id.is_empty() || !status_ids.insert(id) {
+            if id.is_empty() || has_duplicate_registration_name(status_ids.iter().copied(), id) {
                 return Err(invalid_registration(
                     extension_id,
                     format!("invalid or duplicate status item id `{id}`"),
                 ));
             }
+            status_ids.insert(id);
         }
 
         let mut event_types = HashSet::new();
         for event in &self.custom_event_declarations {
             let event_type = event.event_type.as_str();
-            if event_type.is_empty() || !event_types.insert(event_type) {
+            if event_type.is_empty()
+                || has_duplicate_registration_name(event_types.iter().copied(), event_type)
+            {
                 return Err(invalid_registration(
                     extension_id,
                     format!("invalid or duplicate custom event `{event_type}`"),
                 ));
             }
+            event_types.insert(event_type);
             if event.schema_version == 0 {
                 return Err(invalid_registration(
                     extension_id,
@@ -551,15 +558,16 @@ impl ExtensionRegistrations {
             if let Err(reason) = registration.subscription.validate() {
                 return Err(invalid_registration(extension_id, reason));
             }
-            if !subscription_ids.insert(registration.subscription.id.as_str()) {
+            let subscription_id = registration.subscription.id.as_str();
+            if has_duplicate_registration_name(subscription_ids.iter().copied(), subscription_id) {
                 return Err(invalid_registration(
                     extension_id,
                     format!(
-                        "invalid or duplicate custom event subscription id `{}`",
-                        registration.subscription.id
+                        "invalid or duplicate custom event subscription id `{subscription_id}`"
                     ),
                 ));
             }
+            subscription_ids.insert(subscription_id);
         }
 
         for (index, registration) in self.http_routes.iter().enumerate() {

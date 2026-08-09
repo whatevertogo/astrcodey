@@ -3,8 +3,8 @@
 use astrcode_core::{config::ModelSelection, llm::LlmMessage, types::*};
 use astrcode_extension_sdk::{
     extension::{
-        ExchangeSummary, ExtensionError, LifecycleEvent, RuntimeHookCallContext,
-        RuntimeLifecycleContext, RuntimeProviderContext,
+        ExchangeSummary, ExtensionError, LifecycleEvent, LifecyclePayload, ProviderPayload,
+        RuntimeHookCallContext, RuntimeLifecycleContext, RuntimeProviderContext,
     },
     runtime_ports::TurnHooks,
 };
@@ -99,7 +99,7 @@ impl SharedTurnContext {
 
     /// 构造扩展 lifecycle hook 的 ctx。
     pub(crate) fn lifecycle_ctx(&self) -> RuntimeLifecycleContext {
-        RuntimeLifecycleContext::new(self.hook_call_context(), None)
+        RuntimeLifecycleContext::new(self.hook_call_context(), LifecyclePayload::new(None))
     }
 
     /// 构造带当轮消息摘要的 lifecycle hook ctx（用于 TurnEnd）。
@@ -110,10 +110,10 @@ impl SharedTurnContext {
     ) -> RuntimeLifecycleContext {
         RuntimeLifecycleContext::new(
             self.hook_call_context(),
-            Some(ExchangeSummary {
+            LifecyclePayload::new(Some(ExchangeSummary {
                 user_message,
                 assistant_message,
-            }),
+            })),
         )
     }
 
@@ -134,7 +134,7 @@ impl SharedTurnContext {
 
     /// 构造 provider hook 的 ctx，附带本次 LLM 请求的 messages。
     pub(crate) fn provider_ctx(&self, messages: Vec<LlmMessage>) -> RuntimeProviderContext {
-        RuntimeProviderContext::new(self.hook_call_context(), messages)
+        RuntimeProviderContext::new(self.hook_call_context(), ProviderPayload::new(messages))
     }
 
     /// 构造各 tool hook ctx 共用的 `ModelSelection`。

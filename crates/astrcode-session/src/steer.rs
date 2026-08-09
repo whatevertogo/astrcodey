@@ -2,7 +2,7 @@
 //!
 //! 消息由 `TurnScheduler::inject_internal` 立即写入 durable `UserMessage`（无内存 buffer）。
 //! 本模块在每个 step 开始前统计读模型中的 user 条数；增量写入
-//! [`LifecycleContext::mid_turn_user_messages_synced`] 并随 [`LifecycleEvent::StepStart`] 派发。
+//! [`LifecyclePayload::mid_turn_user_messages_synced`] 并随 [`LifecycleEvent::StepStart`] 派发。
 
 use astrcode_context::is_synthetic_context_message;
 use astrcode_core::llm::LlmRole;

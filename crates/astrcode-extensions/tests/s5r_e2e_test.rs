@@ -20,8 +20,8 @@ use astrcode_extension_sdk::{
         Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
         ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
         ExtensionHttpRoute, ExtensionManifest, ExtensionPackageManifest, HookMode, HttpContext,
-        LifecycleEvent, PreToolUseResult, Registrar, RuntimeHookCallContext,
-        RuntimeLifecycleContext, RuntimePreToolUseContext, StopReason,
+        LifecycleEvent, LifecyclePayload, PreToolUsePayload, PreToolUseResult, Registrar,
+        RuntimeHookCallContext, RuntimeLifecycleContext, RuntimePreToolUseContext, StopReason,
     },
 };
 use astrcode_extensions::{
@@ -251,11 +251,13 @@ fn runtime_hook_call() -> RuntimeHookCallContext {
 fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> RuntimePreToolUseContext {
     RuntimePreToolUseContext::new(
         runtime_hook_call(),
-        "call-1".into(),
-        tool_name,
-        tool_input,
-        astrcode_core::permission::ApprovalMode::Manual,
-        Vec::new(),
+        PreToolUsePayload::new(
+            "call-1".into(),
+            tool_name,
+            tool_input,
+            astrcode_core::permission::ApprovalMode::Manual,
+            Vec::new(),
+        ),
     )
 }
 
@@ -560,11 +562,13 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     let ctx = RuntimePreToolUseContext::new(
         runtime_hook_call().with_event_tx(Some(tx.into())),
-        "call-1".into(),
-        "emit_hook_probe",
-        serde_json::json!({}),
-        astrcode_core::permission::ApprovalMode::Manual,
-        Vec::new(),
+        PreToolUsePayload::new(
+            "call-1".into(),
+            "emit_hook_probe",
+            serde_json::json!({}),
+            astrcode_core::permission::ApprovalMode::Manual,
+            Vec::new(),
+        ),
     );
     let result = runner.emit_pre_tool_use(ctx).await.unwrap();
     assert!(matches!(result, PreToolUseResult::Allow));
@@ -633,7 +637,7 @@ async fn s5r_turn_end_continuations_and_pipeline() {
     runner
         .emit_lifecycle(
             LifecycleEvent::TurnEnd,
-            RuntimeLifecycleContext::new(runtime_hook_call(), None),
+            RuntimeLifecycleContext::new(runtime_hook_call(), LifecyclePayload::new(None)),
         )
         .await
         .unwrap();

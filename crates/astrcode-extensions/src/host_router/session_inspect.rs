@@ -9,6 +9,7 @@ use astrcode_core::{
     wire::WireErrorCode,
 };
 use astrcode_extension_sdk::{
+    host::HostOperation,
     s5r::ErrorPayload,
     session_inspect::{
         SessionInspectAgentSession, SessionInspectAgentStatusDto, SessionInspectCompaction,
@@ -22,26 +23,26 @@ use astrcode_session_projection::{
     AgentSessionLinkView, AgentSessionStatus, SequencedLlmMessage, SessionReadModel, SessionSummary,
 };
 use astrcode_storage::{SessionReader, StorageError};
-use serde_json::Value;
 
-use super::{HOST_INVOKE_TIMEOUT, serialize_wire_response, session::storage_error};
+use super::{HOST_INVOKE_TIMEOUT, session::storage_error};
 
-pub(super) async fn list(reader: Arc<dyn SessionReader>) -> Result<Value, ErrorPayload> {
-    let summaries = storage_call("session.inspect.list", reader.list_session_summaries()).await?;
-    serialize_wire_response(
-        SessionInspectListOutput {
-            sessions: summaries.into_iter().map(list_item).collect(),
-        },
-        "session.inspect.list",
-    )
+pub(super) async fn list(
+    operation: HostOperation,
+    reader: Arc<dyn SessionReader>,
+) -> Result<SessionInspectListOutput, ErrorPayload> {
+    let summaries = storage_call(operation.wire_name(), reader.list_session_summaries()).await?;
+    Ok(SessionInspectListOutput {
+        sessions: summaries.into_iter().map(list_item).collect(),
+    })
 }
 
 pub(super) async fn snapshot(
+    operation: HostOperation,
     reader: Arc<dyn SessionReader>,
     session_id: SessionId,
-) -> Result<Value, ErrorPayload> {
+) -> Result<SessionInspectSnapshotOutput, ErrorPayload> {
     let model = storage_call(
-        "session.inspect.snapshot",
+        operation.wire_name(),
         reader.session_read_model(&session_id),
     )
     .await?;
@@ -52,52 +53,48 @@ pub(super) async fn snapshot(
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     pending_tool_call_ids.sort();
-    serialize_wire_response(
-        SessionInspectSnapshotOutput {
-            snapshot: SessionInspectSnapshot {
-                session_id: model.identity.session_id.to_string(),
-                cursor: model.cursor(),
-                working_dir: model.identity.working_dir.clone(),
-                model_id: model.identity.model_id.clone(),
-                phase: model.execution.phase.into(),
-                parent_session_id: model
-                    .identity
-                    .parent
-                    .as_ref()
-                    .map(|parent| parent.session_id.to_string()),
-                source_extension: model.identity.source_extension.clone(),
-                message_count: model.transcript.messages.len(),
-                pending_tool_call_ids,
-                agent_session_count: model.agent_sessions.len(),
-            },
+    Ok(SessionInspectSnapshotOutput {
+        snapshot: SessionInspectSnapshot {
+            session_id: model.identity.session_id.to_string(),
+            cursor: model.cursor(),
+            working_dir: model.identity.working_dir.clone(),
+            model_id: model.identity.model_id.clone(),
+            phase: model.execution.phase.into(),
+            parent_session_id: model
+                .identity
+                .parent
+                .as_ref()
+                .map(|parent| parent.session_id.to_string()),
+            source_extension: model.identity.source_extension.clone(),
+            message_count: model.transcript.messages.len(),
+            pending_tool_call_ids,
+            agent_session_count: model.agent_sessions.len(),
         },
-        "session.inspect.snapshot",
-    )
+    })
 }
 
 pub(super) async fn read_model(
+    operation: HostOperation,
     reader: Arc<dyn SessionReader>,
     session_id: SessionId,
-) -> Result<Value, ErrorPayload> {
+) -> Result<SessionInspectReadModelOutput, ErrorPayload> {
     let model = storage_call(
-        "session.inspect.read_model",
+        operation.wire_name(),
         reader.session_read_model(&session_id),
     )
     .await?;
-    serialize_wire_response(
-        SessionInspectReadModelOutput {
-            read_model: read_model_dto((*model).clone()),
-        },
-        "session.inspect.read_model",
-    )
+    Ok(SessionInspectReadModelOutput {
+        read_model: read_model_dto((*model).clone()),
+    })
 }
 
 pub(super) async fn provider_messages(
+    operation: HostOperation,
     reader: Arc<dyn SessionReader>,
     session_id: SessionId,
-) -> Result<Value, ErrorPayload> {
+) -> Result<SessionInspectProviderMessagesOutput, ErrorPayload> {
     let model = storage_call(
-        "session.inspect.provider_messages",
+        operation.wire_name(),
         reader.session_read_model(&session_id),
     )
     .await?;
@@ -109,12 +106,9 @@ pub(super) async fn provider_messages(
             .map(|message| message.message.clone())
             .collect(),
     );
-    serialize_wire_response(
-        SessionInspectProviderMessagesOutput {
-            messages: messages.into_iter().map(message_dto).collect(),
-        },
-        "session.inspect.provider_messages",
-    )
+    Ok(SessionInspectProviderMessagesOutput {
+        messages: messages.into_iter().map(message_dto).collect(),
+    })
 }
 
 async fn storage_call<T, F>(operation: &str, future: F) -> Result<T, ErrorPayload>

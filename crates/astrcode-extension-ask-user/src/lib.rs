@@ -9,10 +9,10 @@ use std::{
 use astrcode_extension_sdk::{
     builder::{ExtensionToolDefinition, manifest},
     extension::{
-        Extension, ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
-        ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest, HookMode, HookResult,
-        HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler, Registrar, StopReason,
-        ToolContext, ToolHandler,
+        Extension, ExtensionCall, ExtensionCapability, ExtensionError, ExtensionHttpHandler,
+        ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
+        HookMode, HookResult, HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler,
+        Registrar, StopReason, ToolContext, ToolHandler,
     },
     tool::{ToolExecutionResult, ToolPromptMetadata, ToolPromptTag, ToolResult},
 };

@@ -6,9 +6,10 @@ use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult}
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        ExtensionCapability, ExtensionError, ExtensionManifest, HookMode, HookResult,
-        LifecycleContext, PreToolUseContext, PreToolUseResult, Registrar, RuntimeHookCallContext,
-        RuntimeLifecycleContext, RuntimePreToolUseContext, ToolContext, ToolHandler,
+        ExtensionCall, ExtensionCapability, ExtensionError, ExtensionManifest, HookMode,
+        HookResult, LifecycleContext, LifecyclePayload, PreToolUseContext, PreToolUsePayload,
+        PreToolUseResult, Registrar, RuntimeHookCallContext, RuntimeLifecycleContext,
+        RuntimePreToolUseContext, ToolContext, ToolHandler,
     },
 };
 use astrcode_extensions::{Extension, runner::ExtensionRunner};
@@ -248,16 +249,18 @@ fn hook_call(session_id: &str, model_id: &str) -> RuntimeHookCallContext {
 fn pre_tool_use_context(command: &str) -> RuntimePreToolUseContext {
     RuntimePreToolUseContext::new(
         hook_call("test-session", "test-model"),
-        "call-1".into(),
-        "shell",
-        serde_json::json!({ "command": command }),
-        astrcode_core::permission::ApprovalMode::Manual,
-        Vec::new(),
+        PreToolUsePayload::new(
+            "call-1".into(),
+            "shell",
+            serde_json::json!({ "command": command }),
+            astrcode_core::permission::ApprovalMode::Manual,
+            Vec::new(),
+        ),
     )
 }
 
 fn lifecycle_context(session_id: &str, model_id: &str) -> RuntimeLifecycleContext {
-    RuntimeLifecycleContext::new(hook_call(session_id, model_id), None)
+    RuntimeLifecycleContext::new(hook_call(session_id, model_id), LifecyclePayload::new(None))
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────

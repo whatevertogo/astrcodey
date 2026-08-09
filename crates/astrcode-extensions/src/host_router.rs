@@ -28,7 +28,7 @@ use astrcode_extension_sdk::{
         CustomEventDeclaration, ExtensionCapability, ExtensionError, ExtensionHttpRequest,
         ExtensionHttpResponse, ExtensionTaskError, ExtensionTasks,
     },
-    host::internal::OutboundNetworkService,
+    host::{HostOperation, HostOperationGroup, internal::OutboundNetworkService},
     s5r::{CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage},
 };
 use astrcode_storage::{EventReader, SessionReader};
@@ -37,14 +37,8 @@ use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 
 use self::{
-    capability::{HostCapability, ProcessCapability},
-    context::ContextGroup,
-    extension_http::ExtensionHttpGroup,
-    llm::LlmGroup,
-    network::NetworkGroup,
-    process::ProcessGroup,
-    session::SessionGroup,
-    workspace::WorkspaceGroup,
+    context::ContextGroup, extension_http::ExtensionHttpGroup, llm::LlmGroup,
+    network::NetworkGroup, process::ProcessGroup, session::SessionGroup, workspace::WorkspaceGroup,
 };
 
 pub(super) const HOST_INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -74,6 +68,52 @@ where
             format!("failed to serialize {capability} response: {error}"),
         )
     })
+}
+
+/// 无返回值宿主操作（unit output）的统一成功响应，与 SDK 侧 `invoke_unit` 的校验互为契约两端。
+pub(super) fn acknowledgement() -> Value {
+    serde_json::json!({ "ok": true })
+}
+
+/// 单次宿主操作的固定管线：按 spec 线缆名解析请求、调用 typed handler、序列化契约输出。
+pub(super) async fn dispatch<Request, Output, Fut>(
+    operation: HostOperation,
+    input: &Value,
+    handler: impl FnOnce(Request) -> Fut,
+) -> Result<Value, ErrorPayload>
+where
+    Request: serde::de::DeserializeOwned,
+    Output: serde::Serialize,
+    Fut: Future<Output = Result<Output, ErrorPayload>>,
+{
+    let name = operation.wire_name();
+    let request = parse_wire_request::<Request>(input, name)?;
+    serialize_wire_response(handler(request).await?, name)
+}
+
+/// 空对象请求操作的固定管线：校验空对象、调用 handler、序列化契约输出。
+pub(super) async fn dispatch_empty<Output, Fut>(
+    operation: HostOperation,
+    input: &Value,
+    handler: impl FnOnce() -> Fut,
+) -> Result<Value, ErrorPayload>
+where
+    Output: serde::Serialize,
+    Fut: Future<Output = Result<Output, ErrorPayload>>,
+{
+    require_empty_object(input, operation.wire_name())?;
+    serialize_wire_response(handler().await?, operation.wire_name())
+}
+
+pub(super) fn require_empty_object(input: &Value, capability: &str) -> Result<(), ErrorPayload> {
+    if input.as_object().is_some_and(serde_json::Map::is_empty) {
+        Ok(())
+    } else {
+        Err(ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            format!("{capability} expects an empty object"),
+        ))
+    }
 }
 
 pub(super) fn wire_payload<E: WireError>(error: E) -> ErrorPayload {
@@ -263,10 +303,7 @@ impl HostRouter {
 
     /// Reports the operations whose concrete backend is usable for this call context.
     /// Authorization remains a separate check against the canonical SDK catalog.
-    pub(crate) fn available_operations(
-        &self,
-        ctx: &InvokeContext,
-    ) -> Vec<astrcode_extension_sdk::host::HostOperation> {
+    pub(crate) fn available_operations(&self, ctx: &InvokeContext) -> Vec<HostOperation> {
         capability::available_operations(self, ctx)
     }
 
@@ -288,49 +325,49 @@ impl HostRouter {
 
         // Keep the router future bounded: each capability group has a distinct async state machine.
         let invoke = async {
-            match spec.capability {
-                HostCapability::Llm(capability) => {
+            match spec.group {
+                HostOperationGroup::Llm => {
                     Box::pin(
                         self.llm
-                            .invoke(capability, input, ctx.cancel_token.as_ref()),
+                            .invoke(spec.operation, input, ctx.cancel_token.as_ref()),
                     )
                     .await
                 },
-                HostCapability::Session(capability) => {
-                    Box::pin(self.session.invoke(capability, input, ctx)).await
+                HostOperationGroup::Session => {
+                    Box::pin(self.session.invoke(spec.operation, input, ctx)).await
                 },
-                HostCapability::Context(capability) => {
-                    Box::pin(self.context.invoke(capability, &input, ctx)).await
+                HostOperationGroup::Context => {
+                    Box::pin(self.context.invoke(spec.operation, &input, ctx)).await
                 },
-                HostCapability::Workspace(capability) => {
+                HostOperationGroup::Workspace => {
                     Box::pin(self.workspace.invoke(
-                        capability,
+                        spec.operation,
                         input,
                         ctx.working_dir.as_deref(),
                         ctx.tasks.as_ref(),
                     ))
                     .await
                 },
-                HostCapability::Process(capability) => {
+                HostOperationGroup::Process => {
                     Box::pin(self.process.invoke(
-                        capability,
+                        spec.operation,
                         input,
                         ctx.working_dir.as_deref(),
                         ctx.cancel_token.as_ref(),
                     ))
                     .await
                 },
-                HostCapability::Network(capability) => {
+                HostOperationGroup::Network => {
                     Box::pin(
                         self.network
-                            .invoke(capability, input, ctx.cancel_token.as_ref()),
+                            .invoke(spec.operation, input, ctx.cancel_token.as_ref()),
                     )
                     .await
                 },
-                HostCapability::ExtensionHttp(capability) => {
+                HostOperationGroup::ExtensionHttp => {
                     Box::pin(
                         self.extension_http
-                            .invoke(capability, input, &ctx.extension_id),
+                            .invoke(spec.operation, input, &ctx.extension_id),
                     )
                     .await
                 },
@@ -338,10 +375,7 @@ impl HostRouter {
         };
         // ProcessRunner must observe cancellation so it can terminate the process group and reap
         // the direct child before returning.
-        let backend_owns_cancellation = matches!(
-            spec.capability,
-            HostCapability::Process(ProcessCapability::Spawn)
-        );
+        let backend_owns_cancellation = spec.operation == HostOperation::ProcessSpawn;
         if spec.cancelable && !backend_owns_cancellation {
             if let Some(token) = &ctx.cancel_token {
                 return tokio::select! {
@@ -356,7 +390,9 @@ impl HostRouter {
         invoke.await
     }
 
-    /// 流式 invoke：返回 Event 序列（`started` + `delta*` + `completed`/`failed`）。
+    /// 流式 invoke：返回 Event 序列（`started` + `completed`/`failed`）。
+    ///
+    /// 目前唯一支持 stream 的 LLM 组在调用完成后一次性返回有序 delta 集合。
     pub async fn invoke_stream(
         &self,
         cap: &str,
@@ -376,11 +412,11 @@ impl HostRouter {
         }
         let request_id = request_id.to_string();
 
-        match spec.capability {
-            HostCapability::Llm(capability) => {
+        match spec.group {
+            HostOperationGroup::Llm => {
                 let invoke = self
                     .llm
-                    .invoke_stream(capability, input, ctx.cancel_token.as_ref())
+                    .invoke_stream(spec.operation, input, ctx.cancel_token.as_ref())
                     .await;
                 let mut events = vec![WireMessage::Event(EventMsg {
                     id: request_id.clone(),
@@ -391,17 +427,6 @@ impl HostRouter {
                 })];
                 match invoke {
                     Ok(output) => {
-                        if let Some(chunks) = output.get("chunks").and_then(|c| c.as_array()) {
-                            for chunk in chunks {
-                                events.push(WireMessage::Event(EventMsg {
-                                    id: request_id.clone(),
-                                    phase: EventPhase::Delta,
-                                    data: chunk.clone(),
-                                    output: Value::Null,
-                                    error: None,
-                                }));
-                            }
-                        }
                         events.push(WireMessage::Event(EventMsg {
                             id: request_id,
                             phase: EventPhase::Completed,
@@ -423,12 +448,7 @@ impl HostRouter {
                     },
                 }
             },
-            HostCapability::Session(_)
-            | HostCapability::Context(_)
-            | HostCapability::Workspace(_)
-            | HostCapability::Process(_)
-            | HostCapability::Network(_)
-            | HostCapability::ExtensionHttp(_) => Err(ErrorPayload::new(
+            _ => Err(ErrorPayload::new(
                 WireErrorCode::InvalidCapabilityRegistry,
                 format!("streaming capability {cap} has no stream handler"),
             )),
@@ -436,8 +456,23 @@ impl HostRouter {
     }
 }
 
+/// Group handlers are only reachable through the spec-driven group dispatch; a mismatch means the
+/// catalog and the router disagree, which is a registry bug rather than a guest error.
+pub(super) fn invalid_group_operation(
+    operation: HostOperation,
+    group: HostOperationGroup,
+) -> ErrorPayload {
+    ErrorPayload::new(
+        WireErrorCode::InvalidCapabilityRegistry,
+        format!(
+            "{} is not a {group:?} host operation",
+            operation.wire_name()
+        ),
+    )
+}
+
 fn ensure_required_context(
-    operation: astrcode_extension_sdk::host::HostOperation,
+    operation: HostOperation,
     ctx: &InvokeContext,
 ) -> Result<(), ErrorPayload> {
     if operation.requires_session_context() && ctx.session_id.is_none() {
@@ -2184,7 +2219,7 @@ mod tests {
             .invoke_stream("astrcode.llm.main_chat", input.clone(), "stream-1", &ctx)
             .await
             .expect("collect typed model stream");
-        assert_eq!(events.len(), 4);
+        assert_eq!(events.len(), 2);
         let completed = events.last().expect("completed event");
         let WireMessage::Event(completed) = completed else {
             panic!("expected stream event");
@@ -2194,6 +2229,7 @@ mod tests {
             serde_json::from_value::<HostLlmCollectedStreamOutput>(completed.output.clone())
                 .expect("deserialize collected stream output");
         assert_eq!(collected.content, "hello world");
+        assert_eq!(collected.model, "main_llm");
         assert_eq!(collected.chunks[0].delta, "hello ");
         assert_eq!(collected.chunks[1].delta, "world");
 

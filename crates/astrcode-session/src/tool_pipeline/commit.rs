@@ -3,7 +3,9 @@ use std::{
     sync::Arc,
 };
 
-use astrcode_extension_sdk::extension::{PostToolUseResult, RuntimePostToolUseContext};
+use astrcode_extension_sdk::extension::{
+    PostToolUsePayload, PostToolUseResult, RuntimePostToolUseContext,
+};
 
 use super::{
     ToolCalls,
@@ -127,10 +129,12 @@ impl ToolCalls {
         let hook_call = self.turn.shared.hook_call_context();
         let post_ctx = RuntimePostToolUseContext::new(
             hook_call,
-            call.call_id.clone().into(),
-            call.name.clone(),
-            call.tool_input.clone(),
-            result.result.clone(),
+            PostToolUsePayload::new(
+                call.call_id.clone().into(),
+                call.name.clone(),
+                call.tool_input.clone(),
+                result.result.clone(),
+            ),
         );
 
         match self.extension_runner.emit_post_tool_use(post_ctx).await? {

@@ -4,8 +4,9 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::{
-        ExtensionError, ExtensionTasks, HookResult, LifecycleContext, LifecycleHandler,
-        PromptBuildContext, PromptBuildHandler, PromptContributions, ToolContext, ToolHandler,
+        ExtensionCall, ExtensionError, ExtensionTasks, HookResult, LifecycleContext,
+        LifecycleHandler, PromptBuildContext, PromptBuildHandler, PromptContributions, ToolContext,
+        ToolHandler,
     },
     host::ExtensionHost,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},

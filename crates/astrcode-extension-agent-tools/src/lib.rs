@@ -11,8 +11,9 @@ use astrcode_extension_sdk::{
     builder::{ExtensionToolDefinition, manifest},
     discovery::DiscoveryCache,
     extension::{
-        Extension, ExtensionCapability, ExtensionError, ExtensionManifest, PromptBuildContext,
-        PromptBuildHandler, PromptContributions, Registrar, ToolContext, ToolHandler,
+        Extension, ExtensionCall, ExtensionCapability, ExtensionError, ExtensionManifest,
+        PromptBuildContext, PromptBuildHandler, PromptContributions, Registrar, ToolContext,
+        ToolHandler,
     },
     session::{
         HostCreateSessionRequest, HostRecycleSessionRequest, HostSubmitTurnOutput,

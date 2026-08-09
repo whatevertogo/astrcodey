@@ -89,7 +89,7 @@ backend”两个语义完全不同的 `None`，后者则有结构化 `ErrorPaylo
 | 磁盘 `ExtensionManifest` 与运行时 manifest 同名 | `ExtensionPackageManifest` / `ExtensionManifest` | 含义含混的旧类型名 |
 | `Registrar::tool()` + 按名字 `tool_metadata()` | `ToolDefinitionBuilder::prompt()` + `Registrar::tool()` | `tool_metadata` map 和二次名称关联 |
 | `on_provider(event, ...)` + before/after 专用入口 | before/after 专用入口 | `ProviderEvent` 驱动的注册别名 |
-| `on_event(...)` 表示 lifecycle hook | `on_lifecycle(...)` | 容易与 extension event 混淆的别名 |
+| `on_event(...)` 表示 lifecycle hook | `on_lifecycle(...)` | 容易与 custom event 混淆的别名 |
 | handler 位置参数 + `ExtensionToolContext` + hook 公开字段 | 每个 handler 一个私有字段 context | 旧位置参数签名和生产 context struct literal |
 | `ExtensionCtx::event_sink()` 与各 handler 单独事件路径 | `ExtensionCallContext::events()` | 作者可见的裸 event sink |
 | `ExtensionHostServices` 可选 backend 字段 | `ExtensionHost` 领域客户端 | `trusted` re-export 和作者可见 backend trait |
@@ -353,7 +353,8 @@ impl Registrar {
     pub fn http_route(&mut self, route: ExtensionHttpRoute, handler: Arc<dyn ExtensionHttpHandler>);
     pub fn keybinding(&mut self, binding: Keybinding);
     pub fn status_item(&mut self, item: StatusItem);
-    pub fn declare_event(&mut self, event: ExtensionEventDecl);
+    pub fn declare_custom_event(&mut self, event: CustomEventDeclaration);
+    pub fn on_custom_event(&mut self, subscription: CustomEventSubscription, handler: Arc<dyn CustomEventHandler>);
 
     pub fn on_pre_tool_use(&mut self, mode: HookMode, priority: i32, handler: Arc<dyn PreToolUseHandler>);
     pub fn on_pre_tool_use_for(&mut self, target: ToolHookTarget, mode: HookMode, priority: i32, handler: Arc<dyn PreToolUseHandler>);
@@ -365,7 +366,7 @@ impl Registrar {
     pub fn on_compact(&mut self, event: CompactEvent, priority: i32, handler: Arc<dyn CompactHandler>);
     pub fn on_continue_after_stop(&mut self, priority: i32, options: ContinueAfterStopOptions, handler: Arc<dyn ContinueAfterStopHandler>);
     pub fn on_user_message_envelope(&mut self, priority: i32, handler: Arc<dyn UserMessageEnvelopeHandler>);
-    pub fn on_lifecycle(&mut self, event: ExtensionEvent, mode: HookMode, priority: i32, handler: Arc<dyn LifecycleHandler>);
+    pub fn on_lifecycle(&mut self, event: LifecycleEvent, mode: HookMode, priority: i32, handler: Arc<dyn LifecycleHandler>);
 
     #[doc(hidden)]
     pub fn finish(self, manifest: ExtensionManifest)
@@ -383,8 +384,8 @@ impl Registrar {
 | `command_discovery` | 为当前工作区提供动态命令集合。 | 与动态工具使用同一缓存 generation 和错误模型。 |
 | `http_route` | 路由定义与 handler 原子绑定；校验 scope capability、路径、body 上限和冲突。 | handler 取得 `HttpContext`；新增认证模式通过 access enum 和边界映射扩展。 |
 | `keybinding` | 将按键映射到本 extension 已注册命令；目标不存在时安装失败。 | 只声明 UI 意图，不直接执行前端代码。 |
-| `status_item` | 声明一个可由命令结果或 extension event 更新的状态项。 | id 在 extension 内唯一；未来样式字段保持可选且不改变语义。 |
-| `declare_event` | 声明 extension 可发射的事件名、schema version、durability 和 payload 上限。 | 发射时必须匹配声明；schema 演进以 version 为边界，不静默接受未知大 payload。 |
+| `status_item` | 声明一个可由命令结果或 custom event 更新的状态项。 | id 在 extension 内唯一；未来样式字段保持可选且不改变语义。 |
+| `declare_custom_event` | 声明 extension 可发射的事件名、schema version、durability 和 payload 上限。 | 发射时必须匹配声明；schema 演进以 version 为边界，不静默接受未知大 payload。 |
 
 `Registrar` 的读取 accessor 只供运行时内部使用；作者只看到写入 API。`finish(manifest)` 完成所有
 局部校验，并把 manifest 与冻结后的 aggregate 成对返回。全局名称冲突等需要当前 runtime 上下文的
@@ -508,7 +509,7 @@ impl SlashCommandBuilder {
 这些字段只描述客户端交互契约；server 仍在执行时重新检查 session/turn 状态。声明
 `argument_completions(true)` 但 handler 未实现补全时安装失败，而不是运行时返回空列表掩盖配置错误。
 
-#### `http_route()`、`keybinding()`、`status_item()`、`extension_event()`
+#### `http_route()`、`keybinding()`、`status_item()`、`custom_event()`
 
 这些 builder 采用与 `tool()` 相同的规则：构造纯描述值、提供安全默认值、在 `finish()` 与宿主
 安装边界再次校验。建议入口为：
@@ -517,7 +518,7 @@ impl SlashCommandBuilder {
 http_route(method, path).public().max_body_bytes(...).description(...).build();
 keybinding(key, command).arguments(...).description(...).build();
 status_item(id, text).priority(...).build();
-extension_event(name).schema_version(...).durable(...).max_payload_bytes(...).build();
+custom_event(name).schema_version(...).durable(...).max_payload_bytes(...).build();
 ```
 
 HTTP 默认应保持 authenticated，而不是 Vvbot 当前 builder 的 admin 命名，也不能为了更省代码默认
@@ -543,7 +544,7 @@ impl ExtensionCallContext {
     pub fn require_working_dir(&self) -> Result<&Path, HostError>;
     pub fn paths(&self) -> &ExtensionPaths;
     pub fn host(&self) -> &ExtensionHost;
-    pub fn events(&self) -> &ExtensionEventEmitter;
+    pub fn events(&self) -> &CustomEventEmitter;
     pub fn tasks(&self) -> &ExtensionTasks;
     pub fn cancellation(&self) -> &CancellationToken;
 }
@@ -578,15 +579,15 @@ impl ExtensionCallContext {
 `ToolContext::arguments<T>()`、`HttpContext::json<T>()` 等只是边界反序列化便利方法，不把内部函数
 调用改造成 DTO。类型化参数仍由具体扩展定义并使用 `deny_unknown_fields`。
 
-#### `ExtensionEventEmitter`
+#### `CustomEventEmitter`
 
 ```rust
-impl ExtensionEventEmitter {
+impl CustomEventEmitter {
     pub async fn emit<T: serde::Serialize + ?Sized>(
         &self,
         event: &str,
         payload: &T,
-    ) -> Result<(), ExtensionEventError>;
+    ) -> Result<EventDeliveryReceipt, CustomEventEmitError>;
 }
 ```
 
@@ -623,9 +624,9 @@ accessor 先校验授权（若该领域需要）、backend 和当前调用范围
 没有额外 capability，但仍要求 session context 和 state backend。`models()` 的主/小模型授权在
 `main_available` / `small_available` 与具体调用处分别校验：
 
-- manifest 未声明能力：`HostError::class() == HostErrorClass::PermissionDenied`；
-- 已声明但当前宿主没有 backend：`HostErrorClass::BackendUnavailable`；
-- 当前调用没有所需 session/turn/workspace 上下文：`HostErrorClass::ContextUnavailable`。
+- manifest 未声明能力：`HostError::code_enum() == Some(WireErrorCode::PermissionDenied)`；
+- 已声明但当前宿主没有 backend：`WireErrorCode::BackendUnavailable`；
+- 当前调用没有所需 session/turn/workspace 上下文：`WireErrorCode::ContextUnavailable`。
 
 这三种情况必须可观察地区分。公开作者 API 不提供 `invoke("astrcode.*", Value)`；raw invoke 只属于
 HostRouter/S5R transport adapter。
@@ -679,7 +680,7 @@ destructive capability，并在删除点重新验证所有权和目标路径。
 
 | Client | API | 语义 |
 |---|---|---|
-| `ModelClient` | `main_chat`、`small_chat`、`main_chat_stream`、`small_chat_stream` | main 使用 session active model，small 使用宿主 small model；stream 方法当前返回完成后的 `HostLlmCollectedStreamOutput`（最终 content、model、按序 chunks），不是渐进式 Rust `Stream`。 |
+| `ModelClient` | `main_chat`、`small_chat`、`main_chat_stream`、`small_chat_stream` | main 使用 session active model，small 使用宿主 small model；stream 方法返回完成后的 `HostLlmCollectedStreamOutput`（最终 content、model 和有序 chunks），不是渐进式 Rust `Stream`。 |
 | `WorkspaceClient` | `read`、`list`、`grep`、`glob`、`write`、`edit` | 所有路径相对规范化 working dir；拒绝越界、symlink 和敏感路径；写操作重新校验目标。 |
 | `ProcessClient` | `spawn` | 总超时包含排队；cwd 在 workspace 内；进程执行不是 OS sandbox。 |
 | `NetworkClient` | `send` | 仅 HTTP(S)，拒绝本机、内网和链路本地目标；body 在作者 API 中是原始字节，线缆使用 base64。`max_bytes <= 10 MiB`，`timeout_ms` 为 `1..=60_000`；`Manual` 返回受大小限制的原始 3xx body。 |
@@ -760,20 +761,18 @@ pub struct HostError {
     pub details: Option<serde_json::Value>,
 }
 
-pub enum HostErrorClass {
-    PermissionDenied,
-    BackendUnavailable,
-    ContextUnavailable,
-    InvalidInput,
-    Cancelled,
-    Timeout,
-    Transport,
-    Other,
+impl HostError {
+    pub fn code_enum(&self) -> Option<WireErrorCode>;
 }
+
+// `astrcode_core::wire::WireErrorCode`，宿主与 worker 共享的线缆错误码：
+// 通用码 PermissionDenied、BackendUnavailable、ContextUnavailable、InvalidInput、
+// Cancelled、Timeout、Transport 等，以及 network、session 等领域码。
 ```
 
-- `HostError` 无损保存 S5R `ErrorPayload` 的全部字段；未知或未来 error code 不会在分类时丢失。
-- `class()` 只为常见分支提供稳定粗粒度分类；业务诊断和转发仍读取原始 `code`、`hint`、
+- `HostError` 无损保存 S5R `ErrorPayload` 的全部字段；`code` 不在 `WireErrorCode` 已知集合时
+  `code_enum()` 返回 `None`，原始 `code` 字符串不丢失。
+- `code_enum()` 只为已知线缆码提供类型化分支；业务诊断和转发仍读取原始 `code`、`hint`、
   `retryable` 与 `details`。
 - 同一错误只在最可操作的层增加一次上下文。
 - `ExtensionError` 包含 `Host(HostError)` 与作者领域错误；不能把所有宿主失败 stringify 成
@@ -823,7 +822,7 @@ backend 的测试必须主动 grant 并配置响应。
 - 结构化 health 诊断与 config callback 的 `ReloadRequired` 决策；当前分别是 `Result<(),
   ExtensionError>`。
 - 生成式 typed event handle 与通用 JSON state helper；当前只有声明校验后的
-  `ExtensionEventEmitter` 和 attributed `ExtensionPaths`。
+  `CustomEventEmitter` 和 attributed `ExtensionPaths`。
 - 独立 Task Plane client；只有出现稳定调用方与独立权限模型后再设计，不扩张
   `SessionControlClient`。
 
@@ -928,7 +927,7 @@ replacement 的纯 discovery 与包 manifest 校验可以提前完成，但进�
 
 ### 阶段二：注册 API 收敛（已完成）
 
-- 明确命名 `declare_event`、`on_lifecycle`、before/after provider handlers；
+- 明确命名 `declare_custom_event`、`on_custom_event`、`on_lifecycle`、before/after provider handlers；
 - 让 `Registrar::finish(manifest)` 返回 `(ExtensionManifest, ExtensionRegistrations)`；
 - 让 resolved runtime manifest 持有 `(manifest, registrations)`；
 - 保留现有 handler index 构建和 validation 语义；

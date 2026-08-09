@@ -16,11 +16,11 @@ use std::{
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        DiscoveredTool, Extension, ExtensionCapability, ExtensionError, ExtensionManifest,
-        ExtensionStartContext, HookMode, HookResult, LifecycleContext, LifecycleEvent,
-        LifecycleHandler, PromptBuildContext, PromptBuildHandler, PromptContributions, Registrar,
-        StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler,
-        ToolHandler,
+        DiscoveredTool, Extension, ExtensionCall, ExtensionCapability, ExtensionError,
+        ExtensionManifest, ExtensionStartContext, HookMode, HookResult, LifecycleContext,
+        LifecycleEvent, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, Registrar, StopReason, ToolContext, ToolDiscovery,
+        ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler,
     },
     tool::{
         ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPromptMetadata,

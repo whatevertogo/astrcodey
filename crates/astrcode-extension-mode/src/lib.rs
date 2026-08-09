@@ -25,10 +25,10 @@ use std::{path::Path, sync::Arc};
 use astrcode_extension_sdk::{
     builder::{ExtensionToolDefinition, manifest},
     extension::{
-        CommandContext, CommandHandler, Extension, ExtensionCapability, ExtensionCommandResult,
-        ExtensionError, ExtensionManifest, ExtensionPaths, HookMode, PreToolUseContext,
-        PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderHandler, ProviderResult,
-        Registrar, SlashCommand, StatusItemUpdatePayload, ToolContext, ToolHandler,
+        CommandContext, CommandHandler, Extension, ExtensionCall, ExtensionCapability,
+        ExtensionCommandResult, ExtensionError, ExtensionManifest, ExtensionPaths, HookMode,
+        PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderHandler,
+        ProviderResult, Registrar, SlashCommand, StatusItemUpdatePayload, ToolContext, ToolHandler,
     },
     llm::LlmMessage,
     permission::ApprovalMode,
