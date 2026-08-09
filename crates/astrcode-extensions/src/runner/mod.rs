@@ -515,7 +515,7 @@ async fn reconcile_durable_custom_events_once(
         },
     };
 
-    let stream_head = stored_events.last().map(|event| event.seq);
+    let replay_head = stored_events.last().map(|event| event.seq);
     for stored in stored_events {
         let custom_event = match &stored.payload {
             DurableEventPayload::CustomEvent(custom_event) => custom_event,
@@ -567,14 +567,14 @@ async fn reconcile_durable_custom_events_once(
                 .min(CUSTOM_EVENT_RETRY_MAX_DELAY);
         }
     }
-    if let Some(stream_head) = stream_head {
+    if let Some(replay_head) = replay_head {
         match session
             .event_store
             .checkpoint_event_consumer(
                 &consumer.session_id,
                 &consumer.consumer_id,
                 state.revision,
-                stream_head,
+                replay_head,
             )
             .await
         {
