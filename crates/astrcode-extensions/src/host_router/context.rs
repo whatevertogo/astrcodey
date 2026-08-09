@@ -114,6 +114,7 @@ async fn emit_event(input: &Value, ctx: &InvokeContext) -> Result<Value, ErrorPa
         event_tx,
         &request.event_type,
         request.schema_version,
+        ctx.event_causation.clone(),
         request.payload,
     )
     .await

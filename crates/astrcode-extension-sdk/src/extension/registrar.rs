@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 use super::{
     CommandDiscoveryHandler, CommandHandler, CompactEvent, CompactHandler,
     ContinueAfterStopHandler, ContinueAfterStopOptions, ContinueAfterStopRegistration,
-    ExtensionCapability, ExtensionEvent, ExtensionEventDecl, ExtensionHttpAccess,
-    ExtensionHttpHandler, ExtensionHttpRoute, ExtensionHttpRouteRegistration, ExtensionManifest,
-    HookMode, LifecycleHandler, MAX_EXTENSION_EVENT_PAYLOAD_BYTES, PostToolUseHandler,
-    PreToolUseHandler, PromptBuildHandler, ProviderEvent, ProviderHandler, SlashCommand,
-    ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
+    CustomEventDeclaration, CustomEventHandler, CustomEventSubscription, ExtensionCapability,
+    ExtensionHttpAccess, ExtensionHttpHandler, ExtensionHttpRoute, ExtensionHttpRouteRegistration,
+    ExtensionManifest, HookMode, LifecycleEvent, LifecycleHandler, MAX_CUSTOM_EVENT_PAYLOAD_BYTES,
+    PostToolUseHandler, PreToolUseHandler, PromptBuildHandler, ProviderEvent, ProviderHandler,
+    SlashCommand, ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
     UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
     extension_http_route_patterns_conflict, lifecycle_event_allows_blocking,
 };
@@ -55,8 +55,16 @@ pub struct ExtensionRegistrations {
     compact: Vec<(CompactEvent, i32, Arc<dyn CompactHandler>)>,
     continue_after_stop: Vec<ContinueAfterStopRegistration<dyn ContinueAfterStopHandler>>,
     user_message_envelope: Vec<UserMessageEnvelopeRegistration<dyn UserMessageEnvelopeHandler>>,
-    lifecycle: Vec<(ExtensionEvent, HookMode, i32, Arc<dyn LifecycleHandler>)>,
-    extension_event_decls: Vec<ExtensionEventDecl>,
+    lifecycle: Vec<(LifecycleEvent, HookMode, i32, Arc<dyn LifecycleHandler>)>,
+    custom_event_declarations: Vec<CustomEventDeclaration>,
+    custom_event_subscriptions: Vec<CustomEventRegistration>,
+}
+
+#[derive(Clone)]
+pub struct CustomEventRegistration {
+    pub subscription: CustomEventSubscription,
+    pub priority: i32,
+    pub handler: Arc<dyn CustomEventHandler>,
 }
 
 #[derive(Clone)]
@@ -133,9 +141,27 @@ impl Registrar {
         self.registrations.status_items.push(item);
     }
 
-    pub fn declare_event(&mut self, mut declaration: ExtensionEventDecl) {
+    pub fn declare_custom_event(&mut self, mut declaration: CustomEventDeclaration) {
         declaration.event_type = declaration.event_type.trim().to_owned();
-        self.registrations.extension_event_decls.push(declaration);
+        self.registrations
+            .custom_event_declarations
+            .push(declaration);
+    }
+
+    pub fn on_custom_event(
+        &mut self,
+        mut subscription: CustomEventSubscription,
+        priority: i32,
+        handler: Arc<dyn CustomEventHandler>,
+    ) {
+        subscription.normalize();
+        self.registrations
+            .custom_event_subscriptions
+            .push(CustomEventRegistration {
+                subscription,
+                priority,
+                handler,
+            });
     }
 
     pub fn on_pre_tool_use(
@@ -252,7 +278,7 @@ impl Registrar {
 
     pub fn on_lifecycle(
         &mut self,
-        event: ExtensionEvent,
+        event: LifecycleEvent,
         mode: HookMode,
         priority: i32,
         handler: Arc<dyn LifecycleHandler>,
@@ -328,7 +354,7 @@ impl ExtensionRegistrations {
         &self.user_message_envelope
     }
 
-    pub fn lifecycle(&self) -> &[(ExtensionEvent, HookMode, i32, Arc<dyn LifecycleHandler>)] {
+    pub fn lifecycle(&self) -> &[(LifecycleEvent, HookMode, i32, Arc<dyn LifecycleHandler>)] {
         &self.lifecycle
     }
 
@@ -340,8 +366,12 @@ impl ExtensionRegistrations {
         &self.status_items
     }
 
-    pub fn extension_event_decls(&self) -> &[ExtensionEventDecl] {
-        &self.extension_event_decls
+    pub fn custom_event_declarations(&self) -> &[CustomEventDeclaration] {
+        &self.custom_event_declarations
+    }
+
+    pub fn custom_event_subscriptions(&self) -> &[CustomEventRegistration] {
+        &self.custom_event_subscriptions
     }
 
     fn validate(&self, manifest: &ExtensionManifest) -> Result<(), RegistrationError> {
@@ -351,9 +381,16 @@ impl ExtensionRegistrations {
         require_capability(
             extension_id,
             capabilities,
-            !self.extension_event_decls.is_empty(),
+            !self.custom_event_declarations.is_empty(),
             "event",
-            ExtensionCapability::EmitEvents,
+            ExtensionCapability::EmitCustomEvents,
+        )?;
+        require_capability(
+            extension_id,
+            capabilities,
+            !self.custom_event_subscriptions.is_empty(),
+            "custom_event_subscription",
+            ExtensionCapability::ConsumeCustomEvents,
         )?;
         require_capability(
             extension_id,
@@ -484,26 +521,42 @@ impl ExtensionRegistrations {
         }
 
         let mut event_types = HashSet::new();
-        for event in &self.extension_event_decls {
+        for event in &self.custom_event_declarations {
             let event_type = event.event_type.as_str();
             if event_type.is_empty() || !event_types.insert(event_type) {
                 return Err(invalid_registration(
                     extension_id,
-                    format!("invalid or duplicate extension event `{event_type}`"),
+                    format!("invalid or duplicate custom event `{event_type}`"),
                 ));
             }
             if event.schema_version == 0 {
                 return Err(invalid_registration(
                     extension_id,
-                    format!("extension event `{event_type}` requires a non-zero schema version"),
+                    format!("custom event `{event_type}` requires a non-zero schema version"),
                 ));
             }
-            if !(1..=MAX_EXTENSION_EVENT_PAYLOAD_BYTES).contains(&event.max_payload_bytes) {
+            if !(1..=MAX_CUSTOM_EVENT_PAYLOAD_BYTES).contains(&event.max_payload_bytes) {
                 return Err(invalid_registration(
                     extension_id,
                     format!(
-                        "extension event `{event_type}` payload limit must be between 1 and \
-                         {MAX_EXTENSION_EVENT_PAYLOAD_BYTES} bytes"
+                        "custom event `{event_type}` payload limit must be between 1 and \
+                         {MAX_CUSTOM_EVENT_PAYLOAD_BYTES} bytes"
+                    ),
+                ));
+            }
+        }
+
+        let mut subscription_ids = HashSet::new();
+        for registration in &self.custom_event_subscriptions {
+            if let Err(reason) = registration.subscription.validate() {
+                return Err(invalid_registration(extension_id, reason));
+            }
+            if !subscription_ids.insert(registration.subscription.id.as_str()) {
+                return Err(invalid_registration(
+                    extension_id,
+                    format!(
+                        "invalid or duplicate custom event subscription id `{}`",
+                        registration.subscription.id
                     ),
                 ));
             }
@@ -549,7 +602,7 @@ pub enum RegistrationError {
     )]
     InvalidLifecycleMode {
         extension_id: String,
-        event: ExtensionEvent,
+        event: LifecycleEvent,
     },
     #[error("extension {extension_id} has an invalid registration: {reason}")]
     Invalid {
@@ -637,7 +690,7 @@ mod tests {
 
     fn finish_with_event_limit(max_payload_bytes: usize) -> Result<(), RegistrationError> {
         let mut registrar = Registrar::new();
-        registrar.declare_event(ExtensionEventDecl {
+        registrar.declare_custom_event(CustomEventDeclaration {
             event_type: "test.completed".into(),
             schema_version: 1,
             durable: true,
@@ -647,7 +700,7 @@ mod tests {
             .finish(
                 manifest("event-limit-test")
                     .version("1.0.0")
-                    .capability(ExtensionCapability::EmitEvents)
+                    .capability(ExtensionCapability::EmitCustomEvents)
                     .build(),
             )
             .map(|_| ())
@@ -657,8 +710,8 @@ mod tests {
     fn event_payload_limit_accepts_host_ceiling_only() {
         for (max_payload_bytes, accepted) in [
             (0, false),
-            (MAX_EXTENSION_EVENT_PAYLOAD_BYTES, true),
-            (MAX_EXTENSION_EVENT_PAYLOAD_BYTES + 1, false),
+            (MAX_CUSTOM_EVENT_PAYLOAD_BYTES, true),
+            (MAX_CUSTOM_EVENT_PAYLOAD_BYTES + 1, false),
         ] {
             assert_eq!(
                 finish_with_event_limit(max_payload_bytes).is_ok(),
@@ -693,7 +746,7 @@ mod tests {
             priority: 0,
             tooltip: None,
         });
-        registrar.declare_event(ExtensionEventDecl {
+        registrar.declare_custom_event(CustomEventDeclaration {
             event_type: "  review.completed  ".into(),
             schema_version: 1,
             durable: true,
@@ -704,7 +757,7 @@ mod tests {
             .finish(
                 manifest("canonical-registration-test")
                     .version("1.0.0")
-                    .capability(ExtensionCapability::EmitEvents)
+                    .capability(ExtensionCapability::EmitCustomEvents)
                     .build(),
             )
             .expect("canonical registrations");
@@ -715,7 +768,7 @@ mod tests {
         assert_eq!(registrations.keybindings()[0].command, "inspect");
         assert_eq!(registrations.status_items()[0].id, "state");
         assert_eq!(
-            registrations.extension_event_decls()[0].event_type,
+            registrations.custom_event_declarations()[0].event_type,
             "review.completed"
         );
     }

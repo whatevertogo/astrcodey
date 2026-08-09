@@ -294,28 +294,28 @@ const askUserPending = {
 }
 const askUserPatch = reduceConversationDeltas(frameState, [
   {
-    kind: 'extensionEvent',
+    kind: 'customEvent',
     extensionId: 'astrcode-ask-user',
     eventType: 'ask_user.pending',
     schemaVersion: 1,
     payload: askUserPending,
   },
   {
-    kind: 'extensionEvent',
+    kind: 'customEvent',
     extensionId: 'astrcode-ask-user',
     eventType: 'ask_user.pending',
     schemaVersion: 1,
     payload: askUserPending,
   },
   {
-    kind: 'extensionEvent',
+    kind: 'customEvent',
     extensionId: 'astrcode-ask-user',
     eventType: 'ask_user.resolved',
     schemaVersion: 1,
     payload: { sessionId: 'session-1', callId: 'call-1' },
   },
   {
-    kind: 'extensionEvent',
+    kind: 'customEvent',
     extensionId: 'astrcode-ask-user',
     eventType: 'ask_user.pending',
     schemaVersion: 1,
@@ -345,21 +345,21 @@ assert.equal(askUserPatch.resolvedAskUserCallIds, undefined)
 
 const collisionPatch = reduceConversationDeltas(frameState, [
   {
-    kind: 'extensionEvent',
+    kind: 'customEvent',
     extensionId: 'astrcode-ask-user',
     eventType: 'ask_user.pending',
     schemaVersion: 1,
     payload: askUserPending,
   },
   {
-    kind: 'extensionEvent',
+    kind: 'customEvent',
     extensionId: 'astrcode-ask-user',
     eventType: 'ask_user.pending',
     schemaVersion: 1,
     payload: { ...askUserPending, sessionId: 'session-2' },
   },
   {
-    kind: 'extensionEvent',
+    kind: 'customEvent',
     extensionId: 'astrcode-ask-user',
     eventType: 'ask_user.resolved',
     schemaVersion: 1,
@@ -380,7 +380,7 @@ const resolvedDuringRefreshPatch = reduceConversationDeltas(
   { ...frameState, pendingAskUserRefreshInFlight: true },
   [
     {
-      kind: 'extensionEvent',
+      kind: 'customEvent',
       extensionId: 'astrcode-ask-user',
       eventType: 'ask_user.resolved',
       schemaVersion: 1,

@@ -3,7 +3,7 @@
 use astrcode_core::{config::ModelSelection, llm::LlmMessage, types::*};
 use astrcode_extension_sdk::{
     extension::{
-        ExchangeSummary, ExtensionError, ExtensionEvent, RuntimeHookCallContext,
+        ExchangeSummary, ExtensionError, LifecycleEvent, RuntimeHookCallContext,
         RuntimeLifecycleContext, RuntimeProviderContext,
     },
     runtime_ports::TurnHooks,
@@ -21,7 +21,7 @@ pub(crate) async fn on_step_end_best_effort(
     ctx: &RuntimeLifecycleContext,
 ) {
     if let Err(error) = extension_runner
-        .emit_lifecycle(ExtensionEvent::StepEnd, ctx.clone())
+        .emit_lifecycle(LifecycleEvent::StepEnd, ctx.clone())
         .await
     {
         tracing::warn!(error = %error, "StepEnd lifecycle hook failed (best-effort)");
@@ -51,7 +51,7 @@ pub(crate) struct SharedTurnContext {
     pub(crate) working_dir: String,
     pub(crate) model_id: String,
     pub(crate) session_store_dir: Option<std::path::PathBuf>,
-    /// 当前 turn 的事件 ingress（`ExtensionEvents` 在 `process_prompt` 期间注入）。
+    /// 当前 turn 的事件 ingress（`TurnEventBridge` 在 `process_prompt` 期间注入）。
     pub(crate) turn_event_sender: Option<crate::turn_publish::TurnEventSender>,
     pub(crate) approval_mode: astrcode_core::permission::ApprovalMode,
     pub(crate) tool_selection: Option<astrcode_core::tool::SessionToolSelection>,

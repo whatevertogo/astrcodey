@@ -3,4 +3,4 @@
 /**
  * 扩展可发射事件的声明。
  */
-export type ExtensionEventDeclDto = { eventType: string, schemaVersion: number, durable: boolean, maxPayloadBytes: number, };
+export type CustomEventDeclarationDto = { eventType: string, schemaVersion: number, durable: boolean, maxPayloadBytes: number, };

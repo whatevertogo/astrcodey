@@ -19,7 +19,7 @@ mod test_support;
 pub use astrcode_core::tool::ToolResultArtifactSlice;
 pub use error::StorageError;
 pub use traits::{
-    EventReader, SessionEventJournal, SessionPathResolver, SessionReader, SessionStore,
-    ToolResultArtifactStore,
+    EventConsumerCheckpointOutcome, EventConsumerCheckpointReset, EventConsumerState, EventReader,
+    SessionEventJournal, SessionPathResolver, SessionReader, SessionStore, ToolResultArtifactStore,
 };
 pub use types::{CompactSnapshotInput, ToolResultArtifactInput, ToolResultArtifactRef};

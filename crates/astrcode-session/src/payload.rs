@@ -44,10 +44,14 @@ pub fn system_prompt_configured_payload(
 }
 
 /// 构造 transcript 前缀重写事件；`source_seq` 之后的 tail 由 projection 保留。
+///
+/// `source_fingerprint` 是被替换前缀（system prompt + provider 视角消息）的
+/// `transcript_prefix_fingerprint`，提交时 projection 重算不匹配则拒绝写入。
 pub fn transcript_rewritten_payload(
     trigger: impl Into<String>,
     compaction: &CompactResult,
     source_seq: u64,
+    source_fingerprint: String,
     strategy: CompactStrategy,
 ) -> DurableEventPayload {
     let messages = compaction
@@ -58,6 +62,7 @@ pub fn transcript_rewritten_payload(
         .collect();
     DurableEventPayload::TranscriptRewritten {
         source_seq,
+        source_fingerprint: Some(source_fingerprint),
         messages,
         reason: TranscriptRewriteReason::Compaction(CompactionDetails {
             trigger: trigger.into(),

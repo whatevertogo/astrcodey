@@ -11,6 +11,8 @@ pub(super) type ExtensionHandler<H> = (String, HookMode, Arc<H>);
 pub(super) type ToolExtensionHandler<H> = (String, HookMode, ToolHookTarget, Arc<H>);
 pub(super) type ContinueAfterStopExtensionHandler<H> = (String, ContinueAfterStopOptions, Arc<H>);
 pub(super) type SimpleExtensionHandler<H> = (String, Arc<H>);
+pub(super) type CustomEventExtensionHandler =
+    (String, CustomEventSubscription, Arc<dyn CustomEventHandler>);
 type Prioritized<T> = (i32, T);
 type PrioritizedEvent<K, T> = (K, i32, T);
 
@@ -37,7 +39,8 @@ pub(super) struct HandlerIndex {
     pub(super) continue_after_stop:
         Vec<ContinueAfterStopExtensionHandler<dyn ContinueAfterStopHandler>>,
     pub(super) user_message_envelope: Vec<SimpleExtensionHandler<dyn UserMessageEnvelopeHandler>>,
-    pub(super) lifecycle: HashMap<ExtensionEvent, Vec<ExtensionHandler<dyn LifecycleHandler>>>,
+    pub(super) lifecycle: HashMap<LifecycleEvent, Vec<ExtensionHandler<dyn LifecycleHandler>>>,
+    pub(super) custom_event: Vec<CustomEventExtensionHandler>,
     // 预计算的 collect 缓存
     pub(super) tool_metadata: HashMap<String, ToolPromptMetadata>,
     pub(super) static_tools: Vec<(
@@ -55,7 +58,7 @@ pub(super) struct HandlerIndex {
     pub(super) command_discoveries: Vec<(String, Arc<dyn CommandDiscoveryHandler>)>,
     pub(super) keybindings: Vec<Keybinding>,
     pub(super) status_items: Vec<StatusItem>,
-    pub(super) extension_event_decls: HashMap<String, Vec<ExtensionEventDecl>>,
+    pub(super) custom_event_declarations: HashMap<String, Vec<CustomEventDeclaration>>,
     pub(super) capabilities: HashMap<String, Vec<ExtensionCapability>>,
     pub(super) http_routes: Vec<HttpRouteEntry>,
     pub(super) extension_tasks: HashMap<String, ExtensionTasks>,
@@ -71,6 +74,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
     let mut continue_after_stop = Vec::new();
     let mut user_message_envelope = Vec::new();
     let mut lifecycle = Vec::new();
+    let mut custom_event = Vec::new();
     let mut tool_metadata = HashMap::new();
     let mut static_tools = Vec::new();
     let mut tool_discoveries = Vec::new();
@@ -78,7 +82,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
     let mut command_discoveries = Vec::new();
     let mut keybindings = Vec::new();
     let mut status_items = Vec::new();
-    let mut extension_event_decls = HashMap::new();
+    let mut custom_event_declarations = HashMap::new();
     let mut capabilities = HashMap::new();
     let mut http_routes = Vec::new();
     let mut extension_tasks = HashMap::new();
@@ -154,6 +158,16 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
                 (extension_id.clone(), *mode, Arc::clone(handler)),
             ));
         }
+        for registration in registrations.custom_event_subscriptions() {
+            custom_event.push((
+                registration.priority,
+                (
+                    extension_id.clone(),
+                    registration.subscription.clone(),
+                    Arc::clone(&registration.handler),
+                ),
+            ));
+        }
         for registration in registrations.tools() {
             let definition = registration.definition();
             if registration.prompt() != &ToolPromptMetadata::default() {
@@ -181,10 +195,10 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         }
         keybindings.extend_from_slice(registrations.keybindings());
         status_items.extend_from_slice(registrations.status_items());
-        if !registrations.extension_event_decls().is_empty() {
-            extension_event_decls.insert(
+        if !registrations.custom_event_declarations().is_empty() {
+            custom_event_declarations.insert(
                 extension_id.clone(),
-                registrations.extension_event_decls().to_vec(),
+                registrations.custom_event_declarations().to_vec(),
             );
         }
         http_routes.extend(
@@ -209,6 +223,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         continue_after_stop: handlers_by_priority(continue_after_stop),
         user_message_envelope: handlers_by_priority(user_message_envelope),
         lifecycle: handlers_by_event(lifecycle),
+        custom_event: handlers_by_priority(custom_event),
         tool_metadata,
         static_tools,
         tool_discoveries,
@@ -216,7 +231,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         command_discoveries,
         keybindings,
         status_items,
-        extension_event_decls,
+        custom_event_declarations,
         capabilities,
         http_routes,
         extension_tasks,
@@ -256,7 +271,7 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
     let mut provider: Vec<(&str, ProviderEvent, i32, HookMode)> = Vec::new();
     let mut prompt: Vec<(&str, i32)> = Vec::new();
     let mut compact: Vec<(&str, CompactEvent, i32)> = Vec::new();
-    let mut lifecycle: Vec<(&str, ExtensionEvent, i32, HookMode)> = Vec::new();
+    let mut lifecycle: Vec<(&str, LifecycleEvent, i32, HookMode)> = Vec::new();
 
     for hosted in extensions {
         let manifest = &hosted.manifest;

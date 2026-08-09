@@ -10,26 +10,31 @@ use std::{
 
 use astrcode_core::{
     config::ModelSelection,
-    event::{DurableEventPayload, EventPayload, ExtensionEventData},
-    tool::access::ResourceAccess,
+    event::{
+        CustomEventData, DurableEvent, DurableEventPayload, Event, EventPayload, EventSender,
+        LiveEvent, LiveEventPayload, PersistedSystemPrompt, SessionStarted, SystemPromptSource,
+    },
+    tool::{SessionToolSelection, access::ResourceAccess},
+    types::SessionId,
 };
 use astrcode_extension_sdk::{
-    builder::{extension_event, manifest},
+    builder::{custom_event, manifest},
     extension::{
         CommandCompletionContext, CommandCompletionItem, CommandCompletions, CommandContext,
         CommandHandler, CompactContext, CompactEvent, CompactHandler, CompactResult,
         ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
-        ContinueAfterStopResult, Extension, ExtensionCapability, ExtensionCommandResult,
-        ExtensionConfig, ExtensionError, ExtensionEvent, ExtensionHttpHandler, ExtensionHttpMethod,
-        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
-        ExtensionStartContext, ExtensionTasks, HookMode, HookResult, HttpContext, LifecycleContext,
-        LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
-        PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderEvent,
-        ProviderHandler, ProviderResult, Registrar, RuntimeContinueAfterStopContext,
-        RuntimeHookCallContext, RuntimePreToolUseContext, RuntimeProviderContext,
-        RuntimeUserMessageEnvelopeContext, SlashCommand, StatusItem, StopReason, ToolContext,
-        ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler, ToolHookTarget,
-        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+        ContinueAfterStopResult, CustomEventContext, CustomEventHandler, CustomEventSubscription,
+        Extension, ExtensionCapability, ExtensionCommandResult, ExtensionConfig, ExtensionError,
+        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
+        ExtensionHttpRoute, ExtensionManifest, ExtensionStartContext, ExtensionTasks, HookMode,
+        HookResult, HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler,
+        PostToolUseContext, PostToolUseHandler, PostToolUseResult, PreToolUseContext,
+        PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
+        ProviderResult, Registrar, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
+        RuntimePreToolUseContext, RuntimeProviderContext, RuntimeUserMessageEnvelopeContext,
+        SlashCommand, StatusItem, StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext,
+        ToolDiscoveryHandler, ToolHandler, ToolHookTarget, UserMessageEnvelopeContext,
+        UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
     },
     runtime_ports::{
         RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness,
@@ -40,11 +45,15 @@ use astrcode_extension_sdk::{
         ToolResult,
     },
 };
+use astrcode_storage::{SessionEventJournal, SessionStore};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
 
-use super::{CommandSource, ExtensionHttpDispatchResult, ExtensionRunner};
+use super::{
+    CommandSource, CustomEventConsumerAction, CustomEventSession, ExtensionHttpDispatchResult,
+    ExtensionRunner,
+};
 use crate::runner::tool_adapter::normalize_stringified_booleans;
 
 fn extension_manifest(
@@ -276,7 +285,7 @@ struct RegistrationProbeExtension {
 }
 
 struct LifecycleModeProbeExtension {
-    event: ExtensionEvent,
+    event: LifecycleEvent,
 }
 
 struct RegistrationProbeHandler;
@@ -799,7 +808,7 @@ impl Extension for RegistrationProbeExtension {
     fn register(&self, reg: &mut Registrar) {
         match self.registration {
             CapabilityRegistration::Event => {
-                reg.declare_event(extension_event("probe").build());
+                reg.declare_custom_event(custom_event("probe").build());
             },
             CapabilityRegistration::Compact => {
                 reg.on_compact(
@@ -968,11 +977,11 @@ impl Extension for StartupDirectoryExtension {
 #[async_trait::async_trait]
 impl Extension for StartupEventExtension {
     fn manifest(&self) -> ExtensionManifest {
-        extension_manifest("startup-event", &[ExtensionCapability::EmitEvents])
+        extension_manifest("startup-event", &[ExtensionCapability::EmitCustomEvents])
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.declare_event(extension_event("startup_ready").build());
+        reg.declare_custom_event(custom_event("startup_ready").build());
     }
 
     async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
@@ -1043,7 +1052,7 @@ async fn privileged_registrations_require_their_declared_capabilities() {
         (
             CapabilityRegistration::Event,
             "event",
-            ExtensionCapability::EmitEvents,
+            ExtensionCapability::EmitCustomEvents,
         ),
         (
             CapabilityRegistration::Compact,
@@ -1113,7 +1122,7 @@ async fn privileged_registrations_require_their_declared_capabilities() {
 
 #[tokio::test]
 async fn only_turn_entry_lifecycle_events_may_block() {
-    for event in [ExtensionEvent::TurnStart, ExtensionEvent::UserPromptSubmit] {
+    for event in [LifecycleEvent::TurnStart, LifecycleEvent::UserPromptSubmit] {
         ExtensionRunner::new(Duration::from_secs(1))
             .register(Arc::new(LifecycleModeProbeExtension { event }))
             .await
@@ -1121,11 +1130,11 @@ async fn only_turn_entry_lifecycle_events_may_block() {
     }
 
     for event in [
-        ExtensionEvent::SessionStart,
-        ExtensionEvent::SessionResume,
-        ExtensionEvent::TurnEnd,
-        ExtensionEvent::StepEnd,
-        ExtensionEvent::SessionShutdown,
+        LifecycleEvent::SessionStart,
+        LifecycleEvent::SessionResume,
+        LifecycleEvent::TurnEnd,
+        LifecycleEvent::StepEnd,
+        LifecycleEvent::SessionShutdown,
     ] {
         let error = ExtensionRunner::new(Duration::from_secs(1))
             .register(Arc::new(LifecycleModeProbeExtension {
@@ -1648,11 +1657,12 @@ async fn start_can_emit_declared_event_through_bound_startup_channel() {
     let event = event_rx.recv().await.unwrap();
     assert!(matches!(
         event,
-        EventPayload::Durable(DurableEventPayload::ExtensionEvent(ExtensionEventData {
+        EventPayload::Durable(DurableEventPayload::CustomEvent(CustomEventData {
             extension_id,
             event_type,
             schema_version: 1,
             payload,
+            ..
         })) if extension_id == "startup-event"
             && event_type == "startup_ready"
             && payload == json!({"ready": true})
@@ -2652,4 +2662,442 @@ fn command_ctx() -> RuntimeHookCallContext {
         ModelSelection::simple("mock"),
         Some(PathBuf::from("/tmp/session-store")),
     )
+}
+
+struct CustomEventConsumerExtension {
+    attempts: Arc<AtomicUsize>,
+    calls: mpsc::UnboundedSender<(usize, String)>,
+    blocking: Option<Arc<BlockingCustomEvent>>,
+}
+
+struct CustomEventConsumer {
+    attempts: Arc<AtomicUsize>,
+    calls: mpsc::UnboundedSender<(usize, String)>,
+    blocking: Option<Arc<BlockingCustomEvent>>,
+}
+
+#[derive(Default)]
+struct BlockingCustomEvent {
+    entered: Notify,
+    release: Notify,
+}
+
+#[async_trait::async_trait]
+impl Extension for CustomEventConsumerExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("consumer", &[ExtensionCapability::ConsumeCustomEvents])
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.on_custom_event(
+            CustomEventSubscription::from_extension("producer", "job.completed"),
+            0,
+            Arc::new(CustomEventConsumer {
+                attempts: Arc::clone(&self.attempts),
+                calls: self.calls.clone(),
+                blocking: self.blocking.clone(),
+            }),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl CustomEventHandler for CustomEventConsumer {
+    async fn handle(&self, ctx: CustomEventContext) -> Result<(), ExtensionError> {
+        assert_eq!(ctx.source_extension_id(), "producer");
+        assert_eq!(ctx.event_type(), "job.completed");
+        let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
+        let job_id = ctx.payload()["jobId"].as_str().unwrap().to_owned();
+        let should_fail = attempt == 1 || job_id == "live-fails";
+        let _ = self.calls.send((attempt, job_id));
+        if let Some(blocking) = &self.blocking {
+            blocking.entered.notify_one();
+            blocking.release.notified().await;
+        }
+        if should_fail {
+            Err(ExtensionError::Internal("injected consumer failure".into()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[tokio::test]
+async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() {
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let (calls_tx, mut calls_rx) = mpsc::unbounded_channel();
+    runner
+        .register(Arc::new(CustomEventConsumerExtension {
+            attempts: Arc::clone(&attempts),
+            calls: calls_tx,
+            blocking: None,
+        }))
+        .await
+        .unwrap();
+
+    let session_id = SessionId::new("custom-event-session");
+    let store = Arc::new(astrcode_storage::in_memory::InMemoryEventStore::new());
+    store
+        .create_session(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::SessionStarted(SessionStarted {
+                working_dir: "/workspace".into(),
+                model_id: "model".into(),
+                parent: None,
+                tool_selection: SessionToolSelection::default(),
+                source_extension: None,
+                initial_system_prompt: PersistedSystemPrompt {
+                    text: "system".into(),
+                    fingerprint: "fingerprint".into(),
+                    extra_system_prompt: None,
+                    source: SystemPromptSource::Native,
+                },
+            }),
+        ))
+        .await
+        .unwrap();
+    store
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({"jobId": "job-1"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    let second = store
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({"jobId": "job-2"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    let store_port: Arc<dyn SessionStore> = store.clone();
+    let custom_event_session =
+        CustomEventSession::new(Arc::clone(&store_port), |_| EventSender::new(|_| Ok(())));
+
+    assert!(
+        runner.observe_custom_event(Arc::new(Event::from(second)), custom_event_session.clone())
+    );
+    assert_eq!(calls_rx.recv().await, Some((1, "job-1".into())));
+    assert_eq!(calls_rx.recv().await, Some((2, "job-1".into())));
+    assert_eq!(calls_rx.recv().await, Some((3, "job-2".into())));
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if store_port
+                .event_consumer_state(&session_id, "consumer:producer:job.completed")
+                .await
+                .unwrap()
+                .checkpoint
+                == Some(2)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let status = runner
+        .custom_event_consumer_statuses(&session_id, &custom_event_session)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(status.checkpoint, Some(2));
+    assert_eq!(status.pending_events, 0);
+    assert_eq!(status.failed_attempts, 1);
+
+    let paused = runner
+        .control_custom_event_consumer(
+            &session_id,
+            "consumer",
+            "producer:job.completed",
+            CustomEventConsumerAction::Pause,
+            &custom_event_session,
+        )
+        .await
+        .unwrap();
+    assert!(paused.paused);
+    let third = store
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({"jobId": "job-3"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        runner.observe_custom_event(Arc::new(Event::from(third)), custom_event_session.clone())
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), calls_rx.recv())
+            .await
+            .is_err()
+    );
+    let replay = runner
+        .control_custom_event_consumer(
+            &session_id,
+            "consumer",
+            "producer:job.completed",
+            CustomEventConsumerAction::ReplayFromBeginning,
+            &custom_event_session,
+        )
+        .await
+        .unwrap();
+    assert!(replay.paused);
+    assert_eq!(replay.checkpoint, None);
+    assert_eq!(replay.pending_events, 3);
+
+    runner
+        .control_custom_event_consumer(
+            &session_id,
+            "consumer",
+            "producer:job.completed",
+            CustomEventConsumerAction::Resume,
+            &custom_event_session,
+        )
+        .await
+        .unwrap();
+    assert_eq!(calls_rx.recv().await, Some((4, "job-1".into())));
+    assert_eq!(calls_rx.recv().await, Some((5, "job-2".into())));
+    assert_eq!(calls_rx.recv().await, Some((6, "job-3".into())));
+
+    runner
+        .control_custom_event_consumer(
+            &session_id,
+            "consumer",
+            "producer:job.completed",
+            CustomEventConsumerAction::Pause,
+            &custom_event_session,
+        )
+        .await
+        .unwrap();
+    let fourth = store
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({"jobId": "job-4"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        runner.observe_custom_event(Arc::new(Event::from(fourth)), custom_event_session.clone())
+    );
+    let skipped = runner
+        .control_custom_event_consumer(
+            &session_id,
+            "consumer",
+            "producer:job.completed",
+            CustomEventConsumerAction::SkipToStreamHead,
+            &custom_event_session,
+        )
+        .await
+        .unwrap();
+    assert!(skipped.paused);
+    assert_eq!(skipped.checkpoint, Some(4));
+    assert_eq!(skipped.pending_events, 0);
+    runner
+        .control_custom_event_consumer(
+            &session_id,
+            "consumer",
+            "producer:job.completed",
+            CustomEventConsumerAction::Resume,
+            &custom_event_session,
+        )
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), calls_rx.recv())
+            .await
+            .is_err()
+    );
+
+    assert!(runner.observe_custom_event(
+        Arc::new(Event::from(LiveEvent::session(
+            session_id.clone(),
+            LiveEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({"jobId": "live-fails"}),
+            }),
+        ))),
+        custom_event_session.clone(),
+    ));
+    assert_eq!(calls_rx.recv().await, Some((7, "live-fails".into())));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(150), calls_rx.recv())
+            .await
+            .is_err()
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 7);
+    let status = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let status = runner
+                .custom_event_consumer_statuses(&session_id, &custom_event_session)
+                .await
+                .unwrap()
+                .remove(0);
+            if !status.in_flight && status.failed_attempts == 2 {
+                break status;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(status.failed_attempts, 2);
+    assert_eq!(status.consecutive_failures, 1);
+
+    let unrelated = store
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.ignored".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({}),
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(runner.reconcile_custom_events(&session_id, custom_event_session.clone()));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            if store_port
+                .event_consumer_state(&session_id, "consumer:producer:job.completed")
+                .await
+                .unwrap()
+                .checkpoint
+                == Some(unrelated.seq)
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let status = runner
+        .custom_event_consumer_statuses(&session_id, &custom_event_session)
+        .await
+        .unwrap()
+        .remove(0);
+    assert_eq!(status.checkpoint, Some(unrelated.seq));
+    assert_eq!(status.stream_head, Some(unrelated.seq));
+    assert_eq!(status.pending_events, 0);
+}
+
+#[tokio::test]
+async fn skip_to_stream_head_waits_for_in_flight_delivery_and_suppresses_its_retry() {
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let blocking = Arc::new(BlockingCustomEvent::default());
+    let (calls_tx, mut calls_rx) = mpsc::unbounded_channel();
+    runner
+        .register(Arc::new(CustomEventConsumerExtension {
+            attempts,
+            calls: calls_tx,
+            blocking: Some(Arc::clone(&blocking)),
+        }))
+        .await
+        .unwrap();
+
+    let session_id = SessionId::new("custom-event-control-race");
+    let store = Arc::new(astrcode_storage::in_memory::InMemoryEventStore::new());
+    store
+        .create_session(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::SessionStarted(SessionStarted {
+                working_dir: "/workspace".into(),
+                model_id: "model".into(),
+                parent: None,
+                tool_selection: SessionToolSelection::default(),
+                source_extension: None,
+                initial_system_prompt: PersistedSystemPrompt {
+                    text: "system".into(),
+                    fingerprint: "fingerprint".into(),
+                    extra_system_prompt: None,
+                    source: SystemPromptSource::Native,
+                },
+            }),
+        ))
+        .await
+        .unwrap();
+    let blocked = store
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({"jobId": "blocked"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    let store_port: Arc<dyn SessionStore> = store;
+    let session = CustomEventSession::new(store_port, |_| EventSender::new(|_| Ok(())));
+    assert!(runner.observe_custom_event(Arc::new(Event::from(blocked)), session.clone()));
+    blocking.entered.notified().await;
+    assert_eq!(calls_rx.recv().await, Some((1, "blocked".into())));
+
+    let control = runner.control_custom_event_consumer(
+        &session_id,
+        "consumer",
+        "producer:job.completed",
+        CustomEventConsumerAction::SkipToStreamHead,
+        &session,
+    );
+    tokio::pin!(control);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), control.as_mut())
+            .await
+            .is_err()
+    );
+    blocking.release.notify_one();
+    let status = tokio::time::timeout(Duration::from_secs(1), control)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(status.checkpoint, Some(1));
+    assert_eq!(status.pending_events, 0);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), calls_rx.recv())
+            .await
+            .is_err()
+    );
 }

@@ -9,6 +9,25 @@ use astrcode_session_projection::{AgentSessionLinkView, SessionReadModel, Sessio
 
 use crate::{CompactSnapshotInput, StorageError, ToolResultArtifactInput, ToolResultArtifactRef};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EventConsumerState {
+    pub checkpoint: Option<u64>,
+    pub paused: bool,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventConsumerCheckpointReset {
+    Beginning,
+    StreamHead,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventConsumerCheckpointOutcome {
+    Accepted,
+    StaleRevision,
+}
+
 #[async_trait::async_trait]
 pub trait EventReader: Send + Sync {
     async fn replay_events(&self, session_id: &SessionId)
@@ -114,7 +133,22 @@ pub trait SessionEventJournal: Send + Sync {
     /// 原子创建 session 并提交 seq=0 的 `SessionStarted`。
     async fn create_session(&self, event: DurableEvent) -> Result<StoredEvent, StorageError>;
 
-    async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError>;
+    /// Atomically append one or more consecutive events from the same session.
+    ///
+    /// Implementations must commit the whole batch or leave both the event log and projection
+    /// unchanged. Sequence numbers are assigned in input order, and the returned batch has
+    /// exactly one stored event per input event.
+    async fn append_events(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError>;
+
+    async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
+        self.append_events(vec![event])
+            .await?
+            .pop()
+            .ok_or_else(crate::error::short_batch_result)
+    }
 
     async fn sync_durable_events(&self, _session_id: &SessionId) -> Result<(), StorageError> {
         Ok(())
@@ -129,6 +163,35 @@ pub trait SessionEventJournal: Send + Sync {
 pub trait SessionStore:
     EventReader + SessionEventJournal + SessionReader + SessionPathResolver + ToolResultArtifactStore
 {
+    async fn event_consumer_state(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+    ) -> Result<EventConsumerState, StorageError>;
+
+    /// Monotonically advances an at-least-once event consumer checkpoint.
+    async fn checkpoint_event_consumer(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        expected_revision: u64,
+        seq: u64,
+    ) -> Result<EventConsumerCheckpointOutcome, StorageError>;
+
+    async fn set_event_consumer_paused(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        paused: bool,
+    ) -> Result<EventConsumerState, StorageError>;
+
+    async fn reset_event_consumer_checkpoint(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        reset: EventConsumerCheckpointReset,
+    ) -> Result<EventConsumerState, StorageError>;
+
     async fn checkpoint(&self, session_id: &SessionId, cursor: &Cursor)
     -> Result<(), StorageError>;
 

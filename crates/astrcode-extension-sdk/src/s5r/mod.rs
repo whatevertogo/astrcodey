@@ -14,6 +14,7 @@ pub use messages::{
     CAP_HANDLER_INVOKE, CAP_RUNTIME_PING, CancelMsg, CapabilityDescriptor, ErrorPayload, EventMsg,
     EventPhase, HandlerDescriptor, HandlerId, HandlerKind, InitializeMsg, InitializeOutput,
     InvokeMsg, PeerInfo, ResultKind, ResultMsg, S5R_STACK, S5R_VERSION, WIRE_CODEC_JSON,
-    WIRE_CODEC_METADATA_KEY, WIRE_FEATURE_PARENT_INVOKE_ID, WireMessage, encode_wire_message,
-    event_from_name, event_to_name, mode_from_name, mode_to_name, parse_wire_message,
+    WIRE_CODEC_METADATA_KEY, WIRE_FEATURE_PARENT_INVOKE_ID, WireMessage, compact_event_from_name,
+    compact_event_to_name, encode_wire_message, event_from_name, event_to_name, mode_from_name,
+    mode_to_name, parse_wire_message,
 };

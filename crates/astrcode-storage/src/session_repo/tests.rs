@@ -6,12 +6,87 @@ use astrcode_core::{
 };
 use tempfile::tempdir;
 
-use super::FileSystemSessionRepository;
+use super::{FileSystemSessionRepository, event_consumer_state_path};
 use crate::{
-    EventReader, SessionEventJournal, SessionReader, SessionStore, StorageError,
-    ToolResultArtifactInput, ToolResultArtifactStore,
+    EventConsumerCheckpointOutcome, EventConsumerCheckpointReset, EventReader, SessionEventJournal,
+    SessionReader, SessionStore, StorageError, ToolResultArtifactInput, ToolResultArtifactStore,
     test_support::{started_event, user_event},
 };
+
+#[test]
+fn event_consumer_state_path_is_bounded_and_stable_for_long_ids() {
+    let dir = std::path::Path::new("session");
+    let consumer_id = "extension.".repeat(100);
+
+    let first = event_consumer_state_path(dir, &consumer_id).unwrap();
+    let second = event_consumer_state_path(dir, &consumer_id).unwrap();
+    let expected_parent = dir.join("event-consumers");
+
+    assert_eq!(first, second);
+    assert_eq!(first.parent(), Some(expected_parent.as_path()));
+    assert_eq!(first.file_name().unwrap().to_string_lossy().len(), 75);
+}
+
+#[tokio::test]
+async fn event_consumer_state_persists_pause_and_rejects_stale_checkpoints() {
+    let dir = tempdir().unwrap();
+    let session_id = SessionId::new("event-consumer-session");
+    let repo = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    repo.create_session(started_event(&session_id))
+        .await
+        .unwrap();
+    repo.append_event(user_event(&session_id, "event"))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        repo.checkpoint_event_consumer(&session_id, "extension:subscription", 0, 1)
+            .await
+            .unwrap(),
+        EventConsumerCheckpointOutcome::Accepted
+    );
+    repo.set_event_consumer_paused(&session_id, "extension:subscription", true)
+        .await
+        .unwrap();
+    let reset = repo
+        .reset_event_consumer_checkpoint(
+            &session_id,
+            "extension:subscription",
+            EventConsumerCheckpointReset::Beginning,
+        )
+        .await
+        .unwrap();
+    assert!(reset.paused);
+    assert_eq!(reset.checkpoint, None);
+    assert_eq!(reset.revision, 1);
+    drop(repo);
+
+    let reopened = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    assert_eq!(
+        reopened
+            .event_consumer_state(&session_id, "extension:subscription")
+            .await
+            .unwrap(),
+        reset
+    );
+    assert_eq!(
+        reopened
+            .checkpoint_event_consumer(&session_id, "extension:subscription", 0, 1)
+            .await
+            .unwrap(),
+        EventConsumerCheckpointOutcome::StaleRevision
+    );
+    let latest = reopened
+        .reset_event_consumer_checkpoint(
+            &session_id,
+            "extension:subscription",
+            EventConsumerCheckpointReset::StreamHead,
+        )
+        .await
+        .unwrap();
+    assert_eq!(latest.checkpoint, Some(1));
+    assert_eq!(latest.revision, 2);
+}
 
 #[tokio::test]
 async fn filesystem_repository_rebuilds_grouped_projection_and_snapshot_tail() {

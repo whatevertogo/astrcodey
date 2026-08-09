@@ -16,7 +16,7 @@ use crate::{
     config::ModelSelection,
     extension::{
         CommandCompletionContext, CommandContext, CompactContext, ContinueAfterStopContext,
-        ExchangeSummary, ExtensionCallContext, ExtensionCapability, ExtensionEventEmitter,
+        CustomEventEmitter, ExchangeSummary, ExtensionCallContext, ExtensionCapability,
         ExtensionHttpRequest, ExtensionHttpRoute, ExtensionPaths, ExtensionTasks, HttpContext,
         LifecycleContext, PostToolUseContext, PreToolUseContext, PromptBuildContext,
         ProviderContext, RuntimeCompactContext, RuntimeContinueAfterStopContext,
@@ -43,7 +43,7 @@ struct CallContextBuilder {
     session_store_dir: Option<PathBuf>,
     grants: Vec<ExtensionCapability>,
     host: Option<ExtensionHost>,
-    events: Option<ExtensionEventEmitter>,
+    events: Option<CustomEventEmitter>,
     tasks: Option<ExtensionTasks>,
     cancellation: CancellationToken,
 }
@@ -104,7 +104,7 @@ impl CallContextBuilder {
         self
     }
 
-    fn events(mut self, events: ExtensionEventEmitter) -> Self {
+    fn events(mut self, events: CustomEventEmitter) -> Self {
         self.events = Some(events);
         self
     }
@@ -189,7 +189,7 @@ macro_rules! call_context_builder_methods {
             self
         }
 
-        pub fn events(mut self, events: ExtensionEventEmitter) -> Self {
+        pub fn events(mut self, events: CustomEventEmitter) -> Self {
             self.call = self.call.events(events);
             self
         }

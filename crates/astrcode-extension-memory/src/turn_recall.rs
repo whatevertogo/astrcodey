@@ -65,7 +65,7 @@ impl SessionPrefsCache {
     }
 }
 
-/// Project memories ranked at [`ExtensionEvent::TurnEnd`], consumed on next
+/// Project memories ranked at `LifecycleEvent::TurnEnd`, consumed on next
 /// `BeforeProviderRequest`.
 #[derive(Default)]
 pub(crate) struct ProjectRecallBuffer {

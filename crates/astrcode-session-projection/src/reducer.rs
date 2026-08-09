@@ -3,8 +3,14 @@
 //! EventLog 是唯一事实源；本模块只维护可从事件重建的内部读模型。
 
 use astrcode_core::{
-    event::{DurableEvent, DurableEventPayload, Phase, StoredEvent, TranscriptRewriteReason},
-    llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message},
+    event::{
+        DurableEvent, DurableEventPayload, Phase, StoredEvent, TranscriptRewriteReason,
+        transcript_prefix_fingerprint,
+    },
+    llm::{
+        LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, provider_transcript,
+        turn_aborted_context_message,
+    },
     types::SessionId,
 };
 use thiserror::Error;
@@ -50,6 +56,15 @@ pub enum ProjectionError {
     NonContiguousSequence { expected: u64, actual: u64 },
     #[error("transcript rewrite source seq {source_seq} exceeds current seq {current_seq}")]
     InvalidTranscriptRewriteSource { source_seq: u64, current_seq: u64 },
+    #[error(
+        "transcript rewrite source fingerprint mismatch at seq {source_seq}: event expects \
+         {expected}, current prefix hashes to {actual}"
+    )]
+    TranscriptRewriteSourceFingerprintMismatch {
+        source_seq: u64,
+        expected: String,
+        actual: String,
+    },
 }
 
 impl SessionReadModelProjection {
@@ -396,6 +411,7 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
             source_seq,
             messages,
             reason,
+            ..
         } => {
             apply_transcript_rewrite(model, messages, *source_seq);
             model.context_usage = None;
@@ -467,7 +483,7 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                 });
             }
         },
-        DurableEventPayload::ExtensionEvent(_) => {},
+        DurableEventPayload::CustomEvent(_) => {},
     }
     Ok(())
 }
@@ -507,7 +523,47 @@ pub fn validate_next_event(
     event: &DurableEvent,
     model: &SessionReadModel,
 ) -> Result<(), ProjectionError> {
-    validate_next_event_details(seq, event, &model.identity.session_id, model.stats.last_seq)
+    validate_next_event_details(seq, event, &model.identity.session_id, model.stats.last_seq)?;
+    validate_transcript_rewrite_fingerprint(event, model)
+}
+
+/// 重写前缀的乐观并发校验：事件携带的指纹必须等于当前读模型前缀的指纹。
+///
+/// 旧格式事件（`source_fingerprint` 为 `None`）跳过校验；summary projection 没有
+/// transcript，不经过本校验（提交路径走完整读模型的 `validate_next_event`）。
+fn validate_transcript_rewrite_fingerprint(
+    event: &DurableEvent,
+    model: &SessionReadModel,
+) -> Result<(), ProjectionError> {
+    let DurableEventPayload::TranscriptRewritten {
+        source_seq,
+        source_fingerprint: Some(expected),
+        ..
+    } = &event.payload
+    else {
+        return Ok(());
+    };
+    // 与 `apply_transcript_rewrite` 的 tail 划分互逆：前缀 = `updated_seq <= source_seq`。
+    let prefix = provider_transcript(
+        model
+            .transcript
+            .messages
+            .iter()
+            .filter(|message| message.updated_seq <= *source_seq)
+            .map(|message| message.message.clone())
+            .collect(),
+    );
+    let actual = transcript_prefix_fingerprint(&model.system_prompt.text, &prefix);
+    if actual != *expected {
+        return Err(
+            ProjectionError::TranscriptRewriteSourceFingerprintMismatch {
+                source_seq: *source_seq,
+                expected: expected.clone(),
+                actual,
+            },
+        );
+    }
+    Ok(())
 }
 
 fn validate_next_event_details(

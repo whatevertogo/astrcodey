@@ -7,7 +7,7 @@ use astrcode_core::{
     tool::SessionToolSelection,
     types::*,
 };
-use astrcode_extension_sdk::extension::ExtensionEvent;
+use astrcode_extension_sdk::extension::LifecycleEvent;
 use astrcode_session_projection::SessionReadModel;
 use futures_util::FutureExt;
 
@@ -275,7 +275,7 @@ impl Session {
 
         // 父链接是 child 进入父投影的持久可见边界；初始化失败时不能留下 Running 链接。
         if let Err(error) = child
-            .ensure_lifecycle_initialized(ExtensionEvent::SessionStart)
+            .ensure_lifecycle_initialized(LifecycleEvent::SessionStart)
             .await
         {
             self.compensate_failed_child_creation(&child, &child_sid, &error, false)
@@ -396,7 +396,7 @@ impl Session {
         // "要么全部持久化、要么全部补偿"的事务，即使 shutdown hook panic 也必须
         // 继续走补偿路径，所以用 catch_unwind 把 panic 折叠成一条记录项，
         // 而不是让 panic 中断补偿链。
-        match AssertUnwindSafe(child.emit_lifecycle(ExtensionEvent::SessionShutdown))
+        match AssertUnwindSafe(child.emit_lifecycle(LifecycleEvent::SessionShutdown))
             .catch_unwind()
             .await
         {

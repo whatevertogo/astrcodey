@@ -7,12 +7,12 @@ use serde::de::DeserializeOwned;
 use crate::{
     extension::{
         CommandContext, CommandHandler, ContinueAfterStopContext, ContinueAfterStopResult,
-        DEFAULT_EXTENSION_EVENT_DURABLE, DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES,
-        DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION, ExtensionCapability, ExtensionCommandResult,
-        ExtensionError, ExtensionEventDecl, ExtensionHttpAccess, ExtensionHttpHandler,
-        ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
-        ExtensionManifestError, HttpContext, Keybinding, SlashCommand, StatusItem, ToolContext,
-        ToolHandler,
+        CustomEventDeclaration, DEFAULT_CUSTOM_EVENT_DURABLE,
+        DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES, DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION,
+        ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionHttpAccess,
+        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute,
+        ExtensionManifest, ExtensionManifestError, HttpContext, Keybinding, SlashCommand,
+        StatusItem, ToolContext, ToolHandler,
     },
     tool::{ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPromptMetadata},
 };
@@ -229,22 +229,22 @@ impl StatusItemBuilder {
     }
 }
 
-pub fn extension_event(event_type: impl Into<String>) -> ExtensionEventDeclarationBuilder {
-    ExtensionEventDeclarationBuilder {
-        event: ExtensionEventDecl {
+pub fn custom_event(event_type: impl Into<String>) -> CustomEventDeclarationBuilder {
+    CustomEventDeclarationBuilder {
+        event: CustomEventDeclaration {
             event_type: event_type.into(),
-            schema_version: DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION,
-            durable: DEFAULT_EXTENSION_EVENT_DURABLE,
-            max_payload_bytes: DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES,
+            schema_version: DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION,
+            durable: DEFAULT_CUSTOM_EVENT_DURABLE,
+            max_payload_bytes: DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
         },
     }
 }
 
-pub struct ExtensionEventDeclarationBuilder {
-    event: ExtensionEventDecl,
+pub struct CustomEventDeclarationBuilder {
+    event: CustomEventDeclaration,
 }
 
-impl ExtensionEventDeclarationBuilder {
+impl CustomEventDeclarationBuilder {
     pub fn schema_version(mut self, schema_version: u32) -> Self {
         self.event.schema_version = schema_version;
         self
@@ -260,7 +260,7 @@ impl ExtensionEventDeclarationBuilder {
         self
     }
 
-    pub fn build(self) -> ExtensionEventDecl {
+    pub fn build(self) -> CustomEventDeclaration {
         self.event
     }
 }
@@ -651,7 +651,7 @@ mod tests {
         assert_eq!(route.access, ExtensionHttpAccess::Authenticated);
         assert_eq!(route.max_body_bytes, 1024);
 
-        let event = extension_event("review.completed")
+        let event = custom_event("review.completed")
             .schema_version(2)
             .durable(false)
             .max_payload_bytes(2048)

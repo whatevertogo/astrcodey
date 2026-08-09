@@ -38,13 +38,21 @@ pub struct SessionStarted {
     pub initial_system_prompt: PersistedSystemPrompt,
 }
 
-/// 扩展事件的公共事实；是否持久化由外层事件类型表达。
+/// 自定义事件的公共事实；是否持久化由外层事件类型表达。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct ExtensionEventData {
+pub struct CustomEventData {
     pub extension_id: String,
     pub event_type: String,
     pub schema_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub causation_id: Option<EventId>,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cascade_depth: u8,
     pub payload: serde_json::Value,
+}
+
+const fn is_zero(value: &u8) -> bool {
+    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -190,6 +198,10 @@ pub enum DurableEventPayload {
     /// 当前 projection 仍位于 `source_seq` 时，原子替换 provider transcript。
     TranscriptRewritten {
         source_seq: u64,
+        /// 被替换前缀（system prompt + provider 视角消息）的 `transcript_prefix_fingerprint`；
+        /// 旧事件无此字段，`None` 跳过乐观并发校验。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_fingerprint: Option<String>,
         messages: Vec<LlmMessage>,
         reason: TranscriptRewriteReason,
     },
@@ -205,7 +217,9 @@ pub enum DurableEventPayload {
         message: String,
         recoverable: bool,
     },
-    ExtensionEvent(ExtensionEventData),
+    // 兼容更名前的旧磁盘 tag `extension_event`。
+    #[serde(alias = "extension_event")]
+    CustomEvent(CustomEventData),
 }
 
 /// 只在进程内事件流和客户端通知中存在的瞬态事实。
@@ -267,5 +281,58 @@ pub enum LiveEventPayload {
         message: String,
         recoverable: bool,
     },
-    ExtensionEvent(ExtensionEventData),
+    // 兼容更名前的旧磁盘 tag `extension_event`。
+    #[serde(alias = "extension_event")]
+    CustomEvent(CustomEventData),
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 更名前的旧事件：tag 为 `extension_event`，且没有 `causation_id` 字段。
+    const LEGACY_CUSTOM_EVENT_JSON: &str = r#"{
+        "type": "extension_event",
+        "extension_id": "astrcode-pr-review-agent",
+        "event_type": "review_completed",
+        "schema_version": 1,
+        "payload": {"verdict": "approve"}
+    }"#;
+
+    #[test]
+    fn durable_custom_event_deserializes_legacy_tag_without_causation_id() {
+        let payload: DurableEventPayload = serde_json::from_str(LEGACY_CUSTOM_EVENT_JSON).unwrap();
+        let DurableEventPayload::CustomEvent(data) = payload else {
+            panic!("expected CustomEvent");
+        };
+        assert_eq!(data.extension_id, "astrcode-pr-review-agent");
+        assert_eq!(data.causation_id, None);
+        assert_eq!(data.cascade_depth, 0);
+    }
+
+    #[test]
+    fn live_custom_event_deserializes_legacy_tag_without_causation_id() {
+        let payload: LiveEventPayload = serde_json::from_str(LEGACY_CUSTOM_EVENT_JSON).unwrap();
+        let LiveEventPayload::CustomEvent(data) = payload else {
+            panic!("expected CustomEvent");
+        };
+        assert_eq!(data.event_type, "review_completed");
+        assert_eq!(data.causation_id, None);
+    }
+
+    #[test]
+    fn custom_event_serializes_with_new_tag() {
+        let payload = DurableEventPayload::CustomEvent(CustomEventData {
+            extension_id: "ext".into(),
+            event_type: "thing".into(),
+            schema_version: 1,
+            causation_id: None,
+            cascade_depth: 0,
+            payload: serde_json::json!({}),
+        });
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(json.contains(r#""type":"custom_event""#));
+        assert!(!json.contains("causation_id"));
+    }
 }

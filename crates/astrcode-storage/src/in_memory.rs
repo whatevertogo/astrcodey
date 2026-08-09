@@ -16,7 +16,8 @@ use astrcode_session_projection::{
 use tokio::sync::Mutex;
 
 use crate::{
-    CompactSnapshotInput, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
+    CompactSnapshotInput, EventConsumerCheckpointOutcome, EventConsumerCheckpointReset,
+    EventConsumerState, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
     SessionStore, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
     ToolResultArtifactStore,
     tool_artifacts::{slice_tool_result, tool_result_file_name_with_suffix},
@@ -35,6 +36,16 @@ struct InMemorySession {
     events: Vec<StoredEvent>,
     projection: SessionReadModel,
     tool_results: HashMap<String, String>,
+    event_consumers: HashMap<String, EventConsumerState>,
+}
+
+fn validate_event_consumer_id(consumer_id: &str) -> Result<(), StorageError> {
+    if consumer_id.is_empty() {
+        return Err(StorageError::InvalidId(
+            "event consumer id cannot be empty".into(),
+        ));
+    }
+    Ok(())
 }
 
 impl InMemoryEventStore {
@@ -243,26 +254,138 @@ impl SessionEventJournal for InMemoryEventStore {
                 events: vec![stored.clone()],
                 projection,
                 tool_results: HashMap::new(),
+                event_consumers: HashMap::new(),
             },
         );
         Ok(stored)
     }
 
-    async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
+    async fn append_events(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let session_id = events
+            .first()
+            .map(|event| event.session_id.clone())
+            .ok_or_else(|| StorageError::InvalidEvent("event batch cannot be empty".into()))?;
         let mut map = self.sessions.lock().await;
         let session = map
-            .get_mut(&event.session_id)
-            .ok_or_else(|| StorageError::NotFound(event.session_id.clone()))?;
-        let stored = StoredEvent::new(session.events.len() as u64, event);
-        reduce(&stored, &mut session.projection)
-            .map_err(|error| StorageError::InvalidEvent(error.to_string()))?;
-        session.events.push(stored.clone());
-        Ok(stored)
+            .get_mut(&session_id)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        let mut projection = session.projection.clone();
+        let mut stored_events = Vec::with_capacity(events.len());
+        for event in events {
+            let seq = (session.events.len() + stored_events.len()) as u64;
+            let stored = StoredEvent::new(seq, event);
+            reduce(&stored, &mut projection)
+                .map_err(|error| StorageError::InvalidEvent(error.to_string()))?;
+            stored_events.push(stored);
+        }
+        session.projection = projection;
+        session.events.extend(stored_events.iter().cloned());
+        Ok(stored_events)
     }
 }
 
 #[async_trait::async_trait]
 impl SessionStore for InMemoryEventStore {
+    async fn event_consumer_state(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+    ) -> Result<EventConsumerState, StorageError> {
+        validate_event_consumer_id(consumer_id)?;
+        let sessions = self.sessions.lock().await;
+        let session = sessions
+            .get(session_id)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        Ok(session
+            .event_consumers
+            .get(consumer_id)
+            .copied()
+            .unwrap_or_default())
+    }
+
+    async fn checkpoint_event_consumer(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        expected_revision: u64,
+        seq: u64,
+    ) -> Result<EventConsumerCheckpointOutcome, StorageError> {
+        validate_event_consumer_id(consumer_id)?;
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        let event_count = u64::try_from(session.events.len()).map_err(|_| {
+            StorageError::CorruptLog("session event count exceeds consumer checkpoint range".into())
+        })?;
+        if seq >= event_count {
+            return Err(StorageError::InvalidId(format!(
+                "event consumer checkpoint {seq} is beyond the session event log"
+            )));
+        }
+        let state = session
+            .event_consumers
+            .entry(consumer_id.to_owned())
+            .or_default();
+        if state.revision != expected_revision {
+            return Ok(EventConsumerCheckpointOutcome::StaleRevision);
+        }
+        if state.checkpoint.is_some_and(|checkpoint| checkpoint >= seq) {
+            return Ok(EventConsumerCheckpointOutcome::Accepted);
+        }
+        state.checkpoint = Some(seq);
+        Ok(EventConsumerCheckpointOutcome::Accepted)
+    }
+
+    async fn set_event_consumer_paused(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        paused: bool,
+    ) -> Result<EventConsumerState, StorageError> {
+        validate_event_consumer_id(consumer_id)?;
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        let state = session
+            .event_consumers
+            .entry(consumer_id.to_owned())
+            .or_default();
+        state.paused = paused;
+        Ok(*state)
+    }
+
+    async fn reset_event_consumer_checkpoint(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        reset: EventConsumerCheckpointReset,
+    ) -> Result<EventConsumerState, StorageError> {
+        validate_event_consumer_id(consumer_id)?;
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        let latest = session.events.last().map(|event| event.seq);
+        let state = session
+            .event_consumers
+            .entry(consumer_id.to_owned())
+            .or_default();
+        state.checkpoint = match reset {
+            EventConsumerCheckpointReset::Beginning => None,
+            EventConsumerCheckpointReset::StreamHead => latest,
+        };
+        state.revision = state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| StorageError::CorruptLog("event consumer revision overflow".into()))?;
+        Ok(*state)
+    }
+
     async fn checkpoint(
         &self,
         session_id: &SessionId,

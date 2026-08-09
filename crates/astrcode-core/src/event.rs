@@ -1,6 +1,7 @@
 //! 持久事件、实时事件及其信封类型。
 
 mod envelope;
+mod fingerprint;
 mod payload;
 
 use std::sync::Arc;
@@ -10,8 +11,9 @@ pub use envelope::{
     DurableEvent, Event, EventEnvelope, EventPayload, LiveEvent, Phase, StoredEvent,
     ToolOutputStream,
 };
+pub use fingerprint::{stable_hash_hex, transcript_prefix_fingerprint};
 pub use payload::{
-    CompactionDetails, DurableEventPayload, ExtensionEventData, LiveEventPayload, ParentSessionRef,
+    CompactionDetails, CustomEventData, DurableEventPayload, LiveEventPayload, ParentSessionRef,
     SessionStarted, TranscriptRewriteReason,
 };
 use serde::{Deserialize, Serialize};
@@ -20,14 +22,24 @@ use crate::types::EventId;
 
 /// Result of submitting an event through a runtime event ingress.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EventPublishReceipt {
+pub enum EventDeliveryReceipt {
     /// The receiving boundary accepted the event but does not expose publication completion.
-    Queued,
-    /// The event was published; durable events additionally carry their storage sequence.
-    Published { event_id: EventId, seq: Option<u64> },
+    Accepted,
+    /// A live event was accepted into the session's ordered lane without durable storage.
+    ///
+    /// Observer dispatch happens asynchronously after acceptance; this receipt does not
+    /// mean any observer has seen the event yet.
+    LivePublished { event_id: EventId },
+    /// A durable event was stored and assigned its session sequence.
+    Persisted { event_id: EventId, seq: u64 },
 }
 
 /// Runtime-owned event ingress behind [`EventSender`].
+///
+/// `try_send` 对 durable payload 的契约由实现方定义：turn 路径
+/// （astrcode-session 的 `TurnEventPublisher`）接受并入队，由 ingress worker 异步
+/// 持久化；session 路径（`SessionScopedEventPublisher`）直接拒绝并返回
+/// [`EventSendError::PublishFailed`]，durable 必须走 [`EventPublisher::send_confirmed`]。
 #[async_trait]
 #[doc(hidden)]
 pub trait EventPublisher: Send + Sync {
@@ -36,7 +48,7 @@ pub trait EventPublisher: Send + Sync {
     async fn send_confirmed(
         &self,
         payload: EventPayload,
-    ) -> Result<EventPublishReceipt, EventSendError>;
+    ) -> Result<EventDeliveryReceipt, EventSendError>;
 }
 
 /// Cloneable event ingress used by turn-scoped tools and extensions.
@@ -69,7 +81,7 @@ impl EventSender {
     pub async fn send_confirmed(
         &self,
         payload: EventPayload,
-    ) -> Result<EventPublishReceipt, EventSendError> {
+    ) -> Result<EventDeliveryReceipt, EventSendError> {
         self.publisher.send_confirmed(payload).await
     }
 }
@@ -90,9 +102,9 @@ where
     async fn send_confirmed(
         &self,
         payload: EventPayload,
-    ) -> Result<EventPublishReceipt, EventSendError> {
+    ) -> Result<EventDeliveryReceipt, EventSendError> {
         self.try_send(payload)?;
-        Ok(EventPublishReceipt::Queued)
+        Ok(EventDeliveryReceipt::Accepted)
     }
 }
 

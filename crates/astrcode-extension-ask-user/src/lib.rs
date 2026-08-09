@@ -7,12 +7,12 @@ use std::{
 };
 
 use astrcode_extension_sdk::{
-    builder::{ExtensionToolDefinition, extension_event, manifest},
+    builder::{ExtensionToolDefinition, manifest},
     extension::{
-        Extension, ExtensionCapability, ExtensionError, ExtensionEvent, ExtensionHttpHandler,
-        ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
-        HookMode, HookResult, HttpContext, LifecycleContext, LifecycleHandler, Registrar,
-        StopReason, ToolContext, ToolHandler,
+        Extension, ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest, HookMode, HookResult,
+        HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler, Registrar, StopReason,
+        ToolContext, ToolHandler,
     },
     tool::{ToolExecutionResult, ToolPromptMetadata, ToolPromptTag, ToolResult},
 };
@@ -52,7 +52,7 @@ impl Extension for AskUserExtension {
             .version(env!("CARGO_PKG_VERSION"))
             .description(env!("CARGO_PKG_DESCRIPTION"))
             .capability(ExtensionCapability::AuthenticatedHttp)
-            .capability(ExtensionCapability::EmitEvents)
+            .capability(ExtensionCapability::EmitCustomEvents)
             .build()
     }
 
@@ -66,16 +66,9 @@ impl Extension for AskUserExtension {
                 timeout: self.timeout,
             }),
         );
-        registrar.declare_event(
-            extension_event(registry::PENDING_EVENT_TYPE)
-                .durable(false)
-                .build(),
-        );
-        registrar.declare_event(
-            extension_event(registry::RESOLVED_EVENT_TYPE)
-                .durable(false)
-                .build(),
-        );
+        for declaration in registry::custom_event_declarations() {
+            registrar.declare_custom_event(declaration);
+        }
 
         let http = Arc::new(AskUserHttpHandler {
             registry: Arc::clone(&self.registry),
@@ -106,7 +99,7 @@ impl Extension for AskUserExtension {
             http,
         );
         registrar.on_lifecycle(
-            ExtensionEvent::SessionShutdown,
+            LifecycleEvent::SessionShutdown,
             HookMode::Advisory,
             0,
             Arc::new(AskUserSessionShutdown {
@@ -348,10 +341,10 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex};
 
     use astrcode_extension_sdk::{
-        event::{EventPublishReceipt, EventSendError},
+        event::{EventDeliveryReceipt, EventSendError},
         extension::{
-            ExtensionEventDecl, ExtensionEventEmitter, ExtensionHttpRequest,
-            internal::{ExtensionEventSink, extension_event_emitter},
+            CustomEventEmitter, ExtensionHttpRequest,
+            internal::{CustomEventSink, custom_event_emitter},
         },
         testing::{HttpContextBuilder, ToolContextBuilder},
     };
@@ -362,55 +355,42 @@ mod tests {
     #[derive(Default)]
     struct RecordingEvents(Mutex<Vec<(String, serde_json::Value)>>);
 
+    impl RecordingEvents {
+        fn record(&self, event_type: &str, payload: serde_json::Value) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((event_type.to_owned(), payload));
+        }
+    }
+
     #[async_trait::async_trait]
-    impl ExtensionEventSink for RecordingEvents {
+    impl CustomEventSink for RecordingEvents {
         async fn emit(
             &self,
             event_type: &str,
             _schema_version: u32,
             _durable: bool,
             payload: serde_json::Value,
-        ) -> Result<EventPublishReceipt, EventSendError> {
-            self.0
-                .lock()
-                .unwrap()
-                .push((event_type.to_owned(), payload));
-            Ok(EventPublishReceipt::Queued)
+        ) -> Result<EventDeliveryReceipt, EventSendError> {
+            self.record(event_type, payload);
+            Ok(EventDeliveryReceipt::Accepted)
         }
 
-        fn emit_now(
+        fn try_emit(
             &self,
             event_type: &str,
             _schema_version: u32,
             _durable: bool,
             payload: serde_json::Value,
         ) -> Result<(), EventSendError> {
-            self.0
-                .lock()
-                .unwrap()
-                .push((event_type.to_owned(), payload));
+            self.record(event_type, payload);
             Ok(())
         }
     }
 
-    fn event_emitter(events: Arc<dyn ExtensionEventSink>) -> ExtensionEventEmitter {
-        extension_event_emitter(
-            [
-                ExtensionEventDecl {
-                    event_type: registry::PENDING_EVENT_TYPE.into(),
-                    schema_version: 1,
-                    durable: false,
-                    max_payload_bytes: 64 * 1024,
-                },
-                ExtensionEventDecl {
-                    event_type: registry::RESOLVED_EVENT_TYPE.into(),
-                    schema_version: 1,
-                    durable: false,
-                    max_payload_bytes: 64 * 1024,
-                },
-            ],
-            Some(events),
-        )
+    fn event_emitter(events: Arc<dyn CustomEventSink>) -> CustomEventEmitter {
+        custom_event_emitter(registry::custom_event_declarations(), Some(events))
     }
 
     fn pending(session_id: &str, call_id: &str) -> PendingQuestion {
@@ -594,7 +574,7 @@ mod tests {
     async fn registry_enforces_session_validation_and_single_winner() {
         let registry = Arc::new(PendingRegistry::default());
         let events = Arc::new(RecordingEvents::default());
-        let event_sink: Arc<dyn ExtensionEventSink> = events.clone();
+        let event_sink: Arc<dyn CustomEventSink> = events.clone();
         let (receiver, mut guard) = registry
             .register(pending("session-1", "call-1"), event_emitter(event_sink))
             .unwrap();
@@ -701,7 +681,7 @@ mod tests {
     #[tokio::test]
     async fn authenticated_http_contract_uses_expected_statuses() {
         let registry = Arc::new(PendingRegistry::default());
-        let events: Arc<dyn ExtensionEventSink> = Arc::new(RecordingEvents::default());
+        let events: Arc<dyn CustomEventSink> = Arc::new(RecordingEvents::default());
         let context = ToolContextBuilder::new(EXTENSION_ID, ASK_USER_TOOL_NAME)
             .session("session-1", ".", None)
             .call_id("call-1")

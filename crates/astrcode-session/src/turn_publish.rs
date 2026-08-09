@@ -15,7 +15,7 @@ use std::sync::{
 
 use astrcode_core::{
     event::{
-        DurableEventPayload, EventPayload, EventPublishReceipt, EventPublisher, EventSendError,
+        DurableEventPayload, EventDeliveryReceipt, EventPayload, EventPublisher, EventSendError,
         LiveEventPayload, StoredEvent,
     },
     types::{EventId, TurnId},
@@ -183,27 +183,24 @@ fn durable_publish_error_is_retryable(error: &TurnError) -> bool {
 async fn dispatch_payload(
     publisher: &TurnEvents,
     payload: EventPayload,
-) -> Result<EventPublishReceipt, TurnError> {
+) -> Result<EventDeliveryReceipt, TurnError> {
     match payload {
         EventPayload::Durable(payload) => {
             let stored = durable_with_retry(publisher, payload).await?;
-            Ok(EventPublishReceipt::Published {
+            Ok(EventDeliveryReceipt::Persisted {
                 event_id: stored.id.clone(),
-                seq: Some(stored.seq),
+                seq: stored.seq,
             })
         },
-        // 仅 ExtensionEvent 走 required 路径（扩展事件对客户端是强制的）；
+        // 自定义实时事件走 required 路径，确保生产扩展能观察到入队失败；
         // 其余 Live 变体默认 best-effort，丢事件是可接受的降级。
-        EventPayload::Live(payload @ LiveEventPayload::ExtensionEvent(_)) => {
+        EventPayload::Live(payload @ LiveEventPayload::CustomEvent(_)) => {
             let event_id = publisher.live_required(payload).await?;
-            Ok(EventPublishReceipt::Published {
-                event_id,
-                seq: None,
-            })
+            Ok(EventDeliveryReceipt::LivePublished { event_id })
         },
         EventPayload::Live(payload) => {
             publisher.live(payload);
-            Ok(EventPublishReceipt::Queued)
+            Ok(EventDeliveryReceipt::Accepted)
         },
     }
 }
@@ -244,7 +241,7 @@ impl TurnEventSender {
 enum IngressCommand {
     Publish {
         payload: Box<EventPayload>,
-        reply: Option<oneshot::Sender<Result<EventPublishReceipt, EventSendError>>>,
+        reply: Option<oneshot::Sender<Result<EventDeliveryReceipt, EventSendError>>>,
     },
     Flush(oneshot::Sender<()>),
     Shutdown(oneshot::Sender<()>),
@@ -256,6 +253,9 @@ struct TurnEventPublisher {
 
 #[async_trait::async_trait]
 impl EventPublisher for TurnEventPublisher {
+    // durable-in-try_send 与 session 路径（`crate::session_runtime` 的
+    // `SessionScopedEventPublisher`，直接拒绝 durable）语义不同：这里接受并入队，
+    // 由 ingress worker 经 `dispatch_payload` 持久化。
     fn try_send(&self, payload: EventPayload) -> Result<(), EventSendError> {
         self.command_tx
             .try_send(IngressCommand::Publish {
@@ -271,7 +271,7 @@ impl EventPublisher for TurnEventPublisher {
     async fn send_confirmed(
         &self,
         payload: EventPayload,
-    ) -> Result<EventPublishReceipt, EventSendError> {
+    ) -> Result<EventDeliveryReceipt, EventSendError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         self.command_tx
             .send(IngressCommand::Publish {
@@ -314,6 +314,8 @@ impl TurnEventIngress {
                             publisher_for_worker.record_ingress_error(error);
                         }
                         if let Some(reply) = reply {
+                            // 与 `session_runtime.rs` 的 `map_event_publish_error` 互指：
+                            // `TurnError` 不带 Closed/Full 语义，统一折叠为 PublishFailed。
                             let result = result
                                 .map_err(|error| EventSendError::PublishFailed(error.to_string()));
                             let _ = reply.send(result);
@@ -359,12 +361,12 @@ impl TurnEventIngress {
     }
 }
 
-/// Turn 级扩展事件 ingress：在 `process_prompt` 期间为 hook / 工具提供 `event_tx`。
-pub(crate) struct ExtensionEvents {
+/// Turn 级事件桥：在 `process_prompt` 期间为 hook / 工具提供 `event_tx`。
+pub(crate) struct TurnEventBridge {
     ingress: TurnEventIngress,
 }
 
-impl ExtensionEvents {
+impl TurnEventBridge {
     pub(crate) fn start(
         publisher: Arc<TurnEvents>,
         shared: &mut crate::turn_context::SharedTurnContext,
@@ -388,13 +390,13 @@ mod tests {
     use std::sync::Arc;
 
     use astrcode_core::{
-        event::{DurableEventPayload, EventPayload, ExtensionEventData, LiveEventPayload},
+        event::{CustomEventData, DurableEventPayload, EventPayload, LiveEventPayload},
         types::{new_session_id, new_turn_id},
         user_input::UserInput,
     };
     use astrcode_extension_sdk::{
         extension::{
-            CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, ExtensionEvent,
+            CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, LifecycleEvent,
             PostToolUseResult, PreToolUseResult, ProviderEvent, ProviderResult,
             RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
             RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
@@ -451,7 +453,7 @@ mod tests {
     #[tokio::test]
     async fn durable_ingress_notifies_once_for_non_retryable_failure() {
         let retryable_error = TurnError::Session(SessionError::EventPublish(
-            SessionEventPublishError::Storage(StorageError::Io(std::io::Error::new(
+            SessionEventPublishError::from(StorageError::Io(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 "injected timeout",
             ))),
@@ -539,24 +541,26 @@ mod tests {
         let session = test_session().await;
         let publisher = Arc::new(TurnEvents::new(session.clone(), new_turn_id()));
         let (sender, ingress) = TurnEventIngress::start(publisher);
-        let event = ExtensionEventData {
+        let event = CustomEventData {
             extension_id: "receipt-probe".into(),
             event_type: "receipt.published".into(),
             schema_version: 1,
+            causation_id: None,
+            cascade_depth: 0,
             payload: serde_json::json!({ "status": "ok" }),
         };
 
         let receipt = sender
             .event_tx()
-            .send_confirmed(EventPayload::Durable(DurableEventPayload::ExtensionEvent(
+            .send_confirmed(EventPayload::Durable(DurableEventPayload::CustomEvent(
                 event,
             )))
             .await
             .unwrap();
-        let EventPublishReceipt::Published { event_id, seq } = receipt else {
-            panic!("durable extension event must return a published receipt");
+        let EventDeliveryReceipt::Persisted { event_id, seq } = receipt else {
+            panic!("durable extension event must return a persisted receipt");
         };
-        assert!(seq.is_some());
+        assert_eq!(seq, 1);
 
         let stored = session
             .runtime
@@ -649,20 +653,24 @@ mod tests {
                 .event_tx()
                 .cloned()
                 .ok_or_else(|| ExtensionError::Internal("no turn event sender".into()))?;
-            tx.send(EventPayload::Durable(DurableEventPayload::ExtensionEvent(
-                ExtensionEventData {
+            tx.send(EventPayload::Durable(DurableEventPayload::CustomEvent(
+                CustomEventData {
                     extension_id: "emit-probe".into(),
                     event_type: "emit.probe".into(),
                     schema_version: 1,
+                    causation_id: None,
+                    cascade_depth: 0,
                     payload: serde_json::json!({ "probe": true }),
                 },
             )))
             .map_err(|_| ExtensionError::Internal("turn event sender closed".into()))?;
-            tx.send(EventPayload::Live(LiveEventPayload::ExtensionEvent(
-                ExtensionEventData {
+            tx.send(EventPayload::Live(LiveEventPayload::CustomEvent(
+                CustomEventData {
                     extension_id: "emit-probe".into(),
                     event_type: "emit.live".into(),
                     schema_version: 1,
+                    causation_id: None,
+                    cascade_depth: 0,
                     payload: serde_json::json!({ "probe": true }),
                 },
             )))
@@ -709,7 +717,7 @@ mod tests {
 
         async fn emit_lifecycle(
             &self,
-            _event: ExtensionEvent,
+            _event: LifecycleEvent,
             _ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
             Ok(())
@@ -722,23 +730,25 @@ mod tests {
     impl TurnHooks for FailTurnStartAndEmitOnEnd {
         async fn emit_lifecycle(
             &self,
-            event: ExtensionEvent,
+            event: LifecycleEvent,
             ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
             match event {
-                ExtensionEvent::TurnStart => Err(ExtensionError::Internal(
+                LifecycleEvent::TurnStart => Err(ExtensionError::Internal(
                     "injected turn start failure".into(),
                 )),
-                ExtensionEvent::TurnEnd => {
+                LifecycleEvent::TurnEnd => {
                     let tx =
                         ctx.call().event_tx().cloned().ok_or_else(|| {
                             ExtensionError::Internal("no turn event sender".into())
                         })?;
-                    tx.send(EventPayload::Durable(DurableEventPayload::ExtensionEvent(
-                        ExtensionEventData {
+                    tx.send(EventPayload::Durable(DurableEventPayload::CustomEvent(
+                        CustomEventData {
                             extension_id: "turn-end-probe".into(),
                             event_type: "turn.end.error".into(),
                             schema_version: 1,
+                            causation_id: None,
+                            cascade_depth: 0,
                             payload: serde_json::json!({}),
                         },
                     )))
@@ -765,7 +775,7 @@ mod tests {
             &model,
             session.session_store_dir().await,
         );
-        let bridge = ExtensionEvents::start(Arc::clone(&publisher), &mut shared);
+        let bridge = TurnEventBridge::start(Arc::clone(&publisher), &mut shared);
 
         let call = RuntimeHookCallContext::new(
             session.id().to_string(),
@@ -801,7 +811,7 @@ mod tests {
             .unwrap();
         assert!(events.iter().any(|e| matches!(
             &e.payload,
-            DurableEventPayload::ExtensionEvent(ExtensionEventData {
+            DurableEventPayload::CustomEvent(CustomEventData {
                 extension_id,
                 event_type,
                 ..
@@ -809,7 +819,7 @@ mod tests {
         )));
         assert!(!events.iter().any(|e| matches!(
             &e.payload,
-            DurableEventPayload::ExtensionEvent(ExtensionEventData { event_type, .. })
+            DurableEventPayload::CustomEvent(CustomEventData { event_type, .. })
                 if event_type == "emit.live"
         )));
     }
@@ -837,7 +847,7 @@ mod tests {
             .unwrap();
         assert!(events.iter().any(|event| matches!(
             &event.payload,
-            DurableEventPayload::ExtensionEvent(ExtensionEventData {
+            DurableEventPayload::CustomEvent(CustomEventData {
                 extension_id,
                 event_type,
                 ..

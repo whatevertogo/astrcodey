@@ -1,9 +1,13 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use astrcode_core::{
+    event::{
+        DurableEvent, EventDeliveryReceipt, EventPayload, EventPublisher, EventSendError,
+        EventSender, LiveEvent,
+    },
     permission::ApprovalDecision,
     tool::FileObservationStore,
-    types::{SessionId, ToolCallId},
+    types::{SessionId, ToolCallId, TurnId},
 };
 use astrcode_storage::SessionStore;
 use parking_lot::Mutex;
@@ -12,10 +16,82 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
     permission::ApprovalHistoryStore,
-    session_event_sink::{SessionEventObserver, SessionEventSink},
+    session_event_sink::{SessionEventObserver, SessionEventPublishError, SessionEventSink},
     session_tools::SessionToolCache,
     tool_exec::InMemoryFileObservationStore,
 };
+
+struct SessionScopedEventPublisher {
+    session_id: SessionId,
+    turn_id: Option<TurnId>,
+    store: Arc<dyn SessionStore>,
+    event_sink: Arc<SessionEventSink>,
+}
+
+#[async_trait::async_trait]
+impl EventPublisher for SessionScopedEventPublisher {
+    fn try_send(&self, payload: EventPayload) -> Result<(), EventSendError> {
+        match payload {
+            EventPayload::Live(payload) => self
+                .event_sink
+                .publish_live(
+                    self.store.clone(),
+                    LiveEvent::new(self.session_id.clone(), self.turn_id.clone(), payload),
+                )
+                .map_err(map_event_publish_error),
+            // durable-in-try_send 与 turn 路径（`crate::turn_publish` 的
+            // `TurnEventPublisher`，入队由 ingress worker 持久化）语义不同：session
+            // 路径没有自己的 worker，直接拒绝；durable 须走 `send_confirmed`。
+            EventPayload::Durable(_) => Err(EventSendError::PublishFailed(
+                "durable custom events require async emit".into(),
+            )),
+        }
+    }
+
+    async fn send_confirmed(
+        &self,
+        payload: EventPayload,
+    ) -> Result<EventDeliveryReceipt, EventSendError> {
+        match payload {
+            EventPayload::Durable(payload) => {
+                let stored = self
+                    .event_sink
+                    .append(
+                        self.store.clone(),
+                        DurableEvent::new(self.session_id.clone(), self.turn_id.clone(), payload),
+                    )
+                    .await
+                    .map_err(map_event_publish_error)?;
+                Ok(EventDeliveryReceipt::Persisted {
+                    event_id: stored.id.clone(),
+                    seq: stored.seq,
+                })
+            },
+            EventPayload::Live(payload) => {
+                // 与 `session.rs` 的 `emit_live_required` 平行：`LivePublished`
+                // 只表示事件已进入有序 lane，observer 派发是异步的。
+                let event = LiveEvent::new(self.session_id.clone(), self.turn_id.clone(), payload);
+                let event_id = event.id.clone();
+                self.event_sink
+                    .publish_live_required(self.store.clone(), event)
+                    .await
+                    .map_err(map_event_publish_error)?;
+                Ok(EventDeliveryReceipt::LivePublished { event_id })
+            },
+        }
+    }
+}
+
+// 与 `turn_publish.rs` ingress worker 的错误映射互指：这里的源错误
+// `SessionEventPublishError` 带 Closed/Full 变体故可区分；turn 路径的 `TurnError`
+// 无此信息，统一折叠为 `PublishFailed`，两处不宜强行收敛。
+fn map_event_publish_error(error: SessionEventPublishError) -> EventSendError {
+    match error {
+        SessionEventPublishError::Closed => EventSendError::Closed,
+        SessionEventPublishError::Full { .. } => EventSendError::Full,
+        error => EventSendError::PublishFailed(error.to_string()),
+    }
+}
 
 pub struct PendingApprovalRegistration<'a> {
     runtime: &'a ApprovalRuntime,
@@ -263,6 +339,16 @@ impl SessionRuntimeState {
 
     pub fn session_id(&self) -> &SessionId {
         &self.session_id
+    }
+
+    /// Builds a session-scoped event ingress for runtime-owned asynchronous consumers.
+    pub fn event_sender(&self, turn_id: Option<TurnId>) -> EventSender {
+        EventSender::from_publisher(Arc::new(SessionScopedEventPublisher {
+            session_id: self.session_id.clone(),
+            turn_id,
+            store: Arc::clone(&self.store),
+            event_sink: Arc::clone(&self.event_sink),
+        }))
     }
 
     pub(crate) fn store(&self) -> &Arc<dyn SessionStore> {

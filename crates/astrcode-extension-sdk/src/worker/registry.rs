@@ -13,14 +13,15 @@ use serde_json::Value;
 
 use crate::{
     extension::{
-        ContinueAfterStopOptions, ExtensionCapability, ExtensionEvent, ExtensionEventDecl,
-        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, HookMode,
-        extension_http_route_patterns_conflict, fixed_hook_mode, hook_mode_is_supported,
+        CompactEvent, ContinueAfterStopOptions, CustomEventDeclaration, CustomEventSubscription,
+        ExtensionCapability, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
+        HookMode, LifecycleEvent, extension_http_route_patterns_conflict, fixed_hook_mode,
+        hook_mode_is_supported,
     },
     runtime::CancelToken,
     s5r::{
         CAP_HANDLER_INVOKE, ErrorPayload, HandlerId, HandlerKind, HandlerResult, InvokeMsg,
-        capability_to_wire, event_to_name,
+        capability_to_wire, compact_event_to_name, event_to_name,
         manifest::{ManifestCommand, ManifestHook, ManifestHookOptions, ManifestHttpRoute},
         mode_to_name,
     },
@@ -148,6 +149,7 @@ pub(crate) struct HandlerRegistry {
     catalog: ManifestCatalog,
     tools: HashMap<String, ToolHandlerFn>,
     hooks: HashMap<String, HookHandlerFn>,
+    custom_events: HashMap<String, HookHandlerFn>,
     commands: HashMap<String, CommandHandlerFn>,
     http_routes: HashMap<String, HttpHandlerFn>,
 }
@@ -159,6 +161,7 @@ impl HandlerRegistry {
             catalog: ManifestCatalog::default(),
             tools: HashMap::new(),
             hooks: HashMap::new(),
+            custom_events: HashMap::new(),
             commands: HashMap::new(),
             http_routes: HashMap::new(),
         }
@@ -180,9 +183,29 @@ impl HandlerRegistry {
         }
     }
 
-    pub(crate) fn declare_extension_event(&mut self, mut event: ExtensionEventDecl) {
+    pub(crate) fn declare_custom_event(&mut self, mut event: CustomEventDeclaration) {
         event.event_type = event.event_type.trim().to_owned();
-        self.catalog.extension_events.push(event);
+        self.catalog.custom_events.push(event);
+    }
+
+    pub(crate) fn register_custom_event(
+        &mut self,
+        mut subscription: CustomEventSubscription,
+        handler: HookHandlerFn,
+    ) -> Result<(), ErrorPayload> {
+        subscription.normalize();
+        if let Err(reason) = subscription.validate() {
+            return Err(ErrorPayload::new(WireErrorCode::InvalidInput, reason));
+        }
+        if self.custom_events.contains_key(&subscription.id) {
+            return Err(ErrorPayload::new(
+                WireErrorCode::DuplicateRegistration,
+                format!("duplicate custom event subscription: {}", subscription.id),
+            ));
+        }
+        self.custom_events.insert(subscription.id.clone(), handler);
+        self.catalog.custom_event_subscriptions.push(subscription);
+        Ok(())
     }
 
     pub(crate) fn register_tool(
@@ -205,11 +228,11 @@ impl HandlerRegistry {
 
     pub(crate) fn register_hook(
         &mut self,
-        on: ExtensionEvent,
+        on: LifecycleEvent,
         mode: HookMode,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        if on == ExtensionEvent::UserMessageEnvelope {
+        if on == LifecycleEvent::UserMessageEnvelope {
             return Err(ErrorPayload::new(
                 WireErrorCode::UnsupportedHook,
                 "user_message_envelope is not supported by S5R workers",
@@ -241,19 +264,32 @@ impl HandlerRegistry {
 
     pub(crate) fn register_fixed_hook(
         &mut self,
-        on: ExtensionEvent,
+        on: LifecycleEvent,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
         self.register_fixed_hook_with_options(on, ManifestHookOptions::default(), handler)
     }
 
+    pub(crate) fn register_compact_hook(
+        &mut self,
+        on: CompactEvent,
+        handler: HookHandlerFn,
+    ) -> Result<(), ErrorPayload> {
+        self.register_manifest_hook_name(
+            compact_event_to_name(on),
+            HookMode::Blocking,
+            ManifestHookOptions::default(),
+            handler,
+        )
+    }
+
     fn register_fixed_hook_with_options(
         &mut self,
-        on: ExtensionEvent,
+        on: LifecycleEvent,
         options: ManifestHookOptions,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        if on == ExtensionEvent::UserMessageEnvelope {
+        if on == LifecycleEvent::UserMessageEnvelope {
             return Err(ErrorPayload::new(
                 WireErrorCode::UnsupportedHook,
                 "user_message_envelope is not supported by S5R workers",
@@ -270,15 +306,24 @@ impl HandlerRegistry {
 
     fn register_manifest_hook(
         &mut self,
-        on: ExtensionEvent,
+        on: LifecycleEvent,
         mode: HookMode,
         options: ManifestHookOptions,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        let on = event_to_name(&on).to_string();
-        self.insert_hook_handler(on.clone(), handler)?;
+        self.register_manifest_hook_name(event_to_name(&on), mode, options, handler)
+    }
+
+    fn register_manifest_hook_name(
+        &mut self,
+        on: &str,
+        mode: HookMode,
+        options: ManifestHookOptions,
+        handler: HookHandlerFn,
+    ) -> Result<(), ErrorPayload> {
+        self.insert_hook_handler(on.to_owned(), handler)?;
         self.catalog.hooks.push(ManifestHook {
-            on,
+            on: on.to_owned(),
             mode: mode_to_name(mode).into(),
             options,
         });
@@ -302,7 +347,7 @@ impl HandlerRegistry {
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
         self.register_fixed_hook_with_options(
-            ExtensionEvent::ContinueAfterStop,
+            LifecycleEvent::ContinueAfterStop,
             ManifestHookOptions {
                 max_per_turn: Some(options.max_per_turn),
             },
@@ -460,6 +505,15 @@ impl HandlerRegistry {
                 })?;
                 Ok(HandlerResult::effect("http_response", data))
             },
+            "event" => {
+                let handler = self.custom_events.get(name).ok_or_else(|| {
+                    ErrorPayload::new(
+                        WireErrorCode::UnknownHandler,
+                        format!("unknown custom event subscription: {name}"),
+                    )
+                })?;
+                handler(event, ctx).await
+            },
             _ => Err(ErrorPayload::new(
                 WireErrorCode::UnknownHandler,
                 format!("unknown handler kind in {handler_id}"),
@@ -468,15 +522,13 @@ impl HandlerRegistry {
     }
 }
 
-fn fixed_worker_hook_hint(event: &ExtensionEvent) -> &'static str {
+fn fixed_worker_hook_hint(event: &LifecycleEvent) -> &'static str {
     match event {
-        ExtensionEvent::AfterProviderResponse => {
+        LifecycleEvent::AfterProviderResponse => {
             "use Worker::on_after_provider_response(...) instead"
         },
-        ExtensionEvent::ContinueAfterStop => "use Worker::on_continue_after_stop(...) instead",
-        ExtensionEvent::PromptBuild => "use Worker::on_prompt_build(...) instead",
-        ExtensionEvent::PreCompact => "use Worker::on_pre_compact(...) instead",
-        ExtensionEvent::PostCompact => "use Worker::on_post_compact(...) instead",
+        LifecycleEvent::ContinueAfterStop => "use Worker::on_continue_after_stop(...) instead",
+        LifecycleEvent::PromptBuild => "use Worker::on_prompt_build(...) instead",
         _ => "use the dedicated fixed-mode Worker registration method instead",
     }
 }
@@ -586,7 +638,7 @@ mod tests {
                 }),
             )
             .unwrap();
-        registry.declare_extension_event(ExtensionEventDecl {
+        registry.declare_custom_event(CustomEventDeclaration {
             event_type: "  review.completed  ".into(),
             schema_version: 1,
             durable: true,
@@ -596,7 +648,7 @@ mod tests {
         assert_eq!(registry.catalog.tools[0].name, "review");
         assert_eq!(registry.catalog.commands[0].name, "inspect");
         assert_eq!(
-            registry.catalog.extension_events[0].event_type,
+            registry.catalog.custom_events[0].event_type,
             "review.completed"
         );
         assert_eq!(
@@ -608,6 +660,30 @@ mod tests {
                 .expect_err("canonical duplicate")
                 .code_enum(),
             Some(WireErrorCode::DuplicateRegistration)
+        );
+    }
+
+    #[test]
+    fn compact_hooks_keep_their_wire_names_outside_lifecycle_events() {
+        let mut registry = HandlerRegistry::new("test-extension");
+        let handler =
+            crate::worker::hook_handler(|_| async { Ok(HandlerResult::effect("ok", json!({}))) });
+
+        registry
+            .register_compact_hook(CompactEvent::PreCompact, Arc::clone(&handler))
+            .unwrap();
+        registry
+            .register_compact_hook(CompactEvent::PostCompact, handler)
+            .unwrap();
+
+        let metadata =
+            registration_metadata("test-extension", "0.1.0", registry.catalog()).unwrap();
+        assert_eq!(
+            metadata["hooks"],
+            json!([
+                { "on": "pre_compact", "mode": "blocking" },
+                { "on": "post_compact", "mode": "blocking" }
+            ])
         );
     }
 

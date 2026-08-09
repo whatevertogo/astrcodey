@@ -446,7 +446,7 @@ mod tests {
 
     use astrcode_extension_sdk::{
         extension::{
-            ExtensionError, ExtensionEvent, PromptContributions, RuntimeLifecycleContext,
+            ExtensionError, LifecycleEvent, PromptContributions, RuntimeLifecycleContext,
             RuntimePromptBuildContext, RuntimeUserMessageEnvelopeContext,
             UserMessageEnvelopeResult,
         },
@@ -549,19 +549,19 @@ mod tests {
 
         async fn emit_lifecycle(
             &self,
-            event: ExtensionEvent,
+            event: LifecycleEvent,
             ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
             self.record_hook(
                 match event {
-                    ExtensionEvent::TurnStart => "turn_start",
-                    ExtensionEvent::UserPromptSubmit => "prompt_submit",
-                    ExtensionEvent::TurnEnd => "turn_end",
+                    LifecycleEvent::TurnStart => "turn_start",
+                    LifecycleEvent::UserPromptSubmit => "prompt_submit",
+                    LifecycleEvent::TurnEnd => "turn_end",
                     _ => "other_lifecycle",
                 },
                 ctx.call(),
             );
-            if event == ExtensionEvent::TurnStart {
+            if event == LifecycleEvent::TurnStart {
                 Err(ExtensionError::Internal("stop before provider call".into()))
             } else {
                 Ok(())

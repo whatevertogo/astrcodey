@@ -45,7 +45,10 @@ pub mod testing {
 }
 
 use crate::{
-    extension::{ContinueAfterStopOptions, ExtensionCapability, ExtensionEvent, HookMode},
+    extension::{
+        CompactEvent, ContinueAfterStopOptions, CustomEventSubscription, ExtensionCapability,
+        HookMode, LifecycleEvent,
+    },
     runtime::{CancelToken, InvokeHandler, InvokeReply, Peer, ProcessStdioTransport},
     s5r::{HandlerDescriptor, HandlerId, HandlerKind, HandlerResult, PeerInfo, S5R_STACK},
     tool::ToolDefinition,
@@ -83,10 +86,20 @@ impl Worker {
         self
     }
 
-    /// 声明可发射的扩展事件 schema。
-    pub fn extension_event(&mut self, event: crate::extension::ExtensionEventDecl) -> &mut Self {
-        self.registry.declare_extension_event(event);
+    /// 声明可发射的 custom event schema。
+    pub fn custom_event(&mut self, event: crate::extension::CustomEventDeclaration) -> &mut Self {
+        self.registry.declare_custom_event(event);
         self
+    }
+
+    /// Registers a custom-event subscription and its sequential handler.
+    pub fn on_custom_event(
+        &mut self,
+        subscription: CustomEventSubscription,
+        handler: HookHandlerFn,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry.register_custom_event(subscription, handler)?;
+        Ok(self)
     }
 
     /// 注册 tool：manifest 定义与 handler 一次完成，避免两处手动对齐。
@@ -104,7 +117,7 @@ impl Worker {
     /// 固定模式 hook 使用对应的 `on_*` 方法，避免声明一个运行时不会执行的模式。
     pub fn hook(
         &mut self,
-        on: ExtensionEvent,
+        on: LifecycleEvent,
         mode: HookMode,
         handler: HookHandlerFn,
     ) -> Result<&mut Self, ErrorPayload> {
@@ -118,28 +131,28 @@ impl Worker {
         handler: HookHandlerFn,
     ) -> Result<&mut Self, ErrorPayload> {
         self.registry
-            .register_fixed_hook(ExtensionEvent::AfterProviderResponse, handler)?;
+            .register_fixed_hook(LifecycleEvent::AfterProviderResponse, handler)?;
         Ok(self)
     }
 
     /// 注册同步收集 prompt contributions 的 hook。
     pub fn on_prompt_build(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
         self.registry
-            .register_fixed_hook(ExtensionEvent::PromptBuild, handler)?;
+            .register_fixed_hook(LifecycleEvent::PromptBuild, handler)?;
         Ok(self)
     }
 
     /// 注册 pre-compact 决策与 contributions hook。
     pub fn on_pre_compact(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
         self.registry
-            .register_fixed_hook(ExtensionEvent::PreCompact, handler)?;
+            .register_compact_hook(CompactEvent::PreCompact, handler)?;
         Ok(self)
     }
 
     /// 注册 post-compact 同步通知与 contributions hook。
     pub fn on_post_compact(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
         self.registry
-            .register_fixed_hook(ExtensionEvent::PostCompact, handler)?;
+            .register_compact_hook(CompactEvent::PostCompact, handler)?;
         Ok(self)
     }
 
@@ -292,6 +305,13 @@ fn build_handler_descriptors(
         out.push(HandlerDescriptor {
             handler_id: route.handler_id.clone(),
             description: route.route.description.clone(),
+            input_schema: json!({"type":"object"}),
+        });
+    }
+    for subscription in &catalog.custom_event_subscriptions {
+        out.push(HandlerDescriptor {
+            handler_id: HandlerId::new(extension_id, HandlerKind::Event, &subscription.id).into(),
+            description: format!("custom event {}", subscription.event_type),
             input_schema: json!({"type":"object"}),
         });
     }

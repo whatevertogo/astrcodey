@@ -8,8 +8,8 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        ExtensionCallContext, ExtensionCapability, ExtensionError, ExtensionEventDecl,
-        ExtensionPaths, ExtensionTasks, RuntimeHookCallContext, internal::extension_event_emitter,
+        CustomEventDeclaration, ExtensionCallContext, ExtensionCapability, ExtensionError,
+        ExtensionPaths, ExtensionTasks, RuntimeHookCallContext, internal::custom_event_emitter,
     },
     host::{
         ExtensionHost, HostError, HostOperation,
@@ -20,7 +20,7 @@ use astrcode_extension_sdk::{
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::{ExtensionRunner, ExtensionView, HandlerIndex, bind_extension_event_sink};
+use super::{ExtensionRunner, ExtensionView, HandlerIndex, bind_custom_event_sink};
 use crate::host_router::{HostRouter, InvokeContext, decls_to_map};
 
 pub(crate) struct ExtensionCallContextInput {
@@ -30,6 +30,7 @@ pub(crate) struct ExtensionCallContextInput {
     pub(crate) working_dir: Option<PathBuf>,
     pub(crate) session_store_dir: Option<PathBuf>,
     pub(crate) event_tx: Option<EventSender>,
+    pub(crate) event_causation: Option<(astrcode_core::types::EventId, u8)>,
     pub(crate) cancellation: CancellationToken,
 }
 
@@ -42,6 +43,7 @@ impl ExtensionCallContextInput {
             working_dir: None,
             session_store_dir: None,
             event_tx: None,
+            event_causation: None,
             cancellation,
         }
     }
@@ -59,6 +61,7 @@ impl ExtensionCallContextInput {
                 .session_store_dir()
                 .map(std::path::Path::to_path_buf),
             event_tx: runtime.event_tx().cloned(),
+            event_causation: None,
             cancellation,
         }
     }
@@ -85,7 +88,7 @@ impl ExtensionCallContextFactory {
         &self,
         extension_id: &str,
         capabilities: &[ExtensionCapability],
-        declarations: &[ExtensionEventDecl],
+        declarations: &[CustomEventDeclaration],
         tasks: ExtensionTasks,
         input: ExtensionCallContextInput,
     ) -> ExtensionCallContext {
@@ -96,16 +99,22 @@ impl ExtensionCallContextFactory {
             working_dir,
             session_store_dir,
             event_tx,
+            event_causation,
             cancellation,
         } = input;
         let cancellation = linked_call_cancellation(&tasks, cancellation);
-        let event_tx = if capabilities.contains(&ExtensionCapability::EmitEvents) {
+        let event_tx = if capabilities.contains(&ExtensionCapability::EmitCustomEvents) {
             event_tx
         } else {
             None
         };
         let event_sink = event_tx.as_ref().and_then(|event_tx| {
-            bind_extension_event_sink(extension_id, declarations, event_tx.clone())
+            bind_custom_event_sink(
+                extension_id,
+                declarations,
+                event_tx.clone(),
+                event_causation.clone(),
+            )
         });
         let session_ops = if capabilities.iter().any(|capability| {
             matches!(
@@ -129,6 +138,7 @@ impl ExtensionCallContextFactory {
             session_store_dir: session_store_dir.clone(),
             session_ops,
             event_tx,
+            event_causation,
             working_dir: working_dir
                 .as_deref()
                 .map(|path| path.to_string_lossy().into_owned()),
@@ -157,7 +167,7 @@ impl ExtensionCallContextFactory {
             Some(&global_store_dir),
             session_store_dir.as_deref(),
         );
-        let events = extension_event_emitter(declarations.iter().cloned(), event_sink);
+        let events = custom_event_emitter(declarations.iter().cloned(), event_sink);
 
         ExtensionCallContext::from_runtime(
             extension_id,
@@ -243,7 +253,7 @@ impl ExtensionView {
                 ExtensionError::Internal(format!("missing task owner for extension {extension_id}"))
             })?;
         let declarations = index
-            .extension_event_decls
+            .custom_event_declarations
             .get(extension_id)
             .map(Vec::as_slice)
             .unwrap_or_default();
@@ -357,6 +367,7 @@ mod tests {
                     working_dir: Some(PathBuf::from("/workspace")),
                     session_store_dir: Some(session_store_dir.clone()),
                     event_tx: None,
+                    event_causation: None,
                     cancellation: cancellation.clone(),
                 },
             );

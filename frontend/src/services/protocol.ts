@@ -327,7 +327,7 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
       }
     case 'extensionRegistryChanged':
       return { kind }
-    case 'extensionEvent':
+    case 'customEvent':
       return {
         kind,
         extensionId: requiredString(object, 'extensionId'),

@@ -15,7 +15,7 @@ use astrcode_core::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
     event::{
-        DurableEvent, DurableEventPayload, ExtensionEventData, LiveEvent, LiveEventPayload,
+        CustomEventData, DurableEvent, DurableEventPayload, LiveEvent, LiveEventPayload,
         StoredEvent,
     },
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
@@ -25,9 +25,10 @@ use astrcode_core::{
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
-        ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest, HttpContext,
-        MAX_EXTENSION_HTTP_BODY_BYTES, Registrar,
+        CustomEventContext, CustomEventHandler, CustomEventSubscription, ExtensionCapability,
+        ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpResponse,
+        ExtensionHttpRoute, ExtensionManifest, HttpContext, MAX_EXTENSION_HTTP_BODY_BYTES,
+        Registrar,
     },
 };
 use astrcode_extensions::{Extension, runner::ExtensionRunner};
@@ -37,8 +38,8 @@ use astrcode_protocol::{
         ApplyProviderPresetResponseDto, CommandCompletionResponse, CommandInvokeResponse,
         CompactSessionResponse, ConfigureSessionToolsResponse, ConversationBlockDto,
         ConversationErrorEnvelopeDto, ConversationSnapshotResponseDto, CreateSessionResponseDto,
-        PromptSubmitResponse, ProviderCatalogResponseDto, SlashCommandListResponseDto,
-        ToolSelectionDto,
+        CustomEventConsumerListResponseDto, CustomEventConsumerStatusDto, PromptSubmitResponse,
+        ProviderCatalogResponseDto, SlashCommandListResponseDto, ToolSelectionDto,
     },
     wire::{CommandSourceDto, ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
@@ -77,6 +78,10 @@ struct HttpRoutesExtension;
 
 struct HttpRoutesHandler;
 
+struct EventConsumerHttpExtension;
+
+struct EventConsumerHttpHandler;
+
 #[async_trait::async_trait]
 impl ExtensionHttpHandler for HttpRoutesHandler {
     async fn handle(&self, ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError> {
@@ -112,6 +117,32 @@ impl Extension for HttpRoutesExtension {
             ExtensionHttpRoute::authenticated(ExtensionHttpMethod::Post, "/protected-probe/{id}"),
             Arc::new(HttpRoutesHandler),
         );
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for EventConsumerHttpExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("event-consumer-http-test")
+            .version("test")
+            .description("Event consumer HTTP control test extension")
+            .capability(ExtensionCapability::ConsumeCustomEvents)
+            .build()
+    }
+
+    fn register(&self, registrar: &mut Registrar) {
+        registrar.on_custom_event(
+            CustomEventSubscription::from_extension("producer", "job.completed"),
+            0,
+            Arc::new(EventConsumerHttpHandler),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl CustomEventHandler for EventConsumerHttpHandler {
+    async fn handle(&self, _ctx: CustomEventContext) -> Result<(), ExtensionError> {
+        Ok(())
     }
 }
 
@@ -1369,10 +1400,12 @@ async fn stream_preserves_ask_user_events_during_replay_drain() {
         LiveEvent::new(
             SessionId::from("other-session"),
             None,
-            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+            LiveEventPayload::CustomEvent(CustomEventData {
                 extension_id: "astrcode-ask-user".into(),
                 event_type: "ask_user.pending".into(),
                 schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
                 payload: serde_json::json!({ "callId": "call-1" }),
             }),
         )
@@ -1414,10 +1447,12 @@ async fn stream_suppresses_current_session_ask_user_global_copy() {
         LiveEvent::new(
             SessionId::from(session_id),
             None,
-            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+            LiveEventPayload::CustomEvent(CustomEventData {
                 extension_id: "astrcode-ask-user".into(),
                 event_type: "ask_user.pending".into(),
                 schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
                 payload: serde_json::json!({ "callId": "current-session-call" }),
             }),
         )
@@ -1434,6 +1469,184 @@ async fn stream_suppresses_current_session_ask_user_global_copy() {
 
     let duplicate = tokio::time::timeout(Duration::from_millis(250), body.frame()).await;
     assert!(duplicate.is_err(), "global copy should not be delivered");
+}
+
+#[tokio::test]
+async fn raw_event_stream_replays_and_filters_durable_and_live_custom_events() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    let (app, token, events) =
+        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+    let sid = SessionId::from(session_id.clone());
+
+    runtime
+        .event_store()
+        .append_events(vec![
+            DurableEvent::session(
+                sid.clone(),
+                DurableEventPayload::CustomEvent(CustomEventData {
+                    extension_id: "producer".into(),
+                    event_type: "job.completed".into(),
+                    schema_version: 1,
+                    causation_id: None,
+                    cascade_depth: 0,
+                    payload: serde_json::json!({"jobId": "durable-job"}),
+                }),
+            ),
+            DurableEvent::session(
+                sid.clone(),
+                DurableEventPayload::CustomEvent(CustomEventData {
+                    extension_id: "ignored".into(),
+                    event_type: "job.completed".into(),
+                    schema_version: 1,
+                    causation_id: None,
+                    cascade_depth: 0,
+                    payload: serde_json::json!({"jobId": "ignored-job"}),
+                }),
+            ),
+        ])
+        .await
+        .unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .header("authorization", format!("Bearer {token}"))
+                .header("last-event-id", "0")
+                .uri(format!(
+                    "/api/sessions/{session_id}/events?extensionId=producer&eventType=job.\
+                     completed"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    events.send_notification(ClientNotification::Event(
+        LiveEvent::session(
+            sid,
+            LiveEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({"jobId": "live-job"}),
+            }),
+        )
+        .into(),
+    ));
+
+    let body = read_sse_until(response.into_body(), "live-job").await;
+    assert!(body.contains("durable-job"));
+    assert!(body.contains(r#""durability":"durable""#));
+    assert!(body.contains(r#""durability":"live""#));
+    assert!(!body.contains("ignored-job"));
+
+    let invalid_cursor = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .header("authorization", format!("Bearer {token}"))
+                .uri(format!(
+                    "/api/sessions/{session_id}/events?cursor=not-a-cursor"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(invalid_cursor.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn event_consumer_http_control_reports_pending_events_and_updates_persisted_state() {
+    let runtime = runtime(Arc::new(ImmediateLlm)).await;
+    runtime
+        .extension_runner()
+        .register(Arc::new(EventConsumerHttpExtension))
+        .await
+        .unwrap();
+    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+    runtime
+        .event_store()
+        .append_event(DurableEvent::session(
+            SessionId::from(session_id.clone()),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({"jobId": "durable-job"}),
+            }),
+        ))
+        .await
+        .unwrap();
+
+    let list = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .header("authorization", format!("Bearer {token}"))
+                .uri(format!("/api/sessions/{session_id}/event-consumers"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let list: CustomEventConsumerListResponseDto =
+        serde_json::from_slice(&body_bytes(list).await).unwrap();
+    let consumer = list
+        .consumers
+        .iter()
+        .find(|consumer| consumer.extension_id == "event-consumer-http-test")
+        .unwrap();
+    assert_eq!(consumer.pending_events, 1);
+    assert!(!consumer.paused);
+
+    let control = |action: &str| {
+        Request::builder()
+            .method(Method::POST)
+            .header("authorization", format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .uri(format!(
+                "/api/sessions/{session_id}/event-consumers/control"
+            ))
+            .body(Body::from(format!(
+                r#"{{"extensionId":"event-consumer-http-test","subscriptionId":"producer:job.completed","action":"{action}"}}"#
+            )))
+            .unwrap()
+    };
+    let paused = app.clone().oneshot(control("pause")).await.unwrap();
+    let paused: CustomEventConsumerStatusDto =
+        serde_json::from_slice(&body_bytes(paused).await).unwrap();
+    assert!(paused.paused);
+    assert_eq!(paused.pending_events, 1);
+
+    let skipped = app
+        .clone()
+        .oneshot(control("skip_to_stream_head"))
+        .await
+        .unwrap();
+    let skipped: CustomEventConsumerStatusDto =
+        serde_json::from_slice(&body_bytes(skipped).await).unwrap();
+    assert!(skipped.paused);
+    assert_eq!(skipped.checkpoint, skipped.stream_head);
+    assert_eq!(skipped.pending_events, 0);
+
+    let resumed = app.oneshot(control("resume")).await.unwrap();
+    let resumed: CustomEventConsumerStatusDto =
+        serde_json::from_slice(&body_bytes(resumed).await).unwrap();
+    assert!(!resumed.paused);
+    assert_eq!(resumed.pending_events, 0);
 }
 
 #[tokio::test]
@@ -2277,10 +2490,61 @@ impl SessionEventJournal for TestEventStore {
     async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         self.inner.append_event(event).await
     }
+
+    async fn append_events(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        self.inner.append_events(events).await
+    }
 }
 
 #[async_trait::async_trait]
 impl SessionStore for TestEventStore {
+    async fn event_consumer_state(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .event_consumer_state(session_id, consumer_id)
+            .await
+    }
+
+    async fn checkpoint_event_consumer(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        expected_revision: u64,
+        seq: u64,
+    ) -> Result<astrcode_storage::EventConsumerCheckpointOutcome, StorageError> {
+        self.inner
+            .checkpoint_event_consumer(session_id, consumer_id, expected_revision, seq)
+            .await
+    }
+
+    async fn set_event_consumer_paused(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        paused: bool,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .set_event_consumer_paused(session_id, consumer_id, paused)
+            .await
+    }
+
+    async fn reset_event_consumer_checkpoint(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        reset: astrcode_storage::EventConsumerCheckpointReset,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .reset_event_consumer_checkpoint(session_id, consumer_id, reset)
+            .await
+    }
+
     async fn checkpoint(
         &self,
         session_id: &SessionId,

@@ -371,6 +371,33 @@ impl SessionEventJournal for BlockingChildCreateStore {
         self.inner.append_event(event).await
     }
 
+    async fn append_events(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        for event in &events {
+            if matches!(
+                &event.payload,
+                DurableEventPayload::AgentSessionFailed { error, .. } if error == "deleted"
+            ) && self.fail_next_deleted_event.swap(false, Ordering::AcqRel)
+            {
+                return Err(StorageError::Unsupported(
+                    "injected deleted relation failure".into(),
+                ));
+            }
+            if matches!(
+                &event.payload,
+                DurableEventPayload::AgentSessionRecycled { .. }
+            ) && self.fail_next_recycled_event.swap(false, Ordering::AcqRel)
+            {
+                return Err(StorageError::Unsupported(
+                    "injected recycled relation failure".into(),
+                ));
+            }
+        }
+        self.inner.append_events(events).await
+    }
+
     async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
         let mut fail_sync_session = self.fail_sync_session.lock().await;
         if fail_sync_session.as_ref() == Some(session_id) {
@@ -386,6 +413,50 @@ impl SessionEventJournal for BlockingChildCreateStore {
 
 #[async_trait::async_trait]
 impl SessionStore for BlockingChildCreateStore {
+    async fn event_consumer_state(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .event_consumer_state(session_id, consumer_id)
+            .await
+    }
+
+    async fn checkpoint_event_consumer(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        expected_revision: u64,
+        seq: u64,
+    ) -> Result<astrcode_storage::EventConsumerCheckpointOutcome, StorageError> {
+        self.inner
+            .checkpoint_event_consumer(session_id, consumer_id, expected_revision, seq)
+            .await
+    }
+
+    async fn set_event_consumer_paused(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        paused: bool,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .set_event_consumer_paused(session_id, consumer_id, paused)
+            .await
+    }
+
+    async fn reset_event_consumer_checkpoint(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        reset: astrcode_storage::EventConsumerCheckpointReset,
+    ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+        self.inner
+            .reset_event_consumer_checkpoint(session_id, consumer_id, reset)
+            .await
+    }
+
     async fn checkpoint(
         &self,
         session_id: &SessionId,

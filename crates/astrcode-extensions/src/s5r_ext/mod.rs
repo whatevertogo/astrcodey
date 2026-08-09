@@ -7,24 +7,24 @@ use std::{path::Path, sync::Arc};
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        CommandContext, CommandHandler, CompactContext, CompactEvent, CompactHandler,
-        CompactResult, ContinueAfterStopContext, ContinueAfterStopHandler,
-        ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCallContext,
-        ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionEvent,
-        ExtensionEventDecl, ExtensionHttpHandler, ExtensionHttpResponse, ExtensionPackageManifest,
-        ExtensionStartContext, HookMode, HookResult, HttpContext, LifecycleContext,
+        CommandContext, CommandHandler, CompactContext, CompactHandler, CompactResult,
+        ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopResult,
+        CustomEventContext, CustomEventDeclaration, CustomEventHandler, CustomEventSubscription,
+        Extension, ExtensionCallContext, ExtensionCapability, ExtensionCommandResult,
+        ExtensionError, ExtensionHttpHandler, ExtensionHttpResponse, ExtensionPackageManifest,
+        ExtensionStartContext, HookResult, HttpContext, LifecycleContext, LifecycleEvent,
         LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
         PreToolUseContext, PreToolUseHandler, PreToolUseResult, PromptBuildContext,
         PromptBuildHandler, PromptContributions, ProviderContext, ProviderHandler, ProviderResult,
         Registrar, SlashCommand, StopReason, ToolContext, ToolHandler,
     },
-    s5r::{effects::HandlerResult, event_to_name},
+    s5r::effects::HandlerResult,
     tool::{ExecutionMode, ToolDefinition},
 };
 use serde_json::json;
 
 use crate::{
-    extension_manifest::{ExtensionRegistration, RegisteredHttpRoute},
+    extension_manifest::{ExtensionRegistration, HookSubscription, RegisteredHttpRoute},
     host_router::{HostRouter, InvokeContext},
     remote_manifest::{
         handler_id, parse_command_result, parse_compact_result, parse_continue_after_stop_result,
@@ -40,10 +40,11 @@ pub struct S5rExtension {
     version: String,
     capabilities: Vec<ExtensionCapability>,
     session: Arc<S5rSession>,
-    event_decls: Vec<ExtensionEventDecl>,
+    event_decls: Vec<CustomEventDeclaration>,
+    event_subscriptions: Vec<CustomEventSubscription>,
     tools: Vec<ToolDefinition>,
     commands: Vec<SlashCommand>,
-    subscriptions: Vec<(ExtensionEvent, HookMode, ContinueAfterStopOptions)>,
+    subscriptions: Vec<HookSubscription>,
     http_routes: Vec<RegisteredHttpRoute>,
 }
 
@@ -81,7 +82,8 @@ fn build_extension(
         version: registration.version().to_owned(),
         capabilities: registration.capabilities().to_vec(),
         session,
-        event_decls: registration.extension_events().to_vec(),
+        event_decls: registration.custom_events().to_vec(),
+        event_subscriptions: registration.custom_event_subscriptions().to_vec(),
         tools: registration.tools().to_vec(),
         commands: registration.commands().to_vec(),
         subscriptions: registration.subscriptions().to_vec(),
@@ -134,7 +136,18 @@ impl Extension for S5rExtension {
 
     fn register(&self, reg: &mut Registrar) {
         for decl in &self.event_decls {
-            reg.declare_event(decl.clone());
+            reg.declare_custom_event(decl.clone());
+        }
+        for subscription in &self.event_subscriptions {
+            reg.on_custom_event(
+                subscription.clone(),
+                0,
+                Arc::new(S5rCustomEventHandler {
+                    session: Arc::clone(&self.session),
+                    ext_id: self.id.clone(),
+                    subscription_id: subscription.id.clone(),
+                }),
+            );
         }
         for tool_def in &self.tools {
             reg.tool(
@@ -164,96 +177,91 @@ impl Extension for S5rExtension {
                 }),
             );
         }
-        for (event, mode, options) in &self.subscriptions {
+        for subscription in &self.subscriptions {
+            let event_name = subscription.event_name();
             let session = Arc::clone(&self.session);
             let ext_id = self.id.clone();
-            match event {
-                ExtensionEvent::PreToolUse => {
-                    reg.on_pre_tool_use(
-                        *mode,
-                        0,
-                        Arc::new(S5rPreToolUseHandler { session, ext_id }),
-                    );
-                },
-                ExtensionEvent::PostToolUse => {
-                    reg.on_post_tool_use(
-                        *mode,
-                        0,
-                        Arc::new(S5rPostToolUseHandler { session, ext_id }),
-                    );
-                },
-                ExtensionEvent::BeforeProviderRequest => {
-                    reg.on_before_provider_request(
-                        *mode,
-                        0,
-                        Arc::new(S5rProviderHandler {
-                            session,
-                            ext_id,
-                            on: "before_provider_request".into(),
-                        }),
-                    );
-                },
-                ExtensionEvent::AfterProviderResponse => {
-                    reg.on_after_provider_response(
-                        0,
-                        Arc::new(S5rProviderHandler {
-                            session,
-                            ext_id,
-                            on: "after_provider_response".into(),
-                        }),
-                    );
-                },
-                ExtensionEvent::ContinueAfterStop => {
-                    reg.on_continue_after_stop(
-                        0,
-                        *options,
-                        Arc::new(S5rContinueAfterStopHandler { session, ext_id }),
-                    );
-                },
-                ExtensionEvent::PromptBuild => {
-                    reg.on_prompt_build(0, Arc::new(S5rPromptBuildHandler { session, ext_id }));
-                },
-                ExtensionEvent::UserMessageEnvelope => {
-                    tracing::warn!(
-                        extension_id = %ext_id,
-                        hook = event_to_name(event),
-                        "s5r manifest requested an internal typed decision hook; ignoring"
-                    );
-                },
-                ExtensionEvent::PreCompact => {
+            match subscription {
+                HookSubscription::Compact(event) => {
                     reg.on_compact(
-                        CompactEvent::PreCompact,
+                        *event,
                         0,
                         Arc::new(S5rCompactHandler {
                             session,
                             ext_id,
-                            on: "pre_compact".into(),
+                            on: event_name.into(),
                         }),
                     );
                 },
-                ExtensionEvent::PostCompact => {
-                    reg.on_compact(
-                        CompactEvent::PostCompact,
-                        0,
-                        Arc::new(S5rCompactHandler {
-                            session,
-                            ext_id,
-                            on: "post_compact".into(),
-                        }),
-                    );
-                },
-                other => {
-                    let on = event_to_name(other).to_string();
-                    reg.on_lifecycle(
-                        other.clone(),
-                        *mode,
-                        0,
-                        Arc::new(S5rLifecycleHandler {
-                            session,
-                            ext_id,
-                            on,
-                        }),
-                    );
+                HookSubscription::Lifecycle {
+                    event,
+                    mode,
+                    options,
+                } => match event {
+                    LifecycleEvent::PreToolUse => {
+                        reg.on_pre_tool_use(
+                            *mode,
+                            0,
+                            Arc::new(S5rPreToolUseHandler { session, ext_id }),
+                        );
+                    },
+                    LifecycleEvent::PostToolUse => {
+                        reg.on_post_tool_use(
+                            *mode,
+                            0,
+                            Arc::new(S5rPostToolUseHandler { session, ext_id }),
+                        );
+                    },
+                    LifecycleEvent::BeforeProviderRequest => {
+                        reg.on_before_provider_request(
+                            *mode,
+                            0,
+                            Arc::new(S5rProviderHandler {
+                                session,
+                                ext_id,
+                                on: event_name.into(),
+                            }),
+                        );
+                    },
+                    LifecycleEvent::AfterProviderResponse => {
+                        reg.on_after_provider_response(
+                            0,
+                            Arc::new(S5rProviderHandler {
+                                session,
+                                ext_id,
+                                on: event_name.into(),
+                            }),
+                        );
+                    },
+                    LifecycleEvent::ContinueAfterStop => {
+                        reg.on_continue_after_stop(
+                            0,
+                            *options,
+                            Arc::new(S5rContinueAfterStopHandler { session, ext_id }),
+                        );
+                    },
+                    LifecycleEvent::PromptBuild => {
+                        reg.on_prompt_build(0, Arc::new(S5rPromptBuildHandler { session, ext_id }));
+                    },
+                    LifecycleEvent::UserMessageEnvelope => {
+                        tracing::warn!(
+                            extension_id = %ext_id,
+                            hook = event_name,
+                            "s5r manifest requested an internal typed decision hook; ignoring"
+                        );
+                    },
+                    other => {
+                        reg.on_lifecycle(
+                            other.clone(),
+                            *mode,
+                            0,
+                            Arc::new(S5rLifecycleHandler {
+                                session,
+                                ext_id,
+                                on: event_name.into(),
+                            }),
+                        );
+                    },
                 },
             }
         }
@@ -579,6 +587,52 @@ struct S5rLifecycleHandler {
     session: Arc<S5rSession>,
     ext_id: String,
     on: String,
+}
+
+struct S5rCustomEventHandler {
+    session: Arc<S5rSession>,
+    ext_id: String,
+    subscription_id: String,
+}
+
+#[async_trait::async_trait]
+impl CustomEventHandler for S5rCustomEventHandler {
+    async fn handle(&self, ctx: CustomEventContext) -> Result<(), ExtensionError> {
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
+        let handler = handler_id(&self.ext_id, "event", &self.subscription_id);
+        let result = self
+            .session
+            .invoke_handler_with_continuations(
+                &handler,
+                json!({
+                    "input": {
+                        "event_id": ctx.event_id(),
+                        "session_id": ctx.session_id(),
+                        "turn_id": ctx.turn_id(),
+                        "seq": ctx.seq(),
+                        "source_extension_id": ctx.source_extension_id(),
+                        "event_type": ctx.event_type(),
+                        "schema_version": ctx.schema_version(),
+                        "causation_id": ctx.causation_id(),
+                        "cascade_depth": ctx.cascade_depth(),
+                        "durable": ctx.is_durable(),
+                        "payload": ctx.payload(),
+                    }
+                }),
+                &invoke_ctx,
+                ExecutionMode::Sequential,
+            )
+            .await?;
+        if result.ok {
+            Ok(())
+        } else {
+            Err(ExtensionError::Internal(
+                result
+                    .error
+                    .unwrap_or_else(|| "custom event handler failed".into()),
+            ))
+        }
+    }
 }
 
 #[async_trait::async_trait]

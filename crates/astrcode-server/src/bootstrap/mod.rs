@@ -229,6 +229,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         Arc::clone(&runtime_services),
         vec![Arc::new(TerminalCleanup), Arc::new(BackgroundShellCleanup)],
     ));
+    session_manager.bind_custom_event_runner(Arc::clone(&extension_runner));
 
     let child_sessions = Arc::new(ChildSessionCoordinator::new(Arc::clone(&session_manager)));
     let scheduler = Arc::new(TurnScheduler::new(
@@ -254,6 +255,12 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     .await;
     for err in &load_errors {
         tracing::warn!("Extension load error: {err}");
+    }
+    if let Err(error) = session_manager
+        .replay_custom_events(&extension_runner)
+        .await
+    {
+        tracing::warn!(%error, "failed to replay durable custom events");
     }
 
     // 9. 返回运行时容器。
@@ -314,13 +321,21 @@ impl ServerRuntime {
 
     /// 按当前配置重载扩展集合；新 turn 会直接解析新的工具快照。
     pub async fn reload_extensions(&self) -> Vec<String> {
-        load_extensions_into_runner(
+        let errors = load_extensions_into_runner(
             self.extension_runner(),
             self.runtime_services(),
             Arc::clone(self.event_store()),
             self.startup_working_dir(),
         )
-        .await
+        .await;
+        if let Err(error) = self
+            .session_manager()
+            .replay_custom_events(self.extension_runner())
+            .await
+        {
+            tracing::warn!(%error, "failed to replay durable custom events after reload");
+        }
+        errors
     }
 }
 

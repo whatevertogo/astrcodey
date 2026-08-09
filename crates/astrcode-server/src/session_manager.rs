@@ -1,4 +1,9 @@
-use std::{collections::HashMap, future::Future, panic::AssertUnwindSafe, sync::Arc};
+use std::{
+    collections::HashMap,
+    future::Future,
+    panic::AssertUnwindSafe,
+    sync::{Arc, Weak},
+};
 
 use astrcode_core::{
     event::{DurableEventPayload, Event, PersistedSystemPrompt, StoredEvent},
@@ -6,7 +11,8 @@ use astrcode_core::{
     tool::SessionToolSelection,
     types::{Cursor, SessionId, TurnId},
 };
-use astrcode_extension_sdk::extension::ExtensionEvent;
+use astrcode_extension_sdk::extension::LifecycleEvent;
+use astrcode_extensions::runner::{CustomEventSession, ExtensionRunner};
 use astrcode_session::{
     Session, SessionCreateParams, SessionCreationFailed, SessionError, SessionEventObserver,
     SessionEventSink, SessionRuntimeServices, SessionRuntimeState, emit_lifecycle_for_read_model,
@@ -66,6 +72,28 @@ pub struct SessionManager {
     event_bus: Arc<ServerEventBus>,
     event_sink: Arc<SessionEventSink>,
     resource_cleanups: Vec<Arc<dyn SessionResourceCleanup>>,
+    custom_event_runner: Arc<parking_lot::RwLock<Weak<ExtensionRunner>>>,
+}
+
+struct CustomEventObserver {
+    session_manager: std::sync::Weak<SessionManager>,
+    extension_runner: Arc<ExtensionRunner>,
+}
+
+impl SessionEventObserver for CustomEventObserver {
+    fn publish(&self, event: Arc<Event>) {
+        // 先过滤再构造会话上下文:resources_for 在 runtime 缺失时会插入新状态,
+        // 不能对每个总线事件都触发。
+        if event.payload.custom_event().is_none() {
+            return;
+        }
+        let Some(session_manager) = self.session_manager.upgrade() else {
+            return;
+        };
+        let session = session_manager.custom_event_session(&event.session_id);
+        // observe_custom_event 的返回值只表示是否完全 admit,派发本身是尽力的,有意忽略。
+        let _ = self.extension_runner.observe_custom_event(event, session);
+    }
 }
 
 impl SessionManager {
@@ -86,11 +114,38 @@ impl SessionManager {
             event_bus,
             event_sink: Arc::new(SessionEventSink::new(observer)),
             resource_cleanups,
+            custom_event_runner: Arc::new(parking_lot::RwLock::new(Weak::new())),
         }
     }
 
     pub(crate) fn event_bus(&self) -> &Arc<ServerEventBus> {
         &self.event_bus
+    }
+
+    pub(crate) fn bind_custom_event_runner(self: &Arc<Self>, runner: Arc<ExtensionRunner>) {
+        *self.custom_event_runner.write() = Arc::downgrade(&runner);
+        self.event_bus.add_observer(Arc::new(CustomEventObserver {
+            session_manager: Arc::downgrade(self),
+            extension_runner: runner,
+        }));
+    }
+
+    /// Replays durable custom events so uncheckpointed subscriptions resume after restart/reload.
+    pub(crate) async fn replay_custom_events(
+        &self,
+        runner: &ExtensionRunner,
+    ) -> Result<(), SessionManagerError> {
+        for session_id in self.event_store.list_sessions().await? {
+            runner.reconcile_custom_events(&session_id, self.custom_event_session(&session_id));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn custom_event_session(&self, session_id: &SessionId) -> CustomEventSession {
+        let runtime = self.runtime_for(session_id);
+        CustomEventSession::new(Arc::clone(&self.event_store), move |turn_id| {
+            runtime.event_sender(turn_id)
+        })
     }
 
     fn runtime_for(&self, session_id: &SessionId) -> Arc<SessionRuntimeState> {
@@ -242,7 +297,7 @@ impl SessionManager {
         };
 
         if let Err(error) = session
-            .ensure_lifecycle_initialized(ExtensionEvent::SessionStart)
+            .ensure_lifecycle_initialized(LifecycleEvent::SessionStart)
             .await
         {
             if let Err(compensation_error) = self.discard_failed_lifecycle_start(&session).await {
@@ -295,7 +350,7 @@ impl SessionManager {
                             .activate(&session_id)
                             .map_err(SessionError::from)?;
                         session
-                            .ensure_lifecycle_initialized(ExtensionEvent::SessionResume)
+                            .ensure_lifecycle_initialized(LifecycleEvent::SessionResume)
                             .await?;
                         opening.complete();
                         return Ok(session);
@@ -328,7 +383,7 @@ impl SessionManager {
             session_id,
             &model,
             session_store_dir,
-            ExtensionEvent::SessionShutdown,
+            LifecycleEvent::SessionShutdown,
         )
         .await
         .map_err(SessionManagerError::from)
@@ -479,6 +534,7 @@ impl SessionManager {
         let event_bus = Arc::clone(&self.event_bus);
         let event_sink = Arc::clone(&self.event_sink);
         let resource_cleanups = self.resource_cleanups.clone();
+        let custom_event_runner = Arc::clone(&self.custom_event_runner);
         let session_resources = self.runtime_services.session_resources().clone();
         let session_id = session_id.clone();
 
@@ -492,6 +548,9 @@ impl SessionManager {
                 match action {
                     CloseSessionAction::Delete => event_store.delete_session(&session_id).await?,
                     CloseSessionAction::Recycle => event_store.recycle_session(&session_id).await?,
+                }
+                if let Some(runner) = custom_event_runner.read().upgrade() {
+                    runner.forget_custom_event_session(&session_id);
                 }
                 event_bus.detach(&session_id);
                 session_resources.cleanup(&session_id);
@@ -703,7 +762,7 @@ impl SessionManager {
         }
 
         if let Err(error) = session
-            .ensure_lifecycle_initialized(ExtensionEvent::SessionStart)
+            .ensure_lifecycle_initialized(LifecycleEvent::SessionStart)
             .await
         {
             self.compensate_failed_fork_creation(
@@ -791,7 +850,7 @@ impl SessionManager {
 
     async fn discard_failed_lifecycle_start(&self, session: &Session) -> Result<(), String> {
         let shutdown_result =
-            AssertUnwindSafe(session.emit_lifecycle(ExtensionEvent::SessionShutdown))
+            AssertUnwindSafe(session.emit_lifecycle(LifecycleEvent::SessionShutdown))
                 .catch_unwind()
                 .await;
         let discard_result = self.discard_failed_creation(session.id()).await;
@@ -819,6 +878,9 @@ impl SessionManager {
             .await;
         let delete_result = self.event_store.delete_session(session_id).await;
         if delete_result.is_ok() {
+            if let Some(runner) = self.custom_event_runner.read().upgrade() {
+                runner.forget_custom_event_session(session_id);
+            }
             self.event_bus.detach(session_id);
             self.runtime_services
                 .session_resources()
@@ -969,7 +1031,7 @@ mod tests {
         types::ToolCallId,
     };
     use astrcode_extension_sdk::{
-        extension::{ExtensionError, ExtensionEvent, RuntimeLifecycleContext},
+        extension::{ExtensionError, LifecycleEvent, RuntimeLifecycleContext},
         runtime_ports::{NoopRuntimePorts, TurnHooks},
     };
     use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices, SpawnChildParams};
@@ -1037,7 +1099,7 @@ mod tests {
     struct FailingStartHooks {
         fail_start_at: usize,
         starts: AtomicUsize,
-        events: Mutex<Vec<(ExtensionEvent, String)>>,
+        events: Mutex<Vec<(LifecycleEvent, String)>>,
     }
 
     impl FailingStartHooks {
@@ -1049,7 +1111,7 @@ mod tests {
             }
         }
 
-        fn observed(&self, event: ExtensionEvent, session_id: &SessionId) -> bool {
+        fn observed(&self, event: LifecycleEvent, session_id: &SessionId) -> bool {
             self.events
                 .lock()
                 .iter()
@@ -1063,13 +1125,13 @@ mod tests {
     impl TurnHooks for FailingStartHooks {
         async fn emit_lifecycle(
             &self,
-            event: ExtensionEvent,
+            event: LifecycleEvent,
             ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
             self.events
                 .lock()
                 .push((event.clone(), ctx.call().session_id().to_string()));
-            if event == ExtensionEvent::SessionStart {
+            if event == LifecycleEvent::SessionStart {
                 let start = self.starts.fetch_add(1, Ordering::SeqCst) + 1;
                 if start == self.fail_start_at {
                     return Err(ExtensionError::Internal(
@@ -1088,7 +1150,7 @@ mod tests {
         entered: Notify,
         release: Semaphore,
         outcome: AtomicU8,
-        events: Mutex<Vec<(ExtensionEvent, String)>>,
+        events: Mutex<Vec<(LifecycleEvent, String)>>,
     }
 
     impl BlockingStartHooks {
@@ -1129,7 +1191,7 @@ mod tests {
             self.release.add_permits(1);
         }
 
-        fn observed(&self, event: ExtensionEvent, session_id: &SessionId) -> bool {
+        fn observed(&self, event: LifecycleEvent, session_id: &SessionId) -> bool {
             self.events
                 .lock()
                 .iter()
@@ -1143,13 +1205,13 @@ mod tests {
     impl TurnHooks for BlockingStartHooks {
         async fn emit_lifecycle(
             &self,
-            event: ExtensionEvent,
+            event: LifecycleEvent,
             ctx: RuntimeLifecycleContext,
         ) -> Result<(), ExtensionError> {
             self.events
                 .lock()
                 .push((event.clone(), ctx.call().session_id().to_string()));
-            if event != ExtensionEvent::SessionStart {
+            if event != LifecycleEvent::SessionStart {
                 return Ok(());
             }
 
@@ -1367,6 +1429,19 @@ mod tests {
             self.inner.append_event(event).await
         }
 
+        async fn append_events(
+            &self,
+            events: Vec<DurableEvent>,
+        ) -> Result<Vec<StoredEvent>, StorageError> {
+            for _ in &events {
+                let append_number = self.append_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.fail_append_at.load(Ordering::SeqCst) == append_number {
+                    return Err(StorageError::InvalidEvent(INJECTED_APPEND_ERROR.into()));
+                }
+            }
+            self.inner.append_events(events).await
+        }
+
         async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
             let sync_number = self.sync_count.fetch_add(1, Ordering::SeqCst) + 1;
             if self.fail_sync_at.load(Ordering::SeqCst) == sync_number {
@@ -1380,6 +1455,50 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SessionStore for FailingAppendStore {
+        async fn event_consumer_state(
+            &self,
+            session_id: &SessionId,
+            consumer_id: &str,
+        ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+            self.inner
+                .event_consumer_state(session_id, consumer_id)
+                .await
+        }
+
+        async fn checkpoint_event_consumer(
+            &self,
+            session_id: &SessionId,
+            consumer_id: &str,
+            expected_revision: u64,
+            seq: u64,
+        ) -> Result<astrcode_storage::EventConsumerCheckpointOutcome, StorageError> {
+            self.inner
+                .checkpoint_event_consumer(session_id, consumer_id, expected_revision, seq)
+                .await
+        }
+
+        async fn set_event_consumer_paused(
+            &self,
+            session_id: &SessionId,
+            consumer_id: &str,
+            paused: bool,
+        ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+            self.inner
+                .set_event_consumer_paused(session_id, consumer_id, paused)
+                .await
+        }
+
+        async fn reset_event_consumer_checkpoint(
+            &self,
+            session_id: &SessionId,
+            consumer_id: &str,
+            reset: astrcode_storage::EventConsumerCheckpointReset,
+        ) -> Result<astrcode_storage::EventConsumerState, StorageError> {
+            self.inner
+                .reset_event_consumer_checkpoint(session_id, consumer_id, reset)
+                .await
+        }
+
         async fn checkpoint(
             &self,
             session_id: &SessionId,
@@ -1566,8 +1685,8 @@ mod tests {
         );
         let root_id = root_store.created_sessions()[0].clone();
         assert!(root_store.list_sessions().await.unwrap().is_empty());
-        assert!(root_hooks.observed(ExtensionEvent::SessionStart, &root_id));
-        assert!(root_hooks.observed(ExtensionEvent::SessionShutdown, &root_id));
+        assert!(root_hooks.observed(LifecycleEvent::SessionStart, &root_id));
+        assert!(root_hooks.observed(LifecycleEvent::SessionShutdown, &root_id));
         assert!(
             root_events.try_recv().is_err(),
             "failed creation must not publish buffered session events"
@@ -1732,9 +1851,9 @@ mod tests {
                 .is_empty(),
             "a child is linked only after lifecycle initialization succeeds"
         );
-        assert!(child_lifecycle_hooks.observed(ExtensionEvent::SessionStart, &lifecycle_child_id));
+        assert!(child_lifecycle_hooks.observed(LifecycleEvent::SessionStart, &lifecycle_child_id));
         assert!(
-            child_lifecycle_hooks.observed(ExtensionEvent::SessionShutdown, &lifecycle_child_id)
+            child_lifecycle_hooks.observed(LifecycleEvent::SessionShutdown, &lifecycle_child_id)
         );
         assert_runtime_was_released(
             child_lifecycle_services.as_ref(),
@@ -1801,9 +1920,9 @@ mod tests {
             fork_lifecycle_store.list_sessions().await.unwrap(),
             vec![lifecycle_source.id().clone()]
         );
-        assert!(fork_lifecycle_hooks.observed(ExtensionEvent::SessionStart, lifecycle_source.id()));
-        assert!(fork_lifecycle_hooks.observed(ExtensionEvent::SessionStart, &lifecycle_fork_id));
-        assert!(fork_lifecycle_hooks.observed(ExtensionEvent::SessionShutdown, &lifecycle_fork_id));
+        assert!(fork_lifecycle_hooks.observed(LifecycleEvent::SessionStart, lifecycle_source.id()));
+        assert!(fork_lifecycle_hooks.observed(LifecycleEvent::SessionStart, &lifecycle_fork_id));
+        assert!(fork_lifecycle_hooks.observed(LifecycleEvent::SessionShutdown, &lifecycle_fork_id));
         assert_runtime_was_released(
             fork_lifecycle_services.as_ref(),
             Arc::clone(&fork_lifecycle_store_port),
@@ -1926,7 +2045,7 @@ mod tests {
         fork_hooks.release_with_failure();
         fork_manager.owned_tasks.close_and_wait().await;
         assert_eq!(fork_store.list_sessions().await.unwrap(), vec![source_id]);
-        assert!(fork_hooks.observed(ExtensionEvent::SessionShutdown, &fork_id));
+        assert!(fork_hooks.observed(LifecycleEvent::SessionShutdown, &fork_id));
 
         let child_store = Arc::new(FailingAppendStore::default());
         let child_store_port: Arc<dyn SessionStore> = child_store.clone();
@@ -1969,7 +2088,7 @@ mod tests {
         child_manager.owned_tasks.close_and_wait().await;
         assert_eq!(child_store.list_sessions().await.unwrap(), vec![parent_id]);
         assert!(parent.read_model().await.unwrap().agent_sessions.is_empty());
-        assert!(child_hooks.observed(ExtensionEvent::SessionShutdown, &child_id));
+        assert!(child_hooks.observed(LifecycleEvent::SessionShutdown, &child_id));
     }
 
     #[tokio::test]
@@ -2014,7 +2133,7 @@ mod tests {
                 .to_string()
                 .contains("session creation failed before lifecycle initialization committed")
         );
-        assert!(!root_hooks.observed(ExtensionEvent::SessionResume, &root_id));
+        assert!(!root_hooks.observed(LifecycleEvent::SessionResume, &root_id));
         assert_eq!(
             root_store.list_sessions().await.unwrap(),
             vec![root_id.clone()]
@@ -2033,7 +2152,7 @@ mod tests {
                 .to_string()
                 .contains("session creation failed before lifecycle initialization committed")
         );
-        assert!(!root_hooks.observed(ExtensionEvent::SessionResume, &root_id));
+        assert!(!root_hooks.observed(LifecycleEvent::SessionResume, &root_id));
 
         let fork_store = Arc::new(FailingAppendStore::default());
         let fork_store_port: Arc<dyn SessionStore> = fork_store.clone();
@@ -2081,7 +2200,7 @@ mod tests {
                 .to_string()
                 .contains("session creation failed before lifecycle initialization committed")
         );
-        assert!(!fork_hooks.observed(ExtensionEvent::SessionResume, &fork_id));
+        assert!(!fork_hooks.observed(LifecycleEvent::SessionResume, &fork_id));
 
         let child_store = Arc::new(FailingAppendStore::default());
         let child_store_port: Arc<dyn SessionStore> = child_store.clone();
@@ -2138,7 +2257,7 @@ mod tests {
                 .to_string()
                 .contains("session creation failed before lifecycle initialization committed")
         );
-        assert!(!child_hooks.observed(ExtensionEvent::SessionResume, &child_id));
+        assert!(!child_hooks.observed(LifecycleEvent::SessionResume, &child_id));
         assert!(parent.read_model().await.unwrap().agent_sessions.is_empty());
     }
 }

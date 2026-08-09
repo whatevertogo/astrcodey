@@ -17,7 +17,8 @@ pub struct ExtensionDeclarationSnapshot {
     pub dynamic_commands: bool,
     pub keybindings: Vec<astrcode_extension_sdk::extension::Keybinding>,
     pub status_items: Vec<astrcode_extension_sdk::extension::StatusItem>,
-    pub events: Vec<ExtensionEventDecl>,
+    pub custom_events: Vec<CustomEventDeclaration>,
+    pub custom_event_subscriptions: Vec<CustomEventSubscription>,
     pub http_routes: Vec<ExtensionHttpRoute>,
 }
 
@@ -52,7 +53,12 @@ impl ExtensionRunner {
                         dynamic_commands: !registrations.command_discoveries().is_empty(),
                         keybindings: registrations.keybindings().to_vec(),
                         status_items: registrations.status_items().to_vec(),
-                        events: registrations.extension_event_decls().to_vec(),
+                        custom_events: registrations.custom_event_declarations().to_vec(),
+                        custom_event_subscriptions: registrations
+                            .custom_event_subscriptions()
+                            .iter()
+                            .map(|registration| registration.subscription.clone())
+                            .collect(),
                         http_routes: registrations
                             .http_routes()
                             .iter()

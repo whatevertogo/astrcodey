@@ -3,8 +3,9 @@ use astrcode_core::{
     event::{
         CompactionDetails, DurableEvent, DurableEventPayload, PersistedSystemPrompt, Phase,
         SessionStarted, StoredEvent, SystemPromptSource, TranscriptRewriteReason,
+        transcript_prefix_fingerprint,
     },
-    llm::{LlmMessage, LlmRole, LlmTokenUsage},
+    llm::{LlmMessage, LlmRole, LlmTokenUsage, provider_transcript},
     permission::{ApprovalDecision, ApprovalSource},
     tool::{SessionToolSelection, ToolResult},
     types::{SessionId, ToolCallId, TurnId, new_message_id},
@@ -13,7 +14,8 @@ use astrcode_core::{
 
 use super::{ProjectionError, SessionReadModelProjection, reduce, replay};
 use crate::{
-    AgentSessionStatus, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE, TranscriptArtifactView,
+    AgentSessionStatus, SessionReadModel, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
+    TranscriptArtifactView,
 };
 
 fn event(seq: u64, session_id: &SessionId, payload: DurableEventPayload) -> StoredEvent {
@@ -203,6 +205,7 @@ fn transcript_rewrite_does_not_change_active_execution_state() {
                 &turn_id,
                 DurableEventPayload::TranscriptRewritten {
                     source_seq: 1,
+                    source_fingerprint: None,
                     messages: vec![LlmMessage::user("summary")],
                     reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                         trigger: trigger.into(),
@@ -349,6 +352,7 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
             &session_id,
             DurableEventPayload::TranscriptRewritten {
                 source_seq: 6,
+                source_fingerprint: None,
                 messages: vec![LlmMessage::user(
                     "<compact_summary>summary</compact_summary>",
                 )],
@@ -776,6 +780,7 @@ fn projection_rejects_invalid_stream_shapes_without_mutating_valid_state() {
             &session_id,
             DurableEventPayload::TranscriptRewritten {
                 source_seq: 1,
+                source_fingerprint: None,
                 messages: vec![LlmMessage::user("future rewrite")],
                 reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                     trigger: "manual".into(),
@@ -803,4 +808,240 @@ fn projection_rejects_invalid_stream_shapes_without_mutating_valid_state() {
         Err(ProjectionError::DuplicateSessionStarted(1))
     );
     assert_eq!(projection.last_seq(), Some(0));
+}
+
+// ── TranscriptRewritten source_fingerprint 乐观并发校验 ──
+
+/// 与被测的 `validate_transcript_rewrite_fingerprint` 走同一归一化原语，只保留
+/// 「前缀 = `updated_seq <= source_seq`」这一划分，用于交叉验证指纹校验路径。
+fn prefix_fingerprint(model: &SessionReadModel, source_seq: u64) -> String {
+    let prefix = provider_transcript(
+        model
+            .transcript
+            .messages
+            .iter()
+            .filter(|message| message.updated_seq <= source_seq)
+            .map(|message| message.message.clone())
+            .collect(),
+    );
+    transcript_prefix_fingerprint(&model.system_prompt.text, &prefix)
+}
+
+fn rewrite_event(
+    seq: u64,
+    session_id: &SessionId,
+    source_seq: u64,
+    source_fingerprint: Option<String>,
+    summary: &str,
+) -> StoredEvent {
+    event(
+        seq,
+        session_id,
+        DurableEventPayload::TranscriptRewritten {
+            source_seq,
+            source_fingerprint,
+            messages: vec![LlmMessage::user(summary)],
+            reason: TranscriptRewriteReason::Compaction(CompactionDetails {
+                trigger: "manual".into(),
+                pre_tokens: 100,
+                post_tokens: 10,
+                summary: summary.into(),
+                transcript_path: None,
+                strategy: CompactStrategy::Manual {
+                    keep_recent_turns: None,
+                },
+            }),
+        },
+    )
+}
+
+fn user_message(seq: u64, session_id: &SessionId, text: &str) -> StoredEvent {
+    event(
+        seq,
+        session_id,
+        DurableEventPayload::UserMessage {
+            message_id: new_message_id(),
+            text: text.into(),
+            attachments: vec![],
+            accepted_seq: None,
+        },
+    )
+}
+
+fn assistant_message(seq: u64, session_id: &SessionId, text: &str) -> StoredEvent {
+    event(
+        seq,
+        session_id,
+        DurableEventPayload::AssistantMessageCompleted {
+            message_id: new_message_id(),
+            text: text.into(),
+            reasoning_content: None,
+        },
+    )
+}
+
+#[test]
+fn transcript_rewrite_with_matching_fingerprint_applies() {
+    let session_id = SessionId::new("session-fp-match");
+    let mut model = replay(
+        session_id.clone(),
+        &[
+            started(0, &session_id),
+            user_message(1, &session_id, "old user"),
+            assistant_message(2, &session_id, "old answer"),
+            user_message(3, &session_id, "tail user"),
+        ],
+    )
+    .unwrap();
+
+    let fingerprint = prefix_fingerprint(&model, 2);
+    reduce(
+        &rewrite_event(4, &session_id, 2, Some(fingerprint), "summary"),
+        &mut model,
+    )
+    .unwrap();
+
+    let texts: Vec<String> = model
+        .transcript
+        .messages
+        .iter()
+        .map(|message| message.message.joined_display_text("\n"))
+        .collect();
+    assert_eq!(texts, ["summary", "tail user"]);
+}
+
+#[test]
+fn transcript_rewrite_with_stale_fingerprint_is_rejected_without_mutation() {
+    let session_id = SessionId::new("session-fp-stale");
+    let mut model = replay(
+        session_id.clone(),
+        &[
+            started(0, &session_id),
+            user_message(1, &session_id, "old user"),
+            assistant_message(2, &session_id, "old answer"),
+        ],
+    )
+    .unwrap();
+
+    let result = reduce(
+        &rewrite_event(
+            3,
+            &session_id,
+            2,
+            Some("deadbeefdeadbeef".into()),
+            "summary",
+        ),
+        &mut model,
+    );
+    assert!(matches!(
+        result,
+        Err(ProjectionError::TranscriptRewriteSourceFingerprintMismatch { source_seq: 2, .. })
+    ));
+    assert_eq!(model.transcript.messages.len(), 2);
+    assert_eq!(model.stats.last_seq, 2);
+}
+
+#[test]
+fn transcript_rewrite_without_fingerprint_skips_check() {
+    let session_id = SessionId::new("session-fp-legacy");
+    let mut model = replay(
+        session_id.clone(),
+        &[
+            started(0, &session_id),
+            user_message(1, &session_id, "old user"),
+            user_message(2, &session_id, "tail user"),
+        ],
+    )
+    .unwrap();
+
+    reduce(
+        &rewrite_event(3, &session_id, 1, None, "summary"),
+        &mut model,
+    )
+    .unwrap();
+
+    let texts: Vec<String> = model
+        .transcript
+        .messages
+        .iter()
+        .map(|message| message.message.joined_display_text("\n"))
+        .collect();
+    assert_eq!(texts, ["summary", "tail user"]);
+}
+
+#[test]
+fn consecutive_rewrites_validate_against_updated_prefix() {
+    let session_id = SessionId::new("session-fp-chain");
+    let mut model = replay(
+        session_id.clone(),
+        &[
+            started(0, &session_id),
+            user_message(1, &session_id, "user 1"),
+            assistant_message(2, &session_id, "answer 1"),
+            user_message(3, &session_id, "user 2"),
+            assistant_message(4, &session_id, "answer 2"),
+        ],
+    )
+    .unwrap();
+
+    let first_fingerprint = prefix_fingerprint(&model, 2);
+    reduce(
+        &rewrite_event(
+            5,
+            &session_id,
+            2,
+            Some(first_fingerprint.clone()),
+            "summary 1",
+        ),
+        &mut model,
+    )
+    .unwrap();
+
+    // 第二次 rewrite 的前缀包含第一次的输出（锚定在 source_seq=2）。
+    let second_fingerprint = prefix_fingerprint(&model, 4);
+    assert_ne!(first_fingerprint, second_fingerprint);
+    reduce(
+        &rewrite_event(6, &session_id, 4, Some(second_fingerprint), "summary 2"),
+        &mut model,
+    )
+    .unwrap();
+
+    let texts: Vec<String> = model
+        .transcript
+        .messages
+        .iter()
+        .map(|message| message.message.joined_display_text("\n"))
+        .collect();
+    assert_eq!(texts, ["summary 2"]);
+
+    // 第一次的指纹对已改写前缀失效。
+    let mut replayed = replay(
+        session_id.clone(),
+        &[
+            started(0, &session_id),
+            user_message(1, &session_id, "user 1"),
+            assistant_message(2, &session_id, "answer 1"),
+            user_message(3, &session_id, "user 2"),
+            assistant_message(4, &session_id, "answer 2"),
+        ],
+    )
+    .unwrap();
+    reduce(
+        &rewrite_event(
+            5,
+            &session_id,
+            2,
+            Some(first_fingerprint.clone()),
+            "summary 1",
+        ),
+        &mut replayed,
+    )
+    .unwrap();
+    assert!(matches!(
+        reduce(
+            &rewrite_event(6, &session_id, 4, Some(first_fingerprint), "summary 2"),
+            &mut replayed,
+        ),
+        Err(ProjectionError::TranscriptRewriteSourceFingerprintMismatch { source_seq: 4, .. })
+    ));
 }

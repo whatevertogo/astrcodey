@@ -38,6 +38,12 @@ pub enum StorageError {
     Unsupported(String),
 }
 
+/// `append_events` 契约要求返回与输入等长的批次；实现返回更短的批次属于实现 bug，
+/// 两个单事件入口在此收敛为同一个不可达兜底。
+pub(crate) fn short_batch_result() -> StorageError {
+    StorageError::InvalidEvent("batch append returned fewer events than submitted".into())
+}
+
 impl StorageError {
     /// 错误是否属于临时性 IO 故障，调用方可重试。
     pub fn is_retryable(&self) -> bool {

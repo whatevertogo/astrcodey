@@ -16,8 +16,8 @@ use std::{
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        DiscoveredTool, Extension, ExtensionCapability, ExtensionError, ExtensionEvent,
-        ExtensionManifest, ExtensionStartContext, HookMode, HookResult, LifecycleContext,
+        DiscoveredTool, Extension, ExtensionCapability, ExtensionError, ExtensionManifest,
+        ExtensionStartContext, HookMode, HookResult, LifecycleContext, LifecycleEvent,
         LifecycleHandler, PromptBuildContext, PromptBuildHandler, PromptContributions, Registrar,
         StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler,
         ToolHandler,
@@ -108,13 +108,13 @@ impl Extension for McpExtension {
             shared: Arc::clone(&self.shared),
         });
         reg.on_lifecycle(
-            ExtensionEvent::SessionStart,
+            LifecycleEvent::SessionStart,
             HookMode::NonBlocking,
             0,
             lifecycle_handler.clone(),
         );
         reg.on_lifecycle(
-            ExtensionEvent::SessionResume,
+            LifecycleEvent::SessionResume,
             HookMode::NonBlocking,
             0,
             lifecycle_handler,

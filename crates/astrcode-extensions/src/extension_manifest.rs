@@ -5,12 +5,13 @@ use std::collections::HashSet;
 use astrcode_extension_sdk::{
     builder::manifest as extension_manifest,
     extension::{
-        ContinueAfterStopOptions, ExtensionCapability, ExtensionEvent, ExtensionEventDecl,
-        ExtensionHttpRoute, HookMode, SlashCommand, fixed_hook_mode, hook_mode_is_supported,
+        CompactEvent, ContinueAfterStopOptions, CustomEventDeclaration, CustomEventSubscription,
+        ExtensionCapability, ExtensionHttpRoute, HookMode, LifecycleEvent, SlashCommand,
+        fixed_hook_mode, hook_mode_is_supported,
     },
     s5r::{
         HandlerDescriptor, HandlerId, WIRE_FEATURE_PARENT_INVOKE_ID, capability_from_wire,
-        event_from_name, event_to_name,
+        compact_event_from_name, compact_event_to_name, event_from_name, event_to_name,
         manifest::{
             InitializeManifest, ManifestCommand, ManifestHook, ManifestHttpRoute, ManifestTool,
         },
@@ -30,10 +31,30 @@ pub(crate) struct ExtensionRegistration {
     capabilities: Vec<ExtensionCapability>,
     tools: Vec<ToolDefinition>,
     commands: Vec<SlashCommand>,
-    subscriptions: Vec<(ExtensionEvent, HookMode, ContinueAfterStopOptions)>,
+    subscriptions: Vec<HookSubscription>,
     continuation_hooks: Vec<String>,
     http_routes: Vec<RegisteredHttpRoute>,
-    extension_events: Vec<ExtensionEventDecl>,
+    custom_events: Vec<CustomEventDeclaration>,
+    custom_event_subscriptions: Vec<CustomEventSubscription>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum HookSubscription {
+    Lifecycle {
+        event: LifecycleEvent,
+        mode: HookMode,
+        options: ContinueAfterStopOptions,
+    },
+    Compact(CompactEvent),
+}
+
+impl HookSubscription {
+    pub(crate) fn event_name(&self) -> &'static str {
+        match self {
+            Self::Lifecycle { event, .. } => event_to_name(event),
+            Self::Compact(event) => compact_event_to_name(*event),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -63,7 +84,7 @@ impl ExtensionRegistration {
         &self.commands
     }
 
-    pub(crate) fn subscriptions(&self) -> &[(ExtensionEvent, HookMode, ContinueAfterStopOptions)] {
+    pub(crate) fn subscriptions(&self) -> &[HookSubscription] {
         &self.subscriptions
     }
 
@@ -88,8 +109,8 @@ impl ExtensionRegistration {
                 input_schema: tool.parameters.clone(),
             })?;
         }
-        for (event, _, _) in &self.subscriptions {
-            let event_name = event_to_name(event);
+        for subscription in &self.subscriptions {
+            let event_name = subscription.event_name();
             push(HandlerDescriptor {
                 handler_id: handler_id(&self.extension_id, "hook", event_name),
                 description: format!("hook {event_name}"),
@@ -118,6 +139,13 @@ impl ExtensionRegistration {
                 input_schema: json!({"type": "object"}),
             })?;
         }
+        for subscription in &self.custom_event_subscriptions {
+            push(HandlerDescriptor {
+                handler_id: handler_id(&self.extension_id, "event", &subscription.id),
+                description: format!("custom event {}", subscription.event_type),
+                input_schema: json!({"type": "object"}),
+            })?;
+        }
         Ok(descriptors)
     }
 
@@ -125,8 +153,12 @@ impl ExtensionRegistration {
         &self.http_routes
     }
 
-    pub(crate) fn extension_events(&self) -> &[ExtensionEventDecl] {
-        &self.extension_events
+    pub(crate) fn custom_events(&self) -> &[CustomEventDeclaration] {
+        &self.custom_events
+    }
+
+    pub(crate) fn custom_event_subscriptions(&self) -> &[CustomEventSubscription] {
+        &self.custom_event_subscriptions
     }
 }
 
@@ -194,11 +226,8 @@ fn registration_from_manifest(
         .into_iter()
         .map(normalize_http_route)
         .collect::<Result<_, _>>()?;
-    let extension_events = manifest
-        .extension_events
-        .into_iter()
-        .map(ExtensionEventDecl::from)
-        .collect();
+    let custom_events = manifest.custom_events;
+    let custom_event_subscriptions = manifest.custom_event_subscriptions;
 
     Ok(ExtensionRegistration {
         extension_id,
@@ -209,7 +238,8 @@ fn registration_from_manifest(
         subscriptions,
         continuation_hooks,
         http_routes,
-        extension_events,
+        custom_events,
+        custom_event_subscriptions,
     })
 }
 
@@ -276,13 +306,18 @@ fn normalize_command(command: ManifestCommand) -> SlashCommand {
     }
 }
 
-fn normalize_hook(
-    hook: ManifestHook,
-) -> Result<(ExtensionEvent, HookMode, ContinueAfterStopOptions), String> {
+fn normalize_hook(hook: ManifestHook) -> Result<HookSubscription, String> {
+    if let Some(event) = compact_event_from_name(&hook.on) {
+        let mode = normalize_hook_mode(&hook.mode)?;
+        if mode != HookMode::Blocking {
+            return Err(format!("{} requires blocking mode", hook.on));
+        }
+        return Ok(HookSubscription::Compact(event));
+    }
+
     let event = event_from_name(&hook.on)
         .ok_or_else(|| format!("unknown hook event in manifest: {}", hook.on))?;
-    let mode = mode_from_name(&hook.mode)
-        .ok_or_else(|| format!("unknown hook mode in manifest: {}", hook.mode))?;
+    let mode = normalize_hook_mode(&hook.mode)?;
     if s5r_unsupported_typed_hook(&event) {
         return Err(format!("{} is not supported by s5r manifest", hook.on));
     }
@@ -292,16 +327,20 @@ fn normalize_hook(
             None => format!("{} does not support {} mode", hook.on, hook.mode),
         });
     }
-    Ok((
+    Ok(HookSubscription::Lifecycle {
         event,
         mode,
-        ContinueAfterStopOptions {
+        options: ContinueAfterStopOptions {
             max_per_turn: hook
                 .options
                 .max_per_turn
                 .unwrap_or(ContinueAfterStopOptions::default().max_per_turn),
         },
-    ))
+    })
+}
+
+fn normalize_hook_mode(mode: &str) -> Result<HookMode, String> {
+    mode_from_name(mode).ok_or_else(|| format!("unknown hook mode in manifest: {mode}"))
 }
 
 fn normalize_http_route(route: ManifestHttpRoute) -> Result<RegisteredHttpRoute, String> {
@@ -318,8 +357,8 @@ fn normalize_http_route(route: ManifestHttpRoute) -> Result<RegisteredHttpRoute,
     })
 }
 
-fn s5r_unsupported_typed_hook(event: &ExtensionEvent) -> bool {
-    matches!(event, ExtensionEvent::UserMessageEnvelope)
+fn s5r_unsupported_typed_hook(event: &LifecycleEvent) -> bool {
+    matches!(event, LifecycleEvent::UserMessageEnvelope)
 }
 
 #[cfg(test)]
@@ -399,7 +438,7 @@ mod tests {
                 ],
                 "commands": [{"name": "defaulted-command"}],
                 "hooks": [{"on": "turn_end", "mode": "non_blocking"}],
-                "extension_events": [{"event_type": "defaulted.event"}]
+                "custom_events": [{"eventType": "defaulted.event"}]
             }),
             astrcode_extension_sdk::s5r::S5R_VERSION,
         )
@@ -414,16 +453,14 @@ mod tests {
         assert!(registration.capabilities().is_empty());
         assert!(registration.http_routes().is_empty());
         assert_eq!(registration.commands()[0].description, "");
-        assert_eq!(
-            registration.subscriptions()[0].2,
-            ContinueAfterStopOptions::default()
-        );
-        assert_eq!(registration.extension_events()[0].schema_version, 1);
-        assert!(registration.extension_events()[0].durable);
-        assert_eq!(
-            registration.extension_events()[0].max_payload_bytes,
-            64 * 1024
-        );
+        assert!(matches!(
+            &registration.subscriptions()[0],
+            HookSubscription::Lifecycle { options, .. }
+                if *options == ContinueAfterStopOptions::default()
+        ));
+        assert_eq!(registration.custom_events()[0].schema_version, 1);
+        assert!(registration.custom_events()[0].durable);
+        assert_eq!(registration.custom_events()[0].max_payload_bytes, 64 * 1024);
     }
 
     #[test]
@@ -488,5 +525,14 @@ mod tests {
                 None => assert!(result.is_ok(), "{on}/{mode}: {result:?}"),
             }
         }
+
+        assert!(matches!(
+            normalize_hook(ManifestHook {
+                on: "pre_compact".into(),
+                mode: "blocking".into(),
+                options: ManifestHookOptions::default(),
+            }),
+            Ok(HookSubscription::Compact(CompactEvent::PreCompact))
+        ));
     }
 }

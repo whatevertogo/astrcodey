@@ -12,7 +12,7 @@ use astrcode_context::{
 };
 use astrcode_core::{
     compaction::{CompactStrategy, CompactTrigger},
-    event::LiveEventPayload,
+    event::{LiveEventPayload, transcript_prefix_fingerprint},
     llm::{self, LlmMessage, LlmProvider, LlmRequest},
     tool::ToolDefinition,
     types::TurnId,
@@ -419,7 +419,7 @@ async fn commit_compaction(
         host.session,
         compaction,
         meta.trigger.as_str(),
-        snapshot.source_seq,
+        snapshot,
         meta.strategy,
     )
     .await;
@@ -535,18 +535,22 @@ async fn request_compact_summary(
 }
 
 /// 重写 compact 输入快照对应的 transcript 前缀；projection 会保留之后到达的 tail。
+///
+/// 指纹覆盖整个被替换前缀（snapshot.messages + system prompt）；提交时前缀已漂移
+/// （输掉了与另一个 rewrite 的竞速）则 projection 拒绝写入，由调用方按持久化失败放弃。
 async fn persist_compact_result(
     session: &Session,
     compaction: &CompactResult,
     trigger_name: &str,
-    source_seq: u64,
+    snapshot: &ContextSnapshot,
     strategy: CompactStrategy,
 ) -> Result<(), SessionError> {
     session
         .rewrite_transcript_for_compaction(
             trigger_name.to_owned(),
             compaction.clone(),
-            source_seq,
+            snapshot.source_seq,
+            transcript_prefix_fingerprint(&snapshot.system_prompt, &snapshot.messages),
             strategy,
         )
         .await?;
@@ -660,7 +664,7 @@ pub async fn compact_idle_session(
         session,
         &compaction,
         CompactTrigger::ManualCommand.as_str(),
-        snapshot.source_seq,
+        &snapshot,
         CompactStrategy::Manual { keep_recent_turns },
     )
     .await?;

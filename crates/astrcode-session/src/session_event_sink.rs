@@ -19,12 +19,13 @@ use tokio::sync::{mpsc, oneshot};
 use crate::perf_snapshot;
 
 const EVENT_PUBLISH_CAPACITY: usize = 1024;
+const MAX_DURABLE_BATCH_SIZE: usize = 32;
 
 pub trait SessionEventObserver: Send + Sync {
     fn publish(&self, event: Arc<Event>);
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum SessionEventPublishError {
     #[error("session event publisher is closed")]
     Closed,
@@ -35,7 +36,13 @@ pub enum SessionEventPublishError {
     #[error("session event publication is already deferred for {session_id}")]
     AlreadyDeferred { session_id: SessionId },
     #[error(transparent)]
-    Storage(#[from] StorageError),
+    Storage(Arc<StorageError>),
+}
+
+impl From<StorageError> for SessionEventPublishError {
+    fn from(error: StorageError) -> Self {
+        Self::Storage(Arc::new(error))
+    }
 }
 
 impl SessionEventPublishError {
@@ -408,17 +415,74 @@ async fn run_lane(
 ) {
     tracing::debug!(%session_id, "session event lane started");
     let mut shutdown_reply = None;
-    while let Some(command) = commands.recv().await {
+    let mut pending = None;
+    loop {
+        let command = match pending.take() {
+            Some(command) => command,
+            None => match commands.recv().await {
+                Some(command) => command,
+                None => break,
+            },
+        };
         match command {
             PublishCommand::Durable { kind, event, reply } => {
-                let commit = match kind {
-                    DurableCommit::Create => journal.create_session(event).await,
-                    DurableCommit::Append => journal.append_event(event).await,
-                };
-                let result = commit
+                if matches!(kind, DurableCommit::Create) {
+                    let result = journal
+                        .create_session(event)
+                        .await
+                        .map_err(SessionEventPublishError::from)
+                        .inspect(|stored| publish_durable(observer.as_ref(), kind, stored));
+                    let _ = reply.send(result);
+                    continue;
+                }
+
+                let mut events = vec![event];
+                let mut replies = vec![reply];
+                while events.len() < MAX_DURABLE_BATCH_SIZE {
+                    match commands.try_recv() {
+                        Ok(PublishCommand::Durable {
+                            kind: DurableCommit::Append,
+                            event,
+                            reply,
+                        }) => {
+                            events.push(event);
+                            replies.push(reply);
+                        },
+                        Ok(command) => {
+                            pending = Some(command);
+                            break;
+                        },
+                        Err(_) => break,
+                    }
+                }
+
+                match journal
+                    .append_events(events)
+                    .await
                     .map_err(SessionEventPublishError::from)
-                    .inspect(|stored| publish_durable(observer.as_ref(), kind, stored));
-                let _ = reply.send(result);
+                    .and_then(|stored_events| {
+                        if stored_events.len() == replies.len() {
+                            Ok(stored_events)
+                        } else {
+                            Err(SessionEventPublishError::Task(format!(
+                                "event journal returned {} records for a batch of {}",
+                                stored_events.len(),
+                                replies.len()
+                            )))
+                        }
+                    }) {
+                    Ok(stored_events) => {
+                        for (stored, reply) in stored_events.into_iter().zip(replies) {
+                            publish_durable(observer.as_ref(), kind, &stored);
+                            let _ = reply.send(Ok(stored));
+                        }
+                    },
+                    Err(error) => {
+                        for reply in replies {
+                            let _ = reply.send(Err(error.clone()));
+                        }
+                    },
+                }
             },
             PublishCommand::Live(event) => {
                 let event = Event::from(event);
@@ -471,7 +535,7 @@ mod tests {
     };
 
     use astrcode_core::event::{
-        DurableEventPayload, EventPayload, ExtensionEventData, LiveEventPayload,
+        CustomEventData, DurableEventPayload, EventPayload, LiveEventPayload,
     };
     use tokio::sync::{Semaphore, mpsc};
 
@@ -485,6 +549,7 @@ mod tests {
         append_started: Semaphore,
         append_release: Semaphore,
         sync_count: AtomicU64,
+        batch_sizes: Mutex<Vec<usize>>,
     }
 
     impl ControlledJournal {
@@ -496,6 +561,7 @@ mod tests {
                 append_started: Semaphore::new(0),
                 append_release: Semaphore::new(0),
                 sync_count: AtomicU64::new(0),
+                batch_sizes: Mutex::new(Vec::new()),
             }
         }
     }
@@ -516,6 +582,18 @@ mod tests {
             }
             let seq = self.next_seq.fetch_add(1, Ordering::AcqRel);
             Ok(StoredEvent::new(seq, event))
+        }
+
+        async fn append_events(
+            &self,
+            events: Vec<DurableEvent>,
+        ) -> Result<Vec<StoredEvent>, StorageError> {
+            self.batch_sizes.lock().push(events.len());
+            let mut stored = Vec::with_capacity(events.len());
+            for event in events {
+                stored.push(self.append_event(event).await?);
+            }
+            Ok(stored)
         }
 
         async fn sync_durable_events(&self, _session_id: &SessionId) -> Result<(), StorageError> {
@@ -622,6 +700,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lane_batches_only_consecutive_durable_appends() {
+        let session_id = SessionId::new("batch-session");
+        let journal = Arc::new(ControlledJournal::new());
+        journal.gate_next.store(false, Ordering::Release);
+        let journal_port: Arc<dyn SessionEventJournal> = journal.clone();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let observer = ChannelObserver::new(events_tx);
+        let (commands, receiver) = mpsc::channel(8);
+
+        let mut durable_replies = Vec::new();
+        for payload in [
+            DurableEventPayload::TurnStarted,
+            DurableEventPayload::TurnCompleted {
+                finish_reason: "first".into(),
+            },
+        ] {
+            let (reply, received) = oneshot::channel();
+            commands
+                .send(PublishCommand::Durable {
+                    kind: DurableCommit::Append,
+                    event: DurableEvent::session(session_id.clone(), payload),
+                    reply,
+                })
+                .await
+                .unwrap();
+            durable_replies.push(received);
+        }
+        commands
+            .send(PublishCommand::Live(LiveEvent::session(
+                session_id.clone(),
+                LiveEventPayload::AgentRunStarted,
+            )))
+            .await
+            .unwrap();
+        let (third_reply, third_received) = oneshot::channel();
+        commands
+            .send(PublishCommand::Durable {
+                kind: DurableCommit::Append,
+                event: DurableEvent::session(session_id.clone(), DurableEventPayload::TurnStarted),
+                reply: third_reply,
+            })
+            .await
+            .unwrap();
+        durable_replies.push(third_received);
+        let (shutdown_reply, shutdown_received) = oneshot::channel();
+        commands
+            .send(PublishCommand::Shutdown {
+                reply: shutdown_reply,
+            })
+            .await
+            .unwrap();
+
+        run_lane(session_id, journal_port, observer, receiver).await;
+        for reply in durable_replies {
+            reply.await.unwrap().unwrap();
+        }
+        shutdown_received.await.unwrap().unwrap();
+        assert_eq!(&*journal.batch_sizes.lock(), &[2, 1]);
+        let published = [
+            events_rx.recv().await.unwrap(),
+            events_rx.recv().await.unwrap(),
+            events_rx.recv().await.unwrap(),
+            events_rx.recv().await.unwrap(),
+        ];
+        assert_eq!(published[0].seq, Some(0));
+        assert_eq!(published[1].seq, Some(1));
+        assert!(matches!(published[2].payload, EventPayload::Live(_)));
+        assert_eq!(published[3].seq, Some(2));
+    }
+
+    #[tokio::test]
     async fn deferred_publication_commits_in_order_and_discards_failed_creation_events() {
         let session_id = SessionId::new("deferred-session");
         let journal = Arc::new(ControlledJournal::new());
@@ -720,10 +869,12 @@ mod tests {
                     required_journal,
                     LiveEvent::session(
                         required_session_id,
-                        LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                        LiveEventPayload::CustomEvent(CustomEventData {
                             extension_id: "ask-user".into(),
                             event_type: "pending".into(),
                             schema_version: 1,
+                            causation_id: None,
+                            cascade_depth: 0,
                             payload: serde_json::json!({}),
                         }),
                     ),
@@ -745,7 +896,7 @@ mod tests {
         while let Ok(event) = events_rx.try_recv() {
             if matches!(
                 event.payload,
-                EventPayload::Live(LiveEventPayload::ExtensionEvent(ExtensionEventData {
+                EventPayload::Live(LiveEventPayload::CustomEvent(CustomEventData {
                     ref event_type,
                     ..
                 })) if event_type == "pending"

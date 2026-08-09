@@ -22,23 +22,23 @@ mod tool_context;
 pub mod internal {
     use std::sync::Arc;
 
-    use astrcode_core::event::{EventPublishReceipt, EventSendError};
+    use astrcode_core::event::{EventDeliveryReceipt, EventSendError};
     use async_trait::async_trait;
 
-    use super::{ExtensionEventDecl, ExtensionEventEmitter};
+    use super::{CustomEventDeclaration, CustomEventEmitter};
 
-    /// Host-bound event ingress. Extension authors emit through [`ExtensionEventEmitter`].
+    /// Host-bound event ingress. Extension authors emit through [`CustomEventEmitter`].
     #[async_trait]
-    pub trait ExtensionEventSink: Send + Sync {
+    pub trait CustomEventSink: Send + Sync {
         async fn emit(
             &self,
             event_type: &str,
             schema_version: u32,
             durable: bool,
             payload: serde_json::Value,
-        ) -> Result<EventPublishReceipt, EventSendError>;
+        ) -> Result<EventDeliveryReceipt, EventSendError>;
 
-        fn emit_now(
+        fn try_emit(
             &self,
             event_type: &str,
             schema_version: u32,
@@ -47,11 +47,11 @@ pub mod internal {
         ) -> Result<(), EventSendError>;
     }
 
-    pub fn extension_event_emitter(
-        declarations: impl IntoIterator<Item = ExtensionEventDecl>,
-        sink: Option<Arc<dyn ExtensionEventSink>>,
-    ) -> ExtensionEventEmitter {
-        ExtensionEventEmitter::from_runtime(declarations, sink)
+    pub fn custom_event_emitter(
+        declarations: impl IntoIterator<Item = CustomEventDeclaration>,
+        sink: Option<Arc<dyn CustomEventSink>>,
+    ) -> CustomEventEmitter {
+        CustomEventEmitter::from_runtime(declarations, sink)
     }
 }
 

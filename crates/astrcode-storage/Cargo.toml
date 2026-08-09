@@ -24,6 +24,7 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 parking_lot = { workspace = true }
 fs2 = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

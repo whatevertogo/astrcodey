@@ -2,7 +2,7 @@
 
 use astrcode_context::is_compact_summary_text;
 use astrcode_core::event::{
-    DurableEventPayload, Event, EventPayload, ExtensionEventData, LiveEventPayload,
+    CustomEventData, DurableEventPayload, Event, EventPayload, LiveEventPayload,
 };
 use astrcode_protocol::events::{
     ClientNotification, ExtensionCommandInfoDto, KeybindingDto, SessionListItemDto,
@@ -79,7 +79,7 @@ pub fn apply(app: &mut App, notification: &ClientNotification) {
             app.status_text = "Extension registry changed".into();
         },
         // TUI 已从 all_notifications 收到原始扩展事件，无需处理桌面端全局副本。
-        ClientNotification::GlobalExtensionEvent { .. } => {},
+        ClientNotification::GlobalCustomEvent { .. } => {},
     }
 }
 
@@ -529,11 +529,11 @@ fn apply_event(app: &mut App, event: &Event) {
             }
             app.child_session_map.remove(child_session_id.as_str());
         },
-        EventPayload::Durable(DurableEventPayload::ExtensionEvent(extension))
-        | EventPayload::Live(LiveEventPayload::ExtensionEvent(extension)) => {
-            apply_extension_event(app, extension);
+        _ => {
+            if let Some(custom_event) = event.payload.custom_event() {
+                apply_custom_event(app, custom_event);
+            }
         },
-        _ => {},
     }
 }
 
@@ -558,13 +558,13 @@ fn is_tracked_child(app: &App, child_session_id: &str) -> bool {
         .is_some_and(|call_id| app.child_agents.contains_key(call_id))
 }
 
-fn apply_extension_event(app: &mut App, extension: &ExtensionEventData) {
-    let name = &extension.event_type;
+fn apply_custom_event(app: &mut App, custom_event: &CustomEventData) {
+    let name = &custom_event.event_type;
     let fallback = format!(
         "[{name}] {}",
-        inline_preview(&extension.payload.to_string(), 80)
+        inline_preview(&custom_event.payload.to_string(), 80)
     );
-    let body = MessageBody::with_custom(name.clone(), extension.payload.clone(), fallback);
+    let body = MessageBody::with_custom(name.clone(), custom_event.payload.clone(), fallback);
     let message = Message {
         role: MessageRole::System,
         label: name.clone(),

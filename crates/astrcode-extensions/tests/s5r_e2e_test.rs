@@ -8,7 +8,7 @@ use std::{
 };
 
 use astrcode_core::{
-    event::{DurableEventPayload, EventPayload, ExtensionEventData},
+    event::{CustomEventData, DurableEventPayload, EventPayload},
     llm::{LlmEvent, LlmMessage, LlmProvider},
     tool::{ExecutionMode, Tool, ToolCapabilities, ToolDefinition, ToolExecutionContext},
     types::TurnId,
@@ -17,11 +17,11 @@ use astrcode_extension_sdk::{
     builder::manifest,
     config::ModelSelection,
     extension::{
-        Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionEvent,
+        Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
         ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
         ExtensionHttpRoute, ExtensionManifest, ExtensionPackageManifest, HookMode, HttpContext,
-        PreToolUseResult, Registrar, RuntimeHookCallContext, RuntimeLifecycleContext,
-        RuntimePreToolUseContext, StopReason,
+        LifecycleEvent, PreToolUseResult, Registrar, RuntimeHookCallContext,
+        RuntimeLifecycleContext, RuntimePreToolUseContext, StopReason,
     },
 };
 use astrcode_extensions::{
@@ -574,7 +574,7 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
         .expect("timeout")
         .expect("channel closed");
     match payload {
-        EventPayload::Durable(DurableEventPayload::ExtensionEvent(ExtensionEventData {
+        EventPayload::Durable(DurableEventPayload::CustomEvent(CustomEventData {
             extension_id,
             event_type,
             payload,
@@ -632,7 +632,7 @@ async fn s5r_turn_end_continuations_and_pipeline() {
 
     runner
         .emit_lifecycle(
-            ExtensionEvent::TurnEnd,
+            LifecycleEvent::TurnEnd,
             RuntimeLifecycleContext::new(runtime_hook_call(), None),
         )
         .await

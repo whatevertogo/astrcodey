@@ -272,7 +272,7 @@ export type ConversationDelta =
   | { kind: 'statusItemUpdate'; id: string; text: string }
   | { kind: 'extensionRegistryChanged' }
   | {
-      kind: 'extensionEvent'
+      kind: 'customEvent'
       extensionId: string
       eventType: string
       schemaVersion: number

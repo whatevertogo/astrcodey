@@ -8,7 +8,7 @@ use std::{
 use astrcode_core::tool::{SessionOperations, Tool};
 
 use crate::extension::{
-    CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, ExtensionEvent,
+    CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, LifecycleEvent,
     PostToolUseResult, PreToolUseResult, PromptContributions, ProviderEvent, ProviderResult,
     RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
     RuntimePostToolUseContext, RuntimePreToolUseContext, RuntimePromptBuildContext,
@@ -217,7 +217,7 @@ pub trait TurnHooks: Send + Sync {
 
     async fn emit_lifecycle(
         &self,
-        _event: ExtensionEvent,
+        _event: LifecycleEvent,
         _ctx: RuntimeLifecycleContext,
     ) -> Result<(), ExtensionError> {
         Ok(())

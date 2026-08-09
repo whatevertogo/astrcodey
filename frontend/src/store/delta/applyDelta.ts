@@ -252,7 +252,7 @@ export function reduceConversationDeltas(
         transientHint = '扩展已更新'
         break
 
-      case 'extensionEvent': {
+      case 'customEvent': {
         if (delta.extensionId !== 'astrcode-ask-user') break
         if (delta.eventType === 'ask_user.pending') {
           try {

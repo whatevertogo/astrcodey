@@ -215,7 +215,7 @@ impl Extension for FireAndForgetExt {
 
     fn register(&self, reg: &mut Registrar) {
         reg.on_lifecycle(
-            astrcode_extension_sdk::extension::ExtensionEvent::TurnStart,
+            astrcode_extension_sdk::extension::LifecycleEvent::TurnStart,
             HookMode::NonBlocking,
             0,
             Arc::new(FafHandler),
@@ -388,7 +388,7 @@ async fn extension_context_snapshot_works_for_nonblocking() {
 
     runner
         .emit_lifecycle(
-            astrcode_extension_sdk::extension::ExtensionEvent::TurnStart,
+            astrcode_extension_sdk::extension::LifecycleEvent::TurnStart,
             ctx,
         )
         .await
@@ -405,7 +405,7 @@ async fn dispatch_with_no_registered_extensions_is_noop() {
     let ctx = lifecycle_context("empty", "noop");
     runner
         .emit_lifecycle(
-            astrcode_extension_sdk::extension::ExtensionEvent::SessionStart,
+            astrcode_extension_sdk::extension::LifecycleEvent::SessionStart,
             ctx,
         )
         .await
@@ -428,7 +428,7 @@ async fn extension_subscribes_only_to_matching_events() {
     // SessionStart should pass through without blocking.
     runner
         .emit_lifecycle(
-            astrcode_extension_sdk::extension::ExtensionEvent::SessionStart,
+            astrcode_extension_sdk::extension::LifecycleEvent::SessionStart,
             lifecycle_ctx,
         )
         .await

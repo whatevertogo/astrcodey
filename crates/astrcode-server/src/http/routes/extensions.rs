@@ -32,8 +32,9 @@ use super::{
     ConfigRequestError, reload_extension_registry, update_config,
 };
 use crate::protocol_mapping::{
-    extension_capability_to_dto, extension_event_decl_to_dto, extension_http_method_to_dto,
-    extension_slash_command_to_dto, keybinding_to_dto, status_item_to_dto,
+    custom_event_declaration_to_dto, custom_event_subscription_to_dto, extension_capability_to_dto,
+    extension_http_method_to_dto, extension_slash_command_to_dto, keybinding_to_dto,
+    status_item_to_dto,
 };
 
 pub(in crate::http) async fn list_extensions(State(state): State<HttpState>) -> Response {
@@ -250,10 +251,15 @@ fn extension_declaration_dto(
             .into_iter()
             .map(status_item_to_dto)
             .collect(),
-        events: declaration
-            .events
+        custom_events: declaration
+            .custom_events
             .into_iter()
-            .map(extension_event_decl_to_dto)
+            .map(custom_event_declaration_to_dto)
+            .collect(),
+        custom_event_subscriptions: declaration
+            .custom_event_subscriptions
+            .into_iter()
+            .map(custom_event_subscription_to_dto)
             .collect(),
         http_routes: declaration
             .http_routes

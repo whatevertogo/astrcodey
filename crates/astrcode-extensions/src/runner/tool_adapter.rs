@@ -142,7 +142,7 @@ struct HandlerTool {
     working_dir: String,
     extension_id: String,
     capabilities: Vec<ExtensionCapability>,
-    event_declarations: Vec<ExtensionEventDecl>,
+    event_declarations: Vec<CustomEventDeclaration>,
     call_context_factory: ExtensionCallContextFactory,
     index: Weak<HandlerIndex>,
 }
@@ -166,7 +166,7 @@ impl HandlerTool {
             capabilities: capabilities.to_vec(),
             event_declarations: view
                 .index
-                .extension_event_decls
+                .custom_event_declarations
                 .get(extension_id)
                 .cloned()
                 .unwrap_or_default(),
@@ -304,6 +304,7 @@ impl Tool for HandlerTool {
                 working_dir: Some(PathBuf::from(&self.working_dir)),
                 session_store_dir: ctx.capabilities.paths.store_dir.clone(),
                 event_tx: ctx.scope.event_tx.clone(),
+                event_causation: None,
                 cancellation: ctx.cancellation().clone(),
             },
         );

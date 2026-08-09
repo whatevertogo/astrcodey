@@ -3,15 +3,18 @@
 use astrcode_context::is_compact_summary_message;
 use astrcode_core::llm::{LlmContent, LlmMessage};
 use astrcode_extension_sdk::extension::{
-    ExtensionCapability, ExtensionEventDecl, ExtensionHttpMethod, Keybinding, SlashCommand,
-    StatusItem,
+    CustomEventDeclaration, CustomEventSourceFilter, CustomEventSubscription, ExtensionCapability,
+    ExtensionHttpMethod, Keybinding, SlashCommand, StatusItem,
 };
 use astrcode_protocol::{
     agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto},
     events::{
         ExtensionCommandInfoDto, KeybindingDto, MessageDto, SessionSnapshot, StatusItemInfoDto,
     },
-    http::{ExtensionEventDeclDto, ExtensionSlashCommandDto, SlashCommandInfoDto, StatusItemDto},
+    http::{
+        CustomEventDeclarationDto, CustomEventSourceFilterDto, CustomEventSubscriptionDto,
+        ExtensionSlashCommandDto, SlashCommandInfoDto, StatusItemDto,
+    },
     wire::{CommandSourceDto, ExtensionCapabilityDto, ExtensionHttpMethodDto, MessageRoleDto},
 };
 use astrcode_session_projection::{AgentSessionLinkView, AgentSessionStatus, SessionReadModel};
@@ -108,8 +111,8 @@ pub(crate) fn extension_capability_to_dto(
         ExtensionCapability::MainModel => ExtensionCapabilityDto::MainModel,
         ExtensionCapability::SmallModel => ExtensionCapabilityDto::SmallModel,
         ExtensionCapability::SessionHistory => ExtensionCapabilityDto::SessionHistory,
-        ExtensionCapability::EmitEvents => ExtensionCapabilityDto::EmitEvents,
-        ExtensionCapability::ConsumeEvents => ExtensionCapabilityDto::ConsumeEvents,
+        ExtensionCapability::EmitCustomEvents => ExtensionCapabilityDto::EmitCustomEvents,
+        ExtensionCapability::ConsumeCustomEvents => ExtensionCapabilityDto::ConsumeCustomEvents,
         ExtensionCapability::WorkspaceRead => ExtensionCapabilityDto::WorkspaceRead,
         ExtensionCapability::WorkspaceWrite => ExtensionCapabilityDto::WorkspaceWrite,
         ExtensionCapability::ProcessSpawn => ExtensionCapabilityDto::ProcessSpawn,
@@ -203,12 +206,29 @@ pub(crate) fn extension_slash_command_to_dto(command: SlashCommand) -> Extension
     }
 }
 
-pub(crate) fn extension_event_decl_to_dto(event: ExtensionEventDecl) -> ExtensionEventDeclDto {
-    ExtensionEventDeclDto {
+pub(crate) fn custom_event_declaration_to_dto(
+    event: CustomEventDeclaration,
+) -> CustomEventDeclarationDto {
+    CustomEventDeclarationDto {
         event_type: event.event_type,
         schema_version: event.schema_version,
         durable: event.durable,
         max_payload_bytes: event.max_payload_bytes,
+    }
+}
+
+pub(crate) fn custom_event_subscription_to_dto(
+    subscription: CustomEventSubscription,
+) -> CustomEventSubscriptionDto {
+    CustomEventSubscriptionDto {
+        id: subscription.id,
+        event_type: subscription.event_type,
+        source: match subscription.source {
+            CustomEventSourceFilter::Any => CustomEventSourceFilterDto::Any,
+            CustomEventSourceFilter::Extension { extension_id } => {
+                CustomEventSourceFilterDto::Extension { extension_id }
+            },
+        },
     }
 }
 

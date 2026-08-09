@@ -55,6 +55,7 @@ pub struct ServerEventBus {
     conversation_events: Mutex<HashMap<SessionId, broadcast::Sender<Arc<Event>>>>,
     session_routes: Mutex<HashMap<SessionId, SessionRoute>>,
     streaming: Mutex<HashMap<SessionId, Arc<StreamingState>>>,
+    downstream_observers: Mutex<Vec<Arc<dyn SessionEventObserver>>>,
 }
 
 impl ServerEventBus {
@@ -69,7 +70,12 @@ impl ServerEventBus {
             conversation_events: Mutex::new(HashMap::new()),
             session_routes: Mutex::new(HashMap::new()),
             streaming: Mutex::new(HashMap::new()),
+            downstream_observers: Mutex::new(Vec::new()),
         }
+    }
+
+    pub(crate) fn add_observer(&self, observer: Arc<dyn SessionEventObserver>) {
+        self.downstream_observers.lock().push(observer);
     }
 
     /// Subscribe to the complete transport-facing notification stream.
@@ -154,34 +160,37 @@ impl ServerEventBus {
         if route.root_session_id() != &event.session_id && route.forwards_to_root(&event.payload) {
             self.send_to_existing_conversation_fanout(route.root_session_id(), Arc::clone(&event));
         }
-        self.broadcast_global_extension_event(&event);
+        self.broadcast_global_custom_event(&event);
         let _ = self
             .all_notifications
             .send(ClientNotification::Event((*event).clone()));
+        let observers = self.downstream_observers.lock().clone();
+        for observer in observers {
+            observer.publish(Arc::clone(&event));
+        }
     }
 
-    fn broadcast_global_extension_event(&self, event: &Event) {
-        let EventPayload::Live(LiveEventPayload::ExtensionEvent(extension_event)) = &event.payload
-        else {
+    fn broadcast_global_custom_event(&self, event: &Event) {
+        let Some(LiveEventPayload::CustomEvent(custom_event)) = event.payload.as_live() else {
             return;
         };
-        if extension_event.extension_id != ASK_USER_EXTENSION_ID {
+        if custom_event.extension_id != ASK_USER_EXTENSION_ID {
             return;
         }
         if !matches!(
-            extension_event.event_type.as_str(),
+            custom_event.event_type.as_str(),
             ASK_USER_PENDING_EVENT_TYPE | ASK_USER_RESOLVED_EVENT_TYPE
         ) {
             return;
         }
         let _ = self
             .global_notifications
-            .send(ClientNotification::GlobalExtensionEvent {
+            .send(ClientNotification::GlobalCustomEvent {
                 session_id: event.session_id.to_string(),
-                extension_id: extension_event.extension_id.clone(),
-                event_type: extension_event.event_type.clone(),
-                schema_version: extension_event.schema_version,
-                payload: extension_event.payload.clone(),
+                extension_id: custom_event.extension_id.clone(),
+                event_type: custom_event.event_type.clone(),
+                schema_version: custom_event.schema_version,
+                payload: custom_event.payload.clone(),
             });
     }
 
@@ -555,7 +564,7 @@ mod tests {
 
     #[tokio::test]
     async fn ask_user_pending_broadcasts_to_global_notifications() {
-        use astrcode_core::event::ExtensionEventData;
+        use astrcode_core::event::CustomEventData;
 
         let bus = ServerEventBus::new();
         let session_id = SessionId::new("session-1");
@@ -563,16 +572,18 @@ mod tests {
 
         bus.publish_event(live(
             session_id.clone(),
-            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+            LiveEventPayload::CustomEvent(CustomEventData {
                 extension_id: "astrcode-ask-user".into(),
                 event_type: "ask_user.pending".into(),
                 schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
                 payload: serde_json::json!({ "callId": "call-1" }),
             }),
         ));
         assert!(matches!(
             global_rx.recv().await,
-            Ok(ClientNotification::GlobalExtensionEvent {
+            Ok(ClientNotification::GlobalCustomEvent {
                 session_id: broadcast_session,
                 extension_id,
                 event_type,
@@ -586,25 +597,29 @@ mod tests {
         // resolved 同样广播；其他扩展的事件不广播。
         bus.publish_event(live(
             session_id.clone(),
-            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+            LiveEventPayload::CustomEvent(CustomEventData {
                 extension_id: "astrcode-ask-user".into(),
                 event_type: "ask_user.resolved".into(),
                 schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
                 payload: serde_json::json!({ "callId": "call-1" }),
             }),
         ));
         assert!(matches!(
             global_rx.recv().await,
-            Ok(ClientNotification::GlobalExtensionEvent { event_type, .. })
+            Ok(ClientNotification::GlobalCustomEvent { event_type, .. })
                 if event_type == "ask_user.resolved"
         ));
 
         bus.publish_event(live(
             session_id,
-            LiveEventPayload::ExtensionEvent(ExtensionEventData {
+            LiveEventPayload::CustomEvent(CustomEventData {
                 extension_id: "other-extension".into(),
                 event_type: "whatever".into(),
                 schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
                 payload: serde_json::json!({}),
             }),
         ));

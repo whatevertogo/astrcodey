@@ -595,7 +595,7 @@ pub enum ConversationDeltaDto {
         decision: ApprovalDecisionDto,
     },
     /// 扩展发出的实时事件。客户端按 extension/event type 解释 payload。
-    ExtensionEvent {
+    CustomEvent {
         extension_id: String,
         event_type: String,
         schema_version: u32,
@@ -673,11 +673,80 @@ pub struct ExtensionSlashCommandDto {
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExtensionEventDeclDto {
+pub struct CustomEventDeclarationDto {
     pub event_type: String,
     pub schema_version: u32,
     pub durable: bool,
     pub max_payload_bytes: usize,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum CustomEventSourceFilterDto {
+    Any,
+    Extension { extension_id: String },
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomEventSubscriptionDto {
+    pub id: String,
+    pub event_type: String,
+    pub source: CustomEventSourceFilterDto,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomEventConsumerActionDto {
+    Pause,
+    Resume,
+    ReplayFromBeginning,
+    SkipToStreamHead,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CustomEventConsumerControlRequest {
+    pub extension_id: String,
+    pub subscription_id: String,
+    pub action: CustomEventConsumerActionDto,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomEventConsumerStatusDto {
+    pub extension_id: String,
+    pub subscription: CustomEventSubscriptionDto,
+    #[serde(default)]
+    pub paused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_head: Option<String>,
+    pub pending_events: u64,
+    #[serde(default)]
+    pub in_flight: bool,
+    #[serde(default)]
+    pub failed_attempts: u64,
+    #[serde(default)]
+    pub consecutive_failures: u64,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CustomEventConsumerListResponseDto {
+    pub consumers: Vec<CustomEventConsumerStatusDto>,
 }
 
 /// 扩展声明的完整描述。
@@ -698,7 +767,9 @@ pub struct ExtensionDeclarationDto {
     pub dynamic_commands: bool,
     pub keybindings: Vec<KeybindingDto>,
     pub status_items: Vec<StatusItemDto>,
-    pub events: Vec<ExtensionEventDeclDto>,
+    pub custom_events: Vec<CustomEventDeclarationDto>,
+    #[serde(default)]
+    pub custom_event_subscriptions: Vec<CustomEventSubscriptionDto>,
     #[serde(default)]
     pub http_routes: Vec<ExtensionHttpRouteDto>,
 }
@@ -1252,4 +1323,28 @@ mod tests {
         .unwrap();
         assert!(strict.strict);
     }
+}
+
+/// Raw session event envelope exposed by the authenticated event SSE endpoint.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RawEventEnvelopeDto {
+    pub id: String,
+    pub session_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub durability: RawEventDurabilityDto,
+    pub timestamp: String,
+    pub payload: serde_json::Value,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RawEventDurabilityDto {
+    Durable,
+    Live,
 }

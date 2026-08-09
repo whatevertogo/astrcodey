@@ -16,7 +16,7 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        ExtensionError, ExtensionEvent, PromptContributions, RuntimeLifecycleContext,
+        ExtensionError, LifecycleEvent, PromptContributions, RuntimeLifecycleContext,
         RuntimePromptBuildContext,
     },
     runtime_ports::{
@@ -45,10 +45,10 @@ struct RecordingLifecycleHooks(AtomicUsize);
 impl TurnHooks for RecordingLifecycleHooks {
     async fn emit_lifecycle(
         &self,
-        event: ExtensionEvent,
+        event: LifecycleEvent,
         _ctx: RuntimeLifecycleContext,
     ) -> Result<(), ExtensionError> {
-        if event == ExtensionEvent::SessionStart {
+        if event == LifecycleEvent::SessionStart {
             self.0.fetch_add(1, Ordering::SeqCst);
         }
         Ok(())
@@ -311,11 +311,11 @@ async fn parent_and_spawned_child_each_emit_session_start_once() {
     .unwrap();
 
     parent
-        .ensure_lifecycle_initialized(ExtensionEvent::SessionStart)
+        .ensure_lifecycle_initialized(LifecycleEvent::SessionStart)
         .await
         .unwrap();
     parent
-        .ensure_lifecycle_initialized(ExtensionEvent::SessionResume)
+        .ensure_lifecycle_initialized(LifecycleEvent::SessionResume)
         .await
         .unwrap();
     let child = parent
@@ -332,7 +332,7 @@ async fn parent_and_spawned_child_each_emit_session_start_once() {
         .await
         .unwrap();
     child
-        .ensure_lifecycle_initialized(ExtensionEvent::SessionResume)
+        .ensure_lifecycle_initialized(LifecycleEvent::SessionResume)
         .await
         .unwrap();
 

@@ -333,20 +333,6 @@ pub(crate) fn system_text(messages: &[LlmMessage]) -> String {
     )
 }
 
-/// 稳定的十六进制指纹：对每段 part 逐字节做 FNV-1a，段间插入 `0xff` 分隔。
-pub(crate) fn stable_hash_hex(parts: &[&str]) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for part in parts {
-        for &byte in part.as_bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash ^= 0xff;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
-}
-
 pub(crate) fn prompt_cache_retention_wire_value(
     api_mode: OpenAiApiMode,
     retention: PromptCacheRetention,
@@ -360,9 +346,12 @@ pub(crate) fn prompt_cache_retention_wire_value(
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
+    use astrcode_core::{
+        event::stable_hash_hex,
+        llm::{LlmContent, LlmMessage, LlmRole},
+    };
 
-    use super::{chat_message_to_json, responses_input_items, stable_hash_hex};
+    use super::{chat_message_to_json, responses_input_items};
 
     #[test]
     fn chat_tool_call_message_preserves_content_and_reasoning_content() {

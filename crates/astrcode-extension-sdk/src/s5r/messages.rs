@@ -4,7 +4,7 @@ use astrcode_core::wire::WireErrorCode;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::extension::{ExtensionEvent, HookMode};
+use crate::extension::{CompactEvent, HookMode, LifecycleEvent};
 
 /// s5r 协议当前版本。
 pub const S5R_VERSION: &str = "2.0";
@@ -75,6 +75,7 @@ pub enum HandlerKind {
     Hook,
     Command,
     Http,
+    Event,
 }
 
 impl HandlerKind {
@@ -84,6 +85,7 @@ impl HandlerKind {
             Self::Hook => "hook",
             Self::Command => "command",
             Self::Http => "http",
+            Self::Event => "event",
         }
     }
 
@@ -93,6 +95,7 @@ impl HandlerKind {
             "hook" => Self::Hook,
             "command" => Self::Command,
             "http" => Self::Http,
+            "event" => Self::Event,
             _ => return None,
         })
     }
@@ -297,28 +300,35 @@ pub fn encode_wire_message(msg: &WireMessage) -> Result<Vec<u8>, String> {
     serde_json::to_vec(msg).map_err(|e| format!("encode s5r message: {e}"))
 }
 
-/// s5r 事件名 → [`ExtensionEvent`]。
-pub fn event_from_name(name: &str) -> Option<ExtensionEvent> {
+/// s5r 事件名 → [`LifecycleEvent`]。
+pub fn event_from_name(name: &str) -> Option<LifecycleEvent> {
     match name {
-        "session_start" => Some(ExtensionEvent::SessionStart),
-        "session_resume" => Some(ExtensionEvent::SessionResume),
-        "session_shutdown" => Some(ExtensionEvent::SessionShutdown),
-        "turn_start" => Some(ExtensionEvent::TurnStart),
-        "turn_end" => Some(ExtensionEvent::TurnEnd),
-        "turn_aborted" => Some(ExtensionEvent::TurnAborted),
-        "step_start" => Some(ExtensionEvent::StepStart),
-        "step_end" => Some(ExtensionEvent::StepEnd),
-        "pre_tool_use" => Some(ExtensionEvent::PreToolUse),
-        "post_tool_use" => Some(ExtensionEvent::PostToolUse),
-        "before_provider_request" => Some(ExtensionEvent::BeforeProviderRequest),
-        "after_provider_response" => Some(ExtensionEvent::AfterProviderResponse),
-        "continue_after_stop" => Some(ExtensionEvent::ContinueAfterStop),
-        "user_prompt_submit" => Some(ExtensionEvent::UserPromptSubmit),
-        "user_message_envelope" => Some(ExtensionEvent::UserMessageEnvelope),
-        "prompt_build" => Some(ExtensionEvent::PromptBuild),
-        "pre_compact" => Some(ExtensionEvent::PreCompact),
-        "post_compact" => Some(ExtensionEvent::PostCompact),
-        "post_recap" => Some(ExtensionEvent::PostRecap),
+        "session_start" => Some(LifecycleEvent::SessionStart),
+        "session_resume" => Some(LifecycleEvent::SessionResume),
+        "session_shutdown" => Some(LifecycleEvent::SessionShutdown),
+        "turn_start" => Some(LifecycleEvent::TurnStart),
+        "turn_end" => Some(LifecycleEvent::TurnEnd),
+        "turn_aborted" => Some(LifecycleEvent::TurnAborted),
+        "step_start" => Some(LifecycleEvent::StepStart),
+        "step_end" => Some(LifecycleEvent::StepEnd),
+        "pre_tool_use" => Some(LifecycleEvent::PreToolUse),
+        "post_tool_use" => Some(LifecycleEvent::PostToolUse),
+        "before_provider_request" => Some(LifecycleEvent::BeforeProviderRequest),
+        "after_provider_response" => Some(LifecycleEvent::AfterProviderResponse),
+        "continue_after_stop" => Some(LifecycleEvent::ContinueAfterStop),
+        "user_prompt_submit" => Some(LifecycleEvent::UserPromptSubmit),
+        "user_message_envelope" => Some(LifecycleEvent::UserMessageEnvelope),
+        "prompt_build" => Some(LifecycleEvent::PromptBuild),
+        "post_recap" => Some(LifecycleEvent::PostRecap),
+        _ => None,
+    }
+}
+
+/// s5r compact hook 名 → [`CompactEvent`]。
+pub fn compact_event_from_name(name: &str) -> Option<CompactEvent> {
+    match name {
+        "pre_compact" => Some(CompactEvent::PreCompact),
+        "post_compact" => Some(CompactEvent::PostCompact),
         _ => None,
     }
 }
@@ -340,27 +350,32 @@ pub fn mode_to_name(mode: HookMode) -> &'static str {
     }
 }
 
-pub fn event_to_name(event: &ExtensionEvent) -> &'static str {
+pub fn event_to_name(event: &LifecycleEvent) -> &'static str {
     match event {
-        ExtensionEvent::SessionStart => "session_start",
-        ExtensionEvent::SessionResume => "session_resume",
-        ExtensionEvent::SessionShutdown => "session_shutdown",
-        ExtensionEvent::TurnStart => "turn_start",
-        ExtensionEvent::TurnEnd => "turn_end",
-        ExtensionEvent::TurnAborted => "turn_aborted",
-        ExtensionEvent::StepStart => "step_start",
-        ExtensionEvent::StepEnd => "step_end",
-        ExtensionEvent::PreToolUse => "pre_tool_use",
-        ExtensionEvent::PostToolUse => "post_tool_use",
-        ExtensionEvent::BeforeProviderRequest => "before_provider_request",
-        ExtensionEvent::AfterProviderResponse => "after_provider_response",
-        ExtensionEvent::ContinueAfterStop => "continue_after_stop",
-        ExtensionEvent::UserPromptSubmit => "user_prompt_submit",
-        ExtensionEvent::UserMessageEnvelope => "user_message_envelope",
-        ExtensionEvent::PromptBuild => "prompt_build",
-        ExtensionEvent::PreCompact => "pre_compact",
-        ExtensionEvent::PostCompact => "post_compact",
-        ExtensionEvent::PostRecap => "post_recap",
+        LifecycleEvent::SessionStart => "session_start",
+        LifecycleEvent::SessionResume => "session_resume",
+        LifecycleEvent::SessionShutdown => "session_shutdown",
+        LifecycleEvent::TurnStart => "turn_start",
+        LifecycleEvent::TurnEnd => "turn_end",
+        LifecycleEvent::TurnAborted => "turn_aborted",
+        LifecycleEvent::StepStart => "step_start",
+        LifecycleEvent::StepEnd => "step_end",
+        LifecycleEvent::PreToolUse => "pre_tool_use",
+        LifecycleEvent::PostToolUse => "post_tool_use",
+        LifecycleEvent::BeforeProviderRequest => "before_provider_request",
+        LifecycleEvent::AfterProviderResponse => "after_provider_response",
+        LifecycleEvent::ContinueAfterStop => "continue_after_stop",
+        LifecycleEvent::UserPromptSubmit => "user_prompt_submit",
+        LifecycleEvent::UserMessageEnvelope => "user_message_envelope",
+        LifecycleEvent::PromptBuild => "prompt_build",
+        LifecycleEvent::PostRecap => "post_recap",
+    }
+}
+
+pub fn compact_event_to_name(event: CompactEvent) -> &'static str {
+    match event {
+        CompactEvent::PreCompact => "pre_compact",
+        CompactEvent::PostCompact => "post_compact",
     }
 }
 
@@ -386,14 +401,23 @@ mod tests {
     fn event_and_mode_names_roundtrip() {
         assert_eq!(
             event_from_name("continue_after_stop"),
-            Some(ExtensionEvent::ContinueAfterStop)
+            Some(LifecycleEvent::ContinueAfterStop)
         );
         assert_eq!(
-            event_to_name(&ExtensionEvent::ContinueAfterStop),
+            event_to_name(&LifecycleEvent::ContinueAfterStop),
             "continue_after_stop"
         );
         assert_eq!(mode_from_name("advisory"), Some(HookMode::Advisory));
         assert_eq!(mode_to_name(HookMode::Advisory), "advisory");
+        assert_eq!(event_from_name("pre_compact"), None);
+        assert_eq!(
+            compact_event_from_name("pre_compact"),
+            Some(CompactEvent::PreCompact)
+        );
+        assert_eq!(
+            compact_event_to_name(CompactEvent::PostCompact),
+            "post_compact"
+        );
     }
 
     #[test]

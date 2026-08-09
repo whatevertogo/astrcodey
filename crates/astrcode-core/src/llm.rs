@@ -318,6 +318,16 @@ pub fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
     messages
 }
 
+/// 返回指纹与 compact 共用的 provider transcript：provider 可见消息中剔除 System 角色。
+///
+/// system prompt 单独参与指纹与请求组装（见
+/// `crate::event::transcript_prefix_fingerprint`），因此 transcript 只保留对话消息。
+pub fn provider_transcript(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
+    let mut messages = provider_visible_messages(messages);
+    messages.retain(|message| message.role != LlmRole::System);
+    messages
+}
+
 fn normalize_tool_call_messages(messages: &mut Vec<LlmMessage>) {
     let mut merged: Vec<LlmMessage> = Vec::with_capacity(messages.len());
     for message in messages.drain(..) {

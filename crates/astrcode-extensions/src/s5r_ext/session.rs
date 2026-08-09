@@ -537,7 +537,7 @@ async fn handle_host_invoke(
     )?;
     ctx.extension_id = registration.extension_id().to_owned();
     ctx.declared_capabilities = registration.capabilities().to_vec();
-    ctx.event_declarations = decls_to_map(registration.extension_events());
+    ctx.event_declarations = decls_to_map(registration.custom_events());
     ctx.on_peer_io_thread = true;
     let linked_cancellation = link_host_invoke_cancellation(&mut ctx);
 

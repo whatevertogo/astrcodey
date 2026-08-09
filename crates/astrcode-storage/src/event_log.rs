@@ -264,9 +264,9 @@ fn read_summary_at_path(
 const CHANNEL_CAPACITY: usize = 1024;
 
 enum WriteCommand {
-    Append {
-        event: Box<DurableEvent>,
-        done: oneshot::Sender<Result<StoredEvent, StorageError>>,
+    AppendBatch {
+        events: Vec<DurableEvent>,
+        done: oneshot::Sender<Result<Vec<StoredEvent>, StorageError>>,
     },
     FlushSync {
         done: oneshot::Sender<Result<(), StorageError>>,
@@ -309,25 +309,44 @@ impl WriterState {
         })
     }
 
-    fn append_one(&mut self, event: Box<DurableEvent>) -> Result<StoredEvent, StorageError> {
-        if event.session_id != self.session_id {
-            return Err(StorageError::InvalidEvent(format!(
-                "cannot append event for session {} to log for {}",
-                event.session_id, self.session_id
-            )));
-        }
-        if matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
+    fn append_batch(
+        &mut self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        if events.is_empty() {
             return Err(StorageError::InvalidEvent(
-                "SessionStarted may only be written while creating a log".into(),
+                "event log batch cannot be empty".into(),
             ));
         }
-        let stored = StoredEvent::new(self.next_seq, *event);
-        let mut encoded = serde_json::to_vec(&stored)?;
-        encoded.push(b'\n');
+
+        let mut stored_events = Vec::with_capacity(events.len());
+        let mut encoded = Vec::new();
+        let mut next_seq = self.next_seq;
+        for event in events {
+            if event.session_id != self.session_id {
+                return Err(StorageError::InvalidEvent(format!(
+                    "cannot append event for session {} to log for {}",
+                    event.session_id, self.session_id
+                )));
+            }
+            if matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
+                return Err(StorageError::InvalidEvent(
+                    "SessionStarted may only be written while creating a log".into(),
+                ));
+            }
+            let stored = StoredEvent::new(next_seq, event);
+            serde_json::to_writer(&mut encoded, &stored)?;
+            encoded.push(b'\n');
+            stored_events.push(stored);
+            next_seq = next_seq.checked_add(1).ok_or_else(|| {
+                StorageError::CorruptLog("session event sequence overflow".into())
+            })?;
+        }
+
         self.write_committed_record(&encoded)?;
-        self.next_seq += 1;
+        self.next_seq = next_seq;
         self.dirty = true;
-        Ok(stored)
+        Ok(stored_events)
     }
 
     fn write_committed_record(&mut self, encoded: &[u8]) -> Result<(), StorageError> {
@@ -401,8 +420,8 @@ fn write_loop(
 ) {
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
-            WriteCommand::Append { event, done } => {
-                let result = state.append_one(event);
+            WriteCommand::AppendBatch { events, done } => {
+                let result = state.append_batch(events);
                 if result.is_ok() {
                     next_seq.store(state.next_seq, Ordering::Release);
                 }
@@ -628,12 +647,20 @@ impl EventLog {
     /// no mutex contention on the write path.
     /// Writes to the OS page cache immediately; call [`force_sync`] for fsync.
     pub async fn append(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
+        self.append_batch(vec![event])
+            .await?
+            .pop()
+            .ok_or_else(crate::error::short_batch_result)
+    }
+
+    /// Append a prevalidated batch as one recoverable file write.
+    pub async fn append_batch(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
         let (done, rx) = oneshot::channel();
         self.tx
-            .send(WriteCommand::Append {
-                event: Box::new(event),
-                done,
-            })
+            .send(WriteCommand::AppendBatch { events, done })
             .await
             .map_err(|_| StorageError::Io(std::io::Error::other("event log writer closed")))?;
         rx.await

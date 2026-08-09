@@ -12,7 +12,7 @@ use astrcode_protocol::http::RunInfoDto;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    http::{Method, header},
+    http::{HeaderName, Method, header},
     middleware,
     routing::{any, delete, get, post, put},
 };
@@ -21,7 +21,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use super::{
     HttpState,
     auth::{auth_middleware, collect_allowed_origins, configured_auth_token},
-    routes::{config, extensions, lifecycle, models, sessions},
+    routes::{config, event_consumers, extensions, lifecycle, models, sessions},
     stream,
 };
 use crate::{bootstrap::ServerApp, server_event_bus::ServerEventBus};
@@ -93,6 +93,7 @@ fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
             header::CACHE_CONTROL,
+            HeaderName::from_static("last-event-id"),
         ]);
 
     let protected_api = Router::new()
@@ -109,6 +110,15 @@ fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
             put(sessions::configure_session_tools),
         )
         .route("/api/sessions/{id}/stream", get(stream::session_stream))
+        .route("/api/sessions/{id}/events", get(stream::raw_event_stream))
+        .route(
+            "/api/sessions/{id}/event-consumers",
+            get(event_consumers::list_event_consumers),
+        )
+        .route(
+            "/api/sessions/{id}/event-consumers/control",
+            post(event_consumers::control_event_consumer),
+        )
         .route(
             "/api/sessions/{id}/prompt",
             post(sessions::submit_prompt).layer(DefaultBodyLimit::max(MAX_PROMPT_HTTP_BODY_BYTES)),

@@ -5,7 +5,7 @@ use astrcode_protocol::http::{ConversationDeltaDto, ToolApprovalDto};
 
 use super::{
     blocks::{block_from_payload, streaming_tool_call_block},
-    live::control_from_phase,
+    live::{control_from_phase, custom_event_delta},
 };
 
 pub(in crate::http) fn event_to_replay_deltas(
@@ -69,13 +69,8 @@ pub(in crate::http) fn event_to_replay_deltas(
             call_id: call_id.to_string(),
             decision: (*decision).into(),
         }],
-        DurableEventPayload::ExtensionEvent(extension) => {
-            vec![ConversationDeltaDto::ExtensionEvent {
-                extension_id: extension.extension_id.clone(),
-                event_type: extension.event_type.clone(),
-                schema_version: extension.schema_version,
-                payload: extension.payload.clone(),
-            }]
+        DurableEventPayload::CustomEvent(extension) => {
+            vec![custom_event_delta(extension)]
         },
         _ => Vec::new(),
     }
@@ -102,6 +97,7 @@ mod tests {
                 "session-1".into(),
                 DurableEventPayload::TranscriptRewritten {
                     source_seq: 0,
+                    source_fingerprint: None,
                     messages: Vec::new(),
                     reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                         trigger: "manual_command".into(),
@@ -129,7 +125,7 @@ mod tests {
         Rehydrate,
         ControlState,
         Approval,
-        ExtensionEvent,
+        CustomEvent,
         Empty,
     }
 
@@ -148,7 +144,7 @@ mod tests {
             ToolApprovalRequested { .. } | ToolApprovalResolved { .. } => {
                 ReplayExpectation::Approval
             },
-            ExtensionEvent(_) => ReplayExpectation::ExtensionEvent,
+            CustomEvent(_) => ReplayExpectation::CustomEvent,
             // 经 block_from_payload 委托，或 ToolCallRequested 的流式 block 分支产出可见 block。
             UserMessage { .. }
             | AssistantMessageCompleted { .. }
@@ -181,6 +177,7 @@ mod tests {
             // 结构性改写 → RehydrateRequired
             DurableEventPayload::TranscriptRewritten {
                 source_seq: 0,
+                source_fingerprint: None,
                 messages: Vec::new(),
                 reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                     trigger: "manual_command".into(),
@@ -217,10 +214,12 @@ mod tests {
                 decision: astrcode_core::permission::ApprovalDecision::AllowOnce,
                 detail: None,
             },
-            DurableEventPayload::ExtensionEvent(astrcode_core::event::ExtensionEventData {
+            DurableEventPayload::CustomEvent(astrcode_core::event::CustomEventData {
                 extension_id: "extension".into(),
                 event_type: "event".into(),
                 schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
                 payload: serde_json::json!(["scalar-compatible"]),
             }),
             // 委托 block_from_payload → AppendBlock
@@ -280,9 +279,9 @@ mod tests {
                 ),
                 "seq {seq}: expected approval delta, got {deltas:?}"
             ),
-            ReplayExpectation::ExtensionEvent => assert!(
-                matches!(deltas, [ConversationDeltaDto::ExtensionEvent { .. }]),
-                "seq {seq}: expected ExtensionEvent, got {deltas:?}"
+            ReplayExpectation::CustomEvent => assert!(
+                matches!(deltas, [ConversationDeltaDto::CustomEvent { .. }]),
+                "seq {seq}: expected CustomEvent, got {deltas:?}"
             ),
             ReplayExpectation::Empty => assert!(
                 deltas.is_empty(),

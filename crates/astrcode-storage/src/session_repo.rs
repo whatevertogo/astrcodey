@@ -18,16 +18,18 @@ use astrcode_core::{
 };
 use astrcode_session_projection::{
     AgentSessionLinkView, ProjectionError, SessionReadModel, SessionSummary, reduce, replay,
-    validate_next_event,
 };
 use chrono::Utc;
 use fs2::FileExt;
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{RwLock, Semaphore};
 use uuid::Uuid;
 
 use crate::{
-    CompactSnapshotInput, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
+    CompactSnapshotInput, EventConsumerCheckpointOutcome, EventConsumerCheckpointReset,
+    EventConsumerState, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
     SessionStore, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
     ToolResultArtifactStore,
     event_log::EventLog,
@@ -77,6 +79,92 @@ fn source_extension_dir_component(source_extension: &str) -> Result<String, Stor
     Ok(encoded)
 }
 
+fn event_consumer_state_path(
+    session_dir: &Path,
+    consumer_id: &str,
+) -> Result<PathBuf, StorageError> {
+    if consumer_id.is_empty() {
+        return Err(StorageError::InvalidId(
+            "event consumer id cannot be empty".into(),
+        ));
+    }
+    let digest = Sha256::digest(consumer_id.as_bytes());
+    Ok(session_dir
+        .join("event-consumers")
+        .join(format!("{digest:x}.state.json")))
+}
+
+const EVENT_CONSUMER_STATE_VERSION: u8 = 1;
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PersistedEventConsumerState {
+    version: u8,
+    cursor: Option<u64>,
+    paused: bool,
+    revision: u64,
+}
+
+impl From<PersistedEventConsumerState> for EventConsumerState {
+    fn from(state: PersistedEventConsumerState) -> Self {
+        Self {
+            checkpoint: state.cursor,
+            paused: state.paused,
+            revision: state.revision,
+        }
+    }
+}
+
+impl From<EventConsumerState> for PersistedEventConsumerState {
+    fn from(state: EventConsumerState) -> Self {
+        Self {
+            version: EVENT_CONSUMER_STATE_VERSION,
+            cursor: state.checkpoint,
+            paused: state.paused,
+            revision: state.revision,
+        }
+    }
+}
+
+async fn read_event_consumer_state(path: &Path) -> Result<EventConsumerState, StorageError> {
+    let bytes = match tokio::fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(EventConsumerState::default());
+        },
+        Err(error) => return Err(StorageError::Io(error)),
+    };
+    let state = serde_json::from_slice::<PersistedEventConsumerState>(&bytes).map_err(|error| {
+        StorageError::CorruptLog(format!(
+            "invalid event consumer state {}: {error}",
+            path.display()
+        ))
+    })?;
+    if state.version != EVENT_CONSUMER_STATE_VERSION {
+        return Err(StorageError::CorruptLog(format!(
+            "unsupported event consumer state version {} in {}",
+            state.version,
+            path.display()
+        )));
+    }
+    Ok(state.into())
+}
+
+async fn write_event_consumer_state(
+    path: &Path,
+    state: EventConsumerState,
+) -> Result<(), StorageError> {
+    let parent = path.parent().ok_or_else(|| {
+        StorageError::InvalidId("event consumer state has no parent directory".into())
+    })?;
+    tokio::fs::create_dir_all(parent).await?;
+    let bytes = serde_json::to_vec(&PersistedEventConsumerState::from(state))?;
+    let temporary = path.with_extension("json.tmp");
+    tokio::fs::write(&temporary, bytes).await?;
+    tokio::fs::rename(&temporary, path).await?;
+    Ok(())
+}
+
 /// 基于文件系统的会话仓库。
 ///
 /// 管理按项目组织的会话事件日志，目录结构为：
@@ -111,7 +199,7 @@ struct SessionMeta {
     snapshot_mgr: SnapshotManager,
     /// 当前会话所在目录。
     dir: PathBuf,
-    /// 从事件日志同步维护的 projection 实例（本进程内由 `append_event` 增量更新）。
+    /// 从事件日志同步维护的 projection 实例（本进程内由 `append_events` 增量更新）。
     ///
     /// reducer 规则归 `astrcode-session-projection`；storage 只拥有这个可重建缓存的实例。
     projection: SessionProjection,
@@ -119,6 +207,8 @@ struct SessionMeta {
     ///
     /// 这是进程内 storage 一致性边界；OS owner lease 只处理跨进程目录所有权。
     commit_lane: Semaphore,
+    /// 串行化 durable consumer 状态，避免慢订阅者阻塞事件日志提交。
+    consumer_state_lane: Semaphore,
 }
 
 struct SessionProjection {
@@ -137,19 +227,29 @@ impl SessionProjection {
         Arc::clone(&model)
     }
 
-    async fn validate(&self, event: &DurableEvent) -> Result<u64, StorageError> {
-        let model = self.model.read().await;
-        let seq =
+    async fn prepare_batch(
+        &self,
+        events: &[DurableEvent],
+    ) -> Result<(u64, Arc<SessionReadModel>), StorageError> {
+        let model = self.snapshot().await;
+        let first_seq =
             model.stats.last_seq.checked_add(1).ok_or_else(|| {
                 StorageError::CorruptLog("session event sequence overflow".into())
             })?;
-        validate_next_event(seq, event, &model).map_err(invalid_event)?;
-        Ok(seq)
+        let mut candidate = (*model).clone();
+        let mut seq = first_seq;
+        for event in events {
+            reduce(&StoredEvent::new(seq, event.clone()), &mut candidate).map_err(invalid_event)?;
+            seq = seq.checked_add(1).ok_or_else(|| {
+                StorageError::CorruptLog("session event sequence overflow".into())
+            })?;
+        }
+        Ok((first_seq, Arc::new(candidate)))
     }
 
-    async fn apply(&self, event: &StoredEvent) -> Result<(), StorageError> {
+    async fn replace(&self, candidate: Arc<SessionReadModel>) {
         let mut model = self.model.write().await;
-        reduce(event, Arc::make_mut(&mut model)).map_err(corrupt_projection)
+        *model = candidate;
     }
 }
 
@@ -406,6 +506,7 @@ impl FileSystemSessionRepository {
             dir,
             projection: SessionProjection::new(projection),
             commit_lane: Semaphore::new(1),
+            consumer_state_lane: Semaphore::new(1),
         });
 
         let mut sessions = self.sessions.write().await;
@@ -685,20 +786,27 @@ impl SessionEventJournal for FileSystemSessionRepository {
                 dir,
                 projection: SessionProjection::new(projection),
                 commit_lane: Semaphore::new(1),
+                consumer_state_lane: Semaphore::new(1),
             }),
         );
 
         Ok(stored_event)
     }
 
-    async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
-        let session_id = event.session_id.clone();
+    async fn append_events(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let session_id = events
+            .first()
+            .map(|event| event.session_id.clone())
+            .ok_or_else(|| StorageError::InvalidEvent("event batch cannot be empty".into()))?;
         let meta = self.get_or_open_meta(&session_id).await?;
         let _permit =
             meta.commit_lane.acquire().await.map_err(|_| {
                 StorageError::Io(std::io::Error::other("session commit lane closed"))
             })?;
-        let expected_seq = meta.projection.validate(&event).await?;
+        let (expected_seq, candidate) = meta.projection.prepare_batch(&events).await?;
         let log_next_seq = meta.log.count().await? as u64;
         if log_next_seq != expected_seq {
             return Err(StorageError::CorruptLog(format!(
@@ -706,14 +814,8 @@ impl SessionEventJournal for FileSystemSessionRepository {
                  {expected_seq}"
             )));
         }
-        let stored = meta.log.append(event).await?;
-        if stored.seq != expected_seq {
-            return Err(StorageError::CorruptLog(format!(
-                "event log assigned seq {}, expected {expected_seq}",
-                stored.seq
-            )));
-        }
-        meta.projection.apply(&stored).await?;
+        let stored = meta.log.append_batch(events).await?;
+        meta.projection.replace(candidate).await;
         Ok(stored)
     }
 
@@ -725,6 +827,97 @@ impl SessionEventJournal for FileSystemSessionRepository {
 
 #[async_trait::async_trait]
 impl SessionStore for FileSystemSessionRepository {
+    async fn event_consumer_state(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+    ) -> Result<EventConsumerState, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let path = event_consumer_state_path(&meta.dir, consumer_id)?;
+        read_event_consumer_state(&path).await
+    }
+
+    async fn checkpoint_event_consumer(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        expected_revision: u64,
+        seq: u64,
+    ) -> Result<EventConsumerCheckpointOutcome, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
+            StorageError::Io(std::io::Error::other("event consumer state lane closed"))
+        })?;
+        let event_count = u64::try_from(meta.log.count().await?).map_err(|_| {
+            StorageError::CorruptLog("session event count exceeds consumer checkpoint range".into())
+        })?;
+        if seq >= event_count {
+            return Err(StorageError::InvalidId(format!(
+                "event consumer checkpoint {seq} is beyond the session event log"
+            )));
+        }
+        let path = event_consumer_state_path(&meta.dir, consumer_id)?;
+        let mut state = read_event_consumer_state(&path).await?;
+        if state.revision != expected_revision {
+            return Ok(EventConsumerCheckpointOutcome::StaleRevision);
+        }
+        if state.checkpoint.is_some_and(|checkpoint| checkpoint >= seq) {
+            return Ok(EventConsumerCheckpointOutcome::Accepted);
+        }
+        state.checkpoint = Some(seq);
+        write_event_consumer_state(&path, state).await?;
+        Ok(EventConsumerCheckpointOutcome::Accepted)
+    }
+
+    async fn set_event_consumer_paused(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        paused: bool,
+    ) -> Result<EventConsumerState, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
+            StorageError::Io(std::io::Error::other("event consumer state lane closed"))
+        })?;
+        let path = event_consumer_state_path(&meta.dir, consumer_id)?;
+        let mut state = read_event_consumer_state(&path).await?;
+        if state.paused != paused {
+            state.paused = paused;
+            write_event_consumer_state(&path, state).await?;
+        }
+        Ok(state)
+    }
+
+    async fn reset_event_consumer_checkpoint(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        reset: EventConsumerCheckpointReset,
+    ) -> Result<EventConsumerState, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
+            StorageError::Io(std::io::Error::other("event consumer state lane closed"))
+        })?;
+        let path = event_consumer_state_path(&meta.dir, consumer_id)?;
+        let mut state = read_event_consumer_state(&path).await?;
+        state.checkpoint = match reset {
+            EventConsumerCheckpointReset::Beginning => None,
+            EventConsumerCheckpointReset::StreamHead => u64::try_from(meta.log.count().await?)
+                .map_err(|_| {
+                    StorageError::CorruptLog(
+                        "session event count exceeds consumer checkpoint range".into(),
+                    )
+                })?
+                .checked_sub(1),
+        };
+        state.revision = state
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| StorageError::CorruptLog("event consumer revision overflow".into()))?;
+        write_event_consumer_state(&path, state).await?;
+        Ok(state)
+    }
+
     async fn checkpoint(
         &self,
         session_id: &SessionId,

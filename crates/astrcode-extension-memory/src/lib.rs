@@ -20,10 +20,10 @@ mod turn_recall;
 use std::sync::Arc;
 
 use astrcode_extension_sdk::{
-    builder::{extension_event, manifest},
+    builder::{custom_event, manifest},
     extension::{
-        Extension, ExtensionCapability, ExtensionConfig, ExtensionError, ExtensionEvent,
-        ExtensionManifest, ExtensionStartContext, HookMode, Registrar, StopReason,
+        Extension, ExtensionCapability, ExtensionConfig, ExtensionError, ExtensionManifest,
+        ExtensionStartContext, HookMode, LifecycleEvent, Registrar, StopReason,
     },
 };
 use handlers::{
@@ -70,7 +70,7 @@ impl Extension for MemoryExtension {
             .description(env!("CARGO_PKG_DESCRIPTION"))
             .capability(ExtensionCapability::SmallModel)
             .capability(ExtensionCapability::SessionInspect)
-            .capability(ExtensionCapability::EmitEvents)
+            .capability(ExtensionCapability::EmitCustomEvents)
             .capability(ExtensionCapability::ProviderRequest)
             .build()
     }
@@ -109,8 +109,8 @@ impl Extension for MemoryExtension {
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.declare_event(extension_event("memory.created").build());
-        reg.declare_event(extension_event("memory.deleted").build());
+        reg.declare_custom_event(custom_event(handlers::MEMORY_CREATED_EVENT_TYPE).build());
+        reg.declare_custom_event(custom_event(handlers::MEMORY_DELETED_EVENT_TYPE).build());
 
         reg.tool(
             handlers::memory_save_definition(),
@@ -148,7 +148,7 @@ impl Extension for MemoryExtension {
             }),
         );
         reg.on_lifecycle(
-            ExtensionEvent::TurnEnd,
+            LifecycleEvent::TurnEnd,
             HookMode::NonBlocking,
             0,
             Arc::new(MemoryProjectRecallTurnEndHandler {
@@ -158,7 +158,7 @@ impl Extension for MemoryExtension {
             }),
         );
         reg.on_lifecycle(
-            ExtensionEvent::SessionStart,
+            LifecycleEvent::SessionStart,
             HookMode::NonBlocking,
             0,
             Arc::new(MemorySessionStartHandler {

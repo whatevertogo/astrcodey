@@ -28,6 +28,8 @@ const MEMORY_DELETE_TOOL: &str = "memory_delete";
 const MEMORY_LIST_TOOL: &str = "memory_list";
 const MAX_LIST_ENTRIES: usize = 50;
 const DEFAULT_LIST_LIMIT: usize = 20;
+pub(crate) const MEMORY_CREATED_EVENT_TYPE: &str = "memory.created";
+pub(crate) const MEMORY_DELETED_EVENT_TYPE: &str = "memory.deleted";
 
 // ─── Tool Definitions ────────────────────────────────────────────────
 
@@ -182,6 +184,8 @@ impl ToolHandler for MemorySaveHandler {
         }
 
         // 正常新增路径
+        let category_for_emit = category.clone();
+        let content_for_emit = content.clone();
         let result = mutate_scoped_stores(
             ctx.tasks(),
             "memory-save-append",
@@ -193,6 +197,13 @@ impl ToolHandler for MemorySaveHandler {
 
         match result {
             AppendResult::Saved => {
+                let payload = json!({
+                    "category": category_for_emit,
+                    "content": content_for_emit,
+                });
+                if let Err(error) = ctx.events().emit(MEMORY_CREATED_EVENT_TYPE, &payload).await {
+                    tracing::warn!(%error, "memory creation event was not published");
+                }
                 let cfg = self.config.read().clone();
                 if cfg.auto_extract_after_save {
                     spawn_memory_pipeline(
@@ -257,9 +268,9 @@ impl ToolHandler for MemoryDeleteHandler {
         if !removed.is_empty() {
             let payload = json!({
                 "match": pattern_for_emit,
-                "deleted_count": removed.len(),
+                "deletedCount": removed.len(),
             });
-            if let Err(error) = ctx.events().emit("memory.deleted", &payload).await {
+            if let Err(error) = ctx.events().emit(MEMORY_DELETED_EVENT_TYPE, &payload).await {
                 tracing::warn!(%error, "memory deletion event was not published");
             }
         }

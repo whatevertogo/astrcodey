@@ -1,6 +1,8 @@
 //! 实时 EventPayload → ConversationDeltaDto 投影 + 控制态推算。
 
-use astrcode_core::event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase};
+use astrcode_core::event::{
+    CustomEventData, DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase,
+};
 use astrcode_protocol::{
     agent_session_link::AgentSessionLinkDto,
     http::{ConversationControlStateDto, ConversationDeltaDto, LlmRetryStatusDto, ToolApprovalDto},
@@ -130,13 +132,8 @@ fn durable_event_to_deltas(
                 child_session_id: child_session_id.to_string(),
             }]
         },
-        DurableEventPayload::ExtensionEvent(extension_event) => {
-            vec![ConversationDeltaDto::ExtensionEvent {
-                extension_id: extension_event.extension_id.clone(),
-                event_type: extension_event.event_type.clone(),
-                schema_version: extension_event.schema_version,
-                payload: extension_event.payload.clone(),
-            }]
+        DurableEventPayload::CustomEvent(extension_event) => {
+            vec![custom_event_delta(extension_event)]
         },
         DurableEventPayload::SystemPromptConfigured { .. }
         | DurableEventPayload::TurnAbortedContext
@@ -209,15 +206,19 @@ fn live_event_to_deltas(
                 control: control_from_event(event, has_messages),
             }]
         },
-        LiveEventPayload::ExtensionEvent(extension_event) => {
-            vec![ConversationDeltaDto::ExtensionEvent {
-                extension_id: extension_event.extension_id.clone(),
-                event_type: extension_event.event_type.clone(),
-                schema_version: extension_event.schema_version,
-                payload: extension_event.payload.clone(),
-            }]
+        LiveEventPayload::CustomEvent(extension_event) => {
+            vec![custom_event_delta(extension_event)]
         },
         LiveEventPayload::ToolCallArgumentsDelta { .. } => vec![],
+    }
+}
+
+pub(in crate::http) fn custom_event_delta(custom_event: &CustomEventData) -> ConversationDeltaDto {
+    ConversationDeltaDto::CustomEvent {
+        extension_id: custom_event.extension_id.clone(),
+        event_type: custom_event.event_type.clone(),
+        schema_version: custom_event.schema_version,
+        payload: custom_event.payload.clone(),
     }
 }
 
@@ -324,7 +325,7 @@ fn control_from_state(
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::event::{DurableEvent, ExtensionEventData, LiveEvent, StoredEvent};
+    use astrcode_core::event::{CustomEventData, DurableEvent, LiveEvent, StoredEvent};
     use astrcode_protocol::{
         http::{ConversationBlockDto, ConversationBlockStatusDto, ToolCallStatusDto},
         wire::PhaseDto,
@@ -496,10 +497,12 @@ mod tests {
     #[test]
     fn extension_event_preserves_namespaced_live_payload() {
         let event = event(
-            EventPayload::Live(LiveEventPayload::ExtensionEvent(ExtensionEventData {
+            EventPayload::Live(LiveEventPayload::CustomEvent(CustomEventData {
                 extension_id: ASK_USER_EXTENSION_ID.into(),
                 event_type: ASK_USER_PENDING_EVENT_TYPE.into(),
                 schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
                 payload: serde_json::json!({ "callId": "call-1" }),
             })),
             None,
@@ -507,7 +510,7 @@ mod tests {
 
         assert!(matches!(
             event_to_deltas(&event, true).as_slice(),
-            [ConversationDeltaDto::ExtensionEvent {
+            [ConversationDeltaDto::CustomEvent {
                 extension_id,
                 event_type,
                 schema_version: 1,
@@ -663,6 +666,7 @@ mod tests {
         let rewrite = event(
             EventPayload::Durable(DurableEventPayload::TranscriptRewritten {
                 source_seq: 3,
+                source_fingerprint: None,
                 messages: Vec::new(),
                 reason: astrcode_core::event::TranscriptRewriteReason::Compaction(
                     astrcode_core::event::CompactionDetails {

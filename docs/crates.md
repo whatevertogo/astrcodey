@@ -508,7 +508,7 @@ state 使用默认 namespaced session data path。
 - `PromptBuild` 注入用户偏好，按 session 缓存。
 - `TurnEnd` 对当轮对话召回项目事实，下一 turn 首次 LLM 请求注入。
 - 工具：`memory_save`、`memory_delete`、`memory_list`。
-- 事件：注册 `memory.created`、`memory.deleted`。
+- 事件：`memory.created`(`memory_save` 新增成功时发射)、`memory.deleted`(`memory_delete` 删除条目时发射)。
 
 能力声明：`SmallModel`、`SessionInspect`、`EmitEvents`、`ProviderRequest`。启动时如果没有
 small model 会失败；跨 session 的历史读取通过 `SessionInspect` client 完成。

@@ -70,7 +70,7 @@ pub enum ClientNotification {
     },
 
     /// 需要跨会话传播的扩展事件。
-    GlobalExtensionEvent {
+    GlobalCustomEvent {
         session_id: String,
         extension_id: String,
         event_type: String,

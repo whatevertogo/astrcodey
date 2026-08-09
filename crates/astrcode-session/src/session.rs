@@ -12,7 +12,7 @@ use astrcode_core::{
     },
     types::*,
 };
-use astrcode_extension_sdk::extension::ExtensionEvent;
+use astrcode_extension_sdk::extension::LifecycleEvent;
 use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{
     CompactSnapshotInput, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
@@ -68,7 +68,7 @@ impl Session {
 
     pub async fn ensure_lifecycle_initialized(
         &self,
-        event: ExtensionEvent,
+        event: LifecycleEvent,
     ) -> Result<(), SessionError> {
         self.runtime
             .ensure_lifecycle_initialized(|| self.emit_lifecycle(event))
@@ -175,6 +175,8 @@ impl Session {
         turn_id: Option<&TurnId>,
         payload: LiveEventPayload,
     ) -> Result<astrcode_core::types::EventId, SessionError> {
+        // 与 `session_runtime.rs` 的 `SessionScopedEventPublisher::send_confirmed`
+        // Live 分支平行：成功只表示事件已进入有序 lane，observer 派发是异步的。
         let event = LiveEvent::new(self.id().clone(), turn_id.cloned(), payload);
         let event_id = event.id.clone();
         self.runtime
@@ -205,7 +207,7 @@ impl Session {
         Ok(())
     }
 
-    pub async fn emit_lifecycle(&self, event: ExtensionEvent) -> Result<(), SessionError> {
+    pub async fn emit_lifecycle(&self, event: LifecycleEvent) -> Result<(), SessionError> {
         let model = self.read_model().await?;
         emit_lifecycle_for_read_model(
             &self.runtime_services,
@@ -263,7 +265,7 @@ pub async fn emit_lifecycle_for_read_model(
     session_id: &SessionId,
     model: &SessionReadModel,
     session_store_dir: Option<std::path::PathBuf>,
-    event: ExtensionEvent,
+    event: LifecycleEvent,
 ) -> Result<(), SessionError> {
     let ctx =
         SharedTurnContext::from_read_model(session_id, model, session_store_dir).lifecycle_ctx();

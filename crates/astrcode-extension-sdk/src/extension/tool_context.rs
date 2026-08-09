@@ -8,7 +8,7 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    ExtensionCallContext, ExtensionError, ExtensionEventEmitter, ExtensionPaths, ExtensionTasks,
+    CustomEventEmitter, ExtensionCallContext, ExtensionError, ExtensionPaths, ExtensionTasks,
 };
 use crate::host::{ExtensionHost, HostError};
 
@@ -78,7 +78,7 @@ impl ToolContext {
         self.call.host()
     }
 
-    pub fn events(&self) -> &ExtensionEventEmitter {
+    pub fn events(&self) -> &CustomEventEmitter {
         self.call.events()
     }
 

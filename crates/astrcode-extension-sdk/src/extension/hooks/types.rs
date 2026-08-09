@@ -163,7 +163,7 @@ pub enum ExtensionError {
     )]
     InvalidLifecycleMode {
         extension_id: String,
-        event: crate::extension::ExtensionEvent,
+        event: crate::extension::LifecycleEvent,
     },
     #[error(
         "extension {extension_id} tool `{tool_name}` conflicts with extension \

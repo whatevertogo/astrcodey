@@ -25,8 +25,8 @@ use astrcode_core::{
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        CommandContext, ExtensionCommandResult, ExtensionError, ExtensionEvent, ExtensionManifest,
-        HookMode, HookResult, LifecycleContext, Registrar, SlashCommand,
+        CommandContext, ExtensionCommandResult, ExtensionError, ExtensionManifest, HookMode,
+        HookResult, LifecycleContext, LifecycleEvent, Registrar, SlashCommand,
     },
 };
 use astrcode_extensions::Extension;
@@ -297,7 +297,7 @@ struct FailingSessionStartObserver {
 }
 
 struct RecordSessionResumeExtension {
-    events: Arc<Mutex<Vec<ExtensionEvent>>>,
+    events: Arc<Mutex<Vec<LifecycleEvent>>>,
 }
 
 struct FailingSessionResumeObserver {
@@ -312,7 +312,7 @@ struct AwaitedSessionResumeObserver {
 
 #[derive(Clone)]
 struct RecordingLifecycleExtension {
-    events: Arc<Mutex<Vec<ExtensionEvent>>>,
+    events: Arc<Mutex<Vec<LifecycleEvent>>>,
 }
 
 #[derive(Clone, Default)]
@@ -333,8 +333,8 @@ impl Extension for RecordingLifecycleExtension {
 
     fn register(&self, reg: &mut Registrar) {
         for event in [
-            ExtensionEvent::AfterProviderResponse,
-            ExtensionEvent::TurnEnd,
+            LifecycleEvent::AfterProviderResponse,
+            LifecycleEvent::TurnEnd,
         ] {
             reg.on_lifecycle(
                 event.clone(),
@@ -350,8 +350,8 @@ impl Extension for RecordingLifecycleExtension {
 }
 
 struct RecordingLifecycleHandler {
-    event: ExtensionEvent,
-    events: Arc<Mutex<Vec<ExtensionEvent>>>,
+    event: LifecycleEvent,
+    events: Arc<Mutex<Vec<LifecycleEvent>>>,
 }
 
 #[async_trait::async_trait]
@@ -408,7 +408,7 @@ impl Extension for FailingSessionStartObserver {
 
     fn register(&self, reg: &mut Registrar) {
         reg.on_lifecycle(
-            ExtensionEvent::SessionStart,
+            LifecycleEvent::SessionStart,
             HookMode::Advisory,
             0,
             Arc::new(FailingSessionStartHandler {
@@ -426,11 +426,11 @@ impl Extension for RecordSessionResumeExtension {
 
     fn register(&self, reg: &mut Registrar) {
         reg.on_lifecycle(
-            ExtensionEvent::SessionResume,
+            LifecycleEvent::SessionResume,
             HookMode::Advisory,
             0,
             Arc::new(RecordingLifecycleHandler {
-                event: ExtensionEvent::SessionResume,
+                event: LifecycleEvent::SessionResume,
                 events: Arc::clone(&self.events),
             }),
         );
@@ -445,7 +445,7 @@ impl Extension for FailingSessionResumeObserver {
 
     fn register(&self, reg: &mut Registrar) {
         reg.on_lifecycle(
-            ExtensionEvent::SessionResume,
+            LifecycleEvent::SessionResume,
             HookMode::Advisory,
             0,
             Arc::new(FailingSessionResumeHandler {
@@ -463,7 +463,7 @@ impl Extension for AwaitedSessionResumeObserver {
 
     fn register(&self, reg: &mut Registrar) {
         reg.on_lifecycle(
-            ExtensionEvent::SessionResume,
+            LifecycleEvent::SessionResume,
             HookMode::Advisory,
             0,
             Arc::new(AwaitedSessionResumeHandler {
@@ -1154,6 +1154,7 @@ fn transcript_rewrite_payload_contains_compacted_history_and_metadata() {
         "manual_command",
         &compaction,
         7,
+        "fingerprint".to_owned(),
         CompactStrategy::Manual {
             keep_recent_turns: None,
         },
@@ -1163,9 +1164,11 @@ fn transcript_rewrite_payload_contains_compacted_history_and_metadata() {
         rewrite,
         DurableEventPayload::TranscriptRewritten {
             source_seq: 7,
+            source_fingerprint: Some(fingerprint),
             messages,
             reason: astrcode_core::event::TranscriptRewriteReason::Compaction(details),
-        } if messages.len() == 2
+        } if fingerprint == "fingerprint"
+            && messages.len() == 2
             && details.transcript_path.as_deref() == Some("compact.jsonl")
     ));
 }
@@ -1296,7 +1299,7 @@ async fn reopening_persisted_session_emits_resume_once_per_runtime() {
     runtime.session_manager().open(sid.clone()).await.unwrap();
     runtime.session_manager().open(sid).await.unwrap();
 
-    assert_eq!(*events.lock().unwrap(), vec![ExtensionEvent::SessionResume]);
+    assert_eq!(*events.lock().unwrap(), vec![LifecycleEvent::SessionResume]);
 }
 
 #[tokio::test]
@@ -1878,8 +1881,8 @@ async fn successful_text_turn_dispatches_after_provider_response_before_turn_end
     assert_eq!(
         *events.lock().unwrap(),
         vec![
-            ExtensionEvent::AfterProviderResponse,
-            ExtensionEvent::TurnEnd
+            LifecycleEvent::AfterProviderResponse,
+            LifecycleEvent::TurnEnd
         ]
     );
 }
@@ -1906,7 +1909,7 @@ async fn stream_error_still_dispatches_turn_end() {
     let completion = completion.await.unwrap();
 
     assert!(matches!(completion, TurnCompletion::Failed { .. }));
-    assert_eq!(*events.lock().unwrap(), vec![ExtensionEvent::TurnEnd]);
+    assert_eq!(*events.lock().unwrap(), vec![LifecycleEvent::TurnEnd]);
 }
 
 #[tokio::test]

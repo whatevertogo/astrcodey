@@ -2,7 +2,7 @@
 
 use astrcode_context::ContextSnapshot;
 use astrcode_core::{event::DurableEventPayload, llm};
-use astrcode_extension_sdk::extension::ExtensionEvent;
+use astrcode_extension_sdk::extension::LifecycleEvent;
 
 use super::{CommandHandler, HandlerError};
 
@@ -83,7 +83,7 @@ impl CommandHandler {
             &sid,
             &state,
             session.session_store_dir().await,
-            ExtensionEvent::PostRecap,
+            LifecycleEvent::PostRecap,
         )
         .await
         {

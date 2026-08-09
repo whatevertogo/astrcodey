@@ -8,7 +8,7 @@ use std::{
 use astrcode_extension_sdk::{WireErrorCode,
     builder::tool,
     extension::{
-        ExtensionEventDecl, ExtensionHttpDispatchRequest, ExtensionHttpMethod,
+        CustomEventDeclaration, ExtensionHttpDispatchRequest, ExtensionHttpMethod,
         ExtensionHttpResponse, ExtensionHttpRoute,
     },
     s5r::{
@@ -90,13 +90,13 @@ async fn run() -> Result<(), ErrorPayload> {
     worker
         .version("0.1.0")
         .capability(ExtensionCapability::SmallModel)
-        .capability(ExtensionCapability::EmitEvents)
+        .capability(ExtensionCapability::EmitCustomEvents)
         .capability(ExtensionCapability::WorkspaceRead)
         .capability(ExtensionCapability::SessionInspect)
         .capability(ExtensionCapability::PublicHttp)
         .capability(ExtensionCapability::PublicHttpDispatch)
         .capability(ExtensionCapability::ToolIntercept)
-        .extension_event(ExtensionEventDecl {
+        .custom_event(CustomEventDeclaration {
             event_type: "s5r_guest.probe".into(),
             schema_version: 1,
             durable: true,
@@ -370,7 +370,7 @@ async fn run() -> Result<(), ErrorPayload> {
     )?;
 
     worker.hook(
-        ExtensionEvent::PreToolUse,
+        LifecycleEvent::PreToolUse,
         HookMode::Blocking,
         hook_handler_args(|input: PreToolInput, _ctx| async move {
             if input.tool_name == "emit_hook_probe" {
@@ -398,7 +398,7 @@ async fn run() -> Result<(), ErrorPayload> {
     )?;
 
     worker.hook(
-        ExtensionEvent::TurnEnd,
+        LifecycleEvent::TurnEnd,
         HookMode::NonBlocking,
         hook_handler(|_ctx| async {
             Ok(HandlerResult {

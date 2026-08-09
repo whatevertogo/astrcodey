@@ -49,6 +49,40 @@ async fn event_log_round_trip_reopen_and_append_guards_share_one_sequence_contra
     assert_eq!(log.count().await.unwrap(), 3);
 }
 
+#[tokio::test]
+async fn event_log_batch_is_atomic_and_assigns_consecutive_sequences() {
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("events.jsonl");
+    let session_id = SessionId::new("session-1");
+    let other_session_id = SessionId::new("session-2");
+    let (log, _) = EventLog::create(path, started_event(&session_id))
+        .await
+        .unwrap();
+
+    let error = log
+        .append_batch(vec![
+            user_event(&session_id, "valid"),
+            user_event(&other_session_id, "wrong session"),
+        ])
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StorageError::InvalidEvent(_)));
+    assert_eq!(log.count().await.unwrap(), 1);
+    assert_eq!(log.replay_all().await.unwrap().len(), 1);
+
+    let stored = log
+        .append_batch(vec![
+            user_event(&session_id, "first"),
+            user_event(&session_id, "second"),
+        ])
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.iter().map(|event| event.seq).collect::<Vec<_>>(),
+        vec![1, 2]
+    );
+}
+
 #[test]
 fn event_log_rejects_each_invalid_committed_stream_shape() {
     let dir = tempdir().unwrap();

@@ -4,9 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::extension::{
-    ContinueAfterStopLimit, DEFAULT_EXTENSION_EVENT_DURABLE,
-    DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES, DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION,
-    ExtensionEventDecl, ExtensionHttpRoute,
+    ContinueAfterStopLimit, CustomEventDeclaration, CustomEventSubscription, ExtensionHttpRoute,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,7 +30,9 @@ pub struct InitializeManifest {
     #[serde(default)]
     pub http_routes: Vec<ManifestHttpRoute>,
     #[serde(default)]
-    pub extension_events: Vec<ManifestExtensionEvent>,
+    pub custom_events: Vec<CustomEventDeclaration>,
+    #[serde(default)]
+    pub custom_event_subscriptions: Vec<CustomEventSubscription>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,52 +88,6 @@ pub struct ManifestHttpRoute {
     pub handler_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ManifestExtensionEvent {
-    pub event_type: String,
-    #[serde(default = "default_schema_version")]
-    pub schema_version: u32,
-    #[serde(default = "default_durable")]
-    pub durable: bool,
-    #[serde(default = "default_max_payload")]
-    pub max_payload_bytes: usize,
-}
-
-const fn default_schema_version() -> u32 {
-    DEFAULT_EXTENSION_EVENT_SCHEMA_VERSION
-}
-
-const fn default_durable() -> bool {
-    DEFAULT_EXTENSION_EVENT_DURABLE
-}
-
-const fn default_max_payload() -> usize {
-    DEFAULT_EXTENSION_EVENT_MAX_PAYLOAD_BYTES
-}
-
-impl From<ManifestExtensionEvent> for ExtensionEventDecl {
-    fn from(event: ManifestExtensionEvent) -> Self {
-        Self {
-            event_type: event.event_type,
-            schema_version: event.schema_version,
-            durable: event.durable,
-            max_payload_bytes: event.max_payload_bytes,
-        }
-    }
-}
-
-impl From<&ExtensionEventDecl> for ManifestExtensionEvent {
-    fn from(event: &ExtensionEventDecl) -> Self {
-        Self {
-            event_type: event.event_type.clone(),
-            schema_version: event.schema_version,
-            durable: event.durable,
-            max_payload_bytes: event.max_payload_bytes,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,8 +95,8 @@ mod tests {
     #[test]
     fn extension_event_declaration_rejects_unknown_wire_fields() {
         assert!(
-            serde_json::from_value::<ManifestExtensionEvent>(serde_json::json!({
-                "event_type": "test.completed",
+            serde_json::from_value::<CustomEventDeclaration>(serde_json::json!({
+                "eventType": "test.completed",
                 "unexpected": true
             }))
             .is_err()

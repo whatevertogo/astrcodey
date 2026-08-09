@@ -7,7 +7,7 @@ use serde_json::Value;
 use serde_json::json;
 
 use crate::{
-    event::EventPublishReceipt,
+    event::EventDeliveryReceipt,
     llm::{LlmContent, LlmMessage, LlmRole},
     session::{SessionPhaseDto, SessionToolSelectionDto},
     types::SessionId,
@@ -85,19 +85,19 @@ pub struct HostEventEmitRequest {
     deny_unknown_fields
 )]
 pub enum HostEventEmitOutput {
-    Queued,
-    Published {
-        event_id: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        seq: Option<u64>,
-    },
+    Accepted,
+    LivePublished { event_id: String },
+    Persisted { event_id: String, seq: u64 },
 }
 
-impl From<EventPublishReceipt> for HostEventEmitOutput {
-    fn from(receipt: EventPublishReceipt) -> Self {
+impl From<EventDeliveryReceipt> for HostEventEmitOutput {
+    fn from(receipt: EventDeliveryReceipt) -> Self {
         match receipt {
-            EventPublishReceipt::Queued => Self::Queued,
-            EventPublishReceipt::Published { event_id, seq } => Self::Published {
+            EventDeliveryReceipt::Accepted => Self::Accepted,
+            EventDeliveryReceipt::LivePublished { event_id } => Self::LivePublished {
+                event_id: event_id.to_string(),
+            },
+            EventDeliveryReceipt::Persisted { event_id, seq } => Self::Persisted {
                 event_id: event_id.to_string(),
                 seq,
             },
@@ -1117,11 +1117,11 @@ mod tests {
                 schema_version: 1,
                 payload: json!({ "status": "ok" }),
             },
-            HostEventEmitOutput::Published {
+            HostEventEmitOutput::Persisted {
                 event_id: "event-1".into(),
-                seq: Some(7),
+                seq: 7,
             },
-            HostEventEmitOutput::Queued,
+            HostEventEmitOutput::Accepted,
             HostSessionStateReadRequest { key: "goal".into() },
             HostSessionStateReadOutput {
                 content: Some("active".into()),

@@ -3,10 +3,10 @@
 use serde_json::Value;
 
 use crate::{
-    extension::ExtensionEventDecl,
+    extension::{CustomEventDeclaration, CustomEventSubscription},
     s5r::manifest::{
-        InitializeManifest, InitializeManifestProtocol, ManifestCommand, ManifestExtensionEvent,
-        ManifestHook, ManifestHttpRoute, ManifestTool,
+        InitializeManifest, InitializeManifestProtocol, ManifestCommand, ManifestHook,
+        ManifestHttpRoute, ManifestTool,
     },
     tool::ToolDefinition,
 };
@@ -19,7 +19,8 @@ pub(crate) struct ManifestCatalog {
     pub commands: Vec<ManifestCommand>,
     pub http_routes: Vec<ManifestHttpRoute>,
     pub capabilities: Vec<String>,
-    pub extension_events: Vec<ExtensionEventDecl>,
+    pub custom_events: Vec<CustomEventDeclaration>,
+    pub custom_event_subscriptions: Vec<CustomEventSubscription>,
 }
 
 impl ManifestCatalog {
@@ -42,11 +43,6 @@ impl ManifestCatalog {
                 },
             })
             .collect();
-        let extension_events = self
-            .extension_events
-            .iter()
-            .map(ManifestExtensionEvent::from)
-            .collect();
         serde_json::to_value(InitializeManifest {
             extension_id: extension_id.into(),
             version: version.into(),
@@ -61,7 +57,8 @@ impl ManifestCatalog {
             continuation_hooks: self.continuation_hooks.clone(),
             commands: self.commands.clone(),
             http_routes: self.http_routes.clone(),
-            extension_events,
+            custom_events: self.custom_events.clone(),
+            custom_event_subscriptions: self.custom_event_subscriptions.clone(),
         })
         .map_err(|error| error.to_string())
     }
@@ -132,20 +129,35 @@ mod tests {
     }
 
     #[test]
-    fn typed_extension_events_are_serialized_into_the_manifest() {
+    fn custom_event_contracts_are_serialized_into_the_manifest() {
         let mut catalog = ManifestCatalog::default();
-        catalog.extension_events.push(ExtensionEventDecl {
+        catalog.custom_events.push(CustomEventDeclaration {
             event_type: "typed.event".into(),
             schema_version: 2,
             durable: false,
             max_payload_bytes: 4096,
         });
+        catalog.custom_event_subscriptions.push(
+            CustomEventSubscription::from_extension("producer", "typed.event")
+                .named("consume-typed-event"),
+        );
         let metadata = catalog
             .to_metadata_value("test-extension", "0.0.0")
             .unwrap();
-        assert_eq!(metadata["extension_events"][0]["event_type"], "typed.event");
-        assert_eq!(metadata["extension_events"][0]["schema_version"], 2);
-        assert_eq!(metadata["extension_events"][0]["durable"], false);
-        assert_eq!(metadata["extension_events"][0]["max_payload_bytes"], 4096);
+        assert_eq!(metadata["custom_events"][0]["eventType"], "typed.event");
+        assert_eq!(metadata["custom_events"][0]["schemaVersion"], 2);
+        assert_eq!(metadata["custom_events"][0]["durable"], false);
+        assert_eq!(metadata["custom_events"][0]["maxPayloadBytes"], 4096);
+        assert_eq!(
+            metadata["custom_event_subscriptions"][0],
+            serde_json::json!({
+                "id": "consume-typed-event",
+                "eventType": "typed.event",
+                "source": {
+                    "kind": "extension",
+                    "extensionId": "producer"
+                }
+            })
+        );
     }
 }

@@ -170,7 +170,7 @@ pub const HOST_OPERATION_SPECS: [HostOperationSpec; HostOperation::COUNT] = [
     spec!(
         EventEmit,
         "astrcode.event.emit",
-        Some(ExtensionCapability::EmitEvents),
+        Some(ExtensionCapability::EmitCustomEvents),
         "Emit a declared extension event",
     ),
     spec!(
@@ -465,7 +465,7 @@ mod tests {
         }
 
         let cases = [
-            policy!(EventEmit, Some(ExtensionCapability::EmitEvents), None),
+            policy!(EventEmit, Some(ExtensionCapability::EmitCustomEvents), None),
             policy!(
                 ExtensionHttpPublic,
                 Some(ExtensionCapability::PublicHttpDispatch),

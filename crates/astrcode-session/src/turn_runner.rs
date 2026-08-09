@@ -19,7 +19,7 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_extension_sdk::extension::{
-    ContinueAfterStopResult, ExtensionEvent, ProviderEvent, ProviderResult,
+    ContinueAfterStopResult, LifecycleEvent, ProviderEvent, ProviderResult,
     RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
 };
 use parking_lot::Mutex;
@@ -42,7 +42,7 @@ use crate::{
     turn_context::{
         SharedTurnContext, TurnError, end_turn_with_error_typed, on_step_end_best_effort,
     },
-    turn_publish::{ExtensionEvents, TurnEvents},
+    turn_publish::{TurnEventBridge, TurnEvents},
     turn_stages::{PreparedProviderRequest, TurnState},
 };
 
@@ -161,7 +161,7 @@ impl TurnLoop {
         publisher: &Arc<TurnEvents>,
     ) -> Result<TurnOutput, TurnError> {
         let extension_runner = Arc::clone(&self.extension_hooks);
-        let event_bridge = ExtensionEvents::start(Arc::clone(publisher), self.tools.shared_mut());
+        let event_bridge = TurnEventBridge::start(Arc::clone(publisher), self.tools.shared_mut());
         let result = self
             .process_prompt_inner(user_text, turn_id, publisher)
             .await;
@@ -189,7 +189,7 @@ impl TurnLoop {
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
     ) {
         if let Err(hook_error) = extension_runner
-            .emit_lifecycle(ExtensionEvent::TurnEnd, self.shared().lifecycle_ctx())
+            .emit_lifecycle(LifecycleEvent::TurnEnd, self.shared().lifecycle_ctx())
             .await
         {
             tracing::warn!(error = %hook_error, "TurnEnd lifecycle hook failed after turn error");
@@ -207,9 +207,9 @@ impl TurnLoop {
 
         let lifecycle_ctx = self.shared().lifecycle_ctx();
         let (turn_start_res, prompt_submit_res) = tokio::join!(
-            extension_runner.emit_lifecycle(ExtensionEvent::TurnStart, lifecycle_ctx.clone()),
+            extension_runner.emit_lifecycle(LifecycleEvent::TurnStart, lifecycle_ctx.clone()),
             extension_runner
-                .emit_lifecycle(ExtensionEvent::UserPromptSubmit, lifecycle_ctx.clone()),
+                .emit_lifecycle(LifecycleEvent::UserPromptSubmit, lifecycle_ctx.clone()),
         );
         turn_start_res?;
         if let Err(e) = prompt_submit_res {
@@ -289,7 +289,7 @@ impl TurnLoop {
         let step_ctx = lifecycle_ctx.clone().for_step_start(mid_turn_synced);
 
         extension_runner
-            .emit_lifecycle(ExtensionEvent::StepStart, step_ctx)
+            .emit_lifecycle(LifecycleEvent::StepStart, step_ctx)
             .await?;
 
         let visible_tools = state.visible_tools();
@@ -748,7 +748,7 @@ impl TurnLoop {
             .shared()
             .lifecycle_ctx_with_exchange(user_text, state.final_text().to_string());
         extension_runner
-            .emit_lifecycle(ExtensionEvent::TurnEnd, end_ctx)
+            .emit_lifecycle(LifecycleEvent::TurnEnd, end_ctx)
             .await?;
         let (text, tool_results) = state.take_output_parts();
         Ok(TurnOutput {
@@ -860,7 +860,7 @@ impl TurnLoop {
         }
         extension_runner
             .emit_lifecycle(
-                ExtensionEvent::AfterProviderResponse,
+                LifecycleEvent::AfterProviderResponse,
                 self.shared().lifecycle_ctx(),
             )
             .await?;

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use astrcode_core::{
     config::ContextSettings,
     llm::{
-        LlmContent, LlmError, LlmMessage, LlmRole, provider_visible_messages,
+        LlmContent, LlmError, LlmMessage, LlmRole, provider_transcript, provider_visible_messages,
         token_estimate::{
             estimate_provider_message_tokens, estimate_provider_request_tokens,
             estimate_tool_definition_tokens,
@@ -37,12 +37,10 @@ struct InputTokenAnchor {
 
 impl ContextSnapshot {
     pub fn new(source_seq: u64, system_prompt: String, messages: Vec<LlmMessage>) -> Self {
-        let mut messages = provider_visible_messages(messages);
-        messages.retain(|message| message.role != LlmRole::System);
         Self {
             source_seq,
             system_prompt,
-            messages,
+            messages: provider_transcript(messages),
             input_token_anchor: None,
         }
     }
@@ -54,10 +52,7 @@ impl ContextSnapshot {
         model_context_window: usize,
         covered_messages: Vec<LlmMessage>,
     ) -> Self {
-        let covered_message_count = provider_visible_messages(covered_messages)
-            .into_iter()
-            .filter(|message| message.role != LlmRole::System)
-            .count();
+        let covered_message_count = provider_transcript(covered_messages).len();
         self.input_token_anchor = Some(InputTokenAnchor {
             context_tokens,
             model_context_window,

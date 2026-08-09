@@ -15,16 +15,17 @@ use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::
 
 use astrcode_core::{
     event::{
-        DurableEventPayload, EventPayload, EventPublishReceipt, EventSender, ExtensionEventData,
+        CustomEventData, DurableEventPayload, EventDeliveryReceipt, EventPayload, EventSender,
         LiveEventPayload,
     },
     llm::LlmProvider,
     tool::SessionOperations,
+    types::EventId,
     wire::{WireError, WireErrorCode},
 };
 use astrcode_extension_sdk::{
     extension::{
-        ExtensionCapability, ExtensionError, ExtensionEventDecl, ExtensionHttpRequest,
+        CustomEventDeclaration, ExtensionCapability, ExtensionError, ExtensionHttpRequest,
         ExtensionHttpResponse, ExtensionTaskError, ExtensionTasks,
     },
     host::internal::OutboundNetworkService,
@@ -183,10 +184,11 @@ pub struct InvokeContext {
     pub session_store_dir: Option<PathBuf>,
     pub session_ops: Option<Arc<dyn SessionOperations>>,
     pub event_tx: Option<EventSender>,
+    pub event_causation: Option<(EventId, u8)>,
     pub working_dir: Option<String>,
     pub cancel_token: Option<CancellationToken>,
     pub tasks: Option<ExtensionTasks>,
-    pub event_declarations: HashMap<String, ExtensionEventDecl>,
+    pub event_declarations: HashMap<String, CustomEventDeclaration>,
     pub declared_capabilities: Vec<ExtensionCapability>,
     /// 当前调用是否在 peer 专用 I/O 线程上（同步 host import；IPC 子进程共用）。
     pub on_peer_io_thread: bool,
@@ -461,17 +463,19 @@ fn ensure_required_context(
 
 pub async fn emit_for_sink_confirmed(
     extension_id: &str,
-    declarations: &HashMap<String, ExtensionEventDecl>,
+    declarations: &HashMap<String, CustomEventDeclaration>,
     event_tx: &EventSender,
     event_type: &str,
     schema_version: u32,
+    causation: Option<(EventId, u8)>,
     payload: Value,
-) -> Result<EventPublishReceipt, ExtensionError> {
-    let payload = validated_extension_event_payload(
+) -> Result<EventDeliveryReceipt, ExtensionError> {
+    let payload = validated_custom_event_payload(
         extension_id,
         declarations,
         event_type,
         schema_version,
+        causation,
         payload,
     )?;
     event_tx
@@ -480,11 +484,12 @@ pub async fn emit_for_sink_confirmed(
         .map_err(ExtensionError::from)
 }
 
-fn validated_extension_event_payload(
+fn validated_custom_event_payload(
     extension_id: &str,
-    declarations: &HashMap<String, ExtensionEventDecl>,
+    declarations: &HashMap<String, CustomEventDeclaration>,
     event_type: &str,
     schema_version: u32,
+    causation: Option<(EventId, u8)>,
     payload: Value,
 ) -> Result<EventPayload, ExtensionError> {
     validate_emit(declarations, event_type, schema_version, &payload)?;
@@ -492,29 +497,52 @@ fn validated_extension_event_payload(
         .get(event_type)
         .map(|declaration| declaration.durable)
         .ok_or_else(|| {
-            ExtensionError::Internal(format!("undeclared extension event type: {event_type}"))
+            ExtensionError::Internal(format!("undeclared custom event type: {event_type}"))
         })?;
-    let event = ExtensionEventData {
+    Ok(custom_event_payload(
+        extension_id,
+        event_type,
+        schema_version,
+        durable,
+        causation,
+        payload,
+    ))
+}
+
+pub(crate) fn custom_event_payload(
+    extension_id: &str,
+    event_type: &str,
+    schema_version: u32,
+    durable: bool,
+    causation: Option<(EventId, u8)>,
+    payload: Value,
+) -> EventPayload {
+    let (causation_id, cascade_depth) = causation
+        .map(|(event_id, depth)| (Some(event_id), depth.saturating_add(1)))
+        .unwrap_or((None, 0));
+    let event = CustomEventData {
         extension_id: extension_id.to_owned(),
         event_type: event_type.to_owned(),
         schema_version,
+        causation_id,
+        cascade_depth,
         payload,
     };
-    Ok(if durable {
-        EventPayload::Durable(DurableEventPayload::ExtensionEvent(event))
+    if durable {
+        EventPayload::Durable(DurableEventPayload::CustomEvent(event))
     } else {
-        EventPayload::Live(LiveEventPayload::ExtensionEvent(event))
-    })
+        EventPayload::Live(LiveEventPayload::CustomEvent(event))
+    }
 }
 
 fn validate_emit(
-    declarations: &HashMap<String, ExtensionEventDecl>,
+    declarations: &HashMap<String, CustomEventDeclaration>,
     event_type: &str,
     schema_version: u32,
     payload: &Value,
 ) -> Result<(), ExtensionError> {
     let decl = declarations.get(event_type).ok_or_else(|| {
-        ExtensionError::Internal(format!("undeclared extension event type: {event_type}"))
+        ExtensionError::Internal(format!("undeclared custom event type: {event_type}"))
     })?;
     if schema_version != decl.schema_version {
         return Err(ExtensionError::Internal(format!(
@@ -533,7 +561,7 @@ fn validate_emit(
     Ok(())
 }
 
-pub fn decls_to_map(decls: &[ExtensionEventDecl]) -> HashMap<String, ExtensionEventDecl> {
+pub fn decls_to_map(decls: &[CustomEventDeclaration]) -> HashMap<String, CustomEventDeclaration> {
     decls
         .iter()
         .map(|d| (d.event_type.clone(), d.clone()))
@@ -673,8 +701,8 @@ mod tests {
     }
 
     #[test]
-    fn extension_event_emission_requires_the_declared_version_and_payload_bound() {
-        let declarations = decls_to_map(&[ExtensionEventDecl {
+    fn custom_event_emission_requires_the_declared_version_and_payload_bound() {
+        let declarations = decls_to_map(&[CustomEventDeclaration {
             event_type: "probe.completed".into(),
             schema_version: 2,
             durable: true,
@@ -693,6 +721,20 @@ mod tests {
                 "{event_type} v{version} must be rejected"
             );
         }
+
+        let parent_id = EventId::new("parent-event");
+        let EventPayload::Durable(DurableEventPayload::CustomEvent(event)) = custom_event_payload(
+            "consumer",
+            "probe.completed",
+            2,
+            true,
+            Some((parent_id.clone(), 3)),
+            json!({}),
+        ) else {
+            panic!("durable declaration must produce a durable custom event");
+        };
+        assert_eq!(event.causation_id, Some(parent_id));
+        assert_eq!(event.cascade_depth, 4);
     }
 
     #[test]

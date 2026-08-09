@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use super::types::ExchangeSummary;
 use crate::{
     config::ModelSelection,
-    extension::{ExtensionCallContext, ExtensionEventEmitter, ExtensionPaths, ExtensionTasks},
+    extension::{CustomEventEmitter, ExtensionCallContext, ExtensionPaths, ExtensionTasks},
     host::ExtensionHost,
     tool::{ToolDefinition, ToolResult},
 };
@@ -144,7 +144,7 @@ macro_rules! hook_context_accessors {
             self.common.call.host()
         }
 
-        pub fn events(&self) -> &ExtensionEventEmitter {
+        pub fn events(&self) -> &CustomEventEmitter {
             self.common.call.events()
         }
 
@@ -818,7 +818,7 @@ macro_rules! discovery_context {
                 self.common.call.host()
             }
 
-            pub fn events(&self) -> &ExtensionEventEmitter {
+            pub fn events(&self) -> &CustomEventEmitter {
                 self.common.call.events()
             }
 
@@ -900,7 +900,7 @@ macro_rules! command_context_accessors {
             self.call.call.host()
         }
 
-        pub fn events(&self) -> &ExtensionEventEmitter {
+        pub fn events(&self) -> &CustomEventEmitter {
             self.call.call.events()
         }
 

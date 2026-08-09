@@ -143,6 +143,23 @@ fn projected_provider_messages(model: &SessionReadModel) -> Vec<LlmMessage> {
     )
 }
 
+/// 与生产侧 `persist_compact_result` 同路径构造 snapshot 并计算前缀指纹；
+/// 调用时 `source_seq` 必须等于当前 last_seq（前缀即整个 transcript）。
+async fn prefix_fingerprint_at(session: &Session, source_seq: u64) -> String {
+    let model = session.read_model().await.unwrap();
+    let snapshot = astrcode_context::ContextSnapshot::new(
+        source_seq,
+        model.system_prompt.text.clone(),
+        model
+            .transcript
+            .messages
+            .iter()
+            .map(|message| message.message.clone())
+            .collect(),
+    );
+    astrcode_core::event::transcript_prefix_fingerprint(&snapshot.system_prompt, &snapshot.messages)
+}
+
 /// 在 compact LLM 调用期间注入 durable 事件，使 `source_seq` 过期。
 ///
 /// 事件在 mock 内部、LLM 返回前注入，避免测试侧与 mock 之间的 Notify/oneshot 竞态。
@@ -234,6 +251,7 @@ async fn transcript_rewrite_preserves_new_tail_events() {
         .expect("session should have cursor after seeding")
         .parse::<u64>()
         .expect("cursor should be u64 event seq");
+    let source_fingerprint = prefix_fingerprint_at(&session, stale_seq).await;
 
     session
         .emit_durable(
@@ -253,6 +271,7 @@ async fn transcript_rewrite_preserves_new_tail_events() {
             "auto_threshold".into(),
             sample_compaction(),
             stale_seq,
+            source_fingerprint,
             CompactStrategy::Auto,
         )
         .await
@@ -274,6 +293,67 @@ async fn transcript_rewrite_preserves_new_tail_events() {
             .iter()
             .any(|m| m.joined_display_text("\n").contains("race event")),
         "events after source_seq must remain in projection"
+    );
+}
+
+/// 两个 rewrite 竞速：后提交者的前缀已被前一个 rewrite 改写，`source_seq` 校验
+/// 照常通过，只有指纹能识别内容漂移——提交被 projection 拒绝，调用方拿到错误
+/// （turn 内路径由 `commit_compaction` 记 warn 并跳过），日志只保留先提交的 rewrite。
+#[tokio::test]
+async fn transcript_rewrite_with_stale_fingerprint_is_rejected() {
+    let (session, store, _, _) = common::spawn_session_with_context_and_services(
+        Arc::new(StaticOkLlm),
+        ContextSettings::default(),
+    )
+    .await;
+    configure_system_prompt(&session).await;
+    seed_history(&session, 2).await;
+
+    let source_seq = session
+        .latest_cursor()
+        .await
+        .unwrap()
+        .expect("session should have cursor after seeding")
+        .parse::<u64>()
+        .expect("cursor should be u64 event seq");
+    let stale_fingerprint = prefix_fingerprint_at(&session, source_seq).await;
+
+    session
+        .rewrite_transcript_for_compaction(
+            "auto_threshold".into(),
+            sample_compaction(),
+            source_seq,
+            stale_fingerprint.clone(),
+            CompactStrategy::Auto,
+        )
+        .await
+        .expect("first rewrite should commit");
+
+    let stale = session
+        .rewrite_transcript_for_compaction(
+            "auto_threshold".into(),
+            sample_compaction(),
+            source_seq,
+            stale_fingerprint,
+            CompactStrategy::Auto,
+        )
+        .await;
+    assert!(
+        stale.is_err(),
+        "rewrite over an already-rewritten prefix must be rejected"
+    );
+
+    assert_eq!(
+        compact_event_count(store.as_ref(), session.id()).await,
+        1,
+        "only the first rewrite should be persisted"
+    );
+    let provider_messages = projected_provider_messages(&session.read_model().await.unwrap());
+    assert!(
+        provider_messages
+            .iter()
+            .any(|m| m.joined_display_text("\n").contains("kept tail")),
+        "first rewrite output must remain untouched"
     );
 }
 

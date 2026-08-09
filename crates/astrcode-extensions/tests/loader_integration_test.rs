@@ -907,14 +907,14 @@ async fn sync_sources_waits_for_renamed_retirement_and_blocks_failed_replacement
 #[test]
 fn s5r_event_and_mode_names_roundtrip() {
     use astrcode_extension_sdk::{
-        extension::{ExtensionEvent, HookMode},
+        extension::{HookMode, LifecycleEvent},
         s5r::{event_from_name, mode_from_name},
     };
 
-    let cases: &[(&str, ExtensionEvent)] = &[
-        ("session_start", ExtensionEvent::SessionStart),
-        ("pre_tool_use", ExtensionEvent::PreToolUse),
-        ("turn_end", ExtensionEvent::TurnEnd),
+    let cases: &[(&str, LifecycleEvent)] = &[
+        ("session_start", LifecycleEvent::SessionStart),
+        ("pre_tool_use", LifecycleEvent::PreToolUse),
+        ("turn_end", LifecycleEvent::TurnEnd),
     ];
     for (name, expected) in cases {
         assert_eq!(event_from_name(name), Some(expected.clone()));

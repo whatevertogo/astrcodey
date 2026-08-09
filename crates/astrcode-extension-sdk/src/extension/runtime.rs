@@ -37,9 +37,9 @@ pub enum ExtensionCapability {
     /// 只读查询历史 session 投影。
     SessionHistory,
     /// 发射已声明的扩展事件。
-    EmitEvents,
+    EmitCustomEvents,
     /// 消费其他扩展发射的事件。
-    ConsumeEvents,
+    ConsumeCustomEvents,
     /// 读取工作区或扩展发现目录。
     WorkspaceRead,
     /// 写入或编辑工作区内的非敏感文件。

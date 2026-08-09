@@ -11,12 +11,19 @@ impl Session {
         trigger_name: String,
         compaction: astrcode_context::CompactResult,
         source_seq: u64,
+        source_fingerprint: String,
         strategy: CompactStrategy,
     ) -> Result<StoredEvent, SessionError> {
         let event = self
             .emit_durable(
                 None,
-                transcript_rewritten_payload(trigger_name, &compaction, source_seq, strategy),
+                transcript_rewritten_payload(
+                    trigger_name,
+                    &compaction,
+                    source_seq,
+                    source_fingerprint,
+                    strategy,
+                ),
             )
             .await?;
         if let Err(error) = self.checkpoint(&event.seq.to_string()).await {

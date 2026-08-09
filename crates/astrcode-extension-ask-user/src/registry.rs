@@ -1,7 +1,8 @@
 use std::{collections::HashMap, sync::Arc};
 
-use astrcode_extension_sdk::extension::{
-    ExtensionError, ExtensionEventEmitter, ExtensionEventError,
+use astrcode_extension_sdk::{
+    builder::custom_event,
+    extension::{CustomEventDeclaration, CustomEventEmitter, ExtensionError},
 };
 use parking_lot::Mutex;
 use serde_json::json;
@@ -11,6 +12,13 @@ use crate::model::PendingQuestion;
 
 pub(crate) const PENDING_EVENT_TYPE: &str = "ask_user.pending";
 pub(crate) const RESOLVED_EVENT_TYPE: &str = "ask_user.resolved";
+
+pub(crate) fn custom_event_declarations() -> [CustomEventDeclaration; 2] {
+    [
+        custom_event(PENDING_EVENT_TYPE).durable(false).build(),
+        custom_event(RESOLVED_EVENT_TYPE).durable(false).build(),
+    ]
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Resolution {
@@ -64,7 +72,7 @@ impl PendingKey {
 struct PendingEntry {
     question: PendingQuestion,
     sender: oneshot::Sender<Resolution>,
-    events: ExtensionEventEmitter,
+    events: CustomEventEmitter,
     registration: Arc<()>,
 }
 
@@ -83,7 +91,7 @@ impl PendingRegistry {
     pub(crate) fn register(
         self: &Arc<Self>,
         question: PendingQuestion,
-        events: ExtensionEventEmitter,
+        events: CustomEventEmitter,
     ) -> Result<(oneshot::Receiver<Resolution>, PendingGuard), ExtensionError> {
         let key = PendingKey::new(&question.session_id, &question.call_id);
         let (sender, receiver) = oneshot::channel();
@@ -106,9 +114,12 @@ impl PendingRegistry {
         );
         drop(state);
 
-        if let Err(error) = events.emit_now(PENDING_EVENT_TYPE, &question) {
+        if let Err(error) = events
+            .try_emit(PENDING_EVENT_TYPE, &question)
+            .map_err(|error| ExtensionError::Internal(error.to_string()))
+        {
             self.abandon_registered(&key, &registration);
-            return Err(event_error(error));
+            return Err(error);
         }
 
         Ok((
@@ -307,7 +318,7 @@ fn finish_entry(key: PendingKey, entry: PendingEntry, resolution: Resolution) {
             "ask-user receiver closed before resolution"
         );
     }
-    if let Err(error) = entry.events.emit_now(
+    if let Err(error) = entry.events.try_emit(
         RESOLVED_EVENT_TYPE,
         &json!({
             "sessionId": key.session_id,
@@ -317,10 +328,6 @@ fn finish_entry(key: PendingKey, entry: PendingEntry, resolution: Resolution) {
     ) {
         tracing::warn!(%error, "failed to emit ask-user resolved event");
     }
-}
-
-fn event_error(error: ExtensionEventError) -> ExtensionError {
-    ExtensionError::Internal(error.to_string())
 }
 
 pub(crate) struct PendingGuard {

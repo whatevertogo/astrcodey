@@ -6,6 +6,7 @@
 
 use astrcode_core::{
     config::OpenAiApiMode,
+    event::stable_hash_hex,
     llm::{
         LlmMessage, LlmRole, PromptCacheRetention,
         thinking::{ThinkingCapability, ThinkingConfig, ThinkingWireMapping},
@@ -15,7 +16,7 @@ use astrcode_core::{
 
 use super::serialization::{
     chat_message_to_json, prompt_cache_retention_wire_value, responses_input_items,
-    responses_tools_json, stable_hash_hex, system_text, tools_to_json,
+    responses_tools_json, system_text, tools_to_json,
 };
 
 #[derive(Debug, Clone, Copy)]

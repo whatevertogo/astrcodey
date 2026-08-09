@@ -430,7 +430,7 @@ mod host_tests {
                 {
                     Ok(json!({ "ok": false }))
                 },
-                "astrcode.event.emit" => Ok(json!({ "status": "queued" })),
+                "astrcode.event.emit" => Ok(json!({ "status": "accepted" })),
                 "astrcode.session.control.dispose" | "astrcode.session.state.write" => {
                     Ok(json!({ "ok": true }))
                 },
@@ -707,7 +707,7 @@ mod host_tests {
                 })
                 .await
                 .unwrap();
-            assert_eq!(receipt, HostEventEmitOutput::Queued);
+            assert_eq!(receipt, HostEventEmitOutput::Accepted);
 
             let history = HostClient::session_history()
                 .list_summaries()

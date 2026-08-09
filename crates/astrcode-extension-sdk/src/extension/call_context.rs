@@ -11,7 +11,7 @@ use std::{
 use astrcode_core::{types::SessionId, wire::WireErrorCode};
 use tokio_util::sync::CancellationToken;
 
-use super::{ExtensionConfig, ExtensionEventEmitter, ExtensionPaths, ExtensionTasks};
+use super::{CustomEventEmitter, ExtensionConfig, ExtensionPaths, ExtensionTasks};
 use crate::host::{ExtensionHost, HostError};
 
 /// Facts and scoped capabilities shared by extension calls.
@@ -26,7 +26,7 @@ pub struct ExtensionCallContext {
     working_dir: Option<PathBuf>,
     paths: ExtensionPaths,
     host: ExtensionHost,
-    events: ExtensionEventEmitter,
+    events: CustomEventEmitter,
     tasks: ExtensionTasks,
     cancellation: Arc<CallCancellation>,
 }
@@ -54,7 +54,7 @@ impl ExtensionCallContext {
         working_dir: Option<PathBuf>,
         paths: ExtensionPaths,
         host: ExtensionHost,
-        events: ExtensionEventEmitter,
+        events: CustomEventEmitter,
         tasks: ExtensionTasks,
         cancellation: CancellationToken,
     ) -> Self {
@@ -130,7 +130,7 @@ impl ExtensionCallContext {
         &self.host
     }
 
-    pub fn events(&self) -> &ExtensionEventEmitter {
+    pub fn events(&self) -> &CustomEventEmitter {
         &self.events
     }
 
@@ -199,7 +199,7 @@ impl ExtensionStartContext {
         self.call.host()
     }
 
-    pub fn events(&self) -> &ExtensionEventEmitter {
+    pub fn events(&self) -> &CustomEventEmitter {
         self.call.events()
     }
 
@@ -275,7 +275,7 @@ mod tests {
             Some(PathBuf::from("/workspace")),
             ExtensionPaths::from_runtime("startup-probe", Some(Path::new("/global")), None),
             host,
-            ExtensionEventEmitter::default(),
+            CustomEventEmitter::default(),
             ExtensionTasks::new("startup-probe"),
             cancellation,
         );
@@ -327,7 +327,7 @@ mod tests {
             None,
             ExtensionPaths::default(),
             host,
-            ExtensionEventEmitter::default(),
+            CustomEventEmitter::default(),
             ExtensionTasks::new("drop-probe"),
             cancellation,
         );
@@ -362,7 +362,7 @@ mod tests {
             None,
             ExtensionPaths::default(),
             host,
-            ExtensionEventEmitter::default(),
+            CustomEventEmitter::default(),
             ExtensionTasks::new("generation-probe"),
             cancellation,
         )
