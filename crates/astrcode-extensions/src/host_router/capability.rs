@@ -2,7 +2,7 @@
 //! catalog. Dispatch grouping and backend requirements live on `HostOperationSpec`; this module
 //! only interprets them against the router's configured backends and the call context.
 
-use astrcode_core::wire::WireErrorCode;
+use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::ExtensionCapability,
     host::{HOST_OPERATION_SPECS, HostBackendRequirement, HostOperation, HostOperationSpec},

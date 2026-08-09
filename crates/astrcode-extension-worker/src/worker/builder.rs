@@ -2,15 +2,17 @@
 
 use std::{future::Future, sync::Arc};
 
-use astrcode_core::wire::WireErrorCode;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::{
+    WireErrorCode,
     extension::{ExtensionHttpRequest, ExtensionHttpResponse},
     s5r::{ErrorPayload, HandlerResult},
     worker::registry::{
-        CommandHandlerFn, HookHandlerFn, HttpHandlerFn, ToolHandlerFn, WorkerCallContext,
+        CommandHandlerFn, ContinuationHandlerFn, CustomEventHandlerFn, HookHandlerFn,
+        HttpHandlerFn, ToolHandlerFn, WorkerCallContext, WorkerCommandContext,
+        WorkerCustomEventContext, WorkerHookContext, WorkerToolContext,
     },
 };
 
@@ -44,7 +46,7 @@ pub fn parse_hook_input<T: DeserializeOwned>(event: &Value) -> Result<T, ErrorPa
 /// 无参 tool handler：`async move |ctx| { ... }`。
 pub fn tool_handler<F, Fut>(f: F) -> ToolHandlerFn
 where
-    F: Fn(WorkerCallContext) -> Fut + Send + Sync + 'static,
+    F: Fn(WorkerToolContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
     Arc::new(move |_event, ctx| Box::pin(f(ctx)))
@@ -54,7 +56,7 @@ where
 pub fn tool_handler_args<A, F, Fut>(f: F) -> ToolHandlerFn
 where
     A: DeserializeOwned + Send + 'static,
-    F: Fn(A, WorkerCallContext) -> Fut + Send + Sync + 'static,
+    F: Fn(A, WorkerToolContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
     Arc::new(move |event, ctx| match parse_tool_arguments::<A>(&event) {
@@ -66,7 +68,7 @@ where
 /// 无参 hook handler。
 pub fn hook_handler<F, Fut>(f: F) -> HookHandlerFn
 where
-    F: Fn(WorkerCallContext) -> Fut + Send + Sync + 'static,
+    F: Fn(WorkerHookContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
     Arc::new(move |_event, ctx| Box::pin(f(ctx)))
@@ -76,7 +78,7 @@ where
 pub fn hook_handler_args<A, F, Fut>(f: F) -> HookHandlerFn
 where
     A: DeserializeOwned + Send + 'static,
-    F: Fn(A, WorkerCallContext) -> Fut + Send + Sync + 'static,
+    F: Fn(A, WorkerHookContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
     Arc::new(move |event, ctx| match parse_hook_input::<A>(&event) {
@@ -88,10 +90,54 @@ where
 /// 无参 command handler。
 pub fn command_handler<F, Fut>(f: F) -> CommandHandlerFn
 where
+    F: Fn(WorkerCommandContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
+{
+    Arc::new(move |_event, ctx| Box::pin(f(ctx)))
+}
+
+/// Handler for a continuation emitted by another worker handler.
+pub fn continuation_handler<F, Fut>(f: F) -> ContinuationHandlerFn
+where
     F: Fn(WorkerCallContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
     Arc::new(move |_event, ctx| Box::pin(f(ctx)))
+}
+
+/// Typed-input handler for a continuation emitted by another worker handler.
+pub fn continuation_handler_args<A, F, Fut>(f: F) -> ContinuationHandlerFn
+where
+    A: DeserializeOwned + Send + 'static,
+    F: Fn(A, WorkerCallContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
+{
+    Arc::new(move |event, ctx| match parse_hook_input::<A>(&event) {
+        Err(error) => Box::pin(async move { Err(error) }),
+        Ok(input) => Box::pin(f(input, ctx)),
+    })
+}
+
+/// Handler for a session-scoped custom-event delivery.
+pub fn custom_event_handler<F, Fut>(f: F) -> CustomEventHandlerFn
+where
+    F: Fn(WorkerCustomEventContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
+{
+    Arc::new(move |_event, ctx| Box::pin(f(ctx)))
+}
+
+/// Typed-input handler for a session-scoped custom-event delivery.
+pub fn custom_event_handler_args<A, F, Fut>(f: F) -> CustomEventHandlerFn
+where
+    A: DeserializeOwned + Send + 'static,
+    F: Fn(A, WorkerCustomEventContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
+{
+    Arc::new(move |event, ctx| match parse_hook_input::<A>(&event) {
+        Err(error) => Box::pin(async move { Err(error) }),
+        Ok(input) => Box::pin(f(input, ctx)),
+    })
 }
 
 /// 类型化 HTTP handler。
@@ -134,10 +180,10 @@ mod tests {
     async fn typed_tool_handler_preserves_arguments_and_call_facts() {
         let handler = tool_handler_args(|args: GreetArgs, ctx| async move {
             assert_eq!(ctx.extension_id(), "ext");
-            assert_eq!(ctx.session_id(), Some("session-1"));
+            assert_eq!(ctx.session_id(), "session-1");
             assert_eq!(ctx.turn_id(), None);
             assert_eq!(ctx.tool_call_id(), Some("tool-call-1"));
-            assert_eq!(ctx.working_dir(), Some(std::path::Path::new("/workspace")));
+            assert_eq!(ctx.working_dir(), std::path::Path::new("/workspace"));
             assert!(!ctx.cancel_token().is_cancelled());
             Ok(HandlerResult::effect(
                 "ok",
@@ -152,11 +198,14 @@ mod tests {
                 "working_dir": "/workspace"
             }
         });
-        let ctx = WorkerCallContext::from_event(
+        let ctx = crate::worker::registry::WorkerCallFacts::from_event(
             "ext".into(),
-            crate::runtime::CancelToken::default(),
+            crate::worker::CancelToken::default(),
             &event,
-        );
+        )
+        .unwrap()
+        .into_tool()
+        .unwrap();
         let out = handler(event, ctx).await.unwrap();
         assert!(out.ok);
         assert_eq!(
@@ -164,14 +213,19 @@ mod tests {
             Some(&serde_json::json!("hi world"))
         );
 
-        let hook_event = serde_json::json!({
-            "input": { "call_id": "hook-tool-call-1" }
-        });
-        let hook_ctx = WorkerCallContext::from_event(
+        let hook_event = serde_json::json!({ "input": {
+            "call_id": "hook-tool-call-1",
+            "session_id": "session-1",
+            "working_dir": "/workspace"
+        }});
+        let hook_ctx = crate::worker::registry::WorkerCallFacts::from_event(
             "ext".into(),
-            crate::runtime::CancelToken::default(),
+            crate::worker::CancelToken::default(),
             &hook_event,
-        );
+        )
+        .unwrap()
+        .into_hook()
+        .unwrap();
         assert_eq!(hook_ctx.tool_call_id(), Some("hook-tool-call-1"));
     }
 }

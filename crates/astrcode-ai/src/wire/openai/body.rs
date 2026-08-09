@@ -275,6 +275,13 @@ mod tests {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
         };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiResponses,
+            allowed_effort: Some(vec!["high".into()]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: false,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::Responses,
             model_id: "o3-mini",
@@ -288,13 +295,7 @@ mod tests {
                 effort: Some("high".into()),
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiResponses,
-                allowed_effort: Some(vec!["high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: false,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_responses_request_body(config, &[], &[]);
         assert_eq!(body["reasoning"]["effort"], "high");
@@ -330,6 +331,13 @@ mod tests {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
         };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiResponses,
+            allowed_effort: Some(vec!["high".into()]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: false,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::Responses,
             model_id: "o3-mini",
@@ -343,13 +351,7 @@ mod tests {
                 effort: None,
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiResponses,
-                allowed_effort: Some(vec!["high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: false,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_responses_request_body(config, &[], &[]);
         assert!(
@@ -362,6 +364,13 @@ mod tests {
     fn responses_thinking_omitted_when_no_effort_even_if_enabled() {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
+        };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiResponses,
+            allowed_effort: Some(vec!["high".into()]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: false,
         };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::Responses,
@@ -376,13 +385,7 @@ mod tests {
                 effort: None,
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiResponses,
-                allowed_effort: Some(vec!["high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: false,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_responses_request_body(config, &[], &[]);
         assert!(
@@ -395,6 +398,13 @@ mod tests {
     fn chat_emits_thinking_enabled_for_deepseek_when_capability_maps() {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
+        };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiChat,
+            allowed_effort: Some(vec![]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: true,
         };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::ChatCompletions,
@@ -409,13 +419,7 @@ mod tests {
                 effort: None,
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiChat,
-                allowed_effort: Some(vec![]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_chat_request_body(config, &[], &[]);
         assert_eq!(body["thinking"]["type"], "enabled");
@@ -430,6 +434,13 @@ mod tests {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
         };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiChat,
+            allowed_effort: Some(vec![]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: true,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::ChatCompletions,
             model_id: "deepseek-chat",
@@ -443,13 +454,7 @@ mod tests {
                 effort: None,
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiChat,
-                allowed_effort: Some(vec![]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_chat_request_body(config, &[], &[]);
         assert_eq!(body["thinking"]["type"], "disabled");
@@ -489,6 +494,13 @@ mod tests {
         use astrcode_core::llm::thinking::{
             ThinkingCapability, ThinkingConfig, ThinkingWireMapping,
         };
+        let thinking_capability = ThinkingCapability {
+            wire_mapping: ThinkingWireMapping::OpenAiChat,
+            allowed_effort: Some(vec!["low".into(), "medium".into(), "high".into()]),
+            budget_min: None,
+            budget_max: None,
+            can_disable: true,
+        };
         let config = OpenAiRequestConfig {
             api_mode: OpenAiApiMode::ChatCompletions,
             model_id: "deepseek-chat",
@@ -502,13 +514,7 @@ mod tests {
                 effort: Some("low".into()),
                 budget_tokens: None,
             },
-            thinking_capability: Some(&ThinkingCapability {
-                wire_mapping: ThinkingWireMapping::OpenAiChat,
-                allowed_effort: Some(vec!["low".into(), "medium".into(), "high".into()]),
-                budget_min: None,
-                budget_max: None,
-                can_disable: true,
-            }),
+            thinking_capability: Some(&thinking_capability),
         };
         let body = build_chat_request_body(config, &[], &[]);
         assert_eq!(body["thinking"]["type"], "enabled");

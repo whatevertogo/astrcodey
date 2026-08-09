@@ -331,8 +331,8 @@ fn push_tool_result_block(
             continue;
         };
         let status = tool_status_from_message(source);
-        if let Some(block_index) = tool_block_indices.get(tool_call_id) {
-            if let Some(SequencedConversationBlock {
+        if let Some(block_index) = tool_block_indices.get(tool_call_id)
+            && let Some(SequencedConversationBlock {
                 block:
                     ConversationBlockDto::ToolCall {
                         text,
@@ -341,12 +341,11 @@ fn push_tool_result_block(
                     },
                 ..
             }) = blocks.get_mut(*block_index)
-            {
-                text.clone_from(content);
-                *block_status = status;
-                pushed_result = true;
-                continue;
-            }
+        {
+            text.clone_from(content);
+            *block_status = status;
+            pushed_result = true;
+            continue;
         }
         blocks.push(SequencedConversationBlock {
             seq,

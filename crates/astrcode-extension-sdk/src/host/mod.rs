@@ -6,14 +6,14 @@ mod operation;
 
 use std::sync::Arc;
 
-use astrcode_core::wire::WireErrorCode;
+use astrcode_extension_contract::WireErrorCode;
 pub use client::{
     ExtensionHttpClient, ModelClient, NetworkClient, ProcessClient, SessionControlClient,
     SessionHistoryClient, SessionInspectClient, SessionStateClient, WorkspaceClient,
 };
-pub(crate) use contracts::deserialize_non_empty_string;
 pub use contracts::*;
-pub(crate) use domain_client::{
+#[doc(hidden)]
+pub use domain_client::{
     EventClient as TypedEventClient, ExtensionHttpClient as TypedExtensionHttpClient,
     HostClientTransport, ModelClient as TypedModelClient, NetworkClient as TypedNetworkClient,
     ProcessClient as TypedProcessClient, SessionControlClient as TypedSessionControlClient,
@@ -24,10 +24,12 @@ pub(crate) use domain_client::{
 pub use error::*;
 #[doc(hidden)]
 pub use operation::HostBackendRequirement;
-pub use operation::{HOST_OPERATION_SPECS, HostOperation, HostOperationGroup, HostOperationSpec};
+pub use operation::{
+    HOST_OPERATION_SPECS, HostOp, HostOperation, HostOperationGroup, HostOperationSpec, operations,
+};
 use serde_json::Value;
 
-use crate::extension::ExtensionCapability;
+use crate::{extension::ExtensionCapability, model_stream::ModelStream};
 
 /// Instance-scoped access to typed host domains.
 #[derive(Clone)]
@@ -46,15 +48,15 @@ impl ExtensionHost {
     }
 
     pub fn session_control(&self) -> Result<SessionControlClient, HostError> {
-        let session_control = self
+        if !self
             .inner
             .scope
-            .is_granted(ExtensionCapability::SessionControl);
-        let input_delivery = self
-            .inner
-            .scope
-            .is_granted(ExtensionCapability::InputDelivery);
-        if !session_control && !input_delivery {
+            .is_granted(ExtensionCapability::SessionControl)
+            && !self
+                .inner
+                .scope
+                .is_granted(ExtensionCapability::InputDelivery)
+        {
             self.inner.scope.preflight_any_capability(
                 &[
                     ExtensionCapability::SessionControl,
@@ -74,13 +76,21 @@ impl ExtensionHost {
         {
             return Ok(SessionControlClient::new(self.clone()));
         }
-        if session_control {
+        if self
+            .inner
+            .scope
+            .is_granted(ExtensionCapability::SessionControl)
+        {
             self.inner.scope.preflight_context(
                 operation::HostContextRequirement::Session,
                 "session_control",
             )?;
         }
-        if input_delivery {
+        if self
+            .inner
+            .scope
+            .is_granted(ExtensionCapability::InputDelivery)
+        {
             self.inner.scope.preflight_available_operation_context(
                 ExtensionCapability::InputDelivery,
                 "session_control",
@@ -205,6 +215,15 @@ impl HostClientTransport for ExtensionHost {
             .await
     }
 
+    async fn invoke_stream(
+        &self,
+        operation: HostOperation,
+        input: Value,
+    ) -> Result<ModelStream, Self::Error> {
+        self.preflight(operation)?;
+        self.inner.invoker.invoke_stream(operation, input).await
+    }
+
     fn client_error(code: WireErrorCode, message: String) -> Self::Error {
         HostError::new(code, message)
     }
@@ -222,7 +241,7 @@ pub mod internal {
 
     use super::{
         ExtensionCapability, ExtensionHost, ExtensionHostInner, HOST_OPERATION_SPECS, HostError,
-        HostOperation, operation::HostContextRequirement,
+        HostOperation, ModelStream, operation::HostContextRequirement,
     };
 
     /// Host-only redirect policy used by the outbound-network backend port.
@@ -469,6 +488,20 @@ pub mod internal {
                 "stream_unavailable",
                 format!(
                     "{} transport does not support collected streaming",
+                    operation.wire_name()
+                ),
+            ))
+        }
+
+        async fn invoke_stream(
+            &self,
+            operation: HostOperation,
+            _input: Value,
+        ) -> Result<ModelStream, HostError> {
+            Err(HostError::new(
+                "stream_unavailable",
+                format!(
+                    "{} transport does not support streaming",
                     operation.wire_name()
                 ),
             ))

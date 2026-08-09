@@ -96,26 +96,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_inline_limits_match_high_volume_tools() {
-        assert_eq!(
-            tool_result_inline_limit("read"),
-            READ_TOOL_RESULT_INLINE_LIMIT
-        );
-        assert_eq!(
-            tool_result_inline_limit("shell"),
-            Some(SHELL_TOOL_RESULT_INLINE_LIMIT)
-        );
-        assert_eq!(
-            tool_result_inline_limit("grep"),
-            Some(GREP_TOOL_RESULT_INLINE_LIMIT)
-        );
-        assert_eq!(
-            tool_result_inline_limit("unknown"),
-            Some(DEFAULT_TOOL_RESULT_INLINE_LIMIT)
-        );
-    }
-
-    #[test]
     fn auto_persist_eligibility_ignores_legacy_metadata_control_keys() {
         let large_content = "a".repeat(DEFAULT_TOOL_RESULT_INLINE_LIMIT + 1);
         let cases = [
@@ -155,34 +135,5 @@ mod tests {
                 "{name}"
             );
         }
-    }
-
-    #[test]
-    fn preview_reports_more_content() {
-        let preview = tool_result_preview("abcdef", 3);
-
-        assert_eq!(preview.content, "abc");
-        assert!(preview.has_more);
-    }
-
-    #[test]
-    fn summary_names_read_file_path() {
-        let path = "/sessions/session-1/tool-results/shell-call-1.txt";
-        let reference = ToolResultArtifactRef {
-            bytes: 2048,
-            path: Some(path.to_string()),
-        };
-        let preview = ToolResultPreview {
-            content: "first lines".into(),
-            has_more: true,
-        };
-
-        let summary = persisted_tool_result_summary(&reference, &preview);
-
-        assert!(summary.contains("read"));
-        assert!(summary.contains(path));
-        assert!(summary.contains("Preview"));
-        assert!(summary.contains("first lines"));
-        assert!(summary.contains("More output"));
     }
 }

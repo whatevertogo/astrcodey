@@ -5,7 +5,10 @@ use astrcode_extension_sdk::{
     tool::{ToolDefinition, ToolPromptMetadata},
 };
 
-use super::{ExtensionRunner, HostedExtension, retirement::ExtensionIndexLease};
+use super::{
+    ExtensionRunner, HostedExtension, retirement::ExtensionIndexLease,
+    supervisor::ExtensionAdmission,
+};
 
 pub(super) type ExtensionHandler<H> = (String, HookMode, Arc<H>);
 pub(super) type ToolExtensionHandler<H> = (String, HookMode, ToolHookTarget, Arc<H>);
@@ -62,6 +65,7 @@ pub(super) struct HandlerIndex {
     pub(super) capabilities: HashMap<String, Vec<ExtensionCapability>>,
     pub(super) http_routes: Vec<HttpRouteEntry>,
     pub(super) extension_tasks: HashMap<String, ExtensionTasks>,
+    pub(super) extension_admission: HashMap<String, ExtensionAdmission>,
     _publication_leases: Vec<ExtensionIndexLease>,
 }
 
@@ -86,15 +90,20 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
     let mut capabilities = HashMap::new();
     let mut http_routes = Vec::new();
     let mut extension_tasks = HashMap::new();
+    let mut extension_admission = HashMap::new();
     let mut publication_leases = Vec::with_capacity(extensions.len());
 
-    for hosted in extensions {
+    let mut ordered_extensions = extensions.iter().collect::<Vec<_>>();
+    ordered_extensions.sort_by(|left, right| left.manifest.id().cmp(right.manifest.id()));
+
+    for hosted in ordered_extensions {
         let manifest = &hosted.manifest;
         let registrations = &manifest.registrations;
         let extension_id = manifest.id().to_owned();
         let extension_capabilities = manifest.capabilities().to_vec();
         capabilities.insert(extension_id.clone(), extension_capabilities.clone());
         extension_tasks.insert(extension_id.clone(), hosted.tasks.clone());
+        extension_admission.insert(extension_id.clone(), hosted.supervisor.admission());
         publication_leases.push(hosted.publication_lease.acquire());
         for registration in registrations.pre_tool_use() {
             pre_tool_use.push((
@@ -235,6 +244,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         capabilities,
         http_routes,
         extension_tasks,
+        extension_admission,
         _publication_leases: publication_leases,
     }
 }
@@ -259,8 +269,8 @@ where
 /// 在 debug 级日志里输出每个事件的 handler 调度顺序（按优先级降序，extension_id 标注）。
 ///
 /// 排查「我的 hook 没生效 / 顺序不对」时打开 `RUST_LOG=astrcode_extensions=debug`
-/// 即可看到每次 register 后的最终调度表。同优先级的 hook 顺序由扩展的注册
-/// 顺序决定（即 loader 加载顺序），日志按这个顺序原样输出。
+/// 即可看到每次 register 后的最终调度表。同优先级的 hook 按 extension id
+/// 升序、再按该 extension 内的注册顺序调度。
 pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
     if !tracing::enabled!(tracing::Level::DEBUG) {
         return;
@@ -273,7 +283,10 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
     let mut compact: Vec<(&str, CompactEvent, i32)> = Vec::new();
     let mut lifecycle: Vec<(&str, LifecycleEvent, i32, HookMode)> = Vec::new();
 
-    for hosted in extensions {
+    let mut ordered_extensions = extensions.iter().collect::<Vec<_>>();
+    ordered_extensions.sort_by(|left, right| left.manifest.id().cmp(right.manifest.id()));
+
+    for hosted in ordered_extensions {
         let manifest = &hosted.manifest;
         let registrations = &manifest.registrations;
         let id = manifest.id();

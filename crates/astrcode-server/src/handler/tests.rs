@@ -910,13 +910,13 @@ impl TestCommandActor {
                 .await
                 .map_err(|_| HandlerError::ActorUnavailable)?
                 .map_err(|_| HandlerError::ActorUnavailable)?;
-            if let ClientNotification::Event(event) = notification {
-                if matches!(
+            if let ClientNotification::Event(event) = notification
+                && matches!(
                     event.payload,
                     EventPayload::Durable(DurableEventPayload::SessionStarted(_))
-                ) {
-                    return Ok(event.session_id);
-                }
+                )
+            {
+                return Ok(event.session_id);
             }
         }
     }

@@ -19,9 +19,10 @@ use astrcode_extension_sdk::{
     extension::{
         Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
         ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
-        ExtensionHttpRoute, ExtensionManifest, ExtensionPackageManifest, HookMode, HttpContext,
-        LifecycleEvent, LifecyclePayload, PreToolUsePayload, PreToolUseResult, Registrar,
-        RuntimeHookCallContext, RuntimeLifecycleContext, RuntimePreToolUseContext, StopReason,
+        ExtensionHttpRoute, ExtensionManifest, ExtensionPackageManifest, ExtensionStopContext,
+        HookMode, HttpContext, LifecycleEvent, LifecyclePayload, PreToolUsePayload,
+        PreToolUseResult, Registrar, RuntimeHookCallContext, RuntimeLifecycleContext,
+        RuntimePreToolUseContext, StopReason,
     },
 };
 use astrcode_extensions::{
@@ -179,7 +180,7 @@ async fn load_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<S5rExtens
     fs::create_dir_all(&ext_dir).unwrap();
     let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
         "extension_id": "s5r-guest-demo",
-        "protocol": { "s5r": "2.0" },
+        "protocol": { "s5r": "3.0" },
         "command": [guest.to_string_lossy()]
     }))
     .unwrap();
@@ -456,7 +457,7 @@ async fn s5r_workspace_read_via_host_invoke() {
     fs::create_dir_all(&ext_dir).unwrap();
     let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
         "extension_id": "s5r-guest-demo",
-        "protocol": { "s5r": "2.0" },
+        "protocol": { "s5r": "3.0" },
         "command": [guest.to_string_lossy()]
     }))
     .unwrap();
@@ -657,7 +658,10 @@ async fn s5r_turn_end_continuations_and_pipeline() {
         .await
         .unwrap();
 
-    assert_eq!(result.content, "step_1_calls=1 step_2_calls=1 llm_ok=true");
+    assert_eq!(
+        result.content,
+        "step_1_calls=1 step_2_calls=1 tool_calls=1 llm_ok=true"
+    );
 }
 
 #[tokio::test]
@@ -674,7 +678,7 @@ async fn s5r_loader_discovers_manifest() {
         ext_dir.join("extension.json"),
         serde_json::json!({
             "extension_id": "s5r-guest-demo",
-            "protocol": { "s5r": "2.0" },
+            "protocol": { "s5r": "3.0" },
             "command": [guest.to_string_lossy()]
         })
         .to_string(),
@@ -695,7 +699,7 @@ async fn s5r_load_rejects_package_and_handshake_id_mismatch() {
     let root = tempfile::tempdir().unwrap();
     let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
         "extension_id": "different-extension",
-        "protocol": { "s5r": "2.0" },
+        "protocol": { "s5r": "3.0" },
         "command": [guest.to_string_lossy()]
     }))
     .unwrap();
@@ -713,7 +717,9 @@ async fn s5r_load_rejects_package_and_handshake_id_mismatch() {
 #[tokio::test]
 async fn s5r_stop_shuts_down_process() {
     let ext = load_s5r(minimal_router()).await;
-    ext.stop(StopReason::Disabled).await.expect("stop");
+    ext.stop(ExtensionStopContext::from_runtime(StopReason::Disabled))
+        .await
+        .expect("stop");
     ext.health().await.expect_err("process should be gone");
 }
 
@@ -729,7 +735,9 @@ async fn s5r_cancel_on_stop_during_slow_tool() {
     });
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    ext.stop(StopReason::Disabled).await.expect("stop");
+    ext.stop(ExtensionStopContext::from_runtime(StopReason::Disabled))
+        .await
+        .expect("stop");
 
     let result = tokio::time::timeout(Duration::from_secs(5), slow_task)
         .await

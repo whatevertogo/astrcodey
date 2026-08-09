@@ -122,10 +122,10 @@ impl TurnScheduler {
                     break;
                 }
                 let active_turn = self.registry.active_turn_id(session_id);
-                if active_turn != shutdown_turn {
-                    if let Some(turn_id) = self.registry.request_shutdown(session_id) {
-                        shutdown_turn = Some(turn_id);
-                    }
+                if active_turn != shutdown_turn
+                    && let Some(turn_id) = self.registry.request_shutdown(session_id)
+                {
+                    shutdown_turn = Some(turn_id);
                 }
                 tokio::time::sleep(Duration::from_millis(ABORT_WAIT_POLL_MS)).await;
             }
@@ -519,18 +519,16 @@ impl TurnScheduler {
                 for (parent_session_id, child_session_id) in &tree.running_children {
                     if child_session_id == &node.session_id
                         && !tree.visited.contains(parent_session_id)
-                    {
-                        if let Err(relation_error) = self
+                        && let Err(relation_error) = self
                             .child_sessions
                             .record_child_deleted(parent_session_id, child_session_id)
                             .await
-                        {
-                            return Err(TurnScheduleError::DeleteRelationUpdateFailed {
-                                session_id: child_session_id.clone(),
-                                parent_session_id: parent_session_id.clone(),
-                                relation_error: relation_error.to_string(),
-                            });
-                        }
+                    {
+                        return Err(TurnScheduleError::DeleteRelationUpdateFailed {
+                            session_id: child_session_id.clone(),
+                            parent_session_id: parent_session_id.clone(),
+                            relation_error: relation_error.to_string(),
+                        });
                     }
                 }
             }

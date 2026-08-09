@@ -3,20 +3,20 @@ use std::{
     sync::{Arc, RwLock as StdRwLock},
 };
 
-use astrcode_core::{
-    event::EventSender, tool::SessionOperations, types::SessionId, wire::WireErrorCode,
-};
+use astrcode_core::{event::EventSender, tool::SessionOperations, types::SessionId};
+use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::{
         CustomEventDeclaration, ExtensionCallContext, ExtensionCapability, ExtensionError,
         ExtensionPaths, ExtensionTasks, RuntimeHookCallContext, internal::custom_event_emitter,
     },
     host::{
-        ExtensionHost, HostError, HostOperation,
+        ExtensionHost, HostError, HostLlmTextDelta, HostOperation, collect_model_stream_output,
         internal::{HostInvoker, HostScope, extension_host},
     },
-    s5r::{EventPhase, WireMessage},
+    model_stream::ModelStream,
 };
+use futures_util::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -25,7 +25,6 @@ use crate::host_router::{HostRouter, InvokeContext, decls_to_map};
 
 pub(crate) struct ExtensionCallContextInput {
     pub(crate) session_id: Option<SessionId>,
-    pub(crate) turn_id: Option<String>,
     pub(crate) tool_call_id: Option<String>,
     pub(crate) working_dir: Option<PathBuf>,
     pub(crate) session_store_dir: Option<PathBuf>,
@@ -38,7 +37,6 @@ impl ExtensionCallContextInput {
     pub(crate) fn unscoped(cancellation: CancellationToken) -> Self {
         Self {
             session_id: None,
-            turn_id: None,
             tool_call_id: None,
             working_dir: None,
             session_store_dir: None,
@@ -54,7 +52,6 @@ impl ExtensionCallContextInput {
     ) -> Self {
         Self {
             session_id: Some(runtime.session_id().clone()),
-            turn_id: runtime.turn_id().map(str::to_owned),
             tool_call_id: None,
             working_dir: Some(runtime.working_dir().to_path_buf()),
             session_store_dir: runtime
@@ -94,7 +91,6 @@ impl ExtensionCallContextFactory {
     ) -> ExtensionCallContext {
         let ExtensionCallContextInput {
             session_id,
-            turn_id,
             tool_call_id,
             working_dir,
             session_store_dir,
@@ -169,17 +165,7 @@ impl ExtensionCallContextFactory {
         );
         let events = custom_event_emitter(declarations.iter().cloned(), event_sink);
 
-        ExtensionCallContext::from_runtime(
-            extension_id,
-            session_id,
-            turn_id,
-            working_dir,
-            paths,
-            host,
-            events,
-            tasks,
-            cancellation,
-        )
+        ExtensionCallContext::from_runtime(extension_id, paths, host, events, tasks, cancellation)
     }
 }
 
@@ -286,34 +272,31 @@ impl HostInvoker for RouterHostInvoker {
         operation: HostOperation,
         input: Value,
     ) -> Result<Value, HostError> {
-        let events = self
+        let mut events = self
             .router
-            .invoke_stream(
-                operation.wire_name(),
-                input,
-                "bundled-collected-stream",
-                &self.invoke_context,
-            )
+            .invoke_event_stream(operation.wire_name(), input, &self.invoke_context)
             .await
             .map_err(HostError::from)?;
-        for message in events {
-            let WireMessage::Event(event) = message else {
-                continue;
-            };
-            match event.phase {
-                EventPhase::Completed => return Ok(event.output),
-                EventPhase::Failed => {
-                    return Err(event.error.map(HostError::from).unwrap_or_else(|| {
+        let mut chunks = Vec::new();
+        while let Some(event) = events.next().await {
+            match event {
+                astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
+                    content,
+                } => chunks.push(HostLlmTextDelta { delta: content }),
+                astrcode_extension_contract::protocol::ModelStreamEvent::Completed { output } => {
+                    let collected =
+                        collect_model_stream_output(&output, chunks).map_err(HostError::from)?;
+                    return serde_json::to_value(collected).map_err(|error| {
                         HostError::new(
-                            WireErrorCode::InvalidResponse,
-                            format!(
-                                "{} stream failed without an error payload",
-                                operation.wire_name()
-                            ),
+                            WireErrorCode::SerializationFailed,
+                            format!("serialize collected host stream: {error}"),
                         )
-                    }));
+                    });
                 },
-                EventPhase::Started | EventPhase::Delta => {},
+                astrcode_extension_contract::protocol::ModelStreamEvent::Failed { error } => {
+                    return Err(HostError::from(error));
+                },
+                _ => {},
             }
         }
         Err(HostError::new(
@@ -322,6 +305,22 @@ impl HostInvoker for RouterHostInvoker {
                 "{} stream ended without a terminal event",
                 operation.wire_name()
             ),
+        ))
+    }
+
+    async fn invoke_stream(
+        &self,
+        operation: HostOperation,
+        input: Value,
+    ) -> Result<ModelStream, HostError> {
+        let stream = self
+            .router
+            .invoke_event_stream(operation.wire_name(), input, &self.invoke_context)
+            .await
+            .map_err(HostError::from)?;
+        Ok(ModelStream::from_stream(
+            stream,
+            self.invoke_context.cancel_token.clone().unwrap_or_default(),
         ))
     }
 
@@ -339,10 +338,9 @@ pub(crate) fn transport_invoke_context(host: &ExtensionHost) -> Option<InvokeCon
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, time::Duration};
+    use std::time::Duration;
 
     use astrcode_core::llm::{LlmEvent, LlmMessage, LlmProvider, ModelLimits};
-    use astrcode_extension_sdk::host::HostLlmChatRequest;
 
     use super::*;
     use crate::host_router::HostBackends;
@@ -362,7 +360,6 @@ mod tests {
                 ExtensionTasks::new("review-extension"),
                 ExtensionCallContextInput {
                     session_id: Some(session_id.clone()),
-                    turn_id: Some("turn-1".into()),
                     tool_call_id: Some("call-1".into()),
                     working_dir: Some(PathBuf::from("/workspace")),
                     session_store_dir: Some(session_store_dir.clone()),
@@ -373,9 +370,6 @@ mod tests {
             );
 
         assert_eq!(context.extension_id(), "review-extension");
-        assert_eq!(context.session_id(), Some(&session_id));
-        assert_eq!(context.turn_id(), Some("turn-1"));
-        assert_eq!(context.working_dir(), Some(Path::new("/workspace")));
         let expected_global_dir =
             astrcode_core::config::defaults::astrcode_dir().join("extension_data/review-extension");
         assert_eq!(
@@ -450,8 +444,10 @@ mod tests {
                 ..Default::default()
             },
         };
-        let input =
-            serde_json::to_value(HostLlmChatRequest::new(vec![LlmMessage::user("hello")])).unwrap();
+        let input = serde_json::to_value(astrcode_extension_sdk::host::llm_chat_request(vec![
+            LlmMessage::user("hello"),
+        ]))
+        .unwrap();
 
         let result = tokio::time::timeout(
             Duration::from_millis(30),

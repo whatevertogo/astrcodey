@@ -34,25 +34,25 @@ mod tests {
     fn manifest_keeps_discovery_identity_separate_from_runtime_declarations() {
         let manifest: ExtensionPackageManifest = serde_json::from_value(serde_json::json!({
             "extension_id": "review-extension",
-            "protocol": { "s5r": "2.0" },
+            "protocol": { "s5r": "3.0" },
             "command": ["./review-extension", "serve"],
             "env": { "LOG_LEVEL": "info" }
         }))
         .expect("valid extension package manifest");
         assert_eq!(manifest.extension_id, "review-extension");
-        assert_eq!(manifest.protocol.s5r.as_deref(), Some("2.0"));
+        assert_eq!(manifest.protocol.s5r.as_deref(), Some("3.0"));
         assert_eq!(manifest.command, ["./review-extension", "serve"]);
         assert_eq!(manifest.env["LOG_LEVEL"], "info");
 
         for invalid in [
             serde_json::json!({
                 "extension_id": "review-extension",
-                "protocol": { "s5r": "2.0" },
+                "protocol": { "s5r": "3.0" },
                 "command": ["./review-extension"],
                 "capabilities": ["session_control"]
             }),
             serde_json::json!({
-                "protocol": { "s5r": "2.0" },
+                "protocol": { "s5r": "3.0" },
                 "command": ["./review-extension"]
             }),
         ] {

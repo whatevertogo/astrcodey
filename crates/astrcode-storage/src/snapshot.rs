@@ -64,10 +64,10 @@ impl SnapshotManager {
         };
         let content = serde_json::to_vec_pretty(&snapshot)?;
         tokio::fs::write(&temp_path, content).await?;
-        if let Err(e) = tokio::fs::remove_file(&path).await {
-            if e.kind() != std::io::ErrorKind::NotFound {
-                return Err(e.into());
-            }
+        if let Err(e) = tokio::fs::remove_file(&path).await
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(e.into());
         }
         tokio::fs::rename(&temp_path, &path).await?;
         self.prune_old_snapshots().await?;

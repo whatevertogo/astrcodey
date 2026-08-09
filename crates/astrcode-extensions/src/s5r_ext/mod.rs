@@ -1,6 +1,7 @@
-//! 磁盘 s5r 子进程扩展：stdio 长度前缀帧 + WireMessage。
+//! 磁盘 S5R 3.0 子进程扩展。
 
-mod session;
+mod session_support;
+mod v3_session;
 
 use std::{path::Path, sync::Arc};
 
@@ -9,20 +10,20 @@ use astrcode_extension_sdk::{
     extension::{
         CommandContext, CommandHandler, CompactContext, CompactHandler, CompactResult,
         ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopResult,
-        CustomEventContext, CustomEventDeclaration, CustomEventHandler, CustomEventSubscription,
-        Extension, ExtensionCall, ExtensionCallContext, ExtensionCapability,
-        ExtensionCommandResult, ExtensionError, ExtensionHttpHandler, ExtensionHttpResponse,
-        ExtensionPackageManifest, ExtensionStartContext, HookResult, HttpContext, LifecycleContext,
-        LifecycleEvent, LifecycleHandler, PostToolUseContext, PostToolUseHandler,
-        PostToolUseResult, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
-        PromptBuildContext, PromptBuildHandler, PromptContributions, ProviderContext,
-        ProviderHandler, ProviderResult, Registrar, SlashCommand, StopReason, ToolContext,
-        ToolHandler,
+        CustomEventContext, CustomEventDeclaration, CustomEventDisposition, CustomEventHandler,
+        CustomEventSubscription, Extension, ExtensionCall, ExtensionCallContext,
+        ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionHttpHandler,
+        ExtensionHttpResponse, ExtensionPackageManifest, ExtensionStartContext,
+        ExtensionStopContext, HookResult, HttpContext, LifecycleContext, LifecycleEvent,
+        LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
+        PreToolUseContext, PreToolUseHandler, PreToolUseResult, PromptBuildContext,
+        PromptBuildHandler, PromptContributions, ProviderContext, ProviderHandler, ProviderResult,
+        Registrar, SlashCommand, ToolContext, ToolHandler,
     },
     s5r::effects::HandlerResult,
     tool::{ExecutionMode, ToolDefinition},
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
     extension_manifest::{ExtensionRegistration, HookSubscription, RegisteredHttpRoute},
@@ -33,7 +34,7 @@ use crate::{
         parse_pre_tool_use_result, parse_prompt_build_result, parse_provider_result,
         parse_tool_result,
     },
-    s5r_ext::session::S5rSession,
+    s5r_ext::v3_session::S5rV3Session as S5rSession,
 };
 
 pub struct S5rExtension {
@@ -298,7 +299,7 @@ impl Extension for S5rExtension {
         Ok(())
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         self.session.shutdown().await;
         Ok(())
     }
@@ -396,17 +397,8 @@ impl ToolHandler for S5rToolHandler {
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let tool_name = ctx.tool_name().to_owned();
         let arguments = ctx.raw_arguments().clone();
-        let session_id = ctx
-            .session_id()
-            .ok_or_else(|| ExtensionError::Internal("s5r tool requires a session id".into()))?
-            .to_string();
-        let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| {
-                ExtensionError::Internal("s5r tool requires a working directory".into())
-            })?
-            .to_string_lossy()
-            .into_owned();
+        let session_id = ctx.session_id().to_string();
+        let working_dir = ctx.working_dir().to_string_lossy().into_owned();
         let tool_call_id = ctx.call_id().map(str::to_owned);
         let turn_id = ctx.turn_id().map(str::to_owned);
         let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
@@ -446,8 +438,8 @@ impl CommandHandler for S5rCommandHandler {
             "input": {
                 "command_name": ctx.command_name(),
                 "arguments": ctx.argument(),
-                "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
-                "session_id": ctx.session_id().map(ToString::to_string),
+                "working_dir": ctx.working_dir().display().to_string(),
+                "session_id": ctx.session_id().to_string(),
                 "model": ctx.model(),
             }
         });
@@ -466,8 +458,8 @@ s5r_hook_handler!(
     PreToolUseContext,
     PreToolUseResult,
     |ctx| json!({
-        "session_id": ctx.session_id().map(ToString::to_string),
-        "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+        "session_id": ctx.session_id().to_string(),
+        "working_dir": ctx.working_dir().display().to_string(),
         "model": ctx.model(),
         "call_id": ctx.call_id(),
         "tool_name": ctx.tool_name(),
@@ -483,8 +475,8 @@ s5r_hook_handler!(
     PostToolUseContext,
     PostToolUseResult,
     |ctx| json!({
-        "session_id": ctx.session_id().map(ToString::to_string),
-        "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+        "session_id": ctx.session_id().to_string(),
+        "working_dir": ctx.working_dir().display().to_string(),
         "model": ctx.model(),
         "call_id": ctx.call_id(),
         "tool_name": ctx.tool_name(),
@@ -501,8 +493,8 @@ s5r_hook_handler!(
     ProviderContext,
     ProviderResult,
     |ctx| json!({
-        "session_id": ctx.session_id().map(ToString::to_string),
-        "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+        "session_id": ctx.session_id().to_string(),
+        "working_dir": ctx.working_dir().display().to_string(),
         "model": ctx.model(),
         "messages": ctx.messages(),
     }),
@@ -515,8 +507,8 @@ s5r_hook_handler!(
     ContinueAfterStopContext,
     ContinueAfterStopResult,
     |ctx| json!({
-        "session_id": ctx.session_id().map(ToString::to_string),
-        "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+        "session_id": ctx.session_id().to_string(),
+        "working_dir": ctx.working_dir().display().to_string(),
         "model": ctx.model(),
         "assistant_text": ctx.assistant_text(),
         "finish_reason": ctx.finish_reason(),
@@ -531,8 +523,8 @@ s5r_hook_handler!(
     PromptBuildContext,
     PromptContributions,
     |ctx| json!({
-        "session_id": ctx.session_id().map(ToString::to_string),
-        "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+        "session_id": ctx.session_id().to_string(),
+        "working_dir": ctx.working_dir().display().to_string(),
         "model": ctx.model(),
     }),
     parse_prompt_build_result
@@ -544,8 +536,8 @@ s5r_hook_handler!(
     CompactContext,
     CompactResult,
     |ctx| json!({
-        "session_id": ctx.session_id().map(ToString::to_string),
-        "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+        "session_id": ctx.session_id().to_string(),
+        "working_dir": ctx.working_dir().display().to_string(),
         "model": ctx.model(),
         "trigger": ctx.trigger(),
         "message_count": ctx.message_count(),
@@ -562,8 +554,8 @@ s5r_hook_handler!(
     LifecycleContext,
     HookResult,
     |ctx| json!({
-        "session_id": ctx.session_id().map(ToString::to_string),
-        "working_dir": ctx.working_dir().map(|path| path.display().to_string()),
+        "session_id": ctx.session_id().to_string(),
+        "working_dir": ctx.working_dir().display().to_string(),
         "model": ctx.model(),
         "mid_turn_user_messages_synced": ctx.mid_turn_user_messages_synced(),
     }),
@@ -578,7 +570,10 @@ struct S5rCustomEventHandler {
 
 #[async_trait::async_trait]
 impl CustomEventHandler for S5rCustomEventHandler {
-    async fn handle(&self, ctx: CustomEventContext) -> Result<(), ExtensionError> {
+    async fn handle(
+        &self,
+        ctx: CustomEventContext,
+    ) -> Result<CustomEventDisposition, ExtensionError> {
         let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
         let handler = handler_id(&self.ext_id, "event", &self.subscription_id);
         let result = self
@@ -604,14 +599,26 @@ impl CustomEventHandler for S5rCustomEventHandler {
                 ExecutionMode::Sequential,
             )
             .await?;
-        if result.ok {
-            Ok(())
-        } else {
-            Err(ExtensionError::Internal(
+        if !result.ok {
+            return Err(ExtensionError::Internal(
                 result
                     .error
                     .unwrap_or_else(|| "custom event handler failed".into()),
-            ))
+            ));
+        }
+        let reason = || {
+            result
+                .data
+                .as_ref()
+                .and_then(|data| data.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("custom event handler requested redelivery")
+                .to_owned()
+        };
+        match result.effect_name() {
+            "custom_event_retry" => Ok(CustomEventDisposition::retry(reason())),
+            "custom_event_dead_letter" => Ok(CustomEventDisposition::dead_letter(reason())),
+            _ => Ok(CustomEventDisposition::Ack),
         }
     }
 }

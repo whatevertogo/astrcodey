@@ -5,7 +5,8 @@ use std::{
     time::Duration,
 };
 
-use astrcode_extension_sdk::{WireErrorCode,
+use astrcode_extension_sdk::{
+    WireErrorCode,
     builder::tool,
     extension::{
         CustomEventDeclaration, ExtensionHttpDispatchRequest, ExtensionHttpMethod,
@@ -16,13 +17,15 @@ use astrcode_extension_sdk::{WireErrorCode,
         effects::{CallContinuation, HandlerResult},
     },
     tool::ExecutionMode,
-    worker_prelude::*,
 };
+use astrcode_extension_worker::worker_prelude::*;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 static PIPELINE_STEP_1_CALLS: AtomicU32 = AtomicU32::new(0);
 static PIPELINE_STEP_2_CALLS: AtomicU32 = AtomicU32::new(0);
+static PIPELINE_TOOL_CALLS: AtomicU32 = AtomicU32::new(0);
 static PIPELINE_LLM_OK: AtomicBool = AtomicBool::new(false);
 static PARALLEL_ACTIVE: AtomicU32 = AtomicU32::new(0);
 static PARALLEL_PEAK: AtomicU32 = AtomicU32::new(0);
@@ -123,9 +126,7 @@ async fn run() -> Result<(), ErrorPayload> {
                     "session_id": ctx.session_id(),
                     "turn_id": ctx.turn_id(),
                     "tool_call_id": ctx.tool_call_id(),
-                    "working_dir": ctx
-                        .working_dir()
-                        .map(|path| path.to_string_lossy().into_owned()),
+                    "working_dir": ctx.working_dir().to_string_lossy(),
                 })
                 .to_string(),
                 false,
@@ -160,13 +161,12 @@ async fn run() -> Result<(), ErrorPayload> {
     worker.http_route(
         ExtensionHttpRoute::public(ExtensionHttpMethod::Post, "/s5r-probe/{id}"),
         http_handler(|request, _ctx| async move {
-            let status = if request.path_params.get("id").map(String::as_str)
-                == Some("invalid-status")
-            {
-                99
-            } else {
-                202
-            };
+            let status =
+                if request.path_params.get("id").map(String::as_str) == Some("invalid-status") {
+                    99
+                } else {
+                    202
+                };
             Ok(ExtensionHttpResponse::json(
                 status,
                 json!({
@@ -230,6 +230,19 @@ async fn run() -> Result<(), ErrorPayload> {
     )?;
 
     worker.tool(
+        tool("pipeline_tool_step")
+            .description("Pipeline tool continuation probe")
+            .parameters(json!({ "type": "object" }))
+            .build(),
+        tool_handler(|ctx| async move {
+            assert_eq!(ctx.session_id(), "e2e-session");
+            assert_eq!(ctx.working_dir(), std::path::Path::new("/tmp"));
+            PIPELINE_TOOL_CALLS.fetch_add(1, Ordering::SeqCst);
+            Ok(tool_text("pipeline tool complete", false))
+        }),
+    )?;
+
+    worker.tool(
         tool("pipeline_status")
             .description("Pipeline status")
             .parameters(json!({ "type": "object" }))
@@ -237,9 +250,13 @@ async fn run() -> Result<(), ErrorPayload> {
         tool_handler(|_ctx| async move {
             let step_1_calls = PIPELINE_STEP_1_CALLS.load(Ordering::SeqCst);
             let step_2_calls = PIPELINE_STEP_2_CALLS.load(Ordering::SeqCst);
+            let tool_calls = PIPELINE_TOOL_CALLS.load(Ordering::SeqCst);
             let llm_ok = PIPELINE_LLM_OK.load(Ordering::SeqCst);
             Ok(tool_text(
-                format!("step_1_calls={step_1_calls} step_2_calls={step_2_calls} llm_ok={llm_ok}"),
+                format!(
+                    "step_1_calls={step_1_calls} step_2_calls={step_2_calls} \
+                     tool_calls={tool_calls} llm_ok={llm_ok}"
+                ),
                 false,
             ))
         }),
@@ -311,7 +328,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(json!({ "type": "object" }))
             .build(),
         tool_handler(|_ctx| async move {
-            let forged = astrcode_extension_sdk::worker::testing::invoke_host(
+            let forged = astrcode_extension_worker::worker::testing::invoke_host(
                 "astrcode.extension.http.public",
                 json!({
                     "method": "POST",
@@ -416,7 +433,7 @@ async fn run() -> Result<(), ErrorPayload> {
 
     worker.continuation_hook_handler(
         "pipeline_step",
-        hook_handler_args(|input: PipelineStepInput, _ctx| async move {
+        continuation_handler_args(|input: PipelineStepInput, _ctx| async move {
             match input.step {
                 1 => {
                     PIPELINE_STEP_1_CALLS.fetch_add(1, Ordering::SeqCst);
@@ -433,11 +450,48 @@ async fn run() -> Result<(), ErrorPayload> {
                 },
                 2 => {
                     PIPELINE_STEP_2_CALLS.fetch_add(1, Ordering::SeqCst);
-                    let _ = HostClient::models()
-                        .small_chat_stream(vec![LlmMessage::user("continuation pipeline")])
+                    let mut stream = HostClient::models()
+                        .small_chat_events(vec![LlmMessage::user("continuation pipeline")])
                         .await?;
+                    let mut saw_started = false;
+                    let mut content = String::new();
+                    let mut completed = false;
+                    while let Some(event) = stream.next().await {
+                        match event {
+                            ModelStreamEvent::Started => saw_started = true,
+                            ModelStreamEvent::ContentDelta { content: delta } => {
+                                content.push_str(&delta);
+                            },
+                            ModelStreamEvent::Completed { .. } => completed = true,
+                            ModelStreamEvent::Failed { error } => {
+                                return Err(ErrorPayload {
+                                    code: error.code,
+                                    message: error.message,
+                                    hint: error.hint,
+                                    retryable: error.retryable,
+                                    details: error.details,
+                                });
+                            },
+                            _ => {},
+                        }
+                    }
+                    if !saw_started || content != "mock-llm-response" || !completed {
+                        return Err(ErrorPayload::new(
+                            WireErrorCode::InvalidResponse,
+                            "incremental model stream did not preserve event order",
+                        ));
+                    }
                     PIPELINE_LLM_OK.store(true, Ordering::SeqCst);
-                    Ok(HandlerResult::ok())
+                    Ok(HandlerResult {
+                        ok: true,
+                        effect: Some("ok".into()),
+                        data: None,
+                        error: None,
+                        continuations: vec![CallContinuation::Tool {
+                            name: "pipeline_tool_step".into(),
+                            input: json!({}),
+                        }],
+                    })
                 },
                 _ => Err(ErrorPayload::new(
                     WireErrorCode::InvalidRequest,

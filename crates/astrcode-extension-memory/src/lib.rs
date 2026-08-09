@@ -23,7 +23,8 @@ use astrcode_extension_sdk::{
     builder::{custom_event, manifest},
     extension::{
         Extension, ExtensionCall, ExtensionCapability, ExtensionConfig, ExtensionError,
-        ExtensionManifest, ExtensionStartContext, HookMode, LifecycleEvent, Registrar, StopReason,
+        ExtensionManifest, ExtensionStartContext, ExtensionStopContext, HookMode, LifecycleEvent,
+        Registrar,
     },
 };
 use handlers::{
@@ -101,7 +102,7 @@ impl Extension for MemoryExtension {
         Ok(())
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         self.pipeline.reset();
         self.session_prefs.reset();
         self.project_recall_buffer.reset();

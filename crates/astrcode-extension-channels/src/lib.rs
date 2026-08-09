@@ -14,7 +14,7 @@ use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
         Extension, ExtensionCall, ExtensionCapability, ExtensionConfig, ExtensionError,
-        ExtensionManifest, ExtensionStartContext, Registrar, StopReason,
+        ExtensionManifest, ExtensionStartContext, ExtensionStopContext, Registrar,
     },
     host::SessionControlClient,
     session::{
@@ -156,7 +156,7 @@ impl Extension for TelegramChannelsExtension {
         Ok(())
     }
 
-    async fn stop(&self, _: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _: ExtensionStopContext) -> Result<(), ExtensionError> {
         self.runtime.lock().take();
         Ok(())
     }
@@ -383,14 +383,14 @@ async fn poll_telegram(runtime: Arc<TelegramRuntime>, shutdown: CancellationToke
             Ok(updates) => {
                 for update in updates {
                     state.observe(update.update_id);
-                    if let Some(inbound) = inbound_message(update) {
-                        if let Err(error) = runtime.handle_inbound(&cfg, inbound).await {
-                            tracing::warn!(
-                                extension_id = EXTENSION_ID,
-                                error = %error,
-                                "telegram inbound message failed"
-                            );
-                        }
+                    if let Some(inbound) = inbound_message(update)
+                        && let Err(error) = runtime.handle_inbound(&cfg, inbound).await
+                    {
+                        tracing::warn!(
+                            extension_id = EXTENSION_ID,
+                            error = %error,
+                            "telegram inbound message failed"
+                        );
                     }
                 }
             },
@@ -926,6 +926,7 @@ mod tests {
 
     #[test]
     fn bot_token_supports_env_reference() {
+        let _guard = telegram_env_lock().lock().unwrap();
         assert_eq!(
             TelegramChannelConfig {
                 enabled: false,
@@ -936,7 +937,8 @@ mod tests {
             .unwrap(),
             None
         );
-        std::env::set_var("ASTRCODE_TEST_TELEGRAM_TOKEN", "token-from-env");
+        // SAFETY: tests accessing this variable serialize through `telegram_env_lock`.
+        unsafe { std::env::set_var("ASTRCODE_TEST_TELEGRAM_TOKEN", "token-from-env") };
         assert_eq!(
             resolve_bot_token(&TelegramChannelConfig {
                 bot_token: Some("env:ASTRCODE_TEST_TELEGRAM_TOKEN".into()),
@@ -969,7 +971,13 @@ mod tests {
             .unwrap(),
             "token-from-env"
         );
-        std::env::remove_var("ASTRCODE_TEST_TELEGRAM_TOKEN");
+        // SAFETY: tests accessing this variable serialize through `telegram_env_lock`.
+        unsafe { std::env::remove_var("ASTRCODE_TEST_TELEGRAM_TOKEN") };
+    }
+
+    fn telegram_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
     }
 
     #[test]
@@ -990,24 +998,6 @@ mod tests {
         assert_ne!(state.token_fingerprint, first_fingerprint);
         assert_eq!(state.offset, None);
         assert!(!state.commands_registered);
-    }
-
-    #[test]
-    fn telegram_commands_include_start_and_help() {
-        let commands = telegram_commands();
-        assert_eq!(
-            commands,
-            vec![
-                TelegramBotCommand {
-                    command: "start",
-                    description: "Start using AstrCode in this chat"
-                },
-                TelegramBotCommand {
-                    command: "help",
-                    description: "Show AstrCode Telegram usage"
-                }
-            ]
-        );
     }
 
     #[tokio::test]

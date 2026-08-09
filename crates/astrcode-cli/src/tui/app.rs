@@ -376,18 +376,18 @@ impl App {
     }
 
     pub fn session_picker_up(&mut self) {
-        if let Some(picker) = &mut self.session_picker {
-            if picker.selected > 0 {
-                picker.selected -= 1;
-            }
+        if let Some(picker) = &mut self.session_picker
+            && picker.selected > 0
+        {
+            picker.selected -= 1;
         }
     }
 
     pub fn session_picker_down(&mut self) {
-        if let Some(picker) = &mut self.session_picker {
-            if picker.selected + 1 < picker.items.len() {
-                picker.selected += 1;
-            }
+        if let Some(picker) = &mut self.session_picker
+            && picker.selected + 1 < picker.items.len()
+        {
+            picker.selected += 1;
         }
     }
 
@@ -414,18 +414,18 @@ impl App {
     }
 
     pub fn ui_picker_up(&mut self) {
-        if let Some(picker) = &mut self.ui_picker {
-            if picker.selected > 0 {
-                picker.selected -= 1;
-            }
+        if let Some(picker) = &mut self.ui_picker
+            && picker.selected > 0
+        {
+            picker.selected -= 1;
         }
     }
 
     pub fn ui_picker_down(&mut self) {
-        if let Some(picker) = &mut self.ui_picker {
-            if picker.selected + 1 < picker.items.len() {
-                picker.selected += 1;
-            }
+        if let Some(picker) = &mut self.ui_picker
+            && picker.selected + 1 < picker.items.len()
+        {
+            picker.selected += 1;
         }
     }
 

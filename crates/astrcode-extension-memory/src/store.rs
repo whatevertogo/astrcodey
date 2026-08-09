@@ -345,10 +345,10 @@ impl MemoryStore {
     /// 返回 MEMORY.md 中 `user_pref` 类别的前 `limit` 条。
     fn global_preference_lines(&self, limit: usize) -> std::io::Result<Vec<String>> {
         let mtime = self.memory_file_mtime()?;
-        if let Some(cache) = self.preference_lines_cache.lock().as_ref() {
-            if cache.memory_mtime == mtime {
-                return Ok(cache.lines.iter().take(limit).cloned().collect());
-            }
+        if let Some(cache) = self.preference_lines_cache.lock().as_ref()
+            && cache.memory_mtime == mtime
+        {
+            return Ok(cache.lines.iter().take(limit).cloned().collect());
         }
 
         let parsed = self.read_parsed()?;

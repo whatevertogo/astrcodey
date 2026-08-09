@@ -68,8 +68,13 @@ The runner rejects privileged registrations that omit their capability:
 | Command discovery | `command_discovery(handler)` | `CommandDiscoveryContext` | `resolve_commands_for_typed` | Contributes complete command/handler aggregates for one workspace/generation pass. |
 
 Lifecycle registration has one name: `on_lifecycle`. Custom-event declaration and emission are a
-separate family (`declare_custom_event` and `ctx.events()`), so lifecycle callbacks cannot be confused with
-extension-authored events.
+separate family (`declare_custom_event` and `ctx.events()`), so lifecycle callbacks cannot be
+confused with extension-authored events.
+
+`Advisory` remains inside the current lifecycle boundary: the host awaits it in priority order but
+records rather than propagates its failure. `NonBlocking` runs in a host-managed extension task.
+Custom-event subscriptions are not substitutes for either mode; they are decoupled data delivery
+with their own durability, checkpoint, retry, and payload contract.
 
 ## Decision Hooks
 

@@ -267,17 +267,17 @@ async fn execute_tool_call_blocking(
         },
     };
     drop(tool_ctx);
-    if let Some(sender) = turn.shared.turn_event_sender.as_ref() {
-        if let Err(error) = sender.flush().await {
-            // flush 只确认本调用入队的 live 事件已处理完毕，失败不代表工具结果丢失；
-            // 用 ingress 错误覆盖 outcome 会把成功的工具执行伪装成失败。
-            tracing::warn!(
-                tool_name,
-                call_id,
-                error = %error,
-                "failed to flush tool events after execution; keeping tool outcome"
-            );
-        }
+    if let Some(sender) = turn.shared.turn_event_sender.as_ref()
+        && let Err(error) = sender.flush().await
+    {
+        // flush 只确认本调用入队的 live 事件已处理完毕，失败不代表工具结果丢失；
+        // 用 ingress 错误覆盖 outcome 会把成功的工具执行伪装成失败。
+        tracing::warn!(
+            tool_name,
+            call_id,
+            error = %error,
+            "failed to flush tool events after execution; keeping tool outcome"
+        );
     }
 
     match &outcome {

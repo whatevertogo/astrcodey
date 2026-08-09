@@ -147,12 +147,11 @@ impl InstanceCoordinator {
         let deadline = std::time::Instant::now() + ACTIVATION_TIMEOUT;
 
         loop {
-            if let Ok(raw) = fs::read_to_string(&info_path) {
-                if let Ok(info) = serde_json::from_str::<InstanceInfo>(&raw) {
-                    if send_focus_request(&info).is_ok() {
-                        return Ok(());
-                    }
-                }
+            if let Ok(raw) = fs::read_to_string(&info_path)
+                && let Ok(info) = serde_json::from_str::<InstanceInfo>(&raw)
+                && send_focus_request(&info).is_ok()
+            {
+                return Ok(());
             }
 
             if std::time::Instant::now() >= deadline {
@@ -179,12 +178,11 @@ impl InstanceCoordinator {
     pub fn shutdown(&self) {
         self.listener_shutdown.store(true, Ordering::SeqCst);
 
-        if let Ok(raw) = fs::read_to_string(&self.info_path) {
-            if let Ok(info) = serde_json::from_str::<InstanceInfo>(&raw) {
-                if info.pid == std::process::id() {
-                    let _ = fs::remove_file(&self.info_path);
-                }
-            }
+        if let Ok(raw) = fs::read_to_string(&self.info_path)
+            && let Ok(info) = serde_json::from_str::<InstanceInfo>(&raw)
+            && info.pid == std::process::id()
+        {
+            let _ = fs::remove_file(&self.info_path);
         }
     }
 

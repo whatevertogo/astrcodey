@@ -1,6 +1,6 @@
 use astrcode_extension_sdk::{extension::*, tool::ToolDefinition};
 
-use super::ExtensionRunner;
+use super::{ExtensionRunner, supervisor::SupervisorState};
 
 #[derive(Debug, Clone, Default)]
 pub struct ExtensionRegistrySnapshot {
@@ -10,6 +10,8 @@ pub struct ExtensionRegistrySnapshot {
 #[derive(Debug, Clone)]
 pub struct ExtensionDeclarationSnapshot {
     pub id: String,
+    pub generation: u64,
+    pub runtime_state: ExtensionRuntimeState,
     pub capabilities: Vec<ExtensionCapability>,
     pub tools: Vec<ToolDefinition>,
     pub dynamic_tools: bool,
@@ -20,6 +22,27 @@ pub struct ExtensionDeclarationSnapshot {
     pub custom_events: Vec<CustomEventDeclaration>,
     pub custom_event_subscriptions: Vec<CustomEventSubscription>,
     pub http_routes: Vec<ExtensionHttpRoute>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtensionRuntimeState {
+    Initializing,
+    Ready,
+    Draining,
+    Failed,
+    Stopped,
+}
+
+impl From<&SupervisorState> for ExtensionRuntimeState {
+    fn from(state: &SupervisorState) -> Self {
+        match state {
+            SupervisorState::Initializing => Self::Initializing,
+            SupervisorState::Ready => Self::Ready,
+            SupervisorState::Draining => Self::Draining,
+            SupervisorState::Failed(_) => Self::Failed,
+            SupervisorState::Stopped => Self::Stopped,
+        }
+    }
 }
 
 impl ExtensionRunner {
@@ -36,8 +59,11 @@ impl ExtensionRunner {
                 .map(|hosted| {
                     let manifest = &hosted.manifest;
                     let registrations = &manifest.registrations;
+                    let runtime = hosted.supervisor.admission().snapshot();
                     ExtensionDeclarationSnapshot {
                         id: manifest.id().to_owned(),
+                        generation: runtime.generation,
+                        runtime_state: (&runtime.state).into(),
                         capabilities: manifest.capabilities().to_vec(),
                         tools: registrations
                             .tools()

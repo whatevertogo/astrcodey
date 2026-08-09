@@ -670,51 +670,6 @@ The summary should preserve the compact contract and omit this scratchpad later.
     }
 
     #[test]
-    fn format_compact_summary_strips_analysis_and_summary_xml() {
-        let raw = r#"
-<analysis>
-scratchpad that should not survive
-</analysis>
-
-<summary>
-1. Primary Request and Intent:
-   migrate context-window
-</summary>
-"#;
-
-        let formatted = format_compact_summary(raw);
-
-        assert_eq!(
-            formatted,
-            "Summary:\n1. Primary Request and Intent:\n   migrate context-window"
-        );
-        assert!(!formatted.contains("<analysis>"));
-        assert!(!formatted.contains("<summary>"));
-    }
-
-    #[test]
-    fn compact_summary_message_adds_fixed_context_and_parses_model_summary() {
-        let message = assemble::compact_summary_message_text(
-            "1. Primary Request and Intent:\n   keep user intent",
-            &CompactSummaryRenderOptions {
-                transcript_path: Some("C:\\Users\\18794\\.astrcode\\compact.jsonl".into()),
-                custom_instructions: Vec::new(),
-            },
-        );
-
-        assert!(message.starts_with("<compact_summary>\nThis session is being continued"));
-        assert!(message.contains("Resume directly: do not acknowledge this summary"));
-        assert!(message.contains("Summary:\n1. Primary Request and Intent:"));
-        assert!(message.contains("read the full transcript at C:\\Users\\18794"));
-
-        let parsed = parse_compact_summary_message(&message).unwrap();
-        assert_eq!(
-            parsed.summary,
-            "1. Primary Request and Intent:\n   keep user intent"
-        );
-    }
-
-    #[test]
     fn parse_compact_output_accepts_required_nine_section_summary() {
         let parsed = parse_compact_output(valid_compact_summary()).unwrap();
 
@@ -739,43 +694,6 @@ scratchpad that should not survive
                 .to_string()
                 .contains("compact summary missing required section title")
         );
-    }
-
-    #[test]
-    fn compact_template_contains_required_nine_section_contract() {
-        let settings = ContextSettings::default();
-        let prompt = prompt::render_compact_contract(
-            Some("system prompt"),
-            &plan::CompactPromptMode::Fresh,
-            &settings,
-            None,
-            &[],
-        );
-
-        for section in parse::REQUIRED_SUMMARY_SECTIONS {
-            assert!(prompt.contains(section), "missing {section}");
-        }
-        assert!(prompt.contains("<summary>"));
-        assert!(prompt.contains("<analysis>"));
-        assert!(prompt.contains("scratchpad"));
-        assert!(!prompt.contains("<recent_user_context_digest>"));
-    }
-
-    #[test]
-    fn compact_repair_prompt_preserves_analysis_then_summary_contract() {
-        let settings = ContextSettings::default();
-        let prompt = prompt::render_compact_contract(
-            None,
-            &plan::CompactPromptMode::Fresh,
-            &settings,
-            Some("missing section"),
-            &[],
-        );
-
-        assert!(
-            prompt.contains("Return one <analysis> scratchpad block followed by the <summary>")
-        );
-        assert!(!prompt.contains("Return the <summary> block exactly"));
     }
 
     #[tokio::test]

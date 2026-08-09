@@ -8,8 +8,9 @@ use tempfile::tempdir;
 
 use super::{FileSystemSessionRepository, event_consumer_state_path};
 use crate::{
-    EventConsumerCheckpointOutcome, EventConsumerCheckpointReset, EventReader, SessionEventJournal,
-    SessionReader, SessionStore, StorageError, ToolResultArtifactInput, ToolResultArtifactStore,
+    EventConsumerCheckpointOutcome, EventConsumerCheckpointReset, EventConsumerFailureOutcome,
+    EventReader, SessionEventJournal, SessionReader, SessionStore, StorageError,
+    ToolResultArtifactInput, ToolResultArtifactStore,
     test_support::{started_event, user_event},
 };
 
@@ -86,6 +87,64 @@ async fn event_consumer_state_persists_pause_and_rejects_stale_checkpoints() {
         .unwrap();
     assert_eq!(latest.checkpoint, Some(1));
     assert_eq!(latest.revision, 2);
+}
+
+#[tokio::test]
+async fn event_consumer_quarantines_once_at_the_failure_limit_and_persists_the_audit() {
+    let dir = tempdir().unwrap();
+    let session_id = SessionId::new("event-consumer-quarantine");
+    let repo = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    repo.create_session(started_event(&session_id))
+        .await
+        .unwrap();
+    repo.append_event(user_event(&session_id, "event"))
+        .await
+        .unwrap();
+
+    for attempt in 1..=20 {
+        let outcome = repo
+            .record_event_consumer_failure(
+                &session_id,
+                "extension:subscription:v1",
+                0,
+                1,
+                "injected failure",
+                20,
+            )
+            .await
+            .unwrap();
+        let expected = if attempt == 20 {
+            EventConsumerFailureOutcome::Quarantined { attempts: 20 }
+        } else {
+            EventConsumerFailureOutcome::Recorded { attempts: attempt }
+        };
+        assert_eq!(outcome, expected);
+    }
+    assert_eq!(
+        repo.record_event_consumer_failure(
+            &session_id,
+            "extension:subscription:v1",
+            0,
+            1,
+            "injected failure",
+            20,
+        )
+        .await
+        .unwrap(),
+        EventConsumerFailureOutcome::AlreadyConsumed
+    );
+    drop(repo);
+
+    let reopened = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    let state = reopened
+        .event_consumer_state(&session_id, "extension:subscription:v1")
+        .await
+        .unwrap();
+    assert_eq!(state.checkpoint, Some(1));
+    assert_eq!(state.consecutive_failures, 0);
+    assert_eq!(state.quarantined.len(), 1);
+    assert_eq!(state.quarantined[0].attempts, 20);
+    assert_eq!(state.quarantined[0].last_error, "injected failure");
 }
 
 #[tokio::test]

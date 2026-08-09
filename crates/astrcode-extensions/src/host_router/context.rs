@@ -3,8 +3,10 @@
 use std::io::Read as _;
 
 use astrcode_core::{
-    config::defaults::extension_data_dir, event::EventSendError, wire::WireErrorCode,
+    config::defaults::extension_data_dir,
+    event::{EventDeliveryReceipt, EventSendError},
 };
+use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::ExtensionError,
     host::{
@@ -126,7 +128,16 @@ async fn emit_event(
     )
     .await
     .map_err(event_emit_error)?;
-    Ok(HostEventEmitOutput::from(receipt))
+    Ok(match receipt {
+        EventDeliveryReceipt::Accepted => HostEventEmitOutput::Accepted,
+        EventDeliveryReceipt::LivePublished { event_id } => HostEventEmitOutput::LivePublished {
+            event_id: event_id.into_string(),
+        },
+        EventDeliveryReceipt::Persisted { event_id, seq } => HostEventEmitOutput::Persisted {
+            event_id: event_id.into_string(),
+            seq,
+        },
+    })
 }
 
 fn event_emit_error(error: ExtensionError) -> ErrorPayload {

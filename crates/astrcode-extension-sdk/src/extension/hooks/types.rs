@@ -13,11 +13,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HookMode {
-    /// 同步执行，可以阻止操作。
+    /// 宿主等待执行完成，handler 结果可以影响当前流程。
     Blocking,
-    /// 异步执行（即发即弃），不能阻止操作。
+    /// 宿主将执行交给受生命周期管理的后台任务，不等待 handler 完成。
     NonBlocking,
-    /// 执行但结果仅供参考。
+    /// 宿主等待执行完成，但忽略 handler 的控制流结果并记录错误。
     Advisory,
 }
 
@@ -149,6 +149,8 @@ pub enum ExtensionError {
     NotFound(String),
     #[error("Hook timed out after {0}ms")]
     Timeout(u64),
+    #[error("extension {extension_id} is draining")]
+    Draining { extension_id: String },
     #[error("blocked by hook: {reason}")]
     Blocked { reason: String },
     #[error("extension {extension_id} registered {hook} without declaring {capability:?}")]

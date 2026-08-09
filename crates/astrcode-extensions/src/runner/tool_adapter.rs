@@ -62,7 +62,11 @@ impl ExtensionView {
             );
             let discovered = match call {
                 Ok(call) => {
-                    let ctx = ToolDiscoveryContext::from_runtime(call, self.generation());
+                    let ctx = ToolDiscoveryContext::from_runtime(
+                        call,
+                        PathBuf::from(working_dir),
+                        self.generation(),
+                    );
                     self.run_recorded_hook(
                         ext_id,
                         "tool_discovery",
@@ -292,20 +296,43 @@ impl Tool for HandlerTool {
             )
             .into());
         };
+        let Some(admission) = active_index.extension_admission.get(&self.extension_id) else {
+            return Ok(extension_error_result(
+                &self.definition.name,
+                &self.extension_id,
+                ExtensionError::NotFound("extension generation gate is unavailable".into()),
+            )
+            .into());
+        };
+        let draining = admission.draining_token();
+        let _admission = match admission.acquire().await {
+            Ok(permit) => permit,
+            Err(error) => {
+                return Ok(extension_error_result(
+                    &self.definition.name,
+                    &self.extension_id,
+                    error,
+                )
+                .into());
+            },
+        };
+        let call_cancellation = ctx.cancellation().child_token();
+        let session_id = ctx.scope.session_id.clone();
+        let turn_id = ctx.turn_id().map(ToString::to_string);
+        let working_dir = PathBuf::from(&self.working_dir);
         let call = self.call_context_factory.make_extension_call_context(
             &self.extension_id,
             &self.capabilities,
             &self.event_declarations,
             tasks,
             ExtensionCallContextInput {
-                session_id: Some(ctx.scope.session_id.clone()),
-                turn_id: ctx.turn_id().map(ToString::to_string),
+                session_id: Some(session_id.clone()),
                 tool_call_id: ctx.scope.tool_call_id.clone(),
-                working_dir: Some(PathBuf::from(&self.working_dir)),
+                working_dir: Some(working_dir.clone()),
                 session_store_dir: ctx.capabilities.paths.store_dir.clone(),
                 event_tx: ctx.scope.event_tx.clone(),
                 event_causation: None,
-                cancellation: ctx.cancellation().clone(),
+                cancellation: call_cancellation.clone(),
             },
         );
         let main_model_id = self
@@ -325,7 +352,8 @@ impl Tool for HandlerTool {
             .clone()
             .unwrap_or_default();
         let ctx = ToolContext::from_runtime(
-            call,
+            SessionCallContext::from_runtime(call, session_id, turn_id),
+            working_dir,
             self.definition.name.clone(),
             ctx.scope.tool_call_id.clone(),
             arguments,
@@ -333,7 +361,15 @@ impl Tool for HandlerTool {
             small_model_id,
             available_tools,
         );
-        let result = match self.handler.execute(ctx).await {
+        let execution = tokio::select! {
+            biased;
+            result = self.handler.execute(ctx) => result,
+            () = draining.cancelled() => {
+                call_cancellation.cancel();
+                Err(admission.draining_error())
+            },
+        };
+        let result = match execution {
             Ok(result) => result,
             Err(err) => {
                 return Ok(
@@ -361,6 +397,10 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
             format!("Tool `{tool_name}` timed out after {ms}ms."),
             "The extension is still processing. Try again with a simpler request, or proceed \
              without this tool.",
+        ),
+        ExtensionError::Draining { .. } => (
+            format!("Tool `{tool_name}` is temporarily unavailable while its extension reloads."),
+            "Retry after the extension finishes reloading, or proceed without this tool.",
         ),
         ExtensionError::Blocked { reason } => (
             format!("Tool `{tool_name}` was blocked: {reason}"),
@@ -411,6 +451,14 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
             metadata.insert("hint".into(), serde_json::json!(hint));
         }
     }
+    if matches!(&err, ExtensionError::Draining { .. }) {
+        metadata.insert(
+            "errorCode".into(),
+            serde_json::json!(
+                astrcode_extension_contract::WireErrorCode::ExtensionDraining.as_str()
+            ),
+        );
+    }
     if let ExtensionError::Host(error) = &err {
         metadata.insert("errorCode".into(), serde_json::json!(error.code));
         metadata.insert("retryable".into(), serde_json::json!(error.retryable));
@@ -420,4 +468,25 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
     }
 
     ToolResult::text(content, true, metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn draining_error_keeps_the_contract_error_code() {
+        let result = extension_error_result(
+            "probe",
+            "extension-a",
+            ExtensionError::Draining {
+                extension_id: "extension-a".into(),
+            },
+        );
+
+        assert_eq!(
+            result.metadata.get("errorCode"),
+            Some(&serde_json::json!("extension_draining"))
+        );
+    }
 }

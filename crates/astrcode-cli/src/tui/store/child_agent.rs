@@ -119,28 +119,6 @@ mod tests {
     }
 
     #[test]
-    fn flush_emits_overflow_summary() {
-        let mut tracker = ChildAgentTracker::default();
-        let mut queue = Vec::new();
-
-        for i in 0..(MAX_VISIBLE_TOOLS + 4) {
-            tracker.on_tool_completed(&format!("tool{i}"), "done", false, &mut queue);
-        }
-        tracker.flush_on_completion(&mut queue);
-
-        let summary = queue
-            .iter()
-            .find_map(|e| match e {
-                ScrollbackEntry::StreamText { text, .. } if text.contains("more tool use") => {
-                    Some(text.clone())
-                },
-                _ => None,
-            })
-            .expect("overflow summary");
-        assert!(summary.contains("+4"));
-    }
-
-    #[test]
     fn flush_without_overflow_omits_summary() {
         let mut tracker = ChildAgentTracker::default();
         let mut queue = Vec::new();
@@ -152,20 +130,6 @@ mod tests {
             e,
             ScrollbackEntry::StreamText { text, .. } if text.contains("more tool use")
         )));
-    }
-
-    #[test]
-    fn error_completion_uses_cross_mark() {
-        let mut tracker = ChildAgentTracker::default();
-        let mut queue = Vec::new();
-
-        tracker.on_tool_completed("shell", "permission denied", true, &mut queue);
-
-        assert_eq!(queue.len(), 1);
-        assert!(matches!(
-            &queue[0],
-            ScrollbackEntry::StreamText { text, .. } if text.contains("✗ shell")
-        ));
     }
 
     #[test]

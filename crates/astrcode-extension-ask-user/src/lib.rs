@@ -11,8 +11,8 @@ use astrcode_extension_sdk::{
     extension::{
         Extension, ExtensionCall, ExtensionCapability, ExtensionError, ExtensionHttpHandler,
         ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
-        HookMode, HookResult, HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler,
-        Registrar, StopReason, ToolContext, ToolHandler,
+        ExtensionStopContext, HookMode, HookResult, HttpContext, LifecycleContext, LifecycleEvent,
+        LifecycleHandler, Registrar, ToolContext, ToolHandler,
     },
     tool::{ToolExecutionResult, ToolPromptMetadata, ToolPromptTag, ToolResult},
 };
@@ -108,7 +108,7 @@ impl Extension for AskUserExtension {
         );
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         self.registry.shutdown_extension();
         Ok(())
     }
@@ -132,7 +132,7 @@ impl ToolHandler for AskUserToolHandler {
         }
 
         let call_id = context.require_call_id()?.to_owned();
-        let session_id = context.call().require_session_id()?.to_string();
+        let session_id = context.session_id().to_string();
         let events = context.events().clone();
         let auto_select_at = if input
             .questions
@@ -235,7 +235,7 @@ struct AskUserSessionShutdown {
 #[async_trait::async_trait]
 impl LifecycleHandler for AskUserSessionShutdown {
     async fn handle(&self, context: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        let session_id = context.call().require_session_id()?;
+        let session_id = context.session_id();
         self.registry.shutdown_session(session_id.as_str());
         Ok(HookResult::Allow)
     }

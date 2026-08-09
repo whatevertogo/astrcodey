@@ -125,7 +125,8 @@ mod tests {
     fn application_directories_follow_test_home() {
         let _guard = env_lock().lock().unwrap();
         let previous = std::env::var_os(TEST_HOME_ENV);
-        std::env::set_var(TEST_HOME_ENV, "/tmp/astrcode-config-defaults");
+        // SAFETY: tests accessing this variable serialize through `env_lock`.
+        unsafe { std::env::set_var(TEST_HOME_ENV, "/tmp/astrcode-config-defaults") };
 
         assert_eq!(
             user_home_dir(),
@@ -137,8 +138,10 @@ mod tests {
         );
 
         match previous {
-            Some(value) => std::env::set_var(TEST_HOME_ENV, value),
-            None => std::env::remove_var(TEST_HOME_ENV),
+            // SAFETY: tests accessing this variable serialize through `env_lock`.
+            Some(value) => unsafe { std::env::set_var(TEST_HOME_ENV, value) },
+            // SAFETY: tests accessing this variable serialize through `env_lock`.
+            None => unsafe { std::env::remove_var(TEST_HOME_ENV) },
         }
     }
 

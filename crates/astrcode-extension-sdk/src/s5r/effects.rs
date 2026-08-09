@@ -1,107 +1,21 @@
-//! s5r handler 效果模型 — `handler.invoke` 的 `invoke_result.output` 载荷。
+//! Author-facing helpers for the contract-owned `handler.invoke` result.
 
-use serde::{Deserialize, Serialize};
+pub use astrcode_extension_contract::effects::{CallContinuation, HandlerResult};
 use serde_json::Value;
 
-use crate::s5r::messages::{HandlerId, HandlerKind};
+use crate::extension::CustomEventDisposition;
 
-/// `handler.invoke` 成功时的 output 形状（与旧 s6r `CallResponse` 对齐）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct HandlerResult {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effect: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub continuations: Vec<CallContinuation>,
-}
-
-impl HandlerResult {
-    pub fn ok() -> Self {
-        Self {
-            ok: true,
-            effect: Some("ok".into()),
-            data: None,
-            error: None,
-            continuations: Vec::new(),
-        }
-    }
-
-    pub fn effect(effect: &str, data: Value) -> Self {
-        Self {
-            ok: true,
-            effect: Some(effect.into()),
-            data: Some(data),
-            error: None,
-            continuations: Vec::new(),
-        }
-    }
-
-    pub fn err(msg: impl Into<String>) -> Self {
-        Self {
-            ok: false,
-            effect: None,
-            data: None,
-            error: Some(msg.into()),
-            continuations: Vec::new(),
-        }
-    }
-
-    /// LLM 自然结束后请求宿主再跑一个 agent step。
-    pub fn continue_one_step() -> Self {
-        Self::effect("continue_one_step", Value::Null)
-    }
-
-    /// LLM 自然结束后结束当前 turn（默认）。
-    pub fn end_turn() -> Self {
-        Self::ok()
-    }
-
-    pub fn effect_name(&self) -> &str {
-        self.effect.as_deref().unwrap_or("ok")
-    }
-
-    pub fn data_str(&self, key: &str) -> &str {
-        self.data
-            .as_ref()
-            .and_then(|d| d[key].as_str())
-            .unwrap_or("")
-    }
-
-    pub fn data_value(&self, key: &str) -> Option<&Value> {
-        self.data.as_ref().and_then(|d| d.get(key))
-    }
-}
-
-/// 宿主在收到 [`HandlerResult`] 后调度的后续 `handler.invoke`。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "call", rename_all = "snake_case")]
-pub enum CallContinuation {
-    Hook {
-        on: String,
-        #[serde(default)]
-        input: Value,
-    },
-    Tool {
-        name: String,
-        #[serde(default)]
-        input: Value,
-    },
-}
-
-impl CallContinuation {
-    pub fn handler_id_for_extension(&self, extension_id: &str) -> (String, Value) {
-        match self {
-            Self::Hook { on, input } => (
-                HandlerId::new(extension_id, HandlerKind::Hook, on).into(),
-                serde_json::json!({ "on": on, "input": input }),
+impl From<CustomEventDisposition> for HandlerResult {
+    fn from(disposition: CustomEventDisposition) -> Self {
+        match disposition {
+            CustomEventDisposition::Ack => Self::effect("custom_event_ack", Value::Null),
+            CustomEventDisposition::Retry { reason } => Self::effect(
+                "custom_event_retry",
+                serde_json::json!({ "reason": reason }),
             ),
-            Self::Tool { name, input } => (
-                HandlerId::new(extension_id, HandlerKind::Tool, name).into(),
-                serde_json::json!({ "on": "tool", "name": name, "input": input }),
+            CustomEventDisposition::DeadLetter { reason } => Self::effect(
+                "custom_event_dead_letter",
+                serde_json::json!({ "reason": reason }),
             ),
         }
     }

@@ -75,12 +75,11 @@ impl Tool for ReadFileTool {
         let args: ReadFileArgs = serde_json::from_value(args)
             .map_err(|e| ToolError::InvalidArguments(format!("invalid read args: {e}")))?;
         let path = resolve_path(&self.working_dir, &args.path);
-        if is_tool_result_artifact_path(&path) {
-            if let Some(result) =
+        if is_tool_result_artifact_path(&path)
+            && let Some(result) =
                 read_persisted_tool_result_path(ctx, started_at, &path, &args).await?
-            {
-                return Ok(result.into());
-            }
+        {
+            return Ok(result.into());
         }
         if !path.exists() {
             if let Some(result) =
@@ -328,10 +327,10 @@ async fn read_persisted_tool_result_path(
     }
 
     let mut content = slice.content;
-    if slice.has_more {
-        if let Some(next_char_offset) = slice.next_char_offset {
-            content.push_str(&char_pagination_footer(next_char_offset));
-        }
+    if slice.has_more
+        && let Some(next_char_offset) = slice.next_char_offset
+    {
+        content.push_str(&char_pagination_footer(next_char_offset));
     }
 
     Ok(Some(ToolResult {

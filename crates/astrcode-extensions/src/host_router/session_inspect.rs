@@ -6,8 +6,8 @@ use astrcode_core::{
     compaction::CompactStrategy,
     llm::{LlmContent, LlmMessage},
     types::SessionId,
-    wire::WireErrorCode,
 };
+use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     host::HostOperation,
     s5r::ErrorPayload,
@@ -24,7 +24,10 @@ use astrcode_session_projection::{
 };
 use astrcode_storage::{SessionReader, StorageError};
 
-use super::{HOST_INVOKE_TIMEOUT, session::storage_error};
+use super::{
+    HOST_INVOKE_TIMEOUT,
+    session::{phase_output, storage_error, tool_selection_output},
+};
 
 pub(super) async fn list(
     operation: HostOperation,
@@ -59,7 +62,7 @@ pub(super) async fn snapshot(
             cursor: model.cursor(),
             working_dir: model.identity.working_dir.clone(),
             model_id: model.identity.model_id.clone(),
-            phase: model.execution.phase.into(),
+            phase: phase_output(model.execution.phase),
             parent_session_id: model
                 .identity
                 .parent
@@ -130,7 +133,7 @@ fn list_item(summary: SessionSummary) -> SessionInspectListItem {
         source_extension: summary.source_extension,
         created_at: summary.created_at,
         updated_at: summary.updated_at,
-        phase: summary.phase.into(),
+        phase: phase_output(summary.phase),
         latest_cursor: summary.latest_cursor,
         first_user_message: summary.first_user_message,
     }
@@ -158,7 +161,7 @@ pub(super) fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel
             .collect(),
         working_dir: identity.working_dir,
         model_id: identity.model_id,
-        phase: execution.phase.into(),
+        phase: phase_output(execution.phase),
         system_prompt: Some(prompt.text),
         extra_system_prompt: prompt.extra,
         system_prompt_fingerprint: Some(prompt.fingerprint),
@@ -179,7 +182,7 @@ pub(super) fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel
         created_at: stats.created_at.to_rfc3339(),
         updated_at: stats.updated_at.to_rfc3339(),
         parent_session_id: identity.parent.map(|parent| parent.session_id.to_string()),
-        tool_selection: Some(identity.tool_selection.into()),
+        tool_selection: Some(tool_selection_output(identity.tool_selection)),
         source_extension: identity.source_extension,
         agent_sessions: model
             .agent_sessions

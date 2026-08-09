@@ -1,24 +1,26 @@
-use astrcode_core::wire::WireErrorCode;
+use astrcode_extension_contract::WireErrorCode;
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 
+use super::contracts::llm_chat_request;
 use crate::{
     extension::{ExtensionHttpDispatchRequest, ExtensionHttpResponse},
     host::{
         HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitOutput,
-        HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput, HostNetworkRequest,
-        HostNetworkResponse, HostOperation, HostProcessOutput, HostProcessRequest,
-        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
-        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionStateReadOutput,
-        HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
-        HostSessionTokenUsageOutput, HostSessionTranscript, HostWorkspaceEditOutput,
-        HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
-        HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListOutput,
-        HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
-        HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
+        HostLlmChatOutput, HostLlmCollectedStreamOutput, HostNetworkRequest, HostNetworkResponse,
+        HostOperation, HostProcessOutput, HostProcessRequest, HostSessionCancelOutput,
+        HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
+        HostSessionProviderMessagesOutput, HostSessionStateReadOutput, HostSessionStateReadRequest,
+        HostSessionStateWriteRequest, HostSessionSummariesOutput, HostSessionTokenUsageOutput,
+        HostSessionTranscript, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
+        HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepOutput,
+        HostWorkspaceGrepRequest, HostWorkspaceListOutput, HostWorkspaceListRequest,
+        HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
+        HostWorkspaceWriteRequest,
     },
     llm::LlmMessage,
+    model_stream::ModelStream,
     session::{
         HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
         HostRootSubmitTurnRequest, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
@@ -44,6 +46,20 @@ pub trait HostClientTransport: Clone + Send + Sync {
         input: Value,
     ) -> Result<Value, Self::Error>;
 
+    async fn invoke_stream(
+        &self,
+        operation: HostOperation,
+        _input: Value,
+    ) -> Result<ModelStream, Self::Error> {
+        Err(Self::client_error(
+            WireErrorCode::StreamNotSupported,
+            format!(
+                "{} transport does not expose incremental streaming",
+                operation.wire_name()
+            ),
+        ))
+    }
+
     fn client_error(code: WireErrorCode, message: String) -> Self::Error;
 }
 
@@ -55,7 +71,8 @@ macro_rules! domain_client {
         }
 
         impl<T> $name<T> {
-            pub(crate) const fn new(transport: T) -> Self {
+            #[doc(hidden)]
+            pub const fn new(transport: T) -> Self {
                 Self { transport }
             }
         }
@@ -96,7 +113,7 @@ impl<T: HostClientTransport> ModelClient<T> {
         invoke(
             &self.transport,
             HostOperation::LlmMainChat,
-            &HostLlmChatRequest::new(messages),
+            &llm_chat_request(messages),
         )
         .await
     }
@@ -108,7 +125,33 @@ impl<T: HostClientTransport> ModelClient<T> {
         invoke(
             &self.transport,
             HostOperation::LlmSmallChat,
-            &HostLlmChatRequest::new(messages),
+            &llm_chat_request(messages),
+        )
+        .await
+    }
+
+    /// Starts a main-model stream and exposes each event as it arrives.
+    pub async fn main_chat_events(
+        &self,
+        messages: Vec<LlmMessage>,
+    ) -> Result<ModelStream, T::Error> {
+        invoke_stream(
+            &self.transport,
+            HostOperation::LlmMainChat,
+            &llm_chat_request(messages),
+        )
+        .await
+    }
+
+    /// Starts a small-model stream and exposes each event as it arrives.
+    pub async fn small_chat_events(
+        &self,
+        messages: Vec<LlmMessage>,
+    ) -> Result<ModelStream, T::Error> {
+        invoke_stream(
+            &self.transport,
+            HostOperation::LlmSmallChat,
+            &llm_chat_request(messages),
         )
         .await
     }
@@ -121,7 +164,7 @@ impl<T: HostClientTransport> ModelClient<T> {
         invoke_collected_stream(
             &self.transport,
             HostOperation::LlmMainChat,
-            &HostLlmChatRequest::new(messages),
+            &llm_chat_request(messages),
         )
         .await
     }
@@ -134,7 +177,7 @@ impl<T: HostClientTransport> ModelClient<T> {
         invoke_collected_stream(
             &self.transport,
             HostOperation::LlmSmallChat,
-            &HostLlmChatRequest::new(messages),
+            &llm_chat_request(messages),
         )
         .await
     }
@@ -509,6 +552,19 @@ where
     let input = serialize_request::<T, _>(operation, input)?;
     let output = transport.invoke_collected_stream(operation, input).await?;
     deserialize_response::<T, _>(operation, output)
+}
+
+async fn invoke_stream<T, I>(
+    transport: &T,
+    operation: HostOperation,
+    input: &I,
+) -> Result<ModelStream, T::Error>
+where
+    T: HostClientTransport,
+    I: Serialize + ?Sized,
+{
+    let input = serialize_request::<T, _>(operation, input)?;
+    transport.invoke_stream(operation, input).await
 }
 
 async fn invoke_unit<T, I>(

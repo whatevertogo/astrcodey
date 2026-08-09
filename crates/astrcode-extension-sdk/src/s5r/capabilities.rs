@@ -1,82 +1,23 @@
 //! `astrcode.*` 能力与 [`ExtensionCapability`] 的映射。
+//!
+//! 线缆名与授权目录名在 `astrcode-extension-contract` 的 `extension_capabilities!`
+//! 宏里单点声明；这里只保留以 sdk 路径提供的历史函数名。
 
 use crate::extension::ExtensionCapability;
 
-/// 将 enum 能力映射为 s5r 线缆名（`astrcode.*` 或 snake_case 请求名）。
-pub fn astrcode_capability_name(cap: ExtensionCapability) -> &'static str {
-    match cap {
-        ExtensionCapability::SessionControl => "astrcode.session.control",
-        ExtensionCapability::SessionInspect => "astrcode.session.inspect",
-        ExtensionCapability::PublicHttp => "astrcode.extension.http.public_route",
-        ExtensionCapability::AuthenticatedHttp => "astrcode.extension.http.authenticated_route",
-        ExtensionCapability::PublicHttpDispatch => "astrcode.extension.http.public",
-        ExtensionCapability::MainModel => "astrcode.llm.main_chat",
-        ExtensionCapability::SmallModel => "astrcode.llm.small_chat",
-        ExtensionCapability::SessionHistory => "astrcode.session.read_events",
-        ExtensionCapability::EmitCustomEvents => "astrcode.event.emit",
-        ExtensionCapability::ConsumeCustomEvents => "astrcode.event.consume",
-        ExtensionCapability::WorkspaceRead => "astrcode.workspace.read",
-        ExtensionCapability::WorkspaceWrite => "astrcode.workspace.write",
-        ExtensionCapability::ProcessSpawn => "astrcode.process.spawn",
-        ExtensionCapability::NetworkClient => "astrcode.network.client",
-        ExtensionCapability::ProviderRequest => "astrcode.extension.provider_request",
-        ExtensionCapability::InputDelivery => "astrcode.extension.input_delivery",
-        ExtensionCapability::ToolIntercept => "astrcode.extension.tool_intercept",
-        ExtensionCapability::TurnContinuationControl => {
-            "astrcode.extension.turn_continuation_control"
-        },
-        ExtensionCapability::LiveConversation => "astrcode.extension.live_conversation",
-    }
-}
-
-/// manifest / Initialize 请求中的 snake_case 名。
+/// 将 enum 能力映射为 s5r 线缆名（snake_case 请求名）。
 pub fn capability_to_wire(cap: ExtensionCapability) -> &'static str {
-    match cap {
-        ExtensionCapability::SessionControl => "session_control",
-        ExtensionCapability::SessionInspect => "session_inspect",
-        ExtensionCapability::PublicHttp => "public_http",
-        ExtensionCapability::AuthenticatedHttp => "authenticated_http",
-        ExtensionCapability::PublicHttpDispatch => "public_http_dispatch",
-        ExtensionCapability::MainModel => "main_model",
-        ExtensionCapability::SmallModel => "small_model",
-        ExtensionCapability::SessionHistory => "session_history",
-        ExtensionCapability::EmitCustomEvents => "emit_custom_events",
-        ExtensionCapability::ConsumeCustomEvents => "consume_custom_events",
-        ExtensionCapability::WorkspaceRead => "workspace_read",
-        ExtensionCapability::WorkspaceWrite => "workspace_write",
-        ExtensionCapability::ProcessSpawn => "process_spawn",
-        ExtensionCapability::NetworkClient => "network_client",
-        ExtensionCapability::ProviderRequest => "provider_request",
-        ExtensionCapability::InputDelivery => "input_delivery",
-        ExtensionCapability::ToolIntercept => "tool_intercept",
-        ExtensionCapability::TurnContinuationControl => "turn_continuation_control",
-        ExtensionCapability::LiveConversation => "live_conversation",
-    }
+    cap.as_str()
 }
 
+/// manifest / Initialize 请求中的 snake_case 名 → 能力；未知名返回 `None`。
 pub fn capability_from_wire(name: &str) -> Option<ExtensionCapability> {
-    match name {
-        "session_control" => Some(ExtensionCapability::SessionControl),
-        "session_inspect" => Some(ExtensionCapability::SessionInspect),
-        "public_http" => Some(ExtensionCapability::PublicHttp),
-        "authenticated_http" => Some(ExtensionCapability::AuthenticatedHttp),
-        "public_http_dispatch" => Some(ExtensionCapability::PublicHttpDispatch),
-        "main_model" => Some(ExtensionCapability::MainModel),
-        "small_model" => Some(ExtensionCapability::SmallModel),
-        "session_history" => Some(ExtensionCapability::SessionHistory),
-        "emit_custom_events" => Some(ExtensionCapability::EmitCustomEvents),
-        "consume_custom_events" => Some(ExtensionCapability::ConsumeCustomEvents),
-        "workspace_read" => Some(ExtensionCapability::WorkspaceRead),
-        "workspace_write" => Some(ExtensionCapability::WorkspaceWrite),
-        "process_spawn" => Some(ExtensionCapability::ProcessSpawn),
-        "network_client" => Some(ExtensionCapability::NetworkClient),
-        "provider_request" => Some(ExtensionCapability::ProviderRequest),
-        "input_delivery" => Some(ExtensionCapability::InputDelivery),
-        "tool_intercept" => Some(ExtensionCapability::ToolIntercept),
-        "turn_continuation_control" => Some(ExtensionCapability::TurnContinuationControl),
-        "live_conversation" => Some(ExtensionCapability::LiveConversation),
-        _ => None,
-    }
+    ExtensionCapability::parse(name)
+}
+
+/// 将 enum 能力映射为授权目录名（`astrcode.*` 前缀）。
+pub fn astrcode_capability_name(cap: ExtensionCapability) -> &'static str {
+    cap.grant_name()
 }
 
 pub fn is_astrcode_capability(name: &str) -> bool {

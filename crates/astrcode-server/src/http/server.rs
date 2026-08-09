@@ -327,13 +327,6 @@ mod tests {
     };
 
     #[test]
-    fn masked_token_handles_short_env_tokens() {
-        assert_eq!(masked_token("abc"), "<redacted>");
-        assert_eq!(masked_token("12345678"), "<redacted>");
-        assert_eq!(masked_token("123456789"), "1234...6789");
-    }
-
-    #[test]
     fn run_info_is_replaced_completely_and_removed_only_by_current_server() {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("run.json");

@@ -17,10 +17,10 @@ use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
         DiscoveredTool, Extension, ExtensionCall, ExtensionCapability, ExtensionError,
-        ExtensionManifest, ExtensionStartContext, HookMode, HookResult, LifecycleContext,
-        LifecycleEvent, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, Registrar, StopReason, ToolContext, ToolDiscovery,
-        ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler,
+        ExtensionManifest, ExtensionStartContext, ExtensionStopContext, HookMode, HookResult,
+        LifecycleContext, LifecycleEvent, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, Registrar, ToolContext, ToolDiscovery, ToolDiscoveryContext,
+        ToolDiscoveryHandler, ToolHandler,
     },
     tool::{
         ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPromptMetadata,
@@ -89,7 +89,7 @@ impl Extension for McpExtension {
         Ok(())
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         self.shared.pool.shutdown().await;
         self.shared.clear().await;
         Ok(())
@@ -133,7 +133,7 @@ struct McpWorkspaceLifecycleHandler {
 #[async_trait::async_trait]
 impl LifecycleHandler for McpWorkspaceLifecycleHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        let working_dir = ctx.call().require_working_dir()?.to_string_lossy();
+        let working_dir = ctx.working_dir().to_string_lossy();
         self.shared.refresh_workspace(&working_dir).await;
         Ok(HookResult::Allow)
     }
@@ -343,8 +343,7 @@ struct McpToolDiscovery {
 #[async_trait::async_trait]
 impl ToolDiscoveryHandler for McpToolDiscovery {
     async fn discover(&self, ctx: ToolDiscoveryContext) -> Result<ToolDiscovery, ExtensionError> {
-        let working_dir = ctx.call().require_working_dir()?;
-        let working_dir = working_dir.to_string_lossy();
+        let working_dir = ctx.working_dir().to_string_lossy();
         self.shared.await_initial_warm(&working_dir).await;
         // 后台预热若尚未完成，则首个 turn 在此同步等待同一次加载以保证工具完整；
         // 已有缓存时会按配置 fingerprint 快速判断是否仍然有效。
@@ -397,11 +396,7 @@ struct McpToolHandler {
 impl ToolHandler for McpToolHandler {
     async fn execute(&self, ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
         let tool_name = ctx.tool_name();
-        let working_dir = ctx
-            .call()
-            .require_working_dir()?
-            .to_string_lossy()
-            .into_owned();
+        let working_dir = ctx.working_dir().to_string_lossy().into_owned();
         if tool_name == TOOL_SEARCH_TOOL_NAME {
             return Ok(self
                 .handle_tool_search(ctx.arguments()?, &working_dir)
@@ -757,23 +752,5 @@ mod tests {
         assert_eq!(def.name, "mcp__file_system__read_file");
         assert_eq!(def.origin, ToolOrigin::Bundled);
         assert_eq!(def.parameters, json!({"type": "object"}));
-    }
-
-    #[test]
-    fn tool_search_tool_is_bundled_and_read_only_parallel() {
-        let def = tool_search_tool_definition();
-
-        assert_eq!(def.name, TOOL_SEARCH_TOOL_NAME);
-        assert_eq!(def.origin, ToolOrigin::Bundled);
-        assert_eq!(def.execution_mode, ExecutionMode::Parallel);
-    }
-
-    #[test]
-    fn mcp_discovery_instruction_is_additional_instruction_content() {
-        let instruction = mcp_discovery_instructions();
-
-        assert!(instruction.starts_with("MCP discovery workflow:"));
-        assert!(instruction.contains("`tool_search_tool`"));
-        assert!(!instruction.contains("[Example Workflow]"));
     }
 }

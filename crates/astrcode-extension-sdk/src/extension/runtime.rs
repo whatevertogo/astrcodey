@@ -6,59 +6,14 @@ use std::{
     time::Duration,
 };
 
+pub use astrcode_extension_contract::ExtensionCapability;
 use futures_util::FutureExt;
-use serde::{Deserialize, Serialize, de::IntoDeserializer};
+use serde::de::IntoDeserializer;
 use tokio::{
     sync::{Notify, oneshot, watch},
     task::AbortHandle,
 };
 use tokio_util::sync::CancellationToken;
-
-/// 扩展可以显式申请的宿主能力。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ExtensionCapability {
-    /// 创建子 session、提交 turn 与回收 session。
-    SessionControl,
-    /// 宿主级全局读取授权：跨会话读取宿主可见的 session 投影。
-    ///
-    /// 此能力不受当前 session lineage 限制，只应授予需要全局观察或后台接续会话的扩展。
-    SessionInspect,
-    /// 注册无需宿主 bearer token 的公开 HTTP 路由。
-    PublicHttp,
-    /// 注册复用宿主 bearer token 的扩展 HTTP 路由。
-    AuthenticatedHttp,
-    /// 从插件内部调用其他插件的公开 HTTP 路由。
-    PublicHttpDispatch,
-    /// 调用宿主配置的主模型（当前 session 的 active model）。
-    MainModel,
-    /// 调用宿主配置的小模型。
-    SmallModel,
-    /// 只读查询历史 session 投影。
-    SessionHistory,
-    /// 发射已声明的扩展事件。
-    EmitCustomEvents,
-    /// 消费其他扩展发射的事件。
-    ConsumeCustomEvents,
-    /// 读取工作区或扩展发现目录。
-    WorkspaceRead,
-    /// 写入或编辑工作区内的非敏感文件。
-    WorkspaceWrite,
-    /// 启动受扩展管理的子进程。
-    ProcessSpawn,
-    /// 发起网络客户端请求。
-    NetworkClient,
-    /// 读取或改写 provider 请求边界。
-    ProviderRequest,
-    /// 决定外部输入的投递策略。
-    InputDelivery,
-    /// 阻断或改写工具执行。
-    ToolIntercept,
-    /// 决定工具结果或自然停止后 turn 是否继续。
-    TurnContinuationControl,
-    /// 观察临时的实时会话增量。
-    LiveConversation,
-}
 
 /// 扩展专有配置的包装类型。
 ///
@@ -158,6 +113,23 @@ pub enum StopReason {
     Shutdown,
     /// `start` 失败或超时，回滚已经取得的资源。
     StartupFailed,
+}
+
+/// Facts supplied when an extension generation is stopped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExtensionStopContext {
+    reason: StopReason,
+}
+
+impl ExtensionStopContext {
+    #[doc(hidden)]
+    pub const fn from_runtime(reason: StopReason) -> Self {
+        Self { reason }
+    }
+
+    pub const fn reason(self) -> StopReason {
+        self.reason
+    }
 }
 
 /// 宿主管理的插件后台任务集合。

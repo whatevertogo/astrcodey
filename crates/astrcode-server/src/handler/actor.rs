@@ -200,10 +200,9 @@ impl CommandHandler {
                         .focused_session_id
                         .as_ref()
                         .is_some_and(|sid| !self.scheduler.registry().has_active(sid))
+                        && let Err(error) = self.recap_session().await
                     {
-                        if let Err(error) = self.recap_session().await {
-                            tracing::debug!(%error, "auto-recap skipped");
-                        }
+                        tracing::debug!(%error, "auto-recap skipped");
                     }
                 },
             }

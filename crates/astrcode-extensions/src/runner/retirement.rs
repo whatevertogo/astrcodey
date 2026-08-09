@@ -7,14 +7,16 @@ use std::{
     },
 };
 
-use astrcode_extension_sdk::extension::{Extension, ExtensionError, ExtensionTasks, StopReason};
+use astrcode_extension_sdk::extension::{
+    Extension, ExtensionError, ExtensionStopContext, ExtensionTasks, StopReason,
+};
 use futures_util::FutureExt;
 use tokio::{
     sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, oneshot},
     task::JoinSet,
 };
 
-use super::HostedExtension;
+use super::{HostedExtension, supervisor::ExtensionSupervisor};
 
 /// Tracks turn-scoped views that may still dispatch through their captured handlers.
 pub(super) struct ActiveTurnViews {
@@ -87,13 +89,24 @@ impl ExtensionPublicationLease {
         ExtensionIndexLease(Arc::clone(self))
     }
 
-    async fn wait_until_unpublished(&self) {
-        loop {
-            let released = self.released.notified();
-            if self.published_indexes.load(Ordering::Acquire) == 0 {
-                return;
+    async fn wait_until_unpublished(&self, timeout: std::time::Duration) -> Result<(), usize> {
+        let wait = async {
+            loop {
+                let released = self.released.notified();
+                if self.published_indexes.load(Ordering::Acquire) == 0 {
+                    return;
+                }
+                released.await;
             }
-            released.await;
+        };
+        if tokio::time::timeout(timeout, wait).await.is_ok() {
+            return Ok(());
+        }
+        let published_indexes = self.published_indexes.load(Ordering::Acquire);
+        if published_indexes == 0 {
+            Ok(())
+        } else {
+            Err(published_indexes)
         }
     }
 }
@@ -132,6 +145,7 @@ struct RetirementWork {
     extension: Arc<dyn Extension>,
     tasks: ExtensionTasks,
     publication_lease: Option<Arc<ExtensionPublicationLease>>,
+    supervisor: Option<ExtensionSupervisor>,
 }
 
 /// Owns a registration after its runtime resources exist but before publication.
@@ -193,6 +207,7 @@ impl PendingRegistration<'_> {
             extension: self.extension.take()?,
             tasks: self.tasks.take()?,
             publication_lease: None,
+            supervisor: None,
         })
     }
 
@@ -332,6 +347,7 @@ impl RetirementSupervisor {
             extension: hosted.extension,
             tasks: hosted.tasks,
             publication_lease: Some(hosted.publication_lease),
+            supervisor: Some(hosted.supervisor),
         };
         self.spawn_ticketed_retirement(work, reason, operation_timeout, operation_guard)
     }
@@ -412,15 +428,27 @@ impl RetirementSupervisor {
             _operation_guard: operation_guard,
         };
         tasks.spawn(async move {
+            let mut work = work;
+            let supervisor = work.supervisor.take();
             let result = AssertUnwindSafe(async move {
                 work.tasks.cancel();
-                if let Some(publication_lease) = work.publication_lease {
-                    publication_lease.wait_until_unpublished().await;
-                }
+                let publication_drain_error = if let Some(publication_lease) =
+                    work.publication_lease
+                    && let Err(published_indexes) = publication_lease
+                        .wait_until_unpublished(operation_timeout)
+                        .await
+                {
+                    Some(ExtensionError::Internal(format!(
+                        "timed out waiting for {published_indexes} published extension index(es)"
+                    )))
+                } else {
+                    None
+                };
                 let tasks_stopped = work.tasks.wait(operation_timeout).await;
                 let stop_result = match tokio::time::timeout(
                     operation_timeout,
-                    work.extension.stop(reason),
+                    work.extension
+                        .stop(ExtensionStopContext::from_runtime(reason)),
                 )
                 .await
                 {
@@ -438,10 +466,26 @@ impl RetirementSupervisor {
                         ))),
                     };
                 }
-                stop_result
+                match (publication_drain_error, stop_result) {
+                    (None, stop_result) => stop_result,
+                    (Some(drain_error), Ok(())) => Err(drain_error),
+                    (Some(drain_error), Err(stop_error)) => Err(ExtensionError::Internal(format!(
+                        "{drain_error}; stop also failed: {stop_error}"
+                    ))),
+                }
             })
             .catch_unwind()
             .await;
+            let supervisor_failure = match &result {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error.to_string()),
+                Err(_) => Some(format!(
+                    "extension retirement task panicked for {extension_id}"
+                )),
+            };
+            if let Some(supervisor) = supervisor {
+                supervisor.finish(supervisor_failure).await;
+            }
             match result {
                 Ok(Ok(())) => {
                     tracing::debug!(%extension_id, "extension retirement completed");

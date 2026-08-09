@@ -406,10 +406,8 @@ impl Session {
             },
             Err(_) => compensation_errors.push("child shutdown hooks panicked".into()),
         }
-        if parent_link_settled {
-            if let Err(error) = child.discard_failed_creation().await {
-                compensation_errors.push(error);
-            }
+        if parent_link_settled && let Err(error) = child.discard_failed_creation().await {
+            compensation_errors.push(error);
         }
 
         if !compensation_errors.is_empty() {

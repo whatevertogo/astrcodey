@@ -110,19 +110,19 @@ fn evaluate_file_contains(
         },
     };
 
-    if let Some(expected) = contains {
-        if !content.contains(expected) {
-            return Verdict::Fail {
-                reason: format!("{file_path} does not contain '{expected}'"),
-            };
-        }
+    if let Some(expected) = contains
+        && !content.contains(expected)
+    {
+        return Verdict::Fail {
+            reason: format!("{file_path} does not contain '{expected}'"),
+        };
     }
-    if let Some(unexpected) = not_contains {
-        if content.contains(unexpected) {
-            return Verdict::Fail {
-                reason: format!("{file_path} contains forbidden text '{unexpected}'"),
-            };
-        }
+    if let Some(unexpected) = not_contains
+        && content.contains(unexpected)
+    {
+        return Verdict::Fail {
+            reason: format!("{file_path} contains forbidden text '{unexpected}'"),
+        };
     }
     Verdict::Pass
 }

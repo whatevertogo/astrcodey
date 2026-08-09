@@ -24,7 +24,7 @@ use crate::{
         RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
         RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
         RuntimePromptBuildContext, RuntimeProviderContext, RuntimeUserMessageEnvelopeContext,
-        ToolContext, UserMessageEnvelopeContext, UserMessageEnvelopePayload,
+        SessionCallContext, ToolContext, UserMessageEnvelopeContext, UserMessageEnvelopePayload,
     },
     host::{
         ExtensionHost, HostError, HostOperation,
@@ -145,9 +145,6 @@ impl CallContextBuilder {
             .unwrap_or_else(|| ExtensionTasks::new(self.extension_id.as_str()));
         ExtensionCallContext::from_runtime(
             self.extension_id,
-            self.session_id,
-            self.turn_id,
-            self.working_dir,
             paths,
             host,
             self.events.unwrap_or_default(),
@@ -210,8 +207,8 @@ macro_rules! call_context_builder_methods {
 
 /// Builder for an attributed [`CommandContext`] used only by extension tests.
 ///
-/// Like the production command dispatcher, it shares the common extension call context. The
-/// default fixture has no session, workspace, capability, or host backend.
+/// Like the production command dispatcher, it requires a session and workspace. The default
+/// fixture uses deterministic values and has no capability or host backend.
 pub struct CommandContextBuilder {
     call: CallContextBuilder,
     command_name: String,
@@ -222,7 +219,7 @@ pub struct CommandContextBuilder {
 impl CommandContextBuilder {
     pub fn new(extension_id: impl Into<String>, command_name: impl Into<String>) -> Self {
         Self {
-            call: CallContextBuilder::new(extension_id),
+            call: CallContextBuilder::new(extension_id).session("test-session", ".", None),
             command_name: command_name.into(),
             argument: String::new(),
             model: ModelSelection::simple("test-model"),
@@ -242,8 +239,17 @@ impl CommandContextBuilder {
     }
 
     pub fn build(self) -> CommandContext {
+        let session_id = self.call.session_id.clone().unwrap();
+        let working_dir = self.call.working_dir.clone().unwrap();
+        let turn_id = self.call.turn_id.clone();
         let call = self.call.build();
-        CommandContext::from_runtime(call, self.model, self.command_name, self.argument)
+        CommandContext::from_runtime(
+            SessionCallContext::from_runtime(call, session_id, turn_id),
+            working_dir,
+            self.model,
+            self.command_name,
+            self.argument,
+        )
     }
 
     pub fn build_completion(self, cursor: usize) -> CommandCompletionContext {
@@ -291,9 +297,8 @@ impl HttpContextBuilder {
 
 /// Builder for host-attributed hook contexts used only by extension tests.
 ///
-/// Common call facts default to no session, turn, workspace, capability, event sink, or host
-/// backend. Each terminal `build_*` method requires the hook-specific input instead of inventing
-/// plausible production values.
+/// Common call facts default to a deterministic session and workspace because every runtime hook
+/// is session/workspace scoped. Each terminal `build_*` method requires the hook-specific input.
 pub struct HookContextBuilder {
     call: CallContextBuilder,
     model: ModelSelection,
@@ -302,7 +307,7 @@ pub struct HookContextBuilder {
 impl HookContextBuilder {
     pub fn new(extension_id: impl Into<String>) -> Self {
         Self {
-            call: CallContextBuilder::new(extension_id),
+            call: CallContextBuilder::new(extension_id).session("test-session", ".", None),
             model: ModelSelection::simple("test-model"),
         }
     }
@@ -426,20 +431,19 @@ impl HookContextBuilder {
 
     fn into_parts(self) -> (ExtensionCallContext, RuntimeHookCallContext) {
         let session_store_dir = self.call.session_store_dir.clone();
+        let session_id = self.call.session_id.clone().unwrap();
+        let working_dir = self.call.working_dir.clone().unwrap();
+        let turn_id = self.call.turn_id.clone();
         let call = self.call.build();
-        let session_id = call
-            .session_id()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        let working_dir = call
-            .working_dir()
-            .map(|path| path.to_path_buf())
-            .unwrap_or_default();
-        let mut runtime_call =
-            RuntimeHookCallContext::new(session_id, working_dir, self.model, session_store_dir)
-                .with_cancellation(call.cancellation().clone());
-        if let Some(turn_id) = call.turn_id() {
-            runtime_call = runtime_call.with_turn_id(turn_id.to_owned());
+        let mut runtime_call = RuntimeHookCallContext::new(
+            session_id.to_string(),
+            working_dir,
+            self.model,
+            session_store_dir,
+        )
+        .with_cancellation(call.cancellation().clone());
+        if let Some(turn_id) = turn_id {
+            runtime_call = runtime_call.with_turn_id(turn_id);
         }
         (call, runtime_call)
     }
@@ -462,7 +466,7 @@ pub struct ToolContextBuilder {
 impl ToolContextBuilder {
     pub fn new(extension_id: impl Into<String>, tool_name: impl Into<String>) -> Self {
         Self {
-            call: CallContextBuilder::new(extension_id),
+            call: CallContextBuilder::new(extension_id).session("test-session", ".", None),
             tool_name: tool_name.into(),
             call_id: None,
             arguments: Value::Null,
@@ -505,9 +509,13 @@ impl ToolContextBuilder {
     }
 
     pub fn build(self) -> ToolContext {
+        let session_id = self.call.session_id.clone().unwrap();
+        let working_dir = self.call.working_dir.clone().unwrap();
+        let turn_id = self.call.turn_id.clone();
         let call = self.call.build();
         ToolContext::from_runtime(
-            call,
+            SessionCallContext::from_runtime(call, session_id, turn_id),
+            working_dir,
             self.tool_name,
             self.call_id,
             self.arguments,
@@ -577,12 +585,9 @@ mod tests {
         cancellation.cancel();
 
         assert_eq!(pre_tool.extension_id(), "hook-fixture");
-        assert_eq!(
-            pre_tool.session_id().map(SessionId::as_str),
-            Some("session-1")
-        );
+        assert_eq!(pre_tool.session_id().as_str(), "session-1");
         assert_eq!(pre_tool.turn_id(), Some("turn-1"));
-        assert_eq!(pre_tool.working_dir(), Some(Path::new("/workspace")));
+        assert_eq!(pre_tool.working_dir(), Path::new("/workspace"));
         assert_eq!(pre_tool.model().model, "model-1");
         assert_eq!(
             pre_tool.paths().global_data_dir(),
@@ -648,8 +653,8 @@ mod tests {
             3,
         );
         assert_eq!(lifecycle.extension_id(), "hook-fixture");
-        assert!(lifecycle.session_id().is_none());
-        assert!(lifecycle.working_dir().is_none());
+        assert_eq!(lifecycle.session_id().as_str(), "test-session");
+        assert_eq!(lifecycle.working_dir(), Path::new("."));
         assert_eq!(lifecycle.model().model, "test-model");
         assert!(lifecycle.paths().global_data_dir().is_none());
         assert!(lifecycle.paths().session_data_dir().is_err());

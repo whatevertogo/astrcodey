@@ -528,16 +528,15 @@ fn commit_delete_patch(target: &PatchTarget<'_>) -> FileChange {
 }
 
 fn commit_write_patch(target: &PatchTarget<'_>, new_content: &str) -> FileChange {
-    if target.is_new_file {
-        if let Some(parent) = target.resolved_path.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                return failed_file_change(
-                    target.change_type,
-                    &target.path_label,
-                    format!("failed to create parent directory: {error}"),
-                );
-            }
-        }
+    if target.is_new_file
+        && let Some(parent) = target.resolved_path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
+    {
+        return failed_file_change(
+            target.change_type,
+            &target.path_label,
+            format!("failed to create parent directory: {error}"),
+        );
     }
     if let Err(error) = std::fs::write(&target.resolved_path, new_content) {
         return failed_file_change(

@@ -16,3 +16,4 @@ dirs = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt-multi-thread", "macros"] }
 tokio-util = { workspace = true }
+astrcode-extension-contract = { path = "../astrcode-extension-contract" }

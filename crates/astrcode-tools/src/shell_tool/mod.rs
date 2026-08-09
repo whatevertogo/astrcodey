@@ -201,16 +201,16 @@ impl ShellTool {
                 .map_err(|e| ToolError::Execution(format!("spawn: {e}")))?,
         );
 
-        if let Some(input) = &args.stdin {
-            if let Some(stdin) = child.as_mut().and_then(|c| c.stdin.take()) {
-                let mut stdin = stdin;
-                use tokio::io::AsyncWriteExt;
-                stdin
-                    .write_all(input.as_bytes())
-                    .await
-                    .map_err(|e| ToolError::Execution(format!("stdin write: {e}")))?;
-                drop(stdin);
-            }
+        if let Some(input) = &args.stdin
+            && let Some(stdin) = child.as_mut().and_then(|c| c.stdin.take())
+        {
+            let mut stdin = stdin;
+            use tokio::io::AsyncWriteExt;
+            stdin
+                .write_all(input.as_bytes())
+                .await
+                .map_err(|e| ToolError::Execution(format!("stdin write: {e}")))?;
+            drop(stdin);
         }
 
         let stdout = child

@@ -1,7 +1,5 @@
-use astrcode_core::wire::WireErrorCode;
+use astrcode_extension_contract::{WireErrorCode, protocol::ErrorPayload};
 use serde_json::Value;
-
-use crate::s5r::ErrorPayload;
 
 /// Lossless author-facing representation of an S5R host error payload.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

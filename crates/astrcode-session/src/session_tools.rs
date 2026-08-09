@@ -142,11 +142,11 @@ impl SessionToolCache {
             return base_registry;
         }
         let mut state = self.state.lock();
-        if let Some(cached) = state.filtered.as_ref() {
-            if Arc::ptr_eq(&cached.base_registry, &base_registry) && &cached.selection == selection
-            {
-                return Arc::clone(&cached.registry);
-            }
+        if let Some(cached) = state.filtered.as_ref()
+            && Arc::ptr_eq(&cached.base_registry, &base_registry)
+            && &cached.selection == selection
+        {
+            return Arc::clone(&cached.registry);
         }
 
         // `filtered` 构建在锁内执行，这是有意的：缓存条目只有在 base 快照仍是

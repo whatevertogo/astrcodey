@@ -10,6 +10,7 @@ default = []
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
+astrcode-extension-contract = { path = "../astrcode-extension-contract" }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 futures-util = { workspace = true }

@@ -8,8 +8,8 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ExtensionCall, ExtensionCallContext, ExtensionError, HookMode, canonical_registration_name,
-    internal::CustomEventSink,
+    ExtensionCall, ExtensionCallContext, ExtensionError, HookMode, SessionCallContext,
+    canonical_registration_name, internal::CustomEventSink,
 };
 
 // ─── Lifecycle Events ────────────────────────────────────────────────────
@@ -161,6 +161,8 @@ pub enum CustomEventSourceFilter {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CustomEventSubscription {
     pub id: String,
+    #[serde(default = "default_consumer_version")]
+    pub consumer_version: u32,
     pub event_type: String,
     pub source: CustomEventSourceFilter,
 }
@@ -171,6 +173,7 @@ impl CustomEventSubscription {
         let event_type = event_type.into();
         Self {
             id: event_type.clone(),
+            consumer_version: default_consumer_version(),
             event_type,
             source: CustomEventSourceFilter::Any,
         }
@@ -182,6 +185,7 @@ impl CustomEventSubscription {
         let event_type = event_type.into();
         Self {
             id: format!("{extension_id}:{event_type}"),
+            consumer_version: default_consumer_version(),
             event_type,
             source: CustomEventSourceFilter::Extension { extension_id },
         }
@@ -192,8 +196,14 @@ impl CustomEventSubscription {
         self
     }
 
+    pub fn consumer_version(mut self, version: u32) -> Self {
+        self.consumer_version = version;
+        self
+    }
+
     /// 注册路径共用的规范化：裁剪作者侧可能带入的空白。
-    pub(crate) fn normalize(&mut self) {
+    #[doc(hidden)]
+    pub fn normalize(&mut self) {
         canonical_registration_name(&mut self.id);
         canonical_registration_name(&mut self.event_type);
         if let CustomEventSourceFilter::Extension { extension_id } = &mut self.source {
@@ -202,12 +212,16 @@ impl CustomEventSubscription {
     }
 
     /// 注册路径共用的字段校验；重复 id 由各注册路径按自身错误语义检查。
-    pub(crate) fn validate(&self) -> Result<(), String> {
+    #[doc(hidden)]
+    pub fn validate(&self) -> Result<(), String> {
         if self.id.is_empty() || self.id.len() > MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN {
             return Err(format!(
                 "invalid custom event subscription id `{}`",
                 self.id
             ));
+        }
+        if self.consumer_version == 0 {
+            return Err("custom event consumer version must be greater than zero".to_owned());
         }
         if self.event_type.is_empty() {
             return Err("custom event subscription type cannot be empty".to_owned());
@@ -232,11 +246,14 @@ impl CustomEventSubscription {
     }
 }
 
+const fn default_consumer_version() -> u32 {
+    1
+}
+
 /// Host-attributed input for a custom-event consumer.
 #[derive(Clone)]
 pub struct CustomEventContext {
-    call: ExtensionCallContext,
-    session_id: SessionId,
+    call: SessionCallContext,
     event_id: EventId,
     seq: Option<u64>,
     source_extension_id: String,
@@ -253,6 +270,7 @@ impl CustomEventContext {
     pub fn from_runtime(
         call: ExtensionCallContext,
         session_id: SessionId,
+        turn_id: Option<String>,
         event_id: EventId,
         seq: Option<u64>,
         source_extension_id: String,
@@ -263,8 +281,7 @@ impl CustomEventContext {
         payload: serde_json::Value,
     ) -> Self {
         Self {
-            call,
-            session_id,
+            call: SessionCallContext::from_runtime(call, session_id, turn_id),
             event_id,
             seq,
             source_extension_id,
@@ -281,7 +298,11 @@ impl CustomEventContext {
     }
 
     pub fn session_id(&self) -> &SessionId {
-        &self.session_id
+        self.call.session_id()
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        self.call.turn_id()
     }
 
     pub fn seq(&self) -> Option<u64> {
@@ -319,13 +340,38 @@ impl CustomEventContext {
 
 impl ExtensionCall for CustomEventContext {
     fn call(&self) -> &ExtensionCallContext {
-        &self.call
+        self.call.call()
+    }
+}
+
+/// Durable-consumer decision for one custom-event delivery.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CustomEventDisposition {
+    Ack,
+    Retry { reason: String },
+    DeadLetter { reason: String },
+}
+
+impl CustomEventDisposition {
+    pub fn retry(reason: impl Into<String>) -> Self {
+        Self::Retry {
+            reason: reason.into(),
+        }
+    }
+
+    pub fn dead_letter(reason: impl Into<String>) -> Self {
+        Self::DeadLetter {
+            reason: reason.into(),
+        }
     }
 }
 
 #[async_trait]
 pub trait CustomEventHandler: Send + Sync {
-    async fn handle(&self, ctx: CustomEventContext) -> Result<(), ExtensionError>;
+    async fn handle(
+        &self,
+        ctx: CustomEventContext,
+    ) -> Result<CustomEventDisposition, ExtensionError>;
 }
 
 const fn default_custom_event_schema_version() -> u32 {

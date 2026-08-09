@@ -17,9 +17,9 @@ use tokio::sync::Mutex;
 
 use crate::{
     CompactSnapshotInput, EventConsumerCheckpointOutcome, EventConsumerCheckpointReset,
-    EventConsumerState, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
-    SessionStore, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
-    ToolResultArtifactStore,
+    EventConsumerFailureOutcome, EventConsumerQuarantine, EventConsumerSkip, EventConsumerState,
+    EventReader, SessionEventJournal, SessionPathResolver, SessionReader, SessionStore,
+    StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
     tool_artifacts::{slice_tool_result, tool_result_file_name_with_suffix},
 };
 
@@ -302,7 +302,7 @@ impl SessionStore for InMemoryEventStore {
         Ok(session
             .event_consumers
             .get(consumer_id)
-            .copied()
+            .cloned()
             .unwrap_or_default())
     }
 
@@ -337,7 +337,63 @@ impl SessionStore for InMemoryEventStore {
             return Ok(EventConsumerCheckpointOutcome::Accepted);
         }
         state.checkpoint = Some(seq);
+        state.consecutive_failures = 0;
         Ok(EventConsumerCheckpointOutcome::Accepted)
+    }
+
+    async fn record_event_consumer_failure(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        expected_revision: u64,
+        seq: u64,
+        error: &str,
+        quarantine_after: u32,
+    ) -> Result<EventConsumerFailureOutcome, StorageError> {
+        validate_event_consumer_id(consumer_id)?;
+        if quarantine_after == 0 {
+            return Err(StorageError::InvalidId(
+                "event consumer quarantine limit must be greater than zero".into(),
+            ));
+        }
+        let mut sessions = self.sessions.lock().await;
+        let session = sessions
+            .get_mut(session_id)
+            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
+        if seq >= session.events.len() as u64 {
+            return Err(StorageError::InvalidId(format!(
+                "event consumer failure seq {seq} is beyond the session event log"
+            )));
+        }
+        let state = session
+            .event_consumers
+            .entry(consumer_id.to_owned())
+            .or_default();
+        if state.revision != expected_revision {
+            return Ok(EventConsumerFailureOutcome::StaleRevision);
+        }
+        if state.checkpoint.is_some_and(|checkpoint| checkpoint >= seq) {
+            return Ok(EventConsumerFailureOutcome::AlreadyConsumed);
+        }
+        state.consecutive_failures = state
+            .consecutive_failures
+            .checked_add(1)
+            .ok_or_else(|| StorageError::CorruptLog("consumer failure count overflow".into()))?;
+        let attempts = state.consecutive_failures;
+        if attempts >= quarantine_after {
+            if !state.quarantined.iter().any(|record| record.seq == seq) {
+                state.quarantined.push(EventConsumerQuarantine {
+                    seq,
+                    attempts,
+                    last_error: error.to_owned(),
+                });
+            }
+            state.checkpoint = Some(seq);
+            state.consecutive_failures = 0;
+            Ok(EventConsumerFailureOutcome::Quarantined { attempts })
+        } else {
+            Ok(EventConsumerFailureOutcome::Recorded { attempts })
+        }
     }
 
     async fn set_event_consumer_paused(
@@ -356,7 +412,7 @@ impl SessionStore for InMemoryEventStore {
             .entry(consumer_id.to_owned())
             .or_default();
         state.paused = paused;
-        Ok(*state)
+        Ok(state.clone())
     }
 
     async fn reset_event_consumer_checkpoint(
@@ -375,6 +431,7 @@ impl SessionStore for InMemoryEventStore {
             .event_consumers
             .entry(consumer_id.to_owned())
             .or_default();
+        let previous_checkpoint = state.checkpoint;
         state.checkpoint = match reset {
             EventConsumerCheckpointReset::Beginning => None,
             EventConsumerCheckpointReset::StreamHead => latest,
@@ -383,7 +440,17 @@ impl SessionStore for InMemoryEventStore {
             .revision
             .checked_add(1)
             .ok_or_else(|| StorageError::CorruptLog("event consumer revision overflow".into()))?;
-        Ok(*state)
+        state.consecutive_failures = 0;
+        if reset == EventConsumerCheckpointReset::StreamHead
+            && state.checkpoint != previous_checkpoint
+        {
+            state.skips.push(EventConsumerSkip {
+                from_seq: previous_checkpoint,
+                to_seq: state.checkpoint,
+                revision: state.revision,
+            });
+        }
+        Ok(state.clone())
     }
 
     async fn checkpoint(

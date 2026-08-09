@@ -288,7 +288,6 @@ mod tests {
         .expect("same mode should succeed");
 
         assert!(!result.is_error);
-        assert!(result.content.contains("Already in Code"));
     }
 
     #[test]

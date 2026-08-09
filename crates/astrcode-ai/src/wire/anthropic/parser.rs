@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use astrcode_core::llm::{LlmEvent, LlmTokenUsage, LlmTokenUsageSource};
 use tokio::sync::mpsc;
 
-use crate::common::{send_event, stream_text_delta, token_usage_has_value};
+use crate::common::{send_event, stream_text_delta, token_usage_has_value, utf8_prefix};
 
 /// 流式响应的 `Done` 事件守卫，保证至多发送一次 `Done`。
 #[derive(Debug, Default)]
@@ -282,13 +282,13 @@ fn handle_anthropic_event(
             true
         },
         "message_delta" => {
-            if !state.usage_reported {
-                if let Some(usage) = extract_anthropic_token_usage(event) {
-                    if !send_event(tx, LlmEvent::Usage { usage }) {
-                        return false;
-                    }
-                    state.usage_reported = true;
+            if !state.usage_reported
+                && let Some(usage) = extract_anthropic_token_usage(event)
+            {
+                if !send_event(tx, LlmEvent::Usage { usage }) {
+                    return false;
                 }
+                state.usage_reported = true;
             }
             if let Some(stop_reason) = event.pointer("/delta/stop_reason").and_then(|v| v.as_str())
             {
@@ -374,7 +374,7 @@ pub(crate) fn process_sse_line(
                  {error}",
                 current_event_type,
                 data.len(),
-                &data[..data.floor_char_boundary(80)]
+                utf8_prefix(data, 80)
             );
         },
     }

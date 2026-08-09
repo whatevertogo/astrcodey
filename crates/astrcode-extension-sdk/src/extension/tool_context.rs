@@ -1,12 +1,15 @@
 //! Host-attributed context for one extension tool invocation.
 
-use std::sync::Arc;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
-use astrcode_core::{tool::ToolDefinition, wire::WireErrorCode};
+use astrcode_core::{tool::ToolDefinition, types::SessionId, wire::WireErrorCode};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::{ExtensionCall, ExtensionCallContext, ExtensionError};
+use super::{ExtensionCall, ExtensionCallContext, ExtensionError, SessionCallContext};
 use crate::host::HostError;
 
 /// Immutable input and scoped host capabilities for one extension tool call.
@@ -15,7 +18,8 @@ use crate::host::HostError;
 /// context, raw session operations, or the event sink behind this value.
 #[derive(Clone)]
 pub struct ToolContext {
-    call: ExtensionCallContext,
+    call: SessionCallContext,
+    working_dir: PathBuf,
     tool_name: Arc<str>,
     call_id: Option<Arc<str>>,
     arguments: Value,
@@ -28,7 +32,8 @@ impl ToolContext {
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     pub fn from_runtime(
-        call: ExtensionCallContext,
+        call: SessionCallContext,
+        working_dir: PathBuf,
         tool_name: impl Into<String>,
         call_id: Option<String>,
         arguments: Value,
@@ -38,6 +43,7 @@ impl ToolContext {
     ) -> Self {
         Self {
             call,
+            working_dir,
             tool_name: Arc::from(tool_name.into()),
             call_id: call_id.map(Arc::from),
             arguments,
@@ -99,11 +105,23 @@ impl ToolContext {
     pub fn available_tools(&self) -> &[ToolDefinition] {
         &self.available_tools
     }
+
+    pub fn session_id(&self) -> &SessionId {
+        self.call.session_id()
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        self.call.turn_id()
+    }
+
+    pub fn working_dir(&self) -> &Path {
+        &self.working_dir
+    }
 }
 
 impl ExtensionCall for ToolContext {
     fn call(&self) -> &ExtensionCallContext {
-        &self.call
+        self.call.call()
     }
 }
 

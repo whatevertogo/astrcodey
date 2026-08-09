@@ -29,9 +29,9 @@ use uuid::Uuid;
 
 use crate::{
     CompactSnapshotInput, EventConsumerCheckpointOutcome, EventConsumerCheckpointReset,
-    EventConsumerState, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
-    SessionStore, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
-    ToolResultArtifactStore,
+    EventConsumerFailureOutcome, EventConsumerQuarantine, EventConsumerSkip, EventConsumerState,
+    EventReader, SessionEventJournal, SessionPathResolver, SessionReader, SessionStore,
+    StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
     event_log::EventLog,
     snapshot::SnapshotManager,
     tool_artifacts::{slice_tool_result, write_tool_result_file},
@@ -94,7 +94,7 @@ fn event_consumer_state_path(
         .join(format!("{digest:x}.state.json")))
 }
 
-const EVENT_CONSUMER_STATE_VERSION: u8 = 1;
+const EVENT_CONSUMER_STATE_VERSION: u8 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -103,6 +103,9 @@ struct PersistedEventConsumerState {
     cursor: Option<u64>,
     paused: bool,
     revision: u64,
+    consecutive_failures: u32,
+    quarantined: Vec<EventConsumerQuarantine>,
+    skips: Vec<EventConsumerSkip>,
 }
 
 impl From<PersistedEventConsumerState> for EventConsumerState {
@@ -111,17 +114,23 @@ impl From<PersistedEventConsumerState> for EventConsumerState {
             checkpoint: state.cursor,
             paused: state.paused,
             revision: state.revision,
+            consecutive_failures: state.consecutive_failures,
+            quarantined: state.quarantined,
+            skips: state.skips,
         }
     }
 }
 
-impl From<EventConsumerState> for PersistedEventConsumerState {
-    fn from(state: EventConsumerState) -> Self {
+impl From<&EventConsumerState> for PersistedEventConsumerState {
+    fn from(state: &EventConsumerState) -> Self {
         Self {
             version: EVENT_CONSUMER_STATE_VERSION,
             cursor: state.checkpoint,
             paused: state.paused,
             revision: state.revision,
+            consecutive_failures: state.consecutive_failures,
+            quarantined: state.quarantined.clone(),
+            skips: state.skips.clone(),
         }
     }
 }
@@ -152,7 +161,7 @@ async fn read_event_consumer_state(path: &Path) -> Result<EventConsumerState, St
 
 async fn write_event_consumer_state(
     path: &Path,
-    state: EventConsumerState,
+    state: &EventConsumerState,
 ) -> Result<(), StorageError> {
     let parent = path.parent().ok_or_else(|| {
         StorageError::InvalidId("event consumer state has no parent directory".into())
@@ -865,8 +874,66 @@ impl SessionStore for FileSystemSessionRepository {
             return Ok(EventConsumerCheckpointOutcome::Accepted);
         }
         state.checkpoint = Some(seq);
-        write_event_consumer_state(&path, state).await?;
+        state.consecutive_failures = 0;
+        write_event_consumer_state(&path, &state).await?;
         Ok(EventConsumerCheckpointOutcome::Accepted)
+    }
+
+    async fn record_event_consumer_failure(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        expected_revision: u64,
+        seq: u64,
+        error: &str,
+        quarantine_after: u32,
+    ) -> Result<EventConsumerFailureOutcome, StorageError> {
+        if quarantine_after == 0 {
+            return Err(StorageError::InvalidId(
+                "event consumer quarantine limit must be greater than zero".into(),
+            ));
+        }
+        let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
+            StorageError::Io(std::io::Error::other("event consumer state lane closed"))
+        })?;
+        let event_count = u64::try_from(meta.log.count().await?).map_err(|_| {
+            StorageError::CorruptLog("session event count exceeds consumer checkpoint range".into())
+        })?;
+        if seq >= event_count {
+            return Err(StorageError::InvalidId(format!(
+                "event consumer failure seq {seq} is beyond the session event log"
+            )));
+        }
+        let path = event_consumer_state_path(&meta.dir, consumer_id)?;
+        let mut state = read_event_consumer_state(&path).await?;
+        if state.revision != expected_revision {
+            return Ok(EventConsumerFailureOutcome::StaleRevision);
+        }
+        if state.checkpoint.is_some_and(|checkpoint| checkpoint >= seq) {
+            return Ok(EventConsumerFailureOutcome::AlreadyConsumed);
+        }
+        state.consecutive_failures = state
+            .consecutive_failures
+            .checked_add(1)
+            .ok_or_else(|| StorageError::CorruptLog("consumer failure count overflow".into()))?;
+        let attempts = state.consecutive_failures;
+        let outcome = if attempts >= quarantine_after {
+            if !state.quarantined.iter().any(|record| record.seq == seq) {
+                state.quarantined.push(EventConsumerQuarantine {
+                    seq,
+                    attempts,
+                    last_error: error.to_owned(),
+                });
+            }
+            state.checkpoint = Some(seq);
+            state.consecutive_failures = 0;
+            EventConsumerFailureOutcome::Quarantined { attempts }
+        } else {
+            EventConsumerFailureOutcome::Recorded { attempts }
+        };
+        write_event_consumer_state(&path, &state).await?;
+        Ok(outcome)
     }
 
     async fn set_event_consumer_paused(
@@ -883,7 +950,7 @@ impl SessionStore for FileSystemSessionRepository {
         let mut state = read_event_consumer_state(&path).await?;
         if state.paused != paused {
             state.paused = paused;
-            write_event_consumer_state(&path, state).await?;
+            write_event_consumer_state(&path, &state).await?;
         }
         Ok(state)
     }
@@ -900,6 +967,7 @@ impl SessionStore for FileSystemSessionRepository {
         })?;
         let path = event_consumer_state_path(&meta.dir, consumer_id)?;
         let mut state = read_event_consumer_state(&path).await?;
+        let previous_checkpoint = state.checkpoint;
         state.checkpoint = match reset {
             EventConsumerCheckpointReset::Beginning => None,
             EventConsumerCheckpointReset::StreamHead => u64::try_from(meta.log.count().await?)
@@ -914,7 +982,17 @@ impl SessionStore for FileSystemSessionRepository {
             .revision
             .checked_add(1)
             .ok_or_else(|| StorageError::CorruptLog("event consumer revision overflow".into()))?;
-        write_event_consumer_state(&path, state).await?;
+        state.consecutive_failures = 0;
+        if reset == EventConsumerCheckpointReset::StreamHead
+            && state.checkpoint != previous_checkpoint
+        {
+            state.skips.push(EventConsumerSkip {
+                from_seq: previous_checkpoint,
+                to_seq: state.checkpoint,
+                revision: state.revision,
+            });
+        }
+        write_event_consumer_state(&path, &state).await?;
         Ok(state)
     }
 
@@ -978,23 +1056,23 @@ impl SessionStore for FileSystemSessionRepository {
         let extension_dir = dir.parent(); // subagents/{extension}/
         let subagents_dir = extension_dir.and_then(|p| p.parent()); // subagents/
 
-        if let (Some(extension_dir), Some(subagents_dir)) = (extension_dir, subagents_dir) {
-            if subagents_dir.file_name().is_some_and(|n| n == "subagents") {
-                let extension_name = extension_dir
-                    .file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let recycled = subagents_dir
-                    .join(".recycled")
-                    .join(extension_name.as_ref());
-                tokio::fs::create_dir_all(&recycled).await?;
-                let dir_name = dir
-                    .file_name()
-                    .ok_or_else(|| StorageError::InvalidId("unexpected session dir path".into()))?;
-                let dest = recycled.join(dir_name);
-                tokio::fs::rename(&dir, &dest).await?;
-                return Ok(());
-            }
+        if let (Some(extension_dir), Some(subagents_dir)) = (extension_dir, subagents_dir)
+            && subagents_dir.file_name().is_some_and(|n| n == "subagents")
+        {
+            let extension_name = extension_dir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            let recycled = subagents_dir
+                .join(".recycled")
+                .join(extension_name.as_ref());
+            tokio::fs::create_dir_all(&recycled).await?;
+            let dir_name = dir
+                .file_name()
+                .ok_or_else(|| StorageError::InvalidId("unexpected session dir path".into()))?;
+            let dest = recycled.join(dir_name);
+            tokio::fs::rename(&dir, &dest).await?;
+            return Ok(());
         }
 
         // 非子 session 或非标准目录结构，回退到删除
@@ -1133,13 +1211,13 @@ impl FileSystemSessionRepository {
                 }
                 let session_dir = entry.path();
                 let recycled_dir = session_dir.join("subagents").join(".recycled");
-                if directory_exists(&recycled_dir).await {
-                    if let Ok(mut extension_entries) = tokio::fs::read_dir(&recycled_dir).await {
-                        while let Ok(Some(extension_entry)) = extension_entries.next_entry().await {
-                            let candidate = extension_entry.path().join(id.as_str());
-                            if directory_exists(&candidate).await {
-                                return Some(candidate);
-                            }
+                if directory_exists(&recycled_dir).await
+                    && let Ok(mut extension_entries) = tokio::fs::read_dir(&recycled_dir).await
+                {
+                    while let Ok(Some(extension_entry)) = extension_entries.next_entry().await {
+                        let candidate = extension_entry.path().join(id.as_str());
+                        if directory_exists(&candidate).await {
+                            return Some(candidate);
                         }
                     }
                 }

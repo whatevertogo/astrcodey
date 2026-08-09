@@ -11,7 +11,9 @@ mod session;
 mod session_inspect;
 mod workspace;
 
-use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap, future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration,
+};
 
 use astrcode_core::{
     event::{
@@ -21,15 +23,18 @@ use astrcode_core::{
     llm::LlmProvider,
     tool::SessionOperations,
     types::EventId,
-    wire::{WireError, WireErrorCode},
+    wire::WireError,
 };
+use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::{
         CustomEventDeclaration, ExtensionCapability, ExtensionError, ExtensionHttpRequest,
         ExtensionHttpResponse, ExtensionTaskError, ExtensionTasks,
     },
-    host::{HostOperation, HostOperationGroup, internal::OutboundNetworkService},
-    s5r::{CapabilityDescriptor, ErrorPayload, EventMsg, EventPhase, WireMessage},
+    host::{
+        HostOp, HostOperation, HostOperationGroup, internal::OutboundNetworkService, operations,
+    },
+    s5r::{CapabilityDescriptor, ErrorPayload},
 };
 use astrcode_storage::{EventReader, SessionReader};
 use serde_json::Value;
@@ -266,8 +271,200 @@ pub struct HostRouter {
     extension_http: ExtensionHttpGroup,
 }
 
+type HostHandlerFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, ErrorPayload>> + Send + 'a>>;
+type HostHandler =
+    for<'a> fn(&'a HostRouter, HostOperation, Value, &'a InvokeContext) -> HostHandlerFuture<'a>;
+
+#[derive(Clone, Copy)]
+struct RegisteredHostHandler {
+    operation: HostOperation,
+    group: HostOperationGroup,
+    invoke: HostHandler,
+}
+
+impl RegisteredHostHandler {
+    const fn register<Operation>(group: HostOperationGroup, invoke: HostHandler) -> Self
+    where
+        Operation: HostOp,
+    {
+        Self {
+            operation: Operation::OPERATION,
+            group,
+            invoke,
+        }
+    }
+}
+
+macro_rules! host_handler_registry {
+    ($($operation:ident => ($group:ident, $handler:ident)),* $(,)?) => {
+        const HOST_HANDLERS: [RegisteredHostHandler; HostOperation::COUNT] = [
+            $(
+                RegisteredHostHandler::register::<operations::$operation>(
+                    HostOperationGroup::$group,
+                    $handler,
+                )
+            ),*
+        ];
+    };
+}
+
+host_handler_registry! {
+    EventEmit => (Context, invoke_context),
+    ExtensionHttpPublic => (ExtensionHttp, invoke_extension_http),
+    LlmMainChat => (Llm, invoke_llm),
+    LlmSmallChat => (Llm, invoke_llm),
+    NetworkClient => (Network, invoke_network),
+    ProcessSpawn => (Process, invoke_process),
+    SessionControlCancelTurn => (Session, invoke_session),
+    SessionControlConfigureTools => (Session, invoke_session),
+    SessionControlCreate => (Session, invoke_session),
+    SessionControlDispose => (Session, invoke_session),
+    SessionControlExecutionView => (Session, invoke_session),
+    SessionControlInjectOrStart => (Session, invoke_session),
+    SessionControlInterruptAndSubmit => (Session, invoke_session),
+    SessionControlReactivate => (Session, invoke_session),
+    SessionControlState => (Session, invoke_session),
+    SessionControlSubmitTurn => (Session, invoke_session),
+    SessionHistoryList => (Session, invoke_session),
+    SessionHistoryProviderMessages => (Session, invoke_session),
+    SessionHistorySnapshot => (Session, invoke_session),
+    SessionHistoryTokenUsage => (Session, invoke_session),
+    SessionHistoryTranscript => (Session, invoke_session),
+    SessionInspectList => (Session, invoke_session),
+    SessionInspectProviderMessages => (Session, invoke_session),
+    SessionInspectReadModel => (Session, invoke_session),
+    SessionInspectSnapshot => (Session, invoke_session),
+    SessionReadEvents => (Session, invoke_session),
+    SessionRootCreate => (Session, invoke_session),
+    SessionRootState => (Session, invoke_session),
+    SessionRootSubmitTurn => (Session, invoke_session),
+    SessionStateRead => (Context, invoke_context),
+    SessionStateWrite => (Context, invoke_context),
+    WorkspaceEdit => (Workspace, invoke_workspace),
+    WorkspaceGlob => (Workspace, invoke_workspace),
+    WorkspaceGrep => (Workspace, invoke_workspace),
+    WorkspaceList => (Workspace, invoke_workspace),
+    WorkspaceRead => (Workspace, invoke_workspace),
+    WorkspaceWrite => (Workspace, invoke_workspace),
+}
+
+const fn host_handler_registry_is_valid() -> bool {
+    let mut index = 0;
+    while index < HOST_HANDLERS.len() {
+        let registered = HOST_HANDLERS[index];
+        if registered.operation as usize != index
+            || registered.group as usize != registered.operation.spec().group as usize
+        {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
+const _: () = assert!(host_handler_registry_is_valid());
+
+fn invoke_llm<'a>(
+    router: &'a HostRouter,
+    operation: HostOperation,
+    input: Value,
+    context: &'a InvokeContext,
+) -> HostHandlerFuture<'a> {
+    Box::pin(async move {
+        router
+            .llm
+            .invoke(operation, input, context.cancel_token.as_ref())
+            .await
+    })
+}
+
+fn invoke_session<'a>(
+    router: &'a HostRouter,
+    operation: HostOperation,
+    input: Value,
+    context: &'a InvokeContext,
+) -> HostHandlerFuture<'a> {
+    Box::pin(async move { router.session.invoke(operation, input, context).await })
+}
+
+fn invoke_context<'a>(
+    router: &'a HostRouter,
+    operation: HostOperation,
+    input: Value,
+    context: &'a InvokeContext,
+) -> HostHandlerFuture<'a> {
+    Box::pin(async move { router.context.invoke(operation, &input, context).await })
+}
+
+fn invoke_workspace<'a>(
+    router: &'a HostRouter,
+    operation: HostOperation,
+    input: Value,
+    context: &'a InvokeContext,
+) -> HostHandlerFuture<'a> {
+    Box::pin(async move {
+        router
+            .workspace
+            .invoke(
+                operation,
+                input,
+                context.working_dir.as_deref(),
+                context.tasks.as_ref(),
+            )
+            .await
+    })
+}
+
+fn invoke_process<'a>(
+    router: &'a HostRouter,
+    operation: HostOperation,
+    input: Value,
+    context: &'a InvokeContext,
+) -> HostHandlerFuture<'a> {
+    Box::pin(async move {
+        router
+            .process
+            .invoke(
+                operation,
+                input,
+                context.working_dir.as_deref(),
+                context.cancel_token.as_ref(),
+            )
+            .await
+    })
+}
+
+fn invoke_network<'a>(
+    router: &'a HostRouter,
+    operation: HostOperation,
+    input: Value,
+    context: &'a InvokeContext,
+) -> HostHandlerFuture<'a> {
+    Box::pin(async move {
+        router
+            .network
+            .invoke(operation, input, context.cancel_token.as_ref())
+            .await
+    })
+}
+
+fn invoke_extension_http<'a>(
+    router: &'a HostRouter,
+    operation: HostOperation,
+    input: Value,
+    context: &'a InvokeContext,
+) -> HostHandlerFuture<'a> {
+    Box::pin(async move {
+        router
+            .extension_http
+            .invoke(operation, input, &context.extension_id)
+            .await
+    })
+}
+
 impl HostRouter {
     pub fn from_backends(backends: HostBackends) -> Self {
+        debug_assert!(host_handler_registry_is_valid());
         let HostBackends {
             main_llm,
             small_llm,
@@ -323,134 +520,56 @@ impl HostRouter {
         capability::authorize(spec, &ctx.declared_capabilities)?;
         ensure_required_context(spec.operation, ctx)?;
 
-        // Keep the router future bounded: each capability group has a distinct async state machine.
-        let invoke = async {
-            match spec.group {
-                HostOperationGroup::Llm => {
-                    Box::pin(
-                        self.llm
-                            .invoke(spec.operation, input, ctx.cancel_token.as_ref()),
-                    )
-                    .await
-                },
-                HostOperationGroup::Session => {
-                    Box::pin(self.session.invoke(spec.operation, input, ctx)).await
-                },
-                HostOperationGroup::Context => {
-                    Box::pin(self.context.invoke(spec.operation, &input, ctx)).await
-                },
-                HostOperationGroup::Workspace => {
-                    Box::pin(self.workspace.invoke(
-                        spec.operation,
-                        input,
-                        ctx.working_dir.as_deref(),
-                        ctx.tasks.as_ref(),
-                    ))
-                    .await
-                },
-                HostOperationGroup::Process => {
-                    Box::pin(self.process.invoke(
-                        spec.operation,
-                        input,
-                        ctx.working_dir.as_deref(),
-                        ctx.cancel_token.as_ref(),
-                    ))
-                    .await
-                },
-                HostOperationGroup::Network => {
-                    Box::pin(
-                        self.network
-                            .invoke(spec.operation, input, ctx.cancel_token.as_ref()),
-                    )
-                    .await
-                },
-                HostOperationGroup::ExtensionHttp => {
-                    Box::pin(
-                        self.extension_http
-                            .invoke(spec.operation, input, &ctx.extension_id),
-                    )
-                    .await
-                },
-            }
-        };
+        let handler = HOST_HANDLERS[spec.operation as usize];
+        let invoke = (handler.invoke)(self, spec.operation, input, ctx);
         // ProcessRunner must observe cancellation so it can terminate the process group and reap
         // the direct child before returning.
         let backend_owns_cancellation = spec.operation == HostOperation::ProcessSpawn;
-        if spec.cancelable && !backend_owns_cancellation {
-            if let Some(token) = &ctx.cancel_token {
-                return tokio::select! {
-                    biased;
-                    () = token.cancelled() => {
-                        Err(ErrorPayload::new(WireErrorCode::Cancelled, "invoke cancelled"))
-                    },
-                    output = invoke => output,
-                };
-            }
+        if spec.cancelable
+            && !backend_owns_cancellation
+            && let Some(token) = &ctx.cancel_token
+        {
+            return tokio::select! {
+                biased;
+                () = token.cancelled() => {
+                    Err(ErrorPayload::new(WireErrorCode::Cancelled, "invoke cancelled"))
+                },
+                output = invoke => output,
+            };
         }
         invoke.await
     }
 
-    /// 流式 invoke：返回 Event 序列（`started` + `completed`/`failed`）。
-    ///
-    /// 目前唯一支持 stream 的 LLM 组在调用完成后一次性返回有序 delta 集合。
-    pub async fn invoke_stream(
+    #[tracing::instrument(
+        name = "extension.stream",
+        skip(self, input, context),
+        fields(capability, extension_id = %context.extension_id)
+    )]
+    pub(crate) async fn invoke_event_stream(
         &self,
-        cap: &str,
+        capability: &str,
         input: Value,
-        request_id: &str,
-        ctx: &InvokeContext,
-    ) -> Result<Vec<WireMessage>, ErrorPayload> {
-        ensure_invoke_active(ctx)?;
-        let spec = capability::lookup(cap)?;
-        capability::authorize(spec, &ctx.declared_capabilities)?;
-        ensure_required_context(spec.operation, ctx)?;
+        context: &InvokeContext,
+    ) -> Result<astrcode_extension_contract::ModelEventStream, ErrorPayload> {
+        ensure_invoke_active(context)?;
+        let spec = capability::lookup(capability)?;
+        capability::authorize(spec, &context.declared_capabilities)?;
+        ensure_required_context(spec.operation, context)?;
         if !spec.supports_stream {
             return Err(ErrorPayload::new(
                 WireErrorCode::StreamNotSupported,
-                format!("stream not supported for {cap}"),
+                format!("stream not supported for {capability}"),
             ));
         }
-        let request_id = request_id.to_string();
-
         match spec.group {
             HostOperationGroup::Llm => {
-                let invoke = self
-                    .llm
-                    .invoke_stream(spec.operation, input, ctx.cancel_token.as_ref())
-                    .await;
-                let mut events = vec![WireMessage::Event(EventMsg {
-                    id: request_id.clone(),
-                    phase: EventPhase::Started,
-                    data: Value::Null,
-                    output: Value::Null,
-                    error: None,
-                })];
-                match invoke {
-                    Ok(output) => {
-                        events.push(WireMessage::Event(EventMsg {
-                            id: request_id,
-                            phase: EventPhase::Completed,
-                            data: output.clone(),
-                            output,
-                            error: None,
-                        }));
-                        Ok(events)
-                    },
-                    Err(error) => {
-                        events.push(WireMessage::Event(EventMsg {
-                            id: request_id,
-                            phase: EventPhase::Failed,
-                            data: Value::Null,
-                            output: Value::Null,
-                            error: Some(error),
-                        }));
-                        Ok(events)
-                    },
-                }
+                self.llm
+                    .invoke_event_stream(spec.operation, input, context.cancel_token.as_ref())
+                    .await
             },
             _ => Err(ErrorPayload::new(
                 WireErrorCode::InvalidCapabilityRegistry,
-                format!("streaming capability {cap} has no stream handler"),
+                format!("streaming capability {capability} has no stream handler"),
             )),
         }
     }
@@ -622,7 +741,7 @@ pub fn build_host_router_with_public_http_dispatcher(
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap,
+        collections::{BTreeMap, HashSet},
         sync::{
             Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -647,18 +766,37 @@ mod tests {
     use astrcode_extension_sdk::host::{
         HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_REQUEST_BODY_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS,
         HOST_PROCESS_MAX_TIMEOUT_MS, HOST_SESSION_STATE_KEY_MAX_LENGTH,
-        HOST_SESSION_STATE_VALUE_MAX_BYTES, HostLlmChatOutput, HostLlmChatRequest,
-        HostLlmCollectedStreamOutput, HostNetworkRedirectPolicy, HostNetworkRequest,
-        HostNetworkResponse, HostProcessRequest, HostWorkspaceGrepRequest,
+        HOST_SESSION_STATE_VALUE_MAX_BYTES, HostLlmChatOutput, HostNetworkRedirectPolicy,
+        HostNetworkRequest, HostNetworkResponse, HostProcessRequest, HostWorkspaceGrepRequest,
     };
     use astrcode_storage::{
         EventReader, SessionEventJournal, SessionReader, StorageError,
         in_memory::InMemoryEventStore,
     };
+    use futures_util::StreamExt;
     use serde_json::json;
     use tokio::sync::Notify;
 
     use super::*;
+
+    #[test]
+    fn handler_registry_is_bidirectionally_complete() {
+        let mut registered = HashSet::new();
+        for handler in HOST_HANDLERS {
+            assert!(
+                registered.insert(handler.operation),
+                "duplicate handler for {:?}",
+                handler.operation
+            );
+            assert_eq!(handler.group, handler.operation.spec().group);
+        }
+        assert_eq!(registered.len(), HostOperation::COUNT);
+        assert!(
+            astrcode_extension_sdk::host::HOST_OPERATION_SPECS
+                .iter()
+                .all(|spec| registered.contains(&spec.operation))
+        );
+    }
 
     struct DropProbe(Arc<AtomicBool>);
 
@@ -2151,15 +2289,12 @@ mod tests {
             declared_capabilities: vec![ExtensionCapability::SmallModel],
             ..Default::default()
         };
-        let err = router
-            .invoke_stream(
-                "astrcode.llm.small_chat",
-                json!({ "messages": [] }),
-                "req-1",
-                &ctx,
-            )
+        let Err(err) = router
+            .invoke_event_stream("astrcode.llm.small_chat", json!({ "messages": [] }), &ctx)
             .await
-            .unwrap_err();
+        else {
+            panic!("pre-cancelled stream unexpectedly opened");
+        };
         assert_eq!(err.code_enum(), Some(WireErrorCode::Cancelled));
     }
 
@@ -2199,8 +2334,10 @@ mod tests {
             },
             LlmMessage::tool("lookup", "call-1", "done", false),
         ];
-        let input = serde_json::to_value(HostLlmChatRequest::new(messages.clone()))
-            .expect("serialize typed model request");
+        let input = serde_json::to_value(astrcode_extension_sdk::host::llm_chat_request(
+            messages.clone(),
+        ))
+        .expect("serialize typed model request");
         let ctx = InvokeContext {
             declared_capabilities: vec![ExtensionCapability::MainModel],
             ..Default::default()
@@ -2215,23 +2352,27 @@ mod tests {
         assert_eq!(output.content, "hello world");
         assert_eq!(output.model, "main_llm");
 
-        let events = router
-            .invoke_stream("astrcode.llm.main_chat", input.clone(), "stream-1", &ctx)
+        let mut events = router
+            .invoke_event_stream("astrcode.llm.main_chat", input.clone(), &ctx)
             .await
-            .expect("collect typed model stream");
-        assert_eq!(events.len(), 2);
-        let completed = events.last().expect("completed event");
-        let WireMessage::Event(completed) = completed else {
-            panic!("expected stream event");
-        };
-        assert_eq!(completed.phase, EventPhase::Completed);
-        let collected =
-            serde_json::from_value::<HostLlmCollectedStreamOutput>(completed.output.clone())
-                .expect("deserialize collected stream output");
-        assert_eq!(collected.content, "hello world");
-        assert_eq!(collected.model, "main_llm");
-        assert_eq!(collected.chunks[0].delta, "hello ");
-        assert_eq!(collected.chunks[1].delta, "world");
+            .expect("open typed model stream");
+        let mut deltas = Vec::new();
+        let mut completed = None;
+        while let Some(event) = events.next().await {
+            match event {
+                astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
+                    content,
+                } => deltas.push(content),
+                astrcode_extension_contract::protocol::ModelStreamEvent::Completed { output } => {
+                    completed = Some(output);
+                },
+                _ => {},
+            }
+        }
+        assert_eq!(deltas, ["hello ", "world"]);
+        let completed = completed.expect("completed stream event");
+        assert_eq!(completed["content"], "hello world");
+        assert_eq!(completed["model"], "main_llm");
 
         {
             let captured = provider.messages.lock().expect("captured messages");
@@ -2299,9 +2440,10 @@ mod tests {
             declared_capabilities: vec![ExtensionCapability::MainModel],
             ..Default::default()
         };
-        let llm_input =
-            serde_json::to_value(HostLlmChatRequest::new(vec![LlmMessage::user("hello")]))
-                .expect("serialize LLM request");
+        let llm_input = serde_json::to_value(astrcode_extension_sdk::host::llm_chat_request(vec![
+            LlmMessage::user("hello"),
+        ]))
+        .expect("serialize LLM request");
         let invoke = llm_router.invoke("astrcode.llm.main_chat", llm_input, &llm_ctx);
         tokio::pin!(invoke);
         tokio::select! {

@@ -198,10 +198,10 @@ pub(crate) fn chat_message_to_json(message: &LlmMessage) -> serde_json::Value {
             if matches!(message.role, LlmRole::Assistant) {
                 set_reasoning_content(&mut obj, &message.reasoning_content);
             }
-            if matches!(message.role, LlmRole::Tool) {
-                if let Some(ref name) = message.name {
-                    obj["name"] = serde_json::json!(name);
-                }
+            if matches!(message.role, LlmRole::Tool)
+                && let Some(ref name) = message.name
+            {
+                obj["name"] = serde_json::json!(name);
             }
             obj
         },

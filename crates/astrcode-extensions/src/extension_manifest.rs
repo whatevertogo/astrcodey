@@ -10,8 +10,8 @@ use astrcode_extension_sdk::{
         fixed_hook_mode, hook_mode_is_supported,
     },
     s5r::{
-        HandlerDescriptor, HandlerId, WIRE_FEATURE_PARENT_INVOKE_ID, capability_from_wire,
-        compact_event_from_name, compact_event_to_name, event_from_name, event_to_name,
+        HandlerDescriptor, HandlerId, capability_from_wire, compact_event_from_name,
+        compact_event_to_name, event_from_name, event_to_name,
         manifest::{
             InitializeManifest, ManifestCommand, ManifestHook, ManifestHttpRoute, ManifestTool,
         },
@@ -174,13 +174,14 @@ pub(crate) fn registration_from_s5r_metadata(
             "initialize metadata protocol.s5r must be \"{expected_s5r_version}\""
         ));
     }
+    let required_wire_feature = astrcode_extension_contract::protocol::FEATURE_NESTED_INVOKE_V1;
     if !manifest
         .wire_features
         .iter()
-        .any(|feature| feature == WIRE_FEATURE_PARENT_INVOKE_ID)
+        .any(|feature| feature == required_wire_feature)
     {
         return Err(format!(
-            "S5R {expected_s5r_version} requires wire feature {WIRE_FEATURE_PARENT_INVOKE_ID}"
+            "S5R {expected_s5r_version} requires wire feature {required_wire_feature}"
         ));
     }
     registration_from_manifest(manifest)
@@ -404,7 +405,8 @@ mod tests {
             ),
         ];
         for (mut manifest, expected) in invalid_manifests {
-            manifest["wire_features"] = json!([WIRE_FEATURE_PARENT_INVOKE_ID]);
+            manifest["wire_features"] =
+                json!([astrcode_extension_contract::protocol::FEATURE_NESTED_INVOKE_V1]);
             let error =
                 registration_from_s5r_metadata(&manifest, astrcode_extension_sdk::s5r::S5R_VERSION)
                     .unwrap_err();
@@ -420,7 +422,10 @@ mod tests {
                     "future_protocol_field": true
                 },
                 "wire_codec": "json",
-                "wire_features": ["parent_invoke_id", "future_feature"],
+                "wire_features": [
+                    astrcode_extension_contract::protocol::FEATURE_NESTED_INVOKE_V1,
+                    "future_feature"
+                ],
                 "future_manifest_field": {"enabled": true},
                 "tools": [
                     {
@@ -455,8 +460,9 @@ mod tests {
         assert_eq!(registration.commands()[0].description, "");
         assert!(matches!(
             &registration.subscriptions()[0],
-            HookSubscription::Lifecycle { options, .. }
-                if *options == ContinueAfterStopOptions::default()
+            HookSubscription::Lifecycle { mode, options, .. }
+                if *mode == HookMode::NonBlocking
+                    && *options == ContinueAfterStopOptions::default()
         ));
         assert_eq!(registration.custom_events()[0].schema_version, 1);
         assert!(registration.custom_events()[0].durable);

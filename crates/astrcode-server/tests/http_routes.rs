@@ -25,10 +25,10 @@ use astrcode_core::{
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        CustomEventContext, CustomEventHandler, CustomEventSubscription, ExtensionCapability,
-        ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpResponse,
-        ExtensionHttpRoute, ExtensionManifest, HttpContext, MAX_EXTENSION_HTTP_BODY_BYTES,
-        Registrar,
+        CustomEventContext, CustomEventDisposition, CustomEventHandler, CustomEventSubscription,
+        ExtensionCapability, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest, HttpContext,
+        MAX_EXTENSION_HTTP_BODY_BYTES, Registrar,
     },
 };
 use astrcode_extensions::{Extension, runner::ExtensionRunner};
@@ -141,8 +141,11 @@ impl Extension for EventConsumerHttpExtension {
 
 #[async_trait::async_trait]
 impl CustomEventHandler for EventConsumerHttpHandler {
-    async fn handle(&self, _ctx: CustomEventContext) -> Result<(), ExtensionError> {
-        Ok(())
+    async fn handle(
+        &self,
+        _ctx: CustomEventContext,
+    ) -> Result<CustomEventDisposition, ExtensionError> {
+        Ok(CustomEventDisposition::Ack)
     }
 }
 

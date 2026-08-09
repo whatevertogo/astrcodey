@@ -33,7 +33,7 @@
 | `astrcode-extensions::remote_manifest` | 内部 s5r 握手适配与 `HandlerResult` 解析 |
 | `astrcode-extension-sdk::s5r` | 线缆类型、`HandlerResult`、事件名、能力 wire 名 |
 | `astrcode-extension-sdk::runtime` | `Peer`、帧传输、取消、流式 |
-| `astrcode-extension-sdk::worker` | Worker 入口、`HandlerRegistry`、`HostClient` |
+| `astrcode-extension-worker` | Worker 入口、`HandlerRegistry`、远程 `HostClient` |
 
 参考实现：`crates/astrcode-extensions/tests/s5r-guest/`  
 E2E：`cargo test -p astrcode-extensions --test s5r_e2e_test`
@@ -241,29 +241,29 @@ async fn bundled_extension_uses_the_real_authoring_boundaries() {
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `extension_id` | 是 | 启动进程前确定的权威扩展 ID；必须与 S5R 握手 ID 一致 |
-| `protocol.s5r` | 是 | `"2.0"` |
+| `protocol.s5r` | 是 | `"3.0"` |
 | `command` | 是 | 字符串数组：`[可执行文件, ...参数]` |
 | `env` | 否 | 额外环境变量 |
 
 ```json
 {
   "extension_id": "my-extension",
-  "protocol": { "s5r": "2.0" },
+  "protocol": { "s5r": "3.0" },
   "command": ["./my-extension"]
 }
 ```
 
 ### 4.3 握手与调用
 
-1. 子进程启动后通过 `Worker::run_stdio()` 发送 `Initialize`（manifest 在 `metadata`）
-2. 宿主回复 `initialize_result` 与授权的 `astrcode.*` 能力
+1. 宿主启动子进程后发送 `Initialize`，声明 supported/required feature 与授权的宿主能力
+2. `Worker::run_stdio()` 回复 `initialize_result`（注册 manifest 在 `metadata`）
 3. 宿主经 `handler.invoke` 调用工具 / 命令 / 钩子
 4. 子进程经 `astrcode.*` `invoke` 调用宿主能力（可 `stream: true`）
 
-当前 Worker 会在握手 manifest 的 `wire_features` 中声明 `parent_invoke_id`。在 handler
-作用域内发起的嵌套 invoke 会携带父请求 ID 与父取消令牌，宿主据此恢复该请求自己的
-session、working directory 和授权上下文。宿主只会为声明此 feature 且工具 mode 为
-`parallel` 的 worker 开放有界并行；S5R 2.0 初始化缺少该 feature 会被拒绝。
+S5R 3.0 必须协商 `nested_invoke_v1`、`model_stream_v1` 与 `custom_event_v1`。在 handler
+作用域内发起的嵌套 invoke 会携带父请求 ID，宿主据此恢复该请求自己的 session、
+working directory、取消令牌和授权上下文。未完成初始化、feature 交集不满足任一方
+required 集合、或携带未知父请求的调用都会在边界拒绝。
 handler 自行创建的脱离 Tokio task 不继承 task-local 调用作用域；当前 Worker API 不支持
 这类任务在原 handler 返回后继续使用会话级 HostClient 能力。
 
@@ -331,7 +331,8 @@ handler 注册表。宿主在安装时校验 scope capability、路径格式、�
 宿主也会在启动扩展前校验 hook 注册与 capability 声明是否一致。扩展事件、
 compact、provider、blocking tool intercept、continue-after-stop 等敏感注册缺少对应
 capability 时会直接拒绝加载。生命周期事件中只有 `TurnStart` 和
-`UserPromptSubmit` 可以使用 Blocking；session、step 和结束类事件只能作为通知。
+`UserPromptSubmit` 可以使用 Blocking；session、step 和结束类事件可选择同步等待但
+fail-open 的 Advisory，或由宿主管理生命周期的 NonBlocking 通知。
 
 所有来源最终都解析成 runner 内唯一的 `ResolvedExtensionManifest`。索引、快照、
 能力检查和冲突检查只读取这份运行时清单，不再分别维护扩展实例、注册记录和任务表。
@@ -365,7 +366,7 @@ fingerprint 以及无需启动进程即可读取的权威 extension ID；reconci
 
 ## 6. 磁盘扩展编写入口
 
-磁盘扩展从 `astrcode_extension_sdk::worker_prelude` 导入 `Worker`、handler adapter 与
+磁盘扩展从 `astrcode_extension_worker::worker_prelude` 导入 `Worker`、handler adapter 与
 `HostClient`，参考 `tests/s5r-guest/src/main.rs` 与 `s5r_e2e_test.rs`。不要混入 bundled
 `prelude` 的 `Extension`、`Registrar` 或生产 context。
 

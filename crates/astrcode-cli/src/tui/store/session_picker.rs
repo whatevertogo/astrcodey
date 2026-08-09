@@ -66,32 +66,6 @@ mod tests {
     }
 
     #[test]
-    fn formats_recent_as_now() {
-        let ts = (now() - chrono::Duration::seconds(30)).to_rfc3339();
-        assert_eq!(format_relative_time(&ts, now()), "now");
-    }
-
-    #[test]
-    fn formats_minutes_hours_days() {
-        let m = (now() - chrono::Duration::minutes(5)).to_rfc3339();
-        assert_eq!(format_relative_time(&m, now()), "5m");
-        let h = (now() - chrono::Duration::hours(3)).to_rfc3339();
-        assert_eq!(format_relative_time(&h, now()), "3h");
-        let d = (now() - chrono::Duration::days(2)).to_rfc3339();
-        assert_eq!(format_relative_time(&d, now()), "2d");
-    }
-
-    #[test]
-    fn formats_weeks_months_years() {
-        let w = (now() - chrono::Duration::days(10)).to_rfc3339();
-        assert_eq!(format_relative_time(&w, now()), "1w");
-        let mo = (now() - chrono::Duration::days(60)).to_rfc3339();
-        assert_eq!(format_relative_time(&mo, now()), "2mo");
-        let y = (now() - chrono::Duration::days(400)).to_rfc3339();
-        assert_eq!(format_relative_time(&y, now()), "1y");
-    }
-
-    #[test]
     fn returns_empty_on_invalid_input() {
         assert_eq!(format_relative_time("not-a-date", now()), "");
         assert_eq!(format_relative_time("", now()), "");

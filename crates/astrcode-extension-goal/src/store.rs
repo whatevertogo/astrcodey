@@ -169,13 +169,13 @@ impl GoalStore {
     pub(crate) fn load(&self) -> Result<Option<GoalState>, String> {
         let state = hostpaths::read_json_state::<GoalState>(&self.state_path())
             .map_err(|error| format!("read goal state: {error}"))?;
-        if let Some(state) = &state {
-            if state.schema_version != GOAL_SCHEMA_VERSION {
-                return Err(format!(
-                    "unsupported goal state schema version {}",
-                    state.schema_version
-                ));
-            }
+        if let Some(state) = &state
+            && state.schema_version != GOAL_SCHEMA_VERSION
+        {
+            return Err(format!(
+                "unsupported goal state schema version {}",
+                state.schema_version
+            ));
         }
         Ok(state)
     }
@@ -204,13 +204,13 @@ impl GoalStore {
         if let Some(0) = token_budget {
             return Err("tokenBudget must be greater than zero".to_string());
         }
-        if let Some(existing) = self.load()? {
-            if !existing.status.allows_create_replacement() {
-                return Err(format!(
-                    "cannot create a new goal while current goal is {}",
-                    existing.status.label()
-                ));
-            }
+        if let Some(existing) = self.load()?
+            && !existing.status.allows_create_replacement()
+        {
+            return Err(format!(
+                "cannot create a new goal while current goal is {}",
+                existing.status.label()
+            ));
         }
 
         let state = GoalState::new(

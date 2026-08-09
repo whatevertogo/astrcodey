@@ -2357,7 +2357,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionCompleted {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                     ..
                 } if sid == &child_id
             )
@@ -2366,7 +2366,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionRecycled {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                 } if sid == &child_id
             )
         });
@@ -2382,7 +2382,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionCompleted {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                     ..
                 } if sid == &child_id
             )
@@ -2394,7 +2394,7 @@ async fn submit_turn_async_recycle_on_complete_drains_without_manual_call() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionRecycled {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                 } if sid == &child_id
             )
         }),
@@ -2775,7 +2775,7 @@ async fn parent_abort_stops_sync_child_and_recycles() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionFailed {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                     ..
                 } if sid == &child_id
             )
@@ -2787,7 +2787,7 @@ async fn parent_abort_stops_sync_child_and_recycles() {
             matches!(
                 &e.payload,
                 DurableEventPayload::AgentSessionRecycled {
-                    child_session_id: ref sid,
+                    child_session_id: sid,
                 } if sid == &child_id
             )
         }),

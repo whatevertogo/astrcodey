@@ -429,20 +429,17 @@ fn apply_model_options_update(
                 if matches!(
                     cap.wire_mapping,
                     ThinkingWireMapping::AnthropicBudget | ThinkingWireMapping::AnthropicAdaptive
-                ) {
-                    if let Some(budget) = new_thinking.budget_tokens {
-                        if let Some(max_tokens) = model.max_tokens {
-                            if budget >= max_tokens {
-                                return Err(ConfigRequestError::new(
-                                    "invalid_budget_tokens",
-                                    format!(
-                                        "budget_tokens ({budget}) must be less than model \
-                                         max_tokens ({max_tokens})"
-                                    ),
-                                ));
-                            }
-                        }
-                    }
+                ) && let Some(budget) = new_thinking.budget_tokens
+                    && let Some(max_tokens) = model.max_tokens
+                    && budget >= max_tokens
+                {
+                    return Err(ConfigRequestError::new(
+                        "invalid_budget_tokens",
+                        format!(
+                            "budget_tokens ({budget}) must be less than model max_tokens \
+                             ({max_tokens})"
+                        ),
+                    ));
                 }
             },
         }

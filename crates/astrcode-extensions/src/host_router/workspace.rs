@@ -6,7 +6,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use astrcode_core::wire::WireErrorCode;
+use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::ExtensionTasks,
     host::{

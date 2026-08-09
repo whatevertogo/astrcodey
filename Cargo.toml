@@ -10,7 +10,9 @@ members = [
     "crates/astrcode-context",
     "crates/astrcode-session",
     "crates/astrcode-extensions",
+    "crates/astrcode-extension-contract",
     "crates/astrcode-extension-sdk",
+    "crates/astrcode-extension-worker",
     "crates/astrcode-bundled-extensions",
     "crates/astrcode-server",
     "crates/astrcode-protocol",
@@ -33,7 +35,8 @@ members = [
 
 [workspace.package]
 version = "0.3.13"
-edition = "2021"
+edition = "2024"
+rust-version = "1.88"
 license = "AGPL-3.0-only"
 
 [workspace.dependencies]

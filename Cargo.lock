@@ -301,6 +301,7 @@ dependencies = [
 name = "astrcode-core"
 version = "0.3.13"
 dependencies = [
+ "astrcode-extension-contract",
  "async-trait",
  "chrono",
  "dirs",
@@ -397,6 +398,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrcode-extension-contract"
+version = "0.3.13"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "astrcode-extension-goal"
 version = "0.3.13"
 dependencies = [
@@ -456,6 +472,7 @@ name = "astrcode-extension-sdk"
 version = "0.3.13"
 dependencies = [
  "astrcode-core",
+ "astrcode-extension-contract",
  "async-trait",
  "base64 0.22.1",
  "futures-util",
@@ -511,12 +528,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrcode-extension-worker"
+version = "0.3.13"
+dependencies = [
+ "astrcode-extension-contract",
+ "astrcode-extension-sdk",
+ "async-trait",
+ "futures-util",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "astrcode-extensions"
 version = "0.3.13"
 dependencies = [
  "arc-swap",
  "astrcode-context",
  "astrcode-core",
+ "astrcode-extension-contract",
  "astrcode-extension-sdk",
  "astrcode-session-projection",
  "astrcode-storage",

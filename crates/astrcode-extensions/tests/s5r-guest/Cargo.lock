@@ -21,6 +21,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "astrcode-core"
 version = "0.3.13"
 dependencies = [
+ "astrcode-extension-contract",
  "async-trait",
  "chrono",
  "dirs",
@@ -34,10 +35,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "astrcode-extension-contract"
+version = "0.3.13"
+dependencies = [
+ "async-trait",
+ "base64",
+ "futures-util",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "astrcode-extension-sdk"
 version = "0.3.13"
 dependencies = [
  "astrcode-core",
+ "astrcode-extension-contract",
  "async-trait",
  "base64",
  "futures-util",
@@ -49,6 +66,21 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "astrcode-extension-worker"
+version = "0.3.13"
+dependencies = [
+ "astrcode-extension-contract",
+ "astrcode-extension-sdk",
+ "async-trait",
+ "futures-util",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -184,6 +216,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7e3450815272ef58cec6d564423f6e755e25379b217b0bc688e295ba24df6b1d"
 
 [[package]]
+name = "futures-macro"
+version = "0.3.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e835b70203e41293343137df5c0664546da5745f82ec9b84d40be8336958447b"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "futures-sink"
 version = "0.3.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -202,6 +245,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "389ca41296e6190b48053de0321d02a77f32f8a5d2461dd38762c0593805c6d6"
 dependencies = [
  "futures-core",
+ "futures-macro",
  "futures-task",
  "pin-project-lite",
  "slab",
@@ -480,6 +524,8 @@ name = "s5r-guest-demo"
 version = "0.3.13"
 dependencies = [
  "astrcode-extension-sdk",
+ "astrcode-extension-worker",
+ "futures-util",
  "serde",
  "serde_json",
  "tokio",
@@ -645,6 +691,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

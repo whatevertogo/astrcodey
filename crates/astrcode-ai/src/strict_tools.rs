@@ -64,10 +64,10 @@ fn compile_openai_tool_schema(schema: &mut Value) {
     // OpenAI forbids a root `anyOf`. First-party executors remain authoritative for cross-field
     // invariants (for example edit's single-edit versus batch-edit shape), while the compiled
     // schema still constrains every field name and value type.
-    if schema.get("anyOf").is_some_and(is_required_only_root_union) {
-        if let Some(object) = schema.as_object_mut() {
-            object.remove("anyOf");
-        }
+    if schema.get("anyOf").is_some_and(is_required_only_root_union)
+        && let Some(object) = schema.as_object_mut()
+    {
+        object.remove("anyOf");
     }
     compile_openai_schema(schema);
 }
@@ -239,10 +239,10 @@ fn for_each_child_schema_mut(
             }
         }
     }
-    if let Some(items) = schema.get_mut("items") {
-        if !visit(items) {
-            return false;
-        }
+    if let Some(items) = schema.get_mut("items")
+        && !visit(items)
+    {
+        return false;
     }
     for keyword in CHILD_SCHEMA_KEYWORDS {
         if let Some(Value::Array(children)) = schema.get_mut(keyword) {
@@ -381,10 +381,10 @@ fn make_nullable(schema: &mut Value) {
         wrap_nullable(schema);
         return;
     }
-    if let Some(Value::Array(values)) = object.get_mut("enum") {
-        if !values.iter().any(Value::is_null) {
-            values.push(Value::Null);
-        }
+    if let Some(Value::Array(values)) = object.get_mut("enum")
+        && !values.iter().any(Value::is_null)
+    {
+        values.push(Value::Null);
     }
     if let Some(schema_type) = object.get_mut("type") {
         match schema_type {
@@ -815,14 +815,14 @@ fn validate_anthropic_schema(
         }
     }
 
-    if let Some(min_items) = object.get("minItems") {
-        if !matches!(min_items.as_u64(), Some(0 | 1)) {
-            return Err(schema_error(
-                tool,
-                &child_path(path, "minItems"),
-                "Anthropic strict tool schemas only support `minItems` values of 0 or 1",
-            ));
-        }
+    if let Some(min_items) = object.get("minItems")
+        && !matches!(min_items.as_u64(), Some(0 | 1))
+    {
+        return Err(schema_error(
+            tool,
+            &child_path(path, "minItems"),
+            "Anthropic strict tool schemas only support `minItems` values of 0 or 1",
+        ));
     }
 
     if let Some(values) = schema_enum_values(tool, object, path, "Anthropic")? {
@@ -1053,30 +1053,30 @@ fn detect_recursive_refs_from(
         return Ok(());
     };
 
-    if let Some(reference) = object.get("$ref").and_then(Value::as_str) {
-        if let Some(pointer) = reference.strip_prefix('#') {
-            match ref_states.get(pointer) {
-                Some(RefVisitState::Visiting) => {
-                    return Err(schema_error(
+    if let Some(reference) = object.get("$ref").and_then(Value::as_str)
+        && let Some(pointer) = reference.strip_prefix('#')
+    {
+        match ref_states.get(pointer) {
+            Some(RefVisitState::Visiting) => {
+                return Err(schema_error(
+                    tool,
+                    &child_path(path, "$ref"),
+                    "Anthropic strict tool schemas do not support recursive schemas",
+                ));
+            },
+            Some(RefVisitState::Done) => {},
+            None => {
+                let target = root.pointer(pointer).ok_or_else(|| {
+                    schema_error(
                         tool,
                         &child_path(path, "$ref"),
-                        "Anthropic strict tool schemas do not support recursive schemas",
-                    ));
-                },
-                Some(RefVisitState::Done) => {},
-                None => {
-                    let target = root.pointer(pointer).ok_or_else(|| {
-                        schema_error(
-                            tool,
-                            &child_path(path, "$ref"),
-                            &format!("local `$ref` target `{reference}` does not exist"),
-                        )
-                    })?;
-                    ref_states.insert(pointer.to_string(), RefVisitState::Visiting);
-                    detect_recursive_refs_from(tool, root, target, reference, ref_states)?;
-                    ref_states.insert(pointer.to_string(), RefVisitState::Done);
-                },
-            }
+                        &format!("local `$ref` target `{reference}` does not exist"),
+                    )
+                })?;
+                ref_states.insert(pointer.to_string(), RefVisitState::Visiting);
+                detect_recursive_refs_from(tool, root, target, reference, ref_states)?;
+                ref_states.insert(pointer.to_string(), RefVisitState::Done);
+            },
         }
     }
 

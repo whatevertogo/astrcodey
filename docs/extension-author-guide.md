@@ -7,7 +7,7 @@
 | 模块 | 运行边界 | 注册与上下文 | 宿主调用与错误 |
 |------|----------|--------------|----------------|
 | `astrcode_extension_sdk::prelude` | 仓库内、**进程内** bundled Rust 扩展 | 实现 `Extension`；用 `manifest()` + `Registrar`；handler 接收宿主构造的 `ToolContext` / hook context | `ctx.host()` 返回 owned typed domain clients；返回 `ExtensionError` / lossless `HostError` |
-| `astrcode_extension_sdk::worker_prelude` | `extension.json` 启动的**磁盘**独立进程 | `Worker` 同时生成握手 manifest 与 handler registry；handler 接收 `WorkerCallContext` 或 wire input | task-local 静态 `HostClient` 经 S5R invoke；返回 `ErrorPayload` |
+| `astrcode_extension_worker::worker_prelude` | `extension.json` 启动的**磁盘**独立进程 | `Worker` 同时生成握手 manifest 与 handler registry；handler 接收按入口拆分的强类型 context | task-local 静态 `HostClient` 经 S5R invoke；返回 `ErrorPayload` |
 
 边界由 SDK re-export 强制：bundled prelude 不导出 `Worker`、静态 `HostClient` 或 S5R wire 类型；
 worker prelude 不导出 `Extension`、`Registrar` 或 bundled 的生产 context。共享 DTO 从 SDK 稳定模块
@@ -20,7 +20,7 @@ re-export，但两套 runtime 入口、context 和错误返回类型不能互换
 ## 最小示例
 
 ```rust
-use astrcode_extension_sdk::worker_prelude::*;
+use astrcode_extension_worker::worker_prelude::*;
 
 #[tokio::main]
 async fn main() {
@@ -51,7 +51,7 @@ async fn run() -> Result<(), ErrorPayload> {
 ```json
 {
   "extension_id": "my-ext",
-  "protocol": { "s5r": "2.0" },
+  "protocol": { "s5r": "3.0" },
   "command": ["./my-ext"]
 }
 ```
@@ -114,7 +114,7 @@ bundled 扩展不要调用它；bundled handler 应从 `ctx.host()` 取得 `Mode
 主模型与小模型分别声明、分别调用：
 
 ```rust
-use astrcode_extension_sdk::worker_prelude::*;
+use astrcode_extension_worker::worker_prelude::*;
 
 // 主模型（当前 session 的 activeModel）
 worker.capability(ExtensionCapability::MainModel);
@@ -191,7 +191,9 @@ I/O 大小限制，并响应会话取消。
 S5R 同时支持 `public_http` 和复用宿主 bearer token 的 `authenticated_http`；两者都不能
 注册在 `/api` 下。s5r 工具默认串行；显式声明 `ExecutionMode::Parallel` 时，宿主会在同一
 worker 内启用最多 8 个并行调用，并按 request id 隔离 session/working directory 上下文。
-S5R 2.0 握手必须声明 `parent_invoke_id` wire feature，不再为旧 worker 降级。
+S5R 3.0 初始化会协商 `nested_invoke_v1`、`model_stream_v1` 与 `custom_event_v1`。
+只有双方 `supported_features` 的交集满足双方 `required_features` 后 peer 才进入 Ready；
+嵌套调用通过 `parent_invoke_id` 关联父请求，并继承父请求的取消与授权上下文。
 `public_http_dispatch` 仍拒绝同步调用自己的公开
 路由，因为路由和非并行 handler 需要取得顺序执行通道，重入会形成等待环。
 
@@ -227,15 +229,68 @@ return Err(ErrorPayload::new(WireErrorCode::InvalidInput, "name is required")
 
 ## 取消
 
-worker 的长时间 tool 应轮询 `WorkerCallContext::cancel_token()`；宿主取消经 S5R `Cancel` 消息传递。
+worker 的长时间 tool 应轮询 `WorkerToolContext::cancel_token()`；宿主取消经 S5R `Cancel` 消息传递。
 bundled handler 则读取 `ctx.cancellation()`，后台循环使用 `ctx.tasks().cancellation()` 或把调用取消
 令牌克隆进受管任务。两种 token 来源不能跨 prelude 混用。
+
+## Durable custom event 与幂等
+
+session durable custom event 是 **at-least-once** 投递：handler 成功返回只代表本次副作用完成，
+宿主随后还要用 CAS 提交 consumer checkpoint。进程可能恰好在这两步之间崩溃，因此同一个
+`event_id` 会再次到达。`consumer_version` 是 consumer key 的一部分；只有在处理语义确实改变、
+需要独立 checkpoint 时才递增，不能把它当重试计数。
+
+调用外部 HTTP 时，直接把稳定事件 ID 作为幂等键：
+
+```rust
+let event_id = ctx.event_id().to_string();
+let response = http_client
+    .post("https://example.com/callback")
+    .header("Idempotency-Key", event_id)
+    .json(ctx.payload())
+    .send()
+    .await?;
+response.error_for_status()?;
+```
+
+本地副作用则在同一数据库事务内记录已处理事件；唯一约束负责吸收重投：
+
+```sql
+CREATE TABLE processed_extension_events (
+    event_id TEXT PRIMARY KEY,
+    processed_at TEXT NOT NULL
+);
+
+BEGIN;
+INSERT INTO processed_extension_events(event_id, processed_at)
+VALUES (?1, CURRENT_TIMESTAMP)
+ON CONFLICT(event_id) DO NOTHING;
+-- 只有 INSERT 实际写入一行时才执行同一事务内的业务变更。
+COMMIT;
+```
+
+失败会按 250 ms 到 30 s 退避重试；连续第 20 次失败后事件只会被持久化 quarantine/DLQ
+一次并推进 checkpoint。人工 skip 也会推进 checkpoint，但必须通过管理入口留下审计记录。
+retry 等待不占全局 delivery permit，同一 consumer 仍严格串行，不会跳过前一个事件。
+
+bundled handler 显式返回 `CustomEventDisposition::Ack`、`::retry(reason)` 或
+`::dead_letter(reason)`。worker handler 返回相同 disposition 的 `HandlerResult` 表示：
+
+```rust
+Ok(CustomEventDisposition::Ack.into())
+// Ok(CustomEventDisposition::retry("upstream unavailable").into())
+// Ok(CustomEventDisposition::dead_letter("payload is permanently invalid").into())
+```
+
+`Err(...)` 与显式 `Retry` 一样进入重试；`DeadLetter` 必须先持久化 quarantine 并推进 checkpoint
+才算消费完成，不能用它掩盖临时故障。
 
 ## 调试
 
 - **stderr**：宿主会持续 drain 子进程 stderr 以避免阻塞，但当前不保存或转发这些行；
   调试时不要向 stdout 写日志，stdout 专用于 S5R 帧。
-- **握手失败**：检查 `protocol.s5r` 是否为 `2.0`、`extension_id` 是否符合命名规则；
+- **握手失败**：检查 `protocol.s5r` 是否为 `3.0`、`extension_id` 是否符合命名规则，以及
+  required feature 是否都在双方协商交集中；
   为了诊断清晰，建议与目录名一致，但宿主不强制两者相等。
 - **工具不出现**：确认 `worker.tool()` 已调用且 `run_stdio()` 未提前退出。
 - **E2E 参考**：`crates/astrcode-extensions/tests/s5r-guest/`
@@ -244,8 +299,8 @@ bundled handler 则读取 `ctx.cancellation()`，后台循环使用 `ctx.tasks()
 
 ```rust
 use std::sync::Arc;
-use astrcode_extension_sdk::{
-    WireErrorCode,
+use astrcode_extension_sdk::WireErrorCode;
+use astrcode_extension_worker::{
     worker::testing::{HostApi, with_host_api},
     worker_prelude::{ErrorPayload, HostClient, LlmMessage},
 };
@@ -321,7 +376,7 @@ let output = with_host_api(Arc::new(MockHost), async {
 ```json
 {
   "extension_id": "my-agent-tools",
-  "protocol": { "s5r": "2.0" },
+  "protocol": { "s5r": "3.0" },
   "command": ["C:/path/to/my-agent-tools.exe"]
 }
 ```
@@ -377,10 +432,10 @@ worker.on_prompt_build(
 )?;
 ```
 
-固定模式 hook 不通过 `Worker::hook` 注册：`prompt_build`、`pre_compact`、`post_compact`
-固定为 `blocking`，`after_provider_response` 固定为 `advisory`，分别使用对应的 `on_*`
-方法；`continue_after_stop` 使用带 options 的 `on_continue_after_stop`。宿主会拒绝 mode
-与实际 dispatcher 语义不一致的手写 manifest。
+`Worker::hook(event, mode, handler)` 用于运行时确实支持多种调度方式的 hook：
+`advisory` 会按顺序等待但只记录失败，`non_blocking` 由宿主管理后台执行。
+`prompt_build`、`pre_compact`、`post_compact`、`after_provider_response` 和
+`continue_after_stop` 使用固定模式的 typed `on_*` 方法；宿主会拒绝不受支持的组合。
 
 `prompt_build` 的 effect 名必须是 `prompt_contributions`（宿主 `parse_prompt_build_result` 约定）。
 
@@ -420,20 +475,23 @@ worker.tool(
 
 ### 通过 HostClient 派生子会话
 
-`tool_handler_args` 在反序列化 arguments 的同时保留宿主经 `handler.invoke` 传入的调用事实，
-handler 可直接从 `WorkerCallContext` 读取：
+`tool_handler_args` 在反序列化 arguments 的同时验证宿主经 `handler.invoke` 传入的调用事实，
+handler 收到 `WorkerToolContext`，可直接读取：
 
-- `ctx.session_id()`：当前 session；
-- `ctx.require_session_id()`：要求 session 事实存在，否则返回稳定的 `context_unavailable`；
-- `ctx.tool_call_id()`：宿主归属的当前 tool call；非工具入口为 `None`；
-- `ctx.working_dir()`：宿主校验后的工作目录；
-- `ctx.require_working_dir()`：要求 workspace 事实存在，否则返回稳定的 `context_unavailable`；
-- `ctx.turn_id()`：当前 tool call 所属 turn 的真实 ID；会话外调用为 `None`。
+- `ctx.session_id()`：当前 session，必定存在；
+- `ctx.tool_call_id()`：宿主归属的当前 tool call；没有 call id 时为 `None`；
+- `ctx.working_dir()`：宿主校验后的工作目录，必定存在；
+- `ctx.turn_id()`：当前 tool call 所属 turn 的真实 ID；宿主没有 turn attribution 时为 `None`。
+
+hook、command、custom event 分别使用 `WorkerHookContext`、`WorkerCommandContext`、
+`WorkerCustomEventContext`。缺少入口必需事实时，worker runtime 在作者 handler 运行前返回
+`context_unavailable`。HTTP 与 continuation 不承诺 session/workspace，使用只含 extension id 和取消
+信号的 `WorkerCallContext`；continuation 应注册 `continuation_handler[_args]`。
 
 创建子会话：
 
 ```rust
-let _parent_session_id = ctx.require_session_id()?;
+let parent_session_id = ctx.session_id();
 let mut request = HostCreateSessionRequest::new(agent_name);
 request.system_prompt = Some(system_prompt);
 request.model_preference = Some(model);

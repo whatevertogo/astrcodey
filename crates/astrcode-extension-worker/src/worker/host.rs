@@ -5,22 +5,23 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
-use astrcode_core::wire::WireErrorCode;
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use serde_json::Value;
 
-#[cfg(test)]
-use crate::{extension::ExtensionHttpDispatchRequest, llm::LlmMessage};
 use crate::{
+    WireErrorCode,
     host::{
         HostClientTransport, HostOperation, TypedEventClient, TypedExtensionHttpClient,
         TypedModelClient, TypedNetworkClient, TypedProcessClient, TypedSessionControlClient,
         TypedSessionHistoryClient, TypedSessionInspectClient, TypedSessionStateClient,
         TypedWorkspaceClient,
     },
-    runtime::{OutboundInvokeControl, Peer, PeerError},
+    model_stream::ModelStream,
     s5r::ErrorPayload,
 };
+#[cfg(test)]
+use crate::{extension::ExtensionHttpDispatchRequest, llm::LlmMessage};
 pub use crate::{
     host::{
         HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitOutput,
@@ -52,49 +53,162 @@ pub trait HostApi: Send + Sync {
     async fn call(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload>;
 
     async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload>;
+
+    async fn open_stream(
+        &self,
+        capability: &str,
+        input: Value,
+    ) -> Result<ModelStream, ErrorPayload> {
+        let _ = (capability, input);
+        Err(ErrorPayload::new(
+            WireErrorCode::StreamNotSupported,
+            "host transport does not expose incremental streaming",
+        ))
+    }
 }
 
-pub(crate) struct PeerHostApi<T: crate::runtime::FrameTransport + 'static> {
-    peer: Arc<Peer<T>>,
+enum V3PeerClient<T>
+where
+    T: astrcode_extension_contract::FrameTransport + 'static,
+{
+    Peer(astrcode_extension_contract::PeerHandle<T>),
+    Nested(astrcode_extension_contract::NestedPeer<T>),
 }
 
-impl<T: crate::runtime::FrameTransport + 'static> PeerHostApi<T> {
-    pub fn new(peer: Arc<Peer<T>>) -> Self {
-        Self { peer }
+pub(crate) struct V3PeerHostApi<T>
+where
+    T: astrcode_extension_contract::FrameTransport + 'static,
+{
+    client: V3PeerClient<T>,
+}
+
+impl<T> V3PeerHostApi<T>
+where
+    T: astrcode_extension_contract::FrameTransport + 'static,
+{
+    pub fn peer(peer: astrcode_extension_contract::PeerHandle<T>) -> Self {
+        Self {
+            client: V3PeerClient::Peer(peer),
+        }
+    }
+
+    pub fn nested(peer: astrcode_extension_contract::NestedPeer<T>) -> Self {
+        Self {
+            client: V3PeerClient::Nested(peer),
+        }
+    }
+
+    async fn invoke(
+        &self,
+        operation: &str,
+        input: Value,
+    ) -> Result<Value, astrcode_extension_contract::InvokeError> {
+        match &self.client {
+            V3PeerClient::Peer(peer) => peer.invoke(operation, input).await,
+            V3PeerClient::Nested(peer) => peer.invoke(operation, input).await,
+        }
+    }
+
+    async fn invoke_stream(
+        &self,
+        operation: &str,
+        input: Value,
+    ) -> Result<astrcode_extension_contract::PeerStream, astrcode_extension_contract::InvokeError>
+    {
+        match &self.client {
+            V3PeerClient::Peer(peer) => peer.invoke_stream(operation, input).await,
+            V3PeerClient::Nested(peer) => peer.invoke_stream(operation, input).await,
+        }
     }
 }
 
 #[async_trait]
-impl<T> HostApi for PeerHostApi<T>
+impl<T> HostApi for V3PeerHostApi<T>
 where
-    T: crate::runtime::FrameTransport + Send + Sync + 'static,
+    T: astrcode_extension_contract::FrameTransport + Send + Sync + 'static,
 {
     async fn call(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-        self.peer
-            .invoke(capability, input, OutboundInvokeControl::default())
+        self.invoke(capability, input)
             .await
-            .map_err(peer_error_to_payload)
+            .map_err(v3_invoke_error_to_payload)
     }
 
     async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-        self.peer
-            .invoke_stream_collect(capability, input)
+        let mut stream = self
+            .invoke_stream(capability, input)
             .await
-            .map_err(peer_error_to_payload)
+            .map_err(v3_invoke_error_to_payload)?;
+        let mut chunks = Vec::new();
+        let mut terminal = None;
+        while let Some(event) = stream.next().await {
+            match event {
+                astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
+                    content,
+                } => chunks.push(crate::host::HostLlmTextDelta { delta: content }),
+                astrcode_extension_contract::protocol::ModelStreamEvent::Completed { output } => {
+                    terminal = Some(output);
+                },
+                astrcode_extension_contract::protocol::ModelStreamEvent::Failed { error } => {
+                    return Err(contract_error_to_payload(error));
+                },
+                _ => {},
+            }
+        }
+        let terminal = terminal.ok_or_else(|| {
+            ErrorPayload::new(
+                WireErrorCode::StreamClosed,
+                "host stream closed without a completed event",
+            )
+        })?;
+        let output = crate::host::collect_model_stream_output(&terminal, chunks)?;
+        serde_json::to_value(output).map_err(|error| {
+            ErrorPayload::new(
+                WireErrorCode::SerializationFailed,
+                format!("serialize collected host stream: {error}"),
+            )
+        })
+    }
+
+    async fn open_stream(
+        &self,
+        capability: &str,
+        input: Value,
+    ) -> Result<ModelStream, ErrorPayload> {
+        let stream = self
+            .invoke_stream(capability, input)
+            .await
+            .map_err(v3_invoke_error_to_payload)?;
+        Ok(ModelStream::from_stream(
+            stream,
+            tokio_util::sync::CancellationToken::new(),
+        ))
     }
 }
 
-fn peer_error_to_payload(err: PeerError) -> ErrorPayload {
-    match err {
-        PeerError::Closed => ErrorPayload::new(WireErrorCode::PeerClosed, "host peer closed"),
-        PeerError::Timeout => ErrorPayload::new(WireErrorCode::Timeout, "host invoke timed out"),
-        PeerError::Busy => ErrorPayload::new(
-            WireErrorCode::PeerBusy,
-            "host invoke concurrency limit reached",
-        )
-        .retryable(true),
-        PeerError::Payload(payload) => payload,
-        PeerError::Msg(msg) => ErrorPayload::new(WireErrorCode::Transport, msg),
+fn v3_invoke_error_to_payload(error: astrcode_extension_contract::InvokeError) -> ErrorPayload {
+    use astrcode_extension_contract::InvokeError;
+
+    match error {
+        InvokeError::Local(error) | InvokeError::Remote(error) => contract_error_to_payload(error),
+        InvokeError::DriverUnavailable => ErrorPayload::new(
+            WireErrorCode::HostNotReady,
+            "S5R 3.0 host peer driver is not running",
+        ),
+        InvokeError::PeerClosed => {
+            ErrorPayload::new(WireErrorCode::PeerClosed, "S5R 3.0 host peer closed")
+        },
+    }
+}
+
+pub(crate) fn contract_error_to_payload(
+    error: astrcode_extension_contract::protocol::ErrorPayload,
+) -> ErrorPayload {
+    ErrorPayload {
+        code: error.code,
+        message: error.message,
+        hint: error.hint,
+        retryable: error.retryable,
+        details: error.details,
     }
 }
 
@@ -134,6 +248,14 @@ impl HostClientTransport for WorkerHostTransport {
         input: Value,
     ) -> Result<Value, Self::Error> {
         call_host_stream(operation.wire_name(), input).await
+    }
+
+    async fn invoke_stream(
+        &self,
+        operation: HostOperation,
+        input: Value,
+    ) -> Result<ModelStream, Self::Error> {
+        host_api()?.open_stream(operation.wire_name(), input).await
     }
 
     fn client_error(code: WireErrorCode, message: String) -> Self::Error {
@@ -247,54 +369,6 @@ mod host_tests {
             panic!("mock host unexpectedly succeeded");
         };
         assert_eq!(error.code_enum(), Some(WireErrorCode::BackendUnavailable));
-    }
-
-    #[test]
-    fn peer_error_mapping_preserves_host_payload_and_transport_contracts() {
-        let mut expected = ErrorPayload::new(
-            WireErrorCode::ProviderRateLimited,
-            "provider rate limit reached",
-        )
-        .with_hint("retry after the provider backoff")
-        .retryable(true);
-        expected.details = Some(json!({ "retry_after_ms": 250 }));
-
-        let actual = peer_error_to_payload(PeerError::Payload(expected.clone()));
-        assert_eq!(actual.code, expected.code);
-        assert_eq!(actual.message, expected.message);
-        assert_eq!(actual.hint, expected.hint);
-        assert_eq!(actual.retryable, expected.retryable);
-        assert_eq!(actual.details, expected.details);
-
-        let transport_errors = [
-            (PeerError::Closed, "peer_closed", "host peer closed", false),
-            (
-                PeerError::Timeout,
-                "timeout",
-                "host invoke timed out",
-                false,
-            ),
-            (
-                PeerError::Busy,
-                "peer_busy",
-                "host invoke concurrency limit reached",
-                true,
-            ),
-            (
-                PeerError::Msg("invalid frame".into()),
-                "transport_error",
-                "invalid frame",
-                false,
-            ),
-        ];
-        for (error, code, message, retryable) in transport_errors {
-            let payload = peer_error_to_payload(error);
-            assert_eq!(payload.code, code);
-            assert_eq!(payload.message, message);
-            assert_eq!(payload.retryable, retryable);
-            assert!(payload.hint.is_none());
-            assert!(payload.details.is_none());
-        }
     }
 
     #[test]

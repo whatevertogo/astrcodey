@@ -8,17 +8,18 @@ use std::{
 };
 
 use astrcode_core::{
-    event::{DurableEventPayload, StoredEvent},
+    event::{DurableEventPayload, Phase, StoredEvent},
     llm::LlmTokenUsage,
     session_lineage::{ParentChainWalkError, collect_parent_chain},
     tool::{
         CreateRootSessionRequest as CoreCreateRootSessionRequest, CreateSessionRequest,
-        SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionOperations,
-        SessionToolSelection, SubmitTurnRequest,
+        SessionAccessPair, SessionApiError, SessionDeliveryOutcome, SessionHandle,
+        SessionLifecycleState, SessionOperations, SessionState, SessionToolSelection,
+        SubmitTurnRequest, SubmitTurnResult,
     },
     types::SessionId,
-    wire::WireErrorCode,
 };
+use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     host::{
         HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostOperation,
@@ -26,6 +27,7 @@ use astrcode_extension_sdk::{
         HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
         HostSessionSummariesOutput, HostSessionSummary, HostSessionTokenUsage,
         HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
+        llm_message_to_wire, llm_messages_to_wire,
     },
     s5r::ErrorPayload,
     session::{
@@ -366,8 +368,8 @@ impl SessionGroup {
                 continue;
             }
             sessions.push(HostSessionSummary {
-                session_id: summary.session_id,
-                parent_session_id: summary.parent_session_id,
+                session_id: summary.session_id.into_string(),
+                parent_session_id: summary.parent_session_id.map(SessionId::into_string),
                 source_extension: summary.source_extension,
                 working_dir: summary.working_dir,
                 model_id: summary.model_id,
@@ -394,12 +396,12 @@ impl SessionGroup {
             .iter()
             .filter(|message| extension_visible_message(&message.message))
             .map(|message| HostSessionTranscriptMessage {
-                message: message.message.clone().into(),
+                message: llm_message_to_wire(message.message.clone()),
                 source: message.source.clone(),
             })
             .collect();
         Ok(HostSessionTranscript {
-            session_id: model.identity.session_id.clone(),
+            session_id: model.identity.session_id.to_string(),
             messages,
         })
     }
@@ -422,8 +424,8 @@ impl SessionGroup {
                 .collect(),
         );
         Ok(HostSessionProviderMessagesOutput {
-            session_id: model.identity.session_id.clone(),
-            messages: messages.into_iter().map(Into::into).collect(),
+            session_id: model.identity.session_id.to_string(),
+            messages: llm_messages_to_wire(messages),
         })
     }
 
@@ -483,7 +485,7 @@ impl SessionGroup {
         )
         .wait_for_result(wire_request.wait_for_result);
         let result = ops.submit_turn(request).await.map_err(session_api_error)?;
-        Ok(HostSubmitTurnOutput::from(result))
+        Ok(submit_turn_output(result))
     }
 
     async fn root_session_state(
@@ -500,7 +502,7 @@ impl SessionGroup {
             .session_state(access.as_access())
             .await
             .map_err(session_api_error)?;
-        Ok(HostSessionStateOutput::from_state(state))
+        Ok(session_state_output(state))
     }
 
     fn session_reader(&self) -> Result<Arc<dyn SessionReader>, ErrorPayload> {
@@ -691,7 +693,7 @@ async fn create_root_session(
         .create_root_session(request)
         .await
         .map_err(session_api_error)?;
-    Ok(HostCreateSessionOutput::from(handle))
+    Ok(create_session_output(handle))
 }
 
 async fn authorize_owned_root(
@@ -780,7 +782,7 @@ async fn create_session(
         .create_session(&parent, request)
         .await
         .map_err(session_api_error)?;
-    Ok(HostCreateSessionOutput::from(handle))
+    Ok(create_session_output(handle))
 }
 
 async fn configure_tools(
@@ -795,7 +797,7 @@ async fn configure_tools(
         .await
         .map_err(session_api_error)?;
     Ok(HostConfigureSessionToolsOutput {
-        selection: effective.into(),
+        selection: tool_selection_output(effective),
     })
 }
 
@@ -818,7 +820,7 @@ async fn submit_turn(
     .recycle_on_complete(wire_request.recycle_on_complete)
     .tool_call_id(ctx.tool_call_id.clone());
     let result = ops.submit_turn(request).await.map_err(session_api_error)?;
-    Ok(HostSubmitTurnOutput::from(result))
+    Ok(submit_turn_output(result))
 }
 
 async fn inject_input(
@@ -863,7 +865,7 @@ async fn execution_view(
         request.target_session_id,
         |ops, access| async move { ops.execution_view(access.as_access()).await },
         |view| HostSessionExecutionView {
-            phase: view.phase.into(),
+            phase: phase_output(view.phase),
             active_turn_id: view.active_turn_id,
             queued_inputs: view.queued_inputs,
         },
@@ -899,7 +901,7 @@ async fn session_state(
         ctx,
         request.target_session_id,
         |ops, access| async move { ops.session_state(access.as_access()).await },
-        HostSessionStateOutput::from_state,
+        session_state_output,
     )
     .await
 }
@@ -913,7 +915,10 @@ async fn reactivate_session(
         ctx,
         request.target_session_id,
         |ops, access| async move { ops.reactivate_session(access.as_access()).await },
-        move |result| HostSessionReactivateOutput::from_result(target_session_id, result),
+        move |result| HostSessionReactivateOutput {
+            session_id: target_session_id,
+            reactivated: result.reactivated,
+        },
     )
     .await
 }
@@ -1039,6 +1044,58 @@ fn map_tool_selection(
         SessionToolSelectionDto::Only { names } => Ok(SessionToolSelection::Only {
             names: validated_tool_names(names, &format!("{field}.names"))?,
         }),
+    }
+}
+
+fn create_session_output(handle: SessionHandle) -> HostCreateSessionOutput {
+    HostCreateSessionOutput {
+        session_id: handle.session_id,
+    }
+}
+
+fn submit_turn_output(result: SubmitTurnResult) -> HostSubmitTurnOutput {
+    match result {
+        SubmitTurnResult::Completed { content } => HostSubmitTurnOutput::Completed { content },
+        SubmitTurnResult::Backgrounded {
+            task_id,
+            session_id,
+        } => HostSubmitTurnOutput::Backgrounded {
+            task_id,
+            session_id,
+        },
+    }
+}
+
+fn session_state_output(state: SessionState) -> HostSessionStateOutput {
+    HostSessionStateOutput {
+        lifecycle: match state.lifecycle {
+            SessionLifecycleState::Active => SessionLifecycleStateDto::Active,
+            SessionLifecycleState::Recycled => SessionLifecycleStateDto::Recycled,
+        },
+        phase: phase_output(state.phase),
+        active_turn_id: state.active_turn_id,
+        queued_inputs: state.queued_inputs,
+        message_count: state.message_count,
+    }
+}
+
+pub(super) fn phase_output(phase: Phase) -> astrcode_extension_sdk::session::SessionPhaseDto {
+    use astrcode_extension_sdk::session::SessionPhaseDto;
+
+    match phase {
+        Phase::Idle => SessionPhaseDto::Idle,
+        Phase::Thinking => SessionPhaseDto::Thinking,
+        Phase::Streaming => SessionPhaseDto::Streaming,
+        Phase::CallingTool => SessionPhaseDto::CallingTool,
+        Phase::Compacting => SessionPhaseDto::Compacting,
+        Phase::Error => SessionPhaseDto::Error,
+    }
+}
+
+pub(super) fn tool_selection_output(selection: SessionToolSelection) -> SessionToolSelectionDto {
+    match selection {
+        SessionToolSelection::All { except } => SessionToolSelectionDto::All { except },
+        SessionToolSelection::Only { names } => SessionToolSelectionDto::Only { names },
     }
 }
 

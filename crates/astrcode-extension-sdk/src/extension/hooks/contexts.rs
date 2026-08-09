@@ -16,7 +16,7 @@ use tokio_util::sync::CancellationToken;
 use super::types::ExchangeSummary;
 use crate::{
     config::ModelSelection,
-    extension::{ExtensionCall, ExtensionCallContext},
+    extension::{ExtensionCall, ExtensionCallContext, SessionCallContext, WorkspaceCallContext},
     tool::{ToolDefinition, ToolResult},
 };
 
@@ -105,7 +105,8 @@ impl RuntimeHookCallContext {
 /// it implements. Contexts are attributed by the host — extension code cannot construct them.
 #[derive(Clone)]
 pub struct HookContext<P> {
-    call: ExtensionCallContext,
+    call: SessionCallContext,
+    working_dir: PathBuf,
     model: ModelSelection,
     payload: P,
 }
@@ -118,7 +119,12 @@ impl<P> HookContext<P> {
         P: Clone,
     {
         Self {
-            call,
+            call: SessionCallContext::from_runtime(
+                call,
+                input.call.session_id().clone(),
+                input.call.turn_id().map(str::to_owned),
+            ),
+            working_dir: input.call.working_dir().to_path_buf(),
             model: input.call.model().clone(),
             payload: input.payload.clone(),
         }
@@ -126,6 +132,18 @@ impl<P> HookContext<P> {
 
     pub fn model(&self) -> &ModelSelection {
         &self.model
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        self.call.session_id()
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        self.call.turn_id()
+    }
+
+    pub fn working_dir(&self) -> &Path {
+        &self.working_dir
     }
 }
 
@@ -139,7 +157,7 @@ impl<P> Deref for HookContext<P> {
 
 impl<P> ExtensionCall for HookContext<P> {
     fn call(&self) -> &ExtensionCallContext {
-        &self.call
+        self.call.call()
     }
 }
 
@@ -558,24 +576,35 @@ pub type RuntimeLifecycleContext = HookInput<LifecyclePayload>;
 /// Host-attributed context for one workspace-scoped tool discovery pass.
 #[derive(Clone)]
 pub struct ToolDiscoveryContext {
-    call: ExtensionCallContext,
+    call: WorkspaceCallContext,
     generation: u64,
 }
 
 impl ToolDiscoveryContext {
     #[doc(hidden)]
-    pub fn from_runtime(call: ExtensionCallContext, generation: u64) -> Self {
-        Self { call, generation }
+    pub fn from_runtime(
+        call: ExtensionCallContext,
+        working_dir: impl Into<PathBuf>,
+        generation: u64,
+    ) -> Self {
+        Self {
+            call: WorkspaceCallContext::from_runtime(call, working_dir),
+            generation,
+        }
     }
 
     pub fn generation(&self) -> u64 {
         self.generation
     }
+
+    pub fn working_dir(&self) -> &Path {
+        self.call.working_dir()
+    }
 }
 
 impl ExtensionCall for ToolDiscoveryContext {
     fn call(&self) -> &ExtensionCallContext {
-        &self.call
+        self.call.call()
     }
 }
 
@@ -592,24 +621,35 @@ impl std::fmt::Debug for ToolDiscoveryContext {
 /// Host-attributed context for one workspace-scoped command discovery pass.
 #[derive(Clone)]
 pub struct CommandDiscoveryContext {
-    call: ExtensionCallContext,
+    call: WorkspaceCallContext,
     generation: u64,
 }
 
 impl CommandDiscoveryContext {
     #[doc(hidden)]
-    pub fn from_runtime(call: ExtensionCallContext, generation: u64) -> Self {
-        Self { call, generation }
+    pub fn from_runtime(
+        call: ExtensionCallContext,
+        working_dir: impl Into<PathBuf>,
+        generation: u64,
+    ) -> Self {
+        Self {
+            call: WorkspaceCallContext::from_runtime(call, working_dir),
+            generation,
+        }
     }
 
     pub fn generation(&self) -> u64 {
         self.generation
     }
+
+    pub fn working_dir(&self) -> &Path {
+        self.call.working_dir()
+    }
 }
 
 impl ExtensionCall for CommandDiscoveryContext {
     fn call(&self) -> &ExtensionCallContext {
-        &self.call
+        self.call.call()
     }
 }
 
@@ -629,7 +669,8 @@ impl std::fmt::Debug for CommandDiscoveryContext {
 /// accessors so the runtime can extend this context without breaking author implementations.
 #[derive(Clone)]
 pub struct CommandContext {
-    call: ExtensionCallContext,
+    call: SessionCallContext,
+    working_dir: PathBuf,
     model: ModelSelection,
     command_name: String,
     argument: String,
@@ -638,13 +679,15 @@ pub struct CommandContext {
 impl CommandContext {
     #[doc(hidden)]
     pub fn from_runtime(
-        call: ExtensionCallContext,
+        call: SessionCallContext,
+        working_dir: PathBuf,
         model: ModelSelection,
         command_name: impl Into<String>,
         argument: impl Into<String>,
     ) -> Self {
         Self {
             call,
+            working_dir,
             model,
             command_name: command_name.into(),
             argument: argument.into(),
@@ -662,18 +705,31 @@ impl CommandContext {
     pub fn argument(&self) -> &str {
         &self.argument
     }
+
+    pub fn session_id(&self) -> &SessionId {
+        self.call.session_id()
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        self.call.turn_id()
+    }
+
+    pub fn working_dir(&self) -> &Path {
+        &self.working_dir
+    }
 }
 
 impl ExtensionCall for CommandContext {
     fn call(&self) -> &ExtensionCallContext {
-        &self.call
+        self.call.call()
     }
 }
 
 /// Context for completing the argument of one extension slash command.
 #[derive(Clone)]
 pub struct CommandCompletionContext {
-    call: ExtensionCallContext,
+    call: SessionCallContext,
+    working_dir: PathBuf,
     model: ModelSelection,
     command_name: String,
     argument: String,
@@ -685,6 +741,7 @@ impl CommandCompletionContext {
     pub fn for_runtime(command: CommandContext, cursor: usize) -> Self {
         Self {
             call: command.call,
+            working_dir: command.working_dir,
             model: command.model,
             command_name: command.command_name,
             argument: command.argument,
@@ -707,11 +764,23 @@ impl CommandCompletionContext {
     pub fn cursor(&self) -> usize {
         self.cursor
     }
+
+    pub fn session_id(&self) -> &SessionId {
+        self.call.session_id()
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        self.call.turn_id()
+    }
+
+    pub fn working_dir(&self) -> &Path {
+        &self.working_dir
+    }
 }
 
 impl ExtensionCall for CommandCompletionContext {
     fn call(&self) -> &ExtensionCallContext {
-        &self.call
+        self.call.call()
     }
 }
 

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use astrcode_core::wire::WireErrorCode;
+use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     self,
     extension::{ExtensionError, ExtensionHttpDispatchRequest, ExtensionHttpRequest},

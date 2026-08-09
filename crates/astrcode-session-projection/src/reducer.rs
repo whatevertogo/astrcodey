@@ -581,13 +581,13 @@ fn validate_next_event_details(
     if matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
         return Err(ProjectionError::DuplicateSessionStarted(seq));
     }
-    if let DurableEventPayload::TranscriptRewritten { source_seq, .. } = &event.payload {
-        if *source_seq > current_seq {
-            return Err(ProjectionError::InvalidTranscriptRewriteSource {
-                source_seq: *source_seq,
-                current_seq,
-            });
-        }
+    if let DurableEventPayload::TranscriptRewritten { source_seq, .. } = &event.payload
+        && *source_seq > current_seq
+    {
+        return Err(ProjectionError::InvalidTranscriptRewriteSource {
+            source_seq: *source_seq,
+            current_seq,
+        });
     }
     let expected_seq = current_seq.saturating_add(1);
     if seq != expected_seq {

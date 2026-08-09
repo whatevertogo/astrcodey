@@ -94,10 +94,10 @@ where
         if let Err(err) = self.reset_cursor_style() {
             tracing::warn!("Failed to reset cursor style: {err}");
         }
-        if self.hidden_cursor {
-            if let Err(err) = self.show_cursor() {
-                tracing::warn!("Failed to show cursor: {err}");
-            }
+        if self.hidden_cursor
+            && let Err(err) = self.show_cursor()
+        {
+            tracing::warn!("Failed to show cursor: {err}");
         }
     }
 }

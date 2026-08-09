@@ -35,6 +35,14 @@ pub(crate) fn token_usage_has_value(usage: &LlmTokenUsage) -> bool {
         || usage.total_tokens.is_some()
 }
 
+pub(crate) fn utf8_prefix(text: &str, max_bytes: usize) -> &str {
+    let mut end = text.len().min(max_bytes);
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// 根据 `LlmClientConfig` 构建 reqwest client。
 ///
 /// 配置无效时返回 [`LlmError::Transport`]，不在 silently 降级到无 timeout 的默认 client。
@@ -436,7 +444,7 @@ impl SseStreamSummary {
                  Content-Type: {}, bytes: {}, preview: {}",
                 self.content_type.as_deref().unwrap_or("<missing>"),
                 self.bytes_read,
-                &self.body_preview[..self.body_preview.floor_char_boundary(256)],
+                utf8_prefix(&self.body_preview, 256),
             )));
         }
         Ok(())
@@ -491,16 +499,16 @@ pub(crate) async fn consume_sse_lines(
         if body_preview.is_empty() && !bytes.is_empty() {
             body_preview = String::from_utf8_lossy(&bytes[..bytes.len().min(512)]).to_string();
         }
-        if let Some(text) = decoder.push(&bytes).map_err(stream_decoder_error)? {
-            if !consume_decoded_lines(&mut line_reader, &text, &mut on_line)? {
-                return Ok(None);
-            }
-        }
-    }
-    if let Some(tail) = decoder.finish() {
-        if !consume_decoded_lines(&mut line_reader, &tail, &mut on_line)? {
+        if let Some(text) = decoder.push(&bytes).map_err(stream_decoder_error)?
+            && !consume_decoded_lines(&mut line_reader, &text, &mut on_line)?
+        {
             return Ok(None);
         }
+    }
+    if let Some(tail) = decoder.finish()
+        && !consume_decoded_lines(&mut line_reader, &tail, &mut on_line)?
+    {
+        return Ok(None);
     }
     if line_reader.flush().is_some_and(|line| !on_line(&line)) {
         return Ok(None);
@@ -711,6 +719,7 @@ mod tests {
 
     #[test]
     fn stream_text_delta_handles_cumulative_and_incremental_fragments() {
+        assert_eq!(utf8_prefix("你好 world", 4), "你");
         let mut accumulated = String::new();
         assert_eq!(
             stream_text_delta(&mut accumulated, "The"),

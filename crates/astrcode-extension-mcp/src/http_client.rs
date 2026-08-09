@@ -278,14 +278,14 @@ fn response_result(response: JsonRpcResponse, kind: ResponseKind) -> Result<Valu
             stderr: String::new(),
         });
     }
-    if let ResponseKind::Request { expected_id } = kind {
-        if response.id != Some(expected_id) {
-            return Err(McpPoolError::MismatchedResponse {
-                expected: expected_id,
-                actual: response.id,
-                stderr: String::new(),
-            });
-        }
+    if let ResponseKind::Request { expected_id } = kind
+        && response.id != Some(expected_id)
+    {
+        return Err(McpPoolError::MismatchedResponse {
+            expected: expected_id,
+            actual: response.id,
+            stderr: String::new(),
+        });
     }
     Ok(response.result.unwrap_or(Value::Null))
 }

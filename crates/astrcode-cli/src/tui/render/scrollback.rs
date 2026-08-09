@@ -192,20 +192,20 @@ pub fn render_message(
     let content_width = width.max(1) as usize;
 
     // Extension messages: hand off to registered custom renderers.
-    if let Some(custom_type) = msg.body.custom_type.as_deref() {
-        if let Some(renderer) = message_renderers.get(custom_type) {
-            let payload = msg
-                .body
-                .payload
-                .as_ref()
-                .cloned()
-                .unwrap_or(serde_json::Value::Null);
-            let opts = crate::tui::ext::message::MessageRenderOpts;
-            if let Some(spec) = renderer.render(&payload, &opts) {
-                let mut lines = Vec::new();
-                render_spec_inner(&spec, &mut lines, content_width, theme, "  ");
-                return lines;
-            }
+    if let Some(custom_type) = msg.body.custom_type.as_deref()
+        && let Some(renderer) = message_renderers.get(custom_type)
+    {
+        let payload = msg
+            .body
+            .payload
+            .as_ref()
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let opts = crate::tui::ext::message::MessageRenderOpts;
+        if let Some(spec) = renderer.render(&payload, &opts) {
+            let mut lines = Vec::new();
+            render_spec_inner(&spec, &mut lines, content_width, theme, "  ");
+            return lines;
         }
     }
 

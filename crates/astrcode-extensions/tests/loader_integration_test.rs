@@ -230,7 +230,7 @@ impl Extension for CountingExtension {
 
     async fn stop(
         &self,
-        _reason: astrcode_extension_sdk::extension::StopReason,
+        _ctx: astrcode_extension_sdk::extension::ExtensionStopContext,
     ) -> Result<(), ExtensionError> {
         self.stops.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -259,7 +259,7 @@ impl Extension for RetirementControlledExtension {
 
     async fn stop(
         &self,
-        _reason: astrcode_extension_sdk::extension::StopReason,
+        _ctx: astrcode_extension_sdk::extension::ExtensionStopContext,
     ) -> Result<(), ExtensionError> {
         self.stop_entered.notify_one();
         if let Some(stop_release) = &self.stop_release {
@@ -356,26 +356,40 @@ impl ExtensionSource for DisabledCandidateSource {
 }
 
 struct IsolatedTestHome {
+    _guard: std::sync::MutexGuard<'static, ()>,
     _temp: tempfile::TempDir,
     prev: Option<String>,
 }
 
 impl IsolatedTestHome {
     fn new() -> Self {
+        let guard = test_home_lock().lock().unwrap();
         let temp = tempfile::tempdir().expect("tempdir");
         let prev = std::env::var("ASTRCODE_TEST_HOME").ok();
-        std::env::set_var("ASTRCODE_TEST_HOME", temp.path());
-        Self { _temp: temp, prev }
+        // SAFETY: every test in this process that mutates the test home holds `test_home_lock`.
+        unsafe { std::env::set_var("ASTRCODE_TEST_HOME", temp.path()) };
+        Self {
+            _guard: guard,
+            _temp: temp,
+            prev,
+        }
     }
 }
 
 impl Drop for IsolatedTestHome {
     fn drop(&mut self) {
         match &self.prev {
-            Some(value) => std::env::set_var("ASTRCODE_TEST_HOME", value),
-            None => std::env::remove_var("ASTRCODE_TEST_HOME"),
+            // SAFETY: `self._guard` remains held until after this destructor returns.
+            Some(value) => unsafe { std::env::set_var("ASTRCODE_TEST_HOME", value) },
+            // SAFETY: `self._guard` remains held until after this destructor returns.
+            None => unsafe { std::env::remove_var("ASTRCODE_TEST_HOME") },
         }
     }
+}
+
+fn test_home_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
 #[tokio::test]

@@ -252,10 +252,10 @@ impl McpProcessPool {
 
         let (retry_id, retry_entry) = self.pooled_entry(server).await?;
         let result = retry(Arc::clone(&retry_entry)).await;
-        if let Err(error) = &result {
-            if error_invalidates_client(error) {
-                self.evict_entry_if_current(&retry_id, &retry_entry).await;
-            }
+        if let Err(error) = &result
+            && error_invalidates_client(error)
+        {
+            self.evict_entry_if_current(&retry_id, &retry_entry).await;
         }
         result
     }
@@ -280,10 +280,10 @@ impl McpProcessPool {
             pool.values().cloned().collect()
         };
         for entry in entries {
-            if let PooledClient::Stdio(client) = entry.as_ref() {
-                if !client_healthy(client) {
-                    return Err(McpPoolError::UnhealthyProcess);
-                }
+            if let PooledClient::Stdio(client) = entry.as_ref()
+                && !client_healthy(client)
+            {
+                return Err(McpPoolError::UnhealthyProcess);
             }
             list_tools_from_entry(entry).await?;
         }
@@ -453,14 +453,13 @@ async fn shutdown_stdio(client: &StdioPooledClient) {
             .unwrap_or_else(|error| error.into_inner());
         guard.take()
     };
-    if let Some(mut child) = child_opt {
-        if tokio::time::timeout(SHUTDOWN_TIMEOUT, child.wait())
+    if let Some(mut child) = child_opt
+        && tokio::time::timeout(SHUTDOWN_TIMEOUT, child.wait())
             .await
             .is_err()
-        {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-        }
+    {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
     }
     let stdout_task = client
         .stdout_task

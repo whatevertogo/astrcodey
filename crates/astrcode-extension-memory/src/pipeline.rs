@@ -44,10 +44,10 @@ pub async fn run(
 ) -> Result<(), ExtensionError> {
     let store = scoped.project.as_ref();
 
-    if let Ok(n) = store.cleanup_old_contexts(config.max_context_age_days) {
-        if n > 0 {
-            tracing::debug!(deleted = n, "cleaned up old context files");
-        }
+    if let Ok(n) = store.cleanup_old_contexts(config.max_context_age_days)
+        && n > 0
+    {
+        tracing::debug!(deleted = n, "cleaned up old context files");
     }
 
     let candidates = find_changed_candidates(

@@ -1,5 +1,3 @@
-//! s5r 取消令牌。
-
 use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
@@ -11,6 +9,13 @@ pub struct CancelToken {
 }
 
 impl CancelToken {
+    pub(crate) fn from_cancellation_token(cancelled: CancellationToken) -> Self {
+        Self {
+            cancelled,
+            reason: Arc::new(parking_lot::Mutex::new(None)),
+        }
+    }
+
     pub fn cancel(&self, reason: impl Into<String>) {
         *self.reason.lock() = Some(reason.into());
         self.cancelled.cancel();
@@ -20,7 +25,6 @@ impl CancelToken {
         self.cancelled.is_cancelled()
     }
 
-    /// 返回与当前 s5r token 共享取消状态的 Tokio token。
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancelled.clone()
     }

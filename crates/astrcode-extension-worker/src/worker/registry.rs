@@ -8,10 +8,11 @@ use std::{
     sync::Arc,
 };
 
-use astrcode_core::wire::WireErrorCode;
 use serde_json::Value;
 
+use super::CancelToken;
 use crate::{
+    WireErrorCode,
     extension::{
         CompactEvent, ContinueAfterStopOptions, CustomEventDeclaration, CustomEventSubscription,
         ExtensionCapability, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
@@ -19,10 +20,9 @@ use crate::{
         extension_http_route_patterns_conflict, fixed_hook_mode, has_duplicate_registration_name,
         hook_mode_is_supported,
     },
-    runtime::CancelToken,
     s5r::{
-        CAP_HANDLER_INVOKE, ErrorPayload, HandlerId, HandlerKind, HandlerResult, InvokeMsg,
-        capability_to_wire, compact_event_to_name, event_to_name,
+        CAP_HANDLER_INVOKE, ErrorPayload, HandlerId, HandlerInvokeRequest, HandlerKind,
+        HandlerResult, capability_to_wire, compact_event_to_name, event_to_name,
         manifest::{ManifestCommand, ManifestHook, ManifestHookOptions, ManifestHttpRoute},
         mode_to_name,
     },
@@ -31,20 +31,37 @@ use crate::{
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
+pub(crate) struct HandlerInvoke {
+    pub(crate) capability: String,
+    pub(crate) input: Value,
+}
+
 pub type ToolHandlerFn = Arc<
-    dyn Fn(Value, WorkerCallContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
+    dyn Fn(Value, WorkerToolContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
         + Send
         + Sync,
 >;
 
 pub type HookHandlerFn = Arc<
+    dyn Fn(Value, WorkerHookContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
+        + Send
+        + Sync,
+>;
+
+pub type ContinuationHandlerFn = Arc<
     dyn Fn(Value, WorkerCallContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
         + Send
         + Sync,
 >;
 
+pub type CustomEventHandlerFn = Arc<
+    dyn Fn(Value, WorkerCustomEventContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
+        + Send
+        + Sync,
+>;
+
 pub type CommandHandlerFn = Arc<
-    dyn Fn(Value, WorkerCallContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
+    dyn Fn(Value, WorkerCommandContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
         + Send
         + Sync,
 >;
@@ -58,81 +75,17 @@ pub type HttpHandlerFn = Arc<
         + Sync,
 >;
 
-/// Worker handler 的运行时调用事实与取消信号。
+/// Facts shared by worker calls that do not have session or workspace scope.
 #[derive(Clone)]
 pub struct WorkerCallContext {
     extension_id: String,
     cancel_token: CancelToken,
-    session_id: Option<String>,
-    turn_id: Option<String>,
-    tool_call_id: Option<String>,
-    working_dir: Option<PathBuf>,
 }
 
 impl WorkerCallContext {
-    pub(crate) fn from_event(
-        extension_id: String,
-        cancel_token: CancelToken,
-        event: &Value,
-    ) -> Self {
-        let input = event.get("input").unwrap_or(event);
-        // Tool events use `tool_call_id`; tool-use hooks currently use `call_id` for the same fact.
-        let tool_call_id =
-            optional_string(input, "tool_call_id").or_else(|| optional_string(input, "call_id"));
-
-        Self {
-            extension_id,
-            cancel_token,
-            session_id: optional_string(input, "session_id").map(str::to_owned),
-            turn_id: optional_string(input, "turn_id").map(str::to_owned),
-            tool_call_id: tool_call_id.map(str::to_owned),
-            working_dir: optional_string(input, "working_dir").map(PathBuf::from),
-        }
-    }
-
     /// 当前 worker 的扩展标识。
     pub fn extension_id(&self) -> &str {
         &self.extension_id
-    }
-
-    /// 当前调用所属 session；仅在线缆事件携带该事实时存在。
-    pub fn session_id(&self) -> Option<&str> {
-        self.session_id.as_deref()
-    }
-
-    /// Returns the host-attributed session or a stable context error for session-only handlers.
-    pub fn require_session_id(&self) -> Result<&str, ErrorPayload> {
-        self.session_id().ok_or_else(|| {
-            ErrorPayload::new(
-                WireErrorCode::ContextUnavailable,
-                "worker call requires a session-scoped context",
-            )
-        })
-    }
-
-    /// 当前调用所属 turn；仅在线缆事件携带该事实时存在。
-    pub fn turn_id(&self) -> Option<&str> {
-        self.turn_id.as_deref()
-    }
-
-    /// 当前工具调用标识；tool 与 tool-use hook 的线缆字段会统一到此 accessor。
-    pub fn tool_call_id(&self) -> Option<&str> {
-        self.tool_call_id.as_deref()
-    }
-
-    /// 当前调用的工作目录；仅在线缆事件携带该事实时存在。
-    pub fn working_dir(&self) -> Option<&Path> {
-        self.working_dir.as_deref()
-    }
-
-    /// Returns the validated workspace or a stable context error for workspace-only handlers.
-    pub fn require_working_dir(&self) -> Result<&Path, ErrorPayload> {
-        self.working_dir().ok_or_else(|| {
-            ErrorPayload::new(
-                WireErrorCode::ContextUnavailable,
-                "worker call requires a workspace-scoped context",
-            )
-        })
     }
 
     /// 当前 S5R 调用的取消令牌。
@@ -141,8 +94,243 @@ impl WorkerCallContext {
     }
 }
 
-fn optional_string<'a>(input: &'a Value, field: &str) -> Option<&'a str> {
-    input.get(field).and_then(Value::as_str)
+/// Host-attributed facts guaranteed for a worker tool invocation.
+#[derive(Clone)]
+pub struct WorkerToolContext {
+    scoped: WorkerSessionWorkspaceContext,
+    turn_id: Option<String>,
+    tool_call_id: Option<String>,
+}
+
+impl WorkerToolContext {
+    pub fn extension_id(&self) -> &str {
+        self.scoped.call.extension_id()
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.scoped.session_id
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn_id.as_deref()
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+
+    pub fn working_dir(&self) -> &Path {
+        &self.scoped.working_dir
+    }
+
+    pub fn cancel_token(&self) -> &CancelToken {
+        self.scoped.call.cancel_token()
+    }
+}
+
+/// Host-attributed facts guaranteed for a worker hook invocation.
+#[derive(Clone)]
+pub struct WorkerHookContext {
+    scoped: WorkerSessionWorkspaceContext,
+    turn_id: Option<String>,
+    tool_call_id: Option<String>,
+}
+
+impl WorkerHookContext {
+    pub fn extension_id(&self) -> &str {
+        self.scoped.call.extension_id()
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.scoped.session_id
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn_id.as_deref()
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+
+    pub fn working_dir(&self) -> &Path {
+        &self.scoped.working_dir
+    }
+
+    pub fn cancel_token(&self) -> &CancelToken {
+        self.scoped.call.cancel_token()
+    }
+}
+
+/// Host-attributed facts guaranteed for a worker command invocation.
+#[derive(Clone)]
+pub struct WorkerCommandContext {
+    scoped: WorkerSessionWorkspaceContext,
+}
+
+impl WorkerCommandContext {
+    pub fn extension_id(&self) -> &str {
+        self.scoped.call.extension_id()
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.scoped.session_id
+    }
+
+    pub fn working_dir(&self) -> &Path {
+        &self.scoped.working_dir
+    }
+
+    pub fn cancel_token(&self) -> &CancelToken {
+        self.scoped.call.cancel_token()
+    }
+}
+
+/// Host-attributed facts guaranteed for a worker custom-event delivery.
+#[derive(Clone)]
+pub struct WorkerCustomEventContext {
+    call: WorkerCallContext,
+    session_id: String,
+    turn_id: Option<String>,
+}
+
+impl WorkerCustomEventContext {
+    pub fn extension_id(&self) -> &str {
+        self.call.extension_id()
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn_id.as_deref()
+    }
+
+    pub fn cancel_token(&self) -> &CancelToken {
+        self.call.cancel_token()
+    }
+}
+
+pub(crate) struct WorkerCallFacts {
+    call: WorkerCallContext,
+    session_id: Option<String>,
+    turn_id: Option<String>,
+    tool_call_id: Option<String>,
+    working_dir: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+struct WorkerSessionWorkspaceContext {
+    call: WorkerCallContext,
+    session_id: String,
+    working_dir: PathBuf,
+}
+
+impl WorkerCallFacts {
+    pub(crate) fn from_event(
+        extension_id: String,
+        cancel_token: CancelToken,
+        event: &Value,
+    ) -> Result<Self, ErrorPayload> {
+        let input = event.get("input").unwrap_or(event);
+        // Tool events use `tool_call_id`; tool-use hooks currently use `call_id` for the same fact.
+        let tool_call_id = match optional_string(input, "tool_call_id")? {
+            Some(tool_call_id) => Some(tool_call_id),
+            None => optional_string(input, "call_id")?,
+        };
+
+        Ok(Self {
+            call: WorkerCallContext {
+                extension_id,
+                cancel_token,
+            },
+            session_id: optional_string(input, "session_id")?.map(str::to_owned),
+            turn_id: optional_string(input, "turn_id")?.map(str::to_owned),
+            tool_call_id: tool_call_id.map(str::to_owned),
+            working_dir: optional_string(input, "working_dir")?.map(PathBuf::from),
+        })
+    }
+
+    pub(crate) fn into_tool(self) -> Result<WorkerToolContext, ErrorPayload> {
+        let (scoped, turn_id, tool_call_id) = self.into_scoped("tool")?;
+        Ok(WorkerToolContext {
+            scoped,
+            turn_id,
+            tool_call_id,
+        })
+    }
+
+    pub(crate) fn into_hook(self) -> Result<WorkerHookContext, ErrorPayload> {
+        let (scoped, turn_id, tool_call_id) = self.into_scoped("hook")?;
+        Ok(WorkerHookContext {
+            scoped,
+            turn_id,
+            tool_call_id,
+        })
+    }
+
+    fn into_command(self) -> Result<WorkerCommandContext, ErrorPayload> {
+        let (scoped, _, _) = self.into_scoped("command")?;
+        Ok(WorkerCommandContext { scoped })
+    }
+
+    fn into_custom_event(self) -> Result<WorkerCustomEventContext, ErrorPayload> {
+        let session_id = required_context_fact(self.session_id, "custom event", "session_id")?;
+        Ok(WorkerCustomEventContext {
+            call: self.call,
+            session_id,
+            turn_id: self.turn_id,
+        })
+    }
+
+    fn into_scoped(
+        self,
+        kind: &'static str,
+    ) -> Result<
+        (
+            WorkerSessionWorkspaceContext,
+            Option<String>,
+            Option<String>,
+        ),
+        ErrorPayload,
+    > {
+        let session_id = required_context_fact(self.session_id, kind, "session_id")?;
+        let working_dir = required_context_fact(self.working_dir, kind, "working_dir")?;
+        Ok((
+            WorkerSessionWorkspaceContext {
+                call: self.call,
+                session_id,
+                working_dir,
+            },
+            self.turn_id,
+            self.tool_call_id,
+        ))
+    }
+}
+
+fn required_context_fact<T>(
+    value: Option<T>,
+    handler_kind: &str,
+    field: &str,
+) -> Result<T, ErrorPayload> {
+    value.ok_or_else(|| {
+        ErrorPayload::new(
+            WireErrorCode::ContextUnavailable,
+            format!("worker {handler_kind} call requires {field}"),
+        )
+    })
+}
+
+fn optional_string<'a>(input: &'a Value, field: &str) -> Result<Option<&'a str>, ErrorPayload> {
+    match input.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        Some(_) => Err(ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            format!("{field} must be a string when present"),
+        )),
+    }
 }
 
 pub(crate) struct HandlerRegistry {
@@ -150,7 +338,8 @@ pub(crate) struct HandlerRegistry {
     catalog: ManifestCatalog,
     tools: HashMap<String, ToolHandlerFn>,
     hooks: HashMap<String, HookHandlerFn>,
-    custom_events: HashMap<String, HookHandlerFn>,
+    continuation_hooks: HashMap<String, ContinuationHandlerFn>,
+    custom_events: HashMap<String, CustomEventHandlerFn>,
     commands: HashMap<String, CommandHandlerFn>,
     http_routes: HashMap<String, HttpHandlerFn>,
 }
@@ -162,6 +351,7 @@ impl HandlerRegistry {
             catalog: ManifestCatalog::default(),
             tools: HashMap::new(),
             hooks: HashMap::new(),
+            continuation_hooks: HashMap::new(),
             custom_events: HashMap::new(),
             commands: HashMap::new(),
             http_routes: HashMap::new(),
@@ -192,7 +382,7 @@ impl HandlerRegistry {
     pub(crate) fn register_custom_event(
         &mut self,
         mut subscription: CustomEventSubscription,
-        handler: HookHandlerFn,
+        handler: CustomEventHandlerFn,
     ) -> Result<(), ErrorPayload> {
         subscription.normalize();
         if let Err(reason) = subscription.validate() {
@@ -337,10 +527,22 @@ impl HandlerRegistry {
     pub(crate) fn register_continuation_hook_handler(
         &mut self,
         on: impl Into<String>,
-        handler: HookHandlerFn,
+        handler: ContinuationHandlerFn,
     ) -> Result<(), ErrorPayload> {
         let on = on.into();
-        self.insert_hook_handler(on.clone(), handler)?;
+        if has_duplicate_registration_name(
+            self.hooks
+                .keys()
+                .chain(self.continuation_hooks.keys())
+                .map(String::as_str),
+            &on,
+        ) {
+            return Err(ErrorPayload::new(
+                WireErrorCode::DuplicateRegistration,
+                format!("duplicate hook registration: {on}"),
+            ));
+        }
+        self.continuation_hooks.insert(on.clone(), handler);
         self.catalog.continuation_hooks.push(on);
         Ok(())
     }
@@ -364,7 +566,13 @@ impl HandlerRegistry {
         on: String,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        if has_duplicate_registration_name(self.hooks.keys().map(String::as_str), &on) {
+        if has_duplicate_registration_name(
+            self.hooks
+                .keys()
+                .chain(self.continuation_hooks.keys())
+                .map(String::as_str),
+            &on,
+        ) {
             return Err(ErrorPayload::new(
                 WireErrorCode::DuplicateRegistration,
                 format!("duplicate hook registration: {on}"),
@@ -426,7 +634,7 @@ impl HandlerRegistry {
 
     pub async fn dispatch_invoke(
         &self,
-        invoke: InvokeMsg,
+        invoke: HandlerInvoke,
         token: CancelToken,
     ) -> Result<HandlerResult, ErrorPayload> {
         if invoke.capability != CAP_HANDLER_INVOKE {
@@ -438,19 +646,23 @@ impl HandlerRegistry {
         token
             .raise_if_cancelled()
             .map_err(|e| ErrorPayload::new(WireErrorCode::Cancelled, e))?;
-        let handler_id = invoke.input["handler_id"]
-            .as_str()
-            .ok_or_else(|| ErrorPayload::new(WireErrorCode::InvalidInput, "handler_id required"))?;
-        let event = invoke.input.get("event").cloned().unwrap_or(Value::Null);
-        let ctx = WorkerCallContext::from_event(self.extension_id.clone(), token, &event);
-        self.dispatch_handler(handler_id, event, ctx).await
+        let request: HandlerInvokeRequest =
+            serde_json::from_value(invoke.input).map_err(|error| {
+                ErrorPayload::new(
+                    WireErrorCode::InvalidInput,
+                    format!("invalid handler invocation: {error}"),
+                )
+            })?;
+        let facts = WorkerCallFacts::from_event(self.extension_id.clone(), token, &request.event)?;
+        self.dispatch_handler(&request.handler_id, request.event, facts)
+            .await
     }
 
     async fn dispatch_handler(
         &self,
         handler_id: &str,
         event: Value,
-        ctx: WorkerCallContext,
+        facts: WorkerCallFacts,
     ) -> Result<HandlerResult, ErrorPayload> {
         let prefix = format!("{}:", self.extension_id);
         let Some(handler_name) = handler_id.strip_prefix(&prefix) else {
@@ -468,16 +680,19 @@ impl HandlerRegistry {
                         format!("unknown tool: {name}"),
                     )
                 })?;
-                handler(event, ctx).await
+                handler(event, facts.into_tool()?).await
             },
             "hook" => {
-                let handler = self.hooks.get(name).ok_or_else(|| {
-                    ErrorPayload::new(
+                if let Some(handler) = self.hooks.get(name) {
+                    handler(event, facts.into_hook()?).await
+                } else if let Some(handler) = self.continuation_hooks.get(name) {
+                    handler(event, facts.call).await
+                } else {
+                    Err(ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
                         format!("unknown hook: {name}"),
-                    )
-                })?;
-                handler(event, ctx).await
+                    ))
+                }
             },
             "command" => {
                 let handler = self.commands.get(name).ok_or_else(|| {
@@ -486,7 +701,7 @@ impl HandlerRegistry {
                         format!("unknown command: {name}"),
                     )
                 })?;
-                handler(event, ctx).await
+                handler(event, facts.into_command()?).await
             },
             "http" => {
                 let handler = self.http_routes.get(name).ok_or_else(|| {
@@ -497,14 +712,14 @@ impl HandlerRegistry {
                 })?;
                 let request = serde_json::from_value(event).map_err(|error| {
                     ErrorPayload::new(
-                        WireErrorCode::UnknownHandler,
+                        WireErrorCode::InvalidInput,
                         format!("invalid HTTP request payload: {error}"),
                     )
                 })?;
-                let response = handler(request, ctx).await?;
+                let response = handler(request, facts.call).await?;
                 let data = serde_json::to_value(response).map_err(|error| {
                     ErrorPayload::new(
-                        WireErrorCode::UnknownHandler,
+                        WireErrorCode::SerializationFailed,
                         format!("serialize HTTP response: {error}"),
                     )
                 })?;
@@ -517,7 +732,7 @@ impl HandlerRegistry {
                         format!("unknown custom event subscription: {name}"),
                     )
                 })?;
-                handler(event, ctx).await
+                handler(event, facts.into_custom_event()?).await
             },
             _ => Err(ErrorPayload::new(
                 WireErrorCode::UnknownHandler,
@@ -538,14 +753,6 @@ fn fixed_worker_hook_hint(event: &LifecycleEvent) -> &'static str {
     }
 }
 
-pub(crate) fn registration_metadata(
-    extension_id: &str,
-    version: &str,
-    catalog: &ManifestCatalog,
-) -> Result<Value, String> {
-    catalog.to_metadata_value(extension_id, version)
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -561,27 +768,26 @@ mod tests {
         registry
             .register_continuation_hook_handler(
                 "pipeline_step",
-                crate::worker::hook_handler(|_| async {
+                crate::worker::continuation_handler(|_| async {
                     Ok(HandlerResult::effect("ok", json!({"step": 1})))
                 }),
             )
             .unwrap();
 
-        let metadata =
-            registration_metadata("test-extension", "0.1.0", registry.catalog()).unwrap();
+        let metadata = registry
+            .catalog()
+            .to_metadata_value("test-extension", "0.1.0")
+            .unwrap();
         assert_eq!(metadata["hooks"], json!([]));
 
         let result = registry
             .dispatch_invoke(
-                InvokeMsg {
-                    id: "invoke-1".into(),
+                HandlerInvoke {
                     capability: CAP_HANDLER_INVOKE.into(),
                     input: json!({
                         "handler_id": "test-extension:hook:pipeline_step",
                         "event": {}
                     }),
-                    stream: false,
-                    parent_invoke_id: None,
                 },
                 CancelToken::default(),
             )
@@ -590,6 +796,56 @@ mod tests {
 
         assert!(result.ok);
         assert_eq!(result.data_value("step"), Some(&json!(1)));
+
+        let error = registry
+            .dispatch_invoke(
+                HandlerInvoke {
+                    capability: CAP_HANDLER_INVOKE.into(),
+                    input: json!({
+                        "handler_id": "test-extension:hook:pipeline_step",
+                        "event": {},
+                        "unknown": true
+                    }),
+                },
+                CancelToken::default(),
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code_enum(), Some(WireErrorCode::InvalidInput));
+    }
+
+    #[test]
+    fn lifecycle_hook_modes_are_validated_and_preserved() {
+        let mut registry = HandlerRegistry::new("test-extension");
+        let handler =
+            crate::worker::hook_handler(|_| async { Ok(HandlerResult::effect("ok", json!({}))) });
+
+        registry
+            .register_hook(
+                LifecycleEvent::TurnEnd,
+                HookMode::NonBlocking,
+                Arc::clone(&handler),
+            )
+            .unwrap();
+        assert_eq!(registry.catalog.hooks[0].mode, "non_blocking");
+
+        let invalid = registry
+            .register_hook(
+                LifecycleEvent::SessionStart,
+                HookMode::Blocking,
+                Arc::clone(&handler),
+            )
+            .expect_err("observe-only lifecycle event must reject blocking mode");
+        assert_eq!(invalid.code_enum(), Some(WireErrorCode::InvalidHookMode));
+
+        let fixed = registry
+            .register_hook(
+                LifecycleEvent::AfterProviderResponse,
+                HookMode::Advisory,
+                handler,
+            )
+            .expect_err("fixed-mode lifecycle event must use its typed registration API");
+        assert_eq!(fixed.code_enum(), Some(WireErrorCode::TypedHookRequired));
     }
 
     #[test]
@@ -681,8 +937,10 @@ mod tests {
             .register_compact_hook(CompactEvent::PostCompact, handler)
             .unwrap();
 
-        let metadata =
-            registration_metadata("test-extension", "0.1.0", registry.catalog()).unwrap();
+        let metadata = registry
+            .catalog()
+            .to_metadata_value("test-extension", "0.1.0")
+            .unwrap();
         assert_eq!(
             metadata["hooks"],
             json!([
@@ -693,8 +951,8 @@ mod tests {
     }
 
     #[test]
-    fn worker_call_context_requires_scoped_facts_with_stable_errors() {
-        let scoped = WorkerCallContext::from_event(
+    fn worker_context_validates_scoped_facts_before_author_code() {
+        let scoped = WorkerCallFacts::from_event(
             "test-extension".into(),
             CancelToken::default(),
             &json!({
@@ -703,25 +961,31 @@ mod tests {
                     "working_dir": "/workspace"
                 }
             }),
-        );
-        assert_eq!(scoped.require_session_id().unwrap(), "session-1");
-        assert_eq!(
-            scoped.require_working_dir().unwrap(),
-            Path::new("/workspace")
-        );
+        )
+        .unwrap()
+        .into_tool()
+        .unwrap();
+        assert_eq!(scoped.session_id(), "session-1");
+        assert_eq!(scoped.working_dir(), Path::new("/workspace"));
 
-        let unscoped = WorkerCallContext::from_event(
+        let unscoped = WorkerCallFacts::from_event(
             "test-extension".into(),
             CancelToken::default(),
             &Value::Null,
-        );
+        )
+        .unwrap();
         assert_eq!(
-            unscoped.require_session_id().unwrap_err().code_enum(),
+            unscoped.into_tool().err().unwrap().code_enum(),
             Some(WireErrorCode::ContextUnavailable)
         );
-        assert_eq!(
-            unscoped.require_working_dir().unwrap_err().code_enum(),
-            Some(WireErrorCode::ContextUnavailable)
-        );
+
+        let invalid = WorkerCallFacts::from_event(
+            "test-extension".into(),
+            CancelToken::default(),
+            &json!({ "input": { "session_id": 7 } }),
+        )
+        .err()
+        .unwrap();
+        assert_eq!(invalid.code_enum(), Some(WireErrorCode::InvalidInput));
     }
 }

@@ -10,14 +10,14 @@
 /// 把扩展作者提供的注册名规范化为 trim 后的形式。
 ///
 /// 两条注册路径都以规范名入库与判重，因此 `"  review  "` 与 `"review"` 同名。
-pub(crate) fn canonical_registration_name(name: &mut String) {
+pub fn canonical_registration_name(name: &mut String) {
     *name = name.trim().to_owned();
 }
 
 /// 重复注册判定：候选名与任一已注册名精确相等（大小写敏感）。
 ///
 /// `registered` 与 `candidate` 都须先经 [`canonical_registration_name`] 规范化。
-pub(crate) fn has_duplicate_registration_name<'a>(
+pub fn has_duplicate_registration_name<'a>(
     registered: impl IntoIterator<Item = &'a str>,
     candidate: &str,
 ) -> bool {

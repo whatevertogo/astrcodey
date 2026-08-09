@@ -8,11 +8,11 @@ use std::{
     },
 };
 
-use astrcode_core::{types::SessionId, wire::WireErrorCode};
+use astrcode_core::types::SessionId;
 use tokio_util::sync::CancellationToken;
 
 use super::{CustomEventEmitter, ExtensionConfig, ExtensionPaths, ExtensionTasks};
-use crate::host::{ExtensionHost, HostError};
+use crate::host::ExtensionHost;
 
 /// Facts and scoped capabilities shared by extension calls.
 ///
@@ -21,9 +21,6 @@ use crate::host::{ExtensionHost, HostError};
 #[derive(Clone)]
 pub struct ExtensionCallContext {
     extension_id: Arc<str>,
-    session_id: Option<SessionId>,
-    turn_id: Option<Arc<str>>,
-    working_dir: Option<PathBuf>,
     paths: ExtensionPaths,
     host: ExtensionHost,
     events: CustomEventEmitter,
@@ -49,9 +46,6 @@ impl ExtensionCallContext {
     #[allow(clippy::too_many_arguments)]
     pub fn from_runtime(
         extension_id: impl Into<String>,
-        session_id: Option<SessionId>,
-        turn_id: Option<String>,
-        working_dir: Option<PathBuf>,
         paths: ExtensionPaths,
         host: ExtensionHost,
         events: CustomEventEmitter,
@@ -60,9 +54,6 @@ impl ExtensionCallContext {
     ) -> Self {
         Self {
             extension_id: Arc::from(extension_id.into()),
-            session_id,
-            turn_id: turn_id.map(Arc::from),
-            working_dir,
             paths,
             host,
             events,
@@ -88,38 +79,6 @@ impl ExtensionCallContext {
 
     pub fn extension_id(&self) -> &str {
         &self.extension_id
-    }
-
-    pub fn session_id(&self) -> Option<&SessionId> {
-        self.session_id.as_ref()
-    }
-
-    /// Returns the host-attributed session or a stable context error for session-only handlers.
-    pub fn require_session_id(&self) -> Result<&SessionId, HostError> {
-        self.session_id().ok_or_else(|| {
-            HostError::new(
-                WireErrorCode::ContextUnavailable,
-                "extension call requires a session-scoped context",
-            )
-        })
-    }
-
-    pub fn turn_id(&self) -> Option<&str> {
-        self.turn_id.as_deref()
-    }
-
-    pub fn working_dir(&self) -> Option<&Path> {
-        self.working_dir.as_deref()
-    }
-
-    /// Returns the validated workspace or a stable context error for workspace-only handlers.
-    pub fn require_working_dir(&self) -> Result<&Path, HostError> {
-        self.working_dir().ok_or_else(|| {
-            HostError::new(
-                WireErrorCode::ContextUnavailable,
-                "extension call requires a workspace-scoped context",
-            )
-        })
     }
 
     pub fn paths(&self) -> &ExtensionPaths {
@@ -155,28 +114,6 @@ pub trait ExtensionCall {
         self.call().extension_id()
     }
 
-    fn session_id(&self) -> Option<&SessionId> {
-        self.call().session_id()
-    }
-
-    /// Returns the host-attributed session or a stable context error for session-only handlers.
-    fn require_session_id(&self) -> Result<&SessionId, HostError> {
-        self.call().require_session_id()
-    }
-
-    fn turn_id(&self) -> Option<&str> {
-        self.call().turn_id()
-    }
-
-    fn working_dir(&self) -> Option<&Path> {
-        self.call().working_dir()
-    }
-
-    /// Returns the validated workspace or a stable context error for workspace-only handlers.
-    fn require_working_dir(&self) -> Result<&Path, HostError> {
-        self.call().require_working_dir()
-    }
-
     fn paths(&self) -> &ExtensionPaths {
         self.call().paths()
     }
@@ -198,14 +135,96 @@ pub trait ExtensionCall {
     }
 }
 
+/// Host-attributed facts guaranteed for a workspace-scoped invocation.
+#[derive(Clone)]
+pub struct WorkspaceCallContext {
+    call: ExtensionCallContext,
+    working_dir: PathBuf,
+}
+
+impl WorkspaceCallContext {
+    #[doc(hidden)]
+    pub fn from_runtime(call: ExtensionCallContext, working_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            call,
+            working_dir: working_dir.into(),
+        }
+    }
+
+    pub fn working_dir(&self) -> &Path {
+        &self.working_dir
+    }
+}
+
+impl ExtensionCall for WorkspaceCallContext {
+    fn call(&self) -> &ExtensionCallContext {
+        &self.call
+    }
+}
+
+impl std::fmt::Debug for WorkspaceCallContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("WorkspaceCallContext")
+            .field("call", &self.call)
+            .field("working_dir", &self.working_dir)
+            .finish()
+    }
+}
+
+/// Host-attributed facts guaranteed for a session-scoped invocation.
+#[derive(Clone)]
+pub struct SessionCallContext {
+    call: ExtensionCallContext,
+    session_id: SessionId,
+    turn_id: Option<Arc<str>>,
+}
+
+impl SessionCallContext {
+    #[doc(hidden)]
+    pub fn from_runtime(
+        call: ExtensionCallContext,
+        session_id: SessionId,
+        turn_id: Option<String>,
+    ) -> Self {
+        Self {
+            call,
+            session_id,
+            turn_id: turn_id.map(Arc::from),
+        }
+    }
+
+    pub fn session_id(&self) -> &SessionId {
+        &self.session_id
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn_id.as_deref()
+    }
+}
+
+impl ExtensionCall for SessionCallContext {
+    fn call(&self) -> &ExtensionCallContext {
+        &self.call
+    }
+}
+
+impl std::fmt::Debug for SessionCallContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SessionCallContext")
+            .field("call", &self.call)
+            .field("session_id", &self.session_id)
+            .field("turn_id", &self.turn_id)
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for ExtensionCallContext {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("ExtensionCallContext")
             .field("extension_id", &self.extension_id)
-            .field("session_id", &self.session_id)
-            .field("turn_id", &self.turn_id)
-            .field("working_dir", &self.working_dir)
             .field("paths", &self.paths)
             .field("events", &self.events)
             .field("cancelled", &self.cancellation.token.is_cancelled())
@@ -222,12 +241,21 @@ impl std::fmt::Debug for ExtensionCallContext {
 pub struct ExtensionStartContext {
     call: ExtensionCallContext,
     config: ExtensionConfig,
+    startup_working_dir: Option<PathBuf>,
 }
 
 impl ExtensionStartContext {
     #[doc(hidden)]
-    pub fn from_runtime(call: ExtensionCallContext, config: ExtensionConfig) -> Self {
-        Self { call, config }
+    pub fn from_runtime(
+        call: ExtensionCallContext,
+        config: ExtensionConfig,
+        startup_working_dir: Option<PathBuf>,
+    ) -> Self {
+        Self {
+            call,
+            config,
+            startup_working_dir,
+        }
     }
 
     pub fn config(&self) -> &ExtensionConfig {
@@ -235,7 +263,7 @@ impl ExtensionStartContext {
     }
 
     pub fn startup_working_dir(&self) -> Option<&Path> {
-        self.call.working_dir()
+        self.startup_working_dir.as_deref()
     }
 }
 
@@ -303,9 +331,6 @@ mod tests {
         let cancellation = CancellationToken::new();
         let call = ExtensionCallContext::from_runtime(
             "startup-probe",
-            None,
-            None,
-            Some(PathBuf::from("/workspace")),
             ExtensionPaths::from_runtime("startup-probe", Some(Path::new("/global")), None),
             host,
             CustomEventEmitter::default(),
@@ -315,15 +340,11 @@ mod tests {
         let ctx = ExtensionStartContext::from_runtime(
             call,
             ExtensionConfig::from_runtime("startup-probe", json!({ "token": "secret" })),
+            Some(PathBuf::from("/workspace")),
         );
 
         assert_eq!(ctx.extension_id(), "startup-probe");
         assert_eq!(ctx.startup_working_dir(), Some(Path::new("/workspace")));
-        assert_eq!(
-            ctx.call().require_working_dir().unwrap(),
-            Path::new("/workspace")
-        );
-        assert!(ctx.call().require_session_id().is_err());
         assert_eq!(
             ctx.paths().global_data_dir(),
             Some(Path::new("/global/extension_data/startup-probe"))
@@ -355,18 +376,12 @@ mod tests {
         let observer = cancellation.clone();
         let call = ExtensionCallContext::from_runtime(
             "drop-probe",
-            Some(SessionId::new("session-1")),
-            None,
-            None,
             ExtensionPaths::default(),
             host,
             CustomEventEmitter::default(),
             ExtensionTasks::new("drop-probe"),
             cancellation,
         );
-
-        assert_eq!(call.require_session_id().unwrap().as_str(), "session-1");
-        assert!(call.require_working_dir().is_err());
 
         let clone = call.clone();
         drop(call);
@@ -390,9 +405,6 @@ mod tests {
         let observer = cancellation.clone();
         let call = ExtensionCallContext::from_runtime(
             "generation-probe",
-            None,
-            None,
-            None,
             ExtensionPaths::default(),
             host,
             CustomEventEmitter::default(),

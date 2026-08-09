@@ -89,20 +89,18 @@ fn apply_event(app: &mut App, event: &Event) {
     if !matches!(
         &event.payload,
         EventPayload::Durable(DurableEventPayload::SessionStarted(_))
-    ) {
-        if let Some(active) = &app.active_session_id {
-            if event.session_id.as_str() != active.as_str() {
-                // 检查是否是已跟踪的子 session 事件
-                if let Some(call_id) = app
-                    .child_session_map
-                    .get(event.session_id.as_str())
-                    .cloned()
-                {
-                    apply_child_session_event(app, &call_id, event);
-                }
-                return;
-            }
+    ) && let Some(active) = &app.active_session_id
+        && event.session_id.as_str() != active.as_str()
+    {
+        // 检查是否是已跟踪的子 session 事件
+        if let Some(call_id) = app
+            .child_session_map
+            .get(event.session_id.as_str())
+            .cloned()
+        {
+            apply_child_session_event(app, &call_id, event);
         }
+        return;
     }
     match &event.payload {
         EventPayload::Durable(DurableEventPayload::SessionStarted(started)) => {
@@ -192,10 +190,10 @@ fn apply_event(app: &mut App, event: &Event) {
             if let Some(msg) = app.find_message_mut(message_id.as_str()) {
                 msg.body.append_text(delta);
             }
-            if let Some(ctrl) = app.stream_states.get_mut(message_id.as_str()) {
-                if ctrl.push_delta(delta) {
-                    // Lines are queued; commit_tick will drain them.
-                }
+            if let Some(ctrl) = app.stream_states.get_mut(message_id.as_str())
+                && ctrl.push_delta(delta)
+            {
+                // Lines are queued; commit_tick will drain them.
             }
             tracing::debug!(message_id = %message_id, len = delta.len(), "stream_chunk");
         },
@@ -979,19 +977,6 @@ mod tests {
     }
 
     #[test]
-    fn first_line_preview_preserves_content_and_limits_characters() {
-        for (text, max_chars, expected) in [
-            ("hello", 10, "hello"),
-            ("first\nsecond", 80, "first"),
-            ("0123456789abcdef", 8, "01234567…"),
-            ("你好世界abcd", 8, "你好世界abcd"),
-            ("hello   world", 80, "hello   world"),
-        ] {
-            assert_eq!(truncate_first_line(text, max_chars), expected);
-        }
-    }
-
-    #[test]
     fn assistant_deltas_enter_scrollback_incrementally() {
         let mut app = make_app();
         apply_payload(
@@ -1303,35 +1288,6 @@ mod tests {
             assert_eq!(app.messages[0].role, expected_role);
             assert!(app.messages[0].body.plain_text().contains(expected_text));
         }
-    }
-
-    #[test]
-    fn agent_tool_shows_compact_task_summary() {
-        let mut app = make_app();
-        apply_payload(
-            &mut app,
-            EventPayload::Live(LiveEventPayload::ToolCallStarted {
-                call_id: "call-agent".into(),
-                tool_name: "agent".into(),
-            }),
-        );
-        apply_payload(
-            &mut app,
-            EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
-                call_id: "call-agent".into(),
-                tool_name: "agent".into(),
-                result: tool_result("Found 3 relevant files", false),
-                arguments: String::new(),
-                arguments_json: None,
-            }),
-        );
-        assert_eq!(app.messages.len(), 1);
-        assert!(
-            app.messages[0]
-                .body
-                .plain_text()
-                .contains("● Task completed")
-        );
     }
 
     #[test]

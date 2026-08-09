@@ -91,12 +91,8 @@ fn ok_text(content: String) -> ToolResult {
     ToolResult::text(content, false, BTreeMap::new())
 }
 
-fn tool_working_dir(ctx: &ToolContext) -> Result<String, ExtensionError> {
-    Ok(ctx
-        .call()
-        .require_working_dir()?
-        .to_string_lossy()
-        .into_owned())
+fn tool_working_dir(ctx: &ToolContext) -> String {
+    ctx.working_dir().to_string_lossy().into_owned()
 }
 
 async fn with_scoped_stores<T: Send + 'static>(
@@ -156,8 +152,8 @@ impl ToolHandler for MemorySaveHandler {
         ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let args: SaveArgs = ctx.arguments()?;
-        let working_dir = tool_working_dir(&ctx)?;
-        let session_id = ctx.call().require_session_id()?.to_string();
+        let working_dir = tool_working_dir(&ctx);
+        let session_id = ctx.session_id().to_string();
         let content = args.content;
         let category = args.category;
         let replace = args.replace_match.filter(|s| !s.trim().is_empty());
@@ -251,7 +247,7 @@ impl ToolHandler for MemoryDeleteHandler {
         ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let args: DeleteArgs = ctx.arguments()?;
-        let working_dir = tool_working_dir(&ctx)?;
+        let working_dir = tool_working_dir(&ctx);
         if args.match_pattern.trim().is_empty() {
             return Ok(ok_text("No pattern provided. Nothing deleted.".to_string()).into());
         }
@@ -313,7 +309,7 @@ impl ToolHandler for MemoryListHandler {
         ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
         let args: ListArgs = ctx.arguments()?;
-        let working_dir = tool_working_dir(&ctx)?;
+        let working_dir = tool_working_dir(&ctx);
         let limit = args.limit.clamp(1, MAX_LIST_ENTRIES);
         let query = args.query.filter(|q| !q.trim().is_empty());
 
@@ -352,12 +348,8 @@ pub(crate) struct MemoryRecallHandler {
 impl PromptBuildHandler for MemoryRecallHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
         let store_pool = self.store_pool.clone();
-        let working_dir = ctx
-            .call()
-            .require_working_dir()?
-            .to_string_lossy()
-            .into_owned();
-        let session_id = ctx.call().require_session_id()?.to_string();
+        let working_dir = ctx.working_dir().to_string_lossy().into_owned();
+        let session_id = ctx.session_id().to_string();
         let session_prefs = self.session_prefs.clone();
 
         let global_prefs = tokio::task::spawn_blocking(move || {
@@ -531,7 +523,7 @@ pub(crate) struct MemorySessionStartHandler {
 #[async_trait::async_trait]
 impl LifecycleHandler for MemorySessionStartHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        let session_id = ctx.call().require_session_id()?.to_string();
+        let session_id = ctx.session_id().to_string();
         let tasks = ctx.tasks();
         if tasks.cancellation().is_cancelled() {
             return Ok(HookResult::Allow);
@@ -543,11 +535,7 @@ impl LifecycleHandler for MemorySessionStartHandler {
         // 预加载失败不阻塞——PromptBuild 的 lines_for_session 会兜底。
         let store_pool = self.store_pool.clone();
         let session_prefs = self.session_prefs.clone();
-        let working_dir = ctx
-            .call()
-            .require_working_dir()?
-            .to_string_lossy()
-            .into_owned();
+        let working_dir = ctx.working_dir().to_string_lossy().into_owned();
         let preload_working_dir = working_dir.clone();
         let preload_session_id = session_id.clone();
         if let Err(e) = tokio::task::spawn_blocking(move || {

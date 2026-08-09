@@ -6,13 +6,31 @@ use astrcode_core::{
     types::{Cursor, SessionId},
 };
 use astrcode_session_projection::{AgentSessionLinkView, SessionReadModel, SessionSummary};
+use serde::{Deserialize, Serialize};
 
 use crate::{CompactSnapshotInput, StorageError, ToolResultArtifactInput, ToolResultArtifactRef};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventConsumerState {
     pub checkpoint: Option<u64>,
     pub paused: bool,
+    pub revision: u64,
+    pub consecutive_failures: u32,
+    pub quarantined: Vec<EventConsumerQuarantine>,
+    pub skips: Vec<EventConsumerSkip>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventConsumerQuarantine {
+    pub seq: u64,
+    pub attempts: u32,
+    pub last_error: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EventConsumerSkip {
+    pub from_seq: Option<u64>,
+    pub to_seq: Option<u64>,
     pub revision: u64,
 }
 
@@ -25,6 +43,14 @@ pub enum EventConsumerCheckpointReset {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EventConsumerCheckpointOutcome {
     Accepted,
+    StaleRevision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventConsumerFailureOutcome {
+    Recorded { attempts: u32 },
+    Quarantined { attempts: u32 },
+    AlreadyConsumed,
     StaleRevision,
 }
 
@@ -191,6 +217,21 @@ pub trait SessionStore:
         expected_revision: u64,
         seq: u64,
     ) -> Result<EventConsumerCheckpointOutcome, StorageError>;
+
+    /// Records a failed delivery and atomically quarantines plus checkpoints it at the limit.
+    async fn record_event_consumer_failure(
+        &self,
+        _session_id: &SessionId,
+        _consumer_id: &str,
+        _expected_revision: u64,
+        _seq: u64,
+        _error: &str,
+        _quarantine_after: u32,
+    ) -> Result<EventConsumerFailureOutcome, StorageError> {
+        Err(StorageError::Unsupported(
+            "event consumer quarantine is not supported by this store".into(),
+        ))
+    }
 
     async fn set_event_consumer_paused(
         &self,

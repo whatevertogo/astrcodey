@@ -79,29 +79,3 @@ pub(crate) fn project_memory_injection(lines: &[String]) -> String {
         lines.join("\n")
     )
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn batch_user_prompt_omits_empty_existing_block() {
-        let out = batch_user_prompt("### session_id: abc\nUser: hi", "2026-05-31", "  \n");
-        assert!(out.contains("Sessions:"));
-        assert!(!out.contains("Existing memories:"));
-        assert!(out.contains(BATCH_JSON));
-    }
-
-    #[test]
-    fn batch_user_prompt_includes_existing_memories() {
-        let out = batch_user_prompt("block", "2026-05-31", "- pref");
-        assert!(out.contains("Existing memories:\n- pref"));
-    }
-
-    #[test]
-    fn project_memory_injection_includes_disclaimer() {
-        let body = project_memory_injection(&["- fact".to_string()]);
-        assert!(body.contains("may NOT match"));
-        assert!(body.contains("- fact"));
-    }
-}

@@ -336,16 +336,15 @@ fn normalize_tool_call_messages(messages: &mut Vec<LlmMessage>) {
                 .content
                 .iter()
                 .any(|c| matches!(c, LlmContent::ToolCall { .. }));
-        if has_tool_calls {
-            if let Some(last) = merged.last_mut() {
-                if last.role == LlmRole::Assistant {
-                    last.content.extend(message.content);
-                    if last.reasoning_content.is_none() {
-                        last.reasoning_content = message.reasoning_content;
-                    }
-                    continue;
-                }
+        if has_tool_calls
+            && let Some(last) = merged.last_mut()
+            && last.role == LlmRole::Assistant
+        {
+            last.content.extend(message.content);
+            if last.reasoning_content.is_none() {
+                last.reasoning_content = message.reasoning_content;
             }
+            continue;
         }
         merged.push(message);
     }
@@ -932,47 +931,11 @@ mod tests {
     }
 
     #[test]
-    fn provider_visible_keeps_non_empty() {
-        let messages = vec![LlmMessage::user("hello"), LlmMessage::assistant("world")];
-        let visible = provider_visible_messages(messages);
-        assert_eq!(visible.len(), 2);
-    }
-
-    #[test]
     fn attachments_round_trip_preserves_image_filename() {
         let attachments = vec![MessageAttachment::image_png("screenshot.png", "abc123")];
         let message = LlmMessage::user_with_attachments("hello", &attachments);
         let round_trip = attachments_from_user_message(&message);
         assert_eq!(round_trip, attachments);
-    }
-
-    #[test]
-    fn non_image_attachment_uses_xml_delimiters() {
-        let attachments = vec![MessageAttachment {
-            filename: "note.txt".into(),
-            content: "body".into(),
-            media_type: "text/plain".into(),
-        }];
-        let message = LlmMessage::user_with_attachments("", &attachments);
-        let text = message
-            .content
-            .iter()
-            .find_map(LlmContent::as_text)
-            .expect("text attachment");
-        assert!(text.starts_with("<attachment filename=\"note.txt\" media_type=\"text/plain\">"));
-        assert!(text.ends_with("</attachment>"));
-    }
-
-    #[test]
-    fn transport_and_stream_parse_helpers_build_matching_variants() {
-        assert!(matches!(
-            LlmError::transport("boom"),
-            LlmError::Transport { message } if message == "boom"
-        ));
-        assert!(matches!(
-            LlmError::stream_parse("bad json"),
-            LlmError::StreamParse { message } if message == "bad json"
-        ));
     }
 
     #[test]

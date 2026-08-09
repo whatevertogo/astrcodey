@@ -258,16 +258,16 @@ impl TerminalSession {
     fn pending_viewport_area(&mut self) -> io::Result<Option<ratatui::layout::Rect>> {
         let screen_size = self.terminal.size()?;
         let last_known = self.terminal.last_known_screen_size;
-        if screen_size != last_known {
-            if let Ok(cursor_pos) = self.terminal.get_cursor_position() {
-                let last_cursor = self.terminal.last_known_cursor_pos;
-                if cursor_pos.y != last_cursor.y {
-                    let offset = ratatui::layout::Offset {
-                        x: 0,
-                        y: cursor_pos.y as i32 - last_cursor.y as i32,
-                    };
-                    return Ok(Some(self.terminal.viewport_area.offset(offset)));
-                }
+        if screen_size != last_known
+            && let Ok(cursor_pos) = self.terminal.get_cursor_position()
+        {
+            let last_cursor = self.terminal.last_known_cursor_pos;
+            if cursor_pos.y != last_cursor.y {
+                let offset = ratatui::layout::Offset {
+                    x: 0,
+                    y: cursor_pos.y as i32 - last_cursor.y as i32,
+                };
+                return Ok(Some(self.terminal.viewport_area.offset(offset)));
             }
         }
         Ok(None)

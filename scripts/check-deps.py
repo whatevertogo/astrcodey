@@ -2,16 +2,17 @@
 """Check workspace crate dependency direction rules.
 
 Layer hierarchy:
-  L0 Foundation:   astrcode-core, astrcode-desktop
-  L1 Primitives:   astrcode-session-projection
-  L2 Services:     astrcode-extension-sdk, astrcode-ai, astrcode-context,
+  L0 Wire:         astrcode-extension-contract
+  L1 Foundation:   astrcode-core, astrcode-desktop
+  L2 Primitives:   astrcode-session-projection
+  L3 Services:     astrcode-extension-sdk, astrcode-ai, astrcode-context,
                    astrcode-log, astrcode-storage
-  L3 Integration:  astrcode-protocol, astrcode-tools, astrcode-extensions,
+  L4 Integration:  astrcode-protocol, astrcode-tools, astrcode-extensions,
                    astrcode-extension-*
-  L4 Runtime:      astrcode-session, astrcode-client, astrcode-bundled-extensions,
+  L5 Runtime:      astrcode-session, astrcode-client, astrcode-bundled-extensions,
                    astrcode-eval
-  L5 Server:       astrcode-server
-  L6 CLI:          astrcode-cli
+  L6 Server:       astrcode-server
+  L7 CLI:          astrcode-cli
 
 Rule: a crate may only depend on crates at a strictly lower layer.
 """
@@ -26,50 +27,54 @@ from pathlib import Path
 # ── Layer definitions ──────────────────────────────────────────────
 
 LAYERS: dict[str, int] = {
-    # L0 – Foundation
-    "astrcode-core": 0,
-    "astrcode-desktop": 0,
-    # L1 – Primitive contracts
-    "astrcode-session-projection": 1,
-    # L2 – Services
-    "astrcode-extension-sdk": 2,
-    "astrcode-ai": 2,
-    "astrcode-context": 2,
-    "astrcode-log": 2,
-    "astrcode-storage": 2,
-    # L3 – Integration and extension implementations
-    "astrcode-protocol": 3,
-    "astrcode-tools": 3,
-    "astrcode-extensions": 3,
-    "astrcode-extension-goal": 3,
-    "astrcode-extension-agent-tools": 3,
-    "astrcode-extension-mcp": 3,
-    "astrcode-extension-skill": 3,
-    "astrcode-extension-todo-tool": 3,
-    "astrcode-extension-mode": 3,
-    "astrcode-extension-ask-user": 3,
-    "astrcode-extension-memory": 3,
-    "astrcode-extension-channels": 3,
-    "astrcode-extension-web-tools": 3,
-    # L4 – Runtime and composition
-    "astrcode-client": 4,
-    "astrcode-bundled-extensions": 4,
-    "astrcode-eval": 4,
-    "astrcode-session": 4,
-    # L5 – Server
-    "astrcode-server": 5,
-    # L6 – CLI
-    "astrcode-cli": 6,
+    # L0 – Wire contract
+    "astrcode-extension-contract": 0,
+    # L1 – Foundation
+    "astrcode-core": 1,
+    "astrcode-desktop": 1,
+    # L2 – Primitive contracts
+    "astrcode-session-projection": 2,
+    # L3 – Services
+    "astrcode-extension-sdk": 3,
+    "astrcode-ai": 3,
+    "astrcode-context": 3,
+    "astrcode-log": 3,
+    "astrcode-storage": 3,
+    # L4 – Integration and extension implementations
+    "astrcode-protocol": 4,
+    "astrcode-tools": 4,
+    "astrcode-extensions": 4,
+    "astrcode-extension-worker": 4,
+    "astrcode-extension-goal": 4,
+    "astrcode-extension-agent-tools": 4,
+    "astrcode-extension-mcp": 4,
+    "astrcode-extension-skill": 4,
+    "astrcode-extension-todo-tool": 4,
+    "astrcode-extension-mode": 4,
+    "astrcode-extension-ask-user": 4,
+    "astrcode-extension-memory": 4,
+    "astrcode-extension-channels": 4,
+    "astrcode-extension-web-tools": 4,
+    # L5 – Runtime and composition
+    "astrcode-client": 5,
+    "astrcode-bundled-extensions": 5,
+    "astrcode-eval": 5,
+    "astrcode-session": 5,
+    # L6 – Server
+    "astrcode-server": 6,
+    # L7 – CLI
+    "astrcode-cli": 7,
 }
 
 LAYER_NAMES: dict[int, str] = {
-    0: "Foundation",
-    1: "Primitives",
-    2: "Services",
-    3: "Integration",
-    4: "Runtime",
-    5: "Server",
-    6: "CLI",
+    0: "Wire",
+    1: "Foundation",
+    2: "Primitives",
+    3: "Services",
+    4: "Integration",
+    5: "Runtime",
+    6: "Server",
+    7: "CLI",
 }
 
 ALLOWED_SAME_LAYER: set[tuple[str, str]] = set()

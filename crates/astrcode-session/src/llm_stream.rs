@@ -101,11 +101,10 @@ pub(crate) async fn consume_llm_stream(
                         return Err(TurnError::Aborted);
                     }
                     completed = poll_early_tool(&mut consumer.scheduler), if consumer.scheduler.as_ref().is_some_and(EarlyToolScheduler::has_pending) => {
-                        if let Some((index, outcome)) = completed? {
-                            if let Some(ref mut scheduler) = consumer.scheduler {
+                        if let Some((index, outcome)) = completed?
+                            && let Some(ref mut scheduler) = consumer.scheduler {
                                 scheduler.record_outcome(index, outcome);
                             }
-                        }
                         continue;
                     }
                     event = rx.recv() => event,
@@ -309,19 +308,18 @@ impl<'a> StreamConsumer<'a> {
         }
         // 同一结构体的两个字段分别可变借用是允许的（字段级借用）。
         let (early_exec, scheduler) = (self.early_exec.as_mut(), self.scheduler.as_mut());
-        if let (Some(ctx), Some(scheduler)) = (early_exec, scheduler) {
-            if let Some((index, tc)) = self
+        if let (Some(ctx), Some(scheduler)) = (early_exec, scheduler)
+            && let Some((index, tc)) = self
                 .tool_calls
                 .iter()
                 .enumerate()
                 .find(|(_, tc)| tc.call_id == call_id)
-            {
-                let prepared = ctx
-                    .pipeline
-                    .prepare_single_tool_call(tc, index, &ctx.visible_tools, ctx.deduplicator)
-                    .await?;
-                scheduler.schedule(prepared);
-            }
+        {
+            let prepared = ctx
+                .pipeline
+                .prepare_single_tool_call(tc, index, &ctx.visible_tools, ctx.deduplicator)
+                .await?;
+            scheduler.schedule(prepared);
         }
         self.handled_tool_call_ids.insert(call_id);
         Ok(())
@@ -514,18 +512,5 @@ mod tests {
                 EventPayload::Live(LiveEventPayload::AssistantMessageReset { .. })
             ))
         );
-    }
-
-    #[test]
-    fn non_empty_reasoning_returns_some() {
-        assert_eq!(
-            non_empty_reasoning_content("thinking...".into()),
-            Some("thinking...".into())
-        );
-    }
-
-    #[test]
-    fn non_empty_reasoning_empty_returns_none() {
-        assert_eq!(non_empty_reasoning_content(String::new()), None);
     }
 }

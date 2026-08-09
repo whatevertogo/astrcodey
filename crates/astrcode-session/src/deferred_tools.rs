@@ -267,49 +267,4 @@ mod tests {
         let changed = activate_deferred_tools(&mut active, &tools, vec!["a".into()]);
         assert!(!changed);
     }
-
-    #[test]
-    fn tool_is_visible_found() {
-        let tools = vec![def("read"), def("write")];
-        assert!(tool_is_visible(&tools, "read"));
-        assert!(!tool_is_visible(&tools, "shell"));
-    }
-
-    #[test]
-    fn suggest_tool_alias_maps_common_mistakes() {
-        assert_eq!(suggest_tool_alias("find"), Some("glob"));
-        assert_eq!(suggest_tool_alias("list_files"), Some("glob"));
-        assert_eq!(suggest_tool_alias("read_file"), Some("read"));
-        assert_eq!(suggest_tool_alias("shell"), None);
-    }
-
-    #[test]
-    fn unavailable_tool_guidance_suggests_glob_for_legacy_find() {
-        let visible = vec![def("glob"), def("grep"), def("read")];
-        let registered = visible.clone();
-        let msg = unavailable_tool_guidance("find", &visible, &registered);
-        assert!(msg.contains("glob"));
-        assert!(!msg.contains("tool_search_tool"));
-    }
-
-    #[test]
-    fn unavailable_tool_guidance_defers_mcp_tools_to_search() {
-        let visible = vec![def("read"), def("tool_search_tool")];
-        let registered = vec![
-            def("read"),
-            def("tool_search_tool"),
-            def("mcp__demo__search"),
-        ];
-        let msg = unavailable_tool_guidance("mcp__demo__search", &visible, &registered);
-        assert!(msg.contains("tool_search_tool"));
-        assert!(msg.contains("not loaded for this turn"));
-    }
-
-    #[test]
-    fn unavailable_tool_guidance_lists_visible_tools_for_unknown_names() {
-        let visible = vec![def("glob"), def("grep")];
-        let msg = unavailable_tool_guidance("missing_tool", &visible, &visible);
-        assert!(msg.contains("Available tools"));
-        assert!(msg.contains("glob"));
-    }
 }

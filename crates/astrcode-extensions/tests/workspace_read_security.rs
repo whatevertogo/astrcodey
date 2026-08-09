@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use astrcode_core::wire::WireErrorCode;
+use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{extension::ExtensionCapability, s5r::ErrorPayload};
 use astrcode_extensions::host_router::{HostBackends, HostRouter, InvokeContext};
 use serde_json::{Value, json};

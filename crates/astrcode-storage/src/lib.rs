@@ -19,7 +19,8 @@ mod test_support;
 pub use astrcode_core::tool::ToolResultArtifactSlice;
 pub use error::StorageError;
 pub use traits::{
-    EventConsumerCheckpointOutcome, EventConsumerCheckpointReset, EventConsumerState, EventReader,
+    EventConsumerCheckpointOutcome, EventConsumerCheckpointReset, EventConsumerFailureOutcome,
+    EventConsumerQuarantine, EventConsumerSkip, EventConsumerState, EventReader,
     SessionEventJournal, SessionPathResolver, SessionReader, SessionStore, ToolResultArtifactStore,
 };
 pub use types::{CompactSnapshotInput, ToolResultArtifactInput, ToolResultArtifactRef};

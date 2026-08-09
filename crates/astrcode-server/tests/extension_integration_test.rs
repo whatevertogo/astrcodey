@@ -6,14 +6,15 @@ use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult}
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        ExtensionCall, ExtensionCapability, ExtensionError, ExtensionManifest, HookMode,
-        HookResult, LifecycleContext, LifecyclePayload, PreToolUseContext, PreToolUsePayload,
-        PreToolUseResult, Registrar, RuntimeHookCallContext, RuntimeLifecycleContext,
-        RuntimePreToolUseContext, ToolContext, ToolHandler,
+        ExtensionCapability, ExtensionError, ExtensionManifest, HookMode, HookResult,
+        LifecycleContext, LifecyclePayload, PreToolUseContext, PreToolUsePayload, PreToolUseResult,
+        Registrar, RuntimeHookCallContext, RuntimeLifecycleContext, RuntimePreToolUseContext,
+        ToolContext, ToolHandler,
     },
 };
 use astrcode_extensions::{Extension, runner::ExtensionRunner};
 use astrcode_session::ToolRegistry;
+use tokio::sync::Notify;
 
 fn test_manifest(id: impl Into<String>, capabilities: &[ExtensionCapability]) -> ExtensionManifest {
     capabilities
@@ -129,10 +130,7 @@ impl ToolHandler for EchoToolHandler {
             .get("text")
             .and_then(|value| value.as_str())
             .unwrap_or("");
-        let working_dir = ctx
-            .working_dir()
-            .ok_or_else(|| ExtensionError::Internal("working directory not injected".into()))?
-            .display();
+        let working_dir = ctx.working_dir().display();
         Ok(ToolResult {
             content: format!("{working_dir}:{text}"),
             is_error: false,
@@ -205,9 +203,13 @@ impl ToolHandler for FixedToolHandler {
     }
 }
 
-// ─── Lifecycle extension for NonBlocking test ─────────────────────────────
+// ─── Lifecycle observer context probe ─────────────────────────────────────
 
-struct FireAndForgetExt;
+struct FireAndForgetExt {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    completed: Arc<Notify>,
+}
 
 impl Extension for FireAndForgetExt {
     fn manifest(&self) -> ExtensionManifest {
@@ -216,21 +218,32 @@ impl Extension for FireAndForgetExt {
 
     fn register(&self, reg: &mut Registrar) {
         reg.on_lifecycle(
-            astrcode_extension_sdk::extension::LifecycleEvent::TurnStart,
+            astrcode_extension_sdk::extension::LifecycleEvent::TurnEnd,
             HookMode::NonBlocking,
             0,
-            Arc::new(FafHandler),
+            Arc::new(FafHandler {
+                entered: Arc::clone(&self.entered),
+                release: Arc::clone(&self.release),
+                completed: Arc::clone(&self.completed),
+            }),
         );
     }
 }
 
-struct FafHandler;
+struct FafHandler {
+    entered: Arc<Notify>,
+    release: Arc<Notify>,
+    completed: Arc<Notify>,
+}
 
 #[async_trait::async_trait]
 impl astrcode_extension_sdk::extension::LifecycleHandler for FafHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
-        assert_eq!(ctx.session_id().map(|id| id.as_str()), Some("test-session"));
-        assert_eq!(ctx.working_dir(), Some(std::path::Path::new("/tmp")));
+        assert_eq!(ctx.session_id().as_str(), "test-session");
+        assert_eq!(ctx.working_dir(), std::path::Path::new("/tmp"));
+        self.entered.notify_one();
+        self.release.notified().await;
+        self.completed.notify_one();
         Ok(HookResult::Allow)
     }
 }
@@ -385,20 +398,38 @@ async fn pre_tool_use_extension_can_inspect_tool_payload() {
 #[tokio::test]
 async fn extension_context_snapshot_works_for_nonblocking() {
     let runner = ExtensionRunner::new(Duration::from_secs(5));
-    runner.register(Arc::new(FireAndForgetExt)).await.unwrap();
-
-    let ctx = lifecycle_context("test-session", "test-model");
-
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let completed = Arc::new(Notify::new());
     runner
-        .emit_lifecycle(
-            astrcode_extension_sdk::extension::LifecycleEvent::TurnStart,
-            ctx,
-        )
+        .register(Arc::new(FireAndForgetExt {
+            entered: Arc::clone(&entered),
+            release: Arc::clone(&release),
+            completed: Arc::clone(&completed),
+        }))
         .await
         .unwrap();
 
-    // Give the fire-and-forget task a moment to run.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    let ctx = lifecycle_context("test-session", "test-model");
+
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        runner.emit_lifecycle(
+            astrcode_extension_sdk::extension::LifecycleEvent::TurnEnd,
+            ctx,
+        ),
+    )
+    .await
+    .expect("non-blocking lifecycle dispatch must not await the handler")
+    .unwrap();
+
+    tokio::time::timeout(Duration::from_secs(1), entered.notified())
+        .await
+        .expect("non-blocking lifecycle handler should start");
+    release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), completed.notified())
+        .await
+        .expect("non-blocking lifecycle handler should finish after release");
 }
 
 #[tokio::test]

@@ -23,20 +23,20 @@ use astrcode_extension_sdk::{
         CommandCompletionContext, CommandCompletionItem, CommandCompletions, CommandContext,
         CommandHandler, CompactContext, CompactEvent, CompactHandler, CompactResult,
         ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
-        ContinueAfterStopPayload, ContinueAfterStopResult, CustomEventContext, CustomEventHandler,
-        CustomEventSubscription, Extension, ExtensionCall, ExtensionCapability,
-        ExtensionCommandResult, ExtensionConfig, ExtensionError, ExtensionHttpHandler,
-        ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        ExtensionManifest, ExtensionStartContext, ExtensionTasks, HookMode, HookResult,
-        HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler, PostToolUseContext,
-        PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
-        PreToolUsePayload, PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
-        ProviderPayload, ProviderResult, Registrar, RuntimeContinueAfterStopContext,
-        RuntimeHookCallContext, RuntimePreToolUseContext, RuntimeProviderContext,
-        RuntimeUserMessageEnvelopeContext, SlashCommand, StatusItem, StopReason, ToolContext,
-        ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler, ToolHookTarget,
-        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopePayload,
-        UserMessageEnvelopeResult,
+        ContinueAfterStopPayload, ContinueAfterStopResult, CustomEventContext,
+        CustomEventDisposition, CustomEventHandler, CustomEventSubscription, Extension,
+        ExtensionCall, ExtensionCapability, ExtensionCommandResult, ExtensionConfig,
+        ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest,
+        ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest, ExtensionStartContext,
+        ExtensionStopContext, ExtensionTasks, HookMode, HookResult, HttpContext, LifecycleContext,
+        LifecycleEvent, LifecycleHandler, PostToolUseContext, PostToolUseHandler,
+        PostToolUseResult, PreToolUseContext, PreToolUseHandler, PreToolUsePayload,
+        PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler, ProviderPayload,
+        ProviderResult, Registrar, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
+        RuntimePreToolUseContext, RuntimeProviderContext, RuntimeUserMessageEnvelopeContext,
+        SlashCommand, StatusItem, StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext,
+        ToolDiscoveryHandler, ToolHandler, ToolHookTarget, UserMessageEnvelopeContext,
+        UserMessageEnvelopeHandler, UserMessageEnvelopePayload, UserMessageEnvelopeResult,
     },
     runtime_ports::{
         RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness,
@@ -54,7 +54,7 @@ use tokio::sync::{Notify, mpsc};
 
 use super::{
     CommandSource, CustomEventConsumerAction, CustomEventSession, ExtensionHttpDispatchResult,
-    ExtensionRunner,
+    ExtensionRunner, ExtensionRuntimeState,
 };
 use crate::runner::tool_adapter::normalize_stringified_booleans;
 
@@ -328,7 +328,7 @@ impl Extension for ConfigChangeProbeExtension {
         }
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         self.0.stopped.store(true, Ordering::SeqCst);
         Ok(())
     }
@@ -390,7 +390,7 @@ impl Extension for ToolRetirementProbeExtension {
         );
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         self.stopped.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -402,7 +402,7 @@ impl Extension for RetirementFailureExtension {
         extension_manifest("retirement-failure-probe", &[])
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         if self.fail_stop {
             Err(ExtensionError::Internal("intentional stop failure".into()))
         } else {
@@ -476,13 +476,9 @@ impl CommandHandler for CommandProbe {
                 detail: Some(format!(
                     "{}:{}:{}:{}:{}:{}",
                     ctx.extension_id(),
-                    ctx.session_id()
-                        .map(ToString::to_string)
-                        .unwrap_or_default(),
+                    ctx.session_id(),
                     ctx.command_name(),
-                    ctx.working_dir()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_default(),
+                    ctx.working_dir().display(),
                     ctx.model().model,
                     ctx.paths()
                         .session_data_dir()
@@ -607,7 +603,7 @@ impl Extension for GenerationProbeExtension {
         Ok(())
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         if let Some(lifecycle) = &self.lifecycle {
             lifecycle.lock().unwrap().push(match self.label {
                 "v1" => "v1_stop",
@@ -642,8 +638,8 @@ impl Extension for CancelledStartupExtension {
             .map_err(|error| ExtensionError::Internal(error.to_string()))
     }
 
-    async fn stop(&self, reason: StopReason) -> Result<(), ExtensionError> {
-        *self.stop_reason.lock().unwrap() = Some(reason);
+    async fn stop(&self, ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
+        *self.stop_reason.lock().unwrap() = Some(ctx.reason());
         self.stop_entered.notify_one();
         self.stop_release.notified().await;
         self.lifecycle.lock().unwrap().push("v1_stop");
@@ -694,8 +690,8 @@ impl Extension for StartupTimeoutExtension {
         std::future::pending().await
     }
 
-    async fn stop(&self, reason: StopReason) -> Result<(), ExtensionError> {
-        *self.stop_reason.lock().unwrap() = Some(reason);
+    async fn stop(&self, ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
+        *self.stop_reason.lock().unwrap() = Some(ctx.reason());
         Ok(())
     }
 }
@@ -733,7 +729,7 @@ impl Extension for OperationTimeoutExtension {
         reg.on_after_provider_response(0, Arc::new(PendingProviderHook));
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         std::future::pending().await
     }
 }
@@ -969,9 +965,7 @@ impl Extension for StartupDirectoryExtension {
             extension_id: ctx.extension_id().to_owned(),
             startup_working_dir: ctx.startup_working_dir().map(Path::to_path_buf),
             global_data_dir: ctx.paths().global_data_dir().map(Path::to_path_buf),
-            session_context_available: ctx.call().session_id().is_some()
-                || ctx.call().turn_id().is_some()
-                || ctx.paths().session_data_dir().is_ok(),
+            session_context_available: ctx.paths().session_data_dir().is_ok(),
             config_version: config["version"].as_u64().unwrap(),
             cancelled: ctx.cancellation().is_cancelled(),
         });
@@ -1028,8 +1022,8 @@ impl Extension for ManagedTaskExtension {
         Ok(())
     }
 
-    async fn stop(&self, reason: StopReason) -> Result<(), ExtensionError> {
-        assert_eq!(reason, self.expected_reason);
+    async fn stop(&self, ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
+        assert_eq!(ctx.reason(), self.expected_reason);
         assert!(self.task_stopped.load(Ordering::SeqCst));
         self.stopped.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -2004,11 +1998,15 @@ async fn config_update_waits_for_turn_views_and_recovers_after_wait_timeout() {
 #[tokio::test]
 async fn recorded_hook_tracks_error_and_timeout() {
     let runner = ExtensionRunner::new(Duration::from_millis(10));
+    runner
+        .register(Arc::new(StateProbeExtension))
+        .await
+        .unwrap();
     let view = runner.extension_view().await;
 
     assert!(
         view.run_recorded_hook::<()>(
-            "probe",
+            "state-probe",
             "pre_tool_use",
             tokio_util::sync::CancellationToken::new(),
             async { Err(ExtensionError::Internal("injected failure".into())) },
@@ -2018,7 +2016,7 @@ async fn recorded_hook_tracks_error_and_timeout() {
     );
     assert!(matches!(
         view.run_recorded_hook(
-            "probe",
+            "state-probe",
             "pre_tool_use",
             tokio_util::sync::CancellationToken::new(),
             std::future::pending::<Result<(), ExtensionError>>(),
@@ -2028,7 +2026,7 @@ async fn recorded_hook_tracks_error_and_timeout() {
     ));
 
     let diagnostics = runner.diagnostics_snapshot();
-    let diagnostics = diagnostics.get("probe").unwrap();
+    let diagnostics = diagnostics.get("state-probe").unwrap();
     assert_eq!(diagnostics.hook_calls, 2);
     assert_eq!(diagnostics.hook_timeouts, 1);
     assert!(
@@ -2207,7 +2205,8 @@ async fn continue_after_stop_limited_options_stop_after_configured_continuations
 #[tokio::test]
 async fn user_message_envelope_folds_text_by_priority() {
     let replace_calls = Arc::new(AtomicUsize::new(0));
-    let append_calls = Arc::new(AtomicUsize::new(0));
+    let a_append_calls = Arc::new(AtomicUsize::new(0));
+    let z_append_calls = Arc::new(AtomicUsize::new(0));
     let runner = ExtensionRunner::new(Duration::from_secs(1));
     runner
         .register(Arc::new(UserMessageEnvelopeProbeExtension {
@@ -2222,12 +2221,23 @@ async fn user_message_envelope_folds_text_by_priority() {
         .unwrap();
     runner
         .register(Arc::new(UserMessageEnvelopeProbeExtension {
-            id: "append-envelope",
+            id: "z-append-envelope",
             priority: 0,
             result: UserMessageEnvelopeResult::AppendText {
-                text: "tail".into(),
+                text: "z-tail".into(),
             },
-            calls: Arc::clone(&append_calls),
+            calls: Arc::clone(&z_append_calls),
+        }))
+        .await
+        .unwrap();
+    runner
+        .register(Arc::new(UserMessageEnvelopeProbeExtension {
+            id: "a-append-envelope",
+            priority: 0,
+            result: UserMessageEnvelopeResult::AppendText {
+                text: "a-tail".into(),
+            },
+            calls: Arc::clone(&a_append_calls),
         }))
         .await
         .unwrap();
@@ -2240,11 +2250,12 @@ async fn user_message_envelope_folds_text_by_priority() {
     assert_eq!(
         result,
         UserMessageEnvelopeResult::ReplaceText {
-            text: "rewritten\n\ntail".into()
+            text: "rewritten\n\na-tail\n\nz-tail".into()
         }
     );
     assert_eq!(replace_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(append_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(a_append_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(z_append_calls.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -2298,14 +2309,26 @@ async fn registry_snapshot_exposes_registered_extension_declarations() {
         .await
         .unwrap();
 
-    let snapshot = runner.registry_snapshot().await;
-    let declaration = snapshot
-        .extensions
-        .iter()
-        .find(|extension| extension.id == "state-probe")
-        .unwrap();
+    let declaration = tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let snapshot = runner.registry_snapshot().await;
+            let declaration = snapshot
+                .extensions
+                .into_iter()
+                .find(|extension| extension.id == "state-probe")
+                .unwrap();
+            if declaration.runtime_state == ExtensionRuntimeState::Ready {
+                break declaration;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
 
     assert!(declaration.capabilities.is_empty());
+    assert_eq!(declaration.runtime_state, ExtensionRuntimeState::Ready);
+    assert!(declaration.generation > 0);
     assert_eq!(declaration.tools.len(), 1);
     assert_eq!(declaration.tools[0].name, "stateProbe");
     assert!(!declaration.dynamic_tools);
@@ -2708,21 +2731,29 @@ impl Extension for CustomEventConsumerExtension {
 
 #[async_trait::async_trait]
 impl CustomEventHandler for CustomEventConsumer {
-    async fn handle(&self, ctx: CustomEventContext) -> Result<(), ExtensionError> {
+    async fn handle(
+        &self,
+        ctx: CustomEventContext,
+    ) -> Result<CustomEventDisposition, ExtensionError> {
         assert_eq!(ctx.source_extension_id(), "producer");
         assert_eq!(ctx.event_type(), "job.completed");
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
         let job_id = ctx.payload()["jobId"].as_str().unwrap().to_owned();
         let should_fail = attempt == 1 || job_id == "live-fails";
-        let _ = self.calls.send((attempt, job_id));
+        let _ = self.calls.send((attempt, job_id.clone()));
         if let Some(blocking) = &self.blocking {
             blocking.entered.notify_one();
             blocking.release.notified().await;
         }
+        if job_id == "dead-letter" {
+            return Ok(CustomEventDisposition::dead_letter(
+                "fixture requested dead letter",
+            ));
+        }
         if should_fail {
             Err(ExtensionError::Internal("injected consumer failure".into()))
         } else {
-            Ok(())
+            Ok(CustomEventDisposition::Ack)
         }
     }
 }
@@ -2804,7 +2835,7 @@ async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if store_port
-                .event_consumer_state(&session_id, "consumer:producer:job.completed")
+                .event_consumer_state(&session_id, "consumer:producer:job.completed:v1")
                 .await
                 .unwrap()
                 .checkpoint
@@ -2983,6 +3014,42 @@ async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() 
     assert_eq!(status.failed_attempts, 2);
     assert_eq!(status.consecutive_failures, 1);
 
+    let dead_letter = store
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({"jobId": "dead-letter"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    assert!(runner.observe_custom_event(
+        Arc::new(Event::from(dead_letter.clone())),
+        custom_event_session.clone(),
+    ));
+    assert_eq!(calls_rx.recv().await, Some((8, "dead-letter".into())));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            let state = store_port
+                .event_consumer_state(&session_id, "consumer:producer:job.completed:v1")
+                .await
+                .unwrap();
+            if state.checkpoint == Some(dead_letter.seq) {
+                assert_eq!(state.quarantined.len(), 1);
+                assert_eq!(state.quarantined[0].seq, dead_letter.seq);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+
     let unrelated = store
         .append_event(DurableEvent::session(
             session_id.clone(),
@@ -3001,7 +3068,7 @@ async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() 
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
             if store_port
-                .event_consumer_state(&session_id, "consumer:producer:job.completed")
+                .event_consumer_state(&session_id, "consumer:producer:job.completed:v1")
                 .await
                 .unwrap()
                 .checkpoint

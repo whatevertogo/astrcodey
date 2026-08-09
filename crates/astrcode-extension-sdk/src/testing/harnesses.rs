@@ -12,7 +12,8 @@ use super::CallContextBuilder;
 use crate::{
     extension::{
         Extension, ExtensionConfig, ExtensionError, ExtensionManifest, ExtensionRegistrations,
-        ExtensionStartContext, ExtensionTasks, Registrar, RegistrationError, StopReason,
+        ExtensionStartContext, ExtensionStopContext, ExtensionTasks, Registrar, RegistrationError,
+        StopReason,
     },
     host::{
         ExtensionHost, HostError, HostOperation,
@@ -300,6 +301,7 @@ impl ExtensionLifecycleHarness {
         let start = ExtensionStartContext::from_runtime(
             call.build().retain_cancellation_after_context_drop(),
             ExtensionConfig::from_runtime(&extension_id, self.config.clone()),
+            self.startup_working_dir.clone(),
         );
         self.events.push(LifecycleHarnessEvent::Start);
         if let Err(start_error) = self.extension.start(start).await {
@@ -312,7 +314,13 @@ impl ExtensionLifecycleHarness {
             self.events
                 .push(LifecycleHarnessEvent::Stop(StopReason::StartupFailed));
             self.state = LifecycleState::Stopped;
-            return match self.extension.stop(StopReason::StartupFailed).await {
+            return match self
+                .extension
+                .stop(ExtensionStopContext::from_runtime(
+                    StopReason::StartupFailed,
+                ))
+                .await
+            {
                 Ok(()) => Err(LifecycleHarnessError::Extension(start_error)),
                 Err(stop_error) => Err(LifecycleHarnessError::StartupRollback {
                     start: start_error.to_string(),
@@ -354,7 +362,9 @@ impl ExtensionLifecycleHarness {
             return Err(LifecycleHarnessError::TasksDidNotDrain);
         }
         self.events.push(LifecycleHarnessEvent::TasksDrained);
-        self.extension.stop(reason).await?;
+        self.extension
+            .stop(ExtensionStopContext::from_runtime(reason))
+            .await?;
         self.events.push(LifecycleHarnessEvent::Stop(reason));
         self.state = LifecycleState::Stopped;
         Ok(())
@@ -363,7 +373,7 @@ impl ExtensionLifecycleHarness {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_core::wire::WireErrorCode;
+    use astrcode_extension_contract::WireErrorCode;
     use serde_json::json;
 
     use super::*;

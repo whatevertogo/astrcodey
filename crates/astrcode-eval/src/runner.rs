@@ -204,10 +204,10 @@ impl EvalRunner {
 
         while let Some((case_index, mut result)) = tasks.next().await {
             enforce_patch_budget(&mut result, &mut retained_patch_bytes);
-            if let Some(path) = self.config.checkpoint_path.as_deref() {
-                if let Err(error) = append_checkpoint(path.to_path_buf(), result.clone()).await {
-                    tracing::error!(path = %path.display(), %error, "failed to update eval checkpoint");
-                }
+            if let Some(path) = self.config.checkpoint_path.as_deref()
+                && let Err(error) = append_checkpoint(path.to_path_buf(), result.clone()).await
+            {
+                tracing::error!(path = %path.display(), %error, "failed to update eval checkpoint");
             }
             indexed_results.push((case_index, result));
         }

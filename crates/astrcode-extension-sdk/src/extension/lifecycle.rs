@@ -1,8 +1,8 @@
 //! Extension lifecycle contract.
 
 use super::{
-    ExtensionConfig, ExtensionError, ExtensionManifest, ExtensionStartContext, Registrar,
-    StopReason,
+    ExtensionConfig, ExtensionError, ExtensionManifest, ExtensionStartContext,
+    ExtensionStopContext, Registrar,
 };
 
 #[async_trait::async_trait]
@@ -15,7 +15,7 @@ pub trait Extension: Send + Sync {
         Ok(())
     }
 
-    async fn stop(&self, _reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         Ok(())
     }
 

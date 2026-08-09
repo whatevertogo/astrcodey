@@ -148,7 +148,10 @@ fn parse_event_line(
     let trimmed = line.trim();
     let event = serde_json::from_str::<StoredEvent>(trimmed).map_err(|error| {
         let preview = if trimmed.len() > 100 {
-            let end = trimmed.floor_char_boundary(100);
+            let mut end = 100;
+            while end > 0 && !trimmed.is_char_boundary(end) {
+                end -= 1;
+            }
             format!("{}...", &trimmed[..end])
         } else {
             trimmed.to_string()

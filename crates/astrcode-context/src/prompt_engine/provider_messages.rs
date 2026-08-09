@@ -17,12 +17,12 @@ pub fn system_messages_from_prompt(text: &str) -> Vec<LlmMessage> {
     let mut grouped = Vec::<(bool, String)>::new();
     for section in sections {
         let stable = section_group(section.title);
-        if let Some((last_stable, content)) = grouped.last_mut() {
-            if *last_stable == stable {
-                content.push_str("\n\n");
-                content.push_str(section.rendered);
-                continue;
-            }
+        if let Some((last_stable, content)) = grouped.last_mut()
+            && *last_stable == stable
+        {
+            content.push_str("\n\n");
+            content.push_str(section.rendered);
+            continue;
         }
         grouped.push((stable, section.rendered.to_string()));
     }

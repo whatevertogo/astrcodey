@@ -434,7 +434,7 @@ mod tests {
         runtime_services: Arc<SessionRuntimeServices>,
         runtime: Arc<SessionRuntimeState>,
     ) -> Session {
-        let session = Session::create_with_params(SessionCreateParams {
+        Session::create_with_params(SessionCreateParams {
             working_dir: std::env::temp_dir().to_string_lossy().into_owned(),
             model_id: "mock-model".into(),
             parent_session_id: None,
@@ -446,8 +446,7 @@ mod tests {
             runtime_services,
         })
         .await
-        .unwrap();
-        session
+        .unwrap()
     }
 
     #[tokio::test]

@@ -10,10 +10,10 @@ use std::{
 };
 
 use astrcode_core::config::defaults::astrcode_dir;
+use astrcode_extension_contract::protocol::S5R_VERSION;
 use astrcode_extension_sdk::{
     extension::{Extension, ExtensionPackageManifest, StopReason},
     manifest::validate_extension_id,
-    s5r::S5R_VERSION,
 };
 use sha2::{Digest, Sha256};
 
@@ -793,7 +793,7 @@ mod tests {
         let program = root.path().join("extension");
         fs::write(&program, b"binary-v1").unwrap();
         let manifest =
-            br#"{"extension_id":"test","protocol":{"s5r":"2.0"},"command":["./extension"]}"#;
+            br#"{"extension_id":"test","protocol":{"s5r":"3.0"},"command":["./extension"]}"#;
 
         let first =
             hash_disk_source(root.path(), manifest, program.to_str().unwrap(), &[]).unwrap();
@@ -804,7 +804,7 @@ mod tests {
             hash_disk_source(root.path(), manifest, program.to_str().unwrap(), &[]).unwrap();
         let changed_manifest = hash_disk_source(
             root.path(),
-            br#"{"extension_id":"test","protocol":{"s5r":"2.0"},"command":["./extension"],"env":{"MODE":"test"}}"#,
+            br#"{"extension_id":"test","protocol":{"s5r":"3.0"},"command":["./extension"],"env":{"MODE":"test"}}"#,
             program.to_str().unwrap(),
             &[],
         )

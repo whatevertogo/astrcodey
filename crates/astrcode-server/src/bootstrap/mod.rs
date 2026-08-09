@@ -35,10 +35,10 @@ fn apply_approval_mode_bootstrap_options(
         config.runtime.approval_mode = Some(mode.as_str().into());
         return;
     }
-    if config.runtime.approval_mode.is_none() {
-        if let Some(mode) = opts.default_approval_mode_if_unset {
-            config.runtime.approval_mode = Some(mode.as_str().into());
-        }
+    if config.runtime.approval_mode.is_none()
+        && let Some(mode) = opts.default_approval_mode_if_unset
+    {
+        config.runtime.approval_mode = Some(mode.as_str().into());
     }
 }
 

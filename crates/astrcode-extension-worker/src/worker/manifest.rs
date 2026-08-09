@@ -47,10 +47,14 @@ impl ManifestCatalog {
             extension_id: extension_id.into(),
             version: version.into(),
             protocol: InitializeManifestProtocol {
-                s5r: crate::s5r::S5R_VERSION.into(),
+                s5r: astrcode_extension_contract::protocol::S5R_VERSION.into(),
             },
             wire_codec: None,
-            wire_features: vec![crate::s5r::WIRE_FEATURE_PARENT_INVOKE_ID.into()],
+            wire_features: vec![
+                astrcode_extension_contract::protocol::FEATURE_NESTED_INVOKE_V1.into(),
+                astrcode_extension_contract::protocol::FEATURE_MODEL_STREAM_V1.into(),
+                astrcode_extension_contract::protocol::FEATURE_CUSTOM_EVENT_V1.into(),
+            ],
             capabilities: self.capabilities.clone(),
             tools,
             hooks: self.hooks.clone(),
@@ -83,7 +87,11 @@ mod tests {
         assert_eq!(metadata["tools"][0]["strict"], true);
         assert_eq!(
             metadata["wire_features"],
-            serde_json::json!([crate::s5r::WIRE_FEATURE_PARENT_INVOKE_ID])
+            serde_json::json!([
+                astrcode_extension_contract::protocol::FEATURE_NESTED_INVOKE_V1,
+                astrcode_extension_contract::protocol::FEATURE_MODEL_STREAM_V1,
+                astrcode_extension_contract::protocol::FEATURE_CUSTOM_EVENT_V1,
+            ])
         );
     }
 
@@ -152,6 +160,7 @@ mod tests {
             metadata["custom_event_subscriptions"][0],
             serde_json::json!({
                 "id": "consume-typed-event",
+                "consumerVersion": 1,
                 "eventType": "typed.event",
                 "source": {
                     "kind": "extension",

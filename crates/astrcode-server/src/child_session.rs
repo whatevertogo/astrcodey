@@ -333,10 +333,10 @@ impl ChildSessionCoordinator {
     pub async fn shutdown_completion_watcher(&self) {
         self.watcher_shutdown.cancel();
         let watcher = self.watcher.lock().take();
-        if let Some(watcher) = watcher {
-            if let Err(error) = watcher.await {
-                tracing::warn!(%error, "child completion watcher failed to stop");
-            }
+        if let Some(watcher) = watcher
+            && let Err(error) = watcher.await
+        {
+            tracing::warn!(%error, "child completion watcher failed to stop");
         }
     }
 

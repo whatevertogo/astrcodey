@@ -114,8 +114,8 @@ aggregate、一套 context 构造和一条 host 授权路径。
 
 ### 3.2 非目标
 
-- 不改变 S5R 的 stdio 分帧、Peer 时序与取消语义。Host API 的模型消息与网络 body
-  已有意升级为类型化契约，因此协议版本同步升为 S5R 2.0，不兼容 1.0 worker。
+- S5R 3.0 保留十进制长度前缀分帧，在同一次 major 升级中加入 feature negotiation、
+  nested invoke、增量 stream 与 cancel；不兼容 1.0/2.0 worker。
 - 不取消进程内扩展与子进程扩展的信任差异。
 - 不把 Vvbot 的 Robot、Sensor、Audio、Telemetry 能力引入 AstrCode。
 - 不在本设计中增加动态库 ABI、WASM runtime 或插件市场。
@@ -174,13 +174,11 @@ impl Extension for TodoExtension {
             Arc::new(TodoWriteHandler),
         );
         reg.on_before_provider_request(
-            HookMode::Blocking,
             0,
             Arc::new(TodoReminderHandler),
         );
         reg.on_post_tool_use_for(
             ToolHookTarget::names(["todoWrite"]),
-            HookMode::Blocking,
             0,
             Arc::new(TodoWriteObserver),
         );
@@ -278,7 +276,7 @@ pub trait Extension: Send + Sync {
     async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
         Ok(())
     }
-    async fn stop(&self, reason: StopReason) -> Result<(), ExtensionError> {
+    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         Ok(())
     }
     async fn health(&self) -> Result<(), ExtensionError> {
@@ -356,17 +354,17 @@ impl Registrar {
     pub fn declare_custom_event(&mut self, event: CustomEventDeclaration);
     pub fn on_custom_event(&mut self, subscription: CustomEventSubscription, handler: Arc<dyn CustomEventHandler>);
 
-    pub fn on_pre_tool_use(&mut self, mode: HookMode, priority: i32, handler: Arc<dyn PreToolUseHandler>);
-    pub fn on_pre_tool_use_for(&mut self, target: ToolHookTarget, mode: HookMode, priority: i32, handler: Arc<dyn PreToolUseHandler>);
-    pub fn on_post_tool_use(&mut self, mode: HookMode, priority: i32, handler: Arc<dyn PostToolUseHandler>);
-    pub fn on_post_tool_use_for(&mut self, target: ToolHookTarget, mode: HookMode, priority: i32, handler: Arc<dyn PostToolUseHandler>);
-    pub fn on_before_provider_request(&mut self, mode: HookMode, priority: i32, handler: Arc<dyn ProviderHandler>);
+    pub fn on_pre_tool_use(&mut self, priority: i32, handler: Arc<dyn PreToolUseHandler>);
+    pub fn on_pre_tool_use_for(&mut self, target: ToolHookTarget, priority: i32, handler: Arc<dyn PreToolUseHandler>);
+    pub fn on_post_tool_use(&mut self, priority: i32, handler: Arc<dyn PostToolUseHandler>);
+    pub fn on_post_tool_use_for(&mut self, target: ToolHookTarget, priority: i32, handler: Arc<dyn PostToolUseHandler>);
+    pub fn on_before_provider_request(&mut self, priority: i32, handler: Arc<dyn ProviderHandler>);
     pub fn on_after_provider_response(&mut self, priority: i32, handler: Arc<dyn ProviderHandler>);
     pub fn on_prompt_build(&mut self, priority: i32, handler: Arc<dyn PromptBuildHandler>);
     pub fn on_compact(&mut self, event: CompactEvent, priority: i32, handler: Arc<dyn CompactHandler>);
     pub fn on_continue_after_stop(&mut self, priority: i32, options: ContinueAfterStopOptions, handler: Arc<dyn ContinueAfterStopHandler>);
     pub fn on_user_message_envelope(&mut self, priority: i32, handler: Arc<dyn UserMessageEnvelopeHandler>);
-    pub fn on_lifecycle(&mut self, event: LifecycleEvent, mode: HookMode, priority: i32, handler: Arc<dyn LifecycleHandler>);
+    pub fn on_lifecycle(&mut self, event: LifecycleEvent, priority: i32, handler: Arc<dyn LifecycleHandler>);
 
     #[doc(hidden)]
     pub fn finish(self, manifest: ExtensionManifest)
@@ -395,15 +393,15 @@ impl Registrar {
 
 | API | 触发点 | mode / 返回值语义 | 必需 capability |
 |---|---|---|---|
-| `on_pre_tool_use[_for]` | 工具副作用之前 | `Blocking` 可 Allow、Block、Ask、ModifyInput；`NonBlocking` 只能观察，结果丢弃。 | 只有 blocking 需要 `tool_intercept`。 |
-| `on_post_tool_use[_for]` | 工具结果生成之后、交给模型之前 | blocking 可修改可见结果或阻断后续；观察模式不得改写。 | 只有 blocking 需要 `tool_intercept`。 |
+| `on_pre_tool_use[_for]` | 工具副作用之前 | `Blocking` 可 Allow、Block、Ask、ModifyInput；`Advisory` / `NonBlocking` 只观察，结果丢弃。 | 只有 blocking 需要 `tool_intercept`。 |
+| `on_post_tool_use[_for]` | 工具结果生成之后、交给模型之前 | blocking 可修改可见结果或阻断后续；`Advisory` / `NonBlocking` 只观察，结果丢弃。 | 只有 blocking 需要 `tool_intercept`。 |
 | `on_before_provider_request` | provider 请求最终 wire 编码之前 | blocking 可阻断、替换或追加 messages；按 priority 串行合成。 | `provider_request`。 |
 | `on_after_provider_response` | provider 响应完成之后 | 永远是 observer；错误记录诊断，不改写已完成响应。 | `provider_request`。 |
 | `on_prompt_build` | session prompt 构建时 | 返回结构化 contributions；按 priority 稳定合并。首次调用可能早于 `SessionStarted` 持久化。 | 无额外 capability，除非 handler 调用其它 host client。 |
 | `on_compact` | compact 前或后 | pre 可阻断/贡献指令；post 只能观察或贡献后续状态，具体矩阵保持现状。 | `session_history`。 |
 | `on_continue_after_stop` | 模型自然停止且无工具调用后 | 请求至多继续一个 step；宿主执行 per-handler 和全局预算。 | `turn_continuation_control`。 |
 | `on_user_message_envelope` | 用户消息写入 transcript 之前 | 可 Allow、ReplaceText、AppendText、Block；不得改变已校验附件所有权。 | `provider_request`。 |
-| `on_lifecycle` | Session/Turn/Step 生命周期点 | 只有 hook matrix 明确允许的事件可 blocking；其他事件强制观察。 | 按行为校验，不因“生命周期”统一申请高权限。 |
+| `on_lifecycle` | Session/Turn/Step 生命周期点 | 只有 hook matrix 明确允许的事件可 blocking；其他事件支持 awaited advisory 或 lifecycle-managed non-blocking 通知。 | 按行为校验，不因“生命周期”统一申请高权限。 |
 
 含义模糊的 provider/lifecycle 旧别名已经删除；当前只保留 before/after provider 专用入口和
 `on_lifecycle`。
@@ -537,11 +535,6 @@ pub struct ExtensionCallContext { /* private */ }
 
 impl ExtensionCallContext {
     pub fn extension_id(&self) -> &str;
-    pub fn session_id(&self) -> Option<&SessionId>;
-    pub fn require_session_id(&self) -> Result<&SessionId, HostError>;
-    pub fn turn_id(&self) -> Option<&str>;
-    pub fn working_dir(&self) -> Option<&Path>;
-    pub fn require_working_dir(&self) -> Result<&Path, HostError>;
     pub fn paths(&self) -> &ExtensionPaths;
     pub fn host(&self) -> &ExtensionHost;
     pub fn events(&self) -> &CustomEventEmitter;
@@ -553,15 +546,17 @@ impl ExtensionCallContext {
 | accessor | 语义 |
 |---|---|
 | `extension_id()` | 由 manifest attribution 注入，不能由请求覆盖。 |
-| `session_id()` / `turn_id()` | 只有 session/turn 范围调用存在；启动期和无会话 HTTP 请求返回 `None`。 |
-| `require_session_id()` | session 必须存在的 handler 使用；缺失时返回 `ContextUnavailable`，不用重复手写 `ok_or_else`。 |
-| `working_dir()` | 规范化后的宿主工作区；缺失时不回退进程 cwd。 |
-| `require_working_dir()` | workspace 必须存在的 handler 使用；缺失时返回 `ContextUnavailable`。 |
 | `paths()` | 只返回该 extension 已授权的数据目录，不让作者拼 extension id。 |
 | `host()` | 类型化、已按 capability 和调用范围裁剪的宿主客户端。 |
 | `events()` | 只能发射本 manifest 已声明事件；未声明时报结构化错误。 |
 | `tasks()` | 当前 extension generation 的任务所有权；用于登记后台任务或 must-finish 临界区。 |
 | `cancellation()` | turn、HTTP request、reload 或 shutdown 的组合取消信号；handler 应协作退出。 |
+
+session 与 workspace 事实不暴露在公共调用上下文上。`SessionCallContext::session_id()` 和
+`WorkspaceCallContext::working_dir()` 均为非可选值；`ToolContext`、hook context、command context
+组合这些事实并直接提供同名 accessor。只有真正可缺省的 turn id、tool call id 和 startup working
+directory 保持 `Option`。缺少必需事实的输入由运行时在构造专用 context 前拒绝，作者代码不做
+`Option + require_*()` 检查。
 
 #### 专用 context
 
@@ -784,7 +779,7 @@ impl HostError {
 
 ```rust
 use astrcode_extension_sdk::prelude::*;        // bundled Rust extension
-use astrcode_extension_sdk::worker_prelude::*; // S5R executable
+use astrcode_extension_worker::worker_prelude::*; // S5R executable
 ```
 
 bundled `prelude` 只导出：

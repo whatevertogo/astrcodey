@@ -159,11 +159,11 @@ impl ApprovalHistoryStore {
 
         let mut candidate = self.inner.lock().clone();
         candidate.record_decision(key, decision);
-        if let Some(path) = path.as_deref() {
-            if let Err(error) = persist_history(path, &candidate).await {
-                *persistence = ApprovalHistoryPersistence::Failed(error.clone());
-                return Err(error);
-            }
+        if let Some(path) = path.as_deref()
+            && let Err(error) = persist_history(path, &candidate).await
+        {
+            *persistence = ApprovalHistoryPersistence::Failed(error.clone());
+            return Err(error);
         }
         *self.inner.lock() = candidate;
         Ok(())

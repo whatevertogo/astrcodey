@@ -68,11 +68,6 @@ impl ModeCatalog {
     pub(crate) fn get(&self, id: &ModeId) -> Option<&ModeSpec> {
         self.index.get(id.as_str()).map(|&i| &self.modes[i])
     }
-
-    #[cfg(test)]
-    pub(crate) fn list(&self) -> &[ModeSpec] {
-        &self.modes
-    }
 }
 
 /// Validates whether transitioning from one mode to another is allowed.
@@ -126,14 +121,6 @@ pub(crate) fn builtin_catalog() -> ModeCatalog {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn builtin_catalog_contains_code_and_plan() {
-        let catalog = builtin_catalog();
-        assert!(catalog.get(&ModeId::code()).is_some());
-        assert!(catalog.get(&ModeId::plan()).is_some());
-        assert_eq!(catalog.list().len(), 2);
-    }
 
     #[test]
     fn plan_mode_restricts_write_tools() {

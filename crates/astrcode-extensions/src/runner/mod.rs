@@ -22,15 +22,16 @@ use astrcode_extension_sdk::{
     },
     tool::SessionOperations,
 };
-use astrcode_storage::{EventConsumerCheckpointOutcome, SessionStore};
+use astrcode_storage::{EventConsumerCheckpointOutcome, EventConsumerFailureOutcome, SessionStore};
 use tokio::sync::{
     Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, RwLock, Semaphore, mpsc,
 };
 
-const CUSTOM_EVENT_DISPATCH_CAPACITY: usize = 1024;
+const CUSTOM_EVENT_CONCURRENCY: usize = 64;
 const MAX_CUSTOM_EVENT_CASCADE_DEPTH: u8 = 8;
-const CUSTOM_EVENT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(100);
+const CUSTOM_EVENT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
 const CUSTOM_EVENT_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
+const CUSTOM_EVENT_QUARANTINE_AFTER: u32 = 20;
 
 type CustomEventLanes = parking_lot::Mutex<HashMap<CustomEventLaneId, Weak<CustomEventLane>>>;
 
@@ -38,7 +39,10 @@ type CustomEventSenderFactory =
     Arc<dyn Fn(Option<astrcode_core::types::TurnId>) -> EventSender + Send + Sync>;
 
 fn custom_event_consumer_id(extension_id: &str, subscription: &CustomEventSubscription) -> String {
-    format!("{extension_id}:{}", subscription.id)
+    format!(
+        "{extension_id}:{}:v{}",
+        subscription.id, subscription.consumer_version
+    )
 }
 
 #[derive(Clone)]
@@ -135,6 +139,7 @@ mod manifest;
 mod registration;
 mod retirement;
 mod snapshot;
+mod supervisor;
 mod tool_adapter;
 
 pub use commands::{
@@ -160,7 +165,10 @@ use retirement::{
     ActiveTurnViewLease, ActiveTurnViews, ExtensionPublicationLease, RetirementSupervisor,
     RetirementTicket,
 };
-pub use snapshot::{ExtensionDeclarationSnapshot, ExtensionRegistrySnapshot};
+pub use snapshot::{
+    ExtensionDeclarationSnapshot, ExtensionRegistrySnapshot, ExtensionRuntimeState,
+};
+use supervisor::ExtensionSupervisor;
 
 /// 管理扩展生命周期、运行态发布与 hook 分发。
 ///
@@ -300,6 +308,7 @@ struct HostedExtension {
     config: serde_json::Value,
     /// 串行化同一扩展的配置回调与 stop，不阻塞其他扩展。
     operation_gate: Arc<AsyncMutex<()>>,
+    supervisor: ExtensionSupervisor,
     publication_lease: Arc<ExtensionPublicationLease>,
 }
 
@@ -607,7 +616,6 @@ impl CustomEventConsumer {
             &self.extension_id,
             ExtensionCallContextInput {
                 session_id: Some(event.session_id.clone()),
-                turn_id: event.turn_id.as_ref().map(ToString::to_string),
                 tool_call_id: None,
                 working_dir: None,
                 session_store_dir: None,
@@ -630,6 +638,7 @@ impl CustomEventConsumer {
         let context = CustomEventContext::from_runtime(
             call,
             event.session_id.clone(),
+            event.turn_id.as_ref().map(ToString::to_string),
             event.id.clone(),
             event.seq,
             custom_event.extension_id.clone(),
@@ -655,6 +664,16 @@ impl CustomEventConsumer {
     }
 }
 
+#[tracing::instrument(
+    name = "custom_event.delivery",
+    skip(invocation),
+    fields(
+        extension_id = %invocation.extension_id,
+        consumer_id = %invocation.consumer_id,
+        session_id = %invocation.session_id,
+        seq = ?invocation.seq,
+    )
+)]
 async fn run_custom_event_invocation(
     invocation: &CustomEventInvocation,
 ) -> CustomEventInvocationOutcome {
@@ -678,10 +697,10 @@ async fn run_custom_event_invocation(
     if state.paused {
         return CustomEventInvocationOutcome::Paused;
     }
-    if let Some(seq) = invocation.seq {
-        if state.checkpoint.is_some_and(|checkpoint| checkpoint >= seq) {
-            return CustomEventInvocationOutcome::Consumed;
-        }
+    if let Some(seq) = invocation.seq
+        && state.checkpoint.is_some_and(|checkpoint| checkpoint >= seq)
+    {
+        return CustomEventInvocationOutcome::Consumed;
     }
     let result = invocation
         .view
@@ -692,13 +711,78 @@ async fn run_custom_event_invocation(
             invocation.handler.handle(invocation.context.clone()),
         )
         .await;
-    if let Err(error) = result {
+    let disposition = match result {
+        Ok(disposition) => disposition,
+        Err(error) => {
+            tracing::warn!(
+                extension_id = invocation.extension_id,
+                %error,
+                "custom event handler failed"
+            );
+            CustomEventDisposition::retry(error.to_string())
+        },
+    };
+    let failure = match &disposition {
+        CustomEventDisposition::Ack => None,
+        CustomEventDisposition::Retry { reason } => Some((reason.as_str(), false)),
+        CustomEventDisposition::DeadLetter { reason } => Some((reason.as_str(), true)),
+    };
+    if let Some((reason, explicit_dead_letter)) = failure {
         invocation.metrics.record_failure();
-        tracing::warn!(
-            extension_id = invocation.extension_id,
-            %error,
-            "custom event handler failed"
-        );
+        let quarantine_after = if explicit_dead_letter {
+            1
+        } else {
+            CUSTOM_EVENT_QUARANTINE_AFTER
+        };
+        if let Some(seq) = invocation.seq {
+            match invocation
+                .event_store
+                .record_event_consumer_failure(
+                    &invocation.session_id,
+                    &invocation.consumer_id,
+                    state.revision,
+                    seq,
+                    reason,
+                    quarantine_after,
+                )
+                .await
+            {
+                Ok(EventConsumerFailureOutcome::Quarantined { attempts }) => {
+                    invocation.metrics.record_success();
+                    tracing::error!(
+                        extension_id = invocation.extension_id,
+                        session_id = %invocation.session_id,
+                        seq,
+                        attempts,
+                        explicit_dead_letter,
+                        "custom event moved to quarantine"
+                    );
+                    return CustomEventInvocationOutcome::Consumed;
+                },
+                Ok(EventConsumerFailureOutcome::AlreadyConsumed) => {
+                    invocation.metrics.record_success();
+                    return CustomEventInvocationOutcome::Consumed;
+                },
+                Ok(EventConsumerFailureOutcome::Recorded { .. }) => {},
+                Ok(EventConsumerFailureOutcome::StaleRevision) => {
+                    return CustomEventInvocationOutcome::Retry;
+                },
+                Err(storage_error) => {
+                    tracing::warn!(
+                        extension_id = invocation.extension_id,
+                        session_id = %invocation.session_id,
+                        seq,
+                        %storage_error,
+                        "failed to persist custom event delivery failure"
+                    );
+                    return CustomEventInvocationOutcome::Retry;
+                },
+            }
+        }
+        if explicit_dead_letter {
+            invocation.metrics.record_success();
+            return CustomEventInvocationOutcome::Consumed;
+        }
         return CustomEventInvocationOutcome::Retry;
     }
     if let Some(seq) = invocation.seq {
@@ -760,7 +844,7 @@ impl ExtensionRunner {
             extension_configs: parking_lot::RwLock::new(BTreeMap::new()),
             operation_timeout,
             retirements: RetirementSupervisor::new(),
-            custom_event_permits: Arc::new(Semaphore::new(CUSTOM_EVENT_DISPATCH_CAPACITY)),
+            custom_event_permits: Arc::new(Semaphore::new(CUSTOM_EVENT_CONCURRENCY)),
             custom_event_lanes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             custom_event_metrics: parking_lot::Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
@@ -925,6 +1009,7 @@ impl ExtensionRunner {
         let ctx = ExtensionStartContext::from_runtime(
             call,
             ExtensionConfig::from_runtime(&id, ext_config.clone()),
+            startup_working_dir.map(std::path::PathBuf::from),
         );
         let pending_registration = self.retirements.pending_registration(
             id.clone(),
@@ -967,6 +1052,7 @@ impl ExtensionRunner {
             StageOutcome::Succeeded,
         );
 
+        let supervisor = ExtensionSupervisor::spawn(id.clone());
         {
             let mut extensions = self.registry.extensions.write().await;
             extensions.push(HostedExtension {
@@ -979,6 +1065,7 @@ impl ExtensionRunner {
                 tasks: tasks.clone(),
                 config: ext_config,
                 operation_gate,
+                supervisor,
                 publication_lease: ExtensionPublicationLease::new(),
             });
             self.rebuild_index(&extensions);
@@ -1024,7 +1111,7 @@ impl ExtensionRunner {
 
     /// 注销一个扩展，并重建分发表。
     ///
-    /// 返回是否从当前分发表移除了该扩展。旧实例会在所有已发布视图释放后异步停止；
+    /// 返回是否从当前分发表移除了该扩展。generation gate 会先关闭并排空调用，
     /// 停止失败会记录日志，并由等待该退休结果的调用方或 [`Self::shutdown`] 汇总。
     pub async fn unregister(
         &self,
@@ -1042,23 +1129,33 @@ impl ExtensionRunner {
         extension_id: &str,
         reason: StopReason,
     ) -> Result<Option<RetirementTicket>, ExtensionError> {
-        let (operation_guard, _lifecycle) = loop {
-            let operation_gate = self
-                .registry
-                .extensions
-                .read()
-                .await
-                .iter()
-                .find_map(|hosted| {
-                    (hosted.manifest.id() == extension_id)
-                        .then(|| Arc::clone(&hosted.operation_gate))
-                });
-            let operation_guard = match &operation_gate {
-                Some(gate) => Some(Arc::clone(gate).lock_owned().await),
+        let (operation_guard, supervisor, _lifecycle) = loop {
+            let lifecycle_handles =
+                self.registry
+                    .extensions
+                    .read()
+                    .await
+                    .iter()
+                    .find_map(|hosted| {
+                        (hosted.manifest.id() == extension_id).then(|| {
+                            (
+                                Arc::clone(&hosted.operation_gate),
+                                hosted.supervisor.control(),
+                            )
+                        })
+                    });
+            let operation_guard = match &lifecycle_handles {
+                Some((gate, _)) => Some(Arc::clone(gate).lock_owned().await),
                 None => None,
             };
+            let supervisor = lifecycle_handles
+                .as_ref()
+                .map(|(_, supervisor)| supervisor.clone());
+            if let Some(supervisor) = &supervisor {
+                supervisor.begin_draining().await?;
+            }
             let lifecycle = self.coordination.registry.lock().await;
-            let operation_gate_is_current = self
+            let handles_are_current = self
                 .registry
                 .extensions
                 .read()
@@ -1066,13 +1163,14 @@ impl ExtensionRunner {
                 .iter()
                 .find(|hosted| hosted.manifest.id() == extension_id)
                 .map(|hosted| {
-                    operation_gate
-                        .as_ref()
-                        .is_some_and(|gate| Arc::ptr_eq(gate, &hosted.operation_gate))
+                    lifecycle_handles.as_ref().is_some_and(|(gate, control)| {
+                        Arc::ptr_eq(gate, &hosted.operation_gate)
+                            && control.same_generation(&hosted.supervisor.control())
+                    })
                 })
-                .unwrap_or(operation_gate.is_none());
-            if operation_gate_is_current {
-                break (operation_guard, lifecycle);
+                .unwrap_or(lifecycle_handles.is_none());
+            if handles_are_current {
+                break (operation_guard, supervisor, lifecycle);
             }
         };
         let hosted = {
@@ -1093,6 +1191,16 @@ impl ExtensionRunner {
                 "extension {extension_id} lost its lifecycle gate during retirement"
             ))
         })?;
+        let supervisor = supervisor.ok_or_else(|| {
+            ExtensionError::Internal(format!(
+                "extension {extension_id} lost its supervisor during retirement"
+            ))
+        })?;
+        if !supervisor.same_generation(&hosted.supervisor.control()) {
+            return Err(ExtensionError::Internal(format!(
+                "extension {extension_id} changed generation during retirement"
+            )));
+        }
         self.diagnostics.write().remove(extension_id);
         let retirement =
             self.retirements
@@ -1207,6 +1315,9 @@ impl ExtensionRunner {
             generation
         };
         let index = Arc::new(build_handler_index(extensions, generation));
+        for hosted in extensions {
+            hosted.supervisor.mark_ready(generation);
+        }
         self.registry.index.store(index);
     }
 
@@ -1307,14 +1418,14 @@ impl ExtensionRunner {
                 ));
             } else {
                 let mut extensions = self.registry.extensions.write().await;
-                if extension_config(&self.extension_configs.read(), &extension_id) == new_config {
-                    if let Some(hosted) = extensions.iter_mut().find(|hosted| {
+                if extension_config(&self.extension_configs.read(), &extension_id) == new_config
+                    && let Some(hosted) = extensions.iter_mut().find(|hosted| {
                         hosted.manifest.id() == extension_id
                             && Arc::ptr_eq(&hosted.operation_gate, &operation_gate)
                             && Arc::ptr_eq(&hosted.extension, &extension)
-                    }) {
-                        hosted.config = new_config;
-                    }
+                    })
+                {
+                    hosted.config = new_config;
                 }
             }
         }
@@ -1554,6 +1665,11 @@ impl ExtensionView {
         }
     }
 
+    #[tracing::instrument(
+        name = "extension.invoke",
+        skip(self, cancellation, future),
+        fields(extension_id, operation = hook_name, generation = self.generation)
+    )]
     async fn run_recorded_hook<T>(
         &self,
         extension_id: &str,
@@ -1561,8 +1677,29 @@ impl ExtensionView {
         cancellation: tokio_util::sync::CancellationToken,
         future: impl std::future::Future<Output = Result<T, ExtensionError>>,
     ) -> Result<T, ExtensionError> {
+        let admission = self
+            .index
+            .extension_admission
+            .get(extension_id)
+            .ok_or_else(|| {
+                ExtensionError::NotFound(format!(
+                    "extension {extension_id} generation is no longer available"
+                ))
+            })?;
+        let draining = admission.draining_token();
+        let _admission = admission.acquire().await?;
         let started = std::time::Instant::now();
-        match tokio::time::timeout(self.operation_timeout, future).await {
+        let future = tokio::time::timeout(self.operation_timeout, future);
+        tokio::pin!(future);
+        let outcome = tokio::select! {
+            biased;
+            outcome = &mut future => outcome,
+            () = draining.cancelled() => {
+                cancellation.cancel();
+                future.await
+            },
+        };
+        match outcome {
             Ok(result) => {
                 self.record_hook_result(
                     extension_id,

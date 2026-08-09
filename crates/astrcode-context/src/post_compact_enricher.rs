@@ -338,7 +338,8 @@ mod tests {
         let _guard = test_env_lock().lock().unwrap();
         let temp = tempfile_dir("post-compact-notes");
         let home = temp.join("home");
-        std::env::set_var("ASTRCODE_TEST_HOME", &home);
+        // SAFETY: tests accessing this variable serialize through `test_env_lock`.
+        unsafe { std::env::set_var("ASTRCODE_TEST_HOME", &home) };
         let session_dir = temp.join("session-store");
         let plans = extension_data_dir(&session_dir, "astrcode-mode").join("plan");
         fs::create_dir_all(&plans).unwrap();
@@ -387,7 +388,8 @@ mod tests {
         };
         let (files, notes) = collect_post_compact_context(&collect_input);
         append_post_compact_context(&mut compaction, files, notes, &collect_input.settings);
-        std::env::remove_var("ASTRCODE_TEST_HOME");
+        // SAFETY: tests accessing this variable serialize through `test_env_lock`.
+        unsafe { std::env::remove_var("ASTRCODE_TEST_HOME") };
 
         let restored = compaction
             .summary_messages
@@ -427,14 +429,16 @@ mod tests {
         let _guard = test_env_lock().lock().unwrap();
         let temp = tempfile_dir("post-compact-no-omx-plan");
         let home = temp.join("home");
-        std::env::set_var("ASTRCODE_TEST_HOME", &home);
+        // SAFETY: tests accessing this variable serialize through `test_env_lock`.
+        unsafe { std::env::set_var("ASTRCODE_TEST_HOME", &home) };
         let project_plans = temp.join(".omx").join("plans");
         fs::create_dir_all(&project_plans).unwrap();
         fs::write(project_plans.join("work.md"), "project local plan").unwrap();
 
         let note = latest_plan_note(Some(&temp));
 
-        std::env::remove_var("ASTRCODE_TEST_HOME");
+        // SAFETY: tests accessing this variable serialize through `test_env_lock`.
+        unsafe { std::env::remove_var("ASTRCODE_TEST_HOME") };
         assert!(note.is_none());
     }
 

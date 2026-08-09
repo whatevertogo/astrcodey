@@ -429,7 +429,7 @@ pub fn tool(name: impl Into<String>) -> ToolDefinitionBuilder {
     tool_with_origin(name, ToolOrigin::Bundled)
 }
 
-/// Worker-only tool builder used by [`crate::worker_prelude`].
+/// Worker-only tool builder re-exported by the worker runtime prelude.
 pub fn worker_tool(name: impl Into<String>) -> ToolDefinitionBuilder {
     tool_with_origin(name, ToolOrigin::Extension)
 }
@@ -668,14 +668,10 @@ mod tests {
             Ok(ExtensionCommandResult::handled(format!(
                 "{}:{}:{}:{}:{}:{}:{}",
                 ctx.extension_id(),
-                ctx.session_id()
-                    .map(ToString::to_string)
-                    .unwrap_or_default(),
+                ctx.session_id(),
                 ctx.command_name(),
                 ctx.argument(),
-                ctx.working_dir()
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default(),
+                ctx.working_dir().display(),
                 ctx.model().model,
                 ctx.paths()
                     .session_data_dir()
@@ -777,9 +773,7 @@ mod tests {
         assert!(message.contains("count"));
 
         let plain = tool_handler(|ctx| async move {
-            Ok(ToolResult::success(
-                ctx.working_dir().unwrap().display().to_string(),
-            ))
+            Ok(ToolResult::success(ctx.working_dir().display().to_string()))
         });
         let result = plain
             .execute(

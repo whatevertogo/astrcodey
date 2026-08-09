@@ -2,17 +2,19 @@
 
 use std::sync::Arc;
 
-use astrcode_core::{
-    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider},
-    wire::WireErrorCode,
+use astrcode_core::llm::{LlmError, LlmEvent, LlmMessage, LlmProvider};
+use astrcode_extension_contract::{
+    ModelEventStream, WireErrorCode,
+    protocol::{ErrorPayload as V3ErrorPayload, ModelStreamEvent},
 };
 use astrcode_extension_sdk::{
     host::{
         HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput, HostLlmTextDelta,
-        HostOperation, HostOperationGroup,
+        HostOperation, HostOperationGroup, llm_messages_from_wire,
     },
     s5r::ErrorPayload,
 };
+use futures_util::StreamExt;
 use serde_json::Value;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -42,14 +44,150 @@ impl LlmGroup {
             .await
     }
 
-    pub(super) async fn invoke_stream(
+    pub(super) async fn invoke_event_stream(
         &self,
         operation: HostOperation,
         input: Value,
         cancel_token: Option<&CancellationToken>,
-    ) -> Result<Value, ErrorPayload> {
-        self.invoke_with_mode(operation, input, true, cancel_token)
-            .await
+    ) -> Result<ModelEventStream, ErrorPayload> {
+        let (provider, model_label) = match operation {
+            HostOperation::LlmMainChat => (self.main.as_ref(), "main_llm"),
+            HostOperation::LlmSmallChat => (self.small.as_ref(), "small_llm"),
+            _ => return Err(invalid_group_operation(operation, HostOperationGroup::Llm)),
+        };
+        let provider = provider.ok_or_else(|| {
+            ErrorPayload::new(
+                WireErrorCode::BackendUnavailable,
+                format!("{model_label} not configured"),
+            )
+        })?;
+        let request = serde_json::from_value::<HostLlmChatRequest>(input).map_err(|error| {
+            ErrorPayload::new(
+                WireErrorCode::InvalidInput,
+                format!("invalid {model_label}.chat request: {error}"),
+            )
+        })?;
+        if request.messages.is_empty() {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidInput,
+                "messages must contain at least one typed LLM message",
+            ));
+        }
+        let messages = llm_messages_from_wire(request.messages);
+        let receiver = super::run_until_deadline(
+            async {
+                provider
+                    .generate(messages, vec![])
+                    .await
+                    .map_err(llm_error_payload)
+            },
+            Instant::now() + HOST_INVOKE_TIMEOUT,
+            cancel_token,
+            || {
+                ErrorPayload::new(
+                    WireErrorCode::Timeout,
+                    format!("{model_label}.chat timed out"),
+                )
+            },
+            || ErrorPayload::new(WireErrorCode::Cancelled, "invoke cancelled"),
+        )
+        .await?;
+        let model = model_label.to_owned();
+        let events = futures_util::stream::unfold(
+            (receiver, String::new(), 0u32, false),
+            move |(mut receiver, mut content, mut retry_attempt, terminal)| {
+                let model = model.clone();
+                async move {
+                    if terminal {
+                        return None;
+                    }
+                    let Some(event) = receiver.recv().await else {
+                        return Some((
+                            ModelStreamEvent::Failed {
+                                error: V3ErrorPayload::new(
+                                    WireErrorCode::StreamClosed,
+                                    "model provider closed before a terminal event",
+                                ),
+                            },
+                            (receiver, content, retry_attempt, true),
+                        ));
+                    };
+                    let (event, terminal) = match event {
+                        LlmEvent::Retrying {
+                            attempt, delay_ms, ..
+                        } => {
+                            retry_attempt = attempt;
+                            (ModelStreamEvent::Retrying { attempt, delay_ms }, false)
+                        },
+                        LlmEvent::RetryRecovered => (
+                            ModelStreamEvent::Recovered {
+                                attempt: retry_attempt,
+                            },
+                            false,
+                        ),
+                        LlmEvent::ContentDelta { delta } => {
+                            content.push_str(&delta);
+                            (ModelStreamEvent::ContentDelta { content: delta }, false)
+                        },
+                        LlmEvent::ThinkingDelta { delta } => {
+                            (ModelStreamEvent::ThinkingDelta { content: delta }, false)
+                        },
+                        LlmEvent::ToolCallStart {
+                            call_id,
+                            name,
+                            arguments,
+                        } => (
+                            ModelStreamEvent::ToolCallStart {
+                                tool_call_id: call_id,
+                                name,
+                                arguments,
+                            },
+                            false,
+                        ),
+                        LlmEvent::ToolCallDelta { call_id, delta } => (
+                            ModelStreamEvent::ToolCallDelta {
+                                tool_call_id: call_id,
+                                delta,
+                            },
+                            false,
+                        ),
+                        LlmEvent::ToolCallCompleted { call_id } => (
+                            ModelStreamEvent::ToolCallCompleted {
+                                tool_call_id: call_id,
+                            },
+                            false,
+                        ),
+                        LlmEvent::Usage { usage } => (
+                            ModelStreamEvent::Usage {
+                                input_tokens: usage.input_tokens.unwrap_or(0),
+                                output_tokens: usage.output_tokens.unwrap_or(0),
+                            },
+                            false,
+                        ),
+                        LlmEvent::Done { finish_reason } => (
+                            ModelStreamEvent::Completed {
+                                output: serde_json::json!({
+                                    "content": content.clone(),
+                                    "model": model,
+                                    "finish_reason": finish_reason,
+                                }),
+                            },
+                            true,
+                        ),
+                        LlmEvent::Error { message } => (
+                            ModelStreamEvent::Failed {
+                                error: V3ErrorPayload::new(WireErrorCode::LlmStreamError, message),
+                            },
+                            true,
+                        ),
+                    };
+                    Some((event, (receiver, content, retry_attempt, terminal)))
+                }
+            },
+        );
+        Ok(Box::pin(
+            futures_util::stream::once(async { ModelStreamEvent::Started }).chain(events),
+        ))
     }
 
     async fn invoke_with_mode(
@@ -104,7 +242,7 @@ async fn invoke_llm_chat(
             "messages must contain at least one typed LLM message",
         ));
     }
-    let messages = request.into_messages();
+    let messages = llm_messages_from_wire(request.messages);
 
     super::run_until_deadline(
         run_host_llm_chat(&**provider, model_label, messages, collect_chunks),

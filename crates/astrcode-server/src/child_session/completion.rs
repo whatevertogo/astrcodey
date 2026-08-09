@@ -113,7 +113,8 @@ impl ChildSessionCompletionGuard {
             return completion;
         }
         let mut receiver = self.completion_rx.clone();
-        let completion = match receiver.wait_for(Option::is_some).await {
+
+        match receiver.wait_for(Option::is_some).await {
             Ok(completion) => completion.clone().unwrap_or(ChildCompletion {
                 outcome: ChildOutcome::Aborted,
                 finalization: self
@@ -128,8 +129,7 @@ impl ChildSessionCompletionGuard {
                     .as_ref()
                     .and_then(TurnShutdownHandle::finalization),
             },
-        };
-        completion
+        }
     }
 
     pub(super) async fn outcome(&self) -> ChildOutcome {

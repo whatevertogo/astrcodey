@@ -82,20 +82,19 @@ impl SessionCommandService {
             .map_err(|error| HandlerError::InvalidRequest(error.to_string()))?;
 
         let operation = self.scheduler.begin_session_operation(&session_id).await?;
-        if !self.scheduler.registry().has_active(&session_id) {
-            if let Some(command) =
+        if !self.scheduler.registry().has_active(&session_id)
+            && let Some(command) =
                 parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
-            {
-                match self.prepare_command_in_operation(&operation, command).await {
-                    Err(HandlerError::UnknownCommand(_)) => {},
-                    other => {
-                        let command = other?;
-                        return self
-                            .execute_command_operation(operation, command)
-                            .await
-                            .map(CommandInvocation::into_prompt_submission);
-                    },
-                }
+        {
+            match self.prepare_command_in_operation(&operation, command).await {
+                Err(HandlerError::UnknownCommand(_)) => {},
+                other => {
+                    let command = other?;
+                    return self
+                        .execute_command_operation(operation, command)
+                        .await
+                        .map(CommandInvocation::into_prompt_submission);
+                },
             }
         }
 

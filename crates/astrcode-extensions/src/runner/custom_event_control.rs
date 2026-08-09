@@ -33,6 +33,7 @@ pub struct CustomEventConsumerStatus {
     pub in_flight: bool,
     pub failed_attempts: u64,
     pub consecutive_failures: u64,
+    pub quarantined_events: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -316,7 +317,9 @@ impl ExtensionRunner {
             pending_events,
             in_flight: metrics.in_flight,
             failed_attempts: metrics.failed_attempts,
-            consecutive_failures: metrics.consecutive_failures,
+            consecutive_failures: u64::from(state.consecutive_failures)
+                .max(metrics.consecutive_failures),
+            quarantined_events: state.quarantined.len(),
         }
     }
 
@@ -407,10 +410,8 @@ impl ExtensionRunner {
             tracing::error!(session_id = %target.session_id, consumer_id = target.consumer_id, %error, "failed to restore custom event consumer pause state");
             return;
         }
-        if !paused {
-            if let Err(error) = self.wake_custom_event_consumer(target) {
-                tracing::error!(session_id = %target.session_id, consumer_id = target.consumer_id, %error, "failed to wake restored custom event consumer");
-            }
+        if !paused && let Err(error) = self.wake_custom_event_consumer(target) {
+            tracing::error!(session_id = %target.session_id, consumer_id = target.consumer_id, %error, "failed to wake restored custom event consumer");
         }
     }
 }

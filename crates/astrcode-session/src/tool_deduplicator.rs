@@ -91,15 +91,14 @@ impl ToolCallDeduplicator {
             return;
         };
 
-        if let Some(entry) = self.same_step_in_flight.get(&key) {
-            if entry.primary_call_id == call_id
-                && entry.outcome_tx.send(Some(outcome.clone())).is_err()
-            {
-                tracing::warn!(
-                    call_id,
-                    "tool deduplication result send failed: no receivers"
-                );
-            }
+        if let Some(entry) = self.same_step_in_flight.get(&key)
+            && entry.primary_call_id == call_id
+            && entry.outcome_tx.send(Some(outcome.clone())).is_err()
+        {
+            tracing::warn!(
+                call_id,
+                "tool deduplication result send failed: no receivers"
+            );
         }
 
         self.step_call_keys.push(key);

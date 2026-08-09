@@ -68,10 +68,9 @@ impl CommandHandler {
         input: UserInput,
     ) -> Result<PromptSubmission, HandlerError> {
         if let Some(command) = parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
+            && command.name == "model"
         {
-            if command.name == "model" {
-                return self.execute_command_for_session(sid, command).await;
-            }
+            return self.execute_command_for_session(sid, command).await;
         }
         self.session_commands.submit_input(sid, input).await
     }

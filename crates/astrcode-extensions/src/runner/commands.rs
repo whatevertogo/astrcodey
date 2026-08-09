@@ -84,7 +84,17 @@ impl ExtensionView {
             ExtensionCallContextInput::from_hook(runtime, cancellation.clone()),
         )?;
         Ok((
-            CommandContext::from_runtime(call, runtime.model().clone(), command_name, argument),
+            CommandContext::from_runtime(
+                SessionCallContext::from_runtime(
+                    call,
+                    runtime.session_id().clone(),
+                    runtime.turn_id().map(str::to_owned),
+                ),
+                runtime.working_dir().to_path_buf(),
+                runtime.model().clone(),
+                command_name,
+                argument,
+            ),
             cancellation,
         ))
     }
@@ -107,7 +117,11 @@ impl ExtensionView {
             );
             let discovered = match call {
                 Ok(call) => {
-                    let ctx = CommandDiscoveryContext::from_runtime(call, self.generation());
+                    let ctx = CommandDiscoveryContext::from_runtime(
+                        call,
+                        PathBuf::from(working_dir),
+                        self.generation(),
+                    );
                     self.run_recorded_hook(
                         extension_id,
                         "command_discovery",

@@ -362,19 +362,19 @@ pub async fn finalize_turn(
     if state.execution.phase == Phase::Idle {
         return Ok(());
     }
-    if let Some(message) = &finalization.pending_error {
-        if state.execution.phase != Phase::Error {
-            session
-                .emit_durable(
-                    Some(turn_id),
-                    DurableEventPayload::ErrorOccurred {
-                        code: JSON_RPC_INTERNAL_ERROR,
-                        message: message.clone(),
-                        recoverable: false,
-                    },
-                )
-                .await?;
-        }
+    if let Some(message) = &finalization.pending_error
+        && state.execution.phase != Phase::Error
+    {
+        session
+            .emit_durable(
+                Some(turn_id),
+                DurableEventPayload::ErrorOccurred {
+                    code: JSON_RPC_INTERNAL_ERROR,
+                    message: message.clone(),
+                    recoverable: false,
+                },
+            )
+            .await?;
     }
     emit_turn_completed(session, turn_id, &finalization.finish_reason).await
 }

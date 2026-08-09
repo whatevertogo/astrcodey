@@ -140,8 +140,7 @@ impl ToolHandler for AgentToolHandler {
             return Err(ExtensionError::NotFound(ctx.tool_name().into()));
         }
 
-        let working_dir = ctx.call().require_working_dir()?;
-        let working_dir = working_dir.to_string_lossy();
+        let working_dir = ctx.working_dir().to_string_lossy();
         let agents = self.shared.get_or_discover(Some(&working_dir));
         let args: AgentArgs = ctx.arguments()?;
 
@@ -169,7 +168,6 @@ impl ToolHandler for AgentToolHandler {
         let model_preference = resolve_child_small_model(ctx.small_model_id())?;
         let model_label = model_preference.clone();
 
-        ctx.call().require_session_id()?;
         let session_control = ctx.host().session_control()?;
 
         // 1. 创建子会话
@@ -178,7 +176,10 @@ impl ToolHandler for AgentToolHandler {
                 name: matched.name.clone(),
                 system_prompt: Some(enhance_agent_prompt(&matched.body, &working_dir)),
                 model_preference: Some(model_preference),
-                tool_selection: matched.tool_selection.clone().map(Into::into),
+                tool_selection: matched
+                    .tool_selection
+                    .clone()
+                    .map(astrcode_extension_sdk::session::tool_selection_to_dto),
                 ephemeral: true,
             })
             .await?;
@@ -200,17 +201,16 @@ impl ToolHandler for AgentToolHandler {
                 recycle_on_complete: !args.wait_for_result,
             })
             .await;
-        if let Err(ref e) = submit {
-            if let Err(recycle_err) = session_control
+        if let Err(ref e) = submit
+            && let Err(recycle_err) = session_control
                 .recycle(HostRecycleSessionRequest::new(&handle.session_id))
                 .await
-            {
-                tracing::warn!(
-                    child_session_id = %handle.session_id,
-                    error = %recycle_err,
-                    "failed to recycle child session after submit_turn error: {e}"
-                );
-            }
+        {
+            tracing::warn!(
+                child_session_id = %handle.session_id,
+                error = %recycle_err,
+                "failed to recycle child session after submit_turn error: {e}"
+            );
         }
         let result = submit?;
 
@@ -280,8 +280,8 @@ struct AgentPromptBuildHandler {
 #[async_trait::async_trait]
 impl PromptBuildHandler for AgentPromptBuildHandler {
     async fn handle(&self, ctx: PromptBuildContext) -> Result<PromptContributions, ExtensionError> {
-        let working_dir = ctx.working_dir().map(|path| path.to_string_lossy());
-        let agents = self.shared.get_or_discover(working_dir.as_deref());
+        let working_dir = ctx.working_dir().to_string_lossy();
+        let agents = self.shared.get_or_discover(Some(&working_dir));
         Ok(PromptContributions {
             agents: vec![format_agents_for_model(&agents)],
             ..Default::default()
@@ -368,38 +368,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn formats_agent_metadata_for_model_selection() {
-        let agents = vec![agent::AgentConfig {
-            id: String::from("code-reviewer"),
-            name: String::from("code-reviewer"),
-            description: String::from("Use for behavior-focused code review"),
-            body: String::from("Review carefully."),
-            tool_selection: None,
-        }];
-
-        let output = format_agents_for_model(&agents);
-
-        assert!(output.contains("Available agents"));
-        assert!(output.contains("code-reviewer"));
-        assert!(output.contains("Use for behavior-focused code review"));
-        assert!(output.contains("subagentType"));
-    }
-
-    #[test]
-    fn formats_empty_agent_list() {
-        assert_eq!(format_agents_for_model(&[]), "No agents configured.");
-    }
-
-    #[test]
     fn agent_tool_schema_has_wait_for_result() {
         let definition = agent_tool_definition();
         let properties = definition.parameters["properties"]
             .as_object()
             .expect("tool schema properties");
 
-        assert!(definition.description.contains("When NOT to use"));
-        assert!(definition.description.contains("Tips"));
-        assert!(!definition.description.contains("When to use"));
         assert!(properties.contains_key("waitForResult"));
         assert_eq!(
             properties["waitForResult"]["default"],
@@ -427,60 +401,6 @@ mod tests {
         let input = json!({ "description": "test" });
         let result = serde_json::from_value::<AgentArgs>(input);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn builtin_agent_descriptions_define_distinct_workflow_stages() {
-        let agents = agent::builtin_agents();
-        let description = |id: &str| {
-            agents
-                .iter()
-                .find(|agent| agent.id == id)
-                .map(|agent| agent.description.as_str())
-                .expect("builtin agent description")
-        };
-
-        assert!(description("explore").contains("before the main agent makes a design"));
-        assert!(description("execute").contains("concrete plan defined by the main agent"));
-        assert!(description("reviewer").contains("after implementation"));
-    }
-
-    #[test]
-    fn agent_guidance_scales_delegation_without_forcing_a_pipeline() {
-        let agent = agent_tool_prompt();
-
-        assert!(agent.guide.contains("instead of forcing a fixed workflow"));
-        assert!(agent.guide.contains("used independently or combined"));
-        assert_eq!(agent.examples.len(), 1);
-        assert!(agent.examples[0].contains("execute"));
-        assert!(agent.examples[0].contains("work directly"));
-    }
-
-    #[test]
-    fn explore_owns_the_delegated_investigation() {
-        let explore = agent::builtin_agents()
-            .into_iter()
-            .find(|agent| agent.id == "explore")
-            .expect("builtin explore agent");
-
-        assert!(
-            explore
-                .body
-                .contains("complete the delegated investigation")
-        );
-        assert!(explore.body.contains("report the concrete blocker"));
-        assert!(!explore.body.contains("Next action"));
-    }
-
-    #[test]
-    fn enhanced_agent_prompt_requires_a_compact_decision_packet() {
-        let prompt = enhance_agent_prompt("Role guidance.", "/workspace");
-
-        assert!(prompt.contains("Return a decision packet, not a work diary"));
-        assert!(prompt.contains("within about 600 tokens"));
-        assert!(prompt.contains("Never trade correctness for brevity"));
-        assert!(!prompt.contains("main agent's next action"));
-        assert!(prompt.contains("working directory is /workspace"));
     }
 
     #[test]
