@@ -37,14 +37,15 @@ Default session context/API, no manifest capability required:
 | `astrcode.session.state.write` for S5R workers | Writes state namespaced by current session and extension id. |
 
 Sensitive APIs include `input_delivery`, `session_control`, `session_history`, `session_inspect`,
-`main_model`, `small_model`, `emit_events`, `workspace_read`, `workspace_write`, `process_spawn`,
-`network_client`, and `public_http_dispatch`.
+`main_model`, `small_model`, `emit_custom_events`, `consume_custom_events`, `workspace_read`,
+`workspace_write`, `process_spawn`, `network_client`, and `public_http_dispatch`.
 
 The runner rejects privileged registrations that omit their capability:
 
 | Registration | Required capability |
 | --- | --- |
-| Extension event declaration | `emit_events` |
+| Custom event declaration | `emit_custom_events` |
+| Custom event subscription | `consume_custom_events` |
 | Compact hook | `session_history` |
 | Before/after provider hook or user-message envelope | `provider_request` |
 | Blocking pre/post tool hook | `tool_intercept` |

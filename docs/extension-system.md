@@ -152,7 +152,7 @@ builder。
 | `host.process()?` | `process_spawn` | 在受限 workspace cwd 启动进程；不是 OS sandbox。 |
 | `host.network()?` | `network_client` | 受限公网 HTTP(S)，拒绝本机、内网和链路本地目标；body 在作者 API 中是原始字节，线缆使用 base64。`max_bytes <= 10 MiB`，`timeout_ms` 为 `1..=60_000`，`Manual` 返回有界 3xx body。 |
 | `host.extension_http()?` | `public_http_dispatch` | 调用另一扩展的公开路由；同步自调用被拒绝。 |
-| `ctx.events()` | `emit_events` | 只能发射 manifest 已声明的事件。 |
+| `ctx.events()` | `emit_custom_events` | 只能发射 manifest 已声明的事件。 |
 | `ctx.paths().session_data_dir()` | 无额外 capability | 需要 session context，目录已按 extension id 隔离。 |
 
 `HostError` 无损保存 `code`、`message`、`hint`、`retryable` 和 `details`；
@@ -304,7 +304,8 @@ LLM、session、context、workspace、process、network 与公开扩展 HTTP 各
 | `public_http` | 公开路由注册 | 注册无需 bearer token 的 JSON HTTP 路由；禁止占用 `/api` 命名空间。 |
 | `authenticated_http` | 管理路由注册 | 注册复用宿主 bearer token、按扩展 id 隔离的 JSON HTTP 路由。 |
 | `public_http_dispatch` | `astrcode.extension.http.public` | 从插件内部调用另一插件的公开路由；同步自调用会被拒绝以避免 s5r 重入死锁。 |
-| `emit_events` | `astrcode.event.emit` | 发射 manifest 已声明的扩展事件。 |
+| `emit_custom_events` | `astrcode.event.emit` | 发射 manifest 已声明的扩展事件。 |
+| `consume_custom_events` | custom event subscription | 注册并消费符合 source filter 的扩展事件。 |
 | `provider_request` | Provider 与 user-message hooks | 读取或改写 provider 请求、观察 provider 响应，并变换 durable user-message envelope；after-response 返回值不会改写 turn。 |
 | `tool_intercept` | Blocking pre/post tool hooks | 阻断或改写工具输入、结果。 |
 | `turn_continuation_control` | Continue-after-stop hook | 决定 LLM 自然停止后是否继续一个 agent step。 |
@@ -345,6 +346,20 @@ fingerprint 以及无需启动进程即可读取的权威 extension ID；reconci
 已经消失的来源。磁盘来源的 fingerprint 覆盖 `extension.json`、显式路径命令程序及
 命令中引用的本地文件，因此普通 reload 不会启动未变化的 s5r 子进程。增量完成后 runner 会
 恢复来源顺序，再统一激活新任务，handler 优先级与全量加载保持一致。
+
+### 事件运维接口
+
+以下接口位于 bearer 认证后的 `/api` 管理面，不是扩展作者的 host capability：
+
+- `GET /api/sessions/{id}/events` 返回 raw event SSE。`cursor` query 优先于
+  `Last-Event-ID`，并可按 `extensionId`、`eventType`、`durability` 过滤；游标只适用于
+  durable event。响应 `payload` 是事件日志的持久化 serde 形状，不是独立稳定的 HTTP
+  schema。无效、超前或超过 replay 上限的游标返回 `409`；实时订阅落后时发送 `gap` 事件。
+- `GET /api/sessions/{id}/event-consumers` 返回 custom-event subscription 的 pause、
+  checkpoint、pending 与失败计数。
+- `POST /api/sessions/{id}/event-consumers/control` 接受 `extensionId`、`subscriptionId`
+  和 `pause`、`resume`、`replay_from_beginning`、`skip_to_stream_head` 之一。重置 checkpoint
+  前会先暂停并等待当前 handler 退出；超时返回 `409`，不会让旧执行路径越过新 checkpoint。
 
 ---
 

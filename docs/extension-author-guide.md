@@ -216,7 +216,9 @@ bundled host 错误使用 `HostError`：它无损保留 `code` / `message` / `hi
 Handler 返回 `Result<HandlerResult, ErrorPayload>`，与宿主侧一致（`code` / `message` / `hint` / `retryable`）：
 
 ```rust
-return Err(ErrorPayload::new("invalid_input", "name is required")
+use astrcode_extension_sdk::WireErrorCode;
+
+return Err(ErrorPayload::new(WireErrorCode::InvalidInput, "name is required")
     .with_hint("pass {\"name\": \"...\"} in arguments"));
 ```
 
@@ -243,6 +245,7 @@ bundled handler 则读取 `ctx.cancellation()`，后台循环使用 `ctx.tasks()
 ```rust
 use std::sync::Arc;
 use astrcode_extension_sdk::{
+    WireErrorCode,
     worker::testing::{HostApi, with_host_api},
     worker_prelude::{ErrorPayload, HostClient, LlmMessage},
 };
@@ -257,7 +260,7 @@ impl HostApi for MockHost {
                 "content": "mocked",
                 "model": "test-main"
             })),
-            _ => Err(ErrorPayload::new("unexpected_call", cap)),
+            _ => Err(ErrorPayload::new(WireErrorCode::UnknownCapability, cap)),
         }
     }
     async fn call_stream(&self, cap: &str, input: Value) -> Result<Value, ErrorPayload> {
