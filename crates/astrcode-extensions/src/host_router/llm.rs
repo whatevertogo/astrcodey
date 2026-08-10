@@ -3,14 +3,11 @@
 use std::sync::Arc;
 
 use astrcode_core::llm::{LlmError, LlmEvent, LlmMessage, LlmProvider};
-use astrcode_extension_contract::{
-    ModelEventStream, WireErrorCode,
-    protocol::{ErrorPayload as V3ErrorPayload, ModelStreamEvent},
-};
+use astrcode_extension_contract::{ModelEventStream, WireErrorCode, protocol::ModelStreamEvent};
 use astrcode_extension_sdk::{
     host::{
-        HostLlmChatOutput, HostLlmChatRequest, HostLlmCollectedStreamOutput, HostLlmTextDelta,
-        HostOperation, HostOperationGroup, llm_messages_from_wire,
+        HostLlmChatOutput, HostLlmChatRequest, HostOperation, HostOperationGroup,
+        llm_messages_from_wire,
     },
     s5r::ErrorPayload,
 };
@@ -40,8 +37,8 @@ impl LlmGroup {
         input: Value,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<Value, ErrorPayload> {
-        self.invoke_with_mode(operation, input, false, cancel_token)
-            .await
+        let (provider, model_label) = self.provider_for(operation)?;
+        invoke_llm_chat(provider, model_label, input, cancel_token).await
     }
 
     pub(super) async fn invoke_event_stream(
@@ -50,17 +47,7 @@ impl LlmGroup {
         input: Value,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<ModelEventStream, ErrorPayload> {
-        let (provider, model_label) = match operation {
-            HostOperation::LlmMainChat => (self.main.as_ref(), "main_llm"),
-            HostOperation::LlmSmallChat => (self.small.as_ref(), "small_llm"),
-            _ => return Err(invalid_group_operation(operation, HostOperationGroup::Llm)),
-        };
-        let provider = provider.ok_or_else(|| {
-            ErrorPayload::new(
-                WireErrorCode::BackendUnavailable,
-                format!("{model_label} not configured"),
-            )
-        })?;
+        let (provider, model_label) = self.provider_for(operation)?;
         let request = serde_json::from_value::<HostLlmChatRequest>(input).map_err(|error| {
             ErrorPayload::new(
                 WireErrorCode::InvalidInput,
@@ -104,7 +91,7 @@ impl LlmGroup {
                     let Some(event) = receiver.recv().await else {
                         return Some((
                             ModelStreamEvent::Failed {
-                                error: V3ErrorPayload::new(
+                                error: ErrorPayload::new(
                                     WireErrorCode::StreamClosed,
                                     "model provider closed before a terminal event",
                                 ),
@@ -176,7 +163,7 @@ impl LlmGroup {
                         ),
                         LlmEvent::Error { message } => (
                             ModelStreamEvent::Failed {
-                                error: V3ErrorPayload::new(WireErrorCode::LlmStreamError, message),
+                                error: ErrorPayload::new(WireErrorCode::LlmStreamError, message),
                             },
                             true,
                         ),
@@ -190,19 +177,14 @@ impl LlmGroup {
         ))
     }
 
-    async fn invoke_with_mode(
+    fn provider_for(
         &self,
         operation: HostOperation,
-        input: Value,
-        collect_chunks: bool,
-        cancel_token: Option<&CancellationToken>,
-    ) -> Result<Value, ErrorPayload> {
+    ) -> Result<(&Arc<dyn LlmProvider>, &'static str), ErrorPayload> {
         let (provider, model_label) = match operation {
             HostOperation::LlmMainChat => (self.main.as_ref(), "main_llm"),
             HostOperation::LlmSmallChat => (self.small.as_ref(), "small_llm"),
-            _ => {
-                return Err(invalid_group_operation(operation, HostOperationGroup::Llm));
-            },
+            _ => return Err(invalid_group_operation(operation, HostOperationGroup::Llm)),
         };
         let provider = provider.ok_or_else(|| {
             ErrorPayload::new(
@@ -210,7 +192,7 @@ impl LlmGroup {
                 format!("{model_label} not configured"),
             )
         })?;
-        invoke_llm_chat(provider, model_label, input, collect_chunks, cancel_token).await
+        Ok((provider, model_label))
     }
 
     pub(super) fn has_main(&self) -> bool {
@@ -226,7 +208,6 @@ async fn invoke_llm_chat(
     provider: &Arc<dyn LlmProvider>,
     model_label: &'static str,
     input: Value,
-    collect_chunks: bool,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<Value, ErrorPayload> {
     let request = serde_json::from_value::<HostLlmChatRequest>(input).map_err(|error| {
@@ -245,7 +226,7 @@ async fn invoke_llm_chat(
     let messages = llm_messages_from_wire(request.messages);
 
     super::run_until_deadline(
-        run_host_llm_chat(&**provider, model_label, messages, collect_chunks),
+        run_host_llm_chat(&**provider, model_label, messages),
         Instant::now() + HOST_INVOKE_TIMEOUT,
         cancel_token,
         || {
@@ -263,7 +244,6 @@ async fn run_host_llm_chat(
     provider: &dyn LlmProvider,
     model_label: &str,
     messages: Vec<LlmMessage>,
-    collect_chunks: bool,
 ) -> Result<Value, ErrorPayload> {
     let mut rx = provider
         .generate(messages, vec![])
@@ -271,15 +251,9 @@ async fn run_host_llm_chat(
         .map_err(llm_error_payload)?;
 
     let mut text = String::new();
-    let mut chunks = Vec::new();
     while let Some(event) = rx.recv().await {
         match event {
             LlmEvent::ContentDelta { delta } => {
-                if collect_chunks {
-                    chunks.push(HostLlmTextDelta {
-                        delta: delta.clone(),
-                    });
-                }
                 text.push_str(&delta);
             },
             LlmEvent::Done { .. } => break,
@@ -291,24 +265,13 @@ async fn run_host_llm_chat(
             _ => {},
         }
     }
-    if collect_chunks {
-        serialize_wire_response(
-            HostLlmCollectedStreamOutput {
-                content: text,
-                model: model_label.to_owned(),
-                chunks,
-            },
-            model_label,
-        )
-    } else {
-        serialize_wire_response(
-            HostLlmChatOutput {
-                content: text,
-                model: model_label.to_owned(),
-            },
-            model_label,
-        )
-    }
+    serialize_wire_response(
+        HostLlmChatOutput {
+            content: text,
+            model: model_label.to_owned(),
+        },
+        model_label,
+    )
 }
 
 fn llm_error_payload(error: LlmError) -> ErrorPayload {

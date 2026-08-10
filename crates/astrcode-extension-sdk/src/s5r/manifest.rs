@@ -9,22 +9,12 @@ use crate::extension::{
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InitializeManifest {
-    pub extension_id: String,
-    #[serde(default)]
-    pub version: String,
-    pub protocol: InitializeManifestProtocol,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub wire_codec: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub wire_features: Vec<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub tools: Vec<ManifestTool>,
     #[serde(default)]
     pub hooks: Vec<ManifestHook>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub continuation_hooks: Vec<String>,
     #[serde(default)]
     pub commands: Vec<ManifestCommand>,
     #[serde(default)]
@@ -33,11 +23,6 @@ pub struct InitializeManifest {
     pub custom_events: Vec<CustomEventDeclaration>,
     #[serde(default)]
     pub custom_event_subscriptions: Vec<CustomEventSubscription>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct InitializeManifestProtocol {
-    pub s5r: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{
         Arc,
         atomic::{AtomicU32, Ordering},
@@ -7,10 +7,7 @@ use std::{
     time::Duration,
 };
 
-use astrcode_extension_contract::{
-    WireErrorCode,
-    protocol::{ErrorPayload, HandlerDescriptor},
-};
+use astrcode_extension_contract::{WireErrorCode, protocol::ErrorPayload};
 use parking_lot::RwLock;
 use tokio_util::sync::CancellationToken;
 
@@ -149,80 +146,6 @@ fn resolve_host_invoke_context(
             )
         }),
     }
-}
-
-pub(super) fn validate_initialize_handlers(
-    registration: &ExtensionRegistration,
-    handlers: &[HandlerDescriptor],
-) -> Result<(), String> {
-    let expected = registration.expected_handler_descriptors()?;
-    let extension_id = registration.extension_id();
-    let expected_ids = expected
-        .iter()
-        .map(|descriptor| descriptor.handler_id.as_str())
-        .collect::<HashSet<_>>();
-    let mut actual_by_id = HashMap::new();
-    let mut actual_parts = Vec::with_capacity(handlers.len());
-    for handler in handlers {
-        let (kind, name) =
-            crate::extension_manifest::parse_handler_id(extension_id, &handler.handler_id)?;
-        if actual_by_id
-            .insert(handler.handler_id.as_str(), handler)
-            .is_some()
-        {
-            return Err(format!(
-                "initialize declares duplicate handler {}",
-                handler.handler_id
-            ));
-        }
-        actual_parts.push((handler, kind, name));
-    }
-
-    for expected_handler in &expected {
-        let (expected_kind, expected_name) = crate::extension_manifest::parse_handler_id(
-            extension_id,
-            &expected_handler.handler_id,
-        )?;
-        let Some(actual) = actual_by_id.get(expected_handler.handler_id.as_str()) else {
-            if let Some((actual, actual_kind, _)) =
-                actual_parts.iter().find(|(_, actual_kind, actual_name)| {
-                    *actual_name == expected_name && *actual_kind != expected_kind
-                })
-            {
-                return Err(format!(
-                    "handler {} has kind {actual_kind}, expected {expected_kind}",
-                    actual.handler_id
-                ));
-            }
-            return Err(format!(
-                "initialize is missing handler {}",
-                expected_handler.handler_id
-            ));
-        };
-        if actual.description != expected_handler.description {
-            return Err(format!(
-                "handler {} description does not match initialize metadata",
-                expected_handler.handler_id
-            ));
-        }
-        if actual.input_schema != expected_handler.input_schema {
-            return Err(format!(
-                "handler {} input schema does not match initialize metadata",
-                expected_handler.handler_id
-            ));
-        }
-    }
-
-    if let Some(extra) = handlers
-        .iter()
-        .find(|handler| !expected_ids.contains(handler.handler_id.as_str()))
-    {
-        return Err(format!(
-            "initialize declares unexpected handler {}",
-            extra.handler_id
-        ));
-    }
-    Ok(())
 }
 
 pub(super) async fn drain_stderr(stderr: tokio::process::ChildStderr) {

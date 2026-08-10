@@ -11,12 +11,11 @@ use astrcode_extension_sdk::{
         ExtensionPaths, ExtensionTasks, RuntimeHookCallContext, internal::custom_event_emitter,
     },
     host::{
-        ExtensionHost, HostError, HostLlmTextDelta, HostOperation, collect_model_stream_output,
+        ExtensionHost, HostError, HostOperation, collect_model_stream,
         internal::{HostInvoker, HostScope, extension_host},
     },
     model_stream::ModelStream,
 };
-use futures_util::StreamExt;
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -272,40 +271,20 @@ impl HostInvoker for RouterHostInvoker {
         operation: HostOperation,
         input: Value,
     ) -> Result<Value, HostError> {
-        let mut events = self
+        let events = self
             .router
             .invoke_event_stream(operation.wire_name(), input, &self.invoke_context)
             .await
             .map_err(HostError::from)?;
-        let mut chunks = Vec::new();
-        while let Some(event) = events.next().await {
-            match event {
-                astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
-                    content,
-                } => chunks.push(HostLlmTextDelta { delta: content }),
-                astrcode_extension_contract::protocol::ModelStreamEvent::Completed { output } => {
-                    let collected =
-                        collect_model_stream_output(&output, chunks).map_err(HostError::from)?;
-                    return serde_json::to_value(collected).map_err(|error| {
-                        HostError::new(
-                            WireErrorCode::SerializationFailed,
-                            format!("serialize collected host stream: {error}"),
-                        )
-                    });
-                },
-                astrcode_extension_contract::protocol::ModelStreamEvent::Failed { error } => {
-                    return Err(HostError::from(error));
-                },
-                _ => {},
-            }
-        }
-        Err(HostError::new(
-            WireErrorCode::InvalidResponse,
-            format!(
-                "{} stream ended without a terminal event",
-                operation.wire_name()
-            ),
-        ))
+        let collected = collect_model_stream(events)
+            .await
+            .map_err(HostError::from)?;
+        serde_json::to_value(collected).map_err(|error| {
+            HostError::new(
+                WireErrorCode::SerializationFailed,
+                format!("serialize collected host stream: {error}"),
+            )
+        })
     }
 
     async fn invoke_stream(

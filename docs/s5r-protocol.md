@@ -26,8 +26,9 @@ S5R 3.0 不兼容 1.0/2.0 worker，也不提供双协议运行。旧 manifest �
 1. Host 发送唯一一条 `initialize`，携带 `protocol_version = "3.0"`、peer 信息、
    `supported_features`、`required_features`、宿主能力 catalog 和 metadata。
 2. Worker 校验版本与 feature 集合，返回 `kind = "initialize"` 的 `result`；output 中包含
-   worker 的 feature 集合、双方交集 `negotiated_features`、handler catalog 和 manifest metadata。
-3. Host 复核交集、required 集合、身份、manifest 与 handler catalog 的完整性；完成后
+   worker 的 feature 集合、双方交集 `negotiated_features`、peer 身份和 manifest metadata。
+   工具、hook、command 等扩展声明只存在 manifest metadata 中，不在 handler catalog 重复发送。
+3. Host 复核交集、required 集合、peer 身份与 manifest 完整性；完成后
    `Peer<Uninitialized>` 才转换为 `Peer<Ready>`。
 
 required feature 必须同时出现在本方 supported 集合中。协商结果严格等于双方 supported 的交集，

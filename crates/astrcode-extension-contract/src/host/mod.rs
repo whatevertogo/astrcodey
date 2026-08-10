@@ -199,6 +199,7 @@ mod tests {
     use super::*;
     use crate::{
         error::WireErrorCode,
+        protocol::{ErrorPayload, ModelStreamEvent},
         session::{SessionPhaseDto, SessionToolSelectionDto},
     };
 
@@ -439,25 +440,44 @@ mod tests {
         );
     }
 
-    #[test]
-    fn completed_model_stream_requires_model_and_may_collect_content_from_chunks() {
-        let chunks = vec![
-            HostLlmTextDelta {
-                delta: "hel".into(),
+    #[tokio::test]
+    async fn model_stream_collection_enforces_the_terminal_contract() {
+        let collected = collect_model_stream(futures_util::stream::iter([
+            ModelStreamEvent::ContentDelta {
+                content: "hel".into(),
             },
-            HostLlmTextDelta { delta: "lo".into() },
-        ];
-        let collected = collect_model_stream_output(
-            &json!({ "model": "main", "finish_reason": "stop" }),
-            chunks,
-        )
+            ModelStreamEvent::ContentDelta {
+                content: "lo".into(),
+            },
+            ModelStreamEvent::Completed {
+                output: json!({ "model": "main", "finish_reason": "stop" }),
+            },
+        ]))
+        .await
         .unwrap();
         assert_eq!(collected.content, "hello");
         assert_eq!(collected.model, "main");
 
-        let error = collect_model_stream_output(&json!({ "content": "hello" }), Vec::new())
+        let error =
+            collect_model_stream(futures_util::stream::iter([ModelStreamEvent::Completed {
+                output: json!({ "content": "hello" }),
+            }]))
+            .await
             .expect_err("model is required by the collected stream contract");
         assert_eq!(error.code_enum(), Some(WireErrorCode::InvalidResponse));
+
+        let error = collect_model_stream(futures_util::stream::empty::<ModelStreamEvent>())
+            .await
+            .expect_err("a terminal event is required");
+        assert_eq!(error.code_enum(), Some(WireErrorCode::StreamClosed));
+
+        let expected = ErrorPayload::new(WireErrorCode::BackendUnavailable, "model unavailable");
+        let error = collect_model_stream(futures_util::stream::iter([ModelStreamEvent::Failed {
+            error: expected.clone(),
+        }]))
+        .await
+        .expect_err("failed terminal events must remain errors");
+        assert_eq!(error, expected);
     }
 
     #[test]

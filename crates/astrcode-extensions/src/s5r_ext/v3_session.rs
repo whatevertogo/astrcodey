@@ -13,10 +13,7 @@ use std::{
 use astrcode_extension_contract::{
     FeatureName, FrameTransport, InboundInvoke, InvocationResponse, Peer, PeerHandle,
     PeerHandshake, PeerInvokeHandler, StdioFrameTransport,
-    protocol::{
-        ErrorPayload as V3ErrorPayload, HandlerDescriptor as V3HandlerDescriptor, ModelStreamEvent,
-        PeerInfo, S5R_STACK,
-    },
+    protocol::{ModelStreamEvent, PeerInfo, S5R_STACK},
 };
 use astrcode_extension_sdk::{
     extension::ExtensionError,
@@ -34,7 +31,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::session_support::{
     HostInvokeState, ReentrancyGuard, StderrTaskGuard, drain_stderr, prepare_host_invoke,
-    validate_initialize_handlers,
 };
 use crate::{
     extension_manifest::{ExtensionRegistration, registration_from_s5r_metadata},
@@ -140,7 +136,7 @@ where
     async fn invoke(
         &self,
         invocation: InboundInvoke<T>,
-    ) -> Result<InvocationResponse, V3ErrorPayload> {
+    ) -> Result<InvocationResponse, ErrorPayload> {
         let request = invocation.request;
         let (reentrancy, context) = prepare_host_invoke(
             &self.state,
@@ -153,8 +149,7 @@ where
                 .state
                 .router
                 .invoke_event_stream(&request.operation, request.input, &context)
-                .await
-                .map_err(error_to_v3)?;
+                .await?;
             return Ok(InvocationResponse::Stream(Box::pin(GuardedModelStream {
                 stream,
                 _reentrancy: reentrancy,
@@ -164,8 +159,7 @@ where
             .state
             .router
             .invoke(&request.operation, request.input, &context)
-            .await
-            .map_err(error_to_v3)?;
+            .await?;
         drop(reentrancy);
         Ok(InvocationResponse::Unary(output))
     }
@@ -226,7 +220,6 @@ impl S5rV3Session {
         let mut handshake = PeerHandshake::new("initialize-1");
         handshake.supported_features = features.clone();
         handshake.required_features = features;
-        handshake.metadata = json!({ "wire_codec": "json" });
         let peer = match tokio::time::timeout(INITIALIZE_TIMEOUT, peer.initialize(handshake)).await
         {
             Ok(Ok(peer)) => peer,
@@ -242,11 +235,8 @@ impl S5rV3Session {
 
         let (handle, driver) = peer.into_runtime();
 
-        let registration = registration_from_s5r_metadata(
-            handle.remote_metadata(),
-            astrcode_extension_contract::protocol::S5R_VERSION,
-        )?;
-        validate_v3_handlers(&registration, handle.remote_handlers())?;
+        let registration =
+            registration_from_s5r_metadata(handle.remote_peer(), handle.remote_metadata())?;
 
         let registration = Arc::new(RwLock::new(Some(registration)));
         let invoke_contexts = Arc::new(RwLock::new(HashMap::new()));
@@ -478,23 +468,6 @@ async fn run_with_cancellation(
         .map_err(|error| ExtensionError::Internal(error.to_string()))
 }
 
-fn validate_v3_handlers(
-    registration: &ExtensionRegistration,
-    handlers: &[V3HandlerDescriptor],
-) -> Result<(), String> {
-    validate_initialize_handlers(registration, handlers)
-}
-
-fn error_to_v3(error: ErrorPayload) -> V3ErrorPayload {
-    V3ErrorPayload {
-        code: error.code,
-        message: error.message,
-        hint: error.hint,
-        retryable: error.retryable,
-        details: error.details,
-    }
-}
-
 async fn terminate_failed_start(child: &mut SupervisedChild, stderr_task: JoinHandle<()>) {
     let _ = child.terminate(PROCESS_TERMINATION_GRACE).await;
     let mut stderr_task = StderrTaskGuard::new(Some(stderr_task));
@@ -503,38 +476,9 @@ async fn terminate_failed_start(child: &mut SupervisedChild, stderr_task: JoinHa
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_contract::protocol::HandlerDescriptor as V3HandlerDescriptor;
     use serde_json::json;
 
     use super::*;
-
-    #[test]
-    fn v3_handler_catalog_uses_the_existing_bidirectional_manifest_validation() {
-        let registration = registration_from_s5r_metadata(
-            &json!({
-                "extension_id": "v3-worker",
-                "version": "0.1.0",
-                "protocol": {"s5r": "3.0"},
-                "wire_features": ["nested_invoke_v1"],
-                "tools": [{
-                    "name": "probe",
-                    "description": "Probe",
-                    "parameters": {"type": "object"}
-                }]
-            }),
-            "3.0",
-        )
-        .unwrap();
-        let descriptor = V3HandlerDescriptor {
-            handler_id: "v3-worker:tool:probe".into(),
-            description: "Probe".into(),
-            input_schema: json!({"type": "object"}),
-        };
-
-        validate_v3_handlers(&registration, std::slice::from_ref(&descriptor)).unwrap();
-        let error = validate_v3_handlers(&registration, &[]).unwrap_err();
-        assert!(error.contains("missing handler"));
-    }
 
     #[test]
     fn continuation_attribution_is_inherited_and_cannot_be_spoofed() {

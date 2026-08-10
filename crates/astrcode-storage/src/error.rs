@@ -2,10 +2,7 @@
 //!
 //! 从 `storage` 根模块拆出,仅含错误枚举。
 
-use astrcode_core::{
-    types::SessionId,
-    wire::{WireError, WireErrorCode},
-};
+use astrcode_core::types::SessionId;
 
 /// 存储操作产生的错误。
 #[derive(Debug, thiserror::Error)]
@@ -59,25 +56,5 @@ impl StorageError {
             ),
             _ => false,
         }
-    }
-}
-
-impl WireError for StorageError {
-    fn wire_code(&self) -> WireErrorCode {
-        match self {
-            Self::NotFound(_) => WireErrorCode::SessionNotFound,
-            Self::AlreadyExists(_) => WireErrorCode::SessionAlreadyExists,
-            Self::InvalidId(_) => WireErrorCode::InvalidInput,
-            Self::Unsupported(_) => WireErrorCode::Unsupported,
-            Self::Io(_) => WireErrorCode::StorageIoError,
-            Self::Serialization(_) | Self::InvalidEvent(_) | Self::CorruptLog(_) => {
-                WireErrorCode::CorruptSessionData
-            },
-            Self::LockError(_) => WireErrorCode::StorageLockError,
-        }
-    }
-
-    fn is_retryable(&self) -> bool {
-        self.is_retryable()
     }
 }

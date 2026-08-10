@@ -234,7 +234,7 @@ impl HostClientTransport for ExtensionHost {
 pub mod internal {
     use std::{any::Any, collections::BTreeMap, sync::Arc, time::Duration};
 
-    use astrcode_core::wire::{WireError, WireErrorCode};
+    use astrcode_extension_contract::WireErrorCode;
     use async_trait::async_trait;
     use serde_json::Value;
     use tokio_util::sync::CancellationToken;
@@ -286,16 +286,6 @@ pub mod internal {
                 retryable,
                 message: message.into(),
             }
-        }
-    }
-
-    impl WireError for OutboundNetworkError {
-        fn wire_code(&self) -> WireErrorCode {
-            self.code
-        }
-
-        fn is_retryable(&self) -> bool {
-            self.retryable
         }
     }
 

@@ -1,18 +1,21 @@
-//! 领域错误 → 线缆错误码的映射协议。
+//! S5R 边界映射：领域错误 → 线缆错误码。
 //!
-//! 错误码目录本身由 `astrcode-extension-contract` 单点定义（宏生成、线缆字符串永久），
-//! 此处 re-export 供领域层使用；`[`WireError`]` 让每个领域错误类型映射一次，
-//! 宿主路由层统一经 `wire_payload` 构造线缆错误，杜绝同一错误在不同 API 上映射不一致。
+//! 映射实现集中在本模块单点；`astrcode-core`/`astrcode-storage`/`astrcode-extension-sdk`
+//! 不感知线缆概念，宿主路由层统一经 [`wire_payload`] 构造线缆错误，
+//! 杜绝同一错误在不同 API 上映射不一致。
 
 use std::fmt::Display;
 
-pub use astrcode_extension_contract::WireErrorCode;
+use astrcode_core::{llm::LlmError, tool::SessionApiError};
+use astrcode_extension_contract::{ErrorPayload, WireErrorCode};
+use astrcode_extension_sdk::host::internal::OutboundNetworkError;
+use astrcode_storage::StorageError;
 
 /// 领域错误 → 线缆错误码的映射协议。
 ///
-/// 每个领域错误类型（storage、llm、session API）实现一次，宿主路由层统一
-/// 经 [`wire_payload`] 构造线缆错误，杜绝同一错误在不同 API 上映射不一致。
-pub trait WireError: Display {
+/// 每个领域错误类型实现一次，宿主路由层统一经 [`wire_payload`] 构造线缆错误，
+/// 杜绝同一错误在不同 API 上映射不一致。
+pub(super) trait WireError: Display {
     fn wire_code(&self) -> WireErrorCode;
 
     fn is_retryable(&self) -> bool {
@@ -20,7 +23,7 @@ pub trait WireError: Display {
     }
 }
 
-impl WireError for crate::llm::LlmError {
+impl WireError for LlmError {
     fn wire_code(&self) -> WireErrorCode {
         match self {
             Self::InvalidApiKey { .. } => WireErrorCode::InvalidApiKey,
@@ -47,7 +50,7 @@ impl WireError for crate::llm::LlmError {
     }
 }
 
-impl WireError for crate::tool::SessionApiError {
+impl WireError for SessionApiError {
     fn wire_code(&self) -> WireErrorCode {
         match self {
             Self::NotFound(_) => WireErrorCode::SessionNotFound,
@@ -60,14 +63,48 @@ impl WireError for crate::tool::SessionApiError {
     }
 }
 
+impl WireError for StorageError {
+    fn wire_code(&self) -> WireErrorCode {
+        match self {
+            Self::NotFound(_) => WireErrorCode::SessionNotFound,
+            Self::AlreadyExists(_) => WireErrorCode::SessionAlreadyExists,
+            Self::InvalidId(_) => WireErrorCode::InvalidInput,
+            Self::Unsupported(_) => WireErrorCode::Unsupported,
+            Self::Io(_) => WireErrorCode::StorageIoError,
+            Self::Serialization(_) | Self::InvalidEvent(_) | Self::CorruptLog(_) => {
+                WireErrorCode::CorruptSessionData
+            },
+            Self::LockError(_) => WireErrorCode::StorageLockError,
+        }
+    }
+
+    fn is_retryable(&self) -> bool {
+        self.is_retryable()
+    }
+}
+
+impl WireError for OutboundNetworkError {
+    fn wire_code(&self) -> WireErrorCode {
+        self.code
+    }
+
+    fn is_retryable(&self) -> bool {
+        self.retryable
+    }
+}
+
+pub(super) fn wire_payload<E: WireError>(error: E) -> ErrorPayload {
+    ErrorPayload::new(error.wire_code(), error.to_string()).retryable(error.is_retryable())
+}
+
 #[cfg(test)]
 mod tests {
+    use astrcode_core::{llm::LlmError, tool::SessionApiError};
+
     use super::{WireError, WireErrorCode};
 
     #[test]
     fn domain_errors_map_consistently() {
-        use crate::{llm::LlmError, tool::SessionApiError};
-
         assert_eq!(LlmError::Interrupted.wire_code(), WireErrorCode::Cancelled);
         assert_eq!(
             SessionApiError::NotFound("child".into()).wire_code(),

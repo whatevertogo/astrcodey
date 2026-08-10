@@ -9,6 +9,7 @@ mod path;
 mod process;
 mod session;
 mod session_inspect;
+mod wire;
 mod workspace;
 
 use std::{
@@ -23,7 +24,6 @@ use astrcode_core::{
     llm::LlmProvider,
     tool::SessionOperations,
     types::EventId,
-    wire::WireError,
 };
 use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
@@ -40,6 +40,7 @@ use astrcode_storage::{EventReader, SessionReader};
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
+use wire::wire_payload;
 
 use self::{
     context::ContextGroup, extension_http::ExtensionHttpGroup, llm::LlmGroup,
@@ -119,10 +120,6 @@ pub(super) fn require_empty_object(input: &Value, capability: &str) -> Result<()
             format!("{capability} expects an empty object"),
         ))
     }
-}
-
-pub(super) fn wire_payload<E: WireError>(error: E) -> ErrorPayload {
-    ErrorPayload::new(error.wire_code(), error.to_string()).retryable(error.is_retryable())
 }
 
 pub(super) fn io_error(error: impl std::fmt::Display) -> ErrorPayload {

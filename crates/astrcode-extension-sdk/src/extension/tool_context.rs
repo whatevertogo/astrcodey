@@ -5,7 +5,8 @@ use std::{
     sync::Arc,
 };
 
-use astrcode_core::{tool::ToolDefinition, types::SessionId, wire::WireErrorCode};
+use astrcode_core::{tool::ToolDefinition, types::SessionId};
+use astrcode_extension_contract::WireErrorCode;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 

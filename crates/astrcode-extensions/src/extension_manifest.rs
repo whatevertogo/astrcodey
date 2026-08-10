@@ -1,7 +1,6 @@
 //! s5r 扩展握手 manifest 类型与解析。
 
-use std::collections::HashSet;
-
+use astrcode_extension_contract::protocol::PeerInfo;
 use astrcode_extension_sdk::{
     builder::manifest as extension_manifest,
     extension::{
@@ -10,8 +9,8 @@ use astrcode_extension_sdk::{
         fixed_hook_mode, hook_mode_is_supported,
     },
     s5r::{
-        HandlerDescriptor, HandlerId, capability_from_wire, compact_event_from_name,
-        compact_event_to_name, event_from_name, event_to_name,
+        HandlerId, capability_from_wire, compact_event_from_name, compact_event_to_name,
+        event_from_name, event_to_name,
         manifest::{
             InitializeManifest, ManifestCommand, ManifestHook, ManifestHttpRoute, ManifestTool,
         },
@@ -19,9 +18,7 @@ use astrcode_extension_sdk::{
     },
     tool::{ExecutionMode, ToolDefinition, ToolOrigin},
 };
-use serde_json::{Value, json};
-
-use crate::remote_manifest::handler_id;
+use serde_json::Value;
 
 /// `Initialize.metadata` 解析出的注册信息。
 #[derive(Debug, Clone)]
@@ -32,7 +29,6 @@ pub(crate) struct ExtensionRegistration {
     tools: Vec<ToolDefinition>,
     commands: Vec<SlashCommand>,
     subscriptions: Vec<HookSubscription>,
-    continuation_hooks: Vec<String>,
     http_routes: Vec<RegisteredHttpRoute>,
     custom_events: Vec<CustomEventDeclaration>,
     custom_event_subscriptions: Vec<CustomEventSubscription>,
@@ -88,67 +84,6 @@ impl ExtensionRegistration {
         &self.subscriptions
     }
 
-    pub(crate) fn expected_handler_descriptors(&self) -> Result<Vec<HandlerDescriptor>, String> {
-        let mut descriptors = Vec::new();
-        let mut handler_ids = HashSet::new();
-        let mut push = |descriptor: HandlerDescriptor| {
-            if !handler_ids.insert(descriptor.handler_id.clone()) {
-                return Err(format!(
-                    "initialize manifest declares duplicate handler {}",
-                    descriptor.handler_id
-                ));
-            }
-            descriptors.push(descriptor);
-            Ok(())
-        };
-
-        for tool in &self.tools {
-            push(HandlerDescriptor {
-                handler_id: handler_id(&self.extension_id, "tool", &tool.name),
-                description: tool.description.clone(),
-                input_schema: tool.parameters.clone(),
-            })?;
-        }
-        for subscription in &self.subscriptions {
-            let event_name = subscription.event_name();
-            push(HandlerDescriptor {
-                handler_id: handler_id(&self.extension_id, "hook", event_name),
-                description: format!("hook {event_name}"),
-                input_schema: json!({"type": "object"}),
-            })?;
-        }
-        for hook in &self.continuation_hooks {
-            push(HandlerDescriptor {
-                handler_id: handler_id(&self.extension_id, "hook", hook),
-                description: format!("continuation hook {hook}"),
-                input_schema: json!({"type": "object"}),
-            })?;
-        }
-        for command in &self.commands {
-            push(HandlerDescriptor {
-                handler_id: handler_id(&self.extension_id, "command", &command.name),
-                description: command.description.clone(),
-                input_schema: json!({"type": "object"}),
-            })?;
-        }
-        for route in &self.http_routes {
-            validate_handler_id_kind(&self.extension_id, &route.handler_id, "http")?;
-            push(HandlerDescriptor {
-                handler_id: route.handler_id.clone(),
-                description: route.route.description.clone(),
-                input_schema: json!({"type": "object"}),
-            })?;
-        }
-        for subscription in &self.custom_event_subscriptions {
-            push(HandlerDescriptor {
-                handler_id: handler_id(&self.extension_id, "event", &subscription.id),
-                description: format!("custom event {}", subscription.event_type),
-                input_schema: json!({"type": "object"}),
-            })?;
-        }
-        Ok(descriptors)
-    }
-
     pub(crate) fn http_routes(&self) -> &[RegisteredHttpRoute] {
         &self.http_routes
     }
@@ -164,34 +99,25 @@ impl ExtensionRegistration {
 
 /// 从 s5r `InitializeMessage.metadata` 解析注册信息。
 pub(crate) fn registration_from_s5r_metadata(
+    peer: &PeerInfo,
     metadata: &Value,
-    expected_s5r_version: &str,
 ) -> Result<ExtensionRegistration, String> {
     let manifest: InitializeManifest = serde_json::from_value(metadata.clone())
         .map_err(|error| format!("invalid initialize manifest: {error}"))?;
-    if manifest.protocol.s5r != expected_s5r_version {
-        return Err(format!(
-            "initialize metadata protocol.s5r must be \"{expected_s5r_version}\""
-        ));
-    }
-    let required_wire_feature = astrcode_extension_contract::protocol::FEATURE_NESTED_INVOKE_V1;
-    if !manifest
-        .wire_features
-        .iter()
-        .any(|feature| feature == required_wire_feature)
-    {
-        return Err(format!(
-            "S5R {expected_s5r_version} requires wire feature {required_wire_feature}"
-        ));
-    }
-    registration_from_manifest(manifest)
+    let version = peer
+        .version
+        .as_deref()
+        .ok_or_else(|| "initialize peer is missing version".to_owned())?;
+    registration_from_manifest(&peer.name, version, manifest)
 }
 
 fn registration_from_manifest(
+    extension_id: &str,
+    version: &str,
     manifest: InitializeManifest,
 ) -> Result<ExtensionRegistration, String> {
-    let identity = extension_manifest(manifest.extension_id.clone())
-        .version(manifest.version.trim())
+    let identity = extension_manifest(extension_id)
+        .version(version.trim())
         .build_checked()
         .map_err(|error| format!("invalid initialize manifest identity: {error}"))?;
     let extension_id = identity.id().to_owned();
@@ -221,11 +147,10 @@ fn registration_from_manifest(
         .into_iter()
         .map(normalize_hook)
         .collect::<Result<_, _>>()?;
-    let continuation_hooks = manifest.continuation_hooks;
     let http_routes = manifest
         .http_routes
         .into_iter()
-        .map(normalize_http_route)
+        .map(|route| normalize_http_route(&extension_id, route))
         .collect::<Result<_, _>>()?;
     let custom_events = manifest.custom_events;
     let custom_event_subscriptions = manifest.custom_event_subscriptions;
@@ -237,7 +162,6 @@ fn registration_from_manifest(
         tools,
         commands,
         subscriptions,
-        continuation_hooks,
         http_routes,
         custom_events,
         custom_event_subscriptions,
@@ -344,7 +268,10 @@ fn normalize_hook_mode(mode: &str) -> Result<HookMode, String> {
     mode_from_name(mode).ok_or_else(|| format!("unknown hook mode in manifest: {mode}"))
 }
 
-fn normalize_http_route(route: ManifestHttpRoute) -> Result<RegisteredHttpRoute, String> {
+fn normalize_http_route(
+    extension_id: &str,
+    route: ManifestHttpRoute,
+) -> Result<RegisteredHttpRoute, String> {
     route.route.validate()?;
     if route.handler_id.trim().is_empty() {
         return Err(format!(
@@ -352,6 +279,7 @@ fn normalize_http_route(route: ManifestHttpRoute) -> Result<RegisteredHttpRoute,
             route.route.path
         ));
     }
+    validate_handler_id_kind(extension_id, &route.handler_id, "http")?;
     Ok(RegisteredHttpRoute {
         route: route.route,
         handler_id: route.handler_id,
@@ -371,20 +299,23 @@ mod tests {
 
     #[test]
     fn s5r_initialize_manifest_is_forward_compatible_and_validates_known_fields() {
-        let invalid_manifests = [
+        let invalid_inputs = [
             (
-                json!({
-                    "extension_id": "../escape",
-                    "version": "test",
-                    "protocol": {"s5r": astrcode_extension_sdk::s5r::S5R_VERSION}
-                }),
+                PeerInfo {
+                    name: "../escape".into(),
+                    role: "extension_worker".into(),
+                    version: Some("test".into()),
+                },
+                json!({}),
                 "must start with an ASCII letter or digit",
             ),
             (
+                PeerInfo {
+                    name: "bad-known-field".into(),
+                    role: "extension_worker".into(),
+                    version: Some("test".into()),
+                },
                 json!({
-                    "extension_id": "bad-known-field",
-                    "version": "test",
-                    "protocol": {"s5r": astrcode_extension_sdk::s5r::S5R_VERSION},
                     "tools": [{
                         "name": "tool",
                         "description": "",
@@ -395,37 +326,38 @@ mod tests {
                 "invalid type",
             ),
             (
+                PeerInfo {
+                    name: "bad-capability".into(),
+                    role: "extension_worker".into(),
+                    version: Some("test".into()),
+                },
                 json!({
-                    "extension_id": "bad-capability",
-                    "version": "test",
-                    "protocol": {"s5r": astrcode_extension_sdk::s5r::S5R_VERSION},
                     "capabilities": ["not_a_capability"]
                 }),
                 "unknown capability",
             ),
+            (
+                PeerInfo {
+                    name: "missing-version".into(),
+                    role: "extension_worker".into(),
+                    version: None,
+                },
+                json!({}),
+                "missing version",
+            ),
         ];
-        for (mut manifest, expected) in invalid_manifests {
-            manifest["wire_features"] =
-                json!([astrcode_extension_contract::protocol::FEATURE_NESTED_INVOKE_V1]);
-            let error =
-                registration_from_s5r_metadata(&manifest, astrcode_extension_sdk::s5r::S5R_VERSION)
-                    .unwrap_err();
+        for (peer, manifest, expected) in invalid_inputs {
+            let error = registration_from_s5r_metadata(&peer, &manifest).unwrap_err();
             assert!(error.contains(expected), "{error}");
         }
 
         let registration = registration_from_s5r_metadata(
+            &PeerInfo {
+                name: "defaults".into(),
+                role: "extension_worker".into(),
+                version: Some("test".into()),
+            },
             &json!({
-                "extension_id": "defaults",
-                "version": "test",
-                "protocol": {
-                    "s5r": astrcode_extension_sdk::s5r::S5R_VERSION,
-                    "future_protocol_field": true
-                },
-                "wire_codec": "json",
-                "wire_features": [
-                    astrcode_extension_contract::protocol::FEATURE_NESTED_INVOKE_V1,
-                    "future_feature"
-                ],
                 "future_manifest_field": {"enabled": true},
                 "tools": [
                     {
@@ -445,10 +377,11 @@ mod tests {
                 "hooks": [{"on": "turn_end", "mode": "non_blocking"}],
                 "custom_events": [{"eventType": "defaulted.event"}]
             }),
-            astrcode_extension_sdk::s5r::S5R_VERSION,
         )
         .expect("manifest should parse");
 
+        assert_eq!(registration.extension_id(), "defaults");
+        assert_eq!(registration.version(), "test");
         assert!(!registration.tools()[0].strict);
         assert_eq!(
             registration.tools()[0].execution_mode,

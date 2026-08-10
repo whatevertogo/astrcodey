@@ -29,4 +29,3 @@ pub mod session_lineage;
 pub mod tool;
 pub mod types;
 pub mod user_input;
-pub mod wire;

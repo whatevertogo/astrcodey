@@ -73,7 +73,6 @@ pub mod s5r;
 pub mod session;
 pub mod session_inspect;
 
-pub use astrcode_core::wire::WireError;
 pub use astrcode_extension_contract::WireErrorCode;
 pub mod testing;
 

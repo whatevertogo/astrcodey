@@ -14,21 +14,3 @@ pub fn capability_to_wire(cap: ExtensionCapability) -> &'static str {
 pub fn capability_from_wire(name: &str) -> Option<ExtensionCapability> {
     ExtensionCapability::parse(name)
 }
-
-/// 将 enum 能力映射为授权目录名（`astrcode.*` 前缀）。
-pub fn astrcode_capability_name(cap: ExtensionCapability) -> &'static str {
-    cap.grant_name()
-}
-
-pub fn is_astrcode_capability(name: &str) -> bool {
-    name.starts_with("astrcode.")
-}
-
-pub fn is_reserved_capability_prefix(name: &str) -> bool {
-    name.starts_with("handler.") || name.starts_with("astrcode.") || name.starts_with("internal.")
-}
-
-/// `astrcode.session.control` 子动作。
-pub fn session_control_action(cap: &str) -> Option<&str> {
-    cap.strip_prefix("astrcode.session.control.")
-}

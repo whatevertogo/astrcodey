@@ -322,7 +322,7 @@ mod tests {
     use astrcode_protocol::http::RunInfoDto;
 
     use super::{
-        RUN_INFO_TEMPFILE_PREFIX, masked_token, remove_run_info_if_current_at, replace_run_info,
+        RUN_INFO_TEMPFILE_PREFIX, remove_run_info_if_current_at, replace_run_info,
         write_run_info_at,
     };
 

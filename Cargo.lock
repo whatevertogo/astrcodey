@@ -301,7 +301,6 @@ dependencies = [
 name = "astrcode-core"
 version = "0.3.13"
 dependencies = [
- "astrcode-extension-contract",
  "async-trait",
  "chrono",
  "dirs",

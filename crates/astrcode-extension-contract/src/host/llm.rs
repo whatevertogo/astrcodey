@@ -1,9 +1,13 @@
 //! LLM 宿主能力线缆契约。
 
+use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{error::WireErrorCode, protocol::ErrorPayload};
+use crate::{
+    error::WireErrorCode,
+    protocol::{ErrorPayload, ModelStreamEvent},
+};
 
 /// Typed request shared by bundled and worker model clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -88,9 +92,7 @@ pub struct HostLlmCollectedStreamOutput {
     pub chunks: Vec<HostLlmTextDelta>,
 }
 
-/// Validates and collects the typed result of a completed model stream.
-#[doc(hidden)]
-pub fn collect_model_stream_output(
+fn collect_model_stream_output(
     completed: &Value,
     chunks: Vec<HostLlmTextDelta>,
 ) -> Result<HostLlmCollectedStreamOutput, ErrorPayload> {
@@ -114,4 +116,31 @@ pub fn collect_model_stream_output(
         model,
         chunks,
     })
+}
+
+/// Collects a model event stream into the typed response used by host clients.
+#[doc(hidden)]
+pub async fn collect_model_stream<S>(
+    mut stream: S,
+) -> Result<HostLlmCollectedStreamOutput, ErrorPayload>
+where
+    S: Stream<Item = ModelStreamEvent> + Unpin,
+{
+    let mut chunks = Vec::new();
+    while let Some(event) = stream.next().await {
+        match event {
+            ModelStreamEvent::ContentDelta { content } => {
+                chunks.push(HostLlmTextDelta { delta: content });
+            },
+            ModelStreamEvent::Completed { output } => {
+                return collect_model_stream_output(&output, chunks);
+            },
+            ModelStreamEvent::Failed { error } => return Err(error),
+            _ => {},
+        }
+    }
+    Err(ErrorPayload::new(
+        WireErrorCode::StreamClosed,
+        "model stream closed without a terminal event",
+    ))
 }

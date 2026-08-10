@@ -6,7 +6,6 @@ use std::{
 };
 
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use serde_json::Value;
 
 use crate::{
@@ -134,33 +133,11 @@ where
     }
 
     async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-        let mut stream = self
+        let stream = self
             .invoke_stream(capability, input)
             .await
             .map_err(v3_invoke_error_to_payload)?;
-        let mut chunks = Vec::new();
-        let mut terminal = None;
-        while let Some(event) = stream.next().await {
-            match event {
-                astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
-                    content,
-                } => chunks.push(crate::host::HostLlmTextDelta { delta: content }),
-                astrcode_extension_contract::protocol::ModelStreamEvent::Completed { output } => {
-                    terminal = Some(output);
-                },
-                astrcode_extension_contract::protocol::ModelStreamEvent::Failed { error } => {
-                    return Err(contract_error_to_payload(error));
-                },
-                _ => {},
-            }
-        }
-        let terminal = terminal.ok_or_else(|| {
-            ErrorPayload::new(
-                WireErrorCode::StreamClosed,
-                "host stream closed without a completed event",
-            )
-        })?;
-        let output = crate::host::collect_model_stream_output(&terminal, chunks)?;
+        let output = crate::host::collect_model_stream(stream).await?;
         serde_json::to_value(output).map_err(|error| {
             ErrorPayload::new(
                 WireErrorCode::SerializationFailed,
@@ -189,7 +166,7 @@ fn v3_invoke_error_to_payload(error: astrcode_extension_contract::InvokeError) -
     use astrcode_extension_contract::InvokeError;
 
     match error {
-        InvokeError::Local(error) | InvokeError::Remote(error) => contract_error_to_payload(error),
+        InvokeError::Local(error) | InvokeError::Remote(error) => error,
         InvokeError::DriverUnavailable => ErrorPayload::new(
             WireErrorCode::HostNotReady,
             "S5R 3.0 host peer driver is not running",
@@ -197,18 +174,6 @@ fn v3_invoke_error_to_payload(error: astrcode_extension_contract::InvokeError) -
         InvokeError::PeerClosed => {
             ErrorPayload::new(WireErrorCode::PeerClosed, "S5R 3.0 host peer closed")
         },
-    }
-}
-
-pub(crate) fn contract_error_to_payload(
-    error: astrcode_extension_contract::protocol::ErrorPayload,
-) -> ErrorPayload {
-    ErrorPayload {
-        code: error.code,
-        message: error.message,
-        hint: error.hint,
-        retryable: error.retryable,
-        details: error.details,
     }
 }
 

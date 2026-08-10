@@ -55,11 +55,10 @@ use crate::{
         CompactEvent, ContinueAfterStopOptions, CustomEventSubscription, ExtensionCapability,
         HookMode, LifecycleEvent,
     },
-    s5r::{HandlerId, HandlerKind, HandlerResult},
+    s5r::HandlerResult,
     tool::ToolDefinition,
     worker::{
         host::{V3PeerHostApi, set_host_api, with_host_api},
-        manifest::ManifestCatalog,
         registry::{HandlerInvoke, HandlerRegistry},
     },
 };
@@ -218,14 +217,13 @@ impl Worker {
         let metadata = self
             .registry
             .catalog()
-            .to_metadata_value(&self.extension_id, &self.version)
+            .to_metadata_value()
             .map_err(|error| {
                 ErrorPayload::new(
                     WireErrorCode::ManifestSerializeFailed,
                     format!("failed to serialize S5R 3.0 initialize manifest: {error}"),
                 )
             })?;
-        let handlers = build_v3_handler_descriptors(self.registry.catalog(), &self.extension_id);
         let supported = BTreeSet::from([
             FeatureName::nested_invoke_v1(),
             FeatureName::model_stream_v1(),
@@ -239,7 +237,7 @@ impl Worker {
                 version: Some(self.version),
             },
         )
-        .accept(supported, BTreeSet::new(), handlers, Vec::new(), metadata)
+        .accept(supported, BTreeSet::new(), Vec::new(), Vec::new(), metadata)
         .await
         .map_err(v3_peer_error_to_payload)?;
         let (handle, driver) = peer.into_runtime();
@@ -351,9 +349,7 @@ where
         };
         let token = CancelToken::from_cancellation_token(invocation.cancellation);
         let host_api: Arc<dyn host::HostApi> = Arc::new(V3PeerHostApi::nested(invocation.nested));
-        let result = with_host_api(host_api, self.registry.dispatch_invoke(input, token))
-            .await
-            .map_err(payload_to_contract_error)?;
+        let result = with_host_api(host_api, self.registry.dispatch_invoke(input, token)).await?;
         let output = serde_json::to_value(result).map_err(|error| {
             astrcode_extension_contract::protocol::ErrorPayload::new(
                 astrcode_extension_contract::WireErrorCode::SerializationFailed,
@@ -366,82 +362,11 @@ where
     }
 }
 
-fn payload_to_contract_error(
-    error: ErrorPayload,
-) -> astrcode_extension_contract::protocol::ErrorPayload {
-    astrcode_extension_contract::protocol::ErrorPayload {
-        code: error.code,
-        message: error.message,
-        hint: error.hint,
-        retryable: error.retryable,
-        details: error.details,
-    }
-}
-
 fn v3_peer_error_to_payload(error: astrcode_extension_contract::PeerError) -> ErrorPayload {
     match error {
-        astrcode_extension_contract::PeerError::Remote(error) => {
-            host::contract_error_to_payload(error)
-        },
+        astrcode_extension_contract::PeerError::Remote(error) => error,
         error => ErrorPayload::new(WireErrorCode::Transport, error.to_string()),
     }
-}
-
-fn build_handler_descriptors(
-    catalog: &ManifestCatalog,
-    extension_id: &str,
-) -> Vec<astrcode_extension_contract::protocol::HandlerDescriptor> {
-    let mut out = Vec::new();
-    for tool in &catalog.tools {
-        out.push(astrcode_extension_contract::protocol::HandlerDescriptor {
-            handler_id: HandlerId::new(extension_id, HandlerKind::Tool, &tool.name).into(),
-            description: tool.description.clone(),
-            input_schema: tool.parameters.clone(),
-        });
-    }
-    for hook in &catalog.hooks {
-        out.push(astrcode_extension_contract::protocol::HandlerDescriptor {
-            handler_id: HandlerId::new(extension_id, HandlerKind::Hook, &hook.on).into(),
-            description: format!("hook {}", hook.on),
-            input_schema: json!({"type":"object"}),
-        });
-    }
-    for hook in &catalog.continuation_hooks {
-        out.push(astrcode_extension_contract::protocol::HandlerDescriptor {
-            handler_id: HandlerId::new(extension_id, HandlerKind::Hook, hook).into(),
-            description: format!("continuation hook {hook}"),
-            input_schema: json!({"type":"object"}),
-        });
-    }
-    for cmd in &catalog.commands {
-        out.push(astrcode_extension_contract::protocol::HandlerDescriptor {
-            handler_id: HandlerId::new(extension_id, HandlerKind::Command, &cmd.name).into(),
-            description: cmd.description.clone(),
-            input_schema: json!({"type":"object"}),
-        });
-    }
-    for route in &catalog.http_routes {
-        out.push(astrcode_extension_contract::protocol::HandlerDescriptor {
-            handler_id: route.handler_id.clone(),
-            description: route.route.description.clone(),
-            input_schema: json!({"type":"object"}),
-        });
-    }
-    for subscription in &catalog.custom_event_subscriptions {
-        out.push(astrcode_extension_contract::protocol::HandlerDescriptor {
-            handler_id: HandlerId::new(extension_id, HandlerKind::Event, &subscription.id).into(),
-            description: format!("custom event {}", subscription.event_type),
-            input_schema: json!({"type":"object"}),
-        });
-    }
-    out
-}
-
-fn build_v3_handler_descriptors(
-    catalog: &ManifestCatalog,
-    extension_id: &str,
-) -> Vec<astrcode_extension_contract::protocol::HandlerDescriptor> {
-    build_handler_descriptors(catalog, extension_id)
 }
 
 pub fn tool_text(content: impl Into<String>, is_error: bool) -> HandlerResult {

@@ -5,10 +5,7 @@ pub mod effects;
 pub mod manifest;
 pub mod messages;
 
-pub use capabilities::{
-    astrcode_capability_name, capability_from_wire, capability_to_wire, is_astrcode_capability,
-    is_reserved_capability_prefix,
-};
+pub use capabilities::{capability_from_wire, capability_to_wire};
 pub use effects::{CallContinuation, HandlerResult};
 pub use messages::{
     CAP_HANDLER_INVOKE, CAP_RUNTIME_PING, CancelMsg, CapabilityDescriptor, ErrorPayload,

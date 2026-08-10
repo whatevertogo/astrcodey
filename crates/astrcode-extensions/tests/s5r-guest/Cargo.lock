@@ -21,7 +21,6 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 name = "astrcode-core"
 version = "0.3.13"
 dependencies = [
- "astrcode-extension-contract",
  "async-trait",
  "chrono",
  "dirs",

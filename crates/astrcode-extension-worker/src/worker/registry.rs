@@ -543,8 +543,7 @@ impl HandlerRegistry {
                 format!("duplicate hook registration: {on}"),
             ));
         }
-        self.continuation_hooks.insert(on.clone(), handler);
-        self.catalog.continuation_hooks.push(on);
+        self.continuation_hooks.insert(on, handler);
         Ok(())
     }
 
@@ -775,10 +774,7 @@ mod tests {
             )
             .unwrap();
 
-        let metadata = registry
-            .catalog()
-            .to_metadata_value("test-extension", "0.1.0")
-            .unwrap();
+        let metadata = registry.catalog().to_metadata_value().unwrap();
         assert_eq!(metadata["hooks"], json!([]));
 
         let result = registry
@@ -938,10 +934,7 @@ mod tests {
             .register_compact_hook(CompactEvent::PostCompact, handler)
             .unwrap();
 
-        let metadata = registry
-            .catalog()
-            .to_metadata_value("test-extension", "0.1.0")
-            .unwrap();
+        let metadata = registry.catalog().to_metadata_value().unwrap();
         assert_eq!(
             metadata["hooks"],
             json!([

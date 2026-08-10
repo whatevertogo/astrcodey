@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use astrcode_core::wire::WireErrorCode;
+use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     host::{
         HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS, HostNetworkRedirectPolicy,
