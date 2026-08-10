@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
+    marker::PhantomData,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -29,6 +30,7 @@ use crate::{
 };
 
 const COMMAND_QUEUE_CAPACITY: usize = 256;
+const WRITE_QUEUE_CAPACITY: usize = 256;
 const STREAM_BUFFER_CAPACITY: usize = 32;
 const STREAM_FORWARD_BUFFER_CAPACITY: usize = 256;
 const STREAM_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -85,14 +87,16 @@ enum DriverCommand {
     Invoke {
         message: InvokeMsg,
         response: oneshot::Sender<UnaryResult>,
-        accepted: oneshot::Sender<Result<(), ErrorPayload>>,
+        written: oneshot::Sender<Result<(), ErrorPayload>>,
+        caller_cancellation: CancellationToken,
         permit: OwnedSemaphorePermit,
     },
     InvokeStream {
         message: InvokeMsg,
         output: mpsc::Sender<ModelStreamEvent>,
         failure: Arc<Mutex<Option<ErrorPayload>>>,
-        accepted: oneshot::Sender<Result<(), ErrorPayload>>,
+        written: oneshot::Sender<Result<(), ErrorPayload>>,
+        caller_cancellation: CancellationToken,
         permit: OwnedSemaphorePermit,
     },
 }
@@ -106,25 +110,82 @@ enum TaskCompletion {
     StreamForward,
 }
 
+struct WriteRequest {
+    message: WireMessage,
+    written: Option<oneshot::Sender<Result<(), ErrorPayload>>>,
+}
+
+/// Sole post-handshake frame writer. FIFO ordering prevents a cancel from overtaking its invoke.
+#[derive(Clone)]
+struct WritePump {
+    sender: mpsc::Sender<WriteRequest>,
+}
+
+impl WritePump {
+    fn try_write(&self, message: WireMessage) -> Result<(), PeerError> {
+        self.sender
+            .try_send(WriteRequest {
+                message,
+                written: None,
+            })
+            .map_err(write_queue_error)
+    }
+
+    fn try_write_with_receipt(
+        &self,
+        message: WireMessage,
+        written: oneshot::Sender<Result<(), ErrorPayload>>,
+    ) -> bool {
+        match self.sender.try_send(WriteRequest {
+            message,
+            written: Some(written),
+        }) {
+            Ok(()) => true,
+            Err(error) => {
+                let (request, error) = write_queue_rejection(error);
+                if let Some(written) = request.written {
+                    let _ = written.send(Err(error));
+                }
+                false
+            },
+        }
+    }
+
+    async fn write(&self, message: WireMessage) -> Result<(), PeerError> {
+        let (written_tx, written_rx) = oneshot::channel();
+        self.sender
+            .send(WriteRequest {
+                message,
+                written: Some(written_tx),
+            })
+            .await
+            .map_err(|_| PeerError::Protocol("peer write pump is unavailable".into()))?;
+        written_rx
+            .await
+            .map_err(|_| PeerError::Protocol("peer write pump stopped before completion".into()))?
+            .map_err(|error| PeerError::Protocol(format!("peer frame write failed: {error}")))
+    }
+}
+
 /// Cloneable request surface for a running [`PeerDriver`].
 pub struct PeerHandle<T> {
-    transport: Arc<T>,
     state: Arc<Ready>,
     command_tx: mpsc::Sender<DriverCommand>,
     control_tx: mpsc::UnboundedSender<ControlCommand>,
     next_request_id: Arc<AtomicU64>,
     outbound_permits: Arc<Semaphore>,
+    marker: PhantomData<fn() -> T>,
 }
 
 impl<T> Clone for PeerHandle<T> {
     fn clone(&self) -> Self {
         Self {
-            transport: Arc::clone(&self.transport),
             state: Arc::clone(&self.state),
             command_tx: self.command_tx.clone(),
             control_tx: self.control_tx.clone(),
             next_request_id: Arc::clone(&self.next_request_id),
             outbound_permits: Arc::clone(&self.outbound_permits),
+            marker: PhantomData,
         }
     }
 }
@@ -218,8 +279,14 @@ where
         let permit = self
             .acquire_outbound_permit(parent_invoke_id.is_some())
             .await?;
+        let caller_cancellation = CancellationToken::new();
+        let mut cancel = CancelOnDrop::new(
+            id.clone(),
+            self.control_tx.clone(),
+            caller_cancellation.clone(),
+        );
         let (response_tx, response_rx) = oneshot::channel();
-        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let (written_tx, written_rx) = oneshot::channel();
         self.command_tx
             .send(DriverCommand::Invoke {
                 message: InvokeMsg {
@@ -230,17 +297,17 @@ where
                     parent_invoke_id,
                 },
                 response: response_tx,
-                accepted: accepted_tx,
+                written: written_tx,
+                caller_cancellation,
                 permit,
             })
             .await
             .map_err(|_| InvokeError::DriverUnavailable)?;
-        accepted_rx
+        written_rx
             .await
             .map_err(|_| InvokeError::DriverUnavailable)?
             .map_err(InvokeError::Local)?;
 
-        let mut cancel = CancelOnDrop::new(id, self.control_tx.clone());
         let result = response_rx.await.map_err(|_| InvokeError::PeerClosed)?;
         cancel.disarm();
         result.map_err(InvokeError::Remote)
@@ -257,9 +324,15 @@ where
         let permit = self
             .acquire_outbound_permit(parent_invoke_id.is_some())
             .await?;
+        let caller_cancellation = CancellationToken::new();
+        let mut cancel = CancelOnDrop::new(
+            id.clone(),
+            self.control_tx.clone(),
+            caller_cancellation.clone(),
+        );
         let (output_tx, output_rx) = mpsc::channel(STREAM_BUFFER_CAPACITY);
         let failure = Arc::new(Mutex::new(None));
-        let (accepted_tx, accepted_rx) = oneshot::channel();
+        let (written_tx, written_rx) = oneshot::channel();
         self.command_tx
             .send(DriverCommand::InvokeStream {
                 message: InvokeMsg {
@@ -271,15 +344,17 @@ where
                 },
                 output: output_tx,
                 failure: Arc::clone(&failure),
-                accepted: accepted_tx,
+                written: written_tx,
+                caller_cancellation,
                 permit,
             })
             .await
             .map_err(|_| InvokeError::DriverUnavailable)?;
-        accepted_rx
+        written_rx
             .await
             .map_err(|_| InvokeError::DriverUnavailable)?
             .map_err(InvokeError::Local)?;
+        cancel.disarm();
         Ok(PeerStream {
             id,
             stream: TerminalStream::new(model_event_stream(output_rx), failure),
@@ -438,6 +513,8 @@ pub struct PeerDriver<T> {
     state: Arc<Ready>,
     command_rx: mpsc::Receiver<DriverCommand>,
     control_rx: mpsc::UnboundedReceiver<ControlCommand>,
+    write_pump: WritePump,
+    write_rx: Option<mpsc::Receiver<WriteRequest>>,
     handle: PeerHandle<T>,
     inbound_permits: Arc<Semaphore>,
 }
@@ -449,20 +526,23 @@ where
     let state = Arc::new(state);
     let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
     let (control_tx, control_rx) = mpsc::unbounded_channel();
+    let (write_tx, write_rx) = mpsc::channel(WRITE_QUEUE_CAPACITY);
     let outbound_permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS));
     let handle = PeerHandle {
-        transport: Arc::clone(&transport),
         state: Arc::clone(&state),
         command_tx,
         control_tx,
         next_request_id: Arc::new(AtomicU64::new(1)),
         outbound_permits,
+        marker: PhantomData,
     };
     let driver = PeerDriver {
         transport,
         state,
         command_rx,
         control_rx,
+        write_pump: WritePump { sender: write_tx },
+        write_rx: Some(write_rx),
         handle: handle.clone(),
         inbound_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
     };
@@ -488,6 +568,13 @@ where
     where
         H: PeerInvokeHandler<T> + 'static,
     {
+        let Some(write_rx) = self.write_rx.take() else {
+            return Err(PeerError::Protocol(
+                "peer driver can only be run once".into(),
+            ));
+        };
+        let mut writer = JoinSet::new();
+        writer.spawn(run_write_pump(Arc::clone(&self.transport), write_rx));
         let mut pending = HashMap::<String, PendingRequest>::new();
         let mut cancelled = CancelledRequests::default();
         let mut inbound = HashMap::<String, CancellationToken>::new();
@@ -498,7 +585,6 @@ where
                 Some(control) = self.control_rx.recv() => {
                     if let Err(error) = self
                         .handle_control(control, &mut pending, &mut cancelled)
-                        .await
                     {
                         break Err(error);
                     }
@@ -509,7 +595,7 @@ where
                         &mut pending,
                         &inbound,
                         &mut tasks,
-                    ).await {
+                    ) {
                         break Err(error);
                     }
                 }
@@ -523,6 +609,21 @@ where
                         Err(error) => {
                             break Err(PeerError::Protocol(format!(
                                 "peer-owned invocation task failed: {error}"
+                            )));
+                        }
+                    }
+                }
+                Some(joined) = writer.join_next() => {
+                    match joined {
+                        Ok(Ok(())) => {
+                            break Err(PeerError::Protocol(
+                                "peer write pump stopped unexpectedly".into(),
+                            ));
+                        }
+                        Ok(Err(error)) => break Err(error),
+                        Err(error) => {
+                            break Err(PeerError::Protocol(format!(
+                                "peer write pump task failed: {error}"
                             )));
                         }
                     }
@@ -542,7 +643,7 @@ where
                         &mut cancelled,
                         &mut inbound,
                         &mut tasks,
-                    ).await {
+                    ) {
                         break Err(error);
                     }
                 }
@@ -566,10 +667,12 @@ where
             }
         }
         pending.clear();
+        writer.abort_all();
+        while writer.join_next().await.is_some() {}
         result
     }
 
-    async fn handle_command(
+    fn handle_command(
         &self,
         command: DriverCommand,
         pending: &mut HashMap<String, PendingRequest>,
@@ -580,18 +683,19 @@ where
             DriverCommand::Invoke {
                 message,
                 response,
-                accepted,
+                written,
+                caller_cancellation,
                 permit,
             } => {
-                if accepted.is_closed() {
+                if caller_cancellation.is_cancelled() {
                     return Ok(());
                 }
                 if let Err(error) = validate_parent(&message, inbound) {
-                    let _ = accepted.send(Err(error));
+                    let _ = written.send(Err(error));
                     return Ok(());
                 }
                 if pending.contains_key(&message.id) {
-                    let _ = accepted.send(Err(ErrorPayload::new(
+                    let _ = written.send(Err(ErrorPayload::new(
                         WireErrorCode::DuplicateRequestId,
                         "duplicate outbound request id",
                     )));
@@ -605,33 +709,25 @@ where
                         _permit: permit,
                     },
                 );
-                match self.write(&WireMessage::Invoke(message)).await {
-                    Ok(()) => {
-                        let _ = accepted.send(Ok(()));
-                    },
-                    Err(error) => {
-                        pending.remove(&id);
-                        let _ = accepted.send(Err(transport_payload(&error)));
-                        return Err(error);
-                    },
-                }
+                self.start_invoke_write(id, message, written, pending);
             },
             DriverCommand::InvokeStream {
                 message,
                 output,
                 failure,
-                accepted,
+                written,
+                caller_cancellation,
                 permit,
             } => {
-                if accepted.is_closed() {
+                if caller_cancellation.is_cancelled() {
                     return Ok(());
                 }
                 if let Err(error) = validate_parent(&message, inbound) {
-                    let _ = accepted.send(Err(error));
+                    let _ = written.send(Err(error));
                     return Ok(());
                 }
                 if pending.contains_key(&message.id) {
-                    let _ = accepted.send(Err(ErrorPayload::new(
+                    let _ = written.send(Err(ErrorPayload::new(
                         WireErrorCode::DuplicateRequestId,
                         "duplicate outbound request id",
                     )));
@@ -654,22 +750,28 @@ where
                     forward_stream(stream_id, forward_rx, output, failure, control_tx).await;
                     Ok(TaskCompletion::StreamForward)
                 });
-                match self.write(&WireMessage::Invoke(message)).await {
-                    Ok(()) => {
-                        let _ = accepted.send(Ok(()));
-                    },
-                    Err(error) => {
-                        pending.remove(&id);
-                        let _ = accepted.send(Err(transport_payload(&error)));
-                        return Err(error);
-                    },
-                }
+                self.start_invoke_write(id, message, written, pending);
             },
         }
         Ok(())
     }
 
-    async fn handle_control(
+    fn start_invoke_write(
+        &self,
+        id: String,
+        message: InvokeMsg,
+        written: oneshot::Sender<Result<(), ErrorPayload>>,
+        pending: &mut HashMap<String, PendingRequest>,
+    ) {
+        if !self
+            .write_pump
+            .try_write_with_receipt(WireMessage::Invoke(message), written)
+        {
+            pending.remove(&id);
+        }
+    }
+
+    fn handle_control(
         &self,
         control: ControlCommand,
         pending: &mut HashMap<String, PendingRequest>,
@@ -677,19 +779,21 @@ where
     ) -> Result<(), PeerError> {
         match control {
             ControlCommand::Cancel { id, reason } => {
-                pending.remove(&id);
+                if pending.remove(&id).is_none() {
+                    return Ok(());
+                }
                 cancelled.insert(id.clone());
-                self.write(&WireMessage::Cancel(crate::protocol::CancelMsg {
-                    id,
-                    reason: reason.into(),
-                }))
-                .await?;
+                self.write_pump
+                    .try_write(WireMessage::Cancel(crate::protocol::CancelMsg {
+                        id,
+                        reason: reason.into(),
+                    }))?;
             },
         }
         Ok(())
     }
 
-    async fn handle_message<H>(
+    fn handle_message<H>(
         &self,
         message: WireMessage,
         handler: Arc<H>,
@@ -714,46 +818,43 @@ where
             },
             WireMessage::Invoke(request) => {
                 if inbound.contains_key(&request.id) {
-                    self.write(&failed_result(
+                    self.write_pump.try_write(failed_result(
                         request.id,
                         WireErrorCode::DuplicateRequestId,
                         "duplicate inbound request id",
-                    ))
-                    .await?;
+                    ))?;
                     return Ok(());
                 }
                 if let Err(error) =
                     validate_inbound_features(&request, &self.state.negotiated_features, pending)
                 {
-                    self.write(&WireMessage::Result(ResultMsg {
+                    self.write_pump.try_write(WireMessage::Result(ResultMsg {
                         id: request.id,
                         kind: ResultKind::Invoke,
                         success: false,
                         output: None,
                         error: Some(error),
-                    }))
-                    .await?;
+                    }))?;
                     return Ok(());
                 }
                 let permit = match Arc::clone(&self.inbound_permits).try_acquire_owned() {
                     Ok(permit) => permit,
                     Err(_) => {
-                        self.write(&failed_result(
+                        self.write_pump.try_write(failed_result(
                             request.id,
                             WireErrorCode::PeerOverloaded,
                             "peer has reached its in-flight request limit",
-                        ))
-                        .await?;
+                        ))?;
                         return Ok(());
                     },
                 };
                 let cancellation = CancellationToken::new();
                 inbound.insert(request.id.clone(), cancellation.clone());
                 let nested = self.handle.nested(request.id.clone());
-                let transport = Arc::clone(&self.transport);
+                let write_pump = self.write_pump.clone();
                 tasks.spawn(async move {
                     run_inbound(
-                        transport,
+                        write_pump,
                         handler,
                         InboundInvoke {
                             request,
@@ -772,14 +873,10 @@ where
             )),
         }
     }
-
-    async fn write(&self, message: &WireMessage) -> Result<(), PeerError> {
-        write_message(self.transport.as_ref(), message).await
-    }
 }
 
 async fn run_inbound<T, H>(
-    transport: Arc<T>,
+    write_pump: WritePump,
     handler: Arc<H>,
     invocation: InboundInvoke<T>,
     _permit: OwnedSemaphorePermit,
@@ -793,17 +890,15 @@ where
     let cancellation = invocation.cancellation.clone();
     match handler.invoke(invocation).await {
         Ok(InvocationResponse::Unary(output)) if !wants_stream => {
-            write_message(
-                transport.as_ref(),
-                &WireMessage::Result(ResultMsg {
+            write_pump
+                .write(WireMessage::Result(ResultMsg {
                     id: id.clone(),
                     kind: ResultKind::Invoke,
                     success: true,
                     output: Some(output),
                     error: None,
-                }),
-            )
-            .await?;
+                }))
+                .await?;
         },
         Ok(InvocationResponse::Stream(mut stream)) if wants_stream => {
             let mut started = false;
@@ -832,42 +927,36 @@ where
                 };
                 let event = validate_outbound_stream_event(event, &mut started);
                 let terminal = event.is_terminal();
-                write_message(
-                    transport.as_ref(),
-                    &WireMessage::Stream(StreamMsg {
+                write_pump
+                    .write(WireMessage::Stream(StreamMsg {
                         id: id.clone(),
                         event,
-                    }),
-                )
-                .await?;
+                    }))
+                    .await?;
                 if terminal {
                     break;
                 }
             }
         },
         Ok(_) => {
-            write_message(
-                transport.as_ref(),
-                &failed_result(
+            write_pump
+                .write(failed_result(
                     id.clone(),
                     WireErrorCode::InvalidResponse,
                     "handler response mode does not match invoke mode",
-                ),
-            )
-            .await?;
+                ))
+                .await?;
         },
         Err(error) => {
-            write_message(
-                transport.as_ref(),
-                &WireMessage::Result(ResultMsg {
+            write_pump
+                .write(WireMessage::Result(ResultMsg {
                     id: id.clone(),
                     kind: ResultKind::Invoke,
                     success: false,
                     output: None,
                     error: Some(error),
-                }),
-            )
-            .await?;
+                }))
+                .await?;
         },
     }
     Ok(id)
@@ -1105,6 +1194,54 @@ fn failed_result(id: String, code: WireErrorCode, message: &'static str) -> Wire
     })
 }
 
+async fn run_write_pump<T>(
+    transport: Arc<T>,
+    mut receiver: mpsc::Receiver<WriteRequest>,
+) -> Result<(), PeerError>
+where
+    T: FrameTransport + 'static,
+{
+    while let Some(WriteRequest { message, written }) = receiver.recv().await {
+        match write_message(transport.as_ref(), &message).await {
+            Ok(()) => {
+                if let Some(written) = written {
+                    let _ = written.send(Ok(()));
+                }
+            },
+            Err(error) => {
+                if let Some(written) = written {
+                    let _ = written.send(Err(transport_payload(&error)));
+                }
+                return Err(error);
+            },
+        }
+    }
+    Ok(())
+}
+
+fn write_queue_error(error: mpsc::error::TrySendError<WriteRequest>) -> PeerError {
+    let message = match error {
+        mpsc::error::TrySendError::Full(_) => "peer write queue is full",
+        mpsc::error::TrySendError::Closed(_) => "peer write pump is unavailable",
+    };
+    PeerError::Protocol(message.into())
+}
+
+fn write_queue_rejection(
+    error: mpsc::error::TrySendError<WriteRequest>,
+) -> (WriteRequest, ErrorPayload) {
+    match error {
+        mpsc::error::TrySendError::Full(request) => (
+            request,
+            ErrorPayload::new(WireErrorCode::PeerOverloaded, "peer write queue is full"),
+        ),
+        mpsc::error::TrySendError::Closed(request) => (
+            request,
+            ErrorPayload::new(WireErrorCode::PeerClosed, "peer write pump is unavailable"),
+        ),
+    }
+}
+
 async fn write_message<T>(transport: &T, message: &WireMessage) -> Result<(), PeerError>
 where
     T: FrameTransport + ?Sized,
@@ -1130,14 +1267,20 @@ fn set_stream_failure(failure: &Mutex<Option<ErrorPayload>>, error: ErrorPayload
 struct CancelOnDrop {
     id: String,
     control_tx: mpsc::UnboundedSender<ControlCommand>,
+    caller_cancellation: CancellationToken,
     armed: bool,
 }
 
 impl CancelOnDrop {
-    fn new(id: String, control_tx: mpsc::UnboundedSender<ControlCommand>) -> Self {
+    fn new(
+        id: String,
+        control_tx: mpsc::UnboundedSender<ControlCommand>,
+        caller_cancellation: CancellationToken,
+    ) -> Self {
         Self {
             id,
             control_tx,
+            caller_cancellation,
             armed: true,
         }
     }
@@ -1150,6 +1293,7 @@ impl CancelOnDrop {
 impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         if self.armed {
+            self.caller_cancellation.cancel();
             let _ = self.control_tx.send(ControlCommand::Cancel {
                 id: self.id.clone(),
                 reason: "caller_dropped",
@@ -1243,9 +1387,37 @@ mod tests {
         protocol::{FeatureName, ModelStreamEvent},
     };
 
+    struct WriteGate {
+        armed: AtomicBool,
+        started: Notify,
+        release: Semaphore,
+    }
+
+    impl WriteGate {
+        fn new() -> Self {
+            Self {
+                armed: AtomicBool::new(false),
+                started: Notify::new(),
+                release: Semaphore::new(0),
+            }
+        }
+
+        fn arm(&self) {
+            assert!(!self.armed.swap(true, Ordering::AcqRel));
+        }
+
+        async fn wait_if_armed(&self) {
+            if self.armed.swap(false, Ordering::AcqRel) {
+                self.started.notify_one();
+                self.release.acquire().await.unwrap().forget();
+            }
+        }
+    }
+
     struct ChannelTransport {
         inbound: AsyncMutex<mpsc::Receiver<Vec<u8>>>,
         outbound: mpsc::Sender<Vec<u8>>,
+        write_gate: Arc<WriteGate>,
     }
 
     impl ChannelTransport {
@@ -1256,10 +1428,12 @@ mod tests {
                 Self {
                     inbound: AsyncMutex::new(left_rx),
                     outbound: right_tx,
+                    write_gate: Arc::new(WriteGate::new()),
                 },
                 Self {
                     inbound: AsyncMutex::new(right_rx),
                     outbound: left_tx,
+                    write_gate: Arc::new(WriteGate::new()),
                 },
             )
         }
@@ -1277,6 +1451,7 @@ mod tests {
         }
 
         async fn write_frame(&self, payload: &[u8]) -> Result<(), FrameError> {
+            self.write_gate.wait_if_armed().await;
             self.outbound.send(payload.to_vec()).await.map_err(|_| {
                 FrameError::Io(io::Error::new(
                     io::ErrorKind::BrokenPipe,
@@ -1382,6 +1557,7 @@ mod tests {
     #[tokio::test]
     async fn ready_peer_routes_nested_streaming_and_drop_cancellation() {
         let (host_transport, worker_transport) = ChannelTransport::pair();
+        let host_write_gate = Arc::clone(&host_transport.write_gate);
         let host = Peer::new(host_transport, peer_info("host", "host"));
         let worker = Peer::new(worker_transport, peer_info("worker", "extension"));
         let features = BTreeSet::from([
@@ -1430,10 +1606,20 @@ mod tests {
             .unwrap();
         assert_eq!(nested, serde_json::json!({ "value": 7 }));
 
-        let mut stream = host_handle
-            .invoke_stream("worker.stream", Value::Null)
+        host_write_gate.arm();
+        let write_started = host_write_gate.started.notified();
+        let stream_handle = host_handle.clone();
+        let stream_call = tokio::spawn(async move {
+            stream_handle
+                .invoke_stream("worker.stream", Value::Null)
+                .await
+        });
+        timeout(Duration::from_secs(1), write_started)
             .await
             .unwrap();
+        assert!(!stream_call.is_finished());
+        host_write_gate.release.add_permits(1);
+        let mut stream = stream_call.await.unwrap().unwrap();
         assert!(matches!(
             stream.next().await,
             Some(ModelStreamEvent::Started)
@@ -1476,6 +1662,43 @@ mod tests {
         timeout(Duration::from_secs(1), cancellation_notify.notified())
             .await
             .unwrap();
+
+        host_write_gate.arm();
+        let write_started = host_write_gate.started.notified();
+        let cancel_handle = host_handle.clone();
+        let cancelled_before_written = tokio::spawn(async move {
+            cancel_handle
+                .invoke("worker.cancel_unary", Value::Null)
+                .await
+        });
+        timeout(Duration::from_secs(1), write_started)
+            .await
+            .unwrap();
+        cancelled_before_written.abort();
+        let _ = cancelled_before_written.await;
+        timeout(Duration::from_secs(1), async {
+            while host_handle.outbound_permits.available_permits() != MAX_IN_FLIGHT_REQUESTS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let invocation_started_after_write = invocation_started.notified();
+        let cancellation_observed_after_write = cancellation_notify.notified();
+        host_write_gate.release.add_permits(1);
+        timeout(Duration::from_secs(1), invocation_started_after_write)
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), cancellation_observed_after_write)
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while host_handle.outbound_permits.available_permits() != MAX_IN_FLIGHT_REQUESTS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
 
         let after_cancel = host_handle
             .invoke("worker.nested", serde_json::json!({ "still_open": true }))

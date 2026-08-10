@@ -62,7 +62,10 @@ delta、tool-call、usage，最后恰好一个 `completed` 或 `failed`。终态
 `None`。调用 future 或 stream 被 drop 会发送 `cancel`；取消后的迟到终态被有界墓碑吸收，
 不会误杀 peer，真正未知 request 的 result/stream 仍是协议错误。
 
-首版内部调优值为 stream buffer 32、peer command queue 256、背压 30 s、idle 120 s；
+握手后的所有帧由单一 FIFO WritePump 写入；协议 driver 不等待物理写入，因此慢写不会阻塞读取
+和取消状态推进。内部 `written` 回执只表示对应帧已完整写出；caller 生命周期由独立取消信号表达。
+
+首版内部调优值为 stream buffer 32、peer command/write queue 256、背压 30 s、idle 120 s；
 它们不是作者 API。
 
 ## Operation、错误与能力

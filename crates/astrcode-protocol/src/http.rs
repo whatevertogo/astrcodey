@@ -740,6 +740,8 @@ pub struct CustomEventConsumerStatusDto {
     pub failed_attempts: u64,
     #[serde(default)]
     pub consecutive_failures: u64,
+    #[serde(default)]
+    pub quarantined_events: u64,
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]

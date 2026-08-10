@@ -1591,6 +1591,37 @@ async fn event_consumer_http_control_reports_pending_events_and_updates_persiste
         ))
         .await
         .unwrap();
+    let session_id = SessionId::from(session_id);
+    for _ in 0..20 {
+        runtime
+            .event_store()
+            .record_event_consumer_failure(
+                &session_id,
+                "event-consumer-http-test:producer:job.completed:v1",
+                0,
+                1,
+                "injected failure",
+                20,
+            )
+            .await
+            .unwrap();
+    }
+    runtime
+        .event_store()
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({"jobId": "pending-job"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    let session_id = session_id.to_string();
 
     let list = app
         .clone()
@@ -1614,6 +1645,7 @@ async fn event_consumer_http_control_reports_pending_events_and_updates_persiste
         .unwrap();
     assert_eq!(consumer.pending_events, 1);
     assert!(!consumer.paused);
+    assert_eq!(consumer.quarantined_events, 1);
 
     let control = |action: &str| {
         Request::builder()
@@ -2523,6 +2555,27 @@ impl SessionStore for TestEventStore {
     ) -> Result<astrcode_storage::EventConsumerCheckpointOutcome, StorageError> {
         self.inner
             .checkpoint_event_consumer(session_id, consumer_id, expected_revision, seq)
+            .await
+    }
+
+    async fn record_event_consumer_failure(
+        &self,
+        session_id: &SessionId,
+        consumer_id: &str,
+        expected_revision: u64,
+        seq: u64,
+        error: &str,
+        quarantine_after: u32,
+    ) -> Result<astrcode_storage::EventConsumerFailureOutcome, StorageError> {
+        self.inner
+            .record_event_consumer_failure(
+                session_id,
+                consumer_id,
+                expected_revision,
+                seq,
+                error,
+                quarantine_after,
+            )
             .await
     }
 

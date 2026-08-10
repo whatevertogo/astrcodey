@@ -96,6 +96,7 @@ fn status_to_dto(status: CustomEventConsumerStatus) -> CustomEventConsumerStatus
         in_flight: status.in_flight,
         failed_attempts: status.failed_attempts,
         consecutive_failures: status.consecutive_failures,
+        quarantined_events: status.quarantined_events,
     }
 }
 
