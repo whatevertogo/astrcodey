@@ -1,6 +1,6 @@
 [package]
 name = "s5r-guest-demo"
-version = "0.3.13"
+version = "0.3.14"
 edition = "2024"
 rust-version = "1.88"
 publish = false
