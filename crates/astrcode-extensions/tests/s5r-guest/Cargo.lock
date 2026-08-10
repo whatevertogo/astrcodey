@@ -19,7 +19,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "astrcode-core"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "async-trait",
  "chrono",
@@ -34,7 +34,7 @@ dependencies = [
 
 [[package]]
 name = "astrcode-extension-sdk"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "astrcode-core",
  "async-trait",
@@ -468,7 +468,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "s5r-guest-demo"
-version = "0.3.13"
+version = "0.3.14"
 dependencies = [
  "astrcode-extension-sdk",
  "serde",
