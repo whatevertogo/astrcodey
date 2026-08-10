@@ -448,6 +448,9 @@ pub fn tool_text(content: impl Into<String>, is_error: bool) -> HandlerResult {
     if is_error {
         HandlerResult::err(content.into())
     } else {
-        HandlerResult::effect("ok", json!({ "content": content.into() }))
+        HandlerResult::effect(
+            astrcode_extension_contract::effects::EFFECT_OK,
+            json!({ "content": content.into() }),
+        )
     }
 }

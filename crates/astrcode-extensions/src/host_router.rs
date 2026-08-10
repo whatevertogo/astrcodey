@@ -1032,7 +1032,7 @@ mod tests {
         let model = router
             .invoke(
                 "astrcode.session.inspect.read_model",
-                json!({ "session_id": "inspect-session" }),
+                json!({ "sessionId": "inspect-session" }),
                 &ctx,
             )
             .await
@@ -1043,7 +1043,7 @@ mod tests {
         let snapshot = router
             .invoke(
                 "astrcode.session.inspect.snapshot",
-                json!({ "session_id": "inspect-session" }),
+                json!({ "sessionId": "inspect-session" }),
                 &ctx,
             )
             .await
@@ -1053,7 +1053,7 @@ mod tests {
         let inspect_messages = router
             .invoke(
                 "astrcode.session.inspect.provider_messages",
-                json!({ "session_id": "inspect-session" }),
+                json!({ "sessionId": "inspect-session" }),
                 &ctx,
             )
             .await
@@ -1067,27 +1067,27 @@ mod tests {
             ),
             (
                 "astrcode.session.inspect.snapshot",
-                json!({ "session_id": "inspect-session", "unexpected": true }),
+                json!({ "sessionId": "inspect-session", "unexpected": true }),
             ),
             (
                 "astrcode.session.inspect.read_model",
-                json!({ "session_id": "inspect-session", "unexpected": true }),
+                json!({ "sessionId": "inspect-session", "unexpected": true }),
             ),
             (
                 "astrcode.session.inspect.provider_messages",
-                json!({ "session_id": "inspect-session", "unexpected": true }),
+                json!({ "sessionId": "inspect-session", "unexpected": true }),
             ),
             (
                 "astrcode.session.inspect.snapshot",
-                json!({ "session_id": "" }),
+                json!({ "sessionId": "" }),
             ),
             (
                 "astrcode.session.inspect.read_model",
-                json!({ "session_id": "" }),
+                json!({ "sessionId": "" }),
             ),
             (
                 "astrcode.session.inspect.provider_messages",
-                json!({ "session_id": "" }),
+                json!({ "sessionId": "" }),
             ),
         ] {
             let error = router

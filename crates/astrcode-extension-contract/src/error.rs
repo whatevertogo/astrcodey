@@ -45,6 +45,7 @@ wire_error_codes! {
     SerializationFailed => "serialization_failed",
     InvalidResponse => "invalid_host_response",
     Unsupported => "unsupported",
+    NotSupported => "not_supported",
     HostRuntimeFailed => "host_runtime_failed",
     ExtensionDraining => "extension_draining",
     UnsupportedFeature => "unsupported_feature",

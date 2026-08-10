@@ -760,7 +760,8 @@ impl HostError {
     pub fn code_enum(&self) -> Option<WireErrorCode>;
 }
 
-// `astrcode_core::wire::WireErrorCode`，宿主与 worker 共享的线缆错误码：
+// `astrcode_extension_contract::WireErrorCode`（`astrcode_core::wire` re-export），
+// 宿主与 worker 共享的线缆错误码，单点定义在 contract：
 // 通用码 PermissionDenied、BackendUnavailable、ContextUnavailable、InvalidInput、
 // Cancelled、Timeout、Transport 等，以及 network、session 等领域码。
 ```

@@ -253,15 +253,13 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 - `frontmatter`、`shell`：扩展文件解析和宿主 shell 检测。
 - `builder`：进程内扩展 handler 辅助函数。
 - `manifest`：扩展 manifest 校验。
-- `runtime`：扩展 runtime 内部通信、取消、stream、transport、task utils。
 - `s5r`：s5r 子进程协议消息、capabilities、effects。
-- `worker`：s5r worker builder、host client、handler adapter、manifest catalog；提供 session 输入、状态和工具选择等类型化 host 请求。
 - `session`：扩展侧 session 相关 re-export。
-- `prelude`、`worker_prelude`：分别面向进程内扩展和 s5r worker 的便捷导入集合。
+- `prelude`：面向进程内扩展的便捷导入集合；s5r worker 的 `worker_prelude` 与运行时组装位于 `astrcode-extension-worker`。
 
-依赖边界：只依赖 workspace 内的 `astrcode-core`。进程内扩展和磁盘/IPC 扩展都通过 capability-gated typed host API 访问宿主能力；运行时负责注入不可伪造的 extension/session/turn 归属。
+依赖边界：依赖 `astrcode-extension-contract` 和 `astrcode-core`。worker（子进程）作者面只暴露 contract 类型；bundled（进程内）作者面允许共享 core 类型，因为 bundled 在进程内运行。进程内扩展和磁盘/IPC 扩展都通过 capability-gated typed host API 访问宿主能力；运行时负责注入不可伪造的 extension/session/turn 归属。
 
-测试线索：`worker/*`、`builder.rs`、`manifest.rs`、`runtime/*` 有单元测试。修改 SDK 类型等同修改扩展 ABI，需要同步内置扩展和 s5r 测试。
+测试线索：`builder.rs`、`manifest.rs` 有单元测试。修改 SDK 类型等同修改扩展 ABI，需要同步内置扩展和 s5r 测试。
 
 ## `astrcode-extensions`
 

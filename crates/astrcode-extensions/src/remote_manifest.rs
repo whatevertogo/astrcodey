@@ -1,5 +1,6 @@
 //! 远程扩展（IPC）共用的 manifest 构建与 HandlerResult 解析。
 
+use astrcode_extension_contract::effects::{EFFECT_CONTINUE_ONE_STEP, EFFECT_HTTP_RESPONSE};
 use astrcode_extension_sdk::{
     extension::{
         CompactContributions, CompactResult, ContinueAfterStopResult, ExtensionCommandResult,
@@ -18,7 +19,7 @@ pub fn parse_http_response(resp: &HandlerResult) -> Result<ExtensionHttpResponse
             resp.error.clone().unwrap_or_default(),
         ));
     }
-    if resp.effect_name() != "http_response" {
+    if resp.effect_name() != EFFECT_HTTP_RESPONSE {
         return Err(ExtensionError::Internal(format!(
             "expected http_response effect, got {}",
             resp.effect_name()
@@ -153,7 +154,7 @@ pub fn parse_continue_after_stop_result(
         return Ok(ContinueAfterStopResult::EndTurn);
     }
     match resp.effect_name() {
-        "continue_one_step" => Ok(ContinueAfterStopResult::ContinueOneStep),
+        EFFECT_CONTINUE_ONE_STEP => Ok(ContinueAfterStopResult::ContinueOneStep),
         _ => Ok(ContinueAfterStopResult::EndTurn),
     }
 }

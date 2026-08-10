@@ -8,6 +8,7 @@ use std::{
     sync::Arc,
 };
 
+use astrcode_extension_contract::effects::EFFECT_HTTP_RESPONSE;
 use serde_json::Value;
 
 use super::CancelToken;
@@ -723,7 +724,7 @@ impl HandlerRegistry {
                         format!("serialize HTTP response: {error}"),
                     )
                 })?;
-                Ok(HandlerResult::effect("http_response", data))
+                Ok(HandlerResult::effect(EFFECT_HTTP_RESPONSE, data))
             },
             "event" => {
                 let handler = self.custom_events.get(name).ok_or_else(|| {

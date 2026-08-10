@@ -35,6 +35,8 @@ LAYERS: dict[str, int] = {
     # L2 – Primitive contracts
     "astrcode-session-projection": 2,
     # L3 – Services
+    # The SDK serves two author surfaces: worker (subprocess) authors see only
+    # contract types, while bundled (in-process) authors may share core types.
     "astrcode-extension-sdk": 3,
     "astrcode-ai": 3,
     "astrcode-context": 3,

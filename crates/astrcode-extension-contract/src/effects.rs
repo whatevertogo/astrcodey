@@ -5,6 +5,15 @@ use serde_json::Value;
 
 use crate::{HandlerId, HandlerKind};
 
+/// `HandlerResult.effect` 的稳定线缆词汇。生产方与消费方必须引用这些常量，
+/// 不得散落字面量；新 effect 先在此登记。
+pub const EFFECT_OK: &str = "ok";
+pub const EFFECT_CONTINUE_ONE_STEP: &str = "continue_one_step";
+pub const EFFECT_HTTP_RESPONSE: &str = "http_response";
+pub const EFFECT_CUSTOM_EVENT_ACK: &str = "custom_event_ack";
+pub const EFFECT_CUSTOM_EVENT_RETRY: &str = "custom_event_retry";
+pub const EFFECT_CUSTOM_EVENT_DEAD_LETTER: &str = "custom_event_dead_letter";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HandlerResult {
@@ -23,7 +32,7 @@ impl HandlerResult {
     pub fn ok() -> Self {
         Self {
             ok: true,
-            effect: Some("ok".into()),
+            effect: Some(EFFECT_OK.into()),
             data: None,
             error: None,
             continuations: Vec::new(),
@@ -51,7 +60,7 @@ impl HandlerResult {
     }
 
     pub fn continue_one_step() -> Self {
-        Self::effect("continue_one_step", Value::Null)
+        Self::effect(EFFECT_CONTINUE_ONE_STEP, Value::Null)
     }
 
     pub fn end_turn() -> Self {
@@ -59,7 +68,7 @@ impl HandlerResult {
     }
 
     pub fn effect_name(&self) -> &str {
-        self.effect.as_deref().unwrap_or("ok")
+        self.effect.as_deref().unwrap_or(EFFECT_OK)
     }
 
     pub fn data_str(&self, key: &str) -> &str {

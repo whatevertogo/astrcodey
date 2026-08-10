@@ -5,6 +5,9 @@ mod v3_session;
 
 use std::{path::Path, sync::Arc};
 
+use astrcode_extension_contract::effects::{
+    EFFECT_CUSTOM_EVENT_DEAD_LETTER, EFFECT_CUSTOM_EVENT_RETRY,
+};
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
@@ -616,8 +619,8 @@ impl CustomEventHandler for S5rCustomEventHandler {
                 .to_owned()
         };
         match result.effect_name() {
-            "custom_event_retry" => Ok(CustomEventDisposition::retry(reason())),
-            "custom_event_dead_letter" => Ok(CustomEventDisposition::dead_letter(reason())),
+            EFFECT_CUSTOM_EVENT_RETRY => Ok(CustomEventDisposition::retry(reason())),
+            EFFECT_CUSTOM_EVENT_DEAD_LETTER => Ok(CustomEventDisposition::dead_letter(reason())),
             _ => Ok(CustomEventDisposition::Ack),
         }
     }

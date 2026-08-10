@@ -72,7 +72,8 @@ delta、tool-call、usage，最后恰好一个 `completed` 或 `failed`。终态
 | `handler.invoke` | 宿主调用 worker 注册的 tool、command、hook、HTTP 或 event handler |
 | `astrcode.*` | worker 调用宿主能力；由 contract operation catalog 定义 |
 
-宿主固定执行 capability → context/scope → backend 三段检查。`WireErrorCode` 字符串为
+宿主固定执行 capability → context/scope → backend 三段检查。`WireErrorCode` 单点定义在
+`astrcode-extension-contract`，字符串为
 snake_case，废弃后不得复用；未知错误码必须在 `ErrorPayload.code: String` / `HostError.code`
 中无损透传。generation gate 关闭后，排队和新调用统一返回 `extension_draining`。
 

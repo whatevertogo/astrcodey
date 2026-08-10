@@ -13,7 +13,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostSessionInspectRequest {
     #[serde(deserialize_with = "deserialize_non_empty_session_id")]
     pub session_id: String,
@@ -23,7 +23,7 @@ fn deserialize_non_empty_session_id<'de, D>(deserializer: D) -> Result<String, D
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_non_empty_string(deserializer, "session_id")
+    deserialize_non_empty_string(deserializer, "sessionId")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -310,11 +310,11 @@ mod tests {
 
     #[test]
     fn session_inspect_wire_contracts_are_nested_strict() {
-        let request = json!({ "session_id": "session-1" });
+        let request = json!({ "sessionId": "session-1" });
         assert_unknown_fields_rejected::<HostSessionInspectRequest>(&request, &[""]);
         assert!(serde_json::from_value::<HostSessionInspectRequest>(json!({})).is_err());
         assert!(
-            serde_json::from_value::<HostSessionInspectRequest>(json!({ "session_id": "" }))
+            serde_json::from_value::<HostSessionInspectRequest>(json!({ "sessionId": "" }))
                 .is_err()
         );
 

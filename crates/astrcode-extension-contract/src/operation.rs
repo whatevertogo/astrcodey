@@ -492,7 +492,7 @@ host_operations! {
     }
 }
 
-#[doc(hidden)]
+/// Session/workspace context an operation requires the host to resolve before dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostContextRequirement {
     None,
@@ -512,8 +512,8 @@ pub enum HostOperationGroup {
     ExtensionHttp,
 }
 
-/// Concrete backend dependency an operation needs before it can run.
-#[doc(hidden)]
+/// Backend availability predicate for an operation: the concrete host-side dependency the
+/// HostRouter checks before dispatching, one variant per injectable backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HostBackendRequirement {
     MainLlm,
