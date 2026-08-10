@@ -85,6 +85,82 @@ fn unique_temp_dir(name: &str) -> TestDir {
     TestDir::new(name)
 }
 
+fn tool_descriptions() -> Vec<ToolDefinition> {
+    let working_dir = PathBuf::from(".");
+    vec![
+        ReadFileTool {
+            working_dir: working_dir.clone(),
+        }
+        .definition(),
+        WriteFileTool {
+            working_dir: working_dir.clone(),
+        }
+        .definition(),
+        EditFileTool {
+            working_dir: working_dir.clone(),
+        }
+        .definition(),
+        ApplyPatchTool {
+            working_dir: working_dir.clone(),
+        }
+        .definition(),
+        GlobTool {
+            working_dir: working_dir.clone(),
+        }
+        .definition(),
+        GrepTool { working_dir }.definition(),
+    ]
+}
+
+#[test]
+fn file_tool_descriptions_separate_search_read_and_write_roles() {
+    let definitions = tool_descriptions();
+    let glob_tool = definitions
+        .iter()
+        .find(|definition| definition.name == "glob")
+        .expect("glob definition should exist");
+    let grep = definitions
+        .iter()
+        .find(|definition| definition.name == "grep")
+        .expect("grep definition should exist");
+    let read_file = definitions
+        .iter()
+        .find(|definition| definition.name == "read")
+        .expect("read definition should exist");
+    let write_file = definitions
+        .iter()
+        .find(|definition| definition.name == "write")
+        .expect("write definition should exist");
+    let edit_file = definitions
+        .iter()
+        .find(|definition| definition.name == "edit")
+        .expect("edit definition should exist");
+
+    assert!(glob_tool.description.contains("glob pattern"));
+    assert!(glob_tool.description.contains("When NOT to use"));
+    assert!(glob_tool.description.contains("Tips"));
+    assert!(grep.description.contains("When NOT to use"));
+    assert!(grep.description.contains("Tips"));
+    assert!(grep.description.contains("`glob`"));
+    assert!(
+        grep.parameters["properties"]["outputMode"]["description"]
+            .as_str()
+            .expect("outputMode description")
+            .contains("files_with_matches")
+    );
+    assert!(read_file.description.contains("Read a file"));
+    assert!(read_file.description.contains("When NOT to use"));
+    assert!(read_file.description.contains("Tips"));
+    assert!(
+        write_file
+            .description
+            .contains("Create or completely overwrite")
+    );
+    assert!(edit_file.description.contains("string replacement"));
+    assert!(edit_file.description.contains("When NOT to use"));
+    assert!(edit_file.description.contains("Tips"));
+}
+
 #[tokio::test]
 async fn read_file_reports_text_pagination_metadata() {
     let temp = unique_temp_dir("read-file-pagination");

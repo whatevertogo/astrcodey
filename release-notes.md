@@ -8,7 +8,7 @@
   reserved prefix 与 session-control 子动作在所属边界解析。bundled session domain 类型不再从
   `astrcode_extension_sdk::session` 重复导出，统一从 `astrcode_extension_sdk::tool` 导入；
   S5R session DTO 仍保留在 `astrcode_extension_sdk::session`。
-- S5R 协议升级到 2.0，不兼容 1.0 worker。磁盘扩展需要迁移握手 manifest、handler context、
+- S5R 协议升级到 3.0，不兼容 1.0/2.0 worker。磁盘扩展需要迁移握手 manifest、handler context、
   custom event 声明/订阅和 typed host API 后重新构建。
 - custom-event capability 使用 `emit_custom_events` / `consume_custom_events`；模型
   `*_chat_stream` 当前在完成后返回最终内容与有序 collected chunks，不是渐进式 Rust stream。

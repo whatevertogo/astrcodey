@@ -426,7 +426,272 @@ fn indent_body(body: &str) -> String {
 mod tests {
     use std::path::Path;
 
+    use astrcode_core::tool::{ExecutionMode, ToolOrigin, ToolPromptMetadata, ToolPromptTag};
+
     use super::*;
+
+    fn tool(name: &str, description: &str, origin: ToolOrigin) -> ToolDefinition {
+        ToolDefinition {
+            name: name.into(),
+            description: description.into(),
+            parameters: Default::default(),
+            strict: false,
+            origin,
+            execution_mode: ExecutionMode::Sequential,
+        }
+    }
+
+    fn input() -> SystemPromptInput<'static> {
+        SystemPromptInput {
+            working_dir: env!("CARGO_MANIFEST_DIR").to_string(),
+            os: "windows".into(),
+            shell: "powershell".into(),
+            gh_cli_available: false,
+            identity: None,
+            user_rules: None,
+            project_rules: None,
+            tools: &[],
+            extension_blocks: vec![],
+            extra_instructions: None,
+            tool_prompt_metadata: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn build_renders_all_sections_in_order() {
+        let tools = vec![
+            tool("read", "Read files.", ToolOrigin::Builtin),
+            tool(
+                "tool_search_tool",
+                "Search external tools.",
+                ToolOrigin::Bundled,
+            ),
+            tool(
+                "mcp__demo__search",
+                "Search demo server.",
+                ToolOrigin::Bundled,
+            ),
+            tool(
+                "extension_lookup",
+                "Lookup through a configured extension.",
+                ToolOrigin::Extension,
+            ),
+            tool("agent", "Delegate work.", ToolOrigin::Bundled),
+        ];
+        let input = SystemPromptInput {
+            working_dir: "/test".into(),
+            os: "linux".into(),
+            shell: "bash".into(),
+            gh_cli_available: false,
+            identity: Some("custom identity".into()),
+            user_rules: Some("test rules".into()),
+            project_rules: Some("project rules content".into()),
+            tools: &tools,
+            extension_blocks: vec![
+                ExtensionPromptBlock {
+                    section: ExtensionSection::Skills,
+                    content: "skill a".into(),
+                },
+                ExtensionPromptBlock {
+                    section: ExtensionSection::Agents,
+                    content: "agent x".into(),
+                },
+                ExtensionPromptBlock {
+                    section: ExtensionSection::PlatformInstructions,
+                    content: "extra hint".into(),
+                },
+                ExtensionPromptBlock {
+                    section: ExtensionSection::AdditionalInstructions,
+                    content: "mcp workflow".into(),
+                },
+            ],
+            extra_instructions: Some("extra body".into()),
+            tool_prompt_metadata: std::collections::HashMap::from([
+                (
+                    "mcp__demo__search".into(),
+                    ToolPromptMetadata::new("").prompt_tag(ToolPromptTag::System),
+                ),
+                (
+                    "agent".into(),
+                    ToolPromptMetadata::new("").prompt_tag(ToolPromptTag::Collaboration),
+                ),
+            ]),
+        };
+
+        let prompt = build_system_prompt(&input);
+
+        assert!(prompt.contains("[Identity]\n  custom identity"));
+        assert!(prompt.contains("[System]\n"));
+        assert!(prompt.contains("[Task Guidelines]\n"));
+        assert!(prompt.contains("[Communication]\n"));
+        assert!(prompt.contains("let `activeForm` carry routine status"));
+        assert!(prompt.contains("Keep the user oriented without narrating routine tool use."));
+        assert!(!prompt.contains("Before your first tool call"));
+        assert!(prompt.contains("[Environment]\n  Working directory: /test"));
+        assert!(!prompt.contains("GitHub CLI (gh): available"));
+        assert!(prompt.contains("[User Rules]\n  test rules"));
+        assert!(prompt.contains("[Project Rules]\n  project rules content"));
+        assert!(prompt.contains("[Tool Summary]"));
+        assert!(prompt.contains("- `read`"));
+        assert!(prompt.contains("External MCP Tools"));
+        assert!(prompt.contains("- `mcp__demo__search`"));
+        assert!(prompt.contains("Agent Collaboration Tools"));
+        assert_eq!(prompt.matches("- `mcp__demo__search`").count(), 1);
+        assert_eq!(prompt.matches("- `agent`").count(), 1);
+        assert!(prompt.contains("Extension Tools"));
+        assert!(prompt.contains("- `extension_lookup`"));
+        assert!(prompt.contains("[SystemPromptInstruction]\n  extra hint"));
+        assert!(prompt.contains("[Skills]\n  skill a"));
+        assert!(prompt.contains("[Agents]\n  agent x"));
+        assert!(prompt.contains("[Additional Instructions]\n  mcp workflow\n\n  extra body"));
+
+        let identity = prompt.find("[Identity]").unwrap();
+        let system = prompt.find("[System]").unwrap();
+        let task = prompt.find("[Task Guidelines]").unwrap();
+        let comm = prompt.find("[Communication]").unwrap();
+        let env = prompt.find("[Environment]").unwrap();
+        let user_rules = prompt.find("[User Rules]").unwrap();
+        let project_rules = prompt.find("[Project Rules]").unwrap();
+        let tools = prompt.find("[Tool Summary]").unwrap();
+        let platform = prompt.find("[SystemPromptInstruction]").unwrap();
+        let skills = prompt.find("[Skills]").unwrap();
+        let agents = prompt
+            .find("[Agents]\n  agent x")
+            .expect("Agents extension section");
+        let additional = prompt.find("[Additional Instructions]").unwrap();
+
+        assert!(identity < system);
+        assert!(system < task);
+        assert!(task < comm);
+        assert!(comm < env);
+        assert!(env < user_rules);
+        assert!(user_rules < project_rules);
+        assert!(project_rules < tools);
+        assert!(tools < platform);
+        assert!(platform < skills);
+        assert!(skills < agents);
+        assert!(agents < additional);
+    }
+
+    #[test]
+    fn empty_optionals_are_skipped() {
+        let input = SystemPromptInput {
+            working_dir: "/test".into(),
+            os: "linux".into(),
+            shell: "bash".into(),
+            gh_cli_available: false,
+            identity: None,
+            user_rules: None,
+            project_rules: None,
+            tools: &[],
+            extension_blocks: vec![],
+            extra_instructions: None,
+            tool_prompt_metadata: std::collections::HashMap::new(),
+        };
+
+        let prompt = build_system_prompt(&input);
+
+        assert!(prompt.contains("[Identity]\n"));
+        assert!(prompt.contains("[System]"));
+        assert!(prompt.contains("[Task Guidelines]"));
+        assert!(prompt.contains("[Communication]"));
+        assert!(prompt.contains("[Environment]"));
+        assert!(!prompt.contains("[User Rules]"));
+        assert!(!prompt.contains("[Project Rules]"));
+        assert!(!prompt.contains("[Tool Summary]"));
+        assert!(!prompt.contains("[SystemPromptInstruction]"));
+        assert!(!prompt.contains("[Skills]"));
+        assert!(!prompt.contains("[Agents]"));
+    }
+
+    #[test]
+    fn extension_tools_render_without_mcp_tools() {
+        let tools = vec![
+            tool("read", "Read files.", ToolOrigin::Builtin),
+            tool(
+                "tool_search_tool",
+                "Search configured MCP tools.",
+                ToolOrigin::Bundled,
+            ),
+            tool(
+                "extension_lookup",
+                "Lookup through a configured extension.",
+                ToolOrigin::Extension,
+            ),
+        ];
+        let input = SystemPromptInput {
+            working_dir: "/test".into(),
+            os: "linux".into(),
+            shell: "bash".into(),
+            gh_cli_available: false,
+            identity: None,
+            user_rules: None,
+            project_rules: None,
+            tools: &tools,
+            extension_blocks: vec![],
+            extra_instructions: None,
+            tool_prompt_metadata: std::collections::HashMap::new(),
+        };
+
+        let prompt = build_system_prompt(&input);
+
+        assert!(prompt.contains("Extension Tools"));
+        assert!(prompt.contains("- `extension_lookup`"));
+        assert!(!prompt.contains("External MCP Tools"));
+    }
+
+    #[test]
+    fn environment_reports_gh_cli_availability() {
+        let mut available = input();
+        available.gh_cli_available = true;
+        let prompt = build_system_prompt(&available);
+        assert!(prompt.contains("GitHub CLI (gh): available"));
+
+        let mut unavailable = input();
+        unavailable.gh_cli_available = false;
+        let prompt = build_system_prompt(&unavailable);
+        assert!(!prompt.contains("GitHub CLI (gh): available"));
+    }
+
+    #[test]
+    fn environment_changes_keep_identity_prefix_stable() {
+        let tools = [tool("read", "Read files.", ToolOrigin::Builtin)];
+        let base = SystemPromptInput {
+            working_dir: "/one".into(),
+            os: "linux".into(),
+            shell: "bash".into(),
+            gh_cli_available: false,
+            identity: Some("stable identity".into()),
+            user_rules: Some("stable user rules".into()),
+            project_rules: Some("stable project rules".into()),
+            tools: &tools,
+            extension_blocks: vec![
+                ExtensionPromptBlock {
+                    section: ExtensionSection::PlatformInstructions,
+                    content: "stable platform".into(),
+                },
+                ExtensionPromptBlock {
+                    section: ExtensionSection::Skills,
+                    content: "stable skills".into(),
+                },
+                ExtensionPromptBlock {
+                    section: ExtensionSection::Agents,
+                    content: "stable agents".into(),
+                },
+            ],
+            extra_instructions: None,
+            tool_prompt_metadata: std::collections::HashMap::new(),
+        };
+        let mut changed = base.clone();
+        changed.working_dir = "/two".into();
+        changed.shell = "zsh".into();
+
+        let first = build_system_prompt(&base);
+        let second = build_system_prompt(&changed);
+        let env = first.find("[Environment]").unwrap();
+
+        assert_eq!(&first[..env], &second[..env]);
+    }
 
     #[test]
     fn subagent_prompt_file_load_omits_agents_md_rules() {

@@ -12,7 +12,7 @@ use std::{
 use futures_util::Stream;
 use serde_json::Value;
 use tokio::{
-    sync::{mpsc, oneshot},
+    sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc, oneshot},
     task::JoinSet,
     time::timeout,
 };
@@ -34,11 +34,15 @@ const STREAM_FORWARD_BUFFER_CAPACITY: usize = 256;
 const STREAM_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(30);
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 const CANCELLED_REQUEST_CAPACITY: usize = COMMAND_QUEUE_CAPACITY;
+const MAX_IN_FLIGHT_REQUESTS: usize = COMMAND_QUEUE_CAPACITY;
 
 type UnaryResult = Result<Value, ErrorPayload>;
 
 enum PendingRequest {
-    Unary(oneshot::Sender<UnaryResult>),
+    Unary {
+        response: oneshot::Sender<UnaryResult>,
+        _permit: OwnedSemaphorePermit,
+    },
     Stream(PendingStream),
 }
 
@@ -46,6 +50,7 @@ struct PendingStream {
     events: mpsc::Sender<ModelStreamEvent>,
     failure: Arc<Mutex<Option<ErrorPayload>>>,
     started: bool,
+    _permit: OwnedSemaphorePermit,
 }
 
 #[derive(Default)]
@@ -81,12 +86,14 @@ enum DriverCommand {
         message: InvokeMsg,
         response: oneshot::Sender<UnaryResult>,
         accepted: oneshot::Sender<Result<(), ErrorPayload>>,
+        permit: OwnedSemaphorePermit,
     },
     InvokeStream {
         message: InvokeMsg,
         output: mpsc::Sender<ModelStreamEvent>,
         failure: Arc<Mutex<Option<ErrorPayload>>>,
         accepted: oneshot::Sender<Result<(), ErrorPayload>>,
+        permit: OwnedSemaphorePermit,
     },
 }
 
@@ -106,6 +113,7 @@ pub struct PeerHandle<T> {
     command_tx: mpsc::Sender<DriverCommand>,
     control_tx: mpsc::UnboundedSender<ControlCommand>,
     next_request_id: Arc<AtomicU64>,
+    outbound_permits: Arc<Semaphore>,
 }
 
 impl<T> Clone for PeerHandle<T> {
@@ -116,6 +124,7 @@ impl<T> Clone for PeerHandle<T> {
             command_tx: self.command_tx.clone(),
             control_tx: self.control_tx.clone(),
             next_request_id: Arc::clone(&self.next_request_id),
+            outbound_permits: Arc::clone(&self.outbound_permits),
         }
     }
 }
@@ -206,6 +215,9 @@ where
         parent_invoke_id: Option<String>,
     ) -> Result<Value, InvokeError> {
         self.validate_outbound(&id, &operation, parent_invoke_id.as_deref(), false)?;
+        let permit = self
+            .acquire_outbound_permit(parent_invoke_id.is_some())
+            .await?;
         let (response_tx, response_rx) = oneshot::channel();
         let (accepted_tx, accepted_rx) = oneshot::channel();
         self.command_tx
@@ -219,6 +231,7 @@ where
                 },
                 response: response_tx,
                 accepted: accepted_tx,
+                permit,
             })
             .await
             .map_err(|_| InvokeError::DriverUnavailable)?;
@@ -241,6 +254,9 @@ where
     ) -> Result<PeerStream, InvokeError> {
         let id = self.allocate_request_id();
         self.validate_outbound(&id, &operation, parent_invoke_id.as_deref(), true)?;
+        let permit = self
+            .acquire_outbound_permit(parent_invoke_id.is_some())
+            .await?;
         let (output_tx, output_rx) = mpsc::channel(STREAM_BUFFER_CAPACITY);
         let failure = Arc::new(Mutex::new(None));
         let (accepted_tx, accepted_rx) = oneshot::channel();
@@ -256,6 +272,7 @@ where
                 output: output_tx,
                 failure: Arc::clone(&failure),
                 accepted: accepted_tx,
+                permit,
             })
             .await
             .map_err(|_| InvokeError::DriverUnavailable)?;
@@ -309,6 +326,27 @@ where
             )));
         }
         Ok(())
+    }
+
+    async fn acquire_outbound_permit(
+        &self,
+        nested: bool,
+    ) -> Result<OwnedSemaphorePermit, InvokeError> {
+        let permits = Arc::clone(&self.outbound_permits);
+        if !nested {
+            return permits
+                .acquire_owned()
+                .await
+                .map_err(|_| InvokeError::DriverUnavailable);
+        }
+
+        permits.try_acquire_owned().map_err(|error| match error {
+            TryAcquireError::Closed => InvokeError::DriverUnavailable,
+            TryAcquireError::NoPermits => InvokeError::Local(ErrorPayload::new(
+                WireErrorCode::PeerOverloaded,
+                "peer has reached its in-flight request limit",
+            )),
+        })
     }
 }
 
@@ -401,6 +439,7 @@ pub struct PeerDriver<T> {
     command_rx: mpsc::Receiver<DriverCommand>,
     control_rx: mpsc::UnboundedReceiver<ControlCommand>,
     handle: PeerHandle<T>,
+    inbound_permits: Arc<Semaphore>,
 }
 
 pub(crate) fn runtime_parts<T>(transport: Arc<T>, state: Ready) -> (PeerHandle<T>, PeerDriver<T>)
@@ -410,12 +449,14 @@ where
     let state = Arc::new(state);
     let (command_tx, command_rx) = mpsc::channel(COMMAND_QUEUE_CAPACITY);
     let (control_tx, control_rx) = mpsc::unbounded_channel();
+    let outbound_permits = Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS));
     let handle = PeerHandle {
         transport: Arc::clone(&transport),
         state: Arc::clone(&state),
         command_tx,
         control_tx,
         next_request_id: Arc::new(AtomicU64::new(1)),
+        outbound_permits,
     };
     let driver = PeerDriver {
         transport,
@@ -423,6 +464,7 @@ where
         command_rx,
         control_rx,
         handle: handle.clone(),
+        inbound_permits: Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS)),
     };
     (handle, driver)
 }
@@ -450,10 +492,8 @@ where
         let mut cancelled = CancelledRequests::default();
         let mut inbound = HashMap::<String, CancellationToken>::new();
         let mut tasks = JoinSet::<Result<TaskCompletion, PeerError>>::new();
-
         let result = loop {
             tokio::select! {
-                biased;
                 () = shutdown.cancelled() => break Ok(()),
                 Some(control) = self.control_rx.recv() => {
                     if let Err(error) = self
@@ -541,6 +581,7 @@ where
                 message,
                 response,
                 accepted,
+                permit,
             } => {
                 if accepted.is_closed() {
                     return Ok(());
@@ -557,7 +598,13 @@ where
                     return Ok(());
                 }
                 let id = message.id.clone();
-                pending.insert(id.clone(), PendingRequest::Unary(response));
+                pending.insert(
+                    id.clone(),
+                    PendingRequest::Unary {
+                        response,
+                        _permit: permit,
+                    },
+                );
                 match self.write(&WireMessage::Invoke(message)).await {
                     Ok(()) => {
                         let _ = accepted.send(Ok(()));
@@ -574,6 +621,7 @@ where
                 output,
                 failure,
                 accepted,
+                permit,
             } => {
                 if accepted.is_closed() {
                     return Ok(());
@@ -597,6 +645,7 @@ where
                         events: forward_tx,
                         failure: Arc::clone(&failure),
                         started: false,
+                        _permit: permit,
                     }),
                 );
                 let control_tx = self.handle.control_tx.clone();
@@ -686,6 +735,18 @@ where
                     .await?;
                     return Ok(());
                 }
+                let permit = match Arc::clone(&self.inbound_permits).try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        self.write(&failed_result(
+                            request.id,
+                            WireErrorCode::PeerOverloaded,
+                            "peer has reached its in-flight request limit",
+                        ))
+                        .await?;
+                        return Ok(());
+                    },
+                };
                 let cancellation = CancellationToken::new();
                 inbound.insert(request.id.clone(), cancellation.clone());
                 let nested = self.handle.nested(request.id.clone());
@@ -699,6 +760,7 @@ where
                             cancellation,
                             nested,
                         },
+                        permit,
                     )
                     .await
                     .map(TaskCompletion::Inbound)
@@ -720,6 +782,7 @@ async fn run_inbound<T, H>(
     transport: Arc<T>,
     handler: Arc<H>,
     invocation: InboundInvoke<T>,
+    _permit: OwnedSemaphorePermit,
 ) -> Result<String, PeerError>
 where
     T: FrameTransport + 'static,
@@ -864,7 +927,9 @@ fn route_result(
         Err(PeerError::Remote(error))
     };
     match request {
-        PendingRequest::Unary(sender) => match response {
+        PendingRequest::Unary {
+            response: sender, ..
+        } => match response {
             Ok(output) => {
                 let _ = sender.send(Ok(output));
             },
@@ -1417,6 +1482,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(after_cancel, serde_json::json!({ "still_open": true }));
+
+        let unconsumed = host_handle
+            .invoke_stream("worker.stream", Value::Null)
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), async {
+            while host_handle.outbound_permits.available_permits() != MAX_IN_FLIGHT_REQUESTS {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(unconsumed);
+
+        let saturated = Arc::clone(&host_handle.outbound_permits)
+            .acquire_many_owned(MAX_IN_FLIGHT_REQUESTS as u32)
+            .await
+            .unwrap();
+        assert!(matches!(
+            host_handle
+                .nested("active-parent")
+                .invoke("worker.nested", Value::Null)
+                .await,
+            Err(InvokeError::Local(error))
+                if error.code == WireErrorCode::PeerOverloaded.as_str()
+        ));
+        let blocked_handle = host_handle.clone();
+        let mut blocked = Box::pin(blocked_handle.invoke(
+            "worker.nested",
+            serde_json::json!({ "after_capacity": true }),
+        ));
+        assert!(
+            timeout(Duration::from_millis(20), &mut blocked)
+                .await
+                .is_err()
+        );
+        drop(saturated);
+        assert_eq!(
+            timeout(Duration::from_secs(1), blocked)
+                .await
+                .unwrap()
+                .unwrap(),
+            serde_json::json!({ "after_capacity": true })
+        );
 
         host_shutdown.cancel();
         worker_shutdown.cancel();

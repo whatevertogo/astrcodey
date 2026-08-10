@@ -19,6 +19,20 @@ async fn wait_until_terminal(shell_id: &str) -> Vec<BackgroundShellStatus> {
 }
 
 #[test]
+fn command_description_shortens_long_input() {
+    let long = "a".repeat(100);
+    let t = command_description(&long);
+    assert!(t.chars().count() <= 80);
+    assert!(t.ends_with('…'));
+}
+
+#[test]
+fn command_description_preserves_short_input() {
+    let short = "echo hello";
+    assert_eq!(command_description(short), short);
+}
+
+#[test]
 fn background_output_dir_uses_store_dir_when_provided() {
     let store_dir = PathBuf::from("/data/sessions/abc");
     let dir = background_output_dir(Some(&store_dir), Path::new("/tmp"));
@@ -29,6 +43,20 @@ fn background_output_dir_uses_store_dir_when_provided() {
 fn background_output_dir_falls_back_to_cwd_astrcode() {
     let dir = background_output_dir(None, Path::new("/tmp"));
     assert_eq!(dir, PathBuf::from("/tmp/.astrcode/background-shells"));
+}
+
+#[test]
+fn format_footer_contains_status() {
+    let footer = format_footer(ShellRunStatus::Completed, Some(0), None);
+    assert!(footer.contains("completed"));
+    assert!(footer.contains("exit_code: 0"));
+
+    let footer = format_footer(ShellRunStatus::TimedOut, None, None);
+    assert!(footer.contains("timed_out"));
+    assert!(!footer.contains("exit_code"));
+
+    let footer = format_footer(ShellRunStatus::Failed, None, Some(15));
+    assert!(footer.contains("signal: 15"));
 }
 
 #[test]

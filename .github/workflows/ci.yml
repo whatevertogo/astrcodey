@@ -36,6 +36,8 @@ jobs:
       - name: Install Linux desktop dependencies
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: Swatinem/rust-cache@v2
+      - name: Prepare desktop sidecar
+        run: node frontend/scripts/prepare-sidecar.mjs
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
@@ -49,6 +51,8 @@ jobs:
       - name: Install Linux desktop dependencies
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: Swatinem/rust-cache@v2
+      - name: Prepare desktop sidecar
+        run: node frontend/scripts/prepare-sidecar.mjs
       - name: Build s5r guest binary (E2E)
         run: cargo build --release --manifest-path crates/astrcode-extensions/tests/s5r-guest/Cargo.toml
       - name: Run S5R 3.0 worker conformance
@@ -115,6 +119,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: msrv-${{ matrix.os }}
+      - name: Prepare desktop sidecar
+        run: node frontend/scripts/prepare-sidecar.mjs
       - run: cargo check --workspace --all-targets --all-features
       - run: cargo check --manifest-path crates/astrcode-extensions/tests/s5r-guest/Cargo.toml --all-targets
 
@@ -134,6 +140,8 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - uses: Swatinem/rust-cache@v2
+      - name: Prepare desktop sidecar
+        run: node frontend/scripts/prepare-sidecar.mjs
       - run: cargo check --workspace --all-targets --all-features
 
   # ── Frontend ──────────────────────────────────────────────────────

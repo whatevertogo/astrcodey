@@ -458,6 +458,15 @@ fn auto_background_disallows_sleep_commands() {
 }
 
 #[test]
+fn render_shell_output_formats_stdout_and_stderr() {
+    use super::render_shell_output;
+    assert_eq!(render_shell_output("", ""), "");
+    assert_eq!(render_shell_output("hello", ""), "hello");
+    assert_eq!(render_shell_output("", "oops"), "STDERR:\noops");
+    assert_eq!(render_shell_output("hi", "err"), "hi\nSTDERR:\nerr");
+}
+
+#[test]
 fn command_args_wsl_prepends_bash() {
     let wsl = ShellInfo {
         family: ShellFamily::Wsl,
@@ -465,6 +474,39 @@ fn command_args_wsl_prepends_bash() {
         path: "wsl.exe".into(),
     };
     assert_eq!(command_args(&wsl, "ls -la"), vec!["bash", "-lc", "ls -la"]);
+}
+
+#[tokio::test]
+async fn shell_metadata_includes_shell_info_and_cwd() {
+    let tool = ShellTool {
+        working_dir: std::env::current_dir().expect("cwd should exist"),
+        timeout_secs: 30,
+    };
+    let result = tool
+        .execute(
+            serde_json::json!({
+                "command": match resolve_shell().family {
+                    ShellFamily::PowerShell => "Write-Output ok",
+                    ShellFamily::Cmd => "echo ok",
+                    ShellFamily::Posix | ShellFamily::Wsl => "echo ok",
+                },
+            }),
+            &empty_ctx(),
+        )
+        .await
+        .expect("shell should execute");
+
+    assert!(!result.is_error, "{result:?}");
+    assert!(result.metadata.contains_key("shell"));
+    assert!(result.metadata.contains_key("shellPath"));
+    assert!(result.metadata.contains_key("cwd"));
+    assert!(result.metadata.contains_key("exitCode"));
+    assert_eq!(result.metadata["streamed"], serde_json::json!(false));
+    assert_eq!(result.metadata["timedOut"], serde_json::json!(false));
+    assert_eq!(
+        result.metadata["executionStatus"],
+        serde_json::json!("succeeded")
+    );
 }
 
 #[tokio::test]

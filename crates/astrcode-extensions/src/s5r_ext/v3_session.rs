@@ -41,7 +41,7 @@ use crate::{
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
 const INVOKE_TIMEOUT: Duration = Duration::from_secs(120);
 const PROCESS_TERMINATION_GRACE: Duration = Duration::from_secs(2);
-const INVOCATION_PERMITS: usize = 1024;
+const MAX_PARALLEL_INVOKES: u32 = 8;
 const MAX_CONTINUATION_DEPTH: u32 = 16;
 
 #[derive(Debug, thiserror::Error)]
@@ -266,7 +266,7 @@ impl S5rV3Session {
             registration,
             invoke_contexts,
             detached_invoke_context,
-            admission: Arc::new(tokio::sync::Semaphore::new(INVOCATION_PERMITS)),
+            admission: Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_INVOKES as usize)),
         }))
     }
 
@@ -310,11 +310,7 @@ impl S5rV3Session {
         invoke_context: &InvokeContext,
         execution_mode: ExecutionMode,
     ) -> Result<HandlerResult, ExtensionError> {
-        let permits = if execution_mode == ExecutionMode::Parallel {
-            1
-        } else {
-            INVOCATION_PERMITS as u32
-        };
+        let permits = invocation_permit_count(execution_mode);
         let _permit = Arc::clone(&self.admission)
             .acquire_many_owned(permits)
             .await
@@ -367,11 +363,7 @@ impl S5rV3Session {
             .as_ref()
             .map(|registration| registration.extension_id().to_owned())
             .ok_or_else(|| ExtensionError::Internal("extension is not initialized".into()))?;
-        let permits = if execution_mode == ExecutionMode::Parallel {
-            1
-        } else {
-            INVOCATION_PERMITS as u32
-        };
+        let permits = invocation_permit_count(execution_mode);
         let _permit = Arc::clone(&self.admission)
             .acquire_many_owned(permits)
             .await
@@ -435,6 +427,13 @@ impl S5rV3Session {
     }
 }
 
+fn invocation_permit_count(execution_mode: ExecutionMode) -> u32 {
+    match execution_mode {
+        ExecutionMode::Parallel => 1,
+        ExecutionMode::Sequential => MAX_PARALLEL_INVOKES,
+    }
+}
+
 impl Drop for S5rV3Session {
     fn drop(&mut self) {
         self.driver_shutdown.cancel();
@@ -476,7 +475,10 @@ async fn terminate_failed_start(child: &mut SupervisedChild, stderr_task: JoinHa
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use serde_json::json;
+    use tokio::sync::Semaphore;
 
     use super::*;
 
@@ -504,5 +506,40 @@ mod tests {
         assert_eq!(continuation["input"]["turn_id"], "turn-1");
         assert_eq!(continuation["input"]["tool_call_id"], "call-1");
         assert_eq!(continuation["input"]["working_dir"], "/trusted");
+    }
+
+    #[tokio::test]
+    async fn invocation_admission_caps_parallel_calls_and_excludes_sequential_calls() {
+        let admission = Arc::new(Semaphore::new(MAX_PARALLEL_INVOKES as usize));
+        let mut parallel = Vec::new();
+        for _ in 0..MAX_PARALLEL_INVOKES {
+            parallel.push(
+                Arc::clone(&admission)
+                    .acquire_many_owned(invocation_permit_count(ExecutionMode::Parallel))
+                    .await
+                    .unwrap(),
+            );
+        }
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                Arc::clone(&admission)
+                    .acquire_many_owned(invocation_permit_count(ExecutionMode::Parallel)),
+            )
+            .await
+            .is_err()
+        );
+
+        drop(parallel);
+        let _sequential = tokio::time::timeout(
+            Duration::from_secs(1),
+            Arc::clone(&admission)
+                .acquire_many_owned(invocation_permit_count(ExecutionMode::Sequential)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(admission.available_permits(), 0);
     }
 }
