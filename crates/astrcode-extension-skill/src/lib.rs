@@ -638,7 +638,10 @@ fn truncate_for_index(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_sdk::{extension::ExtensionCall, testing::ToolContextBuilder};
+    use astrcode_extension_sdk::{
+        extension::ExtensionCall,
+        testing::{CommandContextBuilder, HookContextBuilder, ToolContextBuilder},
+    };
 
     use super::*;
 
@@ -789,22 +792,70 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).expect("workspace");
-        write_skill(
+        let skill_dir = write_skill(
             &workspace.join(".astrcode").join("skills"),
             "commit",
-            &sample_md("Commit changes.", "Commit guide"),
+            &sample_md(
+                "Commit changes.",
+                "Use ${SKILL_DIR} for ${SESSION_ID} and inspect references.",
+            ),
         );
+        fs::create_dir_all(skill_dir.join("references")).unwrap();
+        fs::write(skill_dir.join("references/rules.md"), "rules").unwrap();
 
         let handler = SkillToolHandler {
             shared: Arc::new(SkillShared::new()),
         };
         let ctx = ToolContextBuilder::new("astrcode-skill", SKILL_TOOL_NAME)
             .session("session", &workspace, None)
-            .arguments(json!({ "skill": "commit" }))
+            .arguments(json!({ "skill": "/commit", "args": "staged files" }))
             .build();
         let result = handler.execute(ctx).await.expect("skill tool");
 
         assert!(!result.is_error);
         assert!(result.content.contains("Skill: commit"));
+        assert!(
+            result
+                .content
+                .contains("<skill-args>staged files</skill-args>")
+        );
+        assert!(result.content.contains("session"));
+        assert!(result.content.contains("- references/rules.md"));
+
+        let skills = discover_skills_with_home(&workspace, None);
+        let index = format_skills_for_model(&skills);
+        assert!(index.contains("calling the Skill tool"));
+        assert!(index.contains("/commit"));
+        assert!(index.contains("- commit: Commit changes."));
+
+        let prompt = SkillPromptBuildHandler {
+            shared: Arc::new(SkillShared::new()),
+        }
+        .handle(
+            HookContextBuilder::new("astrcode-skill")
+                .session("session", &workspace, None)
+                .build_prompt(vec![skill_tool_definition()]),
+        )
+        .await
+        .unwrap();
+        assert!(prompt.skills[0].contains("- commit: Commit changes."));
+
+        let command = SkillCommandHandler {
+            skill_id: "commit".into(),
+            shared: Arc::new(SkillShared::new()),
+        }
+        .execute(
+            CommandContextBuilder::new("astrcode-skill", "commit")
+                .session("session", &workspace, None)
+                .argument("staged files")
+                .build(),
+        )
+        .await
+        .unwrap();
+        let ExtensionCommandResult::StartTurn { instructions } = command else {
+            panic!("skill command should start a turn");
+        };
+        assert!(instructions.contains("<skill-name>commit</skill-name>"));
+        assert!(instructions.contains("<skill-args>staged files</skill-args>"));
     }
 }

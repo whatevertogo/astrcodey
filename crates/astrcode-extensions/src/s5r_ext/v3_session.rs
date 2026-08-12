@@ -11,15 +11,16 @@ use std::{
 };
 
 use astrcode_extension_contract::{
-    FeatureName, FrameTransport, InboundInvoke, InvocationResponse, Peer, PeerHandle,
-    PeerHandshake, PeerInvokeHandler, StdioFrameTransport,
+    FeatureName, FrameTransport, InboundInvoke, InvocationResponse, InvokeError, Peer, PeerHandle,
+    PeerHandshake, PeerInvokeHandler, StdioFrameTransport, WireErrorCode,
     protocol::{ModelStreamEvent, PeerInfo, S5R_STACK},
 };
 use astrcode_extension_sdk::{
     extension::ExtensionError,
+    host::HostError,
     s5r::{
-        CAP_HANDLER_INVOKE, CAP_RUNTIME_PING, ErrorPayload, HandlerInvokeRequest,
-        effects::HandlerResult,
+        CAP_HANDLER_INVOKE, CAP_RUNTIME_PING, CallContinuation, ErrorPayload, HandlerId,
+        HandlerInvokeRequest, HandlerKind, HandlerResult,
     },
     tool::ExecutionMode,
 };
@@ -33,13 +34,16 @@ use super::session_support::{
     HostInvokeState, ReentrancyGuard, StderrTaskGuard, drain_stderr, prepare_host_invoke,
 };
 use crate::{
-    extension_manifest::{ExtensionRegistration, registration_from_s5r_metadata},
+    extension_manifest::{
+        ExtensionRegistration, registration_from_s5r_metadata, validate_registration_features,
+    },
     host_router::{HostRouter, InvokeContext},
     process_supervision::{SupervisedChild, SupervisedCommand},
 };
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
-const INVOKE_TIMEOUT: Duration = Duration::from_secs(120);
+const INVOKE_TIMEOUT_MS: u64 = 120_000;
+const INVOKE_TIMEOUT: Duration = Duration::from_millis(INVOKE_TIMEOUT_MS);
 const PROCESS_TERMINATION_GRACE: Duration = Duration::from_secs(2);
 const MAX_PARALLEL_INVOKES: u32 = 8;
 const MAX_CONTINUATION_DEPTH: u32 = 16;
@@ -69,9 +73,7 @@ impl HandlerAttribution {
         Self {
             session_id: input.and_then(|input| input.get("session_id")).cloned(),
             turn_id: input.and_then(|input| input.get("turn_id")).cloned(),
-            tool_call_id: input
-                .and_then(|input| input.get("tool_call_id").or_else(|| input.get("call_id")))
-                .cloned(),
+            tool_call_id: input.and_then(|input| input.get("tool_call_id")).cloned(),
             working_dir: input.and_then(|input| input.get("working_dir")).cloned(),
         }
     }
@@ -87,9 +89,16 @@ impl HandlerAttribution {
     }
 }
 
+// 缺失的归因字段必须显式移除而非透传：宿主侧归因走 parent_invoke_id→invoke_contexts，
+// 不依赖这些线缆字段，continuation 自带的同名字段不可信。
 fn insert_attribution(input: &mut Map<String, Value>, field: &str, value: &Option<Value>) {
-    if let Some(value) = value {
-        input.insert(field.into(), value.clone());
+    match value {
+        Some(value) => {
+            input.insert(field.into(), value.clone());
+        },
+        None => {
+            input.remove(field);
+        },
     }
 }
 
@@ -218,8 +227,11 @@ impl S5rV3Session {
             FeatureName::custom_event_v1(),
         ]);
         let mut handshake = PeerHandshake::new("initialize-1");
-        handshake.supported_features = features.clone();
-        handshake.required_features = features;
+        handshake.supported_features = features;
+        // 仅 nested_invoke_v1 是所有 worker 的硬依赖（invoke context 经
+        // parent_invoke_id 解析）。model stream 在调用时校验；custom-event
+        // manifest 在握手完成后、发布注册前校验。
+        handshake.required_features = BTreeSet::from([FeatureName::nested_invoke_v1()]);
         let peer = match tokio::time::timeout(INITIALIZE_TIMEOUT, peer.initialize(handshake)).await
         {
             Ok(Ok(peer)) => peer,
@@ -233,10 +245,19 @@ impl S5rV3Session {
             },
         };
 
-        let (handle, driver) = peer.into_runtime();
-
         let registration =
-            registration_from_s5r_metadata(handle.remote_peer(), handle.remote_metadata())?;
+            match registration_from_s5r_metadata(peer.remote_peer(), peer.remote_metadata())
+                .and_then(|registration| {
+                    validate_registration_features(&registration, peer.negotiated_features())?;
+                    Ok(registration)
+                }) {
+                Ok(registration) => registration,
+                Err(error) => {
+                    terminate_failed_start(&mut child, stderr_task).await;
+                    return Err(error);
+                },
+            };
+        let (handle, driver) = peer.into_runtime();
 
         let registration = Arc::new(RwLock::new(Some(registration)));
         let invoke_contexts = Arc::new(RwLock::new(HashMap::new()));
@@ -295,7 +316,7 @@ impl S5rV3Session {
 
     pub(crate) async fn invoke_handler(
         &self,
-        handler_id: &str,
+        handler_id: &astrcode_extension_contract::HandlerId,
         event: Value,
         invoke_context: &InvokeContext,
     ) -> Result<HandlerResult, ExtensionError> {
@@ -305,7 +326,7 @@ impl S5rV3Session {
 
     async fn invoke_handler_in_lane(
         &self,
-        handler_id: &str,
+        handler_id: &astrcode_extension_contract::HandlerId,
         event: Value,
         invoke_context: &InvokeContext,
         execution_mode: ExecutionMode,
@@ -321,7 +342,7 @@ impl S5rV3Session {
 
     async fn invoke_handler_unadmitted(
         &self,
-        handler_id: &str,
+        handler_id: &astrcode_extension_contract::HandlerId,
         event: Value,
         invoke_context: &InvokeContext,
     ) -> Result<HandlerResult, ExtensionError> {
@@ -335,7 +356,7 @@ impl S5rV3Session {
             request_id,
             CAP_HANDLER_INVOKE,
             serde_json::to_value(HandlerInvokeRequest {
-                handler_id: handler_id.to_owned(),
+                handler_id: handler_id.clone(),
                 event,
             })
             .map_err(|error| {
@@ -349,13 +370,13 @@ impl S5rV3Session {
 
     pub(crate) async fn invoke_handler_with_continuations(
         &self,
-        handler_id: &str,
+        handler_id: &astrcode_extension_contract::HandlerId,
         event: Value,
         invoke_context: &InvokeContext,
         execution_mode: ExecutionMode,
     ) -> Result<HandlerResult, ExtensionError> {
         let attribution = HandlerAttribution::from_event(&event);
-        let mut stack = vec![(handler_id.to_owned(), event, 0u32)];
+        let mut stack = vec![(handler_id.clone(), event, 0u32)];
         let mut first = None;
         let extension_id = self
             .registration
@@ -382,8 +403,8 @@ impl S5rV3Session {
                 first = Some(result);
             }
             for continuation in continuations.iter().rev() {
-                let (next_handler, mut next_event) =
-                    continuation.handler_id_for_extension(&extension_id);
+                let (next_handler, mut next_event) = continuation_call(continuation, &extension_id)
+                    .map_err(ExtensionError::Internal)?;
                 attribution.apply_to(&mut next_event);
                 stack.push((next_handler, next_event, depth + 1));
             }
@@ -427,6 +448,26 @@ impl S5rV3Session {
     }
 }
 
+fn continuation_call(
+    continuation: &CallContinuation,
+    extension_id: &str,
+) -> Result<(HandlerId, Value), String> {
+    match continuation {
+        CallContinuation::Hook { on, input } => Ok((
+            HandlerId::new(extension_id, HandlerKind::Hook, on)?,
+            json!({ "on": on, "input": input }),
+        )),
+        CallContinuation::Tool { name, input } => Ok((
+            HandlerId::new(extension_id, HandlerKind::Tool, name)?,
+            json!({
+                "on": "tool",
+                "name": name,
+                "input": { "arguments": input }
+            }),
+        )),
+    }
+}
+
 fn invocation_permit_count(execution_mode: ExecutionMode) -> u32 {
     match execution_mode {
         ExecutionMode::Parallel => 1,
@@ -448,14 +489,14 @@ impl Drop for S5rV3Session {
 }
 
 async fn run_with_cancellation(
-    invoke: impl std::future::Future<Output = Result<Value, astrcode_extension_contract::InvokeError>>,
+    invoke: impl std::future::Future<Output = Result<Value, InvokeError>>,
     cancellation: Option<&CancellationToken>,
 ) -> Result<Value, ExtensionError> {
     let result = if let Some(cancellation) = cancellation {
         tokio::select! {
             biased;
             () = cancellation.cancelled() => {
-                return Err(ExtensionError::Internal("S5R 3.0 handler invoke cancelled".into()));
+                return Err(ExtensionError::Cancelled);
             },
             result = tokio::time::timeout(INVOKE_TIMEOUT, invoke) => result,
         }
@@ -463,8 +504,23 @@ async fn run_with_cancellation(
         tokio::time::timeout(INVOKE_TIMEOUT, invoke).await
     };
     result
-        .map_err(|_| ExtensionError::Internal("S5R 3.0 handler invoke timed out".into()))?
-        .map_err(|error| ExtensionError::Internal(error.to_string()))
+        .map_err(|_| ExtensionError::Timeout(INVOKE_TIMEOUT_MS))?
+        .map_err(invoke_error_to_extension_error)
+}
+
+fn invoke_error_to_extension_error(error: InvokeError) -> ExtensionError {
+    let payload = match error {
+        InvokeError::Local(payload) | InvokeError::Remote(payload) => payload,
+        InvokeError::DriverUnavailable => ErrorPayload::new(
+            WireErrorCode::HostNotReady,
+            "S5R 3.0 extension peer driver is not running",
+        ),
+        InvokeError::PeerClosed => ErrorPayload::new(
+            WireErrorCode::PeerClosed,
+            "S5R 3.0 extension peer closed before the invoke completed",
+        ),
+    };
+    ExtensionError::Host(HostError::from(payload))
 }
 
 async fn terminate_failed_start(child: &mut SupervisedChild, stderr_task: JoinHandle<()>) {
@@ -477,6 +533,7 @@ async fn terminate_failed_start(child: &mut SupervisedChild, stderr_task: JoinHa
 mod tests {
     use std::time::Duration;
 
+    use astrcode_extension_contract::WireErrorCode;
     use serde_json::json;
     use tokio::sync::Semaphore;
 
@@ -488,7 +545,7 @@ mod tests {
             "input": {
                 "session_id": "session-1",
                 "turn_id": "turn-1",
-                "call_id": "call-1",
+                "tool_call_id": "call-1",
                 "working_dir": "/trusted"
             }
         }));
@@ -506,6 +563,91 @@ mod tests {
         assert_eq!(continuation["input"]["turn_id"], "turn-1");
         assert_eq!(continuation["input"]["tool_call_id"], "call-1");
         assert_eq!(continuation["input"]["working_dir"], "/trusted");
+    }
+
+    #[test]
+    fn continuation_attribution_strips_fields_absent_from_the_trusted_event() {
+        let attribution = HandlerAttribution::from_event(&json!({
+            "input": { "arguments": {} }
+        }));
+        let mut continuation = json!({
+            "input": {
+                "arguments": {},
+                "session_id": "spoofed",
+                "turn_id": "spoofed",
+                "tool_call_id": "spoofed",
+                "working_dir": "/untrusted"
+            }
+        });
+
+        attribution.apply_to(&mut continuation);
+
+        let input = continuation["input"].as_object().unwrap();
+        assert_eq!(input.get("arguments"), Some(&json!({})));
+        for field in ["session_id", "turn_id", "tool_call_id", "working_dir"] {
+            assert!(
+                !input.contains_key(field),
+                "continuation must not carry spoofed {field}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn invoke_errors_preserve_structured_protocol_semantics() {
+        for (invoke_error, code, retryable) in [
+            (
+                InvokeError::Remote(ErrorPayload::new(
+                    WireErrorCode::Cancelled,
+                    "structured worker error",
+                )),
+                WireErrorCode::Cancelled,
+                false,
+            ),
+            (
+                InvokeError::Local(
+                    ErrorPayload::new(WireErrorCode::InvalidInput, "local admission error")
+                        .retryable(true),
+                ),
+                WireErrorCode::InvalidInput,
+                true,
+            ),
+            (
+                InvokeError::DriverUnavailable,
+                WireErrorCode::HostNotReady,
+                false,
+            ),
+            (InvokeError::PeerClosed, WireErrorCode::PeerClosed, false),
+        ] {
+            let error = run_with_cancellation(async { Err(invoke_error) }, None)
+                .await
+                .unwrap_err();
+
+            match error {
+                ExtensionError::Host(host) => {
+                    assert_eq!(host.code_enum(), Some(code));
+                    assert_eq!(host.retryable, retryable);
+                },
+                other => panic!("invoke errors must surface as ExtensionError::Host, got {other}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_is_distinguishable_from_internal_errors() {
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+
+        let error = run_with_cancellation(
+            std::future::pending::<Result<Value, InvokeError>>(),
+            Some(&cancellation),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            matches!(error, ExtensionError::Cancelled),
+            "cancellation must not collapse into ExtensionError::Internal, got {error}"
+        );
     }
 
     #[tokio::test]

@@ -129,10 +129,11 @@ live 使用 `try_send`：成功入队后由 worker 按队列位置 fan-out；队
 
 ### Turn ingress
 
-扩展 SDK 和工具上下文需要同步、可 clone 的 `UnboundedSender<EventPayload>`，因此
-`TurnEventIngress` 仍作为边界适配器存在：
+扩展 SDK 和工具上下文需要同步、可 clone 的事件 sender，因此 `TurnEventIngress` 以
+`mpsc::channel(256)` 作为边界适配器：
 
-- 收集 hook/tool 的非阻塞发送；
+- 异步 `emit` 在队列有容量后入队，并等待宿主返回 publication receipt；
+- 仅供同步释放路径使用的 `try_emit` 不等待，队列满时显式返回 `Full`；
 - 绑定当前 turn；
 - durable 失败时执行有限重试；
 - `flush` 等待此前 ingress 事件处理完成。
@@ -161,11 +162,12 @@ projection 的三种“所有权”必须分开：
 此前 turn 内的 `model_cache` 已删除。它复制完整 projection，还需要
 invalidate/reload/reduce 三套手工同步路径，容易形成第二个状态源。
 
-替代方案由 storage 的 `SessionProjection` 统一提供：
-`RwLock<Arc<SessionReadModel>>` 让读取只克隆 `Arc`；写入通过 `Arc::make_mut` reduce。
-仍有调用方持有旧快照时，写入自动 copy-on-write；没有旧读者时直接原地更新。调用方既
-不能修改快照，也不需要 revision、失效或同步协议；必须构造 wire DTO 的边界才按需复制
-字段。
+替代方案由 storage 的 `SessionProjection` 统一提供：读取只克隆
+`RwLock<Arc<SessionReadModel>>` 的 `Arc`。普通 durable 批次先做无副作用校验，日志 append
+成功后再通过 `Arc::make_mut` 应用：没有旧快照时直接原地归约，只有读者仍持有旧
+快照时才 copy-on-write。`TranscriptRewritten` 批次依赖旧 projection 做前缀指纹校验，
+prepare 只复制并推进 system prompt 与 provider transcript 这一窄状态，不构造完整
+read-model candidate；校验失败时不会写入日志或发布部分 projection。
 
 ## 5. 三个不能合并的顺序域
 

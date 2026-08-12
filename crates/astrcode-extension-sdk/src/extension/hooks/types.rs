@@ -5,21 +5,8 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use astrcode_core::event::EventSendError;
+pub use astrcode_extension_contract::manifest::{CompactEvent, ContinueAfterStopLimit, HookMode};
 use serde::{Deserialize, Serialize};
-
-// ─── Hook mode ─────────────────────────────────────────────────────────
-
-/// 钩子订阅的执行模式。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum HookMode {
-    /// 宿主等待执行完成，handler 结果可以影响当前流程。
-    Blocking,
-    /// 宿主将执行交给受生命周期管理的后台任务，不等待 handler 完成。
-    NonBlocking,
-    /// 宿主等待执行完成，但忽略 handler 的控制流结果并记录错误。
-    Advisory,
-}
 
 // ─── Tool hook target ──────────────────────────────────────────────────
 
@@ -118,14 +105,6 @@ pub enum ProviderEvent {
     AfterResponse,
 }
 
-/// Compact hook 触发时机。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CompactEvent {
-    PreCompact,
-    PostCompact,
-}
-
 // ─── Extension error ───────────────────────────────────────────────────
 
 /// 扩展操作产生的错误。
@@ -149,6 +128,8 @@ pub enum ExtensionError {
     NotFound(String),
     #[error("Hook timed out after {0}ms")]
     Timeout(u64),
+    #[error("operation cancelled")]
+    Cancelled,
     #[error("extension {extension_id} is draining")]
     Draining { extension_id: String },
     #[error("blocked by hook: {reason}")]
@@ -186,54 +167,6 @@ pub enum ExtensionError {
 }
 
 // ─── ContinueAfterStop limit ───────────────────────────────────────────
-
-/// 单个 `ContinueAfterStop` hook 在同一个 turn 内可请求的续跑上限。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "i64", into = "i64")]
-pub enum ContinueAfterStopLimit {
-    Limited { max_per_turn: u32 },
-    Unlimited,
-}
-
-impl ContinueAfterStopLimit {
-    pub const fn limited(max_per_turn: u32) -> Self {
-        Self::Limited { max_per_turn }
-    }
-
-    pub const fn unlimited() -> Self {
-        Self::Unlimited
-    }
-
-    pub const fn allows(self, continuations_this_turn: u32) -> bool {
-        match self {
-            Self::Limited { max_per_turn } => continuations_this_turn < max_per_turn,
-            Self::Unlimited => true,
-        }
-    }
-}
-
-impl TryFrom<i64> for ContinueAfterStopLimit {
-    type Error = String;
-
-    fn try_from(max_per_turn: i64) -> Result<Self, Self::Error> {
-        match max_per_turn {
-            -1 => Ok(Self::Unlimited),
-            value if (0..=i64::from(u32::MAX)).contains(&value) => Ok(Self::limited(value as u32)),
-            _ => {
-                Err("continue_after_stop max_per_turn must be -1 or a non-negative integer".into())
-            },
-        }
-    }
-}
-
-impl From<ContinueAfterStopLimit> for i64 {
-    fn from(budget: ContinueAfterStopLimit) -> Self {
-        match budget {
-            ContinueAfterStopLimit::Limited { max_per_turn } => i64::from(max_per_turn),
-            ContinueAfterStopLimit::Unlimited => -1,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContinueAfterStopOptions {

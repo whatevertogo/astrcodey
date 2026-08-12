@@ -117,7 +117,7 @@ impl TelegramChannelsExtension {
     }
 
     fn load_config(config: &ExtensionConfig) -> Result<ChannelsConfig, ExtensionError> {
-        config.deserialize_or_default().map_err(Into::into)
+        Ok(config.deserialize_or_default()?)
     }
 }
 
@@ -687,6 +687,7 @@ mod tests {
     use std::sync::Mutex;
 
     use astrcode_extension_sdk::{
+        WireErrorCode,
         host::{
             HostError, HostOperation,
             internal::{HostInvoker, HostScope, extension_host},
@@ -765,7 +766,9 @@ mod tests {
                     serde_json::to_value(HostSubmitTurnOutput::Completed {
                         content: format!("reply: {}", request.user_prompt),
                     })
-                    .map_err(|error| HostError::new("serialization_failed", error.to_string()))
+                    .map_err(|error| {
+                        HostError::new(WireErrorCode::SerializationFailed, error.to_string())
+                    })
                 },
                 HostOperation::SessionRootState => serde_json::to_value(HostSessionStateOutput {
                     lifecycle: SessionLifecycleStateDto::Active,
@@ -774,9 +777,11 @@ mod tests {
                     queued_inputs: 0,
                     message_count: 0,
                 })
-                .map_err(|error| HostError::new("serialization_failed", error.to_string())),
+                .map_err(|error| {
+                    HostError::new(WireErrorCode::SerializationFailed, error.to_string())
+                }),
                 operation => Err(HostError::new(
-                    "unexpected_operation",
+                    WireErrorCode::InternalError,
                     format!("unexpected operation: {}", operation.wire_name()),
                 )),
             }
@@ -864,15 +869,18 @@ mod tests {
 
     #[test]
     fn nested_config_deserializes_with_defaults() {
-        let cfg: ChannelsConfig = serde_json::from_value(json!({
-            "telegram": {
-                "enabled": true,
-                "botToken": "env:TELEGRAM_BOT_TOKEN",
-                "allowedChatIds": ["1"],
-                "registerCommands": true,
-                "streaming": true
-            }
-        }))
+        let cfg = TelegramChannelsExtension::load_config(&ExtensionConfig::from_runtime(
+            "test",
+            json!({
+                "telegram": {
+                    "enabled": true,
+                    "botToken": "env:TELEGRAM_BOT_TOKEN",
+                    "allowedChatIds": ["1"],
+                    "registerCommands": true,
+                    "streaming": true
+                }
+            }),
+        ))
         .unwrap();
         assert!(cfg.telegram.enabled);
         assert_eq!(
@@ -888,17 +896,37 @@ mod tests {
     }
 
     #[test]
-    fn flat_config_is_rejected() {
-        let result = TelegramChannelsExtension::load_config(&ExtensionConfig::from_runtime(
-            "test",
+    fn telegram_commands_expose_start_and_help() {
+        assert_eq!(
+            telegram_commands(),
+            vec![
+                TelegramBotCommand {
+                    command: "start",
+                    description: "Start using AstrCode in this chat",
+                },
+                TelegramBotCommand {
+                    command: "help",
+                    description: "Show AstrCode Telegram usage",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unknown_config_shapes_are_rejected() {
+        for config in [
             json!({
                 "enabled": true,
                 "botToken": "x",
                 "allowedChatIds": ["1"]
             }),
-        ));
-
-        assert!(result.is_err());
+            json!({ "telegram": { "workingDir": "/removed" } }),
+        ] {
+            let result = TelegramChannelsExtension::load_config(&ExtensionConfig::from_runtime(
+                "test", config,
+            ));
+            assert!(result.is_err());
+        }
     }
 
     #[test]

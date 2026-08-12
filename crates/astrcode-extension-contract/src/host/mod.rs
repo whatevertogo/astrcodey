@@ -197,11 +197,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::{
-        error::WireErrorCode,
-        protocol::{ErrorPayload, ModelStreamEvent},
-        session::{SessionPhaseDto, SessionToolSelectionDto},
-    };
+    use crate::session::{SessionPhaseDto, SessionToolSelectionDto};
 
     fn assert_strict_round_trip<T>(contract: T)
     where
@@ -271,13 +267,6 @@ mod tests {
             HostLlmChatOutput {
                 content: "hello".into(),
                 model: "main".into(),
-            },
-            HostLlmCollectedStreamOutput {
-                content: "hello".into(),
-                model: "main".into(),
-                chunks: vec![HostLlmTextDelta {
-                    delta: "hello".into(),
-                }],
             },
             HostSessionSummariesOutput {
                 sessions: vec![HostSessionSummary {
@@ -438,46 +427,6 @@ mod tests {
                 selection: SessionToolSelectionDto::no_tools(),
             },
         );
-    }
-
-    #[tokio::test]
-    async fn model_stream_collection_enforces_the_terminal_contract() {
-        let collected = collect_model_stream(futures_util::stream::iter([
-            ModelStreamEvent::ContentDelta {
-                content: "hel".into(),
-            },
-            ModelStreamEvent::ContentDelta {
-                content: "lo".into(),
-            },
-            ModelStreamEvent::Completed {
-                output: json!({ "model": "main", "finish_reason": "stop" }),
-            },
-        ]))
-        .await
-        .unwrap();
-        assert_eq!(collected.content, "hello");
-        assert_eq!(collected.model, "main");
-
-        let error =
-            collect_model_stream(futures_util::stream::iter([ModelStreamEvent::Completed {
-                output: json!({ "content": "hello" }),
-            }]))
-            .await
-            .expect_err("model is required by the collected stream contract");
-        assert_eq!(error.code_enum(), Some(WireErrorCode::InvalidResponse));
-
-        let error = collect_model_stream(futures_util::stream::empty::<ModelStreamEvent>())
-            .await
-            .expect_err("a terminal event is required");
-        assert_eq!(error.code_enum(), Some(WireErrorCode::StreamClosed));
-
-        let expected = ErrorPayload::new(WireErrorCode::BackendUnavailable, "model unavailable");
-        let error = collect_model_stream(futures_util::stream::iter([ModelStreamEvent::Failed {
-            error: expected.clone(),
-        }]))
-        .await
-        .expect_err("failed terminal events must remain errors");
-        assert_eq!(error, expected);
     }
 
     #[test]

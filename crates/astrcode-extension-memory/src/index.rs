@@ -18,7 +18,6 @@ const INDEX_VERSION: u32 = 1;
 pub(crate) enum MemorySource {
     Manual,
     Pipeline,
-    #[serde(alias = "turn_end")]
     TurnEnd,
 }
 

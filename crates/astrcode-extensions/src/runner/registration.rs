@@ -1,6 +1,6 @@
 use astrcode_extension_sdk::extension::{
     ExtensionError, ExtensionHttpAccess, ExtensionHttpMethod, ExtensionHttpRouteRegistration,
-    ExtensionRegistrations, extension_http_route_patterns_conflict,
+    ExtensionRegistrations, internal::extension_http_route_patterns_conflict,
 };
 
 use super::HostedExtension;

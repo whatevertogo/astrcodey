@@ -95,21 +95,17 @@ where
         let WireMessage::Result(result) = self.read().await? else {
             return Err(PeerError::UnexpectedMessage("initialize result"));
         };
-        if result.id != handshake.request_id || result.kind != ResultKind::Initialize {
+        if result.id() != handshake.request_id || result.kind() != ResultKind::Initialize {
             return Err(PeerError::UnexpectedMessage("matching initialize result"));
         }
-        if !result.success {
-            return Err(PeerError::Remote(result.error.unwrap_or_else(|| {
-                ErrorPayload::new(
-                    WireErrorCode::InitializeFailed,
-                    "remote peer rejected initialization without an error payload",
-                )
-            })));
-        }
-        let output: InitializeOutput = serde_json::from_value(result.output.ok_or_else(|| {
-            PeerError::Protocol("successful initialize result has no output".into())
-        })?)
-        .map_err(|error| PeerError::Protocol(error.to_string()))?;
+        let output = match result {
+            ResultMsg::Success { output, .. } => output,
+            ResultMsg::Failure { error, .. } => {
+                return Err(PeerError::Remote(error));
+            },
+        };
+        let output: InitializeOutput = serde_json::from_value(output)
+            .map_err(|error| PeerError::Protocol(error.to_string()))?;
         validate_initialize_output(
             &output,
             &handshake.supported_features,
@@ -156,13 +152,11 @@ where
                     capabilities,
                     metadata,
                 };
-                self.write(&WireMessage::Result(ResultMsg {
-                    id: initialize.id,
-                    kind: ResultKind::Initialize,
-                    success: true,
-                    output: Some(serde_json::to_value(output)?),
-                    error: None,
-                }))
+                self.write(&WireMessage::Result(ResultMsg::success(
+                    initialize.id,
+                    ResultKind::Initialize,
+                    serde_json::to_value(output)?,
+                )))
                 .await?;
                 Ok(self.ready(
                     initialize.peer,
@@ -173,13 +167,11 @@ where
                 ))
             },
             Err(error) => {
-                self.write(&WireMessage::Result(ResultMsg {
-                    id: initialize.id,
-                    kind: ResultKind::Initialize,
-                    success: false,
-                    output: None,
-                    error: Some(error.clone()),
-                }))
+                self.write(&WireMessage::Result(ResultMsg::failure(
+                    initialize.id,
+                    ResultKind::Initialize,
+                    error.clone(),
+                )))
                 .await?;
                 Err(PeerError::Remote(error))
             },

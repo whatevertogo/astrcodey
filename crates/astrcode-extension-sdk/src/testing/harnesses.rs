@@ -130,7 +130,7 @@ impl HostInvoker for MockHostInvoker {
             .push(MockHostInvocation { operation, input });
         state.responses.get(&operation).cloned().unwrap_or_else(|| {
             Err(HostError::new(
-                "backend_unavailable",
+                crate::WireErrorCode::BackendUnavailable,
                 format!("{} has no configured mock response", operation.wire_name()),
             ))
         })

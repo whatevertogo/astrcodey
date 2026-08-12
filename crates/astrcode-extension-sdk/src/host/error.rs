@@ -13,9 +13,9 @@ pub struct HostError {
 }
 
 impl HostError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(code: WireErrorCode, message: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
+            code: code.as_str().into(),
             message: message.into(),
             hint: None,
             retryable: false,

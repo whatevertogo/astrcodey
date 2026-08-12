@@ -1164,7 +1164,7 @@ fn transcript_rewrite_payload_contains_compacted_history_and_metadata() {
         rewrite,
         DurableEventPayload::TranscriptRewritten {
             source_seq: 7,
-            source_fingerprint: Some(fingerprint),
+            source_fingerprint: fingerprint,
             messages,
             reason: astrcode_core::event::TranscriptRewriteReason::Compaction(details),
         } if fingerprint == "fingerprint"

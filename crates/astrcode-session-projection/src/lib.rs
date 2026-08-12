@@ -8,6 +8,6 @@ mod reducer;
 
 pub use model::*;
 pub use reducer::{
-    ProjectionError, SessionReadModelProjection, SessionSummaryProjection, reduce, replay,
-    validate_next_event,
+    PreparedProjectionBatch, ProjectionError, SessionReadModelProjection, SessionSummaryProjection,
+    reduce, replay, validate_next_event,
 };

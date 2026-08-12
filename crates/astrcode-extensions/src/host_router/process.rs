@@ -6,7 +6,7 @@ use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     host::{
         HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS, HostOperation,
-        HostOperationGroup, HostProcessOutput, HostProcessRequest,
+        HostProcessOutput, HostProcessRequest, internal::HostOperationGroup,
     },
     s5r::ErrorPayload,
 };

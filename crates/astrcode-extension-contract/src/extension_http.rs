@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,7 @@ pub enum ExtensionHttpAccess {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionHttpRoute {
     pub method: ExtensionHttpMethod,
     pub path: String,
@@ -70,23 +70,10 @@ impl ExtensionHttpRoute {
         self.max_body_bytes = max_body_bytes;
         self
     }
-
-    pub fn validate(&self) -> Result<(), String> {
-        if !valid_extension_http_route_path(&self.path) {
-            return Err(format!("invalid extension HTTP route path: {}", self.path));
-        }
-        if self.max_body_bytes == 0 || self.max_body_bytes > MAX_EXTENSION_HTTP_BODY_BYTES {
-            return Err(format!(
-                "extension HTTP max_body_bytes must be between 1 and \
-                 {MAX_EXTENSION_HTTP_BODY_BYTES}"
-            ));
-        }
-        Ok(())
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionHttpRequest {
     pub method: ExtensionHttpMethod,
     pub path: String,
@@ -121,7 +108,7 @@ impl ExtensionHttpRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionHttpDispatchRequest {
     pub method: ExtensionHttpMethod,
     pub path: String,
@@ -165,7 +152,7 @@ impl From<ExtensionHttpDispatchRequest> for ExtensionHttpRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ExtensionHttpResponse {
     #[serde(
         serialize_with = "serialize_extension_http_status",
@@ -215,75 +202,4 @@ where
             "extension HTTP status must be between 100 and 599",
         ))
     }
-}
-
-pub fn match_extension_http_route(pattern: &str, path: &str) -> Option<BTreeMap<String, String>> {
-    let pattern_segments = extension_http_path_segments(pattern);
-    let path_segments = extension_http_path_segments(path);
-    if pattern_segments.len() != path_segments.len() {
-        return None;
-    }
-    let mut params = BTreeMap::new();
-    for (pattern_segment, path_segment) in pattern_segments.iter().zip(path_segments) {
-        if let Some(name) = extension_http_param_name(pattern_segment) {
-            params.insert(name.to_string(), path_segment.to_string());
-        } else if pattern_segment != &path_segment {
-            return None;
-        }
-    }
-    Some(params)
-}
-
-pub fn extension_http_route_patterns_conflict(left: &str, right: &str) -> bool {
-    let left_segments = extension_http_path_segments(left);
-    let right_segments = extension_http_path_segments(right);
-    left_segments.len() == right_segments.len()
-        && left_segments
-            .iter()
-            .zip(right_segments)
-            .all(|(left, right)| {
-                left == &right
-                    || extension_http_param_name(left).is_some()
-                    || extension_http_param_name(right).is_some()
-            })
-}
-
-fn valid_extension_http_route_path(path: &str) -> bool {
-    if !path.starts_with('/') || path.ends_with('/') || path.contains("//") || path.contains("..") {
-        return false;
-    }
-    let mut params = BTreeSet::new();
-    path.split('/').skip(1).all(|segment| {
-        if segment.is_empty() {
-            return false;
-        }
-        let starts_param = segment.starts_with('{');
-        let ends_param = segment.ends_with('}');
-        match (starts_param, ends_param) {
-            (false, false) => !segment.contains('{') && !segment.contains('}'),
-            (true, true) => {
-                let name = &segment[1..segment.len() - 1];
-                !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|character| character.is_ascii_alphanumeric() || character == '_')
-                    && params.insert(name)
-            },
-            _ => false,
-        }
-    })
-}
-
-fn extension_http_path_segments(path: &str) -> Vec<&str> {
-    path.trim_matches('/')
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect()
-}
-
-fn extension_http_param_name(segment: &str) -> Option<&str> {
-    segment
-        .strip_prefix('{')
-        .and_then(|segment| segment.strip_suffix('}'))
-        .filter(|name| !name.is_empty())
 }

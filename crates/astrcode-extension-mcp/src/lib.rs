@@ -753,4 +753,17 @@ mod tests {
         assert_eq!(def.origin, ToolOrigin::Bundled);
         assert_eq!(def.parameters, json!({"type": "object"}));
     }
+
+    #[test]
+    fn discovery_tool_and_prompt_keep_the_two_step_mcp_contract() {
+        let definition = tool_search_tool_definition();
+        assert_eq!(definition.name, TOOL_SEARCH_TOOL_NAME);
+        assert_eq!(definition.origin, ToolOrigin::Bundled);
+        assert_eq!(definition.execution_mode, ExecutionMode::Parallel);
+
+        let instruction = mcp_discovery_instructions();
+        assert!(instruction.starts_with("MCP discovery workflow:"));
+        assert!(instruction.contains("`tool_search_tool`"));
+        assert!(!instruction.contains("[Example Workflow]"));
+    }
 }

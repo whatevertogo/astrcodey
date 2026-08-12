@@ -1399,6 +1399,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn official_runtime_names_and_pull_budget_are_stable() {
+        assert_eq!(
+            official_image_name("swebench", "django__django-11620"),
+            "swebench/sweb.eval.x86_64.django_1776_django-11620:latest"
+        );
+        assert_eq!(
+            container_name("astrcode-run", "django__django-11620"),
+            "astrcode-run-django__django-11620"
+        );
+        assert_eq!(IMAGE_PULL_TIMEOUT, Duration::from_secs(60 * 60));
+        assert_eq!(IMAGE_PULL_RETRY_DELAY, Duration::from_secs(15));
+    }
+
+    #[test]
     fn patch_collection_includes_only_untracked_paths_created_during_session() {
         let baseline = parse_untracked_paths(b"build/lib/generated.py\0cache file\0").unwrap();
         let current = parse_untracked_paths(

@@ -24,12 +24,14 @@ pub const CONFORMANCE_WAIT_FOR_CANCEL: &str = "s5r.conformance.wait_for_cancel";
 pub const CONFORMANCE_UNKNOWN_ERROR: &str = "s5r.conformance.unknown_error";
 pub const CONFORMANCE_HOST_ECHO: &str = "s5r.conformance.host_echo";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
 pub struct HandlerId(String);
 
 impl HandlerId {
-    pub fn new(extension_id: &str, kind: HandlerKind, name: &str) -> Self {
-        Self(format!("{extension_id}:{}:{name}", kind.as_str()))
+    pub fn new(extension_id: &str, kind: HandlerKind, name: &str) -> Result<Self, String> {
+        let wire = format!("{extension_id}:{}:{name}", kind.as_str());
+        Self::parse(&wire).ok_or_else(|| format!("invalid handler id {wire:?}"))
     }
 
     pub fn as_str(&self) -> &str {
@@ -50,14 +52,31 @@ impl HandlerId {
         Some((extension_id, kind, name))
     }
 
-    pub fn parts(&self) -> Option<(&str, HandlerKind, &str)> {
-        Self::split(&self.0)
+    pub fn parts(&self) -> (&str, HandlerKind, &str) {
+        Self::split(&self.0).expect("HandlerId constructors preserve the parsed invariant")
     }
 }
 
 impl From<HandlerId> for String {
     fn from(id: HandlerId) -> Self {
         id.0
+    }
+}
+
+impl Display for HandlerId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for HandlerId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = String::deserialize(deserializer)?;
+        Self::parse(&wire)
+            .ok_or_else(|| serde::de::Error::custom(format!("invalid handler id {wire:?}")))
     }
 }
 
@@ -171,7 +190,7 @@ impl PeerInfo {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HandlerDescriptor {
-    pub handler_id: String,
+    pub handler_id: HandlerId,
     pub description: String,
     #[serde(default)]
     pub input_schema: Value,
@@ -180,7 +199,7 @@ pub struct HandlerDescriptor {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct HandlerInvokeRequest {
-    pub handler_id: String,
+    pub handler_id: HandlerId,
     #[serde(default)]
     pub event: Value,
 }
@@ -240,15 +259,40 @@ pub enum ResultKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ResultMsg {
-    pub id: String,
-    pub kind: ResultKind,
-    pub success: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub output: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<ErrorPayload>,
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ResultMsg {
+    Success {
+        id: String,
+        kind: ResultKind,
+        output: Value,
+    },
+    Failure {
+        id: String,
+        kind: ResultKind,
+        error: ErrorPayload,
+    },
+}
+
+impl ResultMsg {
+    pub fn success(id: String, kind: ResultKind, output: Value) -> Self {
+        Self::Success { id, kind, output }
+    }
+
+    pub fn failure(id: String, kind: ResultKind, error: ErrorPayload) -> Self {
+        Self::Failure { id, kind, error }
+    }
+
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Success { id, .. } | Self::Failure { id, .. } => id,
+        }
+    }
+
+    pub const fn kind(&self) -> ResultKind {
+        match self {
+            Self::Success { kind, .. } | Self::Failure { kind, .. } => *kind,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -339,7 +383,7 @@ impl WireMessage {
     pub fn id(&self) -> &str {
         match self {
             Self::Initialize(message) => &message.id,
-            Self::Result(message) => &message.id,
+            Self::Result(message) => message.id(),
             Self::Invoke(message) => &message.id,
             Self::Stream(message) => &message.id,
             Self::Cancel(message) => &message.id,
@@ -361,9 +405,9 @@ pub struct ErrorPayload {
 }
 
 impl ErrorPayload {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(code: WireErrorCode, message: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
+            code: code.as_str().into(),
             message: message.into(),
             hint: None,
             retryable: false,

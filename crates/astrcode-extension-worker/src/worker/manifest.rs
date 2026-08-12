@@ -1,12 +1,13 @@
 //! Worker 握手 manifest 构建（与 handler 注册单一数据源）。
 
+use astrcode_extension_contract::manifest::{
+    InitializeManifest, ManifestCommand, ManifestHook, ManifestHttpRoute, ManifestTool,
+    ManifestToolMode,
+};
 use serde_json::Value;
 
 use crate::{
-    extension::{CustomEventDeclaration, CustomEventSubscription},
-    s5r::manifest::{
-        InitializeManifest, ManifestCommand, ManifestHook, ManifestHttpRoute, ManifestTool,
-    },
+    extension::{CustomEventDeclaration, CustomEventSubscription, ExtensionCapability},
     tool::ToolDefinition,
 };
 
@@ -16,7 +17,7 @@ pub(crate) struct ManifestCatalog {
     pub hooks: Vec<ManifestHook>,
     pub commands: Vec<ManifestCommand>,
     pub http_routes: Vec<ManifestHttpRoute>,
-    pub capabilities: Vec<String>,
+    pub capabilities: Vec<ExtensionCapability>,
     pub custom_events: Vec<CustomEventDeclaration>,
     pub custom_event_subscriptions: Vec<CustomEventSubscription>,
 }
@@ -32,8 +33,8 @@ impl ManifestCatalog {
                 parameters: tool.parameters.clone(),
                 strict: tool.strict,
                 mode: match tool.execution_mode {
-                    crate::tool::ExecutionMode::Parallel => "parallel".into(),
-                    crate::tool::ExecutionMode::Sequential => "sequential".into(),
+                    crate::tool::ExecutionMode::Parallel => ManifestToolMode::Parallel,
+                    crate::tool::ExecutionMode::Sequential => ManifestToolMode::Sequential,
                 },
             })
             .collect();
@@ -71,9 +72,9 @@ mod tests {
     fn continue_after_stop_limit_serializes_under_hook_options() {
         let catalog = ManifestCatalog {
             hooks: vec![ManifestHook {
-                on: "continue_after_stop".into(),
-                mode: "blocking".into(),
-                options: crate::s5r::manifest::ManifestHookOptions {
+                on: crate::extension::LifecycleEvent::ContinueAfterStop.into(),
+                mode: crate::extension::HookMode::Blocking,
+                options: astrcode_extension_contract::manifest::ManifestHookOptions {
                     max_per_turn: Some(ContinueAfterStopLimit::unlimited()),
                 },
             }],
@@ -92,9 +93,9 @@ mod tests {
     fn generic_hook_omits_empty_options() {
         let catalog = ManifestCatalog {
             hooks: vec![ManifestHook {
-                on: "turn_end".into(),
-                mode: "advisory".into(),
-                options: crate::s5r::manifest::ManifestHookOptions::default(),
+                on: crate::extension::LifecycleEvent::TurnEnd.into(),
+                mode: crate::extension::HookMode::Advisory,
+                options: astrcode_extension_contract::manifest::ManifestHookOptions::default(),
             }],
             ..Default::default()
         };
@@ -118,19 +119,19 @@ mod tests {
                 .named("consume-typed-event"),
         );
         let metadata = catalog.to_metadata_value().unwrap();
-        assert_eq!(metadata["custom_events"][0]["eventType"], "typed.event");
-        assert_eq!(metadata["custom_events"][0]["schemaVersion"], 2);
+        assert_eq!(metadata["custom_events"][0]["event_type"], "typed.event");
+        assert_eq!(metadata["custom_events"][0]["schema_version"], 2);
         assert_eq!(metadata["custom_events"][0]["durable"], false);
-        assert_eq!(metadata["custom_events"][0]["maxPayloadBytes"], 4096);
+        assert_eq!(metadata["custom_events"][0]["max_payload_bytes"], 4096);
         assert_eq!(
             metadata["custom_event_subscriptions"][0],
             serde_json::json!({
                 "id": "consume-typed-event",
-                "consumerVersion": 1,
-                "eventType": "typed.event",
+                "consumer_version": 1,
+                "event_type": "typed.event",
                 "source": {
                     "kind": "extension",
-                    "extensionId": "producer"
+                    "extension_id": "producer"
                 }
             })
         );

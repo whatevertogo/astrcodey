@@ -15,7 +15,7 @@ re-export，但两套 runtime 入口、context 和错误返回类型不能互换
 
 测试入口也分开：bundled 使用 `astrcode_extension_sdk::testing` 的 context builders、
 `MockExtensionHost`、`RegistrationHarness` 与 `ExtensionLifecycleHarness`；worker 单元测试通过
-`worker::testing::with_host_api` 在异步作用域内注入 `HostApi`，协议验收使用真实子进程 E2E。
+`astrcode_extension_worker::testing::with_host_api` 在异步作用域内注入 `HostApi`，协议验收使用真实子进程 E2E。
 
 ## 最小示例
 
@@ -31,8 +31,7 @@ async fn main() {
 }
 
 async fn run() -> Result<(), ErrorPayload> {
-    let mut worker = Worker::new("my-ext");
-    worker.version("0.1.0");
+    let mut worker = Worker::new("my-ext", "0.1.0");
 
     worker.tool(
         tool("ping")
@@ -191,7 +190,10 @@ I/O 大小限制，并响应会话取消。
 S5R 同时支持 `public_http` 和复用宿主 bearer token 的 `authenticated_http`；两者都不能
 注册在 `/api` 下。s5r 工具默认串行；显式声明 `ExecutionMode::Parallel` 时，宿主会在同一
 worker 内启用最多 8 个并行调用，并按 request id 隔离 session/working directory 上下文。
-S5R 3.0 初始化会协商 `nested_invoke_v1`、`model_stream_v1` 与 `custom_event_v1`。
+S5R 3.0 初始化会协商 `nested_invoke_v1`、`model_stream_v1` 与 `custom_event_v1`；宿主只把
+归因所需的 `nested_invoke_v1` 设为 required。流式调用在实际使用时检查
+`model_stream_v1`；声明 custom event 或 subscription 的 manifest 必须协商
+`custom_event_v1`，否则宿主在发布注册前拒绝加载。
 只有双方 `supported_features` 的交集满足双方 `required_features` 后 peer 才进入 Ready；
 嵌套调用通过 `parent_invoke_id` 关联父请求，并继承父请求的取消与授权上下文。
 `public_http_dispatch` 仍拒绝同步调用自己的公开
@@ -229,7 +231,7 @@ return Err(ErrorPayload::new(WireErrorCode::InvalidInput, "name is required")
 
 ## 取消
 
-worker 的长时间 tool 应轮询 `WorkerToolContext::cancel_token()`；宿主取消经 S5R `Cancel` 消息传递。
+worker 的长时间 tool 应轮询 `WorkerInvocationContext::cancel_token()`；宿主取消经 S5R `Cancel` 消息传递。
 bundled handler 则读取 `ctx.cancellation()`，后台循环使用 `ctx.tasks().cancellation()` 或把调用取消
 令牌克隆进受管任务。两种 token 来源不能跨 prelude 混用。
 
@@ -290,8 +292,8 @@ Ok(CustomEventDisposition::Ack.into())
 - **stderr**：宿主会持续 drain 子进程 stderr 以避免阻塞，但当前不保存或转发这些行；
   调试时不要向 stdout 写日志，stdout 专用于 S5R 帧。
 - **握手失败**：检查 `protocol.s5r` 是否为 `3.0`、`extension_id` 是否符合命名规则，以及
-  required feature 是否都在双方协商交集中；
-  为了诊断清晰，建议与目录名一致，但宿主不强制两者相等。
+  required feature 是否都在双方协商交集中；package manifest 的 `extension_id` 必须与
+  worker 握手身份一致。目录名只建议保持一致，宿主不把目录名当作身份来源。
 - **工具不出现**：确认 `worker.tool()` 已调用且 `run_stdio()` 未提前退出。
 - **E2E 参考**：`crates/astrcode-extensions/tests/s5r-guest/`
 
@@ -301,7 +303,7 @@ Ok(CustomEventDisposition::Ack.into())
 use std::sync::Arc;
 use astrcode_extension_sdk::WireErrorCode;
 use astrcode_extension_worker::{
-    worker::testing::{HostApi, with_host_api},
+    testing::{HostApi, with_host_api},
     worker_prelude::{ErrorPayload, HostClient, LlmMessage},
 };
 use serde_json::Value;
@@ -318,9 +320,6 @@ impl HostApi for MockHost {
             _ => Err(ErrorPayload::new(WireErrorCode::UnknownCapability, cap)),
         }
     }
-    async fn call_stream(&self, cap: &str, input: Value) -> Result<Value, ErrorPayload> {
-        self.call(cap, input).await
-    }
 }
 
 let output = with_host_api(Arc::new(MockHost), async {
@@ -333,7 +332,7 @@ let output = with_host_api(Arc::new(MockHost), async {
 单元测试把类型化领域 client 调用包在作用域内；并发测试各自持有 mock，不修改进程级全局状态。
 `tokio::spawn` 创建的新任务不会继承这个测试作用域；需要在新任务内再次调用 `with_host_api`。
 `HostApi` 和 raw invoke 只是
-`worker::testing` 的 transport seam，不在 `worker_prelude` 中。集成测试使用真实子进程 +
+`astrcode_extension_worker::testing` 的 transport seam，不在 `worker_prelude` 中。集成测试使用真实子进程 +
 `s5r_e2e_test`。
 
 ## 进一步阅读
@@ -415,9 +414,8 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ### 必须声明的能力与钩子
 
 ```rust
-let mut worker = Worker::new("my-agent-tools");
+let mut worker = Worker::new("my-agent-tools", "0.1.0");
 worker
-    .version("0.1.0")
     .capability(ExtensionCapability::SessionControl);
 
 // 向主 Agent 注入 [Agents] 列表（等同内置 on_prompt_build）
@@ -437,7 +435,7 @@ worker.on_prompt_build(
 `prompt_build`、`pre_compact`、`post_compact`、`after_provider_response` 和
 `continue_after_stop` 使用固定模式的 typed `on_*` 方法；宿主会拒绝不受支持的组合。
 
-`prompt_build` 的 effect 名必须是 `prompt_contributions`（宿主 `parse_prompt_build_result` 约定）。
+`prompt_build` 返回 `HandlerEffect::PromptContributions`，宿主会同时校验 effect 和 payload。
 
 ### `agent` 工具（核心）
 
@@ -476,14 +474,14 @@ worker.tool(
 ### 通过 HostClient 派生子会话
 
 `tool_handler_args` 在反序列化 arguments 的同时验证宿主经 `handler.invoke` 传入的调用事实，
-handler 收到 `WorkerToolContext`，可直接读取：
+tool 和 hook handler 共用 `WorkerInvocationContext`，可直接读取：
 
 - `ctx.session_id()`：当前 session，必定存在；
 - `ctx.tool_call_id()`：宿主归属的当前 tool call；没有 call id 时为 `None`；
 - `ctx.working_dir()`：宿主校验后的工作目录，必定存在；
 - `ctx.turn_id()`：当前 tool call 所属 turn 的真实 ID；宿主没有 turn attribution 时为 `None`。
 
-hook、command、custom event 分别使用 `WorkerHookContext`、`WorkerCommandContext`、
+command 和 custom event 分别使用 `WorkerCommandContext`、
 `WorkerCustomEventContext`。缺少入口必需事实时，worker runtime 在作者 handler 运行前返回
 `context_unavailable`。HTTP 与 continuation 不承诺 session/workspace，使用只含 extension id 和取消
 信号的 `WorkerCallContext`；continuation 应注册 `continuation_handler[_args]`。

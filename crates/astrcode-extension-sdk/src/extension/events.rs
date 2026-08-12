@@ -4,251 +4,27 @@ use astrcode_core::{
     event::{EventDeliveryReceipt, EventSendError},
     types::{EventId, SessionId},
 };
-use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
-
-use super::{
-    ExtensionCall, ExtensionCallContext, ExtensionError, HookMode, SessionCallContext,
-    canonical_registration_name, internal::CustomEventSink,
+pub use astrcode_extension_contract::custom_event::{
+    CustomEventDeclaration, CustomEventSourceFilter, CustomEventSubscription,
+    DEFAULT_CUSTOM_EVENT_DURABLE, DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
+    DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION, MAX_CUSTOM_EVENT_PAYLOAD_BYTES,
+    MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN,
 };
-
+use astrcode_extension_contract::effects::{HandlerEffect, HandlerResult};
 // ─── Lifecycle Events ────────────────────────────────────────────────────
-
 /// 扩展可订阅的核心生命周期事件。
 ///
 /// 覆盖会话/轮次/工具/LLM 提供者/prompt 组装的完整生命周期。
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LifecycleEvent {
-    // ── 会话级别 ──
-    /// 会话启动。
-    SessionStart,
-    /// 已持久化的会话首次恢复到当前进程运行态。
-    SessionResume,
-    /// 会话关闭。
-    SessionShutdown,
+pub use astrcode_extension_contract::manifest::LifecycleEvent;
+use async_trait::async_trait;
+use serde::Serialize;
 
-    // ── 轮次级别 ──
-    /// 轮次开始。
-    TurnStart,
-    /// 轮次结束。
-    TurnEnd,
-    /// 用户中止正在运行的轮次。
-    TurnAborted,
-
-    // ── Step 级别 ──
-    /// Step 开始（loop 迭代顶部，prepare_stage 之前）。
-    ///
-    /// 若本 step 前有 mid-turn inject 刚并入上下文，见
-    /// [`LifecyclePayload::mid_turn_user_messages_synced`]。
-    StepStart,
-    /// Step 结束（loop 迭代末尾，tool_calls 执行完毕或 LLM 返回 Complete 后）。
-    StepEnd,
-
-    // ── 工具级别（主要钩子点） ──
-    /// 工具执行前。
-    PreToolUse,
-    /// 工具执行后。
-    PostToolUse,
-
-    // ── LLM 提供者钩子 ──
-    /// LLM 请求发送前。
-    BeforeProviderRequest,
-    /// LLM 响应接收后。
-    AfterProviderResponse,
-    /// LLM 自然结束（无 tool call）后是否再跑一个 agent step。
-    ContinueAfterStop,
-
-    // ── 用户输入 ──
-    /// 用户提交提示词。
-    UserPromptSubmit,
-    /// 用户消息写入 durable transcript 前的 envelope 变换。
-    UserMessageEnvelope,
-
-    // ── Prompt 组装 ──
-    /// 构建 system prompt 前收集插件提供的提示词片段。
-    PromptBuild,
-
-    // ── Recap ──
-    /// Recap 生成完成后通知扩展（非阻塞）。
-    PostRecap,
-}
-
-/// Returns whether a lifecycle event may gate host control flow.
-///
-/// Only turn-entry events run before the corresponding work begins. All other
-/// lifecycle events are observations of work that has already started or
-/// finished and therefore cannot safely fail closed.
-pub fn lifecycle_event_allows_blocking(event: &LifecycleEvent) -> bool {
-    matches!(
-        event,
-        LifecycleEvent::TurnStart | LifecycleEvent::UserPromptSubmit
-    )
-}
-
-/// Returns the mode encoded by hook families whose dispatcher semantics are fixed.
-///
-/// Variable-mode hooks return `None`; their accepted modes are described by
-/// [`hook_mode_is_supported`].
-#[doc(hidden)]
-pub fn fixed_hook_mode(event: &LifecycleEvent) -> Option<HookMode> {
-    match event {
-        LifecycleEvent::AfterProviderResponse => Some(HookMode::Advisory),
-        LifecycleEvent::ContinueAfterStop
-        | LifecycleEvent::UserMessageEnvelope
-        | LifecycleEvent::PromptBuild => Some(HookMode::Blocking),
-        _ => None,
-    }
-}
-
-/// Returns whether the runtime dispatcher implements `mode` for `event`.
-#[doc(hidden)]
-pub fn hook_mode_is_supported(event: &LifecycleEvent, mode: HookMode) -> bool {
-    if let Some(required) = fixed_hook_mode(event) {
-        return mode == required;
-    }
-
-    mode != HookMode::Blocking
-        || matches!(
-            event,
-            LifecycleEvent::PreToolUse
-                | LifecycleEvent::PostToolUse
-                | LifecycleEvent::BeforeProviderRequest
-        )
-        || lifecycle_event_allows_blocking(event)
-}
+use super::{
+    ExtensionCall, ExtensionCallContext, ExtensionError, SessionCallContext,
+    internal::CustomEventSink,
+};
 
 // ─── Custom Event System ───────────────────────────────────────────────────
-
-/// 插件在 [`Registrar`] 中声明的 custom event 类型。
-///
-/// 声明是 emit 时校验的依据：未声明的事件类型会被拒绝，payload 超限也会被拒绝。
-/// `extension_id` 不在声明中——它由 runtime internal event sink 注入。
-pub const DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION: u32 = 1;
-pub const DEFAULT_CUSTOM_EVENT_DURABLE: bool = true;
-pub const DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
-pub const MAX_CUSTOM_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
-/// In-process 与 worker 两条注册路径共用的订阅 id 长度上限。
-pub const MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN: usize = 64;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CustomEventDeclaration {
-    pub event_type: String,
-    #[serde(default = "default_custom_event_schema_version")]
-    pub schema_version: u32,
-    #[serde(default = "default_custom_event_durable")]
-    pub durable: bool,
-    #[serde(default = "default_custom_event_max_payload_bytes")]
-    pub max_payload_bytes: usize,
-}
-
-/// Restricts a custom-event subscription to one producer or accepts every producer.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub enum CustomEventSourceFilter {
-    Any,
-    Extension { extension_id: String },
-}
-
-/// Exact custom-event subscription registered by a consuming extension.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct CustomEventSubscription {
-    pub id: String,
-    #[serde(default = "default_consumer_version")]
-    pub consumer_version: u32,
-    pub event_type: String,
-    pub source: CustomEventSourceFilter,
-}
-
-impl CustomEventSubscription {
-    /// 订阅任意来源的 `event_type`；订阅 id 派生为 `event_type` 本身。
-    pub fn any(event_type: impl Into<String>) -> Self {
-        let event_type = event_type.into();
-        Self {
-            id: event_type.clone(),
-            consumer_version: default_consumer_version(),
-            event_type,
-            source: CustomEventSourceFilter::Any,
-        }
-    }
-
-    /// 订阅指定扩展的 `event_type`；订阅 id 派生为 `{extension_id}:{event_type}`。
-    pub fn from_extension(extension_id: impl Into<String>, event_type: impl Into<String>) -> Self {
-        let extension_id = extension_id.into();
-        let event_type = event_type.into();
-        Self {
-            id: format!("{extension_id}:{event_type}"),
-            consumer_version: default_consumer_version(),
-            event_type,
-            source: CustomEventSourceFilter::Extension { extension_id },
-        }
-    }
-
-    pub fn named(mut self, id: impl Into<String>) -> Self {
-        self.id = id.into();
-        self
-    }
-
-    pub fn consumer_version(mut self, version: u32) -> Self {
-        self.consumer_version = version;
-        self
-    }
-
-    /// 注册路径共用的规范化：裁剪作者侧可能带入的空白。
-    #[doc(hidden)]
-    pub fn normalize(&mut self) {
-        canonical_registration_name(&mut self.id);
-        canonical_registration_name(&mut self.event_type);
-        if let CustomEventSourceFilter::Extension { extension_id } = &mut self.source {
-            canonical_registration_name(extension_id);
-        }
-    }
-
-    /// 注册路径共用的字段校验；重复 id 由各注册路径按自身错误语义检查。
-    #[doc(hidden)]
-    pub fn validate(&self) -> Result<(), String> {
-        if self.id.is_empty() || self.id.len() > MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN {
-            return Err(format!(
-                "invalid custom event subscription id `{}`",
-                self.id
-            ));
-        }
-        if self.consumer_version == 0 {
-            return Err("custom event consumer version must be greater than zero".to_owned());
-        }
-        if self.event_type.is_empty() {
-            return Err("custom event subscription type cannot be empty".to_owned());
-        }
-        if matches!(
-            &self.source,
-            CustomEventSourceFilter::Extension { extension_id } if extension_id.is_empty()
-        ) {
-            return Err("custom event subscription source extension cannot be empty".to_owned());
-        }
-        Ok(())
-    }
-
-    pub fn matches(&self, extension_id: &str, event_type: &str) -> bool {
-        self.event_type == event_type
-            && match &self.source {
-                CustomEventSourceFilter::Any => true,
-                CustomEventSourceFilter::Extension {
-                    extension_id: expected,
-                } => expected == extension_id,
-            }
-    }
-}
-
-const fn default_consumer_version() -> u32 {
-    1
-}
 
 /// Host-attributed input for a custom-event consumer.
 #[derive(Clone)]
@@ -366,24 +142,30 @@ impl CustomEventDisposition {
     }
 }
 
+impl From<CustomEventDisposition> for HandlerResult {
+    fn from(disposition: CustomEventDisposition) -> Self {
+        match disposition {
+            CustomEventDisposition::Ack => {
+                Self::effect(HandlerEffect::CustomEventAck, serde_json::Value::Null)
+            },
+            CustomEventDisposition::Retry { reason } => Self::effect(
+                HandlerEffect::CustomEventRetry,
+                serde_json::json!({ "reason": reason }),
+            ),
+            CustomEventDisposition::DeadLetter { reason } => Self::effect(
+                HandlerEffect::CustomEventDeadLetter,
+                serde_json::json!({ "reason": reason }),
+            ),
+        }
+    }
+}
+
 #[async_trait]
 pub trait CustomEventHandler: Send + Sync {
     async fn handle(
         &self,
         ctx: CustomEventContext,
     ) -> Result<CustomEventDisposition, ExtensionError>;
-}
-
-const fn default_custom_event_schema_version() -> u32 {
-    DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION
-}
-
-const fn default_custom_event_durable() -> bool {
-    DEFAULT_CUSTOM_EVENT_DURABLE
-}
-
-const fn default_custom_event_max_payload_bytes() -> usize {
-    DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES
 }
 
 /// Extension-scoped event emitter with immutable declaration attribution.

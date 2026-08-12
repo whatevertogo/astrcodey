@@ -1,8 +1,13 @@
-use astrcode_extension_sdk::protocol::JsonRpcError;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 pub(crate) const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct JsonRpcError {
+    pub(crate) code: i32,
+    pub(crate) message: String,
+}
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct JsonRpcResponse {

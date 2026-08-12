@@ -45,20 +45,6 @@ pub mod types {
     pub use astrcode_core::types::{SessionId, ToolCallId, project_key_from_path};
 }
 
-/// Protocol types needed by extensions.
-pub mod protocol {
-    use serde::{Deserialize, Serialize};
-
-    /// S5R JSON-RPC 边界使用的错误对象。
-    #[derive(Debug, Clone, Serialize, Deserialize)]
-    pub struct JsonRpcError {
-        pub code: i32,
-        pub message: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        pub data: Option<serde_json::Value>,
-    }
-}
-
 /// Tool Gate 权限类型（扩展只读 `PreToolUseContext::approval_mode`）。
 pub mod permission {
     pub use astrcode_core::permission::{ApprovalDecision, ApprovalMode};
@@ -71,13 +57,19 @@ pub mod model_stream;
 pub mod runtime_ports;
 pub mod s5r;
 pub mod session;
-pub mod session_inspect;
 
 pub use astrcode_extension_contract::WireErrorCode;
 pub mod testing;
 
 /// In-process bundled extension authoring surface.
 pub mod prelude {
+    pub use astrcode_extension_contract::session_inspect::{
+        HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectContent,
+        SessionInspectListItem, SessionInspectListOutput, SessionInspectProviderMessagesOutput,
+        SessionInspectReadModel, SessionInspectReadModelOutput, SessionInspectSnapshot,
+        SessionInspectSnapshotOutput,
+    };
+
     pub use crate::{
         builder::{
             CustomEventDeclarationBuilder, ExtensionHttpRouteBuilder, ExtensionManifestBuilder,
@@ -111,20 +103,19 @@ pub mod prelude {
             ExtensionHost, ExtensionHttpClient, HostConfigureSessionToolsOutput,
             HostConfigureSessionToolsRequest, HostError, HostLlmChatOutput, HostLlmChatRequest,
             HostLlmCollectedStreamOutput, HostLlmContent, HostLlmMessage, HostLlmRole,
-            HostLlmTextDelta, HostNetworkRedirectPolicy, HostNetworkRequest, HostNetworkResponse,
-            HostProcessOutput, HostProcessRequest, HostSessionCancelOutput,
-            HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
-            HostSessionProviderMessagesOutput, HostSessionStateReadOutput,
-            HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
-            HostSessionSummary, HostSessionTokenUsage, HostSessionTokenUsageOutput,
-            HostSessionTranscript, HostSessionTranscriptMessage, HostWorkspaceEditOutput,
-            HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
-            HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
-            HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
-            HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
-            HostWorkspaceWriteRequest, ModelClient, NetworkClient, ProcessClient,
-            SessionControlClient, SessionHistoryClient, SessionInspectClient, SessionStateClient,
-            WorkspaceClient,
+            HostNetworkRedirectPolicy, HostNetworkRequest, HostNetworkResponse, HostProcessOutput,
+            HostProcessRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+            HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+            HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
+            HostSessionSummariesOutput, HostSessionSummary, HostSessionTokenUsage,
+            HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
+            HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
+            HostWorkspaceGlobRequest, HostWorkspaceGrepMatch, HostWorkspaceGrepOutput,
+            HostWorkspaceGrepRequest, HostWorkspaceListEntry, HostWorkspaceListOutput,
+            HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
+            HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient, NetworkClient,
+            ProcessClient, SessionControlClient, SessionHistoryClient, SessionInspectClient,
+            SessionStateClient, WorkspaceClient,
         },
         llm::LlmMessage,
         model_stream::{ModelStream, ModelStreamEvent},
@@ -134,12 +125,6 @@ pub mod prelude {
             HostSessionEventsPageRequest, HostSessionReactivateOutput, HostSessionStateOutput,
             HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest, SessionPhaseDto,
             SessionToolSelectionDto,
-        },
-        session_inspect::{
-            HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListItem,
-            SessionInspectListOutput, SessionInspectProviderMessagesOutput,
-            SessionInspectReadModel, SessionInspectReadModelOutput, SessionInspectSnapshot,
-            SessionInspectSnapshotOutput,
         },
         tool::{
             ExecutionMode, ToolDefinition, ToolExecutionResult, ToolPromptMetadata, ToolResult,

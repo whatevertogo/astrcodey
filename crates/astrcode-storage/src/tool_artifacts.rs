@@ -141,6 +141,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn slices_text_and_reports_the_next_offset() {
+        let slice = slice_tool_result("D:/sessions/session/tool-results/call.txt", "abcdef", 2, 3);
+        assert_eq!(slice.content, "cde");
+        assert_eq!(slice.next_char_offset, Some(5));
+        assert!(slice.has_more);
+    }
+
     fn unique_test_dir(prefix: &str) -> PathBuf {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

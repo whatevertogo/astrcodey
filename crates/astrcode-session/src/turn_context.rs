@@ -12,7 +12,7 @@ use astrcode_session_projection::SessionReadModel;
 use tokio_util::sync::CancellationToken;
 // ─── Turn event channel ──────────────────────────────────────────────────
 
-/// Turn 内扩展/工具 → event bridge 的入口（unbounded，不丢事件、durable 由单 worker 保序）。
+/// Turn 内扩展/工具 → event bridge 的有界入口；背压显式返回，durable 由单 worker 保序。
 pub type TurnEventTx = astrcode_core::event::EventSender;
 
 /// StepEnd 生命周期钩子：失败只记录 warn，不中断 turn。

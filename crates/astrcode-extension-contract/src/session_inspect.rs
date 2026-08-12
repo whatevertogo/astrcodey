@@ -13,7 +13,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct HostSessionInspectRequest {
     #[serde(deserialize_with = "deserialize_non_empty_session_id")]
     pub session_id: String,
@@ -23,11 +23,11 @@ fn deserialize_non_empty_session_id<'de, D>(deserializer: D) -> Result<String, D
 where
     D: serde::Deserializer<'de>,
 {
-    deserialize_non_empty_string(deserializer, "sessionId")
+    deserialize_non_empty_string(deserializer, "session_id")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectListItem {
     pub session_id: String,
     pub working_dir: String,
@@ -42,13 +42,13 @@ pub struct SessionInspectListItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectListOutput {
     pub sessions: Vec<SessionInspectListItem>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectSnapshot {
     pub session_id: String,
     pub cursor: String,
@@ -63,13 +63,13 @@ pub struct SessionInspectSnapshot {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectSnapshotOutput {
     pub snapshot: SessionInspectSnapshot,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectMessage {
     pub role: String,
     pub content: Vec<SessionInspectContent>,
@@ -78,39 +78,30 @@ pub struct SessionInspectMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(
-    tag = "type",
-    rename_all = "snake_case",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum SessionInspectContent {
     Text {
         text: String,
     },
     Image {
         base64: String,
-        #[serde(rename = "mediaType")]
         media_type: String,
         filename: Option<String>,
     },
     ToolCall {
-        #[serde(rename = "callId")]
         call_id: String,
         name: String,
         arguments: Value,
     },
     ToolResult {
-        #[serde(rename = "toolCallId")]
         tool_call_id: String,
         content: String,
-        #[serde(rename = "isError")]
         is_error: bool,
     },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectSequencedMessage {
     pub message: SessionInspectMessage,
     pub updated_seq: u64,
@@ -118,7 +109,7 @@ pub struct SessionInspectSequencedMessage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectPendingApproval {
     pub prompt: String,
     pub rule_key: Option<String>,
@@ -134,7 +125,7 @@ pub enum SessionInspectAgentStatusDto {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectAgentSession {
     pub child_session_id: String,
     pub tool_call_id: Option<String>,
@@ -147,7 +138,7 @@ pub struct SessionInspectAgentSession {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectCompaction {
     pub trigger: String,
     pub pre_tokens: usize,
@@ -161,7 +152,7 @@ pub struct SessionInspectCompaction {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectReadModel {
     pub session_id: String,
     pub messages: Vec<SessionInspectSequencedMessage>,
@@ -184,21 +175,21 @@ pub struct SessionInspectReadModel {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectReadModelOutput {
     pub read_model: SessionInspectReadModel,
 }
 
 /// `astrcode.session.history.snapshot` 的作用域受限只读响应。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionHistorySnapshotOutput {
     pub lifecycle: SessionLifecycleStateDto,
     pub read_model: SessionInspectReadModel,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct SessionInspectProviderMessagesOutput {
     pub messages: Vec<SessionInspectMessage>,
 }
@@ -239,113 +230,113 @@ mod tests {
                 {
                     "type": "image",
                     "base64": "aW1hZ2U=",
-                    "mediaType": "image/png",
+                    "media_type": "image/png",
                     "filename": "image.png"
                 },
                 {
                     "type": "tool_call",
-                    "callId": "call-1",
+                    "call_id": "call-1",
                     "name": "read",
                     "arguments": { "path": "notes.txt" }
                 },
                 {
                     "type": "tool_result",
-                    "toolCallId": "call-1",
+                    "tool_call_id": "call-1",
                     "content": "hello",
-                    "isError": false
+                    "is_error": false
                 }
             ],
             "name": null,
-            "reasoningContent": null
+            "reasoning_content": null
         })
     }
 
     fn read_model_wire() -> Value {
         json!({
-            "sessionId": "session-1",
+            "session_id": "session-1",
             "messages": [{
                 "message": message_wire(),
-                "updatedSeq": 1,
+                "updated_seq": 1,
                 "source": null
             }],
-            "workingDir": "/workspace",
-            "modelId": "main",
+            "working_dir": "/workspace",
+            "model_id": "main",
             "phase": "idle",
-            "systemPrompt": null,
-            "extraSystemPrompt": null,
-            "systemPromptFingerprint": null,
-            "pendingToolCallIds": [],
-            "pendingToolApprovals": {
-                "call-1": { "prompt": "approve", "ruleKey": null }
+            "system_prompt": null,
+            "extra_system_prompt": null,
+            "system_prompt_fingerprint": null,
+            "pending_tool_call_ids": [],
+            "pending_tool_approvals": {
+                "call-1": { "prompt": "approve", "rule_key": null }
             },
-            "createdAt": "2026-08-06T00:00:00Z",
-            "updatedAt": "2026-08-06T00:00:01Z",
-            "parentSessionId": null,
-            "toolSelection": null,
-            "sourceExtension": null,
-            "agentSessions": [{
-                "childSessionId": "child-1",
-                "toolCallId": null,
-                "agentName": "reviewer",
+            "created_at": "2026-08-06T00:00:00Z",
+            "updated_at": "2026-08-06T00:00:01Z",
+            "parent_session_id": null,
+            "tool_selection": null,
+            "source_extension": null,
+            "agent_sessions": [{
+                "child_session_id": "child-1",
+                "tool_call_id": null,
+                "agent_name": "reviewer",
                 "task": "review",
                 "status": "completed",
-                "finalSessionId": null,
+                "final_session_id": null,
                 "summary": null,
                 "error": null
             }],
             "compactions": [{
                 "trigger": "manual",
-                "preTokens": 100,
-                "postTokens": 20,
+                "pre_tokens": 100,
+                "post_tokens": 20,
                 "summary": "summary",
-                "transcriptPath": null,
+                "transcript_path": null,
                 "seq": 2,
-                "sourceSeq": 1,
+                "source_seq": 1,
                 "strategy": "summary",
-                "keepRecentTurns": null
+                "keep_recent_turns": null
             }],
-            "latestSeq": 2
+            "latest_seq": 2
         })
     }
 
     #[test]
     fn session_inspect_wire_contracts_are_nested_strict() {
-        let request = json!({ "sessionId": "session-1" });
+        let request = json!({ "session_id": "session-1" });
         assert_unknown_fields_rejected::<HostSessionInspectRequest>(&request, &[""]);
         assert!(serde_json::from_value::<HostSessionInspectRequest>(json!({})).is_err());
         assert!(
-            serde_json::from_value::<HostSessionInspectRequest>(json!({ "sessionId": "" }))
+            serde_json::from_value::<HostSessionInspectRequest>(json!({ "session_id": "" }))
                 .is_err()
         );
 
         let list = json!({
             "sessions": [{
-                "sessionId": "session-1",
-                "workingDir": "/workspace",
-                "modelId": "main",
-                "parentSessionId": null,
-                "sourceExtension": null,
-                "createdAt": "2026-08-06T00:00:00Z",
-                "updatedAt": "2026-08-06T00:00:01Z",
+                "session_id": "session-1",
+                "working_dir": "/workspace",
+                "model_id": "main",
+                "parent_session_id": null,
+                "source_extension": null,
+                "created_at": "2026-08-06T00:00:00Z",
+                "updated_at": "2026-08-06T00:00:01Z",
                 "phase": "idle",
-                "latestCursor": "2",
-                "firstUserMessage": "hello"
+                "latest_cursor": "2",
+                "first_user_message": "hello"
             }]
         });
         assert_unknown_fields_rejected::<SessionInspectListOutput>(&list, &["", "/sessions/0"]);
 
         let snapshot = json!({
             "snapshot": {
-                "sessionId": "session-1",
+                "session_id": "session-1",
                 "cursor": "2",
-                "workingDir": "/workspace",
-                "modelId": "main",
+                "working_dir": "/workspace",
+                "model_id": "main",
                 "phase": "idle",
-                "parentSessionId": null,
-                "sourceExtension": null,
-                "messageCount": 1,
-                "pendingToolCallIds": [],
-                "agentSessionCount": 1
+                "parent_session_id": null,
+                "source_extension": null,
+                "message_count": 1,
+                "pending_tool_call_ids": [],
+                "agent_session_count": 1
             }
         });
         assert_unknown_fields_rejected::<SessionInspectSnapshotOutput>(
@@ -353,38 +344,38 @@ mod tests {
             &["", "/snapshot"],
         );
 
-        let read_model = json!({ "readModel": read_model_wire() });
+        let read_model = json!({ "read_model": read_model_wire() });
         assert_unknown_fields_rejected::<SessionInspectReadModelOutput>(
             &read_model,
             &[
                 "",
-                "/readModel",
-                "/readModel/messages/0",
-                "/readModel/messages/0/message",
-                "/readModel/messages/0/message/content/0",
-                "/readModel/messages/0/message/content/1",
-                "/readModel/messages/0/message/content/2",
-                "/readModel/messages/0/message/content/3",
-                "/readModel/pendingToolApprovals/call-1",
-                "/readModel/agentSessions/0",
-                "/readModel/compactions/0",
+                "/read_model",
+                "/read_model/messages/0",
+                "/read_model/messages/0/message",
+                "/read_model/messages/0/message/content/0",
+                "/read_model/messages/0/message/content/1",
+                "/read_model/messages/0/message/content/2",
+                "/read_model/messages/0/message/content/3",
+                "/read_model/pending_tool_approvals/call-1",
+                "/read_model/agent_sessions/0",
+                "/read_model/compactions/0",
             ],
         );
         let mut unknown_agent_status = read_model.clone();
-        unknown_agent_status["readModel"]["agentSessions"][0]["status"] = json!("paused");
+        unknown_agent_status["read_model"]["agent_sessions"][0]["status"] = json!("paused");
         assert!(
             serde_json::from_value::<SessionInspectReadModelOutput>(unknown_agent_status).is_err()
         );
         for removed_field in ["phase", "currentTool"] {
             let mut stale_agent_shape = read_model.clone();
-            stale_agent_shape["readModel"]["agentSessions"][0][removed_field] = Value::Null;
+            stale_agent_shape["read_model"]["agent_sessions"][0][removed_field] = Value::Null;
             assert!(
                 serde_json::from_value::<SessionInspectReadModelOutput>(stale_agent_shape).is_err(),
                 "removed agent-session field {removed_field} was accepted"
             );
         }
 
-        let history = json!({ "lifecycle": "active", "readModel": read_model_wire() });
+        let history = json!({ "lifecycle": "active", "read_model": read_model_wire() });
         assert_unknown_fields_rejected::<SessionHistorySnapshotOutput>(&history, &[""]);
 
         let provider_messages = json!({ "messages": [message_wire()] });

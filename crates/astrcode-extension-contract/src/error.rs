@@ -3,6 +3,7 @@ use std::fmt::{Display, Formatter};
 macro_rules! wire_error_codes {
     ($($variant:ident => $wire:literal),+ $(,)?) => {
         /// Known S5R error codes. Wire strings are permanent and must never be reused.
+        /// Invalid caller values use `InvalidInput`; unsupported operations use `Unsupported`.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         #[non_exhaustive]
         pub enum WireErrorCode {
@@ -45,7 +46,6 @@ wire_error_codes! {
     SerializationFailed => "serialization_failed",
     InvalidResponse => "invalid_host_response",
     Unsupported => "unsupported",
-    NotSupported => "not_supported",
     HostRuntimeFailed => "host_runtime_failed",
     ExtensionDraining => "extension_draining",
     UnsupportedFeature => "unsupported_feature",
@@ -67,7 +67,6 @@ wire_error_codes! {
     StderrFailed => "stderr_failed",
     InvalidApiKey => "invalid_api_key",
     ModelNotFound => "model_not_found",
-    InvalidParameter => "invalid_parameter",
     QuotaExceeded => "quota_exceeded",
     ContextWindowExceeded => "context_window_exceeded",
     RateLimited => "rate_limited",
@@ -78,9 +77,7 @@ wire_error_codes! {
     ContentFiltered => "content_filtered",
     TokenLimit => "token_limit",
     EmptyResponse => "empty_response",
-    ProviderRateLimited => "provider_rate_limited",
     LlmStreamError => "llm_stream_error",
-    InvalidManifest => "invalid_manifest",
     NotInitialized => "not_initialized",
     EmitFailed => "emit_failed",
     DispatchFailed => "dispatch_failed",
@@ -88,7 +85,6 @@ wire_error_codes! {
     ReentrancyExceeded => "reentrancy_exceeded",
     UnsupportedProtocolVersion => "unsupported_protocol_version",
     StreamNotSupported => "stream_not_supported",
-    StreamFailed => "stream_failed",
     StreamClosed => "stream_closed",
     BackpressureTimeout => "backpressure_timeout",
     StreamIdleTimeout => "stream_idle_timeout",
@@ -99,13 +95,9 @@ wire_error_codes! {
     InvalidHookMode => "invalid_hook_mode",
     InvalidHookRegistration => "invalid_hook_registration",
     InvalidHttpRoute => "invalid_http_route",
-    InvalidArguments => "invalid_arguments",
-    PeerStartFailed => "peer_start_failed",
     HostApiAlreadySet => "host_api_already_set",
     ManifestSerializeFailed => "manifest_serialize_failed",
     InitializeFailed => "initialize_failed",
-    HandlerPanicked => "handler_panicked",
-    HostError => "host_error",
     NestedFailed => "nested_failed",
     PeerOverloaded => "peer_overloaded",
     InvalidCapabilityRegistry => "invalid_capability_registry",
@@ -117,12 +109,6 @@ wire_error_codes! {
 impl Display for WireErrorCode {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
-    }
-}
-
-impl From<WireErrorCode> for String {
-    fn from(code: WireErrorCode) -> Self {
-        code.as_str().to_owned()
     }
 }
 

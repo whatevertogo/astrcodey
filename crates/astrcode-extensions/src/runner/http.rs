@@ -1,6 +1,6 @@
 use std::sync::{Arc, Weak};
 
-use astrcode_extension_sdk::extension::*;
+use astrcode_extension_sdk::extension::{internal::match_extension_http_route, *};
 
 use super::{ExtensionCallContextInput, ExtensionRunner, ExtensionView};
 

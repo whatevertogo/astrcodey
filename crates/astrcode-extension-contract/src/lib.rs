@@ -4,11 +4,13 @@
 //! they cross the S5R boundary and the transport state needed to exchange those values.
 
 pub mod capability;
+pub mod custom_event;
 pub mod effects;
 pub mod error;
 pub mod extension_http;
 pub mod frame;
 pub mod host;
+pub mod manifest;
 pub mod operation;
 pub mod peer;
 pub mod peer_runtime;
@@ -18,9 +20,11 @@ pub mod session_inspect;
 pub mod stream;
 
 pub use capability::ExtensionCapability;
-pub use effects::{CallContinuation, HandlerResult};
+pub use custom_event::{CustomEventDeclaration, CustomEventSourceFilter, CustomEventSubscription};
+pub use effects::{CallContinuation, HandlerEffect, HandlerResult};
 pub use error::WireErrorCode;
 pub use frame::{FrameTransport, ProcessStdioTransport, StdioFrameTransport};
+pub use manifest::{CompactEvent, HookMode, LifecycleEvent};
 pub use operation::{
     HOST_OPERATION_SPECS, HostBackendRequirement, HostContextRequirement, HostOp, HostOperation,
     HostOperationGroup, HostOperationSpec, operations,

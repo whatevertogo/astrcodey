@@ -6,7 +6,7 @@ use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     self,
     extension::{ExtensionError, ExtensionHttpDispatchRequest, ExtensionHttpRequest},
-    host::{HostOperation, HostOperationGroup},
+    host::{HostOperation, internal::HostOperationGroup},
     s5r::ErrorPayload,
 };
 use serde_json::Value;

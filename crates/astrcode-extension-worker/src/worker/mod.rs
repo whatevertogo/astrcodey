@@ -10,36 +10,35 @@ use std::{collections::BTreeSet, io, marker::PhantomData, sync::Arc};
 
 pub use builder::{
     command_handler, continuation_handler, continuation_handler_args, custom_event_handler,
-    custom_event_handler_args, handler_err, hook_handler, hook_handler_args, http_handler,
-    parse_hook_input, parse_tool_arguments, tool_handler, tool_handler_args,
+    custom_event_handler_args, hook_handler, hook_handler_args, http_handler, parse_hook_input,
+    parse_tool_arguments, tool_handler, tool_handler_args,
 };
 pub use cancel::CancelToken;
 pub use host::{
     EventClient, ExtensionHttpClient, HostClient, HostConfigureSessionToolsOutput,
     HostConfigureSessionToolsRequest, HostCreateSessionOutput, HostCreateSessionRequest,
     HostEventEmitOutput, HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput,
-    HostLlmContent, HostLlmMessage, HostLlmRole, HostLlmTextDelta, HostNetworkRedirectPolicy,
-    HostNetworkRequest, HostNetworkResponse, HostProcessOutput, HostProcessRequest,
-    HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionCancelOutput,
-    HostSessionDeliveryOutput, HostSessionEvent, HostSessionEventsPageOutput,
-    HostSessionEventsPageRequest, HostSessionExecutionView, HostSessionInputRequest,
-    HostSessionProviderMessagesOutput, HostSessionReactivateOutput, HostSessionStateOutput,
-    HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
-    HostSessionSummariesOutput, HostSessionSummary, HostSessionTargetRequest,
-    HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
-    HostSessionTranscriptMessage, HostSubmitTurnOutput, HostSubmitTurnRequest,
-    HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
-    HostWorkspaceGlobRequest, HostWorkspaceGrepMatch, HostWorkspaceGrepOutput,
-    HostWorkspaceGrepRequest, HostWorkspaceListEntry, HostWorkspaceListOutput,
-    HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
-    HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient, NetworkClient, ProcessClient,
-    SessionControlClient, SessionHistoryClient, SessionInspectClient, SessionStateClient,
-    WorkspaceClient,
+    HostLlmContent, HostLlmMessage, HostLlmRole, HostNetworkRedirectPolicy, HostNetworkRequest,
+    HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostRecycleSessionRequest,
+    HostRootSubmitTurnRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+    HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
+    HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+    HostSessionReactivateOutput, HostSessionStateOutput, HostSessionStateReadOutput,
+    HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
+    HostSessionSummary, HostSessionTargetRequest, HostSessionTokenUsage,
+    HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
+    HostSubmitTurnOutput, HostSubmitTurnRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
+    HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
+    HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
+    HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
+    HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient,
+    NetworkClient, ProcessClient, SessionControlClient, SessionHistoryClient, SessionInspectClient,
+    SessionStateClient, WorkspaceClient,
 };
 pub use registry::{
     CommandHandlerFn, ContinuationHandlerFn, CustomEventHandlerFn, HookHandlerFn, HttpHandlerFn,
     ToolHandlerFn, WorkerCallContext, WorkerCommandContext, WorkerCustomEventContext,
-    WorkerHookContext, WorkerToolContext,
+    WorkerInvocationContext,
 };
 use serde_json::json;
 
@@ -55,7 +54,7 @@ use crate::{
         CompactEvent, ContinueAfterStopOptions, CustomEventSubscription, ExtensionCapability,
         HookMode, LifecycleEvent,
     },
-    s5r::HandlerResult,
+    s5r::{HandlerEffect, HandlerResult},
     tool::ToolDefinition,
     worker::{
         host::{V3PeerHostApi, set_host_api, with_host_api},
@@ -70,18 +69,13 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn new(extension_id: impl Into<String>) -> Self {
+    pub fn new(extension_id: impl Into<String>, version: impl Into<String>) -> Self {
         let extension_id = extension_id.into();
         Self {
-            version: "0.1.0".into(),
+            version: version.into(),
             registry: HandlerRegistry::new(extension_id.clone()),
             extension_id,
         }
-    }
-
-    pub fn version(&mut self, version: impl Into<String>) -> &mut Self {
-        self.version = version.into();
-        self
     }
 
     /// 声明 manifest 能力。
@@ -370,12 +364,14 @@ fn v3_peer_error_to_payload(error: astrcode_extension_contract::PeerError) -> Er
 }
 
 pub fn tool_text(content: impl Into<String>, is_error: bool) -> HandlerResult {
-    if is_error {
-        HandlerResult::err(content.into())
-    } else {
-        HandlerResult::effect(
-            astrcode_extension_contract::effects::EFFECT_OK,
-            json!({ "content": content.into() }),
-        )
-    }
+    HandlerResult::effect(
+        HandlerEffect::ToolOutcome,
+        json!({
+            "outcome": {
+                "kind": "text",
+                "content": content.into(),
+                "is_error": is_error,
+            }
+        }),
+    )
 }

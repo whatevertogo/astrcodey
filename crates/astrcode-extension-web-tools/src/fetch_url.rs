@@ -372,7 +372,7 @@ async fn apply_prompt_to_markdown(
         reasoning_content: None,
     }];
     let output = small_llm
-        .small_chat_stream(messages)
+        .small_chat_collected(messages)
         .await
         .map_err(|error| FetchError::PromptProcessing(error.to_string()))?;
     Ok(output.content)

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use astrcode_core::{
     compaction::CompactStrategy,
     event::{
@@ -12,7 +14,7 @@ use astrcode_core::{
     user_input::UserInput,
 };
 
-use super::{ProjectionError, SessionReadModelProjection, reduce, replay};
+use super::{PreparedProjectionBatch, ProjectionError, SessionReadModelProjection, reduce, replay};
 use crate::{
     AgentSessionStatus, SessionReadModel, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
     TranscriptArtifactView,
@@ -171,6 +173,122 @@ fn provider_usage_anchors_covered_transcript_until_context_identity_changes() {
 }
 
 #[test]
+fn prepared_batches_update_in_place_and_validate_rewrites_against_prior_batch_events() {
+    let session_id = SessionId::new("session-prepared-batch");
+    let mut current = Arc::new(
+        replay(
+            session_id.clone(),
+            &[
+                started(0, &session_id),
+                event(
+                    1,
+                    &session_id,
+                    DurableEventPayload::UserMessage {
+                        message_id: new_message_id(),
+                        text: "history".into(),
+                        attachments: vec![],
+                        accepted_seq: None,
+                    },
+                ),
+            ],
+        )
+        .unwrap(),
+    );
+    let initial_model = Arc::as_ptr(&current);
+
+    let invalid = started(2, &session_id).event;
+    assert!(matches!(
+        PreparedProjectionBatch::prepare(current.as_ref(), vec![invalid]),
+        Err(ProjectionError::DuplicateSessionStarted(2))
+    ));
+    assert!(std::ptr::eq(initial_model, Arc::as_ptr(&current)));
+
+    let prepared = PreparedProjectionBatch::prepare(
+        current.as_ref(),
+        vec![DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::ModelIdChanged {
+                model_id: "model-b".into(),
+            },
+        )],
+    )
+    .unwrap();
+    assert_eq!(prepared.first_seq(), 2);
+    prepared.apply(&mut current);
+    assert!(
+        std::ptr::eq(initial_model, Arc::as_ptr(&current)),
+        "an unshared projection should be updated without cloning the full model"
+    );
+    assert_eq!(current.identity.model_id, "model-b");
+
+    let old_snapshot = Arc::clone(&current);
+    let prepared = PreparedProjectionBatch::prepare(
+        current.as_ref(),
+        vec![DurableEvent::session(
+            session_id,
+            DurableEventPayload::ModelIdChanged {
+                model_id: "model-c".into(),
+            },
+        )],
+    )
+    .unwrap();
+    prepared.apply(&mut current);
+
+    assert!(!std::ptr::eq(
+        Arc::as_ptr(&old_snapshot),
+        Arc::as_ptr(&current)
+    ));
+    assert_eq!(old_snapshot.identity.model_id, "model-b");
+    assert_eq!(old_snapshot.stats.last_seq, 2);
+    assert_eq!(current.identity.model_id, "model-c");
+    assert_eq!(current.stats.last_seq, 3);
+
+    drop(old_snapshot);
+    let user = DurableEvent::session(
+        current.identity.session_id.clone(),
+        DurableEventPayload::UserMessage {
+            message_id: new_message_id(),
+            text: "new prefix".into(),
+            attachments: Vec::new(),
+            accepted_seq: None,
+        },
+    );
+    let mut expected = current.as_ref().clone();
+    reduce(&StoredEvent::new(4, user.clone()), &mut expected).unwrap();
+    let rewrite = DurableEvent::session(
+        current.identity.session_id.clone(),
+        DurableEventPayload::TranscriptRewritten {
+            source_seq: 4,
+            source_fingerprint: prefix_fingerprint(&expected, 4),
+            messages: vec![LlmMessage::user("summary")],
+            reason: TranscriptRewriteReason::Compaction(CompactionDetails {
+                trigger: "manual".into(),
+                pre_tokens: 100,
+                post_tokens: 10,
+                summary: "summary".into(),
+                transcript_path: None,
+                strategy: CompactStrategy::Manual {
+                    keep_recent_turns: None,
+                },
+            }),
+        },
+    );
+    let prepared = PreparedProjectionBatch::prepare(current.as_ref(), vec![user, rewrite]).unwrap();
+    let before_rewrite = Arc::as_ptr(&current);
+    prepared.apply(&mut current);
+
+    assert!(std::ptr::eq(before_rewrite, Arc::as_ptr(&current)));
+    assert_eq!(current.stats.last_seq, 5);
+    assert_eq!(current.transcript.messages.len(), 1);
+    assert_eq!(
+        current.transcript.messages[0]
+            .message
+            .joined_display_text("\n"),
+        "summary"
+    );
+}
+
+#[test]
 fn transcript_rewrite_does_not_change_active_execution_state() {
     let session_id = SessionId::new("session-active-compaction");
     let turn_id = TurnId::new("turn-active");
@@ -197,6 +315,7 @@ fn transcript_rewrite_does_not_change_active_execution_state() {
             ],
         )
         .unwrap();
+        let fingerprint = prefix_fingerprint(&model, 1);
 
         reduce(
             &turn_event(
@@ -205,7 +324,7 @@ fn transcript_rewrite_does_not_change_active_execution_state() {
                 &turn_id,
                 DurableEventPayload::TranscriptRewritten {
                     source_seq: 1,
-                    source_fingerprint: None,
+                    source_fingerprint: fingerprint,
                     messages: vec![LlmMessage::user("summary")],
                     reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                         trigger: trigger.into(),
@@ -352,7 +471,7 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
             &session_id,
             DurableEventPayload::TranscriptRewritten {
                 source_seq: 6,
-                source_fingerprint: None,
+                source_fingerprint: prefix_fingerprint(&model, 6),
                 messages: vec![LlmMessage::user(
                     "<compact_summary>summary</compact_summary>",
                 )],
@@ -780,7 +899,7 @@ fn projection_rejects_invalid_stream_shapes_without_mutating_valid_state() {
             &session_id,
             DurableEventPayload::TranscriptRewritten {
                 source_seq: 1,
-                source_fingerprint: None,
+                source_fingerprint: String::new(),
                 messages: vec![LlmMessage::user("future rewrite")],
                 reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                     trigger: "manual".into(),
@@ -831,7 +950,7 @@ fn rewrite_event(
     seq: u64,
     session_id: &SessionId,
     source_seq: u64,
-    source_fingerprint: Option<String>,
+    source_fingerprint: String,
     summary: &str,
 ) -> StoredEvent {
     event(
@@ -896,7 +1015,7 @@ fn transcript_rewrite_with_matching_fingerprint_applies() {
 
     let fingerprint = prefix_fingerprint(&model, 2);
     reduce(
-        &rewrite_event(4, &session_id, 2, Some(fingerprint), "summary"),
+        &rewrite_event(4, &session_id, 2, fingerprint, "summary"),
         &mut model,
     )
     .unwrap();
@@ -924,13 +1043,7 @@ fn transcript_rewrite_with_stale_fingerprint_is_rejected_without_mutation() {
     .unwrap();
 
     let result = reduce(
-        &rewrite_event(
-            3,
-            &session_id,
-            2,
-            Some("deadbeefdeadbeef".into()),
-            "summary",
-        ),
+        &rewrite_event(3, &session_id, 2, "deadbeefdeadbeef".into(), "summary"),
         &mut model,
     );
     assert!(matches!(
@@ -939,34 +1052,6 @@ fn transcript_rewrite_with_stale_fingerprint_is_rejected_without_mutation() {
     ));
     assert_eq!(model.transcript.messages.len(), 2);
     assert_eq!(model.stats.last_seq, 2);
-}
-
-#[test]
-fn transcript_rewrite_without_fingerprint_skips_check() {
-    let session_id = SessionId::new("session-fp-legacy");
-    let mut model = replay(
-        session_id.clone(),
-        &[
-            started(0, &session_id),
-            user_message(1, &session_id, "old user"),
-            user_message(2, &session_id, "tail user"),
-        ],
-    )
-    .unwrap();
-
-    reduce(
-        &rewrite_event(3, &session_id, 1, None, "summary"),
-        &mut model,
-    )
-    .unwrap();
-
-    let texts: Vec<String> = model
-        .transcript
-        .messages
-        .iter()
-        .map(|message| message.message.joined_display_text("\n"))
-        .collect();
-    assert_eq!(texts, ["summary", "tail user"]);
 }
 
 #[test]
@@ -986,13 +1071,7 @@ fn consecutive_rewrites_validate_against_updated_prefix() {
 
     let first_fingerprint = prefix_fingerprint(&model, 2);
     reduce(
-        &rewrite_event(
-            5,
-            &session_id,
-            2,
-            Some(first_fingerprint.clone()),
-            "summary 1",
-        ),
+        &rewrite_event(5, &session_id, 2, first_fingerprint.clone(), "summary 1"),
         &mut model,
     )
     .unwrap();
@@ -1001,7 +1080,7 @@ fn consecutive_rewrites_validate_against_updated_prefix() {
     let second_fingerprint = prefix_fingerprint(&model, 4);
     assert_ne!(first_fingerprint, second_fingerprint);
     reduce(
-        &rewrite_event(6, &session_id, 4, Some(second_fingerprint), "summary 2"),
+        &rewrite_event(6, &session_id, 4, second_fingerprint, "summary 2"),
         &mut model,
     )
     .unwrap();
@@ -1027,19 +1106,13 @@ fn consecutive_rewrites_validate_against_updated_prefix() {
     )
     .unwrap();
     reduce(
-        &rewrite_event(
-            5,
-            &session_id,
-            2,
-            Some(first_fingerprint.clone()),
-            "summary 1",
-        ),
+        &rewrite_event(5, &session_id, 2, first_fingerprint.clone(), "summary 1"),
         &mut replayed,
     )
     .unwrap();
     assert!(matches!(
         reduce(
-            &rewrite_event(6, &session_id, 4, Some(first_fingerprint), "summary 2"),
+            &rewrite_event(6, &session_id, 4, first_fingerprint, "summary 2"),
             &mut replayed,
         ),
         Err(ProjectionError::TranscriptRewriteSourceFingerprintMismatch { source_seq: 4, .. })

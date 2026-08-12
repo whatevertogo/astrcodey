@@ -80,9 +80,9 @@ mod tests {
         );
 
         for (relative, code) in [
-            ("../outside.txt", "permission_denied"),
-            ("/etc/passwd", "invalid_input"),
-            ("", "invalid_input"),
+            ("../outside.txt", WireErrorCode::PermissionDenied.as_str()),
+            ("/etc/passwd", WireErrorCode::InvalidInput.as_str()),
+            ("", WireErrorCode::InvalidInput.as_str()),
         ] {
             let error = canonicalize_workspace_path(&root, relative).unwrap_err();
             assert_eq!(error.code, code, "relative path: {relative:?}");

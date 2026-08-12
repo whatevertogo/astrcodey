@@ -296,6 +296,18 @@ mod tests {
         assert_eq!(names, ["mcp__github__create_issue"]);
     }
 
+    #[test]
+    fn rendered_search_output_uses_the_functions_contract() {
+        let rendered = render_search_output(&ToolSearchOutput {
+            query: "github".into(),
+            total_mcp_tools: 1,
+            matches: vec![candidates().remove(0)],
+        });
+        assert!(rendered.contains("<functions>"));
+        assert!(rendered.contains("<function>{\"description\""));
+        assert!(rendered.contains("\"name\":\"mcp__github__create_issue\""));
+    }
+
     fn candidates() -> Vec<SearchCandidate> {
         vec![
             candidate("mcp__github__create_issue", "GitHub", "Create Issue"),

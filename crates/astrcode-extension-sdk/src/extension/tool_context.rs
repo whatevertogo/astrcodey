@@ -6,12 +6,11 @@ use std::{
 };
 
 use astrcode_core::{tool::ToolDefinition, types::SessionId};
-use astrcode_extension_contract::WireErrorCode;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::{ExtensionCall, ExtensionCallContext, ExtensionError, SessionCallContext};
-use crate::host::HostError;
+use crate::{WireErrorCode, host::HostError};
 
 /// Immutable input and scoped host capabilities for one extension tool call.
 ///
@@ -81,7 +80,7 @@ impl ToolContext {
             let path = error.path().to_string();
             let path = if path.is_empty() { "$" } else { path.as_str() };
             ExtensionError::InvalidInput {
-                code: "invalid_tool_arguments".into(),
+                code: WireErrorCode::InvalidInput.as_str().into(),
                 message: format!(
                     "tool `{}` arguments at `{path}`: {}",
                     self.tool_name,

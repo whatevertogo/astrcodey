@@ -19,15 +19,23 @@ use astrcode_core::{
     },
     types::SessionId,
 };
-use astrcode_extension_contract::WireErrorCode;
+use astrcode_extension_contract::{
+    WireErrorCode,
+    session_inspect::{
+        HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
+        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
+        SessionInspectSnapshotOutput,
+    },
+};
 use astrcode_extension_sdk::{
     host::{
-        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostOperation,
-        HostOperationGroup, HostSessionCancelOutput, HostSessionDeliveryOutput,
-        HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
-        HostSessionSummariesOutput, HostSessionSummary, HostSessionTokenUsage,
-        HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
-        llm_message_to_wire, llm_messages_to_wire,
+        Acknowledgement, EmptyRequest, HostConfigureSessionToolsOutput,
+        HostConfigureSessionToolsRequest, HostOperation, HostSessionCancelOutput,
+        HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
+        HostSessionProviderMessagesOutput, HostSessionSummariesOutput, HostSessionSummary,
+        HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
+        HostSessionTranscriptMessage,
+        internal::{HostOperationGroup, llm_message_to_wire, llm_messages_to_wire},
     },
     s5r::ErrorPayload,
     session::{
@@ -37,18 +45,13 @@ use astrcode_extension_sdk::{
         HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
         SessionLifecycleStateDto, SessionToolSelectionDto,
     },
-    session_inspect::{
-        HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
-        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
-        SessionInspectSnapshotOutput,
-    },
 };
 use astrcode_storage::{EventReader, SessionReader, StorageError};
 use serde_json::Value;
 
 use super::{
-    InvokeContext, acknowledgement, backend_unavailable, dispatch, dispatch_empty,
-    invalid_group_operation, session_inspect,
+    InvokeContext, acknowledgement, backend_unavailable, dispatch, invalid_group_operation,
+    session_inspect,
 };
 
 const MAX_READ_EVENTS_LIMIT: usize = 500;
@@ -85,7 +88,7 @@ impl SessionGroup {
                 .await
             },
             HostOperation::SessionRootCreate => {
-                Box::pin(dispatch_empty(operation, &input, || {
+                Box::pin(dispatch(operation, &input, |_: EmptyRequest| {
                     create_root_session(operation, ctx)
                 }))
                 .await
@@ -163,7 +166,10 @@ impl SessionGroup {
                 .await
             },
             HostOperation::SessionHistoryList => {
-                Box::pin(dispatch_empty(operation, &input, || self.history_list(ctx))).await
+                Box::pin(dispatch(operation, &input, |_: EmptyRequest| {
+                    self.history_list(ctx)
+                }))
+                .await
             },
             HostOperation::SessionHistoryProviderMessages => {
                 Box::pin(dispatch(operation, &input, |request| {
@@ -190,7 +196,7 @@ impl SessionGroup {
                 .await
             },
             HostOperation::SessionInspectList => {
-                Box::pin(dispatch_empty(operation, &input, || {
+                Box::pin(dispatch(operation, &input, |_: EmptyRequest| {
                     self.inspect_list(operation)
                 }))
                 .await
@@ -876,7 +882,7 @@ async fn execution_view(
 async fn dispose_session(
     request: HostRecycleSessionRequest,
     ctx: &InvokeContext,
-) -> Result<Value, ErrorPayload> {
+) -> Result<Acknowledgement, ErrorPayload> {
     let ops = required_session_ops(ctx)?;
     let access = SessionAccessPair::new(
         ctx.session_id.clone().ok_or_else(|| {

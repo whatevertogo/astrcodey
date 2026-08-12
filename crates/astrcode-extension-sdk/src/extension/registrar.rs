@@ -10,9 +10,13 @@ use super::{
     ExtensionManifest, HookMode, LifecycleEvent, LifecycleHandler, MAX_CUSTOM_EVENT_PAYLOAD_BYTES,
     PostToolUseHandler, PreToolUseHandler, PromptBuildHandler, ProviderEvent, ProviderHandler,
     SlashCommand, ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
-    UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration, canonical_registration_name,
-    extension_http_route_patterns_conflict, has_duplicate_registration_name,
-    lifecycle_event_allows_blocking,
+    UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
+    registration_validation::{
+        canonical_registration_name, extension_http_route_patterns_conflict,
+        has_duplicate_registration_name, lifecycle_event_allows_blocking,
+        normalize_custom_event_subscription, validate_custom_event_subscription,
+        validate_extension_http_route,
+    },
 };
 use crate::{
     builder::ExtensionToolDefinition,
@@ -155,7 +159,7 @@ impl Registrar {
         priority: i32,
         handler: Arc<dyn CustomEventHandler>,
     ) {
-        subscription.normalize();
+        normalize_custom_event_subscription(&mut subscription);
         self.registrations
             .custom_event_subscriptions
             .push(CustomEventRegistration {
@@ -555,7 +559,7 @@ impl ExtensionRegistrations {
 
         let mut subscription_ids = HashSet::new();
         for registration in &self.custom_event_subscriptions {
-            if let Err(reason) = registration.subscription.validate() {
+            if let Err(reason) = validate_custom_event_subscription(&registration.subscription) {
                 return Err(invalid_registration(extension_id, reason));
             }
             let subscription_id = registration.subscription.id.as_str();
@@ -572,8 +576,7 @@ impl ExtensionRegistrations {
 
         for (index, registration) in self.http_routes.iter().enumerate() {
             let route = &registration.route;
-            route
-                .validate()
+            validate_extension_http_route(route)
                 .map_err(|reason| invalid_registration(extension_id, reason))?;
             let capability = match route.access {
                 ExtensionHttpAccess::Public => ExtensionCapability::PublicHttp,

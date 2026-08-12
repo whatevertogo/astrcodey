@@ -97,7 +97,7 @@ mod tests {
                 "session-1".into(),
                 DurableEventPayload::TranscriptRewritten {
                     source_seq: 0,
-                    source_fingerprint: None,
+                    source_fingerprint: "fingerprint".into(),
                     messages: Vec::new(),
                     reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                         trigger: "manual_command".into(),
@@ -177,7 +177,7 @@ mod tests {
             // 结构性改写 → RehydrateRequired
             DurableEventPayload::TranscriptRewritten {
                 source_seq: 0,
-                source_fingerprint: None,
+                source_fingerprint: "fingerprint".into(),
                 messages: Vec::new(),
                 reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                     trigger: "manual_command".into(),

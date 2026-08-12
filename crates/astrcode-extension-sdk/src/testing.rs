@@ -532,7 +532,7 @@ struct UnavailableHost;
 impl HostInvoker for UnavailableHost {
     async fn invoke(&self, operation: HostOperation, _input: Value) -> Result<Value, HostError> {
         Err(HostError::new(
-            "backend_unavailable",
+            crate::WireErrorCode::BackendUnavailable,
             format!(
                 "{} backend is unavailable in this test context",
                 operation.wire_name()

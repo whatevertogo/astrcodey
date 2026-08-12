@@ -513,4 +513,13 @@ mod tests {
             ))
         );
     }
+
+    #[test]
+    fn reasoning_content_is_present_only_when_nonempty() {
+        assert_eq!(
+            non_empty_reasoning_content("thinking...".into()),
+            Some("thinking...".into())
+        );
+        assert_eq!(non_empty_reasoning_content(String::new()), None);
+    }
 }

@@ -72,15 +72,6 @@ macro_rules! host_operations {
                 self.spec().required
             }
 
-            #[doc(hidden)]
-            pub const fn requires_session_context(self) -> bool {
-                matches!(self.spec().context, HostContextRequirement::Session)
-            }
-
-            #[doc(hidden)]
-            pub const fn requires_workspace_context(self) -> bool {
-                matches!(self.spec().context, HostContextRequirement::Workspace)
-            }
         }
 
         /// The canonical operation catalog, in declaration order.
@@ -598,16 +589,6 @@ mod tests {
                 operation.required_capability(),
                 spec.required,
                 "{operation:?} capability accessor"
-            );
-            assert_eq!(
-                operation.requires_session_context(),
-                spec.context == HostContextRequirement::Session,
-                "{operation:?} hidden session-context helper"
-            );
-            assert_eq!(
-                operation.requires_workspace_context(),
-                spec.context == HostContextRequirement::Workspace,
-                "{operation:?} hidden workspace-context helper"
             );
             assert!(
                 !spec.supports_stream || spec.cancelable,

@@ -12,9 +12,7 @@ mod session_inspect;
 mod wire;
 mod workspace;
 
-use std::{
-    collections::HashMap, future::Future, path::PathBuf, pin::Pin, sync::Arc, time::Duration,
-};
+use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
 use astrcode_core::{
     event::{
@@ -25,14 +23,15 @@ use astrcode_core::{
     tool::SessionOperations,
     types::EventId,
 };
-use astrcode_extension_contract::WireErrorCode;
+use astrcode_extension_contract::{HostContextRequirement, WireErrorCode};
 use astrcode_extension_sdk::{
     extension::{
         CustomEventDeclaration, ExtensionCapability, ExtensionError, ExtensionHttpRequest,
         ExtensionHttpResponse, ExtensionTaskError, ExtensionTasks,
     },
     host::{
-        HostOp, HostOperation, HostOperationGroup, internal::OutboundNetworkService, operations,
+        HostOperation,
+        internal::{HostOperationGroup, OutboundNetworkService},
     },
     s5r::{CapabilityDescriptor, ErrorPayload},
 };
@@ -76,9 +75,9 @@ where
     })
 }
 
-/// 无返回值宿主操作（unit output）的统一成功响应，与 SDK 侧 `invoke_unit` 的校验互为契约两端。
-pub(super) fn acknowledgement() -> Value {
-    serde_json::json!({ "ok": true })
+/// 无返回值宿主操作的统一成功响应。
+pub(super) const fn acknowledgement() -> astrcode_extension_contract::host::Acknowledgement {
+    astrcode_extension_contract::host::Acknowledgement { ok: true }
 }
 
 /// 单次宿主操作的固定管线：按 spec 线缆名解析请求、调用 typed handler、序列化契约输出。
@@ -95,31 +94,6 @@ where
     let name = operation.wire_name();
     let request = parse_wire_request::<Request>(input, name)?;
     serialize_wire_response(handler(request).await?, name)
-}
-
-/// 空对象请求操作的固定管线：校验空对象、调用 handler、序列化契约输出。
-pub(super) async fn dispatch_empty<Output, Fut>(
-    operation: HostOperation,
-    input: &Value,
-    handler: impl FnOnce() -> Fut,
-) -> Result<Value, ErrorPayload>
-where
-    Output: serde::Serialize,
-    Fut: Future<Output = Result<Output, ErrorPayload>>,
-{
-    require_empty_object(input, operation.wire_name())?;
-    serialize_wire_response(handler().await?, operation.wire_name())
-}
-
-pub(super) fn require_empty_object(input: &Value, capability: &str) -> Result<(), ErrorPayload> {
-    if input.as_object().is_some_and(serde_json::Map::is_empty) {
-        Ok(())
-    } else {
-        Err(ErrorPayload::new(
-            WireErrorCode::InvalidInput,
-            format!("{capability} expects an empty object"),
-        ))
-    }
 }
 
 pub(super) fn io_error(error: impl std::fmt::Display) -> ErrorPayload {
@@ -268,200 +242,8 @@ pub struct HostRouter {
     extension_http: ExtensionHttpGroup,
 }
 
-type HostHandlerFuture<'a> = Pin<Box<dyn Future<Output = Result<Value, ErrorPayload>> + Send + 'a>>;
-type HostHandler =
-    for<'a> fn(&'a HostRouter, HostOperation, Value, &'a InvokeContext) -> HostHandlerFuture<'a>;
-
-#[derive(Clone, Copy)]
-struct RegisteredHostHandler {
-    operation: HostOperation,
-    group: HostOperationGroup,
-    invoke: HostHandler,
-}
-
-impl RegisteredHostHandler {
-    const fn register<Operation>(group: HostOperationGroup, invoke: HostHandler) -> Self
-    where
-        Operation: HostOp,
-    {
-        Self {
-            operation: Operation::OPERATION,
-            group,
-            invoke,
-        }
-    }
-}
-
-macro_rules! host_handler_registry {
-    ($($operation:ident => ($group:ident, $handler:ident)),* $(,)?) => {
-        const HOST_HANDLERS: [RegisteredHostHandler; HostOperation::COUNT] = [
-            $(
-                RegisteredHostHandler::register::<operations::$operation>(
-                    HostOperationGroup::$group,
-                    $handler,
-                )
-            ),*
-        ];
-    };
-}
-
-host_handler_registry! {
-    EventEmit => (Context, invoke_context),
-    ExtensionHttpPublic => (ExtensionHttp, invoke_extension_http),
-    LlmMainChat => (Llm, invoke_llm),
-    LlmSmallChat => (Llm, invoke_llm),
-    NetworkClient => (Network, invoke_network),
-    ProcessSpawn => (Process, invoke_process),
-    SessionControlCancelTurn => (Session, invoke_session),
-    SessionControlConfigureTools => (Session, invoke_session),
-    SessionControlCreate => (Session, invoke_session),
-    SessionControlDispose => (Session, invoke_session),
-    SessionControlExecutionView => (Session, invoke_session),
-    SessionControlInjectOrStart => (Session, invoke_session),
-    SessionControlInterruptAndSubmit => (Session, invoke_session),
-    SessionControlReactivate => (Session, invoke_session),
-    SessionControlState => (Session, invoke_session),
-    SessionControlSubmitTurn => (Session, invoke_session),
-    SessionHistoryList => (Session, invoke_session),
-    SessionHistoryProviderMessages => (Session, invoke_session),
-    SessionHistorySnapshot => (Session, invoke_session),
-    SessionHistoryTokenUsage => (Session, invoke_session),
-    SessionHistoryTranscript => (Session, invoke_session),
-    SessionInspectList => (Session, invoke_session),
-    SessionInspectProviderMessages => (Session, invoke_session),
-    SessionInspectReadModel => (Session, invoke_session),
-    SessionInspectSnapshot => (Session, invoke_session),
-    SessionReadEvents => (Session, invoke_session),
-    SessionRootCreate => (Session, invoke_session),
-    SessionRootState => (Session, invoke_session),
-    SessionRootSubmitTurn => (Session, invoke_session),
-    SessionStateRead => (Context, invoke_context),
-    SessionStateWrite => (Context, invoke_context),
-    WorkspaceEdit => (Workspace, invoke_workspace),
-    WorkspaceGlob => (Workspace, invoke_workspace),
-    WorkspaceGrep => (Workspace, invoke_workspace),
-    WorkspaceList => (Workspace, invoke_workspace),
-    WorkspaceRead => (Workspace, invoke_workspace),
-    WorkspaceWrite => (Workspace, invoke_workspace),
-}
-
-const fn host_handler_registry_is_valid() -> bool {
-    let mut index = 0;
-    while index < HOST_HANDLERS.len() {
-        let registered = HOST_HANDLERS[index];
-        if registered.operation as usize != index
-            || registered.group as usize != registered.operation.spec().group as usize
-        {
-            return false;
-        }
-        index += 1;
-    }
-    true
-}
-
-const _: () = assert!(host_handler_registry_is_valid());
-
-fn invoke_llm<'a>(
-    router: &'a HostRouter,
-    operation: HostOperation,
-    input: Value,
-    context: &'a InvokeContext,
-) -> HostHandlerFuture<'a> {
-    Box::pin(async move {
-        router
-            .llm
-            .invoke(operation, input, context.cancel_token.as_ref())
-            .await
-    })
-}
-
-fn invoke_session<'a>(
-    router: &'a HostRouter,
-    operation: HostOperation,
-    input: Value,
-    context: &'a InvokeContext,
-) -> HostHandlerFuture<'a> {
-    Box::pin(async move { router.session.invoke(operation, input, context).await })
-}
-
-fn invoke_context<'a>(
-    router: &'a HostRouter,
-    operation: HostOperation,
-    input: Value,
-    context: &'a InvokeContext,
-) -> HostHandlerFuture<'a> {
-    Box::pin(async move { router.context.invoke(operation, &input, context).await })
-}
-
-fn invoke_workspace<'a>(
-    router: &'a HostRouter,
-    operation: HostOperation,
-    input: Value,
-    context: &'a InvokeContext,
-) -> HostHandlerFuture<'a> {
-    Box::pin(async move {
-        router
-            .workspace
-            .invoke(
-                operation,
-                input,
-                context.working_dir.as_deref(),
-                context.tasks.as_ref(),
-            )
-            .await
-    })
-}
-
-fn invoke_process<'a>(
-    router: &'a HostRouter,
-    operation: HostOperation,
-    input: Value,
-    context: &'a InvokeContext,
-) -> HostHandlerFuture<'a> {
-    Box::pin(async move {
-        router
-            .process
-            .invoke(
-                operation,
-                input,
-                context.working_dir.as_deref(),
-                context.cancel_token.as_ref(),
-            )
-            .await
-    })
-}
-
-fn invoke_network<'a>(
-    router: &'a HostRouter,
-    operation: HostOperation,
-    input: Value,
-    context: &'a InvokeContext,
-) -> HostHandlerFuture<'a> {
-    Box::pin(async move {
-        router
-            .network
-            .invoke(operation, input, context.cancel_token.as_ref())
-            .await
-    })
-}
-
-fn invoke_extension_http<'a>(
-    router: &'a HostRouter,
-    operation: HostOperation,
-    input: Value,
-    context: &'a InvokeContext,
-) -> HostHandlerFuture<'a> {
-    Box::pin(async move {
-        router
-            .extension_http
-            .invoke(operation, input, &context.extension_id)
-            .await
-    })
-}
-
 impl HostRouter {
     pub fn from_backends(backends: HostBackends) -> Self {
-        debug_assert!(host_handler_registry_is_valid());
         let HostBackends {
             main_llm,
             small_llm,
@@ -505,6 +287,54 @@ impl HostRouter {
         self.network.service()
     }
 
+    async fn invoke_group(
+        &self,
+        group: HostOperationGroup,
+        operation: HostOperation,
+        input: Value,
+        context: &InvokeContext,
+    ) -> Result<Value, ErrorPayload> {
+        match group {
+            HostOperationGroup::Llm => {
+                self.llm
+                    .invoke(operation, input, context.cancel_token.as_ref())
+                    .await
+            },
+            HostOperationGroup::Session => self.session.invoke(operation, input, context).await,
+            HostOperationGroup::Context => self.context.invoke(operation, &input, context).await,
+            HostOperationGroup::Workspace => {
+                self.workspace
+                    .invoke(
+                        operation,
+                        input,
+                        context.working_dir.as_deref(),
+                        context.tasks.as_ref(),
+                    )
+                    .await
+            },
+            HostOperationGroup::Process => {
+                self.process
+                    .invoke(
+                        operation,
+                        input,
+                        context.working_dir.as_deref(),
+                        context.cancel_token.as_ref(),
+                    )
+                    .await
+            },
+            HostOperationGroup::Network => {
+                self.network
+                    .invoke(operation, input, context.cancel_token.as_ref())
+                    .await
+            },
+            HostOperationGroup::ExtensionHttp => {
+                self.extension_http
+                    .invoke(operation, input, &context.extension_id)
+                    .await
+            },
+        }
+    }
+
     /// Executes one guest-to-host operation on the caller's async task.
     pub async fn invoke(
         &self,
@@ -517,8 +347,9 @@ impl HostRouter {
         capability::authorize(spec, &ctx.declared_capabilities)?;
         ensure_required_context(spec.operation, ctx)?;
 
-        let handler = HOST_HANDLERS[spec.operation as usize];
-        let invoke = (handler.invoke)(self, spec.operation, input, ctx);
+        // Boxing at the group boundary keeps the public invoke future independent of the
+        // combined stack size of every backend dispatcher.
+        let invoke = Box::pin(self.invoke_group(spec.group, spec.operation, input, ctx));
         // ProcessRunner must observe cancellation so it can terminate the process group and reap
         // the direct child before returning.
         let backend_owns_cancellation = spec.operation == HostOperation::ProcessSpawn;
@@ -591,7 +422,7 @@ fn ensure_required_context(
     operation: HostOperation,
     ctx: &InvokeContext,
 ) -> Result<(), ErrorPayload> {
-    if operation.requires_session_context() && ctx.session_id.is_none() {
+    if operation.spec().context == HostContextRequirement::Session && ctx.session_id.is_none() {
         return Err(ErrorPayload::new(
             WireErrorCode::ContextUnavailable,
             format!(
@@ -600,7 +431,7 @@ fn ensure_required_context(
             ),
         ));
     }
-    if operation.requires_workspace_context() && ctx.working_dir.is_none() {
+    if operation.spec().context == HostContextRequirement::Workspace && ctx.working_dir.is_none() {
         return Err(ErrorPayload::new(
             WireErrorCode::ContextUnavailable,
             format!(
@@ -712,7 +543,9 @@ fn validate_emit(
     Ok(())
 }
 
-pub fn decls_to_map(decls: &[CustomEventDeclaration]) -> HashMap<String, CustomEventDeclaration> {
+pub(crate) fn decls_to_map(
+    decls: &[CustomEventDeclaration],
+) -> HashMap<String, CustomEventDeclaration> {
     decls
         .iter()
         .map(|d| (d.event_type.clone(), d.clone()))
@@ -738,7 +571,7 @@ pub fn build_host_router_with_public_http_dispatcher(
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{BTreeMap, HashSet},
+        collections::BTreeMap,
         sync::{
             Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -775,25 +608,6 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
-
-    #[test]
-    fn handler_registry_is_bidirectionally_complete() {
-        let mut registered = HashSet::new();
-        for handler in HOST_HANDLERS {
-            assert!(
-                registered.insert(handler.operation),
-                "duplicate handler for {:?}",
-                handler.operation
-            );
-            assert_eq!(handler.group, handler.operation.spec().group);
-        }
-        assert_eq!(registered.len(), HostOperation::COUNT);
-        assert!(
-            astrcode_extension_sdk::host::HOST_OPERATION_SPECS
-                .iter()
-                .all(|spec| registered.contains(&spec.operation))
-        );
-    }
 
     struct DropProbe(Arc<AtomicBool>);
 
@@ -1024,33 +838,33 @@ mod tests {
             .invoke("astrcode.session.inspect.list", json!({}), &ctx)
             .await
             .expect("list sessions");
-        assert_eq!(list["sessions"][0]["sessionId"], "inspect-session");
+        assert_eq!(list["sessions"][0]["session_id"], "inspect-session");
 
         let model = router
             .invoke(
                 "astrcode.session.inspect.read_model",
-                json!({ "sessionId": "inspect-session" }),
+                json!({ "session_id": "inspect-session" }),
                 &ctx,
             )
             .await
             .expect("read session model");
-        assert_eq!(model["readModel"]["modelId"], "test-model");
-        assert_eq!(model["readModel"]["phase"], "idle");
+        assert_eq!(model["read_model"]["model_id"], "test-model");
+        assert_eq!(model["read_model"]["phase"], "idle");
 
         let snapshot = router
             .invoke(
                 "astrcode.session.inspect.snapshot",
-                json!({ "sessionId": "inspect-session" }),
+                json!({ "session_id": "inspect-session" }),
                 &ctx,
             )
             .await
             .expect("read session snapshot");
-        assert_eq!(snapshot["snapshot"]["sessionId"], "inspect-session");
+        assert_eq!(snapshot["snapshot"]["session_id"], "inspect-session");
 
         let inspect_messages = router
             .invoke(
                 "astrcode.session.inspect.provider_messages",
-                json!({ "sessionId": "inspect-session" }),
+                json!({ "session_id": "inspect-session" }),
                 &ctx,
             )
             .await
@@ -1064,27 +878,27 @@ mod tests {
             ),
             (
                 "astrcode.session.inspect.snapshot",
-                json!({ "sessionId": "inspect-session", "unexpected": true }),
+                json!({ "session_id": "inspect-session", "unexpected": true }),
             ),
             (
                 "astrcode.session.inspect.read_model",
-                json!({ "sessionId": "inspect-session", "unexpected": true }),
+                json!({ "session_id": "inspect-session", "unexpected": true }),
             ),
             (
                 "astrcode.session.inspect.provider_messages",
-                json!({ "sessionId": "inspect-session", "unexpected": true }),
+                json!({ "session_id": "inspect-session", "unexpected": true }),
             ),
             (
                 "astrcode.session.inspect.snapshot",
-                json!({ "sessionId": "" }),
+                json!({ "session_id": "" }),
             ),
             (
                 "astrcode.session.inspect.read_model",
-                json!({ "sessionId": "" }),
+                json!({ "session_id": "" }),
             ),
             (
                 "astrcode.session.inspect.provider_messages",
-                json!({ "sessionId": "" }),
+                json!({ "session_id": "" }),
             ),
         ] {
             let error = router
@@ -1107,7 +921,7 @@ mod tests {
             .await
             .expect("read scoped history snapshot");
         assert_eq!(history["lifecycle"], "active");
-        assert_eq!(history["readModel"]["modelId"], "test-model");
+        assert_eq!(history["read_model"]["model_id"], "test-model");
 
         let summaries = router
             .invoke("astrcode.session.history.list", json!({}), &ctx)
@@ -1590,11 +1404,11 @@ mod tests {
             .expect("oversized write must not replace existing state");
         assert_eq!(unchanged["content"], "active");
 
-        let legacy_path = temp
+        let persisted_path = temp
             .path()
             .join("extension_data/stateful-test/oversized-existing");
         std::fs::write(
-            legacy_path,
+            persisted_path,
             vec![b'x'; HOST_SESSION_STATE_VALUE_MAX_BYTES + 1],
         )
         .expect("write oversized pre-existing state");
@@ -2331,7 +2145,7 @@ mod tests {
             },
             LlmMessage::tool("lookup", "call-1", "done", false),
         ];
-        let input = serde_json::to_value(astrcode_extension_sdk::host::llm_chat_request(
+        let input = serde_json::to_value(astrcode_extension_sdk::host::internal::llm_chat_request(
             messages.clone(),
         ))
         .expect("serialize typed model request");
@@ -2437,10 +2251,11 @@ mod tests {
             declared_capabilities: vec![ExtensionCapability::MainModel],
             ..Default::default()
         };
-        let llm_input = serde_json::to_value(astrcode_extension_sdk::host::llm_chat_request(vec![
-            LlmMessage::user("hello"),
-        ]))
-        .expect("serialize LLM request");
+        let llm_input =
+            serde_json::to_value(astrcode_extension_sdk::host::internal::llm_chat_request(
+                vec![LlmMessage::user("hello")],
+            ))
+            .expect("serialize LLM request");
         let invoke = llm_router.invoke("astrcode.llm.main_chat", llm_input, &llm_ctx);
         tokio::pin!(invoke);
         tokio::select! {

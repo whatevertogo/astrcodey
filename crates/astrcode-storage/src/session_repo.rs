@@ -17,7 +17,8 @@ use astrcode_core::{
     types::{Cursor, SessionId, project_key_from_path, validate_session_id},
 };
 use astrcode_session_projection::{
-    AgentSessionLinkView, ProjectionError, SessionReadModel, SessionSummary, reduce, replay,
+    AgentSessionLinkView, PreparedProjectionBatch, ProjectionError, SessionReadModel,
+    SessionSummary, reduce, replay,
 };
 use chrono::Utc;
 use fs2::FileExt;
@@ -238,27 +239,18 @@ impl SessionProjection {
 
     async fn prepare_batch(
         &self,
-        events: &[DurableEvent],
-    ) -> Result<(u64, Arc<SessionReadModel>), StorageError> {
-        let model = self.snapshot().await;
-        let first_seq =
-            model.stats.last_seq.checked_add(1).ok_or_else(|| {
-                StorageError::CorruptLog("session event sequence overflow".into())
-            })?;
-        let mut candidate = (*model).clone();
-        let mut seq = first_seq;
-        for event in events {
-            reduce(&StoredEvent::new(seq, event.clone()), &mut candidate).map_err(invalid_event)?;
-            seq = seq.checked_add(1).ok_or_else(|| {
-                StorageError::CorruptLog("session event sequence overflow".into())
-            })?;
-        }
-        Ok((first_seq, Arc::new(candidate)))
+        events: Vec<DurableEvent>,
+    ) -> Result<PreparedProjectionBatch, StorageError> {
+        let model = self.model.read().await;
+        PreparedProjectionBatch::prepare(model.as_ref(), events).map_err(|error| match error {
+            ProjectionError::SequenceOverflow => StorageError::CorruptLog(error.to_string()),
+            error => invalid_event(error),
+        })
     }
 
-    async fn replace(&self, candidate: Arc<SessionReadModel>) {
+    async fn apply_committed(&self, batch: PreparedProjectionBatch) -> Vec<StoredEvent> {
         let mut model = self.model.write().await;
-        *model = candidate;
+        batch.apply(&mut model)
     }
 }
 
@@ -565,7 +557,7 @@ async fn restore_from_snapshot(
     let latest_seq = snapshot.model.stats.last_seq;
 
     // `count()` returns the next seq to assign (= number of persisted events).
-    let next_seq = log.count().await? as u64;
+    let next_seq = log.count().await?;
     if latest_seq >= next_seq {
         return Err(StorageError::InvalidId(format!(
             "snapshot latest_seq {latest_seq} is outside event log (next_seq={next_seq})"
@@ -815,16 +807,17 @@ impl SessionEventJournal for FileSystemSessionRepository {
             meta.commit_lane.acquire().await.map_err(|_| {
                 StorageError::Io(std::io::Error::other("session commit lane closed"))
             })?;
-        let (expected_seq, candidate) = meta.projection.prepare_batch(&events).await?;
-        let log_next_seq = meta.log.count().await? as u64;
+        let prepared = meta.projection.prepare_batch(events).await?;
+        let expected_seq = prepared.first_seq();
+        let log_next_seq = meta.log.count().await?;
         if log_next_seq != expected_seq {
             return Err(StorageError::CorruptLog(format!(
                 "event log next seq {log_next_seq} does not match projection next seq \
                  {expected_seq}"
             )));
         }
-        let stored = meta.log.append_batch(events).await?;
-        meta.projection.replace(candidate).await;
+        let committed = meta.log.append_prepared_batch(prepared).await?;
+        let stored = meta.projection.apply_committed(committed).await;
         Ok(stored)
     }
 
@@ -857,9 +850,7 @@ impl SessionStore for FileSystemSessionRepository {
         let _permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
             StorageError::Io(std::io::Error::other("event consumer state lane closed"))
         })?;
-        let event_count = u64::try_from(meta.log.count().await?).map_err(|_| {
-            StorageError::CorruptLog("session event count exceeds consumer checkpoint range".into())
-        })?;
+        let event_count = meta.log.count().await?;
         if seq >= event_count {
             return Err(StorageError::InvalidId(format!(
                 "event consumer checkpoint {seq} is beyond the session event log"
@@ -897,9 +888,7 @@ impl SessionStore for FileSystemSessionRepository {
         let _permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
             StorageError::Io(std::io::Error::other("event consumer state lane closed"))
         })?;
-        let event_count = u64::try_from(meta.log.count().await?).map_err(|_| {
-            StorageError::CorruptLog("session event count exceeds consumer checkpoint range".into())
-        })?;
+        let event_count = meta.log.count().await?;
         if seq >= event_count {
             return Err(StorageError::InvalidId(format!(
                 "event consumer failure seq {seq} is beyond the session event log"
@@ -970,13 +959,7 @@ impl SessionStore for FileSystemSessionRepository {
         let previous_checkpoint = state.checkpoint;
         state.checkpoint = match reset {
             EventConsumerCheckpointReset::Beginning => None,
-            EventConsumerCheckpointReset::StreamHead => u64::try_from(meta.log.count().await?)
-                .map_err(|_| {
-                    StorageError::CorruptLog(
-                        "session event count exceeds consumer checkpoint range".into(),
-                    )
-                })?
-                .checked_sub(1),
+            EventConsumerCheckpointReset::StreamHead => meta.log.count().await?.checked_sub(1),
         };
         state.revision = state
             .revision

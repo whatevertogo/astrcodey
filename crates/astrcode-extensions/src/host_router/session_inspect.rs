@@ -7,10 +7,8 @@ use astrcode_core::{
     llm::{LlmContent, LlmMessage},
     types::SessionId,
 };
-use astrcode_extension_contract::WireErrorCode;
-use astrcode_extension_sdk::{
-    host::HostOperation,
-    s5r::ErrorPayload,
+use astrcode_extension_contract::{
+    WireErrorCode,
     session_inspect::{
         SessionInspectAgentSession, SessionInspectAgentStatusDto, SessionInspectCompaction,
         SessionInspectContent, SessionInspectListItem, SessionInspectListOutput,
@@ -19,6 +17,7 @@ use astrcode_extension_sdk::{
         SessionInspectSnapshot, SessionInspectSnapshotOutput,
     },
 };
+use astrcode_extension_sdk::{host::HostOperation, s5r::ErrorPayload};
 use astrcode_session_projection::{
     AgentSessionLinkView, AgentSessionStatus, SequencedLlmMessage, SessionReadModel, SessionSummary,
 };
@@ -339,10 +338,10 @@ mod tests {
         })
         .expect("serialize mapped model");
 
-        assert_eq!(value["readModel"]["sessionId"], "session-1");
-        assert_eq!(value["readModel"]["phase"], "calling_tool");
+        assert_eq!(value["read_model"]["session_id"], "session-1");
+        assert_eq!(value["read_model"]["phase"], "calling_tool");
         assert_eq!(
-            value["readModel"]["messages"][0]["message"]["content"][0]["type"],
+            value["read_model"]["messages"][0]["message"]["content"][0]["type"],
             "text"
         );
     }

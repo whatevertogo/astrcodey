@@ -666,7 +666,7 @@ mod tests {
         let rewrite = event(
             EventPayload::Durable(DurableEventPayload::TranscriptRewritten {
                 source_seq: 3,
-                source_fingerprint: None,
+                source_fingerprint: "fingerprint".into(),
                 messages: Vec::new(),
                 reason: astrcode_core::event::TranscriptRewriteReason::Compaction(
                     astrcode_core::event::CompactionDetails {

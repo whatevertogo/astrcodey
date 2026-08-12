@@ -398,6 +398,10 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
             "The extension is still processing. Try again with a simpler request, or proceed \
              without this tool.",
         ),
+        ExtensionError::Cancelled => (
+            format!("Tool `{tool_name}` was cancelled."),
+            "The current operation was cancelled; retry only if the caller starts a new attempt.",
+        ),
         ExtensionError::Draining { .. } => (
             format!("Tool `{tool_name}` is temporarily unavailable while its extension reloads."),
             "Retry after the extension finishes reloading, or proceed without this tool.",
@@ -459,6 +463,12 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
             ),
         );
     }
+    if matches!(&err, ExtensionError::Cancelled) {
+        metadata.insert(
+            "errorCode".into(),
+            serde_json::json!(astrcode_extension_contract::WireErrorCode::Cancelled.as_str()),
+        );
+    }
     if let ExtensionError::Host(error) = &err {
         metadata.insert("errorCode".into(), serde_json::json!(error.code));
         metadata.insert("retryable".into(), serde_json::json!(error.retryable));
@@ -475,18 +485,49 @@ mod tests {
     use super::*;
 
     #[test]
-    fn draining_error_keeps_the_contract_error_code() {
-        let result = extension_error_result(
-            "probe",
-            "extension-a",
-            ExtensionError::Draining {
-                extension_id: "extension-a".into(),
-            },
-        );
+    fn extension_errors_keep_their_contract_error_codes() {
+        let cases = [
+            (
+                ExtensionError::Draining {
+                    extension_id: "extension-a".into(),
+                },
+                astrcode_extension_contract::WireErrorCode::ExtensionDraining.as_str(),
+            ),
+            (
+                ExtensionError::Cancelled,
+                astrcode_extension_contract::WireErrorCode::Cancelled.as_str(),
+            ),
+            (
+                ExtensionError::InvalidInput {
+                    code: astrcode_extension_contract::WireErrorCode::InvalidInput
+                        .as_str()
+                        .into(),
+                    message: "bad input".into(),
+                    hint: None,
+                },
+                astrcode_extension_contract::WireErrorCode::InvalidInput.as_str(),
+            ),
+            (
+                ExtensionError::Host(
+                    astrcode_extension_contract::protocol::ErrorPayload {
+                        code: "future_worker_error".into(),
+                        message: "worker failed".into(),
+                        hint: None,
+                        retryable: false,
+                        details: None,
+                    }
+                    .into(),
+                ),
+                "future_worker_error",
+            ),
+        ];
 
-        assert_eq!(
-            result.metadata.get("errorCode"),
-            Some(&serde_json::json!("extension_draining"))
-        );
+        for (error, expected_code) in cases {
+            let result = extension_error_result("probe", "extension-a", error);
+            assert_eq!(
+                result.metadata.get("errorCode"),
+                Some(&serde_json::json!(expected_code))
+            );
+        }
     }
 }

@@ -1,23 +1,70 @@
-pub use astrcode_extension_contract::host::*;
+use astrcode_extension_contract::{WireErrorCode, host::*, protocol::ErrorPayload};
+use futures_util::StreamExt;
 
-use crate::llm::{LlmContent, LlmMessage, LlmRole};
+use crate::{
+    llm::{LlmContent, LlmMessage, LlmRole},
+    model_stream::{ModelStream, ModelStreamEvent},
+};
 
-#[doc(hidden)]
+/// A completed model stream with its ordered text deltas.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostLlmCollectedStreamOutput {
+    pub content: String,
+    pub model: String,
+    pub chunks: Vec<String>,
+}
+
+pub(crate) async fn collect_model_stream(
+    mut stream: ModelStream,
+) -> Result<HostLlmCollectedStreamOutput, ErrorPayload> {
+    let mut chunks = Vec::new();
+    while let Some(event) = stream.next().await {
+        match event {
+            ModelStreamEvent::ContentDelta { content } => chunks.push(content),
+            ModelStreamEvent::Completed { output } => {
+                let model = output
+                    .get("model")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        ErrorPayload::new(
+                            WireErrorCode::InvalidResponse,
+                            "completed model stream is missing string field `model`",
+                        )
+                    })?
+                    .to_owned();
+                let content = output
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| chunks.concat());
+                return Ok(HostLlmCollectedStreamOutput {
+                    content,
+                    model,
+                    chunks,
+                });
+            },
+            ModelStreamEvent::Failed { error } => return Err(error),
+            _ => {},
+        }
+    }
+    Err(ErrorPayload::new(
+        WireErrorCode::StreamClosed,
+        "model stream closed without a terminal event",
+    ))
+}
+
 pub fn llm_chat_request(messages: Vec<LlmMessage>) -> HostLlmChatRequest {
     HostLlmChatRequest::new(llm_messages_to_wire(messages))
 }
 
-#[doc(hidden)]
 pub fn llm_messages_from_wire(messages: Vec<HostLlmMessage>) -> Vec<LlmMessage> {
     messages.into_iter().map(llm_message_from_wire).collect()
 }
 
-#[doc(hidden)]
 pub fn llm_messages_to_wire(messages: Vec<LlmMessage>) -> Vec<HostLlmMessage> {
     messages.into_iter().map(llm_message_to_wire).collect()
 }
 
-#[doc(hidden)]
 pub fn llm_message_to_wire(message: LlmMessage) -> HostLlmMessage {
     HostLlmMessage {
         role: match message.role {
@@ -121,5 +168,63 @@ fn llm_content_from_wire(content: HostLlmContent) -> LlmContent {
             content,
             is_error,
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_extension_contract::protocol::{ErrorPayload, ModelStreamEvent};
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+
+    use super::*;
+
+    fn stream<I>(events: I) -> ModelStream
+    where
+        I: IntoIterator<Item = ModelStreamEvent>,
+        I::IntoIter: Send + 'static,
+    {
+        ModelStream::from_stream(futures_util::stream::iter(events), CancellationToken::new())
+    }
+
+    #[tokio::test]
+    async fn collected_model_stream_requires_and_preserves_one_terminal_result() {
+        let collected = collect_model_stream(stream([
+            ModelStreamEvent::ContentDelta {
+                content: "hel".into(),
+            },
+            ModelStreamEvent::ContentDelta {
+                content: "lo".into(),
+            },
+            ModelStreamEvent::Completed {
+                output: json!({ "model": "main", "finish_reason": "stop" }),
+            },
+        ]))
+        .await
+        .unwrap();
+        assert_eq!(collected.content, "hello");
+        assert_eq!(collected.model, "main");
+        assert_eq!(collected.chunks, ["hel", "lo"]);
+
+        let missing_model = collect_model_stream(stream([ModelStreamEvent::Completed {
+            output: json!({ "content": "hello" }),
+        }]))
+        .await
+        .unwrap_err();
+        assert_eq!(
+            missing_model.code_enum(),
+            Some(WireErrorCode::InvalidResponse)
+        );
+
+        let closed = collect_model_stream(stream([])).await.unwrap_err();
+        assert_eq!(closed.code_enum(), Some(WireErrorCode::StreamClosed));
+
+        let expected = ErrorPayload::new(WireErrorCode::BackendUnavailable, "model unavailable");
+        let failed = collect_model_stream(stream([ModelStreamEvent::Failed {
+            error: expected.clone(),
+        }]))
+        .await
+        .unwrap_err();
+        assert_eq!(failed, expected);
     }
 }

@@ -6,7 +6,7 @@
 
 ## 总览
 
-AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上 `src-tauri` 的桌面壳 `astrcode-desktop`。
+AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上 `src-tauri` 的桌面壳 `astrcode-desktop`。
 
 整体分层可以按依赖方向理解：
 
@@ -34,7 +34,9 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 | `astrcode-context` | `crates/astrcode-context` | lib | prompt 组装、上下文裁剪、token 预算、compact |
 | `astrcode-tools` | `crates/astrcode-tools` | lib | 内置文件工具、shell、terminal、后台 shell 与工具 catalog |
 | `astrcode-session` | `crates/astrcode-session` | lib | session/turn 运行时、工具管线、权限链、compact 持久化 |
-| `astrcode-extension-sdk` | `crates/astrcode-extension-sdk` | lib | 扩展作者公开 SDK、进程内扩展和 s5r worker 契约 |
+| `astrcode-extension-contract` | `crates/astrcode-extension-contract` | lib | S5R wire DTO、稳定错误码、帧传输与 `Peer` 状态机 |
+| `astrcode-extension-sdk` | `crates/astrcode-extension-sdk` | lib | 扩展作者公开 SDK、进程内扩展作者面（s5r wire 契约与运行时位于 contract/worker） |
+| `astrcode-extension-worker` | `crates/astrcode-extension-worker` | lib | s5r worker 运行时：`run_stdio`、handler dispatch、远程 `HostClient` |
 | `astrcode-extensions` | `crates/astrcode-extensions` | lib | 扩展加载、hook 分发、host router、s5r 子进程运行 |
 | `astrcode-bundled-extensions` | `crates/astrcode-bundled-extensions` | lib | 第一方内置扩展组合根 |
 | `astrcode-extension-agent-tools` | `crates/astrcode-extension-agent-tools` | lib | `agent` 子 Agent 委派工具 |
@@ -260,6 +262,44 @@ AstrCode 当前 workspace 有 27 个成员：`crates/` 下 26 个 crate，加上
 依赖边界：依赖 `astrcode-extension-contract` 和 `astrcode-core`。worker（子进程）作者面只暴露 contract 类型；bundled（进程内）作者面允许共享 core 类型，因为 bundled 在进程内运行。进程内扩展和磁盘/IPC 扩展都通过 capability-gated typed host API 访问宿主能力；运行时负责注入不可伪造的 extension/session/turn 归属。
 
 测试线索：`builder.rs`、`manifest.rs` 有单元测试。修改 SDK 类型等同修改扩展 ABI，需要同步内置扩展和 s5r 测试。
+
+## `astrcode-extension-contract`
+
+路径：`crates/astrcode-extension-contract`
+
+职责：S5R 宿主与 worker 共享的稳定 wire 契约。它只承载跨 S5R 边界的值和交换这些值所需的传输状态，刻意不依赖任何宿主领域 crate。
+
+主要模块：
+
+- `protocol`：握手 `InitializeMsg`/`InitializeOutput`、`result` 消息与 feature 协商等线缆消息。
+- `error`：稳定错误码 `WireErrorCode`。
+- `frame`：stdio 帧传输 `FrameTransport`/`StdioFrameTransport`。
+- `peer`、`peer_runtime`：`Peer<Uninitialized>`/`Peer<Ready>` 握手状态机，invoke/stream/cancel 驱动与嵌套 invoke。
+- `operation`：`astrcode.*` 宿主操作 catalog 及上下文/后端需求描述。
+- `manifest`、`custom_event`：`Initialize.metadata` 的 typed manifest、custom-event 声明与订阅契约。
+- `capability`、`effects`、`extension_http`、`host`、`session`、`session_inspect`、`stream`：能力 wire 名、`HandlerResult` 与其余跨边界 DTO。
+
+依赖边界：无 workspace 内部依赖，只依赖 serde、tokio 等基础库。SDK、宿主和 worker 都以它为 wire 事实来源；manifest 的 capability、tool mode、hook event/mode 与 handler id 也只在此定义。
+
+测试线索：各模块内单元测试覆盖握手状态机、帧编解码、错误码和 wire DTO 序列化。
+
+## `astrcode-extension-worker`
+
+路径：`crates/astrcode-extension-worker`
+
+职责：s5r worker（子进程）侧运行时。磁盘扩展通过它把 handler 暴露给宿主；authoring 契约本身仍由 SDK 和 contract crate 拥有。
+
+主要模块：
+
+- `worker`：`Worker` 入口和 `run_stdio` 主循环，驱动握手、invoke 与取消。
+- `worker/registry`：`HandlerRegistry` 按 handler id 分发工具/命令/hook/custom event/HTTP handler。
+- `worker/host`：远程 `HostClient` 和各能力域客户端，经嵌套 invoke 调用宿主能力。
+- `worker/builder`：worker handler 注册辅助函数。
+- `worker_prelude`：磁盘扩展作者的一站式导入集合。
+
+依赖边界：依赖 `astrcode-extension-sdk` 和 `astrcode-extension-contract`，不依赖宿主内部 crate。
+
+测试线索：`worker/registry.rs`、`worker/host.rs` 等模块内测试覆盖 handler dispatch、取消和宿主调用错误路径。
 
 ## `astrcode-extensions`
 

@@ -977,6 +977,19 @@ mod tests {
     }
 
     #[test]
+    fn first_line_preview_preserves_content_and_limits_characters() {
+        for (text, max_chars, expected) in [
+            ("hello", 10, "hello"),
+            ("first\nsecond", 80, "first"),
+            ("0123456789abcdef", 8, "01234567…"),
+            ("你好世界abcd", 8, "你好世界abcd"),
+            ("hello   world", 80, "hello   world"),
+        ] {
+            assert_eq!(truncate_first_line(text, max_chars), expected);
+        }
+    }
+
+    #[test]
     fn assistant_deltas_enter_scrollback_incrementally() {
         let mut app = make_app();
         apply_payload(
@@ -1311,5 +1324,34 @@ mod tests {
         );
         assert!(app.scrollback_queue.is_empty());
         assert!(app.status_text.contains("Receiving"));
+    }
+
+    #[test]
+    fn agent_tool_shows_compact_task_summary() {
+        let mut app = make_app();
+        apply_payload(
+            &mut app,
+            EventPayload::Live(LiveEventPayload::ToolCallStarted {
+                call_id: "call-agent".into(),
+                tool_name: "agent".into(),
+            }),
+        );
+        apply_payload(
+            &mut app,
+            EventPayload::Durable(DurableEventPayload::ToolCallCompleted {
+                call_id: "call-agent".into(),
+                tool_name: "agent".into(),
+                result: tool_result("Found 3 relevant files", false),
+                arguments: String::new(),
+                arguments_json: None,
+            }),
+        );
+        assert_eq!(app.messages.len(), 1);
+        assert!(
+            app.messages[0]
+                .body
+                .plain_text()
+                .contains("● Task completed")
+        );
     }
 }

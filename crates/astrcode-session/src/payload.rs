@@ -62,7 +62,7 @@ pub fn transcript_rewritten_payload(
         .collect();
     DurableEventPayload::TranscriptRewritten {
         source_seq,
-        source_fingerprint: Some(source_fingerprint),
+        source_fingerprint,
         messages,
         reason: TranscriptRewriteReason::Compaction(CompactionDetails {
             trigger: trigger.into(),

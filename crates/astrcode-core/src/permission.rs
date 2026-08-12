@@ -84,3 +84,15 @@ pub struct PermissionRule {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ApprovalMode;
+
+    #[test]
+    fn approval_mode_parsing_is_case_insensitive_and_closed() {
+        assert_eq!("yolo".parse(), Ok(ApprovalMode::Yolo));
+        assert_eq!("MANUAL".parse(), Ok(ApprovalMode::Manual));
+        assert!("unknown".parse::<ApprovalMode>().is_err());
+    }
+}

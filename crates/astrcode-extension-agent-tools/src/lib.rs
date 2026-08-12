@@ -404,6 +404,71 @@ mod tests {
     }
 
     #[test]
+    fn agent_catalog_and_prompt_metadata_keep_distinct_delegation_responsibilities() {
+        let configured = vec![agent::AgentConfig {
+            id: "code-reviewer".into(),
+            name: "code-reviewer".into(),
+            description: "Use for behavior-focused code review".into(),
+            body: "Review carefully.".into(),
+            tool_selection: None,
+        }];
+        let rendered = format_agents_for_model(&configured);
+        for expected in [
+            "Available agents",
+            "code-reviewer",
+            "Use for behavior-focused code review",
+            "subagentType",
+        ] {
+            assert!(rendered.contains(expected));
+        }
+        assert_eq!(format_agents_for_model(&[]), "No agents configured.");
+
+        let agents = agent::builtin_agents();
+        let by_id = |id: &str| agents.iter().find(|agent| agent.id == id).unwrap();
+        assert!(
+            by_id("explore")
+                .description
+                .contains("before the main agent makes a design")
+        );
+        assert!(
+            by_id("execute")
+                .description
+                .contains("concrete plan defined by the main agent")
+        );
+        assert!(
+            by_id("reviewer")
+                .description
+                .contains("after implementation")
+        );
+        assert!(
+            by_id("explore")
+                .body
+                .contains("complete the delegated investigation")
+        );
+        assert!(
+            by_id("explore")
+                .body
+                .contains("report the concrete blocker")
+        );
+
+        let metadata = agent_tool_prompt();
+        assert!(
+            metadata
+                .guide
+                .contains("instead of forcing a fixed workflow")
+        );
+        assert!(metadata.guide.contains("used independently or combined"));
+        assert_eq!(metadata.examples.len(), 1);
+        assert!(metadata.examples[0].contains("work directly"));
+
+        let enhanced = enhance_agent_prompt("Role guidance.", "/workspace");
+        assert!(enhanced.contains("Return a decision packet, not a work diary"));
+        assert!(enhanced.contains("within about 600 tokens"));
+        assert!(enhanced.contains("Never trade correctness for brevity"));
+        assert!(enhanced.contains("working directory is /workspace"));
+    }
+
+    #[test]
     fn resolve_child_small_model_always_uses_configured_small_llm() {
         assert_eq!(resolve_child_small_model(Some("haiku")).unwrap(), "haiku");
     }

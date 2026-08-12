@@ -267,4 +267,34 @@ mod tests {
         let changed = activate_deferred_tools(&mut active, &tools, vec!["a".into()]);
         assert!(!changed);
     }
+
+    #[test]
+    fn visibility_aliases_and_unavailable_guidance_cover_each_resolution_path() {
+        let visible = vec![
+            def("glob"),
+            def("grep"),
+            def("read"),
+            def("tool_search_tool"),
+        ];
+        assert!(tool_is_visible(&visible, "read"));
+        assert!(!tool_is_visible(&visible, "shell"));
+        assert_eq!(suggest_tool_alias("find"), Some("glob"));
+        assert_eq!(suggest_tool_alias("list_files"), Some("glob"));
+        assert_eq!(suggest_tool_alias("read_file"), Some("read"));
+        assert_eq!(suggest_tool_alias("shell"), None);
+
+        let legacy = unavailable_tool_guidance("find", &visible, &visible);
+        assert!(legacy.contains("glob"));
+        assert!(!legacy.contains("not loaded for this turn"));
+
+        let mut registered = visible.clone();
+        registered.push(def("mcp__demo__search"));
+        let deferred = unavailable_tool_guidance("mcp__demo__search", &visible, &registered);
+        assert!(deferred.contains("tool_search_tool"));
+        assert!(deferred.contains("not loaded for this turn"));
+
+        let unknown = unavailable_tool_guidance("missing_tool", &visible, &visible);
+        assert!(unknown.contains("Available tools"));
+        assert!(unknown.contains("glob"));
+    }
 }

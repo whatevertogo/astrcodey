@@ -153,13 +153,8 @@ struct StdioPooledClient {
 
 impl Drop for StdioPooledClient {
     fn drop(&mut self) {
-        let child = self
-            .child
-            .get_mut()
-            .unwrap_or_else(|error| error.into_inner());
-        if let Some(child) = child.as_mut() {
-            let _ = child.start_kill();
-        }
+        // 进程回收依赖 spawn 时设置的 `kill_on_drop(true)`:`Child` 随结构体
+        // drop 时由 tokio 的 ChildDropGuard 触发 kill,这里只需终止 I/O 任务。
         for task in [&mut self.stdout_task, &mut self.stderr_task] {
             let task = task.get_mut().unwrap_or_else(|error| error.into_inner());
             if let Some(task) = task.take() {

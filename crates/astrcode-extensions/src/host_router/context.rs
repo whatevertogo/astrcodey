@@ -10,9 +10,9 @@ use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::ExtensionError,
     host::{
-        HOST_SESSION_STATE_VALUE_MAX_BYTES, HostEventEmitOutput, HostEventEmitRequest,
-        HostOperation, HostOperationGroup, HostSessionStateReadOutput, HostSessionStateReadRequest,
-        HostSessionStateWriteRequest,
+        Acknowledgement, HOST_SESSION_STATE_VALUE_MAX_BYTES, HostEventEmitOutput,
+        HostEventEmitRequest, HostOperation, HostSessionStateReadOutput,
+        HostSessionStateReadRequest, HostSessionStateWriteRequest, internal::HostOperationGroup,
     },
     s5r::ErrorPayload,
 };
@@ -90,7 +90,7 @@ async fn read_state(
 async fn write_state(
     request: HostSessionStateWriteRequest,
     ctx: &InvokeContext,
-) -> Result<Value, ErrorPayload> {
+) -> Result<Acknowledgement, ErrorPayload> {
     let key = request.key;
     let base = ctx
         .session_store_dir

@@ -199,9 +199,8 @@ pub enum DurableEventPayload {
     TranscriptRewritten {
         source_seq: u64,
         /// 被替换前缀（system prompt + provider 视角消息）的 `transcript_prefix_fingerprint`；
-        /// 旧事件无此字段，`None` 跳过乐观并发校验。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        source_fingerprint: Option<String>,
+        /// 提交时必须与 projection 重算结果一致。
+        source_fingerprint: String,
         messages: Vec<LlmMessage>,
         reason: TranscriptRewriteReason,
     },
@@ -217,8 +216,6 @@ pub enum DurableEventPayload {
         message: String,
         recoverable: bool,
     },
-    // 兼容更名前的旧磁盘 tag `extension_event`。
-    #[serde(alias = "extension_event")]
     CustomEvent(CustomEventData),
 }
 
@@ -281,8 +278,6 @@ pub enum LiveEventPayload {
         message: String,
         recoverable: bool,
     },
-    // 兼容更名前的旧磁盘 tag `extension_event`。
-    #[serde(alias = "extension_event")]
     CustomEvent(CustomEventData),
 }
 
@@ -290,36 +285,6 @@ pub enum LiveEventPayload {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 更名前的旧事件：tag 为 `extension_event`，且没有 `causation_id` 字段。
-    const LEGACY_CUSTOM_EVENT_JSON: &str = r#"{
-        "type": "extension_event",
-        "extension_id": "astrcode-pr-review-agent",
-        "event_type": "review_completed",
-        "schema_version": 1,
-        "payload": {"verdict": "approve"}
-    }"#;
-
-    #[test]
-    fn durable_custom_event_deserializes_legacy_tag_without_causation_id() {
-        let payload: DurableEventPayload = serde_json::from_str(LEGACY_CUSTOM_EVENT_JSON).unwrap();
-        let DurableEventPayload::CustomEvent(data) = payload else {
-            panic!("expected CustomEvent");
-        };
-        assert_eq!(data.extension_id, "astrcode-pr-review-agent");
-        assert_eq!(data.causation_id, None);
-        assert_eq!(data.cascade_depth, 0);
-    }
-
-    #[test]
-    fn live_custom_event_deserializes_legacy_tag_without_causation_id() {
-        let payload: LiveEventPayload = serde_json::from_str(LEGACY_CUSTOM_EVENT_JSON).unwrap();
-        let LiveEventPayload::CustomEvent(data) = payload else {
-            panic!("expected CustomEvent");
-        };
-        assert_eq!(data.event_type, "review_completed");
-        assert_eq!(data.causation_id, None);
-    }
 
     #[test]
     fn custom_event_serializes_with_new_tag() {

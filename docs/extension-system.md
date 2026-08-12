@@ -31,8 +31,9 @@
 | `astrcode-extensions::host_router` | 唯一 `astrcode.*` 宿主能力实现 |
 | `astrcode-extensions::runner` | 统一运行时 manifest、registration 校验、索引发布与生命周期 |
 | `astrcode-extensions::remote_manifest` | 内部 s5r 握手适配与 `HandlerResult` 解析 |
-| `astrcode-extension-sdk::s5r` | 线缆类型、`HandlerResult`、事件名、能力 wire 名 |
-| `astrcode-extension-sdk::runtime` | `Peer`、帧传输、取消、流式 |
+| `astrcode-extension-sdk::s5r` | contract 协议类型的作者向 re-export 和 `HandlerResult` 领域转换 |
+| `astrcode-extension-contract` | S5R wire DTO、稳定错误码（`WireErrorCode`）、宿主操作 catalog |
+| `astrcode-extension-contract::{peer, peer_runtime, frame}` | `Peer` 握手状态机、帧传输、取消、流式 |
 | `astrcode-extension-worker` | Worker 入口、`HandlerRegistry`、远程 `HostClient` |
 
 参考实现：`crates/astrcode-extensions/tests/s5r-guest/`  
@@ -144,7 +145,7 @@ builder。
 
 | 入口 | Capability | 调用范围与示例 |
 |------|------------|----------------|
-| `host.models()` | `main_model` / `small_model` | `main_chat`、`small_chat`；各模型独立校验。`*_chat_stream` 当前返回完成后的收集结果（最终 content、model），不是渐进式 `Stream`。 |
+| `host.models()` | `main_model` / `small_model` | `main_chat`、`small_chat`；`*_chat_events` 返回渐进式 `ModelStream`，`*_chat_collected` 返回完成后的最终 content、model 与有序 chunks。 |
 | `host.session_control()?` | `session_control` 或 `input_delivery` | `create_root`、`submit_root_turn`、`root_state` 使用 `input_delivery`；子 session 的创建、提交、注入、中断、取消、状态、工具配置、回收与重新激活使用 session-scoped `session_control`。`cancel_turn` 返回 `HostSessionCancelOutput { cancelled }`。 |
 | `host.session_history()?` | `session_history` | 当前 session 及其已授权后代的 `list_summaries`、`transcript`、`provider_messages`、`token_usage`、`events_page` 与 `snapshot`。 |
 | `host.session_inspect()?` | `session_inspect` | 全局跨 session 只读能力；只授予确需全局观察的扩展。 |
@@ -256,14 +257,20 @@ async fn bundled_extension_uses_the_real_authoring_boundaries() {
 ### 4.3 握手与调用
 
 1. 宿主启动子进程后发送 `Initialize`，声明 supported/required feature 与授权的宿主能力
-2. `Worker::run_stdio()` 回复 `initialize_result`（注册 manifest 在 `metadata`）
+2. `Worker::run_stdio()` 回复 `kind = "initialize"` 的 `result` 消息（注册 manifest 在 `metadata`，类型由 `astrcode-extension-contract::manifest` 拥有）
 3. 宿主经 `handler.invoke` 调用工具 / 命令 / 钩子
 4. 子进程经 `astrcode.*` `invoke` 调用宿主能力（可 `stream: true`）
 
-S5R 3.0 必须协商 `nested_invoke_v1`、`model_stream_v1` 与 `custom_event_v1`。在 handler
-作用域内发起的嵌套 invoke 会携带父请求 ID，宿主据此恢复该请求自己的 session、
-working directory、取消令牌和授权上下文。未完成初始化、feature 交集不满足任一方
-required 集合、或携带未知父请求的调用都会在边界拒绝。
+S5R 消息和 session host-operation DTO 的字段统一使用 `snake_case`。面向 HTTP/前端的 DTO
+可在其独立边界使用 `camelCase`，不得把该命名约定带回 S5R payload。
+
+宿主只把 `nested_invoke_v1` 列为 required，因为 handler invoke 的归因依赖
+`parent_invoke_id`；`model_stream_v1` 与 `custom_event_v1` 属于可选能力，双方支持时协商。
+未协商 `model_stream_v1` 的流式调用返回 `unsupported_feature`；声明 custom event 或
+subscription 却未协商 `custom_event_v1` 的 manifest 在发布注册前被拒绝。在 handler 作用域内发起的
+嵌套 invoke 会携带父请求 ID，宿主据此恢复该请求自己的 session、working directory、
+取消令牌和授权上下文。未完成初始化、feature 交集不满足任一方 required 集合、或携带
+未知父请求的调用都会在边界拒绝。
 handler 自行创建的脱离 Tokio task 不继承 task-local 调用作用域；当前 Worker API 不支持
 这类任务在原 handler 返回后继续使用会话级 HostClient 能力。
 
@@ -318,10 +325,10 @@ LLM、session、context、workspace、process、network 与公开扩展 HTTP 各
 不用于调用宿主本机或内网服务。只应给确实需要这些权限的插件声明相应 capability。
 Worker 使用与 bundled 同名的类型化领域方法，例如
 `HostClient::process().spawn(...)` 与 `HostClient::network().send(...)`。通用 raw invoke 仅保留在
-`worker::testing` transport seam，不属于作者 prelude。
+`astrcode_extension_worker::testing` transport seam，不属于作者 prelude。
 
 `session_inspect.read_model` 不会直接暴露核心的 `SessionReadModel`。宿主在
-`host_router::session_inspect` 边界显式映射到 SDK DTO，内部 enum 的调整不会静默改变
+`host_router::session_inspect` 边界显式映射到 contract DTO，内部 enum 的调整不会静默改变
 插件线缆契约。
 
 HTTP 路由由 `Worker::http_route(route, http_handler(...))` 同时写入握手 manifest 与

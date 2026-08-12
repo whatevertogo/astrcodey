@@ -575,6 +575,7 @@ mod tests {
 
     use super::*;
     use crate::{
+        WireErrorCode,
         extension::{
             ContinueAfterStopContext, ContinueAfterStopPayload, ContinueAfterStopResult,
             ExtensionCall, ExtensionHttpRequest, RuntimeContinueAfterStopContext,
@@ -768,7 +769,7 @@ mod tests {
         let ExtensionError::InvalidInput { code, message, .. } = error else {
             panic!("typed arguments should preserve the invalid-input error class");
         };
-        assert_eq!(code, "invalid_tool_arguments");
+        assert_eq!(code, WireErrorCode::InvalidInput.as_str());
         assert!(message.contains("tool `count`"));
         assert!(message.contains("count"));
 

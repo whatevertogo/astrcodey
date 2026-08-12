@@ -8,7 +8,9 @@ use std::{
 };
 
 use astrcode_core::{event::DurableEventPayload, types::SessionId};
-use astrcode_extension_sdk::extension::{CustomEventHandler, CustomEventSubscription};
+use astrcode_extension_sdk::extension::{
+    CustomEventHandler, CustomEventSubscription, internal::custom_event_subscription_matches,
+};
 use astrcode_storage::{EventConsumerCheckpointReset, EventConsumerState, StorageError};
 use tokio::sync::Notify;
 
@@ -303,7 +305,11 @@ impl ExtensionRunner {
                 })
                 .filter(|event| {
                     event.cascade_depth <= super::MAX_CUSTOM_EVENT_CASCADE_DEPTH
-                        && subscription.matches(&event.extension_id, &event.event_type)
+                        && custom_event_subscription_matches(
+                            subscription,
+                            &event.extension_id,
+                            &event.event_type,
+                        )
                 })
                 .count(),
         )

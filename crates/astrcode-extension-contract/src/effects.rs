@@ -3,27 +3,30 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{HandlerId, HandlerKind};
-
-/// `HandlerResult.effect` 的稳定线缆词汇。生产方与消费方必须引用这些常量，
-/// 不得散落字面量；新 effect 先在此登记。
-pub const EFFECT_OK: &str = "ok";
-pub const EFFECT_CONTINUE_ONE_STEP: &str = "continue_one_step";
-pub const EFFECT_HTTP_RESPONSE: &str = "http_response";
-pub const EFFECT_CUSTOM_EVENT_ACK: &str = "custom_event_ack";
-pub const EFFECT_CUSTOM_EVENT_RETRY: &str = "custom_event_retry";
-pub const EFFECT_CUSTOM_EVENT_DEAD_LETTER: &str = "custom_event_dead_letter";
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HandlerEffect {
+    Ok,
+    ToolOutcome,
+    Block,
+    ModifiedInput,
+    ReplaceMessages,
+    AppendMessages,
+    ContinueOneStep,
+    PromptContributions,
+    CompactContributions,
+    HttpResponse,
+    CustomEventAck,
+    CustomEventRetry,
+    CustomEventDeadLetter,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HandlerResult {
-    pub ok: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub effect: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
+    pub effect: HandlerEffect,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub data: Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub continuations: Vec<CallContinuation>,
 }
@@ -31,55 +34,22 @@ pub struct HandlerResult {
 impl HandlerResult {
     pub fn ok() -> Self {
         Self {
-            ok: true,
-            effect: Some(EFFECT_OK.into()),
-            data: None,
-            error: None,
+            effect: HandlerEffect::Ok,
+            data: Value::Null,
             continuations: Vec::new(),
         }
     }
 
-    pub fn effect(effect: &str, data: Value) -> Self {
+    pub fn effect(effect: HandlerEffect, data: Value) -> Self {
         Self {
-            ok: true,
-            effect: Some(effect.into()),
-            data: Some(data),
-            error: None,
+            effect,
+            data,
             continuations: Vec::new(),
         }
-    }
-
-    pub fn err(message: impl Into<String>) -> Self {
-        Self {
-            ok: false,
-            effect: None,
-            data: None,
-            error: Some(message.into()),
-            continuations: Vec::new(),
-        }
-    }
-
-    pub fn continue_one_step() -> Self {
-        Self::effect(EFFECT_CONTINUE_ONE_STEP, Value::Null)
-    }
-
-    pub fn end_turn() -> Self {
-        Self::ok()
-    }
-
-    pub fn effect_name(&self) -> &str {
-        self.effect.as_deref().unwrap_or(EFFECT_OK)
-    }
-
-    pub fn data_str(&self, key: &str) -> &str {
-        self.data
-            .as_ref()
-            .and_then(|data| data[key].as_str())
-            .unwrap_or("")
     }
 
     pub fn data_value(&self, key: &str) -> Option<&Value> {
-        self.data.as_ref().and_then(|data| data.get(key))
+        self.data.get(key)
     }
 }
 
@@ -98,42 +68,14 @@ pub enum CallContinuation {
     },
 }
 
-impl CallContinuation {
-    pub fn handler_id_for_extension(&self, extension_id: &str) -> (String, Value) {
-        match self {
-            Self::Hook { on, input } => (
-                HandlerId::new(extension_id, HandlerKind::Hook, on).into(),
-                serde_json::json!({ "on": on, "input": input }),
-            ),
-            Self::Tool { name, input } => (
-                HandlerId::new(extension_id, HandlerKind::Tool, name).into(),
-                serde_json::json!({
-                    "on": "tool",
-                    "name": name,
-                    "input": { "arguments": input }
-                }),
-            ),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn handler_effect_contract_is_strict_and_builds_typed_continuations() {
-        let continuation = CallContinuation::Tool {
-            name: "read".into(),
-            input: serde_json::json!({ "path": "README.md" }),
-        };
-        let (handler_id, input) = continuation.handler_id_for_extension("example");
-        assert_eq!(handler_id, "example:tool:read");
-        assert_eq!(input["input"]["arguments"]["path"], "README.md");
-
+    fn handler_effect_contract_is_strict() {
         assert!(
             serde_json::from_value::<HandlerResult>(serde_json::json!({
-                "ok": true,
                 "effect": "ok",
                 "unexpected": true
             }))

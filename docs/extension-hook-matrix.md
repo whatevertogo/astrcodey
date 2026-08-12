@@ -76,6 +76,11 @@ records rather than propagates its failure. `NonBlocking` runs in a host-managed
 Custom-event subscriptions are not substitutes for either mode; they are decoupled data delivery
 with their own durability, checkpoint, retry, and payload contract.
 
+Session lifecycle events emitted outside an active turn, including `SessionShutdown` compensation,
+first wait for one stable extension generation. The wait uses the same bounded 30-second stability
+budget as turn setup and can return `RuntimeUnstable`; callers performing compensation record that
+failure and continue the remaining cleanup.
+
 ## Decision Hooks
 
 Decision hooks do not accept `HookMode`; their registration API encodes that the host must await

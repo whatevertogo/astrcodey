@@ -79,6 +79,16 @@ fn category_to_header(scope: MemoryStoreScope, category: &str) -> &'static str {
         })
 }
 
+fn empty_memory_content(scope: MemoryStoreScope) -> String {
+    let mut content = String::from(HEADER);
+    for &(_, header) in scope.sections() {
+        content.push('\n');
+        content.push_str(header);
+        content.push('\n');
+    }
+    content
+}
+
 fn header_to_category(scope: MemoryStoreScope, header: &str) -> Option<&'static str> {
     let trimmed = header.trim();
     scope
@@ -309,18 +319,8 @@ impl MemoryStore {
 
     /// 初始化 MEMORY.md，写入 header + 空 sections。
     fn init_memory_file(&self) -> std::io::Result<()> {
-        let content = self.empty_memory_content();
+        let content = empty_memory_content(self.scope);
         hostpaths::write_file_atomic(&self.memory_path(), &content)
-    }
-
-    fn empty_memory_content(&self) -> String {
-        let mut out = String::from(HEADER);
-        for &(_, header) in self.scope.sections() {
-            out.push('\n');
-            out.push_str(header);
-            out.push('\n');
-        }
-        out
     }
 
     // ─── Read ──────────────────────────────────────────────────────

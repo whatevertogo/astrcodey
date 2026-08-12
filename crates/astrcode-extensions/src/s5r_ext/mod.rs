@@ -5,9 +5,7 @@ mod v3_session;
 
 use std::{path::Path, sync::Arc};
 
-use astrcode_extension_contract::effects::{
-    EFFECT_CUSTOM_EVENT_DEAD_LETTER, EFFECT_CUSTOM_EVENT_RETRY,
-};
+use astrcode_extension_contract::{HandlerEffect, HandlerId, HandlerKind, HandlerResult};
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
@@ -23,7 +21,6 @@ use astrcode_extension_sdk::{
         PromptBuildHandler, PromptContributions, ProviderContext, ProviderHandler, ProviderResult,
         Registrar, SlashCommand, ToolContext, ToolHandler,
     },
-    s5r::effects::HandlerResult,
     tool::{ExecutionMode, ToolDefinition},
 };
 use serde_json::{Value, json};
@@ -317,7 +314,7 @@ impl Extension for S5rExtension {
 
 struct S5rHttpHandler {
     session: Arc<S5rSession>,
-    handler_id: String,
+    handler_id: HandlerId,
 }
 
 #[async_trait::async_trait]
@@ -352,7 +349,7 @@ async fn invoke_hook(
     invoke_context: &InvokeContext,
     input: serde_json::Value,
 ) -> Result<HandlerResult, ExtensionError> {
-    let handler = handler_id(extension_id, "hook", hook_name);
+    let handler = handler_id(extension_id, HandlerKind::Hook, hook_name)?;
     session
         .invoke_handler_with_continuations(
             &handler,
@@ -417,7 +414,7 @@ impl ToolHandler for S5rToolHandler {
                 "tool_call_id": tool_call_id,
             }
         });
-        let hid = handler_id(&self.extension_id, "tool", &tool_name);
+        let hid = handler_id(&self.extension_id, HandlerKind::Tool, &tool_name)?;
         let resp = self
             .session
             .invoke_handler_with_continuations(&hid, event, &invoke_ctx, self.execution_mode)
@@ -446,7 +443,7 @@ impl CommandHandler for S5rCommandHandler {
                 "model": ctx.model(),
             }
         });
-        let hid = handler_id(&self.extension_id, "command", ctx.command_name());
+        let hid = handler_id(&self.extension_id, HandlerKind::Command, ctx.command_name())?;
         let resp = self
             .session
             .invoke_handler_with_continuations(&hid, event, &invoke_ctx, ExecutionMode::Sequential)
@@ -464,7 +461,7 @@ s5r_hook_handler!(
         "session_id": ctx.session_id().to_string(),
         "working_dir": ctx.working_dir().display().to_string(),
         "model": ctx.model(),
-        "call_id": ctx.call_id(),
+        "tool_call_id": ctx.call_id(),
         "tool_name": ctx.tool_name(),
         "tool_input": ctx.tool_input(),
         "available_tools": ctx.available_tools(),
@@ -481,7 +478,7 @@ s5r_hook_handler!(
         "session_id": ctx.session_id().to_string(),
         "working_dir": ctx.working_dir().display().to_string(),
         "model": ctx.model(),
-        "call_id": ctx.call_id(),
+        "tool_call_id": ctx.call_id(),
         "tool_name": ctx.tool_name(),
         "tool_input": ctx.tool_input(),
         "tool_result": ctx.tool_result(),
@@ -578,7 +575,7 @@ impl CustomEventHandler for S5rCustomEventHandler {
         ctx: CustomEventContext,
     ) -> Result<CustomEventDisposition, ExtensionError> {
         let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
-        let handler = handler_id(&self.ext_id, "event", &self.subscription_id);
+        let handler = handler_id(&self.ext_id, HandlerKind::Event, &self.subscription_id)?;
         let result = self
             .session
             .invoke_handler_with_continuations(
@@ -602,26 +599,23 @@ impl CustomEventHandler for S5rCustomEventHandler {
                 ExecutionMode::Sequential,
             )
             .await?;
-        if !result.ok {
-            return Err(ExtensionError::Internal(
-                result
-                    .error
-                    .unwrap_or_else(|| "custom event handler failed".into()),
-            ));
-        }
         let reason = || {
             result
                 .data
-                .as_ref()
-                .and_then(|data| data.get("reason"))
+                .get("reason")
                 .and_then(Value::as_str)
                 .unwrap_or("custom event handler requested redelivery")
                 .to_owned()
         };
-        match result.effect_name() {
-            EFFECT_CUSTOM_EVENT_RETRY => Ok(CustomEventDisposition::retry(reason())),
-            EFFECT_CUSTOM_EVENT_DEAD_LETTER => Ok(CustomEventDisposition::dead_letter(reason())),
-            _ => Ok(CustomEventDisposition::Ack),
+        match result.effect {
+            HandlerEffect::CustomEventAck => Ok(CustomEventDisposition::Ack),
+            HandlerEffect::CustomEventRetry => Ok(CustomEventDisposition::retry(reason())),
+            HandlerEffect::CustomEventDeadLetter => {
+                Ok(CustomEventDisposition::dead_letter(reason()))
+            },
+            effect => Err(ExtensionError::Internal(format!(
+                "unexpected {effect:?} effect from custom event handler"
+            ))),
         }
     }
 }

@@ -1,11 +1,15 @@
 #[cfg(test)]
 use serde_json::json;
 
-use crate::host::{
-    ExtensionHost, HostError, HostOperation, TypedExtensionHttpClient, TypedModelClient,
-    TypedNetworkClient, TypedProcessClient, TypedSessionControlClient, TypedSessionHistoryClient,
-    TypedSessionInspectClient, TypedSessionStateClient, TypedWorkspaceClient,
+use super::domain_client::{
+    ExtensionHttpClient as TypedExtensionHttpClient, ModelClient as TypedModelClient,
+    NetworkClient as TypedNetworkClient, ProcessClient as TypedProcessClient,
+    SessionControlClient as TypedSessionControlClient,
+    SessionHistoryClient as TypedSessionHistoryClient,
+    SessionInspectClient as TypedSessionInspectClient,
+    SessionStateClient as TypedSessionStateClient, WorkspaceClient as TypedWorkspaceClient,
 };
+use crate::host::{ExtensionHost, HostError, HostOperation};
 #[cfg(test)]
 use crate::{
     extension::ExtensionHttpDispatchRequest,
@@ -73,19 +77,19 @@ mod tests {
         ) -> Result<Value, HostError> {
             self.operations.lock().unwrap().push(operation);
             Err(HostError::new(
-                "backend_unavailable",
+                WireErrorCode::BackendUnavailable,
                 "test backend unavailable",
             ))
         }
 
-        async fn invoke_collected_stream(
+        async fn invoke_stream(
             &self,
             operation: HostOperation,
             _input: Value,
-        ) -> Result<Value, HostError> {
+        ) -> Result<crate::model_stream::ModelStream, HostError> {
             self.operations.lock().unwrap().push(operation);
             Err(HostError::new(
-                "backend_unavailable",
+                WireErrorCode::BackendUnavailable,
                 "test backend unavailable",
             ))
         }
@@ -175,7 +179,7 @@ mod tests {
             HostOperation::SessionInspectProviderMessages,
         ];
         let covered = expected_operations.iter().copied().collect::<HashSet<_>>();
-        let expected = crate::host::HOST_OPERATION_SPECS
+        let expected = crate::host::internal::HOST_OPERATION_SPECS
             .iter()
             .map(|spec| spec.operation)
             .filter(|operation| *operation != HostOperation::EventEmit)
@@ -216,8 +220,8 @@ mod tests {
         let messages = || vec![LlmMessage::user("hello")];
         expect_backend_error(host.models().main_chat(messages())).await;
         expect_backend_error(host.models().small_chat(messages())).await;
-        expect_backend_error(host.models().main_chat_stream(messages())).await;
-        expect_backend_error(host.models().small_chat_stream(messages())).await;
+        expect_backend_error(host.models().main_chat_collected(messages())).await;
+        expect_backend_error(host.models().small_chat_collected(messages())).await;
         expect_backend_error(
             host.process()
                 .unwrap()

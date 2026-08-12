@@ -11,10 +11,13 @@ use serde_json::Value;
 use crate::{
     WireErrorCode,
     host::{
-        HostClientTransport, HostOperation, TypedEventClient, TypedExtensionHttpClient,
-        TypedModelClient, TypedNetworkClient, TypedProcessClient, TypedSessionControlClient,
-        TypedSessionHistoryClient, TypedSessionInspectClient, TypedSessionStateClient,
-        TypedWorkspaceClient,
+        HostOperation,
+        internal::{
+            HostClientTransport, TypedEventClient, TypedExtensionHttpClient, TypedModelClient,
+            TypedNetworkClient, TypedProcessClient, TypedSessionControlClient,
+            TypedSessionHistoryClient, TypedSessionInspectClient, TypedSessionStateClient,
+            TypedWorkspaceClient,
+        },
     },
     model_stream::ModelStream,
     s5r::ErrorPayload,
@@ -25,18 +28,17 @@ pub use crate::{
     host::{
         HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitOutput,
         HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmContent,
-        HostLlmMessage, HostLlmRole, HostLlmTextDelta, HostNetworkRedirectPolicy,
-        HostNetworkRequest, HostNetworkResponse, HostProcessOutput, HostProcessRequest,
-        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
-        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionStateReadOutput,
-        HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
-        HostSessionSummary, HostSessionTokenUsage, HostSessionTokenUsageOutput,
-        HostSessionTranscript, HostSessionTranscriptMessage, HostWorkspaceEditOutput,
-        HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
-        HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
-        HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
-        HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
-        HostWorkspaceWriteRequest,
+        HostLlmMessage, HostLlmRole, HostNetworkRedirectPolicy, HostNetworkRequest,
+        HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostSessionCancelOutput,
+        HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
+        HostSessionProviderMessagesOutput, HostSessionStateReadOutput, HostSessionStateReadRequest,
+        HostSessionStateWriteRequest, HostSessionSummariesOutput, HostSessionSummary,
+        HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
+        HostSessionTranscriptMessage, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
+        HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
+        HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
+        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
+        HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
     },
     session::{
         HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
@@ -50,8 +52,6 @@ pub use crate::{
 #[async_trait]
 pub trait HostApi: Send + Sync {
     async fn call(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload>;
-
-    async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload>;
 
     async fn open_stream(
         &self,
@@ -132,20 +132,6 @@ where
             .map_err(v3_invoke_error_to_payload)
     }
 
-    async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-        let stream = self
-            .invoke_stream(capability, input)
-            .await
-            .map_err(v3_invoke_error_to_payload)?;
-        let output = crate::host::collect_model_stream(stream).await?;
-        serde_json::to_value(output).map_err(|error| {
-            ErrorPayload::new(
-                WireErrorCode::SerializationFailed,
-                format!("serialize collected host stream: {error}"),
-            )
-        })
-    }
-
     async fn open_stream(
         &self,
         capability: &str,
@@ -207,14 +193,6 @@ impl HostClientTransport for WorkerHostTransport {
         call_host(operation.wire_name(), input).await
     }
 
-    async fn invoke_collected_stream(
-        &self,
-        operation: HostOperation,
-        input: Value,
-    ) -> Result<Value, Self::Error> {
-        call_host_stream(operation.wire_name(), input).await
-    }
-
     async fn invoke_stream(
         &self,
         operation: HostOperation,
@@ -225,6 +203,10 @@ impl HostClientTransport for WorkerHostTransport {
 
     fn client_error(code: WireErrorCode, message: String) -> Self::Error {
         ErrorPayload::new(code, message)
+    }
+
+    fn payload_error(error: ErrorPayload) -> Self::Error {
+        error
     }
 }
 
@@ -288,10 +270,6 @@ async fn call_host(capability: &str, input: Value) -> Result<Value, ErrorPayload
     host_api()?.call(capability, input).await
 }
 
-async fn call_host_stream(capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-    host_api()?.call_stream(capability, input).await
-}
-
 fn host_api() -> Result<Arc<dyn HostApi>, ErrorPayload> {
     if let Ok(api) = SCOPED_HOST_API.try_with(Arc::clone) {
         return Ok(api);
@@ -316,6 +294,7 @@ mod host_tests {
 
     use async_trait::async_trait;
     use serde_json::{Value, json};
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
     use crate::{s5r::ErrorPayload, session::SessionToolSelectionDto};
@@ -477,16 +456,27 @@ mod host_tests {
             }
         }
 
-        async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-            if capability == "astrcode.llm.main_chat" {
-                assert_eq!(input["messages"][0]["role"], "user");
-                return Ok(json!({
-                    "content": "typed",
-                    "model": "main_llm",
-                    "chunks": [{ "delta": "ty" }, { "delta": "ped" }]
-                }));
-            }
-            self.call(capability, input).await
+        async fn open_stream(
+            &self,
+            capability: &str,
+            input: Value,
+        ) -> Result<ModelStream, ErrorPayload> {
+            assert_eq!(capability, "astrcode.llm.main_chat");
+            assert_eq!(input["messages"][0]["role"], "user");
+            Ok(ModelStream::from_stream(
+                futures_util::stream::iter([
+                    astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
+                        content: "ty".into(),
+                    },
+                    astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
+                        content: "ped".into(),
+                    },
+                    astrcode_extension_contract::protocol::ModelStreamEvent::Completed {
+                        output: json!({ "content": "typed", "model": "main_llm" }),
+                    },
+                ]),
+                CancellationToken::new(),
+            ))
         }
     }
 
@@ -503,8 +493,19 @@ mod host_tests {
             ))
         }
 
-        async fn call_stream(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-            self.call(capability, input).await
+        async fn open_stream(
+            &self,
+            capability: &str,
+            _input: Value,
+        ) -> Result<ModelStream, ErrorPayload> {
+            self.operations.lock().unwrap().push(
+                HostOperation::from_wire_name(capability)
+                    .unwrap_or_else(|| panic!("unknown host operation {capability}")),
+            );
+            Err(ErrorPayload::new(
+                WireErrorCode::BackendUnavailable,
+                "test backend unavailable",
+            ))
         }
     }
 
@@ -552,7 +553,7 @@ mod host_tests {
             HostOperation::SessionInspectProviderMessages,
         ];
         let covered = expected_operations.iter().copied().collect::<HashSet<_>>();
-        let expected = crate::host::HOST_OPERATION_SPECS
+        let expected = crate::host::internal::HOST_OPERATION_SPECS
             .iter()
             .map(|spec| spec.operation)
             .collect::<HashSet<_>>();
@@ -577,8 +578,8 @@ mod host_tests {
             .await;
             expect_backend_error(HostClient::models().main_chat(messages())).await;
             expect_backend_error(HostClient::models().small_chat(messages())).await;
-            expect_backend_error(HostClient::models().main_chat_stream(messages())).await;
-            expect_backend_error(HostClient::models().small_chat_stream(messages())).await;
+            expect_backend_error(HostClient::models().main_chat_collected(messages())).await;
+            expect_backend_error(HostClient::models().small_chat_collected(messages())).await;
             expect_backend_error(HostClient::process().spawn(HostProcessRequest::new("true")))
                 .await;
             expect_backend_error(
@@ -723,11 +724,10 @@ mod host_tests {
                 .unwrap();
             assert_eq!(chat.content, "typed");
             let stream = HostClient::models()
-                .main_chat_stream(vec![LlmMessage::user("hello")])
+                .main_chat_collected(vec![LlmMessage::user("hello")])
                 .await
                 .unwrap();
-            assert_eq!(stream.chunks[0].delta, "ty");
-            assert_eq!(stream.chunks[1].delta, "ped");
+            assert_eq!(stream.chunks, ["ty", "ped"]);
 
             let network = HostClient::network()
                 .send(HostNetworkRequest::get("https://example.com"))

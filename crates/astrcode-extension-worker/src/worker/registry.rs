@@ -8,7 +8,9 @@ use std::{
     sync::Arc,
 };
 
-use astrcode_extension_contract::effects::EFFECT_HTTP_RESPONSE;
+use astrcode_extension_contract::manifest::{
+    ManifestCommand, ManifestHook, ManifestHookEvent, ManifestHookOptions, ManifestHttpRoute,
+};
 use serde_json::Value;
 
 use super::CancelToken;
@@ -17,15 +19,17 @@ use crate::{
     extension::{
         CompactEvent, ContinueAfterStopOptions, CustomEventDeclaration, CustomEventSubscription,
         ExtensionCapability, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        HookMode, LifecycleEvent, canonical_registration_name,
-        extension_http_route_patterns_conflict, fixed_hook_mode, has_duplicate_registration_name,
-        hook_mode_is_supported,
+        HookMode, LifecycleEvent,
+        internal::{
+            canonical_registration_name, extension_http_route_patterns_conflict, fixed_hook_mode,
+            has_duplicate_registration_name, hook_mode_is_supported,
+            normalize_custom_event_subscription, validate_custom_event_subscription,
+            validate_extension_http_route,
+        },
     },
     s5r::{
-        CAP_HANDLER_INVOKE, ErrorPayload, HandlerId, HandlerInvokeRequest, HandlerKind,
-        HandlerResult, capability_to_wire, compact_event_to_name, event_to_name,
-        manifest::{ManifestCommand, ManifestHook, ManifestHookOptions, ManifestHttpRoute},
-        mode_to_name,
+        CAP_HANDLER_INVOKE, ErrorPayload, HandlerEffect, HandlerId, HandlerInvokeRequest,
+        HandlerKind, HandlerResult,
     },
     worker::manifest::ManifestCatalog,
 };
@@ -38,13 +42,13 @@ pub(crate) struct HandlerInvoke {
 }
 
 pub type ToolHandlerFn = Arc<
-    dyn Fn(Value, WorkerToolContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
+    dyn Fn(Value, WorkerInvocationContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
         + Send
         + Sync,
 >;
 
 pub type HookHandlerFn = Arc<
-    dyn Fn(Value, WorkerHookContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
+    dyn Fn(Value, WorkerInvocationContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
         + Send
         + Sync,
 >;
@@ -95,49 +99,15 @@ impl WorkerCallContext {
     }
 }
 
-/// Host-attributed facts guaranteed for a worker tool invocation.
+/// Host-attributed facts guaranteed for a session/workspace worker invocation.
 #[derive(Clone)]
-pub struct WorkerToolContext {
+pub struct WorkerInvocationContext {
     scoped: WorkerSessionWorkspaceContext,
     turn_id: Option<String>,
     tool_call_id: Option<String>,
 }
 
-impl WorkerToolContext {
-    pub fn extension_id(&self) -> &str {
-        self.scoped.call.extension_id()
-    }
-
-    pub fn session_id(&self) -> &str {
-        &self.scoped.session_id
-    }
-
-    pub fn turn_id(&self) -> Option<&str> {
-        self.turn_id.as_deref()
-    }
-
-    pub fn tool_call_id(&self) -> Option<&str> {
-        self.tool_call_id.as_deref()
-    }
-
-    pub fn working_dir(&self) -> &Path {
-        &self.scoped.working_dir
-    }
-
-    pub fn cancel_token(&self) -> &CancelToken {
-        self.scoped.call.cancel_token()
-    }
-}
-
-/// Host-attributed facts guaranteed for a worker hook invocation.
-#[derive(Clone)]
-pub struct WorkerHookContext {
-    scoped: WorkerSessionWorkspaceContext,
-    turn_id: Option<String>,
-    tool_call_id: Option<String>,
-}
-
-impl WorkerHookContext {
+impl WorkerInvocationContext {
     pub fn extension_id(&self) -> &str {
         self.scoped.call.extension_id()
     }
@@ -235,12 +205,6 @@ impl WorkerCallFacts {
         event: &Value,
     ) -> Result<Self, ErrorPayload> {
         let input = event.get("input").unwrap_or(event);
-        // Tool events use `tool_call_id`; tool-use hooks currently use `call_id` for the same fact.
-        let tool_call_id = match optional_string(input, "tool_call_id")? {
-            Some(tool_call_id) => Some(tool_call_id),
-            None => optional_string(input, "call_id")?,
-        };
-
         Ok(Self {
             call: WorkerCallContext {
                 extension_id,
@@ -248,23 +212,17 @@ impl WorkerCallFacts {
             },
             session_id: optional_string(input, "session_id")?.map(str::to_owned),
             turn_id: optional_string(input, "turn_id")?.map(str::to_owned),
-            tool_call_id: tool_call_id.map(str::to_owned),
+            tool_call_id: optional_string(input, "tool_call_id")?.map(str::to_owned),
             working_dir: optional_string(input, "working_dir")?.map(PathBuf::from),
         })
     }
 
-    pub(crate) fn into_tool(self) -> Result<WorkerToolContext, ErrorPayload> {
-        let (scoped, turn_id, tool_call_id) = self.into_scoped("tool")?;
-        Ok(WorkerToolContext {
-            scoped,
-            turn_id,
-            tool_call_id,
-        })
-    }
-
-    pub(crate) fn into_hook(self) -> Result<WorkerHookContext, ErrorPayload> {
-        let (scoped, turn_id, tool_call_id) = self.into_scoped("hook")?;
-        Ok(WorkerHookContext {
+    pub(crate) fn into_invocation(
+        self,
+        scope: &'static str,
+    ) -> Result<WorkerInvocationContext, ErrorPayload> {
+        let (scoped, turn_id, tool_call_id) = self.into_scoped(scope)?;
+        Ok(WorkerInvocationContext {
             scoped,
             turn_id,
             tool_call_id,
@@ -364,14 +322,8 @@ impl HandlerRegistry {
     }
 
     pub(crate) fn declare_capability(&mut self, cap: ExtensionCapability) {
-        let cap = capability_to_wire(cap);
-        if !self
-            .catalog
-            .capabilities
-            .iter()
-            .any(|declared| declared == cap)
-        {
-            self.catalog.capabilities.push(cap.into());
+        if !self.catalog.capabilities.contains(&cap) {
+            self.catalog.capabilities.push(cap);
         }
     }
 
@@ -385,8 +337,8 @@ impl HandlerRegistry {
         mut subscription: CustomEventSubscription,
         handler: CustomEventHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        subscription.normalize();
-        if let Err(reason) = subscription.validate() {
+        normalize_custom_event_subscription(&mut subscription);
+        if let Err(reason) = validate_custom_event_subscription(&subscription) {
             return Err(ErrorPayload::new(WireErrorCode::InvalidInput, reason));
         }
         if has_duplicate_registration_name(
@@ -438,8 +390,8 @@ impl HandlerRegistry {
                 WireErrorCode::TypedHookRequired,
                 format!(
                     "{} has fixed {} mode; {}",
-                    event_to_name(&on),
-                    mode_to_name(required),
+                    on.as_str(),
+                    required.as_str(),
                     fixed_worker_hook_hint(&on)
                 ),
             ));
@@ -447,11 +399,7 @@ impl HandlerRegistry {
         if !hook_mode_is_supported(&on, mode) {
             return Err(ErrorPayload::new(
                 WireErrorCode::InvalidHookMode,
-                format!(
-                    "{} does not support {} mode",
-                    event_to_name(&on),
-                    mode_to_name(mode)
-                ),
+                format!("{} does not support {} mode", on.as_str(), mode.as_str()),
             ));
         }
         self.register_manifest_hook(on, mode, ManifestHookOptions::default(), handler)
@@ -470,8 +418,8 @@ impl HandlerRegistry {
         on: CompactEvent,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        self.register_manifest_hook_name(
-            compact_event_to_name(on),
+        self.register_manifest_hook_event(
+            on.into(),
             HookMode::Blocking,
             ManifestHookOptions::default(),
             handler,
@@ -493,7 +441,7 @@ impl HandlerRegistry {
         let mode = fixed_hook_mode(&on).ok_or_else(|| {
             ErrorPayload::new(
                 WireErrorCode::InvalidHookRegistration,
-                format!("{} is not a fixed-mode hook", event_to_name(&on)),
+                format!("{} is not a fixed-mode hook", on.as_str()),
             )
         })?;
         self.register_manifest_hook(on, mode, options, handler)
@@ -506,22 +454,18 @@ impl HandlerRegistry {
         options: ManifestHookOptions,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        self.register_manifest_hook_name(event_to_name(&on), mode, options, handler)
+        self.register_manifest_hook_event(on.into(), mode, options, handler)
     }
 
-    fn register_manifest_hook_name(
+    fn register_manifest_hook_event(
         &mut self,
-        on: &str,
+        on: ManifestHookEvent,
         mode: HookMode,
         options: ManifestHookOptions,
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        self.insert_hook_handler(on.to_owned(), handler)?;
-        self.catalog.hooks.push(ManifestHook {
-            on: on.to_owned(),
-            mode: mode_to_name(mode).into(),
-            options,
-        });
+        self.insert_hook_handler(on.as_str().to_owned(), handler)?;
+        self.catalog.hooks.push(ManifestHook { on, mode, options });
         Ok(())
     }
 
@@ -609,8 +553,7 @@ impl HandlerRegistry {
         route: ExtensionHttpRoute,
         handler: HttpHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        route
-            .validate()
+        validate_extension_http_route(&route)
             .map_err(|error| ErrorPayload::new(WireErrorCode::InvalidHttpRoute, error))?;
         if self.catalog.http_routes.iter().any(|entry| {
             entry.route.access == route.access
@@ -623,8 +566,8 @@ impl HandlerRegistry {
             ));
         }
         let handler_name = format!("route_{}", self.catalog.http_routes.len());
-        let handler_id =
-            HandlerId::new(&self.extension_id, HandlerKind::Http, &handler_name).into();
+        let handler_id = HandlerId::new(&self.extension_id, HandlerKind::Http, &handler_name)
+            .map_err(|error| ErrorPayload::new(WireErrorCode::InvalidHookRegistration, error))?;
         self.catalog
             .http_routes
             .push(ManifestHttpRoute { route, handler_id });
@@ -660,31 +603,30 @@ impl HandlerRegistry {
 
     async fn dispatch_handler(
         &self,
-        handler_id: &str,
+        handler_id: &astrcode_extension_contract::HandlerId,
         event: Value,
         facts: WorkerCallFacts,
     ) -> Result<HandlerResult, ErrorPayload> {
-        let prefix = format!("{}:", self.extension_id);
-        let Some(handler_name) = handler_id.strip_prefix(&prefix) else {
+        let (owner, kind, name) = handler_id.parts();
+        if owner != self.extension_id {
             return Err(ErrorPayload::new(
                 WireErrorCode::UnknownHandler,
                 format!("unknown handler: {handler_id}"),
             ));
-        };
-        let (kind, name) = handler_name.split_once(':').unwrap_or((handler_name, ""));
+        }
         match kind {
-            "tool" => {
+            astrcode_extension_contract::HandlerKind::Tool => {
                 let handler = self.tools.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
                         format!("unknown tool: {name}"),
                     )
                 })?;
-                handler(event, facts.into_tool()?).await
+                handler(event, facts.into_invocation("tool")?).await
             },
-            "hook" => {
+            astrcode_extension_contract::HandlerKind::Hook => {
                 if let Some(handler) = self.hooks.get(name) {
-                    handler(event, facts.into_hook()?).await
+                    handler(event, facts.into_invocation("hook")?).await
                 } else if let Some(handler) = self.continuation_hooks.get(name) {
                     handler(event, facts.call).await
                 } else {
@@ -694,7 +636,7 @@ impl HandlerRegistry {
                     ))
                 }
             },
-            "command" => {
+            astrcode_extension_contract::HandlerKind::Command => {
                 let handler = self.commands.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
@@ -703,7 +645,7 @@ impl HandlerRegistry {
                 })?;
                 handler(event, facts.into_command()?).await
             },
-            "http" => {
+            astrcode_extension_contract::HandlerKind::Http => {
                 let handler = self.http_routes.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
@@ -723,9 +665,9 @@ impl HandlerRegistry {
                         format!("serialize HTTP response: {error}"),
                     )
                 })?;
-                Ok(HandlerResult::effect(EFFECT_HTTP_RESPONSE, data))
+                Ok(HandlerResult::effect(HandlerEffect::HttpResponse, data))
             },
-            "event" => {
+            astrcode_extension_contract::HandlerKind::Event => {
                 let handler = self.custom_events.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
@@ -734,10 +676,6 @@ impl HandlerRegistry {
                 })?;
                 handler(event, facts.into_custom_event()?).await
             },
-            _ => Err(ErrorPayload::new(
-                WireErrorCode::UnknownHandler,
-                format!("unknown handler kind in {handler_id}"),
-            )),
         }
     }
 }
@@ -769,7 +707,7 @@ mod tests {
             .register_continuation_hook_handler(
                 "pipeline_step",
                 crate::worker::continuation_handler(|_| async {
-                    Ok(HandlerResult::effect("ok", json!({"step": 1})))
+                    Ok(HandlerResult::effect(HandlerEffect::Ok, json!({"step": 1})))
                 }),
             )
             .unwrap();
@@ -791,7 +729,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(result.ok);
+        assert_eq!(result.effect, HandlerEffect::Ok);
         assert_eq!(result.data_value("step"), Some(&json!(1)));
 
         let error = registry
@@ -814,8 +752,9 @@ mod tests {
     #[test]
     fn lifecycle_hook_modes_are_validated_and_preserved() {
         let mut registry = HandlerRegistry::new("test-extension");
-        let handler =
-            crate::worker::hook_handler(|_| async { Ok(HandlerResult::effect("ok", json!({}))) });
+        let handler = crate::worker::hook_handler(|_| async {
+            Ok(HandlerResult::effect(HandlerEffect::Ok, json!({})))
+        });
 
         registry
             .register_hook(
@@ -824,7 +763,7 @@ mod tests {
                 Arc::clone(&handler),
             )
             .unwrap();
-        assert_eq!(registry.catalog.hooks[0].mode, "non_blocking");
+        assert_eq!(registry.catalog.hooks[0].mode, HookMode::NonBlocking);
 
         let invalid = registry
             .register_hook(
@@ -879,8 +818,9 @@ mod tests {
     #[test]
     fn worker_registration_names_use_the_same_canonical_form_as_the_host() {
         let mut registry = HandlerRegistry::new("test-extension");
-        let tool_handler =
-            crate::worker::tool_handler(|_| async { Ok(HandlerResult::effect("ok", json!({}))) });
+        let tool_handler = crate::worker::tool_handler(|_| async {
+            Ok(HandlerResult::effect(HandlerEffect::Ok, json!({})))
+        });
         registry
             .register_tool(
                 crate::builder::worker_tool("  review  ").build().into(),
@@ -892,7 +832,7 @@ mod tests {
                 "  inspect  ",
                 "Inspect state",
                 crate::worker::command_handler(|_| async {
-                    Ok(HandlerResult::effect("ok", json!({})))
+                    Ok(HandlerResult::effect(HandlerEffect::Ok, json!({})))
                 }),
             )
             .unwrap();
@@ -924,8 +864,9 @@ mod tests {
     #[test]
     fn compact_hooks_keep_their_wire_names_outside_lifecycle_events() {
         let mut registry = HandlerRegistry::new("test-extension");
-        let handler =
-            crate::worker::hook_handler(|_| async { Ok(HandlerResult::effect("ok", json!({}))) });
+        let handler = crate::worker::hook_handler(|_| async {
+            Ok(HandlerResult::effect(HandlerEffect::Ok, json!({})))
+        });
 
         registry
             .register_compact_hook(CompactEvent::PreCompact, Arc::clone(&handler))
@@ -957,7 +898,7 @@ mod tests {
             }),
         )
         .unwrap()
-        .into_tool()
+        .into_invocation("tool")
         .unwrap();
         assert_eq!(scoped.session_id(), "session-1");
         assert_eq!(scoped.working_dir(), Path::new("/workspace"));
@@ -969,7 +910,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            unscoped.into_tool().err().unwrap().code_enum(),
+            unscoped.into_invocation("tool").err().unwrap().code_enum(),
             Some(WireErrorCode::ContextUnavailable)
         );
 

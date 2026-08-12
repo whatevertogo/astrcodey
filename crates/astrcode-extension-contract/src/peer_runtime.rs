@@ -828,13 +828,12 @@ where
                 if let Err(error) =
                     validate_inbound_features(&request, &self.state.negotiated_features, pending)
                 {
-                    self.write_pump.try_write(WireMessage::Result(ResultMsg {
-                        id: request.id,
-                        kind: ResultKind::Invoke,
-                        success: false,
-                        output: None,
-                        error: Some(error),
-                    }))?;
+                    self.write_pump
+                        .try_write(WireMessage::Result(ResultMsg::failure(
+                            request.id,
+                            ResultKind::Invoke,
+                            error,
+                        )))?;
                     return Ok(());
                 }
                 let permit = match Arc::clone(&self.inbound_permits).try_acquire_owned() {
@@ -888,16 +887,19 @@ where
     let id = invocation.request.id.clone();
     let wants_stream = invocation.request.stream;
     let cancellation = invocation.cancellation.clone();
-    match handler.invoke(invocation).await {
+    let response = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Ok(id),
+        response = handler.invoke(invocation) => response,
+    };
+    match response {
         Ok(InvocationResponse::Unary(output)) if !wants_stream => {
             write_pump
-                .write(WireMessage::Result(ResultMsg {
-                    id: id.clone(),
-                    kind: ResultKind::Invoke,
-                    success: true,
-                    output: Some(output),
-                    error: None,
-                }))
+                .write(WireMessage::Result(ResultMsg::success(
+                    id.clone(),
+                    ResultKind::Invoke,
+                    output,
+                )))
                 .await?;
         },
         Ok(InvocationResponse::Stream(mut stream)) if wants_stream => {
@@ -949,13 +951,11 @@ where
         },
         Err(error) => {
             write_pump
-                .write(WireMessage::Result(ResultMsg {
-                    id: id.clone(),
-                    kind: ResultKind::Invoke,
-                    success: false,
-                    output: None,
-                    error: Some(error),
-                }))
+                .write(WireMessage::Result(ResultMsg::failure(
+                    id.clone(),
+                    ResultKind::Invoke,
+                    error,
+                )))
                 .await?;
         },
     }
@@ -986,34 +986,27 @@ fn route_result(
     pending: &mut HashMap<String, PendingRequest>,
     cancelled: &mut CancelledRequests,
 ) -> Result<(), PeerError> {
-    if result.kind != ResultKind::Invoke {
+    if result.kind() != ResultKind::Invoke {
         return Err(PeerError::UnexpectedMessage("invoke result"));
     }
-    if cancelled.contains(&result.id) {
-        cancelled.remove(&result.id);
+    if cancelled.contains(result.id()) {
+        cancelled.remove(result.id());
         return Ok(());
     }
-    let Some(request) = pending.remove(&result.id) else {
+    let Some(request) = pending.remove(result.id()) else {
         return Err(PeerError::Protocol(format!(
             "result references unknown request {}",
-            result.id
+            result.id()
         )));
     };
-    let response = if result.success {
-        result
-            .output
-            .ok_or_else(|| PeerError::Protocol("successful invoke result has no output".into()))
-    } else {
-        let error = result.error.unwrap_or_else(|| {
-            ErrorPayload::new(
-                WireErrorCode::InvalidResponse,
-                "failed invoke result has no error payload",
-            )
-        });
-        if error.code_enum().is_none() {
-            tracing::warn!(code = %error.code, "peer returned an unknown S5R wire error code");
-        }
-        Err(PeerError::Remote(error))
+    let response = match result {
+        ResultMsg::Success { output, .. } => Ok(output),
+        ResultMsg::Failure { error, .. } => {
+            if error.code_enum().is_none() {
+                tracing::warn!(code = %error.code, "peer returned an unknown S5R wire error code");
+            }
+            Err(PeerError::Remote(error))
+        },
     };
     match request {
         PendingRequest::Unary {
@@ -1185,13 +1178,11 @@ fn validate_inbound_features(
 }
 
 fn failed_result(id: String, code: WireErrorCode, message: &'static str) -> WireMessage {
-    WireMessage::Result(ResultMsg {
+    WireMessage::Result(ResultMsg::failure(
         id,
-        kind: ResultKind::Invoke,
-        success: false,
-        output: None,
-        error: Some(ErrorPayload::new(code, message)),
-    })
+        ResultKind::Invoke,
+        ErrorPayload::new(code, message),
+    ))
 }
 
 async fn run_write_pump<T>(
@@ -1375,7 +1366,10 @@ pub enum InvokeError {
 
 #[cfg(test)]
 mod tests {
-    use std::{io, sync::atomic::AtomicBool};
+    use std::{
+        io,
+        sync::atomic::{AtomicBool, AtomicUsize},
+    };
 
     use futures_util::StreamExt;
     use tokio::sync::{Mutex as AsyncMutex, Notify};
@@ -1384,13 +1378,21 @@ mod tests {
     use crate::{
         Peer, PeerHandshake, PeerInfo,
         frame::FrameError,
-        protocol::{FeatureName, ModelStreamEvent},
+        protocol::{FeatureName, InvokeMsg, ModelStreamEvent, WireMessage, encode_wire_message},
     };
 
     struct WriteGate {
         armed: AtomicBool,
         started: Notify,
         release: Semaphore,
+    }
+
+    struct DropNotify(Arc<Notify>);
+
+    impl Drop for DropNotify {
+        fn drop(&mut self) {
+            self.0.notify_one();
+        }
     }
 
     impl WriteGate {
@@ -1479,10 +1481,81 @@ mod tests {
         }
     }
 
+    struct SaturatingHostHandler {
+        started: Arc<AtomicUsize>,
+        started_notify: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerInvokeHandler<ChannelTransport> for SaturatingHostHandler {
+        async fn invoke(
+            &self,
+            invocation: InboundInvoke<ChannelTransport>,
+        ) -> Result<InvocationResponse, ErrorPayload> {
+            if invocation.request.operation != "host.block" {
+                return HostHandler.invoke(invocation).await;
+            }
+            self.started.fetch_add(1, Ordering::SeqCst);
+            self.started_notify.notify_waiters();
+            invocation.cancellation.cancelled().await;
+            Err(ErrorPayload::new(
+                WireErrorCode::Cancelled,
+                "blocking host invocation cancelled",
+            ))
+        }
+    }
+
+    struct CancellationObservingHostHandler {
+        started: Arc<Notify>,
+        cancelled: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerInvokeHandler<ChannelTransport> for CancellationObservingHostHandler {
+        async fn invoke(
+            &self,
+            invocation: InboundInvoke<ChannelTransport>,
+        ) -> Result<InvocationResponse, ErrorPayload> {
+            if invocation.request.operation != "host.block" {
+                return HostHandler.invoke(invocation).await;
+            }
+            let _stopped = DropNotify(Arc::clone(&self.cancelled));
+            self.started.notify_one();
+            invocation.cancellation.cancelled().await;
+            Err(ErrorPayload::new(
+                WireErrorCode::Cancelled,
+                "nested host invocation cancelled",
+            ))
+        }
+    }
+
     struct WorkerHandler {
         cancellation_observed: Arc<AtomicBool>,
         cancellation_notify: Arc<Notify>,
         invocation_started: Arc<Notify>,
+    }
+
+    struct DelayedEchoWorkerHandler {
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl PeerInvokeHandler<ChannelTransport> for DelayedEchoWorkerHandler {
+        async fn invoke(
+            &self,
+            invocation: InboundInvoke<ChannelTransport>,
+        ) -> Result<InvocationResponse, ErrorPayload> {
+            if invocation.request.operation != "worker.delayed_echo" {
+                return Err(ErrorPayload::new(
+                    WireErrorCode::UnknownHandler,
+                    "unknown worker operation",
+                ));
+            }
+            self.started.notify_one();
+            self.release.notified().await;
+            Ok(InvocationResponse::Unary(invocation.request.input))
+        }
     }
 
     #[async_trait::async_trait]
@@ -1492,9 +1565,18 @@ mod tests {
             invocation: InboundInvoke<ChannelTransport>,
         ) -> Result<InvocationResponse, ErrorPayload> {
             match invocation.request.operation.as_str() {
+                "worker.echo" => Ok(InvocationResponse::Unary(invocation.request.input)),
                 "worker.nested" => invocation
                     .nested
                     .invoke("host.echo", invocation.request.input)
+                    .await
+                    .map(InvocationResponse::Unary)
+                    .map_err(|error| {
+                        ErrorPayload::new(WireErrorCode::NestedFailed, error.to_string())
+                    }),
+                "worker.nested_wait" => invocation
+                    .nested
+                    .invoke("host.block", invocation.request.input)
                     .await
                     .map(InvocationResponse::Unary)
                     .map_err(|error| {
@@ -1530,9 +1612,9 @@ mod tests {
                     Ok(InvocationResponse::Stream(model_event_stream(receiver)))
                 },
                 "worker.cancel_unary" => {
+                    let _stopped = DropNotify(Arc::clone(&self.cancellation_notify));
                     self.invocation_started.notify_one();
                     invocation.cancellation.cancelled().await;
-                    self.cancellation_notify.notify_one();
                     Err(ErrorPayload::new(
                         WireErrorCode::Cancelled,
                         "invocation cancelled",
@@ -1554,16 +1636,21 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn ready_peer_routes_nested_streaming_and_drop_cancellation() {
+    struct ReadyPeerPair {
+        host_handle: PeerHandle<ChannelTransport>,
+        host_driver: PeerDriver<ChannelTransport>,
+        worker_handle: PeerHandle<ChannelTransport>,
+        worker_driver: PeerDriver<ChannelTransport>,
+        host_write_gate: Arc<WriteGate>,
+        host_inbound_tx: mpsc::Sender<Vec<u8>>,
+    }
+
+    async fn ready_peer_pair(features: BTreeSet<FeatureName>) -> ReadyPeerPair {
         let (host_transport, worker_transport) = ChannelTransport::pair();
         let host_write_gate = Arc::clone(&host_transport.write_gate);
+        let host_inbound_tx = worker_transport.outbound.clone();
         let host = Peer::new(host_transport, peer_info("host", "host"));
         let worker = Peer::new(worker_transport, peer_info("worker", "extension"));
-        let features = BTreeSet::from([
-            FeatureName::nested_invoke_v1(),
-            FeatureName::model_stream_v1(),
-        ]);
         let mut handshake = PeerHandshake::new("initialize-1");
         handshake.supported_features = features.clone();
         handshake.required_features = features.clone();
@@ -1578,7 +1665,333 @@ mod tests {
             )
         );
         let (host_handle, host_driver) = host.unwrap().into_runtime();
-        let (_, worker_driver) = worker.unwrap().into_runtime();
+        let (worker_handle, worker_driver) = worker.unwrap().into_runtime();
+        ReadyPeerPair {
+            host_handle,
+            host_driver,
+            worker_handle,
+            worker_driver,
+            host_write_gate,
+            host_inbound_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_eof_releases_pending_unary_and_stream_calls() {
+        let ReadyPeerPair {
+            host_handle,
+            host_driver,
+            worker_driver,
+            ..
+        } = ready_peer_pair(BTreeSet::from([FeatureName::model_stream_v1()])).await;
+        let cancellation_observed = Arc::new(AtomicBool::new(false));
+        let cancellation_notify = Arc::new(Notify::new());
+        let invocation_started = Arc::new(Notify::new());
+        let host_task =
+            tokio::spawn(host_driver.run_until(Arc::new(HostHandler), CancellationToken::new()));
+        let worker_shutdown = CancellationToken::new();
+        let worker_task = tokio::spawn(worker_driver.run_until(
+            Arc::new(WorkerHandler {
+                cancellation_observed,
+                cancellation_notify,
+                invocation_started: Arc::clone(&invocation_started),
+            }),
+            worker_shutdown.clone(),
+        ));
+
+        let unary_handle = host_handle.clone();
+        let unary = tokio::spawn(async move {
+            unary_handle
+                .invoke("worker.cancel_unary", Value::Null)
+                .await
+        });
+        timeout(Duration::from_secs(1), invocation_started.notified())
+            .await
+            .unwrap();
+        let mut stream = host_handle
+            .invoke_stream("worker.wait", Value::Null)
+            .await
+            .unwrap();
+        assert!(matches!(
+            stream.next().await,
+            Some(ModelStreamEvent::Started)
+        ));
+
+        worker_shutdown.cancel();
+        timeout(Duration::from_secs(1), worker_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(
+            timeout(Duration::from_secs(1), host_task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(matches!(
+            timeout(Duration::from_secs(1), unary)
+                .await
+                .unwrap()
+                .unwrap(),
+            Err(InvokeError::PeerClosed)
+        ));
+        assert!(matches!(
+            timeout(Duration::from_secs(1), stream.next()).await.unwrap(),
+            Some(ModelStreamEvent::Failed { error })
+                if error.code_enum() == Some(WireErrorCode::PeerClosed)
+        ));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn nested_invoke_inherits_parent_cancellation() {
+        let ReadyPeerPair {
+            host_handle,
+            host_driver,
+            worker_driver,
+            ..
+        } = ready_peer_pair(BTreeSet::from([FeatureName::nested_invoke_v1()])).await;
+        let nested_started = Arc::new(Notify::new());
+        let nested_cancelled = Arc::new(Notify::new());
+        let host_shutdown = CancellationToken::new();
+        let worker_shutdown = CancellationToken::new();
+        let host_task = tokio::spawn(host_driver.run_until(
+            Arc::new(CancellationObservingHostHandler {
+                started: Arc::clone(&nested_started),
+                cancelled: Arc::clone(&nested_cancelled),
+            }),
+            host_shutdown.clone(),
+        ));
+        let worker_task = tokio::spawn(worker_driver.run_until(
+            Arc::new(WorkerHandler {
+                cancellation_observed: Arc::new(AtomicBool::new(false)),
+                cancellation_notify: Arc::new(Notify::new()),
+                invocation_started: Arc::new(Notify::new()),
+            }),
+            worker_shutdown.clone(),
+        ));
+
+        let invoke_handle = host_handle.clone();
+        let outer = tokio::spawn(async move {
+            invoke_handle
+                .invoke("worker.nested_wait", Value::Null)
+                .await
+        });
+        timeout(Duration::from_secs(1), nested_started.notified())
+            .await
+            .unwrap();
+        outer.abort();
+        let _ = outer.await;
+        timeout(Duration::from_secs(1), nested_cancelled.notified())
+            .await
+            .expect("cancelling the parent must cancel its nested invoke");
+
+        host_shutdown.cancel();
+        worker_shutdown.cancel();
+        timeout(Duration::from_secs(1), host_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(1), worker_task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn saturated_inbound_handlers_do_not_block_result_dispatch() {
+        let ReadyPeerPair {
+            host_handle,
+            host_driver,
+            worker_handle,
+            worker_driver,
+            ..
+        } = ready_peer_pair(BTreeSet::new()).await;
+        let started = Arc::new(AtomicUsize::new(0));
+        let started_notify = Arc::new(Notify::new());
+        let host_shutdown = CancellationToken::new();
+        let worker_shutdown = CancellationToken::new();
+        let host_task = tokio::spawn(host_driver.run_until(
+            Arc::new(SaturatingHostHandler {
+                started: Arc::clone(&started),
+                started_notify: Arc::clone(&started_notify),
+            }),
+            host_shutdown.clone(),
+        ));
+        let worker_task = tokio::spawn(worker_driver.run_until(
+            Arc::new(WorkerHandler {
+                cancellation_observed: Arc::new(AtomicBool::new(false)),
+                cancellation_notify: Arc::new(Notify::new()),
+                invocation_started: Arc::new(Notify::new()),
+            }),
+            worker_shutdown.clone(),
+        ));
+
+        let mut blocked = Vec::with_capacity(MAX_IN_FLIGHT_REQUESTS);
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let worker_handle = worker_handle.clone();
+            blocked.push(tokio::spawn(async move {
+                worker_handle.invoke("host.block", Value::Null).await
+            }));
+        }
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let notified = started_notify.notified();
+                if started.load(Ordering::SeqCst) == MAX_IN_FLIGHT_REQUESTS {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let echoed = timeout(
+            Duration::from_secs(1),
+            host_handle.invoke("worker.echo", serde_json::json!({ "routed": true })),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(echoed, serde_json::json!({ "routed": true }));
+
+        host_shutdown.cancel();
+        worker_shutdown.cancel();
+        for task in blocked {
+            task.abort();
+        }
+        let _ = timeout(Duration::from_secs(1), host_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = timeout(Duration::from_secs(1), worker_task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejection_write_backpressure_does_not_block_result_dispatch() {
+        let ReadyPeerPair {
+            host_handle,
+            host_driver,
+            worker_handle,
+            worker_driver,
+            host_write_gate,
+            host_inbound_tx,
+        } = ready_peer_pair(BTreeSet::new()).await;
+        let started = Arc::new(AtomicUsize::new(0));
+        let started_notify = Arc::new(Notify::new());
+        let delayed_started = Arc::new(Notify::new());
+        let delayed_release = Arc::new(Notify::new());
+        let host_shutdown = CancellationToken::new();
+        let worker_shutdown = CancellationToken::new();
+        let host_task = tokio::spawn(host_driver.run_until(
+            Arc::new(SaturatingHostHandler {
+                started: Arc::clone(&started),
+                started_notify: Arc::clone(&started_notify),
+            }),
+            host_shutdown.clone(),
+        ));
+        let worker_task = tokio::spawn(worker_driver.run_until(
+            Arc::new(DelayedEchoWorkerHandler {
+                started: Arc::clone(&delayed_started),
+                release: Arc::clone(&delayed_release),
+            }),
+            worker_shutdown.clone(),
+        ));
+
+        let mut blocked = Vec::with_capacity(MAX_IN_FLIGHT_REQUESTS);
+        for _ in 0..MAX_IN_FLIGHT_REQUESTS {
+            let worker_handle = worker_handle.clone();
+            blocked.push(tokio::spawn(async move {
+                worker_handle.invoke("host.block", Value::Null).await
+            }));
+        }
+        timeout(Duration::from_secs(2), async {
+            loop {
+                let notified = started_notify.notified();
+                if started.load(Ordering::SeqCst) == MAX_IN_FLIGHT_REQUESTS {
+                    break;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let delayed_handle = host_handle.clone();
+        let delayed = tokio::spawn(async move {
+            delayed_handle
+                .invoke("worker.delayed_echo", serde_json::json!({ "routed": true }))
+                .await
+        });
+        timeout(Duration::from_secs(1), delayed_started.notified())
+            .await
+            .unwrap();
+
+        host_write_gate.arm();
+        let write_started = host_write_gate.started.notified();
+        host_inbound_tx
+            .send(
+                encode_wire_message(&WireMessage::Invoke(InvokeMsg {
+                    id: "overflow".into(),
+                    operation: "host.block".into(),
+                    input: Value::Null,
+                    stream: false,
+                    parent_invoke_id: None,
+                }))
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        timeout(Duration::from_secs(1), write_started)
+            .await
+            .unwrap();
+
+        delayed_release.notify_one();
+        assert_eq!(
+            timeout(Duration::from_secs(1), delayed)
+                .await
+                .expect("result dispatch must not wait for the rejection writer")
+                .unwrap()
+                .unwrap(),
+            serde_json::json!({ "routed": true })
+        );
+
+        host_write_gate.release.add_permits(1);
+        host_shutdown.cancel();
+        worker_shutdown.cancel();
+        for task in blocked {
+            task.abort();
+        }
+        let _ = timeout(Duration::from_secs(1), host_task)
+            .await
+            .unwrap()
+            .unwrap();
+        let _ = timeout(Duration::from_secs(1), worker_task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn ready_peer_routes_nested_streaming_and_drop_cancellation() {
+        let features = BTreeSet::from([
+            FeatureName::nested_invoke_v1(),
+            FeatureName::model_stream_v1(),
+        ]);
+        let ReadyPeerPair {
+            host_handle,
+            host_driver,
+            worker_driver,
+            host_write_gate,
+            ..
+        } = ready_peer_pair(features).await;
         assert_eq!(host_handle.remote_peer().name, "worker");
         assert!(host_handle.remote_handlers().is_empty());
         assert!(host_handle.remote_capabilities().is_empty());
@@ -1683,15 +2096,7 @@ mod tests {
         })
         .await
         .unwrap();
-        let invocation_started_after_write = invocation_started.notified();
-        let cancellation_observed_after_write = cancellation_notify.notified();
         host_write_gate.release.add_permits(1);
-        timeout(Duration::from_secs(1), invocation_started_after_write)
-            .await
-            .unwrap();
-        timeout(Duration::from_secs(1), cancellation_observed_after_write)
-            .await
-            .unwrap();
         timeout(Duration::from_secs(1), async {
             while host_handle.outbound_permits.available_permits() != MAX_IN_FLIGHT_REQUESTS {
                 tokio::task::yield_now().await;

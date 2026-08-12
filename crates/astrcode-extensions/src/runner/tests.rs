@@ -18,6 +18,7 @@ use astrcode_core::{
     types::SessionId,
 };
 use astrcode_extension_sdk::{
+    WireErrorCode,
     builder::{custom_event, manifest},
     extension::{
         CommandCompletionContext, CommandCompletionItem, CommandCompletions, CommandContext,
@@ -2570,7 +2571,7 @@ async fn public_http_route_dispatches_with_path_params() {
     assert!(matches!(
         error,
         ExtensionError::InvalidInput { code, hint: Some(_), .. }
-            if code == "invalid_http_body"
+            if code == WireErrorCode::InvalidInput.as_str()
     ));
 
     let error = runner

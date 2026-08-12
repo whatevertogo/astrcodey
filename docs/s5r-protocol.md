@@ -16,7 +16,11 @@ S5R 3.0 不兼容 1.0/2.0 worker，也不提供双协议运行。旧 manifest �
 - 子进程 stdio；stdout 只允许协议帧，日志写 stderr。
 - 帧为 `"<decimal length>\n<JSON>"`，长度是 JSON body 的字节数。
 - frame body 硬上限 16 MiB，header 最多 32 bytes；空 header、符号、空格、超长和超限均拒绝。
-- envelope 与具体 payload 都严格解析；除显式 `metadata` / `details` 外，未知字段被拒绝。
+- envelope 与具体 payload 都严格解析；未知字段被拒绝。只有明确声明为
+  任意 JSON 的 `metadata` / `details` 值内容不由 envelope 解析器限制；宿主解析的
+  initialize manifest 本身仍严格拒绝未知字段。
+- envelope、manifest、handler input 与 `astrcode.*` DTO 的字段名统一使用 `snake_case`，
+  不接受 `camelCase` alias；HTTP/前端 DTO 在各自边界单独映射。
 - bundled extension 不经过该编码层，直接使用 typed request/response。
 
 ## 初始化与 feature negotiation
@@ -40,6 +44,11 @@ required feature 必须同时出现在本方 supported 集合中。协商结果�
 | `model_stream_v1` | 增量 model stream 与唯一终态 |
 | `custom_event_v1` | typed custom-event 注册、投递与错误语义 |
 
+当前宿主把 `nested_invoke_v1` 设为 required；worker 不额外声明 required feature。
+`model_stream_v1` 在流式调用时校验，缺失时返回 `unsupported_feature`。声明 custom
+event 或 subscription 的 manifest 必须协商 `custom_event_v1`；不使用这两类能力的
+worker 不会因未协商它们而初始化失败。
+
 ## 消息
 
 所有消息使用 `type` tagged JSON envelope：
@@ -51,6 +60,11 @@ required feature 必须同时出现在本方 supported 集合中。协商结果�
 | `invoke` | 双向 | operation、input、`stream` 和可选 `parent_invoke_id` |
 | `stream` | 响应方 → 调用方 | 单个增量事件 |
 | `cancel` | 调用方 → 响应方 | 按 request id 取消，附带非敏感 reason |
+
+`result` 是以 `status = success | failure` 标记的闭合枚举：success 必须携带
+`output`，failure 必须携带结构化 `error`，不存在两者同时缺失或同时出现的状态。
+handler 返回的 effect 也是 contract enum，未知或与 handler 类别不匹配的 effect
+在宿主边界拒绝。
 
 `invoke` request id 在同一 peer 上必须唯一。nested invoke 的 parent 必须仍是当前连接上的活跃
 入站请求；未知 parent、未协商 stream/nested feature、重复 request id 都在边界拒绝。

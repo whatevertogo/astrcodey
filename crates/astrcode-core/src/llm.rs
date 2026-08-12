@@ -939,6 +939,40 @@ mod tests {
     }
 
     #[test]
+    fn provider_visibility_attachment_framing_and_error_helpers_preserve_semantics() {
+        let visible = provider_visible_messages(vec![
+            LlmMessage::user("hello"),
+            LlmMessage::assistant("world"),
+        ]);
+        assert_eq!(visible.len(), 2);
+
+        let message = LlmMessage::user_with_attachments(
+            "",
+            &[MessageAttachment {
+                filename: "note.txt".into(),
+                content: "body".into(),
+                media_type: "text/plain".into(),
+            }],
+        );
+        let text = message
+            .content
+            .iter()
+            .find_map(LlmContent::as_text)
+            .expect("text attachment");
+        assert!(text.starts_with("<attachment filename=\"note.txt\" media_type=\"text/plain\">"));
+        assert!(text.ends_with("</attachment>"));
+
+        assert!(matches!(
+            LlmError::transport("boom"),
+            LlmError::Transport { message } if message == "boom"
+        ));
+        assert!(matches!(
+            LlmError::stream_parse("bad json"),
+            LlmError::StreamParse { message } if message == "bad json"
+        ));
+    }
+
+    #[test]
     fn is_retryable_classifies_correctly() {
         // 恒可重试
         assert!(

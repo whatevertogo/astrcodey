@@ -11,7 +11,8 @@ use astrcode_core::{
     types::{Cursor, SessionId},
 };
 use astrcode_session_projection::{
-    AgentSessionLinkView, SessionReadModel, SessionReadModelProjection, SessionSummary, reduce,
+    AgentSessionLinkView, PreparedProjectionBatch, SessionReadModel, SessionReadModelProjection,
+    SessionSummary,
 };
 use tokio::sync::Mutex;
 
@@ -272,16 +273,9 @@ impl SessionEventJournal for InMemoryEventStore {
         let session = map
             .get_mut(&session_id)
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
-        let mut projection = session.projection.clone();
-        let mut stored_events = Vec::with_capacity(events.len());
-        for event in events {
-            let seq = (session.events.len() + stored_events.len()) as u64;
-            let stored = StoredEvent::new(seq, event);
-            reduce(&stored, &mut projection)
-                .map_err(|error| StorageError::InvalidEvent(error.to_string()))?;
-            stored_events.push(stored);
-        }
-        session.projection = projection;
+        let prepared = PreparedProjectionBatch::prepare(&session.projection, events)
+            .map_err(|error| StorageError::InvalidEvent(error.to_string()))?;
+        let stored_events = prepared.apply_to_model(&mut session.projection);
         session.events.extend(stored_events.iter().cloned());
         Ok(stored_events)
     }

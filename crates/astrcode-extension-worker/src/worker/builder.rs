@@ -12,7 +12,7 @@ use crate::{
     worker::registry::{
         CommandHandlerFn, ContinuationHandlerFn, CustomEventHandlerFn, HookHandlerFn,
         HttpHandlerFn, ToolHandlerFn, WorkerCallContext, WorkerCommandContext,
-        WorkerCustomEventContext, WorkerHookContext, WorkerToolContext,
+        WorkerCustomEventContext, WorkerInvocationContext,
     },
 };
 
@@ -26,7 +26,7 @@ pub fn parse_tool_arguments<T: DeserializeOwned>(event: &Value) -> Result<T, Err
         .unwrap_or(Value::Null);
     serde_json::from_value(args).map_err(|e| {
         ErrorPayload::new(
-            WireErrorCode::InvalidArguments,
+            WireErrorCode::InvalidInput,
             format!("parse tool arguments: {e}"),
         )
     })
@@ -46,7 +46,7 @@ pub fn parse_hook_input<T: DeserializeOwned>(event: &Value) -> Result<T, ErrorPa
 /// 无参 tool handler：`async move |ctx| { ... }`。
 pub fn tool_handler<F, Fut>(f: F) -> ToolHandlerFn
 where
-    F: Fn(WorkerToolContext) -> Fut + Send + Sync + 'static,
+    F: Fn(WorkerInvocationContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
     Arc::new(move |_event, ctx| Box::pin(f(ctx)))
@@ -56,7 +56,7 @@ where
 pub fn tool_handler_args<A, F, Fut>(f: F) -> ToolHandlerFn
 where
     A: DeserializeOwned + Send + 'static,
-    F: Fn(A, WorkerToolContext) -> Fut + Send + Sync + 'static,
+    F: Fn(A, WorkerInvocationContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
     Arc::new(move |event, ctx| match parse_tool_arguments::<A>(&event) {
@@ -68,7 +68,7 @@ where
 /// 无参 hook handler。
 pub fn hook_handler<F, Fut>(f: F) -> HookHandlerFn
 where
-    F: Fn(WorkerHookContext) -> Fut + Send + Sync + 'static,
+    F: Fn(WorkerInvocationContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
     Arc::new(move |_event, ctx| Box::pin(f(ctx)))
@@ -78,7 +78,7 @@ where
 pub fn hook_handler_args<A, F, Fut>(f: F) -> HookHandlerFn
 where
     A: DeserializeOwned + Send + 'static,
-    F: Fn(A, WorkerHookContext) -> Fut + Send + Sync + 'static,
+    F: Fn(A, WorkerInvocationContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
     Arc::new(move |event, ctx| match parse_hook_input::<A>(&event) {
@@ -149,27 +149,12 @@ where
     Arc::new(move |request, ctx| Box::pin(f(request, ctx)))
 }
 
-/// 将 [`ErrorPayload`] 转为失败的 [`HandlerResult`]（保留 code 于 data）。
-pub fn handler_err(err: ErrorPayload) -> HandlerResult {
-    HandlerResult {
-        ok: false,
-        effect: None,
-        data: Some(serde_json::json!({
-            "code": err.code,
-            "hint": err.hint,
-            "retryable": err.retryable,
-            "details": err.details,
-        })),
-        error: Some(err.message),
-        continuations: Vec::new(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;
 
     use super::*;
+    use crate::s5r::HandlerEffect;
 
     #[derive(Deserialize)]
     struct GreetArgs {
@@ -186,7 +171,7 @@ mod tests {
             assert_eq!(ctx.working_dir(), std::path::Path::new("/workspace"));
             assert!(!ctx.cancel_token().is_cancelled());
             Ok(HandlerResult::effect(
-                "ok",
+                HandlerEffect::Ok,
                 serde_json::json!({ "content": format!("hi {}", args.name) }),
             ))
         });
@@ -204,17 +189,17 @@ mod tests {
             &event,
         )
         .unwrap()
-        .into_tool()
+        .into_invocation("tool")
         .unwrap();
         let out = handler(event, ctx).await.unwrap();
-        assert!(out.ok);
+        assert_eq!(out.effect, HandlerEffect::Ok);
         assert_eq!(
             out.data_value("content"),
             Some(&serde_json::json!("hi world"))
         );
 
         let hook_event = serde_json::json!({ "input": {
-            "call_id": "hook-tool-call-1",
+            "tool_call_id": "hook-tool-call-1",
             "session_id": "session-1",
             "working_dir": "/workspace"
         }});
@@ -224,7 +209,7 @@ mod tests {
             &hook_event,
         )
         .unwrap()
-        .into_hook()
+        .into_invocation("hook")
         .unwrap();
         assert_eq!(hook_ctx.tool_call_id(), Some("hook-tool-call-1"));
     }

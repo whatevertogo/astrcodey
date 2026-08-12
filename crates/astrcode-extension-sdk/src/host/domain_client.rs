@@ -1,23 +1,31 @@
-use astrcode_extension_contract::WireErrorCode;
+use astrcode_extension_contract::{
+    HostOp, WireErrorCode, operations,
+    protocol::ErrorPayload,
+    session_inspect::{
+        HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
+        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
+        SessionInspectSnapshotOutput,
+    },
+};
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use super::contracts::llm_chat_request;
 use crate::{
     extension::{ExtensionHttpDispatchRequest, ExtensionHttpResponse},
     host::{
-        HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitOutput,
-        HostLlmChatOutput, HostLlmCollectedStreamOutput, HostNetworkRequest, HostNetworkResponse,
-        HostOperation, HostProcessOutput, HostProcessRequest, HostSessionCancelOutput,
-        HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
-        HostSessionProviderMessagesOutput, HostSessionStateReadOutput, HostSessionStateReadRequest,
-        HostSessionStateWriteRequest, HostSessionSummariesOutput, HostSessionTokenUsageOutput,
-        HostSessionTranscript, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
-        HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepOutput,
-        HostWorkspaceGrepRequest, HostWorkspaceListOutput, HostWorkspaceListRequest,
-        HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
-        HostWorkspaceWriteRequest,
+        Acknowledgement, EmptyRequest, HostConfigureSessionToolsOutput,
+        HostConfigureSessionToolsRequest, HostEventEmitOutput, HostLlmChatOutput,
+        HostLlmCollectedStreamOutput, HostNetworkRequest, HostNetworkResponse, HostOperation,
+        HostProcessOutput, HostProcessRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+        HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+        HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
+        HostSessionSummariesOutput, HostSessionTokenUsageOutput, HostSessionTranscript,
+        HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
+        HostWorkspaceGlobRequest, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
+        HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
     },
     llm::LlmMessage,
     model_stream::ModelStream,
@@ -27,11 +35,6 @@ use crate::{
         HostSessionReactivateOutput, HostSessionStateOutput, HostSessionTargetRequest,
         HostSubmitTurnOutput, HostSubmitTurnRequest,
     },
-    session_inspect::{
-        HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
-        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
-        SessionInspectSnapshotOutput,
-    },
 };
 
 #[async_trait]
@@ -39,12 +42,6 @@ pub trait HostClientTransport: Clone + Send + Sync {
     type Error;
 
     async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, Self::Error>;
-
-    async fn invoke_collected_stream(
-        &self,
-        operation: HostOperation,
-        input: Value,
-    ) -> Result<Value, Self::Error>;
 
     async fn invoke_stream(
         &self,
@@ -61,6 +58,8 @@ pub trait HostClientTransport: Clone + Send + Sync {
     }
 
     fn client_error(code: WireErrorCode, message: String) -> Self::Error;
+
+    fn payload_error(error: ErrorPayload) -> Self::Error;
 }
 
 macro_rules! domain_client {
@@ -101,7 +100,7 @@ impl<T: HostClientTransport> EventClient<T> {
         &self,
         request: crate::host::HostEventEmitRequest,
     ) -> Result<HostEventEmitOutput, T::Error> {
-        invoke(&self.transport, HostOperation::EventEmit, &request).await
+        invoke::<operations::EventEmit, _>(&self.transport, &request).await
     }
 }
 
@@ -110,24 +109,14 @@ impl<T: HostClientTransport> ModelClient<T> {
         &self,
         messages: Vec<LlmMessage>,
     ) -> Result<HostLlmChatOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::LlmMainChat,
-            &llm_chat_request(messages),
-        )
-        .await
+        invoke::<operations::LlmMainChat, _>(&self.transport, &llm_chat_request(messages)).await
     }
 
     pub async fn small_chat(
         &self,
         messages: Vec<LlmMessage>,
     ) -> Result<HostLlmChatOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::LlmSmallChat,
-            &llm_chat_request(messages),
-        )
-        .await
+        invoke::<operations::LlmSmallChat, _>(&self.transport, &llm_chat_request(messages)).await
     }
 
     /// Starts a main-model stream and exposes each event as it arrives.
@@ -135,12 +124,8 @@ impl<T: HostClientTransport> ModelClient<T> {
         &self,
         messages: Vec<LlmMessage>,
     ) -> Result<ModelStream, T::Error> {
-        invoke_stream(
-            &self.transport,
-            HostOperation::LlmMainChat,
-            &llm_chat_request(messages),
-        )
-        .await
+        invoke_stream::<operations::LlmMainChat, _>(&self.transport, &llm_chat_request(messages))
+            .await
     }
 
     /// Starts a small-model stream and exposes each event as it arrives.
@@ -148,251 +133,154 @@ impl<T: HostClientTransport> ModelClient<T> {
         &self,
         messages: Vec<LlmMessage>,
     ) -> Result<ModelStream, T::Error> {
-        invoke_stream(
-            &self.transport,
-            HostOperation::LlmSmallChat,
-            &llm_chat_request(messages),
-        )
-        .await
+        invoke_stream::<operations::LlmSmallChat, _>(&self.transport, &llm_chat_request(messages))
+            .await
     }
 
     /// Runs the main model stream and returns all ordered text deltas after completion.
-    pub async fn main_chat_stream(
+    pub async fn main_chat_collected(
         &self,
         messages: Vec<LlmMessage>,
     ) -> Result<HostLlmCollectedStreamOutput, T::Error> {
-        invoke_collected_stream(
-            &self.transport,
-            HostOperation::LlmMainChat,
-            &llm_chat_request(messages),
-        )
-        .await
+        collect_stream::<operations::LlmMainChat, _>(&self.transport, &llm_chat_request(messages))
+            .await
     }
 
     /// Runs the small model stream and returns all ordered text deltas after completion.
-    pub async fn small_chat_stream(
+    pub async fn small_chat_collected(
         &self,
         messages: Vec<LlmMessage>,
     ) -> Result<HostLlmCollectedStreamOutput, T::Error> {
-        invoke_collected_stream(
-            &self.transport,
-            HostOperation::LlmSmallChat,
-            &llm_chat_request(messages),
-        )
-        .await
+        collect_stream::<operations::LlmSmallChat, _>(&self.transport, &llm_chat_request(messages))
+            .await
     }
 }
 
 impl<T: HostClientTransport> SessionControlClient<T> {
     pub async fn create_root(&self) -> Result<HostCreateSessionOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionRootCreate,
-            &json!({}),
-        )
-        .await
+        invoke::<operations::SessionRootCreate, _>(&self.transport, &EmptyRequest::default()).await
     }
 
     pub async fn submit_root_turn(
         &self,
         request: HostRootSubmitTurnRequest,
     ) -> Result<HostSubmitTurnOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionRootSubmitTurn,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionRootSubmitTurn, _>(&self.transport, &request).await
     }
 
     pub async fn root_state(
         &self,
         request: HostSessionTargetRequest,
     ) -> Result<HostSessionStateOutput, T::Error> {
-        invoke(&self.transport, HostOperation::SessionRootState, &request).await
+        invoke::<operations::SessionRootState, _>(&self.transport, &request).await
     }
 
     pub async fn inject_or_start(
         &self,
         request: HostSessionInputRequest,
     ) -> Result<HostSessionDeliveryOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionControlInjectOrStart,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionControlInjectOrStart, _>(&self.transport, &request).await
     }
 
     pub async fn interrupt_and_submit(
         &self,
         request: HostSessionInputRequest,
     ) -> Result<HostSessionDeliveryOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionControlInterruptAndSubmit,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionControlInterruptAndSubmit, _>(&self.transport, &request).await
     }
 
     pub async fn cancel_turn(
         &self,
         request: HostSessionTargetRequest,
     ) -> Result<HostSessionCancelOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionControlCancelTurn,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionControlCancelTurn, _>(&self.transport, &request).await
     }
 
     pub async fn execution_view(
         &self,
         request: HostSessionTargetRequest,
     ) -> Result<HostSessionExecutionView, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionControlExecutionView,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionControlExecutionView, _>(&self.transport, &request).await
     }
 
     pub async fn state(
         &self,
         request: HostSessionTargetRequest,
     ) -> Result<HostSessionStateOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionControlState,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionControlState, _>(&self.transport, &request).await
     }
 
     pub async fn reactivate(
         &self,
         request: HostSessionTargetRequest,
     ) -> Result<HostSessionReactivateOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionControlReactivate,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionControlReactivate, _>(&self.transport, &request).await
     }
 
     pub async fn create_child(
         &self,
         request: HostCreateSessionRequest,
     ) -> Result<HostCreateSessionOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionControlCreate,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionControlCreate, _>(&self.transport, &request).await
     }
 
     pub async fn submit_turn(
         &self,
         request: HostSubmitTurnRequest,
     ) -> Result<HostSubmitTurnOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionControlSubmitTurn,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionControlSubmitTurn, _>(&self.transport, &request).await
     }
 
     pub async fn configure_tools(
         &self,
         request: HostConfigureSessionToolsRequest,
     ) -> Result<HostConfigureSessionToolsOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionControlConfigureTools,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionControlConfigureTools, _>(&self.transport, &request).await
     }
 
     pub async fn recycle(&self, request: HostRecycleSessionRequest) -> Result<(), T::Error> {
-        invoke_unit(
-            &self.transport,
-            HostOperation::SessionControlDispose,
-            &request,
-        )
-        .await
+        invoke_ack::<operations::SessionControlDispose, _>(&self.transport, &request).await
     }
 }
 
 impl<T: HostClientTransport> SessionHistoryClient<T> {
     pub async fn list_summaries(&self) -> Result<HostSessionSummariesOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionHistoryList,
-            &json!({}),
-        )
-        .await
+        invoke::<operations::SessionHistoryList, _>(&self.transport, &EmptyRequest::default()).await
     }
 
     pub async fn transcript(
         &self,
         request: HostSessionTargetRequest,
     ) -> Result<HostSessionTranscript, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionHistoryTranscript,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionHistoryTranscript, _>(&self.transport, &request).await
     }
 
     pub async fn provider_messages(
         &self,
         request: HostSessionTargetRequest,
     ) -> Result<HostSessionProviderMessagesOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionHistoryProviderMessages,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionHistoryProviderMessages, _>(&self.transport, &request).await
     }
 
     pub async fn token_usage(
         &self,
         request: HostSessionTargetRequest,
     ) -> Result<HostSessionTokenUsageOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionHistoryTokenUsage,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionHistoryTokenUsage, _>(&self.transport, &request).await
     }
 
     pub async fn events_page(
         &self,
         request: HostSessionEventsPageRequest,
     ) -> Result<HostSessionEventsPageOutput, T::Error> {
-        invoke(&self.transport, HostOperation::SessionReadEvents, &request).await
+        invoke::<operations::SessionReadEvents, _>(&self.transport, &request).await
     }
 
     pub async fn snapshot(
         &self,
         request: HostSessionTargetRequest,
     ) -> Result<SessionHistorySnapshotOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionHistorySnapshot,
-            &request,
-        )
-        .await
+        invoke::<operations::SessionHistorySnapshot, _>(&self.transport, &request).await
     }
 }
 
@@ -401,29 +289,24 @@ impl<T: HostClientTransport> SessionStateClient<T> {
         &self,
         request: HostSessionStateReadRequest,
     ) -> Result<HostSessionStateReadOutput, T::Error> {
-        invoke(&self.transport, HostOperation::SessionStateRead, &request).await
+        invoke::<operations::SessionStateRead, _>(&self.transport, &request).await
     }
 
     pub async fn write(&self, request: HostSessionStateWriteRequest) -> Result<(), T::Error> {
-        invoke_unit(&self.transport, HostOperation::SessionStateWrite, &request).await
+        invoke_ack::<operations::SessionStateWrite, _>(&self.transport, &request).await
     }
 }
 
 impl<T: HostClientTransport> SessionInspectClient<T> {
     pub async fn list(&self) -> Result<SessionInspectListOutput, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::SessionInspectList,
-            &json!({}),
-        )
-        .await
+        invoke::<operations::SessionInspectList, _>(&self.transport, &EmptyRequest::default()).await
     }
 
     pub async fn snapshot(
         &self,
         session_id: &str,
     ) -> Result<SessionInspectSnapshotOutput, T::Error> {
-        self.inspect(HostOperation::SessionInspectSnapshot, session_id)
+        self.inspect::<operations::SessionInspectSnapshot>(session_id)
             .await
     }
 
@@ -431,7 +314,7 @@ impl<T: HostClientTransport> SessionInspectClient<T> {
         &self,
         session_id: &str,
     ) -> Result<SessionInspectReadModelOutput, T::Error> {
-        self.inspect(HostOperation::SessionInspectReadModel, session_id)
+        self.inspect::<operations::SessionInspectReadModel>(session_id)
             .await
     }
 
@@ -439,17 +322,16 @@ impl<T: HostClientTransport> SessionInspectClient<T> {
         &self,
         session_id: &str,
     ) -> Result<SessionInspectProviderMessagesOutput, T::Error> {
-        self.inspect(HostOperation::SessionInspectProviderMessages, session_id)
+        self.inspect::<operations::SessionInspectProviderMessages>(session_id)
             .await
     }
 
-    async fn inspect<O>(&self, operation: HostOperation, session_id: &str) -> Result<O, T::Error>
+    async fn inspect<Op>(&self, session_id: &str) -> Result<Op::Response, T::Error>
     where
-        O: DeserializeOwned,
+        Op: HostOp<Request = HostSessionInspectRequest>,
     {
-        invoke(
+        invoke::<Op, _>(
             &self.transport,
-            operation,
             &HostSessionInspectRequest {
                 session_id: session_id.into(),
             },
@@ -463,54 +345,54 @@ impl<T: HostClientTransport> WorkspaceClient<T> {
         &self,
         request: HostWorkspaceReadRequest,
     ) -> Result<HostWorkspaceReadOutput, T::Error> {
-        invoke(&self.transport, HostOperation::WorkspaceRead, &request).await
+        invoke::<operations::WorkspaceRead, _>(&self.transport, &request).await
     }
 
     pub async fn write(
         &self,
         request: HostWorkspaceWriteRequest,
     ) -> Result<HostWorkspaceWriteOutput, T::Error> {
-        invoke(&self.transport, HostOperation::WorkspaceWrite, &request).await
+        invoke::<operations::WorkspaceWrite, _>(&self.transport, &request).await
     }
 
     pub async fn edit(
         &self,
         request: HostWorkspaceEditRequest,
     ) -> Result<HostWorkspaceEditOutput, T::Error> {
-        invoke(&self.transport, HostOperation::WorkspaceEdit, &request).await
+        invoke::<operations::WorkspaceEdit, _>(&self.transport, &request).await
     }
 
     pub async fn list(
         &self,
         request: HostWorkspaceListRequest,
     ) -> Result<HostWorkspaceListOutput, T::Error> {
-        invoke(&self.transport, HostOperation::WorkspaceList, &request).await
+        invoke::<operations::WorkspaceList, _>(&self.transport, &request).await
     }
 
     pub async fn grep(
         &self,
         request: HostWorkspaceGrepRequest,
     ) -> Result<HostWorkspaceGrepOutput, T::Error> {
-        invoke(&self.transport, HostOperation::WorkspaceGrep, &request).await
+        invoke::<operations::WorkspaceGrep, _>(&self.transport, &request).await
     }
 
     pub async fn glob(
         &self,
         request: HostWorkspaceGlobRequest,
     ) -> Result<HostWorkspaceGlobOutput, T::Error> {
-        invoke(&self.transport, HostOperation::WorkspaceGlob, &request).await
+        invoke::<operations::WorkspaceGlob, _>(&self.transport, &request).await
     }
 }
 
 impl<T: HostClientTransport> ProcessClient<T> {
     pub async fn spawn(&self, request: HostProcessRequest) -> Result<HostProcessOutput, T::Error> {
-        invoke(&self.transport, HostOperation::ProcessSpawn, &request).await
+        invoke::<operations::ProcessSpawn, _>(&self.transport, &request).await
     }
 }
 
 impl<T: HostClientTransport> NetworkClient<T> {
     pub async fn send(&self, request: HostNetworkRequest) -> Result<HostNetworkResponse, T::Error> {
-        invoke(&self.transport, HostOperation::NetworkClient, &request).await
+        invoke::<operations::NetworkClient, _>(&self.transport, &request).await
     }
 }
 
@@ -519,65 +401,52 @@ impl<T: HostClientTransport> ExtensionHttpClient<T> {
         &self,
         request: ExtensionHttpDispatchRequest,
     ) -> Result<ExtensionHttpResponse, T::Error> {
-        invoke(
-            &self.transport,
-            HostOperation::ExtensionHttpPublic,
-            &request,
-        )
-        .await
+        invoke::<operations::ExtensionHttpPublic, _>(&self.transport, &request).await
     }
 }
 
-async fn invoke<T, I, O>(transport: &T, operation: HostOperation, input: &I) -> Result<O, T::Error>
+async fn invoke<Op, T>(transport: &T, input: &Op::Request) -> Result<Op::Response, T::Error>
 where
     T: HostClientTransport,
-    I: Serialize + ?Sized,
-    O: DeserializeOwned,
+    Op: HostOp,
 {
+    let operation = Op::OPERATION;
     let input = serialize_request::<T, _>(operation, input)?;
     let output = transport.invoke(operation, input).await?;
     deserialize_response::<T, _>(operation, output)
 }
 
-async fn invoke_collected_stream<T, I, O>(
+async fn collect_stream<Op, T>(
     transport: &T,
-    operation: HostOperation,
-    input: &I,
-) -> Result<O, T::Error>
+    input: &Op::Request,
+) -> Result<HostLlmCollectedStreamOutput, T::Error>
 where
     T: HostClientTransport,
-    I: Serialize + ?Sized,
-    O: DeserializeOwned,
+    Op: HostOp,
 {
-    let input = serialize_request::<T, _>(operation, input)?;
-    let output = transport.invoke_collected_stream(operation, input).await?;
-    deserialize_response::<T, _>(operation, output)
+    let stream = invoke_stream::<Op, T>(transport, input).await?;
+    super::contracts::collect_model_stream(stream)
+        .await
+        .map_err(T::payload_error)
 }
 
-async fn invoke_stream<T, I>(
-    transport: &T,
-    operation: HostOperation,
-    input: &I,
-) -> Result<ModelStream, T::Error>
+async fn invoke_stream<Op, T>(transport: &T, input: &Op::Request) -> Result<ModelStream, T::Error>
 where
     T: HostClientTransport,
-    I: Serialize + ?Sized,
+    Op: HostOp,
 {
+    let operation = Op::OPERATION;
     let input = serialize_request::<T, _>(operation, input)?;
     transport.invoke_stream(operation, input).await
 }
 
-async fn invoke_unit<T, I>(
-    transport: &T,
-    operation: HostOperation,
-    input: &I,
-) -> Result<(), T::Error>
+async fn invoke_ack<Op, T>(transport: &T, input: &Op::Request) -> Result<(), T::Error>
 where
     T: HostClientTransport,
-    I: Serialize + ?Sized,
+    Op: HostOp<Response = Acknowledgement>,
 {
-    let output: Value = invoke(transport, operation, input).await?;
-    if output == json!({ "ok": true }) {
+    let operation = Op::OPERATION;
+    if invoke::<Op, _>(transport, input).await?.ok {
         return Ok(());
     }
     Err(T::client_error(

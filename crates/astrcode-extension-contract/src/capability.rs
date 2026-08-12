@@ -1,7 +1,7 @@
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 macro_rules! extension_capabilities {
-    ($($variant:ident { wire: $wire:literal, grant: $grant:literal }),* $(,)?) => {
+    ($($variant:ident => $wire:literal),* $(,)?) => {
         /// Host capabilities an extension may explicitly request.
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
         pub enum ExtensionCapability {
@@ -16,7 +16,7 @@ macro_rules! extension_capabilities {
                 }
             }
 
-            /// 解析线缆名；未知名返回 `None`（旧扩展/未来能力由调用方透传）。
+            /// 解析线缆名；未知名返回 `None`。
             pub fn parse(name: &str) -> Option<Self> {
                 match name {
                     $($wire => Some(Self::$variant),)*
@@ -24,12 +24,6 @@ macro_rules! extension_capabilities {
                 }
             }
 
-            /// 授权目录名（`astrcode.*` 能力前缀）。
-            pub const fn grant_name(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $grant),*
-                }
-            }
         }
 
         impl Serialize for ExtensionCapability {
@@ -50,25 +44,25 @@ macro_rules! extension_capabilities {
 }
 
 extension_capabilities! {
-    SessionControl { wire: "session_control", grant: "astrcode.session.control" },
-    SessionInspect { wire: "session_inspect", grant: "astrcode.session.inspect" },
-    PublicHttp { wire: "public_http", grant: "astrcode.extension.http.public_route" },
-    AuthenticatedHttp { wire: "authenticated_http", grant: "astrcode.extension.http.authenticated_route" },
-    PublicHttpDispatch { wire: "public_http_dispatch", grant: "astrcode.extension.http.public" },
-    MainModel { wire: "main_model", grant: "astrcode.llm.main_chat" },
-    SmallModel { wire: "small_model", grant: "astrcode.llm.small_chat" },
-    SessionHistory { wire: "session_history", grant: "astrcode.session.read_events" },
-    EmitCustomEvents { wire: "emit_custom_events", grant: "astrcode.event.emit" },
-    ConsumeCustomEvents { wire: "consume_custom_events", grant: "astrcode.event.consume" },
-    WorkspaceRead { wire: "workspace_read", grant: "astrcode.workspace.read" },
-    WorkspaceWrite { wire: "workspace_write", grant: "astrcode.workspace.write" },
-    ProcessSpawn { wire: "process_spawn", grant: "astrcode.process.spawn" },
-    NetworkClient { wire: "network_client", grant: "astrcode.network.client" },
-    ProviderRequest { wire: "provider_request", grant: "astrcode.extension.provider_request" },
-    InputDelivery { wire: "input_delivery", grant: "astrcode.extension.input_delivery" },
-    ToolIntercept { wire: "tool_intercept", grant: "astrcode.extension.tool_intercept" },
-    TurnContinuationControl { wire: "turn_continuation_control", grant: "astrcode.extension.turn_continuation_control" },
-    LiveConversation { wire: "live_conversation", grant: "astrcode.extension.live_conversation" },
+    SessionControl => "session_control",
+    SessionInspect => "session_inspect",
+    PublicHttp => "public_http",
+    AuthenticatedHttp => "authenticated_http",
+    PublicHttpDispatch => "public_http_dispatch",
+    MainModel => "main_model",
+    SmallModel => "small_model",
+    SessionHistory => "session_history",
+    EmitCustomEvents => "emit_custom_events",
+    ConsumeCustomEvents => "consume_custom_events",
+    WorkspaceRead => "workspace_read",
+    WorkspaceWrite => "workspace_write",
+    ProcessSpawn => "process_spawn",
+    NetworkClient => "network_client",
+    ProviderRequest => "provider_request",
+    InputDelivery => "input_delivery",
+    ToolIntercept => "tool_intercept",
+    TurnContinuationControl => "turn_continuation_control",
+    LiveConversation => "live_conversation",
 }
 
 #[cfg(test)]
@@ -102,7 +96,6 @@ mod tests {
             let wire = capability.as_str();
             assert!(wires.insert(wire), "duplicate wire name {wire}");
             assert_eq!(ExtensionCapability::parse(wire), Some(capability));
-            assert!(capability.grant_name().starts_with("astrcode."));
             assert_eq!(
                 serde_json::to_value(capability).unwrap(),
                 serde_json::Value::String(wire.into()),

@@ -66,6 +66,24 @@ mod tests {
     }
 
     #[test]
+    fn formats_each_relative_time_bucket() {
+        for (duration, expected) in [
+            (chrono::Duration::seconds(30), "now"),
+            (chrono::Duration::minutes(5), "5m"),
+            (chrono::Duration::hours(3), "3h"),
+            (chrono::Duration::days(2), "2d"),
+            (chrono::Duration::days(10), "1w"),
+            (chrono::Duration::days(60), "2mo"),
+            (chrono::Duration::days(400), "1y"),
+        ] {
+            assert_eq!(
+                format_relative_time(&(now() - duration).to_rfc3339(), now()),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn returns_empty_on_invalid_input() {
         assert_eq!(format_relative_time("not-a-date", now()), "");
         assert_eq!(format_relative_time("", now()), "");

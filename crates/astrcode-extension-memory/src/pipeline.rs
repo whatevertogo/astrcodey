@@ -4,7 +4,7 @@ use astrcode_extension_sdk::{
     extension::ExtensionError,
     host::{ModelClient, SessionInspectClient},
     llm::{LlmContent, LlmMessage, LlmRole},
-    session_inspect::{SessionInspectContent, SessionInspectListItem, SessionInspectReadModel},
+    prelude::{SessionInspectContent, SessionInspectListItem, SessionInspectReadModel},
 };
 use chrono::{DateTime, Local, Utc};
 use serde::Deserialize;
@@ -219,7 +219,7 @@ async fn extract_batch(
     ];
 
     let text = small_model
-        .small_chat_stream(messages)
+        .small_chat_collected(messages)
         .await
         .map_err(|e| ExtensionError::Internal(e.to_string()))?
         .content;

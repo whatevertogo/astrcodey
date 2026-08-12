@@ -14,7 +14,10 @@ use astrcode_core::event::{
     DurableEventPayload, Event, EventDeliveryReceipt, EventPayload, EventSendError, EventSender,
 };
 use astrcode_extension_sdk::{
-    extension::{internal::CustomEventSink, *},
+    extension::{
+        internal::{CustomEventSink, custom_event_subscription_matches},
+        *,
+    },
     runtime_ports::{
         PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
         SessionOperationsProvider, ToolCatalogProvider,
@@ -530,10 +533,11 @@ async fn reconcile_durable_custom_events_once(
             DurableEventPayload::CustomEvent(custom_event) => custom_event,
             _ => continue,
         };
-        if !consumer
-            .subscription
-            .matches(&custom_event.extension_id, &custom_event.event_type)
-        {
+        if !custom_event_subscription_matches(
+            &consumer.subscription,
+            &custom_event.extension_id,
+            &custom_event.event_type,
+        ) {
             continue;
         }
         if custom_event.cascade_depth > MAX_CUSTOM_EVENT_CASCADE_DEPTH {
@@ -1465,7 +1469,11 @@ impl ExtensionRunner {
         let view = self.turn_extension_view_with_lease();
         let mut fully_admitted = true;
         for (extension_id, subscription, handler) in &view.index.custom_event {
-            if !subscription.matches(&custom_event.extension_id, &custom_event.event_type) {
+            if !custom_event_subscription_matches(
+                subscription,
+                &custom_event.extension_id,
+                &custom_event.event_type,
+            ) {
                 continue;
             }
             let Some(lane) = self.custom_event_lane(

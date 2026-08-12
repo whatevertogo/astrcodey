@@ -65,3 +65,18 @@ pub(super) fn path_matches_glob(path: &Path, working_dir: &Path, globset: &GlobS
     let rel = path_for_matching(path, working_dir);
     globset.is_match(&rel) || globset.is_match(path.to_string_lossy().as_ref())
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::extract_tool_paths;
+
+    #[test]
+    fn extracts_nonempty_path_fields() {
+        assert_eq!(
+            extract_tool_paths(&serde_json::json!({"path": "src/main.rs"})),
+            vec![PathBuf::from("src/main.rs")]
+        );
+    }
+}

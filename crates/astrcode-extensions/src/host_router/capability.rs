@@ -5,7 +5,10 @@
 use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::ExtensionCapability,
-    host::{HOST_OPERATION_SPECS, HostBackendRequirement, HostOperation, HostOperationSpec},
+    host::{
+        HostOperation,
+        internal::{HOST_OPERATION_SPECS, HostBackendRequirement, HostOperationSpec},
+    },
     s5r::{CapabilityDescriptor, ErrorPayload},
 };
 
@@ -77,7 +80,7 @@ pub(super) fn authorize(
         format!(
             "{} requires declared capability {}",
             spec.name,
-            astrcode_extension_sdk::s5r::capability_to_wire(required)
+            required.as_str()
         ),
     ))
 }

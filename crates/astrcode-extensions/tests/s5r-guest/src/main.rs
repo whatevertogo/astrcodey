@@ -13,8 +13,7 @@ use astrcode_extension_sdk::{
         ExtensionHttpResponse, ExtensionHttpRoute,
     },
     s5r::{
-        ErrorPayload,
-        effects::{CallContinuation, HandlerResult},
+        CallContinuation, ErrorPayload, HandlerEffect, HandlerResult,
     },
     tool::ExecutionMode,
 };
@@ -89,9 +88,8 @@ async fn main() {
 }
 
 async fn run() -> Result<(), ErrorPayload> {
-    let mut worker = Worker::new(EXT_ID);
+    let mut worker = Worker::new(EXT_ID, "0.1.0");
     worker
-        .version("0.1.0")
         .capability(ExtensionCapability::SmallModel)
         .capability(ExtensionCapability::EmitCustomEvents)
         .capability(ExtensionCapability::WorkspaceRead)
@@ -328,18 +326,18 @@ async fn run() -> Result<(), ErrorPayload> {
             .parameters(json!({ "type": "object" }))
             .build(),
         tool_handler(|_ctx| async move {
-            let forged = astrcode_extension_worker::worker::testing::invoke_host(
+            let forged = astrcode_extension_worker::testing::invoke_host(
                 "astrcode.extension.http.public",
                 json!({
                     "method": "POST",
                     "path": "/dispatch-target/42",
-                    "pathParams": { "id": "forged" },
+                    "path_params": { "id": "forged" },
                     "query": "source=forged",
                     "body": { "from": "forged" }
                 }),
             )
             .await;
-            if !matches!(&forged, Err(error) if error.code == "invalid_input") {
+            if !matches!(&forged, Err(error) if error.code == WireErrorCode::InvalidInput.as_str()) {
                 return Err(ErrorPayload::new(
                     WireErrorCode::InvalidInput,
                     format!("host accepted forged path params: {forged:?}"),
@@ -380,7 +378,7 @@ async fn run() -> Result<(), ErrorPayload> {
         "Demo slash command",
         command_handler(|_ctx| async {
             Ok(HandlerResult::effect(
-                "ok",
+                HandlerEffect::Ok,
                 json!({ "kind": "display", "content": "s5r guest demo works!", "is_error": false }),
             ))
         }),
@@ -405,7 +403,7 @@ async fn run() -> Result<(), ErrorPayload> {
                 let cmd = input.tool_input["command"].as_str().unwrap_or("");
                 if cmd.contains("rm -rf") {
                     return Ok(HandlerResult::effect(
-                        "block",
+                        HandlerEffect::Block,
                         json!({ "reason": "dangerous rm -rf blocked by s5r-guest-demo" }),
                     ));
                 }
@@ -419,10 +417,8 @@ async fn run() -> Result<(), ErrorPayload> {
         HookMode::NonBlocking,
         hook_handler(|_ctx| async {
             Ok(HandlerResult {
-                ok: true,
-                effect: Some("ok".into()),
-                data: None,
-                error: None,
+                effect: HandlerEffect::Ok,
+                data: Value::Null,
                 continuations: vec![CallContinuation::Hook {
                     on: "pipeline_step".into(),
                     input: json!({ "step": 1 }),
@@ -438,10 +434,8 @@ async fn run() -> Result<(), ErrorPayload> {
                 1 => {
                     PIPELINE_STEP_1_CALLS.fetch_add(1, Ordering::SeqCst);
                     Ok(HandlerResult {
-                        ok: true,
-                        effect: Some("ok".into()),
-                        data: None,
-                        error: None,
+                        effect: HandlerEffect::Ok,
+                        data: Value::Null,
                         continuations: vec![CallContinuation::Hook {
                             on: "pipeline_step".into(),
                             input: json!({ "step": 2 }),
@@ -483,10 +477,8 @@ async fn run() -> Result<(), ErrorPayload> {
                     }
                     PIPELINE_LLM_OK.store(true, Ordering::SeqCst);
                     Ok(HandlerResult {
-                        ok: true,
-                        effect: Some("ok".into()),
-                        data: None,
-                        error: None,
+                        effect: HandlerEffect::Ok,
+                        data: Value::Null,
                         continuations: vec![CallContinuation::Tool {
                             name: "pipeline_tool_step".into(),
                             input: json!({}),

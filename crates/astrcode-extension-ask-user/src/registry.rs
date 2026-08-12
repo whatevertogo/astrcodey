@@ -114,12 +114,9 @@ impl PendingRegistry {
         );
         drop(state);
 
-        if let Err(error) = events
-            .try_emit(PENDING_EVENT_TYPE, &question)
-            .map_err(|error| ExtensionError::Internal(error.to_string()))
-        {
+        if let Err(error) = events.try_emit(PENDING_EVENT_TYPE, &question) {
             self.abandon_registered(&key, &registration);
-            return Err(error);
+            return Err(ExtensionError::Internal(error.to_string()));
         }
 
         Ok((

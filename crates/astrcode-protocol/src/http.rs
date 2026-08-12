@@ -1325,18 +1325,51 @@ mod tests {
         .unwrap();
         assert!(strict.strict);
     }
+
+    #[test]
+    fn raw_event_envelope_roundtrips_live_event_without_optional_fields() {
+        let dto = RawEventEnvelopeDto {
+            id: "event-1".into(),
+            session_id: "session-1".into(),
+            turn_id: None,
+            cursor: None,
+            durability: RawEventDurabilityDto::Live,
+            timestamp: "2026-01-01T00:00:00Z".into(),
+            payload: serde_json::json!({"kind": "live"}),
+        };
+        let value = serde_json::to_value(&dto).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "id": "event-1",
+                "sessionId": "session-1",
+                "durability": "live",
+                "timestamp": "2026-01-01T00:00:00Z",
+                "payload": {"kind": "live"}
+            })
+        );
+        let decoded: RawEventEnvelopeDto = serde_json::from_value(value).unwrap();
+        assert!(decoded.turn_id.is_none());
+        assert!(decoded.cursor.is_none());
+    }
 }
 
 /// Raw session event envelope exposed by the authenticated event SSE endpoint.
+///
+/// `payload` directly exposes the event log's persisted serde shape (the storage
+/// format of `EventPayload`), not an independent, stable HTTP schema — it evolves
+/// with the storage format and consumers must stay compatible across storage
+/// versions. This is an intentional contract decision; do not treat `payload` as
+/// a stable API.
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawEventEnvelopeDto {
     pub id: String,
     pub session_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cursor: Option<String>,
     pub durability: RawEventDurabilityDto,
     pub timestamp: String,

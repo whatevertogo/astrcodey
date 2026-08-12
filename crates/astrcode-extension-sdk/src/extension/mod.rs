@@ -26,6 +26,12 @@ pub mod internal {
     use astrcode_core::event::{EventDeliveryReceipt, EventSendError};
     use async_trait::async_trait;
 
+    pub use super::registration_validation::{
+        canonical_registration_name, custom_event_subscription_matches,
+        extension_http_route_patterns_conflict, fixed_hook_mode, has_duplicate_registration_name,
+        hook_mode_is_supported, match_extension_http_route, normalize_custom_event_subscription,
+        validate_custom_event_subscription, validate_extension_http_route,
+    };
     use super::{CustomEventDeclaration, CustomEventEmitter};
 
     /// Host-bound event ingress. Extension authors emit through [`CustomEventEmitter`].
@@ -68,8 +74,6 @@ pub use lifecycle::*;
 pub use package_manifest::*;
 pub use paths::*;
 pub use registrar::*;
-#[doc(hidden)]
-pub use registration_validation::{canonical_registration_name, has_duplicate_registration_name};
 pub use runtime::*;
 pub use tool_context::*;
 

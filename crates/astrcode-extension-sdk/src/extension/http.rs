@@ -4,8 +4,7 @@ use std::sync::Arc;
 pub use astrcode_extension_contract::extension_http::{
     DEFAULT_EXTENSION_HTTP_BODY_BYTES, ExtensionHttpAccess, ExtensionHttpDispatchRequest,
     ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-    MAX_EXTENSION_HTTP_BODY_BYTES, extension_http_route_patterns_conflict,
-    match_extension_http_route,
+    MAX_EXTENSION_HTTP_BODY_BYTES,
 };
 #[cfg(test)]
 use serde::Serialize;
@@ -13,7 +12,13 @@ use serde::de::DeserializeOwned;
 #[cfg(test)]
 use serde_json::{Value, json};
 
+#[cfg(test)]
+use super::registration_validation::{
+    extension_http_route_patterns_conflict, match_extension_http_route,
+    validate_extension_http_route,
+};
 use super::{ExtensionCall, ExtensionCallContext, ExtensionError};
+use crate::WireErrorCode;
 
 /// Validated request context for one extension HTTP route invocation.
 ///
@@ -58,7 +63,7 @@ impl HttpContext {
     pub fn json<T: DeserializeOwned>(&self) -> Result<T, ExtensionError> {
         serde_json::from_value(self.request.body.clone()).map_err(|error| {
             ExtensionError::InvalidInput {
-                code: "invalid_http_body".into(),
+                code: WireErrorCode::InvalidInput.as_str().into(),
                 message: error.to_string(),
                 hint: Some("check the JSON body against this route's request schema".into()),
             }
@@ -124,7 +129,7 @@ mod extension_http_tests {
             serde_json::from_value::<ExtensionHttpDispatchRequest>(json!({
                 "method": "GET",
                 "path": "/users/42",
-                "pathParams": { "id": "forged" }
+                "path_params": { "id": "forged" }
             }))
             .is_err()
         );
@@ -158,7 +163,7 @@ mod extension_http_tests {
     #[test]
     fn route_validation_and_matching_are_segment_scoped() {
         let route = ExtensionHttpRoute::public(ExtensionHttpMethod::Patch, "/future-tasks/{jobId}");
-        route.validate().expect("valid route");
+        validate_extension_http_route(&route).expect("valid route");
 
         let params =
             match_extension_http_route(&route.path, "/future-tasks/job-1").expect("matching route");
@@ -180,10 +185,10 @@ mod extension_http_tests {
     #[test]
     fn route_validation_rejects_traversal_and_duplicate_params() {
         let traversal = ExtensionHttpRoute::public(ExtensionHttpMethod::Get, "/files/../secret");
-        assert!(traversal.validate().is_err());
+        assert!(validate_extension_http_route(&traversal).is_err());
 
         let duplicate = ExtensionHttpRoute::public(ExtensionHttpMethod::Get, "/{id}/{id}");
-        assert!(duplicate.validate().is_err());
+        assert!(validate_extension_http_route(&duplicate).is_err());
     }
 
     #[test]

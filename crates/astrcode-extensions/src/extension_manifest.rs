@@ -1,21 +1,23 @@
 //! s5r 扩展握手 manifest 类型与解析。
 
-use astrcode_extension_contract::protocol::PeerInfo;
+use std::collections::BTreeSet;
+
+use astrcode_extension_contract::{
+    FeatureName,
+    manifest::{
+        InitializeManifest, ManifestCommand, ManifestHook, ManifestHookEvent, ManifestHttpRoute,
+        ManifestTool, ManifestToolMode,
+    },
+    protocol::PeerInfo,
+};
 use astrcode_extension_sdk::{
     builder::manifest as extension_manifest,
     extension::{
         CompactEvent, ContinueAfterStopOptions, CustomEventDeclaration, CustomEventSubscription,
         ExtensionCapability, ExtensionHttpRoute, HookMode, LifecycleEvent, SlashCommand,
-        fixed_hook_mode, hook_mode_is_supported,
+        internal::{fixed_hook_mode, hook_mode_is_supported},
     },
-    s5r::{
-        HandlerId, capability_from_wire, compact_event_from_name, compact_event_to_name,
-        event_from_name, event_to_name,
-        manifest::{
-            InitializeManifest, ManifestCommand, ManifestHook, ManifestHttpRoute, ManifestTool,
-        },
-        mode_from_name, mode_to_name,
-    },
+    s5r::HandlerId,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin},
 };
 use serde_json::Value;
@@ -47,8 +49,8 @@ pub(crate) enum HookSubscription {
 impl HookSubscription {
     pub(crate) fn event_name(&self) -> &'static str {
         match self {
-            Self::Lifecycle { event, .. } => event_to_name(event),
-            Self::Compact(event) => compact_event_to_name(*event),
+            Self::Lifecycle { event, .. } => event.as_str(),
+            Self::Compact(event) => event.as_str(),
         }
     }
 }
@@ -56,7 +58,7 @@ impl HookSubscription {
 #[derive(Debug, Clone)]
 pub(crate) struct RegisteredHttpRoute {
     pub(crate) route: ExtensionHttpRoute,
-    pub(crate) handler_id: String,
+    pub(crate) handler_id: HandlerId,
 }
 
 impl ExtensionRegistration {
@@ -111,6 +113,21 @@ pub(crate) fn registration_from_s5r_metadata(
     registration_from_manifest(&peer.name, version, manifest)
 }
 
+pub(crate) fn validate_registration_features(
+    registration: &ExtensionRegistration,
+    negotiated_features: &BTreeSet<FeatureName>,
+) -> Result<(), String> {
+    let uses_custom_events = !registration.custom_events.is_empty()
+        || !registration.custom_event_subscriptions.is_empty();
+    if uses_custom_events && !negotiated_features.contains(&FeatureName::custom_event_v1()) {
+        return Err(
+            "initialize manifest declares custom events but custom_event_v1 was not negotiated"
+                .into(),
+        );
+    }
+    Ok(())
+}
+
 fn registration_from_manifest(
     extension_id: &str,
     version: &str,
@@ -123,14 +140,7 @@ fn registration_from_manifest(
     let extension_id = identity.id().to_owned();
     let version = identity.version().to_owned();
 
-    let capabilities = manifest
-        .capabilities
-        .into_iter()
-        .map(|name| {
-            capability_from_wire(&name)
-                .ok_or_else(|| format!("initialize manifest has unknown capability \"{name}\""))
-        })
-        .collect::<Result<_, _>>()?;
+    let capabilities = manifest.capabilities;
 
     let tools = manifest
         .tools
@@ -172,43 +182,37 @@ fn registration_from_manifest(
 /// 格式本身由 [`HandlerId`] 单点定义；这里只补充「必须归属调用方扩展」的宿主约束。
 pub(crate) fn parse_handler_id<'a>(
     extension_id: &str,
-    handler_id: &'a str,
-) -> Result<(&'a str, &'a str), String> {
-    let parsed = HandlerId::split(handler_id)
-        .ok_or_else(|| format!("handler {handler_id} must use <extension>:<kind>:<name>"))?;
-    let (owner, kind, name) = parsed;
+    handler_id: &'a HandlerId,
+) -> Result<(astrcode_extension_contract::HandlerKind, &'a str), String> {
+    let (owner, kind, name) = handler_id.parts();
     if owner != extension_id {
         return Err(format!(
             "handler {handler_id} must be attributed to extension {extension_id}"
         ));
     }
-    Ok((kind.as_str(), name))
+    Ok((kind, name))
 }
 
 fn validate_handler_id_kind(
     extension_id: &str,
-    handler_id: &str,
-    expected_kind: &str,
+    handler_id: &HandlerId,
+    expected_kind: astrcode_extension_contract::HandlerKind,
 ) -> Result<(), String> {
     let (kind, _) = parse_handler_id(extension_id, handler_id)?;
     if kind != expected_kind {
         return Err(format!(
-            "handler {handler_id} has kind {kind}, expected {expected_kind}"
+            "handler {handler_id} has kind {}, expected {}",
+            kind.as_str(),
+            expected_kind.as_str()
         ));
     }
     Ok(())
 }
 
 fn normalize_tool(tool: ManifestTool) -> Result<ToolDefinition, String> {
-    let execution_mode = match tool.mode.as_str() {
-        "parallel" => ExecutionMode::Parallel,
-        "sequential" => ExecutionMode::Sequential,
-        _ => {
-            return Err(format!(
-                "unknown tool execution mode in manifest: {}",
-                tool.mode
-            ));
-        },
+    let execution_mode = match tool.mode {
+        ManifestToolMode::Parallel => ExecutionMode::Parallel,
+        ManifestToolMode::Sequential => ExecutionMode::Sequential,
     };
     Ok(ToolDefinition {
         name: tool.name,
@@ -232,29 +236,29 @@ fn normalize_command(command: ManifestCommand) -> SlashCommand {
 }
 
 fn normalize_hook(hook: ManifestHook) -> Result<HookSubscription, String> {
-    if let Some(event) = compact_event_from_name(&hook.on) {
-        let mode = normalize_hook_mode(&hook.mode)?;
-        if mode != HookMode::Blocking {
-            return Err(format!("{} requires blocking mode", hook.on));
+    let event_name = hook.on.as_str();
+    if let ManifestHookEvent::Compact(event) = hook.on {
+        if hook.mode != HookMode::Blocking {
+            return Err(format!("{event_name} requires blocking mode"));
         }
         return Ok(HookSubscription::Compact(event));
     }
 
-    let event = event_from_name(&hook.on)
-        .ok_or_else(|| format!("unknown hook event in manifest: {}", hook.on))?;
-    let mode = normalize_hook_mode(&hook.mode)?;
+    let ManifestHookEvent::Lifecycle(event) = hook.on else {
+        unreachable!("compact hooks return above")
+    };
     if s5r_unsupported_typed_hook(&event) {
-        return Err(format!("{} is not supported by s5r manifest", hook.on));
+        return Err(format!("{event_name} is not supported by s5r manifest"));
     }
-    if !hook_mode_is_supported(&event, mode) {
+    if !hook_mode_is_supported(&event, hook.mode) {
         return Err(match fixed_hook_mode(&event) {
-            Some(required) => format!("{} requires {} mode", hook.on, mode_to_name(required)),
-            None => format!("{} does not support {} mode", hook.on, hook.mode),
+            Some(required) => format!("{event_name} requires {} mode", required.as_str()),
+            None => format!("{event_name} does not support {} mode", hook.mode.as_str()),
         });
     }
     Ok(HookSubscription::Lifecycle {
         event,
-        mode,
+        mode: hook.mode,
         options: ContinueAfterStopOptions {
             max_per_turn: hook
                 .options
@@ -264,22 +268,16 @@ fn normalize_hook(hook: ManifestHook) -> Result<HookSubscription, String> {
     })
 }
 
-fn normalize_hook_mode(mode: &str) -> Result<HookMode, String> {
-    mode_from_name(mode).ok_or_else(|| format!("unknown hook mode in manifest: {mode}"))
-}
-
 fn normalize_http_route(
     extension_id: &str,
     route: ManifestHttpRoute,
 ) -> Result<RegisteredHttpRoute, String> {
-    route.route.validate()?;
-    if route.handler_id.trim().is_empty() {
-        return Err(format!(
-            "HTTP route {} is missing handler_id",
-            route.route.path
-        ));
-    }
-    validate_handler_id_kind(extension_id, &route.handler_id, "http")?;
+    astrcode_extension_sdk::extension::internal::validate_extension_http_route(&route.route)?;
+    validate_handler_id_kind(
+        extension_id,
+        &route.handler_id,
+        astrcode_extension_contract::HandlerKind::Http,
+    )?;
     Ok(RegisteredHttpRoute {
         route: route.route,
         handler_id: route.handler_id,
@@ -292,13 +290,14 @@ fn s5r_unsupported_typed_hook(event: &LifecycleEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_sdk::{s5r::manifest::ManifestHookOptions, tool::ExecutionMode};
+    use astrcode_extension_contract::manifest::ManifestHookOptions;
+    use astrcode_extension_sdk::tool::ExecutionMode;
     use serde_json::json;
 
     use super::*;
 
     #[test]
-    fn s5r_initialize_manifest_is_forward_compatible_and_validates_known_fields() {
+    fn s5r_initialize_manifest_is_strict_and_validates_known_fields() {
         let invalid_inputs = [
             (
                 PeerInfo {
@@ -334,7 +333,7 @@ mod tests {
                 json!({
                     "capabilities": ["not_a_capability"]
                 }),
-                "unknown capability",
+                "unknown variant",
             ),
             (
                 PeerInfo {
@@ -344,6 +343,15 @@ mod tests {
                 },
                 json!({}),
                 "missing version",
+            ),
+            (
+                PeerInfo {
+                    name: "unknown-field".into(),
+                    role: "extension_worker".into(),
+                    version: Some("test".into()),
+                },
+                json!({"future_manifest_field": true}),
+                "unknown field",
             ),
         ];
         for (peer, manifest, expected) in invalid_inputs {
@@ -358,13 +366,11 @@ mod tests {
                 version: Some("test".into()),
             },
             &json!({
-                "future_manifest_field": {"enabled": true},
                 "tools": [
                     {
                         "name": "defaulted",
                         "description": "",
-                        "parameters": {"type": "object"},
-                        "future_tool_field": "ignored"
+                        "parameters": {"type": "object"}
                     },
                     {
                         "name": "strict",
@@ -375,7 +381,7 @@ mod tests {
                 ],
                 "commands": [{"name": "defaulted-command"}],
                 "hooks": [{"on": "turn_end", "mode": "non_blocking"}],
-                "custom_events": [{"eventType": "defaulted.event"}]
+                "custom_events": [{"event_type": "defaulted.event"}]
             }),
         )
         .expect("manifest should parse");
@@ -400,6 +406,17 @@ mod tests {
         assert_eq!(registration.custom_events()[0].schema_version, 1);
         assert!(registration.custom_events()[0].durable);
         assert_eq!(registration.custom_events()[0].max_payload_bytes, 64 * 1024);
+        assert!(
+            validate_registration_features(&registration, &BTreeSet::new()).is_err(),
+            "custom-event declarations require the negotiated feature"
+        );
+        assert!(
+            validate_registration_features(
+                &registration,
+                &BTreeSet::from([FeatureName::custom_event_v1()])
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -454,11 +471,8 @@ mod tests {
         ];
 
         for (on, mode, expected_error) in cases {
-            let result = normalize_hook(ManifestHook {
-                on: on.into(),
-                mode: mode.into(),
-                options: ManifestHookOptions::default(),
-            });
+            let hook = serde_json::from_value(json!({"on": on, "mode": mode})).unwrap();
+            let result = normalize_hook(hook);
             match expected_error {
                 Some(expected_error) => assert_eq!(result.unwrap_err(), expected_error),
                 None => assert!(result.is_ok(), "{on}/{mode}: {result:?}"),
@@ -467,8 +481,8 @@ mod tests {
 
         assert!(matches!(
             normalize_hook(ManifestHook {
-                on: "pre_compact".into(),
-                mode: "blocking".into(),
+                on: CompactEvent::PreCompact.into(),
+                mode: HookMode::Blocking,
                 options: ManifestHookOptions::default(),
             }),
             Ok(HookSubscription::Compact(CompactEvent::PreCompact))

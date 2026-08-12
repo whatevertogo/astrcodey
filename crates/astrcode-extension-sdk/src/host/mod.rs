@@ -2,31 +2,18 @@ mod client;
 mod contracts;
 mod domain_client;
 mod error;
-mod operation;
 
 use std::sync::Arc;
 
-use astrcode_extension_contract::WireErrorCode;
+use astrcode_extension_contract::{HostContextRequirement, WireErrorCode};
+pub use astrcode_extension_contract::{HostOperation, host::*};
 pub use client::{
     ExtensionHttpClient, ModelClient, NetworkClient, ProcessClient, SessionControlClient,
     SessionHistoryClient, SessionInspectClient, SessionStateClient, WorkspaceClient,
 };
-pub use contracts::*;
-#[doc(hidden)]
-pub use domain_client::{
-    EventClient as TypedEventClient, ExtensionHttpClient as TypedExtensionHttpClient,
-    HostClientTransport, ModelClient as TypedModelClient, NetworkClient as TypedNetworkClient,
-    ProcessClient as TypedProcessClient, SessionControlClient as TypedSessionControlClient,
-    SessionHistoryClient as TypedSessionHistoryClient,
-    SessionInspectClient as TypedSessionInspectClient,
-    SessionStateClient as TypedSessionStateClient, WorkspaceClient as TypedWorkspaceClient,
-};
+pub use contracts::HostLlmCollectedStreamOutput;
+use domain_client::HostClientTransport;
 pub use error::*;
-#[doc(hidden)]
-pub use operation::HostBackendRequirement;
-pub use operation::{
-    HOST_OPERATION_SPECS, HostOp, HostOperation, HostOperationGroup, HostOperationSpec, operations,
-};
 use serde_json::Value;
 
 use crate::{extension::ExtensionCapability, model_stream::ModelStream};
@@ -81,10 +68,9 @@ impl ExtensionHost {
             .scope
             .is_granted(ExtensionCapability::SessionControl)
         {
-            self.inner.scope.preflight_context(
-                operation::HostContextRequirement::Session,
-                "session_control",
-            )?;
+            self.inner
+                .scope
+                .preflight_context(HostContextRequirement::Session, "session_control")?;
         }
         if self
             .inner
@@ -106,10 +92,9 @@ impl ExtensionHost {
         self.inner
             .scope
             .require_grant(ExtensionCapability::SessionHistory, "session_history")?;
-        self.inner.scope.preflight_context(
-            operation::HostContextRequirement::Session,
-            "session_history",
-        )?;
+        self.inner
+            .scope
+            .preflight_context(HostContextRequirement::Session, "session_history")?;
         self.preflight_capability(ExtensionCapability::SessionHistory)?;
         Ok(SessionHistoryClient::new(self.clone()))
     }
@@ -117,7 +102,7 @@ impl ExtensionHost {
     pub fn session_state(&self) -> Result<SessionStateClient, HostError> {
         self.inner
             .scope
-            .preflight_context(operation::HostContextRequirement::Session, "session_state")?;
+            .preflight_context(HostContextRequirement::Session, "session_state")?;
         let available = [
             HostOperation::SessionStateRead,
             HostOperation::SessionStateWrite,
@@ -148,7 +133,7 @@ impl ExtensionHost {
         )?;
         self.inner
             .scope
-            .preflight_context(operation::HostContextRequirement::Workspace, "workspace")?;
+            .preflight_context(HostContextRequirement::Workspace, "workspace")?;
         Ok(WorkspaceClient::new(self.clone()))
     }
 
@@ -158,7 +143,7 @@ impl ExtensionHost {
             .require_grant(ExtensionCapability::ProcessSpawn, "process")?;
         self.inner
             .scope
-            .preflight_context(operation::HostContextRequirement::Workspace, "process")?;
+            .preflight_context(HostContextRequirement::Workspace, "process")?;
         self.preflight(HostOperation::ProcessSpawn)?;
         Ok(ProcessClient::new(self.clone()))
     }
@@ -203,18 +188,6 @@ impl HostClientTransport for ExtensionHost {
         self.inner.invoker.invoke(operation, input).await
     }
 
-    async fn invoke_collected_stream(
-        &self,
-        operation: HostOperation,
-        input: Value,
-    ) -> Result<Value, Self::Error> {
-        self.preflight(operation)?;
-        self.inner
-            .invoker
-            .invoke_collected_stream(operation, input)
-            .await
-    }
-
     async fn invoke_stream(
         &self,
         operation: HostOperation,
@@ -227,6 +200,10 @@ impl HostClientTransport for ExtensionHost {
     fn client_error(code: WireErrorCode, message: String) -> Self::Error {
         HostError::new(code, message)
     }
+
+    fn payload_error(error: astrcode_extension_contract::protocol::ErrorPayload) -> Self::Error {
+        HostError::from(error)
+    }
 }
 
 /// Runtime construction boundary. This module is intentionally absent from author preludes.
@@ -235,13 +212,31 @@ pub mod internal {
     use std::{any::Any, collections::BTreeMap, sync::Arc, time::Duration};
 
     use astrcode_extension_contract::WireErrorCode;
+    pub use astrcode_extension_contract::{
+        HOST_OPERATION_SPECS, HostBackendRequirement, HostOp, HostOperationGroup,
+        HostOperationSpec, operations,
+    };
     use async_trait::async_trait;
     use serde_json::Value;
     use tokio_util::sync::CancellationToken;
 
     use super::{
-        ExtensionCapability, ExtensionHost, ExtensionHostInner, HOST_OPERATION_SPECS, HostError,
-        HostOperation, ModelStream, operation::HostContextRequirement,
+        ExtensionCapability, ExtensionHost, ExtensionHostInner, HostContextRequirement, HostError,
+        HostOperation, ModelStream,
+    };
+    pub use super::{
+        contracts::{
+            llm_chat_request, llm_message_to_wire, llm_messages_from_wire, llm_messages_to_wire,
+        },
+        domain_client::{
+            EventClient as TypedEventClient, ExtensionHttpClient as TypedExtensionHttpClient,
+            HostClientTransport, ModelClient as TypedModelClient,
+            NetworkClient as TypedNetworkClient, ProcessClient as TypedProcessClient,
+            SessionControlClient as TypedSessionControlClient,
+            SessionHistoryClient as TypedSessionHistoryClient,
+            SessionInspectClient as TypedSessionInspectClient,
+            SessionStateClient as TypedSessionStateClient, WorkspaceClient as TypedWorkspaceClient,
+        },
     };
 
     /// Host-only redirect policy used by the outbound-network backend port.
@@ -346,7 +341,7 @@ pub mod internal {
             &self,
             capability: ExtensionCapability,
         ) -> Result<(), HostError> {
-            self.preflight_any_capability(&[capability], crate::s5r::capability_to_wire(capability))
+            self.preflight_any_capability(&[capability], capability.as_str())
         }
 
         pub(super) fn is_granted(&self, capability: ExtensionCapability) -> bool {
@@ -396,7 +391,7 @@ pub mod internal {
             if granted.is_empty() {
                 let required = capabilities
                     .iter()
-                    .map(|capability| crate::s5r::capability_to_wire(*capability))
+                    .map(|capability| capability.as_str())
                     .collect::<Vec<_>>()
                     .join(" or ");
                 return Err(HostError::new(
@@ -459,7 +454,7 @@ pub mod internal {
                 WireErrorCode::PermissionDenied,
                 format!(
                     "{target} requires declared capability {}",
-                    crate::s5r::capability_to_wire(capability)
+                    capability.as_str()
                 ),
             ))
         }
@@ -469,27 +464,13 @@ pub mod internal {
     pub trait HostInvoker: Send + Sync {
         async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, HostError>;
 
-        async fn invoke_collected_stream(
-            &self,
-            operation: HostOperation,
-            _input: Value,
-        ) -> Result<Value, HostError> {
-            Err(HostError::new(
-                "stream_unavailable",
-                format!(
-                    "{} transport does not support collected streaming",
-                    operation.wire_name()
-                ),
-            ))
-        }
-
         async fn invoke_stream(
             &self,
             operation: HostOperation,
             _input: Value,
         ) -> Result<ModelStream, HostError> {
             Err(HostError::new(
-                "stream_unavailable",
+                WireErrorCode::Unsupported,
                 format!(
                     "{} transport does not support streaming",
                     operation.wire_name()

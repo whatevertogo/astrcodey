@@ -307,7 +307,7 @@ mod tests {
             _input: Value,
         ) -> Result<Value, HostError> {
             Err(HostError::new(
-                "unexpected_operation",
+                crate::WireErrorCode::InternalError,
                 format!("unexpected operation: {}", operation.wire_name()),
             ))
         }

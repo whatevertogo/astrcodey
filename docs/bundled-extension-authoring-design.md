@@ -675,7 +675,7 @@ destructive capability，并在删除点重新验证所有权和目标路径。
 
 | Client | API | 语义 |
 |---|---|---|
-| `ModelClient` | `main_chat`、`small_chat`、`main_chat_stream`、`small_chat_stream` | main 使用 session active model，small 使用宿主 small model；stream 方法返回完成后的 `HostLlmCollectedStreamOutput`（最终 content、model 和有序 chunks），不是渐进式 Rust `Stream`。 |
+| `ModelClient` | `main_chat`、`small_chat`、`*_chat_events`、`*_chat_collected` | main 使用 session active model，small 使用宿主 small model；events 方法返回渐进式 `ModelStream`，collected 方法返回最终 content、model 和有序 chunks。 |
 | `WorkspaceClient` | `read`、`list`、`grep`、`glob`、`write`、`edit` | 所有路径相对规范化 working dir；拒绝越界、symlink 和敏感路径；写操作重新校验目标。 |
 | `ProcessClient` | `spawn` | 总超时包含排队；cwd 在 workspace 内；进程执行不是 OS sandbox。 |
 | `NetworkClient` | `send` | 仅 HTTP(S)，拒绝本机、内网和链路本地目标；body 在作者 API 中是原始字节，线缆使用 base64。`max_bytes <= 10 MiB`，`timeout_ms` 为 `1..=60_000`；`Manual` 返回受大小限制的原始 3xx body。 |
@@ -685,7 +685,7 @@ bundled adapter 可以直接调用内部 trait；worker adapter 将同一请求/
 两者共享领域方法名、错误 code 和验收测试，但不强求共享具体 transport 类型。
 worker 从 `HostClient::models()` / `session_control()` / `session_history()` / `session_inspect()` /
 `workspace()` / `process()` / `network()` / `extension_http()` 取得对应领域 client；raw
-`HostApi` 只在 `worker::testing` 作为可注入 transport seam。
+`HostApi` 只在 `astrcode_extension_worker::testing` 作为可注入 transport seam。
 
 当前统一 invoker 的流式入口是 collected stream：宿主收集有序 delta 后一次返回。真正的渐进式
 author-facing stream 是未来演进项；不能把当前返回值描述为边生成边交付。
@@ -1018,7 +1018,9 @@ compatibility 层。
   [`lifecycle.rs`](../crates/astrcode-extension-sdk/src/extension/lifecycle.rs)、
   [`call_context.rs`](../crates/astrcode-extension-sdk/src/extension/call_context.rs) 与
   [`host/`](../crates/astrcode-extension-sdk/src/host/)
-- 当前 bundled/worker prelude：[`lib.rs`](../crates/astrcode-extension-sdk/src/lib.rs)
+- 当前 bundled/worker prelude：[`sdk/src/lib.rs`](../crates/astrcode-extension-sdk/src/lib.rs)
+  （bundled `prelude`）与 [`worker/src/lib.rs`](../crates/astrcode-extension-worker/src/lib.rs)
+  （`worker_prelude`）
 - 当前 Registrar：
   [`registrar.rs`](../crates/astrcode-extension-sdk/src/extension/registrar.rs)
 - 当前 handler contexts：
@@ -1030,7 +1032,7 @@ compatibility 层。
 - 当前 registration validation：
   [`registration.rs`](../crates/astrcode-extensions/src/runner/registration.rs)
 - 当前 S5R runtime：[`s5r_ext/`](../crates/astrcode-extensions/src/s5r_ext/) 与
-  [`runtime/`](../crates/astrcode-extension-sdk/src/runtime/)
+  [`astrcode-extension-contract/src/`](../crates/astrcode-extension-contract/src/)
 
 Vvbot 参考锚点：
 

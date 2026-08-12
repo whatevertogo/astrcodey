@@ -6,8 +6,8 @@ use astrcode_core::llm::{LlmError, LlmEvent, LlmMessage, LlmProvider};
 use astrcode_extension_contract::{ModelEventStream, WireErrorCode, protocol::ModelStreamEvent};
 use astrcode_extension_sdk::{
     host::{
-        HostLlmChatOutput, HostLlmChatRequest, HostOperation, HostOperationGroup,
-        llm_messages_from_wire,
+        HostLlmChatOutput, HostLlmChatRequest, HostOperation,
+        internal::{HostOperationGroup, llm_messages_from_wire},
     },
     s5r::ErrorPayload,
 };

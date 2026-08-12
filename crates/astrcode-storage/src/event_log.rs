@@ -14,7 +14,9 @@ use std::{
 };
 
 use astrcode_core::event::{DurableEvent, DurableEventPayload, StoredEvent};
-use astrcode_session_projection::{SessionSummary, SessionSummaryProjection};
+use astrcode_session_projection::{
+    PreparedProjectionBatch, SessionSummary, SessionSummaryProjection,
+};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::StorageError;
@@ -271,6 +273,10 @@ enum WriteCommand {
         events: Vec<DurableEvent>,
         done: oneshot::Sender<Result<Vec<StoredEvent>, StorageError>>,
     },
+    AppendPreparedBatch {
+        batch: PreparedProjectionBatch,
+        done: oneshot::Sender<Result<PreparedProjectionBatch, StorageError>>,
+    },
     FlushSync {
         done: oneshot::Sender<Result<(), StorageError>>,
     },
@@ -323,9 +329,34 @@ impl WriterState {
         }
 
         let mut stored_events = Vec::with_capacity(events.len());
+        let mut next_seq = self.next_seq;
+        for event in events {
+            stored_events.push(StoredEvent::new(next_seq, event));
+            next_seq = next_seq.checked_add(1).ok_or_else(|| {
+                StorageError::CorruptLog("session event sequence overflow".into())
+            })?;
+        }
+
+        self.append_stored_batch(&stored_events)?;
+        Ok(stored_events)
+    }
+
+    fn append_stored_batch(&mut self, events: &[StoredEvent]) -> Result<(), StorageError> {
+        if events.is_empty() {
+            return Err(StorageError::InvalidEvent(
+                "event log batch cannot be empty".into(),
+            ));
+        }
+
         let mut encoded = Vec::new();
         let mut next_seq = self.next_seq;
         for event in events {
+            if event.seq != next_seq {
+                return Err(StorageError::InvalidEvent(format!(
+                    "event log expected seq {next_seq}, got {}",
+                    event.seq
+                )));
+            }
             if event.session_id != self.session_id {
                 return Err(StorageError::InvalidEvent(format!(
                     "cannot append event for session {} to log for {}",
@@ -337,19 +368,16 @@ impl WriterState {
                     "SessionStarted may only be written while creating a log".into(),
                 ));
             }
-            let stored = StoredEvent::new(next_seq, event);
-            serde_json::to_writer(&mut encoded, &stored)?;
+            serde_json::to_writer(&mut encoded, event)?;
             encoded.push(b'\n');
-            stored_events.push(stored);
             next_seq = next_seq.checked_add(1).ok_or_else(|| {
                 StorageError::CorruptLog("session event sequence overflow".into())
             })?;
         }
-
         self.write_committed_record(&encoded)?;
         self.next_seq = next_seq;
         self.dirty = true;
-        Ok(stored_events)
+        Ok(())
     }
 
     fn write_committed_record(&mut self, encoded: &[u8]) -> Result<(), StorageError> {
@@ -425,6 +453,13 @@ fn write_loop(
         match cmd {
             WriteCommand::AppendBatch { events, done } => {
                 let result = state.append_batch(events);
+                if result.is_ok() {
+                    next_seq.store(state.next_seq, Ordering::Release);
+                }
+                let _ = done.send(result);
+            },
+            WriteCommand::AppendPreparedBatch { batch, done } => {
+                let result = state.append_stored_batch(batch.events()).map(|()| batch);
                 if result.is_ok() {
                     next_seq.store(state.next_seq, Ordering::Release);
                 }
@@ -670,6 +705,20 @@ impl EventLog {
             .map_err(|_| StorageError::Io(std::io::Error::other("event log writer dropped")))?
     }
 
+    /// Append a projection-validated batch without rebuilding or cloning its event payloads.
+    pub(crate) async fn append_prepared_batch(
+        &self,
+        batch: PreparedProjectionBatch,
+    ) -> Result<PreparedProjectionBatch, StorageError> {
+        let (done, rx) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::AppendPreparedBatch { batch, done })
+            .await
+            .map_err(|_| StorageError::Io(std::io::Error::other("event log writer closed")))?;
+        rx.await
+            .map_err(|_| StorageError::Io(std::io::Error::other("event log writer dropped")))?
+    }
+
     /// Replay all events from the beginning.
     pub async fn replay_all(&self) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
@@ -697,8 +746,8 @@ impl EventLog {
     }
 
     /// Count total events (lock-free read of the writer thread's seq counter).
-    pub(crate) async fn count(&self) -> Result<usize, StorageError> {
-        Ok(self.next_seq.load(Ordering::Acquire) as usize)
+    pub(crate) async fn count(&self) -> Result<u64, StorageError> {
+        Ok(self.next_seq.load(Ordering::Acquire))
     }
 
     /// Force-fsync the event log if there are pending writes.

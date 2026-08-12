@@ -2,6 +2,8 @@
 //!
 //! EventLog 是唯一事实源；本模块只维护可从事件重建的内部读模型。
 
+use std::sync::Arc;
+
 use astrcode_core::{
     event::{
         DurableEvent, DurableEventPayload, Phase, StoredEvent, TranscriptRewriteReason,
@@ -35,8 +37,26 @@ pub struct SessionSummaryProjection {
     last_seq: u64,
 }
 
+/// A validated projection update that can be applied after its events are durably appended.
+///
+/// The batch retains only its events. Transcript rewrite validation uses a narrow transcript
+/// state, so preparing a batch never clones the complete read model.
+pub struct PreparedProjectionBatch {
+    first_seq: u64,
+    events: Vec<StoredEvent>,
+}
+
+struct TranscriptValidationState {
+    system_prompt: String,
+    messages: Vec<SequencedLlmMessage>,
+}
+
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum ProjectionError {
+    #[error("projection batch cannot be empty")]
+    EmptyBatch,
+    #[error("session event sequence overflow")]
+    SequenceOverflow,
     #[error("session {0} has no SessionStarted event")]
     MissingSessionStarted(SessionId),
     #[error("event belongs to session {actual}, expected {expected}")]
@@ -65,6 +85,101 @@ pub enum ProjectionError {
         expected: String,
         actual: String,
     },
+}
+
+impl PreparedProjectionBatch {
+    pub fn prepare(
+        model: &SessionReadModel,
+        events: Vec<DurableEvent>,
+    ) -> Result<Self, ProjectionError> {
+        if events.is_empty() {
+            return Err(ProjectionError::EmptyBatch);
+        }
+
+        let first_seq = model
+            .stats
+            .last_seq
+            .checked_add(1)
+            .ok_or(ProjectionError::SequenceOverflow)?;
+        let mut stored_events = Vec::with_capacity(events.len());
+        for (index, event) in events.into_iter().enumerate() {
+            let offset = u64::try_from(index).map_err(|_| ProjectionError::SequenceOverflow)?;
+            let seq = first_seq
+                .checked_add(offset)
+                .ok_or(ProjectionError::SequenceOverflow)?;
+            stored_events.push(StoredEvent::new(seq, event));
+        }
+
+        let mut transcript = stored_events
+            .iter()
+            .any(|event| {
+                matches!(
+                    event.payload,
+                    DurableEventPayload::TranscriptRewritten { .. }
+                )
+            })
+            .then(|| TranscriptValidationState::from_model(model));
+
+        let mut current_seq = model.stats.last_seq;
+        for event in &stored_events {
+            validate_next_event_details(
+                event.seq,
+                &event.event,
+                &model.identity.session_id,
+                current_seq,
+            )?;
+            if let Some(transcript) = transcript.as_mut() {
+                transcript.validate_and_apply(event)?;
+            }
+            current_seq = event.seq;
+        }
+
+        Ok(Self {
+            first_seq,
+            events: stored_events,
+        })
+    }
+
+    pub const fn first_seq(&self) -> u64 {
+        self.first_seq
+    }
+
+    pub fn events(&self) -> &[StoredEvent] {
+        &self.events
+    }
+
+    /// Applies a batch already committed to the event log.
+    pub fn apply(self, model: &mut Arc<SessionReadModel>) -> Vec<StoredEvent> {
+        let model = Arc::make_mut(model);
+        self.apply_to_model(model)
+    }
+
+    /// Applies a batch to an exclusively owned projection.
+    pub fn apply_to_model(self, model: &mut SessionReadModel) -> Vec<StoredEvent> {
+        for event in &self.events {
+            apply_validated_event(event, model);
+        }
+        self.events
+    }
+}
+
+impl TranscriptValidationState {
+    fn from_model(model: &SessionReadModel) -> Self {
+        Self {
+            system_prompt: model.system_prompt.text.clone(),
+            messages: model.transcript.messages.clone(),
+        }
+    }
+
+    fn validate_and_apply(&mut self, event: &StoredEvent) -> Result<(), ProjectionError> {
+        validate_transcript_rewrite_fingerprint_against(
+            &event.event,
+            &self.system_prompt,
+            &self.messages,
+        )?;
+        apply_provider_transcript_event(event, &mut self.system_prompt, &mut self.messages);
+        Ok(())
+    }
 }
 
 impl SessionReadModelProjection {
@@ -190,16 +305,24 @@ pub fn replay(
 pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), ProjectionError> {
     validate_next_event(event.seq, &event.event, model)?;
 
+    apply_validated_event(event, model);
+    Ok(())
+}
+
+fn apply_validated_event(event: &StoredEvent, model: &mut SessionReadModel) {
     model.stats.last_seq = event.seq;
     model.stats.updated_at = event.timestamp;
     model.stats.event_count += 1;
     let event_seq = event.seq;
     apply_execution_event(event, &mut model.execution);
+    apply_provider_transcript_event(
+        event,
+        &mut model.system_prompt.text,
+        &mut model.transcript.messages,
+    );
 
     match &event.payload {
-        DurableEventPayload::SessionStarted(_) => {
-            return Err(ProjectionError::DuplicateSessionStarted(event.seq));
-        },
+        DurableEventPayload::SessionStarted(_) => {},
         DurableEventPayload::ModelIdChanged { model_id } => {
             model.identity.model_id = model_id.clone();
             model.context_usage = None;
@@ -264,12 +387,11 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                 .retain(|l| l.child_session_id != *child_session_id);
         },
         DurableEventPayload::SystemPromptConfigured {
-            text,
             fingerprint,
             extra_system_prompt,
             source,
+            ..
         } => {
-            model.system_prompt.text = text.clone();
             model.system_prompt.extra = extra_system_prompt.clone();
             model.system_prompt.fingerprint = fingerprint.clone();
             model.system_prompt.source = *source;
@@ -283,10 +405,7 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
         },
         DurableEventPayload::TurnStarted | DurableEventPayload::UserMessage { .. } => {
             if let DurableEventPayload::UserMessage {
-                text,
-                attachments,
-                accepted_seq,
-                ..
+                text, accepted_seq, ..
             } = &event.payload
             {
                 if let Some(accepted_seq) = accepted_seq {
@@ -298,122 +417,24 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
                 if model.transcript.first_user_message.is_none() {
                     model.transcript.first_user_message = Some(text.clone());
                 }
-                model.transcript.messages.push(SequencedLlmMessage::plain(
-                    LlmMessage::user_with_attachments(text, attachments),
-                    event_seq,
-                ));
             }
         },
         DurableEventPayload::TurnCompleted { .. } => {},
-        DurableEventPayload::TurnAbortedContext => {
-            model.transcript.messages.push(SequencedLlmMessage {
-                message: turn_aborted_context_message(),
-                updated_seq: event_seq,
-                source: Some(TURN_ABORTED_SOURCE.into()),
-            });
-        },
-        DurableEventPayload::AssistantMessageCompleted {
-            text,
-            reasoning_content,
-            ..
-        } => {
-            let mut msg = LlmMessage::assistant(text);
-            msg.reasoning_content = reasoning_content.clone();
-            model
-                .transcript
-                .messages
-                .push(SequencedLlmMessage::plain(msg, event_seq));
-        },
-        DurableEventPayload::ToolCallRequested {
-            call_id,
-            tool_name,
-            arguments,
-            raw_arguments,
-        } => {
-            let tool_call = LlmContent::ToolCall {
-                call_id: call_id.to_string(),
-                name: tool_name.clone(),
-                arguments: arguments.clone(),
-                raw_arguments: raw_arguments.clone(),
-            };
-            // Merge into the previous assistant message for this model sub-turn.
-            // DeepSeek thinking mode requires reasoning_content and tool_calls to
-            // be replayed on the same assistant message after tool use.
-            match model.transcript.messages.last_mut() {
-                Some(last) if last.message.role == LlmRole::Assistant => {
-                    last.message.content.push(tool_call);
-                    last.updated_seq = event_seq;
-                },
-                _ => {
-                    model.transcript.messages.push(SequencedLlmMessage::plain(
-                        LlmMessage {
-                            role: LlmRole::Assistant,
-                            content: vec![tool_call],
-                            name: None,
-                            reasoning_content: None,
-                        },
-                        event_seq,
-                    ));
-                },
-            }
-        },
+        DurableEventPayload::TurnAbortedContext
+        | DurableEventPayload::AssistantMessageCompleted { .. }
+        | DurableEventPayload::ToolCallRequested { .. } => {},
         DurableEventPayload::ToolApprovalRequested { .. }
         | DurableEventPayload::ToolApprovalResolved { .. } => {},
-        DurableEventPayload::ToolCallCompleted {
-            call_id,
-            tool_name,
-            result,
-            ..
-        } => {
-            apply_tool_terminal(
-                model,
-                call_id,
-                tool_name,
-                result.content.clone(),
-                result.is_error,
-                None,
-                event_seq,
-            );
-        },
-        DurableEventPayload::ToolCallFailed {
-            call_id,
-            tool_name,
-            error,
-            ..
-        } => {
-            apply_tool_terminal(
-                model,
-                call_id,
-                tool_name,
-                error.clone(),
-                true,
-                Some(TOOL_CALL_FAILED_SOURCE),
-                event_seq,
-            );
-        },
-        DurableEventPayload::ToolCallCancelled {
-            call_id,
-            tool_name,
-            reason,
-            ..
-        } => {
-            apply_tool_terminal(
-                model,
-                call_id,
-                tool_name,
-                format!("Tool cancelled: {reason}"),
-                true,
-                Some(TOOL_CALL_CANCELLED_SOURCE),
-                event_seq,
-            );
-        },
+        DurableEventPayload::ToolCallCompleted { .. }
+        | DurableEventPayload::ToolCallFailed { .. }
+        | DurableEventPayload::ToolCallCancelled { .. } => {},
         DurableEventPayload::TranscriptRewritten {
-            source_seq,
-            messages,
-            reason,
-            ..
+            source_seq, reason, ..
         } => {
-            apply_transcript_rewrite(model, messages, *source_seq);
+            model
+                .transcript
+                .artifacts
+                .retain(|artifact| artifact.seq() > *source_seq);
             model.context_usage = None;
             match reason {
                 TranscriptRewriteReason::Compaction(details) => {
@@ -434,18 +455,13 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
             source_session_id,
             source_cursor,
             first_user_message,
-            messages,
+            ..
         } => {
             model.identity.forked_from = Some(ForkSourceRef {
                 session_id: source_session_id.clone(),
                 cursor: source_cursor.clone(),
             });
             model.transcript.first_user_message = first_user_message.clone();
-            model.transcript.messages = messages
-                .iter()
-                .cloned()
-                .map(|message| SequencedLlmMessage::plain(message, event_seq))
-                .collect();
             model.context_usage = None;
         },
         DurableEventPayload::ErrorOccurred { message, .. } => {
@@ -485,21 +501,137 @@ pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), P
         },
         DurableEventPayload::CustomEvent(_) => {},
     }
-    Ok(())
+}
+
+fn apply_provider_transcript_event(
+    event: &StoredEvent,
+    system_prompt: &mut String,
+    messages: &mut Vec<SequencedLlmMessage>,
+) {
+    let event_seq = event.seq;
+    match &event.payload {
+        DurableEventPayload::SystemPromptConfigured { text, .. } => {
+            text.clone_into(system_prompt);
+        },
+        DurableEventPayload::UserMessage {
+            text, attachments, ..
+        } => messages.push(SequencedLlmMessage::plain(
+            LlmMessage::user_with_attachments(text, attachments),
+            event_seq,
+        )),
+        DurableEventPayload::TurnAbortedContext => messages.push(SequencedLlmMessage {
+            message: turn_aborted_context_message(),
+            updated_seq: event_seq,
+            source: Some(TURN_ABORTED_SOURCE.into()),
+        }),
+        DurableEventPayload::AssistantMessageCompleted {
+            text,
+            reasoning_content,
+            ..
+        } => {
+            let mut message = LlmMessage::assistant(text);
+            message.reasoning_content = reasoning_content.clone();
+            messages.push(SequencedLlmMessage::plain(message, event_seq));
+        },
+        DurableEventPayload::ToolCallRequested {
+            call_id,
+            tool_name,
+            arguments,
+            raw_arguments,
+        } => {
+            let tool_call = LlmContent::ToolCall {
+                call_id: call_id.to_string(),
+                name: tool_name.clone(),
+                arguments: arguments.clone(),
+                raw_arguments: raw_arguments.clone(),
+            };
+            // DeepSeek thinking mode requires reasoning and tool calls to remain on one message.
+            match messages.last_mut() {
+                Some(last) if last.message.role == LlmRole::Assistant => {
+                    last.message.content.push(tool_call);
+                    last.updated_seq = event_seq;
+                },
+                _ => messages.push(SequencedLlmMessage::plain(
+                    LlmMessage {
+                        role: LlmRole::Assistant,
+                        content: vec![tool_call],
+                        name: None,
+                        reasoning_content: None,
+                    },
+                    event_seq,
+                )),
+            }
+        },
+        DurableEventPayload::ToolCallCompleted {
+            call_id,
+            tool_name,
+            result,
+            ..
+        } => apply_tool_terminal(
+            messages,
+            call_id,
+            tool_name,
+            result.content.clone(),
+            result.is_error,
+            None,
+            event_seq,
+        ),
+        DurableEventPayload::ToolCallFailed {
+            call_id,
+            tool_name,
+            error,
+            ..
+        } => apply_tool_terminal(
+            messages,
+            call_id,
+            tool_name,
+            error.clone(),
+            true,
+            Some(TOOL_CALL_FAILED_SOURCE),
+            event_seq,
+        ),
+        DurableEventPayload::ToolCallCancelled {
+            call_id,
+            tool_name,
+            reason,
+            ..
+        } => apply_tool_terminal(
+            messages,
+            call_id,
+            tool_name,
+            format!("Tool cancelled: {reason}"),
+            true,
+            Some(TOOL_CALL_CANCELLED_SOURCE),
+            event_seq,
+        ),
+        DurableEventPayload::TranscriptRewritten {
+            source_seq,
+            messages: rewritten,
+            ..
+        } => apply_transcript_rewrite(messages, rewritten, *source_seq),
+        DurableEventPayload::SessionForked {
+            messages: forked, ..
+        } => {
+            *messages = forked
+                .iter()
+                .cloned()
+                .map(|message| SequencedLlmMessage::plain(message, event_seq))
+                .collect();
+        },
+        _ => {},
+    }
 }
 
 fn apply_transcript_rewrite(
-    model: &mut SessionReadModel,
-    messages: &[LlmMessage],
+    current: &mut Vec<SequencedLlmMessage>,
+    rewritten: &[LlmMessage],
     source_seq: u64,
 ) {
-    let tail = model
-        .transcript
-        .messages
+    let tail = current
         .iter()
         .filter(|message| message.updated_seq > source_seq)
         .cloned();
-    model.transcript.messages = messages
+    *current = rewritten
         .iter()
         .cloned()
         .map(|message| SequencedLlmMessage {
@@ -511,10 +643,6 @@ fn apply_transcript_rewrite(
         })
         .chain(tail)
         .collect();
-    model
-        .transcript
-        .artifacts
-        .retain(|artifact| artifact.seq() > source_seq);
 }
 
 /// 校验事件能否作为读模型的下一条事实，不修改读模型。
@@ -529,15 +657,26 @@ pub fn validate_next_event(
 
 /// 重写前缀的乐观并发校验：事件携带的指纹必须等于当前读模型前缀的指纹。
 ///
-/// 旧格式事件（`source_fingerprint` 为 `None`）跳过校验；summary projection 没有
-/// transcript，不经过本校验（提交路径走完整读模型的 `validate_next_event`）。
+/// Summary projection 没有 transcript，不经过本校验；提交路径必须走完整读模型。
 fn validate_transcript_rewrite_fingerprint(
     event: &DurableEvent,
     model: &SessionReadModel,
 ) -> Result<(), ProjectionError> {
+    validate_transcript_rewrite_fingerprint_against(
+        event,
+        &model.system_prompt.text,
+        &model.transcript.messages,
+    )
+}
+
+fn validate_transcript_rewrite_fingerprint_against(
+    event: &DurableEvent,
+    system_prompt: &str,
+    messages: &[SequencedLlmMessage],
+) -> Result<(), ProjectionError> {
     let DurableEventPayload::TranscriptRewritten {
         source_seq,
-        source_fingerprint: Some(expected),
+        source_fingerprint: expected,
         ..
     } = &event.payload
     else {
@@ -545,15 +684,13 @@ fn validate_transcript_rewrite_fingerprint(
     };
     // 与 `apply_transcript_rewrite` 的 tail 划分互逆：前缀 = `updated_seq <= source_seq`。
     let prefix = provider_transcript(
-        model
-            .transcript
-            .messages
+        messages
             .iter()
             .filter(|message| message.updated_seq <= *source_seq)
             .map(|message| message.message.clone())
             .collect(),
     );
-    let actual = transcript_prefix_fingerprint(&model.system_prompt.text, &prefix);
+    let actual = transcript_prefix_fingerprint(system_prompt, &prefix);
     if actual != *expected {
         return Err(
             ProjectionError::TranscriptRewriteSourceFingerprintMismatch {
@@ -680,7 +817,7 @@ fn apply_execution_event(event: &StoredEvent, execution: &mut SessionExecutionSt
 }
 
 fn apply_tool_terminal(
-    model: &mut SessionReadModel,
+    messages: &mut Vec<SequencedLlmMessage>,
     call_id: &astrcode_core::types::ToolCallId,
     tool_name: &str,
     content: String,
@@ -688,7 +825,7 @@ fn apply_tool_terminal(
     source: Option<&str>,
     event_seq: u64,
 ) {
-    model.transcript.messages.push(SequencedLlmMessage {
+    messages.push(SequencedLlmMessage {
         message: LlmMessage {
             role: LlmRole::Tool,
             content: vec![LlmContent::ToolResult {

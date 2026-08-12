@@ -28,7 +28,7 @@ impl WireError for LlmError {
         match self {
             Self::InvalidApiKey { .. } => WireErrorCode::InvalidApiKey,
             Self::ModelNotFound { .. } => WireErrorCode::ModelNotFound,
-            Self::InvalidParameter { .. } => WireErrorCode::InvalidParameter,
+            Self::InvalidParameter { .. } => WireErrorCode::InvalidInput,
             Self::QuotaExceeded { .. } => WireErrorCode::QuotaExceeded,
             Self::ContextWindowExceeded { .. } => WireErrorCode::ContextWindowExceeded,
             Self::RateLimited { .. } => WireErrorCode::RateLimited,

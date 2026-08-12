@@ -548,6 +548,74 @@ The summary should preserve the compact contract and omit this scratchpad later.
     }
 
     #[test]
+    fn summary_formatting_and_message_round_trip_strip_scratchpad_markup() {
+        let formatted = format_compact_summary(
+            r#"
+<analysis>
+scratchpad that should not survive
+</analysis>
+
+<summary>
+1. Primary Request and Intent:
+   migrate context-window
+</summary>
+"#,
+        );
+        assert_eq!(
+            formatted,
+            "Summary:\n1. Primary Request and Intent:\n   migrate context-window"
+        );
+        assert!(!formatted.contains("<analysis>"));
+        assert!(!formatted.contains("<summary>"));
+
+        let message = assemble::compact_summary_message_text(
+            "1. Primary Request and Intent:\n   keep user intent",
+            &CompactSummaryRenderOptions {
+                transcript_path: Some("C:\\Users\\18794\\.astrcode\\compact.jsonl".into()),
+                custom_instructions: Vec::new(),
+            },
+        );
+        assert!(message.starts_with("<compact_summary>\nThis session is being continued"));
+        assert!(message.contains("Resume directly: do not acknowledge this summary"));
+        assert!(message.contains("read the full transcript at C:\\Users\\18794"));
+        assert_eq!(
+            parse_compact_summary_message(&message).unwrap().summary,
+            "1. Primary Request and Intent:\n   keep user intent"
+        );
+    }
+
+    #[test]
+    fn compact_prompts_keep_the_required_analysis_and_summary_contract() {
+        let settings = ContextSettings::default();
+        let prompt = prompt::render_compact_contract(
+            Some("system prompt"),
+            &plan::CompactPromptMode::Fresh,
+            &settings,
+            None,
+            &[],
+        );
+        for section in parse::REQUIRED_SUMMARY_SECTIONS {
+            assert!(prompt.contains(section), "missing {section}");
+        }
+        assert!(prompt.contains("<summary>"));
+        assert!(prompt.contains("<analysis>"));
+        assert!(prompt.contains("scratchpad"));
+        assert!(!prompt.contains("<recent_user_context_digest>"));
+
+        let repair = prompt::render_compact_contract(
+            None,
+            &plan::CompactPromptMode::Fresh,
+            &settings,
+            Some("missing section"),
+            &[],
+        );
+        assert!(
+            repair.contains("Return one <analysis> scratchpad block followed by the <summary>")
+        );
+        assert!(!repair.contains("Return the <summary> block exactly"));
+    }
+
+    #[test]
     fn compact_keeps_recent_user_turns_and_builds_context_message() {
         let messages = vec![
             LlmMessage::user("old one"),

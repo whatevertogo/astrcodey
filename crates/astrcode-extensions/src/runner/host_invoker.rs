@@ -4,14 +4,13 @@ use std::{
 };
 
 use astrcode_core::{event::EventSender, tool::SessionOperations, types::SessionId};
-use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::{
         CustomEventDeclaration, ExtensionCallContext, ExtensionCapability, ExtensionError,
         ExtensionPaths, ExtensionTasks, RuntimeHookCallContext, internal::custom_event_emitter,
     },
     host::{
-        ExtensionHost, HostError, HostOperation, collect_model_stream,
+        ExtensionHost, HostError, HostOperation,
         internal::{HostInvoker, HostScope, extension_host},
     },
     model_stream::ModelStream,
@@ -119,6 +118,8 @@ impl ExtensionCallContextFactory {
                     | ExtensionCapability::InputDelivery
             )
         }) {
+            // 不变式：锁保护的 Option<Arc> 只在绑定时单次赋值，赋值本身不会 panic，
+            // 因此 poison 不可能留下不一致状态，直接取回内部值是安全的。
             self.session_ops
                 .read()
                 .unwrap_or_else(|error| error.into_inner())
@@ -266,27 +267,6 @@ impl HostInvoker for RouterHostInvoker {
             .map_err(HostError::from)
     }
 
-    async fn invoke_collected_stream(
-        &self,
-        operation: HostOperation,
-        input: Value,
-    ) -> Result<Value, HostError> {
-        let events = self
-            .router
-            .invoke_event_stream(operation.wire_name(), input, &self.invoke_context)
-            .await
-            .map_err(HostError::from)?;
-        let collected = collect_model_stream(events)
-            .await
-            .map_err(HostError::from)?;
-        serde_json::to_value(collected).map_err(|error| {
-            HostError::new(
-                WireErrorCode::SerializationFailed,
-                format!("serialize collected host stream: {error}"),
-            )
-        })
-    }
-
     async fn invoke_stream(
         &self,
         operation: HostOperation,
@@ -320,6 +300,7 @@ mod tests {
     use std::time::Duration;
 
     use astrcode_core::llm::{LlmEvent, LlmMessage, LlmProvider, ModelLimits};
+    use astrcode_extension_contract::WireErrorCode;
 
     use super::*;
     use crate::host_router::HostBackends;
@@ -423,9 +404,9 @@ mod tests {
                 ..Default::default()
             },
         };
-        let input = serde_json::to_value(astrcode_extension_sdk::host::llm_chat_request(vec![
-            LlmMessage::user("hello"),
-        ]))
+        let input = serde_json::to_value(astrcode_extension_sdk::host::internal::llm_chat_request(
+            vec![LlmMessage::user("hello")],
+        ))
         .unwrap();
 
         let result = tokio::time::timeout(

@@ -12,10 +12,10 @@ use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     host::{
         HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS, HostNetworkRedirectPolicy,
-        HostNetworkRequest, HostNetworkResponse, HostOperation, HostOperationGroup,
+        HostNetworkRequest, HostNetworkResponse, HostOperation,
         internal::{
-            NetworkRedirectPolicy, OutboundNetworkError, OutboundNetworkRequest,
-            OutboundNetworkResponse, OutboundNetworkService,
+            HostOperationGroup, NetworkRedirectPolicy, OutboundNetworkError,
+            OutboundNetworkRequest, OutboundNetworkResponse, OutboundNetworkService,
         },
     },
     s5r::ErrorPayload,

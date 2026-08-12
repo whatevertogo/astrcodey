@@ -1,13 +1,7 @@
 //! LLM 宿主能力线缆契约。
 
-use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-
-use crate::{
-    error::WireErrorCode,
-    protocol::{ErrorPayload, ModelStreamEvent},
-};
 
 /// Typed request shared by bundled and worker model clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -74,73 +68,4 @@ pub struct HostLlmMessage {
 pub struct HostLlmChatOutput {
     pub content: String,
     pub model: String,
-}
-
-/// One ordered text delta emitted by a model stream.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct HostLlmTextDelta {
-    pub delta: String,
-}
-
-/// Collected model stream returned after generation completes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct HostLlmCollectedStreamOutput {
-    pub content: String,
-    pub model: String,
-    pub chunks: Vec<HostLlmTextDelta>,
-}
-
-fn collect_model_stream_output(
-    completed: &Value,
-    chunks: Vec<HostLlmTextDelta>,
-) -> Result<HostLlmCollectedStreamOutput, ErrorPayload> {
-    let model = completed
-        .get("model")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            ErrorPayload::new(
-                WireErrorCode::InvalidResponse,
-                "completed model stream is missing string field `model`",
-            )
-        })?
-        .to_owned();
-    let content = completed
-        .get("content")
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| chunks.iter().map(|chunk| chunk.delta.as_str()).collect());
-    Ok(HostLlmCollectedStreamOutput {
-        content,
-        model,
-        chunks,
-    })
-}
-
-/// Collects a model event stream into the typed response used by host clients.
-#[doc(hidden)]
-pub async fn collect_model_stream<S>(
-    mut stream: S,
-) -> Result<HostLlmCollectedStreamOutput, ErrorPayload>
-where
-    S: Stream<Item = ModelStreamEvent> + Unpin,
-{
-    let mut chunks = Vec::new();
-    while let Some(event) = stream.next().await {
-        match event {
-            ModelStreamEvent::ContentDelta { content } => {
-                chunks.push(HostLlmTextDelta { delta: content });
-            },
-            ModelStreamEvent::Completed { output } => {
-                return collect_model_stream_output(&output, chunks);
-            },
-            ModelStreamEvent::Failed { error } => return Err(error),
-            _ => {},
-        }
-    }
-    Err(ErrorPayload::new(
-        WireErrorCode::StreamClosed,
-        "model stream closed without a terminal event",
-    ))
 }
