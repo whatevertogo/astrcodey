@@ -88,7 +88,8 @@ pub enum DurableEventPayload {
         fingerprint: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         extra_system_prompt: Option<String>,
-        #[serde(skip_serializing_if = "SystemPromptSource::is_native")]
+        // `default` 兼容旧日志：Native 是默认来源，序列化时被省略，缺失等价于 Native。
+        #[serde(default, skip_serializing_if = "SystemPromptSource::is_native")]
         source: SystemPromptSource,
     },
     AgentSessionSpawned {
@@ -177,7 +178,8 @@ pub enum DurableEventPayload {
         call_id: ToolCallId,
         tool_name: String,
         error: String,
-        #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+        // `default` 兼容旧日志：空 metadata 序列化时被省略，反序列化时缺失等价于空 map。
+        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         metadata: std::collections::BTreeMap<String, serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
@@ -299,5 +301,36 @@ mod tests {
         let json = serde_json::to_string(&payload).unwrap();
         assert!(json.contains(r#""type":"custom_event""#));
         assert!(!json.contains("causation_id"));
+    }
+
+    #[test]
+    fn tool_call_failed_accepts_missing_empty_metadata() {
+        // 旧日志写入时空 metadata 被省略；缺失必须等价于空 map，否则整个会话无法重放。
+        let json = r#"{"type":"tool_call_failed","call_id":"c1","tool_name":"t","error":"boom","arguments":"{}"}"#;
+        let payload = serde_json::from_str::<DurableEventPayload>(json).unwrap();
+        let DurableEventPayload::ToolCallFailed { ref metadata, .. } = payload else {
+            panic!("expected tool_call_failed");
+        };
+        assert!(metadata.is_empty());
+
+        // 写读往返：空 metadata 序列化时省略，再读回仍为空 map。
+        let roundtrip = serde_json::to_string(&payload).unwrap();
+        assert!(!roundtrip.contains("metadata"));
+        let payload = serde_json::from_str::<DurableEventPayload>(&roundtrip).unwrap();
+        let DurableEventPayload::ToolCallFailed { metadata, .. } = payload else {
+            panic!("expected tool_call_failed");
+        };
+        assert!(metadata.is_empty());
+    }
+
+    #[test]
+    fn system_prompt_configured_accepts_missing_native_source() {
+        // 旧日志写入 Native 来源时省略 source 字段；缺失必须等价于 Native。
+        let json = r#"{"type":"system_prompt_configured","text":"hi","fingerprint":"fp"}"#;
+        let payload = serde_json::from_str::<DurableEventPayload>(json).unwrap();
+        let DurableEventPayload::SystemPromptConfigured { source, .. } = payload else {
+            panic!("expected system_prompt_configured");
+        };
+        assert_eq!(source, SystemPromptSource::Native);
     }
 }
