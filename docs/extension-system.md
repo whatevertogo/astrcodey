@@ -30,7 +30,7 @@
 | `astrcode-extensions::s5r_ext` | `S5rExtension`、Peer 会话、宿主 `invoke` 路由 |
 | `astrcode-extensions::host_router` | 唯一 `astrcode.*` 宿主能力实现 |
 | `astrcode-extensions::runner` | 统一运行时 manifest、registration 校验、索引发布与生命周期 |
-| `astrcode-extensions::remote_manifest` | 内部 s5r 握手适配与 `HandlerResult` 解析 |
+| `astrcode-extensions::extension_manifest` / `s5r_handler` | typed S5R manifest 规范化与 handler 返回值解析 |
 | `astrcode-extension-sdk::s5r` | contract 协议类型的作者向 re-export 和 `HandlerResult` 领域转换 |
 | `astrcode-extension-contract` | S5R wire DTO、稳定错误码（`WireErrorCode`）、宿主操作 catalog |
 | `astrcode-extension-contract::{peer, peer_runtime, frame}` | `Peer` 握手状态机、帧传输、取消、流式 |
@@ -241,7 +241,7 @@ async fn bundled_extension_uses_the_real_authoring_boundaries() {
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `extension_id` | 是 | 启动进程前确定的权威扩展 ID；必须与 S5R 握手 ID 一致 |
+| `extension_id` | 是 | 启动进程前确定的权威扩展 ID；Host 在 Initialize 中指定，Worker 必须确认一致 |
 | `protocol.s5r` | 是 | `"3.0"` |
 | `command` | 是 | 字符串数组：`[可执行文件, ...参数]` |
 | `env` | 否 | 额外环境变量 |
@@ -256,10 +256,10 @@ async fn bundled_extension_uses_the_real_authoring_boundaries() {
 
 ### 4.3 握手与调用
 
-1. 宿主启动子进程后发送 `Initialize`，声明 supported/required feature 与授权的宿主能力
-2. `Worker::run_stdio()` 回复 `kind = "initialize"` 的 `result` 消息（注册 manifest 在 `metadata`，类型由 `astrcode-extension-contract::manifest` 拥有）
-3. 宿主经 `handler.invoke` 调用工具 / 命令 / 钩子
-4. 子进程经 `astrcode.*` `invoke` 调用宿主能力（可 `stream: true`）
+1. 宿主启动子进程后发送 `Initialize`，声明预期扩展 ID、feature 与完整 Host operation 支持目录
+2. `Worker::run_stdio()` 返回 Worker 身份、协商 feature 和严格类型的 `InitializeManifest`
+3. 宿主完成 Registrar 校验及跨扩展冲突检查后发送 `Activate`，Worker 回复 Ready
+4. Ready 后宿主经 `handler.invoke` 调用工具 / 命令 / 钩子，子进程经 `astrcode.*` 调用宿主
 
 S5R 消息和 session host-operation DTO 的字段统一使用 `snake_case`。面向 HTTP/前端的 DTO
 可在其独立边界使用 `camelCase`，不得把该命名约定带回 S5R payload。
@@ -269,7 +269,7 @@ S5R 消息和 session host-operation DTO 的字段统一使用 `snake_case`。�
 未协商 `model_stream_v1` 的流式调用返回 `unsupported_feature`；声明 custom event 或
 subscription 却未协商 `custom_event_v1` 的 manifest 在发布注册前被拒绝。在 handler 作用域内发起的
 嵌套 invoke 会携带父请求 ID，宿主据此恢复该请求自己的 session、working directory、
-取消令牌和授权上下文。未完成初始化、feature 交集不满足任一方 required 集合、或携带
+取消令牌和授权上下文。未完成激活、feature 交集不满足任一方 required 集合、或携带
 未知父请求的调用都会在边界拒绝。
 handler 自行创建的脱离 Tokio task 不继承 task-local 调用作用域；当前 Worker API 不支持
 这类任务在原 handler 返回后继续使用会话级 HostClient 能力。
@@ -281,9 +281,13 @@ handler 自行创建的脱离 Tokio task 不继承 task-local 调用作用域；
 见 `HostRouter`；除默认 session state API 外，子进程 invoke 的 capability 须以
 `astrcode.` 开头，且 manifest 中已声明对应 capability。
 
-宿主通过单一 capability registry 生成握手 catalog、校验 grant 并选择类型化能力域；
+宿主从唯一的 `HOST_OPERATION_SPECS` 生成握手支持目录，并用同一目录查找、授权和选择类型化能力域；
 LLM、session、context、workspace、process、network 与公开扩展 HTTP 各自持有窄后端并实现行为，
 `HostRouter` 仅负责解析、授权和分发。
+
+握手目录不按 Worker manifest、当前 backend 或调用上下文过滤，只说明当前 Host 版本实现该
+operation。`host_supports == true` 不是授权或可用性承诺；每次调用仍按 manifest capability、
+可信 `InvokeContext` 和 backend 状态逐层检查。
 
 默认可用、无需 manifest capability：
 
@@ -350,7 +354,7 @@ fail-open 的 Advisory，或由宿主管理生命周期的 NonBlocking 通知。
 来源同步分为 discovery 与 load 两阶段。每个候选携带稳定的 `source_key` 和内容
 fingerprint 以及无需启动进程即可读取的权威 extension ID；reconcile 直接保留未变化的运行实例，
 禁用候选不会启动子进程。替换候选只在旧 generation retirement 与 must-finish barrier 完成后
-启动并握手；随后还会校验握手 ID 与包 ID 一致。加载器只加载新增或变更候选，并停止
+启动并初始化；Worker 在响应前校验 Host 指定的 ID，Host 也复核响应身份。加载器只加载新增或变更候选，并停止
 已经消失的来源。磁盘来源的 fingerprint 覆盖 `extension.json`、显式路径命令程序及
 命令中引用的本地文件，因此普通 reload 不会启动未变化的 s5r 子进程。增量完成后 runner 会
 恢复来源顺序，再统一激活新任务，handler 优先级与全量加载保持一致。

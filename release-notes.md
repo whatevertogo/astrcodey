@@ -12,6 +12,12 @@
   S5R session DTO 仍保留在 `astrcode_extension_sdk::session`。
 - S5R 协议升级到 3.0，不兼容 1.0/2.0 worker。磁盘扩展需要迁移握手 manifest、handler context、
   custom event 声明/订阅和 typed host API 后重新构建。
+- S5R 3.0 改为 Host-first 两阶段握手：Host 发送预期扩展 ID 与完整 operation 支持目录，Worker
+  直接返回 typed manifest；Registrar 与跨扩展冲突校验通过后，Host 再发送 `activate`。
+  删除 generic metadata、handler catalog、双向 capability catalog 及旧字段 alias。支持目录只
+  传输由共享 contract 定义的 operation 名，不重复传输描述、能力和流式属性；它表示 Host 版本
+  实现，不代表授权、调用上下文或 backend 可用。Host/Worker 角色由字段位置与类型状态表达，
+  `PeerInfo.role` 已删除。Worker 的取消令牌可读取首个 `cancel.reason`，后续清理不会覆盖原因。
 - custom-event capability 使用 `emit_custom_events` / `consume_custom_events`；模型客户端以
   `*_chat_events` 返回渐进式 `ModelStream`，以 `*_chat_collected` 明确返回完成后的最终内容和
   有序 chunks；删除名称与行为不一致的 `*_chat_stream`。
@@ -23,6 +29,9 @@
   将需要的文件移到新目录。
 - channels 扩展删除 Telegram 配置的 `workingDir`；由于配置严格拒绝未知字段，
   升级前必须删除该字段。工作目录统一由宿主按调用上下文归因。
+- mode 持久化状态不再接受 `currentMode` / `previousMode` /
+  `pendingTransitionContext` 别名；todo 持久化 schema 升级为 v2，条目必须显式包含
+  `executor`。两者均不保留旧格式读取分支。
 - S5R 3.0 完成协议重命名：事件名 `extension_event` 改为 `custom_event`，
   capability `emit_events` / `consume_events` 改为 `emit_custom_events` /
   `consume_custom_events`，wire DTO 同步更名为 `ConversationDeltaDto::CustomEvent`、

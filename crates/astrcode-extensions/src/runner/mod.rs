@@ -161,7 +161,9 @@ pub use diagnostics::{
 pub(crate) use host_invoker::transport_invoke_context;
 use host_invoker::{ExtensionCallContextFactory, ExtensionCallContextInput};
 pub use http::ExtensionHttpDispatchResult;
-use index::{HandlerIndex, build_handler_index, log_handler_dispatch_order};
+use index::{
+    ExtensionGenerationEntry, HandlerIndex, build_handler_index, log_handler_dispatch_order,
+};
 use manifest::ResolvedExtensionManifest;
 use registration::validate_registration_conflicts;
 use retirement::{
@@ -1609,7 +1611,7 @@ impl ExtensionRunner {
         handler: &Arc<dyn CustomEventHandler>,
         session_id: &astrcode_core::types::SessionId,
     ) -> Option<CustomEventConsumer> {
-        let Some(tasks) = view.index.extension_tasks.get(extension_id) else {
+        let Some(generation) = view.index.extensions.get(extension_id) else {
             tracing::warn!(extension_id, "custom event consumer has no task owner");
             return None;
         };
@@ -1619,7 +1621,7 @@ impl ExtensionRunner {
             extension_id: extension_id.to_owned(),
             consumer_id: consumer_id.clone(),
             subscription: subscription.clone(),
-            cancellation: tasks.cancellation().child_token(),
+            cancellation: generation.tasks.cancellation().child_token(),
             handler: Arc::clone(handler),
             metrics: self.custom_event_consumer_metrics(session_id, &consumer_id),
             session_id: session_id.clone(),
@@ -1661,9 +1663,9 @@ impl ExtensionView {
     where
         F: std::future::Future<Output = ()> + Send + 'static,
     {
-        let tasks = self.index.extension_tasks.get(extension_id);
-        if let Some(tasks) = tasks {
-            tasks.spawn(task_name, fut);
+        let generation = self.index.extensions.get(extension_id);
+        if let Some(generation) = generation {
+            generation.tasks.spawn(task_name, fut);
         } else {
             tracing::debug!(
                 extension_id,
@@ -1685,17 +1687,13 @@ impl ExtensionView {
         cancellation: tokio_util::sync::CancellationToken,
         future: impl std::future::Future<Output = Result<T, ExtensionError>>,
     ) -> Result<T, ExtensionError> {
-        let admission = self
-            .index
-            .extension_admission
-            .get(extension_id)
-            .ok_or_else(|| {
-                ExtensionError::NotFound(format!(
-                    "extension {extension_id} generation is no longer available"
-                ))
-            })?;
-        let draining = admission.draining_token();
-        let _admission = admission.acquire().await?;
+        let admission = self.index.extensions.get(extension_id).ok_or_else(|| {
+            ExtensionError::NotFound(format!(
+                "extension {extension_id} generation is no longer available"
+            ))
+        })?;
+        let draining = admission.admission.draining_token();
+        let _admission = admission.admission.acquire().await?;
         let started = std::time::Instant::now();
         let future = tokio::time::timeout(self.operation_timeout, future);
         tokio::pin!(future);

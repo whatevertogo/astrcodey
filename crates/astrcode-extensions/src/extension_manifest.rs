@@ -20,20 +20,19 @@ use astrcode_extension_sdk::{
     s5r::HandlerId,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin},
 };
-use serde_json::Value;
 
-/// `Initialize.metadata` 解析出的注册信息。
+/// Host-normalized registration derived from a typed S5R initialize manifest.
 #[derive(Debug, Clone)]
 pub(crate) struct ExtensionRegistration {
-    extension_id: String,
-    version: String,
-    capabilities: Vec<ExtensionCapability>,
-    tools: Vec<ToolDefinition>,
-    commands: Vec<SlashCommand>,
-    subscriptions: Vec<HookSubscription>,
-    http_routes: Vec<RegisteredHttpRoute>,
-    custom_events: Vec<CustomEventDeclaration>,
-    custom_event_subscriptions: Vec<CustomEventSubscription>,
+    pub(crate) extension_id: String,
+    pub(crate) version: String,
+    pub(crate) capabilities: Vec<ExtensionCapability>,
+    pub(crate) tools: Vec<ToolDefinition>,
+    pub(crate) commands: Vec<SlashCommand>,
+    pub(crate) subscriptions: Vec<HookSubscription>,
+    pub(crate) http_routes: Vec<RegisteredHttpRoute>,
+    pub(crate) custom_events: Vec<CustomEventDeclaration>,
+    pub(crate) custom_event_subscriptions: Vec<CustomEventSubscription>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,51 +60,11 @@ pub(crate) struct RegisteredHttpRoute {
     pub(crate) handler_id: HandlerId,
 }
 
-impl ExtensionRegistration {
-    pub(crate) fn extension_id(&self) -> &str {
-        &self.extension_id
-    }
-
-    pub(crate) fn version(&self) -> &str {
-        &self.version
-    }
-
-    pub(crate) fn capabilities(&self) -> &[ExtensionCapability] {
-        &self.capabilities
-    }
-
-    pub(crate) fn tools(&self) -> &[ToolDefinition] {
-        &self.tools
-    }
-
-    pub(crate) fn commands(&self) -> &[SlashCommand] {
-        &self.commands
-    }
-
-    pub(crate) fn subscriptions(&self) -> &[HookSubscription] {
-        &self.subscriptions
-    }
-
-    pub(crate) fn http_routes(&self) -> &[RegisteredHttpRoute] {
-        &self.http_routes
-    }
-
-    pub(crate) fn custom_events(&self) -> &[CustomEventDeclaration] {
-        &self.custom_events
-    }
-
-    pub(crate) fn custom_event_subscriptions(&self) -> &[CustomEventSubscription] {
-        &self.custom_event_subscriptions
-    }
-}
-
-/// 从 s5r `InitializeMessage.metadata` 解析注册信息。
-pub(crate) fn registration_from_s5r_metadata(
+/// Normalize the typed worker declaration into the host registration model.
+pub(crate) fn registration_from_s5r_manifest(
     peer: &PeerInfo,
-    metadata: &Value,
+    manifest: InitializeManifest,
 ) -> Result<ExtensionRegistration, String> {
-    let manifest: InitializeManifest = serde_json::from_value(metadata.clone())
-        .map_err(|error| format!("invalid initialize manifest: {error}"))?;
     let version = peer
         .version
         .as_deref()
@@ -297,115 +256,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn s5r_initialize_manifest_is_strict_and_validates_known_fields() {
-        let invalid_inputs = [
+    fn typed_s5r_manifest_normalizes_defaults_and_validates_identity() {
+        let invalid_peers = [
             (
                 PeerInfo {
                     name: "../escape".into(),
-                    role: "extension_worker".into(),
                     version: Some("test".into()),
                 },
-                json!({}),
                 "must start with an ASCII letter or digit",
             ),
             (
                 PeerInfo {
-                    name: "bad-known-field".into(),
-                    role: "extension_worker".into(),
-                    version: Some("test".into()),
-                },
-                json!({
-                    "tools": [{
-                        "name": "tool",
-                        "description": "",
-                        "parameters": {"type": "object"},
-                        "strict": "yes"
-                    }]
-                }),
-                "invalid type",
-            ),
-            (
-                PeerInfo {
-                    name: "bad-capability".into(),
-                    role: "extension_worker".into(),
-                    version: Some("test".into()),
-                },
-                json!({
-                    "capabilities": ["not_a_capability"]
-                }),
-                "unknown variant",
-            ),
-            (
-                PeerInfo {
                     name: "missing-version".into(),
-                    role: "extension_worker".into(),
                     version: None,
                 },
-                json!({}),
                 "missing version",
             ),
-            (
-                PeerInfo {
-                    name: "unknown-field".into(),
-                    role: "extension_worker".into(),
-                    version: Some("test".into()),
-                },
-                json!({"future_manifest_field": true}),
-                "unknown field",
-            ),
         ];
-        for (peer, manifest, expected) in invalid_inputs {
-            let error = registration_from_s5r_metadata(&peer, &manifest).unwrap_err();
+        for (peer, expected) in invalid_peers {
+            let error =
+                registration_from_s5r_manifest(&peer, InitializeManifest::default()).unwrap_err();
             assert!(error.contains(expected), "{error}");
         }
 
-        let registration = registration_from_s5r_metadata(
+        let manifest: InitializeManifest = serde_json::from_value(json!({
+            "tools": [
+                {
+                    "name": "defaulted",
+                    "description": "",
+                    "parameters": {"type": "object"}
+                },
+                {
+                    "name": "strict",
+                    "description": "",
+                    "parameters": {"type": "object"},
+                    "strict": true
+                }
+            ],
+            "commands": [{"name": "defaulted-command"}],
+            "hooks": [{"on": "turn_end", "mode": "non_blocking"}],
+            "custom_events": [{"event_type": "defaulted.event"}]
+        }))
+        .unwrap();
+        let registration = registration_from_s5r_manifest(
             &PeerInfo {
                 name: "defaults".into(),
-                role: "extension_worker".into(),
                 version: Some("test".into()),
             },
-            &json!({
-                "tools": [
-                    {
-                        "name": "defaulted",
-                        "description": "",
-                        "parameters": {"type": "object"}
-                    },
-                    {
-                        "name": "strict",
-                        "description": "",
-                        "parameters": {"type": "object"},
-                        "strict": true
-                    }
-                ],
-                "commands": [{"name": "defaulted-command"}],
-                "hooks": [{"on": "turn_end", "mode": "non_blocking"}],
-                "custom_events": [{"event_type": "defaulted.event"}]
-            }),
+            manifest,
         )
         .expect("manifest should parse");
 
-        assert_eq!(registration.extension_id(), "defaults");
-        assert_eq!(registration.version(), "test");
-        assert!(!registration.tools()[0].strict);
+        assert_eq!(registration.extension_id, "defaults");
+        assert_eq!(registration.version, "test");
+        assert!(!registration.tools[0].strict);
         assert_eq!(
-            registration.tools()[0].execution_mode,
+            registration.tools[0].execution_mode,
             ExecutionMode::Sequential
         );
-        assert!(registration.tools()[1].strict);
-        assert!(registration.capabilities().is_empty());
-        assert!(registration.http_routes().is_empty());
-        assert_eq!(registration.commands()[0].description, "");
+        assert!(registration.tools[1].strict);
+        assert!(registration.capabilities.is_empty());
+        assert!(registration.http_routes.is_empty());
+        assert_eq!(registration.commands[0].description, "");
         assert!(matches!(
-            &registration.subscriptions()[0],
+            &registration.subscriptions[0],
             HookSubscription::Lifecycle { mode, options, .. }
                 if *mode == HookMode::NonBlocking
                     && *options == ContinueAfterStopOptions::default()
         ));
-        assert_eq!(registration.custom_events()[0].schema_version, 1);
-        assert!(registration.custom_events()[0].durable);
-        assert_eq!(registration.custom_events()[0].max_payload_bytes, 64 * 1024);
+        assert_eq!(registration.custom_events[0].schema_version, 1);
+        assert!(registration.custom_events[0].durable);
+        assert_eq!(registration.custom_events[0].max_payload_bytes, 64 * 1024);
         assert!(
             validate_registration_features(&registration, &BTreeSet::new()).is_err(),
             "custom-event declarations require the negotiated feature"

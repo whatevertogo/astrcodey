@@ -274,9 +274,9 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 - `protocol`：握手 `InitializeMsg`/`InitializeOutput`、`result` 消息与 feature 协商等线缆消息。
 - `error`：稳定错误码 `WireErrorCode`。
 - `frame`：stdio 帧传输 `FrameTransport`/`StdioFrameTransport`。
-- `peer`、`peer_runtime`：`Peer<Uninitialized>`/`Peer<Ready>` 握手状态机，invoke/stream/cancel 驱动与嵌套 invoke。
+- `peer`、`peer_runtime`：Host/Worker 角色化的 `Uninitialized → Initialized → Ready` 状态机，activate、invoke/stream/cancel 驱动与嵌套 invoke。
 - `operation`：`astrcode.*` 宿主操作 catalog 及上下文/后端需求描述。
-- `manifest`、`custom_event`：`Initialize.metadata` 的 typed manifest、custom-event 声明与订阅契约。
+- `manifest`、`custom_event`：`InitializeOutput.manifest` 的严格 typed manifest、custom-event 声明与订阅契约。
 - `capability`、`effects`、`extension_http`、`host`、`session`、`session_inspect`、`stream`：能力 wire 名、`HandlerResult` 与其余跨边界 DTO。
 
 依赖边界：无 workspace 内部依赖，只依赖 serde、tokio 等基础库。SDK、宿主和 worker 都以它为 wire 事实来源；manifest 的 capability、tool mode、hook event/mode 与 handler id 也只在此定义。
@@ -313,7 +313,7 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 - `runner`：扩展生命周期、generation 发布、partial tool catalog、hook 分发、工具/命令/状态注册执行；维护 typed decision hook 的优先级排序和短路语义。
 - `host_router`：把扩展请求路由到宿主能力，例如 session、storage、provider、event 等。
 - `extension_manifest`：本地扩展 manifest 解析和验证。
-- `remote_manifest`：远程/外部扩展 manifest 表示。
+- `s5r_handler`：S5R handler 返回值解析。
 - `s5r_ext`：s5r 子进程扩展协议、session、加载和运行。
 
 依赖边界：依赖 `astrcode-core`、`astrcode-session-projection`、`astrcode-storage` 和 `astrcode-extension-sdk`。它不依赖某个具体内置扩展；内置扩展组合在 `astrcode-bundled-extensions`。

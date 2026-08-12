@@ -1,39 +1,39 @@
 //! Worker 运行时：扩展子进程入口。
 
 mod builder;
-mod cancel;
 mod host;
-mod manifest;
 mod registry;
 
-use std::{collections::BTreeSet, io, marker::PhantomData, sync::Arc};
+use std::{collections::BTreeSet, io, sync::Arc};
 
+pub use astrcode_extension_contract::InvocationCancellation as CancelToken;
+use astrcode_extension_contract::ProcessStdioTransport;
 pub use builder::{
     command_handler, continuation_handler, continuation_handler_args, custom_event_handler,
     custom_event_handler_args, hook_handler, hook_handler_args, http_handler, parse_hook_input,
     parse_tool_arguments, tool_handler, tool_handler_args,
 };
-pub use cancel::CancelToken;
 pub use host::{
     EventClient, ExtensionHttpClient, HostClient, HostConfigureSessionToolsOutput,
     HostConfigureSessionToolsRequest, HostCreateSessionOutput, HostCreateSessionRequest,
     HostEventEmitOutput, HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput,
     HostLlmContent, HostLlmMessage, HostLlmRole, HostNetworkRedirectPolicy, HostNetworkRequest,
-    HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostRecycleSessionRequest,
-    HostRootSubmitTurnRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
-    HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
-    HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
-    HostSessionReactivateOutput, HostSessionStateOutput, HostSessionStateReadOutput,
-    HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
-    HostSessionSummary, HostSessionTargetRequest, HostSessionTokenUsage,
-    HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
-    HostSubmitTurnOutput, HostSubmitTurnRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
-    HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
-    HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
-    HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
-    HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient,
-    NetworkClient, ProcessClient, SessionControlClient, SessionHistoryClient, SessionInspectClient,
-    SessionStateClient, WorkspaceClient,
+    HostNetworkResponse, HostOperation, HostProcessOutput, HostProcessRequest,
+    HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionCancelOutput,
+    HostSessionDeliveryOutput, HostSessionEvent, HostSessionEventsPageOutput,
+    HostSessionEventsPageRequest, HostSessionExecutionView, HostSessionInputRequest,
+    HostSessionProviderMessagesOutput, HostSessionReactivateOutput, HostSessionStateOutput,
+    HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
+    HostSessionSummariesOutput, HostSessionSummary, HostSessionTargetRequest,
+    HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
+    HostSessionTranscriptMessage, HostSubmitTurnOutput, HostSubmitTurnRequest,
+    HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
+    HostWorkspaceGlobRequest, HostWorkspaceGrepMatch, HostWorkspaceGrepOutput,
+    HostWorkspaceGrepRequest, HostWorkspaceListEntry, HostWorkspaceListOutput,
+    HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
+    HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient, NetworkClient, ProcessClient,
+    SessionControlClient, SessionHistoryClient, SessionInspectClient, SessionStateClient,
+    WorkspaceClient,
 };
 pub use registry::{
     CommandHandlerFn, ContinuationHandlerFn, CustomEventHandlerFn, HookHandlerFn, HttpHandlerFn,
@@ -58,12 +58,11 @@ use crate::{
     tool::ToolDefinition,
     worker::{
         host::{V3PeerHostApi, set_host_api, with_host_api},
-        registry::{HandlerInvoke, HandlerRegistry},
+        registry::HandlerRegistry,
     },
 };
 
 pub struct Worker {
-    extension_id: String,
     version: String,
     registry: HandlerRegistry,
 }
@@ -73,8 +72,7 @@ impl Worker {
         let extension_id = extension_id.into();
         Self {
             version: version.into(),
-            registry: HandlerRegistry::new(extension_id.clone()),
-            extension_id,
+            registry: HandlerRegistry::new(extension_id),
         }
     }
 
@@ -203,47 +201,41 @@ impl Worker {
     }
 
     /// Runs this worker over the S5R 3.0 stdio transport.
-    pub async fn run_stdio(self) -> Result<(), ErrorPayload> {
+    pub async fn run_stdio(mut self) -> Result<(), ErrorPayload> {
         use astrcode_extension_contract::{
-            FeatureName, Peer as V3Peer, PeerInfo as V3PeerInfo, ProcessStdioTransport,
+            FeatureName, Peer as V3Peer, PeerInfo as V3PeerInfo, WorkerInitialization,
         };
 
-        let metadata = self
-            .registry
-            .catalog()
-            .to_metadata_value()
-            .map_err(|error| {
-                ErrorPayload::new(
-                    WireErrorCode::ManifestSerializeFailed,
-                    format!("failed to serialize S5R 3.0 initialize manifest: {error}"),
-                )
-            })?;
+        let extension_id = self.registry.extension_id().to_owned();
         let supported = BTreeSet::from([
             FeatureName::nested_invoke_v1(),
             FeatureName::model_stream_v1(),
             FeatureName::custom_event_v1(),
         ]);
+        let mut initialization = WorkerInitialization::new(self.registry.take_manifest());
+        initialization.supported_features = supported;
         let peer = V3Peer::new(
             ProcessStdioTransport::new(),
             V3PeerInfo {
-                name: self.extension_id.clone(),
-                role: "extension_worker".into(),
+                name: extension_id,
                 version: Some(self.version),
             },
         )
-        .accept(supported, BTreeSet::new(), Vec::new(), Vec::new(), metadata)
+        .accept(initialization)
+        .await
+        .map_err(v3_peer_error_to_payload)?
+        .accept_activation()
         .await
         .map_err(v3_peer_error_to_payload)?;
         let (handle, driver) = peer.into_runtime();
-        set_host_api(Arc::new(V3PeerHostApi::peer(handle))).map_err(|_| {
+        set_host_api(Arc::new(V3PeerHostApi::new(handle))).map_err(|_| {
             ErrorPayload::new(
                 WireErrorCode::HostApiAlreadySet,
                 "host API already initialized",
             )
         })?;
-        let handler = Arc::new(V3WorkerInvokeHandler::<ProcessStdioTransport> {
+        let handler = Arc::new(V3WorkerInvokeHandler {
             registry: Arc::new(self.registry),
-            transport: PhantomData,
         });
         match driver.run(handler).await {
             Ok(()) => Ok(()),
@@ -257,19 +249,15 @@ impl Worker {
 
 type ErrorPayload = crate::s5r::ErrorPayload;
 
-struct V3WorkerInvokeHandler<T> {
+struct V3WorkerInvokeHandler {
     registry: Arc<HandlerRegistry>,
-    transport: PhantomData<fn() -> T>,
 }
 
 #[async_trait::async_trait]
-impl<T> astrcode_extension_contract::PeerInvokeHandler<T> for V3WorkerInvokeHandler<T>
-where
-    T: astrcode_extension_contract::FrameTransport + 'static,
-{
+impl astrcode_extension_contract::PeerInvokeHandler for V3WorkerInvokeHandler {
     async fn invoke(
         &self,
-        invocation: astrcode_extension_contract::InboundInvoke<T>,
+        invocation: astrcode_extension_contract::InboundInvoke,
     ) -> Result<
         astrcode_extension_contract::InvocationResponse,
         astrcode_extension_contract::protocol::ErrorPayload,
@@ -337,13 +325,23 @@ where
             },
             _ => {},
         }
-        let input = HandlerInvoke {
-            capability: invocation.request.operation,
-            input: invocation.request.input,
-        };
-        let token = CancelToken::from_cancellation_token(invocation.cancellation);
-        let host_api: Arc<dyn host::HostApi> = Arc::new(V3PeerHostApi::nested(invocation.nested));
-        let result = with_host_api(host_api, self.registry.dispatch_invoke(input, token)).await?;
+        if invocation.request.operation != crate::s5r::CAP_HANDLER_INVOKE {
+            return Err(astrcode_extension_contract::protocol::ErrorPayload::new(
+                WireErrorCode::UnknownCapability,
+                format!(
+                    "worker does not handle capability {}",
+                    invocation.request.operation
+                ),
+            ));
+        }
+        let token = invocation.cancellation;
+        let host_api: Arc<dyn host::HostApi> = Arc::new(V3PeerHostApi::new(invocation.nested));
+        let result = with_host_api(
+            host_api,
+            self.registry
+                .dispatch_invoke(invocation.request.input, token),
+        )
+        .await?;
         let output = serde_json::to_value(result).map_err(|error| {
             astrcode_extension_contract::protocol::ErrorPayload::new(
                 astrcode_extension_contract::WireErrorCode::SerializationFailed,
@@ -367,11 +365,8 @@ pub fn tool_text(content: impl Into<String>, is_error: bool) -> HandlerResult {
     HandlerResult::effect(
         HandlerEffect::ToolOutcome,
         json!({
-            "outcome": {
-                "kind": "text",
-                "content": content.into(),
-                "is_error": is_error,
-            }
+            "content": content.into(),
+            "is_error": is_error,
         }),
     )
 }

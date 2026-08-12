@@ -6,7 +6,7 @@ use std::{
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
 
-use crate::WireErrorCode;
+use crate::{WireErrorCode, manifest::InitializeManifest};
 
 pub const S5R_VERSION: &str = "3.0";
 pub const S5R_STACK: &str = "astrcode";
@@ -170,30 +170,20 @@ fn valid_feature_name(value: &str) -> bool {
 #[serde(deny_unknown_fields)]
 pub struct PeerInfo {
     pub name: String,
-    pub role: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
 }
 
 impl PeerInfo {
     pub fn validate(&self) -> Result<(), ErrorPayload> {
-        if self.name.is_empty() || self.role.is_empty() {
+        if self.name.is_empty() {
             return Err(ErrorPayload::new(
                 WireErrorCode::InvalidRequest,
-                "peer name and role must not be empty",
+                "peer name must not be empty",
             ));
         }
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct HandlerDescriptor {
-    pub handler_id: HandlerId,
-    pub description: String,
-    #[serde(default)]
-    pub input_schema: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -204,57 +194,49 @@ pub struct HandlerInvokeRequest {
     pub event: Value,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct CapabilityDescriptor {
-    pub name: String,
-    pub description: String,
-    #[serde(default)]
-    pub supports_stream: bool,
-    #[serde(default)]
-    pub cancelable: bool,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitializeMsg {
     pub id: String,
     pub protocol_version: String,
-    pub peer: PeerInfo,
+    pub host: PeerInfo,
+    pub extension_id: String,
     #[serde(default)]
     pub supported_features: Vec<FeatureName>,
     #[serde(default)]
     pub required_features: Vec<FeatureName>,
     #[serde(default)]
-    pub handlers: Vec<HandlerDescriptor>,
-    #[serde(default)]
-    pub provided_capabilities: Vec<CapabilityDescriptor>,
-    #[serde(default)]
-    pub metadata: Value,
+    pub host_operations: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitializeOutput {
-    pub peer: PeerInfo,
+    pub worker: PeerInfo,
     pub protocol_version: String,
     #[serde(default)]
     pub supported_features: Vec<FeatureName>,
     #[serde(default)]
     pub required_features: Vec<FeatureName>,
     pub negotiated_features: Vec<FeatureName>,
-    #[serde(default)]
-    pub handlers: Vec<HandlerDescriptor>,
-    #[serde(default)]
-    pub capabilities: Vec<CapabilityDescriptor>,
-    #[serde(default)]
-    pub metadata: Value,
+    pub manifest: InitializeManifest,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivateMsg {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActivateOutput {}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ResultKind {
     Initialize,
+    Activate,
     Invoke,
 }
 
@@ -373,22 +355,11 @@ pub struct CancelMsg {
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WireMessage {
     Initialize(InitializeMsg),
+    Activate(ActivateMsg),
     Result(ResultMsg),
     Invoke(InvokeMsg),
     Stream(StreamMsg),
     Cancel(CancelMsg),
-}
-
-impl WireMessage {
-    pub fn id(&self) -> &str {
-        match self {
-            Self::Initialize(message) => &message.id,
-            Self::Result(message) => message.id(),
-            Self::Invoke(message) => &message.id,
-            Self::Stream(message) => &message.id,
-            Self::Cancel(message) => &message.id,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -527,14 +498,28 @@ mod tests {
     #[test]
     fn envelope_and_nested_payloads_reject_unknown_fields() {
         let cases = [
-            br#"{"type":"initialize","id":"1","protocol_version":"3.0","peer":{"name":"worker","role":"plugin"},"unknown":true}"#.as_slice(),
-            br#"{"type":"initialize","id":"1","protocol_version":"3.0","peer":{"name":"worker","role":"plugin","unknown":true}}"#.as_slice(),
+            br#"{"type":"initialize","id":"1","protocol_version":"3.0","host":{"name":"host"},"extension_id":"worker","host_operations":[],"unknown":true}"#.as_slice(),
+            br#"{"type":"initialize","id":"1","protocol_version":"3.0","host":{"name":"host","unknown":true},"extension_id":"worker","host_operations":[]}"#.as_slice(),
+            br#"{"type":"activate","id":"1","unknown":true}"#.as_slice(),
             br#"{"type":"cancel","id":"1","reason":"reload","unknown":true}"#.as_slice(),
             br#"{"type":"stream","id":"1","event":{"type":"content_delta","content":"delta","unknown":true}}"#.as_slice(),
         ];
         for payload in cases {
             assert!(parse_wire_message(payload).is_err());
         }
+
+        assert!(
+            serde_json::from_value::<InitializeOutput>(serde_json::json!({
+                "worker": {"name": "worker"},
+                "protocol_version": "3.0",
+                "negotiated_features": [],
+                "manifest": {"unknown": true}
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ActivateOutput>(serde_json::json!({"unknown": true})).is_err()
+        );
     }
 
     #[test]

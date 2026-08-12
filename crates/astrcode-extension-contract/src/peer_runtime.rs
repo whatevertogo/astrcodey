@@ -1,6 +1,5 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
-    marker::PhantomData,
     pin::Pin,
     sync::{
         Arc, Mutex,
@@ -23,9 +22,8 @@ use crate::{
     FrameTransport, TerminalStream, WireErrorCode,
     peer::{PeerError, Ready},
     protocol::{
-        CapabilityDescriptor, ErrorPayload, FeatureName, HandlerDescriptor, InvokeMsg,
-        ModelStreamEvent, PeerInfo, ResultKind, ResultMsg, StreamMsg, WireMessage,
-        encode_wire_message, parse_wire_message,
+        ErrorPayload, FeatureName, InvokeMsg, ModelStreamEvent, ResultKind, ResultMsg, StreamMsg,
+        WireMessage, encode_wire_message, parse_wire_message,
     },
 };
 
@@ -168,16 +166,16 @@ impl WritePump {
 }
 
 /// Cloneable request surface for a running [`PeerDriver`].
-pub struct PeerHandle<T> {
+pub struct PeerHandle {
     state: Arc<Ready>,
     command_tx: mpsc::Sender<DriverCommand>,
     control_tx: mpsc::UnboundedSender<ControlCommand>,
     next_request_id: Arc<AtomicU64>,
     outbound_permits: Arc<Semaphore>,
-    marker: PhantomData<fn() -> T>,
+    parent_invoke_id: Option<Arc<str>>,
 }
 
-impl<T> Clone for PeerHandle<T> {
+impl Clone for PeerHandle {
     fn clone(&self) -> Self {
         Self {
             state: Arc::clone(&self.state),
@@ -185,40 +183,23 @@ impl<T> Clone for PeerHandle<T> {
             control_tx: self.control_tx.clone(),
             next_request_id: Arc::clone(&self.next_request_id),
             outbound_permits: Arc::clone(&self.outbound_permits),
-            marker: PhantomData,
+            parent_invoke_id: self.parent_invoke_id.clone(),
         }
     }
 }
 
-impl<T> PeerHandle<T>
-where
-    T: FrameTransport + 'static,
-{
-    pub fn negotiated_features(&self) -> &BTreeSet<FeatureName> {
-        &self.state.negotiated_features
+impl PeerHandle {
+    pub fn host_supports(&self, operation: &str) -> bool {
+        self.state
+            .host_operations
+            .iter()
+            .any(|supported| supported == operation)
     }
 
-    pub fn remote_peer(&self) -> &PeerInfo {
-        &self.state.remote_peer
-    }
-
-    pub fn remote_handlers(&self) -> &[HandlerDescriptor] {
-        &self.state.remote_handlers
-    }
-
-    pub fn remote_capabilities(&self) -> &[CapabilityDescriptor] {
-        &self.state.remote_capabilities
-    }
-
-    pub fn remote_metadata(&self) -> &Value {
-        &self.state.remote_metadata
-    }
-
-    pub fn nested(&self, parent_invoke_id: impl Into<String>) -> NestedPeer<T> {
-        NestedPeer {
-            handle: self.clone(),
-            parent_invoke_id: parent_invoke_id.into(),
-        }
+    pub fn nested(&self, parent_invoke_id: impl Into<String>) -> Self {
+        let mut nested = self.clone();
+        nested.parent_invoke_id = Some(Arc::from(parent_invoke_id.into()));
+        nested
     }
 
     pub async fn invoke(
@@ -227,7 +208,7 @@ where
         input: Value,
     ) -> Result<Value, InvokeError> {
         let id = self.allocate_request_id();
-        self.invoke_with_id_and_parent(id, operation.into(), input, None)
+        self.invoke_with_id_and_parent(id, operation.into(), input)
             .await
     }
 
@@ -244,7 +225,7 @@ where
         operation: impl Into<String>,
         input: Value,
     ) -> Result<Value, InvokeError> {
-        self.invoke_with_id_and_parent(id.into(), operation.into(), input, None)
+        self.invoke_with_id_and_parent(id.into(), operation.into(), input)
             .await
     }
 
@@ -253,18 +234,7 @@ where
         operation: impl Into<String>,
         input: Value,
     ) -> Result<PeerStream, InvokeError> {
-        self.invoke_stream_with_parent(operation.into(), input, None)
-            .await
-    }
-
-    async fn invoke_with_parent(
-        &self,
-        operation: String,
-        input: Value,
-        parent_invoke_id: Option<String>,
-    ) -> Result<Value, InvokeError> {
-        let id = self.allocate_request_id();
-        self.invoke_with_id_and_parent(id, operation, input, parent_invoke_id)
+        self.invoke_stream_with_parent(operation.into(), input)
             .await
     }
 
@@ -273,9 +243,9 @@ where
         id: String,
         operation: String,
         input: Value,
-        parent_invoke_id: Option<String>,
     ) -> Result<Value, InvokeError> {
-        self.validate_outbound(&id, &operation, parent_invoke_id.as_deref(), false)?;
+        let parent_invoke_id = self.parent_invoke_id.as_deref();
+        self.validate_outbound(&id, &operation, parent_invoke_id, false)?;
         let permit = self
             .acquire_outbound_permit(parent_invoke_id.is_some())
             .await?;
@@ -294,7 +264,7 @@ where
                     operation,
                     input,
                     stream: false,
-                    parent_invoke_id,
+                    parent_invoke_id: parent_invoke_id.map(str::to_owned),
                 },
                 response: response_tx,
                 written: written_tx,
@@ -317,10 +287,10 @@ where
         &self,
         operation: String,
         input: Value,
-        parent_invoke_id: Option<String>,
     ) -> Result<PeerStream, InvokeError> {
         let id = self.allocate_request_id();
-        self.validate_outbound(&id, &operation, parent_invoke_id.as_deref(), true)?;
+        let parent_invoke_id = self.parent_invoke_id.as_deref();
+        self.validate_outbound(&id, &operation, parent_invoke_id, true)?;
         let permit = self
             .acquire_outbound_permit(parent_invoke_id.is_some())
             .await?;
@@ -340,7 +310,7 @@ where
                     operation,
                     input,
                     stream: true,
-                    parent_invoke_id,
+                    parent_invoke_id: parent_invoke_id.map(str::to_owned),
                 },
                 output: output_tx,
                 failure: Arc::clone(&failure),
@@ -425,51 +395,51 @@ where
     }
 }
 
-/// A handle that automatically attaches the current inbound invocation as the parent.
-pub struct NestedPeer<T> {
-    handle: PeerHandle<T>,
-    parent_invoke_id: String,
+/// Cancellation state for one inbound invocation, including the peer-provided reason.
+#[derive(Clone, Default)]
+pub struct InvocationCancellation {
+    token: CancellationToken,
+    reason: Arc<Mutex<Option<String>>>,
 }
 
-impl<T> Clone for NestedPeer<T> {
-    fn clone(&self) -> Self {
-        Self {
-            handle: self.handle.clone(),
-            parent_invoke_id: self.parent_invoke_id.clone(),
+impl InvocationCancellation {
+    pub fn is_cancelled(&self) -> bool {
+        self.token.is_cancelled()
+    }
+
+    pub async fn cancelled(&self) {
+        self.token.cancelled().await;
+    }
+
+    pub fn reason(&self) -> Option<String> {
+        self.reason
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.token.clone()
+    }
+
+    fn cancel(&self, reason: impl Into<String>) {
+        let mut stored_reason = self
+            .reason
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if stored_reason.is_none() {
+            *stored_reason = Some(reason.into());
         }
-    }
-}
-
-impl<T> NestedPeer<T>
-where
-    T: FrameTransport + 'static,
-{
-    pub async fn invoke(
-        &self,
-        operation: impl Into<String>,
-        input: Value,
-    ) -> Result<Value, InvokeError> {
-        self.handle
-            .invoke_with_parent(operation.into(), input, Some(self.parent_invoke_id.clone()))
-            .await
-    }
-
-    pub async fn invoke_stream(
-        &self,
-        operation: impl Into<String>,
-        input: Value,
-    ) -> Result<PeerStream, InvokeError> {
-        self.handle
-            .invoke_stream_with_parent(operation.into(), input, Some(self.parent_invoke_id.clone()))
-            .await
+        drop(stored_reason);
+        self.token.cancel();
     }
 }
 
 /// A single inbound request plus its cancellation and nested-call context.
-pub struct InboundInvoke<T> {
+pub struct InboundInvoke {
     pub request: InvokeMsg,
-    pub cancellation: CancellationToken,
-    pub nested: NestedPeer<T>,
+    pub cancellation: InvocationCancellation,
+    pub nested: PeerHandle,
 }
 
 pub type ModelEventStream = Pin<Box<dyn Stream<Item = ModelStreamEvent> + Send>>;
@@ -497,14 +467,8 @@ impl Stream for ReceiverModelStream {
 }
 
 #[async_trait::async_trait]
-pub trait PeerInvokeHandler<T>: Send + Sync
-where
-    T: FrameTransport + 'static,
-{
-    async fn invoke(
-        &self,
-        invocation: InboundInvoke<T>,
-    ) -> Result<InvocationResponse, ErrorPayload>;
+pub trait PeerInvokeHandler: Send + Sync {
+    async fn invoke(&self, invocation: InboundInvoke) -> Result<InvocationResponse, ErrorPayload>;
 }
 
 /// Explicit owner of peer reads, pending calls, inbound tasks, and cancellation state.
@@ -515,11 +479,11 @@ pub struct PeerDriver<T> {
     control_rx: mpsc::UnboundedReceiver<ControlCommand>,
     write_pump: WritePump,
     write_rx: Option<mpsc::Receiver<WriteRequest>>,
-    handle: PeerHandle<T>,
+    handle: PeerHandle,
     inbound_permits: Arc<Semaphore>,
 }
 
-pub(crate) fn runtime_parts<T>(transport: Arc<T>, state: Ready) -> (PeerHandle<T>, PeerDriver<T>)
+pub(crate) fn runtime_parts<T>(transport: Arc<T>, state: Ready) -> (PeerHandle, PeerDriver<T>)
 where
     T: FrameTransport + 'static,
 {
@@ -534,7 +498,7 @@ where
         control_tx,
         next_request_id: Arc::new(AtomicU64::new(1)),
         outbound_permits,
-        marker: PhantomData,
+        parent_invoke_id: None,
     };
     let driver = PeerDriver {
         transport,
@@ -555,7 +519,7 @@ where
 {
     pub async fn run<H>(self, handler: Arc<H>) -> Result<(), PeerError>
     where
-        H: PeerInvokeHandler<T> + 'static,
+        H: PeerInvokeHandler + 'static,
     {
         self.run_until(handler, CancellationToken::new()).await
     }
@@ -566,7 +530,7 @@ where
         shutdown: CancellationToken,
     ) -> Result<(), PeerError>
     where
-        H: PeerInvokeHandler<T> + 'static,
+        H: PeerInvokeHandler + 'static,
     {
         let Some(write_rx) = self.write_rx.take() else {
             return Err(PeerError::Protocol(
@@ -577,7 +541,7 @@ where
         writer.spawn(run_write_pump(Arc::clone(&self.transport), write_rx));
         let mut pending = HashMap::<String, PendingRequest>::new();
         let mut cancelled = CancelledRequests::default();
-        let mut inbound = HashMap::<String, CancellationToken>::new();
+        let mut inbound = HashMap::<String, InvocationCancellation>::new();
         let mut tasks = JoinSet::<Result<TaskCompletion, PeerError>>::new();
         let result = loop {
             tokio::select! {
@@ -651,7 +615,7 @@ where
         };
 
         for cancellation in inbound.values() {
-            cancellation.cancel();
+            cancellation.cancel("peer_driver_stopped");
         }
         tasks.abort_all();
         while tasks.join_next().await.is_some() {}
@@ -676,7 +640,7 @@ where
         &self,
         command: DriverCommand,
         pending: &mut HashMap<String, PendingRequest>,
-        inbound: &HashMap<String, CancellationToken>,
+        inbound: &HashMap<String, InvocationCancellation>,
         tasks: &mut JoinSet<Result<TaskCompletion, PeerError>>,
     ) -> Result<(), PeerError> {
         match command {
@@ -799,11 +763,11 @@ where
         handler: Arc<H>,
         pending: &mut HashMap<String, PendingRequest>,
         cancelled: &mut CancelledRequests,
-        inbound: &mut HashMap<String, CancellationToken>,
+        inbound: &mut HashMap<String, InvocationCancellation>,
         tasks: &mut JoinSet<Result<TaskCompletion, PeerError>>,
     ) -> Result<(), PeerError>
     where
-        H: PeerInvokeHandler<T> + 'static,
+        H: PeerInvokeHandler + 'static,
     {
         match message {
             WireMessage::Result(result) => route_result(result, pending, cancelled),
@@ -812,7 +776,7 @@ where
             },
             WireMessage::Cancel(cancel) => {
                 if let Some(cancellation) = inbound.get(&cancel.id) {
-                    cancellation.cancel();
+                    cancellation.cancel(cancel.reason);
                 }
                 Ok(())
             },
@@ -847,7 +811,7 @@ where
                         return Ok(());
                     },
                 };
-                let cancellation = CancellationToken::new();
+                let cancellation = InvocationCancellation::default();
                 inbound.insert(request.id.clone(), cancellation.clone());
                 let nested = self.handle.nested(request.id.clone());
                 let write_pump = self.write_pump.clone();
@@ -867,30 +831,29 @@ where
                 });
                 Ok(())
             },
-            WireMessage::Initialize(_) => Err(PeerError::UnexpectedMessage(
-                "post-initialize invoke, result, stream, or cancel message",
-            )),
+            WireMessage::Initialize(_) | WireMessage::Activate(_) => Err(
+                PeerError::UnexpectedMessage("runtime invoke, result, stream, or cancel message"),
+            ),
         }
     }
 }
 
-async fn run_inbound<T, H>(
+async fn run_inbound<H>(
     write_pump: WritePump,
     handler: Arc<H>,
-    invocation: InboundInvoke<T>,
+    invocation: InboundInvoke,
     _permit: OwnedSemaphorePermit,
 ) -> Result<String, PeerError>
 where
-    T: FrameTransport + 'static,
-    H: PeerInvokeHandler<T> + 'static,
+    H: PeerInvokeHandler + 'static,
 {
     let id = invocation.request.id.clone();
     let wants_stream = invocation.request.stream;
     let cancellation = invocation.cancellation.clone();
     let response = tokio::select! {
         biased;
-        () = cancellation.cancelled() => return Ok(id),
         response = handler.invoke(invocation) => response,
+        () = cancellation.cancelled() => return Ok(id),
     };
     match response {
         Ok(InvocationResponse::Unary(output)) if !wants_stream => {
@@ -1130,7 +1093,7 @@ async fn forward_stream(
 
 fn validate_parent(
     message: &InvokeMsg,
-    inbound: &HashMap<String, CancellationToken>,
+    inbound: &HashMap<String, InvocationCancellation>,
 ) -> Result<(), ErrorPayload> {
     if let Some(parent) = &message.parent_invoke_id
         && !inbound.contains_key(parent)
@@ -1376,8 +1339,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        Peer, PeerHandshake, PeerInfo,
+        HostInitialization, Peer, PeerInfo, WorkerInitialization,
         frame::FrameError,
+        manifest::InitializeManifest,
         protocol::{FeatureName, InvokeMsg, ModelStreamEvent, WireMessage, encode_wire_message},
     };
 
@@ -1466,10 +1430,10 @@ mod tests {
     struct HostHandler;
 
     #[async_trait::async_trait]
-    impl PeerInvokeHandler<ChannelTransport> for HostHandler {
+    impl PeerInvokeHandler for HostHandler {
         async fn invoke(
             &self,
-            invocation: InboundInvoke<ChannelTransport>,
+            invocation: InboundInvoke,
         ) -> Result<InvocationResponse, ErrorPayload> {
             match invocation.request.operation.as_str() {
                 "host.echo" => Ok(InvocationResponse::Unary(invocation.request.input)),
@@ -1487,10 +1451,10 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl PeerInvokeHandler<ChannelTransport> for SaturatingHostHandler {
+    impl PeerInvokeHandler for SaturatingHostHandler {
         async fn invoke(
             &self,
-            invocation: InboundInvoke<ChannelTransport>,
+            invocation: InboundInvoke,
         ) -> Result<InvocationResponse, ErrorPayload> {
             if invocation.request.operation != "host.block" {
                 return HostHandler.invoke(invocation).await;
@@ -1508,13 +1472,14 @@ mod tests {
     struct CancellationObservingHostHandler {
         started: Arc<Notify>,
         cancelled: Arc<Notify>,
+        reason: Arc<Mutex<Option<String>>>,
     }
 
     #[async_trait::async_trait]
-    impl PeerInvokeHandler<ChannelTransport> for CancellationObservingHostHandler {
+    impl PeerInvokeHandler for CancellationObservingHostHandler {
         async fn invoke(
             &self,
-            invocation: InboundInvoke<ChannelTransport>,
+            invocation: InboundInvoke,
         ) -> Result<InvocationResponse, ErrorPayload> {
             if invocation.request.operation != "host.block" {
                 return HostHandler.invoke(invocation).await;
@@ -1522,6 +1487,10 @@ mod tests {
             let _stopped = DropNotify(Arc::clone(&self.cancelled));
             self.started.notify_one();
             invocation.cancellation.cancelled().await;
+            *self
+                .reason
+                .lock()
+                .unwrap_or_else(|error| error.into_inner()) = invocation.cancellation.reason();
             Err(ErrorPayload::new(
                 WireErrorCode::Cancelled,
                 "nested host invocation cancelled",
@@ -1540,11 +1509,21 @@ mod tests {
         release: Arc<Notify>,
     }
 
+    #[test]
+    fn cancellation_preserves_the_first_reason() {
+        let cancellation = InvocationCancellation::default();
+        cancellation.cancel("caller_dropped");
+        cancellation.cancel("peer_driver_stopped");
+
+        assert!(cancellation.is_cancelled());
+        assert_eq!(cancellation.reason().as_deref(), Some("caller_dropped"));
+    }
+
     #[async_trait::async_trait]
-    impl PeerInvokeHandler<ChannelTransport> for DelayedEchoWorkerHandler {
+    impl PeerInvokeHandler for DelayedEchoWorkerHandler {
         async fn invoke(
             &self,
-            invocation: InboundInvoke<ChannelTransport>,
+            invocation: InboundInvoke,
         ) -> Result<InvocationResponse, ErrorPayload> {
             if invocation.request.operation != "worker.delayed_echo" {
                 return Err(ErrorPayload::new(
@@ -1559,10 +1538,10 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl PeerInvokeHandler<ChannelTransport> for WorkerHandler {
+    impl PeerInvokeHandler for WorkerHandler {
         async fn invoke(
             &self,
-            invocation: InboundInvoke<ChannelTransport>,
+            invocation: InboundInvoke,
         ) -> Result<InvocationResponse, ErrorPayload> {
             match invocation.request.operation.as_str() {
                 "worker.echo" => Ok(InvocationResponse::Unary(invocation.request.input)),
@@ -1628,18 +1607,17 @@ mod tests {
         }
     }
 
-    fn peer_info(name: &str, role: &str) -> PeerInfo {
+    fn peer_info(name: &str) -> PeerInfo {
         PeerInfo {
             name: name.into(),
-            role: role.into(),
             version: None,
         }
     }
 
     struct ReadyPeerPair {
-        host_handle: PeerHandle<ChannelTransport>,
+        host_handle: PeerHandle,
         host_driver: PeerDriver<ChannelTransport>,
-        worker_handle: PeerHandle<ChannelTransport>,
+        worker_handle: PeerHandle,
         worker_driver: PeerDriver<ChannelTransport>,
         host_write_gate: Arc<WriteGate>,
         host_inbound_tx: mpsc::Sender<Vec<u8>>,
@@ -1649,20 +1627,20 @@ mod tests {
         let (host_transport, worker_transport) = ChannelTransport::pair();
         let host_write_gate = Arc::clone(&host_transport.write_gate);
         let host_inbound_tx = worker_transport.outbound.clone();
-        let host = Peer::new(host_transport, peer_info("host", "host"));
-        let worker = Peer::new(worker_transport, peer_info("worker", "extension"));
-        let mut handshake = PeerHandshake::new("initialize-1");
-        handshake.supported_features = features.clone();
-        handshake.required_features = features.clone();
+        let host = Peer::new(host_transport, peer_info("host"));
+        let worker = Peer::new(worker_transport, peer_info("worker"));
+        let mut host_initialization = HostInitialization::new("initialize-1", "worker");
+        host_initialization.supported_features = features.clone();
+        host_initialization.required_features = features.clone();
+        let mut worker_initialization = WorkerInitialization::new(InitializeManifest::default());
+        worker_initialization.supported_features = features;
         let (host, worker) = tokio::join!(
-            host.initialize(handshake),
-            worker.accept(
-                features,
-                BTreeSet::new(),
-                Vec::new(),
-                Vec::new(),
-                Value::Null,
-            )
+            host.initialize(host_initialization),
+            worker.accept(worker_initialization)
+        );
+        let (host, worker) = tokio::join!(
+            host.unwrap().0.activate("activate-1"),
+            worker.unwrap().accept_activation()
         );
         let (host_handle, host_driver) = host.unwrap().into_runtime();
         let (worker_handle, worker_driver) = worker.unwrap().into_runtime();
@@ -1755,12 +1733,14 @@ mod tests {
         } = ready_peer_pair(BTreeSet::from([FeatureName::nested_invoke_v1()])).await;
         let nested_started = Arc::new(Notify::new());
         let nested_cancelled = Arc::new(Notify::new());
+        let nested_cancel_reason = Arc::new(Mutex::new(None));
         let host_shutdown = CancellationToken::new();
         let worker_shutdown = CancellationToken::new();
         let host_task = tokio::spawn(host_driver.run_until(
             Arc::new(CancellationObservingHostHandler {
                 started: Arc::clone(&nested_started),
                 cancelled: Arc::clone(&nested_cancelled),
+                reason: Arc::clone(&nested_cancel_reason),
             }),
             host_shutdown.clone(),
         ));
@@ -1787,6 +1767,13 @@ mod tests {
         timeout(Duration::from_secs(1), nested_cancelled.notified())
             .await
             .expect("cancelling the parent must cancel its nested invoke");
+        assert_eq!(
+            nested_cancel_reason
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .as_deref(),
+            Some("caller_dropped")
+        );
 
         host_shutdown.cancel();
         worker_shutdown.cancel();
@@ -1992,11 +1979,6 @@ mod tests {
             host_write_gate,
             ..
         } = ready_peer_pair(features).await;
-        assert_eq!(host_handle.remote_peer().name, "worker");
-        assert!(host_handle.remote_handlers().is_empty());
-        assert!(host_handle.remote_capabilities().is_empty());
-        assert_eq!(host_handle.remote_metadata(), &Value::Null);
-
         let cancellation_observed = Arc::new(AtomicBool::new(false));
         let cancellation_notify = Arc::new(Notify::new());
         let invocation_started = Arc::new(Notify::new());

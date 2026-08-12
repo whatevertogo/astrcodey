@@ -11,8 +11,8 @@ use std::{
 };
 
 use astrcode_extension_contract::{
-    FeatureName, FrameTransport, InboundInvoke, InvocationResponse, InvokeError, Peer, PeerHandle,
-    PeerHandshake, PeerInvokeHandler, StdioFrameTransport, WireErrorCode,
+    FeatureName, HostInitialization, HostInitialized, InboundInvoke, InvocationResponse,
+    InvokeError, Peer, PeerHandle, PeerInvokeHandler, StdioFrameTransport, WireErrorCode,
     protocol::{ModelStreamEvent, PeerInfo, S5R_STACK},
 };
 use astrcode_extension_sdk::{
@@ -34,29 +34,22 @@ use super::session_support::{
     HostInvokeState, ReentrancyGuard, StderrTaskGuard, drain_stderr, prepare_host_invoke,
 };
 use crate::{
-    extension_manifest::{
-        ExtensionRegistration, registration_from_s5r_metadata, validate_registration_features,
-    },
-    host_router::{HostRouter, InvokeContext},
+    extension_manifest::{registration_from_s5r_manifest, validate_registration_features},
+    host_router::{HostRouter, InvokeContext, supported_operation_catalog},
     process_supervision::{SupervisedChild, SupervisedCommand},
 };
 
 const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(30);
+const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(30);
 const INVOKE_TIMEOUT_MS: u64 = 120_000;
 const INVOKE_TIMEOUT: Duration = Duration::from_millis(INVOKE_TIMEOUT_MS);
 const PROCESS_TERMINATION_GRACE: Duration = Duration::from_secs(2);
 const MAX_PARALLEL_INVOKES: u32 = 8;
 const MAX_CONTINUATION_DEPTH: u32 = 16;
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum S5rV3SessionError {
-    #[error("{0}")]
-    Message(String),
-}
-
-struct InvokeContextGuard {
+struct InvokeContextGuard<'a> {
     id: String,
-    contexts: Arc<RwLock<HashMap<String, InvokeContext>>>,
+    contexts: &'a RwLock<HashMap<String, InvokeContext>>,
 }
 
 #[derive(Clone, Default)]
@@ -102,26 +95,25 @@ fn insert_attribution(input: &mut Map<String, Value>, field: &str, value: &Optio
     }
 }
 
-impl InvokeContextGuard {
+impl<'a> InvokeContextGuard<'a> {
     fn insert(
         id: String,
         context: InvokeContext,
-        contexts: Arc<RwLock<HashMap<String, InvokeContext>>>,
+        contexts: &'a RwLock<HashMap<String, InvokeContext>>,
     ) -> Self {
         contexts.write().insert(id.clone(), context);
         Self { id, contexts }
     }
 }
 
-impl Drop for InvokeContextGuard {
+impl Drop for InvokeContextGuard<'_> {
     fn drop(&mut self) {
         self.contexts.write().remove(&self.id);
     }
 }
 
-struct V3HostInvokeHandler<T> {
+struct V3HostInvokeHandler {
     state: Arc<HostInvokeState>,
-    transport: std::marker::PhantomData<fn() -> T>,
 }
 
 struct GuardedModelStream {
@@ -138,14 +130,8 @@ impl Stream for GuardedModelStream {
 }
 
 #[async_trait::async_trait]
-impl<T> PeerInvokeHandler<T> for V3HostInvokeHandler<T>
-where
-    T: FrameTransport + 'static,
-{
-    async fn invoke(
-        &self,
-        invocation: InboundInvoke<T>,
-    ) -> Result<InvocationResponse, ErrorPayload> {
+impl PeerInvokeHandler for V3HostInvokeHandler {
+    async fn invoke(&self, invocation: InboundInvoke) -> Result<InvocationResponse, ErrorPayload> {
         let request = invocation.request;
         let (reentrancy, context) = prepare_host_invoke(
             &self.state,
@@ -180,10 +166,9 @@ pub(crate) struct S5rV3Session {
     stderr_task: Mutex<Option<JoinHandle<()>>>,
     driver_task: Mutex<Option<JoinHandle<Result<(), astrcode_extension_contract::PeerError>>>>,
     driver_shutdown: CancellationToken,
-    handle: PeerHandle<StdioFrameTransport>,
-    registration: Arc<RwLock<Option<ExtensionRegistration>>>,
-    invoke_contexts: Arc<RwLock<HashMap<String, InvokeContext>>>,
-    detached_invoke_context: Arc<RwLock<Option<InvokeContext>>>,
+    initialized_peer: Mutex<Option<Peer<StdioFrameTransport, HostInitialized>>>,
+    handle: RwLock<Option<PeerHandle>>,
+    host_invoke: Arc<HostInvokeState>,
     admission: Arc<tokio::sync::Semaphore>,
 }
 
@@ -193,6 +178,7 @@ impl S5rV3Session {
         args: &[String],
         cwd: &Path,
         env: &[(String, String)],
+        extension_id: &str,
         router: Arc<HostRouter>,
     ) -> Result<Arc<Self>, String> {
         let mut command = Command::new(program);
@@ -217,7 +203,6 @@ impl S5rV3Session {
             StdioFrameTransport::new(stdin, stdout),
             PeerInfo {
                 name: "astrcode-host".into(),
-                role: "host".into(),
                 version: Some(S5R_STACK.into()),
             },
         );
@@ -226,89 +211,109 @@ impl S5rV3Session {
             FeatureName::model_stream_v1(),
             FeatureName::custom_event_v1(),
         ]);
-        let mut handshake = PeerHandshake::new("initialize-1");
-        handshake.supported_features = features;
+        let mut initialization = HostInitialization::new("initialize-1", extension_id);
+        initialization.supported_features = features;
         // 仅 nested_invoke_v1 是所有 worker 的硬依赖（invoke context 经
         // parent_invoke_id 解析）。model stream 在调用时校验；custom-event
         // manifest 在握手完成后、发布注册前校验。
-        handshake.required_features = BTreeSet::from([FeatureName::nested_invoke_v1()]);
-        let peer = match tokio::time::timeout(INITIALIZE_TIMEOUT, peer.initialize(handshake)).await
-        {
-            Ok(Ok(peer)) => peer,
-            Ok(Err(error)) => {
-                terminate_failed_start(&mut child, stderr_task).await;
-                return Err(format!("S5R 3.0 initialize: {error}"));
-            },
-            Err(_) => {
-                terminate_failed_start(&mut child, stderr_task).await;
-                return Err("S5R 3.0 initialize timed out".into());
-            },
-        };
-
-        let registration =
-            match registration_from_s5r_metadata(peer.remote_peer(), peer.remote_metadata())
-                .and_then(|registration| {
-                    validate_registration_features(&registration, peer.negotiated_features())?;
-                    Ok(registration)
-                }) {
-                Ok(registration) => registration,
-                Err(error) => {
+        initialization.required_features = BTreeSet::from([FeatureName::nested_invoke_v1()]);
+        initialization.host_operations = supported_operation_catalog();
+        let (peer, worker_peer, worker_manifest) =
+            match tokio::time::timeout(INITIALIZE_TIMEOUT, peer.initialize(initialization)).await {
+                Ok(Ok(peer)) => peer,
+                Ok(Err(error)) => {
                     terminate_failed_start(&mut child, stderr_task).await;
-                    return Err(error);
+                    return Err(format!("S5R 3.0 initialize: {error}"));
+                },
+                Err(_) => {
+                    terminate_failed_start(&mut child, stderr_task).await;
+                    return Err("S5R 3.0 initialize timed out".into());
                 },
             };
-        let (handle, driver) = peer.into_runtime();
 
-        let registration = Arc::new(RwLock::new(Some(registration)));
-        let invoke_contexts = Arc::new(RwLock::new(HashMap::new()));
-        let detached_invoke_context = Arc::new(RwLock::new(None));
-        let state = Arc::new(HostInvokeState {
+        let registration = match registration_from_s5r_manifest(&worker_peer, worker_manifest)
+            .and_then(|registration| {
+                validate_registration_features(&registration, peer.negotiated_features())?;
+                Ok(registration)
+            }) {
+            Ok(registration) => registration,
+            Err(error) => {
+                terminate_failed_start(&mut child, stderr_task).await;
+                return Err(error);
+            },
+        };
+        let host_invoke = Arc::new(HostInvokeState {
             router,
-            registration: Arc::clone(&registration),
+            registration,
             reentrancy: Arc::new(AtomicU32::new(0)),
-            invoke_contexts: Arc::clone(&invoke_contexts),
-            detached_invoke_context: Arc::clone(&detached_invoke_context),
+            invoke_contexts: RwLock::new(HashMap::new()),
+            detached_invoke_context: RwLock::new(None),
         });
         let driver_shutdown = CancellationToken::new();
-        let driver_task = tokio::spawn(driver.run_until(
-            Arc::new(V3HostInvokeHandler::<StdioFrameTransport> {
-                state,
-                transport: std::marker::PhantomData,
-            }),
-            driver_shutdown.clone(),
-        ));
 
         Ok(Arc::new(Self {
             child: Mutex::new(Some(child)),
             stderr_task: Mutex::new(Some(stderr_task)),
-            driver_task: Mutex::new(Some(driver_task)),
+            driver_task: Mutex::new(None),
             driver_shutdown,
-            handle,
-            registration,
-            invoke_contexts,
-            detached_invoke_context,
+            initialized_peer: Mutex::new(Some(peer)),
+            handle: RwLock::new(None),
+            host_invoke,
             admission: Arc::new(tokio::sync::Semaphore::new(MAX_PARALLEL_INVOKES as usize)),
         }))
     }
 
-    pub(crate) fn registration(&self) -> Option<ExtensionRegistration> {
-        self.registration.read().clone()
+    pub(crate) fn registration(&self) -> &crate::extension_manifest::ExtensionRegistration {
+        &self.host_invoke.registration
     }
 
     pub(crate) fn set_detached_invoke_context(&self, context: InvokeContext) {
-        *self.detached_invoke_context.write() = Some(context);
+        *self.host_invoke.detached_invoke_context.write() = Some(context);
     }
 
-    pub(crate) async fn ping(&self) -> Result<(), S5rV3SessionError> {
-        let output = self
+    pub(crate) async fn activate(&self) -> Result<(), ExtensionError> {
+        let peer = self.initialized_peer.lock().take().ok_or_else(|| {
+            ExtensionError::Internal("S5R 3.0 session is not awaiting activation".into())
+        })?;
+        let peer = match tokio::time::timeout(ACTIVATE_TIMEOUT, peer.activate("activate-1")).await {
+            Ok(Ok(peer)) => peer,
+            Ok(Err(error)) => {
+                self.shutdown().await;
+                return Err(ExtensionError::Internal(format!(
+                    "S5R 3.0 activate: {error}"
+                )));
+            },
+            Err(_) => {
+                self.shutdown().await;
+                return Err(ExtensionError::Timeout(ACTIVATE_TIMEOUT.as_millis() as u64));
+            },
+        };
+        let (handle, driver) = peer.into_runtime();
+        *self.handle.write() = Some(handle);
+        let driver_task = tokio::spawn(driver.run_until(
+            Arc::new(V3HostInvokeHandler {
+                state: Arc::clone(&self.host_invoke),
+            }),
+            self.driver_shutdown.clone(),
+        ));
+        *self.driver_task.lock() = Some(driver_task);
+        Ok(())
+    }
+
+    pub(crate) async fn ping(&self) -> Result<(), ExtensionError> {
+        let handle = self
             .handle
+            .read()
+            .clone()
+            .ok_or_else(|| ExtensionError::Internal("S5R 3.0 session is not active".into()))?;
+        let output = handle
             .invoke(CAP_RUNTIME_PING, Value::Null)
             .await
-            .map_err(|error| S5rV3SessionError::Message(error.to_string()))?;
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?;
         if output == json!({ "ok": true }) {
             Ok(())
         } else {
-            Err(S5rV3SessionError::Message(
+            Err(ExtensionError::Internal(
                 "S5R 3.0 worker returned an invalid ping response".into(),
             ))
         }
@@ -346,13 +351,18 @@ impl S5rV3Session {
         event: Value,
         invoke_context: &InvokeContext,
     ) -> Result<HandlerResult, ExtensionError> {
-        let request_id = self.handle.allocate_request_id();
+        let handle = self
+            .handle
+            .read()
+            .clone()
+            .ok_or_else(|| ExtensionError::Internal("S5R 3.0 session is not active".into()))?;
+        let request_id = handle.allocate_request_id();
         let _context = InvokeContextGuard::insert(
             request_id.clone(),
             invoke_context.clone(),
-            Arc::clone(&self.invoke_contexts),
+            &self.host_invoke.invoke_contexts,
         );
-        let invoke = self.handle.invoke_with_id(
+        let invoke = handle.invoke_with_id(
             request_id,
             CAP_HANDLER_INVOKE,
             serde_json::to_value(HandlerInvokeRequest {
@@ -378,12 +388,7 @@ impl S5rV3Session {
         let attribution = HandlerAttribution::from_event(&event);
         let mut stack = vec![(handler_id.clone(), event, 0u32)];
         let mut first = None;
-        let extension_id = self
-            .registration
-            .read()
-            .as_ref()
-            .map(|registration| registration.extension_id().to_owned())
-            .ok_or_else(|| ExtensionError::Internal("extension is not initialized".into()))?;
+        let extension_id = self.host_invoke.registration.extension_id.clone();
         let permits = invocation_permit_count(execution_mode);
         let _permit = Arc::clone(&self.admission)
             .acquire_many_owned(permits)
@@ -413,19 +418,16 @@ impl S5rV3Session {
     }
 
     fn draining_error(&self) -> ExtensionError {
-        let extension_id = self
-            .registration
-            .read()
-            .as_ref()
-            .map(|registration| registration.extension_id().to_owned())
-            .unwrap_or_else(|| "unknown-extension".into());
+        let extension_id = self.host_invoke.registration.extension_id.clone();
         ExtensionError::Draining { extension_id }
     }
 
     pub(crate) async fn shutdown(&self) {
-        *self.detached_invoke_context.write() = None;
+        *self.host_invoke.detached_invoke_context.write() = None;
         self.admission.close();
         self.driver_shutdown.cancel();
+        self.initialized_peer.lock().take();
+        self.handle.write().take();
         let driver_task = self.driver_task.lock().take();
         if let Some(driver_task) = driver_task {
             match tokio::time::timeout(Duration::from_secs(2), driver_task).await {
@@ -478,6 +480,8 @@ fn invocation_permit_count(execution_mode: ExecutionMode) -> u32 {
 impl Drop for S5rV3Session {
     fn drop(&mut self) {
         self.driver_shutdown.cancel();
+        self.initialized_peer.lock().take();
+        self.handle.write().take();
         if let Some(task) = self.driver_task.lock().take() {
             task.abort();
         }

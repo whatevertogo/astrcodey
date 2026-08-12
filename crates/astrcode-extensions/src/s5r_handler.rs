@@ -1,6 +1,8 @@
-//! 远程扩展（IPC）共用的 manifest 构建与 HandlerResult 解析。
+//! S5R handler identity construction and wire-result translation.
 
-use astrcode_extension_contract::{HandlerEffect, HandlerId, HandlerKind, HandlerResult};
+use astrcode_extension_contract::{
+    HandlerEffect, HandlerId, HandlerKind, HandlerResult, ToolOutcome,
+};
 use astrcode_extension_sdk::{
     extension::{
         CompactContributions, CompactResult, ContinueAfterStopResult, ExtensionCommandResult,
@@ -9,9 +11,9 @@ use astrcode_extension_sdk::{
     },
     tool::ToolResult,
 };
-use serde::Deserialize;
-
-pub fn parse_http_response(resp: &HandlerResult) -> Result<ExtensionHttpResponse, ExtensionError> {
+pub(crate) fn parse_http_response(
+    resp: &HandlerResult,
+) -> Result<ExtensionHttpResponse, ExtensionError> {
     if resp.effect != HandlerEffect::HttpResponse {
         return Err(ExtensionError::Internal(format!(
             "expected http_response effect, got {:?}",
@@ -22,7 +24,7 @@ pub fn parse_http_response(resp: &HandlerResult) -> Result<ExtensionHttpResponse
         .map_err(|error| ExtensionError::Internal(format!("parse HTTP response: {error}")))
 }
 
-pub fn handler_id(
+pub(crate) fn handler_id(
     extension_id: &str,
     kind: HandlerKind,
     name: &str,
@@ -30,29 +32,22 @@ pub fn handler_id(
     HandlerId::new(extension_id, kind, name).map_err(ExtensionError::Internal)
 }
 
-pub fn parse_tool_result(resp: &HandlerResult) -> Result<ToolResult, ExtensionError> {
+pub(crate) fn parse_tool_result(resp: &HandlerResult) -> Result<ToolResult, ExtensionError> {
     match resp.effect {
         HandlerEffect::ToolOutcome => {
-            let raw = required_data_value(resp, "outcome")?;
-            let outcome: ExtensionToolOutput = serde_json::from_value(raw)
+            let outcome: ToolOutcome = serde_json::from_value(resp.data.clone())
                 .map_err(|e| ExtensionError::Internal(format!("parse tool_outcome: {e}")))?;
-            match outcome {
-                ExtensionToolOutput::Text { content, is_error } => {
-                    Ok(ToolResult::text(content, is_error, Default::default()))
-                },
-            }
+            Ok(ToolResult::text(
+                outcome.content,
+                outcome.is_error,
+                Default::default(),
+            ))
         },
         effect => Err(unexpected_effect("tool", effect)),
     }
 }
 
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ExtensionToolOutput {
-    Text { content: String, is_error: bool },
-}
-
-pub fn parse_command_result(
+pub(crate) fn parse_command_result(
     resp: &HandlerResult,
 ) -> Result<ExtensionCommandResult, ExtensionError> {
     if resp.effect != HandlerEffect::Ok {
@@ -62,7 +57,9 @@ pub fn parse_command_result(
         .map_err(|e| ExtensionError::Internal(format!("parse command result: {e}")))
 }
 
-pub fn parse_pre_tool_use_result(resp: &HandlerResult) -> Result<PreToolUseResult, ExtensionError> {
+pub(crate) fn parse_pre_tool_use_result(
+    resp: &HandlerResult,
+) -> Result<PreToolUseResult, ExtensionError> {
     match resp.effect {
         HandlerEffect::Ok => Ok(PreToolUseResult::Allow),
         HandlerEffect::Block => Ok(PreToolUseResult::Block {
@@ -76,7 +73,7 @@ pub fn parse_pre_tool_use_result(resp: &HandlerResult) -> Result<PreToolUseResul
     }
 }
 
-pub fn parse_post_tool_use_result(
+pub(crate) fn parse_post_tool_use_result(
     resp: &HandlerResult,
 ) -> Result<PostToolUseResult, ExtensionError> {
     match resp.effect {
@@ -91,7 +88,9 @@ pub fn parse_post_tool_use_result(
     }
 }
 
-pub fn parse_provider_result(resp: &HandlerResult) -> Result<ProviderResult, ExtensionError> {
+pub(crate) fn parse_provider_result(
+    resp: &HandlerResult,
+) -> Result<ProviderResult, ExtensionError> {
     match resp.effect {
         HandlerEffect::Ok => Ok(ProviderResult::Allow),
         HandlerEffect::Block => Ok(ProviderResult::Block {
@@ -115,7 +114,7 @@ pub fn parse_provider_result(resp: &HandlerResult) -> Result<ProviderResult, Ext
     }
 }
 
-pub fn parse_continue_after_stop_result(
+pub(crate) fn parse_continue_after_stop_result(
     resp: &HandlerResult,
 ) -> Result<ContinueAfterStopResult, ExtensionError> {
     match resp.effect {
@@ -125,7 +124,7 @@ pub fn parse_continue_after_stop_result(
     }
 }
 
-pub fn parse_prompt_build_result(
+pub(crate) fn parse_prompt_build_result(
     resp: &HandlerResult,
 ) -> Result<PromptContributions, ExtensionError> {
     match resp.effect {
@@ -137,7 +136,7 @@ pub fn parse_prompt_build_result(
         .map_err(|e| ExtensionError::Internal(format!("parse PromptContributions: {e}")))
 }
 
-pub fn parse_compact_result(resp: &HandlerResult) -> Result<CompactResult, ExtensionError> {
+pub(crate) fn parse_compact_result(resp: &HandlerResult) -> Result<CompactResult, ExtensionError> {
     match resp.effect {
         HandlerEffect::Ok => return Ok(CompactResult::Allow),
         HandlerEffect::CompactContributions => {},
@@ -148,7 +147,7 @@ pub fn parse_compact_result(resp: &HandlerResult) -> Result<CompactResult, Exten
     Ok(CompactResult::Contributions(contributions))
 }
 
-pub fn parse_lifecycle_result(resp: &HandlerResult) -> Result<HookResult, ExtensionError> {
+pub(crate) fn parse_lifecycle_result(resp: &HandlerResult) -> Result<HookResult, ExtensionError> {
     match resp.effect {
         HandlerEffect::Block => Ok(HookResult::Block {
             reason: required_data_string(resp, "reason")?,
@@ -168,7 +167,7 @@ fn required_data_value(
     result: &HandlerResult,
     field: &str,
 ) -> Result<serde_json::Value, ExtensionError> {
-    result.data_value(field).cloned().ok_or_else(|| {
+    result.data.get(field).cloned().ok_or_else(|| {
         ExtensionError::Internal(format!("effect={:?} requires data.{field}", result.effect))
     })
 }

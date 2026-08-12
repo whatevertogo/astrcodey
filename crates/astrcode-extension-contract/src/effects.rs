@@ -23,6 +23,13 @@ pub enum HandlerEffect {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ToolOutcome {
+    pub content: String,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HandlerResult {
     pub effect: HandlerEffect,
     #[serde(default, skip_serializing_if = "Value::is_null")]
@@ -46,10 +53,6 @@ impl HandlerResult {
             data,
             continuations: Vec::new(),
         }
-    }
-
-    pub fn data_value(&self, key: &str) -> Option<&Value> {
-        self.data.get(key)
     }
 }
 
@@ -78,6 +81,14 @@ mod tests {
             serde_json::from_value::<HandlerResult>(serde_json::json!({
                 "effect": "ok",
                 "unexpected": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ToolOutcome>(serde_json::json!({
+                "content": "done",
+                "is_error": false,
+                "kind": "text"
             }))
             .is_err()
         );

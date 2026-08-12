@@ -44,7 +44,6 @@ impl ExtensionSource for BundledExtensionSource {
             .collect();
         DiscoverExtensionsResult {
             candidates,
-            errors: Vec::new(),
             failures: Vec::new(),
         }
     }
@@ -64,43 +63,43 @@ pub fn bundled_extensions(
     let mut extensions = Vec::new();
 
     #[cfg(feature = "agent-tools")]
-    if is_enabled(extension_states, "astrcode-agent-tools") {
+    if extension_enabled(extension_states, "astrcode-agent-tools") {
         extensions.push(astrcode_extension_agent_tools::extension());
     }
     #[cfg(feature = "mcp")]
-    if is_enabled(extension_states, "astrcode-mcp") {
+    if extension_enabled(extension_states, "astrcode-mcp") {
         extensions.push(astrcode_extension_mcp::extension());
     }
     #[cfg(feature = "skill")]
-    if is_enabled(extension_states, "astrcode-skill") {
+    if extension_enabled(extension_states, "astrcode-skill") {
         extensions.push(astrcode_extension_skill::extension());
     }
     #[cfg(feature = "todo-tool")]
-    if is_enabled(extension_states, "astrcode-todo-tool") {
+    if extension_enabled(extension_states, "astrcode-todo-tool") {
         extensions.push(astrcode_extension_todo_tool::extension());
     }
     #[cfg(feature = "mode")]
-    if is_enabled(extension_states, "astrcode-mode") {
+    if extension_enabled(extension_states, "astrcode-mode") {
         extensions.push(astrcode_extension_mode::extension());
     }
     #[cfg(feature = "ask-user")]
-    if is_enabled(extension_states, "astrcode-ask-user") {
+    if extension_enabled(extension_states, "astrcode-ask-user") {
         extensions.push(astrcode_extension_ask_user::extension());
     }
     #[cfg(feature = "goal")]
-    if is_enabled(extension_states, "astrcode-goal") {
+    if extension_enabled(extension_states, "astrcode-goal") {
         extensions.push(astrcode_extension_goal::extension());
     }
     #[cfg(feature = "memory")]
-    if is_enabled(extension_states, "astrcode.memory") {
+    if extension_enabled(extension_states, "astrcode.memory") {
         extensions.push(astrcode_extension_memory::extension());
     }
     #[cfg(feature = "channels")]
-    if is_enabled(extension_states, "astrcode-channels") {
+    if extension_enabled(extension_states, "astrcode-channels") {
         extensions.push(astrcode_extension_channels::extension());
     }
     #[cfg(feature = "web-tools")]
-    if is_enabled(extension_states, "astrcode-web-tools") {
+    if extension_enabled(extension_states, "astrcode-web-tools") {
         extensions.push(astrcode_extension_web_tools::extension());
     }
 
@@ -130,10 +129,6 @@ pub fn bundled_extension_ids() -> Vec<&'static str> {
         #[cfg(feature = "web-tools")]
         "astrcode-web-tools",
     ]
-}
-
-fn is_enabled(extension_states: &BTreeMap<String, bool>, extension_id: &str) -> bool {
-    extension_enabled(extension_states, extension_id)
 }
 
 /// 解析扩展是否启用（config 显式值优先，否则按扩展 id 的默认策略）。

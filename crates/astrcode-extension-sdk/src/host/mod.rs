@@ -95,7 +95,9 @@ impl ExtensionHost {
         self.inner
             .scope
             .preflight_context(HostContextRequirement::Session, "session_history")?;
-        self.preflight_capability(ExtensionCapability::SessionHistory)?;
+        self.inner
+            .scope
+            .preflight_capability(ExtensionCapability::SessionHistory)?;
         Ok(SessionHistoryClient::new(self.clone()))
     }
 
@@ -119,7 +121,9 @@ impl ExtensionHost {
     }
 
     pub fn session_inspect(&self) -> Result<SessionInspectClient, HostError> {
-        self.preflight_capability(ExtensionCapability::SessionInspect)?;
+        self.inner
+            .scope
+            .preflight_capability(ExtensionCapability::SessionInspect)?;
         Ok(SessionInspectClient::new(self.clone()))
     }
 
@@ -144,22 +148,20 @@ impl ExtensionHost {
         self.inner
             .scope
             .preflight_context(HostContextRequirement::Workspace, "process")?;
-        self.preflight(HostOperation::ProcessSpawn)?;
+        self.inner.scope.preflight(HostOperation::ProcessSpawn)?;
         Ok(ProcessClient::new(self.clone()))
     }
 
     pub fn network(&self) -> Result<NetworkClient, HostError> {
-        self.preflight(HostOperation::NetworkClient)?;
+        self.inner.scope.preflight(HostOperation::NetworkClient)?;
         Ok(NetworkClient::new(self.clone()))
     }
 
     pub fn extension_http(&self) -> Result<ExtensionHttpClient, HostError> {
-        self.preflight(HostOperation::ExtensionHttpPublic)?;
+        self.inner
+            .scope
+            .preflight(HostOperation::ExtensionHttpPublic)?;
         Ok(ExtensionHttpClient::new(self.clone()))
-    }
-
-    fn preflight(&self, operation: HostOperation) -> Result<(), HostError> {
-        self.inner.scope.preflight(operation)
     }
 
     fn operation_available(&self, operation: HostOperation) -> Result<bool, HostError> {
@@ -173,10 +175,6 @@ impl ExtensionHost {
             .preflight_context(operation.spec().context, operation.wire_name())?;
         Ok(self.inner.scope.is_operation_available(operation))
     }
-
-    fn preflight_capability(&self, capability: ExtensionCapability) -> Result<(), HostError> {
-        self.inner.scope.preflight_capability(capability)
-    }
 }
 
 #[async_trait::async_trait]
@@ -184,7 +182,7 @@ impl HostClientTransport for ExtensionHost {
     type Error = HostError;
 
     async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, Self::Error> {
-        self.preflight(operation)?;
+        self.inner.scope.preflight(operation)?;
         self.inner.invoker.invoke(operation, input).await
     }
 
@@ -193,7 +191,7 @@ impl HostClientTransport for ExtensionHost {
         operation: HostOperation,
         input: Value,
     ) -> Result<ModelStream, Self::Error> {
-        self.preflight(operation)?;
+        self.inner.scope.preflight(operation)?;
         self.inner.invoker.invoke_stream(operation, input).await
     }
 
@@ -296,10 +294,9 @@ pub mod internal {
 
     /// Runtime-owned facts used only for synchronous, best-effort early failure.
     /// HostRouter remains authoritative and rechecks authorization during invoke.
-    #[derive(Clone)]
     pub struct HostScope {
-        granted: Arc<[ExtensionCapability]>,
-        available: Arc<[bool; HostOperation::COUNT]>,
+        granted: Box<[ExtensionCapability]>,
+        available: [bool; HostOperation::COUNT],
         session_context_available: bool,
         workspace_context_available: bool,
     }
@@ -316,8 +313,8 @@ pub mod internal {
                 operation_availability[operation as usize] = true;
             }
             Self {
-                granted: granted.into_iter().collect::<Vec<_>>().into(),
-                available: Arc::new(operation_availability),
+                granted: granted.into_iter().collect(),
+                available: operation_availability,
                 session_context_available,
                 workspace_context_available,
             }

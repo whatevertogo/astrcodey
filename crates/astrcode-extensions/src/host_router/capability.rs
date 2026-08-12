@@ -9,7 +9,7 @@ use astrcode_extension_sdk::{
         HostOperation,
         internal::{HOST_OPERATION_SPECS, HostBackendRequirement, HostOperationSpec},
     },
-    s5r::{CapabilityDescriptor, ErrorPayload},
+    s5r::ErrorPayload,
 };
 
 pub(super) fn lookup(name: &str) -> Result<&'static HostOperationSpec, ErrorPayload> {
@@ -85,17 +85,10 @@ pub(super) fn authorize(
     ))
 }
 
-pub(super) fn catalog_for_grants(
-    capabilities: &[ExtensionCapability],
-) -> Vec<CapabilityDescriptor> {
+pub(crate) fn supported_operation_catalog() -> Vec<String> {
     HOST_OPERATION_SPECS
         .iter()
-        .filter(|spec| match spec.required {
-            Some(required) => capabilities.contains(&required),
-            None => true,
-        })
-        .copied()
-        .map(HostOperationSpec::descriptor)
+        .map(|spec| spec.name.to_owned())
         .collect()
 }
 
@@ -104,21 +97,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lookup_authorize_and_granted_catalog_follow_the_sdk_catalog() {
-        for spec in HOST_OPERATION_SPECS.iter() {
+    fn lookup_authorize_and_supported_catalog_follow_the_sdk_catalog() {
+        let supported = supported_operation_catalog();
+        assert_eq!(supported.len(), HOST_OPERATION_SPECS.len());
+        for (index, spec) in HOST_OPERATION_SPECS.iter().enumerate() {
             assert_eq!(lookup(spec.name).unwrap().operation, spec.operation);
-
-            let granted_catalog = match spec.required {
-                Some(required) => catalog_for_grants(&[required]),
-                None => catalog_for_grants(&[]),
-            };
-            assert!(
-                granted_catalog
-                    .iter()
-                    .any(|descriptor| descriptor.name == spec.name),
-                "granted catalog is missing {} despite its capability being granted",
-                spec.name
-            );
+            assert_eq!(supported[index], spec.name);
 
             if let Some(required) = spec.required {
                 assert!(authorize(spec, &[required]).is_ok());

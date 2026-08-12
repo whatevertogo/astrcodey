@@ -7,9 +7,8 @@ use std::{
     time::Duration,
 };
 
-use astrcode_extension_contract::{WireErrorCode, protocol::ErrorPayload};
+use astrcode_extension_contract::{InvocationCancellation, WireErrorCode, protocol::ErrorPayload};
 use parking_lot::RwLock;
-use tokio_util::sync::CancellationToken;
 
 use crate::{
     extension_manifest::ExtensionRegistration,
@@ -58,10 +57,10 @@ impl Drop for StderrTaskGuard {
 
 pub(super) struct HostInvokeState {
     pub(super) router: Arc<HostRouter>,
-    pub(super) registration: Arc<RwLock<Option<ExtensionRegistration>>>,
+    pub(super) registration: ExtensionRegistration,
     pub(super) reentrancy: Arc<AtomicU32>,
-    pub(super) invoke_contexts: Arc<RwLock<HashMap<String, InvokeContext>>>,
-    pub(super) detached_invoke_context: Arc<RwLock<Option<InvokeContext>>>,
+    pub(super) invoke_contexts: RwLock<HashMap<String, InvokeContext>>,
+    pub(super) detached_invoke_context: RwLock<Option<InvokeContext>>,
 }
 
 pub(super) struct ReentrancyGuard {
@@ -94,7 +93,7 @@ pub(super) fn prepare_host_invoke(
     state: &HostInvokeState,
     operation: &str,
     parent_invoke_id: Option<&str>,
-    cancellation: &CancellationToken,
+    cancellation: &InvocationCancellation,
 ) -> Result<(ReentrancyGuard, InvokeContext), ErrorPayload> {
     if cancellation.is_cancelled() {
         return Err(ErrorPayload::new(
@@ -109,9 +108,6 @@ pub(super) fn prepare_host_invoke(
         ));
     }
     let reentrancy = ReentrancyGuard::enter(&state.reentrancy)?;
-    let registration = state.registration.read().clone().ok_or_else(|| {
-        ErrorPayload::new(WireErrorCode::NotInitialized, "extension not initialized")
-    })?;
     let parent_context =
         parent_invoke_id.and_then(|parent_id| state.invoke_contexts.read().get(parent_id).cloned());
     let mut context = resolve_host_invoke_context(
@@ -119,11 +115,11 @@ pub(super) fn prepare_host_invoke(
         parent_context,
         state.detached_invoke_context.read().clone(),
     )?;
-    context.extension_id = registration.extension_id().to_owned();
-    context.declared_capabilities = registration.capabilities().to_vec();
-    context.event_declarations = decls_to_map(registration.custom_events());
+    context.extension_id = state.registration.extension_id.clone();
+    context.declared_capabilities = state.registration.capabilities.clone();
+    context.event_declarations = decls_to_map(&state.registration.custom_events);
     context.on_peer_io_thread = true;
-    context.cancel_token = Some(cancellation.clone());
+    context.cancel_token = Some(cancellation.cancellation_token());
     Ok((reentrancy, context))
 }
 

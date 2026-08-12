@@ -7,9 +7,9 @@ mod extension_manifest;
 pub mod host_router;
 pub mod loader;
 mod process_supervision;
-mod remote_manifest;
 pub mod runner;
 pub mod s5r_ext;
+mod s5r_handler;
 
 pub use astrcode_extension_sdk::extension::Extension;
 pub use host_router::{

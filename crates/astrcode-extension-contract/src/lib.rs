@@ -21,7 +21,7 @@ pub mod stream;
 
 pub use capability::ExtensionCapability;
 pub use custom_event::{CustomEventDeclaration, CustomEventSourceFilter, CustomEventSubscription};
-pub use effects::{CallContinuation, HandlerEffect, HandlerResult};
+pub use effects::{CallContinuation, HandlerEffect, HandlerResult, ToolOutcome};
 pub use error::WireErrorCode;
 pub use frame::{FrameTransport, ProcessStdioTransport, StdioFrameTransport};
 pub use manifest::{CompactEvent, HookMode, LifecycleEvent};
@@ -29,13 +29,16 @@ pub use operation::{
     HOST_OPERATION_SPECS, HostBackendRequirement, HostContextRequirement, HostOp, HostOperation,
     HostOperationGroup, HostOperationSpec, operations,
 };
-pub use peer::{Peer, PeerError, PeerHandshake, Ready, Uninitialized};
+pub use peer::{
+    HostInitialization, HostInitialized, Peer, PeerError, Ready, Uninitialized,
+    WorkerInitialization, WorkerInitialized,
+};
 pub use peer_runtime::{
-    InboundInvoke, InvocationResponse, InvokeError, ModelEventStream, NestedPeer, PeerDriver,
-    PeerHandle, PeerInvokeHandler, PeerStream, model_event_stream,
+    InboundInvoke, InvocationCancellation, InvocationResponse, InvokeError, ModelEventStream,
+    PeerDriver, PeerHandle, PeerInvokeHandler, PeerStream, model_event_stream,
 };
 pub use protocol::{
-    ErrorPayload, FeatureName, HandlerId, HandlerInvokeRequest, HandlerKind, InitializeMsg,
-    InitializeOutput, PeerInfo, WireMessage,
+    ActivateMsg, ActivateOutput, ErrorPayload, FeatureName, HandlerId, HandlerInvokeRequest,
+    HandlerKind, InitializeMsg, InitializeOutput, PeerInfo, WireMessage,
 };
 pub use stream::TerminalStream;

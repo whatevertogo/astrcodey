@@ -10,14 +10,11 @@ use serde_json::Value;
 
 use crate::{
     WireErrorCode,
-    host::{
-        HostOperation,
-        internal::{
-            HostClientTransport, TypedEventClient, TypedExtensionHttpClient, TypedModelClient,
-            TypedNetworkClient, TypedProcessClient, TypedSessionControlClient,
-            TypedSessionHistoryClient, TypedSessionInspectClient, TypedSessionStateClient,
-            TypedWorkspaceClient,
-        },
+    host::internal::{
+        HostClientTransport, TypedEventClient, TypedExtensionHttpClient, TypedModelClient,
+        TypedNetworkClient, TypedProcessClient, TypedSessionControlClient,
+        TypedSessionHistoryClient, TypedSessionInspectClient, TypedSessionStateClient,
+        TypedWorkspaceClient,
     },
     model_stream::ModelStream,
     s5r::ErrorPayload,
@@ -29,16 +26,17 @@ pub use crate::{
         HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitOutput,
         HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmContent,
         HostLlmMessage, HostLlmRole, HostNetworkRedirectPolicy, HostNetworkRequest,
-        HostNetworkResponse, HostProcessOutput, HostProcessRequest, HostSessionCancelOutput,
-        HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
-        HostSessionProviderMessagesOutput, HostSessionStateReadOutput, HostSessionStateReadRequest,
-        HostSessionStateWriteRequest, HostSessionSummariesOutput, HostSessionSummary,
-        HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
-        HostSessionTranscriptMessage, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
-        HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepMatch,
-        HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
-        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
-        HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
+        HostNetworkResponse, HostOperation, HostProcessOutput, HostProcessRequest,
+        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
+        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionStateReadOutput,
+        HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
+        HostSessionSummary, HostSessionTokenUsage, HostSessionTokenUsageOutput,
+        HostSessionTranscript, HostSessionTranscriptMessage, HostWorkspaceEditOutput,
+        HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+        HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+        HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
+        HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
+        HostWorkspaceWriteRequest,
     },
     session::{
         HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
@@ -51,6 +49,8 @@ pub use crate::{
 /// 扩展子进程调用 `astrcode.*` 能力的接口。
 #[async_trait]
 pub trait HostApi: Send + Sync {
+    fn host_supports(&self, operation: HostOperation) -> bool;
+
     async fn call(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload>;
 
     async fn open_stream(
@@ -66,68 +66,25 @@ pub trait HostApi: Send + Sync {
     }
 }
 
-enum V3PeerClient<T>
-where
-    T: astrcode_extension_contract::FrameTransport + 'static,
-{
-    Peer(astrcode_extension_contract::PeerHandle<T>),
-    Nested(astrcode_extension_contract::NestedPeer<T>),
+pub(crate) struct V3PeerHostApi {
+    peer: astrcode_extension_contract::PeerHandle,
 }
 
-pub(crate) struct V3PeerHostApi<T>
-where
-    T: astrcode_extension_contract::FrameTransport + 'static,
-{
-    client: V3PeerClient<T>,
-}
-
-impl<T> V3PeerHostApi<T>
-where
-    T: astrcode_extension_contract::FrameTransport + 'static,
-{
-    pub fn peer(peer: astrcode_extension_contract::PeerHandle<T>) -> Self {
-        Self {
-            client: V3PeerClient::Peer(peer),
-        }
-    }
-
-    pub fn nested(peer: astrcode_extension_contract::NestedPeer<T>) -> Self {
-        Self {
-            client: V3PeerClient::Nested(peer),
-        }
-    }
-
-    async fn invoke(
-        &self,
-        operation: &str,
-        input: Value,
-    ) -> Result<Value, astrcode_extension_contract::InvokeError> {
-        match &self.client {
-            V3PeerClient::Peer(peer) => peer.invoke(operation, input).await,
-            V3PeerClient::Nested(peer) => peer.invoke(operation, input).await,
-        }
-    }
-
-    async fn invoke_stream(
-        &self,
-        operation: &str,
-        input: Value,
-    ) -> Result<astrcode_extension_contract::PeerStream, astrcode_extension_contract::InvokeError>
-    {
-        match &self.client {
-            V3PeerClient::Peer(peer) => peer.invoke_stream(operation, input).await,
-            V3PeerClient::Nested(peer) => peer.invoke_stream(operation, input).await,
-        }
+impl V3PeerHostApi {
+    pub fn new(peer: astrcode_extension_contract::PeerHandle) -> Self {
+        Self { peer }
     }
 }
 
 #[async_trait]
-impl<T> HostApi for V3PeerHostApi<T>
-where
-    T: astrcode_extension_contract::FrameTransport + Send + Sync + 'static,
-{
+impl HostApi for V3PeerHostApi {
+    fn host_supports(&self, operation: HostOperation) -> bool {
+        self.peer.host_supports(operation.wire_name())
+    }
+
     async fn call(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-        self.invoke(capability, input)
+        self.peer
+            .invoke(capability, input)
             .await
             .map_err(v3_invoke_error_to_payload)
     }
@@ -138,6 +95,7 @@ where
         input: Value,
     ) -> Result<ModelStream, ErrorPayload> {
         let stream = self
+            .peer
             .invoke_stream(capability, input)
             .await
             .map_err(v3_invoke_error_to_payload)?;
@@ -190,7 +148,8 @@ impl HostClientTransport for WorkerHostTransport {
     type Error = ErrorPayload;
 
     async fn invoke(&self, operation: HostOperation, input: Value) -> Result<Value, Self::Error> {
-        call_host(operation.wire_name(), input).await
+        let api = supported_host_api(operation)?;
+        api.call(operation.wire_name(), input).await
     }
 
     async fn invoke_stream(
@@ -198,7 +157,8 @@ impl HostClientTransport for WorkerHostTransport {
         operation: HostOperation,
         input: Value,
     ) -> Result<ModelStream, Self::Error> {
-        host_api()?.open_stream(operation.wire_name(), input).await
+        let api = supported_host_api(operation)?;
+        api.open_stream(operation.wire_name(), input).await
     }
 
     fn client_error(code: WireErrorCode, message: String) -> Self::Error {
@@ -225,6 +185,10 @@ pub type ExtensionHttpClient = TypedExtensionHttpClient<WorkerHostTransport>;
 pub struct HostClient;
 
 impl HostClient {
+    pub fn host_supports(operation: HostOperation) -> Result<bool, ErrorPayload> {
+        Ok(host_api()?.host_supports(operation))
+    }
+
     pub const fn events() -> EventClient {
         EventClient::new(WorkerHostTransport)
     }
@@ -266,10 +230,6 @@ impl HostClient {
     }
 }
 
-async fn call_host(capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-    host_api()?.call(capability, input).await
-}
-
 fn host_api() -> Result<Arc<dyn HostApi>, ErrorPayload> {
     if let Ok(api) = SCOPED_HOST_API.try_with(Arc::clone) {
         return Ok(api);
@@ -280,16 +240,31 @@ fn host_api() -> Result<Arc<dyn HostApi>, ErrorPayload> {
         .ok_or_else(|| ErrorPayload::new(WireErrorCode::HostNotReady, "host peer not ready"))
 }
 
+fn supported_host_api(operation: HostOperation) -> Result<Arc<dyn HostApi>, ErrorPayload> {
+    let api = host_api()?;
+    if api.host_supports(operation) {
+        Ok(api)
+    } else {
+        Err(ErrorPayload::new(
+            WireErrorCode::Unsupported,
+            format!("host does not support operation {}", operation.wire_name()),
+        ))
+    }
+}
+
 /// Invokes a raw host capability for transport or request-context integration tests.
 pub async fn invoke_host(capability: &str, input: Value) -> Result<Value, ErrorPayload> {
-    call_host(capability, input).await
+    host_api()?.call(capability, input).await
 }
 #[cfg(test)]
 mod host_tests {
     use std::{
         collections::HashSet,
         future::Future,
-        sync::{Arc, Mutex},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use async_trait::async_trait;
@@ -306,6 +281,11 @@ mod host_tests {
     #[derive(Default)]
     struct RecordingHost {
         operations: Mutex<Vec<HostOperation>>,
+    }
+
+    #[derive(Default)]
+    struct LimitedHost {
+        calls: AtomicUsize,
     }
 
     async fn expect_backend_error<T>(future: impl Future<Output = Result<T, ErrorPayload>>) {
@@ -394,6 +374,10 @@ mod host_tests {
 
     #[async_trait]
     impl HostApi for MockHost {
+        fn host_supports(&self, _operation: HostOperation) -> bool {
+            true
+        }
+
         async fn call(&self, capability: &str, input: Value) -> Result<Value, ErrorPayload> {
             match capability {
                 "astrcode.llm.main_chat" => {
@@ -482,6 +466,10 @@ mod host_tests {
 
     #[async_trait]
     impl HostApi for RecordingHost {
+        fn host_supports(&self, _operation: HostOperation) -> bool {
+            true
+        }
+
         async fn call(&self, capability: &str, _input: Value) -> Result<Value, ErrorPayload> {
             self.operations.lock().unwrap().push(
                 HostOperation::from_wire_name(capability)
@@ -507,6 +495,51 @@ mod host_tests {
                 "test backend unavailable",
             ))
         }
+    }
+
+    #[async_trait]
+    impl HostApi for LimitedHost {
+        fn host_supports(&self, operation: HostOperation) -> bool {
+            operation == HostOperation::EventEmit
+        }
+
+        async fn call(&self, _capability: &str, _input: Value) -> Result<Value, ErrorPayload> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(ErrorPayload::new(
+                WireErrorCode::BackendUnavailable,
+                "test backend unavailable",
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn support_query_and_typed_preflight_use_the_handshake_catalog() {
+        let host = Arc::new(LimitedHost::default());
+        with_host_api(host.clone(), async {
+            assert!(HostClient::host_supports(HostOperation::EventEmit).unwrap());
+            assert!(!HostClient::host_supports(HostOperation::LlmMainChat).unwrap());
+
+            expect_backend_error(HostClient::events().emit(HostEventEmitRequest {
+                event_type: "review.completed".into(),
+                schema_version: 1,
+                payload: json!({}),
+            }))
+            .await;
+            for error in [
+                HostClient::models()
+                    .main_chat(vec![LlmMessage::user("hello")])
+                    .await
+                    .unwrap_err(),
+                HostClient::models()
+                    .main_chat_collected(vec![LlmMessage::user("hello")])
+                    .await
+                    .unwrap_err(),
+            ] {
+                assert_eq!(error.code_enum(), Some(WireErrorCode::Unsupported));
+            }
+        })
+        .await;
+        assert_eq!(host.calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

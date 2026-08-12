@@ -11,43 +11,33 @@ use astrcode_extension_sdk::{
     extension::{
         CommandContext, CommandHandler, CompactContext, CompactHandler, CompactResult,
         ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopResult,
-        CustomEventContext, CustomEventDeclaration, CustomEventDisposition, CustomEventHandler,
-        CustomEventSubscription, Extension, ExtensionCall, ExtensionCallContext,
-        ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionHttpHandler,
+        CustomEventContext, CustomEventDisposition, CustomEventHandler, Extension, ExtensionCall,
+        ExtensionCallContext, ExtensionCommandResult, ExtensionError, ExtensionHttpHandler,
         ExtensionHttpResponse, ExtensionPackageManifest, ExtensionStartContext,
         ExtensionStopContext, HookResult, HttpContext, LifecycleContext, LifecycleEvent,
         LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
         PreToolUseContext, PreToolUseHandler, PreToolUseResult, PromptBuildContext,
         PromptBuildHandler, PromptContributions, ProviderContext, ProviderHandler, ProviderResult,
-        Registrar, SlashCommand, ToolContext, ToolHandler,
+        Registrar, ToolContext, ToolHandler,
     },
-    tool::{ExecutionMode, ToolDefinition},
+    tool::ExecutionMode,
 };
 use serde_json::{Value, json};
 
 use crate::{
-    extension_manifest::{ExtensionRegistration, HookSubscription, RegisteredHttpRoute},
+    extension_manifest::HookSubscription,
     host_router::{HostRouter, InvokeContext},
-    remote_manifest::{
+    s5r_ext::v3_session::S5rV3Session as S5rSession,
+    s5r_handler::{
         handler_id, parse_command_result, parse_compact_result, parse_continue_after_stop_result,
         parse_http_response, parse_lifecycle_result, parse_post_tool_use_result,
         parse_pre_tool_use_result, parse_prompt_build_result, parse_provider_result,
         parse_tool_result,
     },
-    s5r_ext::v3_session::S5rV3Session as S5rSession,
 };
 
 pub struct S5rExtension {
-    id: String,
-    version: String,
-    capabilities: Vec<ExtensionCapability>,
     session: Arc<S5rSession>,
-    event_decls: Vec<CustomEventDeclaration>,
-    event_subscriptions: Vec<CustomEventSubscription>,
-    tools: Vec<ToolDefinition>,
-    commands: Vec<SlashCommand>,
-    subscriptions: Vec<HookSubscription>,
-    http_routes: Vec<RegisteredHttpRoute>,
 }
 
 impl S5rExtension {
@@ -58,39 +48,17 @@ impl S5rExtension {
     ) -> Result<Arc<Self>, String> {
         let (program, args) = parse_command(manifest, ext_dir)?;
         let env = parse_env(manifest);
-        let session = S5rSession::spawn(&program, &args, ext_dir, &env, host_router).await?;
-        let registration = session
-            .registration()
-            .ok_or("s5r extension did not complete initialize handshake")?;
-        if registration.extension_id() != manifest.extension_id {
-            let actual_id = registration.extension_id().to_owned();
-            session.shutdown().await;
-            return Err(format!(
-                "extension id mismatch: extension.json declares {:?}, initialize declares \
-                 {actual_id:?}",
-                manifest.extension_id
-            ));
-        }
-        Ok(build_extension(session, registration))
+        let session = S5rSession::spawn(
+            &program,
+            &args,
+            ext_dir,
+            &env,
+            &manifest.extension_id,
+            host_router,
+        )
+        .await?;
+        Ok(Arc::new(Self { session }))
     }
-}
-
-fn build_extension(
-    session: Arc<S5rSession>,
-    registration: ExtensionRegistration,
-) -> Arc<S5rExtension> {
-    Arc::new(S5rExtension {
-        id: registration.extension_id().to_owned(),
-        version: registration.version().to_owned(),
-        capabilities: registration.capabilities().to_vec(),
-        session,
-        event_decls: registration.custom_events().to_vec(),
-        event_subscriptions: registration.custom_event_subscriptions().to_vec(),
-        tools: registration.tools().to_vec(),
-        commands: registration.commands().to_vec(),
-        subscriptions: registration.subscriptions().to_vec(),
-        http_routes: registration.http_routes().to_vec(),
-    })
 }
 
 pub(crate) fn parse_command(
@@ -124,12 +92,14 @@ fn parse_env(manifest: &ExtensionPackageManifest) -> Vec<(String, String)> {
 #[async_trait::async_trait]
 impl Extension for S5rExtension {
     fn manifest(&self) -> astrcode_extension_sdk::extension::ExtensionManifest {
-        self.capabilities
+        let registration = self.session.registration();
+        registration
+            .capabilities
             .iter()
             .copied()
             .fold(
-                manifest(self.id.clone())
-                    .version(self.version.clone())
+                manifest(&registration.extension_id)
+                    .version(&registration.version)
                     .description("External S5R extension"),
                 |builder, capability| builder.capability(capability),
             )
@@ -137,40 +107,41 @@ impl Extension for S5rExtension {
     }
 
     fn register(&self, reg: &mut Registrar) {
-        for decl in &self.event_decls {
+        let registration = self.session.registration();
+        for decl in &registration.custom_events {
             reg.declare_custom_event(decl.clone());
         }
-        for subscription in &self.event_subscriptions {
+        for subscription in &registration.custom_event_subscriptions {
             reg.on_custom_event(
                 subscription.clone(),
                 0,
                 Arc::new(S5rCustomEventHandler {
                     session: Arc::clone(&self.session),
-                    ext_id: self.id.clone(),
+                    ext_id: registration.extension_id.clone(),
                     subscription_id: subscription.id.clone(),
                 }),
             );
         }
-        for tool_def in &self.tools {
+        for tool_def in &registration.tools {
             reg.tool(
                 tool_def.clone(),
                 Arc::new(S5rToolHandler {
                     session: Arc::clone(&self.session),
-                    extension_id: self.id.clone(),
+                    extension_id: registration.extension_id.clone(),
                     execution_mode: tool_def.execution_mode,
                 }),
             );
         }
-        for cmd in &self.commands {
+        for cmd in &registration.commands {
             reg.command(
                 cmd.clone(),
                 Arc::new(S5rCommandHandler {
                     session: Arc::clone(&self.session),
-                    extension_id: self.id.clone(),
+                    extension_id: registration.extension_id.clone(),
                 }),
             );
         }
-        for entry in &self.http_routes {
+        for entry in &registration.http_routes {
             reg.http_route(
                 entry.route.clone(),
                 Arc::new(S5rHttpHandler {
@@ -179,10 +150,10 @@ impl Extension for S5rExtension {
                 }),
             );
         }
-        for subscription in &self.subscriptions {
+        for subscription in &registration.subscriptions {
             let event_name = subscription.event_name();
             let session = Arc::clone(&self.session);
-            let ext_id = self.id.clone();
+            let ext_id = registration.extension_id.clone();
             match subscription {
                 HookSubscription::Compact(event) => {
                     reg.on_compact(
@@ -296,7 +267,7 @@ impl Extension for S5rExtension {
                 )
             })?;
         self.session.set_detached_invoke_context(invoke_context);
-        Ok(())
+        self.session.activate().await
     }
 
     async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
@@ -305,10 +276,7 @@ impl Extension for S5rExtension {
     }
 
     async fn health(&self) -> Result<(), ExtensionError> {
-        self.session
-            .ping()
-            .await
-            .map_err(|e| ExtensionError::Internal(e.to_string()))
+        self.session.ping().await
     }
 }
 

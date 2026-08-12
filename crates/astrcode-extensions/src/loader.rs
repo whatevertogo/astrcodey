@@ -74,17 +74,7 @@ impl ExtensionCandidate {
 #[derive(Default)]
 pub struct DiscoverExtensionsResult {
     pub candidates: Vec<ExtensionCandidate>,
-    pub errors: Vec<String>,
     pub failures: Vec<ExtensionLoadFailure>,
-}
-
-/// 从磁盘加载所有扩展的结果。
-#[derive(Default)]
-pub struct LoadExtensionsResult {
-    pub extensions: Vec<Arc<dyn Extension>>,
-    pub errors: Vec<String>,
-    pub load_failures: Vec<ExtensionLoadFailure>,
-    pub load_success_durations: BTreeMap<String, Duration>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,60 +106,40 @@ pub trait ExtensionSource: Send + Sync {
     }
 }
 
-pub struct ExtensionRuntime {
-    pub runner: Arc<ExtensionRunner>,
-    pub load_errors: Vec<String>,
-}
-
-impl ExtensionRuntime {
-    pub async fn load(
-        ctx: ExtensionLoadContext,
-        operation_timeout: Duration,
-        sources: &[&dyn ExtensionSource],
-    ) -> Self {
-        let runner = Arc::new(ExtensionRunner::new(operation_timeout));
-        let load_errors = Self::sync_sources(&runner, &ctx, sources).await;
-        Self {
-            runner,
-            load_errors,
-        }
-    }
-
-    pub async fn sync_sources(
-        runner: &Arc<ExtensionRunner>,
-        ctx: &ExtensionLoadContext,
-        sources: &[&dyn ExtensionSource],
-    ) -> Vec<String> {
-        let _reconcile = runner.lock_source_reconcile().await;
-        let current_ids = runner.registered_extension_ids().await;
-        let current_sources = runner.registered_source_extensions().await;
-        let current_by_source: CurrentSourceMap<'_> = current_sources
-            .iter()
-            .map(|current| (current.key.as_str(), current))
-            .collect();
-        let current_by_id: CurrentSourceMap<'_> = current_sources
-            .iter()
-            .map(|current| (current.id.as_str(), current))
-            .collect();
-        let plan = build_reconcile_plan(
-            runner,
-            ctx,
-            sources,
-            &current_ids,
-            &current_sources,
-            &current_by_source,
-        )
-        .await;
-        apply_reconcile_plan(
-            runner,
-            ctx,
-            &current_ids,
-            &current_by_source,
-            &current_by_id,
-            plan,
-        )
-        .await
-    }
+pub async fn sync_extension_sources(
+    runner: &Arc<ExtensionRunner>,
+    ctx: &ExtensionLoadContext,
+    sources: &[&dyn ExtensionSource],
+) -> Vec<String> {
+    let _reconcile = runner.lock_source_reconcile().await;
+    let current_ids = runner.registered_extension_ids().await;
+    let current_sources = runner.registered_source_extensions().await;
+    let current_by_source: CurrentSourceMap<'_> = current_sources
+        .iter()
+        .map(|current| (current.key.as_str(), current))
+        .collect();
+    let current_by_id: CurrentSourceMap<'_> = current_sources
+        .iter()
+        .map(|current| (current.id.as_str(), current))
+        .collect();
+    let plan = build_reconcile_plan(
+        runner,
+        ctx,
+        sources,
+        &current_ids,
+        &current_sources,
+        &current_by_source,
+    )
+    .await;
+    apply_reconcile_plan(
+        runner,
+        ctx,
+        &current_ids,
+        &current_by_source,
+        &current_by_id,
+        plan,
+    )
+    .await
 }
 
 struct ReconcilePlan {
@@ -195,7 +165,7 @@ async fn build_reconcile_plan(
 
     for source in sources {
         let discovery = source.discover(ctx).await;
-        for failure in &discovery.failures {
+        for failure in discovery.failures {
             let current_source = failure
                 .source_key
                 .as_deref()
@@ -224,8 +194,8 @@ async fn build_reconcile_plan(
                         .map(|current| current.id.clone()),
                 );
             }
+            errors.push(failure.message);
         }
-        errors.extend(discovery.errors);
 
         for candidate in discovery.candidates {
             let ExtensionCandidate {
@@ -246,22 +216,20 @@ async fn build_reconcile_plan(
                 .filter(|current| current.id == extension_id && current.fingerprint == fingerprint)
             {
                 if desired_ids.insert(current.id.clone()) {
-                    desired_extensions.push(DesiredExtension::retain(
-                        current.id.clone(),
-                        source_key,
-                        fingerprint,
-                    ));
+                    desired_extensions.push(DesiredExtension::Retain {
+                        id: current.id.clone(),
+                    });
                 }
                 continue;
             }
 
             if desired_ids.insert(extension_id.clone()) {
-                desired_extensions.push(DesiredExtension::start(
-                    extension_id,
+                desired_extensions.push(DesiredExtension::Start {
+                    id: extension_id,
                     source_key,
                     fingerprint,
                     load,
-                ));
+                });
             }
         }
     }
@@ -290,19 +258,20 @@ async fn apply_reconcile_plan(
     } = plan;
     let desired_order = desired_extensions
         .iter()
-        .map(|desired| desired.id.clone())
+        .map(DesiredExtension::id)
+        .map(str::to_owned)
         .collect::<Vec<_>>();
     let mut pending_task_activations = Vec::new();
     let batch_publication = runner.begin_source_batch_publication();
 
     for desired in desired_extensions {
-        let DesiredExtension {
+        let DesiredExtension::Start {
             id,
             source_key,
             fingerprint,
-            state,
-        } = desired;
-        let DesiredExtensionState::Start { load } = state else {
+            load,
+        } = desired
+        else {
             continue;
         };
         let mut replaced_ids = Vec::new();
@@ -411,7 +380,7 @@ impl DiskExtensionSource {
 #[async_trait::async_trait]
 impl ExtensionSource for DiskExtensionSource {
     async fn discover(&self, ctx: &ExtensionLoadContext) -> DiscoverExtensionsResult {
-        ExtensionLoader::discover_all(ctx.working_dir.as_deref(), ctx.host_router.clone()).await
+        discover_all(ctx.working_dir.as_deref(), ctx.host_router.clone()).await
     }
 
     fn is_enabled(&self, extension_id: &str) -> bool {
@@ -426,275 +395,233 @@ impl ExtensionSource for DiskExtensionSource {
     }
 }
 
-enum DesiredExtensionState {
-    Retain,
-    Start { load: CandidateLoader },
-}
-
-struct DesiredExtension {
-    id: String,
-    source_key: String,
-    fingerprint: String,
-    state: DesiredExtensionState,
+enum DesiredExtension {
+    Retain {
+        id: String,
+    },
+    Start {
+        id: String,
+        source_key: String,
+        fingerprint: String,
+        load: CandidateLoader,
+    },
 }
 
 impl DesiredExtension {
-    fn retain(id: String, source_key: String, fingerprint: String) -> Self {
-        Self {
-            id,
-            source_key,
-            fingerprint,
-            state: DesiredExtensionState::Retain,
-        }
-    }
-
-    fn start(id: String, source_key: String, fingerprint: String, load: CandidateLoader) -> Self {
-        Self {
-            id,
-            source_key,
-            fingerprint,
-            state: DesiredExtensionState::Start { load },
+    fn id(&self) -> &str {
+        match self {
+            Self::Retain { id } | Self::Start { id, .. } => id,
         }
     }
 }
 
-pub struct ExtensionLoader;
+async fn discover_all(
+    working_dir: Option<&str>,
+    host_router: Option<Arc<HostRouter>>,
+) -> DiscoverExtensionsResult {
+    let mut result = DiscoverExtensionsResult::default();
 
-impl ExtensionLoader {
-    pub async fn load_all(
-        working_dir: Option<&str>,
-        host_router: Option<Arc<HostRouter>>,
-    ) -> LoadExtensionsResult {
-        let discovery = Self::discover_all(working_dir, host_router).await;
-        Self::load_discovered(discovery).await
+    let global_dir = astrcode_dir().join("extensions");
+    if global_dir.exists() {
+        let global = discover_from_dir(&global_dir, host_router.clone()).await;
+        result.candidates.extend(global.candidates);
+        result.failures.extend(global.failures);
     }
 
-    async fn discover_all(
-        working_dir: Option<&str>,
-        host_router: Option<Arc<HostRouter>>,
-    ) -> DiscoverExtensionsResult {
-        let mut result = DiscoverExtensionsResult::default();
-
-        let global_dir = astrcode_dir().join("extensions");
-        if global_dir.exists() {
-            let global = Self::discover_from_dir(&global_dir, host_router.clone()).await;
-            result.candidates.extend(global.candidates);
-            result.errors.extend(global.errors);
-            result.failures.extend(global.failures);
+    if let Some(wd) = working_dir {
+        let project_dir = PathBuf::from(wd).join(".astrcode").join("extensions");
+        if project_dir.exists() {
+            let project = discover_from_dir(&project_dir, host_router).await;
+            result.candidates.splice(0..0, project.candidates);
+            result.failures.extend(project.failures);
         }
-
-        if let Some(wd) = working_dir {
-            let project_dir = PathBuf::from(wd).join(".astrcode").join("extensions");
-            if project_dir.exists() {
-                let project = Self::discover_from_dir(&project_dir, host_router).await;
-                result.candidates.splice(0..0, project.candidates);
-                result.errors.extend(project.errors);
-                result.failures.extend(project.failures);
-            }
-        }
-
-        result
     }
 
-    #[doc(hidden)]
-    pub async fn load_from_dir_for_test(
-        dir: &Path,
-        host_router: &Option<Arc<HostRouter>>,
-    ) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
-        let discovery = Self::discover_from_dir(dir, host_router.clone()).await;
-        let loaded = Self::load_discovered(discovery).await;
-        (loaded.extensions, loaded.errors)
-    }
+    result
+}
 
-    async fn discover_from_dir(
-        dir: &Path,
-        host_router: Option<Arc<HostRouter>>,
-    ) -> DiscoverExtensionsResult {
-        let mut result = DiscoverExtensionsResult::default();
-        let paths = match Self::extension_dirs(dir).await {
-            Ok(paths) => paths,
-            Err(e) => {
+#[doc(hidden)]
+pub async fn load_extensions_from_dir_for_test(
+    dir: &Path,
+    host_router: &Option<Arc<HostRouter>>,
+) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
+    let discovery = discover_from_dir(dir, host_router.clone()).await;
+    load_discovered(discovery).await
+}
+
+async fn discover_from_dir(
+    dir: &Path,
+    host_router: Option<Arc<HostRouter>>,
+) -> DiscoverExtensionsResult {
+    let mut result = DiscoverExtensionsResult::default();
+    let paths = match extension_dirs(dir).await {
+        Ok(paths) => paths,
+        Err(e) => {
+            result.failures.push(ExtensionLoadFailure {
+                source_key: None,
+                extension_id: None,
+                message: e.clone(),
+                duration_ms: None,
+            });
+            return result;
+        },
+    };
+
+    for path in paths {
+        let started = Instant::now();
+        match discover_extension(&path, host_router.clone()).await {
+            Ok(candidate) => result.candidates.push(candidate),
+            Err(message) => {
                 result.failures.push(ExtensionLoadFailure {
-                    source_key: None,
+                    source_key: disk_source_key(&path).await,
                     extension_id: None,
-                    message: e.clone(),
-                    duration_ms: None,
+                    message: message.clone(),
+                    duration_ms: Some(started.elapsed().as_millis() as u64),
                 });
-                result.errors.push(e);
-                return result;
             },
-        };
-
-        for path in paths {
-            let started = Instant::now();
-            match Self::discover_extension(&path, host_router.clone()).await {
-                Ok(candidate) => result.candidates.push(candidate),
-                Err(message) => {
-                    result.failures.push(ExtensionLoadFailure {
-                        source_key: Self::disk_source_key(&path).await,
-                        extension_id: None,
-                        message: message.clone(),
-                        duration_ms: Some(started.elapsed().as_millis() as u64),
-                    });
-                    result.errors.push(message);
-                },
-            }
         }
-
-        result
     }
 
-    async fn load_discovered(discovery: DiscoverExtensionsResult) -> LoadExtensionsResult {
-        let mut result = LoadExtensionsResult {
-            errors: discovery.errors,
-            load_failures: discovery.failures,
-            ..Default::default()
-        };
-        for candidate in discovery.candidates {
-            let ExtensionCandidate {
-                source_key,
-                extension_id,
-                load,
-                ..
-            } = candidate;
-            let started = Instant::now();
-            match load()
-                .await
-                .and_then(|extension| ensure_candidate_identity(&extension_id, extension))
-            {
-                Ok(extension) => {
-                    result
-                        .load_success_durations
-                        .insert(extension_id.clone(), started.elapsed());
-                    result.extensions.push(extension);
-                },
-                Err(message) => {
-                    result.load_failures.push(ExtensionLoadFailure {
-                        source_key: Some(source_key),
-                        extension_id: Some(extension_id),
-                        message: message.clone(),
-                        duration_ms: Some(started.elapsed().as_millis() as u64),
-                    });
-                    result.errors.push(message);
-                },
-            }
-        }
-        result
-    }
+    result
+}
 
-    async fn extension_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
-        let mut entries = tokio::fs::read_dir(dir)
+async fn load_discovered(
+    discovery: DiscoverExtensionsResult,
+) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
+    let mut extensions = Vec::new();
+    let mut errors = discovery
+        .failures
+        .into_iter()
+        .map(|failure| failure.message)
+        .collect::<Vec<_>>();
+    for candidate in discovery.candidates {
+        let ExtensionCandidate {
+            extension_id, load, ..
+        } = candidate;
+        match load()
             .await
-            .map_err(|e| format!("Cannot read extensions dir {}: {e}", dir.display()))?;
-        let mut paths = Vec::new();
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| format!("read dir entry: {e}"))?
+            .and_then(|extension| ensure_candidate_identity(&extension_id, extension))
         {
-            let path = entry.path();
-            let file_type = entry
-                .file_type()
-                .await
-                .map_err(|e| format!("read file type: {e}"))?;
-            if file_type.is_dir()
-                && tokio::fs::metadata(path.join("extension.json"))
-                    .await
-                    .is_ok()
-            {
-                paths.push(path);
-            }
-        }
-        paths.sort();
-        Ok(paths)
-    }
-
-    async fn discover_extension(
-        ext_dir: &Path,
-        host_router: Option<Arc<HostRouter>>,
-    ) -> Result<ExtensionCandidate, String> {
-        let manifest_path = ext_dir.join("extension.json");
-        let manifest_bytes = tokio::fs::read(&manifest_path)
-            .await
-            .map_err(|e| format!("{}: read manifest: {e}", ext_dir.display()))?;
-        let entry: ExtensionPackageManifest = serde_json::from_slice(&manifest_bytes)
-            .map_err(|e| format!("{}: parse manifest: {e}", ext_dir.display()))?;
-        validate_extension_id(&entry.extension_id)
-            .map_err(|error| format!("{}: {error}", ext_dir.display()))?;
-
-        if entry.protocol.native.is_some() {
-            return Err(format!(
-                "{}: protocol.native is not implemented yet; use protocol.s5r",
-                ext_dir.display()
-            ));
-        }
-
-        if entry.protocol.s5r.as_deref() != Some(S5R_VERSION) {
-            return Err(format!(
-                "{}: extension.json must set protocol.s5r to \"{}\"",
-                ext_dir.display(),
-                S5R_VERSION
-            ));
-        }
-
-        if entry.command.is_empty() {
-            return Err(format!(
-                "{}: extension.json 'command' must contain an executable",
-                ext_dir.display()
-            ));
-        }
-
-        let canonical_dir = tokio::fs::canonicalize(ext_dir)
-            .await
-            .map_err(|error| format!("{}: canonicalize: {error}", ext_dir.display()))?;
-        let source_key = format!("disk:{}", canonical_dir.display());
-        let fingerprint =
-            Self::disk_source_fingerprint(&canonical_dir, manifest_bytes, &entry).await?;
-        let extension_id = entry.extension_id.clone();
-        let display_path = canonical_dir.display().to_string();
-
-        Ok(ExtensionCandidate::lazy(
-            source_key,
-            fingerprint,
-            extension_id,
-            move || async move {
-                let router = host_router.ok_or_else(|| {
-                    format!(
-                        "{display_path}: ExtensionLoadContext.host_router is required for disk \
-                         extensions"
-                    )
-                })?;
-                crate::s5r_ext::S5rExtension::load(&canonical_dir, &entry, router)
-                    .await
-                    .map(|extension| extension as Arc<dyn Extension>)
-                    .map_err(|error| format!("{display_path}: {error}"))
+            Ok(extension) => extensions.push(extension),
+            Err(message) => {
+                errors.push(message);
             },
-        ))
+        }
     }
+    (extensions, errors)
+}
 
-    async fn disk_source_fingerprint(
-        ext_dir: &Path,
-        manifest_bytes: Vec<u8>,
-        manifest: &ExtensionPackageManifest,
-    ) -> Result<String, String> {
-        let (program, args) = crate::s5r_ext::parse_command(manifest, ext_dir)
-            .map_err(|error| format!("{}: {error}", ext_dir.display()))?;
-        let ext_dir = ext_dir.to_path_buf();
-        let display_path = ext_dir.display().to_string();
-        tokio::task::spawn_blocking(move || {
-            hash_disk_source(&ext_dir, &manifest_bytes, &program, &args)
-        })
+async fn extension_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
+    let mut entries = tokio::fs::read_dir(dir)
         .await
-        .map_err(|error| format!("{display_path}: fingerprint task failed: {error}"))?
-        .map_err(|error| format!("{display_path}: {error}"))
+        .map_err(|e| format!("Cannot read extensions dir {}: {e}", dir.display()))?;
+    let mut paths = Vec::new();
+    while let Some(entry) = entries
+        .next_entry()
+        .await
+        .map_err(|e| format!("read dir entry: {e}"))?
+    {
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .await
+            .map_err(|e| format!("read file type: {e}"))?;
+        if file_type.is_dir()
+            && tokio::fs::metadata(path.join("extension.json"))
+                .await
+                .is_ok()
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+async fn discover_extension(
+    ext_dir: &Path,
+    host_router: Option<Arc<HostRouter>>,
+) -> Result<ExtensionCandidate, String> {
+    let manifest_path = ext_dir.join("extension.json");
+    let manifest_bytes = tokio::fs::read(&manifest_path)
+        .await
+        .map_err(|e| format!("{}: read manifest: {e}", ext_dir.display()))?;
+    let entry: ExtensionPackageManifest = serde_json::from_slice(&manifest_bytes)
+        .map_err(|e| format!("{}: parse manifest: {e}", ext_dir.display()))?;
+    validate_extension_id(&entry.extension_id)
+        .map_err(|error| format!("{}: {error}", ext_dir.display()))?;
+
+    if entry.protocol.native.is_some() {
+        return Err(format!(
+            "{}: protocol.native is not implemented yet; use protocol.s5r",
+            ext_dir.display()
+        ));
     }
 
-    async fn disk_source_key(ext_dir: &Path) -> Option<String> {
-        tokio::fs::canonicalize(ext_dir)
-            .await
-            .ok()
-            .map(|path| format!("disk:{}", path.display()))
+    if entry.protocol.s5r.as_deref() != Some(S5R_VERSION) {
+        return Err(format!(
+            "{}: extension.json must set protocol.s5r to \"{}\"",
+            ext_dir.display(),
+            S5R_VERSION
+        ));
     }
+
+    if entry.command.is_empty() {
+        return Err(format!(
+            "{}: extension.json 'command' must contain an executable",
+            ext_dir.display()
+        ));
+    }
+
+    let canonical_dir = tokio::fs::canonicalize(ext_dir)
+        .await
+        .map_err(|error| format!("{}: canonicalize: {error}", ext_dir.display()))?;
+    let source_key = format!("disk:{}", canonical_dir.display());
+    let fingerprint = disk_source_fingerprint(&canonical_dir, manifest_bytes, &entry).await?;
+    let extension_id = entry.extension_id.clone();
+    let display_path = canonical_dir.display().to_string();
+
+    Ok(ExtensionCandidate::lazy(
+        source_key,
+        fingerprint,
+        extension_id,
+        move || async move {
+            let router = host_router.ok_or_else(|| {
+                format!(
+                    "{display_path}: ExtensionLoadContext.host_router is required for disk \
+                     extensions"
+                )
+            })?;
+            crate::s5r_ext::S5rExtension::load(&canonical_dir, &entry, router)
+                .await
+                .map(|extension| extension as Arc<dyn Extension>)
+                .map_err(|error| format!("{display_path}: {error}"))
+        },
+    ))
+}
+
+async fn disk_source_fingerprint(
+    ext_dir: &Path,
+    manifest_bytes: Vec<u8>,
+    manifest: &ExtensionPackageManifest,
+) -> Result<String, String> {
+    let (program, args) = crate::s5r_ext::parse_command(manifest, ext_dir)
+        .map_err(|error| format!("{}: {error}", ext_dir.display()))?;
+    let ext_dir = ext_dir.to_path_buf();
+    let display_path = ext_dir.display().to_string();
+    tokio::task::spawn_blocking(move || {
+        hash_disk_source(&ext_dir, &manifest_bytes, &program, &args)
+    })
+    .await
+    .map_err(|error| format!("{display_path}: fingerprint task failed: {error}"))?
+    .map_err(|error| format!("{display_path}: {error}"))
+}
+
+async fn disk_source_key(ext_dir: &Path) -> Option<String> {
+    tokio::fs::canonicalize(ext_dir)
+        .await
+        .ok()
+        .map(|path| format!("disk:{}", path.display()))
 }
 
 fn ensure_candidate_identity(
@@ -777,7 +704,7 @@ mod tests {
         fs::write(root.join("zeta").join("extension.json"), "{}").unwrap();
         fs::write(root.join("alpha").join("extension.json"), "{}").unwrap();
 
-        let dirs = ExtensionLoader::extension_dirs(&root).await.unwrap();
+        let dirs = extension_dirs(&root).await.unwrap();
         let names = dirs
             .iter()
             .map(|path| path.file_name().unwrap().to_string_lossy().to_string())

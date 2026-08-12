@@ -17,8 +17,8 @@ use astrcode_extension_sdk::{
 };
 
 use super::{
-    ExtensionCallContextFactory, ExtensionCallContextInput, ExtensionRunner, ExtensionView,
-    HandlerIndex,
+    ExtensionCallContextFactory, ExtensionCallContextInput, ExtensionGenerationEntry,
+    ExtensionRunner, ExtensionView,
 };
 
 impl ExtensionView {
@@ -39,19 +39,18 @@ impl ExtensionView {
         let index = &self.index;
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
         let mut diagnostics = Vec::new();
-        for (def, handler, ext_id, capabilities) in &index.static_tools {
-            let prompt_metadata = index.tool_metadata.get(&def.name).cloned();
+        for entry in &index.static_tools {
             tools.push(Arc::new(HandlerTool::new(
-                def.clone(),
-                Arc::clone(handler),
-                prompt_metadata,
+                entry.definition.clone(),
+                Arc::clone(&entry.handler),
+                entry.prompt_metadata.clone(),
                 working_dir,
-                ext_id,
-                capabilities,
+                &entry.generation,
                 self,
             )));
         }
-        for (ext_id, discovery, capabilities) in &index.tool_discoveries {
+        for entry in &index.tool_discoveries {
+            let ext_id = entry.generation.extension_id.as_ref();
             let cancellation = tokio_util::sync::CancellationToken::new();
             let call = self.make_registered_extension_call_context(
                 ext_id,
@@ -71,7 +70,7 @@ impl ExtensionView {
                         ext_id,
                         "tool_discovery",
                         cancellation,
-                        discovery.discover(ctx),
+                        entry.handler.discover(ctx),
                     )
                     .await
                 },
@@ -86,8 +85,7 @@ impl ExtensionView {
                             handler,
                             prompt_metadata,
                             working_dir,
-                            ext_id,
-                            capabilities,
+                            &entry.generation,
                             self,
                         )));
                     }
@@ -96,7 +94,7 @@ impl ExtensionView {
                     let message = error.to_string();
                     tracing::warn!(extension_id = %ext_id, error = %message);
                     diagnostics.push(ToolCatalogDiagnostic {
-                        source: ext_id.clone(),
+                        source: ext_id.to_owned(),
                         message,
                     });
                 },
@@ -144,11 +142,10 @@ struct HandlerTool {
     handler: Arc<dyn ToolHandler>,
     prompt_metadata: Option<astrcode_extension_sdk::tool::ToolPromptMetadata>,
     working_dir: String,
-    extension_id: String,
-    capabilities: Vec<ExtensionCapability>,
-    event_declarations: Vec<CustomEventDeclaration>,
+    extension_id: Arc<str>,
+    capabilities: Arc<[ExtensionCapability]>,
+    generation: Weak<ExtensionGenerationEntry>,
     call_context_factory: ExtensionCallContextFactory,
-    index: Weak<HandlerIndex>,
 }
 
 impl HandlerTool {
@@ -157,8 +154,7 @@ impl HandlerTool {
         handler: Arc<dyn ToolHandler>,
         prompt_metadata: Option<astrcode_extension_sdk::tool::ToolPromptMetadata>,
         working_dir: &str,
-        extension_id: &str,
-        capabilities: &[ExtensionCapability],
+        generation: &Arc<ExtensionGenerationEntry>,
         view: &ExtensionView,
     ) -> Self {
         Self {
@@ -166,16 +162,10 @@ impl HandlerTool {
             handler,
             prompt_metadata,
             working_dir: working_dir.to_owned(),
-            extension_id: extension_id.to_owned(),
-            capabilities: capabilities.to_vec(),
-            event_declarations: view
-                .index
-                .custom_event_declarations
-                .get(extension_id)
-                .cloned()
-                .unwrap_or_default(),
+            extension_id: Arc::clone(&generation.extension_id),
+            capabilities: Arc::clone(&generation.capabilities),
+            generation: Arc::downgrade(generation),
             call_context_factory: view.call_context_factory.clone(),
-            index: Arc::downgrade(&view.index),
         }
     }
 }
@@ -266,7 +256,7 @@ impl Tool for HandlerTool {
         mut arguments: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolExecutionResult, ToolError> {
-        let Some(active_index) = self.index.upgrade() else {
+        let Some(generation) = self.generation.upgrade() else {
             return Ok(extension_error_result(
                 &self.definition.name,
                 &self.extension_id,
@@ -278,39 +268,19 @@ impl Tool for HandlerTool {
             normalize_stringified_booleans(&mut arguments, &self.definition.parameters);
         if normalized_booleans > 0 {
             tracing::debug!(
-                extension_id = %self.extension_id,
+                extension_id = %generation.extension_id,
                 tool_name = %self.definition.name,
                 normalized_booleans,
                 "normalized stringified boolean extension tool arguments"
             );
         }
-        let Some(tasks) = active_index
-            .extension_tasks
-            .get(&self.extension_id)
-            .cloned()
-        else {
-            return Ok(extension_error_result(
-                &self.definition.name,
-                &self.extension_id,
-                ExtensionError::Internal("extension task scope is unavailable".into()),
-            )
-            .into());
-        };
-        let Some(admission) = active_index.extension_admission.get(&self.extension_id) else {
-            return Ok(extension_error_result(
-                &self.definition.name,
-                &self.extension_id,
-                ExtensionError::NotFound("extension generation gate is unavailable".into()),
-            )
-            .into());
-        };
-        let draining = admission.draining_token();
-        let _admission = match admission.acquire().await {
+        let draining = generation.admission.draining_token();
+        let _admission = match generation.admission.acquire().await {
             Ok(permit) => permit,
             Err(error) => {
                 return Ok(extension_error_result(
                     &self.definition.name,
-                    &self.extension_id,
+                    &generation.extension_id,
                     error,
                 )
                 .into());
@@ -321,10 +291,10 @@ impl Tool for HandlerTool {
         let turn_id = ctx.turn_id().map(ToString::to_string);
         let working_dir = PathBuf::from(&self.working_dir);
         let call = self.call_context_factory.make_extension_call_context(
-            &self.extension_id,
-            &self.capabilities,
-            &self.event_declarations,
-            tasks,
+            &generation.extension_id,
+            &generation.capabilities,
+            &generation.custom_event_declarations,
+            generation.tasks.clone(),
             ExtensionCallContextInput {
                 session_id: Some(session_id.clone()),
                 tool_call_id: ctx.scope.tool_call_id.clone(),
@@ -366,19 +336,21 @@ impl Tool for HandlerTool {
             result = self.handler.execute(ctx) => result,
             () = draining.cancelled() => {
                 call_cancellation.cancel();
-                Err(admission.draining_error())
+                Err(generation.admission.draining_error())
             },
         };
         let result = match execution {
             Ok(result) => result,
             Err(err) => {
-                return Ok(
-                    extension_error_result(&self.definition.name, &self.extension_id, err).into(),
-                );
+                return Ok(extension_error_result(
+                    &self.definition.name,
+                    &generation.extension_id,
+                    err,
+                )
+                .into());
             },
         };
 
-        drop(active_index);
         Ok(result)
     }
 }

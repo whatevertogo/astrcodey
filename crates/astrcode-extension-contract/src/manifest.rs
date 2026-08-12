@@ -1,4 +1,4 @@
-//! `Initialize.metadata` wire contract shared by S5R workers and the host.
+//! Typed initialization declaration shared by S5R workers and the host.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -9,7 +9,7 @@ use crate::{
     extension_http::ExtensionHttpRoute,
 };
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitializeManifest {
     #[serde(default)]

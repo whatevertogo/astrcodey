@@ -19,6 +19,19 @@ may share `astrcode-core` types because bundled extensions run in-process.
 remote host transport. Bundled extensions depend on the SDK and use typed calls without wire
 encoding.
 
+## Host-first activation
+
+The Host owns discovery, placement, identity, registration, and activation. It sends Initialize
+with the expected extension id and the operation catalog derived directly from
+`HOST_OPERATION_SPECS`. The Worker returns a typed `InitializeManifest`; there is no generic
+metadata, handler, or bidirectional capability catalog. Both peers remain Initialized while the
+Host validates the declaration and global registration conflicts. Only a subsequent Host Activate
+transitions both peers to Ready and permits runtime traffic.
+
+The operation catalog describes implementation support by Host version, not grants or current
+availability. Runtime authority remains the Worker manifest declaration, registration validation,
+HostRouter lookup, trusted `InvokeContext` scope check, backend availability, and dispatch.
+
 ## Stable Rust policy
 
 The workspace uses edition 2024 with Rust 1.88 as its minimum supported version. The dated nightly

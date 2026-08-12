@@ -9,7 +9,8 @@ use std::{
 };
 
 use astrcode_extension_contract::manifest::{
-    ManifestCommand, ManifestHook, ManifestHookEvent, ManifestHookOptions, ManifestHttpRoute,
+    InitializeManifest, ManifestCommand, ManifestHook, ManifestHookEvent, ManifestHookOptions,
+    ManifestHttpRoute, ManifestTool, ManifestToolMode,
 };
 use serde_json::Value;
 
@@ -28,18 +29,11 @@ use crate::{
         },
     },
     s5r::{
-        CAP_HANDLER_INVOKE, ErrorPayload, HandlerEffect, HandlerId, HandlerInvokeRequest,
-        HandlerKind, HandlerResult,
+        ErrorPayload, HandlerEffect, HandlerId, HandlerInvokeRequest, HandlerKind, HandlerResult,
     },
-    worker::manifest::ManifestCatalog,
 };
 
 type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
-
-pub(crate) struct HandlerInvoke {
-    pub(crate) capability: String,
-    pub(crate) input: Value,
-}
 
 pub type ToolHandlerFn = Arc<
     dyn Fn(Value, WorkerInvocationContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
@@ -293,8 +287,8 @@ fn optional_string<'a>(input: &'a Value, field: &str) -> Result<Option<&'a str>,
 }
 
 pub(crate) struct HandlerRegistry {
-    pub extension_id: String,
-    catalog: ManifestCatalog,
+    extension_id: String,
+    manifest: InitializeManifest,
     tools: HashMap<String, ToolHandlerFn>,
     hooks: HashMap<String, HookHandlerFn>,
     continuation_hooks: HashMap<String, ContinuationHandlerFn>,
@@ -307,7 +301,7 @@ impl HandlerRegistry {
     pub fn new(extension_id: impl Into<String>) -> Self {
         Self {
             extension_id: extension_id.into(),
-            catalog: ManifestCatalog::default(),
+            manifest: InitializeManifest::default(),
             tools: HashMap::new(),
             hooks: HashMap::new(),
             continuation_hooks: HashMap::new(),
@@ -317,19 +311,28 @@ impl HandlerRegistry {
         }
     }
 
-    pub(crate) fn catalog(&self) -> &ManifestCatalog {
-        &self.catalog
+    #[cfg(test)]
+    pub(crate) fn manifest(&self) -> &InitializeManifest {
+        &self.manifest
+    }
+
+    pub(crate) fn take_manifest(&mut self) -> InitializeManifest {
+        std::mem::take(&mut self.manifest)
+    }
+
+    pub(crate) fn extension_id(&self) -> &str {
+        &self.extension_id
     }
 
     pub(crate) fn declare_capability(&mut self, cap: ExtensionCapability) {
-        if !self.catalog.capabilities.contains(&cap) {
-            self.catalog.capabilities.push(cap);
+        if !self.manifest.capabilities.contains(&cap) {
+            self.manifest.capabilities.push(cap);
         }
     }
 
     pub(crate) fn declare_custom_event(&mut self, mut event: CustomEventDeclaration) {
         canonical_registration_name(&mut event.event_type);
-        self.catalog.custom_events.push(event);
+        self.manifest.custom_events.push(event);
     }
 
     pub(crate) fn register_custom_event(
@@ -351,7 +354,7 @@ impl HandlerRegistry {
             ));
         }
         self.custom_events.insert(subscription.id.clone(), handler);
-        self.catalog.custom_event_subscriptions.push(subscription);
+        self.manifest.custom_event_subscriptions.push(subscription);
         Ok(())
     }
 
@@ -368,7 +371,16 @@ impl HandlerRegistry {
                 format!("duplicate tool registration: {name}"),
             ));
         }
-        self.catalog.tools.push(def);
+        self.manifest.tools.push(ManifestTool {
+            name: def.name,
+            description: def.description,
+            parameters: def.parameters,
+            strict: def.strict,
+            mode: match def.execution_mode {
+                crate::tool::ExecutionMode::Parallel => ManifestToolMode::Parallel,
+                crate::tool::ExecutionMode::Sequential => ManifestToolMode::Sequential,
+            },
+        });
         self.tools.insert(name, handler);
         Ok(())
     }
@@ -465,7 +477,7 @@ impl HandlerRegistry {
         handler: HookHandlerFn,
     ) -> Result<(), ErrorPayload> {
         self.insert_hook_handler(on.as_str().to_owned(), handler)?;
-        self.catalog.hooks.push(ManifestHook { on, mode, options });
+        self.manifest.hooks.push(ManifestHook { on, mode, options });
         Ok(())
     }
 
@@ -540,7 +552,7 @@ impl HandlerRegistry {
                 format!("duplicate command registration: {name}"),
             ));
         }
-        self.catalog.commands.push(ManifestCommand {
+        self.manifest.commands.push(ManifestCommand {
             name: name.clone(),
             description: description.into(),
         });
@@ -555,7 +567,7 @@ impl HandlerRegistry {
     ) -> Result<(), ErrorPayload> {
         validate_extension_http_route(&route)
             .map_err(|error| ErrorPayload::new(WireErrorCode::InvalidHttpRoute, error))?;
-        if self.catalog.http_routes.iter().any(|entry| {
+        if self.manifest.http_routes.iter().any(|entry| {
             entry.route.access == route.access
                 && entry.route.method == route.method
                 && extension_http_route_patterns_conflict(&entry.route.path, &route.path)
@@ -565,10 +577,10 @@ impl HandlerRegistry {
                 format!("conflicting HTTP route registration: {}", route.path),
             ));
         }
-        let handler_name = format!("route_{}", self.catalog.http_routes.len());
+        let handler_name = format!("route_{}", self.manifest.http_routes.len());
         let handler_id = HandlerId::new(&self.extension_id, HandlerKind::Http, &handler_name)
             .map_err(|error| ErrorPayload::new(WireErrorCode::InvalidHookRegistration, error))?;
-        self.catalog
+        self.manifest
             .http_routes
             .push(ManifestHttpRoute { route, handler_id });
         self.http_routes.insert(handler_name, handler);
@@ -577,25 +589,21 @@ impl HandlerRegistry {
 
     pub async fn dispatch_invoke(
         &self,
-        invoke: HandlerInvoke,
+        input: Value,
         token: CancelToken,
     ) -> Result<HandlerResult, ErrorPayload> {
-        if invoke.capability != CAP_HANDLER_INVOKE {
+        if token.is_cancelled() {
             return Err(ErrorPayload::new(
-                WireErrorCode::UnknownCapability,
-                format!("worker does not handle capability {}", invoke.capability),
+                WireErrorCode::Cancelled,
+                "handler invocation cancelled",
             ));
         }
-        token
-            .raise_if_cancelled()
-            .map_err(|e| ErrorPayload::new(WireErrorCode::Cancelled, e))?;
-        let request: HandlerInvokeRequest =
-            serde_json::from_value(invoke.input).map_err(|error| {
-                ErrorPayload::new(
-                    WireErrorCode::InvalidInput,
-                    format!("invalid handler invocation: {error}"),
-                )
-            })?;
+        let request: HandlerInvokeRequest = serde_json::from_value(input).map_err(|error| {
+            ErrorPayload::new(
+                WireErrorCode::InvalidInput,
+                format!("invalid handler invocation: {error}"),
+            )
+        })?;
         let facts = WorkerCallFacts::from_event(self.extension_id.clone(), token, &request.event)?;
         self.dispatch_handler(&request.handler_id, request.event, facts)
             .await
@@ -712,36 +720,29 @@ mod tests {
             )
             .unwrap();
 
-        let metadata = registry.catalog().to_metadata_value().unwrap();
-        assert_eq!(metadata["hooks"], json!([]));
+        assert!(registry.manifest().hooks.is_empty());
 
         let result = registry
             .dispatch_invoke(
-                HandlerInvoke {
-                    capability: CAP_HANDLER_INVOKE.into(),
-                    input: json!({
-                        "handler_id": "test-extension:hook:pipeline_step",
-                        "event": {}
-                    }),
-                },
+                json!({
+                    "handler_id": "test-extension:hook:pipeline_step",
+                    "event": {}
+                }),
                 CancelToken::default(),
             )
             .await
             .unwrap();
 
         assert_eq!(result.effect, HandlerEffect::Ok);
-        assert_eq!(result.data_value("step"), Some(&json!(1)));
+        assert_eq!(result.data.get("step"), Some(&json!(1)));
 
         let error = registry
             .dispatch_invoke(
-                HandlerInvoke {
-                    capability: CAP_HANDLER_INVOKE.into(),
-                    input: json!({
-                        "handler_id": "test-extension:hook:pipeline_step",
-                        "event": {},
-                        "unknown": true
-                    }),
-                },
+                json!({
+                    "handler_id": "test-extension:hook:pipeline_step",
+                    "event": {},
+                    "unknown": true
+                }),
                 CancelToken::default(),
             )
             .await
@@ -763,7 +764,7 @@ mod tests {
                 Arc::clone(&handler),
             )
             .unwrap();
-        assert_eq!(registry.catalog.hooks[0].mode, HookMode::NonBlocking);
+        assert_eq!(registry.manifest.hooks[0].mode, HookMode::NonBlocking);
 
         let invalid = registry
             .register_hook(
@@ -808,7 +809,7 @@ mod tests {
             .register_http_route(duplicate, handler)
             .expect_err("same-access conflicting route must be rejected");
 
-        assert_eq!(registry.catalog.http_routes.len(), 2);
+        assert_eq!(registry.manifest.http_routes.len(), 2);
         assert_eq!(
             error.code_enum(),
             Some(WireErrorCode::DuplicateRegistration)
@@ -823,7 +824,11 @@ mod tests {
         });
         registry
             .register_tool(
-                crate::builder::worker_tool("  review  ").build().into(),
+                crate::builder::worker_tool("  review  ")
+                    .strict()
+                    .execution_mode(crate::tool::ExecutionMode::Sequential)
+                    .build()
+                    .into(),
                 Arc::clone(&tool_handler),
             )
             .unwrap();
@@ -843,10 +848,15 @@ mod tests {
             max_payload_bytes: 1024,
         });
 
-        assert_eq!(registry.catalog.tools[0].name, "review");
-        assert_eq!(registry.catalog.commands[0].name, "inspect");
+        assert_eq!(registry.manifest.tools[0].name, "review");
+        assert!(registry.manifest.tools[0].strict);
         assert_eq!(
-            registry.catalog.custom_events[0].event_type,
+            registry.manifest.tools[0].mode,
+            ManifestToolMode::Sequential
+        );
+        assert_eq!(registry.manifest.commands[0].name, "inspect");
+        assert_eq!(
+            registry.manifest.custom_events[0].event_type,
             "review.completed"
         );
         assert_eq!(
@@ -875,9 +885,9 @@ mod tests {
             .register_compact_hook(CompactEvent::PostCompact, handler)
             .unwrap();
 
-        let metadata = registry.catalog().to_metadata_value().unwrap();
+        let manifest = registry.manifest();
         assert_eq!(
-            metadata["hooks"],
+            serde_json::to_value(&manifest.hooks).unwrap(),
             json!([
                 { "on": "pre_compact", "mode": "blocking" },
                 { "on": "post_compact", "mode": "blocking" }

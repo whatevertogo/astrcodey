@@ -1,4 +1,4 @@
-use crate::{ExtensionCapability, protocol::CapabilityDescriptor};
+use crate::ExtensionCapability;
 
 macro_rules! host_operations {
     (@count $operation:ident) => {
@@ -523,8 +523,7 @@ pub enum HostBackendRequirement {
     PublicHttpDispatcher,
 }
 
-/// Metadata shared by authoring clients, authorization, host dispatch, and the S5R capability
-/// catalog.
+/// Canonical metadata shared by authorization, host dispatch, and the S5R operation catalog.
 #[derive(Debug, Clone, Copy)]
 pub struct HostOperationSpec {
     pub operation: HostOperation,
@@ -536,17 +535,6 @@ pub struct HostOperationSpec {
     pub description: &'static str,
     pub supports_stream: bool,
     pub cancelable: bool,
-}
-
-impl HostOperationSpec {
-    pub fn descriptor(self) -> CapabilityDescriptor {
-        CapabilityDescriptor {
-            name: self.name.into(),
-            description: self.description.into(),
-            supports_stream: self.supports_stream,
-            cancelable: self.cancelable,
-        }
-    }
 }
 
 #[cfg(test)]

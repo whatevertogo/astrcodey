@@ -3,9 +3,9 @@
 pub use astrcode_extension_contract::{
     CallContinuation, HandlerEffect, HandlerResult,
     protocol::{
-        CAP_HANDLER_INVOKE, CAP_RUNTIME_PING, CancelMsg, CapabilityDescriptor, ErrorPayload,
-        HandlerDescriptor, HandlerId, HandlerInvokeRequest, HandlerKind, InitializeMsg,
-        InitializeOutput, InvokeMsg, PeerInfo, ResultKind, ResultMsg, S5R_STACK, S5R_VERSION,
-        StreamMsg, WIRE_CODEC_JSON, WireMessage, encode_wire_message, parse_wire_message,
+        ActivateMsg, ActivateOutput, CAP_HANDLER_INVOKE, CAP_RUNTIME_PING, CancelMsg, ErrorPayload,
+        HandlerId, HandlerInvokeRequest, HandlerKind, InitializeMsg, InitializeOutput, InvokeMsg,
+        PeerInfo, ResultKind, ResultMsg, S5R_STACK, S5R_VERSION, StreamMsg, WIRE_CODEC_JSON,
+        WireMessage, encode_wire_message, parse_wire_message,
     },
 };

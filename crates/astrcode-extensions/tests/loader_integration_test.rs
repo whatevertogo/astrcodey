@@ -21,7 +21,7 @@ use astrcode_extension_sdk::{
 use astrcode_extensions::{
     loader::{
         DiscoverExtensionsResult, ExtensionCandidate, ExtensionLoadContext, ExtensionLoadFailure,
-        ExtensionLoader, ExtensionRuntime, ExtensionSource,
+        ExtensionSource, sync_extension_sources,
     },
     runner::{ExtensionHttpDispatchResult, ExtensionRunner, ExtensionStageStatus},
 };
@@ -61,7 +61,6 @@ impl ExtensionSource for BrokenSource {
     async fn discover(&self, _ctx: &ExtensionLoadContext) -> DiscoverExtensionsResult {
         DiscoverExtensionsResult {
             candidates: Vec::new(),
-            errors: vec!["broken extension failed".into()],
             failures: vec![ExtensionLoadFailure {
                 source_key: None,
                 extension_id: Some("broken-extension".into()),
@@ -315,7 +314,6 @@ impl ExtensionSource for FingerprintSource {
 impl ExtensionSource for UnavailableFingerprintSource {
     async fn discover(&self, _ctx: &ExtensionLoadContext) -> DiscoverExtensionsResult {
         DiscoverExtensionsResult {
-            errors: vec!["source unavailable".into()],
             failures: vec![ExtensionLoadFailure {
                 source_key: None,
                 extension_id: None,
@@ -355,64 +353,11 @@ impl ExtensionSource for DisabledCandidateSource {
     }
 }
 
-struct IsolatedTestHome {
-    _guard: std::sync::MutexGuard<'static, ()>,
-    _temp: tempfile::TempDir,
-    prev: Option<String>,
-}
-
-impl IsolatedTestHome {
-    fn new() -> Self {
-        let guard = test_home_lock().lock().unwrap();
-        let temp = tempfile::tempdir().expect("tempdir");
-        let prev = std::env::var("ASTRCODE_TEST_HOME").ok();
-        // SAFETY: every test in this process that mutates the test home holds `test_home_lock`.
-        unsafe { std::env::set_var("ASTRCODE_TEST_HOME", temp.path()) };
-        Self {
-            _guard: guard,
-            _temp: temp,
-            prev,
-        }
-    }
-}
-
-impl Drop for IsolatedTestHome {
-    fn drop(&mut self) {
-        match &self.prev {
-            // SAFETY: `self._guard` remains held until after this destructor returns.
-            Some(value) => unsafe { std::env::set_var("ASTRCODE_TEST_HOME", value) },
-            // SAFETY: `self._guard` remains held until after this destructor returns.
-            None => unsafe { std::env::remove_var("ASTRCODE_TEST_HOME") },
-        }
-    }
-}
-
-fn test_home_lock() -> &'static std::sync::Mutex<()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-}
-
-#[tokio::test]
-async fn loader_returns_empty_result_when_no_extensions_dir() {
-    let _home = IsolatedTestHome::new();
-    let result = ExtensionLoader::load_all(Some("/nonexistent/path"), None).await;
-    assert!(result.extensions.is_empty());
-    assert!(result.errors.is_empty());
-}
-
-#[tokio::test]
-async fn loader_returns_empty_result_for_none_working_dir() {
-    let _home = IsolatedTestHome::new();
-    let result = ExtensionLoader::load_all(None, None).await;
-    assert!(result.extensions.is_empty());
-    assert!(result.errors.is_empty());
-}
-
 #[tokio::test]
 async fn sync_sources_records_load_failure_diagnostics() {
     let runner = Arc::new(ExtensionRunner::new(std::time::Duration::from_secs(1)));
     let source = BrokenSource;
-    let errors = ExtensionRuntime::sync_sources(
+    let errors = sync_extension_sources(
         &runner,
         &ExtensionLoadContext {
             working_dir: None,
@@ -440,7 +385,7 @@ async fn sync_sources_does_not_load_disabled_candidates() {
         loads: Arc::clone(&loads),
     };
 
-    let errors = ExtensionRuntime::sync_sources(
+    let errors = sync_extension_sources(
         &runner,
         &ExtensionLoadContext {
             working_dir: None,
@@ -475,7 +420,7 @@ async fn sync_sources_activates_tasks_after_publishing_the_complete_batch() {
         ],
     };
 
-    let errors = ExtensionRuntime::sync_sources(
+    let errors = sync_extension_sources(
         &runner,
         &ExtensionLoadContext {
             working_dir: None,
@@ -524,7 +469,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
         loads: Arc::new(AtomicUsize::new(0)),
     };
     assert!(
-        ExtensionRuntime::sync_sources(&runner, &ctx, &[&initial])
+        sync_extension_sources(&runner, &ctx, &[&initial])
             .await
             .is_empty()
     );
@@ -536,7 +481,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
     };
     assert_eq!(published_initial_generation, initial_generation);
     assert!(
-        ExtensionRuntime::sync_sources(&runner, &ctx, &[&initial])
+        sync_extension_sources(&runner, &ctx, &[&initial])
             .await
             .is_empty()
     );
@@ -576,7 +521,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
                 ],
                 loads: Arc::new(AtomicUsize::new(0)),
             };
-            ExtensionRuntime::sync_sources(
+            sync_extension_sources(
                 &runner,
                 &ExtensionLoadContext {
                     working_dir: None,
@@ -729,7 +674,7 @@ async fn sync_sources_reconciles_only_changed_sources_and_preserves_source_order
         loads: Arc::clone(&initial_loads),
     };
     assert!(
-        ExtensionRuntime::sync_sources(&runner, &ctx, &[&initial])
+        sync_extension_sources(&runner, &ctx, &[&initial])
             .await
             .is_empty()
     );
@@ -743,12 +688,12 @@ async fn sync_sources_reconciles_only_changed_sources_and_preserves_source_order
         loads: Arc::clone(&updated_loads),
     };
     assert!(
-        ExtensionRuntime::sync_sources(&runner, &ctx, &[&updated])
+        sync_extension_sources(&runner, &ctx, &[&updated])
             .await
             .is_empty()
     );
     assert_eq!(
-        ExtensionRuntime::sync_sources(&runner, &ctx, &[&UnavailableFingerprintSource]).await,
+        sync_extension_sources(&runner, &ctx, &[&UnavailableFingerprintSource]).await,
         vec!["source unavailable"]
     );
     tokio::time::timeout(std::time::Duration::from_secs(1), async {
@@ -808,7 +753,7 @@ async fn sync_sources_waits_for_renamed_retirement_and_blocks_failed_replacement
         working_dir: None,
         host_router: None,
     };
-    let errors = ExtensionRuntime::sync_sources(&runner, &ctx, &[&initial]).await;
+    let errors = sync_extension_sources(&runner, &ctx, &[&initial]).await;
     assert!(errors.is_empty(), "initial sync failed: {errors:?}");
 
     let mut replacement = {
@@ -829,7 +774,7 @@ async fn sync_sources_waits_for_renamed_retirement_and_blocks_failed_replacement
                 )],
                 loads: replacement_loads,
             };
-            ExtensionRuntime::sync_sources(
+            sync_extension_sources(
                 &runner,
                 &ExtensionLoadContext {
                     working_dir: None,
@@ -888,7 +833,7 @@ async fn sync_sources_waits_for_renamed_retirement_and_blocks_failed_replacement
         loads: Arc::new(AtomicUsize::new(0)),
     };
     assert!(
-        ExtensionRuntime::sync_sources(&runner, &ctx, &[&initial])
+        sync_extension_sources(&runner, &ctx, &[&initial])
             .await
             .is_empty()
     );
@@ -904,7 +849,7 @@ async fn sync_sources_waits_for_renamed_retirement_and_blocks_failed_replacement
         )],
         loads: Arc::clone(&failed_replacement_loads),
     };
-    let errors = ExtensionRuntime::sync_sources(&runner, &ctx, &[&updated]).await;
+    let errors = sync_extension_sources(&runner, &ctx, &[&updated]).await;
 
     assert_eq!(failed_starts.load(Ordering::SeqCst), 1);
     assert_eq!(failed_stops.load(Ordering::SeqCst), 1);

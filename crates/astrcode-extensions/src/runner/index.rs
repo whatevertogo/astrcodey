@@ -19,6 +19,26 @@ pub(super) type CustomEventExtensionHandler =
 type Prioritized<T> = (i32, T);
 type PrioritizedEvent<K, T> = (K, i32, T);
 
+pub(super) struct ExtensionGenerationEntry {
+    pub(super) extension_id: Arc<str>,
+    pub(super) capabilities: Arc<[ExtensionCapability]>,
+    pub(super) custom_event_declarations: Vec<CustomEventDeclaration>,
+    pub(super) tasks: ExtensionTasks,
+    pub(super) admission: ExtensionAdmission,
+}
+
+pub(super) struct StaticToolEntry {
+    pub(super) definition: ToolDefinition,
+    pub(super) prompt_metadata: Option<ToolPromptMetadata>,
+    pub(super) handler: Arc<dyn ToolHandler>,
+    pub(super) generation: Arc<ExtensionGenerationEntry>,
+}
+
+pub(super) struct ToolDiscoveryEntry {
+    pub(super) handler: Arc<dyn ToolDiscoveryHandler>,
+    pub(super) generation: Arc<ExtensionGenerationEntry>,
+}
+
 #[derive(Clone)]
 pub(super) struct HttpRouteEntry {
     pub(super) extension_id: String,
@@ -44,28 +64,14 @@ pub(super) struct HandlerIndex {
     pub(super) user_message_envelope: Vec<SimpleExtensionHandler<dyn UserMessageEnvelopeHandler>>,
     pub(super) lifecycle: HashMap<LifecycleEvent, Vec<ExtensionHandler<dyn LifecycleHandler>>>,
     pub(super) custom_event: Vec<CustomEventExtensionHandler>,
-    // 预计算的 collect 缓存
-    pub(super) tool_metadata: HashMap<String, ToolPromptMetadata>,
-    pub(super) static_tools: Vec<(
-        ToolDefinition,
-        Arc<dyn ToolHandler>,
-        String,
-        Vec<ExtensionCapability>,
-    )>,
-    pub(super) tool_discoveries: Vec<(
-        String,
-        Arc<dyn ToolDiscoveryHandler>,
-        Vec<ExtensionCapability>,
-    )>,
+    pub(super) static_tools: Vec<StaticToolEntry>,
+    pub(super) tool_discoveries: Vec<ToolDiscoveryEntry>,
     pub(super) static_commands: Vec<(String, SlashCommand, Arc<dyn CommandHandler>)>,
     pub(super) command_discoveries: Vec<(String, Arc<dyn CommandDiscoveryHandler>)>,
     pub(super) keybindings: Vec<Keybinding>,
     pub(super) status_items: Vec<StatusItem>,
-    pub(super) custom_event_declarations: HashMap<String, Vec<CustomEventDeclaration>>,
-    pub(super) capabilities: HashMap<String, Vec<ExtensionCapability>>,
     pub(super) http_routes: Vec<HttpRouteEntry>,
-    pub(super) extension_tasks: HashMap<String, ExtensionTasks>,
-    pub(super) extension_admission: HashMap<String, ExtensionAdmission>,
+    pub(super) extensions: HashMap<String, Arc<ExtensionGenerationEntry>>,
     _publication_leases: Vec<ExtensionIndexLease>,
 }
 
@@ -79,18 +85,14 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
     let mut user_message_envelope = Vec::new();
     let mut lifecycle = Vec::new();
     let mut custom_event = Vec::new();
-    let mut tool_metadata = HashMap::new();
     let mut static_tools = Vec::new();
     let mut tool_discoveries = Vec::new();
     let mut static_commands = Vec::new();
     let mut command_discoveries = Vec::new();
     let mut keybindings = Vec::new();
     let mut status_items = Vec::new();
-    let mut custom_event_declarations = HashMap::new();
-    let mut capabilities = HashMap::new();
     let mut http_routes = Vec::new();
-    let mut extension_tasks = HashMap::new();
-    let mut extension_admission = HashMap::new();
+    let mut indexed_extensions = HashMap::new();
     let mut publication_leases = Vec::with_capacity(extensions.len());
 
     let mut ordered_extensions = extensions.iter().collect::<Vec<_>>();
@@ -100,10 +102,13 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         let manifest = &hosted.manifest;
         let registrations = &manifest.registrations;
         let extension_id = manifest.id().to_owned();
-        let extension_capabilities = manifest.capabilities().to_vec();
-        capabilities.insert(extension_id.clone(), extension_capabilities.clone());
-        extension_tasks.insert(extension_id.clone(), hosted.tasks.clone());
-        extension_admission.insert(extension_id.clone(), hosted.supervisor.admission());
+        let generation_entry = Arc::new(ExtensionGenerationEntry {
+            extension_id: Arc::from(extension_id.as_str()),
+            capabilities: Arc::from(manifest.capabilities()),
+            custom_event_declarations: registrations.custom_event_declarations().to_vec(),
+            tasks: hosted.tasks.clone(),
+            admission: hosted.supervisor.admission(),
+        });
         publication_leases.push(hosted.publication_lease.acquire());
         for registration in registrations.pre_tool_use() {
             pre_tool_use.push((
@@ -179,22 +184,20 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         }
         for registration in registrations.tools() {
             let definition = registration.definition();
-            if registration.prompt() != &ToolPromptMetadata::default() {
-                tool_metadata.insert(definition.name.clone(), registration.prompt().clone());
-            }
-            static_tools.push((
-                definition.clone(),
-                Arc::clone(registration.handler()),
-                extension_id.clone(),
-                extension_capabilities.clone(),
-            ));
+            let prompt_metadata = (registration.prompt() != &ToolPromptMetadata::default())
+                .then(|| registration.prompt().clone());
+            static_tools.push(StaticToolEntry {
+                definition: definition.clone(),
+                prompt_metadata,
+                handler: Arc::clone(registration.handler()),
+                generation: Arc::clone(&generation_entry),
+            });
         }
         for discovery in registrations.tool_discoveries() {
-            tool_discoveries.push((
-                extension_id.clone(),
-                Arc::clone(discovery),
-                extension_capabilities.clone(),
-            ));
+            tool_discoveries.push(ToolDiscoveryEntry {
+                handler: Arc::clone(discovery),
+                generation: Arc::clone(&generation_entry),
+            });
         }
         for (command, handler) in registrations.commands() {
             static_commands.push((extension_id.clone(), command.clone(), Arc::clone(handler)));
@@ -204,12 +207,6 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         }
         keybindings.extend_from_slice(registrations.keybindings());
         status_items.extend_from_slice(registrations.status_items());
-        if !registrations.custom_event_declarations().is_empty() {
-            custom_event_declarations.insert(
-                extension_id.clone(),
-                registrations.custom_event_declarations().to_vec(),
-            );
-        }
         http_routes.extend(
             registrations
                 .http_routes()
@@ -220,6 +217,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
                     handler: Arc::clone(&registration.handler),
                 }),
         );
+        indexed_extensions.insert(extension_id, generation_entry);
     }
 
     HandlerIndex {
@@ -233,18 +231,14 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         user_message_envelope: handlers_by_priority(user_message_envelope),
         lifecycle: handlers_by_event(lifecycle),
         custom_event: handlers_by_priority(custom_event),
-        tool_metadata,
         static_tools,
         tool_discoveries,
         static_commands,
         command_discoveries,
         keybindings,
         status_items,
-        custom_event_declarations,
-        capabilities,
         http_routes,
-        extension_tasks,
-        extension_admission,
+        extensions: indexed_extensions,
         _publication_leases: publication_leases,
     }
 }

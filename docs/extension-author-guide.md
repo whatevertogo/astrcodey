@@ -194,8 +194,11 @@ S5R 3.0 初始化会协商 `nested_invoke_v1`、`model_stream_v1` 与 `custom_ev
 归因所需的 `nested_invoke_v1` 设为 required。流式调用在实际使用时检查
 `model_stream_v1`；声明 custom event 或 subscription 的 manifest 必须协商
 `custom_event_v1`，否则宿主在发布注册前拒绝加载。
-只有双方 `supported_features` 的交集满足双方 `required_features` 后 peer 才进入 Ready；
+只有双方 feature 约束满足后 peer 才进入 Initialized；宿主完成全局注册校验并发送 Activate 后
+才进入 Ready。Activate 前 Worker 不安装 Host API，也不处理 handler。
 嵌套调用通过 `parent_invoke_id` 关联父请求，并继承父请求的取消与授权上下文。
+`HostClient::host_supports(HostOperation)` 可查询 Host 版本是否实现 operation；typed client 会用
+同一目录预检，但查询成功不代表 manifest 已授权、当前上下文完整或 backend 可用。
 `public_http_dispatch` 仍拒绝同步调用自己的公开
 路由，因为路由和非并行 handler 需要取得顺序执行通道，重入会形成等待环。
 
@@ -231,7 +234,8 @@ return Err(ErrorPayload::new(WireErrorCode::InvalidInput, "name is required")
 
 ## 取消
 
-worker 的长时间 tool 应轮询 `WorkerInvocationContext::cancel_token()`；宿主取消经 S5R `Cancel` 消息传递。
+worker 的长时间 tool 应等待或轮询 `WorkerInvocationContext::cancel_token()`；宿主取消经 S5R
+`Cancel` 消息传递，并可通过 `cancel_token().reason()` 读取首个非敏感取消原因标识。
 bundled handler 则读取 `ctx.cancellation()`，后台循环使用 `ctx.tasks().cancellation()` 或把调用取消
 令牌克隆进受管任务。两种 token 来源不能跨 prelude 混用。
 
@@ -293,7 +297,8 @@ Ok(CustomEventDisposition::Ack.into())
   调试时不要向 stdout 写日志，stdout 专用于 S5R 帧。
 - **握手失败**：检查 `protocol.s5r` 是否为 `3.0`、`extension_id` 是否符合命名规则，以及
   required feature 是否都在双方协商交集中；package manifest 的 `extension_id` 必须与
-  worker 握手身份一致。目录名只建议保持一致，宿主不把目录名当作身份来源。
+  Worker 身份一致。注册冲突会发生在 Initialize 之后、Activate 之前；目录名只建议保持一致，
+  宿主不把目录名当作身份来源。
 - **工具不出现**：确认 `worker.tool()` 已调用且 `run_stdio()` 未提前退出。
 - **E2E 参考**：`crates/astrcode-extensions/tests/s5r-guest/`
 
@@ -584,7 +589,7 @@ sequenceDiagram
     Note over Host: prompt_build 钩子注入 Agents 列表
 ```
 
-宿主加载：`ExtensionLoader` 读 `extension.json` → 启动子进程 → `Initialize` 交换 manifest → `S5rExtension::register` 把 tools/hooks 注册进 `ExtensionRunner`，之后与内置扩展一样参与 `pre_tool_use` / `prompt_build` / LLM tool 调用。
+宿主加载：磁盘扩展源读取 `extension.json` → 启动子进程 → `Initialize` 交换 manifest → `S5rExtension::register` 把 tools/hooks 注册进 `ExtensionRunner`，之后与内置扩展一样参与 `pre_tool_use` / `prompt_build` / LLM tool 调用。
 
 ### 参考代码
 

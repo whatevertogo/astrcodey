@@ -8,12 +8,11 @@ use serde::{Deserialize, Serialize};
 /// Per-session mode state persisted to disk.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub(crate) struct ModeState {
-    #[serde(alias = "currentMode")]
     pub current_mode: String,
-    #[serde(default, alias = "previousMode")]
+    #[serde(default)]
     pub previous_mode: Option<String>,
     /// Set when a transition just happened; cleared after injection.
-    #[serde(default, alias = "pendingTransitionContext")]
+    #[serde(default)]
     pub pending_transition_context: Option<String>,
     /// True if the user entered plan mode (slash command / keybinding).
     /// False if the LLM entered plan mode via `switchMode` tool call.

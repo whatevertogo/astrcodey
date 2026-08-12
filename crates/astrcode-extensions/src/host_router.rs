@@ -33,17 +33,18 @@ use astrcode_extension_sdk::{
         HostOperation,
         internal::{HostOperationGroup, OutboundNetworkService},
     },
-    s5r::{CapabilityDescriptor, ErrorPayload},
+    s5r::ErrorPayload,
 };
 use astrcode_storage::{EventReader, SessionReader};
+pub(crate) use capability::supported_operation_catalog;
 use serde_json::Value;
 use tokio::time::{Instant, timeout_at};
 use tokio_util::sync::CancellationToken;
 use wire::wire_payload;
 
 use self::{
-    context::ContextGroup, extension_http::ExtensionHttpGroup, llm::LlmGroup,
-    network::NetworkGroup, process::ProcessGroup, session::SessionGroup, workspace::WorkspaceGroup,
+    extension_http::ExtensionHttpGroup, llm::LlmGroup, network::NetworkGroup,
+    process::ProcessGroup, session::SessionGroup, workspace::WorkspaceGroup,
 };
 
 pub(super) const HOST_INVOKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -235,7 +236,6 @@ pub trait PublicHttpDispatcher: Send + Sync {
 pub struct HostRouter {
     llm: LlmGroup,
     session: SessionGroup,
-    context: ContextGroup,
     workspace: WorkspaceGroup,
     process: ProcessGroup,
     network: NetworkGroup,
@@ -256,7 +256,6 @@ impl HostRouter {
         Self {
             llm: LlmGroup::new(main_llm, small_llm),
             session: SessionGroup::new(event_reader, session_reader),
-            context: ContextGroup,
             workspace: WorkspaceGroup::new(default_working_dir.clone()),
             process: ProcessGroup::new(default_working_dir),
             network: NetworkGroup::new(outbound_network),
@@ -270,11 +269,6 @@ impl HostRouter {
     ) -> Self {
         self.extension_http.set_dispatcher(dispatcher);
         self
-    }
-
-    /// 根据已声明能力生成握手 catalog。
-    pub fn catalog_for_grants(caps: &[ExtensionCapability]) -> Vec<CapabilityDescriptor> {
-        capability::catalog_for_grants(caps)
     }
 
     /// Reports the operations whose concrete backend is usable for this call context.
@@ -301,7 +295,7 @@ impl HostRouter {
                     .await
             },
             HostOperationGroup::Session => self.session.invoke(operation, input, context).await,
-            HostOperationGroup::Context => self.context.invoke(operation, &input, context).await,
+            HostOperationGroup::Context => context::invoke(operation, &input, context).await,
             HostOperationGroup::Workspace => {
                 self.workspace
                     .invoke(
@@ -721,49 +715,6 @@ mod tests {
         assert_eq!(event.cascade_depth, 4);
     }
 
-    #[test]
-    fn catalog_includes_session_control_subcaps() {
-        let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionControl]);
-        let names: Vec<_> = caps.iter().map(|c| c.name.as_str()).collect();
-        assert!(names.contains(&"astrcode.session.control.create"));
-        assert!(names.contains(&"astrcode.session.control.configure_tools"));
-        assert!(names.contains(&"astrcode.session.control.state"));
-        assert!(names.contains(&"astrcode.session.control.reactivate"));
-    }
-
-    #[test]
-    fn catalog_includes_session_inspect_surface() {
-        let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionInspect]);
-        let names = caps
-            .iter()
-            .map(|descriptor| descriptor.name.as_str())
-            .collect::<Vec<_>>();
-
-        assert!(names.contains(&"astrcode.session.inspect.list"));
-        assert!(names.contains(&"astrcode.session.inspect.snapshot"));
-        assert!(names.contains(&"astrcode.session.inspect.read_model"));
-        assert!(names.contains(&"astrcode.session.inspect.provider_messages"));
-    }
-
-    #[test]
-    fn catalog_includes_typed_session_history_surface() {
-        let caps = HostRouter::catalog_for_grants(&[ExtensionCapability::SessionHistory]);
-        let names = caps
-            .iter()
-            .map(|descriptor| descriptor.name.as_str())
-            .collect::<Vec<_>>();
-        for expected in [
-            "astrcode.session.history.list",
-            "astrcode.session.history.provider_messages",
-            "astrcode.session.history.snapshot",
-            "astrcode.session.history.token_usage",
-            "astrcode.session.history.transcript",
-            "astrcode.session.read_events",
-        ] {
-            assert!(names.contains(&expected), "missing {expected}");
-        }
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn session_inspect_maps_storage_model_to_wire_contract() {
         let store = Arc::new(InMemoryEventStore::new());
@@ -992,25 +943,6 @@ mod tests {
         assert_eq!(
             missing_attribution.code_enum(),
             Some(WireErrorCode::ContextUnavailable)
-        );
-    }
-
-    #[test]
-    fn input_delivery_catalog_lists_root_session_operations() {
-        let root_caps = HostRouter::catalog_for_grants(&[ExtensionCapability::InputDelivery]);
-        let root_names = root_caps
-            .iter()
-            .map(|descriptor| descriptor.name.as_str())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            root_names,
-            [
-                "astrcode.session.root.create",
-                "astrcode.session.root.state",
-                "astrcode.session.root.submit_turn",
-                "astrcode.session.state.read",
-                "astrcode.session.state.write",
-            ]
         );
     }
 

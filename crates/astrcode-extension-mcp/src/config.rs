@@ -57,7 +57,7 @@ struct RawMcpServerConfig {
     env: BTreeMap<String, String>,
     #[serde(default)]
     cwd: Option<String>,
-    #[serde(default, alias = "type")]
+    #[serde(default)]
     r#type: Option<String>,
     url: Option<String>,
     #[serde(default)]

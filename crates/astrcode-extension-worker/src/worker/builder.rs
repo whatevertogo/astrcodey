@@ -194,7 +194,7 @@ mod tests {
         let out = handler(event, ctx).await.unwrap();
         assert_eq!(out.effect, HandlerEffect::Ok);
         assert_eq!(
-            out.data_value("content"),
+            out.data.get("content"),
             Some(&serde_json::json!("hi world"))
         );
 

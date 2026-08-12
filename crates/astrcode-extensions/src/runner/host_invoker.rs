@@ -226,28 +226,16 @@ impl ExtensionView {
         extension_id: &str,
         input: ExtensionCallContextInput,
     ) -> Result<ExtensionCallContext, ExtensionError> {
-        let capabilities = index.capabilities.get(extension_id).ok_or_else(|| {
+        let generation = index.extensions.get(extension_id).ok_or_else(|| {
             ExtensionError::Internal(format!(
-                "missing capability attribution for extension {extension_id}"
+                "missing generation entry for extension {extension_id}"
             ))
         })?;
-        let tasks = index
-            .extension_tasks
-            .get(extension_id)
-            .cloned()
-            .ok_or_else(|| {
-                ExtensionError::Internal(format!("missing task owner for extension {extension_id}"))
-            })?;
-        let declarations = index
-            .custom_event_declarations
-            .get(extension_id)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
         Ok(self.call_context_factory.make_extension_call_context(
             extension_id,
-            capabilities,
-            declarations,
-            tasks,
+            &generation.capabilities,
+            &generation.custom_event_declarations,
+            generation.tasks.clone(),
             input,
         ))
     }

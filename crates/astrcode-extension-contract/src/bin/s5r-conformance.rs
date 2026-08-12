@@ -1,8 +1,8 @@
 use std::{collections::BTreeSet, process::Stdio, sync::Arc, time::Duration};
 
 use astrcode_extension_contract::{
-    FeatureName, FrameTransport, InboundInvoke, InvocationResponse, InvokeError, Peer,
-    PeerHandshake, PeerInfo, PeerInvokeHandler, StdioFrameTransport, WireErrorCode,
+    FeatureName, HostInitialization, InboundInvoke, InvocationResponse, InvokeError, Peer,
+    PeerInfo, PeerInvokeHandler, StdioFrameTransport, WireErrorCode,
     frame::MAX_FRAME_BYTES,
     protocol::{
         CAP_RUNTIME_PING, CONFORMANCE_HOST_ECHO, CONFORMANCE_NESTED, CONFORMANCE_STREAM,
@@ -20,13 +20,10 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 struct HostConformanceHandler;
 
 #[async_trait::async_trait]
-impl<T> PeerInvokeHandler<T> for HostConformanceHandler
-where
-    T: FrameTransport + 'static,
-{
+impl PeerInvokeHandler for HostConformanceHandler {
     async fn invoke(
         &self,
-        invocation: InboundInvoke<T>,
+        invocation: InboundInvoke,
     ) -> std::result::Result<InvocationResponse, ErrorPayload> {
         if invocation.request.operation == CONFORMANCE_HOST_ECHO {
             Ok(InvocationResponse::Unary(invocation.request.input))
@@ -44,23 +41,29 @@ where
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
-    let command = worker_command()?;
-    run_behavior_suite(&command).await?;
+    let (extension_id, command) = worker_command()?;
+    run_behavior_suite(&extension_id, &command).await?;
     run_rejection_probe(&command, b"1\n{").await?;
     run_rejection_probe(&command, format!("{}\n", MAX_FRAME_BYTES + 1).as_bytes()).await?;
     println!("S5R 3.0 conformance passed");
     Ok(())
 }
 
-fn worker_command() -> Result<Vec<String>> {
+fn worker_command() -> Result<(String, Vec<String>)> {
     let mut args = std::env::args().skip(1).collect::<Vec<_>>();
-    if args.first().is_some_and(|arg| arg == "--") {
-        args.remove(0);
+    if args.len() < 4 || args[0] != "--extension-id" || args[2] != "--" {
+        return Err(
+            "usage: s5r-conformance --extension-id <id> -- <worker command> [args...]".into(),
+        );
     }
-    if args.is_empty() {
-        return Err("usage: s5r-conformance -- <worker command> [args...]".into());
+    let extension_id = args.remove(1);
+    args.drain(..2);
+    if extension_id.is_empty() || args.is_empty() {
+        return Err(
+            "usage: s5r-conformance --extension-id <id> -- <worker command> [args...]".into(),
+        );
     }
-    Ok(args)
+    Ok((extension_id, args))
 }
 
 fn spawn_worker(command: &[String]) -> Result<tokio::process::Child> {
@@ -74,7 +77,7 @@ fn spawn_worker(command: &[String]) -> Result<tokio::process::Child> {
     Ok(child.spawn()?)
 }
 
-async fn run_behavior_suite(command: &[String]) -> Result<()> {
+async fn run_behavior_suite(extension_id: &str, command: &[String]) -> Result<()> {
     eprintln!("checking initialize and feature negotiation");
     let mut child = spawn_worker(command)?;
     let stdin = child.stdin.take().ok_or("worker stdin unavailable")?;
@@ -85,20 +88,25 @@ async fn run_behavior_suite(command: &[String]) -> Result<()> {
         FeatureName::model_stream_v1(),
         FeatureName::custom_event_v1(),
     ]);
-    let mut handshake = PeerHandshake::new("conformance-initialize");
-    handshake.supported_features = supported.clone();
-    handshake.required_features = supported;
-    let peer = tokio::time::timeout(
+    let mut initialization = HostInitialization::new("conformance-initialize", extension_id);
+    initialization.supported_features = supported.clone();
+    initialization.required_features = supported;
+    initialization.host_operations = vec![CONFORMANCE_HOST_ECHO.into()];
+    let (peer, _worker, _manifest) = tokio::time::timeout(
         Duration::from_secs(30),
         Peer::new(
             transport,
             PeerInfo {
                 name: "s5r-conformance".into(),
-                role: "host".into(),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             },
         )
-        .initialize(handshake),
+        .initialize(initialization),
+    )
+    .await??;
+    let peer = tokio::time::timeout(
+        Duration::from_secs(30),
+        peer.activate("conformance-activate"),
     )
     .await??;
     let (handle, driver) = peer.into_runtime();

@@ -33,7 +33,7 @@ const TODO_WRITE_DESCRIPTION: &str =
      fully done (tests pass, implementation complete).\n- After receiving new instructions, \
      immediately add them as todos.\n- Each item: `content` (imperative: \"Fix auth bug\") + \
      `activeForm` (continuous: \"Fixing auth bug\").";
-const PROGRESS_SCHEMA_VERSION: u32 = 1;
+const PROGRESS_SCHEMA_VERSION: u32 = 2;
 const PROGRESS_FILE: &str = "progress.json";
 const REMINDER_THRESHOLD: u32 = 15;
 const REMINDER_STATE_FILE: &str = ".reminder-state.json";
@@ -188,7 +188,6 @@ pub(crate) struct ProgressItem {
     pub content: String,
     pub active_form: String,
     pub status: ProgressStatus,
-    #[serde(default)]
     pub executor: TodoExecutor,
     #[serde(default)]
     pub agent_type: Option<String>,
@@ -758,20 +757,6 @@ mod tests {
         }))
         .expect_err("missing executor must fail");
         assert!(error.to_string().contains("executor"));
-    }
-
-    #[test]
-    fn loads_legacy_items_without_executor_as_self() {
-        let store = test_store("legacy");
-        std::fs::create_dir_all(&store.root).unwrap();
-        let legacy = r#"{"schemaVersion":1,"items":[{"content":"Run tests","activeForm":"Running tests","status":"pending"}],"updatedAt":"2026-01-01T00:00:00Z"}"#;
-        std::fs::write(store.root.join(PROGRESS_FILE), legacy).unwrap();
-
-        let items = store.load_items().unwrap();
-        assert_eq!(items.len(), 1);
-        assert_eq!(items[0].executor, TodoExecutor::MainAgent);
-        assert_eq!(items[0].agent_type, None);
-        assert_eq!(items[0].mode, None);
     }
 
     #[test]

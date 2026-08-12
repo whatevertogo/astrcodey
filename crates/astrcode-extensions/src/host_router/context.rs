@@ -23,31 +23,25 @@ use super::{
     invalid_group_operation, io_error, run_blocking_io, run_blocking_io_to_completion,
 };
 
-#[derive(Default)]
-pub(super) struct ContextGroup;
-
-impl ContextGroup {
-    pub(super) async fn invoke(
-        &self,
-        operation: HostOperation,
-        input: &Value,
-        ctx: &InvokeContext,
-    ) -> Result<Value, ErrorPayload> {
-        match operation {
-            HostOperation::SessionStateRead => {
-                dispatch(operation, input, |request| read_state(request, ctx)).await
-            },
-            HostOperation::SessionStateWrite => {
-                dispatch(operation, input, |request| write_state(request, ctx)).await
-            },
-            HostOperation::EventEmit => {
-                dispatch(operation, input, |request| emit_event(request, ctx)).await
-            },
-            _ => Err(invalid_group_operation(
-                operation,
-                HostOperationGroup::Context,
-            )),
-        }
+pub(super) async fn invoke(
+    operation: HostOperation,
+    input: &Value,
+    ctx: &InvokeContext,
+) -> Result<Value, ErrorPayload> {
+    match operation {
+        HostOperation::SessionStateRead => {
+            dispatch(operation, input, |request| read_state(request, ctx)).await
+        },
+        HostOperation::SessionStateWrite => {
+            dispatch(operation, input, |request| write_state(request, ctx)).await
+        },
+        HostOperation::EventEmit => {
+            dispatch(operation, input, |request| emit_event(request, ctx)).await
+        },
+        _ => Err(invalid_group_operation(
+            operation,
+            HostOperationGroup::Context,
+        )),
     }
 }
 

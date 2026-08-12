@@ -27,7 +27,7 @@ use astrcode_extension_sdk::{
 };
 use astrcode_extensions::{
     HostBackends, build_host_router, build_host_router_with_public_http_dispatcher,
-    loader::ExtensionLoader, runner::ExtensionRunner, s5r_ext::S5rExtension,
+    loader::load_extensions_from_dir_for_test, runner::ExtensionRunner, s5r_ext::S5rExtension,
 };
 use astrcode_storage::{EventReader, SessionReader, in_memory::InMemoryEventStore};
 use async_trait::async_trait;
@@ -376,9 +376,19 @@ async fn s5r_host_client_dispatches_to_another_extensions_public_route() {
 }
 
 #[tokio::test]
-async fn s5r_ping_health() {
-    let ext = load_s5r(minimal_router()).await;
+async fn s5r_health_is_unavailable_until_runner_activation() {
+    let router = minimal_router();
+    let ext = load_s5r(Arc::clone(&router)).await;
+    assert!(
+        ext.health().await.is_err(),
+        "initialized worker must not become callable before registration"
+    );
+
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
+    runner.bind_host_router(router);
+    runner.register(ext.clone()).await.unwrap();
     ext.health().await.expect("extension/ping via health()");
+    runner.shutdown().await;
 }
 
 #[tokio::test]
@@ -685,8 +695,7 @@ async fn s5r_loader_discovers_manifest() {
     )
     .unwrap();
 
-    let (exts, errors) =
-        ExtensionLoader::load_from_dir_for_test(&root, &Some(minimal_router())).await;
+    let (exts, errors) = load_extensions_from_dir_for_test(&root, &Some(minimal_router())).await;
     assert!(errors.is_empty(), "{errors:?}");
     assert_eq!(exts.len(), 1);
     assert_eq!(exts[0].manifest().id(), "s5r-guest-demo");
@@ -709,7 +718,7 @@ async fn s5r_load_rejects_package_and_handshake_id_mismatch() {
         Err(error) => error,
     };
 
-    assert!(error.contains("extension id mismatch"), "{error}");
+    assert!(error.contains("host expected extension"), "{error}");
     assert!(error.contains("different-extension"), "{error}");
     assert!(error.contains("s5r-guest-demo"), "{error}");
 }

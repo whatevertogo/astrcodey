@@ -14,7 +14,7 @@ use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{config::ConfigStore, tool::SessionOperations};
 use astrcode_extensions::{
     host_router::{HostBackends, build_host_router_with_public_http_dispatcher},
-    loader::{DiskExtensionSource, ExtensionLoadContext, ExtensionRuntime},
+    loader::{DiskExtensionSource, ExtensionLoadContext, sync_extension_sources},
     runner::ExtensionRunner,
 };
 use astrcode_session::SessionRuntimeServices;
@@ -380,7 +380,7 @@ async fn load_extensions_into_runner(
         runner.public_http_dispatcher(),
     );
     runner.bind_host_router(Arc::clone(&host_router));
-    ExtensionRuntime::sync_sources(
+    sync_extension_sources(
         runner,
         &ExtensionLoadContext {
             working_dir: Some(working_dir),
