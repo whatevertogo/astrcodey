@@ -57,7 +57,8 @@ jobs:
         run: cargo build --release --manifest-path crates/astrcode-extensions/tests/s5r-guest/Cargo.toml
       - name: Run S5R 3.0 worker conformance
         run: >-
-          cargo run -p astrcode-extension-contract --bin s5r-conformance -- --
+          cargo run -p astrcode-extension-contract --bin s5r-conformance --
+          --extension-id s5r-guest-demo --
           crates/astrcode-extensions/tests/s5r-guest/target/release/s5r_guest_demo
       - run: cargo test --workspace --all-features
 
@@ -104,6 +105,8 @@ jobs:
   msrv:
     name: MSRV (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    env:
+      RUSTUP_TOOLCHAIN: 1.88.0
     strategy:
       fail-fast: false
       matrix:
@@ -112,7 +115,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.88.0
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
       - name: Install Linux desktop dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf

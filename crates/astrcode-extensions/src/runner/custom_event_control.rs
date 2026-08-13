@@ -1,20 +1,18 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-    time::Duration,
-};
+use std::sync::Arc;
 
 use astrcode_core::{event::DurableEventPayload, types::SessionId};
 use astrcode_extension_sdk::extension::{
     CustomEventHandler, CustomEventSubscription, internal::custom_event_subscription_matches,
 };
 use astrcode_storage::{EventConsumerCheckpointReset, EventConsumerState, StorageError};
-use tokio::sync::Notify;
 
-use super::{CustomEventSession, ExtensionRunner, custom_event_consumer_id};
+use super::{
+    ExtensionRunner,
+    custom_event_delivery::{
+        CustomEventConsumerKey, CustomEventSession, MAX_CUSTOM_EVENT_CASCADE_DEPTH,
+        custom_event_consumer_id,
+    },
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CustomEventConsumerAction {
@@ -51,87 +49,6 @@ pub enum CustomEventConsumerControlError {
     ConsumerBusy(String),
     #[error(transparent)]
     Storage(#[from] StorageError),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(super) struct CustomEventConsumerKey {
-    session_id: SessionId,
-    consumer_id: String,
-}
-
-impl CustomEventConsumerKey {
-    pub(super) fn new(session_id: &SessionId, consumer_id: &str) -> Self {
-        Self {
-            session_id: session_id.clone(),
-            consumer_id: consumer_id.to_owned(),
-        }
-    }
-}
-
-pub(super) type CustomEventConsumerMetricsMap =
-    parking_lot::Mutex<HashMap<CustomEventConsumerKey, Arc<CustomEventConsumerMetrics>>>;
-
-#[derive(Debug, Clone, Copy, Default)]
-pub(super) struct CustomEventConsumerMetricsSnapshot {
-    pub(super) in_flight: bool,
-    pub(super) failed_attempts: u64,
-    pub(super) consecutive_failures: u64,
-}
-
-#[derive(Default)]
-pub(super) struct CustomEventConsumerMetrics {
-    active_deliveries: AtomicU64,
-    failed_attempts: AtomicU64,
-    consecutive_failures: AtomicU64,
-    became_idle: Notify,
-}
-
-impl CustomEventConsumerMetrics {
-    pub(super) fn track_delivery(&self) -> ActiveDelivery<'_> {
-        self.active_deliveries.fetch_add(1, Ordering::AcqRel);
-        ActiveDelivery(self)
-    }
-
-    pub(super) fn record_failure(&self) {
-        self.failed_attempts.fetch_add(1, Ordering::Relaxed);
-        self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
-    }
-
-    pub(super) fn record_success(&self) {
-        self.consecutive_failures.store(0, Ordering::Relaxed);
-    }
-
-    fn snapshot(&self) -> CustomEventConsumerMetricsSnapshot {
-        CustomEventConsumerMetricsSnapshot {
-            in_flight: self.active_deliveries.load(Ordering::Acquire) != 0,
-            failed_attempts: self.failed_attempts.load(Ordering::Relaxed),
-            consecutive_failures: self.consecutive_failures.load(Ordering::Relaxed),
-        }
-    }
-
-    async fn wait_until_idle(&self, timeout: Duration) -> bool {
-        tokio::time::timeout(timeout, async {
-            loop {
-                let became_idle = self.became_idle.notified();
-                if self.active_deliveries.load(Ordering::Acquire) == 0 {
-                    return;
-                }
-                became_idle.await;
-            }
-        })
-        .await
-        .is_ok()
-    }
-}
-
-pub(super) struct ActiveDelivery<'a>(&'a CustomEventConsumerMetrics);
-
-impl Drop for ActiveDelivery<'_> {
-    fn drop(&mut self) {
-        if self.0.active_deliveries.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.0.became_idle.notify_waiters();
-        }
-    }
 }
 
 struct CustomEventConsumerControlTarget<'a> {
@@ -244,37 +161,6 @@ impl ExtensionRunner {
         ))
     }
 
-    pub fn forget_custom_event_session(&self, session_id: &SessionId) {
-        let mut lanes = self.custom_event_lanes.lock();
-        lanes.retain(|lane_id, lane| {
-            if lane_id.session_id == *session_id {
-                if let Some(lane) = lane.upgrade() {
-                    lane.consumer.cancellation.cancel();
-                }
-                false
-            } else {
-                lane.strong_count() > 0
-            }
-        });
-        drop(lanes);
-        self.custom_event_metrics
-            .lock()
-            .retain(|key, _| key.session_id != *session_id);
-    }
-
-    pub(super) fn custom_event_consumer_metrics(
-        &self,
-        session_id: &SessionId,
-        consumer_id: &str,
-    ) -> Arc<CustomEventConsumerMetrics> {
-        Arc::clone(
-            self.custom_event_metrics
-                .lock()
-                .entry(CustomEventConsumerKey::new(session_id, consumer_id))
-                .or_default(),
-        )
-    }
-
     fn custom_event_consumer_status(
         &self,
         session_id: &SessionId,
@@ -304,7 +190,7 @@ impl ExtensionRunner {
                     _ => None,
                 })
                 .filter(|event| {
-                    event.cascade_depth <= super::MAX_CUSTOM_EVENT_CASCADE_DEPTH
+                    event.cascade_depth <= MAX_CUSTOM_EVENT_CASCADE_DEPTH
                         && custom_event_subscription_matches(
                             subscription,
                             &event.extension_id,

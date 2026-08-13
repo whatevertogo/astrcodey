@@ -182,6 +182,7 @@ impl LlmProvider for UsageLlm {
                 input_tokens: Some(100),
                 cached_input_tokens: Some(64),
                 cache_creation_input_tokens: None,
+                input_accounting: Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive),
                 output_tokens: Some(20),
                 reasoning_output_tokens: Some(5),
                 total_tokens: Some(120),

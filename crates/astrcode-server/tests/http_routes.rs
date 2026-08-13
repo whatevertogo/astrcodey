@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::Duration,
 };
@@ -63,7 +63,7 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tower::ServiceExt;
 
 fn router(
@@ -1549,21 +1549,128 @@ async fn raw_event_stream_replays_and_filters_durable_and_live_custom_events() {
     assert!(body.contains(r#""durability":"durable""#));
     assert!(body.contains(r#""durability":"live""#));
     assert!(!body.contains("ignored-job"));
+}
 
-    let invalid_cursor = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
-                .uri(format!(
-                    "/api/sessions/{session_id}/events?cursor=not-a-cursor"
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
+#[tokio::test]
+async fn raw_event_stream_buffers_events_while_validating_and_maps_replay_errors() {
+    let latest_cursor = Arc::new(LatestCursorControl::default());
+    let event_store = Arc::new(TestEventStore::with_latest_cursor_control(Arc::clone(
+        &latest_cursor,
+    ))) as Arc<dyn SessionStore>;
+    let runtime = runtime_with_event_store(Arc::new(ImmediateLlm), event_store).await;
+    let (app, token, publisher) =
+        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let session_id = create_session(app.clone(), &token).await;
+    let sid = SessionId::from(session_id.clone());
+    let raw_request = |session_id: &str, query: &str| {
+        let query = if query.is_empty() {
+            String::new()
+        } else {
+            format!("?{query}")
+        };
+        Request::builder()
+            .method(Method::GET)
+            .header("authorization", format!("Bearer {token}"))
+            .uri(format!("/api/sessions/{session_id}/events{query}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    latest_cursor.block_next();
+    let response_task = tokio::spawn({
+        let app = app.clone();
+        let request = raw_request(&session_id, "");
+        async move { app.oneshot(request).await.unwrap() }
+    });
+    latest_cursor.wait_until_blocked().await;
+
+    let durable = runtime
+        .event_store()
+        .append_event(DurableEvent::session(
+            sid.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({"jobId": "setup-durable"}),
+            }),
+        ))
         .await
         .unwrap();
-    assert_eq!(invalid_cursor.status(), StatusCode::CONFLICT);
+    publisher.send_notification(ClientNotification::Event(durable.into()));
+    publisher.send_notification(ClientNotification::Event(
+        LiveEvent::session(
+            sid.clone(),
+            LiveEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({"jobId": "setup-live"}),
+            }),
+        )
+        .into(),
+    ));
+    latest_cursor.resume();
+
+    let response = response_task.await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = read_sse_until(response.into_body(), "setup-live").await;
+    assert!(body.contains("setup-durable"));
+
+    let invalid = app
+        .clone()
+        .oneshot(raw_request(&session_id, "cursor=not-a-cursor"))
+        .await
+        .unwrap();
+    assert_eq!(invalid.status(), StatusCode::CONFLICT);
+
+    let ahead = app
+        .clone()
+        .oneshot(raw_request(&session_id, "cursor=18446744073709551615"))
+        .await
+        .unwrap();
+    assert_eq!(ahead.status(), StatusCode::CONFLICT);
+
+    let missing = app
+        .clone()
+        .oneshot(raw_request("missing-raw-session", ""))
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+
+    latest_cursor.fail_next();
+    let internal = app
+        .clone()
+        .oneshot(raw_request(&session_id, ""))
+        .await
+        .unwrap();
+    assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let overflow = (0..1_000)
+        .map(|index| {
+            DurableEvent::session(
+                sid.clone(),
+                DurableEventPayload::CustomEvent(CustomEventData {
+                    extension_id: "producer".into(),
+                    event_type: "job.completed".into(),
+                    schema_version: 1,
+                    causation_id: None,
+                    cascade_depth: 0,
+                    payload: serde_json::json!({"index": index}),
+                }),
+            )
+        })
+        .collect();
+    runtime.event_store().append_events(overflow).await.unwrap();
+    let over_limit = app
+        .oneshot(raw_request(&session_id, "cursor=0"))
+        .await
+        .unwrap();
+    assert_eq!(over_limit.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -2417,14 +2524,61 @@ async fn read_sse_until(mut body: Body, needle: &str) -> String {
 struct TestEventStore {
     inner: InMemoryEventStore,
     temp_dir: PathBuf,
+    latest_cursor: Arc<LatestCursorControl>,
 }
 
 impl TestEventStore {
     fn new() -> Self {
+        Self::with_latest_cursor_control(Arc::new(LatestCursorControl::default()))
+    }
+
+    fn with_latest_cursor_control(latest_cursor: Arc<LatestCursorControl>) -> Self {
         Self {
             inner: InMemoryEventStore::new(),
             temp_dir: std::env::temp_dir(),
+            latest_cursor,
         }
+    }
+}
+
+#[derive(Default)]
+struct LatestCursorControl {
+    block_next: AtomicBool,
+    fail_next: AtomicBool,
+    blocked: Notify,
+    resume: Notify,
+}
+
+impl LatestCursorControl {
+    fn block_next(&self) {
+        assert!(!self.block_next.swap(true, Ordering::AcqRel));
+    }
+
+    async fn wait_until_blocked(&self) {
+        tokio::time::timeout(Duration::from_secs(1), self.blocked.notified())
+            .await
+            .expect("latest_cursor should be reached");
+    }
+
+    fn resume(&self) {
+        self.resume.notify_one();
+    }
+
+    fn fail_next(&self) {
+        assert!(!self.fail_next.swap(true, Ordering::AcqRel));
+    }
+
+    async fn before_read(&self) -> Result<(), StorageError> {
+        if self.block_next.swap(false, Ordering::AcqRel) {
+            self.blocked.notify_one();
+            self.resume.notified().await;
+        }
+        if self.fail_next.swap(false, Ordering::AcqRel) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected latest cursor failure",
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -2438,6 +2592,7 @@ impl EventReader for TestEventStore {
     }
 
     async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
+        self.latest_cursor.before_read().await?;
         self.inner.latest_cursor(session_id).await
     }
 
@@ -2613,6 +2768,13 @@ impl SessionStore for TestEventStore {
 }
 
 async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
+    runtime_with_event_store(llm_provider, Arc::new(TestEventStore::new())).await
+}
+
+async fn runtime_with_event_store(
+    llm_provider: Arc<dyn LlmProvider>,
+    event_store: Arc<dyn SessionStore>,
+) -> Arc<ServerRuntime> {
     static NEXT_CONFIG_ID: AtomicU64 = AtomicU64::new(0);
 
     let effective = EffectiveConfig {
@@ -2676,7 +2838,6 @@ async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
-    let event_store = Arc::new(TestEventStore::new()) as Arc<dyn SessionStore>;
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
     extension_runner
         .register(astrcode_extension_mode::extension())

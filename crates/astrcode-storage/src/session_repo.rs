@@ -4,7 +4,7 @@
 //! `~/.astrcode/projects/<project>/sessions/<session>/`
 
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::File,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock, Weak},
@@ -362,6 +362,11 @@ impl FileSystemSessionRepository {
         }
     }
 
+    #[cfg(feature = "testing")]
+    pub fn for_testing(projects_base: PathBuf) -> Self {
+        Self::with_projects_base(projects_base)
+    }
+
     /// 根据 `working_dir` 计算新会话的存储目录。
     fn session_dir_from_working_dir(&self, working_dir: &str, id: &SessionId) -> PathBuf {
         let project_key = project_key_from_path(&PathBuf::from(working_dir));
@@ -384,6 +389,28 @@ impl FileSystemSessionRepository {
             }
         }
         roots
+    }
+
+    async fn all_session_roots_strict(&self) -> Result<Vec<PathBuf>, StorageError> {
+        let mut entries = match tokio::fs::read_dir(&self.projects_base).await {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
+        let mut roots = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            if !entry.file_type().await?.is_dir() {
+                continue;
+            }
+            let sessions_dir = entry.path().join("sessions");
+            match tokio::fs::metadata(&sessions_dir).await {
+                Ok(metadata) if metadata.is_dir() => roots.push(sessions_dir),
+                Ok(_) => {},
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(roots)
     }
 
     /// 在所有项目目录中查找指定会话的目录。
@@ -610,8 +637,25 @@ impl EventReader for FileSystemSessionRepository {
         meta.log.replay_after_limited(seq, max_events).await
     }
 
+    async fn replay_from_start_limited(
+        &self,
+        session_id: &SessionId,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        meta.log.replay_from_start_limited(max_events).await
+    }
+
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
         self.list_session_dirs().await
+    }
+
+    async fn list_all_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
+        Ok(self
+            .list_all_session_locations()
+            .await?
+            .into_keys()
+            .collect())
     }
 }
 
@@ -657,6 +701,35 @@ impl SessionReader for FileSystemSessionRepository {
 
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
         let session_ids = self.list_session_dirs().await?;
+        self.summaries_for_session_ids(session_ids).await
+    }
+
+    async fn list_all_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
+        let session_locations = self.list_all_session_locations().await?;
+        let sessions = self.sessions.read().await.clone();
+        let mut summaries = Vec::with_capacity(session_locations.len());
+
+        for (session_id, session_dir) in session_locations {
+            if let Some(meta) = sessions.get(&session_id) {
+                summaries.push(meta.projection.snapshot().await.to_summary());
+            } else if let Some(summary) =
+                EventLog::read_summary(&Self::event_log_path(&session_dir, &session_id), session_id)
+                    .await?
+            {
+                summaries.push(summary);
+            }
+        }
+
+        summaries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+        Ok(summaries)
+    }
+}
+
+impl FileSystemSessionRepository {
+    async fn summaries_for_session_ids(
+        &self,
+        session_ids: Vec<SessionId>,
+    ) -> Result<Vec<SessionSummary>, StorageError> {
         let sessions = self.sessions.read().await.clone();
         let mut summaries = Vec::new();
 
@@ -1239,6 +1312,63 @@ impl FileSystemSessionRepository {
                 .await;
         }
         Ok(ids.into_iter().collect())
+    }
+
+    /// Scans active root and nested subagent session directories without opening logs.
+    async fn list_all_session_locations(
+        &self,
+    ) -> Result<BTreeMap<SessionId, PathBuf>, StorageError> {
+        let mut locations: BTreeMap<SessionId, PathBuf> = self
+            .sessions
+            .read()
+            .await
+            .iter()
+            .map(|(id, meta)| (id.clone(), meta.dir.clone()))
+            .collect();
+        for sessions_root in self.all_session_roots_strict().await? {
+            let mut containers = vec![sessions_root];
+            while let Some(container) = containers.pop() {
+                let mut entries = match tokio::fs::read_dir(container).await {
+                    Ok(entries) => entries,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error.into()),
+                };
+                while let Some(entry) = entries.next_entry().await? {
+                    if !entry.file_type().await?.is_dir() {
+                        continue;
+                    }
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    if is_session_metadata_dir(&name) {
+                        continue;
+                    }
+                    let session_id = SessionId::from(name.into_owned());
+                    let session_dir = entry.path();
+                    match tokio::fs::metadata(Self::event_log_path(&session_dir, &session_id)).await
+                    {
+                        Ok(metadata) if metadata.is_file() => {},
+                        Ok(_) => continue,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error.into()),
+                    }
+                    locations.entry(session_id).or_insert(session_dir.clone());
+                    let subagents = session_dir.join("subagents");
+                    let mut extensions = match tokio::fs::read_dir(subagents).await {
+                        Ok(entries) => entries,
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(error) => return Err(error.into()),
+                    };
+                    while let Some(extension) = extensions.next_entry().await? {
+                        if extension.file_name().to_string_lossy() != ".recycled"
+                            && extension.file_type().await?.is_dir()
+                        {
+                            containers.push(extension.path());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(locations)
     }
 
     /// 收集 `base` 下一层会话目录名（不含 `subagents/` 等元数据目录）。

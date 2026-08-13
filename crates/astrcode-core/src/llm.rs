@@ -422,6 +422,9 @@ pub struct LlmTokenUsage {
     pub cached_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u64>,
+    /// How provider input and cache counters relate to each other.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_accounting: Option<LlmInputTokenAccounting>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -430,6 +433,16 @@ pub struct LlmTokenUsage {
     pub total_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<LlmTokenUsageSource>,
+}
+
+/// Provider usage counter semantics, normalized at the provider wire boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LlmInputTokenAccounting {
+    /// `input_tokens` contains cached input; cache counters are descriptive subsets.
+    Inclusive,
+    /// Regular, cache-read, and cache-creation inputs are independent components.
+    Components,
 }
 
 /// token usage 的来源，用于区分 provider 原生统计与 fallback 估算。
@@ -459,6 +472,39 @@ impl ProviderInputTokenCount {
 }
 
 impl LlmTokenUsage {
+    /// Returns billable non-cache-read input plus generated output.
+    pub fn non_cached_tokens(&self) -> Option<u64> {
+        let cached = self.cached_input_tokens.unwrap_or_default();
+        let component_accounting = matches!(
+            self.input_accounting,
+            Some(LlmInputTokenAccounting::Components)
+        ) || (self.input_accounting.is_none()
+            && self.cache_creation_input_tokens.is_some());
+        // Persisted usage predating `input_accounting` only populated cache-creation tokens for
+        // component-style providers.
+        if component_accounting {
+            let input = self
+                .input_tokens
+                .unwrap_or_default()
+                .saturating_add(self.cache_creation_input_tokens.unwrap_or_default());
+            return (self.input_tokens.is_some()
+                || self.cache_creation_input_tokens.is_some()
+                || self.output_tokens.is_some())
+            .then(|| input.saturating_add(self.output_tokens.unwrap_or_default()));
+        }
+
+        self.total_tokens
+            .map(|total| total.saturating_sub(cached))
+            .or_else(|| {
+                let input = self.input_tokens.map(|input| input.saturating_sub(cached));
+                (input.is_some() || self.output_tokens.is_some()).then(|| {
+                    input
+                        .unwrap_or_default()
+                        .saturating_add(self.output_tokens.unwrap_or_default())
+                })
+            })
+    }
+
     /// 返回本次响应结束后占用的完整上下文 token。
     ///
     /// Provider 原生 `total_tokens` 优先；Anthropic 等未提供 total 的协议只有在
@@ -469,12 +515,15 @@ impl LlmTokenUsage {
             return Some(total_tokens);
         }
 
-        Some(
-            self.input_tokens?
+        let input = self.input_tokens?;
+        let output = self.output_tokens?;
+        Some(match self.input_accounting {
+            Some(LlmInputTokenAccounting::Inclusive) => input.saturating_add(output),
+            Some(LlmInputTokenAccounting::Components) | None => input
                 .saturating_add(self.cached_input_tokens.unwrap_or(0))
                 .saturating_add(self.cache_creation_input_tokens.unwrap_or(0))
-                .saturating_add(self.output_tokens?),
-        )
+                .saturating_add(output),
+        })
     }
 }
 
@@ -877,6 +926,66 @@ pub async fn collect_stream_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_usage_respects_inclusive_and_component_accounting() {
+        let cases = [
+            (
+                LlmTokenUsage {
+                    input_tokens: Some(100),
+                    cached_input_tokens: Some(20),
+                    output_tokens: Some(20),
+                    total_tokens: Some(120),
+                    input_accounting: Some(LlmInputTokenAccounting::Inclusive),
+                    ..Default::default()
+                },
+                Some(100),
+                Some(120),
+            ),
+            (
+                LlmTokenUsage {
+                    input_tokens: Some(100),
+                    cached_input_tokens: Some(20),
+                    cache_creation_input_tokens: Some(7),
+                    output_tokens: Some(20),
+                    input_accounting: Some(LlmInputTokenAccounting::Components),
+                    ..Default::default()
+                },
+                Some(127),
+                Some(147),
+            ),
+            (
+                LlmTokenUsage {
+                    input_tokens: Some(100),
+                    cached_input_tokens: Some(20),
+                    cache_creation_input_tokens: Some(7),
+                    output_tokens: Some(20),
+                    ..Default::default()
+                },
+                Some(127),
+                Some(147),
+            ),
+            (
+                LlmTokenUsage {
+                    cached_input_tokens: Some(20),
+                    total_tokens: Some(120),
+                    ..Default::default()
+                },
+                Some(100),
+                Some(120),
+            ),
+            (LlmTokenUsage::default(), None, None),
+        ];
+
+        for (usage, non_cached, context) in cases {
+            assert_eq!(usage.non_cached_tokens(), non_cached, "usage: {usage:?}");
+            assert_eq!(
+                usage.context_tokens_after_response(),
+                context,
+                "usage: {usage:?}"
+            );
+        }
+    }
 
     #[test]
     fn joined_text_preserves_text_blocks_and_ignores_other_content() {

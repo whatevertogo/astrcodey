@@ -32,7 +32,8 @@ pub(super) async fn list(
     operation: HostOperation,
     reader: Arc<dyn SessionReader>,
 ) -> Result<SessionInspectListOutput, ErrorPayload> {
-    let summaries = storage_call(operation.wire_name(), reader.list_session_summaries()).await?;
+    let summaries =
+        storage_call(operation.wire_name(), reader.list_all_session_summaries()).await?;
     Ok(SessionInspectListOutput {
         sessions: summaries.into_iter().map(list_item).collect(),
     })

@@ -236,6 +236,7 @@ pub trait PublicHttpDispatcher: Send + Sync {
 pub struct HostRouter {
     llm: LlmGroup,
     session: SessionGroup,
+    session_state_writes: context::SessionStateWriteGates,
     workspace: WorkspaceGroup,
     process: ProcessGroup,
     network: NetworkGroup,
@@ -256,6 +257,7 @@ impl HostRouter {
         Self {
             llm: LlmGroup::new(main_llm, small_llm),
             session: SessionGroup::new(event_reader, session_reader),
+            session_state_writes: context::SessionStateWriteGates::default(),
             workspace: WorkspaceGroup::new(default_working_dir.clone()),
             process: ProcessGroup::new(default_working_dir),
             network: NetworkGroup::new(outbound_network),
@@ -295,7 +297,9 @@ impl HostRouter {
                     .await
             },
             HostOperationGroup::Session => self.session.invoke(operation, input, context).await,
-            HostOperationGroup::Context => context::invoke(operation, &input, context).await,
+            HostOperationGroup::Context => {
+                context::invoke(operation, &input, context, &self.session_state_writes).await
+            },
             HostOperationGroup::Workspace => {
                 self.workspace
                     .invoke(
@@ -599,7 +603,7 @@ mod tests {
     };
     use futures_util::StreamExt;
     use serde_json::json;
-    use tokio::sync::Notify;
+    use tokio::sync::{Barrier, Notify};
 
     use super::*;
 
@@ -1210,7 +1214,7 @@ mod tests {
 
     #[tokio::test]
     async fn session_state_api_is_capability_free_strict_and_collision_safe() {
-        let router = HostRouter::from_backends(HostBackends::default());
+        let router = Arc::new(HostRouter::from_backends(HostBackends::default()));
         let temp = tempfile::tempdir().expect("tempdir");
         let ctx = InvokeContext {
             extension_id: "stateful-test".into(),
@@ -1267,6 +1271,83 @@ mod tests {
             .await
             .expect("read stored empty state");
         assert_eq!(empty["content"], "");
+
+        let concurrent_values = [
+            "alpha".repeat(8_192),
+            "bravo".repeat(8_192),
+            "charlie".repeat(8_192),
+        ];
+        let start = Arc::new(Barrier::new(concurrent_values.len()));
+        let writes = concurrent_values
+            .iter()
+            .cloned()
+            .map(|content| {
+                let router = Arc::clone(&router);
+                let ctx = ctx.clone();
+                let start = Arc::clone(&start);
+                tokio::spawn(async move {
+                    start.wait().await;
+                    router
+                        .invoke(
+                            "astrcode.session.state.write",
+                            json!({ "key": "concurrent", "content": content }),
+                            &ctx,
+                        )
+                        .await
+                })
+            })
+            .collect::<Vec<_>>();
+        for write in writes {
+            write
+                .await
+                .expect("concurrent state writer should not panic")
+                .expect("concurrent state write");
+        }
+        let concurrent = router
+            .invoke(
+                "astrcode.session.state.read",
+                json!({ "key": "concurrent" }),
+                &ctx,
+            )
+            .await
+            .expect("read concurrently written state");
+        let concurrent = concurrent["content"]
+            .as_str()
+            .expect("state content should be a string");
+        assert!(
+            concurrent_values.iter().any(|value| value == concurrent),
+            "concurrent writes must leave one complete value"
+        );
+
+        let failed_target = temp
+            .path()
+            .join("extension_data/stateful-test/failed-replacement");
+        std::fs::create_dir_all(&failed_target).expect("create occupied state target");
+        let old_value = failed_target.join("old-value");
+        std::fs::write(&old_value, "preserved").expect("write old state marker");
+        let error = router
+            .invoke(
+                "astrcode.session.state.write",
+                json!({ "key": "failed-replacement", "content": "replacement" }),
+                &ctx,
+            )
+            .await
+            .expect_err("replacing a directory with state must fail");
+        assert_eq!(error.code_enum(), Some(WireErrorCode::IoError));
+        assert_eq!(
+            std::fs::read_to_string(old_value).expect("read preserved state marker"),
+            "preserved"
+        );
+        assert!(
+            std::fs::read_dir(failed_target.parent().expect("state parent"))
+                .expect("read state directory")
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".astrcode-write-")),
+            "failed replacement must clean up its temporary file"
+        );
 
         for (capability, input) in [
             ("astrcode.session.state.write", json!({ "key": "missing" })),
@@ -1942,21 +2023,22 @@ mod tests {
             )
             .await
             .expect("first event page");
-        assert_eq!(first["events"][0]["seq"], 1);
-        assert_eq!(first["events"][1]["seq"], 2);
-        assert_eq!(first["next_cursor"], "2");
+        assert_eq!(first["events"][0]["seq"], 0);
+        assert_eq!(first["events"][1]["seq"], 1);
+        assert_eq!(first["next_cursor"], "1");
         assert_eq!(first["has_more"], true);
 
         let next = router
             .invoke(
                 "astrcode.session.read_events",
-                json!({ "session_id": "owned-root", "cursor": "2", "limit": 2 }),
+                json!({ "session_id": "owned-root", "cursor": "1", "limit": 2 }),
                 &history_ctx,
             )
             .await
             .expect("next event page");
-        assert_eq!(next["events"].as_array().expect("events").len(), 1);
-        assert_eq!(next["events"][0]["seq"], 3);
+        assert_eq!(next["events"].as_array().expect("events").len(), 2);
+        assert_eq!(next["events"][0]["seq"], 2);
+        assert_eq!(next["events"][1]["seq"], 3);
         assert_eq!(next["next_cursor"], "3");
         assert_eq!(next["has_more"], false);
 

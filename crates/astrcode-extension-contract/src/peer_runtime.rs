@@ -50,6 +50,7 @@ struct PendingStream {
     events: mpsc::Sender<ModelStreamEvent>,
     failure: Arc<Mutex<Option<ErrorPayload>>>,
     started: bool,
+    cancel_requested: bool,
     _permit: OwnedSemaphorePermit,
 }
 
@@ -705,6 +706,7 @@ where
                         events: forward_tx,
                         failure: Arc::clone(&failure),
                         started: false,
+                        cancel_requested: false,
                         _permit: permit,
                     }),
                 );
@@ -1020,6 +1022,9 @@ fn route_stream(
             stream.id
         )));
     };
+    if request.cancel_requested {
+        return Ok(());
+    }
     let valid = match &stream.event {
         ModelStreamEvent::Started if !request.started => {
             request.started = true;
@@ -1035,11 +1040,11 @@ fn route_stream(
             "stream event ordering is invalid",
         );
         set_stream_failure(&request.failure, failure);
+        request.cancel_requested = true;
         let _ = control_tx.send(ControlCommand::Cancel {
             id: stream.id.clone(),
             reason: "invalid_stream_order",
         });
-        pending.remove(&stream.id);
         return Ok(());
     }
     let terminal = stream.event.is_terminal();
@@ -1049,11 +1054,11 @@ fn route_stream(
             format!("stream forwarding queue is full: {error}"),
         );
         set_stream_failure(&request.failure, failure);
+        request.cancel_requested = true;
         let _ = control_tx.send(ControlCommand::Cancel {
             id: stream.id.clone(),
             reason: "stream_forward_queue_full",
         });
-        pending.remove(&stream.id);
         return Ok(());
     }
     if terminal {
@@ -1651,6 +1656,148 @@ mod tests {
             worker_driver,
             host_write_gate,
             host_inbound_tx,
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_failures_handoff_pending_requests_to_cancel_control() {
+        let ReadyPeerPair {
+            host_handle,
+            mut host_driver,
+            ..
+        } = ready_peer_pair(BTreeSet::new()).await;
+        let mut write_rx = host_driver.write_rx.take().expect("driver write queue");
+
+        for (id, started, fill_queue, expected_code, expected_reason) in [
+            (
+                "invalid-order",
+                false,
+                false,
+                WireErrorCode::InvalidResponse,
+                "invalid_stream_order",
+            ),
+            (
+                "full-queue",
+                true,
+                true,
+                WireErrorCode::PeerOverloaded,
+                "stream_forward_queue_full",
+            ),
+        ] {
+            let (events, _events_rx) = mpsc::channel(STREAM_FORWARD_BUFFER_CAPACITY);
+            if fill_queue {
+                for index in 0..STREAM_FORWARD_BUFFER_CAPACITY {
+                    events
+                        .try_send(ModelStreamEvent::ContentDelta {
+                            content: index.to_string(),
+                        })
+                        .expect("fill stream forwarding queue");
+                }
+            }
+            let failure = Arc::new(Mutex::new(None));
+            let permit = Arc::clone(&host_handle.outbound_permits)
+                .acquire_owned()
+                .await
+                .expect("outbound permit");
+            let mut pending = HashMap::from([(
+                id.to_owned(),
+                PendingRequest::Stream(PendingStream {
+                    events,
+                    failure: Arc::clone(&failure),
+                    started,
+                    cancel_requested: false,
+                    _permit: permit,
+                }),
+            )]);
+            let mut cancelled = CancelledRequests::default();
+            let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+
+            route_stream(
+                StreamMsg {
+                    id: id.into(),
+                    event: ModelStreamEvent::ContentDelta {
+                        content: "rejected".into(),
+                    },
+                },
+                &mut pending,
+                &mut cancelled,
+                &control_tx,
+            )
+            .expect("stream failure should enqueue cancellation");
+
+            assert!(pending.contains_key(id), "case: {id}");
+            assert_eq!(
+                failure
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .as_ref()
+                    .and_then(ErrorPayload::code_enum),
+                Some(expected_code),
+                "case: {id}"
+            );
+            let control = control_rx.try_recv().expect("cancel control command");
+            let ControlCommand::Cancel {
+                id: control_id,
+                reason,
+            } = &control;
+            assert_eq!(control_id, id);
+            assert_eq!(*reason, expected_reason);
+
+            route_stream(
+                StreamMsg {
+                    id: id.into(),
+                    event: ModelStreamEvent::Completed {
+                        output: serde_json::json!({"mustNotWin": true}),
+                    },
+                },
+                &mut pending,
+                &mut cancelled,
+                &control_tx,
+            )
+            .expect("a terminal racing with cancel control must be ignored");
+            assert!(pending.contains_key(id), "case: {id}");
+            assert!(
+                control_rx.try_recv().is_err(),
+                "the rejected stream must request cancellation only once: {id}"
+            );
+
+            host_driver
+                .handle_control(control, &mut pending, &mut cancelled)
+                .expect("cancel control should own pending removal");
+            assert!(!pending.contains_key(id), "case: {id}");
+            assert!(cancelled.contains(id), "case: {id}");
+            let written = write_rx.try_recv().expect("wire cancel");
+            let WireMessage::Cancel(cancel) = written.message else {
+                panic!("expected wire cancel for {id}");
+            };
+            assert_eq!(cancel.id, id);
+            assert_eq!(cancel.reason, expected_reason);
+
+            route_stream(
+                StreamMsg {
+                    id: id.into(),
+                    event: ModelStreamEvent::ContentDelta {
+                        content: "after-cancel".into(),
+                    },
+                },
+                &mut pending,
+                &mut cancelled,
+                &control_tx,
+            )
+            .expect("a late frame for a cancelled stream must not close the peer");
+            route_stream(
+                StreamMsg {
+                    id: id.into(),
+                    event: ModelStreamEvent::Completed {
+                        output: Value::Null,
+                    },
+                },
+                &mut pending,
+                &mut cancelled,
+                &control_tx,
+            )
+            .expect("the cancelled stream terminal should clear its tombstone");
+            assert!(!cancelled.contains(id), "case: {id}");
         }
     }
 

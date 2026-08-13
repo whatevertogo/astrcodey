@@ -1,6 +1,11 @@
 //! Extension-scoped state and event capabilities.
 
-use std::io::Read as _;
+use std::{
+    collections::HashMap,
+    io::Read as _,
+    path::{Path, PathBuf},
+    sync::{Arc, Weak},
+};
 
 use astrcode_core::{
     config::defaults::extension_data_dir,
@@ -14,26 +19,55 @@ use astrcode_extension_sdk::{
         HostEventEmitRequest, HostOperation, HostSessionStateReadOutput,
         HostSessionStateReadRequest, HostSessionStateWriteRequest, internal::HostOperationGroup,
     },
+    hostpaths::write_file_atomic,
     s5r::ErrorPayload,
 };
 use serde_json::Value;
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 use super::{
     InvokeContext, acknowledgement, backend_unavailable, dispatch, emit_for_sink_confirmed,
     invalid_group_operation, io_error, run_blocking_io, run_blocking_io_to_completion,
 };
 
+#[derive(Default)]
+pub(super) struct SessionStateWriteGates {
+    gates: parking_lot::Mutex<HashMap<PathBuf, Weak<AsyncMutex<()>>>>,
+}
+
+impl SessionStateWriteGates {
+    async fn lock(&self, path: &Path) -> OwnedMutexGuard<()> {
+        self.gate(path).lock_owned().await
+    }
+
+    fn gate(&self, path: &Path) -> Arc<AsyncMutex<()>> {
+        let mut gates = self.gates.lock();
+        gates.retain(|_, gate| gate.strong_count() > 0);
+        if let Some(gate) = gates.get(path).and_then(Weak::upgrade) {
+            return gate;
+        }
+
+        let gate = Arc::new(AsyncMutex::new(()));
+        gates.insert(path.to_path_buf(), Arc::downgrade(&gate));
+        gate
+    }
+}
+
 pub(super) async fn invoke(
     operation: HostOperation,
     input: &Value,
     ctx: &InvokeContext,
+    state_writes: &SessionStateWriteGates,
 ) -> Result<Value, ErrorPayload> {
     match operation {
         HostOperation::SessionStateRead => {
             dispatch(operation, input, |request| read_state(request, ctx)).await
         },
         HostOperation::SessionStateWrite => {
-            dispatch(operation, input, |request| write_state(request, ctx)).await
+            dispatch(operation, input, |request| {
+                write_state(request, ctx, state_writes)
+            })
+            .await
         },
         HostOperation::EventEmit => {
             dispatch(operation, input, |request| emit_event(request, ctx)).await
@@ -84,20 +118,19 @@ async fn read_state(
 async fn write_state(
     request: HostSessionStateWriteRequest,
     ctx: &InvokeContext,
+    state_writes: &SessionStateWriteGates,
 ) -> Result<Acknowledgement, ErrorPayload> {
     let key = request.key;
     let base = ctx
         .session_store_dir
         .as_ref()
-        .cloned()
         .ok_or_else(|| backend_unavailable("session_store_dir missing"))?;
     let content = request.content;
-    let extension_id = ctx.extension_id.clone();
+    let path = extension_data_dir(base, &ctx.extension_id).join(key);
+    let write_guard = state_writes.lock(&path).await;
     run_blocking_io_to_completion(ctx.tasks.as_ref(), "session-state-write", move || {
-        let dir = extension_data_dir(&base, &extension_id);
-        std::fs::create_dir_all(&dir).map_err(io_error)?;
-        let path = dir.join(key);
-        std::fs::write(path, content).map_err(io_error)
+        let _write_guard = write_guard;
+        write_file_atomic(&path, &content).map_err(io_error)
     })
     .await?;
     Ok(acknowledgement())

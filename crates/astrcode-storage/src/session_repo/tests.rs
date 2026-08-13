@@ -388,6 +388,67 @@ async fn filesystem_repository_cold_and_hot_summaries_are_equivalent() {
 }
 
 #[tokio::test]
+async fn all_session_summaries_include_nested_lineage_while_catalog_stays_root_only() {
+    let dir = tempdir().unwrap();
+    let repo = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    let root_id = SessionId::new("summary-root");
+    let child_id = SessionId::new("summary-child");
+    let grandchild_id = SessionId::new("summary-grandchild");
+    let sibling_id = SessionId::new("summary-sibling");
+
+    repo.create_session(started_event(&root_id)).await.unwrap();
+    for (session_id, parent_id, extension) in [
+        (&child_id, &root_id, "agent-a"),
+        (&grandchild_id, &child_id, "agent-b"),
+        (&sibling_id, &root_id, "agent-c"),
+    ] {
+        let mut event = started_event(session_id);
+        let DurableEventPayload::SessionStarted(started) = &mut event.payload else {
+            unreachable!("fixture must be SessionStarted");
+        };
+        started.parent = Some(ParentSessionRef {
+            session_id: parent_id.clone(),
+        });
+        started.source_extension = Some(extension.into());
+        repo.create_session(event).await.unwrap();
+    }
+
+    let catalog = repo.list_session_summaries().await.unwrap();
+    assert_eq!(
+        catalog
+            .iter()
+            .map(|summary| &summary.session_id)
+            .collect::<Vec<_>>(),
+        vec![&root_id]
+    );
+    let all = repo.list_all_session_summaries().await.unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|summary| summary.session_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            "summary-child",
+            "summary-grandchild",
+            "summary-root",
+            "summary-sibling",
+        ]
+    );
+
+    drop(repo);
+    let reopened = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    assert_eq!(reopened.list_all_session_summaries().await.unwrap(), all);
+
+    let invalid_base = dir.path().join("not-a-directory");
+    let invalid_repo = FileSystemSessionRepository::with_projects_base(invalid_base.clone());
+    std::fs::remove_dir(&invalid_base).unwrap();
+    std::fs::write(&invalid_base, "occupied").unwrap();
+    assert!(matches!(
+        invalid_repo.list_all_sessions().await,
+        Err(StorageError::Io(_))
+    ));
+}
+
+#[tokio::test]
 async fn filesystem_repository_rejects_snapshot_from_another_session() {
     let dir = tempdir().unwrap();
     let source_id = SessionId::new("session-snapshot-source");

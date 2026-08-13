@@ -408,11 +408,15 @@ name = "my-agent-tools"
 path = "src/main.rs"
 
 [dependencies]
+astrcode-extension-worker = { path = "…/astrcode/crates/astrcode-extension-worker" }
 astrcode-extension-sdk = { path = "…/astrcode/crates/astrcode-extension-sdk" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 ```
+
+`astrcode-extension-worker` 提供 `Worker`、`worker_prelude` 与 S5R 运行时，是磁盘扩展的直接依赖；
+本示例另从 SDK 的 `tool` 模块导入 `ExecutionMode`，因此同时列出 `astrcode-extension-sdk`。
 
 `Worker::new` 的 id 建议与目录名一致，例如 `"my-agent-tools"`。
 

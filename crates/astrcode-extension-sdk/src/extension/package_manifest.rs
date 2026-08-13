@@ -20,10 +20,7 @@ pub struct ExtensionPackageManifest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ExtensionPackageProtocol {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub s5r: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub native: Option<String>,
+    pub s5r: String,
 }
 
 #[cfg(test)]
@@ -40,7 +37,7 @@ mod tests {
         }))
         .expect("valid extension package manifest");
         assert_eq!(manifest.extension_id, "review-extension");
-        assert_eq!(manifest.protocol.s5r.as_deref(), Some("3.0"));
+        assert_eq!(manifest.protocol.s5r, "3.0");
         assert_eq!(manifest.command, ["./review-extension", "serve"]);
         assert_eq!(manifest.env["LOG_LEVEL"], "info");
 
@@ -53,6 +50,16 @@ mod tests {
             }),
             serde_json::json!({
                 "protocol": { "s5r": "3.0" },
+                "command": ["./review-extension"]
+            }),
+            serde_json::json!({
+                "extension_id": "review-extension",
+                "protocol": {},
+                "command": ["./review-extension"]
+            }),
+            serde_json::json!({
+                "extension_id": "review-extension",
+                "protocol": { "s5r": "3.0", "native": "1.0" },
                 "command": ["./review-extension"]
             }),
         ] {

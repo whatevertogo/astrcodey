@@ -78,7 +78,23 @@ pub trait EventReader: Send + Sync {
         Ok(events)
     }
 
+    /// Replays the first page, including the event at sequence zero.
+    async fn replay_from_start_limited(
+        &self,
+        session_id: &SessionId,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let mut events = self.replay_events(session_id).await?;
+        events.truncate(max_events);
+        Ok(events)
+    }
+
     async fn list_sessions(&self) -> Result<Vec<SessionId>, StorageError>;
+
+    /// Lists every active session, including nested subagent sessions.
+    async fn list_all_sessions(&self) -> Result<Vec<SessionId>, StorageError> {
+        self.list_sessions().await
+    }
 }
 
 #[async_trait::async_trait]
@@ -128,6 +144,14 @@ pub trait SessionReader: Send + Sync {
     }
 
     async fn list_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError>;
+
+    /// Lists every active session, including nested subagent sessions.
+    ///
+    /// User-facing catalog APIs may intentionally use [`Self::list_session_summaries`]
+    /// to show roots only. Lineage and administrative APIs need this complete view.
+    async fn list_all_session_summaries(&self) -> Result<Vec<SessionSummary>, StorageError> {
+        self.list_session_summaries().await
+    }
 }
 
 #[async_trait::async_trait]

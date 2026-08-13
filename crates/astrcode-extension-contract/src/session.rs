@@ -207,8 +207,8 @@ impl HostRootSubmitTurnRequest {
 #[serde(deny_unknown_fields)]
 pub struct HostSessionEventsPageRequest {
     pub session_id: String,
-    #[serde(default = "default_session_events_cursor")]
-    pub cursor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
     #[serde(default = "default_session_events_limit")]
     pub limit: usize,
 }
@@ -217,14 +217,10 @@ impl HostSessionEventsPageRequest {
     pub fn new(session_id: impl Into<String>) -> Self {
         Self {
             session_id: session_id.into(),
-            cursor: default_session_events_cursor(),
+            cursor: None,
             limit: default_session_events_limit(),
         }
     }
-}
-
-fn default_session_events_cursor() -> String {
-    "0".into()
 }
 
 const fn default_session_events_limit() -> usize {
@@ -349,7 +345,7 @@ mod tests {
 
         let events_request: HostSessionEventsPageRequest =
             serde_json::from_value(json!({ "session_id": "root-1" })).unwrap();
-        assert_eq!(events_request.cursor, "0");
+        assert_eq!(events_request.cursor, None);
         assert_eq!(events_request.limit, 100);
         assert_strict_round_trip(&events_request);
         assert_strict_round_trip(&HostSessionEventsPageOutput {

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 
-use super::contracts::llm_chat_request;
+use super::llm_mapping::llm_chat_request;
 use crate::{
     extension::{ExtensionHttpDispatchRequest, ExtensionHttpResponse},
     host::{
@@ -425,7 +425,7 @@ where
     Op: HostOp,
 {
     let stream = invoke_stream::<Op, T>(transport, input).await?;
-    super::contracts::collect_model_stream(stream)
+    super::llm_mapping::collect_model_stream(stream)
         .await
         .map_err(T::payload_error)
 }

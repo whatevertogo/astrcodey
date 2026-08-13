@@ -11,9 +11,10 @@ were crate-private and have been removed; old on-disk data is rejected at its bo
 `astrcode-extension-contract` owns wire DTOs, operation and error catalogs, framing, and the peer
 session state machine. It has no dependency on host domain crates. Both the worker runtime and
 `astrcode-extensions` depend on the contract; the host never depends on the worker runtime.
-`WireErrorCode` is defined once in the contract; `astrcode-extension-sdk` re-exports it for bundled
-authors. The worker author surface exposes only contract types, while the bundled author surface
-may share `astrcode-core` types because bundled extensions run in-process.
+`WireErrorCode` is defined once in the contract; `astrcode-extension-sdk` re-exports it for authors.
+The worker prelude combines wire DTOs from the contract with the curated SDK/domain author types
+needed by handlers; it does not expose host implementation crates. Bundled extensions may share
+additional `astrcode-core` types because they run in-process.
 
 `astrcode-extension-worker` owns only worker-side assembly: `run_stdio`, handler dispatch, and the
 remote host transport. Bundled extensions depend on the SDK and use typed calls without wire

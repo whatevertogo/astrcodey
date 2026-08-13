@@ -91,11 +91,27 @@ impl ServerEventBus {
         self.global_notifications.subscribe()
     }
 
+    /// Receiver creation stays under the fanout-map lock so pruning cannot detach its sender.
     pub fn subscribe_conversation_events(
         &self,
         session_id: &SessionId,
     ) -> broadcast::Receiver<Arc<Event>> {
-        self.conversation_fanout(session_id).subscribe()
+        let mut fanouts = self.conversation_events.lock();
+        fanouts
+            .entry(session_id.clone())
+            .or_insert_with(|| broadcast::channel(Self::EVENT_CHANNEL_CAPACITY).0)
+            .subscribe()
+    }
+
+    /// The receiver-count check and removal are serialized with subscription on the same map.
+    pub(crate) fn prune_conversation_fanout(&self, session_id: &SessionId) {
+        let mut fanouts = self.conversation_events.lock();
+        if fanouts
+            .get(session_id)
+            .is_some_and(|fanout| fanout.receiver_count() == 0)
+        {
+            fanouts.remove(session_id);
+        }
     }
 
     pub(crate) fn register_conversation_children(
@@ -221,14 +237,6 @@ impl ServerEventBus {
                     },
                 })
         })
-    }
-
-    fn conversation_fanout(&self, session_id: &SessionId) -> broadcast::Sender<Arc<Event>> {
-        self.conversation_events
-            .lock()
-            .entry(session_id.clone())
-            .or_insert_with(|| broadcast::channel(Self::EVENT_CHANNEL_CAPACITY).0)
-            .clone()
     }
 
     fn existing_conversation_fanout(
@@ -444,15 +452,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subscribed_conversation_receives_published_event() {
+    async fn conversation_fanout_prunes_only_without_subscribers() {
         let bus = ServerEventBus::new();
         let session_id = SessionId::new("session-1");
         let mut rx = bus.subscribe_conversation_events(&session_id);
 
+        bus.prune_conversation_fanout(&session_id);
+        assert!(bus.existing_conversation_fanout(&session_id).is_some());
         bus.publish_event(turn_started(&session_id));
-
         let event = rx.recv().await.expect("conversation event");
         assert_eq!(event.session_id, session_id);
+
+        drop(rx);
+        bus.prune_conversation_fanout(&session_id);
+        assert!(bus.existing_conversation_fanout(&session_id).is_none());
     }
 
     #[tokio::test]

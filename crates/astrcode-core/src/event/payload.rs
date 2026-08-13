@@ -228,6 +228,7 @@ pub enum DurableEventPayload {
         message: String,
         recoverable: bool,
     },
+    #[serde(alias = "extension_event")]
     CustomEvent(CustomEventData),
 }
 
@@ -299,7 +300,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn custom_event_serializes_with_new_tag() {
+    fn custom_event_accepts_the_legacy_tag_and_serializes_the_canonical_tag() {
         let payload = DurableEventPayload::CustomEvent(CustomEventData {
             extension_id: "ext".into(),
             event_type: "thing".into(),
@@ -308,9 +309,22 @@ mod tests {
             cascade_depth: 0,
             payload: serde_json::json!({}),
         });
-        let json = serde_json::to_string(&payload).unwrap();
-        assert!(json.contains(r#""type":"custom_event""#));
-        assert!(!json.contains("causation_id"));
+        let canonical = serde_json::to_value(&payload).unwrap();
+        assert_eq!(canonical["type"], "custom_event");
+        assert!(canonical.get("causation_id").is_none());
+
+        let mut legacy = canonical.clone();
+        legacy["type"] = serde_json::json!("extension_event");
+        assert_eq!(
+            serde_json::from_value::<DurableEventPayload>(canonical).unwrap(),
+            payload
+        );
+        let legacy_payload = serde_json::from_value::<DurableEventPayload>(legacy).unwrap();
+        assert_eq!(legacy_payload, payload);
+        assert_eq!(
+            serde_json::to_value(legacy_payload).unwrap()["type"],
+            "custom_event"
+        );
     }
 
     #[test]

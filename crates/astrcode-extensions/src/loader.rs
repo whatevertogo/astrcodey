@@ -551,14 +551,7 @@ async fn discover_extension(
     validate_extension_id(&entry.extension_id)
         .map_err(|error| format!("{}: {error}", ext_dir.display()))?;
 
-    if entry.protocol.native.is_some() {
-        return Err(format!(
-            "{}: protocol.native is not implemented yet; use protocol.s5r",
-            ext_dir.display()
-        ));
-    }
-
-    if entry.protocol.s5r.as_deref() != Some(S5R_VERSION) {
+    if entry.protocol.s5r != S5R_VERSION {
         return Err(format!(
             "{}: extension.json must set protocol.s5r to \"{}\"",
             ext_dir.display(),

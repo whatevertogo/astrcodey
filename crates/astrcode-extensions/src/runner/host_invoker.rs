@@ -3,11 +3,16 @@ use std::{
     sync::{Arc, RwLock as StdRwLock},
 };
 
-use astrcode_core::{event::EventSender, tool::SessionOperations, types::SessionId};
+use astrcode_core::{
+    event::{EventDeliveryReceipt, EventSendError, EventSender},
+    tool::SessionOperations,
+    types::SessionId,
+};
 use astrcode_extension_sdk::{
     extension::{
         CustomEventDeclaration, ExtensionCallContext, ExtensionCapability, ExtensionError,
-        ExtensionPaths, ExtensionTasks, RuntimeHookCallContext, internal::custom_event_emitter,
+        ExtensionPaths, ExtensionTasks, RuntimeHookCallContext,
+        internal::{CustomEventSink, custom_event_emitter},
     },
     host::{
         ExtensionHost, HostError, HostOperation,
@@ -18,21 +23,83 @@ use astrcode_extension_sdk::{
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use super::{ExtensionRunner, ExtensionView, HandlerIndex, bind_custom_event_sink};
+use super::{ExtensionRunner, ExtensionView, HandlerIndex};
 use crate::host_router::{HostRouter, InvokeContext, decls_to_map};
 
-pub(crate) struct ExtensionCallContextInput {
-    pub(crate) session_id: Option<SessionId>,
-    pub(crate) tool_call_id: Option<String>,
-    pub(crate) working_dir: Option<PathBuf>,
-    pub(crate) session_store_dir: Option<PathBuf>,
-    pub(crate) event_tx: Option<EventSender>,
-    pub(crate) event_causation: Option<(astrcode_core::types::EventId, u8)>,
-    pub(crate) cancellation: CancellationToken,
+pub(super) struct ExtensionCallContextInput {
+    pub(super) session_id: Option<SessionId>,
+    pub(super) tool_call_id: Option<String>,
+    pub(super) working_dir: Option<PathBuf>,
+    pub(super) session_store_dir: Option<PathBuf>,
+    pub(super) event_tx: Option<EventSender>,
+    pub(super) event_causation: Option<(astrcode_core::types::EventId, u8)>,
+    pub(super) cancellation: CancellationToken,
+}
+
+/// Event emitter with the extension identity fixed by the runtime call-context factory.
+struct BoundCustomEventSink {
+    extension_id: String,
+    event_tx: EventSender,
+    causation: Option<(astrcode_core::types::EventId, u8)>,
+}
+
+fn bind_custom_event_sink(
+    extension_id: &str,
+    declarations: &[CustomEventDeclaration],
+    event_tx: EventSender,
+    causation: Option<(astrcode_core::types::EventId, u8)>,
+) -> Option<Arc<dyn CustomEventSink>> {
+    if declarations.is_empty() {
+        return None;
+    }
+    Some(Arc::new(BoundCustomEventSink {
+        extension_id: extension_id.to_owned(),
+        event_tx,
+        causation,
+    }))
+}
+
+#[async_trait::async_trait]
+impl CustomEventSink for BoundCustomEventSink {
+    async fn emit(
+        &self,
+        event_type: &str,
+        schema_version: u32,
+        durable: bool,
+        payload: serde_json::Value,
+    ) -> Result<EventDeliveryReceipt, EventSendError> {
+        self.event_tx
+            .send_confirmed(crate::host_router::custom_event_payload(
+                &self.extension_id,
+                event_type,
+                schema_version,
+                durable,
+                self.causation.clone(),
+                payload,
+            ))
+            .await
+    }
+
+    fn try_emit(
+        &self,
+        event_type: &str,
+        schema_version: u32,
+        durable: bool,
+        payload: serde_json::Value,
+    ) -> Result<(), EventSendError> {
+        self.event_tx.send(crate::host_router::custom_event_payload(
+            &self.extension_id,
+            event_type,
+            schema_version,
+            durable,
+            self.causation.clone(),
+            payload,
+        ))
+    }
 }
 
 impl ExtensionCallContextInput {
-    pub(crate) fn unscoped(cancellation: CancellationToken) -> Self {
+    pub(super) fn unscoped(cancellation: CancellationToken) -> Self {
         Self {
             session_id: None,
             tool_call_id: None,
@@ -63,7 +130,7 @@ impl ExtensionCallContextInput {
 }
 
 #[derive(Clone)]
-pub(crate) struct ExtensionCallContextFactory {
+pub(super) struct ExtensionCallContextFactory {
     router: Arc<HostRouter>,
     session_ops: Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>>,
 }
@@ -79,7 +146,7 @@ impl ExtensionCallContextFactory {
         }
     }
 
-    pub(crate) fn make_extension_call_context(
+    pub(super) fn make_extension_call_context(
         &self,
         extension_id: &str,
         capabilities: &[ExtensionCapability],
@@ -212,7 +279,7 @@ impl ExtensionRunner {
 }
 
 impl ExtensionView {
-    pub(crate) fn make_registered_extension_call_context(
+    pub(super) fn make_registered_extension_call_context(
         &self,
         extension_id: &str,
         input: ExtensionCallContextInput,

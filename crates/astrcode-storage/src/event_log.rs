@@ -725,6 +725,15 @@ impl EventLog {
         run_blocking_io(move || replay_events_at_path(&path, None, None)).await
     }
 
+    /// Replay at most `max_events` events from the beginning of the log.
+    pub(crate) async fn replay_from_start_limited(
+        &self,
+        max_events: usize,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let path = self.path.clone();
+        run_blocking_io(move || replay_events_at_path(&path, None, Some(max_events))).await
+    }
+
     /// Replay events whose assigned seq is greater than `seq`.
     ///
     /// This is used when recovering from a snapshot: only the events that

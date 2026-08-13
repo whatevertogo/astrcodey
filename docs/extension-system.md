@@ -1,6 +1,7 @@
 # AstrCode 扩展系统
 
-> 以当前代码为准（`astrcode-core`、`astrcode-extension-sdk`、`astrcode-extensions`、`astrcode-server`）。
+> 以当前代码为准（`astrcode-extension-contract`、`astrcode-extension-sdk`、
+> `astrcode-extension-worker`、`astrcode-extensions`、`astrcode-server`）。
 
 ---
 
@@ -157,9 +158,8 @@ builder。
 | `ctx.paths().session_data_dir()` | 无额外 capability | 需要 session context，目录已按 extension id 隔离。 |
 
 `HostError` 无损保存 `code`、`message`、`hint`、`retryable` 和 `details`；
-`HostError::class()` 仅把常见错误归为 `PermissionDenied`、`BackendUnavailable`、
-`ContextUnavailable`、`InvalidInput`、`Cancelled`、`Timeout`、`Transport` 或 `Other`，不会丢掉未知
-wire code。
+`HostError::code_enum()` 将已知 code 解析为 `WireErrorCode`，未知 code 返回 `None`，原始字符串仍
+保留在 `HostError::code` 中。
 
 ### 3.5 测试入口
 

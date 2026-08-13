@@ -1,7 +1,7 @@
 mod client;
-mod contracts;
 mod domain_client;
 mod error;
+mod llm_mapping;
 
 use std::sync::Arc;
 
@@ -11,9 +11,9 @@ pub use client::{
     ExtensionHttpClient, ModelClient, NetworkClient, ProcessClient, SessionControlClient,
     SessionHistoryClient, SessionInspectClient, SessionStateClient, WorkspaceClient,
 };
-pub use contracts::HostLlmCollectedStreamOutput;
 use domain_client::HostClientTransport;
 pub use error::*;
+pub use llm_mapping::HostLlmCollectedStreamOutput;
 use serde_json::Value;
 
 use crate::{extension::ExtensionCapability, model_stream::ModelStream};
@@ -223,9 +223,6 @@ pub mod internal {
         HostOperation, ModelStream,
     };
     pub use super::{
-        contracts::{
-            llm_chat_request, llm_message_to_wire, llm_messages_from_wire, llm_messages_to_wire,
-        },
         domain_client::{
             EventClient as TypedEventClient, ExtensionHttpClient as TypedExtensionHttpClient,
             HostClientTransport, ModelClient as TypedModelClient,
@@ -234,6 +231,9 @@ pub mod internal {
             SessionHistoryClient as TypedSessionHistoryClient,
             SessionInspectClient as TypedSessionInspectClient,
             SessionStateClient as TypedSessionStateClient, WorkspaceClient as TypedWorkspaceClient,
+        },
+        llm_mapping::{
+            llm_chat_request, llm_message_to_wire, llm_messages_from_wire, llm_messages_to_wire,
         },
     };
 

@@ -10,10 +10,10 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 
 整体分层可以按依赖方向理解：
 
-1. 基础契约层：`astrcode-core`、`astrcode-session-projection`、`astrcode-protocol`、`astrcode-extension-sdk`。
+1. 基础领域与线缆契约层：`astrcode-core`、`astrcode-session-projection`、`astrcode-protocol`、`astrcode-extension-contract`。
 2. 基础能力实现层：`astrcode-ai`、`astrcode-storage`、`astrcode-context`、`astrcode-tools`、`astrcode-log`。
 3. 会话运行时层：`astrcode-session`。
-4. 扩展系统层：`astrcode-extension-sdk`、`astrcode-extensions`、`astrcode-bundled-extensions` 和各 `astrcode-extension-*` 内置扩展。
+4. 扩展系统层：作者面 `astrcode-extension-sdk`、外部进程运行时 `astrcode-extension-worker`、宿主 `astrcode-extensions`，以及 `astrcode-bundled-extensions` 和各 `astrcode-extension-*` 内置扩展。
 5. 服务与客户端层：`astrcode-server`、`astrcode-client`。
 6. 用户入口层：`astrcode-cli`、`astrcode-desktop`。
 7. 辅助评测层：`astrcode-eval`。
@@ -256,7 +256,9 @@ pipeline 不再接收第二份 `turn_id`。前端同样不复制 conversation ph
 
 路径：`crates/astrcode-extension-sdk`
 
-职责：扩展作者的稳定公开面。进程内内置扩展和 s5r 子进程扩展都应该依赖它，而不是依赖宿主内部 crate。
+职责：扩展作者的稳定公开契约。进程内内置扩展直接依赖它；s5r 子进程扩展以
+`astrcode-extension-worker` 为运行时入口，并在需要 worker prelude 未导出的 SDK 模块时直接依赖它。
+两类扩展都不依赖宿主内部 crate。
 
 主要模块：
 
@@ -273,7 +275,10 @@ pipeline 不再接收第二份 `turn_id`。前端同样不复制 conversation ph
 - `session`：扩展侧 session 相关 re-export。
 - `prelude`：面向进程内扩展的便捷导入集合；s5r worker 的 `worker_prelude` 与运行时组装位于 `astrcode-extension-worker`。
 
-依赖边界：依赖 `astrcode-extension-contract` 和 `astrcode-core`。worker（子进程）作者面只暴露 contract 类型；bundled（进程内）作者面允许共享 core 类型，因为 bundled 在进程内运行。进程内扩展和磁盘/IPC 扩展都通过 capability-gated typed host API 访问宿主能力；运行时负责注入不可伪造的 extension/session/turn 归属。
+依赖边界：依赖 `astrcode-extension-contract` 和 `astrcode-core`。worker prelude 组合 contract
+wire DTO 与 handler 所需的精选 SDK/domain 类型，但不暴露宿主实现 crate；bundled（进程内）
+作者面可共享更多 core 类型。两类扩展都通过 capability-gated typed host API 访问宿主能力；
+运行时负责注入不可伪造的 extension/session/turn 归属。
 
 测试线索：`builder.rs`、`manifest.rs` 有单元测试。修改 SDK 类型等同修改扩展 ABI，需要同步内置扩展和 s5r 测试。
 
@@ -330,7 +335,9 @@ pipeline 不再接收第二份 `turn_id`。前端同样不复制 conversation ph
 - `s5r_handler`：S5R handler 返回值解析。
 - `s5r_ext`：s5r 子进程扩展协议、session、加载和运行。
 
-依赖边界：依赖 `astrcode-core`、`astrcode-session-projection`、`astrcode-storage` 和 `astrcode-extension-sdk`。它不依赖某个具体内置扩展；内置扩展组合在 `astrcode-bundled-extensions`。
+依赖边界：依赖 `astrcode-core`、`astrcode-context`、`astrcode-session-projection`、
+`astrcode-storage`、`astrcode-extension-sdk` 和 `astrcode-extension-contract`。它不依赖某个
+具体内置扩展；内置扩展组合在 `astrcode-bundled-extensions`。
 
 测试线索：`tests/loader_integration_test.rs`、`tests/s5r_e2e_test.rs`、`tests/workspace_read_security.rs` 覆盖加载、s5r 端到端和 workspace read 安全边界；`tests/s5r-guest` 是测试用 guest 程序。
 

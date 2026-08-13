@@ -32,7 +32,7 @@ use axum::{
 };
 use child_sessions::ChildSessionTracker;
 use futures_util::{StreamExt, stream};
-use replay::replay_after_cursor;
+use replay::{ReplayError, latest_event_seq, parse_replay_cursor, replay_after_cursor};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -121,32 +121,12 @@ pub(in crate::http) async fn raw_event_stream(
     headers: HeaderMap,
 ) -> Response {
     let session_id = SessionId::from(raw_session_id);
-    if http_state
-        .app
-        .runtime()
-        .session_manager()
-        .latest_cursor(&session_id)
-        .await
-        .is_err()
-    {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            "session_not_found",
-            "Session not found",
-        );
-    }
-
-    let event_rx = http_state
-        .app
-        .event_bus()
-        .subscribe_conversation_events(&session_id);
-    let replay_cursor = if query.cursor.is_some() {
-        query.cursor.clone()
-    } else {
-        match headers.get("last-event-id") {
+    let replay_cursor = match query.cursor.as_deref() {
+        Some(cursor) => Some(cursor),
+        None => match headers.get("last-event-id") {
             Some(value) => match value.to_str() {
                 Ok("") => None,
-                Ok(value) => Some(value.to_owned()),
+                Ok(value) => Some(value),
                 Err(_) => {
                     return error_response(
                         StatusCode::BAD_REQUEST,
@@ -156,19 +136,37 @@ pub(in crate::http) async fn raw_event_stream(
                 },
             },
             None => None,
-        }
+        },
     };
-    let (replayed, replay_error) = match replay_cursor.as_deref() {
+    let replay_cursor = match replay_cursor {
+        Some(cursor) => match parse_replay_cursor(cursor) {
+            Ok(cursor) => Some(cursor),
+            Err(error) => return raw_replay_error_response(&session_id, error),
+        },
+        None => None,
+    };
+
+    let event_rx = http_state
+        .app
+        .event_bus()
+        .subscribe_conversation_events(&session_id);
+    let replay_result = match replay_cursor {
         Some(cursor) => replay_after_cursor(http_state.app.runtime(), &session_id, cursor).await,
-        None => (Vec::new(), false),
+        None => latest_event_seq(http_state.app.runtime(), &session_id)
+            .await
+            .map(|_| Vec::new()),
     };
-    if replay_error {
-        return error_response(
-            StatusCode::CONFLICT,
-            "event_cursor_unavailable",
-            "Event cursor is invalid, ahead of the session, or exceeds the replay limit",
-        );
-    }
+    let replayed = match replay_result {
+        Ok(replayed) => replayed,
+        Err(error) => {
+            drop(event_rx);
+            http_state
+                .app
+                .event_bus()
+                .prune_conversation_fanout(&session_id);
+            return raw_replay_error_response(&session_id, error);
+        },
+    };
     let replay_max_seq = replayed.iter().filter_map(|event| event.seq).max();
     let replay_filter = query.clone();
     let replay_stream = stream::iter(
@@ -209,6 +207,29 @@ pub(in crate::http) async fn raw_event_stream(
     Sse::new(connected.chain(replay_stream).chain(live_stream))
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+fn raw_replay_error_response(session_id: &SessionId, error: ReplayError) -> Response {
+    if error.is_cursor_unavailable() {
+        return error_response(
+            StatusCode::CONFLICT,
+            "event_cursor_unavailable",
+            "Event cursor is invalid, ahead of the session, or exceeds the replay limit",
+        );
+    }
+    if error.is_session_not_found() {
+        return error_response(
+            StatusCode::NOT_FOUND,
+            "session_not_found",
+            "Session not found",
+        );
+    }
+    tracing::warn!(%session_id, %error, "failed to open raw event stream");
+    error_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "event_stream_failed",
+        "Failed to read session events",
+    )
 }
 
 fn raw_event_sse_item(event: &Event) -> Option<SseItem> {
@@ -316,9 +337,23 @@ pub(in crate::http) async fn session_stream(
         .event_bus()
         .subscribe_conversation_events(&session_id);
     let notification_rx = http_state.app.event_bus().subscribe_global_notifications();
-    let (missed_events, replay_error) = match query.cursor.as_ref() {
-        Some(cursor) => replay_after_cursor(http_state.app.runtime(), &session_id, cursor).await,
-        None => (Vec::new(), false),
+    let replay_result = match query.cursor.as_deref() {
+        Some(cursor) => match parse_replay_cursor(cursor) {
+            Ok(cursor) => replay_after_cursor(http_state.app.runtime(), &session_id, cursor).await,
+            Err(error) => Err(error),
+        },
+        None => Ok(Vec::new()),
+    };
+    let (missed_events, replay_error) = match replay_result {
+        Ok(events) => (events, false),
+        Err(error) => {
+            if error.is_cursor_unavailable() {
+                tracing::info!(%session_id, %error, "SSE cursor requires rehydrate");
+            } else {
+                tracing::warn!(%session_id, %error, "failed to replay SSE cursor");
+            }
+            (Vec::new(), true)
+        },
     };
     let replay_max_seq = missed_events.iter().filter_map(|event| event.seq).max();
     let replay_runtime = Arc::clone(http_state.app.runtime());

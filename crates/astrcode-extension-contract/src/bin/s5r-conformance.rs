@@ -1,4 +1,6 @@
-use std::{collections::BTreeSet, process::Stdio, sync::Arc, time::Duration};
+use std::{
+    cell::Cell, collections::BTreeSet, future::Future, process::Stdio, sync::Arc, time::Duration,
+};
 
 use astrcode_extension_contract::{
     FeatureName, HostInitialization, InboundInvoke, InvocationResponse, InvokeError, Peer,
@@ -12,10 +14,24 @@ use astrcode_extension_contract::{
 };
 use futures_util::StreamExt;
 use serde_json::{Value, json};
-use tokio::{io::AsyncWriteExt, process::Command};
+use tokio::{
+    io::AsyncWriteExt,
+    process::{Child, Command},
+    task::AbortHandle,
+};
 use tokio_util::sync::CancellationToken;
 
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+const BEHAVIOR_SUITE_TIMEOUT: Duration = Duration::from_secs(60);
+
+struct DriverAbortGuard(AbortHandle);
+
+impl Drop for DriverAbortGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
 
 struct HostConformanceHandler;
 
@@ -78,8 +94,23 @@ fn spawn_worker(command: &[String]) -> Result<tokio::process::Child> {
 }
 
 async fn run_behavior_suite(extension_id: &str, command: &[String]) -> Result<()> {
-    eprintln!("checking initialize and feature negotiation");
     let mut child = spawn_worker(command)?;
+    let stage = Cell::new("worker initialization");
+    let result = run_with_timeout(
+        &stage,
+        BEHAVIOR_SUITE_TIMEOUT,
+        run_behavior_suite_with_child(extension_id, &mut child, &stage),
+    )
+    .await;
+    cleanup_failed_worker(&mut child, result).await
+}
+
+async fn run_behavior_suite_with_child(
+    extension_id: &str,
+    child: &mut Child,
+    stage: &Cell<&'static str>,
+) -> Result<()> {
+    announce_check(stage, "initialize, negotiate, and activate");
     let stdin = child.stdin.take().ok_or("worker stdin unavailable")?;
     let stdout = child.stdout.take().ok_or("worker stdout unavailable")?;
     let transport = StdioFrameTransport::new(stdin, stdout);
@@ -92,29 +123,23 @@ async fn run_behavior_suite(extension_id: &str, command: &[String]) -> Result<()
     initialization.supported_features = supported.clone();
     initialization.required_features = supported;
     initialization.host_operations = vec![CONFORMANCE_HOST_ECHO.into()];
-    let (peer, _worker, _manifest) = tokio::time::timeout(
-        Duration::from_secs(30),
-        Peer::new(
-            transport,
-            PeerInfo {
-                name: "s5r-conformance".into(),
-                version: Some(env!("CARGO_PKG_VERSION").into()),
-            },
-        )
-        .initialize(initialization),
+    let (peer, _worker, _manifest) = Peer::new(
+        transport,
+        PeerInfo {
+            name: "s5r-conformance".into(),
+            version: Some(env!("CARGO_PKG_VERSION").into()),
+        },
     )
-    .await??;
-    let peer = tokio::time::timeout(
-        Duration::from_secs(30),
-        peer.activate("conformance-activate"),
-    )
-    .await??;
+    .initialize(initialization)
+    .await?;
+    let peer = peer.activate("conformance-activate").await?;
     let (handle, driver) = peer.into_runtime();
     let shutdown = CancellationToken::new();
     let driver_task =
         tokio::spawn(driver.run_until(Arc::new(HostConformanceHandler), shutdown.clone()));
+    let _driver_abort_guard = DriverAbortGuard(driver_task.abort_handle());
 
-    eprintln!("checking unary invoke");
+    announce_check(stage, "unary invoke");
     let ping = handle.invoke(CAP_RUNTIME_PING, Value::Null).await?;
     ensure(
         ping["ok"] == true,
@@ -127,7 +152,7 @@ async fn run_behavior_suite(extension_id: &str, command: &[String]) -> Result<()
         "unary echo did not preserve its input",
     )?;
 
-    eprintln!("checking streaming and terminal ordering");
+    announce_check(stage, "streaming and terminal ordering");
     let mut stream = handle
         .invoke_stream(CONFORMANCE_STREAM, fixture.clone())
         .await?;
@@ -152,13 +177,13 @@ async fn run_behavior_suite(extension_id: &str, command: &[String]) -> Result<()
         "stream ordering or terminal semantics are invalid",
     )?;
 
-    eprintln!("checking nested invoke");
+    announce_check(stage, "nested invoke");
     ensure(
         handle.invoke(CONFORMANCE_NESTED, fixture.clone()).await? == fixture,
         "nested invoke did not round-trip through the host",
     )?;
 
-    eprintln!("checking cancellation cleanup");
+    announce_check(stage, "cancellation cleanup");
     let cancel_handle = handle.clone();
     let cancelled = tokio::spawn(async move {
         cancel_handle
@@ -174,13 +199,13 @@ async fn run_behavior_suite(extension_id: &str, command: &[String]) -> Result<()
     )
     .await??;
 
-    eprintln!("checking unknown error passthrough");
+    announce_check(stage, "unknown error passthrough");
     match handle.invoke(CONFORMANCE_UNKNOWN_ERROR, Value::Null).await {
         Err(InvokeError::Remote(error)) if error.code == "future_conformance_error" => {},
         result => return Err(format!("unknown error code was not preserved: {result:?}").into()),
     }
 
-    eprintln!("checking clean shutdown");
+    announce_check(stage, "clean shutdown");
     shutdown.cancel();
     driver_task.await??;
     drop(handle);
@@ -204,10 +229,75 @@ async fn run_rejection_probe(command: &[String], frame: &[u8]) -> Result<()> {
     )
 }
 
+fn announce_check(stage: &Cell<&'static str>, check: &'static str) {
+    stage.set(check);
+    eprintln!("checking {check}");
+}
+
+async fn run_with_timeout(
+    stage: &Cell<&'static str>,
+    timeout: Duration,
+    future: impl Future<Output = Result<()>>,
+) -> Result<()> {
+    match tokio::time::timeout(timeout, future).await {
+        Ok(result) => result,
+        Err(_) => Err(format!(
+            "S5R conformance timed out during {} after {timeout:?}",
+            stage.get()
+        )
+        .into()),
+    }
+}
+
+async fn cleanup_failed_worker(child: &mut Child, result: Result<()>) -> Result<()> {
+    let Err(error) = result else {
+        return Ok(());
+    };
+    if let Err(cleanup_error) = kill_and_reap_worker(child).await {
+        return Err(format!("{error}; failed to kill and reap worker: {cleanup_error}").into());
+    }
+    Err(error)
+}
+
+async fn kill_and_reap_worker(child: &mut Child) -> std::io::Result<()> {
+    if child.try_wait()?.is_none() {
+        child.kill().await?;
+    }
+    Ok(())
+}
+
 fn ensure(condition: bool, message: &'static str) -> Result<()> {
     if condition {
         Ok(())
     } else {
         Err(message.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{ffi::OsString, future::pending};
+
+    use super::*;
+
+    #[tokio::test]
+    async fn timeout_reports_stage_and_worker_cleanup_reaps_child() {
+        let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc"));
+        let mut child = Command::new(rustc)
+            .arg("-")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(child.try_wait().unwrap().is_none());
+
+        let stage = Cell::new("test stalled stage");
+        let result =
+            run_with_timeout(&stage, Duration::from_millis(10), pending::<Result<()>>()).await;
+        let error = cleanup_failed_worker(&mut child, result).await.unwrap_err();
+
+        assert!(error.to_string().contains("test stalled stage"));
+        assert!(child.try_wait().unwrap().is_some());
     }
 }

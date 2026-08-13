@@ -343,11 +343,27 @@ impl SessionRuntimeState {
 
     /// Builds a session-scoped event ingress for runtime-owned asynchronous consumers.
     pub fn event_sender(&self, turn_id: Option<TurnId>) -> EventSender {
-        EventSender::from_publisher(Arc::new(SessionScopedEventPublisher {
-            session_id: self.session_id.clone(),
+        Self::event_sender_from_parts(
+            self.session_id.clone(),
+            Arc::clone(&self.store),
+            Arc::clone(&self.event_sink),
             turn_id,
-            store: Arc::clone(&self.store),
-            event_sink: Arc::clone(&self.event_sink),
+        )
+    }
+
+    /// Builds event ingress without allocating a complete per-session runtime.
+    #[doc(hidden)]
+    pub fn event_sender_from_parts(
+        session_id: SessionId,
+        store: Arc<dyn SessionStore>,
+        event_sink: Arc<SessionEventSink>,
+        turn_id: Option<TurnId>,
+    ) -> EventSender {
+        EventSender::from_publisher(Arc::new(SessionScopedEventPublisher {
+            session_id,
+            turn_id,
+            store,
+            event_sink,
         }))
     }
 

@@ -275,13 +275,20 @@ impl SessionEventSink {
             state.inactive_sessions.insert(session_id.clone());
             state.lanes.remove(session_id)
         };
-        match lane {
+        let result = match lane {
             Some(lane) => lane.shutdown().await,
             None => journal
                 .sync_durable_events(session_id)
                 .await
                 .map_err(Into::into),
+        };
+        if result.is_err() {
+            let mut state = self.state.lock();
+            if !state.closed {
+                state.inactive_sessions.remove(session_id);
+            }
         }
+        result
     }
 
     pub async fn shutdown(&self) {
@@ -546,6 +553,7 @@ mod tests {
         next_seq: AtomicU64,
         gate_next: AtomicBool,
         fail_next: AtomicBool,
+        fail_next_sync: AtomicBool,
         append_started: Semaphore,
         append_release: Semaphore,
         sync_count: AtomicU64,
@@ -558,6 +566,7 @@ mod tests {
                 next_seq: AtomicU64::new(0),
                 gate_next: AtomicBool::new(true),
                 fail_next: AtomicBool::new(false),
+                fail_next_sync: AtomicBool::new(false),
                 append_started: Semaphore::new(0),
                 append_release: Semaphore::new(0),
                 sync_count: AtomicU64::new(0),
@@ -598,6 +607,9 @@ mod tests {
 
         async fn sync_durable_events(&self, _session_id: &SessionId) -> Result<(), StorageError> {
             self.sync_count.fetch_add(1, Ordering::AcqRel);
+            if self.fail_next_sync.swap(false, Ordering::AcqRel) {
+                return Err(StorageError::Unsupported("injected sync failure".into()));
+            }
             Ok(())
         }
     }
@@ -671,8 +683,20 @@ mod tests {
         ));
         assert!(events_rx.try_recv().is_err());
 
+        journal.fail_next_sync.store(true, Ordering::Release);
+        assert!(sink.release(journal.as_ref(), &session_id).await.is_err());
+        sink.publish_live(
+            Arc::clone(&journal_port),
+            LiveEvent::session(session_id.clone(), LiveEventPayload::AgentRunStarted),
+        )
+        .unwrap();
+        assert!(matches!(
+            events_rx.recv().await.unwrap().payload,
+            EventPayload::Live(_)
+        ));
+
         sink.release(journal.as_ref(), &session_id).await.unwrap();
-        assert_eq!(journal.sync_count.load(Ordering::Acquire), 1);
+        assert_eq!(journal.sync_count.load(Ordering::Acquire), 2);
         assert!(matches!(
             sink.publish_live(
                 Arc::clone(&journal_port),
@@ -692,7 +716,7 @@ mod tests {
             EventPayload::Live(_)
         ));
         sink.shutdown().await;
-        assert_eq!(journal.sync_count.load(Ordering::Acquire), 2);
+        assert_eq!(journal.sync_count.load(Ordering::Acquire), 3);
         assert!(matches!(
             sink.activate(&session_id),
             Err(SessionEventPublishError::Closed)

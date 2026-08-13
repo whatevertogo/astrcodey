@@ -3,21 +3,16 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
-        Arc, RwLock as StdRwLock, Weak,
+        Arc, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
 use arc_swap::ArcSwap;
-use astrcode_core::event::{
-    DurableEventPayload, Event, EventDeliveryReceipt, EventPayload, EventSendError, EventSender,
-};
+use astrcode_core::event::EventPayload;
 use astrcode_extension_sdk::{
-    extension::{
-        internal::{CustomEventSink, custom_event_subscription_matches},
-        *,
-    },
+    extension::*,
     runtime_ports::{
         PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
         SessionOperationsProvider, ToolCatalogProvider,
@@ -25,115 +20,11 @@ use astrcode_extension_sdk::{
     },
     tool::SessionOperations,
 };
-use astrcode_storage::{EventConsumerCheckpointOutcome, EventConsumerFailureOutcome, SessionStore};
-use tokio::sync::{
-    Mutex as AsyncMutex, Notify, OwnedMutexGuard, OwnedSemaphorePermit, RwLock, Semaphore, mpsc,
-};
-
-const CUSTOM_EVENT_CONCURRENCY: usize = 64;
-const MAX_CUSTOM_EVENT_CASCADE_DEPTH: u8 = 8;
-const CUSTOM_EVENT_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(250);
-const CUSTOM_EVENT_RETRY_MAX_DELAY: Duration = Duration::from_secs(30);
-const CUSTOM_EVENT_QUARANTINE_AFTER: u32 = 20;
-
-type CustomEventLanes = parking_lot::Mutex<HashMap<CustomEventLaneId, Weak<CustomEventLane>>>;
-
-type CustomEventSenderFactory =
-    Arc<dyn Fn(Option<astrcode_core::types::TurnId>) -> EventSender + Send + Sync>;
-
-fn custom_event_consumer_id(extension_id: &str, subscription: &CustomEventSubscription) -> String {
-    format!(
-        "{extension_id}:{}:v{}",
-        subscription.id, subscription.consumer_version
-    )
-}
-
-#[derive(Clone)]
-#[doc(hidden)]
-pub struct CustomEventSession {
-    event_store: Arc<dyn SessionStore>,
-    event_sender: CustomEventSenderFactory,
-}
-
-impl CustomEventSession {
-    pub fn new(
-        event_store: Arc<dyn SessionStore>,
-        event_sender: impl Fn(Option<astrcode_core::types::TurnId>) -> EventSender
-        + Send
-        + Sync
-        + 'static,
-    ) -> Self {
-        Self {
-            event_store,
-            event_sender: Arc::new(event_sender),
-        }
-    }
-
-    fn event_sender(&self, turn_id: Option<astrcode_core::types::TurnId>) -> EventSender {
-        (self.event_sender)(turn_id)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct CustomEventLaneId {
-    generation: u64,
-    session_id: astrcode_core::types::SessionId,
-    consumer_id: String,
-}
-
-struct CustomEventLane {
-    sender: mpsc::UnboundedSender<CustomEventLaneCommand>,
-    durable_reconciliation_queued: AtomicBool,
-    consumer: Arc<CustomEventConsumer>,
-}
-
-enum CustomEventLaneCommand {
-    Live {
-        _lane: Arc<CustomEventLane>,
-        _permit: OwnedSemaphorePermit,
-        invocation: Box<CustomEventInvocation>,
-    },
-    ReconcileDurable {
-        _lane: Arc<CustomEventLane>,
-        session: CustomEventSession,
-    },
-}
-
-struct CustomEventConsumer {
-    view: Arc<ExtensionView>,
-    extension_id: String,
-    consumer_id: String,
-    subscription: CustomEventSubscription,
-    cancellation: tokio_util::sync::CancellationToken,
-    handler: Arc<dyn CustomEventHandler>,
-    metrics: Arc<CustomEventConsumerMetrics>,
-    session_id: astrcode_core::types::SessionId,
-}
-
-#[derive(Clone)]
-struct CustomEventInvocation {
-    _lane: Arc<CustomEventLane>,
-    view: Arc<ExtensionView>,
-    extension_id: String,
-    consumer_id: String,
-    cancellation: tokio_util::sync::CancellationToken,
-    handler: Arc<dyn CustomEventHandler>,
-    metrics: Arc<CustomEventConsumerMetrics>,
-    context: CustomEventContext,
-    event_store: Arc<dyn SessionStore>,
-    session_id: astrcode_core::types::SessionId,
-    seq: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CustomEventInvocationOutcome {
-    Consumed,
-    Paused,
-    Retry,
-}
+use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, RwLock, Semaphore, mpsc};
 
 mod commands;
 mod custom_event_control;
+mod custom_event_delivery;
 mod diagnostics;
 mod host_invoker;
 mod http;
@@ -151,7 +42,10 @@ pub use commands::{
 pub use custom_event_control::{
     CustomEventConsumerAction, CustomEventConsumerControlError, CustomEventConsumerStatus,
 };
-use custom_event_control::{CustomEventConsumerMetrics, CustomEventConsumerMetricsMap};
+pub use custom_event_delivery::CustomEventSession;
+use custom_event_delivery::{
+    CUSTOM_EVENT_CONCURRENCY, CustomEventConsumerMetricsMap, CustomEventLanes, CustomEventQuiescing,
+};
 use diagnostics::{
     ExtensionDiagnosticStage as DiagnosticStage, ExtensionStageOutcome as StageOutcome,
 };
@@ -197,6 +91,7 @@ pub struct ExtensionRunner {
     retirements: RetirementSupervisor,
     custom_event_permits: Arc<Semaphore>,
     custom_event_lanes: Arc<CustomEventLanes>,
+    custom_event_quiescing: Arc<CustomEventQuiescing>,
     custom_event_metrics: CustomEventConsumerMetricsMap,
     shutting_down: AtomicBool,
 }
@@ -207,9 +102,10 @@ pub(crate) struct ExtensionView {
     index: Arc<HandlerIndex>,
     diagnostics: Arc<parking_lot::RwLock<BTreeMap<String, ExtensionDiagnostics>>>,
     operation_timeout: Duration,
-    pub(super) call_context_factory: ExtensionCallContextFactory,
+    call_context_factory: ExtensionCallContextFactory,
     custom_event_permits: Arc<Semaphore>,
     custom_event_lanes: Arc<CustomEventLanes>,
+    custom_event_quiescing: Arc<CustomEventQuiescing>,
     _active_turn_lease: Option<ActiveTurnViewLease>,
 }
 
@@ -364,465 +260,6 @@ impl Drop for DeferredTaskActivation {
     }
 }
 
-// ─── BoundCustomEventSink ─────────────────────────────────────────────────
-
-/// 绑定了 extension_id 的事件发射器。
-///
-/// 由 runtime call-context factory 构造并传给扩展钩子；`extension_id` 在构造时
-/// 注入，调用方无法伪造身份。
-struct BoundCustomEventSink {
-    extension_id: String,
-    event_tx: astrcode_core::event::EventSender,
-    causation: Option<(astrcode_core::types::EventId, u8)>,
-}
-
-fn bind_custom_event_sink(
-    extension_id: &str,
-    declarations: &[CustomEventDeclaration],
-    event_tx: astrcode_core::event::EventSender,
-    causation: Option<(astrcode_core::types::EventId, u8)>,
-) -> Option<Arc<dyn CustomEventSink>> {
-    if declarations.is_empty() {
-        return None;
-    }
-    Some(Arc::new(BoundCustomEventSink {
-        extension_id: extension_id.to_owned(),
-        event_tx,
-        causation,
-    }))
-}
-
-#[async_trait::async_trait]
-impl CustomEventSink for BoundCustomEventSink {
-    async fn emit(
-        &self,
-        event_type: &str,
-        schema_version: u32,
-        durable: bool,
-        payload: serde_json::Value,
-    ) -> Result<EventDeliveryReceipt, EventSendError> {
-        self.event_tx
-            .send_confirmed(crate::host_router::custom_event_payload(
-                &self.extension_id,
-                event_type,
-                schema_version,
-                durable,
-                self.causation.clone(),
-                payload,
-            ))
-            .await
-    }
-
-    fn try_emit(
-        &self,
-        event_type: &str,
-        schema_version: u32,
-        durable: bool,
-        payload: serde_json::Value,
-    ) -> Result<(), EventSendError> {
-        self.event_tx.send(crate::host_router::custom_event_payload(
-            &self.extension_id,
-            event_type,
-            schema_version,
-            durable,
-            self.causation.clone(),
-            payload,
-        ))
-    }
-}
-
-async fn run_custom_event_lane(
-    consumer: Arc<CustomEventConsumer>,
-    mut receiver: mpsc::UnboundedReceiver<CustomEventLaneCommand>,
-) {
-    while let Some(command) = receiver.recv().await {
-        match command {
-            CustomEventLaneCommand::Live {
-                _permit,
-                invocation,
-                ..
-            } => {
-                let _ = run_custom_event_invocation(&invocation).await;
-                drop(_permit);
-            },
-            CustomEventLaneCommand::ReconcileDurable { _lane, session } => {
-                _lane
-                    .durable_reconciliation_queued
-                    .store(false, Ordering::Release);
-                reconcile_durable_custom_events(&consumer, &_lane, &session).await;
-            },
-        }
-    }
-}
-
-async fn reconcile_durable_custom_events(
-    consumer: &CustomEventConsumer,
-    lane: &Arc<CustomEventLane>,
-    session: &CustomEventSession,
-) {
-    let mut retry_delay = CUSTOM_EVENT_RETRY_INITIAL_DELAY;
-    loop {
-        if reconcile_durable_custom_events_once(consumer, lane, session).await {
-            return;
-        }
-        tokio::select! {
-            () = consumer.cancellation.cancelled() => return,
-            () = tokio::time::sleep(retry_delay) => {},
-        }
-        retry_delay = retry_delay
-            .saturating_mul(2)
-            .min(CUSTOM_EVENT_RETRY_MAX_DELAY);
-    }
-}
-
-async fn reconcile_durable_custom_events_once(
-    consumer: &CustomEventConsumer,
-    lane: &Arc<CustomEventLane>,
-    session: &CustomEventSession,
-) -> bool {
-    let state = match session
-        .event_store
-        .event_consumer_state(&consumer.session_id, &consumer.consumer_id)
-        .await
-    {
-        Ok(state) => state,
-        Err(error) => {
-            consumer.metrics.record_failure();
-            tracing::warn!(
-                extension_id = consumer.extension_id,
-                session_id = %consumer.session_id,
-                %error,
-                "failed to read custom event consumer checkpoint"
-            );
-            return false;
-        },
-    };
-    if state.paused {
-        return true;
-    }
-    let stored_events = match state.checkpoint {
-        Some(seq) => {
-            let cursor = seq.to_string();
-            session
-                .event_store
-                .replay_from(&consumer.session_id, &cursor)
-                .await
-        },
-        None => {
-            session
-                .event_store
-                .replay_events(&consumer.session_id)
-                .await
-        },
-    };
-    let stored_events = match stored_events {
-        Ok(events) => events,
-        Err(error) => {
-            consumer.metrics.record_failure();
-            tracing::warn!(
-                extension_id = consumer.extension_id,
-                session_id = %consumer.session_id,
-                %error,
-                "failed to replay durable custom events"
-            );
-            return false;
-        },
-    };
-
-    let replay_head = stored_events.last().map(|event| event.seq);
-    for stored in stored_events {
-        let custom_event = match &stored.payload {
-            DurableEventPayload::CustomEvent(custom_event) => custom_event,
-            _ => continue,
-        };
-        if !custom_event_subscription_matches(
-            &consumer.subscription,
-            &custom_event.extension_id,
-            &custom_event.event_type,
-        ) {
-            continue;
-        }
-        if custom_event.cascade_depth > MAX_CUSTOM_EVENT_CASCADE_DEPTH {
-            tracing::warn!(
-                event_id = %stored.id,
-                cascade_depth = custom_event.cascade_depth,
-                "custom event cascade depth exceeded"
-            );
-            continue;
-        }
-
-        let event = Arc::new(Event::from(stored));
-        let Some(invocation) = consumer.invocation(Arc::clone(lane), &event, session) else {
-            return false;
-        };
-        let mut retry_delay = CUSTOM_EVENT_RETRY_INITIAL_DELAY;
-        loop {
-            let permit = tokio::select! {
-                result = Arc::clone(&consumer.view.custom_event_permits).acquire_owned() => {
-                    match result {
-                        Ok(permit) => permit,
-                        Err(_) => return false,
-                    }
-                },
-                () = consumer.cancellation.cancelled() => return false,
-            };
-            let outcome = run_custom_event_invocation(&invocation).await;
-            drop(permit);
-            match outcome {
-                CustomEventInvocationOutcome::Consumed => break,
-                CustomEventInvocationOutcome::Paused => return true,
-                CustomEventInvocationOutcome::Retry => {},
-            }
-            tokio::select! {
-                () = consumer.cancellation.cancelled() => return false,
-                () = tokio::time::sleep(retry_delay) => {},
-            }
-            retry_delay = retry_delay
-                .saturating_mul(2)
-                .min(CUSTOM_EVENT_RETRY_MAX_DELAY);
-        }
-    }
-    if let Some(replay_head) = replay_head {
-        match session
-            .event_store
-            .checkpoint_event_consumer(
-                &consumer.session_id,
-                &consumer.consumer_id,
-                state.revision,
-                replay_head,
-            )
-            .await
-        {
-            Ok(EventConsumerCheckpointOutcome::Accepted) => {},
-            Ok(EventConsumerCheckpointOutcome::StaleRevision) => return false,
-            Err(error) => {
-                consumer.metrics.record_failure();
-                tracing::warn!(
-                    extension_id = consumer.extension_id,
-                    %error,
-                    "failed to checkpoint inspected custom events"
-                );
-                return false;
-            },
-        }
-    }
-    consumer.metrics.record_success();
-    true
-}
-
-impl CustomEventConsumer {
-    fn invocation(
-        &self,
-        lane: Arc<CustomEventLane>,
-        event: &Arc<Event>,
-        session: &CustomEventSession,
-    ) -> Option<CustomEventInvocation> {
-        let custom_event = event.payload.custom_event()?;
-        let call = match self.view.make_registered_extension_call_context(
-            &self.extension_id,
-            ExtensionCallContextInput {
-                session_id: Some(event.session_id.clone()),
-                tool_call_id: None,
-                working_dir: None,
-                session_store_dir: None,
-                event_tx: Some(session.event_sender(event.turn_id.clone())),
-                event_causation: Some((event.id.clone(), custom_event.cascade_depth)),
-                cancellation: self.cancellation.clone(),
-            },
-        ) {
-            Ok(call) => call,
-            Err(error) => {
-                tracing::warn!(
-                    event_id = %event.id,
-                    extension_id = self.extension_id,
-                    %error,
-                    "failed to build custom event context"
-                );
-                return None;
-            },
-        };
-        let context = CustomEventContext::from_runtime(
-            call,
-            event.session_id.clone(),
-            event.turn_id.as_ref().map(ToString::to_string),
-            event.id.clone(),
-            event.seq,
-            custom_event.extension_id.clone(),
-            custom_event.event_type.clone(),
-            custom_event.schema_version,
-            custom_event.causation_id.clone(),
-            custom_event.cascade_depth,
-            custom_event.payload.clone(),
-        );
-        Some(CustomEventInvocation {
-            _lane: lane,
-            view: Arc::clone(&self.view),
-            extension_id: self.extension_id.clone(),
-            consumer_id: self.consumer_id.clone(),
-            cancellation: self.cancellation.clone(),
-            handler: Arc::clone(&self.handler),
-            metrics: Arc::clone(&self.metrics),
-            context,
-            event_store: Arc::clone(&session.event_store),
-            session_id: event.session_id.clone(),
-            seq: event.seq,
-        })
-    }
-}
-
-#[tracing::instrument(
-    name = "custom_event.delivery",
-    skip(invocation),
-    fields(
-        extension_id = %invocation.extension_id,
-        consumer_id = %invocation.consumer_id,
-        session_id = %invocation.session_id,
-        seq = ?invocation.seq,
-    )
-)]
-async fn run_custom_event_invocation(
-    invocation: &CustomEventInvocation,
-) -> CustomEventInvocationOutcome {
-    let _active_delivery = invocation.metrics.track_delivery();
-    let state = match invocation
-        .event_store
-        .event_consumer_state(&invocation.session_id, &invocation.consumer_id)
-        .await
-    {
-        Ok(state) => state,
-        Err(error) => {
-            invocation.metrics.record_failure();
-            tracing::warn!(
-                extension_id = invocation.extension_id,
-                %error,
-                "failed to read custom event consumer state"
-            );
-            return CustomEventInvocationOutcome::Retry;
-        },
-    };
-    if state.paused {
-        return CustomEventInvocationOutcome::Paused;
-    }
-    if let Some(seq) = invocation.seq
-        && state.checkpoint.is_some_and(|checkpoint| checkpoint >= seq)
-    {
-        return CustomEventInvocationOutcome::Consumed;
-    }
-    let result = invocation
-        .view
-        .run_recorded_hook(
-            &invocation.extension_id,
-            "custom_event",
-            invocation.cancellation.clone(),
-            invocation.handler.handle(invocation.context.clone()),
-        )
-        .await;
-    let disposition = match result {
-        Ok(disposition) => disposition,
-        Err(error) => {
-            tracing::warn!(
-                extension_id = invocation.extension_id,
-                %error,
-                "custom event handler failed"
-            );
-            CustomEventDisposition::retry(error.to_string())
-        },
-    };
-    let failure = match &disposition {
-        CustomEventDisposition::Ack => None,
-        CustomEventDisposition::Retry { reason } => Some((reason.as_str(), false)),
-        CustomEventDisposition::DeadLetter { reason } => Some((reason.as_str(), true)),
-    };
-    if let Some((reason, explicit_dead_letter)) = failure {
-        invocation.metrics.record_failure();
-        let quarantine_after = if explicit_dead_letter {
-            1
-        } else {
-            CUSTOM_EVENT_QUARANTINE_AFTER
-        };
-        if let Some(seq) = invocation.seq {
-            match invocation
-                .event_store
-                .record_event_consumer_failure(
-                    &invocation.session_id,
-                    &invocation.consumer_id,
-                    state.revision,
-                    seq,
-                    reason,
-                    quarantine_after,
-                )
-                .await
-            {
-                Ok(EventConsumerFailureOutcome::Quarantined { attempts }) => {
-                    invocation.metrics.record_success();
-                    tracing::error!(
-                        extension_id = invocation.extension_id,
-                        session_id = %invocation.session_id,
-                        seq,
-                        attempts,
-                        explicit_dead_letter,
-                        "custom event moved to quarantine"
-                    );
-                    return CustomEventInvocationOutcome::Consumed;
-                },
-                Ok(EventConsumerFailureOutcome::AlreadyConsumed) => {
-                    invocation.metrics.record_success();
-                    return CustomEventInvocationOutcome::Consumed;
-                },
-                Ok(EventConsumerFailureOutcome::Recorded { .. }) => {},
-                Ok(EventConsumerFailureOutcome::StaleRevision) => {
-                    return CustomEventInvocationOutcome::Retry;
-                },
-                Err(storage_error) => {
-                    tracing::warn!(
-                        extension_id = invocation.extension_id,
-                        session_id = %invocation.session_id,
-                        seq,
-                        %storage_error,
-                        "failed to persist custom event delivery failure"
-                    );
-                    return CustomEventInvocationOutcome::Retry;
-                },
-            }
-        }
-        if explicit_dead_letter {
-            invocation.metrics.record_success();
-            return CustomEventInvocationOutcome::Consumed;
-        }
-        return CustomEventInvocationOutcome::Retry;
-    }
-    if let Some(seq) = invocation.seq {
-        match invocation
-            .event_store
-            .checkpoint_event_consumer(
-                &invocation.session_id,
-                &invocation.consumer_id,
-                state.revision,
-                seq,
-            )
-            .await
-        {
-            Ok(EventConsumerCheckpointOutcome::Accepted) => {},
-            Ok(EventConsumerCheckpointOutcome::StaleRevision) => {
-                return CustomEventInvocationOutcome::Retry;
-            },
-            Err(error) => {
-                invocation.metrics.record_failure();
-                tracing::warn!(
-                    extension_id = invocation.extension_id,
-                    %error,
-                    "failed to checkpoint custom event consumer"
-                );
-                return CustomEventInvocationOutcome::Retry;
-            },
-        }
-    }
-    invocation.metrics.record_success();
-    CustomEventInvocationOutcome::Consumed
-}
-
-// ─── ExtensionRunner impl ───────────────────────────────────────────────
-
 impl ExtensionRunner {
     /// 创建新的扩展运行器。
     pub fn new(operation_timeout: Duration) -> Self {
@@ -851,8 +288,9 @@ impl ExtensionRunner {
             operation_timeout,
             retirements: RetirementSupervisor::new(),
             custom_event_permits: Arc::new(Semaphore::new(CUSTOM_EVENT_CONCURRENCY)),
-            custom_event_lanes: Arc::new(parking_lot::Mutex::new(HashMap::new())),
-            custom_event_metrics: parking_lot::Mutex::new(HashMap::new()),
+            custom_event_lanes: Arc::new(CustomEventLanes::default()),
+            custom_event_quiescing: Arc::new(CustomEventQuiescing::default()),
+            custom_event_metrics: CustomEventConsumerMetricsMap::default(),
             shutting_down: AtomicBool::new(false),
         }
     }
@@ -1452,206 +890,6 @@ impl ExtensionRunner {
     pub fn bind_startup_event_channel(&self, event_tx: mpsc::UnboundedSender<EventPayload>) {
         self.bindings.write().startup_event_tx = Some(event_tx.into());
     }
-
-    /// Dispatches an already-published custom event without affecting producer success.
-    pub fn observe_custom_event(&self, event: Arc<Event>, session: CustomEventSession) -> bool {
-        let Some(custom_event) = event.payload.custom_event() else {
-            return true;
-        };
-        let durable = event.payload.as_durable().is_some();
-        if custom_event.cascade_depth > MAX_CUSTOM_EVENT_CASCADE_DEPTH {
-            tracing::warn!(
-                event_id = %event.id,
-                cascade_depth = custom_event.cascade_depth,
-                "custom event cascade depth exceeded"
-            );
-            return true;
-        }
-
-        let view = self.turn_extension_view_with_lease();
-        let mut fully_admitted = true;
-        for (extension_id, subscription, handler) in &view.index.custom_event {
-            if !custom_event_subscription_matches(
-                subscription,
-                &custom_event.extension_id,
-                &custom_event.event_type,
-            ) {
-                continue;
-            }
-            let Some(lane) = self.custom_event_lane(
-                &view,
-                extension_id,
-                subscription,
-                handler,
-                &event.session_id,
-            ) else {
-                fully_admitted = false;
-                continue;
-            };
-            if durable {
-                if !Self::signal_durable_custom_events(&lane, session.clone()) {
-                    fully_admitted = false;
-                }
-                continue;
-            }
-
-            let permit = match Arc::clone(&view.custom_event_permits).try_acquire_owned() {
-                Ok(permit) => permit,
-                Err(_) => {
-                    tracing::warn!(
-                        event_id = %event.id,
-                        extension_id,
-                        "live custom event dispatch capacity exhausted"
-                    );
-                    fully_admitted = false;
-                    continue;
-                },
-            };
-            let Some(invocation) = lane
-                .consumer
-                .invocation(Arc::clone(&lane), &event, &session)
-            else {
-                fully_admitted = false;
-                continue;
-            };
-            if lane
-                .sender
-                .send(CustomEventLaneCommand::Live {
-                    _lane: Arc::clone(&lane),
-                    _permit: permit,
-                    invocation: Box::new(invocation),
-                })
-                .is_err()
-            {
-                tracing::warn!(
-                    event_id = %event.id,
-                    extension_id,
-                    "custom event lane stopped before admission"
-                );
-                fully_admitted = false;
-            }
-        }
-        fully_admitted
-    }
-
-    /// Wakes every durable consumer for one session after startup or extension reload.
-    #[doc(hidden)]
-    pub fn reconcile_custom_events(
-        &self,
-        session_id: &astrcode_core::types::SessionId,
-        session: CustomEventSession,
-    ) -> bool {
-        let view = self.turn_extension_view_with_lease();
-        let mut fully_admitted = true;
-        for (extension_id, subscription, handler) in &view.index.custom_event {
-            let Some(lane) =
-                self.custom_event_lane(&view, extension_id, subscription, handler, session_id)
-            else {
-                fully_admitted = false;
-                continue;
-            };
-            if !Self::signal_durable_custom_events(&lane, session.clone()) {
-                fully_admitted = false;
-            }
-        }
-        fully_admitted
-    }
-
-    fn custom_event_lane(
-        &self,
-        view: &Arc<ExtensionView>,
-        extension_id: &str,
-        subscription: &CustomEventSubscription,
-        handler: &Arc<dyn CustomEventHandler>,
-        session_id: &astrcode_core::types::SessionId,
-    ) -> Option<Arc<CustomEventLane>> {
-        let consumer_id = custom_event_consumer_id(extension_id, subscription);
-        let lane_id = CustomEventLaneId {
-            generation: view.generation,
-            session_id: session_id.clone(),
-            consumer_id: consumer_id.clone(),
-        };
-        let mut lanes = view.custom_event_lanes.lock();
-        lanes.retain(|_, lane| lane.strong_count() > 0);
-        if let Some(lane) = lanes
-            .get(&lane_id)
-            .and_then(Weak::upgrade)
-            .filter(|lane| !lane.sender.is_closed())
-        {
-            return Some(lane);
-        }
-
-        let consumer = Arc::new(self.custom_event_consumer(
-            view,
-            extension_id,
-            subscription,
-            handler,
-            session_id,
-        )?);
-        let (sender, receiver) = mpsc::unbounded_channel();
-        let lane = Arc::new(CustomEventLane {
-            sender,
-            durable_reconciliation_queued: AtomicBool::new(false),
-            consumer: Arc::clone(&consumer),
-        });
-        lanes.insert(lane_id, Arc::downgrade(&lane));
-        view.spawn_extension_task(
-            extension_id,
-            "custom-event-lane",
-            run_custom_event_lane(consumer, receiver),
-        );
-        Some(lane)
-    }
-
-    fn custom_event_consumer(
-        &self,
-        view: &Arc<ExtensionView>,
-        extension_id: &str,
-        subscription: &CustomEventSubscription,
-        handler: &Arc<dyn CustomEventHandler>,
-        session_id: &astrcode_core::types::SessionId,
-    ) -> Option<CustomEventConsumer> {
-        let Some(generation) = view.index.extensions.get(extension_id) else {
-            tracing::warn!(extension_id, "custom event consumer has no task owner");
-            return None;
-        };
-        let consumer_id = custom_event_consumer_id(extension_id, subscription);
-        Some(CustomEventConsumer {
-            view: Arc::clone(view),
-            extension_id: extension_id.to_owned(),
-            consumer_id: consumer_id.clone(),
-            subscription: subscription.clone(),
-            cancellation: generation.tasks.cancellation().child_token(),
-            handler: Arc::clone(handler),
-            metrics: self.custom_event_consumer_metrics(session_id, &consumer_id),
-            session_id: session_id.clone(),
-        })
-    }
-
-    fn signal_durable_custom_events(
-        lane: &Arc<CustomEventLane>,
-        session: CustomEventSession,
-    ) -> bool {
-        if lane
-            .durable_reconciliation_queued
-            .swap(true, Ordering::AcqRel)
-        {
-            return true;
-        }
-        if lane
-            .sender
-            .send(CustomEventLaneCommand::ReconcileDurable {
-                _lane: Arc::clone(lane),
-                session,
-            })
-            .is_ok()
-        {
-            return true;
-        }
-        lane.durable_reconciliation_queued
-            .store(false, Ordering::Release);
-        false
-    }
 }
 
 impl ExtensionView {
@@ -2221,6 +1459,7 @@ impl ExtensionRunner {
             call_context_factory: self.extension_call_context_factory(),
             custom_event_permits: Arc::clone(&self.custom_event_permits),
             custom_event_lanes: Arc::clone(&self.custom_event_lanes),
+            custom_event_quiescing: Arc::clone(&self.custom_event_quiescing),
             _active_turn_lease: active_turn_lease,
         })
     }

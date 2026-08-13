@@ -703,6 +703,7 @@ impl TurnLoop {
             input_tokens,
             cached_input_tokens: None,
             cache_creation_input_tokens: None,
+            input_accounting: Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive),
             output_tokens: None,
             reasoning_output_tokens: None,
             total_tokens: None,

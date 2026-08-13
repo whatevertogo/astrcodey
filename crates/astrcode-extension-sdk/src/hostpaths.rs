@@ -1,6 +1,11 @@
 //! Host path operations exposed to extensions.
 
-use std::path::{Component, Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    io::{self, Write as _},
+    path::{Component, Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 pub use astrcode_core::config::defaults::{astrcode_dir, user_home_dir};
 
@@ -15,18 +20,47 @@ pub fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
 
 /// Atomically write `content` to `path`.
 ///
-/// The bytes go to a sibling `<file name>.tmp` file first, which is then
-/// renamed over `path`, so a crash mid-write cannot leave a truncated target.
-/// Parent directories are created as needed.
-pub fn write_file_atomic(path: &Path, content: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// The bytes go to a unique sibling temporary file first, which is flushed and
+/// synced before being renamed over `path`. Parent directories are created as needed.
+pub fn write_file_atomic(path: &Path, content: &str) -> io::Result<()> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let (mut temporary, temporary_path) = create_atomic_write_file(parent)?;
+    let write_result = temporary
+        .write_all(content.as_bytes())
+        .and_then(|()| temporary.flush())
+        .and_then(|()| temporary.sync_all());
+    drop(temporary);
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&temporary_path);
+        return Err(error);
     }
-    let mut tmp = path.as_os_str().to_os_string();
-    tmp.push(".tmp");
-    std::fs::write(PathBuf::from(&tmp), content)?;
-    std::fs::rename(&tmp, path)?;
+    if let Err(error) = std::fs::rename(&temporary_path, path) {
+        let _ = std::fs::remove_file(temporary_path);
+        return Err(error);
+    }
     Ok(())
+}
+
+static NEXT_ATOMIC_WRITE_ID: AtomicU64 = AtomicU64::new(0);
+
+fn create_atomic_write_file(parent: &Path) -> io::Result<(File, PathBuf)> {
+    for _ in 0..100 {
+        let id = NEXT_ATOMIC_WRITE_ID.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(".astrcode-write-{}-{id}.tmp", std::process::id()));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => return Ok((file, path)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {},
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "failed to allocate a unique atomic-write temporary file",
+    ))
 }
 
 /// 读取 JSON 状态文件；文件不存在时返回 `Ok(None)`。解析失败以 io::Error 返回。
@@ -87,7 +121,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_file_atomic_creates_parents_and_leaves_no_tmp() {
+    fn write_file_atomic_replaces_the_target_and_leaves_no_temporary_file() {
         let root = std::env::temp_dir().join(format!(
             "astrcode-sdk-hostpaths-test-{}",
             std::process::id()
@@ -95,10 +129,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         let path = root.join("nested").join("state.json");
 
-        write_file_atomic(&path, "{}").unwrap();
+        write_file_atomic(&path, "old").unwrap();
+        write_file_atomic(&path, "new").unwrap();
 
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{}");
-        assert!(!root.join("nested").join("state.json.tmp").exists());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

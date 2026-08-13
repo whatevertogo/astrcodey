@@ -39,6 +39,7 @@ use astrcode_extension_sdk::{
         ToolDiscoveryHandler, ToolHandler, ToolHookTarget, UserMessageEnvelopeContext,
         UserMessageEnvelopeHandler, UserMessageEnvelopePayload, UserMessageEnvelopeResult,
     },
+    host::{HostSessionStateReadRequest, HostSessionStateWriteRequest},
     runtime_ports::{
         RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness,
         TurnExtensionViewProvider,
@@ -48,7 +49,7 @@ use astrcode_extension_sdk::{
         ToolResult,
     },
 };
-use astrcode_storage::{SessionEventJournal, SessionStore};
+use astrcode_storage::{SessionEventJournal, SessionPathResolver, SessionStore};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
@@ -2711,6 +2712,59 @@ struct BlockingCustomEvent {
     release: Notify,
 }
 
+struct StatefulCustomEventExtension {
+    handler: Arc<StatefulCustomEvent>,
+}
+
+struct StatefulCustomEvent {
+    entered: mpsc::UnboundedSender<PathBuf>,
+    release: Notify,
+}
+
+#[async_trait::async_trait]
+impl Extension for StatefulCustomEventExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest(
+            "stateful-consumer",
+            &[ExtensionCapability::ConsumeCustomEvents],
+        )
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.on_custom_event(
+            CustomEventSubscription::from_extension("producer", "job.completed"),
+            0,
+            Arc::clone(&self.handler) as Arc<dyn CustomEventHandler>,
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl CustomEventHandler for StatefulCustomEvent {
+    async fn handle(
+        &self,
+        ctx: CustomEventContext,
+    ) -> Result<CustomEventDisposition, ExtensionError> {
+        let session_data_dir = ctx.paths().session_data_dir()?.to_path_buf();
+        let state = ctx.host().session_state()?;
+        state
+            .write(HostSessionStateWriteRequest {
+                key: "delivery".into(),
+                content: "started".into(),
+            })
+            .await?;
+        let stored = state
+            .read(HostSessionStateReadRequest {
+                key: "delivery".into(),
+            })
+            .await?;
+        assert_eq!(stored.content.as_deref(), Some("started"));
+        let _ = self.entered.send(session_data_dir);
+        self.release.notified().await;
+        Ok(CustomEventDisposition::Ack)
+    }
+}
+
 #[async_trait::async_trait]
 impl Extension for CustomEventConsumerExtension {
     fn manifest(&self) -> ExtensionManifest {
@@ -3173,4 +3227,85 @@ async fn skip_to_stream_head_waits_for_in_flight_delivery_and_suppresses_its_ret
             .await
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn custom_event_delivery_has_session_state_and_quiescence_blocks_new_admission() {
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    let (entered_tx, mut entered_rx) = mpsc::unbounded_channel();
+    let handler = Arc::new(StatefulCustomEvent {
+        entered: entered_tx,
+        release: Notify::new(),
+    });
+    runner
+        .register(Arc::new(StatefulCustomEventExtension {
+            handler: Arc::clone(&handler),
+        }))
+        .await
+        .unwrap();
+
+    let projects = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        astrcode_storage::session_repo::FileSystemSessionRepository::for_testing(
+            projects.path().into(),
+        ),
+    );
+    let session_id = SessionId::new("stateful-custom-event");
+    store
+        .create_session(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::SessionStarted(SessionStarted {
+                working_dir: "/workspace".into(),
+                model_id: "model".into(),
+                parent: None,
+                tool_selection: SessionToolSelection::default(),
+                source_extension: None,
+                initial_system_prompt: PersistedSystemPrompt {
+                    text: "system".into(),
+                    fingerprint: "fingerprint".into(),
+                    extra_system_prompt: None,
+                    source: SystemPromptSource::Native,
+                },
+            }),
+        ))
+        .await
+        .unwrap();
+    let event = store
+        .append_event(DurableEvent::session(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "job.completed".into(),
+                schema_version: 1,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: json!({"jobId": "stateful"}),
+            }),
+        ))
+        .await
+        .unwrap();
+    let expected_store_dir = store.session_store_dir(&session_id).await.unwrap().unwrap();
+    let store_port: Arc<dyn SessionStore> = store;
+    let session = CustomEventSession::new(store_port, |_| EventSender::new(|_| Ok(())));
+
+    assert!(runner.observe_custom_event(Arc::new(Event::from(event.clone())), session.clone()));
+    assert_eq!(
+        entered_rx.recv().await,
+        Some(expected_store_dir.join("extension_data/stateful-consumer"))
+    );
+
+    let quiesce = runner.quiesce_custom_event_session(&session_id);
+    tokio::pin!(quiesce);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), quiesce.as_mut())
+            .await
+            .is_err()
+    );
+    handler.release.notify_one();
+    tokio::time::timeout(Duration::from_secs(1), quiesce)
+        .await
+        .unwrap();
+    assert!(!runner.observe_custom_event(Arc::new(Event::from(event)), session.clone()));
+
+    runner.resume_custom_event_session(&session_id, session);
 }

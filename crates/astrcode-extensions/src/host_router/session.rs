@@ -9,7 +9,6 @@ use std::{
 
 use astrcode_core::{
     event::{DurableEventPayload, Phase, StoredEvent},
-    llm::LlmTokenUsage,
     session_lineage::{ParentChainWalkError, collect_parent_chain},
     tool::{
         CreateRootSessionRequest as CoreCreateRootSessionRequest, CreateSessionRequest,
@@ -254,16 +253,26 @@ impl SessionGroup {
         authorize_history_target(ctx.session_ops.as_deref(), &access).await?;
 
         let session_id = astrcode_core::types::SessionId::new(&access.target_session_id);
-        let mut events = reader
-            .replay_from_limited(&session_id, &request.cursor, request.limit + 1)
-            .await
-            .map_err(storage_read_error)?;
+        let mut events = match request.cursor.as_ref() {
+            Some(cursor) => {
+                reader
+                    .replay_from_limited(&session_id, cursor, request.limit + 1)
+                    .await
+            },
+            None => {
+                reader
+                    .replay_from_start_limited(&session_id, request.limit + 1)
+                    .await
+            },
+        }
+        .map_err(storage_read_error)?;
         let has_more = events.len() > request.limit;
         events.truncate(request.limit);
         let next_cursor = events
             .last()
             .map(|event| event.seq.to_string())
-            .unwrap_or(request.cursor);
+            .or(request.cursor)
+            .unwrap_or_else(|| "0".into());
         let events = events
             .into_iter()
             .map(host_session_event)
@@ -345,7 +354,7 @@ impl SessionGroup {
         let caller_session_id = required_history_context(ctx)?.to_owned();
         let reader = self.session_reader()?;
         let summaries = reader
-            .list_session_summaries()
+            .list_all_session_summaries()
             .await
             .map_err(storage_read_error)?;
         let mut parents = HashMap::with_capacity(summaries.len());
@@ -460,7 +469,7 @@ impl SessionGroup {
                 model_context_window: window,
             } = event.event.payload
             {
-                if let Some(tokens) = non_cached_token_count(&usage) {
+                if let Some(tokens) = usage.non_cached_tokens() {
                     total_tokens = total_tokens.saturating_add(tokens);
                     saw_usage = true;
                 }
@@ -622,29 +631,6 @@ async fn history_read_model(
 
 fn extension_visible_message(message: &astrcode_core::llm::LlmMessage) -> bool {
     !astrcode_context::is_compact_summary_message(message)
-}
-
-fn non_cached_token_count(usage: &LlmTokenUsage) -> Option<u64> {
-    match (usage.input_tokens, usage.output_tokens) {
-        (Some(input), Some(output)) => Some(
-            input
-                .saturating_sub(usage.cached_input_tokens.unwrap_or_default())
-                .saturating_add(output),
-        ),
-        _ => usage
-            .total_tokens
-            .map(|total| total.saturating_sub(usage.cached_input_tokens.unwrap_or_default()))
-            .or_else(|| {
-                let input = usage.input_tokens.map(|input| {
-                    input.saturating_sub(usage.cached_input_tokens.unwrap_or_default())
-                });
-                (input.is_some() || usage.output_tokens.is_some()).then(|| {
-                    input
-                        .unwrap_or_default()
-                        .saturating_add(usage.output_tokens.unwrap_or_default())
-                })
-            }),
-    }
 }
 
 /// 只读会话 API 的 StorageError 映射：身份与能力类错误保持稳定码，其余读失败
@@ -1117,53 +1103,6 @@ fn validated_tool_names(tools: Vec<String>, field: &str) -> Result<Vec<String>, 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn non_cached_token_count_handles_complete_and_partial_usage() {
-        let cases = [
-            (
-                LlmTokenUsage {
-                    input_tokens: Some(100),
-                    cached_input_tokens: Some(20),
-                    cache_creation_input_tokens: None,
-                    output_tokens: Some(20),
-                    reasoning_output_tokens: Some(5),
-                    total_tokens: Some(120),
-                    source: None,
-                },
-                Some(100),
-            ),
-            (
-                LlmTokenUsage {
-                    cached_input_tokens: Some(20),
-                    reasoning_output_tokens: Some(5),
-                    total_tokens: Some(120),
-                    ..Default::default()
-                },
-                Some(100),
-            ),
-            (
-                LlmTokenUsage {
-                    input_tokens: Some(100),
-                    cached_input_tokens: Some(20),
-                    ..Default::default()
-                },
-                Some(80),
-            ),
-            (
-                LlmTokenUsage {
-                    output_tokens: Some(20),
-                    ..Default::default()
-                },
-                Some(20),
-            ),
-            (LlmTokenUsage::default(), None),
-        ];
-
-        for (usage, expected) in cases {
-            assert_eq!(non_cached_token_count(&usage), expected, "usage: {usage:?}");
-        }
-    }
 
     #[tokio::test]
     async fn history_visibility_uses_lineage_and_rejects_cycles() {

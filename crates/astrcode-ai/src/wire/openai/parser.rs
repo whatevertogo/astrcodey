@@ -640,6 +640,7 @@ fn extract_token_usage(event: &serde_json::Value) -> Option<LlmTokenUsage> {
         input_tokens,
         cached_input_tokens,
         cache_creation_input_tokens: None,
+        input_accounting: Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive),
         output_tokens,
         reasoning_output_tokens,
         total_tokens,
@@ -787,6 +788,8 @@ mod accumulator_tests {
             [LlmEvent::Usage { usage }]
                 if usage.input_tokens == Some(100)
                     && usage.cached_input_tokens == Some(64)
+                    && usage.input_accounting
+                        == Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive)
                     && usage.output_tokens == Some(20)
                     && usage.reasoning_output_tokens == Some(5)
                     && usage.total_tokens == Some(120)
@@ -826,6 +829,8 @@ mod accumulator_tests {
                 LlmEvent::Done { finish_reason }
             ] if usage.input_tokens == Some(100)
                 && usage.cached_input_tokens == Some(64)
+                && usage.input_accounting
+                    == Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive)
                 && usage.output_tokens == Some(20)
                 && usage.total_tokens == Some(120)
                 && usage.source == Some(LlmTokenUsageSource::ProviderUsage)
@@ -873,6 +878,8 @@ mod accumulator_tests {
             LlmEvent::Usage { usage }
                 if usage.input_tokens == Some(50)
                     && usage.cached_input_tokens == Some(32)
+                    && usage.input_accounting
+                        == Some(astrcode_core::llm::LlmInputTokenAccounting::Inclusive)
                     && usage.output_tokens == Some(10)
                     && usage.reasoning_output_tokens == Some(3)
                     && usage.total_tokens == Some(60)

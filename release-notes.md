@@ -2,6 +2,10 @@
 
 ### ⚠️ Breaking changes
 
+- workspace 升级到 Rust 2024 edition，MSRV 为 Rust 1.88。源码保持 stable-compatible；仓库
+  `rust-toolchain.toml`、默认 CI 作业与 release 固定 `nightly-2026-07-27`，用于复现格式化、lint
+  和构建结果，独立 MSRV 作业显式使用 `1.88.0`。源码构建者需使用 Rust 1.88 或更高版本，
+  贡献者默认使用该 pinned toolchain。
 - 扩展作者 API 已收敛为 `ExtensionCallContext`、专用 handler context、`Registrar` 和类型化
   `ExtensionHost` 领域客户端；旧 context、事件名与裸宿主服务入口不再保留兼容垫片。
 - 删除 SDK capability 历史 helper 和未被授权流程使用的 `grant_name` 平行目录；能力线缆名
