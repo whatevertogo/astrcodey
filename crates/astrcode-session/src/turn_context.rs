@@ -61,35 +61,6 @@ pub(crate) struct SharedTurnContext {
 }
 
 impl SharedTurnContext {
-    /// 从 read model 重建共享上下文，用于**没有活跃 turn 管线**的 hook 场景：
-    /// lifecycle 事件发射（`emit_lifecycle_for_read_model`）、idle compaction、
-    /// turn 提交前的 envelope / prompt 准备（调用方覆写 `turn_id` 与 `cancellation_token`）。
-    ///
-    /// 本构造产出的 `permission_chain` 是空链（一切工具全拒）、`approval_history`
-    /// 是未初始化默认 store，不能用于工具管线或审批决策——那些路径必须经由
-    /// `TurnToolContext::for_turn`。
-    pub(crate) fn from_read_model(
-        session_id: &SessionId,
-        model: &SessionReadModel,
-        session_store_dir: Option<std::path::PathBuf>,
-    ) -> Self {
-        Self {
-            session_id: session_id.clone(),
-            turn_id: None,
-            working_dir: model.identity.working_dir.clone(),
-            model_id: model.identity.model_id.clone(),
-            session_store_dir,
-            turn_event_sender: None,
-            approval_mode: astrcode_core::permission::ApprovalMode::default(),
-            tool_selection: Some(model.identity.tool_selection.clone()),
-            permission_chain: std::sync::Arc::new(crate::permission::PermissionChain::new(vec![])),
-            approval_history: std::sync::Arc::new(
-                crate::permission::ApprovalHistoryStore::default(),
-            ),
-            cancellation_token: CancellationToken::new(),
-        }
-    }
-
     /// Hook / 工具侧非阻塞事件入口；turn 外为 `None`。
     pub(crate) fn turn_event_tx(&self) -> Option<TurnEventTx> {
         self.turn_event_sender
@@ -141,6 +112,20 @@ impl SharedTurnContext {
     pub(crate) fn model_selection(&self) -> ModelSelection {
         ModelSelection::simple(self.model_id.clone())
     }
+}
+
+/// 为没有活跃工具管线的 session hook 构造最小调用上下文。
+pub(crate) fn hook_call_context_for_read_model(
+    session_id: &SessionId,
+    model: &SessionReadModel,
+    session_store_dir: Option<std::path::PathBuf>,
+) -> RuntimeHookCallContext {
+    RuntimeHookCallContext::new(
+        session_id.to_string(),
+        model.identity.working_dir.clone(),
+        ModelSelection::simple(model.identity.model_id.clone()),
+        session_store_dir,
+    )
 }
 
 // ─── TurnError ───────────────────────────────────────────────────────────

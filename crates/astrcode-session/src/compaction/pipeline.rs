@@ -12,7 +12,6 @@ use astrcode_core::{
     event::LiveEventPayload,
     llm::{self, LlmMessage, LlmProvider, LlmRequest},
     tool::ToolDefinition,
-    types::TurnId,
 };
 use astrcode_extension_sdk::{
     extension::{
@@ -32,15 +31,9 @@ pub(crate) struct CompactionPipeline<'a> {
     pub extension_runner: &'a dyn TurnHooks,
     pub hook_call: RuntimeHookCallContext,
     pub pre_hook_message_count: usize,
-    pub tools: Vec<ToolDefinition>,
-    pub working_dir: String,
-    pub session_store_dir: Option<std::path::PathBuf>,
-    pub turn_id: Option<&'a TurnId>,
-    pub trigger: CompactTrigger,
+    pub tools: &'a [ToolDefinition],
     pub strategy: CompactStrategy,
     pub use_llm: bool,
-    pub keep_recent_turns: Option<usize>,
-    pub write_transcript_snapshot: bool,
 }
 
 #[derive(Debug)]
@@ -73,8 +66,12 @@ impl CompactionPipelineOutcome {
 impl CompactionPipeline<'_> {
     /// 运行一次完整 compact，并恰好发出一个 started 与一个 terminal live event。
     pub(crate) async fn run(self) -> CompactionPipelineOutcome {
+        let turn_id = self
+            .hook_call
+            .turn_id()
+            .map(astrcode_core::types::TurnId::from);
         self.session
-            .emit_live(self.turn_id, LiveEventPayload::CompactionStarted);
+            .emit_live(turn_id.as_ref(), LiveEventPayload::CompactionStarted);
 
         let outcome = self.run_inner().await;
         let terminal = match &outcome {
@@ -92,16 +89,17 @@ impl CompactionPipeline<'_> {
                 reason: error.to_string(),
             },
         };
-        self.session.emit_live(self.turn_id, terminal);
+        self.session.emit_live(turn_id.as_ref(), terminal);
         outcome
     }
 
     async fn run_inner(&self) -> CompactionPipelineOutcome {
+        let trigger = self.strategy.trigger();
         let custom_instructions = match collect_compact_instructions(
             self.extension_runner,
             CompactHookContext {
                 call: self.hook_call.clone(),
-                trigger: self.trigger,
+                trigger,
                 message_count: self.pre_hook_message_count,
             },
         )
@@ -133,11 +131,11 @@ impl CompactionPipeline<'_> {
         };
         let source_snapshot = context_snapshot(&source_model);
 
-        let transcript_path = if self.write_transcript_snapshot {
+        let transcript_path = if matches!(self.strategy, CompactStrategy::Manual { .. }) {
             match self
                 .session
                 .write_compact_snapshot(CompactSnapshotInput {
-                    trigger: self.trigger.as_str().into(),
+                    trigger: trigger.as_str().into(),
                     model_id: source_model.identity.model_id.clone(),
                     working_dir: source_model.identity.working_dir.clone(),
                     system_prompt: Some(source_snapshot.system_prompt.clone()),
@@ -160,7 +158,8 @@ impl CompactionPipeline<'_> {
 
         let context_assembler = self.session.runtime_services().context_assembler_arc();
         let keep_recent_turns = self
-            .keep_recent_turns
+            .strategy
+            .keep_recent_turns()
             .or(context_assembler.settings().compact_keep_recent_turns);
         let render_options = CompactSummaryRenderOptions {
             transcript_path,
@@ -201,7 +200,7 @@ impl CompactionPipeline<'_> {
         update_compaction_token_counts(
             self.session,
             &self.llm,
-            &self.tools,
+            self.tools,
             &source_snapshot,
             &mut compaction,
         )
@@ -214,23 +213,20 @@ impl CompactionPipeline<'_> {
                 PostCompactEnrichInput {
                     session_id: self.session.id().as_str(),
                     source_messages: &source_snapshot.messages,
-                    working_dir: &self.working_dir,
+                    working_dir: &source_model.identity.working_dir,
                     system_prompt: Some(&source_snapshot.system_prompt),
-                    tools: &self.tools,
+                    tools: self.tools,
                     settings: context_assembler.settings(),
-                    session_store_dir: self.session_store_dir.clone(),
+                    session_store_dir: self
+                        .hook_call
+                        .session_store_dir()
+                        .map(std::path::Path::to_path_buf),
                 },
             )
             .await;
 
-        if let Err(error) = persist_compaction(
-            self.session,
-            &compaction,
-            self.trigger.as_str(),
-            &source_snapshot,
-            self.strategy.clone(),
-        )
-        .await
+        if let Err(error) =
+            persist_compaction(self.session, &compaction, &source_snapshot, self.strategy).await
         {
             tracing::warn!(error = %error, "compaction persist failed");
             return CompactionPipelineOutcome::Failed {
@@ -242,7 +238,7 @@ impl CompactionPipeline<'_> {
 
         let post_hook = CompactHookContext {
             call: self.hook_call.clone(),
-            trigger: self.trigger,
+            trigger,
             message_count: source_snapshot.messages.len(),
         };
         if let Err(error) =
@@ -408,3 +404,6 @@ async fn request_compact_summary(
         .await
         .map_err(CompactError::Llm)
 }
+
+#[cfg(test)]
+mod tests;

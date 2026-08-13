@@ -12,7 +12,9 @@ use astrcode_core::{
     },
     types::*,
 };
-use astrcode_extension_sdk::extension::LifecycleEvent;
+use astrcode_extension_sdk::extension::{
+    LifecycleEvent, LifecyclePayload, RuntimeLifecycleContext,
+};
 use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{
     CompactSnapshotInput, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
@@ -21,7 +23,7 @@ use astrcode_storage::{
 use crate::{
     SessionEventPublishError, session_error::SessionError, session_runtime::SessionRuntimeState,
     session_runtime_services::SessionRuntimeServices, session_state::SessionStateSource,
-    turn_context::SharedTurnContext,
+    turn_context::hook_call_context_for_read_model,
 };
 
 /// 创建 session 所需的参数集合。
@@ -267,8 +269,10 @@ pub async fn emit_lifecycle_for_read_model(
     session_store_dir: Option<std::path::PathBuf>,
     event: LifecycleEvent,
 ) -> Result<(), SessionError> {
-    let ctx =
-        SharedTurnContext::from_read_model(session_id, model, session_store_dir).lifecycle_ctx();
+    let ctx = RuntimeLifecycleContext::new(
+        hook_call_context_for_read_model(session_id, model, session_store_dir),
+        LifecyclePayload::new(None),
+    );
     runtime_services
         .turn_runtime_view()
         .await?

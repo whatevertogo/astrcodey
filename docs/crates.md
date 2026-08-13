@@ -146,7 +146,7 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 
 主要模块：
 
-- `model`：组合 `SessionReadModel`，维护 identity、stats、summary 和跨子投影查询。
+- `model`：组合 `SessionReadModel`，定义 identity、stats、`SessionSummary` 和跨子投影查询。
 - `model_context`：system prompt、provider-visible 消息、usage、compact 元数据，以及 rewrite fingerprint 校验和前缀替换。
 - `presentation`：首条用户消息、artifact、错误与 recap 等展示事实。
 - `execution`：phase、未结 turn、pending input、tool call、approval 和 active step。
@@ -208,7 +208,7 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 主要公开入口：
 
 - `Session`、`SessionCreateParams`、`SessionError`：session handle 和创建参数。
-- `SessionRuntimeState`、`SessionModelBinding`：同一 session 的进程内共享状态和模型绑定。
+- `SessionRuntimeState`：同一 session 的进程内共享状态和事件排序边界。
 - `SessionRuntimeServices`、`SessionExtensionPorts`：server composition root 注入的 context、窄 extension ports、tool catalog、post-compact enrichment 等能力。
 - `ToolRegistry`：由单个 turn 显式持有的不可变工具快照；session 按运行时代次缓存并复用。
 - `TurnHandle`、`TurnOutput`、`RunTurnResult`：turn 运行和停止控制。
@@ -216,9 +216,9 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 主要模块：
 
 - `session`：session 对象、payload 级事件写入、恢复、订阅和读模型访问。
-- `event_publisher`：每个 session 一条 durable/live 有序发布管线。
+- `session_event_sink`：每个 session 一条 durable/live 有序发布管线。
 - `session_state`：应用层只读状态端口及 storage adapter。
-- `session_runtime`：进程内 runtime state，持有 publisher、broadcast、file observation store、审批状态和不可变工具快照缓存。
+- `session_runtime`：进程内 runtime state，持有 event sink、file observation store、审批状态和不可变工具快照缓存。
 - `session_runtime_services`：跨 session 共享的运行时服务。
 - `session_extension_ports`：runtime snapshot、tool catalog、prompt contribution、turn hooks、session operations 五个窄端口。
 - `session_tools`：按 catalog revision、working directory 和工具选择缓存快照，处理 partial TTL 与 single-flight。
@@ -227,7 +227,7 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 - `tool_registry`：工具定义、执行句柄和 prompt metadata 的不可变快照。
 - `turn_context`：单 turn 上下文、事件 tx、错误类型。
 - `turn_runner`、`turn_stages`：agent turn 主循环和阶段划分。
-- `llm_stream`、`llm_request_history`：LLM 流处理和请求历史。
+- `llm_stream`：LLM 流处理；当轮 provider 请求快照由 `turn_stages` 持有。
 - `tool_pipeline`：工具调用预处理、执行、提交；并行/串行工具调度。
 - `tool_exec`：单个工具执行、file observation store、interrupt 结果。
 - `tool_json_repair`：修复模型输出的工具 JSON 参数。
@@ -242,9 +242,15 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 - `steer`：运行中注入用户消息。
 - `turn_publish`、`payload`：turn 事件 ingress、storage projection 读取和 payload 构建。
 
+Compact 调用链只传递 `CompactStrategy`；trigger 与 manual 的 `keep_recent_turns` 由 strategy
+唯一派生，避免多个可冲突参数描述同一次 compact。turn 归属由 hook call context 携带，
+pipeline 不再接收第二份 `turn_id`。前端同样不复制 conversation phase：服务端
+`ConversationControlStateDto.phase` 是远端事实，本地只叠加请求尚未到达 live event 的
+`compactSubmitting` 短窗口。
+
 依赖边界：依赖 `astrcode-core`、`astrcode-context`、`astrcode-extension-sdk`、`astrcode-storage` 和 `astrcode-session-projection`。它刻意不依赖 `astrcode-tools`、`astrcode-extensions`、`astrcode-server`；server 在 composition root 通过 `SessionRuntimeServices` 注入这些能力。
 
-测试线索：`tests/session_resume.rs`、`tests/ssot_turn_history.rs`、`tests/compact_persist_conflict.rs` 覆盖恢复、历史唯一事实源和 compact 并发；模块内测试覆盖权限链、工具 JSON 修复、工具结果、turn 发布等。
+测试线索：`tests/session_resume.rs`、`tests/ssot_turn_history.rs`、`tests/compact_persist_conflict.rs` 覆盖恢复、历史唯一事实源和 compact 并发；`compaction/pipeline/tests.rs` 覆盖 hook、fsync、checkpoint 与唯一终态顺序；模块内测试覆盖权限链、工具 JSON 修复、工具结果、turn 发布等。
 
 ## `astrcode-extension-sdk`
 

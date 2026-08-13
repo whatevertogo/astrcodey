@@ -3,6 +3,7 @@ import { useAppStore } from '../../store/conversation'
 import type { SessionStreamStatus } from '../../store/sessionStreamController'
 import { cn } from '../../lib/utils'
 import { PHASE_BG_CLASS } from '../../lib/styles'
+import { effectiveConversationPhase } from '../../store/phaseHelpers'
 import { Dropdown, Icon, IconButton } from '../ui'
 
 const PHASE_LABELS: Record<string, string> = {
@@ -48,7 +49,9 @@ export default function TopBar({
   isSidebarOpen,
   onToggleSidebar,
 }: TopBarProps) {
-  const phase = useAppStore((s) => s.phase)
+  const phase = useAppStore((state) =>
+    effectiveConversationPhase(state.control, state.compactSubmitting)
+  )
   const activeSessionTitle = useAppStore((s) => s.activeSessionTitle)
   const agentSessions = useAppStore((s) => s.agentSessions)
   const switchSession = useAppStore((s) => s.switchSession)

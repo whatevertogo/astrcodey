@@ -5,9 +5,8 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
-use astrcode_context::{CompactResult, is_compact_summary_message};
+use astrcode_context::is_compact_summary_message;
 use astrcode_core::{
-    compaction::CompactStrategy,
     config::ContextSettings,
     event::DurableEventPayload,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
@@ -103,20 +102,6 @@ async fn configure_system_prompt(session: &Session) {
         .unwrap();
 }
 
-fn sample_compaction() -> CompactResult {
-    CompactResult {
-        pre_tokens: 100,
-        post_tokens: 10,
-        summary: "integration summary".into(),
-        messages_removed: 2,
-        summary_messages: vec![LlmMessage::user(
-            "<compact_summary>\nSummary:\nintegration\n</compact_summary>",
-        )],
-        retained_messages: vec![LlmMessage::user("kept tail")],
-        transcript_path: None,
-    }
-}
-
 async fn compact_event_count(store: &dyn SessionStore, session_id: &SessionId) -> usize {
     store
         .replay_events(session_id)
@@ -141,23 +126,6 @@ fn projected_provider_messages(model: &SessionReadModel) -> Vec<LlmMessage> {
             .map(|message| message.message.clone())
             .collect(),
     )
-}
-
-/// 与生产侧 `persist_compact_result` 同路径构造 snapshot 并计算前缀指纹；
-/// 调用时 `source_seq` 必须等于当前 last_seq（前缀即整个 transcript）。
-async fn prefix_fingerprint_at(session: &Session, source_seq: u64) -> String {
-    let model = session.read_model().await.unwrap();
-    let snapshot = astrcode_context::ContextSnapshot::new(
-        source_seq,
-        model.system_prompt.text.clone(),
-        model
-            .model_context
-            .messages
-            .iter()
-            .map(|message| message.message.clone())
-            .collect(),
-    );
-    astrcode_core::event::transcript_prefix_fingerprint(&snapshot.system_prompt, &snapshot.messages)
 }
 
 /// 在 compact LLM 调用期间注入 durable 事件，使 `source_seq` 过期。
@@ -232,129 +200,6 @@ impl LlmProvider for RaceOnCompactLlm {
             max_output_tokens: 1024,
         }
     }
-}
-
-#[tokio::test]
-async fn transcript_rewrite_preserves_new_tail_events() {
-    let (session, store, _, _) = common::spawn_session_with_context_and_services(
-        Arc::new(StaticOkLlm),
-        ContextSettings::default(),
-    )
-    .await;
-    configure_system_prompt(&session).await;
-    seed_history(&session, 2).await;
-
-    let stale_seq = session
-        .latest_cursor()
-        .await
-        .unwrap()
-        .expect("session should have cursor after seeding")
-        .parse::<u64>()
-        .expect("cursor should be u64 event seq");
-    let source_fingerprint = prefix_fingerprint_at(&session, stale_seq).await;
-
-    session
-        .emit_durable(
-            None,
-            DurableEventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "race event".into(),
-                attachments: vec![],
-                accepted_seq: None,
-            },
-        )
-        .await
-        .unwrap();
-
-    session
-        .rewrite_transcript_for_compaction(
-            "auto_threshold".into(),
-            sample_compaction(),
-            stale_seq,
-            source_fingerprint,
-            CompactStrategy::Auto,
-        )
-        .await
-        .expect("persist should preserve events after source_seq");
-    assert_eq!(
-        compact_event_count(store.as_ref(), session.id()).await,
-        1,
-        "compact should append one rewrite event"
-    );
-    let provider_messages = projected_provider_messages(&session.read_model().await.unwrap());
-    assert!(
-        provider_messages
-            .iter()
-            .any(|m| m.joined_display_text("\n").contains("kept tail")),
-        "retained compact messages should remain visible"
-    );
-    assert!(
-        provider_messages
-            .iter()
-            .any(|m| m.joined_display_text("\n").contains("race event")),
-        "events after source_seq must remain in projection"
-    );
-}
-
-/// 两个 rewrite 竞速：后提交者的前缀已被前一个 rewrite 改写，`source_seq` 校验
-/// 照常通过，只有指纹能识别内容漂移——提交被 projection 拒绝，调用方拿到错误
-/// （turn 内路径由 `commit_compaction` 记 warn 并跳过），日志只保留先提交的 rewrite。
-#[tokio::test]
-async fn transcript_rewrite_with_stale_fingerprint_is_rejected() {
-    let (session, store, _, _) = common::spawn_session_with_context_and_services(
-        Arc::new(StaticOkLlm),
-        ContextSettings::default(),
-    )
-    .await;
-    configure_system_prompt(&session).await;
-    seed_history(&session, 2).await;
-
-    let source_seq = session
-        .latest_cursor()
-        .await
-        .unwrap()
-        .expect("session should have cursor after seeding")
-        .parse::<u64>()
-        .expect("cursor should be u64 event seq");
-    let stale_fingerprint = prefix_fingerprint_at(&session, source_seq).await;
-
-    session
-        .rewrite_transcript_for_compaction(
-            "auto_threshold".into(),
-            sample_compaction(),
-            source_seq,
-            stale_fingerprint.clone(),
-            CompactStrategy::Auto,
-        )
-        .await
-        .expect("first rewrite should commit");
-
-    let stale = session
-        .rewrite_transcript_for_compaction(
-            "auto_threshold".into(),
-            sample_compaction(),
-            source_seq,
-            stale_fingerprint,
-            CompactStrategy::Auto,
-        )
-        .await;
-    assert!(
-        stale.is_err(),
-        "rewrite over an already-rewritten prefix must be rejected"
-    );
-
-    assert_eq!(
-        compact_event_count(store.as_ref(), session.id()).await,
-        1,
-        "only the first rewrite should be persisted"
-    );
-    let provider_messages = projected_provider_messages(&session.read_model().await.unwrap());
-    assert!(
-        provider_messages
-            .iter()
-            .any(|m| m.joined_display_text("\n").contains("kept tail")),
-        "first rewrite output must remain untouched"
-    );
 }
 
 #[tokio::test]
@@ -499,7 +344,7 @@ async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
 
     let outcome = compact_task.await.unwrap().unwrap();
     assert!(
-        matches!(outcome, ManualCompactionOutcome::Compacted { .. }),
+        outcome == ManualCompactionOutcome::Compacted,
         "idle compact should preserve the concurrent tail, got {outcome:?}"
     );
     assert_eq!(
@@ -516,29 +361,4 @@ async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
         )),
         "projection must preserve artifacts appended during compact"
     );
-}
-
-struct StaticOkLlm;
-
-#[async_trait::async_trait]
-impl LlmProvider for StaticOkLlm {
-    async fn generate(
-        &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
-        let _ = tx.send(LlmEvent::Done {
-            finish_reason: "stop".into(),
-        });
-        Ok(rx)
-    }
-
-    fn model_limits(&self) -> ModelLimits {
-        ModelLimits {
-            max_input_tokens: 200_000,
-            max_output_tokens: 1024,
-        }
-    }
 }

@@ -148,9 +148,7 @@
         "control": {
           "phase": "idle",
           "canSubmitPrompt": true,
-          "canRequestCompact": true,
-          "compactPending": false,
-          "compacting": false
+          "canRequestCompact": true
         }
       }
     }
@@ -177,12 +175,9 @@
     "control": {
       "phase": "idle",
       "canSubmitPrompt": true,
-      "canRequestCompact": true,
-      "compactPending": false,
-      "compacting": false
+      "canRequestCompact": true
     },
     "cursor": "13",
-    "phase": "idle",
     "agentSessions": [
       {
         "childSessionId": "child-contract",

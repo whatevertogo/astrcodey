@@ -300,17 +300,16 @@ fn unsupported_prompt_block(kind: &str) -> Error {
 
 fn handler_error_to_acp(error: HandlerError) -> Error {
     match error {
-        HandlerError::TurnAlreadyRunning => Error::new(40900, error.to_string()),
+        HandlerError::TurnAlreadyRunning | HandlerError::CompactBlocked => {
+            Error::new(40900, error.to_string())
+        },
         HandlerError::NoActiveSession => Error::new(40400, error.to_string()),
         HandlerError::SessionNotFound(_) => Error::new(40401, error.to_string()),
         HandlerError::UnknownCommand(_) => Error::invalid_params().data(error.to_string()),
         HandlerError::NoActiveTurn
-        | HandlerError::CompactBlocked
-        | HandlerError::CompactionSkipped(_)
         | HandlerError::SessionManager(_)
         | HandlerError::Session(_)
         | HandlerError::Turn(_)
-        | HandlerError::Compact(_)
         | HandlerError::Llm(_)
         | HandlerError::Extension(_)
         | HandlerError::ActorUnavailable

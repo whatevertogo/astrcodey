@@ -1,3 +1,5 @@
+//! Turn、step、输入、工具调用与审批的执行状态投影。
+
 use std::collections::{BTreeMap, HashSet};
 
 use astrcode_core::{
@@ -144,4 +146,54 @@ fn settle(execution: &mut SessionExecutionState, phase: Phase) {
     execution.pending_tool_calls.clear();
     execution.pending_tool_approvals.clear();
     execution.active_step = None;
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::{
+        event::{DurableEvent, DurableEventPayload, StoredEvent},
+        types::{SessionId, new_message_id},
+        user_input::UserInput,
+    };
+
+    use super::{SessionExecutionState, apply_event};
+
+    #[test]
+    fn matching_user_message_consumes_accepted_input() {
+        let session_id = SessionId::new("session-pending");
+        let input = UserInput::text_only("queued");
+        let mut execution = SessionExecutionState::default();
+
+        apply_event(
+            &StoredEvent::new(
+                1,
+                DurableEvent::session(
+                    session_id.clone(),
+                    DurableEventPayload::UserInputAccepted {
+                        input: input.clone(),
+                    },
+                ),
+            ),
+            &mut execution,
+        );
+        assert_eq!(execution.pending_inputs.len(), 1);
+
+        apply_event(
+            &StoredEvent::new(
+                2,
+                DurableEvent::session(
+                    session_id,
+                    DurableEventPayload::UserMessage {
+                        message_id: new_message_id(),
+                        text: input.text,
+                        attachments: input.attachments,
+                        accepted_seq: Some(1),
+                    },
+                ),
+            ),
+            &mut execution,
+        );
+
+        assert!(execution.pending_inputs.is_empty());
+    }
 }

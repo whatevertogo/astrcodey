@@ -197,7 +197,6 @@ export interface ConversationSnapshot {
   sessionId: string
   sessionTitle: string
   cursor: ConversationCursor
-  phase: Phase
   control: ConversationControlState
   blocks: ConversationBlock[]
   agentSessions: AgentSessionLink[]

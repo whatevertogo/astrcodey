@@ -29,7 +29,7 @@ use crate::{
     session_error::SessionError,
     session_runtime_services::SessionRuntimeView,
     tool_exec::TurnToolContext,
-    turn_context::{SharedTurnContext, TurnError},
+    turn_context::{TurnError, hook_call_context_for_read_model},
     turn_handle::{SharedTurnFinalization, TurnHandle},
     turn_runner::{RunTurnResult, TurnFinalization, TurnLoop, run_turn},
 };
@@ -42,10 +42,9 @@ impl Session {
         turn_id: &TurnId,
         cancellation: &CancellationToken,
     ) -> RuntimeHookCallContext {
-        let mut shared = SharedTurnContext::from_read_model(self.id(), state, session_store_dir);
-        shared.turn_id = Some(turn_id.clone());
-        shared.cancellation_token = cancellation.clone();
-        shared.hook_call_context()
+        hook_call_context_for_read_model(self.id(), state, session_store_dir)
+            .with_turn_id(turn_id.to_string())
+            .with_cancellation(cancellation.clone())
     }
 
     async fn emit_turn_start_events(

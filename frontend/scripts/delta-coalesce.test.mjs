@@ -76,7 +76,6 @@ const retriedAssistant = reduceConversationDeltas(
     ],
     control: null,
     cursor: '1',
-    phase: 'streaming',
     compactSubmitting: false,
     agentSessions: [],
     statusItems: {},
@@ -143,7 +142,6 @@ const frameState = {
   blocks: [],
   control: null,
   cursor: '1',
-  phase: 'idle',
   compactSubmitting: false,
   agentSessions: [
     {
@@ -181,8 +179,6 @@ const framePatch = reduceConversationDeltas(
         phase: 'streaming',
         canSubmitPrompt: false,
         canRequestCompact: true,
-        compactPending: false,
-        compacting: false,
       },
     },
     { kind: 'statusItemUpdate', id: 'branch', text: 'main' },
@@ -191,7 +187,7 @@ const framePatch = reduceConversationDeltas(
 )
 
 assert.equal(framePatch.blocks?.[0].text, 'hello world')
-assert.equal(framePatch.phase, 'streaming')
+assert.equal(framePatch.control?.phase, 'streaming')
 assert.equal(framePatch.cursor, '6')
 assert.deepEqual(framePatch.statusItems, { branch: 'main' })
 assert.deepEqual(framePatch.statusItemRevisions, { branch: 1 })
@@ -575,7 +571,6 @@ const reducerInitialState = {
   blocks: reducerFixture.initialBlocks,
   control: null,
   cursor: '1',
-  phase: 'streaming',
   compactSubmitting: false,
   agentSessions: [],
   statusItems: {},

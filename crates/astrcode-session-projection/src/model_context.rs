@@ -1,3 +1,5 @@
+//! Provider 可见上下文、system prompt、usage 与 compact rewrite 投影。
+
 use std::collections::HashSet;
 
 use astrcode_core::{
@@ -185,7 +187,7 @@ pub(crate) fn apply_event(
                         transcript_path: details.transcript_path.clone(),
                         seq: event.seq,
                         source_seq: *source_seq,
-                        strategy: details.strategy.clone(),
+                        strategy: details.strategy,
                     });
                 },
             }
@@ -456,5 +458,100 @@ impl SessionModelContext {
                 _ => None,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::{
+        event::{DurableEvent, DurableEventPayload, StoredEvent, SystemPromptSource},
+        llm::LlmTokenUsage,
+        types::{SessionId, new_message_id},
+    };
+
+    use super::{SessionModelContext, SessionSystemPrompt, apply_event};
+
+    #[test]
+    fn usage_remains_anchored_to_covered_messages_until_context_identity_changes() {
+        let session_id = SessionId::new("session-context-usage");
+        let mut system_prompt = SessionSystemPrompt {
+            text: "system".into(),
+            extra: None,
+            fingerprint: "fingerprint".into(),
+            source: SystemPromptSource::Native,
+        };
+        let mut context = SessionModelContext::default();
+        let stored = |seq, payload| {
+            StoredEvent::new(seq, DurableEvent::session(session_id.clone(), payload))
+        };
+
+        apply_event(
+            &stored(
+                1,
+                DurableEventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: "first".into(),
+                    attachments: vec![],
+                    accepted_seq: None,
+                },
+            ),
+            &mut system_prompt,
+            &mut context,
+        );
+        apply_event(
+            &stored(
+                2,
+                DurableEventPayload::TokenUsageRecorded {
+                    usage: LlmTokenUsage {
+                        total_tokens: Some(655_859),
+                        ..Default::default()
+                    },
+                    model_context_window: 1_000_000,
+                },
+            ),
+            &mut system_prompt,
+            &mut context,
+        );
+        assert_eq!(
+            context.usage.as_ref().map(|usage| (
+                usage.context_tokens,
+                usage.model_context_window,
+                usage.covered_message_count,
+            )),
+            Some((655_859, 1_000_000, 1))
+        );
+
+        apply_event(
+            &stored(
+                3,
+                DurableEventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: "tail".into(),
+                    attachments: vec![],
+                    accepted_seq: None,
+                },
+            ),
+            &mut system_prompt,
+            &mut context,
+        );
+        assert_eq!(
+            context
+                .usage
+                .as_ref()
+                .map(|usage| usage.covered_message_count),
+            Some(1)
+        );
+
+        apply_event(
+            &stored(
+                4,
+                DurableEventPayload::ModelIdChanged {
+                    model_id: "model-b".into(),
+                },
+            ),
+            &mut system_prompt,
+            &mut context,
+        );
+        assert!(context.usage.is_none());
     }
 }

@@ -1,13 +1,13 @@
 //! Idle session 的 manual compact 入口。
 
-use astrcode_core::compaction::{CompactStrategy, CompactTrigger};
+use astrcode_core::compaction::CompactStrategy;
 
 use super::pipeline::{CompactionPipeline, CompactionPipelineOutcome};
-use crate::{SessionError, session::Session, turn_context::SharedTurnContext};
+use crate::{SessionError, session::Session, turn_context::hook_call_context_for_read_model};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManualCompactionOutcome {
-    Compacted { messages_removed: usize },
+    Compacted,
     Skipped { message: String },
 }
 
@@ -20,36 +20,28 @@ pub async fn compact_manual_session(
     let runtime_view = runtime_services.turn_runtime_view().await?;
     let extension_runner = runtime_view.turn_hooks_arc();
     let state = session.read_model().await?;
-    let session_store_dir = session.session_store_dir().await;
-    let shared =
-        SharedTurnContext::from_read_model(session.id(), &state, session_store_dir.clone());
+    let hook_call =
+        hook_call_context_for_read_model(session.id(), &state, session.session_store_dir().await);
     let tool_registry = session
         .tool_registry_snapshot_for_view(&runtime_view, &state.identity.working_dir)
         .await?;
+    let tools = tool_registry.list_definitions();
 
     let outcome = CompactionPipeline {
         session,
         llm: runtime_services.llm(),
         extension_runner: extension_runner.as_ref(),
-        hook_call: shared.hook_call_context(),
+        hook_call,
         pre_hook_message_count: state.model_context.messages.len(),
-        tools: tool_registry.list_definitions(),
-        working_dir: state.identity.working_dir.clone(),
-        session_store_dir,
-        turn_id: None,
-        trigger: CompactTrigger::ManualCommand,
+        tools: &tools,
         strategy: CompactStrategy::Manual { keep_recent_turns },
         use_llm: true,
-        keep_recent_turns,
-        write_transcript_snapshot: true,
     }
     .run()
     .await;
 
     match outcome {
-        CompactionPipelineOutcome::Compacted {
-            messages_removed, ..
-        } => Ok(ManualCompactionOutcome::Compacted { messages_removed }),
+        CompactionPipelineOutcome::Compacted { .. } => Ok(ManualCompactionOutcome::Compacted),
         CompactionPipelineOutcome::Skipped { message, .. } => {
             Ok(ManualCompactionOutcome::Skipped { message })
         },

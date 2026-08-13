@@ -423,7 +423,6 @@ export function decodeConversationSnapshot(
     sessionId: requiredString(object, 'sessionId'),
     sessionTitle: requiredString(object, 'sessionTitle'),
     cursor: decodeConversationCursor(object.cursor),
-    phase: decodePhase(object.phase),
     control: decodeConversationControlState(object.control),
     blocks: arrayField(object, 'blocks').map(decodeConversationBlock),
     agentSessions: arrayField(object, 'agentSessions').map(

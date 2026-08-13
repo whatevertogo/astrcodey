@@ -30,7 +30,11 @@ import type {
 } from '../../services/types'
 import { Icon } from '../ui'
 import * as api from '../../services/api'
-import { canInjectMidTurn, isExecutionPhase } from '../../store/phaseHelpers'
+import {
+  canInjectMidTurn,
+  effectiveConversationPhase,
+  isExecutionPhase,
+} from '../../store/phaseHelpers'
 
 interface InputBarProps {
   presentation?: 'docked' | 'hero'
@@ -43,13 +47,15 @@ function projectNameFromDir(workingDir: string): string {
 export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   const submitPrompt = useAppStore((s) => s.submitPrompt)
   const abortCurrentTurn = useAppStore((s) => s.abortCurrentTurn)
-  const phase = useAppStore((s) => s.phase)
   const control = useAppStore((s) => s.control)
   const workingDir = useAppStore((s) => s.workingDir)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const modelRefreshKey = useAppStore((s) => s.modelRefreshKey)
   const bumpModelRefreshKey = useAppStore((s) => s.bumpModelRefreshKey)
   const compactSubmitting = useAppStore((s) => s.compactSubmitting)
+  const phase = useAppStore((state) =>
+    effectiveConversationPhase(state.control, state.compactSubmitting)
+  )
   const statusItems = useAppStore((s) => s.statusItems)
   const slashCommands = useAppStore((s) => s.slashCommands)
   const refreshCommands = useAppStore((s) => s.refreshCommands)
@@ -72,8 +78,8 @@ export default function InputBar({ presentation = 'docked' }: InputBarProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const isHero = presentation === 'hero'
-  const isCompacting = phase === 'compacting' || compactSubmitting
-  const isBusy = isExecutionPhase(phase, compactSubmitting)
+  const isCompacting = phase === 'compacting'
+  const isBusy = isExecutionPhase(phase)
   const canSubmit = !!activeSessionId && !isCompacting
   const canInject = canInjectMidTurn(control, compactSubmitting)
   const submitActionLabel = isBusy

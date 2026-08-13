@@ -398,9 +398,9 @@ mod tests {
         extension::{
             CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, LifecycleEvent,
             PostToolUseResult, PreToolUsePayload, PreToolUseResult, ProviderEvent, ProviderResult,
-            RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
-            RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
-            RuntimeProviderContext, RuntimeUserMessageEnvelopeContext, UserMessageEnvelopeResult,
+            RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
+            RuntimePostToolUseContext, RuntimePreToolUseContext, RuntimeProviderContext,
+            RuntimeUserMessageEnvelopeContext, UserMessageEnvelopeResult,
         },
         runtime_ports::TurnHooks,
     };
@@ -769,27 +769,24 @@ mod tests {
         let turn_id = new_turn_id();
         let publisher = Arc::new(TurnEvents::new(session.clone(), turn_id.clone()));
         let model = session.read_model().await.unwrap();
-        let mut shared = crate::turn_context::SharedTurnContext::from_read_model(
-            session.id(),
+        let mut tool_context = crate::tool_exec::TurnToolContext::for_turn(
+            &session,
             &model,
+            turn_id,
+            model.identity.tool_selection.clone(),
             session.session_store_dir().await,
+            tokio_util::sync::CancellationToken::new(),
         );
-        let bridge = TurnEventBridge::start(Arc::clone(&publisher), &mut shared);
+        let bridge = TurnEventBridge::start(Arc::clone(&publisher), &mut tool_context.shared);
 
-        let call = RuntimeHookCallContext::new(
-            session.id().to_string(),
-            shared.working_dir.clone(),
-            shared.model_selection(),
-            None,
-        )
-        .with_event_tx(shared.turn_event_tx());
+        let call = tool_context.shared.hook_call_context();
         let ctx = RuntimePreToolUseContext::new(
             call,
             PreToolUsePayload::new(
                 "call-1".into(),
                 "any",
                 serde_json::json!({}),
-                shared.approval_mode,
+                tool_context.shared.approval_mode,
                 vec![],
             ),
         );
@@ -802,7 +799,7 @@ mod tests {
             .await
             .unwrap();
 
-        bridge.shutdown(&mut shared).await.unwrap();
+        bridge.shutdown(&mut tool_context.shared).await.unwrap();
 
         let events = session
             .runtime

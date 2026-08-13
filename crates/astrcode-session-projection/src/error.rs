@@ -1,3 +1,5 @@
+//! Projection 顺序、会话归属与 transcript rewrite 校验错误。
+
 use astrcode_core::types::SessionId;
 use thiserror::Error;
 

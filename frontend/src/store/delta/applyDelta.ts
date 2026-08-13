@@ -7,7 +7,7 @@ import type {
 } from '../../services/types'
 import { decodePendingAskUserQuestion } from '../../services/protocol'
 import type { AppState } from '../types'
-import { mergeAgentSession, resolvePhase, upsertBlock } from './blockHelpers'
+import { mergeAgentSession, upsertBlock } from './blockHelpers'
 import {
   applyCoalescedDeltas,
   coalesceDeltas,
@@ -22,7 +22,6 @@ export type ConversationRenderState = Pick<
   | 'blocks'
   | 'control'
   | 'cursor'
-  | 'phase'
   | 'compactSubmitting'
   | 'agentSessions'
   | 'statusItems'
@@ -140,7 +139,6 @@ export function reduceConversationDeltas(
 ): ConversationRenderPatch {
   let blocks = current.blocks
   let control = current.control
-  let phase = current.phase
   let agentSessions = current.agentSessions
   let statusItems = current.statusItems
   let statusItemRevisions = current.statusItemRevisions
@@ -193,7 +191,6 @@ export function reduceConversationDeltas(
         if (!sameControlState(control, delta.control)) {
           control = delta.control
         }
-        phase = resolvePhase(delta.control, current.compactSubmitting)
         break
       }
 
@@ -346,7 +343,6 @@ export function reduceConversationDeltas(
   const patch: ConversationRenderPatch = {}
   if (blocks !== current.blocks) patch.blocks = blocks
   if (control !== current.control) patch.control = control
-  if (phase !== current.phase) patch.phase = phase
   if (agentSessions !== current.agentSessions) {
     patch.agentSessions = agentSessions
   }

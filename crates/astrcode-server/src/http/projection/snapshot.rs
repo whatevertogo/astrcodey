@@ -56,7 +56,6 @@ pub(in crate::http) fn conversation_to_dto(
         cursor: ConversationCursorDto {
             value: session.cursor(),
         },
-        phase: session.execution.phase.into(),
         control: control_from_phase(
             session.execution.phase,
             !session.model_context.messages.is_empty(),

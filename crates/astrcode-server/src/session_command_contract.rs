@@ -72,16 +72,12 @@ pub enum HandlerError {
     UnknownCommand(String),
     #[error("Cannot compact while a turn is running")]
     CompactBlocked,
-    #[error("Compaction skipped: {0}")]
-    CompactionSkipped(String),
     #[error(transparent)]
     SessionManager(#[from] SessionManagerError),
     #[error(transparent)]
     Session(astrcode_session::SessionError),
     #[error(transparent)]
     Turn(astrcode_session::TurnError),
-    #[error(transparent)]
-    Compact(astrcode_context::CompactError),
     #[error("LLM error: {0}")]
     Llm(#[source] astrcode_core::llm::LlmError),
     #[error(transparent)]

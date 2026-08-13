@@ -10,7 +10,6 @@ import { isRegisteredSlashCommand } from '../lib/keybindings'
 import {
   commandNoteBlock,
   isCompactCommand,
-  resolvePhase,
   withTimeout,
 } from './delta/blockHelpers'
 import { startSessionStream } from './stream'
@@ -18,7 +17,11 @@ import {
   PendingAskUserPoller,
   type PendingAskUserPollScheduler,
 } from './pendingAskUserPoller'
-import { canInjectMidTurn, isExecutionPhase } from './phaseHelpers'
+import {
+  canInjectMidTurn,
+  effectiveConversationPhase,
+  isExecutionPhase,
+} from './phaseHelpers'
 import {
   computeInitialProjectFolderOrder,
   syncProjectFolderOrder,
@@ -45,7 +48,6 @@ function resetSessionView(): Partial<AppState> {
     blocks: [],
     control: null,
     cursor: null,
-    phase: 'idle',
     compactSubmitting: false,
     sessionStream: null,
     sessionStreamStatus: 'disconnected',
@@ -74,7 +76,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   blocks: [],
   control: null,
   cursor: null,
-  phase: 'idle',
   compactSubmitting: false,
   sessionStream: null,
   sessionStreamStatus: 'disconnected',
@@ -250,7 +251,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         blocks: snapshot.blocks,
         control: snapshot.control,
         cursor: snapshot.cursor.value,
-        phase: resolvePhase(snapshot.control, false),
         activeSessionTitle: snapshot.sessionTitle,
         workingDir: sessionItem?.workingDir ?? null,
         agentSessions: snapshot.agentSessions ?? [],
@@ -307,7 +307,6 @@ export const useAppStore = create<AppState>((set, get) => ({
         blocks: snapshot.blocks,
         control: snapshot.control,
         cursor: snapshot.cursor.value,
-        phase: resolvePhase(snapshot.control, get().compactSubmitting),
         activeSessionTitle: snapshot.sessionTitle,
         agentSessions: snapshot.agentSessions ?? [],
       })
@@ -490,10 +489,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     const compactCommand = isCompactCommand(text)
     if (compactCommand) {
-      set({ compactSubmitting: true, phase: 'compacting' })
+      set({ compactSubmitting: true })
     }
 
-    const busy = isExecutionPhase(state.phase, state.compactSubmitting)
+    const busy = isExecutionPhase(
+      effectiveConversationPhase(state.control, state.compactSubmitting)
+    )
     const slashCommand = isRegisteredSlashCommand(text, state.slashCommands)
     const injectable = canInjectMidTurn(state.control, state.compactSubmitting)
 
@@ -540,7 +541,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       )
       if (response.kind === 'accepted') {
         set((current) => ({
-          phase: 'thinking',
           control: {
             phase: 'thinking',
             canSubmitPrompt: false,
@@ -552,7 +552,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         if (get().activeSessionId !== response.sessionId) {
           return true
         }
-        if (response.message === 'compact accepted') {
+        if (compactCommand) {
           await get().refreshSessions()
           await get().switchSession(response.sessionId)
         } else if (
@@ -575,11 +575,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return false
     } finally {
       if (compactCommand) {
-        const current = get()
-        set({
-          compactSubmitting: false,
-          phase: resolvePhase(current.control, false),
-        })
+        set({ compactSubmitting: false })
       }
     }
   },
@@ -653,9 +649,15 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   flushPendingQueued: async () => {
     const state = get()
-    const { activeSessionId, phase, compactSubmitting } = state
+    const { activeSessionId, compactSubmitting } = state
     if (!activeSessionId) return
-    if (isExecutionPhase(phase, compactSubmitting)) return
+    if (
+      isExecutionPhase(
+        effectiveConversationPhase(state.control, compactSubmitting)
+      )
+    ) {
+      return
+    }
 
     const normalized = state.pendingMessages.map((item) =>
       item.delivery === 'inject'

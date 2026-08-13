@@ -4,31 +4,24 @@ use std::sync::Arc;
 
 use astrcode_context::{ContextPrepareInput, ContextSnapshot};
 use astrcode_core::{
-    compaction::{CompactStrategy, CompactTrigger},
+    compaction::CompactStrategy,
     llm::{LlmMessage, LlmProvider},
     tool::ToolDefinition,
-    types::TurnId,
 };
-use astrcode_extension_sdk::runtime_ports::TurnHooks;
+use astrcode_extension_sdk::{extension::RuntimeHookCallContext, runtime_ports::TurnHooks};
 
 use super::{
     circuit_breaker::CompactCircuitBreaker,
     pipeline::{CompactionPipeline, CompactionPipelineOutcome, try_provider_input_tokens},
 };
 use crate::{
-    deferred_tools::append_deferred_tools_reminder,
-    projection_context::context_snapshot,
-    session::Session,
-    turn_context::{SharedTurnContext, TurnError},
-    turn_publish::TurnEvents,
-    turn_stages::TurnState,
+    deferred_tools::append_deferred_tools_reminder, projection_context::context_snapshot,
+    session::Session, turn_context::TurnError, turn_publish::TurnEvents, turn_stages::TurnState,
 };
 
 pub(crate) struct CompactionPlan {
-    trigger: CompactTrigger,
     strategy: CompactStrategy,
     use_llm: bool,
-    keep_recent_turns: Option<usize>,
 }
 
 #[derive(PartialEq, Eq)]
@@ -45,7 +38,7 @@ pub(crate) struct PreparedProviderHistory {
 pub(crate) struct CompactionHost<'a> {
     pub session: &'a Session,
     pub llm: &'a Arc<dyn LlmProvider>,
-    pub shared: &'a SharedTurnContext,
+    pub hook_call: RuntimeHookCallContext,
     pub extension_runner: &'a dyn TurnHooks,
     pub breaker: &'a parking_lot::Mutex<CompactCircuitBreaker>,
 }
@@ -75,10 +68,8 @@ pub(crate) async fn plan_auto_compaction(
     }
 
     Some(CompactionPlan {
-        trigger: CompactTrigger::AutoThreshold,
         strategy: CompactStrategy::Auto,
         use_llm: host.breaker.lock().should_attempt(),
-        keep_recent_turns: None,
     })
 }
 
@@ -86,8 +77,8 @@ pub(crate) async fn prepare_provider_history(
     host: &CompactionHost<'_>,
     state: &TurnState,
     initial_snapshot: ContextSnapshot,
-    turn_id: &TurnId,
     plan: Option<CompactionPlan>,
+    tools: &[ToolDefinition],
     publisher: &TurnEvents,
 ) -> Result<PreparedProviderHistory, TurnError> {
     let context_assembler = host.session.runtime_services().context_assembler_arc();
@@ -95,10 +86,9 @@ pub(crate) async fn prepare_provider_history(
         Some(plan) => {
             let (snapshot, _) = run_compaction(
                 host,
-                state,
                 initial_snapshot.messages.len(),
-                turn_id,
                 plan,
+                tools,
                 publisher,
             )
             .await?;
@@ -128,22 +118,19 @@ pub(crate) async fn prepare_provider_history(
 pub(crate) async fn run_reactive_compaction(
     host: &CompactionHost<'_>,
     state: &TurnState,
-    turn_id: &TurnId,
     publisher: &TurnEvents,
 ) -> Result<bool, TurnError> {
     let model = publisher.snapshot_model().await?;
     let snapshot = context_snapshot(&model);
+    let tools = state.visible_tools();
     let (_, outcome) = run_compaction(
         host,
-        state,
         snapshot.messages.len(),
-        turn_id,
         CompactionPlan {
-            trigger: CompactTrigger::ReactivePromptTooLong,
             strategy: CompactStrategy::ReactivePromptTooLong,
             use_llm: true,
-            keep_recent_turns: None,
         },
+        &tools,
         publisher,
     )
     .await?;
@@ -155,33 +142,29 @@ pub(crate) async fn run_reactive_compaction(
 
 async fn run_compaction(
     host: &CompactionHost<'_>,
-    state: &TurnState,
     probe_message_count: usize,
-    turn_id: &TurnId,
     plan: CompactionPlan,
+    tools: &[ToolDefinition],
     publisher: &TurnEvents,
 ) -> Result<(ContextSnapshot, CompactionOutcome), TurnError> {
-    let tools = state.visible_tools();
+    let CompactionPlan { strategy, use_llm } = plan;
+    let records_breaker_attempt = matches!(strategy, CompactStrategy::Auto) && use_llm;
     let outcome = CompactionPipeline {
         session: host.session,
         llm: Arc::clone(host.llm),
         extension_runner: host.extension_runner,
-        hook_call: host.shared.hook_call_context(),
+        hook_call: host.hook_call.clone(),
         pre_hook_message_count: probe_message_count,
         tools,
-        working_dir: host.shared.working_dir.clone(),
-        session_store_dir: host.shared.session_store_dir.clone(),
-        turn_id: Some(turn_id),
-        trigger: plan.trigger,
-        strategy: plan.strategy.clone(),
-        use_llm: plan.use_llm,
-        keep_recent_turns: plan.keep_recent_turns,
-        write_transcript_snapshot: false,
+        strategy,
+        use_llm,
     }
     .run()
     .await;
 
-    record_breaker_attempt(host, &plan, outcome.llm_api_failed());
+    if records_breaker_attempt {
+        host.breaker.lock().finish_attempt(outcome.llm_api_failed());
+    }
     // append 已更新进程内 projection 但 fsync 失败时，本 turn 仍必须沿用冻结的原上下文。
     let fallback_snapshot = match &outcome {
         CompactionPipelineOutcome::Failed {
@@ -207,11 +190,4 @@ async fn run_compaction(
         },
     };
     Ok((snapshot, result))
-}
-
-/// 仅 auto LLM 探测需要记账；reactive/manual 不参与熔断。
-fn record_breaker_attempt(host: &CompactionHost<'_>, plan: &CompactionPlan, llm_failed: bool) {
-    if plan.trigger == CompactTrigger::AutoThreshold && plan.use_llm {
-        host.breaker.lock().finish_attempt(llm_failed);
-    }
 }

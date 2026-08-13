@@ -1,3 +1,5 @@
+//! Session read model 的根组合、身份、统计与跨子投影查询。
+
 use astrcode_core::{
     event::{ParentSessionRef, Phase, SessionStarted},
     tool::SessionToolSelection,

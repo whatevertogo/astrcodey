@@ -5,7 +5,6 @@ import type {
   ExtensionStateView,
   KeybindingInfo,
   PendingAskUserQuestion,
-  Phase,
   SessionListItem,
   SlashCommandInfo,
 } from '../services/types'
@@ -38,7 +37,6 @@ export interface AppState {
   blocks: ConversationBlock[]
   control: ConversationControlState | null
   cursor: string | null
-  phase: Phase
   compactSubmitting: boolean
 
   sessionStream: ActiveSessionStream | null

@@ -41,8 +41,7 @@ pub(crate) mod turn_runner;
 pub(crate) mod turn_stages;
 
 pub use payload::{
-    agent_session_completed_payload, agent_session_failed_payload,
-    system_prompt_configured_payload, transcript_rewritten_payload,
+    agent_session_completed_payload, agent_session_failed_payload, system_prompt_configured_payload,
 };
 pub use session::{Session, SessionCreateParams, emit_lifecycle_for_read_model};
 pub use session_error::SessionError;

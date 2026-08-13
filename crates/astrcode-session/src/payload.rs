@@ -47,13 +47,13 @@ pub fn system_prompt_configured_payload(
 ///
 /// `source_fingerprint` 是被替换前缀（system prompt + provider 视角消息）的
 /// `transcript_prefix_fingerprint`，提交时 projection 重算不匹配则拒绝写入。
-pub fn transcript_rewritten_payload(
-    trigger: impl Into<String>,
+pub(crate) fn transcript_rewritten_payload(
     compaction: &CompactResult,
     source_seq: u64,
     source_fingerprint: String,
     strategy: CompactStrategy,
 ) -> DurableEventPayload {
+    let trigger = strategy.trigger().as_str().to_owned();
     let messages = compaction
         .summary_messages
         .iter()
@@ -65,7 +65,7 @@ pub fn transcript_rewritten_payload(
         source_fingerprint,
         messages,
         reason: TranscriptRewriteReason::Compaction(CompactionDetails {
-            trigger: trigger.into(),
+            trigger,
             pre_tokens: compaction.pre_tokens,
             post_tokens: compaction.post_tokens,
             summary: compaction.summary.clone(),
@@ -113,4 +113,51 @@ pub fn agent_session_failed_payload(
 fn agent_session_final_ids(child_session_id: SessionId) -> (SessionId, SessionId) {
     let final_session_id = child_session_id.clone();
     (child_session_id, final_session_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_context::CompactResult;
+    use astrcode_core::{
+        compaction::CompactStrategy,
+        event::{DurableEventPayload, TranscriptRewriteReason},
+        llm::LlmMessage,
+    };
+
+    use super::transcript_rewritten_payload;
+
+    #[test]
+    fn transcript_rewrite_contains_compacted_history_and_strategy_metadata() {
+        let compaction = CompactResult {
+            pre_tokens: 100,
+            post_tokens: 20,
+            summary: "summary".into(),
+            messages_removed: 2,
+            summary_messages: vec![LlmMessage::user("summary context")],
+            retained_messages: vec![LlmMessage::user("retained")],
+            transcript_path: Some("compact.jsonl".into()),
+        };
+
+        let rewrite = transcript_rewritten_payload(
+            &compaction,
+            7,
+            "fingerprint".to_owned(),
+            CompactStrategy::Manual {
+                keep_recent_turns: None,
+            },
+        );
+
+        assert!(matches!(
+            rewrite,
+            DurableEventPayload::TranscriptRewritten {
+                source_seq: 7,
+                source_fingerprint,
+                messages,
+                reason: TranscriptRewriteReason::Compaction(details),
+            } if source_fingerprint == "fingerprint"
+                && messages.len() == 2
+                && details.trigger == "manual_command"
+                && details.transcript_path.as_deref() == Some("compact.jsonl")
+        ));
+    }
 }

@@ -26,7 +26,7 @@ impl CompactTrigger {
 }
 
 /// Compact 使用的策略，记录在事件中用于 replay 和审计。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CompactStrategy {
     Auto,
@@ -35,4 +35,23 @@ pub enum CompactStrategy {
         keep_recent_turns: Option<usize>,
     },
     ReactivePromptTooLong,
+}
+
+impl CompactStrategy {
+    /// 返回该策略唯一对应的触发来源，避免调用方分别传递两个可能冲突的事实。
+    pub const fn trigger(self) -> CompactTrigger {
+        match self {
+            Self::Auto => CompactTrigger::AutoThreshold,
+            Self::Manual { .. } => CompactTrigger::ManualCommand,
+            Self::ReactivePromptTooLong => CompactTrigger::ReactivePromptTooLong,
+        }
+    }
+
+    /// 返回策略显式指定的保留 turn 数；其它策略使用 context 默认配置。
+    pub const fn keep_recent_turns(self) -> Option<usize> {
+        match self {
+            Self::Manual { keep_recent_turns } => keep_recent_turns,
+            Self::Auto | Self::ReactivePromptTooLong => None,
+        }
+    }
 }

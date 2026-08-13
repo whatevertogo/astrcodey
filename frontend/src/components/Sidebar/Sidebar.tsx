@@ -8,6 +8,7 @@ import { groupSessionsByWorkingDir } from './projectFolderOrder'
 import type { MainView } from '../../App'
 import type { IconName } from '../ui/Icon'
 import type { SessionListItem } from '../../services/types'
+import { effectiveConversationPhase } from '../../store/phaseHelpers'
 
 const NAV_ITEMS: Array<{
   icon: IconName
@@ -75,7 +76,9 @@ export default function Sidebar({
   const sessions = useAppStore((s) => s.sessions)
   const projectFolderOrder = useAppStore((s) => s.projectFolderOrder)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
-  const phase = useAppStore((s) => s.phase)
+  const phase = useAppStore((state) =>
+    effectiveConversationPhase(state.control, state.compactSubmitting)
+  )
   const workingDir = useAppStore((s) => s.workingDir)
   const createSession = useAppStore((s) => s.createSession)
   const switchSession = useAppStore((s) => s.switchSession)

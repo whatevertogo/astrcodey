@@ -11,7 +11,6 @@ use astrcode_core::{
     permission::{ApprovalDecision, ApprovalSource},
     tool::{SessionToolSelection, ToolResult},
     types::{SessionId, ToolCallId, TurnId, new_message_id},
-    user_input::UserInput,
 };
 
 use super::{PreparedProjectionBatch, ProjectionError, SessionReadModelProjection, reduce, replay};
@@ -56,121 +55,6 @@ fn started(seq: u64, session_id: &SessionId) -> StoredEvent {
             },
         }),
     )
-}
-
-#[test]
-fn accepted_input_stays_pending_until_matching_user_message() {
-    let session_id = SessionId::new("session-pending");
-    let input = UserInput::text_only("queued");
-    let mut model = replay(
-        session_id.clone(),
-        &[
-            started(0, &session_id),
-            event(
-                1,
-                &session_id,
-                DurableEventPayload::UserInputAccepted {
-                    input: input.clone(),
-                },
-            ),
-        ],
-    )
-    .unwrap();
-
-    assert_eq!(model.execution.pending_inputs.len(), 1);
-    assert!(model.model_context.messages.is_empty());
-
-    reduce(
-        &event(
-            2,
-            &session_id,
-            DurableEventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: input.text,
-                attachments: input.attachments,
-                accepted_seq: Some(1),
-            },
-        ),
-        &mut model,
-    )
-    .unwrap();
-
-    assert!(model.execution.pending_inputs.is_empty());
-    assert_eq!(model.model_context.messages.len(), 1);
-}
-
-#[test]
-fn provider_usage_anchors_covered_transcript_until_context_identity_changes() {
-    let session_id = SessionId::new("session-context-usage");
-    let mut model = replay(
-        session_id.clone(),
-        &[
-            started(0, &session_id),
-            event(
-                1,
-                &session_id,
-                DurableEventPayload::UserMessage {
-                    message_id: new_message_id(),
-                    text: "first".into(),
-                    attachments: vec![],
-                    accepted_seq: None,
-                },
-            ),
-            event(
-                2,
-                &session_id,
-                DurableEventPayload::TokenUsageRecorded {
-                    usage: LlmTokenUsage {
-                        total_tokens: Some(655_859),
-                        ..Default::default()
-                    },
-                    model_context_window: 1_000_000,
-                },
-            ),
-        ],
-    )
-    .unwrap();
-
-    let usage = model.model_context.usage.as_ref().unwrap();
-    assert_eq!(usage.context_tokens, 655_859);
-    assert_eq!(usage.model_context_window, 1_000_000);
-    assert_eq!(usage.covered_message_count, 1);
-
-    reduce(
-        &event(
-            3,
-            &session_id,
-            DurableEventPayload::UserMessage {
-                message_id: new_message_id(),
-                text: "tail".into(),
-                attachments: vec![],
-                accepted_seq: None,
-            },
-        ),
-        &mut model,
-    )
-    .unwrap();
-    assert_eq!(
-        model
-            .model_context
-            .usage
-            .as_ref()
-            .map(|usage| usage.covered_message_count),
-        Some(1)
-    );
-
-    reduce(
-        &event(
-            4,
-            &session_id,
-            DurableEventPayload::ModelIdChanged {
-                model_id: "model-b".into(),
-            },
-        ),
-        &mut model,
-    )
-    .unwrap();
-    assert!(model.model_context.usage.is_none());
 }
 
 #[test]
@@ -947,7 +831,17 @@ fn projection_rejects_invalid_stream_shapes_without_mutating_valid_state() {
         projection.apply(&started(1, &session_id)),
         Err(ProjectionError::DuplicateSessionStarted(1))
     );
-    assert_eq!(projection.last_seq(), Some(0));
+    assert_eq!(projection.snapshot().unwrap().stats.last_seq, 0);
+
+    let mut exhausted = projection.snapshot().unwrap();
+    exhausted.stats.last_seq = u64::MAX;
+    assert_eq!(
+        reduce(
+            &event(u64::MAX, &session_id, DurableEventPayload::TurnStarted),
+            &mut exhausted,
+        ),
+        Err(ProjectionError::SequenceOverflow)
+    );
 }
 
 // ── TranscriptRewritten source_fingerprint 乐观并发校验 ──

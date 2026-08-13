@@ -1,3 +1,5 @@
+//! 父 session 可见的 child-agent 链接与终态投影。
+
 use astrcode_core::{
     event::{DurableEventPayload, StoredEvent},
     types::{SessionId, ToolCallId},

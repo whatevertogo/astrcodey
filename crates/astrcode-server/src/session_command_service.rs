@@ -35,8 +35,8 @@ pub(crate) struct SessionCommandService {
     event_bus: Arc<ServerEventBus>,
 }
 
-enum CommandOperation {
-    Complete(CommandInvocation),
+enum CommandDispatch {
+    Completed(CommandInvocation),
     StartTurn(UserInput),
 }
 
@@ -83,12 +83,15 @@ impl SessionCommandService {
         if let Some(command) = parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
             && (command.name == "compact" || !has_active_turn)
         {
-            match self.prepare_command_in_operation(&operation, command).await {
+            match self
+                .dispatch_command_in_operation(&operation, command)
+                .await
+            {
                 Err(HandlerError::UnknownCommand(_)) => {},
                 other => {
-                    let command = other?;
+                    let dispatch = other?;
                     return self
-                        .execute_command_operation(operation, command)
+                        .finish_command_dispatch(operation, dispatch)
                         .await
                         .map(CommandInvocation::into_prompt_submission);
                 },
@@ -189,7 +192,7 @@ impl SessionCommandService {
         let outcome = compact_manual_session(&session, keep_recent_turns)
             .await
             .map_err(HandlerError::Session)?;
-        if matches!(outcome, ManualCompactionOutcome::Compacted { .. }) {
+        if outcome == ManualCompactionOutcome::Compacted {
             let state = session.read_model().await.map_err(HandlerError::Session)?;
             self.event_bus.send_session_resumed(&state);
         }
@@ -278,23 +281,23 @@ impl SessionCommandService {
         command: ParsedSlashCommand,
     ) -> Result<CommandInvocation, HandlerError> {
         let operation = self.scheduler.begin_session_operation(&session_id).await?;
-        let command = self
-            .prepare_command_in_operation(&operation, command)
+        let dispatch = self
+            .dispatch_command_in_operation(&operation, command)
             .await?;
-        self.execute_command_operation(operation, command).await
+        self.finish_command_dispatch(operation, dispatch).await
     }
 
-    async fn prepare_command_in_operation(
+    async fn dispatch_command_in_operation(
         &self,
         operation: &SessionOperationGuard,
         command: ParsedSlashCommand,
-    ) -> Result<CommandOperation, HandlerError> {
+    ) -> Result<CommandDispatch, HandlerError> {
         let command = normalize_command(command)?;
         let session_id = operation.session_id();
 
         if command.name == "compact" {
             return self
-                .prepare_compact_command(operation, &command.arguments)
+                .dispatch_compact_command(operation, &command.arguments)
                 .await;
         }
 
@@ -304,14 +307,14 @@ impl SessionCommandService {
             ));
         }
 
-        self.prepare_extension_command(session_id, command).await
+        self.dispatch_extension_command(session_id, command).await
     }
 
-    async fn prepare_compact_command(
+    async fn dispatch_compact_command(
         &self,
         operation: &SessionOperationGuard,
         arguments: &str,
-    ) -> Result<CommandOperation, HandlerError> {
+    ) -> Result<CommandDispatch, HandlerError> {
         let arguments = arguments.trim();
         let keep_recent_turns = if arguments.is_empty() {
             None
@@ -326,19 +329,19 @@ impl SessionCommandService {
             .compact_session_in_operation(operation, keep_recent_turns)
             .await?
         {
-            ManualCompactionOutcome::Compacted { .. } => CommandInvocation::Handled {
-                message: "compact accepted".into(),
+            ManualCompactionOutcome::Compacted => CommandInvocation::Handled {
+                message: "compact completed".into(),
             },
             ManualCompactionOutcome::Skipped { message } => CommandInvocation::Handled { message },
         };
-        Ok(CommandOperation::Complete(invocation))
+        Ok(CommandDispatch::Completed(invocation))
     }
 
-    async fn prepare_extension_command(
+    async fn dispatch_extension_command(
         &self,
         session_id: &SessionId,
         command: ParsedSlashCommand,
-    ) -> Result<CommandOperation, HandlerError> {
+    ) -> Result<CommandDispatch, HandlerError> {
         let context = self.command_context(session_id).await?;
         let resolved = self
             .runtime
@@ -373,13 +376,13 @@ impl SessionCommandService {
                     content.clone(),
                     is_error,
                 );
-                Ok(CommandOperation::Complete(CommandInvocation::Display {
+                Ok(CommandDispatch::Completed(CommandInvocation::Display {
                     content,
                     is_error,
                 }))
             },
             Ok(ExtensionCommandResult::Handled { message }) => {
-                Ok(CommandOperation::Complete(CommandInvocation::Handled {
+                Ok(CommandDispatch::Completed(CommandInvocation::Handled {
                     message,
                 }))
             },
@@ -389,7 +392,7 @@ impl SessionCommandService {
                 } else {
                     instructions
                 };
-                Ok(CommandOperation::StartTurn(UserInput::text_only(user_text)))
+                Ok(CommandDispatch::StartTurn(UserInput::text_only(user_text)))
             },
             Err(ExtensionError::NotFound(name)) => Err(HandlerError::UnknownCommand(
                 name.trim_start_matches('/').to_string(),
@@ -398,14 +401,14 @@ impl SessionCommandService {
         }
     }
 
-    async fn execute_command_operation(
+    async fn finish_command_dispatch(
         &self,
         operation: SessionOperationGuard,
-        command: CommandOperation,
+        command: CommandDispatch,
     ) -> Result<CommandInvocation, HandlerError> {
         let input = match command {
-            CommandOperation::Complete(invocation) => return Ok(invocation),
-            CommandOperation::StartTurn(input) => input,
+            CommandDispatch::Completed(invocation) => return Ok(invocation),
+            CommandDispatch::StartTurn(input) => input,
         };
         match self
             .scheduler

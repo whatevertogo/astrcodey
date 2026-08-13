@@ -56,7 +56,7 @@ pub(crate) async fn drive_agent(
     turn_id: &TurnId,
 ) -> (Result<TurnOutput, TurnError>, bool) {
     let publisher = Arc::new(TurnEvents::new(agent.session().clone(), turn_id.clone()));
-    let output = agent.process_prompt(user_text, turn_id, &publisher).await;
+    let output = agent.process_prompt(user_text, &publisher).await;
     (output, publisher.emitted_error())
 }
 
@@ -104,7 +104,6 @@ impl TurnLoop {
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
         state: &mut TurnState,
-        turn_id: &TurnId,
         publisher: &TurnEvents,
     ) -> Result<bool, TurnError> {
         if state.reactive_compact_used() {
@@ -112,15 +111,14 @@ impl TurnLoop {
         }
 
         state.mark_reactive_compact_used();
-        let shared = self.shared().clone();
         let host = CompactionHost {
             session: &self.session,
             llm: &self.llm,
-            shared: &shared,
+            hook_call: self.shared().hook_call_context(),
             extension_runner,
             breaker: &self.compact_circuit_breaker,
         };
-        run_reactive_compaction(&host, state, turn_id, publisher).await
+        run_reactive_compaction(&host, state, publisher).await
     }
 
     pub(crate) fn new_with_llm(
@@ -157,14 +155,11 @@ impl TurnLoop {
     pub(crate) async fn process_prompt(
         &mut self,
         user_text: &str,
-        turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
     ) -> Result<TurnOutput, TurnError> {
         let extension_runner = Arc::clone(&self.extension_hooks);
         let event_bridge = TurnEventBridge::start(Arc::clone(publisher), self.tools.shared_mut());
-        let result = self
-            .process_prompt_inner(user_text, turn_id, publisher)
-            .await;
+        let result = self.process_prompt_inner(user_text, publisher).await;
         if result.is_err() {
             self.finalize_turn_on_error(extension_runner.as_ref()).await;
         }
@@ -199,7 +194,6 @@ impl TurnLoop {
     async fn process_prompt_inner(
         &mut self,
         user_text: &str,
-        turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
     ) -> Result<TurnOutput, TurnError> {
         let all_tools = self.tools.list_definitions_with_prompt_metadata();
@@ -244,7 +238,6 @@ impl TurnLoop {
                     &mut state,
                     extension_runner.as_ref(),
                     &lifecycle_ctx,
-                    turn_id,
                     publisher,
                     user_text,
                 )
@@ -264,7 +257,6 @@ impl TurnLoop {
         state: &mut TurnState,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
         lifecycle_ctx: &RuntimeLifecycleContext,
-        turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
         user_text: &str,
     ) -> Result<StepOutcome, TurnError> {
@@ -276,14 +268,7 @@ impl TurnLoop {
             })
             .await?;
         let result = self
-            .step_body(
-                state,
-                extension_runner,
-                lifecycle_ctx,
-                turn_id,
-                publisher,
-                user_text,
-            )
+            .step_body(state, extension_runner, lifecycle_ctx, publisher, user_text)
             .await;
         state.tool_deduplicator_mut().end_step();
         if let Ok(outcome) = &result {
@@ -306,7 +291,6 @@ impl TurnLoop {
         state: &mut TurnState,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
         lifecycle_ctx: &RuntimeLifecycleContext,
-        turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
         user_text: &str,
     ) -> Result<StepOutcome, TurnError> {
@@ -321,13 +305,13 @@ impl TurnLoop {
 
         let visible_tools = state.visible_tools();
         let prepared = match self
-            .prepare_stage(extension_runner, state, &visible_tools, turn_id, publisher)
+            .prepare_stage(extension_runner, state, &visible_tools, publisher)
             .await
         {
             Ok(prepared) => prepared,
             Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
                 return self
-                    .recover_or_fail(extension_runner, state, turn_id, publisher)
+                    .recover_or_fail(extension_runner, state, publisher)
                     .await;
             },
             Err(error) => return Err(error),
@@ -354,7 +338,7 @@ impl TurnLoop {
             Ok(outcome) => outcome,
             Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
                 return self
-                    .recover_or_fail(extension_runner, state, turn_id, publisher)
+                    .recover_or_fail(extension_runner, state, publisher)
                     .await;
             },
             Err(error) => return Err(error),
@@ -509,11 +493,10 @@ impl TurnLoop {
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
         state: &mut TurnState,
-        turn_id: &TurnId,
         publisher: &TurnEvents,
     ) -> Result<StepOutcome, TurnError> {
         if self
-            .recover_context_overflow(extension_runner, state, turn_id, publisher)
+            .recover_context_overflow(extension_runner, state, publisher)
             .await?
         {
             Ok(StepOutcome::Continue)
@@ -527,14 +510,12 @@ impl TurnLoop {
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
         state: &TurnState,
         visible_tools: &[ToolDefinition],
-        turn_id: &TurnId,
         publisher: &Arc<TurnEvents>,
     ) -> Result<PreparedProviderRequest, TurnError> {
-        let shared = self.shared().clone();
         let host = CompactionHost {
             session: &self.session,
             llm: &self.llm,
-            shared: &shared,
+            hook_call: self.shared().hook_call_context(),
             extension_runner,
             breaker: &self.compact_circuit_breaker,
         };
@@ -543,9 +524,15 @@ impl TurnLoop {
         let llm = Arc::clone(host.llm);
         let compaction_plan = plan_auto_compaction(&host, &snapshot, visible_tools).await;
 
-        let PreparedProviderHistory { snapshot, messages } =
-            prepare_provider_history(&host, state, snapshot, turn_id, compaction_plan, publisher)
-                .await?;
+        let PreparedProviderHistory { snapshot, messages } = prepare_provider_history(
+            &host,
+            state,
+            snapshot,
+            compaction_plan,
+            visible_tools,
+            publisher,
+        )
+        .await?;
 
         let mut messages = snapshot.request_messages(messages);
         if let Some(reminder) = state.tool_deduplicator().check_reminder() {

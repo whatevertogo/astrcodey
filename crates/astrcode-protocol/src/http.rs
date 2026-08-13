@@ -368,7 +368,6 @@ pub struct ConversationSnapshotResponseDto {
     pub session_id: String,
     pub session_title: String,
     pub cursor: ConversationCursorDto,
-    pub phase: PhaseDto,
     pub control: ConversationControlStateDto,
     pub blocks: Vec<ConversationBlockDto>,
     #[serde(default)]

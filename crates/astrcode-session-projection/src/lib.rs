@@ -24,5 +24,4 @@ pub use model_context::{
 pub use presentation::{SessionArtifactView, SessionPresentation};
 pub use reducer::{
     PreparedProjectionBatch, SessionReadModelProjection, SessionSummaryProjection, reduce, replay,
-    validate_next_event,
 };

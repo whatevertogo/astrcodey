@@ -12,7 +12,7 @@ impl CommandHandler {
             return Ok(());
         };
         match self.compact_session(&session_id, keep_recent_turns).await {
-            Ok(ManualCompactionOutcome::Compacted { .. }) => Ok(()),
+            Ok(ManualCompactionOutcome::Compacted) => Ok(()),
             Ok(ManualCompactionOutcome::Skipped { message }) => {
                 self.send_error(40000, &message);
                 Ok(())

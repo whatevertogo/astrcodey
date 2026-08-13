@@ -8,9 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use astrcode_context::{
-    compaction::CompactResult, context_assembler::LlmContextAssembler, is_compact_summary_message,
-};
+use astrcode_context::{context_assembler::LlmContextAssembler, is_compact_summary_message};
 use astrcode_core::{
     compaction::CompactStrategy,
     config::{
@@ -31,7 +29,6 @@ use astrcode_extension_sdk::{
 };
 use astrcode_extensions::Extension;
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
-use astrcode_session::transcript_rewritten_payload;
 use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::{broadcast, mpsc};
@@ -1135,41 +1132,6 @@ async fn wait_until_no_active_turn(
     panic!("turn registry entry was not cleaned up");
 }
 
-#[test]
-fn transcript_rewrite_payload_contains_compacted_history_and_metadata() {
-    let compaction = CompactResult {
-        pre_tokens: 100,
-        post_tokens: 20,
-        summary: "summary".into(),
-        messages_removed: 2,
-        summary_messages: vec![LlmMessage::user("summary context")],
-        retained_messages: vec![LlmMessage::user("retained")],
-        transcript_path: Some("compact.jsonl".into()),
-    };
-
-    let rewrite = transcript_rewritten_payload(
-        "manual_command",
-        &compaction,
-        7,
-        "fingerprint".to_owned(),
-        CompactStrategy::Manual {
-            keep_recent_turns: None,
-        },
-    );
-
-    assert!(matches!(
-        rewrite,
-        DurableEventPayload::TranscriptRewritten {
-            source_seq: 7,
-            source_fingerprint: fingerprint,
-            messages,
-            reason: astrcode_core::event::TranscriptRewriteReason::Compaction(details),
-        } if fingerprint == "fingerprint"
-            && messages.len() == 2
-            && details.transcript_path.as_deref() == Some("compact.jsonl")
-    ));
-}
-
 #[tokio::test]
 async fn record_and_broadcast_updates_projection_before_broadcast() {
     let runtime = test_runtime();
@@ -2045,7 +2007,7 @@ async fn slash_compact_rejects_running_turn_without_input_or_compaction_events()
     while event_rx.try_recv().is_ok() {}
 
     let error = handler
-        .submit_input_for_session(sid.clone(), "/compact".into())
+        .submit_input_for_session(sid.clone(), "/COMPACT".into())
         .await
         .unwrap_err();
     assert!(
@@ -2067,10 +2029,11 @@ async fn slash_compact_rejects_running_turn_without_input_or_compaction_events()
 
     let events = runtime.event_store().replay_events(&sid).await.unwrap();
     assert!(events.iter().all(|event| {
-        !matches!(&event.payload, DurableEventPayload::UserMessage { text, .. } if text == "/compact")
+        !matches!(&event.payload, DurableEventPayload::UserMessage { text, .. } if text.eq_ignore_ascii_case("/compact"))
             && !matches!(
                 &event.payload,
-                DurableEventPayload::UserInputAccepted { input } if input.text == "/compact"
+                DurableEventPayload::UserInputAccepted { input }
+                    if input.text.eq_ignore_ascii_case("/compact")
             )
     }));
 

@@ -275,13 +275,10 @@ const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
   sessionId: 's-1',
   sessionTitle: 'title',
   cursor: { value: '0' },
-  phase: 'idle',
   control: {
     phase: 'idle',
     canSubmitPrompt: true,
     canRequestCompact: false,
-    compactPending: false,
-    compacting: false,
     retryStatus: {
       status: 503,
       attempt: 2,

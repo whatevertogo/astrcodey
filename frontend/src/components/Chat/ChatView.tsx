@@ -5,6 +5,7 @@ import TopBar from './TopBar'
 import { PendingAskUserBanner } from './PendingAskUserBanner'
 import { useKeybindings } from '../../hooks/useKeybindings'
 import { Icon } from '../ui'
+import { effectiveConversationPhase } from '../../store/phaseHelpers'
 
 interface ChatViewProps {
   isSidebarOpen: boolean
@@ -18,7 +19,9 @@ export default function ChatView({
   const blocks = useAppStore((s) => s.blocks)
   const activeSessionId = useAppStore((s) => s.activeSessionId)
   const workingDir = useAppStore((s) => s.workingDir)
-  const phase = useAppStore((s) => s.phase)
+  const phase = useAppStore((state) =>
+    effectiveConversationPhase(state.control, state.compactSubmitting)
+  )
 
   useKeybindings()
   const showHeroComposer =

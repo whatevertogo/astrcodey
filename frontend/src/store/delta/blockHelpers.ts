@@ -2,26 +2,7 @@ import type {
   AgentSessionLink,
   AgentSessionStatus,
   ConversationBlock,
-  ConversationControlState,
-  Phase,
 } from '../../services/types'
-
-export function phaseFromControl(
-  control: ConversationControlState | null
-): Phase {
-  return control?.phase ?? 'idle'
-}
-
-/** 合并本地请求窗口与后端 compact phase，避免 snapshot 刷新冲掉压缩中 UI。 */
-export function resolvePhase(
-  control: ConversationControlState | null,
-  compactSubmitting: boolean
-): Phase {
-  if (compactSubmitting || control?.phase === 'compacting') {
-    return 'compacting'
-  }
-  return phaseFromControl(control)
-}
 
 export function mergeBlock(
   current: ConversationBlock,

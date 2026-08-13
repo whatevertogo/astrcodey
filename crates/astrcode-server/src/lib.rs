@@ -6,7 +6,6 @@ pub mod http;
 mod task_utils;
 pub mod transport;
 
-pub use astrcode_session::compaction::ManualCompactionOutcome;
 pub use child_session::{ChildCleanup, ChildSessionCoordinator};
 pub use config_manager::ConfigManager;
 pub use handler::CommandHandle;

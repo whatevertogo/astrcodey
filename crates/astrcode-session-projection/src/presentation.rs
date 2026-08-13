@@ -1,3 +1,5 @@
+//! 不进入 provider context 的稳定展示事实。
+
 use astrcode_core::event::{DurableEventPayload, StoredEvent};
 use serde::{Deserialize, Serialize};
 

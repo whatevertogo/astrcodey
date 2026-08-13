@@ -149,10 +149,6 @@ impl SessionReadModelProjection {
             .clone()
             .ok_or_else(|| ProjectionError::MissingSessionStarted(self.session_id.clone()))
     }
-
-    pub fn last_seq(&self) -> Option<u64> {
-        self.model.as_ref().map(|model| model.stats.last_seq)
-    }
 }
 
 impl SessionSummaryProjection {
@@ -264,7 +260,7 @@ fn apply_validated_event(event: &StoredEvent, model: &mut SessionReadModel) {
 }
 
 /// 校验事件能否作为读模型的下一条事实，不修改读模型。
-pub fn validate_next_event(
+fn validate_next_event(
     seq: u64,
     event: &DurableEvent,
     model: &SessionReadModel,
@@ -296,7 +292,9 @@ fn validate_next_event_details(
             current_seq,
         });
     }
-    let expected_seq = current_seq.saturating_add(1);
+    let expected_seq = current_seq
+        .checked_add(1)
+        .ok_or(ProjectionError::SequenceOverflow)?;
     if seq != expected_seq {
         return Err(ProjectionError::NonContiguousSequence {
             expected: expected_seq,

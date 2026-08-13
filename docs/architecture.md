@@ -19,8 +19,8 @@ Rust 实现的 AI coding agent，~116.8k 行（Rust ~104.4k + TypeScript ~12.4k�
 - `Session` 是持久事实的应用句柄；EventLog 才是唯一事实来源
 - 持久层：`SessionEventJournal` 负责 durable 写入，storage 持有 EventLog 的唯一
   `SessionReadModel` 实例
-- 瞬态层：`SessionRuntimeState` 持有有序 publisher、file observation store、审批状态和 session 级 broadcast channel；工具表由每个 Turn 显式持有不可变快照
-- 同一 sid 的所有 `Session` 实例共享同一份 `SessionRuntimeState`（由 `SessionManager` 的 `SessionRuntimeRegistry` 保证），订阅者通过 `Session::subscribe()` 接收该 session 的所有事件
+- 瞬态层：`SessionRuntimeState` 持有有序 `SessionEventSink`、file observation store、审批状态和工具快照缓存；工具表由每个 Turn 显式持有不可变快照
+- 同一 sid 的所有 `Session` 实例共享同一份 `SessionRuntimeState`；`SessionEventSink` 将已排序事件交给 server 注入的 observer
 - 不需要"保存 session"——事件已经写回了
 
 ### Agent — 无状态运行时
@@ -37,7 +37,7 @@ Session 持久化、projection 所有权、文件 lease 以及读写应用端口
 
 ```
 Session::emit_durable / Session::emit_live
-  → SessionEventPublisher（同一 session 的 bounded FIFO）
+  → SessionEventSink（同一 session 的 bounded FIFO）
     → durable: SessionEventJournal → projection → fan-out
     → live: 跳过 storage/projection → fan-out
     → ServerEventBus forwarder（attach 后订阅）
@@ -134,22 +134,29 @@ Compact 是一个**严格的 XML contract**：
 - 输出有 token 上限（`COMPACT_OUTPUT_TOKEN_CAP`）
 - 解析器容忍外层 markdown fence、大小写不敏感的 XML tag，但不容忍结构缺失
 
-### 闭环式 LLM 调用
+### 同步 LLM 调用
 
-Compact 通过 `make_compact_request_fn` 从 `LlmProvider` 构造请求闭包：
+`astrcode-session::compaction::pipeline` 是 manual、auto、reactive 三个入口共用的唯一
+同步状态机：
 
-- 闭包调用 `llm.generate(messages, vec![])`（不传工具），收集流式文本输出并返回
+- pipeline 通过闭包调用 `LlmProvider::generate_request`（不传工具），收集流式文本输出
 - 闭包传入 `compact_messages_with_fallback`，`LlmContextAssembler` 不持有 provider 引用，保持模型切换时的无状态设计
 - compact prompt 禁止工具调用，如果模型尝试调用工具则解析失败，触发 contract repair 重试
 
-### 双路径 + 熔断 + 安全持久化
+### 三入口 + 熔断 + 安全持久化
 
-- 自动压缩和手动压缩统一走 `compact_messages_with_fallback`：先尝试 LLM 生成结构化摘要，失败时降级到确定性模板
-- LLM 调用通过闭包注入（`make_compact_request_fn`），`LlmContextAssembler` 不持有 provider 引用
-- 确定性 fallback 仅在 LLM 完全不可用时触发，作为最后保障
+- manual、auto 和 reactive 统一走同一个 pipeline：先发 `PreCompact`，随后重读
+  `SessionReadModel` 并冻结 `ContextSnapshot`
+- LLM 失败时降级到确定性模板；fallback 成功仍是一次成功 compact
+- provider、流收集或 contract repair 失败时使用确定性 fallback；明确的 skip 条件不伪装成成功
 - **压缩熔断器**（`CompactCircuitBreaker`）：LLM 连续失败达到阈值后，在冷却期内跳过自动压缩
 - **可选预测性压缩**：根据 turn token 增长估算，在超出窗口前提前 compact
-- **CAS 持久化**：`persist_compact_result` 使用 compare-and-swap；并发写入冲突时安全失败，不污染事件日志
+- **前缀校验**：`TranscriptRewritten` 携带冻结时的 `source_seq + source_fingerprint`；
+  projection 在 append 前重算前缀指纹，冲突时拒绝事件，同时保留 source seq 后的并发 tail
+- **durable 边界**：追加 rewrite 后必须通过 EventLog fsync，之后才允许 `PostCompact` 和成功响应；checkpoint 只是 best-effort 加速器
+
+`CompactStrategy` 是调用链唯一传递的策略事实，trigger 与 manual 的
+`keep_recent_turns` 均由它派生。turn id 只来自 hook call context，不再沿多个函数重复转手。
 
 ### Post-compact 上下文恢复
 

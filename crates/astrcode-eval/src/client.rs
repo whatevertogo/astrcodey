@@ -157,7 +157,7 @@ impl EvalClient {
             })?;
         let body: ConversationSnapshotResponseDto =
             decode_json_response(response, "get conversation phase").await?;
-        Ok(body.phase)
+        Ok(body.control.phase)
     }
 }
 
