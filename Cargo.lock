@@ -418,7 +418,6 @@ dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
  "chrono",
- "parking_lot",
  "serde",
  "serde_json",
  "uuid",
@@ -473,9 +472,7 @@ dependencies = [
  "astrcode-core",
  "astrcode-extension-contract",
  "async-trait",
- "base64 0.22.1",
  "futures-util",
- "parking_lot",
  "serde",
  "serde_json",
  "serde_path_to_error",
@@ -522,7 +519,6 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.19",
- "tracing",
  "url",
 ]
 
@@ -534,7 +530,6 @@ dependencies = [
  "astrcode-extension-sdk",
  "async-trait",
  "futures-util",
- "parking_lot",
  "serde",
  "serde_json",
  "tokio",

@@ -170,35 +170,6 @@ impl TurnRegistry {
         Some((entry.turn_id, session))
     }
 
-    pub fn force_kill_and_remove_if_running(
-        &self,
-        session_id: &SessionId,
-        expected_turn_id: &TurnId,
-    ) -> Option<(TurnId, Arc<Session>)> {
-        let mut entries = self.entries.lock();
-        let entry = entries.get(session_id)?;
-        let TurnEntryState::Running {
-            shutdown_handle, ..
-        } = &entry.state
-        else {
-            return None;
-        };
-        if &entry.turn_id != expected_turn_id || shutdown_handle.is_finished() {
-            return None;
-        }
-        let entry = entries.remove(session_id)?;
-        let TurnEntryState::Running {
-            shutdown_handle,
-            session,
-        } = entry.state
-        else {
-            return None;
-        };
-        drop(entries);
-        shutdown_handle.force_kill();
-        Some((entry.turn_id, session))
-    }
-
     /// 强制终止匹配的运行中 turn，但保留 registry ownership，直到 durable 收尾成功。
     pub fn force_kill_if_running(
         &self,

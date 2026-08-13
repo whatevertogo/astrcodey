@@ -397,7 +397,7 @@ impl SessionGroup {
         authorize_history_target(ctx.session_ops.as_deref(), &access).await?;
         let model = history_read_model(&reader, &access.target_session_id).await?;
         let messages = model
-            .transcript
+            .model_context
             .messages
             .iter()
             .filter(|message| extension_visible_message(&message.message))
@@ -423,7 +423,7 @@ impl SessionGroup {
         let model = history_read_model(&reader, &access.target_session_id).await?;
         let messages = astrcode_core::llm::provider_visible_messages(
             model
-                .transcript
+                .model_context
                 .messages
                 .iter()
                 .map(|message| message.message.clone())

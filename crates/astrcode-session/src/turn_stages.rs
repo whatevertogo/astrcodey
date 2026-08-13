@@ -6,6 +6,7 @@ use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole, provider_visible_messages},
     tool::{ToolDefinition, ToolResult},
 };
+use astrcode_session_projection::ActiveStepView;
 
 use crate::{
     deferred_tools::{ToolSnapshot, activate_deferred_tools, provider_visible_tools},
@@ -135,10 +136,15 @@ pub(crate) struct TurnState {
     all_tools: Vec<ToolSnapshot>,
     visible_tools: Vec<ToolSnapshot>,
     tool_deduplicator: ToolCallDeduplicator,
+    next_step_index: u32,
+    resumed_attempt: Option<u32>,
 }
 
 impl TurnState {
-    pub(crate) fn new(all_tools: Vec<crate::tool_registry::DefinitionWithPromptMetadata>) -> Self {
+    pub(crate) fn new(
+        all_tools: Vec<crate::tool_registry::DefinitionWithPromptMetadata>,
+        active_step: Option<&ActiveStepView>,
+    ) -> Self {
         let all_tools = all_tools
             .into_iter()
             .map(|tool| ToolSnapshot {
@@ -158,13 +164,27 @@ impl TurnState {
             all_tools,
             visible_tools,
             tool_deduplicator: ToolCallDeduplicator::new(),
+            next_step_index: active_step.map_or(0, |step| {
+                if step.completed {
+                    step.step_index.saturating_add(1)
+                } else {
+                    step.step_index
+                }
+            }),
+            resumed_attempt: active_step
+                .filter(|step| !step.completed)
+                .map(|step| step.attempt.saturating_add(1)),
         }
     }
 
     /// 每个 agent step 开始时调用：清空同 step 去重状态并重置 provider 响应快照。
-    pub(crate) fn begin_step(&mut self) {
+    pub(crate) fn begin_step(&mut self) -> (u32, u32) {
         self.transcript.reset_latest_provider_response();
         self.tool_deduplicator.begin_step();
+        let step_index = self.next_step_index;
+        let attempt = self.resumed_attempt.take().unwrap_or(1);
+        self.next_step_index = self.next_step_index.saturating_add(1);
+        (step_index, attempt)
     }
 
     pub(crate) fn tool_deduplicator(&self) -> &ToolCallDeduplicator {

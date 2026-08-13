@@ -29,7 +29,7 @@ trait ProviderMessages {
 impl ProviderMessages for SessionReadModel {
     fn provider_messages(&self) -> Vec<LlmMessage> {
         astrcode_core::llm::provider_visible_messages(
-            self.transcript
+            self.model_context
                 .messages
                 .iter()
                 .map(|message| message.message.clone())
@@ -527,7 +527,7 @@ async fn ssot_tool_only_turn_emits_assistant_shell_before_tool_requests() {
 
     let model = session.read_model().await.unwrap();
     assert!(
-        model.transcript.messages.iter().any(|message| {
+        model.model_context.messages.iter().any(|message| {
             message.message.role == LlmRole::Assistant
                 && message.message.content.iter().any(|content| {
                     matches!(
@@ -631,7 +631,7 @@ async fn ssot_mid_turn_inject_visible_on_next_prepare() {
 
     let model = session.read_model().await.unwrap();
     assert!(
-        model.transcript.messages.iter().any(|message| {
+        model.model_context.messages.iter().any(|message| {
             message.message.role == LlmRole::User
                 && message.message.content.iter().any(|content| {
                     matches!(

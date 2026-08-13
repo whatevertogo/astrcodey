@@ -134,7 +134,7 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
   `SessionStore` 组合完整 repository 所需的生命周期、checkpoint 和 compact snapshot 能力。
 - `in_memory`：`testing` feature 下的内存存储，供测试使用。
 
-依赖边界：依赖 `astrcode-core` 和 `astrcode-session-projection`；不依赖 session/server。依赖方向保持为 `session/server → storage → session-projection → core`。
+依赖边界：依赖 `astrcode-core` 和 `astrcode-session-projection`；不依赖 session/server。按“右侧可以依赖左侧”表示，运行时主方向为 `core → session-projection → storage → session → server`；协议支线为 `core → protocol → server` 和 `protocol → frontend`，`context → session`、`extension-sdk → session` 是另外两条显式输入边。
 
 测试线索：`event_log/tests.rs`、`session_repo/tests.rs` 和 `in_memory/tests.rs` 覆盖日志校验、尾部恢复、projection 恢复与并发追加；`snapshot.rs`、`tool_artifacts.rs` 有模块内测试。任何事件 payload 或持久化格式变更都应同时验证 replay 和 session repository。
 
@@ -142,12 +142,16 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 
 路径：`crates/astrcode-session-projection`
 
-职责：拥有 session 的纯读模型，不做任何存储 I/O。`SessionReadModelProjection` 以事件序列为唯一输入，维护 read model、summary、cursor 和 provider-visible history。
+职责：拥有 session 的纯读模型，不做任何存储 I/O。`SessionReadModelProjection` 以事件序列为唯一输入，把 durable facts fan-out 到 model context、展示、执行和 child-agent 子投影；消息按原始顺序统一容纳 user、assistant、tool 与 synthetic context，不按角色拆 projection。
 
 主要模块：
 
-- `model`：`SessionReadModel`、`SessionSummary` 及 approval、compact、agent session 等投影视图。
-- `reducer`：纯事件 reducer、下一事件预校验，以及 `SessionReadModelProjection::{new, apply, snapshot, last_seq}`。
+- `model`：组合 `SessionReadModel`，维护 identity、stats、summary 和跨子投影查询。
+- `model_context`：system prompt、provider-visible 消息、usage、compact 元数据，以及 rewrite fingerprint 校验和前缀替换。
+- `presentation`：首条用户消息、artifact、错误与 recap 等展示事实。
+- `execution`：phase、未结 turn、pending input、tool call、approval 和 active step。
+- `agents`：父 session 可见的 child-agent link 与终态。
+- `reducer`：事件序列校验、batch/replay/summary，并按固定顺序把已校验事件分派给各子投影。
 
 依赖边界：只依赖 `astrcode-core` 和序列化基础库，不依赖 storage、session runtime 或 server。
 
@@ -230,7 +234,11 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 - `tool_results`：工具结果 inline/persist 策略、artifact summary。
 - `tool_deduplicator`、`deferred_tools`：工具调用去重和延迟发现工具。
 - `permission/*`：默认权限链，包括 yolo、配置 allow/deny/ask、cwd 外写入、git 路径、敏感文件、shell broad access、子 session 限制、approval history。
-- `compact`、`compaction_run`、`compaction_coordinator`、`compact_circuit_breaker`：自动/手动 compact、CAS 持久化、熔断。
+- `compaction/pipeline`：manual、auto、reactive 共用的同步 compact 状态机；负责 hook、重读 projection、摘要、token、enrich、durable 提交和唯一终态通知。
+- `compaction/turn`、`compaction/manual`：分别负责 turn 内阈值/reactive 编排和空闲 manual 入口。
+- `compaction/persistence`：追加 `TranscriptRewritten`、fsync EventLog，并以 best-effort 创建 checkpoint。
+- `compaction/circuit_breaker`：只维护 auto LLM compact 的熔断状态。
+- `projection_context`：从 projection 映射当前 provider `ContextSnapshot`，不把 context 组装职责下沉到 projection crate。
 - `steer`：运行中注入用户消息。
 - `turn_publish`、`payload`：turn 事件 ingress、storage projection 读取和 payload 构建。
 

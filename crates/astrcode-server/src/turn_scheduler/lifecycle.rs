@@ -613,7 +613,24 @@ impl TurnScheduler {
     }
 
     pub async fn repair_stale(&self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
+        let admission = self.admit_owned()?;
         let operation = self.begin_session_operation(session_id).await?;
+        if let Some(started) = self.resume_stale_execution(&operation).await? {
+            let turn_id = started.turn_id.clone();
+            drop(operation);
+            self.watch_owned_turn(
+                admission,
+                session_id.clone(),
+                turn_id,
+                started.handle,
+                super::CompletionWatch {
+                    source: "stale-resume",
+                    completion_tx: None,
+                    output_tx: None,
+                },
+            );
+            return Ok(());
+        }
         self.repair_stale_locked(session_id).await?;
         let next = self.reserve_next_pending(&operation).await?;
         drop(operation);
@@ -622,6 +639,77 @@ impl TurnScheduler {
                 .await?;
         }
         Ok(())
+    }
+
+    async fn resume_stale_execution(
+        &self,
+        operation: &SessionOperationGuard,
+    ) -> Result<Option<super::StartedExecution>, TurnScheduleError> {
+        let session_id = operation.session_id();
+        if self.registry.has_active(session_id) {
+            return Ok(None);
+        }
+        let session = self.session_manager.open(session_id.clone()).await?;
+        let state = session
+            .read_model()
+            .await
+            .map_err(TurnScheduleError::Session)?;
+        let (Some(turn_id), Some(step)) = (
+            state.execution.unsettled_turn_id.clone(),
+            state.execution.active_step.as_ref(),
+        ) else {
+            return Ok(None);
+        };
+
+        if let Some(finish_reason) = &step.finish_reason {
+            finalize_turn(
+                &session,
+                &turn_id,
+                &TurnFinalization {
+                    finish_reason: finish_reason.clone(),
+                    pending_error: None,
+                    aborted: false,
+                    terminal_persisted: false,
+                },
+            )
+            .await
+            .map_err(TurnScheduleError::EventEmit)?;
+            self.session_manager
+                .sync_durable_events_required(session_id)
+                .await?;
+            return Ok(None);
+        }
+
+        emit_interrupted_tool_results(
+            &session,
+            &state,
+            Some(&turn_id),
+            InterruptedToolOutcome::Failed,
+        )
+        .await
+        .map_err(TurnScheduleError::EventEmit)?;
+        self.session_manager
+            .sync_durable_events_required(session_id)
+            .await?;
+
+        let reservation = self
+            .registry
+            .reserve(session_id.clone(), turn_id.clone())
+            .ok_or(TurnScheduleError::TurnAlreadyRunning)?;
+        let _start_lease = operation.start_lease();
+        tracing::info!(
+            %session_id,
+            %turn_id,
+            step_index = if step.completed { step.step_index.saturating_add(1) } else { step.step_index },
+            next_attempt = if step.completed { 1 } else { step.attempt.saturating_add(1) },
+            "resuming stale turn from durable step"
+        );
+        let handle = session.resume(turn_id.clone()).await?;
+        if !reservation.activate(handle.shutdown_handle(), Arc::new(session)) {
+            handle.force_kill();
+            return Err(TurnScheduleError::TurnAlreadyRunning);
+        }
+        Ok(Some(super::StartedExecution { turn_id, handle }))
     }
 
     async fn repair_stale_locked(&self, session_id: &SessionId) -> Result<(), TurnScheduleError> {
@@ -674,6 +762,7 @@ impl TurnScheduler {
 
     pub(crate) fn needs_stale_repair(state: &SessionReadModel) -> bool {
         !matches!(state.execution.phase, Phase::Idle | Phase::Error)
+            || state.execution.active_step.is_some()
             || !state.tool_calls_needing_interruption().is_empty()
             || state
                 .agent_sessions

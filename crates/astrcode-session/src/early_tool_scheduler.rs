@@ -64,9 +64,14 @@ impl EarlyToolScheduler {
     /// 调用后自动尝试启动队列中的就绪任务。
     ///
     /// 只有 `Ready` 的工具会被实际执行；其它结果延迟到 tools_stage 按原顺序处理。
-    pub(crate) fn schedule(&mut self, prepared: PreparedToolInvocation) -> usize {
+    pub(crate) fn schedule(
+        &mut self,
+        prepared: PreparedToolInvocation,
+        execute_early: bool,
+    ) -> usize {
         let index = self.slots.len();
-        let should_execute = matches!(prepared.disposition, PreparedToolDisposition::Execute);
+        let should_execute =
+            execute_early && matches!(prepared.disposition, PreparedToolDisposition::Execute);
         self.slots.push(EarlyExecutionSlot {
             prepared,
             outcome: None,

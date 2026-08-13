@@ -545,8 +545,6 @@ export const useAppStore = create<AppState>((set, get) => ({
             phase: 'thinking',
             canSubmitPrompt: false,
             canRequestCompact: current.control?.canRequestCompact ?? false,
-            compactPending: current.control?.compactPending ?? false,
-            compacting: false,
             activeTurnId: response.turnId,
           },
         }))

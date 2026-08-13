@@ -11,7 +11,7 @@ use astrcode_session_projection::SessionReadModel;
 /// 统计读模型中 provider 可见的非合成 user 消息条数。
 pub(crate) fn count_visible_user_messages(model: &SessionReadModel) -> usize {
     model
-        .transcript
+        .model_context
         .messages
         .iter()
         .filter(|entry| {
@@ -38,7 +38,7 @@ mod tests {
 
     fn model_with_messages(messages: Vec<LlmMessage>) -> SessionReadModel {
         let mut model = read_model(SessionId::new("s-test"));
-        model.transcript.messages = messages
+        model.model_context.messages = messages
             .into_iter()
             .enumerate()
             .map(|(updated_seq, message)| SequencedLlmMessage {

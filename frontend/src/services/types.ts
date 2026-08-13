@@ -149,8 +149,6 @@ export interface ConversationControlState {
   phase: Phase
   canSubmitPrompt: boolean
   canRequestCompact: boolean
-  compactPending: boolean
-  compacting: boolean
   activeTurnId?: string
   retryStatus?: LlmRetryStatusDto
 }

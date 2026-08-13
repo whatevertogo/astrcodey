@@ -12,6 +12,7 @@ use astrcode_protocol::http::{
     SessionListItemDto, SessionListResponseDto, SlashCommandListResponseDto, ToolApprovalRequest,
     ToolSelectionDto,
 };
+use astrcode_session::compaction::ManualCompactionOutcome;
 use astrcode_session_projection::SessionSummary;
 use axum::{
     Json,
@@ -28,9 +29,7 @@ use super::super::{
 };
 use crate::{
     protocol_mapping::{command_info_to_http_dto, keybinding_to_dto, status_item_to_dto},
-    session_command_contract::{
-        CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission,
-    },
+    session_command_contract::{CommandInvocation, HandlerError, PromptSubmission},
 };
 
 #[derive(Debug, Deserialize)]
@@ -380,17 +379,13 @@ pub(in crate::http) async fn compact_session(
         .compact_session(&session_id, request.keep_recent_turns)
         .await
     {
-        Ok(ManualCompactOutcome::Compacted { session_id }) => Json(CompactSessionResponse {
-            accepted: true,
-            deferred: false,
-            session_id: Some(session_id.into_string()),
-            message: "compact accepted".into(),
+        Ok(ManualCompactionOutcome::Compacted { .. }) => Json(CompactSessionResponse {
+            compacted: true,
+            message: "compact completed".into(),
         })
         .into_response(),
-        Ok(ManualCompactOutcome::Skipped { message }) => Json(CompactSessionResponse {
-            accepted: false,
-            deferred: false,
-            session_id: None,
+        Ok(ManualCompactionOutcome::Skipped { message }) => Json(CompactSessionResponse {
+            compacted: false,
             message,
         })
         .into_response(),

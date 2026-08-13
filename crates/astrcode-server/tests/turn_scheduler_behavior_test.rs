@@ -13,10 +13,10 @@ use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
-    event::{DurableEventPayload, StoredEvent},
+    event::{DurableEvent, DurableEventPayload, StoredEvent},
     llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
     tool::ToolDefinition,
-    types::{SessionId, new_session_id},
+    types::{SessionId, new_message_id, new_session_id, new_turn_id},
 };
 use astrcode_extension_sdk::{
     builder::manifest,
@@ -425,6 +425,7 @@ async fn durable_queue_recovers_fifo_after_scheduler_restart() {
         .start_with_completion(sid.clone(), "first".into())
         .await
         .unwrap();
+    let first_turn_id = first.turn_id.clone();
     for text in ["queued one", "queued two"] {
         scheduler
             .deliver_input(
@@ -438,7 +439,7 @@ async fn durable_queue_recovers_fifo_after_scheduler_restart() {
 
     let queued = store.session_read_model(&sid).await.unwrap();
     assert_eq!(queued.execution.pending_inputs.len(), 2);
-    assert_eq!(queued.transcript.messages.len(), 1);
+    assert_eq!(queued.model_context.messages.len(), 1);
 
     first.handle.force_kill();
     drop(first.handle);
@@ -456,17 +457,85 @@ async fn durable_queue_recovers_fifo_after_scheduler_restart() {
 
     let state = store.session_read_model(&sid).await.unwrap();
     assert!(state.execution.pending_inputs.is_empty());
-    let user_messages = store
-        .replay_events(&sid)
-        .await
-        .unwrap()
-        .into_iter()
+    let events = store.replay_events(&sid).await.unwrap();
+    let user_messages = events
+        .iter()
         .filter_map(|event| match &event.payload {
             DurableEventPayload::UserMessage { text, .. } => Some(text.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(user_messages, ["first", "queued one", "queued two"]);
+
+    let first_turn_attempts = events
+        .iter()
+        .filter_map(|event| match &event.payload {
+            DurableEventPayload::StepStarted {
+                step_index,
+                attempt,
+            } if event.turn_id.as_ref() == Some(&first_turn_id) => Some((*step_index, *attempt)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(first_turn_attempts, [(0, 1), (0, 2)]);
+    assert!(events.iter().any(|event| {
+        event.turn_id.as_ref() == Some(&first_turn_id)
+            && matches!(
+                &event.payload,
+                DurableEventPayload::TurnCompleted { finish_reason } if finish_reason == "stop"
+            )
+    }));
+
+    let final_sid = seed_session(&store).await;
+    let final_turn_id = new_turn_id();
+    for payload in [
+        DurableEventPayload::TurnStarted,
+        DurableEventPayload::UserMessage {
+            message_id: new_message_id(),
+            text: "already answered".into(),
+            attachments: Vec::new(),
+            accepted_seq: None,
+        },
+        DurableEventPayload::StepStarted {
+            step_index: 0,
+            attempt: 1,
+        },
+        DurableEventPayload::AssistantMessageCompleted {
+            message_id: new_message_id(),
+            text: "done".into(),
+            reasoning_content: None,
+        },
+        DurableEventPayload::StepCompleted {
+            step_index: 0,
+            attempt: 1,
+            finish_reason: Some("stop".into()),
+        },
+    ] {
+        store
+            .append_event(DurableEvent::new(
+                final_sid.clone(),
+                Some(final_turn_id.clone()),
+                payload,
+            ))
+            .await
+            .unwrap();
+    }
+    restarted.repair_stale(&final_sid).await.unwrap();
+    let final_events = store.replay_events(&final_sid).await.unwrap();
+    assert_eq!(
+        final_events
+            .iter()
+            .filter(|event| matches!(event.payload, DurableEventPayload::StepStarted { .. }))
+            .count(),
+        1,
+        "a completed final step must not call the provider again"
+    );
+    assert!(final_events.iter().any(|event| {
+        matches!(
+            &event.payload,
+            DurableEventPayload::TurnCompleted { finish_reason } if finish_reason == "stop"
+        )
+    }));
 }
 
 #[tokio::test]
@@ -517,7 +586,7 @@ async fn queued_input_retries_after_a_transient_start_failure() {
     assert!(state.execution.pending_inputs.is_empty());
     assert_eq!(
         state
-            .transcript
+            .model_context
             .messages
             .iter()
             .filter(|message| message.message.role == astrcode_core::llm::LlmRole::User)

@@ -120,10 +120,6 @@ pub fn builtin_tools(working_dir: PathBuf, timeout_secs: u64) -> Vec<Arc<dyn Too
     ]
 }
 
-pub fn default_tool_catalog() -> Arc<dyn ToolCatalogProvider> {
-    Arc::new(BuiltinToolCatalog::default())
-}
-
 pub fn default_tool_catalog_with_shell_timeout_source(
     shell_timeout_secs: Arc<AtomicU64>,
 ) -> Arc<dyn ToolCatalogProvider> {

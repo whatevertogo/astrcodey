@@ -53,7 +53,7 @@ trait ProviderMessages {
 impl ProviderMessages for SessionReadModel {
     fn provider_messages(&self) -> Vec<LlmMessage> {
         astrcode_core::llm::provider_visible_messages(
-            self.transcript
+            self.model_context
                 .messages
                 .iter()
                 .map(|message| message.message.clone())
@@ -855,12 +855,9 @@ fn write_project_skill(workspace: &Path, id: &str, content: &str) {
     fs::write(skill_dir.join("SKILL.md"), content).unwrap();
 }
 
-fn compacted_session_id(outcome: ManualCompactOutcome) -> SessionId {
-    match outcome {
-        ManualCompactOutcome::Compacted { session_id } => session_id,
-        ManualCompactOutcome::Skipped { message } => {
-            panic!("expected compact, compact was skipped: {message}")
-        },
+fn assert_compacted(outcome: ManualCompactionOutcome) {
+    if let ManualCompactionOutcome::Skipped { message } = outcome {
+        panic!("expected compact, compact was skipped: {message}");
     }
 }
 
@@ -949,7 +946,7 @@ impl TestCommandActor {
         &self,
         session_id: SessionId,
         keep_recent_turns: Option<usize>,
-    ) -> Result<ManualCompactOutcome, HandlerError> {
+    ) -> Result<ManualCompactionOutcome, HandlerError> {
         self.session_commands
             .compact_session(&session_id, keep_recent_turns)
             .await
@@ -1248,7 +1245,7 @@ async fn create_session_persists_initial_system_prompt() {
         .await
         .unwrap();
     assert!(state.system_prompt.text.contains("[Identity]"));
-    assert!(state.transcript.messages.is_empty());
+    assert!(state.model_context.messages.is_empty());
 }
 
 #[tokio::test]
@@ -1541,7 +1538,7 @@ async fn startup_repairs_stale_pending_tool_calls() {
         .unwrap();
     assert_eq!(state.execution.phase, Phase::Idle);
     assert!(state.execution.pending_tool_calls.is_empty());
-    assert!(state.transcript.messages.iter().any(|message| {
+    assert!(state.model_context.messages.iter().any(|message| {
         message.message.content.iter().any(|content| {
             matches!(
                 content,
@@ -1633,7 +1630,7 @@ async fn repair_stale_session_settles_dangling_tool_call_after_aborted_turn() {
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert!(state.transcript.messages.iter().any(|message| {
+    assert!(state.model_context.messages.iter().any(|message| {
         message.message.content.iter().any(|content| {
             matches!(
                 content,
@@ -2034,7 +2031,7 @@ async fn abort_stops_inner_turn_before_late_provider_events_are_persisted() {
 }
 
 #[tokio::test]
-async fn compact_session_rejects_running_turn_without_compaction_started() {
+async fn slash_compact_rejects_running_turn_without_input_or_compaction_events() {
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let runtime = test_runtime_with_llm(Arc::new(PendingLlm));
@@ -2048,9 +2045,7 @@ async fn compact_session_rejects_running_turn_without_compaction_started() {
     while event_rx.try_recv().is_ok() {}
 
     let error = handler
-        .handle(ClientCommand::Compact {
-            keep_recent_turns: None,
-        })
+        .submit_input_for_session(sid.clone(), "/compact".into())
         .await
         .unwrap_err();
     assert!(
@@ -2058,25 +2053,26 @@ async fn compact_session_rejects_running_turn_without_compaction_started() {
         "expected CompactBlocked, got {error:?}"
     );
 
-    let mut saw_conflict = false;
     while let Ok(notification) = event_rx.try_recv() {
-        match notification {
-            ClientNotification::Error { code, .. } => {
-                saw_conflict |= code == 40900;
-            },
-            ClientNotification::Event(event) => {
-                assert!(
-                    !matches!(
-                        event.payload,
-                        EventPayload::Live(LiveEventPayload::CompactionStarted)
-                    ),
-                    "rejected compact must not leave clients in compacting state"
-                );
-            },
-            _ => {},
+        if let ClientNotification::Event(event) = notification {
+            assert!(
+                !matches!(
+                    event.payload,
+                    EventPayload::Live(LiveEventPayload::CompactionStarted)
+                ),
+                "rejected compact must not leave clients in compacting state"
+            );
         }
     }
-    assert!(saw_conflict);
+
+    let events = runtime.event_store().replay_events(&sid).await.unwrap();
+    assert!(events.iter().all(|event| {
+        !matches!(&event.payload, DurableEventPayload::UserMessage { text, .. } if text == "/compact")
+            && !matches!(
+                &event.payload,
+                DurableEventPayload::UserInputAccepted { input } if input.text == "/compact"
+            )
+    }));
 
     handler.abort_session(sid).await.unwrap();
 }
@@ -2098,15 +2094,11 @@ async fn compact_command_rewrites_transcript_with_summary() {
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
     }
 
-    let compacted_id = handler
+    handler
         .compact_session(session_id.clone(), None)
         .await
-        .map(compacted_session_id)
+        .map(assert_compacted)
         .unwrap();
-    assert_eq!(
-        compacted_id, session_id,
-        "same-session compact keeps session_id"
-    );
     let rewritten_session_id = drain_until_transcript_rewrite(&mut event_rx).await;
     assert_eq!(rewritten_session_id, session_id);
 
@@ -2128,7 +2120,7 @@ async fn compact_command_rewrites_transcript_with_summary() {
     }));
     assert_eq!(
         state
-            .transcript
+            .model_context
             .messages
             .iter()
             .filter(|message| is_compact_summary_message(&message.message))
@@ -2171,7 +2163,7 @@ async fn slash_compact_uses_backend_command_without_user_message() {
         .unwrap();
     assert!(
         state
-            .transcript
+            .model_context
             .messages
             .iter()
             .all(|message| message_to_dto(&message.message).content != "/compact")
@@ -2341,7 +2333,7 @@ async fn skill_slash_command_uses_skill_content_as_user_message() {
         .unwrap();
     assert!(
         state
-            .transcript
+            .model_context
             .messages
             .iter()
             .any(|message| message_to_dto(&message.message)
@@ -2423,12 +2415,11 @@ async fn compact_command_compacts_existing_hidden_context_again() {
         assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
     }
 
-    let first_compacted = handler
+    handler
         .compact_session(session_id.clone(), None)
         .await
-        .map(compacted_session_id)
+        .map(assert_compacted)
         .unwrap();
-    assert_eq!(first_compacted, session_id, "same-session compact");
     assert_eq!(
         session_id,
         drain_until_transcript_rewrite(&mut event_rx).await
@@ -2454,12 +2445,11 @@ async fn compact_command_compacts_existing_hidden_context_again() {
         .await
         .unwrap();
     assert_eq!(wait_for_turn_completed(&mut event_rx).await, "stop");
-    let second_compacted = handler
+    handler
         .compact_session(session_id.clone(), None)
         .await
-        .map(compacted_session_id)
+        .map(assert_compacted)
         .unwrap();
-    assert_eq!(second_compacted, session_id, "same-session compact again");
     assert_eq!(
         session_id,
         drain_until_transcript_rewrite(&mut event_rx).await
@@ -2745,7 +2735,7 @@ async fn auto_compact_uses_configured_keep_recent_turns() {
         .await
         .unwrap();
     let visible = state
-        .transcript
+        .model_context
         .messages
         .iter()
         .map(|message| message_to_dto(&message.message).content)
@@ -2758,6 +2748,7 @@ async fn auto_compact_uses_configured_keep_recent_turns() {
     assert!(visible.contains("current"));
     assert!(matches!(
         state
+            .model_context
             .compactions
             .first()
             .map(|compaction| &compaction.strategy),

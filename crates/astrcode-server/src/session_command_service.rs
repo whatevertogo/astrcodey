@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use astrcode_core::{
     config::ModelSelection,
-    event::LiveEventPayload,
     tool::SessionToolSelection,
     types::{SessionId, TurnId},
     user_input::UserInput,
@@ -16,9 +15,7 @@ use astrcode_extension_sdk::extension::{
     CommandCompletions, ExtensionCommandResult, ExtensionError, RuntimeHookCallContext,
 };
 use astrcode_extensions::runner::CommandSource as ExtensionCommandSource;
-use astrcode_session::compaction::{
-    IdleCompactionError, IdleCompactionOutcome, compact_idle_session,
-};
+use astrcode_session::compaction::{ManualCompactionOutcome, compact_manual_session};
 
 use crate::{
     bootstrap::ServerRuntime,
@@ -26,7 +23,7 @@ use crate::{
     server_event_bus::ServerEventBus,
     session_command_contract::{
         CommandInfo, CommandInvocation, CommandList, CommandSource, HandlerError,
-        ManualCompactOutcome, ParsedSlashCommand, PromptSubmission, parse_slash_command,
+        ParsedSlashCommand, PromptSubmission, parse_slash_command,
     },
     turn_scheduler::{DeliveryOutcome, InputDelivery, TurnCompletion, TurnScheduler},
 };
@@ -82,9 +79,9 @@ impl SessionCommandService {
             .map_err(|error| HandlerError::InvalidRequest(error.to_string()))?;
 
         let operation = self.scheduler.begin_session_operation(&session_id).await?;
-        if !self.scheduler.registry().has_active(&session_id)
-            && let Some(command) =
-                parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
+        let has_active_turn = self.scheduler.registry().has_active(&session_id);
+        if let Some(command) = parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
+            && (command.name == "compact" || !has_active_turn)
         {
             match self.prepare_command_in_operation(&operation, command).await {
                 Err(HandlerError::UnknownCommand(_)) => {},
@@ -167,7 +164,7 @@ impl SessionCommandService {
         &self,
         session_id: &SessionId,
         keep_recent_turns: Option<usize>,
-    ) -> Result<ManualCompactOutcome, HandlerError> {
+    ) -> Result<ManualCompactionOutcome, HandlerError> {
         let operation = self.scheduler.begin_session_operation(session_id).await?;
         self.compact_session_in_operation(&operation, keep_recent_turns)
             .await
@@ -177,7 +174,7 @@ impl SessionCommandService {
         &self,
         operation: &SessionOperationGuard,
         keep_recent_turns: Option<usize>,
-    ) -> Result<ManualCompactOutcome, HandlerError> {
+    ) -> Result<ManualCompactionOutcome, HandlerError> {
         let session_id = operation.session_id();
         if self.scheduler.registry().has_active(session_id) {
             return Err(HandlerError::CompactBlocked);
@@ -189,46 +186,14 @@ impl SessionCommandService {
             .open(session_id.clone())
             .await
             .map_err(HandlerError::SessionManager)?;
-        session.emit_live(None, LiveEventPayload::CompactionStarted);
-
-        let outcome = compact_idle_session(&session, keep_recent_turns)
+        let outcome = compact_manual_session(&session, keep_recent_turns)
             .await
-            .map_err(|error| match error {
-                IdleCompactionError::Session(error) => HandlerError::Session(error),
-                IdleCompactionError::Extension(error) => HandlerError::Extension(error),
-            });
-
-        let (result, terminal_event) = match outcome {
-            Ok(IdleCompactionOutcome::Skipped { message }) => (
-                Ok(ManualCompactOutcome::Skipped {
-                    message: message.clone(),
-                }),
-                LiveEventPayload::CompactionSkipped { reason: message },
-            ),
-            Ok(IdleCompactionOutcome::Compacted { messages_removed }) => {
-                match session.read_model().await.map_err(HandlerError::Session) {
-                    Ok(state) => {
-                        self.event_bus.send_session_resumed(&state);
-                        (
-                            Ok(ManualCompactOutcome::Compacted {
-                                session_id: session_id.clone(),
-                            }),
-                            LiveEventPayload::CompactionCompleted { messages_removed },
-                        )
-                    },
-                    Err(error) => {
-                        let reason = error.to_string();
-                        (Err(error), LiveEventPayload::CompactionFailed { reason })
-                    },
-                }
-            },
-            Err(error) => {
-                let reason = error.to_string();
-                (Err(error), LiveEventPayload::CompactionFailed { reason })
-            },
-        };
-        session.emit_live(None, terminal_event);
-        result
+            .map_err(HandlerError::Session)?;
+        if matches!(outcome, ManualCompactionOutcome::Compacted { .. }) {
+            let state = session.read_model().await.map_err(HandlerError::Session)?;
+            self.event_bus.send_session_resumed(&state);
+        }
+        Ok(outcome)
     }
 
     pub(crate) async fn abort_session(&self, session_id: &SessionId) -> Result<(), HandlerError> {
@@ -347,10 +312,6 @@ impl SessionCommandService {
         operation: &SessionOperationGuard,
         arguments: &str,
     ) -> Result<CommandOperation, HandlerError> {
-        let session_id = operation.session_id();
-        if self.session_is_busy(session_id).await {
-            return Err(HandlerError::TurnAlreadyRunning);
-        }
         let arguments = arguments.trim();
         let keep_recent_turns = if arguments.is_empty() {
             None
@@ -365,10 +326,10 @@ impl SessionCommandService {
             .compact_session_in_operation(operation, keep_recent_turns)
             .await?
         {
-            ManualCompactOutcome::Compacted { .. } => CommandInvocation::Handled {
+            ManualCompactionOutcome::Compacted { .. } => CommandInvocation::Handled {
                 message: "compact accepted".into(),
             },
-            ManualCompactOutcome::Skipped { message } => CommandInvocation::Handled { message },
+            ManualCompactionOutcome::Skipped { message } => CommandInvocation::Handled { message },
         };
         Ok(CommandOperation::Complete(invocation))
     }

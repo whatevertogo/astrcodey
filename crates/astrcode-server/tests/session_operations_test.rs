@@ -2289,7 +2289,7 @@ async fn submit_turn_async_returns_backgrounded_and_completes() {
     );
 
     // notify_parent_on_complete 消息应存在，且包含子 agent 输出
-    let has_notify = parent_model.transcript.messages.iter().any(|m| {
+    let has_notify = parent_model.model_context.messages.iter().any(|m| {
         m.message.content.iter().any(|c| {
             matches!(
                 c,

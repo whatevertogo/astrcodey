@@ -115,6 +115,16 @@ pub enum DurableEventPayload {
         child_session_id: SessionId,
     },
     TurnStarted,
+    StepStarted {
+        step_index: u32,
+        attempt: u32,
+    },
+    StepCompleted {
+        step_index: u32,
+        attempt: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        finish_reason: Option<String>,
+    },
     TurnCompleted {
         finish_reason: String,
     },

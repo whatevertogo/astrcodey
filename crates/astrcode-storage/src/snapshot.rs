@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 use crate::StorageError;
 
-const SNAPSHOT_VERSION: u32 = 4;
+const SNAPSHOT_VERSION: u32 = 5;
 
 /// 保留的最大快照数量。创建新快照后自动清理超出数量的旧快照。
 const MAX_SNAPSHOTS: usize = 4;
@@ -188,4 +188,43 @@ fn validate_snapshot(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use astrcode_core::{event::StoredEvent, types::SessionId};
+    use astrcode_session_projection::replay;
+    use serde_json::Value;
+    use tempfile::tempdir;
+
+    use super::SnapshotManager;
+    use crate::test_support::started_event;
+
+    #[tokio::test]
+    async fn v5_snapshot_round_trips_and_v4_snapshot_is_ignored() {
+        let temp_dir = tempdir().unwrap();
+        let session_id = SessionId::new("snapshot-test");
+        let model = replay(
+            session_id.clone(),
+            &[StoredEvent::new(0, started_event(&session_id))],
+        )
+        .unwrap();
+        let manager = SnapshotManager::new(temp_dir.path().to_path_buf());
+
+        manager.create_snapshot(model.clone()).await.unwrap();
+        let snapshot = manager.latest_snapshot().await.unwrap().unwrap();
+        assert_eq!(snapshot.model, model);
+
+        let path = temp_dir
+            .path()
+            .join(format!("snapshot-{}.json", model.cursor()));
+        let mut json: Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.unwrap()).unwrap();
+        json["version"] = Value::from(4);
+        tokio::fs::write(&path, serde_json::to_vec(&json).unwrap())
+            .await
+            .unwrap();
+
+        assert!(manager.latest_snapshot().await.unwrap().is_none());
+    }
 }

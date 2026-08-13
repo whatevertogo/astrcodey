@@ -5,12 +5,12 @@ use astrcode_core::llm::{LlmContent, LlmRole};
 use astrcode_session_projection::SessionReadModel;
 
 pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
-    let Some(usage) = &model.context_usage else {
+    let Some(usage) = &model.model_context.usage else {
         return ContextSnapshot::new(
             model.stats.last_seq,
             model.system_prompt.text.clone(),
             model
-                .transcript
+                .model_context
                 .messages
                 .iter()
                 .map(|entry| entry.message.clone())
@@ -22,7 +22,7 @@ pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
     // 合并等非逐条变换，无法从已过滤的 snapshot.messages 反推），所以前缀消息会
     // 随全量克隆各出现一次——这是 API 形状决定的必要克隆，不是冗余。
     let covered_messages = model
-        .transcript
+        .model_context
         .messages
         .iter()
         .take(usage.covered_message_count)
@@ -32,7 +32,7 @@ pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
         model.stats.last_seq,
         model.system_prompt.text.clone(),
         model
-            .transcript
+            .model_context
             .messages
             .iter()
             .map(|entry| entry.message.clone())
@@ -48,7 +48,7 @@ pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
 /// 已提交 tool 结果内容的字符总量（用于 tool 结果预算）。
 pub(crate) fn committed_tool_result_content_len(model: &SessionReadModel) -> usize {
     model
-        .transcript
+        .model_context
         .messages
         .iter()
         .map(|entry| &entry.message)
@@ -74,17 +74,17 @@ mod tests {
 
     fn sample_model() -> SessionReadModel {
         let mut model = read_model(new_session_id());
-        model.transcript.messages.push(SequencedLlmMessage {
+        model.model_context.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("hello"),
             updated_seq: 1,
             source: None,
         });
-        model.transcript.messages.push(SequencedLlmMessage {
+        model.model_context.messages.push(SequencedLlmMessage {
             message: LlmMessage::system("stale system in store"),
             updated_seq: 2,
             source: None,
         });
-        model.transcript.messages.push(SequencedLlmMessage {
+        model.model_context.messages.push(SequencedLlmMessage {
             message: LlmMessage::assistant("ctx"),
             updated_seq: 3,
             source: None,
@@ -134,7 +134,7 @@ mod tests {
     #[test]
     fn committed_tool_result_content_len_sums_tool_messages() {
         let mut model = sample_model();
-        model.transcript.messages.push(SequencedLlmMessage {
+        model.model_context.messages.push(SequencedLlmMessage {
             message: LlmMessage {
                 role: LlmRole::Tool,
                 content: vec![LlmContent::ToolResult {
@@ -148,7 +148,7 @@ mod tests {
             updated_seq: 1,
             source: None,
         });
-        model.transcript.messages.push(SequencedLlmMessage {
+        model.model_context.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("hi"),
             updated_seq: 2,
             source: None,

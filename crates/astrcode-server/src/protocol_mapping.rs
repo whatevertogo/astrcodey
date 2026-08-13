@@ -41,7 +41,7 @@ pub(crate) fn session_snapshot(state: &SessionReadModel) -> SessionSnapshot {
         session_id: state.identity.session_id.to_string(),
         cursor: state.cursor(),
         messages: state
-            .transcript
+            .model_context
             .messages
             .iter()
             .map(|message| message_to_dto(&message.message))

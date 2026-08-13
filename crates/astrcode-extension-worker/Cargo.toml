@@ -11,7 +11,6 @@ astrcode-extension-contract = { path = "../astrcode-extension-contract" }
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
-parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "io-std", "macros", "process", "rt-multi-thread", "sync", "time"] }

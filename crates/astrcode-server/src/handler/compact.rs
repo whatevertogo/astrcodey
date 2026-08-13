@@ -1,6 +1,6 @@
 use astrcode_core::types::SessionId;
 
-use super::{CommandHandler, HandlerError, ManualCompactOutcome};
+use super::{CommandHandler, HandlerError, ManualCompactionOutcome};
 
 impl CommandHandler {
     pub(super) async fn compact_active_session(
@@ -12,8 +12,8 @@ impl CommandHandler {
             return Ok(());
         };
         match self.compact_session(&session_id, keep_recent_turns).await {
-            Ok(ManualCompactOutcome::Compacted { .. }) => Ok(()),
-            Ok(ManualCompactOutcome::Skipped { message }) => {
+            Ok(ManualCompactionOutcome::Compacted { .. }) => Ok(()),
+            Ok(ManualCompactionOutcome::Skipped { message }) => {
                 self.send_error(40000, &message);
                 Ok(())
             },
@@ -25,7 +25,7 @@ impl CommandHandler {
         &self,
         session_id: &SessionId,
         keep_recent_turns: Option<usize>,
-    ) -> Result<ManualCompactOutcome, HandlerError> {
+    ) -> Result<ManualCompactionOutcome, HandlerError> {
         let result = self
             .session_commands
             .compact_session(session_id, keep_recent_turns)

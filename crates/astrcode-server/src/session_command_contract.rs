@@ -1,4 +1,4 @@
-use astrcode_core::types::{SessionId, TurnId};
+use astrcode_core::types::TurnId;
 
 use crate::{session_manager::SessionManagerError, turn_scheduler::TurnScheduleError};
 
@@ -55,12 +55,6 @@ impl CommandInvocation {
             Self::Started { turn_id } => PromptSubmission::Accepted { turn_id },
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ManualCompactOutcome {
-    Compacted { session_id: SessionId },
-    Skipped { message: String },
 }
 
 /// Session command application error.

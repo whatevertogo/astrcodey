@@ -68,7 +68,7 @@ pub(super) async fn snapshot(
                 .as_ref()
                 .map(|parent| parent.session_id.to_string()),
             source_extension: model.identity.source_extension.clone(),
-            message_count: model.transcript.messages.len(),
+            message_count: model.model_context.messages.len(),
             pending_tool_call_ids,
             agent_session_count: model.agent_sessions.len(),
         },
@@ -102,7 +102,7 @@ pub(super) async fn provider_messages(
     .await?;
     let messages = astrcode_core::llm::provider_visible_messages(
         model
-            .transcript
+            .model_context
             .messages
             .iter()
             .map(|message| message.message.clone())
@@ -149,11 +149,11 @@ pub(super) fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel
     let identity = model.identity;
     let stats = model.stats;
     let prompt = model.system_prompt;
-    let transcript = model.transcript;
+    let model_context = model.model_context;
     let execution = model.execution;
     SessionInspectReadModel {
         session_id: identity.session_id.to_string(),
-        messages: transcript
+        messages: model_context
             .messages
             .into_iter()
             .map(sequenced_message_dto)
@@ -188,7 +188,7 @@ pub(super) fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel
             .into_iter()
             .map(agent_session_dto)
             .collect(),
-        compactions: model
+        compactions: model_context
             .compactions
             .into_iter()
             .map(|boundary| {
@@ -327,7 +327,7 @@ mod tests {
         )
         .unwrap();
         model.execution.phase = Phase::CallingTool;
-        model.transcript.messages.push(SequencedLlmMessage {
+        model.model_context.messages.push(SequencedLlmMessage {
             message: LlmMessage::user("hello"),
             updated_seq: 2,
             source: None,

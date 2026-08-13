@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 use astrcode_core::types::*;
 use astrcode_protocol::commands::UiResponseValue;
+use astrcode_session::compaction::ManualCompactionOutcome;
 
 use crate::{
     bootstrap::ServerRuntime, session_command_service::SessionCommandService,
@@ -33,7 +34,7 @@ pub use actor::CommandHandle;
 use model_selection::ModelSelectionController;
 
 pub(crate) use crate::session_command_contract::{
-    CommandInvocation, HandlerError, ManualCompactOutcome, PromptSubmission,
+    CommandInvocation, HandlerError, PromptSubmission,
 };
 #[cfg(test)]
 pub(crate) use crate::{session_command_contract::CommandList, turn_scheduler::TurnCompletion};

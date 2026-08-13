@@ -34,7 +34,7 @@ impl CommandHandler {
 
         let state = session.read_model().await.map_err(HandlerError::Session)?;
 
-        if state.transcript.messages.is_empty() {
+        if state.model_context.messages.is_empty() {
             self.send_error(40400, "Nothing to recap yet");
             return Ok(());
         }
@@ -43,7 +43,7 @@ impl CommandHandler {
             state.stats.last_seq,
             state.system_prompt.text.clone(),
             state
-                .transcript
+                .model_context
                 .messages
                 .iter()
                 .map(|message| message.message.clone())

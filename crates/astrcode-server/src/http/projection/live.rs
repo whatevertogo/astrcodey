@@ -316,8 +316,6 @@ fn control_from_state(
         phase: phase.into(),
         can_submit_prompt,
         can_request_compact: can_submit_prompt && has_messages,
-        compact_pending: false,
-        compacting: matches!(phase, Phase::Compacting),
         active_turn_id,
         retry_status: None,
     }

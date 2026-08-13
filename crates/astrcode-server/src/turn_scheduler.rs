@@ -376,7 +376,7 @@ impl TurnScheduler {
             phase: state.execution.phase,
             active_turn_id,
             queued_inputs,
-            message_count: state.transcript.messages.len(),
+            message_count: state.model_context.messages.len(),
         })
     }
 

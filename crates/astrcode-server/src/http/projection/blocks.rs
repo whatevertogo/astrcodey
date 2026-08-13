@@ -12,8 +12,8 @@ use astrcode_protocol::http::{
     ConversationBlockDto, ConversationBlockStatusDto, ToolCallStatusDto,
 };
 use astrcode_session_projection::{
-    CompactionView, SequencedLlmMessage, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
-    TranscriptArtifactView,
+    CompactionView, SequencedLlmMessage, SessionArtifactView, TOOL_CALL_CANCELLED_SOURCE,
+    TOOL_CALL_FAILED_SOURCE,
 };
 
 use super::{args::format_args_inline, non_empty_metadata};
@@ -205,7 +205,7 @@ fn tool_call_terminal_block(
 
 pub(in crate::http) fn transcript_blocks(
     messages: &[SequencedLlmMessage],
-    artifacts: &[TranscriptArtifactView],
+    artifacts: &[SessionArtifactView],
     forkable_after_seq: Option<u64>,
 ) -> Vec<ConversationBlockDto> {
     let mut blocks = sequenced_message_blocks(messages, forkable_after_seq);
@@ -400,13 +400,13 @@ fn tool_terminal_metadata(
     non_empty_metadata(&metadata)
 }
 
-fn transcript_artifact_block(artifact: &TranscriptArtifactView) -> ConversationBlockDto {
+fn transcript_artifact_block(artifact: &SessionArtifactView) -> ConversationBlockDto {
     match artifact {
-        TranscriptArtifactView::Error { id, message, .. } => ConversationBlockDto::Error {
+        SessionArtifactView::Error { id, message, .. } => ConversationBlockDto::Error {
             id: id.clone(),
             message: message.clone(),
         },
-        TranscriptArtifactView::SystemNote { id, text, .. } => ConversationBlockDto::SystemNote {
+        SessionArtifactView::SystemNote { id, text, .. } => ConversationBlockDto::SystemNote {
             id: id.clone(),
             text: text.clone(),
         },

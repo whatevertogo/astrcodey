@@ -4,7 +4,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use astrcode_core::{
     event::{DurableEventPayload, LiveEventPayload, Phase},
-    llm::TURN_ABORTED_SOURCE,
+    llm::{LlmRole, TURN_ABORTED_SOURCE},
     message_attachment::MessageAttachment,
     tool::SessionToolSelection,
     types::*,
@@ -223,6 +223,36 @@ impl Session {
         let _ = completion_tx.send(result);
     }
 
+    fn spawn_prepared_turn(&self, agent: TurnLoop, text: String, turn_id: TurnId) -> TurnHandle {
+        let cancellation_token = agent.cancellation_token();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let turn_id_for_task = turn_id.clone();
+        let session_for_completion = self.clone();
+        let cancellation_for_task = cancellation_token.clone();
+        let finalization_state = Arc::new(Mutex::new(None));
+        let finalization_for_task = Arc::clone(&finalization_state);
+        let join = tokio::spawn(async move {
+            Self::run_and_finalize_turn(
+                session_for_completion,
+                agent,
+                text,
+                turn_id_for_task,
+                cancellation_for_task,
+                completion_tx,
+                finalization_for_task,
+            )
+            .await;
+        });
+
+        TurnHandle::new(
+            turn_id,
+            join,
+            cancellation_token,
+            completion_rx,
+            finalization_state,
+        )
+    }
+
     pub async fn submit(
         &self,
         input: UserInput,
@@ -256,33 +286,29 @@ impl Session {
             },
         };
         setup_cancellation.disarm();
-        let cancellation_token = agent.cancellation_token();
-        let (completion_tx, completion_rx) = oneshot::channel();
-        let turn_id_for_task = turn_id.clone();
-        let session_for_completion = self.clone();
-        let cancellation_for_task = cancellation_token.clone();
-        let finalization_state = Arc::new(Mutex::new(None));
-        let finalization_for_task = Arc::clone(&finalization_state);
-        let join = tokio::spawn(async move {
-            Self::run_and_finalize_turn(
-                session_for_completion,
-                agent,
-                text,
-                turn_id_for_task,
-                cancellation_for_task,
-                completion_tx,
-                finalization_for_task,
-            )
-            .await;
-        });
+        Ok(self.spawn_prepared_turn(agent, text, turn_id))
+    }
 
-        Ok(TurnHandle::new(
-            turn_id,
-            join,
-            cancellation_token,
-            completion_rx,
-            finalization_state,
-        ))
+    /// 重新驱动事件日志中仍处于 active step 的原 turn，不追加新的用户消息。
+    pub async fn resume(&self, turn_id: TurnId) -> Result<TurnHandle, TurnError> {
+        let cancellation_token = CancellationToken::new();
+        let setup_cancellation = cancellation_token.clone().drop_guard();
+        let state = self.read_model().await?;
+        let text = state
+            .model_context
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.source.is_none() && message.message.role == LlmRole::User)
+            .map(|message| message.message.joined_display_text("\n"))
+            .unwrap_or_default();
+        let runtime_view = self.runtime_services.turn_runtime_view().await?;
+        let agent = self
+            .prepare_turn_runner(&runtime_view, &turn_id, cancellation_token)
+            .await?;
+        setup_cancellation.disarm();
+        self.emit_live(Some(&turn_id), LiveEventPayload::AgentRunStarted);
+        Ok(self.spawn_prepared_turn(agent, text, turn_id))
     }
 
     async fn settle_failed_turn_setup(&self, turn_id: &TurnId, error: &TurnError) {
@@ -338,7 +364,7 @@ pub async fn finalize_aborted_turn(
     )
     .await?;
     let has_aborted_context = state
-        .transcript
+        .model_context
         .messages
         .last()
         .and_then(|message| message.source.as_deref())

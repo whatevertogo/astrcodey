@@ -176,10 +176,7 @@ pub struct CompactSessionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CompactSessionResponse {
-    pub accepted: bool,
-    pub deferred: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_id: Option<String>,
+    pub compacted: bool,
     pub message: String,
 }
 
@@ -386,8 +383,6 @@ pub struct ConversationControlStateDto {
     pub phase: PhaseDto,
     pub can_submit_prompt: bool,
     pub can_request_compact: bool,
-    pub compact_pending: bool,
-    pub compacting: bool,
     /// 活跃 turn ID，v1 snapshot 暂无。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn_id: Option<String>,

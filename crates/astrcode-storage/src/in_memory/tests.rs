@@ -29,7 +29,7 @@ async fn in_memory_store_enforces_creation_and_updates_projection_atomically() {
     let model = store.session_read_model(&session_id).await.unwrap();
     assert_eq!(user.seq, 1);
     assert_eq!(model.stats.last_seq, 1);
-    assert_eq!(model.transcript.messages.len(), 1);
+    assert_eq!(model.model_context.messages.len(), 1);
     assert_eq!(model.system_prompt.text, "system");
     assert_eq!(
         store.latest_cursor(&session_id).await.unwrap(),

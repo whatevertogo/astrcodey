@@ -75,6 +75,8 @@ fn durable_payload_type(payload: &DurableEventPayload) -> &'static str {
         DurableEventPayload::AgentSessionFailed { .. } => "agent_session_failed",
         DurableEventPayload::AgentSessionRecycled { .. } => "agent_session_recycled",
         DurableEventPayload::TurnStarted => "turn_started",
+        DurableEventPayload::StepStarted { .. } => "step_started",
+        DurableEventPayload::StepCompleted { .. } => "step_completed",
         DurableEventPayload::TurnCompleted { .. } => "turn_completed",
         DurableEventPayload::TurnAbortedContext => "turn_aborted_context",
         DurableEventPayload::UserInputAccepted { .. } => "user_input_accepted",

@@ -2193,10 +2193,10 @@ async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
         .session_read_model(&sid)
         .await
         .unwrap();
-    assert!(state.compactions.iter().any(|compaction| {
+    assert!(state.model_context.compactions.iter().any(|compaction| {
         compaction.trigger == "manual_command" && !compaction.summary.is_empty()
     }));
-    assert!(!state.transcript.messages.iter().any(|message| {
+    assert!(!state.model_context.messages.iter().any(|message| {
         message
             .message
             .content
@@ -2290,8 +2290,7 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
     .await;
     assert_eq!(response.status(), StatusCode::OK);
     let body: CompactSessionResponse = serde_json::from_slice(&body_bytes(response).await).unwrap();
-    let returned_session_id = body.session_id.expect("compact should return session_id");
-    assert_eq!(returned_session_id, session_id, "same-session compact");
+    assert!(body.compacted, "compact should complete synchronously");
 
     let state = runtime
         .event_store()
@@ -2300,7 +2299,7 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
         .unwrap();
     let restored_context = astrcode_core::llm::LlmContent::join_text(
         state
-            .transcript
+            .model_context
             .messages
             .iter()
             .flat_map(|message| &message.message.content),

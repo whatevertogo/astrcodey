@@ -15,7 +15,7 @@ use astrcode_core::{
     types::{SessionId, new_message_id, new_turn_id},
 };
 use astrcode_session::Session;
-use astrcode_session_projection::{SessionReadModel, TranscriptArtifactView};
+use astrcode_session_projection::{SessionArtifactView, SessionReadModel};
 use astrcode_storage::SessionStore;
 use tokio::sync::mpsc;
 
@@ -135,7 +135,7 @@ async fn compact_event_count(store: &dyn SessionStore, session_id: &SessionId) -
 fn projected_provider_messages(model: &SessionReadModel) -> Vec<LlmMessage> {
     astrcode_core::llm::provider_visible_messages(
         model
-            .transcript
+            .model_context
             .messages
             .iter()
             .map(|message| message.message.clone())
@@ -151,7 +151,7 @@ async fn prefix_fingerprint_at(session: &Session, source_seq: u64) -> String {
         source_seq,
         model.system_prompt.text.clone(),
         model
-            .transcript
+            .model_context
             .messages
             .iter()
             .map(|message| message.message.clone())
@@ -426,9 +426,9 @@ async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
         "projection should contain the compact summary"
     );
     assert!(
-        model.transcript.artifacts.iter().any(|artifact| matches!(
+        model.presentation.artifacts.iter().any(|artifact| matches!(
             artifact,
-            TranscriptArtifactView::SystemNote { text, .. }
+            SessionArtifactView::SystemNote { text, .. }
                 if text == "concurrent race during compact"
         )),
         "projection must preserve artifacts appended during compact"
@@ -467,7 +467,7 @@ async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
 
 #[tokio::test]
 async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
-    use astrcode_session::compaction::{IdleCompactionOutcome, compact_idle_session};
+    use astrcode_session::compaction::{ManualCompactionOutcome, compact_manual_session};
 
     let session_to_race = Arc::new(std::sync::Mutex::new(None));
     let race_llm = Arc::new(RaceOnCompactLlm {
@@ -495,11 +495,11 @@ async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
 
     let session_for_race = Arc::clone(&session);
     let compact_task =
-        tokio::spawn(async move { compact_idle_session(session_for_race.as_ref(), None).await });
+        tokio::spawn(async move { compact_manual_session(session_for_race.as_ref(), None).await });
 
     let outcome = compact_task.await.unwrap().unwrap();
     assert!(
-        matches!(outcome, IdleCompactionOutcome::Compacted { .. }),
+        matches!(outcome, ManualCompactionOutcome::Compacted { .. }),
         "idle compact should preserve the concurrent tail, got {outcome:?}"
     );
     assert_eq!(
@@ -509,9 +509,9 @@ async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
     );
     let model = session.read_model().await.unwrap();
     assert!(
-        model.transcript.artifacts.iter().any(|artifact| matches!(
+        model.presentation.artifacts.iter().any(|artifact| matches!(
             artifact,
-            TranscriptArtifactView::SystemNote { text, .. }
+            SessionArtifactView::SystemNote { text, .. }
                 if text == "race during idle compact"
         )),
         "projection must preserve artifacts appended during compact"

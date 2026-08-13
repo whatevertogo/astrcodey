@@ -172,7 +172,7 @@ async fn filesystem_repository_rebuilds_grouped_projection_and_snapshot_tail() {
     assert_eq!(model.system_prompt.text, "system");
     assert_eq!(model.stats.last_seq, 2);
     assert_eq!(model.stats.event_count, 3);
-    assert_eq!(model.transcript.messages.len(), 2);
+    assert_eq!(model.model_context.messages.len(), 2);
     assert_eq!(reopened.replay_events(&session_id).await.unwrap().len(), 3);
 }
 
@@ -341,7 +341,7 @@ async fn filesystem_repository_enforces_owner_validation_and_append_order() {
     ));
     assert_eq!(model.stats.last_seq, 32);
     assert_eq!(model.stats.event_count, 33);
-    assert_eq!(model.transcript.messages.len(), 32);
+    assert_eq!(model.model_context.messages.len(), 32);
     assert_eq!(repo.replay_events(&session_id).await.unwrap().len(), 33);
 }
 

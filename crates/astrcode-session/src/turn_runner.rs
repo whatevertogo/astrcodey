@@ -216,8 +216,15 @@ impl TurnLoop {
             return end_turn_with_error_typed(e);
         }
 
-        let mut state = TurnState::new(all_tools);
-        match publisher.snapshot_model().await {
+        let initial_model = publisher.snapshot_model().await;
+        let mut state = TurnState::new(
+            all_tools,
+            initial_model
+                .as_ref()
+                .ok()
+                .and_then(|model| model.execution.active_step.as_ref()),
+        );
+        match initial_model {
             Ok(model) => state.set_synced_user_message_count(count_visible_user_messages(&model)),
             Err(error) => {
                 // 降级为 0 会让首 step 把全部历史 user 消息误判为 mid-turn 新增，必须可观测。
@@ -261,7 +268,13 @@ impl TurnLoop {
         publisher: &Arc<TurnEvents>,
         user_text: &str,
     ) -> Result<StepOutcome, TurnError> {
-        state.begin_step();
+        let (step_index, attempt) = state.begin_step();
+        publisher
+            .durable(DurableEventPayload::StepStarted {
+                step_index,
+                attempt,
+            })
+            .await?;
         let result = self
             .step_body(
                 state,
@@ -273,6 +286,18 @@ impl TurnLoop {
             )
             .await;
         state.tool_deduplicator_mut().end_step();
+        if let Ok(outcome) = &result {
+            publisher
+                .durable(DurableEventPayload::StepCompleted {
+                    step_index,
+                    attempt,
+                    finish_reason: match outcome {
+                        StepOutcome::Continue => None,
+                        StepOutcome::Finished(output) => Some(output.finish_reason.clone()),
+                    },
+                })
+                .await?;
+        }
         result
     }
 
@@ -308,8 +333,9 @@ impl TurnLoop {
             Err(error) => return Err(error),
         };
 
-        // 提取 deduplicator 用于流式工具执行；llm_stage 返回后归还。
-        // visible_tools 传给 early exec context 供 prepare 使用。
+        // ToolCallRequested 是现有的 durable effect intent。只读工具可安全提前执行；
+        // 其它工具必须在完整 assistant 消息和 intent 都提交后执行，避免进程在流式
+        // 早执行与事件提交之间退出后无法判断副作用是否发生。
         let request = LlmRequestSnapshot {
             messages: prepared.messages.clone(),
             context_window: prepared.llm.model_limits().max_input_tokens,

@@ -1,26 +1,18 @@
-//! 会话事件投影。
+//! Durable session event projection.
 //!
-//! EventLog 是唯一事实源；本模块只维护可从事件重建的内部读模型。
+//! EventLog is the source of truth. This module validates event ordering and fans each validated
+//! event out to the independent read-model components.
 
 use std::sync::Arc;
 
 use astrcode_core::{
-    event::{
-        DurableEvent, DurableEventPayload, Phase, StoredEvent, TranscriptRewriteReason,
-        transcript_prefix_fingerprint,
-    },
-    llm::{
-        LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, provider_transcript,
-        turn_aborted_context_message,
-    },
+    event::{DurableEvent, DurableEventPayload, StoredEvent},
     types::SessionId,
 };
-use thiserror::Error;
 
 use crate::{
-    AgentSessionLinkView, AgentSessionStatus, CompactionView, ForkSourceRef,
-    PendingToolApprovalView, SequencedLlmMessage, SessionExecutionState, SessionReadModel,
-    SessionSummary, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE, TranscriptArtifactView,
+    ForkSourceRef, ProjectionError, SessionExecutionState, SessionReadModel, SessionSummary,
+    agents, execution, model_context, model_context::ModelContextValidationState, presentation,
 };
 
 #[derive(Clone)]
@@ -39,52 +31,11 @@ pub struct SessionSummaryProjection {
 
 /// A validated projection update that can be applied after its events are durably appended.
 ///
-/// The batch retains only its events. Transcript rewrite validation uses a narrow transcript
-/// state, so preparing a batch never clones the complete read model.
+/// The batch retains only its events. Rewrite validation clones the narrow provider-input state,
+/// never the complete read model.
 pub struct PreparedProjectionBatch {
     first_seq: u64,
     events: Vec<StoredEvent>,
-}
-
-struct TranscriptValidationState {
-    system_prompt: String,
-    messages: Vec<SequencedLlmMessage>,
-}
-
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
-pub enum ProjectionError {
-    #[error("projection batch cannot be empty")]
-    EmptyBatch,
-    #[error("session event sequence overflow")]
-    SequenceOverflow,
-    #[error("session {0} has no SessionStarted event")]
-    MissingSessionStarted(SessionId),
-    #[error("event belongs to session {actual}, expected {expected}")]
-    SessionMismatch {
-        expected: SessionId,
-        actual: SessionId,
-    },
-    #[error("first event must have seq 0, got {0}")]
-    InvalidFirstSequence(u64),
-    #[error("first event must be SessionStarted")]
-    InvalidFirstEvent,
-    #[error("SessionStarted must be a session-level event")]
-    SessionStartedHasTurn,
-    #[error("duplicate SessionStarted at seq {0}")]
-    DuplicateSessionStarted(u64),
-    #[error("expected event seq {expected}, got {actual}")]
-    NonContiguousSequence { expected: u64, actual: u64 },
-    #[error("transcript rewrite source seq {source_seq} exceeds current seq {current_seq}")]
-    InvalidTranscriptRewriteSource { source_seq: u64, current_seq: u64 },
-    #[error(
-        "transcript rewrite source fingerprint mismatch at seq {source_seq}: event expects \
-         {expected}, current prefix hashes to {actual}"
-    )]
-    TranscriptRewriteSourceFingerprintMismatch {
-        source_seq: u64,
-        expected: String,
-        actual: String,
-    },
 }
 
 impl PreparedProjectionBatch {
@@ -110,7 +61,7 @@ impl PreparedProjectionBatch {
             stored_events.push(StoredEvent::new(seq, event));
         }
 
-        let mut transcript = stored_events
+        let mut model_context = stored_events
             .iter()
             .any(|event| {
                 matches!(
@@ -118,7 +69,7 @@ impl PreparedProjectionBatch {
                     DurableEventPayload::TranscriptRewritten { .. }
                 )
             })
-            .then(|| TranscriptValidationState::from_model(model));
+            .then(|| ModelContextValidationState::new(&model.system_prompt, &model.model_context));
 
         let mut current_seq = model.stats.last_seq;
         for event in &stored_events {
@@ -128,8 +79,8 @@ impl PreparedProjectionBatch {
                 &model.identity.session_id,
                 current_seq,
             )?;
-            if let Some(transcript) = transcript.as_mut() {
-                transcript.validate_and_apply(event)?;
+            if let Some(model_context) = model_context.as_mut() {
+                model_context.validate_and_apply(event)?;
             }
             current_seq = event.seq;
         }
@@ -148,37 +99,15 @@ impl PreparedProjectionBatch {
         &self.events
     }
 
-    /// Applies a batch already committed to the event log.
     pub fn apply(self, model: &mut Arc<SessionReadModel>) -> Vec<StoredEvent> {
-        let model = Arc::make_mut(model);
-        self.apply_to_model(model)
+        self.apply_to_model(Arc::make_mut(model))
     }
 
-    /// Applies a batch to an exclusively owned projection.
     pub fn apply_to_model(self, model: &mut SessionReadModel) -> Vec<StoredEvent> {
         for event in &self.events {
             apply_validated_event(event, model);
         }
         self.events
-    }
-}
-
-impl TranscriptValidationState {
-    fn from_model(model: &SessionReadModel) -> Self {
-        Self {
-            system_prompt: model.system_prompt.text.clone(),
-            messages: model.transcript.messages.clone(),
-        }
-    }
-
-    fn validate_and_apply(&mut self, event: &StoredEvent) -> Result<(), ProjectionError> {
-        validate_transcript_rewrite_fingerprint_against(
-            &event.event,
-            &self.system_prompt,
-            &self.messages,
-        )?;
-        apply_provider_transcript_event(event, &mut self.system_prompt, &mut self.messages);
-        Ok(())
     }
 }
 
@@ -257,8 +186,7 @@ impl SessionSummaryProjection {
         };
 
         validate_next_event_details(event.seq, &event.event, &self.session_id, self.last_seq)?;
-
-        apply_execution_event(event, &mut self.execution);
+        execution::apply_event(event, &mut self.execution);
         match &event.payload {
             DurableEventPayload::ModelIdChanged { model_id } => {
                 summary.model_id = model_id.clone();
@@ -270,9 +198,7 @@ impl SessionSummaryProjection {
             },
             DurableEventPayload::SessionForked {
                 first_user_message, ..
-            } => {
-                summary.first_user_message = first_user_message.clone();
-            },
+            } => summary.first_user_message = first_user_message.clone(),
             _ => {},
         }
         summary.updated_at = event.timestamp.to_rfc3339();
@@ -289,7 +215,6 @@ impl SessionSummaryProjection {
     }
 }
 
-/// 从事件序列重建会话读模型。
 pub fn replay(
     session_id: SessionId,
     events: &[StoredEvent],
@@ -301,10 +226,8 @@ pub fn replay(
     projection.snapshot()
 }
 
-/// 将单个持久事件归约到读模型。
 pub fn reduce(event: &StoredEvent, model: &mut SessionReadModel) -> Result<(), ProjectionError> {
     validate_next_event(event.seq, &event.event, model)?;
-
     apply_validated_event(event, model);
     Ok(())
 }
@@ -313,336 +236,31 @@ fn apply_validated_event(event: &StoredEvent, model: &mut SessionReadModel) {
     model.stats.last_seq = event.seq;
     model.stats.updated_at = event.timestamp;
     model.stats.event_count += 1;
-    let event_seq = event.seq;
-    apply_execution_event(event, &mut model.execution);
-    apply_provider_transcript_event(
-        event,
-        &mut model.system_prompt.text,
-        &mut model.transcript.messages,
-    );
+
+    model_context::apply_event(event, &mut model.system_prompt, &mut model.model_context);
+    presentation::apply_event(event, &mut model.presentation);
+    execution::apply_event(event, &mut model.execution);
+    agents::apply_event(event, &mut model.agent_sessions);
 
     match &event.payload {
-        DurableEventPayload::SessionStarted(_) => {},
         DurableEventPayload::ModelIdChanged { model_id } => {
             model.identity.model_id = model_id.clone();
-            model.context_usage = None;
         },
         DurableEventPayload::SessionToolsConfigured { selection } => {
             model.identity.tool_selection = selection.clone();
-            model.context_usage = None;
-        },
-        DurableEventPayload::AgentSessionSpawned {
-            child_session_id,
-            agent_name,
-            task,
-            tool_selection: _,
-            tool_call_id,
-        } => {
-            model.agent_sessions.push(AgentSessionLinkView {
-                child_session_id: child_session_id.clone(),
-                tool_call_id: tool_call_id.clone(),
-                agent_name: agent_name.clone(),
-                task: task.clone(),
-                status: AgentSessionStatus::Running,
-                final_session_id: None,
-                summary: None,
-                error: None,
-            });
-        },
-        DurableEventPayload::AgentSessionCompleted {
-            child_session_id,
-            final_session_id,
-            summary,
-        } => {
-            if let Some(link) = model
-                .agent_sessions
-                .iter_mut()
-                .find(|l| l.child_session_id == *child_session_id)
-            {
-                link.status = AgentSessionStatus::Completed;
-                link.final_session_id = Some(final_session_id.clone());
-                link.summary = Some(summary.clone());
-                link.error = None;
-            }
-        },
-        DurableEventPayload::AgentSessionFailed {
-            child_session_id,
-            final_session_id,
-            error,
-        } => {
-            if let Some(link) = model
-                .agent_sessions
-                .iter_mut()
-                .find(|l| l.child_session_id == *child_session_id)
-            {
-                link.status = AgentSessionStatus::Failed;
-                link.final_session_id = Some(final_session_id.clone());
-                link.error = Some(error.clone());
-                link.summary = None;
-            }
-        },
-        DurableEventPayload::AgentSessionRecycled { child_session_id } => {
-            model
-                .agent_sessions
-                .retain(|l| l.child_session_id != *child_session_id);
-        },
-        DurableEventPayload::SystemPromptConfigured {
-            fingerprint,
-            extra_system_prompt,
-            source,
-            ..
-        } => {
-            model.system_prompt.extra = extra_system_prompt.clone();
-            model.system_prompt.fingerprint = fingerprint.clone();
-            model.system_prompt.source = *source;
-            model.context_usage = None;
-        },
-        DurableEventPayload::UserInputAccepted { input } => {
-            model.execution.pending_inputs.push(crate::PendingInput {
-                accepted_seq: event_seq,
-                input: input.clone(),
-            });
-        },
-        DurableEventPayload::TurnStarted | DurableEventPayload::UserMessage { .. } => {
-            if let DurableEventPayload::UserMessage {
-                text, accepted_seq, ..
-            } = &event.payload
-            {
-                if let Some(accepted_seq) = accepted_seq {
-                    model
-                        .execution
-                        .pending_inputs
-                        .retain(|input| input.accepted_seq != *accepted_seq);
-                }
-                if model.transcript.first_user_message.is_none() {
-                    model.transcript.first_user_message = Some(text.clone());
-                }
-            }
-        },
-        DurableEventPayload::TurnCompleted { .. } => {},
-        DurableEventPayload::TurnAbortedContext
-        | DurableEventPayload::AssistantMessageCompleted { .. }
-        | DurableEventPayload::ToolCallRequested { .. } => {},
-        DurableEventPayload::ToolApprovalRequested { .. }
-        | DurableEventPayload::ToolApprovalResolved { .. } => {},
-        DurableEventPayload::ToolCallCompleted { .. }
-        | DurableEventPayload::ToolCallFailed { .. }
-        | DurableEventPayload::ToolCallCancelled { .. } => {},
-        DurableEventPayload::TranscriptRewritten {
-            source_seq, reason, ..
-        } => {
-            model
-                .transcript
-                .artifacts
-                .retain(|artifact| artifact.seq() > *source_seq);
-            model.context_usage = None;
-            match reason {
-                TranscriptRewriteReason::Compaction(details) => {
-                    model.compactions.push(CompactionView {
-                        trigger: details.trigger.clone(),
-                        pre_tokens: details.pre_tokens,
-                        post_tokens: details.post_tokens,
-                        summary: details.summary.clone(),
-                        transcript_path: details.transcript_path.clone(),
-                        seq: event.seq,
-                        source_seq: *source_seq,
-                        strategy: details.strategy.clone(),
-                    });
-                },
-            }
         },
         DurableEventPayload::SessionForked {
             source_session_id,
             source_cursor,
-            first_user_message,
             ..
         } => {
             model.identity.forked_from = Some(ForkSourceRef {
                 session_id: source_session_id.clone(),
                 cursor: source_cursor.clone(),
             });
-            model.transcript.first_user_message = first_user_message.clone();
-            model.context_usage = None;
-        },
-        DurableEventPayload::ErrorOccurred { message, .. } => {
-            model
-                .transcript
-                .artifacts
-                .push(TranscriptArtifactView::Error {
-                    id: event.id.to_string(),
-                    message: message.clone(),
-                    seq: event_seq,
-                });
-        },
-        DurableEventPayload::RecapGenerated { text, .. } => {
-            model
-                .transcript
-                .artifacts
-                .push(TranscriptArtifactView::SystemNote {
-                    id: event.id.to_string(),
-                    text: text.clone(),
-                    seq: event_seq,
-                });
-        },
-        DurableEventPayload::TokenUsageRecorded {
-            usage,
-            model_context_window,
-        } => {
-            if let Some(context_tokens) = usage
-                .context_tokens_after_response()
-                .and_then(|tokens| usize::try_from(tokens).ok())
-            {
-                model.context_usage = Some(crate::ContextUsageView {
-                    context_tokens,
-                    model_context_window: *model_context_window,
-                    covered_message_count: model.transcript.messages.len(),
-                });
-            }
-        },
-        DurableEventPayload::CustomEvent(_) => {},
-    }
-}
-
-fn apply_provider_transcript_event(
-    event: &StoredEvent,
-    system_prompt: &mut String,
-    messages: &mut Vec<SequencedLlmMessage>,
-) {
-    let event_seq = event.seq;
-    match &event.payload {
-        DurableEventPayload::SystemPromptConfigured { text, .. } => {
-            text.clone_into(system_prompt);
-        },
-        DurableEventPayload::UserMessage {
-            text, attachments, ..
-        } => messages.push(SequencedLlmMessage::plain(
-            LlmMessage::user_with_attachments(text, attachments),
-            event_seq,
-        )),
-        DurableEventPayload::TurnAbortedContext => messages.push(SequencedLlmMessage {
-            message: turn_aborted_context_message(),
-            updated_seq: event_seq,
-            source: Some(TURN_ABORTED_SOURCE.into()),
-        }),
-        DurableEventPayload::AssistantMessageCompleted {
-            text,
-            reasoning_content,
-            ..
-        } => {
-            let mut message = LlmMessage::assistant(text);
-            message.reasoning_content = reasoning_content.clone();
-            messages.push(SequencedLlmMessage::plain(message, event_seq));
-        },
-        DurableEventPayload::ToolCallRequested {
-            call_id,
-            tool_name,
-            arguments,
-            raw_arguments,
-        } => {
-            let tool_call = LlmContent::ToolCall {
-                call_id: call_id.to_string(),
-                name: tool_name.clone(),
-                arguments: arguments.clone(),
-                raw_arguments: raw_arguments.clone(),
-            };
-            // DeepSeek thinking mode requires reasoning and tool calls to remain on one message.
-            match messages.last_mut() {
-                Some(last) if last.message.role == LlmRole::Assistant => {
-                    last.message.content.push(tool_call);
-                    last.updated_seq = event_seq;
-                },
-                _ => messages.push(SequencedLlmMessage::plain(
-                    LlmMessage {
-                        role: LlmRole::Assistant,
-                        content: vec![tool_call],
-                        name: None,
-                        reasoning_content: None,
-                    },
-                    event_seq,
-                )),
-            }
-        },
-        DurableEventPayload::ToolCallCompleted {
-            call_id,
-            tool_name,
-            result,
-            ..
-        } => apply_tool_terminal(
-            messages,
-            call_id,
-            tool_name,
-            result.content.clone(),
-            result.is_error,
-            None,
-            event_seq,
-        ),
-        DurableEventPayload::ToolCallFailed {
-            call_id,
-            tool_name,
-            error,
-            ..
-        } => apply_tool_terminal(
-            messages,
-            call_id,
-            tool_name,
-            error.clone(),
-            true,
-            Some(TOOL_CALL_FAILED_SOURCE),
-            event_seq,
-        ),
-        DurableEventPayload::ToolCallCancelled {
-            call_id,
-            tool_name,
-            reason,
-            ..
-        } => apply_tool_terminal(
-            messages,
-            call_id,
-            tool_name,
-            format!("Tool cancelled: {reason}"),
-            true,
-            Some(TOOL_CALL_CANCELLED_SOURCE),
-            event_seq,
-        ),
-        DurableEventPayload::TranscriptRewritten {
-            source_seq,
-            messages: rewritten,
-            ..
-        } => apply_transcript_rewrite(messages, rewritten, *source_seq),
-        DurableEventPayload::SessionForked {
-            messages: forked, ..
-        } => {
-            *messages = forked
-                .iter()
-                .cloned()
-                .map(|message| SequencedLlmMessage::plain(message, event_seq))
-                .collect();
         },
         _ => {},
     }
-}
-
-fn apply_transcript_rewrite(
-    current: &mut Vec<SequencedLlmMessage>,
-    rewritten: &[LlmMessage],
-    source_seq: u64,
-) {
-    let tail = current
-        .iter()
-        .filter(|message| message.updated_seq > source_seq)
-        .cloned();
-    *current = rewritten
-        .iter()
-        .cloned()
-        .map(|message| SequencedLlmMessage {
-            message,
-            // Rewrite output represents the frozen prefix, not a new tail fact.
-            // Anchoring it here also lets a later concurrent rewrite replace it cleanly.
-            updated_seq: source_seq,
-            source: None,
-        })
-        .chain(tail)
-        .collect();
 }
 
 /// 校验事件能否作为读模型的下一条事实，不修改读模型。
@@ -652,55 +270,7 @@ pub fn validate_next_event(
     model: &SessionReadModel,
 ) -> Result<(), ProjectionError> {
     validate_next_event_details(seq, event, &model.identity.session_id, model.stats.last_seq)?;
-    validate_transcript_rewrite_fingerprint(event, model)
-}
-
-/// 重写前缀的乐观并发校验：事件携带的指纹必须等于当前读模型前缀的指纹。
-///
-/// Summary projection 没有 transcript，不经过本校验；提交路径必须走完整读模型。
-fn validate_transcript_rewrite_fingerprint(
-    event: &DurableEvent,
-    model: &SessionReadModel,
-) -> Result<(), ProjectionError> {
-    validate_transcript_rewrite_fingerprint_against(
-        event,
-        &model.system_prompt.text,
-        &model.transcript.messages,
-    )
-}
-
-fn validate_transcript_rewrite_fingerprint_against(
-    event: &DurableEvent,
-    system_prompt: &str,
-    messages: &[SequencedLlmMessage],
-) -> Result<(), ProjectionError> {
-    let DurableEventPayload::TranscriptRewritten {
-        source_seq,
-        source_fingerprint: expected,
-        ..
-    } = &event.payload
-    else {
-        return Ok(());
-    };
-    // 与 `apply_transcript_rewrite` 的 tail 划分互逆：前缀 = `updated_seq <= source_seq`。
-    let prefix = provider_transcript(
-        messages
-            .iter()
-            .filter(|message| message.updated_seq <= *source_seq)
-            .map(|message| message.message.clone())
-            .collect(),
-    );
-    let actual = transcript_prefix_fingerprint(system_prompt, &prefix);
-    if actual != *expected {
-        return Err(
-            ProjectionError::TranscriptRewriteSourceFingerprintMismatch {
-                source_seq: *source_seq,
-                expected: expected.clone(),
-                actual,
-            },
-        );
-    }
-    Ok(())
+    model_context::validate_rewrite_fingerprint(event, &model.system_prompt, &model.model_context)
 }
 
 fn validate_next_event_details(
@@ -747,98 +317,6 @@ fn validate_first_event(event: &StoredEvent) -> Result<(), ProjectionError> {
         return Err(ProjectionError::InvalidFirstEvent);
     }
     Ok(())
-}
-
-fn apply_execution_event(event: &StoredEvent, execution: &mut SessionExecutionState) {
-    match &event.payload {
-        DurableEventPayload::TurnStarted => {
-            execution.phase = Phase::Thinking;
-            execution.unsettled_turn_id = event.turn_id.clone();
-        },
-        DurableEventPayload::UserInputAccepted { .. } => {},
-        DurableEventPayload::UserMessage { .. }
-        | DurableEventPayload::AssistantMessageCompleted { .. } => {
-            execution.phase = Phase::Thinking;
-        },
-        DurableEventPayload::ToolCallRequested { call_id, .. } => {
-            execution.pending_tool_calls.insert(call_id.clone());
-            execution.phase = Phase::CallingTool;
-        },
-        DurableEventPayload::ToolApprovalRequested {
-            call_id,
-            prompt,
-            rule_key,
-            ..
-        } => {
-            execution.pending_tool_approvals.insert(
-                call_id.clone(),
-                PendingToolApprovalView {
-                    prompt: prompt.clone(),
-                    rule_key: rule_key.clone(),
-                },
-            );
-            execution.phase = Phase::CallingTool;
-        },
-        DurableEventPayload::ToolApprovalResolved { call_id, .. } => {
-            execution.pending_tool_approvals.remove(call_id);
-        },
-        DurableEventPayload::ToolCallCompleted { call_id, .. }
-        | DurableEventPayload::ToolCallFailed { call_id, .. }
-        | DurableEventPayload::ToolCallCancelled { call_id, .. } => {
-            execution.pending_tool_calls.remove(call_id);
-            execution.pending_tool_approvals.remove(call_id);
-            execution.phase = if execution.pending_tool_calls.is_empty() {
-                Phase::Thinking
-            } else {
-                Phase::CallingTool
-            };
-        },
-        DurableEventPayload::TurnCompleted { .. }
-            if event.turn_id.is_none()
-                || execution.unsettled_turn_id.is_none()
-                || event.turn_id.as_ref() == execution.unsettled_turn_id.as_ref() =>
-        {
-            execution.phase = Phase::Idle;
-            execution.unsettled_turn_id = None;
-            execution.pending_tool_calls.clear();
-            execution.pending_tool_approvals.clear();
-        },
-        DurableEventPayload::SessionForked { .. } => {
-            execution.phase = Phase::Idle;
-            execution.unsettled_turn_id = None;
-            execution.pending_tool_calls.clear();
-            execution.pending_tool_approvals.clear();
-        },
-        DurableEventPayload::ErrorOccurred { .. } => {
-            execution.phase = Phase::Error;
-        },
-        _ => {},
-    }
-}
-
-fn apply_tool_terminal(
-    messages: &mut Vec<SequencedLlmMessage>,
-    call_id: &astrcode_core::types::ToolCallId,
-    tool_name: &str,
-    content: String,
-    is_error: bool,
-    source: Option<&str>,
-    event_seq: u64,
-) {
-    messages.push(SequencedLlmMessage {
-        message: LlmMessage {
-            role: LlmRole::Tool,
-            content: vec![LlmContent::ToolResult {
-                tool_call_id: call_id.to_string(),
-                content,
-                is_error,
-            }],
-            name: Some(tool_name.to_owned()),
-            reasoning_content: None,
-        },
-        updated_seq: event_seq,
-        source: source.map(str::to_owned),
-    });
 }
 
 #[cfg(test)]

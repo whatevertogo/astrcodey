@@ -244,8 +244,6 @@ export function decodeConversationControlState(
     phase: decodePhase(object.phase),
     canSubmitPrompt: requiredBoolean(object, 'canSubmitPrompt'),
     canRequestCompact: requiredBoolean(object, 'canRequestCompact'),
-    compactPending: requiredBoolean(object, 'compactPending'),
-    compacting: requiredBoolean(object, 'compacting'),
     activeTurnId: optionalString(object, 'activeTurnId'),
     retryStatus: retryStatus
       ? {

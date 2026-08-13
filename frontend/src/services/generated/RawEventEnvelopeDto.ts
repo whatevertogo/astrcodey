@@ -4,5 +4,11 @@ import type { JsonValue } from "./serde_json/JsonValue";
 
 /**
  * Raw session event envelope exposed by the authenticated event SSE endpoint.
+ *
+ * `payload` directly exposes the event log's persisted serde shape (the storage
+ * format of `EventPayload`), not an independent, stable HTTP schema — it evolves
+ * with the storage format and consumers must stay compatible across storage
+ * versions. This is an intentional contract decision; do not treat `payload` as
+ * a stable API.
  */
-export type RawEventEnvelopeDto = { id: string, sessionId: string, turnId: string | null, cursor: string | null, durability: RawEventDurabilityDto, timestamp: string, payload: JsonValue, };
+export type RawEventEnvelopeDto = { id: string, sessionId: string, turnId?: string | null, cursor?: string | null, durability: RawEventDurabilityDto, timestamp: string, payload: JsonValue, };

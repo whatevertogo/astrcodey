@@ -83,8 +83,6 @@ function sameControlState(
     left.phase === right.phase &&
     left.canSubmitPrompt === right.canSubmitPrompt &&
     left.canRequestCompact === right.canRequestCompact &&
-    left.compactPending === right.compactPending &&
-    left.compacting === right.compacting &&
     left.activeTurnId === right.activeTurnId &&
     left.retryStatus?.status === right.retryStatus?.status &&
     left.retryStatus?.attempt === right.retryStatus?.attempt &&

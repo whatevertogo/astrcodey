@@ -12,7 +12,6 @@ pub(crate) mod permission;
 pub(crate) mod projection_context;
 pub(crate) mod runtime_stability;
 mod session;
-mod session_compaction;
 mod session_error;
 mod session_event_sink;
 mod session_extension_ports;

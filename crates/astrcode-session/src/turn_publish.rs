@@ -524,7 +524,7 @@ mod tests {
             .unwrap();
 
         let model = session.read_model().await.unwrap();
-        assert!(model.transcript.messages.iter().any(|message| {
+        assert!(model.model_context.messages.iter().any(|message| {
             message.message.role == astrcode_core::llm::LlmRole::User
                 && message.message.content.iter().any(|content| {
                     matches!(

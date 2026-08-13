@@ -28,13 +28,13 @@ pub(in crate::http) fn conversation_to_dto(
 
     // 与 provider_messages 一致：最新 compact 摘要紧挨保留消息之前（被压掉的历史不在 UI 展示）
     let mut blocks: Vec<ConversationBlockDto> = Vec::new();
-    let latest_compaction = latest_compaction(&session.compactions);
+    let latest_compaction = latest_compaction(&session.model_context.compactions);
     if let Some(compaction) = latest_compaction {
         blocks.push(compact_summary_block(compaction));
     }
     blocks.extend(transcript_blocks(
-        &session.transcript.messages,
-        &session.transcript.artifacts,
+        &session.model_context.messages,
+        &session.presentation.artifacts,
         latest_compaction.map(|compaction| compaction.source_seq),
     ));
     apply_pending_tool_approvals(&mut blocks, &session.execution.pending_tool_approvals);
@@ -59,7 +59,7 @@ pub(in crate::http) fn conversation_to_dto(
         phase: session.execution.phase.into(),
         control: control_from_phase(
             session.execution.phase,
-            !session.transcript.messages.is_empty(),
+            !session.model_context.messages.is_empty(),
         ),
         blocks,
         agent_sessions: session
@@ -144,7 +144,7 @@ mod tests {
     ) -> SessionReadModel {
         let mut session = session_read_model(session_id);
         session
-            .transcript
+            .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage {
@@ -169,7 +169,7 @@ mod tests {
         let mut session = session_read_model("session-1");
         session.stats.last_seq = 9;
         session
-            .transcript
+            .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::assistant("hello"),
@@ -199,7 +199,7 @@ mod tests {
             serde_json::json!({ "path": "Cargo.toml" }),
         );
         session
-            .transcript
+            .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::tool("read", "tool-1", "file contents", false),
@@ -269,14 +269,14 @@ mod tests {
         let mut session = session_read_model("session-multi-compact");
         session.stats.last_seq = 20;
         session
-            .transcript
+            .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::user("latest user"),
                 updated_seq: 1,
                 source: None,
             });
-        session.compactions.push(CompactionView {
+        session.model_context.compactions.push(CompactionView {
             trigger: "auto_threshold".into(),
             pre_tokens: 800,
             post_tokens: 100,
@@ -286,7 +286,7 @@ mod tests {
             source_seq: 4,
             strategy: CompactStrategy::Auto,
         });
-        session.compactions.push(CompactionView {
+        session.model_context.compactions.push(CompactionView {
             trigger: "auto_threshold".into(),
             pre_tokens: 600,
             post_tokens: 80,

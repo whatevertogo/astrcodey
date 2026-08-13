@@ -160,6 +160,8 @@ mod tests {
             | ModelIdChanged { .. }
             | SessionToolsConfigured { .. }
             | SystemPromptConfigured { .. }
+            | StepStarted { .. }
+            | StepCompleted { .. }
             | TurnAbortedContext
             | UserInputAccepted { .. }
             | TokenUsageRecorded { .. }

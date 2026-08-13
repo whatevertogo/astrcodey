@@ -18,7 +18,7 @@ export function canInjectMidTurn(
   control: ConversationControlState | null,
   compactSubmitting: boolean
 ): boolean {
-  if (compactSubmitting || control?.compacting) {
+  if (compactSubmitting || control?.phase === 'compacting') {
     return false
   }
   return !!control?.activeTurnId

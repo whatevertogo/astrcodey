@@ -319,7 +319,8 @@ impl<'a> StreamConsumer<'a> {
                 .pipeline
                 .prepare_single_tool_call(tc, index, &ctx.visible_tools, ctx.deduplicator)
                 .await?;
-            scheduler.schedule(prepared);
+            let execute_early = ctx.pipeline.can_execute_early(&prepared);
+            scheduler.schedule(prepared, execute_early);
         }
         self.handled_tool_call_ids.insert(call_id);
         Ok(())

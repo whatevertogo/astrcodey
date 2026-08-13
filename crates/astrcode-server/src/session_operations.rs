@@ -339,7 +339,7 @@ impl SessionOperations for ServerSessionOperations {
                     phase: model.execution.phase,
                     active_turn_id: None,
                     queued_inputs: model.execution.pending_inputs.len(),
-                    message_count: model.transcript.messages.len(),
+                    message_count: model.model_context.messages.len(),
                 })
             },
             Err(error) => Err(SessionApiError::internal(error)),

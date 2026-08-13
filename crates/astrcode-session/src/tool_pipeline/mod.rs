@@ -7,7 +7,10 @@ mod prepare;
 
 use std::sync::Arc;
 
-use astrcode_core::tool::{ToolDefinition, ToolResultArtifactReader};
+use astrcode_core::tool::{
+    ToolDefinition, ToolResultArtifactReader,
+    access::{FileOperation, ResourceAccess},
+};
 use astrcode_extension_sdk::runtime_ports::TurnHooks;
 use tokio_util::sync::CancellationToken;
 
@@ -28,6 +31,29 @@ pub(crate) struct ToolCalls {
 }
 
 impl ToolCalls {
+    pub(crate) fn can_execute_early(
+        &self,
+        call: &crate::tool_types::PreparedToolInvocation,
+    ) -> bool {
+        self.tool_registry
+            .resource_accesses(
+                &call.name,
+                &call.tool_input,
+                std::path::Path::new(&self.turn.shared.working_dir),
+            )
+            .is_ok_and(|accesses| {
+                accesses.iter().all(|access| {
+                    matches!(
+                        access,
+                        ResourceAccess::File {
+                            operation: FileOperation::Read | FileOperation::Search,
+                            ..
+                        }
+                    )
+                })
+            })
+    }
+
     pub(crate) fn new(
         turn: TurnToolContext,
         tool_registry: Arc<ToolRegistry>,
