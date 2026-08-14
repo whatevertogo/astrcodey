@@ -227,7 +227,9 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&runtime_services),
-        vec![Arc::new(TerminalCleanup), Arc::new(BackgroundShellCleanup)],
+        vec![Arc::new(HostResourceCleanup {
+            runner: Arc::downgrade(&extension_runner),
+        })],
     ));
     session_manager.bind_custom_event_runner(Arc::clone(&extension_runner));
 
@@ -393,23 +395,16 @@ async fn load_extensions_into_runner(
 
 // ─── SessionResourceCleanup 实现 ────────────────────────────────────────
 
-/// session 销毁/回收时清理 PTY 终端资源。
-struct TerminalCleanup;
-
-impl SessionResourceCleanup for TerminalCleanup {
-    fn cleanup(&self, session_id: &astrcode_core::types::SessionId) {
-        astrcode_tools::terminal_tool::cleanup_terminals_for_session(session_id.as_str());
-    }
+/// Session durable close 后统一释放 Extension Runtime 持有的瞬态资源。
+struct HostResourceCleanup {
+    runner: std::sync::Weak<ExtensionRunner>,
 }
 
-/// session 销毁/回收时终止后台 shell 子进程。
-struct BackgroundShellCleanup;
-
-impl SessionResourceCleanup for BackgroundShellCleanup {
+impl SessionResourceCleanup for HostResourceCleanup {
     fn cleanup(&self, session_id: &astrcode_core::types::SessionId) {
-        astrcode_tools::background_shell::cleanup_background_shells_for_session(
-            session_id.as_str(),
-        );
+        if let Some(runner) = self.runner.upgrade() {
+            runner.cleanup_session_resources(session_id);
+        }
     }
 }
 

@@ -7,7 +7,7 @@ use crate::{SessionError, session::Session, turn_context::hook_call_context_for_
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManualCompactionOutcome {
-    Compacted,
+    Compacted { messages_removed: usize },
     Skipped { message: String },
 }
 
@@ -17,7 +17,7 @@ pub async fn compact_manual_session(
     keep_recent_turns: Option<usize>,
 ) -> Result<ManualCompactionOutcome, SessionError> {
     let runtime_services = session.runtime_services();
-    let runtime_view = runtime_services.turn_runtime_view().await?;
+    let runtime_view = runtime_services.pin_extension_view().await?;
     let extension_runner = runtime_view.turn_hooks_arc();
     let state = session.read_model().await?;
     let hook_call =
@@ -41,7 +41,9 @@ pub async fn compact_manual_session(
     .await;
 
     match outcome {
-        CompactionPipelineOutcome::Compacted { .. } => Ok(ManualCompactionOutcome::Compacted),
+        CompactionPipelineOutcome::Compacted {
+            messages_removed, ..
+        } => Ok(ManualCompactionOutcome::Compacted { messages_removed }),
         CompactionPipelineOutcome::Skipped { message, .. } => {
             Ok(ManualCompactionOutcome::Skipped { message })
         },

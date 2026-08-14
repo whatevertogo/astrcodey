@@ -11,7 +11,6 @@ use astrcode_core::{
     config::defaults::extension_data_dir,
     event::{EventDeliveryReceipt, EventSendError},
 };
-use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::ExtensionError,
     host::{
@@ -21,6 +20,7 @@ use astrcode_extension_sdk::{
     },
     hostpaths::write_file_atomic,
     s5r::ErrorPayload,
+    wire::WireErrorCode,
 };
 use serde_json::Value;
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};

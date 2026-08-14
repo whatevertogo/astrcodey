@@ -1,8 +1,5 @@
 //! S5R handler identity construction and wire-result translation.
 
-use astrcode_extension_contract::{
-    HandlerEffect, HandlerId, HandlerKind, HandlerResult, ToolOutcome,
-};
 use astrcode_extension_sdk::{
     extension::{
         CompactContributions, CompactResult, ContinueAfterStopResult, ExtensionCommandResult,
@@ -10,6 +7,7 @@ use astrcode_extension_sdk::{
         PromptContributions, ProviderResult,
     },
     tool::ToolResult,
+    wire::{HandlerEffect, HandlerId, HandlerKind, HandlerResult, ToolOutcome},
 };
 pub(crate) fn parse_http_response(
     resp: &HandlerResult,

@@ -1,6 +1,6 @@
 # AstrCode 扩展系统
 
-> 以当前代码为准（`astrcode-extension-contract`、`astrcode-extension-sdk`、
+> 以当前代码为准（`astrcode-extension-sdk`、
 > `astrcode-extension-worker`、`astrcode-extensions`、`astrcode-server`）。
 
 ---
@@ -32,9 +32,9 @@
 | `astrcode-extensions::host_router` | 唯一 `astrcode.*` 宿主能力实现 |
 | `astrcode-extensions::runner` | 统一运行时 manifest、registration 校验、索引发布与生命周期 |
 | `astrcode-extensions::extension_manifest` / `s5r_handler` | typed S5R manifest 规范化与 handler 返回值解析 |
-| `astrcode-extension-sdk::s5r` | contract 协议类型的作者向 re-export 和 `HandlerResult` 领域转换 |
-| `astrcode-extension-contract` | S5R wire DTO、稳定错误码（`WireErrorCode`）、宿主操作 catalog |
-| `astrcode-extension-contract::{peer, peer_runtime, frame}` | `Peer` 握手状态机、帧传输、取消、流式 |
+| `astrcode-extension-sdk::s5r` | wire 协议类型的作者向 re-export 和 `HandlerResult` 领域转换 |
+| `astrcode-extension-sdk::wire` | S5R wire DTO、稳定错误码（`WireErrorCode`）、宿主操作 catalog |
+| `astrcode-extension-sdk::wire::{peer, peer_runtime, frame}` | `Peer` 握手状态机、帧传输、取消、流式 |
 | `astrcode-extension-worker` | Worker 入口、`HandlerRegistry`、远程 `HostClient` |
 
 参考实现：`crates/astrcode-extensions/tests/s5r-guest/`  
@@ -71,7 +71,10 @@ impl Extension for PingExtension {
     fn register(&self, reg: &mut Registrar) {
         reg.tool(
             tool("ping").description("Return pong").build(),
-            tool_handler(|_ctx| async { Ok(ToolResult::success("pong")) }),
+            tool_handler(
+                |_ctx| async { Ok(ToolPlan::default()) },
+                |_ctx| async { Ok(ToolResult::success("pong")) },
+            ),
         );
     }
 
@@ -108,6 +111,11 @@ struct EchoHandler;
 
 #[async_trait::async_trait]
 impl ToolHandler for EchoHandler {
+    async fn plan(&self, ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        let _: EchoArgs = ctx.arguments()?;
+        Ok(ToolPlan::default())
+    }
+
     async fn execute(&self, ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
         let args: EchoArgs = ctx.arguments()?;
         let _session_dir = ctx.paths().session_data_dir()?;
@@ -115,6 +123,10 @@ impl ToolHandler for EchoHandler {
     }
 }
 ```
+
+`ToolPlanContext` 只暴露最终参数与不可变调用事实，不提供 Host、event、task 或持久化入口。
+session 用 plan 完成权限决策并签发 resource lease；`execute` 中的每次 Host 调用再校验该 lease。
+因此 closure adapter 也要求同时提供 planner，不存在隐式 trusted/native 入口。
 
 `ctx.extension_id()`、session/turn、working directory、路径 namespace、capability scope 和取消令牌
 均来自 runtime attribution。`ToolContext` 不暴露 core `ToolExecutionContext`、裸
@@ -134,8 +146,8 @@ impl ToolHandler for EchoHandler {
 | 动态发现 | `ToolDiscoveryContext` / `CommandDiscoveryContext` | workspace 与 discovery generation |
 | Hook | `PreToolUseContext`、`PostToolUseContext`、`ProviderContext`、`PromptBuildContext`、`CompactContext`、`ContinueAfterStopContext`、`UserMessageEnvelopeContext`、`LifecycleContext` | 只增加该 hook 的输入；公共 attribution 仍通过同名 accessor 读取 |
 
-生产代码不能用 struct literal 构造这些 context；测试从 `astrcode_extension_sdk::testing` 使用
-builder。
+生产代码不能用 struct literal 构造这些 context；测试在 SDK 依赖启用 `testing` feature 后，
+从 `astrcode_extension_sdk::testing` 使用 builder。
 
 ### 3.4 类型化 host 与 capability
 
@@ -150,6 +162,7 @@ builder。
 | `host.session_control()?` | `session_control` 或 `input_delivery` | `create_root`、`submit_root_turn`、`root_state` 使用 `input_delivery`；子 session 的创建、提交、注入、中断、取消、状态、工具配置、回收与重新激活使用 session-scoped `session_control`。`cancel_turn` 返回 `HostSessionCancelOutput { cancelled }`。 |
 | `host.session_history()?` | `session_history` | 当前 session 及其已授权后代的 `list_summaries`、`transcript`、`provider_messages`、`token_usage`、`events_page` 与 `snapshot`。 |
 | `host.session_inspect()?` | `session_inspect` | 全局跨 session 只读能力；只授予确需全局观察的扩展。 |
+| `host.tool_results()?` | `tool_result_read` | `read(HostToolResultReadRequest)` 分页读取当前 session 的持久化工具结果；artifact ID 是不含路径语义的 opaque token。 |
 | `host.workspace()?` | `workspace_read` / `workspace_write` | 必须有 workspace context；read/list/grep/glob 与 write/edit 分别重新校验所需能力。 |
 | `host.process()?` | `process_spawn` | 在受限 workspace cwd 启动进程；不是 OS sandbox。 |
 | `host.network()?` | `network_client` | 受限公网 HTTP(S)，拒绝本机、内网和链路本地目标；body 在作者 API 中是原始字节，线缆使用 base64。`max_bytes <= 10 MiB`，`timeout_ms` 为 `1..=60_000`，`Manual` 返回有界 3xx body。 |
@@ -160,6 +173,10 @@ builder。
 `HostError` 无损保存 `code`、`message`、`hint`、`retryable` 和 `details`；
 `HostError::code_enum()` 将已知 code 解析为 `WireErrorCode`，未知 code 返回 `None`，原始字符串仍
 保留在 `HostError::code` 中。
+
+工具结果读取要求 session context，不能借 artifact ID 跨 session 访问。`max_bytes` 必须在
+`4..=20_000`，默认 20,000；`byte_offset` 是 UTF-8 字节偏移，必须使用上页返回的
+`next_byte_offset` 继续读取。Host 只返回完整 UTF-8 字符，调用方不应自行推算下一页游标。
 
 ### 3.5 测试入口
 
@@ -211,6 +228,7 @@ async fn bundled_extension_uses_the_real_authoring_boundaries() {
 
 | 扩展 ID | Crate | 默认 | 说明 |
 |---------|-------|------|------|
+| `astrcode-coding` | `astrcode-extension-coding` | 启用 | `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell`、`terminal` |
 | `astrcode-agent-tools` | `astrcode-extension-agent-tools` | 启用 | 子 Agent 委派与发现 |
 | `astrcode-mcp` | `astrcode-extension-mcp` | 启用 | MCP 客户端（stdio/HTTP） |
 | `astrcode-skill` | `astrcode-extension-skill` | 启用 | 斜杠命令 Skill 发现与调度 |
@@ -320,6 +338,7 @@ operation。`host_supports == true` 不是授权或可用性承诺；每次调�
 | `provider_request` | Provider 与 user-message hooks | 读取或改写 provider 请求、观察 provider 响应，并变换 durable user-message envelope；after-response 返回值不会改写 turn。 |
 | `tool_intercept` | Blocking pre/post tool hooks | 阻断或改写工具输入、结果。 |
 | `turn_continuation_control` | Continue-after-stop hook | 决定 LLM 自然停止后是否继续一个 agent step。 |
+| `tool_result_read` | `astrcode.tool_result.read` | 读取当前 session 拥有的 opaque 工具结果 artifact；按 `4..=20_000` UTF-8 字节分页，并使用响应中的 `next_byte_offset` 续读。 |
 | `workspace_read` | `astrcode.workspace.read/list/grep/glob` | 有界读取、目录遍历、正则搜索和 glob；拒绝越界路径、symlink 和密钥类路径，默认忽略 `.git`/`node_modules`。 |
 | `workspace_write` | `astrcode.workspace.write` / `astrcode.workspace.edit` | 创建、替换或精确编辑工作区内的非敏感文件；拒绝越界路径、symlink 和密钥类路径。 |
 | `process_spawn` | `astrcode.process.spawn` | 在工作区目录运行子进程。并发、总时长、stdin 和输出均受限；取消/超时会清理进程组。 |
@@ -329,10 +348,11 @@ operation。`host_supports == true` 不是授权或可用性承诺；每次调�
 不用于调用宿主本机或内网服务。只应给确实需要这些权限的插件声明相应 capability。
 Worker 使用与 bundled 同名的类型化领域方法，例如
 `HostClient::process().spawn(...)` 与 `HostClient::network().send(...)`。通用 raw invoke 仅保留在
-`astrcode_extension_worker::testing` transport seam，不属于作者 prelude。
+启用 `testing` feature 后的 `astrcode_extension_worker::testing` transport seam，不属于作者
+prelude，也不进入默认生产 API。
 
 `session_inspect.read_model` 不会直接暴露核心的 `SessionReadModel`。宿主在
-`host_router::session_inspect` 边界显式映射到 contract DTO，内部 enum 的调整不会静默改变
+`host_router::session_inspect` 边界显式映射到 `sdk::wire` DTO，内部 enum 的调整不会静默改变
 插件线缆契约。
 
 HTTP 路由由 `Worker::http_route(route, http_handler(...))` 同时写入握手 manifest 与
@@ -363,6 +383,9 @@ fingerprint 以及无需启动进程即可读取的权威 extension ID；reconci
 
 以下接口位于 bearer 认证后的 `/api` 管理面，不是扩展作者的 host capability：
 
+Phase 0 有意保留 raw event SSE 作为认证后的诊断与运维接口；frontend 和扩展运行时不依赖它，
+其 durable `payload` 也不承诺独立于 EventLog 的长期 wire 兼容。
+
 - `GET /api/sessions/{id}/events` 返回 raw event SSE。`cursor` query 优先于
   `Last-Event-ID`，并可按 `extensionId`、`eventType`、`durability` 过滤；游标只适用于
   durable event。响应 `payload` 是事件日志的持久化 serde 形状，不是独立稳定的 HTTP
@@ -372,6 +395,8 @@ fingerprint 以及无需启动进程即可读取的权威 extension ID；reconci
 - `POST /api/sessions/{id}/event-consumers/control` 接受 `extensionId`、`subscriptionId`
   和 `pause`、`resume`、`replay_from_beginning`、`skip_to_stream_head` 之一。重置 checkpoint
   前会先暂停并等待当前 handler 退出；超时返回 `409`，不会让旧执行路径越过新 checkpoint。
+  consumer state 只保留最近 128 条 quarantine/skip 审计和单调总数；写入会先同步临时文件
+  再原子替换，Unix 还会同步目录元数据。
 
 ---
 

@@ -179,7 +179,7 @@ mod tests {
             description: String::new(),
             parameters: serde_json::json!({}),
             strict: false,
-            origin: ToolOrigin::Builtin,
+            origin: ToolOrigin::Bundled,
             execution_mode: Default::default(),
         }
     }

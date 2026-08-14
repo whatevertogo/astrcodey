@@ -312,20 +312,20 @@ AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。旧�
              │           │           │
     ┌────────┴───┐ ┌─────┴─────┐ ┌───┴──────────┐
     │ astrcode-ai│ │astrcode-  │ │ astrcode-    │
-    │            │ │extensions │ │ tools        │
-    │ Anthropic  │ │钩子系统    │ │文件/Shell/   │
-    │ OpenAI     │ │扩展 SDK   │ │Task 工具     │
-    │ 兼容协议   │ │IPC 扩展   │ │              │
+    │            │ │context    │ │ extensions   │
+    │ Anthropic  │ │Token 预算  │ │Host 运行时    │
+    │ OpenAI     │ │与上下文    │ │钩子 + S5R    │
+    │ 兼容协议   │ │压缩       │ │能力门控      │
     │ SSE + 重试  │ │           │ │              │
-    └────────┬───┘ └─────┬─────┘ └──────────────┘
-             │           │
-   ┌─────────┴──┐  ┌────┴─────────────────────────┐
-   │astrcode-   │  │ 扩展层                        │
-   │ context    │  │ bundled-extensions           │
-   │ Token 预算  │  │ sdk · mode · goal · skill  │
-   │ 自动压缩    │  │ todo · agent-tools · mcp   │
-   └────────────┘  │ memory · channels · web-tools │
-                   │ + 磁盘 IPC 扩展              │
+    └────────────┘ └───────────┘ └──────┬───────┘
+                                      │
+                   ┌──────────────────┴─────────┐
+                   │ 扩展层                       │
+                   │ bundled-extensions          │
+                   │ astrcode-extension-coding   │
+                   │ mode · goal · skill · todo  │
+                   │ agent-tools · mcp · memory  │
+                   │ channels · web-tools + IPC  │
                    └────────────────────────────┘
         ┌─────────────────────────────────────┐
         │              共享基础层               │
@@ -336,13 +336,12 @@ AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。旧�
 
 ## Crate 一览
 
-Cargo workspace 在 [`crates/`](crates/) 下包含 **28 个 crate**，另有 [`src-tauri/`](src-tauri/) 作为桌面壳（workspace 共 **29 个成员**）。按架构分层如下（详见[架构设计](docs/architecture.md)）。
+Cargo workspace 在 [`crates/`](crates/) 下包含 **27 个 crate**，另有 [`src-tauri/`](src-tauri/) 作为桌面壳（workspace 共 **28 个成员**）。按架构分层如下（详见[架构设计](docs/architecture.md)）。
 
 ### Layer 0：基础契约层
 
 | Crate | 说明 |
 |---|---|
-| [`astrcode-extension-contract`](crates/astrcode-extension-contract) | S5R wire DTO、稳定错误码、帧传输与 Peer 状态机 |
 | [`astrcode-core`](crates/astrcode-core) | 共享领域类型、trait、配置系统与提示词组合 |
 | [`astrcode-session-projection`](crates/astrcode-session-projection) | 纯 durable-event reducer 与 session read model |
 | [`astrcode-protocol`](crates/astrcode-protocol) | JSON-RPC 2.0 线协议类型、命令、事件与 HTTP/UI DTO |
@@ -354,7 +353,6 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **28 个 crate**，另有 [`s
 | [`astrcode-ai`](crates/astrcode-ai) | 多 Provider LLM 层（Anthropic 与 OpenAI 兼容 Provider）、SSE 流式与重试 |
 | [`astrcode-storage`](crates/astrcode-storage) | JSONL 事件日志、快照、配置持久化与文件锁 |
 | [`astrcode-context`](crates/astrcode-context) | Token 估算、上下文窗口预算、自动压缩与提示词引擎 |
-| [`astrcode-tools`](crates/astrcode-tools) | 内置工具：read、write、edit、patch、glob、grep、shell、terminal、task |
 | [`astrcode-log`](crates/astrcode-log) | 文件轮转、stderr 输出与 env-filter 日志 |
 
 ### Layer 2：会话运行时层
@@ -367,11 +365,12 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **28 个 crate**，另有 [`s
 
 | Crate | 说明 |
 |---|---|
-| [`astrcode-extension-sdk`](crates/astrcode-extension-sdk) | 进程内扩展的稳定作者 API、类型化 host client、manifest 与注册契约 |
+| [`astrcode-extension-sdk`](crates/astrcode-extension-sdk) | 扩展作者 API，以及共享的 S5R wire、帧、Peer 与 Host operation 契约 |
 | [`astrcode-extension-worker`](crates/astrcode-extension-worker) | S5R 子进程 worker 运行时、handler 分发与远程类型化 `HostClient` |
 | [`astrcode-extensions`](crates/astrcode-extensions) | 宿主侧扩展生命周期、钩子分发、能力门控与磁盘 IPC 加载 |
 | [`astrcode-bundled-extensions`](crates/astrcode-bundled-extensions) | 组合根：注册全部第一方扩展 crate |
 | [`astrcode-extension-agent-tools`](crates/astrcode-extension-agent-tools) | 子 Agent 委派与 Agent 发现（兼容 Claude Code 格式） |
+| [`astrcode-extension-coding`](crates/astrcode-extension-coding) | 只通过 SDK Host 能力实现的 9 个第一方工具：read、read_tool_result、write、edit、patch、glob、grep、shell、terminal |
 | [`astrcode-extension-mcp`](crates/astrcode-extension-mcp) | MCP 客户端：stdio/HTTP 传输、常驻进程池、预热与健康检查 |
 | [`astrcode-extension-skill`](crates/astrcode-extension-skill) | 斜杠命令技能发现与 Skill 工具调度 |
 | [`astrcode-extension-todo-tool`](crates/astrcode-extension-todo-tool) | 进度追踪 Todo 工具 |

@@ -1,8 +1,6 @@
 //! Session authoring API and S5R contract re-exports.
 
-pub use astrcode_extension_contract::session::*;
-
-pub use crate::extension::SessionToolSelection;
+pub use crate::{extension::SessionToolSelection, wire::session::*};
 
 /// Maps the bundled authoring selection into the stable extension boundary contract.
 pub fn tool_selection_to_dto(selection: SessionToolSelection) -> SessionToolSelectionDto {

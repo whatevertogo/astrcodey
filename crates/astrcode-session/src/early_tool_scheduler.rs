@@ -230,6 +230,7 @@ mod tests {
                 name: call_id.to_string(),
                 tool_input: serde_json::json!({}),
                 raw_arguments: None,
+                plan: astrcode_core::tool::access::ToolPlan::default(),
                 mode,
                 discovery_gate: None,
                 disposition: PreparedToolDisposition::Execute,

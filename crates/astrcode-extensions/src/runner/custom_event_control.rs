@@ -211,7 +211,7 @@ impl ExtensionRunner {
             failed_attempts: metrics.failed_attempts,
             consecutive_failures: u64::from(state.consecutive_failures)
                 .max(metrics.consecutive_failures),
-            quarantined_events: u64::try_from(state.quarantined.len()).unwrap_or(u64::MAX),
+            quarantined_events: state.quarantined_count,
         }
     }
 

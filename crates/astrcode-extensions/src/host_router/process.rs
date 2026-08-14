@@ -1,14 +1,16 @@
 //! 受并发、时间和输出上限约束的扩展子进程执行器。
 
-use std::{process::Stdio, time::Duration};
+use std::{ffi::OsString, process::Stdio, time::Duration};
 
-use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     host::{
-        HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS, HostOperation,
-        HostProcessOutput, HostProcessRequest, internal::HostOperationGroup,
+        EmptyRequest, HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS, HostOperation,
+        HostProcessInputRequest, HostProcessOutput, HostProcessReadRequest, HostProcessRequest,
+        HostProcessResizeRequest, HostProcessStartRequest, HostProcessTargetRequest,
+        internal::HostOperationGroup,
     },
     s5r::ErrorPayload,
+    wire::WireErrorCode,
 };
 use serde_json::Value;
 use tokio::{
@@ -19,7 +21,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    dispatch, invalid_group_operation, path::canonicalize_workspace_path, run_blocking_io,
+    InvokeContext, acknowledgement, dispatch, invalid_group_operation,
+    path::canonicalize_workspace_path, process_handles::ProcessHandleStore, run_blocking_io,
 };
 
 const MAX_CONCURRENT_PROCESSES: usize = 8;
@@ -50,6 +53,7 @@ const SAFE_INHERITED_ENV: &[&str] = &[
 
 pub(super) struct ProcessGroup {
     runner: ProcessRunner,
+    handles: ProcessHandleStore,
     default_working_dir: Option<String>,
 }
 
@@ -57,6 +61,7 @@ impl ProcessGroup {
     pub(super) fn new(default_working_dir: Option<String>) -> Self {
         Self {
             runner: ProcessRunner::default(),
+            handles: ProcessHandleStore::default(),
             default_working_dir,
         }
     }
@@ -65,17 +70,118 @@ impl ProcessGroup {
         &self,
         operation: HostOperation,
         input: Value,
-        working_dir: Option<&str>,
-        cancel_token: Option<&CancellationToken>,
+        context: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
+        let working_dir = context
+            .working_dir
+            .as_deref()
+            .or(self.default_working_dir.as_deref());
+        let owner = || {
+            context
+                .session_id
+                .as_deref()
+                .map(|session_id| (session_id, context.extension_id.as_str()))
+                .ok_or_else(|| {
+                    ErrorPayload::new(
+                        WireErrorCode::ContextUnavailable,
+                        format!("{} requires a session", operation.wire_name()),
+                    )
+                })
+        };
         match operation {
             HostOperation::ProcessSpawn => {
-                let working_dir = working_dir
-                    .map(str::to_owned)
-                    .or_else(|| self.default_working_dir.clone());
                 dispatch(operation, &input, |request| {
                     self.runner
-                        .spawn(request, working_dir.as_deref(), cancel_token)
+                        .spawn(request, working_dir, context.cancel_token.as_ref())
+                })
+                .await
+            },
+            HostOperation::ProcessStart => {
+                let (session_id, extension_id) = owner()?;
+                dispatch::<HostProcessStartRequest, _, _>(operation, &input, |request| {
+                    self.handles.start(
+                        request,
+                        working_dir,
+                        session_id,
+                        extension_id,
+                        context.cancel_token.as_ref(),
+                    )
+                })
+                .await
+            },
+            HostOperation::ProcessRead => {
+                let (session_id, extension_id) = owner()?;
+                dispatch::<HostProcessReadRequest, _, _>(operation, &input, |request| {
+                    self.handles.read(
+                        request,
+                        session_id,
+                        extension_id,
+                        context.cancel_token.as_ref(),
+                    )
+                })
+                .await
+            },
+            HostOperation::ProcessInput => {
+                let (session_id, extension_id) = owner()?;
+                dispatch::<HostProcessInputRequest, _, _>(operation, &input, |request| async move {
+                    self.handles
+                        .input(request, session_id, extension_id)
+                        .await?;
+                    Ok(acknowledgement())
+                })
+                .await
+            },
+            HostOperation::ProcessResize => {
+                let (session_id, extension_id) = owner()?;
+                dispatch::<HostProcessResizeRequest, _, _>(
+                    operation,
+                    &input,
+                    |request| async move {
+                        self.handles
+                            .resize(request, session_id, extension_id)
+                            .await?;
+                        Ok(acknowledgement())
+                    },
+                )
+                .await
+            },
+            HostOperation::ProcessStatus => {
+                let (session_id, extension_id) = owner()?;
+                dispatch::<HostProcessTargetRequest, _, _>(
+                    operation,
+                    &input,
+                    |request| async move { self.handles.status(request, session_id, extension_id) },
+                )
+                .await
+            },
+            HostOperation::ProcessPromote => {
+                let (session_id, extension_id) = owner()?;
+                dispatch::<HostProcessTargetRequest, _, _>(
+                    operation,
+                    &input,
+                    |request| async move {
+                        self.handles.promote(request, session_id, extension_id)?;
+                        Ok(acknowledgement())
+                    },
+                )
+                .await
+            },
+            HostOperation::ProcessKill => {
+                let (session_id, extension_id) = owner()?;
+                dispatch::<HostProcessTargetRequest, _, _>(
+                    operation,
+                    &input,
+                    |request| async move {
+                        self.handles.kill(request, session_id, extension_id).await?;
+                        Ok(acknowledgement())
+                    },
+                )
+                .await
+            },
+            HostOperation::ProcessList => {
+                let (session_id, extension_id) = owner()?;
+                dispatch::<EmptyRequest, _, _>(operation, &input, |_| async move {
+                    Ok(self.handles.list(session_id, extension_id))
                 })
                 .await
             },
@@ -88,6 +194,14 @@ impl ProcessGroup {
 
     pub(super) fn is_available(&self, working_dir: Option<&str>) -> bool {
         working_dir.is_some() || self.default_working_dir.is_some()
+    }
+
+    pub(super) fn cleanup_session(&self, session_id: &str) {
+        self.handles.cleanup_session(session_id);
+    }
+
+    pub(super) fn cleanup_extension(&self, extension_id: &str) {
+        self.handles.cleanup_extension(extension_id);
     }
 }
 
@@ -326,7 +440,7 @@ async fn terminate_child(child: &mut tokio::process::Child, child_pid: Option<u3
     let _ = child.wait().await;
 }
 
-fn resolve_cwd(
+pub(super) fn resolve_cwd(
     working_dir: Option<&str>,
     relative_cwd: Option<&str>,
 ) -> Result<std::path::PathBuf, ErrorPayload> {
@@ -343,7 +457,7 @@ fn resolve_cwd(
     Ok(path)
 }
 
-fn validated_timeout(timeout_ms: Option<u64>) -> Result<Duration, ErrorPayload> {
+pub(super) fn validated_timeout(timeout_ms: Option<u64>) -> Result<Duration, ErrorPayload> {
     let timeout_ms = timeout_ms.unwrap_or(HOST_PROCESS_DEFAULT_TIMEOUT_MS);
     if !(1..=HOST_PROCESS_MAX_TIMEOUT_MS).contains(&timeout_ms) {
         return Err(ErrorPayload::new(
@@ -376,9 +490,37 @@ fn append_bounded(target: &mut Vec<u8>, chunk: &[u8], limit: usize) -> bool {
     accepted < chunk.len()
 }
 
-fn safe_child_env() -> impl Iterator<Item = (String, String)> {
-    std::env::vars()
-        .filter(|(key, _)| SAFE_INHERITED_ENV.contains(&key.as_str()) || key.starts_with("LC_"))
+fn safe_child_env() -> impl Iterator<Item = (OsString, OsString)> {
+    filter_safe_child_env(std::env::vars_os())
+}
+
+pub(super) fn configure_process(command: &mut tokio::process::Command) {
+    command.env_clear();
+    for (key, value) in safe_child_env() {
+        command.env(key, value);
+    }
+    for (key, value) in NONINTERACTIVE_ENV {
+        command.env(key, value);
+    }
+}
+
+pub(super) fn configure_pty_process(command: &mut portable_pty::CommandBuilder) {
+    command.env_clear();
+    for (key, value) in safe_child_env() {
+        command.env(key, value);
+    }
+    for (key, value) in NONINTERACTIVE_ENV {
+        command.env(key, value);
+    }
+}
+
+fn filter_safe_child_env(
+    environment: impl Iterator<Item = (OsString, OsString)>,
+) -> impl Iterator<Item = (OsString, OsString)> {
+    environment.filter(|(key, _)| {
+        key.to_str()
+            .is_some_and(|key| SAFE_INHERITED_ENV.contains(&key) || key.starts_with("LC_"))
+    })
 }
 
 fn cancelled() -> ErrorPayload {
@@ -400,6 +542,9 @@ fn kill_process_group(_pid: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use std::os::unix::ffi::OsStringExt;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -415,6 +560,29 @@ mod tests {
         let timed_out = ensure_spawn_active(Instant::now() - Duration::from_secs(1), None)
             .expect_err("expired process must not spawn");
         assert_eq!(timed_out.code_enum(), Some(WireErrorCode::Timeout));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_environment_is_bounded_for_pipe_and_pty_processes() {
+        let key = OsString::from_vec(b"ASTRCODE_INVALID_ENV_\xff".to_vec());
+        let inherited = filter_safe_child_env(
+            vec![
+                (key.clone(), "ignored".into()),
+                ("PATH".into(), OsString::from_vec(b"/bin:\xff".to_vec())),
+            ]
+            .into_iter(),
+        )
+        .collect::<Vec<_>>();
+
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(inherited[0].0, "PATH");
+
+        let mut pty = portable_pty::CommandBuilder::new("ignored");
+        assert!(pty.get_env("CARGO_MANIFEST_DIR").is_some());
+        configure_pty_process(&mut pty);
+        assert!(pty.get_env("CARGO_MANIFEST_DIR").is_none());
+        assert_eq!(pty.get_env("PAGER"), Some(std::ffi::OsStr::new("cat")));
     }
 
     #[cfg(unix)]

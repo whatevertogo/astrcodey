@@ -237,8 +237,6 @@ pub struct RuntimeSection {
     pub agent_max_depth: Option<usize>,
     /// 单轮中允许同时执行的并行工具调用数上限。
     pub agent_tool_max_parallel_calls: Option<usize>,
-    /// Shell 工具默认超时时间（秒）。
-    pub shell_timeout_secs: Option<u64>,
     /// 是否允许在解析 API key 时执行 `!command`。
     pub allow_api_key_shell_command: Option<bool>,
     /// 工具审批模式：`manual`（默认）或 `yolo`。

@@ -185,6 +185,12 @@ impl ModelSelectionFlow {
                 ConfigUpdateError::Provider(error) => {
                     HandlerError::InvalidRequest(format!("Failed to build model provider: {error}"))
                 },
+                ConfigUpdateError::ExtensionValidation(error) => HandlerError::InvalidRequest(
+                    format!("Invalid extension configuration: {error}"),
+                ),
+                ConfigUpdateError::ExtensionApply(error) => HandlerError::InvalidRequest(format!(
+                    "Failed to apply extension configuration: {error}"
+                )),
                 ConfigUpdateError::Store(error) => {
                     HandlerError::InvalidRequest(format!("Failed to write config: {error}"))
                 },

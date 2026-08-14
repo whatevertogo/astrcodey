@@ -20,11 +20,11 @@ use astrcode_extension_sdk::{
         ExtensionManifest, ExtensionStartContext, ExtensionStopContext, HookMode, HookResult,
         LifecycleContext, LifecycleEvent, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
         PromptContributions, Registrar, ToolContext, ToolDiscovery, ToolDiscoveryContext,
-        ToolDiscoveryHandler, ToolHandler,
+        ToolDiscoveryHandler, ToolHandler, ToolPlanContext,
     },
     tool::{
-        ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPromptMetadata,
-        ToolPromptTag, ToolResult, tool_metadata,
+        ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
+        ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata,
     },
 };
 use serde_json::{Value, json};
@@ -394,6 +394,12 @@ struct McpToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for McpToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        // MCP tools can reach arbitrary resources declared by an external server. Until MCP
+        // descriptors expose a trustworthy resource contract, approval must remain conservative.
+        Ok(ToolPlan::opaque())
+    }
+
     async fn execute(&self, ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
         let tool_name = ctx.tool_name();
         let working_dir = ctx.working_dir().to_string_lossy().into_owned();
@@ -622,7 +628,7 @@ fn tool_search_tool_definition() -> ToolDefinition {
     ToolDefinition {
         name: TOOL_SEARCH_TOOL_NAME.into(),
         description: "Find an external MCP tool by name or keyword and return its input schema \
-                      (not execute it).\n\nWhen NOT to use:\n- Builtin tools suffice: \
+                      (not execute it).\n\nWhen NOT to use:\n- First-party coding tools suffice: \
                       `read`/`grep`/`glob`/`edit`/`patch`/`write`/`shell`\n- Guessing `mcp__...` \
                       argument names without a schema\n\nTips:\n- Task needs an external MCP \
                       capability\n- A visible `mcp__...` tool has unclear \

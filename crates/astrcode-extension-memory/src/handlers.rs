@@ -6,10 +6,13 @@ use astrcode_extension_sdk::{
     extension::{
         ExtensionCall, ExtensionError, ExtensionTasks, HookResult, LifecycleContext,
         LifecycleHandler, PromptBuildContext, PromptBuildHandler, PromptContributions, ToolContext,
-        ToolHandler,
+        ToolHandler, ToolPlanContext,
     },
     host::ExtensionHost,
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult},
+    tool::{
+        ExecutionMode, HostResource, ResourceAccess, ToolDefinition, ToolOrigin, ToolPlan,
+        ToolResult,
+    },
 };
 use parking_lot::{Mutex, RwLock};
 use serde::Deserialize;
@@ -147,6 +150,14 @@ fn default_category() -> String {
 
 #[async_trait::async_trait]
 impl ToolHandler for MemorySaveHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::from_resources([
+            ResourceAccess::host(HostResource::Session),
+            ResourceAccess::host(HostResource::Event),
+            ResourceAccess::host(HostResource::Model),
+        ]))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,
@@ -242,6 +253,13 @@ struct DeleteArgs {
 
 #[async_trait::async_trait]
 impl ToolHandler for MemoryDeleteHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::from_resources([
+            ResourceAccess::host(HostResource::Session),
+            ResourceAccess::host(HostResource::Event),
+        ]))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,
@@ -304,6 +322,10 @@ const fn default_list_limit() -> usize {
 
 #[async_trait::async_trait]
 impl ToolHandler for MemoryListHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,

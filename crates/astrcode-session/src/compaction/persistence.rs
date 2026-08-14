@@ -2,6 +2,7 @@
 
 use astrcode_context::{CompactResult, ContextSnapshot};
 use astrcode_core::{compaction::CompactStrategy, event::transcript_prefix_fingerprint};
+use astrcode_storage::StorageError;
 
 use crate::{payload::transcript_rewritten_payload, session::Session, session_error::SessionError};
 
@@ -12,15 +13,12 @@ pub(crate) async fn persist_compaction(
     snapshot: &ContextSnapshot,
     strategy: CompactStrategy,
 ) -> Result<(), SessionError> {
+    let fingerprint = transcript_prefix_fingerprint(&snapshot.system_prompt, &snapshot.messages)
+        .map_err(|error| SessionError::Storage(StorageError::Serialization(error)))?;
     let event = session
         .emit_durable(
             None,
-            transcript_rewritten_payload(
-                compaction,
-                snapshot.source_seq,
-                transcript_prefix_fingerprint(&snapshot.system_prompt, &snapshot.messages),
-                strategy,
-            ),
+            transcript_rewritten_payload(compaction, snapshot.source_seq, fingerprint, strategy),
         )
         .await?;
 

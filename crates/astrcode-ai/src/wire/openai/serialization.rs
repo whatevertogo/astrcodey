@@ -77,7 +77,7 @@ mod strict_tool_tests {
                 "additionalProperties": false
             }),
             strict,
-            origin: ToolOrigin::Builtin,
+            origin: ToolOrigin::Bundled,
             execution_mode: ExecutionMode::Parallel,
         }
     }

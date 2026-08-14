@@ -7,8 +7,10 @@
 use std::fmt::Display;
 
 use astrcode_core::{llm::LlmError, tool::SessionApiError};
-use astrcode_extension_contract::{ErrorPayload, WireErrorCode};
-use astrcode_extension_sdk::host::internal::OutboundNetworkError;
+use astrcode_extension_sdk::{
+    host::internal::OutboundNetworkError,
+    wire::{ErrorPayload, WireErrorCode},
+};
 use astrcode_storage::StorageError;
 
 /// 领域错误 → 线缆错误码的映射协议。

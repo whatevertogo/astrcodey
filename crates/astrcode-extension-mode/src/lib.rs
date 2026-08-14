@@ -29,10 +29,11 @@ use astrcode_extension_sdk::{
         ExtensionCommandResult, ExtensionError, ExtensionManifest, ExtensionPaths, HookMode,
         PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderHandler,
         ProviderResult, Registrar, SlashCommand, StatusItemUpdatePayload, ToolContext, ToolHandler,
+        ToolPlanContext,
     },
     llm::LlmMessage,
     permission::ApprovalMode,
-    tool::{ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata},
+    tool::{HostResource, ToolPlan, ToolPromptMetadata, ToolPromptTag, ToolResult, tool_metadata},
 };
 
 fn session_data_dir(paths: &ExtensionPaths) -> Result<&Path, ExtensionError> {
@@ -133,6 +134,10 @@ struct ModeToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for ModeToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,

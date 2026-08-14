@@ -11,20 +11,14 @@ use crate::{
     s5r::{ErrorPayload, HandlerResult},
     worker::registry::{
         CommandHandlerFn, ContinuationHandlerFn, CustomEventHandlerFn, HookHandlerFn,
-        HttpHandlerFn, ToolHandlerFn, WorkerCallContext, WorkerCommandContext,
-        WorkerCustomEventContext, WorkerInvocationContext,
+        HttpHandlerFn, ToolHandlerFn, ToolPlannerFn, WorkerCallContext, WorkerCommandContext,
+        WorkerCustomEventContext, WorkerInvocationContext, WorkerToolPlanContext,
     },
 };
 
-/// 从 tool 事件 JSON 反序列化 LLM 传入的 `arguments`。
-pub fn parse_tool_arguments<T: DeserializeOwned>(event: &Value) -> Result<T, ErrorPayload> {
-    let args = event
-        .get("input")
-        .and_then(|i| i.get("arguments"))
-        .or_else(|| event.get("arguments"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    serde_json::from_value(args).map_err(|e| {
+/// 反序列化 S5R tool invocation 已校验过的 `arguments`。
+pub fn parse_tool_arguments<T: DeserializeOwned>(arguments: Value) -> Result<T, ErrorPayload> {
+    serde_json::from_value(arguments).map_err(|e| {
         ErrorPayload::new(
             WireErrorCode::InvalidInput,
             format!("parse tool arguments: {e}"),
@@ -59,9 +53,31 @@ where
     F: Fn(A, WorkerInvocationContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
-    Arc::new(move |event, ctx| match parse_tool_arguments::<A>(&event) {
+    Arc::new(move |event, ctx| match parse_tool_arguments::<A>(event) {
         Err(e) => Box::pin(async move { Err(e) }),
         Ok(args) => Box::pin(f(args, ctx)),
+    })
+}
+
+/// Side-effect-free tool planner.
+pub fn tool_planner<F, Fut>(f: F) -> ToolPlannerFn
+where
+    F: Fn(WorkerToolPlanContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<crate::tool::ToolPlan, ErrorPayload>> + Send + 'static,
+{
+    Arc::new(move |_event, ctx| Box::pin(f(ctx)))
+}
+
+/// Side-effect-free tool planner with typed arguments.
+pub fn tool_planner_args<A, F, Fut>(f: F) -> ToolPlannerFn
+where
+    A: DeserializeOwned + Send + 'static,
+    F: Fn(A, WorkerToolPlanContext) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = Result<crate::tool::ToolPlan, ErrorPayload>> + Send + 'static,
+{
+    Arc::new(move |event, ctx| match parse_tool_arguments::<A>(event) {
+        Err(error) => Box::pin(async move { Err(error) }),
+        Ok(arguments) => Box::pin(f(arguments, ctx)),
     })
 }
 
@@ -177,7 +193,6 @@ mod tests {
         });
         let event = serde_json::json!({
             "input": {
-                "arguments": { "name": "world" },
                 "session_id": "session-1",
                 "tool_call_id": "tool-call-1",
                 "working_dir": "/workspace"
@@ -191,7 +206,9 @@ mod tests {
         .unwrap()
         .into_invocation("tool")
         .unwrap();
-        let out = handler(event, ctx).await.unwrap();
+        let out = handler(serde_json::json!({ "name": "world" }), ctx)
+            .await
+            .unwrap();
         assert_eq!(out.effect, HandlerEffect::Ok);
         assert_eq!(
             out.data.get("content"),

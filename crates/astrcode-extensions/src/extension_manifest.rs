@@ -2,14 +2,6 @@
 
 use std::collections::BTreeSet;
 
-use astrcode_extension_contract::{
-    FeatureName,
-    manifest::{
-        InitializeManifest, ManifestCommand, ManifestHook, ManifestHookEvent, ManifestHttpRoute,
-        ManifestTool, ManifestToolMode,
-    },
-    protocol::PeerInfo,
-};
 use astrcode_extension_sdk::{
     builder::manifest as extension_manifest,
     extension::{
@@ -19,6 +11,14 @@ use astrcode_extension_sdk::{
     },
     s5r::HandlerId,
     tool::{ExecutionMode, ToolDefinition, ToolOrigin},
+    wire::{
+        FeatureName,
+        manifest::{
+            InitializeManifest, ManifestCommand, ManifestHook, ManifestHookEvent,
+            ManifestHttpRoute, ManifestTool, ManifestToolMode,
+        },
+        protocol::PeerInfo,
+    },
 };
 
 /// Host-normalized registration derived from a typed S5R initialize manifest.
@@ -142,8 +142,10 @@ fn registration_from_manifest(
 pub(crate) fn parse_handler_id<'a>(
     extension_id: &str,
     handler_id: &'a HandlerId,
-) -> Result<(astrcode_extension_contract::HandlerKind, &'a str), String> {
-    let (owner, kind, name) = handler_id.parts();
+) -> Result<(astrcode_extension_sdk::wire::HandlerKind, &'a str), String> {
+    let (owner, kind, name) = handler_id
+        .parts()
+        .ok_or_else(|| format!("invalid handler id {handler_id}"))?;
     if owner != extension_id {
         return Err(format!(
             "handler {handler_id} must be attributed to extension {extension_id}"
@@ -155,7 +157,7 @@ pub(crate) fn parse_handler_id<'a>(
 fn validate_handler_id_kind(
     extension_id: &str,
     handler_id: &HandlerId,
-    expected_kind: astrcode_extension_contract::HandlerKind,
+    expected_kind: astrcode_extension_sdk::wire::HandlerKind,
 ) -> Result<(), String> {
     let (kind, _) = parse_handler_id(extension_id, handler_id)?;
     if kind != expected_kind {
@@ -235,7 +237,7 @@ fn normalize_http_route(
     validate_handler_id_kind(
         extension_id,
         &route.handler_id,
-        astrcode_extension_contract::HandlerKind::Http,
+        astrcode_extension_sdk::wire::HandlerKind::Http,
     )?;
     Ok(RegisteredHttpRoute {
         route: route.route,
@@ -249,8 +251,7 @@ fn s5r_unsupported_typed_hook(event: &LifecycleEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_contract::manifest::ManifestHookOptions;
-    use astrcode_extension_sdk::tool::ExecutionMode;
+    use astrcode_extension_sdk::{tool::ExecutionMode, wire::manifest::ManifestHookOptions};
     use serde_json::json;
 
     use super::*;

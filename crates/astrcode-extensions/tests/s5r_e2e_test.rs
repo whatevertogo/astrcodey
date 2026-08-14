@@ -10,7 +10,10 @@ use std::{
 use astrcode_core::{
     event::{CustomEventData, DurableEventPayload, EventPayload},
     llm::{LlmEvent, LlmMessage, LlmProvider},
-    tool::{ExecutionMode, Tool, ToolCapabilities, ToolDefinition, ToolExecutionContext},
+    tool::{
+        ExecutionMode, Tool, ToolCapabilities, ToolDefinition, ToolExecutionContext,
+        access::{FileOperation, HostResource, ResourceAccess, ResourceLease, ToolPlan},
+    },
     types::TurnId,
 };
 use astrcode_extension_sdk::{
@@ -232,6 +235,7 @@ fn core_tool_ctx(working_dir: &str) -> ToolExecutionContext {
         None,
         Default::default(),
     )
+    .with_resource_lease(full_host_test_lease(working_dir))
 }
 
 fn attributed_tool_ctx(working_dir: &str) -> ToolExecutionContext {
@@ -242,7 +246,32 @@ fn attributed_tool_ctx(working_dir: &str) -> ToolExecutionContext {
         None,
         Default::default(),
     )
+    .with_resource_lease(full_host_test_lease(working_dir))
     .with_turn_id(TurnId::new("turn-e2e"))
+}
+
+fn full_host_test_lease(working_dir: &str) -> ResourceLease {
+    let mut resources = vec![
+        ResourceAccess::File {
+            operation: FileOperation::ReadWrite,
+            path: working_dir.into(),
+            recursive: true,
+        },
+        ResourceAccess::search_file(working_dir, true),
+    ];
+    resources.extend(
+        [
+            HostResource::Process,
+            HostResource::ToolResultArtifact,
+            HostResource::Session,
+            HostResource::Model,
+            HostResource::Network,
+            HostResource::Event,
+            HostResource::ExtensionHttp,
+        ]
+        .map(ResourceAccess::host),
+    );
+    ResourceLease::from_plan(&ToolPlan::from_resources(resources))
 }
 
 fn runtime_hook_call() -> RuntimeHookCallContext {
@@ -558,7 +587,8 @@ async fn s5r_session_state_roundtrips_via_typed_host_client() {
         Some("call-state".into()),
         None,
         capabilities,
-    );
+    )
+    .with_resource_lease(full_host_test_lease("/tmp"));
 
     let result = tool.execute(serde_json::json!({}), &ctx).await.unwrap();
 

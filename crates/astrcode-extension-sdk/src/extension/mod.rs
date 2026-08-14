@@ -17,6 +17,7 @@ mod registrar;
 mod registration_validation;
 mod runtime;
 mod tool_context;
+mod tool_plan_context;
 
 /// Runtime-only construction seam. This module is intentionally absent from author preludes.
 #[doc(hidden)]
@@ -76,5 +77,6 @@ pub use paths::*;
 pub use registrar::*;
 pub use runtime::*;
 pub use tool_context::*;
+pub use tool_plan_context::*;
 
 pub use crate::manifest::{ExtensionManifest, ExtensionManifestError};

@@ -66,6 +66,10 @@ pub fn bundled_extensions(
     if extension_enabled(extension_states, "astrcode-agent-tools") {
         extensions.push(astrcode_extension_agent_tools::extension());
     }
+    #[cfg(feature = "coding")]
+    if extension_enabled(extension_states, "astrcode-coding") {
+        extensions.push(astrcode_extension_coding::extension());
+    }
     #[cfg(feature = "mcp")]
     if extension_enabled(extension_states, "astrcode-mcp") {
         extensions.push(astrcode_extension_mcp::extension());
@@ -110,6 +114,8 @@ pub fn bundled_extension_ids() -> Vec<&'static str> {
     vec![
         #[cfg(feature = "agent-tools")]
         "astrcode-agent-tools",
+        #[cfg(feature = "coding")]
+        "astrcode-coding",
         #[cfg(feature = "mcp")]
         "astrcode-mcp",
         #[cfg(feature = "skill")]

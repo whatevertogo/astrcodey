@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
-use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     self,
     extension::{ExtensionError, ExtensionHttpDispatchRequest, ExtensionHttpRequest},
     host::{HostOperation, internal::HostOperationGroup},
     s5r::ErrorPayload,
+    wire::WireErrorCode,
 };
 use serde_json::Value;
 

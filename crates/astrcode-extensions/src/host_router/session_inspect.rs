@@ -7,17 +7,21 @@ use astrcode_core::{
     llm::{LlmContent, LlmMessage},
     types::SessionId,
 };
-use astrcode_extension_contract::{
-    WireErrorCode,
-    session_inspect::{
-        SessionInspectAgentSession, SessionInspectAgentStatusDto, SessionInspectCompaction,
-        SessionInspectContent, SessionInspectListItem, SessionInspectListOutput,
-        SessionInspectMessage, SessionInspectPendingApproval, SessionInspectProviderMessagesOutput,
-        SessionInspectReadModel, SessionInspectReadModelOutput, SessionInspectSequencedMessage,
-        SessionInspectSnapshot, SessionInspectSnapshotOutput,
+use astrcode_extension_sdk::{
+    host::HostOperation,
+    s5r::ErrorPayload,
+    wire::{
+        WireErrorCode,
+        session_inspect::{
+            SessionInspectAgentSession, SessionInspectAgentStatusDto, SessionInspectCompaction,
+            SessionInspectContent, SessionInspectListItem, SessionInspectListOutput,
+            SessionInspectMessage, SessionInspectPendingApproval,
+            SessionInspectProviderMessagesOutput, SessionInspectReadModel,
+            SessionInspectReadModelOutput, SessionInspectSequencedMessage, SessionInspectSnapshot,
+            SessionInspectSnapshotOutput,
+        },
     },
 };
-use astrcode_extension_sdk::{host::HostOperation, s5r::ErrorPayload};
 use astrcode_session_projection::{
     AgentSessionLinkView, AgentSessionStatus, SequencedLlmMessage, SessionReadModel, SessionSummary,
 };

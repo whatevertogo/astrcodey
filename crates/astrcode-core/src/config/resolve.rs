@@ -430,9 +430,6 @@ fn build_agent_settings(runtime: &RuntimeSection) -> AgentSettings {
         tool_max_parallel_calls: runtime
             .agent_tool_max_parallel_calls
             .unwrap_or(super::defaults::DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS),
-        shell_timeout_secs: runtime
-            .shell_timeout_secs
-            .unwrap_or(super::defaults::DEFAULT_SHELL_TIMEOUT_SECS),
         approval_mode: runtime
             .approval_mode
             .as_deref()
@@ -549,7 +546,6 @@ fn merge_runtime_section(base: &mut RuntimeSection, overlay: RuntimeSection) {
     merge_field!(post_compact_max_tokens_per_file);
     merge_field!(agent_max_depth);
     merge_field!(agent_tool_max_parallel_calls);
-    merge_field!(shell_timeout_secs);
     merge_field!(allow_api_key_shell_command);
     merge_field!(approval_mode);
     if let Some(states) = overlay.extension_states {

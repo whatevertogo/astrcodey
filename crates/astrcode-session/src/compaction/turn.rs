@@ -163,7 +163,7 @@ async fn run_compaction(
     .await;
 
     if records_breaker_attempt {
-        host.breaker.lock().finish_attempt(outcome.llm_api_failed());
+        host.breaker.lock().finish_attempt(outcome.llm_attempt());
     }
     // append 已更新进程内 projection 但 fsync 失败时，本 turn 仍必须沿用冻结的原上下文。
     let fallback_snapshot = match &outcome {

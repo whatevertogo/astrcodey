@@ -9,8 +9,8 @@ use tempfile::tempdir;
 use super::{FileSystemSessionRepository, event_consumer_state_path};
 use crate::{
     EventConsumerCheckpointOutcome, EventConsumerCheckpointReset, EventConsumerFailureOutcome,
-    EventReader, SessionEventJournal, SessionReader, SessionStore, StorageError,
-    ToolResultArtifactInput, ToolResultArtifactStore,
+    EventReader, SessionEventJournal, SessionPathResolver, SessionReader, SessionStore,
+    StorageError, ToolResultArtifactInput, ToolResultArtifactStore,
     test_support::{started_event, user_event},
 };
 
@@ -87,6 +87,27 @@ async fn event_consumer_state_persists_pause_and_rejects_stale_checkpoints() {
         .unwrap();
     assert_eq!(latest.checkpoint, Some(1));
     assert_eq!(latest.revision, 2);
+    assert_eq!(latest.skipped_count, 1);
+    assert_eq!(latest.skips.len(), 1);
+
+    let session_dir = reopened.find_session_dir(&session_id).await.unwrap();
+    let state_path = event_consumer_state_path(&session_dir, "extension:subscription").unwrap();
+    assert!(!state_path.with_extension("json.tmp").exists());
+
+    let mut persisted: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state_path).unwrap()).unwrap();
+    assert_eq!(persisted["version"], 3);
+    assert_eq!(persisted["skippedCount"], 1);
+
+    persisted["version"] = 2.into();
+    std::fs::write(&state_path, serde_json::to_vec(&persisted).unwrap()).unwrap();
+    assert!(matches!(
+        reopened
+            .event_consumer_state(&session_id, "extension:subscription")
+            .await,
+        Err(StorageError::CorruptLog(message))
+            if message.contains("unsupported event consumer state version 2")
+    ));
 }
 
 #[tokio::test]
@@ -142,7 +163,9 @@ async fn event_consumer_quarantines_once_at_the_failure_limit_and_persists_the_a
         .unwrap();
     assert_eq!(state.checkpoint, Some(1));
     assert_eq!(state.consecutive_failures, 0);
+    assert_eq!(state.quarantined_count, 1);
     assert_eq!(state.quarantined.len(), 1);
+    assert_eq!(state.quarantined[0].revision, 0);
     assert_eq!(state.quarantined[0].attempts, 20);
     assert_eq!(state.quarantined[0].last_error, "injected failure");
 }
@@ -252,17 +275,15 @@ async fn tool_result_artifacts_stay_inside_the_session_directory() {
         )
         .await
         .unwrap();
-    let artifact_path = artifact.path.unwrap();
+    let artifact_id = artifact.artifact_id;
     let slice = repo
-        .read_tool_result_artifact_by_path(&session_id, &artifact_path, 0, 100)
+        .read_tool_result_artifact(&session_id, &artifact_id, 0, 100)
         .await
         .unwrap();
     assert_eq!(slice.content, "artifact content");
 
-    let outside = dir.path().join("outside.txt");
-    std::fs::write(&outside, "outside").unwrap();
     let error = repo
-        .read_tool_result_artifact_by_path(&session_id, outside.to_str().unwrap(), 0, 100)
+        .read_tool_result_artifact(&session_id, "../outside.txt", 0, 100)
         .await
         .unwrap_err();
     assert!(matches!(error, StorageError::InvalidId(_)));
@@ -271,14 +292,20 @@ async fn tool_result_artifacts_stay_inside_the_session_directory() {
     {
         use std::os::unix::fs::symlink;
 
-        let artifact_path = std::path::PathBuf::from(artifact_path);
-        let artifact_dir = artifact_path.parent().unwrap().to_path_buf();
+        let artifact_dir = repo
+            .session_store_dir(&session_id)
+            .await
+            .unwrap()
+            .unwrap()
+            .join("tool-results");
+        let artifact_path = artifact_dir.join(&artifact_id);
+        let outside = dir.path().join("outside.txt");
+        std::fs::write(&outside, "outside").unwrap();
         std::fs::remove_file(&artifact_path).unwrap();
-        std::fs::remove_dir(&artifact_dir).unwrap();
-        symlink(dir.path(), &artifact_dir).unwrap();
+        symlink(&outside, &artifact_path).unwrap();
 
         let error = repo
-            .read_tool_result_artifact_by_path(&session_id, outside.to_str().unwrap(), 0, 100)
+            .read_tool_result_artifact(&session_id, &artifact_id, 0, 100)
             .await
             .unwrap_err();
         assert!(matches!(error, StorageError::InvalidId(_)));

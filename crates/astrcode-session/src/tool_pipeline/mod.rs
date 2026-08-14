@@ -35,23 +35,15 @@ impl ToolCalls {
         &self,
         call: &crate::tool_types::PreparedToolInvocation,
     ) -> bool {
-        self.tool_registry
-            .resource_accesses(
-                &call.name,
-                &call.tool_input,
-                std::path::Path::new(&self.turn.shared.working_dir),
+        call.plan.resources().iter().all(|access| {
+            matches!(
+                access,
+                ResourceAccess::File {
+                    operation: FileOperation::Read | FileOperation::Search,
+                    ..
+                }
             )
-            .is_ok_and(|accesses| {
-                accesses.iter().all(|access| {
-                    matches!(
-                        access,
-                        ResourceAccess::File {
-                            operation: FileOperation::Read | FileOperation::Search,
-                            ..
-                        }
-                    )
-                })
-            })
+        })
     }
 
     pub(crate) fn new(

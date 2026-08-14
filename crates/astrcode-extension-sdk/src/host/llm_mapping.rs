@@ -1,9 +1,9 @@
-use astrcode_extension_contract::{WireErrorCode, host::*, protocol::ErrorPayload};
 use futures_util::StreamExt;
 
 use crate::{
     llm::{LlmContent, LlmMessage, LlmRole},
     model_stream::{ModelStream, ModelStreamEvent},
+    wire::{WireErrorCode, host::*, protocol::ErrorPayload},
 };
 
 /// A completed model stream with its ordered text deltas.
@@ -173,11 +173,11 @@ fn llm_content_from_wire(content: HostLlmContent) -> LlmContent {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_contract::protocol::{ErrorPayload, ModelStreamEvent};
     use serde_json::json;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
+    use crate::wire::protocol::{ErrorPayload, ModelStreamEvent};
 
     fn stream<I>(events: I) -> ModelStream
     where

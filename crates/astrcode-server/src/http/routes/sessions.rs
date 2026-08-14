@@ -379,11 +379,13 @@ pub(in crate::http) async fn compact_session(
         .compact_session(&session_id, request.keep_recent_turns)
         .await
     {
-        Ok(ManualCompactionOutcome::Compacted) => Json(CompactSessionResponse {
-            compacted: true,
-            message: "compact completed".into(),
-        })
-        .into_response(),
+        Ok(ManualCompactionOutcome::Compacted { messages_removed }) => {
+            Json(CompactSessionResponse {
+                compacted: true,
+                message: format!("compact completed; {messages_removed} messages removed"),
+            })
+            .into_response()
+        },
         Ok(ManualCompactionOutcome::Skipped { message }) => Json(CompactSessionResponse {
             compacted: false,
             message,

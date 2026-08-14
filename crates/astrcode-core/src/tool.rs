@@ -1,7 +1,7 @@
 //! 工具 trait 及关联类型。
 //!
 //! 工具是 Agent 与外部世界交互的主要方式。
-//! 扩展可以在内置工具集之外注册额外的工具。
+//! 所有工具都由扩展注册；core 只定义共同领域契约。
 //!
 //! 本模块定义了：
 //! - [`Tool`] trait：所有工具（内置和扩展注册）的核心接口
@@ -13,7 +13,7 @@
 //! 本模块不含具体工具实现与调度逻辑（注册表、并行调度、权限门禁位于
 //! `astrcode-session` / 各工具 crate）。
 
-use std::{collections::BTreeMap, path::Path, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 
@@ -23,21 +23,17 @@ pub mod access;
 pub mod read_image;
 pub mod selection;
 
-use access::ResourceAccess;
+use access::{ResourceLease, ToolPlan};
 pub use selection::{EmptyToolNameError, SessionToolSelection, validated_tool_names};
 
 /// 工具来源分类，影响诊断日志和策略优先级，不改变执行路径。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolOrigin {
-    /// First-party core tools required by the coding runtime.
-    Builtin,
-    /// First-party tools shipped with the server but not fundamental to the tool trait.
+    /// First-party tools shipped as bundled extensions.
     Bundled,
     /// Tools contributed by user or project extensions.
     Extension,
-    /// Tools registered by a future SDK surface.
-    Sdk,
 }
 
 /// 工具定义，作为函数调用 schema 发送给 LLM。
@@ -79,9 +75,9 @@ pub struct ToolDefinition {
 ///
 /// # 不要
 ///
-/// - 不要往 builtin（filesystem/system/planning 标签）工具的 `caveats` 里写约束 —— 它**不会**进
-///   system prompt。把这类信息写到 `ToolDefinition.description` 或 参数 schema 的 description 里。
-/// - 如果 builtin 工具确实需要 system prompt 级别的策略指引，扩展
+/// - 不要往普通 filesystem/system/planning 工具的 `caveats` 里写约束 —— 它**不会**进 system
+///   prompt。把这类信息写到 `ToolDefinition.description` 或 参数 schema 的 description 里。
+/// - 如果普通工具确实需要 system prompt 级别的策略指引，扩展
 ///   [`Self::should_render_detailed_guide`]，而不是新增字段。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ToolPromptMetadata {
@@ -192,19 +188,21 @@ pub struct ToolResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolResultArtifactSlice {
-    pub path: String,
+    pub artifact_id: String,
     pub bytes: usize,
-    pub char_offset: usize,
-    pub returned_chars: usize,
-    pub next_char_offset: Option<usize>,
+    pub byte_offset: usize,
+    pub returned_bytes: usize,
+    pub next_byte_offset: Option<usize>,
     pub has_more: bool,
     pub content: String,
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolResultArtifactError {
-    #[error("invalid tool result artifact path: {0}")]
-    InvalidPath(String),
+    #[error("invalid tool result artifact id: {0}")]
+    InvalidId(String),
+    #[error("invalid tool result artifact read request: {0}")]
+    InvalidRequest(String),
     #[error("tool result artifact not found: {0}")]
     NotFound(String),
     #[error("tool result artifact reading is unsupported: {0}")]
@@ -215,12 +213,12 @@ pub enum ToolResultArtifactError {
 
 #[async_trait::async_trait]
 pub trait ToolResultArtifactReader: Send + Sync {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<ToolResultArtifactSlice, ToolResultArtifactError>;
 }
 
@@ -863,6 +861,49 @@ pub struct ToolCallScope {
     pub event_tx: Option<crate::event::EventSender>,
 }
 
+/// Host-internal facts available while planning one tool invocation.
+///
+/// This context deliberately excludes executable capabilities and event channels. Adapters may
+/// project it into an author-facing planning context, but planning cannot perform Host I/O.
+#[derive(Clone, Debug)]
+pub struct ToolPlanningContext {
+    pub session_id: SessionId,
+    pub turn_id: Option<TurnId>,
+    pub working_dir: String,
+    pub tool_call_id: Option<String>,
+    cancellation: tokio_util::sync::CancellationToken,
+}
+
+impl ToolPlanningContext {
+    pub fn new(
+        session_id: SessionId,
+        working_dir: impl Into<String>,
+        tool_call_id: Option<String>,
+    ) -> Self {
+        Self {
+            session_id,
+            turn_id: None,
+            working_dir: working_dir.into(),
+            tool_call_id,
+            cancellation: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    pub fn with_turn_id(mut self, turn_id: TurnId) -> Self {
+        self.turn_id = Some(turn_id);
+        self
+    }
+
+    pub fn with_cancellation(mut self, cancellation: tokio_util::sync::CancellationToken) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    pub fn cancellation(&self) -> &tokio_util::sync::CancellationToken {
+        &self.cancellation
+    }
+}
+
 /// 每次工具调用时传递的上下文。
 ///
 /// 由 Agent 在每次工具调用开始时创建。[`ToolCallScope`] 为每次调用
@@ -872,6 +913,7 @@ pub struct ToolCallScope {
 pub struct ToolExecutionContext {
     pub scope: ToolCallScope,
     pub capabilities: ToolCapabilities,
+    resource_lease: Option<ResourceLease>,
     cancellation: tokio_util::sync::CancellationToken,
 }
 
@@ -892,8 +934,19 @@ impl ToolExecutionContext {
                 event_tx,
             },
             capabilities,
+            resource_lease: None,
             cancellation: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    /// Attach the resource lease approved for this exact tool invocation.
+    pub fn with_resource_lease(mut self, resource_lease: ResourceLease) -> Self {
+        self.resource_lease = Some(resource_lease);
+        self
+    }
+
+    pub fn resource_lease(&self) -> Option<&ResourceLease> {
+        self.resource_lease.as_ref()
     }
 
     /// Attach the turn cancellation signal that owns this tool call.
@@ -945,6 +998,7 @@ impl std::fmt::Debug for ToolExecutionContext {
         f.debug_struct("ToolExecutionContext")
             .field("scope", &self.scope)
             .field("capabilities", &self.capabilities)
+            .field("resource_lease", &self.resource_lease)
             .field("cancelled", &self.cancellation.is_cancelled())
             .finish()
     }
@@ -1011,16 +1065,12 @@ pub trait Tool: Send + Sync {
         self.definition().execution_mode
     }
 
-    /// 声明本次调用将访问的资源，供权限策略判断。
-    ///
-    /// 默认保守返回 [`ResourceAccess::All`]。内置工具应基于参数动态解析路径。
-    fn resource_accesses(
+    /// Plan the resources required by the final, immutable tool arguments.
+    async fn plan(
         &self,
-        _arguments: &serde_json::Value,
-        _working_dir: &Path,
-    ) -> Result<Vec<ResourceAccess>, ToolError> {
-        Ok(vec![ResourceAccess::all()])
-    }
+        arguments: &serde_json::Value,
+        ctx: &ToolPlanningContext,
+    ) -> Result<ToolPlan, ToolError>;
 
     /// 返回工具的结构化提示词元数据。
     ///
@@ -1037,7 +1087,7 @@ pub trait Tool: Send + Sync {
 
     /// 使用给定参数和调用上下文执行工具。
     ///
-    /// 内置工具通常只使用自己声明过的窄能力。
+    /// 工具通常只使用自己声明过的窄能力。
     async fn execute(
         &self,
         arguments: serde_json::Value,

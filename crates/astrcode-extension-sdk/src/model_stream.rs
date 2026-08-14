@@ -5,11 +5,12 @@ use std::{
     time::Duration,
 };
 
-pub use astrcode_extension_contract::protocol::ModelStreamEvent;
-use astrcode_extension_contract::{TerminalStream, WireErrorCode, protocol::ErrorPayload};
 use futures_util::Stream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+
+pub use crate::wire::protocol::ModelStreamEvent;
+use crate::wire::{TerminalStream, WireErrorCode, protocol::ErrorPayload};
 
 pub const MODEL_STREAM_BUFFER_CAPACITY: usize = 32;
 pub const MODEL_STREAM_BACKPRESSURE_TIMEOUT: Duration = Duration::from_secs(30);

@@ -6,7 +6,7 @@ use std::{
 
 use astrcode_core::{
     event::DurableEventPayload,
-    permission::{ApprovalDecision, ApprovalSource},
+    permission::ApprovalDecision,
     tool::{ExecutionMode, ToolDefinition},
     types::ToolCallId,
 };
@@ -20,7 +20,8 @@ use crate::{
     permission::APPROVAL_TIMEOUT_SECS,
     tool_exec::execute_tool_call,
     tool_types::{
-        ExecutableToolInvocation, ExecuteToolBatch, PreparedToolDisposition, ToolExecutionOutcome,
+        ExecutableToolInvocation, ExecuteToolBatch, PreparedToolApproval, PreparedToolDisposition,
+        ToolExecutionOutcome,
     },
     turn_context::TurnError,
 };
@@ -100,17 +101,11 @@ impl ToolCalls {
                         .await_same_step_outcome(&call.call_id)
                         .await,
                 ),
-                PreparedToolDisposition::AwaitApproval {
-                    prompt,
-                    rule_key,
-                    source,
-                } => Some(
-                    self.request_approval_and_resolve(
+                PreparedToolDisposition::AwaitApprovals(approvals) => Some(
+                    self.request_approvals_and_resolve(
                         input,
                         position,
-                        prompt.clone(),
-                        rule_key.clone(),
-                        *source,
+                        approvals,
                         Arc::clone(&tools),
                     )
                     .await?,
@@ -208,74 +203,81 @@ impl ToolCalls {
         }
     }
 
-    async fn request_approval_and_resolve(
+    async fn request_approvals_and_resolve(
         &self,
         input: &ExecuteToolBatch<'_>,
         position: usize,
-        prompt: String,
-        rule_key: Option<String>,
-        source: ApprovalSource,
+        approvals: &[PreparedToolApproval],
         tools: Arc<[ToolDefinition]>,
     ) -> Result<ToolExecutionOutcome, TurnError> {
         let call = &input.batch.calls[position];
-        let (tx, rx) = oneshot::channel();
-        let runtime = self.session.runtime();
-        let _pending_approval =
-            runtime.register_pending_approval(ToolCallId::from(call.call_id.as_str()), tx)?;
-        input
-            .publisher
-            .durable(DurableEventPayload::ToolApprovalRequested {
-                call_id: call.call_id.clone().into(),
-                tool_name: call.name.clone(),
-                prompt: prompt.clone(),
-                rule_key: rule_key.clone(),
-                source,
-                arguments: call.tool_input.clone(),
-            })
-            .await?;
+        for PreparedToolApproval {
+            prompt,
+            rule_key,
+            source,
+        } in approvals
+        {
+            let (tx, rx) = oneshot::channel();
+            let runtime = self.session.runtime();
+            let _pending_approval =
+                runtime.register_pending_approval(ToolCallId::from(call.call_id.as_str()), tx)?;
+            input
+                .publisher
+                .durable(DurableEventPayload::ToolApprovalRequested {
+                    call_id: call.call_id.clone().into(),
+                    tool_name: call.name.clone(),
+                    prompt: prompt.clone(),
+                    rule_key: rule_key.clone(),
+                    source: *source,
+                    arguments: call.tool_input.clone(),
+                })
+                .await?;
 
-        let (decision, resolution_detail) = tokio::select! {
-            _ = self.cancellation_token.cancelled() => return Err(TurnError::Aborted),
-            result = tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx) => {
-                match result {
-                    Ok(Ok(decision)) => (decision, None),
-                    Ok(Err(_)) => (
-                        ApprovalDecision::DenyOnce,
-                        Some("approval receiver dropped".into()),
-                    ),
-                    Err(_) => (
-                        ApprovalDecision::DenyOnce,
-                        Some(format!("approval timed out after {APPROVAL_TIMEOUT_SECS}s")),
-                    ),
+            let (decision, resolution_detail) = tokio::select! {
+                _ = self.cancellation_token.cancelled() => return Err(TurnError::Aborted),
+                result = tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx) => {
+                    match result {
+                        Ok(Ok(decision)) => (decision, None),
+                        Ok(Err(_)) => (
+                            ApprovalDecision::DenyOnce,
+                            Some("approval receiver dropped".into()),
+                        ),
+                        Err(_) => (
+                            ApprovalDecision::DenyOnce,
+                            Some(format!("approval timed out after {APPROVAL_TIMEOUT_SECS}s")),
+                        ),
+                    }
                 }
-            }
-        };
-        input
-            .publisher
-            .durable(DurableEventPayload::ToolApprovalResolved {
-                call_id: call.call_id.clone().into(),
+            };
+            input
+                .publisher
+                .durable(DurableEventPayload::ToolApprovalResolved {
+                    call_id: call.call_id.clone().into(),
+                    decision,
+                    detail: resolution_detail.clone(),
+                })
+                .await?;
+            if matches!(
                 decision,
-                detail: resolution_detail.clone(),
-            })
-            .await?;
-        if matches!(
-            decision,
-            ApprovalDecision::AllowAlways | ApprovalDecision::DenyAlways
-        ) {
-            self.turn
-                .shared
-                .approval_history
-                .record_decision(rule_key.as_deref(), decision)
-                .await
-                .map_err(|error| TurnError::ApprovalHistory(error.to_string()))?;
+                ApprovalDecision::AllowAlways | ApprovalDecision::DenyAlways
+            ) {
+                self.turn
+                    .shared
+                    .approval_history
+                    .record_decision(rule_key.as_deref(), decision)
+                    .await
+                    .map_err(|error| TurnError::ApprovalHistory(error.to_string()))?;
+            }
+            if !decision.allows() {
+                let reason = resolution_detail
+                    .map(|detail| format!("Tool execution denied ({detail}, {source:?}): {prompt}"))
+                    .unwrap_or_else(|| {
+                        format!("Tool execution denied by user ({source:?}): {prompt}")
+                    });
+                return Ok(ToolExecutionOutcome::failed(reason));
+            }
         }
-        if decision.allows() {
-            return Ok(self.execute_single_tool(call.to_executable(), tools).await);
-        }
-        let reason = resolution_detail
-            .map(|detail| format!("Tool execution denied ({detail}, {source:?}): {prompt}"))
-            .unwrap_or_else(|| format!("Tool execution denied by user ({source:?}): {prompt}"));
-        Ok(ToolExecutionOutcome::failed(reason))
+        Ok(self.execute_single_tool(call.to_executable(), tools).await)
     }
 
     async fn flush_and_commit_parallel_batch(

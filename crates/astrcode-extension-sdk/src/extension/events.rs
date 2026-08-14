@@ -4,18 +4,6 @@ use astrcode_core::{
     event::{EventDeliveryReceipt, EventSendError},
     types::{EventId, SessionId},
 };
-pub use astrcode_extension_contract::custom_event::{
-    CustomEventDeclaration, CustomEventSourceFilter, CustomEventSubscription,
-    DEFAULT_CUSTOM_EVENT_DURABLE, DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
-    DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION, MAX_CUSTOM_EVENT_PAYLOAD_BYTES,
-    MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN,
-};
-use astrcode_extension_contract::effects::{HandlerEffect, HandlerResult};
-// ─── Lifecycle Events ────────────────────────────────────────────────────
-/// 扩展可订阅的核心生命周期事件。
-///
-/// 覆盖会话/轮次/工具/LLM 提供者/prompt 组装的完整生命周期。
-pub use astrcode_extension_contract::manifest::LifecycleEvent;
 use async_trait::async_trait;
 use serde::Serialize;
 
@@ -23,6 +11,18 @@ use super::{
     ExtensionCall, ExtensionCallContext, ExtensionError, SessionCallContext,
     internal::CustomEventSink,
 };
+pub use crate::wire::custom_event::{
+    CustomEventDeclaration, CustomEventSourceFilter, CustomEventSubscription,
+    DEFAULT_CUSTOM_EVENT_DURABLE, DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
+    DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION, MAX_CUSTOM_EVENT_PAYLOAD_BYTES,
+    MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN,
+};
+use crate::wire::effects::{HandlerEffect, HandlerResult};
+// ─── Lifecycle Events ────────────────────────────────────────────────────
+/// 扩展可订阅的核心生命周期事件。
+///
+/// 覆盖会话/轮次/工具/LLM 提供者/prompt 组装的完整生命周期。
+pub use crate::wire::manifest::LifecycleEvent;
 
 // ─── Custom Event System ───────────────────────────────────────────────────
 

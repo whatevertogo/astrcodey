@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use astrcode_extension_sdk::runtime_ports::{
     NoopRuntimePorts, PromptContributor, RuntimeSnapshotProvider, RuntimeSnapshotState,
-    SessionOperationsProvider, TurnExtensionView, TurnExtensionViewProvider, TurnHooks,
+    SessionOperationsProvider, ToolCatalogProvider, TurnExtensionView, TurnExtensionViewProvider,
+    TurnHooks,
 };
 
 struct FixedTurnExtensionViewProvider {
@@ -31,14 +32,14 @@ impl SessionExtensionPorts {
     ///
     /// 传入端口在构造后不可变，因此它们共享 generation 0 的固定视图。
     pub fn from_immutable_ports(
+        tool_catalog: Arc<dyn ToolCatalogProvider>,
         prompt_contributor: Arc<dyn PromptContributor>,
         turn_hooks: Arc<dyn TurnHooks>,
         session_operations: Arc<dyn SessionOperationsProvider>,
     ) -> Self {
-        let noop = Arc::new(NoopRuntimePorts);
         let view = TurnExtensionView::new(
             0,
-            noop,
+            tool_catalog,
             Arc::clone(&prompt_contributor),
             Arc::clone(&turn_hooks),
         );
@@ -61,7 +62,7 @@ impl SessionExtensionPorts {
     #[cfg(test)]
     pub(crate) fn with_turn_hooks(turn_hooks: Arc<dyn TurnHooks>) -> Self {
         let noop = Arc::new(NoopRuntimePorts);
-        Self::from_immutable_ports(noop.clone(), turn_hooks, noop)
+        Self::from_immutable_ports(noop.clone(), noop.clone(), turn_hooks, noop)
     }
 
     pub(crate) fn turn_extension_view(&self) -> TurnExtensionView {

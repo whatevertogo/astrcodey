@@ -125,15 +125,15 @@ impl SessionPathResolver for RecordingStore {
 
 #[async_trait::async_trait]
 impl ToolResultArtifactStore for RecordingStore {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<ToolResultArtifactSlice, StorageError> {
         self.inner
-            .read_tool_result_artifact_by_path(session_id, path, char_offset, max_chars)
+            .read_tool_result_artifact(session_id, artifact_id, byte_offset, max_bytes)
             .await
     }
 

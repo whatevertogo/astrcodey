@@ -16,7 +16,7 @@ use astrcode_extension_sdk::{
         ExtensionStartContext, Registrar,
     },
     runtime_ports::{RuntimeSnapshotProvider, RuntimeSnapshotState},
-    tool::ToolResult,
+    tool::{ToolPlan, ToolResult},
 };
 use astrcode_extensions::{
     loader::{
@@ -147,9 +147,10 @@ impl Extension for CatalogExtension {
             tool(self.tool_name)
                 .description("Atomic reload catalog probe")
                 .build(),
-            tool_handler(|_| async {
-                Ok(ToolResult::text("ok".into(), false, Default::default()))
-            }),
+            tool_handler(
+                |_| async { Ok(ToolPlan::default()) },
+                |_| async { Ok(ToolResult::text("ok".into(), false, Default::default())) },
+            ),
         );
         reg.command(
             command(self.tool_name)

@@ -5,7 +5,9 @@ use std::sync::Arc;
 use astrcode_context::{
     CompactError, CompactResult, CompactSummaryRenderOptions, ContextSnapshot,
     PostCompactEnrichInput,
-    compaction::{compact_messages_deterministic, compact_messages_with_fallback},
+    compaction::{
+        LlmCompactAttempt, compact_messages_deterministic, compact_messages_with_fallback,
+    },
 };
 use astrcode_core::{
     compaction::{CompactStrategy, CompactTrigger},
@@ -40,25 +42,23 @@ pub(crate) struct CompactionPipeline<'a> {
 pub(crate) enum CompactionPipelineOutcome {
     Compacted {
         messages_removed: usize,
-        llm_api_failed: bool,
+        llm_attempt: LlmCompactAttempt,
     },
     Skipped {
         message: String,
     },
     Failed {
         error: SessionError,
-        llm_api_failed: bool,
+        llm_attempt: LlmCompactAttempt,
         source_snapshot: Option<ContextSnapshot>,
     },
 }
 
 impl CompactionPipelineOutcome {
-    pub(crate) const fn llm_api_failed(&self) -> bool {
+    pub(crate) const fn llm_attempt(&self) -> LlmCompactAttempt {
         match self {
-            Self::Compacted { llm_api_failed, .. } | Self::Failed { llm_api_failed, .. } => {
-                *llm_api_failed
-            },
-            Self::Skipped { .. } => false,
+            Self::Compacted { llm_attempt, .. } | Self::Failed { llm_attempt, .. } => *llm_attempt,
+            Self::Skipped { .. } => LlmCompactAttempt::NotAttempted,
         }
     }
 }
@@ -112,7 +112,7 @@ impl CompactionPipeline<'_> {
             Err(error) => {
                 return CompactionPipelineOutcome::Failed {
                     error: error.into(),
-                    llm_api_failed: false,
+                    llm_attempt: LlmCompactAttempt::NotAttempted,
                     source_snapshot: None,
                 };
             },
@@ -124,7 +124,7 @@ impl CompactionPipeline<'_> {
             Err(error) => {
                 return CompactionPipelineOutcome::Failed {
                     error,
-                    llm_api_failed: false,
+                    llm_attempt: LlmCompactAttempt::NotAttempted,
                     source_snapshot: None,
                 };
             },
@@ -147,7 +147,7 @@ impl CompactionPipeline<'_> {
                 Err(error) => {
                     return CompactionPipelineOutcome::Failed {
                         error,
-                        llm_api_failed: false,
+                        llm_attempt: LlmCompactAttempt::NotAttempted,
                         source_snapshot: Some(source_snapshot),
                     };
                 },
@@ -231,7 +231,7 @@ impl CompactionPipeline<'_> {
             tracing::warn!(error = %error, "compaction persist failed");
             return CompactionPipelineOutcome::Failed {
                 error,
-                llm_api_failed: execution.llm_api_failed,
+                llm_attempt: execution.llm_attempt,
                 source_snapshot: Some(source_snapshot),
             };
         }
@@ -249,7 +249,7 @@ impl CompactionPipeline<'_> {
 
         CompactionPipelineOutcome::Compacted {
             messages_removed: compaction.messages_removed,
-            llm_api_failed: execution.llm_api_failed,
+            llm_attempt: execution.llm_attempt,
         }
     }
 }

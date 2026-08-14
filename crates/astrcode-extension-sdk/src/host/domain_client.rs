@@ -1,12 +1,3 @@
-use astrcode_extension_contract::{
-    HostOp, WireErrorCode, operations,
-    protocol::ErrorPayload,
-    session_inspect::{
-        HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
-        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
-        SessionInspectSnapshotOutput,
-    },
-};
 use async_trait::async_trait;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
@@ -18,14 +9,19 @@ use crate::{
         Acknowledgement, EmptyRequest, HostConfigureSessionToolsOutput,
         HostConfigureSessionToolsRequest, HostEventEmitOutput, HostLlmChatOutput,
         HostLlmCollectedStreamOutput, HostNetworkRequest, HostNetworkResponse, HostOperation,
-        HostProcessOutput, HostProcessRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+        HostProcessHandleOutput, HostProcessInputRequest, HostProcessListOutput, HostProcessOutput,
+        HostProcessReadOutput, HostProcessReadRequest, HostProcessRequest,
+        HostProcessResizeRequest, HostProcessStartRequest, HostProcessStatusOutput,
+        HostProcessTargetRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
         HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
         HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
         HostSessionSummariesOutput, HostSessionTokenUsageOutput, HostSessionTranscript,
-        HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
-        HostWorkspaceGlobRequest, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
-        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
-        HostWorkspaceReadRequest, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
+        HostToolResultReadOutput, HostToolResultReadRequest, HostWorkspaceApplyPatchOutput,
+        HostWorkspaceApplyPatchRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
+        HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepOutput,
+        HostWorkspaceGrepRequest, HostWorkspaceListOutput, HostWorkspaceListRequest,
+        HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
+        HostWorkspaceWriteRequest,
     },
     llm::LlmMessage,
     model_stream::ModelStream,
@@ -34,6 +30,15 @@ use crate::{
         HostRootSubmitTurnRequest, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
         HostSessionReactivateOutput, HostSessionStateOutput, HostSessionTargetRequest,
         HostSubmitTurnOutput, HostSubmitTurnRequest,
+    },
+    wire::{
+        HostOp, WireErrorCode, operations,
+        protocol::ErrorPayload,
+        session_inspect::{
+            HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
+            SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
+            SessionInspectSnapshotOutput,
+        },
     },
 };
 
@@ -84,6 +89,7 @@ domain_client!(SessionControlClient);
 domain_client!(SessionHistoryClient);
 domain_client!(SessionStateClient);
 domain_client!(SessionInspectClient);
+domain_client!(ToolResultClient);
 domain_client!(WorkspaceClient);
 domain_client!(ProcessClient);
 domain_client!(NetworkClient);
@@ -340,7 +346,23 @@ impl<T: HostClientTransport> SessionInspectClient<T> {
     }
 }
 
+impl<T: HostClientTransport> ToolResultClient<T> {
+    pub async fn read(
+        &self,
+        request: HostToolResultReadRequest,
+    ) -> Result<HostToolResultReadOutput, T::Error> {
+        invoke::<operations::ToolResultRead, _>(&self.transport, &request).await
+    }
+}
+
 impl<T: HostClientTransport> WorkspaceClient<T> {
+    pub async fn apply_patch(
+        &self,
+        request: HostWorkspaceApplyPatchRequest,
+    ) -> Result<HostWorkspaceApplyPatchOutput, T::Error> {
+        invoke::<operations::WorkspaceApplyPatch, _>(&self.transport, &request).await
+    }
+
     pub async fn read(
         &self,
         request: HostWorkspaceReadRequest,
@@ -387,6 +409,63 @@ impl<T: HostClientTransport> WorkspaceClient<T> {
 impl<T: HostClientTransport> ProcessClient<T> {
     pub async fn spawn(&self, request: HostProcessRequest) -> Result<HostProcessOutput, T::Error> {
         invoke::<operations::ProcessSpawn, _>(&self.transport, &request).await
+    }
+
+    pub async fn start(
+        &self,
+        request: HostProcessStartRequest,
+    ) -> Result<HostProcessHandleOutput, T::Error> {
+        invoke::<operations::ProcessStart, _>(&self.transport, &request).await
+    }
+
+    pub async fn read(
+        &self,
+        request: HostProcessReadRequest,
+    ) -> Result<HostProcessReadOutput, T::Error> {
+        invoke::<operations::ProcessRead, _>(&self.transport, &request).await
+    }
+
+    pub async fn write(
+        &self,
+        id: impl Into<String>,
+        input: impl Into<String>,
+    ) -> Result<(), T::Error> {
+        invoke_ack::<operations::ProcessInput, _>(
+            &self.transport,
+            &HostProcessInputRequest::write(id, input),
+        )
+        .await
+    }
+
+    pub async fn close_stdin(&self, id: impl Into<String>) -> Result<(), T::Error> {
+        invoke_ack::<operations::ProcessInput, _>(
+            &self.transport,
+            &HostProcessInputRequest::close(id),
+        )
+        .await
+    }
+
+    pub async fn resize(&self, request: HostProcessResizeRequest) -> Result<(), T::Error> {
+        invoke_ack::<operations::ProcessResize, _>(&self.transport, &request).await
+    }
+
+    pub async fn status(
+        &self,
+        request: HostProcessTargetRequest,
+    ) -> Result<HostProcessStatusOutput, T::Error> {
+        invoke::<operations::ProcessStatus, _>(&self.transport, &request).await
+    }
+
+    pub async fn promote(&self, request: HostProcessTargetRequest) -> Result<(), T::Error> {
+        invoke_ack::<operations::ProcessPromote, _>(&self.transport, &request).await
+    }
+
+    pub async fn kill(&self, request: HostProcessTargetRequest) -> Result<(), T::Error> {
+        invoke_ack::<operations::ProcessKill, _>(&self.transport, &request).await
+    }
+
+    pub async fn list(&self) -> Result<HostProcessListOutput, T::Error> {
+        invoke::<operations::ProcessList, _>(&self.transport, &EmptyRequest::default()).await
     }
 }
 

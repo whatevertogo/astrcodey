@@ -40,7 +40,14 @@ pub use crate::{
 
 pub struct CompactExecution {
     pub result: CompactResult,
-    pub llm_api_failed: bool,
+    pub llm_attempt: LlmCompactAttempt,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmCompactAttempt {
+    NotAttempted,
+    Succeeded,
+    Failed,
 }
 
 struct PreparedCompactParts {
@@ -189,11 +196,15 @@ where
     {
         Ok(result) => Ok(CompactExecution {
             result,
-            llm_api_failed: false,
+            llm_attempt: LlmCompactAttempt::Succeeded,
         }),
         Err(CompactError::Skip(reason)) => Err(reason),
         Err(error) => {
-            let llm_api_failed = matches!(error, CompactError::Llm(_));
+            let llm_attempt = if matches!(error, CompactError::Llm(_)) {
+                LlmCompactAttempt::Failed
+            } else {
+                LlmCompactAttempt::Succeeded
+            };
             tracing::warn!(%error, "LLM compact failed, falling back to deterministic");
             compact_messages_with_render_options_and_keep(
                 messages,
@@ -203,7 +214,7 @@ where
             )
             .map(|result| CompactExecution {
                 result,
-                llm_api_failed,
+                llm_attempt,
             })
         },
     }
@@ -224,7 +235,7 @@ pub fn compact_messages_deterministic(
     )
     .map(|result| CompactExecution {
         result,
-        llm_api_failed: true,
+        llm_attempt: LlmCompactAttempt::NotAttempted,
     })
 }
 

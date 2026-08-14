@@ -2,12 +2,11 @@
 """Check workspace crate dependency direction rules.
 
 Layer hierarchy:
-  L0 Wire:         astrcode-extension-contract
   L1 Foundation:   astrcode-core, astrcode-desktop
   L2 Primitives:   astrcode-session-projection
   L3 Services:     astrcode-extension-sdk, astrcode-ai, astrcode-context,
                    astrcode-log, astrcode-storage
-  L4 Integration:  astrcode-protocol, astrcode-tools, astrcode-extensions,
+  L4 Integration:  astrcode-protocol, astrcode-extensions,
                    astrcode-extension-*
   L5 Runtime:      astrcode-session, astrcode-client, astrcode-bundled-extensions,
                    astrcode-eval
@@ -15,6 +14,8 @@ Layer hierarchy:
   L7 CLI:          astrcode-cli
 
 Rule: a crate may only depend on crates at a strictly lower layer.
+Concrete first-party extensions may have production dependents only at the
+astrcode-bundled-extensions composition root.
 """
 
 from __future__ import annotations
@@ -27,16 +28,13 @@ from pathlib import Path
 # ── Layer definitions ──────────────────────────────────────────────
 
 LAYERS: dict[str, int] = {
-    # L0 – Wire contract
-    "astrcode-extension-contract": 0,
     # L1 – Foundation
     "astrcode-core": 1,
     "astrcode-desktop": 1,
     # L2 – Primitive contracts
     "astrcode-session-projection": 2,
     # L3 – Services
-    # The SDK serves two author surfaces: worker (subprocess) authors see only
-    # contract types, while bundled (in-process) authors may share core types.
+    # The SDK contains both the author API and its logically isolated wire module.
     "astrcode-extension-sdk": 3,
     "astrcode-ai": 3,
     "astrcode-context": 3,
@@ -44,8 +42,8 @@ LAYERS: dict[str, int] = {
     "astrcode-storage": 3,
     # L4 – Integration and extension implementations
     "astrcode-protocol": 4,
-    "astrcode-tools": 4,
     "astrcode-extensions": 4,
+    "astrcode-extension-coding": 4,
     "astrcode-extension-worker": 4,
     "astrcode-extension-goal": 4,
     "astrcode-extension-agent-tools": 4,
@@ -69,7 +67,6 @@ LAYERS: dict[str, int] = {
 }
 
 LAYER_NAMES: dict[int, str] = {
-    0: "Wire",
     1: "Foundation",
     2: "Primitives",
     3: "Services",
@@ -85,12 +82,31 @@ FORBIDDEN_DEPS: dict[str, set[str]] = {
     # Session owns prompt lifecycle and intentionally depends on context's
     # concrete prompt implementation. It must not depend on higher layers.
     "astrcode-session": {
-        "astrcode-tools",
         "astrcode-extensions",
         "astrcode-bundled-extensions",
         "astrcode-server",
     },
 }
+
+CONCRETE_EXTENSION_CRATES: frozenset[str] = frozenset(
+    {
+        "astrcode-extension-agent-tools",
+        "astrcode-extension-ask-user",
+        "astrcode-extension-channels",
+        "astrcode-extension-coding",
+        "astrcode-extension-goal",
+        "astrcode-extension-mcp",
+        "astrcode-extension-memory",
+        "astrcode-extension-mode",
+        "astrcode-extension-skill",
+        "astrcode-extension-todo-tool",
+        "astrcode-extension-web-tools",
+    }
+)
+EXTENSION_INFRASTRUCTURE_CRATES: frozenset[str] = frozenset(
+    {"astrcode-extension-sdk", "astrcode-extension-worker"}
+)
+EXTENSION_COMPOSITION_ROOT = "astrcode-bundled-extensions"
 
 
 # ── Workspace discovery ────────────────────────────────────────────
@@ -210,6 +226,36 @@ def main() -> None:
         graph[name] = extract_deps(manifest, all_names)
 
     violations: list[str] = []
+
+    # Keep the explicit concrete-extension set complete so a new first-party
+    # extension cannot silently bypass the composition-root boundary.
+    discovered_concrete_extensions = {
+        name
+        for name in all_names
+        if name.startswith("astrcode-extension-")
+        and name not in EXTENSION_INFRASTRUCTURE_CRATES
+    }
+    undeclared_extensions = discovered_concrete_extensions - CONCRETE_EXTENSION_CRATES
+    removed_extensions = CONCRETE_EXTENSION_CRATES - discovered_concrete_extensions
+    for crate in sorted(undeclared_extensions):
+        violations.append(
+            f"  concrete extension {crate} is missing from CONCRETE_EXTENSION_CRATES"
+        )
+    for crate in sorted(removed_extensions):
+        violations.append(
+            f"  CONCRETE_EXTENSION_CRATES contains missing workspace crate {crate}"
+        )
+
+    # The production graph has one owner for concrete first-party extension
+    # selection. Test-only dependencies remain available for focused fixtures.
+    for crate, deps in sorted(graph.items()):
+        if crate == EXTENSION_COMPOSITION_ROOT:
+            continue
+        for dep in sorted(deps & CONCRETE_EXTENSION_CRATES):
+            violations.append(
+                f"  {crate} must not depend directly on concrete extension {dep}; "
+                f"depend on {EXTENSION_COMPOSITION_ROOT} at the composition boundary"
+            )
 
     # Check layer direction
     for crate, deps in sorted(graph.items()):

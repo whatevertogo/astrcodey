@@ -56,24 +56,17 @@ pub(in crate::http) async fn update_config<T>(
             ConfigUpdateError::Provider(error) => {
                 ConfigUpdateHttpError(Box::new(bad_request_response("invalid_provider", error)))
             },
+            ConfigUpdateError::ExtensionValidation(error) => ConfigUpdateHttpError(Box::new(
+                bad_request_response("invalid_extension_config", error),
+            )),
+            ConfigUpdateError::ExtensionApply(error) => ConfigUpdateHttpError(Box::new(
+                internal_error_response("extension_config_apply_failed", error),
+            )),
             ConfigUpdateError::Store(error) => {
                 ConfigUpdateHttpError(Box::new(internal_error_response("save_failed", error)))
             },
         })?;
-    notify_extensions_config_changed(state).await;
     Ok(result)
-}
-
-async fn notify_extensions_config_changed(state: &HttpState) {
-    for error in state
-        .app
-        .runtime()
-        .config_manager()
-        .notify_extensions_config_changed()
-        .await
-    {
-        tracing::warn!("extension config notify error: {error}");
-    }
 }
 
 async fn reload_extension_registry(state: &HttpState) -> Vec<String> {

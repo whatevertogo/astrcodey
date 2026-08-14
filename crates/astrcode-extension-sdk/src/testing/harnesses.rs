@@ -373,7 +373,6 @@ impl ExtensionLifecycleHarness {
 
 #[cfg(test)]
 mod tests {
-    use astrcode_extension_contract::WireErrorCode;
     use serde_json::json;
 
     use super::*;
@@ -381,6 +380,7 @@ mod tests {
         builder::manifest,
         extension::{ExtensionCall, ExtensionCapability},
         host::{HostWorkspaceReadOutput, HostWorkspaceReadRequest},
+        wire::WireErrorCode,
     };
 
     struct LifecycleProbe;
@@ -418,8 +418,13 @@ mod tests {
 
         let ungranted = MockExtensionHost::new().workspace_context(true).respond(
             HostOperation::WorkspaceRead,
-            json!(HostWorkspaceReadOutput {
+            json!(HostWorkspaceReadOutput::Text {
                 content: "hello".into(),
+                bytes: 5,
+                total_lines: 1,
+                line_offset: 0,
+                returned_lines: 1,
+                has_more_lines: false,
             }),
         );
         let error = ungranted
@@ -434,8 +439,13 @@ mod tests {
             .workspace_context(true)
             .respond(
                 HostOperation::WorkspaceRead,
-                json!(HostWorkspaceReadOutput {
+                json!(HostWorkspaceReadOutput::Text {
                     content: "hello".into(),
+                    bytes: 5,
+                    total_lines: 1,
+                    line_offset: 0,
+                    returned_lines: 1,
+                    has_more_lines: false,
                 }),
             );
         let output = allowed
@@ -445,10 +455,22 @@ mod tests {
             .read(HostWorkspaceReadRequest {
                 path: "README.md".into(),
                 max_bytes: None,
+                line_offset: 0,
+                line_limit: None,
             })
             .await
             .unwrap();
-        assert_eq!(output.content, "hello");
+        assert_eq!(
+            output,
+            HostWorkspaceReadOutput::Text {
+                content: "hello".into(),
+                bytes: 5,
+                total_lines: 1,
+                line_offset: 0,
+                returned_lines: 1,
+                has_more_lines: false,
+            }
+        );
         assert_eq!(allowed.invocations().len(), 1);
 
         let mut lifecycle = ExtensionLifecycleHarness::new(Arc::new(LifecycleProbe)).unwrap();

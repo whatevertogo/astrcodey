@@ -6,13 +6,17 @@
 //! - `compaction`：LLM 驱动的摘要压缩
 //! - `token_budget`：token 估算
 
-pub use astrcode_core::config::ContextSettings;
+pub use astrcode_core::{
+    compaction::{
+        COMPACT_SUMMARY_MARKER, POST_COMPACT_CONTEXT_MARKER, is_compact_summary_message,
+        is_compact_summary_text, is_synthetic_context_message,
+    },
+    config::ContextSettings,
+};
 pub use context::{
-    COMPACT_SUMMARY_MARKER, CompactError, CompactResult, CompactSkipReason,
-    CompactSummaryRenderOptions, ContextSnapshot, NoopPostCompactEnricher,
-    POST_COMPACT_CONTEXT_MARKER, PostCompactEnrichInput, PostCompactEnricher,
-    is_compact_summary_message, is_compact_summary_text, is_prompt_too_long_message,
-    is_synthetic_context_message,
+    CompactError, CompactResult, CompactSkipReason, CompactSummaryRenderOptions, ContextSnapshot,
+    NoopPostCompactEnricher, PostCompactEnrichInput, PostCompactEnricher,
+    is_prompt_too_long_message,
 };
 pub use context_assembler::{ContextAssembler, ContextPrepareInput, PreparedContext};
 

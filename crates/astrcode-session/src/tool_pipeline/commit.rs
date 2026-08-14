@@ -12,10 +12,9 @@ use super::{
     events::{finish_tool_call, missing_tool_outcome, tool_result_for_output},
 };
 use crate::{
-    projection_context::committed_tool_result_content_len,
     tool_results::{
-        MAX_TOOL_RESULTS_PER_MESSAGE_CHARS, TOOL_RESULT_PREVIEW_CHARS,
-        persisted_tool_result_summary, should_auto_persist_tool_result, tool_result_preview,
+        TOOL_RESULT_PREVIEW_CHARS, persisted_tool_result_summary, should_auto_persist_tool_result,
+        tool_result_preview,
     },
     tool_types::{
         PreparedToolDisposition, PreparedToolInvocation, ToolExecutionOutcome,
@@ -80,12 +79,6 @@ impl ToolCalls {
                     .await?;
             }
         }
-        let model = publisher.snapshot_model().await?;
-        let committed_tool_result_chars = committed_tool_result_content_len(&model);
-        // 当累计工具结果超过消息字符预算时，按体积从大到小持久化，直到总量回到预算内。
-        self.enforce_tool_result_message_budget(committed_tool_result_chars, &mut pending)
-            .await?;
-
         let mut discovered_tools = Vec::new();
         for item in pending {
             if let ToolExecutionOutcome::Completed(result) = &item.outcome {
@@ -182,14 +175,14 @@ impl ToolCalls {
         result: &mut ToolResultCommit,
     ) -> Result<(), TurnError> {
         if result.artifact_state == ToolResultArtifactState::Persisted
-            || !should_auto_persist_tool_result(tool_name, &result.result)
+            || !should_auto_persist_tool_result(&result.result)
         {
             return Ok(());
         }
         self.persist_tool_result(tool_name, call_id, result).await
     }
 
-    /// 将工具结果写入 session 存储并替换为摘要引用（含 preview 和 artifact 路径）。
+    /// 将工具结果写入 session 存储并替换为摘要引用（含 preview 和 artifact ID）。
     async fn persist_tool_result(
         &self,
         tool_name: &str,
@@ -209,73 +202,15 @@ impl ToolCalls {
         result
             .metadata
             .insert("artifactBytes".into(), serde_json::json!(reference.bytes));
-        if let Some(path) = &reference.path {
-            result
-                .metadata
-                .insert("artifactPath".into(), serde_json::json!(path));
-        }
+        result.metadata.insert(
+            "artifactId".into(),
+            serde_json::json!(&reference.artifact_id),
+        );
         result.content = persisted_tool_result_summary(&reference, &preview);
         result.artifact_state = ToolResultArtifactState::Persisted;
         if result.is_error {
             result.error = Some(result.content.clone());
         }
-        Ok(())
-    }
-
-    /// 当累计工具结果超过消息字符预算时，按体积从大到小持久化，直到总量回到预算内。
-    async fn enforce_tool_result_message_budget(
-        &self,
-        committed_tool_result_chars: usize,
-        pending: &mut [PendingToolCommit<'_>],
-    ) -> Result<(), TurnError> {
-        let mut total: usize = committed_tool_result_chars
-            + pending
-                .iter()
-                .filter_map(|item| match &item.outcome {
-                    ToolExecutionOutcome::Completed(result) => Some(result.content.len()),
-                    ToolExecutionOutcome::Failed { .. }
-                    | ToolExecutionOutcome::Cancelled { .. } => None,
-                })
-                .sum::<usize>();
-        if total <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS {
-            return Ok(());
-        }
-
-        let mut candidates: Vec<usize> = pending
-            .iter()
-            .enumerate()
-            .filter_map(|(index, item)| {
-                let ToolExecutionOutcome::Completed(result) = &item.outcome else {
-                    return None;
-                };
-                (result.artifact_state == ToolResultArtifactState::Inline
-                    && should_auto_persist_tool_result(&item.call.name, &result.result))
-                .then_some(index)
-            })
-            .collect();
-        candidates.sort_by(|left, right| {
-            let content_len = |index: usize| match &pending[index].outcome {
-                ToolExecutionOutcome::Completed(result) => result.content.len(),
-                ToolExecutionOutcome::Failed { .. } | ToolExecutionOutcome::Cancelled { .. } => 0,
-            };
-            content_len(*right).cmp(&content_len(*left))
-        });
-
-        for index in candidates {
-            if total <= MAX_TOOL_RESULTS_PER_MESSAGE_CHARS {
-                break;
-            }
-            let item = &mut pending[index];
-            let ToolExecutionOutcome::Completed(result) = &mut item.outcome else {
-                continue;
-            };
-            let before = result.content.len();
-            self.persist_tool_result(&item.call.name, &item.call.call_id, result)
-                .await?;
-            let after = result.content.len();
-            total = total.saturating_sub(before).saturating_add(after);
-        }
-
         Ok(())
     }
 }

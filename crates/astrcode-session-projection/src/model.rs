@@ -1,5 +1,7 @@
 //! Session read model 的根组合、身份、统计与跨子投影查询。
 
+use std::collections::HashSet;
+
 use astrcode_core::{
     event::{ParentSessionRef, Phase, SessionStarted},
     tool::SessionToolSelection,
@@ -123,8 +125,20 @@ impl SessionReadModel {
 
     /// 返回 abort / repair 时必须补齐的 tool call。
     pub fn tool_calls_needing_interruption(&self) -> Vec<UnansweredToolCall> {
-        self.model_context
-            .tool_calls_needing_interruption(&self.execution.pending_tool_calls)
+        let mut calls = self
+            .model_context
+            .requested_tool_calls(&self.execution.pending_tool_calls);
+        let mut seen = calls
+            .iter()
+            .map(|call| call.call_id.clone())
+            .collect::<HashSet<_>>();
+
+        for call in self.model_context.tail_unanswered_tool_calls() {
+            if seen.insert(call.call_id.clone()) {
+                calls.push(call);
+            }
+        }
+        calls
     }
 }
 

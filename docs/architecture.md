@@ -1,6 +1,6 @@
 # AstrCode 架构设计
 
-Rust 实现的 AI coding agent，由 `crates/` 下 28 个 crate 与 Tauri 桌面壳组成（共 29 个 workspace 成员），支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
+Rust 实现的 AI coding agent，由 `crates/` 下 27 个 crate 与 Tauri 桌面壳组成（共 28 个 workspace 成员），支持 TUI、Web 前端、Desktop GUI 和 ACP 四种前端。
 
 核心判断：**EventLog 是事实，SessionReadModel 是投影，Agent 是无状态运行时。**
 
@@ -203,7 +203,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 ### 分层工具而非全 bash
 
-8 个内置工具（read / write / edit / patch / glob / grep / shell / terminal）：
+Coding Extension 注册 9 个第一方工具（read / read_tool_result / write / edit / patch / glob / grep / shell / terminal）：
 
 - **为什么不全用 bash**：Codex 可以全 bash 是因为模型足够强。对能力较弱的模型，结构化工具（edit 的 oldStr/newStr 精确替换、patch 的 unified diff）比让模型写 shell 命令更可靠
 - edit 支持 `edits` 数组做原子多编辑，先全部验证再一次性写回
@@ -335,7 +335,7 @@ Session 是唯一的持久事实来源。所有状态变化都以不可变事件
 
 ### Extension-First 架构
 
-核心只保留必须通用的能力（agent loop、hooks、context compaction、built-in tools）。其他能力（skills、MCP、自定义工具、模式切换）通过扩展接入。Mode 系统从内置逻辑迁移到插件即是这一架构的验证。
+核心只保留必须通用的机制（agent loop、hooks、context compaction、权限与资源 lease）。所有工具，包括第一方 coding 工具，都通过扩展接入；Host 只提供受能力与 lease 约束的 workspace/process 等基础能力。Mode 系统和 coding 工具都验证了这一边界。
 
 ### 工具-First 而非 extension-First
 

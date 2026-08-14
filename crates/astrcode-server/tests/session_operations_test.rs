@@ -47,17 +47,39 @@ struct StaticTextLlm {
 
 /// 在发送 Done 前阻塞，便于在活跃 turn 期间调用 `inject_message`。
 struct GateLlm {
-    release: Arc<tokio::sync::Notify>,
+    gate: Arc<GateLlmControl>,
+}
+
+struct GateLlmControl {
+    started: Semaphore,
+    release: tokio::sync::Notify,
+}
+
+impl GateLlmControl {
+    async fn wait_until_started(&self) {
+        self.started.acquire().await.unwrap().forget();
+    }
+
+    fn notify_one(&self) {
+        self.release.notify_one();
+    }
+
+    fn notify_waiters(&self) {
+        self.release.notify_waiters();
+    }
 }
 
 impl GateLlm {
-    fn new_pair() -> (Self, Arc<tokio::sync::Notify>) {
-        let release = Arc::new(tokio::sync::Notify::new());
+    fn new_pair() -> (Self, Arc<GateLlmControl>) {
+        let gate = Arc::new(GateLlmControl {
+            started: Semaphore::new(0),
+            release: tokio::sync::Notify::new(),
+        });
         (
             Self {
-                release: Arc::clone(&release),
+                gate: Arc::clone(&gate),
             },
-            release,
+            gate,
         )
     }
 }
@@ -70,12 +92,13 @@ impl LlmProvider for GateLlm {
         _tools: Vec<ToolDefinition>,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
-        let release = Arc::clone(&self.release);
+        let gate = Arc::clone(&self.gate);
+        gate.started.add_permits(1);
         tokio::spawn(async move {
             let _ = tx.send(LlmEvent::ContentDelta {
                 delta: "partial".into(),
             });
-            release.notified().await;
+            gate.release.notified().await;
             let _ = tx.send(LlmEvent::Done {
                 finish_reason: "stop".into(),
             });
@@ -312,15 +335,15 @@ impl SessionPathResolver for BlockingChildCreateStore {
 
 #[async_trait::async_trait]
 impl ToolResultArtifactStore for BlockingChildCreateStore {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<astrcode_core::tool::ToolResultArtifactSlice, StorageError> {
         self.inner
-            .read_tool_result_artifact_by_path(session_id, path, char_offset, max_chars)
+            .read_tool_result_artifact(session_id, artifact_id, byte_offset, max_bytes)
             .await
     }
 
@@ -575,14 +598,12 @@ fn build_test_ops_with_llm(
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
-    let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
     let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         llm_provider.clone(),
         llm_provider,
         effective,
         extension_runner.clone(),
         context_assembler,
-        std::sync::Arc::clone(&shell_timeout_secs),
     );
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&store),
@@ -966,12 +987,9 @@ async fn cancelled_sync_request_keeps_independent_completion_owner() {
             ))
             .await
     });
-    for _ in 0..100 {
-        if ops.scheduler.registry().has_active(&parent_id) && ops.scheduler.owned_task_count() > 0 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    tokio::time::timeout(Duration::from_secs(5), release.wait_until_started())
+        .await
+        .expect("root provider did not start");
     assert!(ops.scheduler.registry().has_active(&parent_id));
     root_request.abort();
     assert!(root_request.await.unwrap_err().is_cancelled());
@@ -1010,7 +1028,7 @@ async fn cancelled_sync_request_keeps_independent_completion_owner() {
     let child_ops = Arc::clone(&ops);
     let child_parent = parent_id.clone();
     let child_target = child_id.clone();
-    let child_request = tokio::spawn(async move {
+    let mut child_request = tokio::spawn(async move {
         child_ops
             .submit_turn(SubmitTurnRequest::for_child(
                 child_parent.as_str(),
@@ -1019,12 +1037,16 @@ async fn cancelled_sync_request_keeps_independent_completion_owner() {
             ))
             .await
     });
-    for _ in 0..100 {
-        if ops.scheduler.registry().has_active(&child_id) {
-            break;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            () = release.wait_until_started() => {},
+            result = &mut child_request => {
+                panic!("child request completed before provider start: {result:?}");
+            },
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    })
+    .await
+    .expect("child provider did not start");
     assert!(ops.scheduler.registry().has_active(&child_id));
     child_request.abort();
     assert!(child_request.await.unwrap_err().is_cancelled());

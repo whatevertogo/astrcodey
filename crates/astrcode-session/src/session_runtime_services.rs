@@ -19,10 +19,7 @@ use astrcode_core::{
     },
     tool::ToolDefinition,
 };
-use astrcode_extension_sdk::runtime_ports::{
-    CompositeToolCatalogProvider, PromptContributor, RuntimeSnapshotState, ToolCatalogProvider,
-    TurnExtensionView, TurnHooks,
-};
+use astrcode_extension_sdk::runtime_ports::{RuntimeSnapshotState, TurnExtensionView};
 
 use crate::{
     SessionExtensionPorts, SessionResourceStore,
@@ -42,32 +39,7 @@ pub struct SessionRuntimeServices {
     context_assembler: Arc<dyn ContextAssembler>,
     post_compact_enricher: Arc<dyn PostCompactEnricher>,
     effective_config: ArcSwap<EffectiveConfig>,
-    tool_catalog: Arc<dyn ToolCatalogProvider>,
     session_resources: SessionResourceStore,
-}
-
-/// Extension ports and the combined tool catalog pinned to one generation.
-pub(crate) struct SessionRuntimeView {
-    extension: TurnExtensionView,
-    tool_catalog: Arc<dyn ToolCatalogProvider>,
-}
-
-impl SessionRuntimeView {
-    pub(crate) fn tool_catalog(&self) -> &dyn ToolCatalogProvider {
-        self.tool_catalog.as_ref()
-    }
-
-    pub(crate) fn prompt_contributor(&self) -> &dyn PromptContributor {
-        self.extension.prompt_contributor()
-    }
-
-    pub(crate) fn turn_hooks(&self) -> &dyn TurnHooks {
-        self.extension.turn_hooks()
-    }
-
-    pub(crate) fn turn_hooks_arc(&self) -> Arc<dyn TurnHooks> {
-        self.extension.turn_hooks_arc()
-    }
 }
 
 struct ProviderSlot {
@@ -130,7 +102,6 @@ impl SessionRuntimeServices {
         extension_ports: SessionExtensionPorts,
         context_assembler: Arc<dyn ContextAssembler>,
         post_compact_enricher: Arc<dyn PostCompactEnricher>,
-        tool_catalog: Arc<dyn ToolCatalogProvider>,
     ) -> Self {
         Self {
             llm: Arc::new(ArcSwap::from_pointee(ProviderSlot { provider: llm })),
@@ -141,7 +112,6 @@ impl SessionRuntimeServices {
             context_assembler,
             post_compact_enricher,
             effective_config: ArcSwap::from_pointee(effective_config),
-            tool_catalog,
             session_resources: SessionResourceStore::default(),
         }
     }
@@ -191,7 +161,7 @@ impl SessionRuntimeServices {
         })
     }
 
-    pub(crate) async fn turn_runtime_view(&self) -> Result<SessionRuntimeView, SessionError> {
+    pub(crate) async fn pin_extension_view(&self) -> Result<TurnExtensionView, SessionError> {
         let mut stability = RuntimeStabilityBudget::new();
         loop {
             let RuntimeSnapshotState::Stable(generation) =
@@ -208,16 +178,7 @@ impl SessionRuntimeServices {
                 retry_runtime_snapshot(&mut stability).await?;
                 continue;
             }
-            let extension_catalog = extension.tool_catalog_arc();
-            let tool_catalog: Arc<dyn ToolCatalogProvider> =
-                Arc::new(CompositeToolCatalogProvider::new(vec![
-                    ("extensions".into(), extension_catalog),
-                    ("builtins".into(), Arc::clone(&self.tool_catalog)),
-                ]));
-            return Ok(SessionRuntimeView {
-                extension,
-                tool_catalog,
-            });
+            return Ok(extension);
         }
     }
 
@@ -353,7 +314,6 @@ mod tests {
             SessionExtensionPorts::default(),
             Arc::clone(&context_assembler),
             Arc::new(CountingPostCompactEnricher),
-            Arc::new(NoopRuntimePorts),
         );
 
         assert!(!services.context_assembler().auto_compact_enabled());
@@ -400,7 +360,6 @@ mod tests {
             SessionExtensionPorts::from_adapter(Arc::clone(&extension_runtime)),
             Arc::new(NoopContextAssembler::new(context)),
             Arc::new(CountingPostCompactEnricher),
-            Arc::new(NoopRuntimePorts),
         );
         let runtime_for_update = Arc::clone(&extension_runtime);
         tokio::spawn(async move {
@@ -408,9 +367,9 @@ mod tests {
             runtime_for_update.updating.store(false, Ordering::Release);
         });
 
-        let view = services.turn_runtime_view().await.unwrap();
+        let view = services.pin_extension_view().await.unwrap();
 
-        assert_eq!(view.extension.generation(), 2);
+        assert_eq!(view.generation(), 2);
         assert_eq!(extension_runtime.view_calls.load(Ordering::Acquire), 2);
     }
 
@@ -430,7 +389,6 @@ mod tests {
             SessionExtensionPorts::default(),
             context_assembler,
             Arc::new(CountingPostCompactEnricher),
-            Arc::new(NoopRuntimePorts),
         );
         let live_main = services.live_llm();
         let live_small = services.live_small_llm();

@@ -12,9 +12,12 @@ use crate::{
         ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionHttpAccess,
         ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute,
         ExtensionManifest, ExtensionManifestError, HttpContext, Keybinding, SlashCommand,
-        StatusItem, ToolContext, ToolHandler,
+        StatusItem, ToolContext, ToolHandler, ToolPlanContext,
     },
-    tool::{ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPromptMetadata},
+    tool::{
+        ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
+        ToolPromptMetadata,
+    },
 };
 
 // ─── Extension manifest builder ────────────────────────────────────────
@@ -318,59 +321,79 @@ where
     }
 }
 
-/// Wraps an async single-context closure into an [`ToolHandler`].
-pub fn tool_handler<F, Fut, R>(f: F) -> Arc<dyn ToolHandler>
+/// Wraps explicit plan and execute closures into a [`ToolHandler`].
+pub fn tool_handler<P, PlanFut, F, Fut, R>(planner: P, f: F) -> Arc<dyn ToolHandler>
 where
+    P: Fn(ToolPlanContext) -> PlanFut + Send + Sync + 'static,
+    PlanFut: Future<Output = Result<ToolPlan, ExtensionError>> + Send + 'static,
     F: Fn(ToolContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<R, ExtensionError>> + Send + 'static,
     R: Into<ToolExecutionResult> + Send + 'static,
 {
-    Arc::new(FnToolHandler { f })
+    Arc::new(FnToolHandler { planner, f })
 }
 
-struct FnToolHandler<F> {
+struct FnToolHandler<P, F> {
+    planner: P,
     f: F,
 }
 
 #[async_trait::async_trait]
-impl<F, Fut, R> ToolHandler for FnToolHandler<F>
+impl<P, PlanFut, F, Fut, R> ToolHandler for FnToolHandler<P, F>
 where
+    P: Fn(ToolPlanContext) -> PlanFut + Send + Sync + 'static,
+    PlanFut: Future<Output = Result<ToolPlan, ExtensionError>> + Send + 'static,
     F: Fn(ToolContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<R, ExtensionError>> + Send + 'static,
     R: Into<ToolExecutionResult> + Send + 'static,
 {
+    async fn plan(&self, ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        (self.planner)(ctx).await
+    }
+
     async fn execute(&self, ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
         (self.f)(ctx).await.map(Into::into)
     }
 }
 
 /// Wraps an async closure that receives typed tool arguments and the complete call context.
-pub fn tool_handler_args<A, F, Fut, R>(f: F) -> Arc<dyn ToolHandler>
+pub fn tool_handler_args<A, P, PlanFut, F, Fut, R>(planner: P, f: F) -> Arc<dyn ToolHandler>
 where
     A: DeserializeOwned + Send + 'static,
+    P: Fn(A, ToolPlanContext) -> PlanFut + Send + Sync + 'static,
+    PlanFut: Future<Output = Result<ToolPlan, ExtensionError>> + Send + 'static,
     F: Fn(A, ToolContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<R, ExtensionError>> + Send + 'static,
     R: Into<ToolExecutionResult> + Send + 'static,
 {
     Arc::new(FnToolArgsHandler {
+        planner,
         f,
         _arguments: std::marker::PhantomData,
     })
 }
 
-struct FnToolArgsHandler<A, F> {
+struct FnToolArgsHandler<A, P, F> {
+    planner: P,
     f: F,
     _arguments: std::marker::PhantomData<fn() -> A>,
 }
 
 #[async_trait::async_trait]
-impl<A, F, Fut, R> ToolHandler for FnToolArgsHandler<A, F>
+impl<A, P, PlanFut, F, Fut, R> ToolHandler for FnToolArgsHandler<A, P, F>
 where
     A: DeserializeOwned + Send + 'static,
+    P: Fn(A, ToolPlanContext) -> PlanFut + Send + Sync + 'static,
+    PlanFut: Future<Output = Result<ToolPlan, ExtensionError>> + Send + 'static,
     F: Fn(A, ToolContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<R, ExtensionError>> + Send + 'static,
     R: Into<ToolExecutionResult> + Send + 'static,
 {
+    async fn plan(&self, ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        let arguments = ctx.arguments::<A>()?;
+        (self.planner)(arguments, ctx).await
+    }
+
     async fn execute(&self, ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
         let arguments = ctx.arguments::<A>()?;
         (self.f)(arguments, ctx).await.map(Into::into)
@@ -740,14 +763,17 @@ mod tests {
             count: usize,
         }
 
-        let handler = tool_handler_args(|args: Args, ctx| async move {
-            Ok(ToolResult::success(format!(
-                "{}:{}:{}",
-                ctx.extension_id(),
-                ctx.tool_name(),
-                args.count
-            )))
-        });
+        let handler = tool_handler_args(
+            |_args: Args, _ctx| async move { Ok(ToolPlan::default()) },
+            |args: Args, ctx| async move {
+                Ok(ToolResult::success(format!(
+                    "{}:{}:{}",
+                    ctx.extension_id(),
+                    ctx.tool_name(),
+                    args.count
+                )))
+            },
+        );
         let ctx = ToolContextBuilder::new("test-extension", "count")
             .session("session-1", "/workspace", None)
             .arguments(serde_json::json!({ "count": 3 }))
@@ -773,9 +799,10 @@ mod tests {
         assert!(message.contains("tool `count`"));
         assert!(message.contains("count"));
 
-        let plain = tool_handler(|ctx| async move {
-            Ok(ToolResult::success(ctx.working_dir().display().to_string()))
-        });
+        let plain = tool_handler(
+            |_ctx| async move { Ok(ToolPlan::default()) },
+            |ctx| async move { Ok(ToolResult::success(ctx.working_dir().display().to_string())) },
+        );
         let result = plain
             .execute(
                 ToolContextBuilder::new("test-extension", "plain")

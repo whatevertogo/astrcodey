@@ -10,11 +10,6 @@ use std::{
     time::Duration,
 };
 
-use astrcode_extension_contract::{
-    FeatureName, HostInitialization, HostInitialized, InboundInvoke, InvocationResponse,
-    InvokeError, Peer, PeerHandle, PeerInvokeHandler, StdioFrameTransport, WireErrorCode,
-    protocol::{ModelStreamEvent, PeerInfo, S5R_STACK},
-};
 use astrcode_extension_sdk::{
     extension::ExtensionError,
     host::HostError,
@@ -23,6 +18,11 @@ use astrcode_extension_sdk::{
         HandlerInvokeRequest, HandlerKind, HandlerResult,
     },
     tool::ExecutionMode,
+    wire::{
+        FeatureName, HostInitialization, HostInitialized, InboundInvoke, InvocationResponse,
+        InvokeError, Peer, PeerHandle, PeerInvokeHandler, StdioFrameTransport, WireErrorCode,
+        protocol::{ModelStreamEvent, PeerInfo, S5R_STACK},
+    },
 };
 use futures_util::Stream;
 use parking_lot::{Mutex, RwLock};
@@ -62,7 +62,10 @@ struct HandlerAttribution {
 
 impl HandlerAttribution {
     fn from_event(event: &Value) -> Self {
-        let input = event.get("input").and_then(Value::as_object);
+        let input = event
+            .get("scope")
+            .and_then(Value::as_object)
+            .or_else(|| event.get("input").and_then(Value::as_object));
         Self {
             session_id: input.and_then(|input| input.get("session_id")).cloned(),
             turn_id: input.and_then(|input| input.get("turn_id")).cloned(),
@@ -72,7 +75,15 @@ impl HandlerAttribution {
     }
 
     fn apply_to(&self, event: &mut Value) {
-        let Some(input) = event.get_mut("input").and_then(Value::as_object_mut) else {
+        let attribution_field = if event.get("scope").is_some() {
+            "scope"
+        } else {
+            "input"
+        };
+        let Some(input) = event
+            .get_mut(attribution_field)
+            .and_then(Value::as_object_mut)
+        else {
             return;
         };
         insert_attribution(input, "session_id", &self.session_id);
@@ -117,7 +128,7 @@ struct V3HostInvokeHandler {
 }
 
 struct GuardedModelStream {
-    stream: astrcode_extension_contract::ModelEventStream,
+    stream: astrcode_extension_sdk::wire::ModelEventStream,
     _reentrancy: ReentrancyGuard,
 }
 
@@ -164,7 +175,7 @@ impl PeerInvokeHandler for V3HostInvokeHandler {
 pub(crate) struct S5rV3Session {
     child: Mutex<Option<SupervisedChild>>,
     stderr_task: Mutex<Option<JoinHandle<()>>>,
-    driver_task: Mutex<Option<JoinHandle<Result<(), astrcode_extension_contract::PeerError>>>>,
+    driver_task: Mutex<Option<JoinHandle<Result<(), astrcode_extension_sdk::wire::PeerError>>>>,
     driver_shutdown: CancellationToken,
     initialized_peer: Mutex<Option<Peer<StdioFrameTransport, HostInitialized>>>,
     handle: RwLock<Option<PeerHandle>>,
@@ -321,7 +332,7 @@ impl S5rV3Session {
 
     pub(crate) async fn invoke_handler(
         &self,
-        handler_id: &astrcode_extension_contract::HandlerId,
+        handler_id: &astrcode_extension_sdk::wire::HandlerId,
         event: Value,
         invoke_context: &InvokeContext,
     ) -> Result<HandlerResult, ExtensionError> {
@@ -331,7 +342,7 @@ impl S5rV3Session {
 
     async fn invoke_handler_in_lane(
         &self,
-        handler_id: &astrcode_extension_contract::HandlerId,
+        handler_id: &astrcode_extension_sdk::wire::HandlerId,
         event: Value,
         invoke_context: &InvokeContext,
         execution_mode: ExecutionMode,
@@ -347,7 +358,7 @@ impl S5rV3Session {
 
     async fn invoke_handler_unadmitted(
         &self,
-        handler_id: &astrcode_extension_contract::HandlerId,
+        handler_id: &astrcode_extension_sdk::wire::HandlerId,
         event: Value,
         invoke_context: &InvokeContext,
     ) -> Result<HandlerResult, ExtensionError> {
@@ -380,7 +391,7 @@ impl S5rV3Session {
 
     pub(crate) async fn invoke_handler_with_continuations(
         &self,
-        handler_id: &astrcode_extension_contract::HandlerId,
+        handler_id: &astrcode_extension_sdk::wire::HandlerId,
         event: Value,
         invoke_context: &InvokeContext,
         execution_mode: ExecutionMode,
@@ -415,6 +426,29 @@ impl S5rV3Session {
             }
         }
         first.ok_or_else(|| ExtensionError::Internal("empty handler chain".into()))
+    }
+
+    pub(crate) async fn invoke_handler_once(
+        &self,
+        handler_id: &astrcode_extension_sdk::wire::HandlerId,
+        event: Value,
+        invoke_context: &InvokeContext,
+        execution_mode: ExecutionMode,
+    ) -> Result<HandlerResult, ExtensionError> {
+        let permits = invocation_permit_count(execution_mode);
+        let _permit = Arc::clone(&self.admission)
+            .acquire_many_owned(permits)
+            .await
+            .map_err(|_| self.draining_error())?;
+        let result = self
+            .invoke_handler_unadmitted(handler_id, event, invoke_context)
+            .await?;
+        if !result.continuations.is_empty() {
+            return Err(ExtensionError::Internal(
+                "tool planning cannot return continuations".into(),
+            ));
+        }
+        Ok(result)
     }
 
     fn draining_error(&self) -> ExtensionError {
@@ -462,9 +496,9 @@ fn continuation_call(
         CallContinuation::Tool { name, input } => Ok((
             HandlerId::new(extension_id, HandlerKind::Tool, name)?,
             json!({
-                "on": "tool",
-                "name": name,
-                "input": { "arguments": input }
+                "phase": astrcode_extension_sdk::s5r::ToolInvocationPhase::Execute,
+                "arguments": input,
+                "scope": {}
             }),
         )),
     }
@@ -537,7 +571,7 @@ async fn terminate_failed_start(child: &mut SupervisedChild, stderr_task: JoinHa
 mod tests {
     use std::time::Duration;
 
-    use astrcode_extension_contract::WireErrorCode;
+    use astrcode_extension_sdk::wire::WireErrorCode;
     use serde_json::json;
     use tokio::sync::Semaphore;
 
@@ -546,7 +580,7 @@ mod tests {
     #[test]
     fn continuation_attribution_is_inherited_and_cannot_be_spoofed() {
         let attribution = HandlerAttribution::from_event(&json!({
-            "input": {
+            "scope": {
                 "session_id": "session-1",
                 "turn_id": "turn-1",
                 "tool_call_id": "call-1",
@@ -554,8 +588,7 @@ mod tests {
             }
         }));
         let mut continuation = json!({
-            "input": {
-                "arguments": {},
+            "scope": {
                 "session_id": "spoofed",
                 "working_dir": "/untrusted"
             }
@@ -563,10 +596,10 @@ mod tests {
 
         attribution.apply_to(&mut continuation);
 
-        assert_eq!(continuation["input"]["session_id"], "session-1");
-        assert_eq!(continuation["input"]["turn_id"], "turn-1");
-        assert_eq!(continuation["input"]["tool_call_id"], "call-1");
-        assert_eq!(continuation["input"]["working_dir"], "/trusted");
+        assert_eq!(continuation["scope"]["session_id"], "session-1");
+        assert_eq!(continuation["scope"]["turn_id"], "turn-1");
+        assert_eq!(continuation["scope"]["tool_call_id"], "call-1");
+        assert_eq!(continuation["scope"]["working_dir"], "/trusted");
     }
 
     #[test]

@@ -7,14 +7,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use astrcode_extension_contract::{
-    extension_http::{ExtensionHttpRoute, MAX_EXTENSION_HTTP_BODY_BYTES},
-    manifest::LifecycleEvent,
-};
-
 use super::{
     CustomEventSourceFilter, CustomEventSubscription, HookMode,
     MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN,
+};
+use crate::wire::{
+    extension_http::{ExtensionHttpRoute, MAX_EXTENSION_HTTP_BODY_BYTES},
+    manifest::LifecycleEvent,
 };
 
 /// 把扩展作者提供的注册名规范化为 trim 后的形式。

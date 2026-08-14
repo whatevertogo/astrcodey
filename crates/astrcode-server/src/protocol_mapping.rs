@@ -115,6 +115,7 @@ pub(crate) fn extension_capability_to_dto(
         ExtensionCapability::ConsumeCustomEvents => ExtensionCapabilityDto::ConsumeCustomEvents,
         ExtensionCapability::WorkspaceRead => ExtensionCapabilityDto::WorkspaceRead,
         ExtensionCapability::WorkspaceWrite => ExtensionCapabilityDto::WorkspaceWrite,
+        ExtensionCapability::ToolResultRead => ExtensionCapabilityDto::ToolResultRead,
         ExtensionCapability::ProcessSpawn => ExtensionCapabilityDto::ProcessSpawn,
         ExtensionCapability::NetworkClient => ExtensionCapabilityDto::NetworkClient,
         ExtensionCapability::ProviderRequest => ExtensionCapabilityDto::ProviderRequest,

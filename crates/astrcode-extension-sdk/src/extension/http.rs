@@ -1,11 +1,5 @@
 use std::sync::Arc;
 
-// ─── Extension HTTP ─────────────────────────────────────────────────────
-pub use astrcode_extension_contract::extension_http::{
-    DEFAULT_EXTENSION_HTTP_BODY_BYTES, ExtensionHttpAccess, ExtensionHttpDispatchRequest,
-    ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-    MAX_EXTENSION_HTTP_BODY_BYTES,
-};
 #[cfg(test)]
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -19,6 +13,12 @@ use super::registration_validation::{
 };
 use super::{ExtensionCall, ExtensionCallContext, ExtensionError};
 use crate::WireErrorCode;
+// ─── Extension HTTP ─────────────────────────────────────────────────────
+pub use crate::wire::extension_http::{
+    DEFAULT_EXTENSION_HTTP_BODY_BYTES, ExtensionHttpAccess, ExtensionHttpDispatchRequest,
+    ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
+    MAX_EXTENSION_HTTP_BODY_BYTES,
+};
 
 /// Validated request context for one extension HTTP route invocation.
 ///

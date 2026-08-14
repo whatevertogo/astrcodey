@@ -1,9 +1,4 @@
-use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
-    path::PathBuf,
-    sync::Arc,
-};
+use std::sync::Arc;
 
 use astrcode_core::tool::{SessionOperations, Tool};
 
@@ -44,10 +39,9 @@ pub struct ToolCatalogDiagnostic {
     pub message: String,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct ToolCatalogScope {
     pub working_dir: String,
-    pub session_store_dir: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -81,79 +75,6 @@ pub trait ToolCatalogProvider: Send + Sync {
         _scope: &ToolCatalogScope,
     ) -> Result<ToolCatalogSnapshot, ExtensionError> {
         Ok(ToolCatalogSnapshot::complete(self.revision(), Vec::new()))
-    }
-}
-
-/// 将多个完整 catalog 组合成 session 使用的单一快照。
-///
-/// providers 按优先级从高到低排列；重复名称保留更靠前的 provider。
-pub struct CompositeToolCatalogProvider {
-    providers: Vec<(String, Arc<dyn ToolCatalogProvider>)>,
-}
-
-impl CompositeToolCatalogProvider {
-    pub fn new(providers: Vec<(String, Arc<dyn ToolCatalogProvider>)>) -> Self {
-        Self { providers }
-    }
-
-    fn combined_revision(revisions: impl IntoIterator<Item = u64>) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        for revision in revisions {
-            revision.hash(&mut hasher);
-        }
-        hasher.finish()
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolCatalogProvider for CompositeToolCatalogProvider {
-    fn revision(&self) -> u64 {
-        Self::combined_revision(
-            self.providers
-                .iter()
-                .map(|(_, provider)| provider.revision()),
-        )
-    }
-
-    async fn tool_catalog(
-        &self,
-        scope: &ToolCatalogScope,
-    ) -> Result<ToolCatalogSnapshot, ExtensionError> {
-        let mut revisions = Vec::with_capacity(self.providers.len());
-        let mut tools = Vec::new();
-        let mut diagnostics = Vec::new();
-        let mut completeness = ToolCatalogCompleteness::Complete;
-        let mut names = HashMap::<String, String>::new();
-
-        for (source, provider) in &self.providers {
-            let snapshot = provider.tool_catalog(scope).await?;
-            revisions.push(snapshot.revision);
-            if snapshot.completeness == ToolCatalogCompleteness::Partial {
-                completeness = ToolCatalogCompleteness::Partial;
-            }
-            diagnostics.extend(snapshot.diagnostics);
-            for tool in snapshot.tools {
-                let name = tool.definition().name;
-                if let Some(winner) = names.get(&name) {
-                    diagnostics.push(ToolCatalogDiagnostic {
-                        source: source.clone(),
-                        message: format!(
-                            "tool {name} is shadowed by higher-priority catalog {winner}"
-                        ),
-                    });
-                    continue;
-                }
-                names.insert(name, source.clone());
-                tools.push(tool);
-            }
-        }
-
-        Ok(ToolCatalogSnapshot {
-            revision: Self::combined_revision(revisions),
-            tools,
-            completeness,
-            diagnostics,
-        })
     }
 }
 
@@ -260,10 +181,6 @@ impl TurnExtensionView {
         self.tool_catalog.as_ref()
     }
 
-    pub fn tool_catalog_arc(&self) -> Arc<dyn ToolCatalogProvider> {
-        Arc::clone(&self.tool_catalog)
-    }
-
     pub fn prompt_contributor(&self) -> &dyn PromptContributor {
         self.prompt_contributor.as_ref()
     }
@@ -312,113 +229,3 @@ impl TurnExtensionViewProvider for NoopRuntimePorts {
 }
 
 impl SessionOperationsProvider for NoopRuntimePorts {}
-
-#[cfg(test)]
-mod tests {
-    use std::{
-        path::Path,
-        sync::atomic::{AtomicU64, Ordering},
-    };
-
-    use astrcode_core::tool::{
-        ExecutionMode, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionResult,
-        ToolOrigin,
-    };
-
-    use super::*;
-
-    struct NamedTool(&'static str);
-
-    #[async_trait::async_trait]
-    impl Tool for NamedTool {
-        fn definition(&self) -> ToolDefinition {
-            ToolDefinition {
-                name: self.0.into(),
-                description: String::new(),
-                parameters: serde_json::json!({"type": "object"}),
-                strict: false,
-                origin: ToolOrigin::Extension,
-                execution_mode: ExecutionMode::Sequential,
-            }
-        }
-
-        async fn execute(
-            &self,
-            _arguments: serde_json::Value,
-            _ctx: &ToolExecutionContext,
-        ) -> Result<ToolExecutionResult, ToolError> {
-            unreachable!("catalog tests do not execute tools")
-        }
-    }
-
-    struct StaticCatalog {
-        revision: AtomicU64,
-        names: Vec<&'static str>,
-        completeness: ToolCatalogCompleteness,
-    }
-
-    #[async_trait::async_trait]
-    impl ToolCatalogProvider for StaticCatalog {
-        fn revision(&self) -> u64 {
-            self.revision.load(Ordering::Acquire)
-        }
-
-        async fn tool_catalog(
-            &self,
-            _scope: &ToolCatalogScope,
-        ) -> Result<ToolCatalogSnapshot, ExtensionError> {
-            Ok(ToolCatalogSnapshot {
-                revision: self.revision(),
-                tools: self
-                    .names
-                    .iter()
-                    .map(|name| Arc::new(NamedTool(name)) as Arc<dyn Tool>)
-                    .collect(),
-                completeness: self.completeness,
-                diagnostics: Vec::new(),
-            })
-        }
-    }
-
-    #[tokio::test]
-    async fn composite_catalog_tracks_revision_partial_state_and_duplicate_winners() {
-        let high = Arc::new(StaticCatalog {
-            revision: AtomicU64::new(1),
-            names: vec!["shared"],
-            completeness: ToolCatalogCompleteness::Complete,
-        });
-        let low = Arc::new(StaticCatalog {
-            revision: AtomicU64::new(2),
-            names: vec!["shared", "low_only"],
-            completeness: ToolCatalogCompleteness::Partial,
-        });
-        let composite = CompositeToolCatalogProvider::new(vec![
-            ("high".into(), high.clone()),
-            ("low".into(), low),
-        ]);
-        let revision = composite.revision();
-        let snapshot = composite
-            .tool_catalog(&ToolCatalogScope {
-                working_dir: Path::new(".").display().to_string(),
-                session_store_dir: None,
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(snapshot.revision, revision);
-        assert_eq!(snapshot.completeness, ToolCatalogCompleteness::Partial);
-        assert_eq!(
-            snapshot
-                .tools
-                .iter()
-                .map(|tool| tool.definition().name)
-                .collect::<Vec<_>>(),
-            ["shared", "low_only"]
-        );
-        assert_eq!(snapshot.diagnostics.len(), 1);
-        assert_eq!(snapshot.diagnostics[0].source, "low");
-
-        high.revision.store(3, Ordering::Release);
-        assert_ne!(composite.revision(), revision);
-    }
-}

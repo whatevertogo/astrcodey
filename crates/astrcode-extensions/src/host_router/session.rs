@@ -18,14 +18,6 @@ use astrcode_core::{
     },
     types::SessionId,
 };
-use astrcode_extension_contract::{
-    WireErrorCode,
-    session_inspect::{
-        HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
-        SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
-        SessionInspectSnapshotOutput,
-    },
-};
 use astrcode_extension_sdk::{
     host::{
         Acknowledgement, EmptyRequest, HostConfigureSessionToolsOutput,
@@ -43,6 +35,14 @@ use astrcode_extension_sdk::{
         HostSessionEventsPageRequest, HostSessionReactivateOutput, HostSessionStateOutput,
         HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
         SessionLifecycleStateDto, SessionToolSelectionDto,
+    },
+    wire::{
+        WireErrorCode,
+        session_inspect::{
+            HostSessionInspectRequest, SessionHistorySnapshotOutput, SessionInspectListOutput,
+            SessionInspectProviderMessagesOutput, SessionInspectReadModelOutput,
+            SessionInspectSnapshotOutput,
+        },
     },
 };
 use astrcode_storage::{EventReader, SessionReader, StorageError};
@@ -630,7 +630,7 @@ async fn history_read_model(
 }
 
 fn extension_visible_message(message: &astrcode_core::llm::LlmMessage) -> bool {
-    !astrcode_context::is_compact_summary_message(message)
+    !astrcode_core::compaction::is_compact_summary_message(message)
 }
 
 /// 只读会话 API 的 StorageError 映射：身份与能力类错误保持稳定码，其余读失败

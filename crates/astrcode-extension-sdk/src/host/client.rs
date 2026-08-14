@@ -7,17 +7,21 @@ use super::domain_client::{
     SessionControlClient as TypedSessionControlClient,
     SessionHistoryClient as TypedSessionHistoryClient,
     SessionInspectClient as TypedSessionInspectClient,
-    SessionStateClient as TypedSessionStateClient, WorkspaceClient as TypedWorkspaceClient,
+    SessionStateClient as TypedSessionStateClient, ToolResultClient as TypedToolResultClient,
+    WorkspaceClient as TypedWorkspaceClient,
 };
 use crate::host::{ExtensionHost, HostError, HostOperation};
 #[cfg(test)]
 use crate::{
     extension::ExtensionHttpDispatchRequest,
     host::{
-        HostConfigureSessionToolsRequest, HostNetworkRequest, HostProcessRequest,
-        HostSessionInputRequest, HostSessionStateReadRequest, HostSessionStateWriteRequest,
-        HostWorkspaceEditRequest, HostWorkspaceGlobRequest, HostWorkspaceGrepRequest,
-        HostWorkspaceListRequest, HostWorkspaceReadRequest, HostWorkspaceWriteRequest,
+        HostConfigureSessionToolsRequest, HostNetworkRequest, HostProcessReadRequest,
+        HostProcessRequest, HostProcessResizeRequest, HostProcessStartRequest,
+        HostProcessTargetRequest, HostSessionInputRequest, HostSessionStateReadRequest,
+        HostSessionStateWriteRequest, HostToolResultReadRequest, HostWorkspaceApplyPatchRequest,
+        HostWorkspaceEditRequest, HostWorkspaceGlobRequest, HostWorkspaceGrepMode,
+        HostWorkspaceGrepRequest, HostWorkspaceListRequest, HostWorkspaceReadRequest,
+        HostWorkspaceWriteRequest,
     },
     llm::LlmMessage,
     session::{
@@ -31,6 +35,7 @@ pub type SessionControlClient = TypedSessionControlClient<ExtensionHost>;
 pub type SessionHistoryClient = TypedSessionHistoryClient<ExtensionHost>;
 pub type SessionStateClient = TypedSessionStateClient<ExtensionHost>;
 pub type SessionInspectClient = TypedSessionInspectClient<ExtensionHost>;
+pub type ToolResultClient = TypedToolResultClient<ExtensionHost>;
 pub type WorkspaceClient = TypedWorkspaceClient<ExtensionHost>;
 pub type ProcessClient = TypedProcessClient<ExtensionHost>;
 pub type NetworkClient = TypedNetworkClient<ExtensionHost>;
@@ -55,12 +60,14 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use astrcode_extension_contract::WireErrorCode;
     use async_trait::async_trait;
     use serde_json::Value;
 
     use super::*;
-    use crate::{extension::ExtensionHttpMethod, host::internal, session::SessionToolSelectionDto};
+    use crate::{
+        extension::ExtensionHttpMethod, host::internal, session::SessionToolSelectionDto,
+        wire::WireErrorCode,
+    };
 
     struct RecordingInvoker {
         operations: Mutex<Vec<HostOperation>>,
@@ -144,6 +151,15 @@ mod tests {
             HostOperation::LlmMainChat,
             HostOperation::LlmSmallChat,
             HostOperation::ProcessSpawn,
+            HostOperation::ProcessStart,
+            HostOperation::ProcessRead,
+            HostOperation::ProcessInput,
+            HostOperation::ProcessInput,
+            HostOperation::ProcessResize,
+            HostOperation::ProcessStatus,
+            HostOperation::ProcessPromote,
+            HostOperation::ProcessKill,
+            HostOperation::ProcessList,
             HostOperation::NetworkClient,
             HostOperation::ExtensionHttpPublic,
             HostOperation::SessionRootCreate,
@@ -167,6 +183,8 @@ mod tests {
             HostOperation::SessionReadEvents,
             HostOperation::SessionStateRead,
             HostOperation::SessionStateWrite,
+            HostOperation::WorkspaceApplyPatch,
+            HostOperation::ToolResultRead,
             HostOperation::WorkspaceRead,
             HostOperation::WorkspaceWrite,
             HostOperation::WorkspaceEdit,
@@ -200,6 +218,7 @@ mod tests {
                 crate::extension::ExtensionCapability::SessionHistory,
                 crate::extension::ExtensionCapability::WorkspaceRead,
                 crate::extension::ExtensionCapability::WorkspaceWrite,
+                crate::extension::ExtensionCapability::ToolResultRead,
                 crate::extension::ExtensionCapability::SessionInspect,
             ],
             expected_operations.iter().copied(),
@@ -228,6 +247,32 @@ mod tests {
                 .spawn(HostProcessRequest::new("true")),
         )
         .await;
+        expect_backend_error(
+            host.process()
+                .unwrap()
+                .start(HostProcessStartRequest::pipes("true")),
+        )
+        .await;
+        let process_target = || HostProcessTargetRequest {
+            id: "process-1".into(),
+        };
+        expect_backend_error(host.process().unwrap().read(HostProcessReadRequest {
+            id: "process-1".into(),
+            wait_ms: None,
+        }))
+        .await;
+        expect_backend_error(host.process().unwrap().write("process-1", "continue\n")).await;
+        expect_backend_error(host.process().unwrap().close_stdin("process-1")).await;
+        expect_backend_error(host.process().unwrap().resize(HostProcessResizeRequest {
+            id: "process-1".into(),
+            rows: 24,
+            cols: 80,
+        }))
+        .await;
+        expect_backend_error(host.process().unwrap().status(process_target())).await;
+        expect_backend_error(host.process().unwrap().promote(process_target())).await;
+        expect_backend_error(host.process().unwrap().kill(process_target())).await;
+        expect_backend_error(host.process().unwrap().list()).await;
         expect_backend_error(
             host.network()
                 .unwrap()
@@ -313,21 +358,41 @@ mod tests {
                 }),
         )
         .await;
+        expect_backend_error(host.workspace().unwrap().apply_patch(
+            HostWorkspaceApplyPatchRequest {
+                patch: "*** Begin Patch\n*** End Patch".into(),
+            },
+        ))
+        .await;
+        expect_backend_error(
+            host.tool_results()
+                .unwrap()
+                .read(HostToolResultReadRequest {
+                    artifact_id: "result.txt".into(),
+                    byte_offset: 0,
+                    max_bytes: 1_024,
+                }),
+        )
+        .await;
         expect_backend_error(host.workspace().unwrap().read(HostWorkspaceReadRequest {
             path: "notes.txt".into(),
             max_bytes: None,
+            line_offset: 0,
+            line_limit: None,
         }))
         .await;
         expect_backend_error(host.workspace().unwrap().write(HostWorkspaceWriteRequest {
             path: "notes.txt".into(),
             content: "hello".into(),
+            create_dirs: false,
         }))
         .await;
         expect_backend_error(host.workspace().unwrap().edit(HostWorkspaceEditRequest {
             path: "notes.txt".into(),
-            old_text: "hello".into(),
-            new_text: "hi".into(),
+            old_text: Some("hello".into()),
+            new_text: Some("hi".into()),
             replace_all: false,
+            edits: Vec::new(),
         }))
         .await;
         expect_backend_error(host.workspace().unwrap().list(HostWorkspaceListRequest {
@@ -339,16 +404,26 @@ mod tests {
         expect_backend_error(host.workspace().unwrap().grep(HostWorkspaceGrepRequest {
             pattern: "hello".into(),
             path: None,
+            offset: 0,
             max_matches: None,
             max_bytes: None,
             max_line_chars: None,
+            recursive: true,
+            multiline: false,
+            path_filters: Vec::new(),
+            before_context: 0,
+            after_context: 0,
+            mode: HostWorkspaceGrepMode::FilesWithMatches,
         }))
         .await;
         expect_backend_error(host.workspace().unwrap().glob(HostWorkspaceGlobRequest {
             pattern: "**/*.rs".into(),
             root: None,
+            offset: 0,
             max_matches: None,
-            include_ignored: false,
+            respect_gitignore: true,
+            include_hidden: true,
+            include_directories: true,
         }))
         .await;
         expect_backend_error(host.session_inspect().unwrap().list()).await;

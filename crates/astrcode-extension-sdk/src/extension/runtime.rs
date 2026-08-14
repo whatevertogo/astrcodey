@@ -6,7 +6,6 @@ use std::{
     time::Duration,
 };
 
-pub use astrcode_extension_contract::ExtensionCapability;
 use futures_util::FutureExt;
 use serde::de::IntoDeserializer;
 use tokio::{
@@ -14,6 +13,8 @@ use tokio::{
     task::AbortHandle,
 };
 use tokio_util::sync::CancellationToken;
+
+pub use crate::wire::ExtensionCapability;
 
 /// 扩展专有配置的包装类型。
 ///

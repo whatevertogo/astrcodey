@@ -244,14 +244,12 @@ fn build_scheduler_with_runtime(
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
-    let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
     let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         Arc::clone(&llm),
         llm,
         effective,
         extension_runner.clone(),
         context_assembler,
-        std::sync::Arc::clone(&shell_timeout_secs),
     );
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&store),

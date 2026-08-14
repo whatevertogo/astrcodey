@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use astrcode_extension_contract::{InvocationCancellation, WireErrorCode, protocol::ErrorPayload};
+use astrcode_extension_sdk::wire::{InvocationCancellation, WireErrorCode, protocol::ErrorPayload};
 use parking_lot::RwLock;
 
 use crate::{

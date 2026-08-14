@@ -234,7 +234,7 @@ mod tests {
             description: String::new(),
             parameters: serde_json::json!({"type": "string"}),
             strict: true,
-            origin: astrcode_core::tool::ToolOrigin::Builtin,
+            origin: astrcode_core::tool::ToolOrigin::Bundled,
             execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
         };
 

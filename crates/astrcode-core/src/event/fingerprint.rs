@@ -28,18 +28,22 @@ pub fn stable_hash_hex(parts: &[&str]) -> String {
 /// 哈希输入。`LlmMessage` / `LlmContent` 的序列化形状变更（改名、重排、新增无
 /// `skip_serializing_if` 的字段）会静默改变指纹，使新旧进程对同一前缀算出不同
 /// 值；这类变更必须显式决策，不能当作普通重构。
-pub fn transcript_prefix_fingerprint(system_prompt: &str, messages: &[LlmMessage]) -> String {
+///
+/// 当前 `LlmContent` 只含 `String`/`bool`/`serde_json::Value`，序列化实际不会失败；
+/// 但该不变量未被类型系统编码——未来新增字段（如裸 `f64`）可能引入 JSON 无法编码
+/// 的值。因此返回 `Result`，把潜在失败交由调用方显式处理，而非在持久化路径上 panic。
+pub fn transcript_prefix_fingerprint(
+    system_prompt: &str,
+    messages: &[LlmMessage],
+) -> Result<String, serde_json::Error> {
     let serialized_messages: Vec<String> = messages
         .iter()
-        .map(|message| {
-            // LlmMessage 的 Serialize 是派生实现（字段序确定），序列化为 JSON 不会失败。
-            serde_json::to_string(message).expect("LlmMessage serialization is infallible")
-        })
-        .collect();
+        .map(serde_json::to_string)
+        .collect::<Result<_, _>>()?;
     let mut parts: Vec<&str> = Vec::with_capacity(serialized_messages.len() + 1);
     parts.push(system_prompt);
     parts.extend(serialized_messages.iter().map(String::as_str));
-    stable_hash_hex(&parts)
+    Ok(stable_hash_hex(&parts))
 }
 
 fn fnv1a_update(mut hash: u64, bytes: &[u8]) -> u64 {
@@ -57,15 +61,18 @@ mod tests {
     #[test]
     fn fingerprint_is_stable_and_content_sensitive() {
         let messages = vec![LlmMessage::user("hello")];
-        let first = transcript_prefix_fingerprint("system", &messages);
-        assert_eq!(first, transcript_prefix_fingerprint("system", &messages));
-        assert_ne!(
+        let first = transcript_prefix_fingerprint("system", &messages).unwrap();
+        assert_eq!(
             first,
-            transcript_prefix_fingerprint("system changed", &messages)
+            transcript_prefix_fingerprint("system", &messages).unwrap()
         );
         assert_ne!(
             first,
-            transcript_prefix_fingerprint("system", &[LlmMessage::user("changed")])
+            transcript_prefix_fingerprint("system changed", &messages).unwrap()
+        );
+        assert_ne!(
+            first,
+            transcript_prefix_fingerprint("system", &[LlmMessage::user("changed")]).unwrap()
         );
     }
 
@@ -88,7 +95,7 @@ mod tests {
         let message = LlmMessage::user("hello");
         let serialized = serde_json::to_string(&message).unwrap();
         assert_eq!(
-            transcript_prefix_fingerprint("system", &[message]),
+            transcript_prefix_fingerprint("system", &[message]).unwrap(),
             reference(&["system", &serialized])
         );
     }
@@ -103,7 +110,7 @@ mod tests {
             r#"{"role":"user","content":[{"type":"text","text":"hello"}]}"#
         );
         assert_eq!(
-            transcript_prefix_fingerprint("system", &[message]),
+            transcript_prefix_fingerprint("system", &[message]).unwrap(),
             "8cadff38c396770a"
         );
     }

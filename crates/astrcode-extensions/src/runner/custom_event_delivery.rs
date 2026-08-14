@@ -445,6 +445,9 @@ impl CustomEventConsumer {
                 session_store_dir,
                 event_tx: Some(session.event_sender(event.turn_id.clone())),
                 event_causation: Some((event.id.clone(), custom_event.cascade_depth)),
+                resource_lease: None,
+                file_observation_store: None,
+                tool_result_reader: None,
                 cancellation: self.cancellation.clone(),
             },
         ) {

@@ -80,9 +80,17 @@ impl Tool for NamedTool {
             description: String::new(),
             parameters: serde_json::json!({"type": "object"}),
             strict: false,
-            origin: ToolOrigin::Sdk,
+            origin: ToolOrigin::Extension,
             execution_mode: ExecutionMode::Sequential,
         }
+    }
+
+    async fn plan(
+        &self,
+        _arguments: &serde_json::Value,
+        _ctx: &astrcode_core::tool::ToolPlanningContext,
+    ) -> Result<astrcode_core::tool::access::ToolPlan, ToolError> {
+        Ok(astrcode_core::tool::access::ToolPlan::default())
     }
 
     async fn execute(
@@ -293,7 +301,12 @@ async fn parent_and_spawned_child_each_emit_session_start_once() {
     let noop = Arc::new(NoopRuntimePorts);
     let caps = common::test_runtime_services_with_extensions(
         llm,
-        SessionExtensionPorts::from_immutable_ports(noop.clone(), hooks.clone(), noop),
+        SessionExtensionPorts::from_immutable_ports(
+            noop.clone(),
+            noop.clone(),
+            hooks.clone(),
+            noop,
+        ),
     );
     let parent_id = new_session_id();
     let parent = Session::create_with_params(SessionCreateParams {
@@ -347,6 +360,7 @@ async fn prompt_failure_does_not_create_session() {
     let caps = common::test_runtime_services_with_extensions(
         Arc::clone(&llm),
         SessionExtensionPorts::from_immutable_ports(
+            noop.clone(),
             Arc::new(FailingPromptContributor),
             noop.clone(),
             noop,

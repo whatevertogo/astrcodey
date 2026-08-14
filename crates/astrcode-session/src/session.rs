@@ -89,20 +89,25 @@ impl Session {
 
 #[async_trait::async_trait]
 impl ToolResultArtifactReader for Session {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         _session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<ToolResultArtifactSlice, ToolResultArtifactError> {
         self.runtime
             .store()
-            .read_tool_result_artifact_by_path(self.id(), path, char_offset, max_chars)
+            .read_tool_result_artifact(self.id(), artifact_id, byte_offset, max_bytes)
             .await
             .map_err(|error| match error {
-                StorageError::InvalidId(message) => ToolResultArtifactError::InvalidPath(message),
-                StorageError::NotFound(_) => ToolResultArtifactError::NotFound(path.to_owned()),
+                StorageError::InvalidId(message) => ToolResultArtifactError::InvalidId(message),
+                StorageError::Io(error) if error.kind() == std::io::ErrorKind::InvalidInput => {
+                    ToolResultArtifactError::InvalidRequest(error.to_string())
+                },
+                StorageError::NotFound(_) => {
+                    ToolResultArtifactError::NotFound(artifact_id.to_owned())
+                },
                 StorageError::Unsupported(message) => ToolResultArtifactError::Unsupported(message),
                 error => ToolResultArtifactError::Read(error.to_string()),
             })
@@ -274,7 +279,7 @@ pub async fn emit_lifecycle_for_read_model(
         LifecyclePayload::new(None),
     );
     runtime_services
-        .turn_runtime_view()
+        .pin_extension_view()
         .await?
         .turn_hooks()
         .emit_lifecycle(event, ctx)

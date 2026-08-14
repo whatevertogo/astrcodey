@@ -5,6 +5,8 @@ use astrcode_core::{
     tool::{SessionToolSelection, access::ResourceAccess},
 };
 
+use super::ApprovalHistoryStore;
+
 /// 权限策略的评估结果。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PermissionDecision {
@@ -36,7 +38,9 @@ pub(crate) trait PermissionPolicy: Send + Sync {
     fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision;
 }
 
-/// 按 priority 升序评估，第一条非 Pass 结果胜出；全部 Pass 时拒绝。
+/// 按 priority 升序评估；会话记忆只结算产生它的 Ask，不能跳过后续策略。
+///
+/// 未被记忆消解的第一条非 Pass 结果胜出；全部 Pass 时拒绝。
 pub(crate) struct PermissionChain {
     policies: Vec<Box<dyn PermissionPolicy>>,
 }
@@ -55,11 +59,33 @@ impl PermissionChain {
         Self { policies }
     }
 
-    pub(crate) fn decide(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
+    pub(crate) fn decide(
+        &self,
+        ctx: &PermissionContext<'_>,
+        history: &ApprovalHistoryStore,
+    ) -> PermissionDecision {
         for policy in &self.policies {
             let decision = policy.evaluate(ctx);
-            if !matches!(decision, PermissionDecision::Pass) {
-                return decision;
+            match decision {
+                PermissionDecision::Ask {
+                    prompt,
+                    rule_key: Some(rule_key),
+                } => {
+                    if history.is_denied_always(&rule_key) {
+                        return PermissionDecision::Deny {
+                            reason: format!("Denied by session approval memory ({rule_key})"),
+                        };
+                    }
+                    if history.is_allowed_always(&rule_key) {
+                        continue;
+                    }
+                    return PermissionDecision::Ask {
+                        prompt,
+                        rule_key: Some(rule_key),
+                    };
+                },
+                PermissionDecision::Pass => {},
+                decision => return decision,
             }
         }
         PermissionDecision::Deny {
@@ -70,6 +96,8 @@ impl PermissionChain {
 
 #[cfg(test)]
 mod tests {
+    use astrcode_core::permission::ApprovalDecision;
+
     use super::*;
 
     struct FixedPolicy {
@@ -117,14 +145,61 @@ mod tests {
                 },
             }),
         ]);
-        assert_eq!(chain.decide(&empty_ctx(&input)), PermissionDecision::Allow);
+        let history = ApprovalHistoryStore::default();
+        assert_eq!(
+            chain.decide(&empty_ctx(&input), &history),
+            PermissionDecision::Allow
+        );
 
         let chain = PermissionChain::new(vec![Box::new(FixedPolicy {
             priority: 10,
             decision: PermissionDecision::Pass,
         })]);
         assert!(matches!(
-            chain.decide(&empty_ctx(&input)),
+            chain.decide(&empty_ctx(&input), &ApprovalHistoryStore::default()),
+            PermissionDecision::Deny { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn remembered_approval_skips_only_its_rule() {
+        let input = serde_json::json!({});
+        let chain = PermissionChain::new(vec![
+            Box::new(FixedPolicy {
+                priority: 10,
+                decision: PermissionDecision::Ask {
+                    prompt: "first".into(),
+                    rule_key: Some("first-rule".into()),
+                },
+            }),
+            Box::new(FixedPolicy {
+                priority: 20,
+                decision: PermissionDecision::Ask {
+                    prompt: "second".into(),
+                    rule_key: Some("second-rule".into()),
+                },
+            }),
+        ]);
+        let history = ApprovalHistoryStore::default();
+        history.ensure_loaded(None).await.unwrap();
+        history
+            .record_decision(Some("first-rule"), ApprovalDecision::AllowAlways)
+            .await
+            .unwrap();
+        assert!(matches!(
+            chain.decide(&empty_ctx(&input), &history),
+            PermissionDecision::Ask {
+                rule_key: Some(rule_key),
+                ..
+            } if rule_key == "second-rule"
+        ));
+
+        history
+            .record_decision(Some("second-rule"), ApprovalDecision::DenyAlways)
+            .await
+            .unwrap();
+        assert!(matches!(
+            chain.decide(&empty_ctx(&input), &history),
             PermissionDecision::Deny { .. }
         ));
     }

@@ -97,7 +97,7 @@ fn prepare_anthropic_tools(tools: &mut [ToolDefinition]) -> Result<(), LlmError>
             let mut candidate = tool.clone();
             compile_anthropic_schema(
                 &mut candidate.parameters,
-                matches!(candidate.origin, ToolOrigin::Builtin | ToolOrigin::Bundled),
+                candidate.origin == ToolOrigin::Bundled,
             );
             (index, candidate)
         })
@@ -283,10 +283,8 @@ fn visit_child_schemas_mut_count(
 
 fn tool_origin_priority(origin: ToolOrigin) -> u8 {
     match origin {
-        ToolOrigin::Builtin => 0,
-        ToolOrigin::Bundled => 1,
-        ToolOrigin::Extension => 2,
-        ToolOrigin::Sdk => 3,
+        ToolOrigin::Bundled => 0,
+        ToolOrigin::Extension => 1,
     }
 }
 
@@ -1214,7 +1212,7 @@ fn schema_error(tool: &ToolDefinition, path: &str, message: &str) -> LlmError {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeMap, path::PathBuf};
+    use std::collections::BTreeMap;
 
     use astrcode_core::tool::{ExecutionMode, ToolOrigin};
     use astrcode_extension_sdk::extension::Registrar;
@@ -1228,7 +1226,7 @@ mod tests {
             description: String::new(),
             parameters,
             strict: true,
-            origin: ToolOrigin::Builtin,
+            origin: ToolOrigin::Bundled,
             execution_mode: ExecutionMode::Parallel,
         }
     }
@@ -1757,7 +1755,7 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        capped_tools[0].origin = ToolOrigin::Bundled;
+        capped_tools[0].origin = ToolOrigin::Extension;
         prepare_strict_tools(&mut capped_tools, true, StrictToolProvider::Anthropic)
             .expect("Anthropic overflow should degrade deterministically");
         assert!(!capped_tools[0].strict);
@@ -1803,10 +1801,7 @@ mod tests {
 
     #[test]
     fn compiles_all_first_party_non_mcp_tool_schemas() {
-        let mut definitions = astrcode_tools::registry::builtin_tools(PathBuf::from("."), 30)
-            .into_iter()
-            .map(|tool| tool.definition())
-            .collect::<Vec<_>>();
+        let mut definitions = Vec::new();
         let states = astrcode_bundled_extensions::bundled_extension_ids()
             .into_iter()
             .map(|id| (id.to_string(), true))
@@ -1837,33 +1832,56 @@ mod tests {
                 .all(|definition| definition.strict)
         );
 
-        let mut anthropic_builtins = definitions
+        let mut anthropic_bundled = definitions
             .iter()
-            .filter(|definition| definition.origin == ToolOrigin::Builtin)
+            .filter(|definition| definition.origin == ToolOrigin::Bundled)
             .cloned()
             .collect::<Vec<_>>();
-        for definition in &mut anthropic_builtins {
+        for definition in &mut anthropic_bundled {
             compile_anthropic_schema(&mut definition.parameters, true);
         }
-        let builtin_refs = anthropic_builtins.iter().collect::<Vec<_>>();
-        let builtin_stats = collect_anthropic_schema_stats(&builtin_refs)
-            .expect("compiled built-ins should be valid Anthropic schemas");
+        let bundled_refs = anthropic_bundled.iter().collect::<Vec<_>>();
+        let bundled_stats = collect_anthropic_schema_stats(&bundled_refs)
+            .expect("compiled bundled tools should be valid Anthropic schemas");
 
         prepare_strict_tools(&mut definitions, true, StrictToolProvider::Anthropic)
             .expect("all first-party schemas should compile or deterministically degrade");
-        let downgraded_builtins = definitions
+        let downgraded_bundled = definitions
             .iter()
-            .filter(|definition| definition.origin == ToolOrigin::Builtin && !definition.strict)
+            .filter(|definition| definition.origin == ToolOrigin::Bundled && !definition.strict)
             .map(|definition| definition.name.as_str())
             .collect::<Vec<_>>();
-        assert_eq!(
-            downgraded_builtins,
-            ["terminal"],
-            "Anthropic's 24 optional + 16 union limits cannot fit all built-ins when their \
-             natural schema has optional={}, unions={}",
-            builtin_stats.optional_parameters,
-            builtin_stats.union_parameters
+        assert!(
+            !downgraded_bundled.is_empty(),
+            "Anthropic's strict aggregate limits should downgrade overflow from optional={}, \
+             unions={}",
+            bundled_stats.optional_parameters,
+            bundled_stats.union_parameters,
         );
+        let accepted = definitions
+            .iter()
+            .filter(|definition| definition.strict)
+            .collect::<Vec<_>>();
+        validate_anthropic_tools(&accepted)
+            .expect("the accepted first-party strict subset must satisfy aggregate limits");
+        for coding_tool in [
+            "read",
+            "read_tool_result",
+            "write",
+            "edit",
+            "patch",
+            "glob",
+            "grep",
+            "shell",
+            "terminal",
+        ] {
+            assert!(
+                definitions
+                    .iter()
+                    .any(|definition| definition.name == coding_tool && definition.strict),
+                "bundled coding tool {coding_tool} should remain in the prioritized strict subset"
+            );
+        }
     }
 
     #[test]

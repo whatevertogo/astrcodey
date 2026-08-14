@@ -6,8 +6,11 @@ rust-version.workspace = true
 license.workspace = true
 description = "S5R worker-side runtime for AstrCode extensions"
 
+[features]
+default = []
+testing = []
+
 [dependencies]
-astrcode-extension-contract = { path = "../astrcode-extension-contract" }
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
 async-trait = { workspace = true }
 futures-util = { workspace = true }

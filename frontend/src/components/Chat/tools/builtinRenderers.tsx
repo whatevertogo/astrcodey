@@ -17,6 +17,7 @@ import {
   SearchToolDetails,
   ShellToolDetails,
   TerminalToolDetails,
+  ToolResultDetails,
 } from './details'
 import { registerToolRenderer } from './registry'
 import { todoWriteRenderSpec, todoWriteSummaryLine } from './todoWrite'
@@ -43,6 +44,33 @@ registerToolRenderer({
     )
   },
   render: ({ block }) => <ReadToolDetails block={block} />,
+})
+
+registerToolRenderer({
+  id: 'builtin:read-tool-result',
+  priority: 100,
+  match: ({ block }) => block.name === 'read_tool_result',
+  summary: ({ args, meta }) => {
+    const artifactId =
+      stringValue(meta, 'artifactId') || stringValue(args, 'artifactId')
+    const returnedBytes = numberValue(meta, 'returnedBytes')
+    const totalBytes = numberValue(meta, 'bytes')
+    const size =
+      returnedBytes != null && totalBytes != null
+        ? `${formatBytes(returnedBytes)}/${formatBytes(totalBytes)}`
+        : formatBytes(returnedBytes)
+    return compactLine(
+      [
+        'read tool result',
+        artifactId && truncateMiddle(artifactId, 40),
+        size,
+        paginationLabel(meta),
+      ]
+        .filter(Boolean)
+        .join(' ')
+    )
+  },
+  render: ({ block }) => <ToolResultDetails block={block} />,
 })
 
 registerToolRenderer({

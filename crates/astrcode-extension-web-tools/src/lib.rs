@@ -18,9 +18,13 @@ use astrcode_extension_sdk::{
     extension::{
         Extension, ExtensionCall, ExtensionCapability, ExtensionConfig, ExtensionError,
         ExtensionManifest, ExtensionStartContext, Registrar, ToolContext, ToolHandler,
+        ToolPlanContext,
     },
     host::{HOST_NETWORK_MAX_TIMEOUT_MS, ModelClient, NetworkClient},
-    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult, tool_metadata},
+    tool::{
+        ExecutionMode, HostResource, ResourceAccess, ToolDefinition, ToolOrigin, ToolPlan,
+        ToolResult, tool_metadata,
+    },
 };
 use parking_lot::{Mutex, RwLock};
 use serde_json::json;
@@ -160,6 +164,10 @@ struct WebSearchToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for WebSearchToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Network))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,
@@ -211,6 +219,13 @@ struct FetchUrlToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for FetchUrlToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::from_resources([
+            ResourceAccess::host(HostResource::Network),
+            ResourceAccess::host(HostResource::Model),
+        ]))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,

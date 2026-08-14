@@ -5,8 +5,9 @@
 use std::{collections::BTreeSet, sync::Arc};
 
 use astrcode_core::event::EventSendError;
-pub use astrcode_extension_contract::manifest::{CompactEvent, ContinueAfterStopLimit, HookMode};
 use serde::{Deserialize, Serialize};
+
+pub use crate::wire::manifest::{CompactEvent, ContinueAfterStopLimit, HookMode};
 
 // ─── Tool hook target ──────────────────────────────────────────────────
 

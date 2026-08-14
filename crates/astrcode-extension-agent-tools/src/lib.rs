@@ -13,15 +13,15 @@ use astrcode_extension_sdk::{
     extension::{
         Extension, ExtensionCall, ExtensionCapability, ExtensionError, ExtensionManifest,
         PromptBuildContext, PromptBuildHandler, PromptContributions, Registrar, ToolContext,
-        ToolHandler,
+        ToolHandler, ToolPlanContext,
     },
     session::{
         HostCreateSessionRequest, HostRecycleSessionRequest, HostSubmitTurnOutput,
         HostSubmitTurnRequest,
     },
     tool::{
-        ExecutionMode, ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
-        tool_metadata,
+        ExecutionMode, HostResource, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata,
+        ToolPromptTag, ToolResult, tool_metadata,
     },
 };
 use serde::Deserialize;
@@ -132,6 +132,10 @@ struct AgentToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for AgentToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,

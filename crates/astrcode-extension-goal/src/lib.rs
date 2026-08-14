@@ -13,14 +13,14 @@ use astrcode_extension_sdk::{
         ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCall,
         ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionManifest,
         ExtensionPaths, HookMode, ProviderContext, ProviderHandler, ProviderResult, Registrar,
-        SlashCommand, ToolContext, ToolHandler,
+        SlashCommand, ToolContext, ToolHandler, ToolPlanContext,
     },
     host::ExtensionHost,
     llm::LlmMessage,
     session::HostSessionTargetRequest,
     tool::{
-        ExecutionMode, ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
-        tool_metadata,
+        ExecutionMode, HostResource, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata,
+        ToolPromptTag, ToolResult, tool_metadata,
     },
     types::SessionId,
 };
@@ -172,6 +172,10 @@ struct GoalToolHandler;
 
 #[async_trait::async_trait]
 impl ToolHandler for GoalToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,

@@ -62,11 +62,11 @@ fn durable_event_to_deltas(
         },
         DurableEventPayload::ToolCallRequested {
             call_id,
-            tool_name,
+            tool_name: _,
             arguments,
             raw_arguments,
         } => {
-            let args_text = format_args_inline(tool_name, arguments);
+            let args_text = format_args_inline(arguments);
             vec![ConversationDeltaDto::PatchArguments {
                 block_id: call_id.to_string(),
                 arguments: args_text,
@@ -373,7 +373,7 @@ mod tests {
                 arguments_json,
             } => {
                 assert_eq!(block_id, "tool-1");
-                assert_eq!(arguments, "Explore crate architecture (explorer)");
+                assert_eq!(arguments, "Explore crate architecture");
                 assert!(!arguments.contains("Read every module"));
                 assert!(arguments_json.is_some());
                 let json = arguments_json.as_ref().unwrap();

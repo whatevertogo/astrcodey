@@ -16,6 +16,7 @@ re-export，但两套 runtime 入口、context 和错误返回类型不能互换
 测试入口也分开：bundled 使用 `astrcode_extension_sdk::testing` 的 context builders、
 `MockExtensionHost`、`RegistrationHarness` 与 `ExtensionLifecycleHarness`；worker 单元测试通过
 `astrcode_extension_worker::testing::with_host_api` 在异步作用域内注入 `HostApi`，协议验收使用真实子进程 E2E。
+两者都只在对应 crate 的 `testing` feature 开启时导出，生产依赖无需携带测试构造入口。
 
 ## 最小示例
 
@@ -38,6 +39,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .description("Returns pong")
             .parameters(serde_json::json!({"type": "object"}))
             .build(),
+        tool_planner(|_| async { Ok(ToolPlan::default()) }),
         tool_handler(|_ctx| async { Ok(tool_text("pong", false)) }),
     )?;
 
@@ -59,7 +61,9 @@ async fn run() -> Result<(), ErrorPayload> {
 
 旧写法在 JSON `manifest()` 里写一遍 `tools`，又在 `register_tool("ping", ...)` 注册一遍，名称不一致时**静默失败**（宿主有工具、子进程无 handler）。
 
-现用 `worker.tool(def, handler)`：**同一次调用**写入 manifest 与 handler 表。
+现用 `worker.tool(def, planner, handler)`：**同一次调用**写入 manifest、纯资源规划器与执行
+handler。planner 不是可选兼容钩子；每一次工具调用都固定经过“最终参数 → plan → 权限 →
+resource lease → execute”。
 
 SDK builder 创建的工具默认不启用 provider strict。只有确认 Schema 满足所有目标 provider 的
 strict JSON Schema 子集时才调用 `.strict()`：
@@ -96,11 +100,49 @@ struct GreetArgs { name: String }
 
 worker.tool(
     tool("greet").description("Greet").parameters(/* JSON Schema */).build(),
+    tool_planner_args(|_args: GreetArgs, _ctx| async move {
+        Ok(ToolPlan::default())
+    }),
     tool_handler_args(|args: GreetArgs, _ctx| async move {
         Ok(tool_text(format!("hello, {}!", args.name), false))
     }),
 )?;
 ```
+
+## 资源规划不是权限检查
+
+planner 与 execute 接收同一份已经完成 JSON repair 的最终参数。planner 只能把参数解释为
+`ToolPlan`，不能调用 `HostClient`、写事件、创建任务或访问扩展持久目录；worker runtime 在 plan
+阶段不会安装 Host API。路径型资源必须使用 `ResourceAccess::{read_file, search_file,
+write_file, read_write_file}`，非文件 Host 能力使用 `ToolPlan::host(HostResource::...)`。只有不经过
+Host、无法由 lease 强制约束的外部副作用才使用 `ToolPlan::opaque()`；它会要求显式审批，但不会
+因此获得任意 Host capability。
+
+```rust
+#[derive(Deserialize)]
+struct SaveArgs { path: String, content: String }
+
+worker.capability(ExtensionCapability::WorkspaceWrite);
+worker.tool(
+    tool("save").description("Save text").parameters(/* strict schema */).build(),
+    tool_planner_args(|args: SaveArgs, ctx| async move {
+        let path = ctx.working_dir().join(args.path);
+        Ok(ToolPlan::from_resources([ResourceAccess::write_file(path)]))
+    }),
+    tool_handler_args(|args: SaveArgs, _ctx| async move {
+        let output = HostClient::workspace().write(HostWorkspaceWriteRequest {
+            path: args.path,
+            content: args.content,
+            create_dirs: false,
+        }).await?;
+        Ok(tool_text(format!("wrote {} bytes", output.bytes_written), false))
+    }),
+)?;
+```
+
+Host 不信任 planner 的声明：session 用 plan 做权限决策并签发不可由扩展构造的 lease；真正的
+workspace/process/network/session/model/event operation 在 HostRouter 再按 lease 校验具体访问。
+声明不足会在执行边界失败，声明过宽则会触发更宽权限，因此 planner 应精确、确定且无副作用。
 
 钩子同理：`hook_handler_args` + `parse_hook_input`（反序列化 `event["input"]`）。
 
@@ -143,6 +185,7 @@ worker.capability(ExtensionCapability::WorkspaceWrite);
 let written = HostClient::workspace().write(HostWorkspaceWriteRequest {
     path: "notes/result.txt".into(),
     content: "done".into(),
+    create_dirs: true,
 }).await?;
 
 // 跨会话检查（返回 SDK 定义的稳定 DTO，不暴露内部 SessionReadModel）
@@ -278,6 +321,8 @@ COMMIT;
 失败会按 250 ms 到 30 s 退避重试；连续第 20 次失败后事件只会被持久化 quarantine/DLQ
 一次并推进 checkpoint。人工 skip 也会推进 checkpoint，但必须通过管理入口留下审计记录。
 retry 等待不占全局 delivery permit，同一 consumer 仍严格串行，不会跳过前一个事件。
+consumer state 保存 quarantine/skip 的单调总数和最近 128 条审计；单条错误文本最多 4 KiB，
+因此长期运行不会让控制文件无界增长。状态更新先同步临时文件再原子替换；Unix 还会同步目录元数据。
 
 bundled handler 显式返回 `CustomEventDisposition::Ack`、`::retry(reason)` 或
 `::dead_letter(reason)`。worker handler 返回相同 disposition 的 `HandlerResult` 表示：
@@ -303,6 +348,8 @@ Ok(CustomEventDisposition::Ack.into())
 - **E2E 参考**：`crates/astrcode-extensions/tests/s5r-guest/`
 
 ## 测试 Worker `HostClient`
+
+测试依赖需显式启用 `features = ["testing"]`；该 feature 不应加入生产依赖。
 
 ```rust
 use std::sync::Arc;
@@ -337,7 +384,8 @@ let output = with_host_api(Arc::new(MockHost), async {
 单元测试把类型化领域 client 调用包在作用域内；并发测试各自持有 mock，不修改进程级全局状态。
 `tokio::spawn` 创建的新任务不会继承这个测试作用域；需要在新任务内再次调用 `with_host_api`。
 `HostApi` 和 raw invoke 只是
-`astrcode_extension_worker::testing` 的 transport seam，不在 `worker_prelude` 中。集成测试使用真实子进程 +
+启用 `testing` feature 后的 `astrcode_extension_worker::testing` transport seam，不在
+`worker_prelude` 中。集成测试使用真实子进程 +
 `s5r_e2e_test`。
 
 ## 进一步阅读

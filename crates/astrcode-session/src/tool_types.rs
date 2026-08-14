@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use astrcode_core::{
     permission::ApprovalSource,
-    tool::{ExecutionMode, ToolDefinition, ToolExecutionResult, ToolResult},
+    tool::{ExecutionMode, ToolDefinition, ToolExecutionResult, ToolResult, access::ToolPlan},
 };
 
 use super::turn_publish::TurnEvents;
@@ -26,6 +26,7 @@ pub(crate) struct PreparedToolInvocation {
     pub(crate) name: String,
     pub(crate) tool_input: serde_json::Value,
     pub(crate) raw_arguments: Option<String>,
+    pub(crate) plan: ToolPlan,
     pub(crate) mode: ExecutionMode,
     pub(crate) discovery_gate: Option<String>,
     pub(crate) disposition: PreparedToolDisposition,
@@ -59,12 +60,15 @@ pub(crate) enum PreparedToolDisposition {
     },
     /// 同 step 内与先前调用相同 `(toolName, args)`，复用 Primary 的最终结果。
     ReuseSameStep,
-    /// 需用户审批后执行。
-    AwaitApproval {
-        prompt: String,
-        rule_key: Option<String>,
-        source: ApprovalSource,
-    },
+    /// 所有尚未被会话记忆消解的审批条件，按声明顺序逐项确认。
+    AwaitApprovals(Vec<PreparedToolApproval>),
+}
+
+#[derive(Clone)]
+pub(crate) struct PreparedToolApproval {
+    pub(crate) prompt: String,
+    pub(crate) rule_key: Option<String>,
+    pub(crate) source: ApprovalSource,
 }
 
 /// 一次工具调用在 session 编排层的终态。
@@ -159,6 +163,7 @@ pub(crate) struct ExecutableToolInvocation {
     pub(crate) call_id: String,
     pub(crate) name: String,
     pub(crate) tool_input: serde_json::Value,
+    pub(crate) plan: ToolPlan,
 }
 
 /// 工具完成事件所需的参数形状。
@@ -194,6 +199,7 @@ impl PreparedToolInvocation {
             call_id: self.call_id.clone(),
             name: self.name.clone(),
             tool_input: self.tool_input.clone(),
+            plan: self.plan.clone(),
         }
     }
 }

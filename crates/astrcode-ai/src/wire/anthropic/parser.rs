@@ -9,7 +9,7 @@ use std::collections::{HashMap, HashSet};
 use astrcode_core::llm::{LlmEvent, LlmTokenUsage, LlmTokenUsageSource};
 use tokio::sync::mpsc;
 
-use crate::common::{send_event, stream_text_delta, token_usage_has_value, utf8_prefix};
+use crate::common::{send_event, stream_text_delta, token_usage_has_value};
 
 /// 流式响应的 `Done` 事件守卫，保证至多发送一次 `Done`。
 #[derive(Debug, Default)]
@@ -414,7 +414,7 @@ pub(crate) fn process_sse_line(
                  {error}",
                 current_event_type,
                 data.len(),
-                utf8_prefix(data, 80)
+                &data[..data.floor_char_boundary(80)]
             );
         },
     }

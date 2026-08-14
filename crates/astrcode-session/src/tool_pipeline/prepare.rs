@@ -2,7 +2,7 @@ use std::{collections::HashMap, path::Path};
 
 use astrcode_core::{
     permission::ApprovalSource,
-    tool::{ExecutionMode, ToolDefinition, access::ResourceAccess},
+    tool::{ExecutionMode, ToolDefinition, ToolPlanningContext, access::ToolPlan},
 };
 use astrcode_extension_sdk::extension::{
     PreToolUsePayload, PreToolUseResult, RuntimePreToolUseContext,
@@ -16,8 +16,8 @@ use crate::{
     tool_deduplicator::{SameStepCheck, ToolCallDeduplicator},
     tool_json_repair::parse_and_repair_json,
     tool_types::{
-        PreparedToolDisposition, PreparedToolInvocation, StreamedToolCall, ToolBatch,
-        ToolExecutionOutcome,
+        PreparedToolApproval, PreparedToolDisposition, PreparedToolInvocation, StreamedToolCall,
+        ToolBatch, ToolExecutionOutcome,
     },
     turn_context::TurnError,
     turn_publish::TurnEvents,
@@ -49,6 +49,7 @@ impl ToolCalls {
                 name: tc.name.clone(),
                 tool_input: args,
                 raw_arguments: None,
+                plan: ToolPlan::default(),
                 mode: ExecutionMode::Sequential,
                 discovery_gate: None,
                 disposition: PreparedToolDisposition::Rejected { error: guidance },
@@ -69,15 +70,31 @@ impl ToolCalls {
 
         let pre_hook_result = self.extension_runner.emit_pre_tool_use(pre_ctx).await?;
 
-        let (tool_input, mut disposition) = match pre_hook_result {
-            PreToolUseResult::Ask { prompt, rule_key } => (
-                args,
-                PreparedToolDisposition::AwaitApproval {
-                    prompt,
-                    rule_key,
-                    source: ApprovalSource::Extension,
-                },
-            ),
+        let mut approvals = Vec::new();
+        let (mut tool_input, mut disposition) = match pre_hook_result {
+            PreToolUseResult::Ask { prompt, rule_key } => {
+                let disposition = match rule_key.as_deref() {
+                    Some(key) if self.turn.shared.approval_history.is_denied_always(key) => {
+                        PreparedToolDisposition::Rejected {
+                            error: format!(
+                                "Denied by session approval memory for extension rule `{key}`"
+                            ),
+                        }
+                    },
+                    Some(key) if self.turn.shared.approval_history.is_allowed_always(key) => {
+                        PreparedToolDisposition::Execute
+                    },
+                    _ => {
+                        approvals.push(PreparedToolApproval {
+                            prompt,
+                            rule_key,
+                            source: ApprovalSource::Extension,
+                        });
+                        PreparedToolDisposition::Execute
+                    },
+                };
+                (args, disposition)
+            },
             PreToolUseResult::ModifyInput { tool_input } => {
                 (tool_input, PreparedToolDisposition::Execute)
             },
@@ -90,8 +107,44 @@ impl ToolCalls {
             PreToolUseResult::Allow => (args, PreparedToolDisposition::Execute),
         };
 
+        let mut plan = ToolPlan::default();
+        if !matches!(disposition, PreparedToolDisposition::Rejected { .. }) {
+            if let Err(error) = self
+                .tool_registry
+                .normalize_final_arguments(&tc.name, &mut tool_input)
+            {
+                disposition = PreparedToolDisposition::Rejected {
+                    error: format!("failed to normalize final tool arguments: {error}"),
+                };
+            } else {
+                match self
+                    .tool_registry
+                    .plan(
+                        &tc.name,
+                        &tool_input,
+                        &tool_planning_context(
+                            &self.turn.shared,
+                            &tc.call_id,
+                            self.cancellation_token.clone(),
+                        ),
+                    )
+                    .await
+                {
+                    Ok(planned) => plan = planned,
+                    Err(error) => {
+                        disposition = PreparedToolDisposition::Rejected {
+                            error: format!("failed to plan tool resources: {error}"),
+                        };
+                    },
+                }
+            }
+        }
+
         if matches!(disposition, PreparedToolDisposition::Execute) {
-            disposition = self.evaluate_permission_chain(&tc.name, &tool_input);
+            disposition = compose_permission_decision(
+                approvals,
+                self.evaluate_permission_chain(&tc.name, &tool_input, &plan),
+            );
         }
 
         let same_step = deduplicator.check_same_step(&tc.call_id, &tc.name, &tool_input);
@@ -106,7 +159,7 @@ impl ToolCalls {
             PreparedToolDisposition::Execute => self.tool_registry.execution_mode(&tc.name),
             PreparedToolDisposition::Rejected { .. }
             | PreparedToolDisposition::ReuseSameStep
-            | PreparedToolDisposition::AwaitApproval { .. } => ExecutionMode::Sequential,
+            | PreparedToolDisposition::AwaitApprovals(_) => ExecutionMode::Sequential,
         };
 
         Ok(PreparedToolInvocation {
@@ -115,6 +168,7 @@ impl ToolCalls {
             name: tc.name.clone(),
             tool_input,
             raw_arguments: None,
+            plan,
             mode,
             discovery_gate: self
                 .tool_registry
@@ -181,59 +235,60 @@ impl ToolCalls {
         &self,
         tool_name: &str,
         tool_input: &serde_json::Value,
-    ) -> PreparedToolDisposition {
-        let accesses = self
-            .tool_registry
-            .resource_accesses(
-                tool_name,
-                tool_input,
-                Path::new(&self.turn.shared.working_dir),
-            )
-            .unwrap_or_else(|error| {
-                tracing::debug!(
-                    tool_name,
-                    error = %error,
-                    "resource_accesses parse failed during permission check; declaring \
-                     unrestricted access so the permission chain applies its strictest \
-                     policy (fail-closed)"
-                );
-                vec![ResourceAccess::all()]
-            });
+        plan: &ToolPlan,
+    ) -> PermissionDecision {
         let ctx = PermissionContext {
             tool_name,
             tool_input,
             working_dir: Path::new(&self.turn.shared.working_dir),
-            resource_accesses: &accesses,
+            resource_accesses: plan.resources().as_slice(),
             approval_mode: self.turn.shared.approval_mode,
             tool_selection: self.turn.shared.tool_selection.as_ref(),
         };
-        match self.turn.shared.permission_chain.decide(&ctx) {
-            PermissionDecision::Allow => PreparedToolDisposition::Execute,
-            PermissionDecision::Deny { reason } => {
-                PreparedToolDisposition::Rejected { error: reason }
-            },
-            PermissionDecision::Ask { prompt, rule_key } => {
-                if let Some(key) = rule_key.as_deref() {
-                    if self.turn.shared.approval_history.is_allowed_always(key) {
-                        return PreparedToolDisposition::Execute;
-                    }
-                    if self.turn.shared.approval_history.is_denied_always(key) {
-                        return PreparedToolDisposition::Rejected {
-                            error: format!("Denied by session approval memory ({key})"),
-                        };
-                    }
-                }
-                PreparedToolDisposition::AwaitApproval {
-                    prompt,
-                    rule_key,
-                    source: ApprovalSource::Core,
-                }
-            },
-            PermissionDecision::Pass => PreparedToolDisposition::Rejected {
-                error: "permission chain returned Pass without resolution".into(),
-            },
-        }
+        self.turn
+            .shared
+            .permission_chain
+            .decide(&ctx, &self.turn.shared.approval_history)
     }
+}
+
+fn compose_permission_decision(
+    mut approvals: Vec<PreparedToolApproval>,
+    decision: PermissionDecision,
+) -> PreparedToolDisposition {
+    match decision {
+        PermissionDecision::Allow if approvals.is_empty() => PreparedToolDisposition::Execute,
+        PermissionDecision::Allow => PreparedToolDisposition::AwaitApprovals(approvals),
+        PermissionDecision::Deny { reason } => PreparedToolDisposition::Rejected { error: reason },
+        PermissionDecision::Ask { prompt, rule_key } => {
+            approvals.push(PreparedToolApproval {
+                prompt,
+                rule_key,
+                source: ApprovalSource::Core,
+            });
+            PreparedToolDisposition::AwaitApprovals(approvals)
+        },
+        PermissionDecision::Pass => PreparedToolDisposition::Rejected {
+            error: "permission chain returned Pass without resolution".into(),
+        },
+    }
+}
+
+fn tool_planning_context(
+    turn: &crate::turn_context::SharedTurnContext,
+    tool_call_id: &str,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> ToolPlanningContext {
+    let mut context = ToolPlanningContext::new(
+        turn.session_id.clone(),
+        turn.working_dir.clone(),
+        Some(tool_call_id.to_owned()),
+    )
+    .with_cancellation(cancellation);
+    if let Some(turn_id) = &turn.turn_id {
+        context = context.with_turn_id(turn_id.clone());
+    }
+    context
 }
 
 fn reject_malformed_tool_call(
@@ -254,6 +309,7 @@ fn reject_malformed_tool_call(
         // ToolCallRequested instead of disguising a parse failure as `{}`.
         tool_input: serde_json::Value::String(tool_call.arguments.clone()),
         raw_arguments: Some(tool_call.arguments.clone()),
+        plan: ToolPlan::default(),
         mode: ExecutionMode::Sequential,
         discovery_gate: None,
         disposition: PreparedToolDisposition::Rejected { error: message },
@@ -285,5 +341,37 @@ mod tests {
         };
         assert!(error.contains("invalid JSON"));
         assert!(error.contains("expected `:`"));
+    }
+
+    #[test]
+    fn extension_and_core_approval_requirements_compose_while_denial_wins() {
+        let extension = PreparedToolApproval {
+            prompt: "extension gate".into(),
+            rule_key: Some("extension:guard:dangerous".into()),
+            source: ApprovalSource::Extension,
+        };
+        let disposition = compose_permission_decision(
+            vec![extension.clone()],
+            PermissionDecision::Ask {
+                prompt: "process access".into(),
+                rule_key: Some("process-resource:run_tests".into()),
+            },
+        );
+        let PreparedToolDisposition::AwaitApprovals(approvals) = disposition else {
+            panic!("independent approval requirements must compose");
+        };
+        assert_eq!(approvals.len(), 2);
+        assert!(matches!(approvals[0].source, ApprovalSource::Extension));
+        assert!(matches!(approvals[1].source, ApprovalSource::Core));
+
+        assert!(matches!(
+            compose_permission_decision(
+                vec![extension],
+                PermissionDecision::Deny {
+                    reason: "blocked".into(),
+                },
+            ),
+            PreparedToolDisposition::Rejected { error } if error == "blocked"
+        ));
     }
 }

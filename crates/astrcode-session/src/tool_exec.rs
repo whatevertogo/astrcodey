@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Instant};
 use astrcode_core::{
     tool::{
         FileObservation, FileObservationStore, LlmModelIds, ToolCapabilities, ToolDefinition,
-        ToolError, ToolExecutionContext, ToolResultArtifactReader,
+        ToolError, ToolExecutionContext, ToolResultArtifactReader, access::ResourceLease,
     },
     types::TurnId,
 };
@@ -40,8 +40,7 @@ impl TurnToolContext {
         let runtime_services = session.runtime_services();
         let effective = runtime_services.read_effective();
         let approval_history = session.runtime().approval_history();
-        let permission_chain =
-            crate::permission::build_default_chain(&effective, Arc::clone(&approval_history));
+        let permission_chain = crate::permission::build_default_chain(&effective);
         let shared = crate::turn_context::SharedTurnContext {
             session_id: session.id().clone(),
             turn_id: Some(turn_id),
@@ -228,8 +227,13 @@ async fn execute_tool_call_blocking(
     call: ExecutableToolInvocation,
 ) -> (usize, ToolExecutionOutcome) {
     let started_at = Instant::now();
-    let tool_name = call.name;
-    let call_id = call.call_id;
+    let ExecutableToolInvocation {
+        index,
+        call_id,
+        name: tool_name,
+        tool_input,
+        plan,
+    } = call;
     let ToolCallRuntimeContext {
         turn,
         tools,
@@ -245,6 +249,7 @@ async fn execute_tool_call_blocking(
         turn.shared.turn_event_tx(),
         capabilities,
     )
+    .with_resource_lease(ResourceLease::from_plan(&plan))
     .with_cancellation(cancellation_token.clone());
     if let Some(turn_id) = &turn.shared.turn_id {
         tool_ctx = tool_ctx.with_turn_id(turn_id.clone());
@@ -255,7 +260,7 @@ async fn execute_tool_call_blocking(
             "tool execution cancelled",
             Some(started_at.elapsed().as_millis() as u64),
         ),
-        result = tool_registry.execute(&tool_name, call.tool_input, &tool_ctx) => {
+        result = tool_registry.execute(&tool_name, tool_input, &tool_ctx) => {
             match result {
                 Ok(mut result) => {
                     result.result_mut().duration_ms =
@@ -323,7 +328,7 @@ async fn execute_tool_call_blocking(
         },
     }
 
-    (call.index, outcome)
+    (index, outcome)
 }
 
 // ─── File observation store ──────────────────────────────────────────────────
@@ -384,6 +389,14 @@ mod tests {
                 origin: ToolOrigin::Extension,
                 execution_mode: ExecutionMode::Sequential,
             }
+        }
+
+        async fn plan(
+            &self,
+            _arguments: &serde_json::Value,
+            _ctx: &astrcode_core::tool::ToolPlanningContext,
+        ) -> Result<astrcode_core::tool::access::ToolPlan, ToolError> {
+            Ok(astrcode_core::tool::access::ToolPlan::default())
         }
 
         async fn execute(
@@ -447,6 +460,7 @@ mod tests {
                 call_id: "call-source".into(),
                 name: "capture_context".into(),
                 tool_input: serde_json::json!({}),
+                plan: astrcode_core::tool::access::ToolPlan::default(),
             },
         )
         .await;

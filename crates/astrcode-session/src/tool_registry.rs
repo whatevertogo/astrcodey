@@ -2,13 +2,12 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
-    path::Path,
     sync::Arc,
 };
 
 use astrcode_core::tool::{
     ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
-    ToolExecutionResult, ToolPromptMetadata, access::ResourceAccess,
+    ToolExecutionResult, ToolPlanningContext, ToolPromptMetadata, access::ToolPlan,
 };
 use serde_json::Value;
 
@@ -86,20 +85,44 @@ impl ToolRegistry {
     pub async fn execute(
         &self,
         name: &str,
-        mut args: serde_json::Value,
+        args: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolExecutionResult, ToolError> {
         match self.tools.get(name) {
-            Some(entry) => {
-                if entry.definition.strict {
-                    normalize_strict_arguments(
-                        &mut args,
-                        &entry.definition.parameters,
-                        &entry.definition.parameters,
-                    );
-                }
-                entry.tool.execute(args, ctx).await
-            },
+            Some(entry) => entry.tool.execute(args, ctx).await,
+            None => Err(ToolError::NotFound(name.into())),
+        }
+    }
+
+    /// Normalize provider quirks once, after PreToolUse and before plan/permission/execute.
+    pub(crate) fn normalize_final_arguments(
+        &self,
+        name: &str,
+        args: &mut Value,
+    ) -> Result<(), ToolError> {
+        let entry = self
+            .tools
+            .get(name)
+            .ok_or_else(|| ToolError::NotFound(name.into()))?;
+        normalize_stringified_booleans(args, &entry.definition.parameters);
+        if entry.definition.strict {
+            normalize_strict_arguments(
+                args,
+                &entry.definition.parameters,
+                &entry.definition.parameters,
+            );
+        }
+        Ok(())
+    }
+
+    pub async fn plan(
+        &self,
+        name: &str,
+        args: &Value,
+        ctx: &ToolPlanningContext,
+    ) -> Result<ToolPlan, ToolError> {
+        match self.tools.get(name) {
+            Some(entry) => entry.tool.plan(args, ctx).await,
             None => Err(ToolError::NotFound(name.into())),
         }
     }
@@ -109,18 +132,6 @@ impl ToolRegistry {
             .get(name)
             .map(|entry| entry.definition.execution_mode)
             .unwrap_or(ExecutionMode::Sequential)
-    }
-
-    pub fn resource_accesses(
-        &self,
-        name: &str,
-        args: &serde_json::Value,
-        working_dir: &Path,
-    ) -> Result<Vec<ResourceAccess>, ToolError> {
-        match self.tools.get(name) {
-            Some(entry) => entry.tool.resource_accesses(args, working_dir),
-            None => Err(ToolError::NotFound(name.into())),
-        }
     }
 
     pub fn find_definition(&self, name: &str) -> Option<ToolDefinition> {
@@ -185,6 +196,50 @@ impl ToolRegistry {
                 .collect(),
         };
         Self { tools }
+    }
+}
+
+fn normalize_stringified_booleans(arguments: &mut Value, schema: &Value) -> usize {
+    match arguments {
+        Value::String(raw) if schema["type"] == "boolean" => {
+            let normalized = match raw.trim().to_ascii_lowercase().as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            };
+            if let Some(normalized) = normalized {
+                *arguments = Value::Bool(normalized);
+                1
+            } else {
+                0
+            }
+        },
+        Value::Object(values) => schema["properties"]
+            .as_object()
+            .map(|properties| {
+                values
+                    .iter_mut()
+                    .filter_map(|(name, value)| {
+                        properties
+                            .get(name)
+                            .map(|field_schema| normalize_stringified_booleans(value, field_schema))
+                    })
+                    .sum()
+            })
+            .unwrap_or_default(),
+        Value::Array(values) => match &schema["items"] {
+            Value::Array(item_schemas) => values
+                .iter_mut()
+                .zip(item_schemas)
+                .map(|(value, item_schema)| normalize_stringified_booleans(value, item_schema))
+                .sum(),
+            Value::Object(_) => values
+                .iter_mut()
+                .map(|value| normalize_stringified_booleans(value, &schema["items"]))
+                .sum(),
+            _ => 0,
+        },
+        _ => 0,
     }
 }
 
@@ -328,6 +383,14 @@ mod tests {
             self.1
         }
 
+        async fn plan(
+            &self,
+            _arguments: &serde_json::Value,
+            _ctx: &ToolPlanningContext,
+        ) -> Result<ToolPlan, ToolError> {
+            Ok(ToolPlan::default())
+        }
+
         async fn execute(
             &self,
             _arguments: serde_json::Value,
@@ -352,6 +415,14 @@ mod tests {
 
         fn prompt_metadata(&self) -> Option<ToolPromptMetadata> {
             Some(ToolPromptMetadata::default().deferred_discovery_group(self.1))
+        }
+
+        async fn plan(
+            &self,
+            _arguments: &serde_json::Value,
+            _ctx: &ToolPlanningContext,
+        ) -> Result<ToolPlan, ToolError> {
+            Ok(ToolPlan::default())
         }
 
         async fn execute(
@@ -463,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn strict_argument_normalization_only_removes_synthetic_optional_nulls() {
+    fn final_argument_normalization_handles_provider_booleans_and_optional_nulls() {
         let schema = serde_json::json!({
             "type": "object",
             "properties": {
@@ -486,9 +557,10 @@ mod tests {
             "required": "value",
             "optional": null,
             "nullable": null,
-            "items": [{"flag": null}]
+            "items": [{"flag": "TRUE"}, {"flag": null}]
         });
 
+        assert_eq!(normalize_stringified_booleans(&mut arguments, &schema), 1);
         normalize_strict_arguments(&mut arguments, &schema, &schema);
 
         assert_eq!(
@@ -496,7 +568,7 @@ mod tests {
             serde_json::json!({
                 "required": "value",
                 "nullable": null,
-                "items": [{}]
+                "items": [{"flag": true}, {}]
             })
         );
     }

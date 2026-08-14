@@ -18,10 +18,10 @@ use tokio::sync::Mutex;
 
 use crate::{
     CompactSnapshotInput, EventConsumerCheckpointOutcome, EventConsumerCheckpointReset,
-    EventConsumerFailureOutcome, EventConsumerQuarantine, EventConsumerSkip, EventConsumerState,
-    EventReader, SessionEventJournal, SessionPathResolver, SessionReader, SessionStore,
-    StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
-    tool_artifacts::{slice_tool_result, tool_result_file_name_with_suffix},
+    EventConsumerFailureOutcome, EventConsumerState, EventReader, SessionEventJournal,
+    SessionPathResolver, SessionReader, SessionStore, StorageError, ToolResultArtifactInput,
+    ToolResultArtifactRef, ToolResultArtifactStore,
+    tool_artifacts::{slice_tool_result_content, tool_result_artifact_id},
 };
 
 /// 纯内存 session persistence 实现。
@@ -136,28 +136,25 @@ impl SessionReader for InMemoryEventStore {
 
 #[async_trait::async_trait]
 impl ToolResultArtifactStore for InMemoryEventStore {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<ToolResultArtifactSlice, StorageError> {
-        let expected_prefix = format!("memory://{session_id}/tool-results/");
-        if !path.starts_with(&expected_prefix) {
-            return Err(StorageError::InvalidId(
-                "tool result path belongs to a different session".into(),
-            ));
-        }
+        crate::tool_artifacts::validate_tool_result_artifact_id(artifact_id)
+            .map_err(|message| StorageError::InvalidId(message.into()))?;
         let sessions = self.sessions.lock().await;
         let session = sessions
             .get(session_id)
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
         let content = session
             .tool_results
-            .get(path)
+            .get(artifact_id)
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
-        Ok(slice_tool_result(path, content, char_offset, max_chars))
+        slice_tool_result_content(artifact_id, content, byte_offset, max_bytes)
+            .map_err(StorageError::Io)
     }
 
     async fn write_tool_result_artifact(
@@ -170,27 +167,23 @@ impl ToolResultArtifactStore for InMemoryEventStore {
             .get_mut(session_id)
             .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
         for suffix in 0..1000 {
-            let path = format_memory_tool_result_path(
-                session_id.as_str(),
-                &artifact.tool_name,
-                &artifact.call_id,
-                suffix,
-            );
-            match session.tool_results.get(&path) {
+            let artifact_id =
+                tool_result_artifact_id(&artifact.tool_name, &artifact.call_id, suffix);
+            match session.tool_results.get(&artifact_id) {
                 Some(existing) if existing == &artifact.content => {
                     return Ok(ToolResultArtifactRef {
                         bytes: artifact.content.len(),
-                        path: Some(path),
+                        artifact_id,
                     });
                 },
                 Some(_) => continue,
                 None => {
                     session
                         .tool_results
-                        .insert(path.clone(), artifact.content.clone());
+                        .insert(artifact_id.clone(), artifact.content.clone());
                     return Ok(ToolResultArtifactRef {
                         bytes: artifact.content.len(),
-                        path: Some(path),
+                        artifact_id,
                     });
                 },
             }
@@ -375,13 +368,7 @@ impl SessionStore for InMemoryEventStore {
             .ok_or_else(|| StorageError::CorruptLog("consumer failure count overflow".into()))?;
         let attempts = state.consecutive_failures;
         if attempts >= quarantine_after {
-            if !state.quarantined.iter().any(|record| record.seq == seq) {
-                state.quarantined.push(EventConsumerQuarantine {
-                    seq,
-                    attempts,
-                    last_error: error.to_owned(),
-                });
-            }
+            state.record_quarantine(seq, attempts, error)?;
             state.checkpoint = Some(seq);
             state.consecutive_failures = 0;
             Ok(EventConsumerFailureOutcome::Quarantined { attempts })
@@ -438,11 +425,7 @@ impl SessionStore for InMemoryEventStore {
         if reset == EventConsumerCheckpointReset::StreamHead
             && state.checkpoint != previous_checkpoint
         {
-            state.skips.push(EventConsumerSkip {
-                from_seq: previous_checkpoint,
-                to_seq: state.checkpoint,
-                revision: state.revision,
-            });
+            state.record_skip(previous_checkpoint, state.checkpoint)?;
         }
         Ok(state.clone())
     }
@@ -479,15 +462,6 @@ impl SessionStore for InMemoryEventStore {
     }
 }
 
-fn format_memory_tool_result_path(
-    session_id: &str,
-    tool_name: &str,
-    call_id: &str,
-    suffix: usize,
-) -> String {
-    let file_name = tool_result_file_name_with_suffix(tool_name, call_id, suffix);
-    format!("memory://{session_id}/tool-results/{file_name}")
-}
 
 #[cfg(test)]
 mod tests;

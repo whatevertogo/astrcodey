@@ -1,0 +1,89 @@
+use std::time::Instant;
+
+use astrcode_extension_sdk::{
+    extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
+    host::HostWorkspaceWriteRequest,
+    tool::{
+        ExecutionMode, ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
+    },
+};
+use serde::Deserialize;
+
+use super::{absolute_path, text_change_metadata};
+use crate::result::success;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WriteArgs {
+    path: String,
+    content: String,
+    #[serde(default)]
+    create_dirs: bool,
+}
+
+pub(super) struct WriteHandler;
+
+#[async_trait::async_trait]
+impl ToolHandler for WriteHandler {
+    async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        let args: WriteArgs = context.arguments()?;
+        Ok(ToolPlan::from_resources([ResourceAccess::write_file(
+            absolute_path(context.working_dir(), &args.path),
+        )]))
+    }
+
+    async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
+        let started_at = Instant::now();
+        let args: WriteArgs = context.arguments()?;
+        let output = context
+            .host()
+            .workspace()?
+            .write(HostWorkspaceWriteRequest {
+                path: args.path.clone(),
+                content: args.content,
+                create_dirs: args.create_dirs,
+            })
+            .await?;
+        let created = output.created;
+        let content = if created {
+            format!(
+                "Created {} ({} bytes)",
+                output.path, output.change.new_bytes
+            )
+        } else {
+            format!(
+                "Updated {} ({} bytes)",
+                output.path, output.change.new_bytes
+            )
+        };
+        let mut metadata = text_change_metadata(&output.change);
+        metadata.insert("path".into(), serde_json::json!(output.path));
+        metadata.insert("created".into(), serde_json::json!(created));
+        Ok(success(started_at, content, metadata).into())
+    }
+}
+
+pub(super) fn definition() -> ToolDefinition {
+    ToolDefinition {
+        name: "write".into(),
+        description: concat!(
+            "Create or completely overwrite a file.\n\n",
+            "When NOT to use:\n- Incremental edits to an existing file → `edit`\n\n",
+            "Tips:\n- New files\n- Full-file rewrite after `read`"
+        )
+        .into(),
+        strict: true,
+        origin: ToolOrigin::Bundled,
+        execution_mode: ExecutionMode::Sequential,
+        parameters: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "path": { "type": "string", "description": "Target path." },
+                "content": { "type": "string", "description": "Complete UTF-8 content. Replaces the whole file. MUST read existing files first." },
+                "createDirs": { "type": "boolean", "description": "Create missing parent directories." }
+            },
+            "required": ["path", "content"],
+            "additionalProperties": false
+        }),
+    }
+}

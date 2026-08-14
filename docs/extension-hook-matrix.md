@@ -38,7 +38,8 @@ Default session context/API, no manifest capability required:
 
 Sensitive APIs include `input_delivery`, `session_control`, `session_history`, `session_inspect`,
 `main_model`, `small_model`, `emit_custom_events`, `consume_custom_events`, `workspace_read`,
-`workspace_write`, `process_spawn`, `network_client`, and `public_http_dispatch`.
+`workspace_write`, `tool_result_read`, `process_spawn`, `network_client`, and
+`public_http_dispatch`.
 
 The runner rejects privileged registrations that omit their capability:
 

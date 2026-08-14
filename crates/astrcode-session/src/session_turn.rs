@@ -10,9 +10,12 @@ use astrcode_core::{
     types::*,
     user_input::UserInput,
 };
-use astrcode_extension_sdk::extension::{
-    RuntimeHookCallContext, RuntimeUserMessageEnvelopeContext, UserMessageEnvelopePayload,
-    UserMessageEnvelopeResult,
+use astrcode_extension_sdk::{
+    extension::{
+        RuntimeHookCallContext, RuntimeUserMessageEnvelopeContext, UserMessageEnvelopePayload,
+        UserMessageEnvelopeResult,
+    },
+    runtime_ports::TurnExtensionView,
 };
 use astrcode_session_projection::SessionReadModel;
 use parking_lot::Mutex;
@@ -27,7 +30,6 @@ use crate::{
     runtime_stability::RuntimeStabilityBudget,
     session::Session,
     session_error::SessionError,
-    session_runtime_services::SessionRuntimeView,
     tool_exec::TurnToolContext,
     turn_context::{TurnError, hook_call_context_for_read_model},
     turn_handle::{SharedTurnFinalization, TurnHandle},
@@ -72,7 +74,7 @@ impl Session {
 
     async fn apply_user_message_envelope(
         &self,
-        runtime_view: &SessionRuntimeView,
+        runtime_view: &TurnExtensionView,
         text: String,
         attachments: &[MessageAttachment],
         call: RuntimeHookCallContext,
@@ -103,7 +105,7 @@ impl Session {
 
     async fn prepare_turn_runner(
         &self,
-        runtime_view: &SessionRuntimeView,
+        runtime_view: &TurnExtensionView,
         turn_id: &TurnId,
         cancellation_token: CancellationToken,
     ) -> Result<TurnLoop, TurnError> {
@@ -260,7 +262,7 @@ impl Session {
     ) -> Result<TurnHandle, TurnError> {
         let cancellation_token = CancellationToken::new();
         let setup_cancellation = cancellation_token.clone().drop_guard();
-        let runtime_view = self.runtime_services.turn_runtime_view().await?;
+        let runtime_view = self.runtime_services.pin_extension_view().await?;
         let UserInput { text, attachments } = input;
         let envelope_state = self.read_model().await?;
         let envelope_call = self.turn_hook_call_context(
@@ -301,7 +303,7 @@ impl Session {
             .find(|message| message.source.is_none() && message.message.role == LlmRole::User)
             .map(|message| message.message.joined_display_text("\n"))
             .unwrap_or_default();
-        let runtime_view = self.runtime_services.turn_runtime_view().await?;
+        let runtime_view = self.runtime_services.pin_extension_view().await?;
         let agent = self
             .prepare_turn_runner(&runtime_view, &turn_id, cancellation_token)
             .await?;
@@ -640,7 +642,6 @@ mod tests {
                 astrcode_core::config::ContextSettings::default(),
             )),
             Arc::new(astrcode_context::NoopPostCompactEnricher),
-            Arc::new(astrcode_extension_sdk::runtime_ports::NoopRuntimePorts),
         ));
         let session_id = new_session_id();
         let store: Arc<dyn astrcode_storage::SessionStore> = Arc::new(InMemoryEventStore::new());

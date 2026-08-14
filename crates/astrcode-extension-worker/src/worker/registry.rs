@@ -8,7 +8,7 @@ use std::{
     sync::Arc,
 };
 
-use astrcode_extension_contract::manifest::{
+use astrcode_extension_sdk::wire::manifest::{
     InitializeManifest, ManifestCommand, ManifestHook, ManifestHookEvent, ManifestHookOptions,
     ManifestHttpRoute, ManifestTool, ManifestToolMode,
 };
@@ -37,6 +37,12 @@ type BoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 pub type ToolHandlerFn = Arc<
     dyn Fn(Value, WorkerInvocationContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
+        + Send
+        + Sync,
+>;
+
+pub type ToolPlannerFn = Arc<
+    dyn Fn(Value, WorkerToolPlanContext) -> BoxFuture<Result<crate::tool::ToolPlan, ErrorPayload>>
         + Send
         + Sync,
 >;
@@ -99,6 +105,43 @@ pub struct WorkerInvocationContext {
     scoped: WorkerSessionWorkspaceContext,
     turn_id: Option<String>,
     tool_call_id: Option<String>,
+}
+
+/// Side-effect-free facts exposed to a worker tool planner.
+#[derive(Clone)]
+pub struct WorkerToolPlanContext {
+    extension_id: String,
+    session_id: String,
+    turn_id: Option<String>,
+    tool_call_id: Option<String>,
+    working_dir: PathBuf,
+    cancel_token: CancelToken,
+}
+
+impl WorkerToolPlanContext {
+    pub fn extension_id(&self) -> &str {
+        &self.extension_id
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn turn_id(&self) -> Option<&str> {
+        self.turn_id.as_deref()
+    }
+
+    pub fn tool_call_id(&self) -> Option<&str> {
+        self.tool_call_id.as_deref()
+    }
+
+    pub fn working_dir(&self) -> &Path {
+        &self.working_dir
+    }
+
+    pub fn cancel_token(&self) -> &CancelToken {
+        &self.cancel_token
+    }
 }
 
 impl WorkerInvocationContext {
@@ -198,7 +241,10 @@ impl WorkerCallFacts {
         cancel_token: CancelToken,
         event: &Value,
     ) -> Result<Self, ErrorPayload> {
-        let input = event.get("input").unwrap_or(event);
+        let input = event
+            .get("input")
+            .or_else(|| event.get("scope"))
+            .unwrap_or(event);
         Ok(Self {
             call: WorkerCallContext {
                 extension_id,
@@ -220,6 +266,18 @@ impl WorkerCallFacts {
             scoped,
             turn_id,
             tool_call_id,
+        })
+    }
+
+    fn into_tool_plan(self) -> Result<WorkerToolPlanContext, ErrorPayload> {
+        let (scoped, turn_id, tool_call_id) = self.into_scoped("tool plan")?;
+        Ok(WorkerToolPlanContext {
+            extension_id: scoped.call.extension_id,
+            session_id: scoped.session_id,
+            turn_id,
+            tool_call_id,
+            working_dir: scoped.working_dir,
+            cancel_token: scoped.call.cancel_token,
         })
     }
 
@@ -289,12 +347,17 @@ fn optional_string<'a>(input: &'a Value, field: &str) -> Result<Option<&'a str>,
 pub(crate) struct HandlerRegistry {
     extension_id: String,
     manifest: InitializeManifest,
-    tools: HashMap<String, ToolHandlerFn>,
+    tools: HashMap<String, RegisteredTool>,
     hooks: HashMap<String, HookHandlerFn>,
     continuation_hooks: HashMap<String, ContinuationHandlerFn>,
     custom_events: HashMap<String, CustomEventHandlerFn>,
     commands: HashMap<String, CommandHandlerFn>,
     http_routes: HashMap<String, HttpHandlerFn>,
+}
+
+struct RegisteredTool {
+    planner: ToolPlannerFn,
+    handler: ToolHandlerFn,
 }
 
 impl HandlerRegistry {
@@ -361,6 +424,7 @@ impl HandlerRegistry {
     pub(crate) fn register_tool(
         &mut self,
         mut def: crate::tool::ToolDefinition,
+        planner: ToolPlannerFn,
         handler: ToolHandlerFn,
     ) -> Result<(), ErrorPayload> {
         canonical_registration_name(&mut def.name);
@@ -381,7 +445,7 @@ impl HandlerRegistry {
                 crate::tool::ExecutionMode::Sequential => ManifestToolMode::Sequential,
             },
         });
-        self.tools.insert(name, handler);
+        self.tools.insert(name, RegisteredTool { planner, handler });
         Ok(())
     }
 
@@ -611,11 +675,16 @@ impl HandlerRegistry {
 
     async fn dispatch_handler(
         &self,
-        handler_id: &astrcode_extension_contract::HandlerId,
+        handler_id: &astrcode_extension_sdk::wire::HandlerId,
         event: Value,
         facts: WorkerCallFacts,
     ) -> Result<HandlerResult, ErrorPayload> {
-        let (owner, kind, name) = handler_id.parts();
+        let (owner, kind, name) = handler_id.parts().ok_or_else(|| {
+            ErrorPayload::new(
+                WireErrorCode::InvalidInput,
+                format!("invalid handler id: {handler_id}"),
+            )
+        })?;
         if owner != self.extension_id {
             return Err(ErrorPayload::new(
                 WireErrorCode::UnknownHandler,
@@ -623,16 +692,39 @@ impl HandlerRegistry {
             ));
         }
         match kind {
-            astrcode_extension_contract::HandlerKind::Tool => {
-                let handler = self.tools.get(name).ok_or_else(|| {
+            astrcode_extension_sdk::wire::HandlerKind::Tool => {
+                let tool = self.tools.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
                         format!("unknown tool: {name}"),
                     )
                 })?;
-                handler(event, facts.into_invocation("tool")?).await
+                let invocation = serde_json::from_value::<crate::s5r::ToolInvocationRequest>(event)
+                    .map_err(|error| {
+                        ErrorPayload::new(
+                            WireErrorCode::InvalidInput,
+                            format!("invalid tool invocation: {error}"),
+                        )
+                    })?;
+                match invocation.phase {
+                    crate::s5r::ToolInvocationPhase::Plan => {
+                        let plan =
+                            (tool.planner)(invocation.arguments, facts.into_tool_plan()?).await?;
+                        let data = serde_json::to_value(crate::s5r::ToolPlanDto::from(&plan))
+                            .map_err(|error| {
+                                ErrorPayload::new(
+                                    WireErrorCode::SerializationFailed,
+                                    format!("serialize tool plan: {error}"),
+                                )
+                            })?;
+                        Ok(HandlerResult::effect(HandlerEffect::ToolPlan, data))
+                    },
+                    crate::s5r::ToolInvocationPhase::Execute => {
+                        (tool.handler)(invocation.arguments, facts.into_invocation("tool")?).await
+                    },
+                }
             },
-            astrcode_extension_contract::HandlerKind::Hook => {
+            astrcode_extension_sdk::wire::HandlerKind::Hook => {
                 if let Some(handler) = self.hooks.get(name) {
                     handler(event, facts.into_invocation("hook")?).await
                 } else if let Some(handler) = self.continuation_hooks.get(name) {
@@ -644,7 +736,7 @@ impl HandlerRegistry {
                     ))
                 }
             },
-            astrcode_extension_contract::HandlerKind::Command => {
+            astrcode_extension_sdk::wire::HandlerKind::Command => {
                 let handler = self.commands.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
@@ -653,7 +745,7 @@ impl HandlerRegistry {
                 })?;
                 handler(event, facts.into_command()?).await
             },
-            astrcode_extension_contract::HandlerKind::Http => {
+            astrcode_extension_sdk::wire::HandlerKind::Http => {
                 let handler = self.http_routes.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
@@ -675,7 +767,7 @@ impl HandlerRegistry {
                 })?;
                 Ok(HandlerResult::effect(HandlerEffect::HttpResponse, data))
             },
-            astrcode_extension_contract::HandlerKind::Event => {
+            astrcode_extension_sdk::wire::HandlerKind::Event => {
                 let handler = self.custom_events.get(name).ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::UnknownHandler,
@@ -822,6 +914,8 @@ mod tests {
         let tool_handler = crate::worker::tool_handler(|_| async {
             Ok(HandlerResult::effect(HandlerEffect::Ok, json!({})))
         });
+        let tool_planner =
+            crate::worker::tool_planner(|_| async { Ok(crate::tool::ToolPlan::default()) });
         registry
             .register_tool(
                 crate::builder::worker_tool("  review  ")
@@ -829,6 +923,7 @@ mod tests {
                     .execution_mode(crate::tool::ExecutionMode::Sequential)
                     .build()
                     .into(),
+                Arc::clone(&tool_planner),
                 Arc::clone(&tool_handler),
             )
             .unwrap();
@@ -863,6 +958,7 @@ mod tests {
             registry
                 .register_tool(
                     crate::builder::worker_tool("review").build().into(),
+                    tool_planner,
                     tool_handler,
                 )
                 .expect_err("canonical duplicate")

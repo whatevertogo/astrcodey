@@ -17,12 +17,12 @@ use astrcode_extension_sdk::{
         CommandContext, CommandDiscovery, CommandDiscoveryContext, CommandDiscoveryHandler,
         CommandHandler, DiscoveredCommand, Extension, ExtensionCapability, ExtensionCommandResult,
         ExtensionError, ExtensionManifest, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, Registrar, ToolContext, ToolHandler,
+        PromptContributions, Registrar, ToolContext, ToolHandler, ToolPlanContext,
     },
     frontmatter, hostpaths,
     tool::{
-        ExecutionMode, ToolDefinition, ToolOrigin, ToolPromptMetadata, ToolPromptTag, ToolResult,
-        tool_metadata,
+        ExecutionMode, ResourceAccess, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata,
+        ToolPromptTag, ToolResult, tool_metadata,
     },
 };
 use noyalib::compat::serde_yaml as yaml;
@@ -94,6 +94,16 @@ struct SkillToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for SkillToolHandler {
+    async fn plan(&self, ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        let home = hostpaths::user_home_dir();
+        let roots = skill_roots(ctx.working_dir(), Some(&home));
+        Ok(ToolPlan::from_resources(
+            roots
+                .into_iter()
+                .map(|root| ResourceAccess::search_file(root.dir, true)),
+        ))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,

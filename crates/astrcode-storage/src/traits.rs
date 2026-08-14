@@ -10,12 +10,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::{CompactSnapshotInput, StorageError, ToolResultArtifactInput, ToolResultArtifactRef};
 
+pub(crate) const EVENT_CONSUMER_AUDIT_RECORD_LIMIT: usize = 128;
+const EVENT_CONSUMER_ERROR_MAX_BYTES: usize = 4 * 1024;
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EventConsumerState {
     pub checkpoint: Option<u64>,
     pub paused: bool,
     pub revision: u64,
     pub consecutive_failures: u32,
+    pub quarantined_count: u64,
+    pub skipped_count: u64,
     pub quarantined: Vec<EventConsumerQuarantine>,
     pub skips: Vec<EventConsumerSkip>,
 }
@@ -23,6 +28,7 @@ pub struct EventConsumerState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EventConsumerQuarantine {
     pub seq: u64,
+    pub revision: u64,
     pub attempts: u32,
     pub last_error: String,
 }
@@ -52,6 +58,113 @@ pub enum EventConsumerFailureOutcome {
     Quarantined { attempts: u32 },
     AlreadyConsumed,
     StaleRevision,
+}
+
+impl EventConsumerState {
+    pub(crate) fn record_quarantine(
+        &mut self,
+        seq: u64,
+        attempts: u32,
+        error: &str,
+    ) -> Result<(), StorageError> {
+        if self
+            .quarantined
+            .iter()
+            .any(|record| record.seq == seq && record.revision == self.revision)
+        {
+            return Ok(());
+        }
+        self.quarantined_count = self
+            .quarantined_count
+            .checked_add(1)
+            .ok_or_else(|| StorageError::CorruptLog("consumer quarantine count overflow".into()))?;
+        push_recent(
+            &mut self.quarantined,
+            EventConsumerQuarantine {
+                seq,
+                revision: self.revision,
+                attempts,
+                last_error: truncate_utf8(error, EVENT_CONSUMER_ERROR_MAX_BYTES),
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn record_skip(
+        &mut self,
+        from_seq: Option<u64>,
+        to_seq: Option<u64>,
+    ) -> Result<(), StorageError> {
+        self.skipped_count = self
+            .skipped_count
+            .checked_add(1)
+            .ok_or_else(|| StorageError::CorruptLog("consumer skip count overflow".into()))?;
+        push_recent(
+            &mut self.skips,
+            EventConsumerSkip {
+                from_seq,
+                to_seq,
+                revision: self.revision,
+            },
+        );
+        Ok(())
+    }
+
+    pub(crate) fn validate_audit_bounds(&self) -> Result<(), StorageError> {
+        if self.quarantined.len() > EVENT_CONSUMER_AUDIT_RECORD_LIMIT {
+            return Err(StorageError::CorruptLog(
+                "consumer quarantine audit exceeds its persisted record limit".into(),
+            ));
+        }
+        if self.skips.len() > EVENT_CONSUMER_AUDIT_RECORD_LIMIT {
+            return Err(StorageError::CorruptLog(
+                "consumer skip audit exceeds its persisted record limit".into(),
+            ));
+        }
+        let quarantined_records = u64::try_from(self.quarantined.len()).map_err(|_| {
+            StorageError::CorruptLog("consumer quarantine audit is too large".into())
+        })?;
+        let skip_records = u64::try_from(self.skips.len())
+            .map_err(|_| StorageError::CorruptLog("consumer skip audit is too large".into()))?;
+        if self.quarantined_count < quarantined_records {
+            return Err(StorageError::CorruptLog(
+                "consumer quarantine count is smaller than its persisted audit".into(),
+            ));
+        }
+        if self.skipped_count < skip_records {
+            return Err(StorageError::CorruptLog(
+                "consumer skip count is smaller than its persisted audit".into(),
+            ));
+        }
+        if self
+            .quarantined
+            .iter()
+            .any(|record| record.last_error.len() > EVENT_CONSUMER_ERROR_MAX_BYTES)
+        {
+            return Err(StorageError::CorruptLog(
+                "consumer quarantine error exceeds its persisted byte limit".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn push_recent<T>(records: &mut Vec<T>, record: T) {
+    if records.len() == EVENT_CONSUMER_AUDIT_RECORD_LIMIT {
+        records.remove(0);
+    }
+    records.push(record);
+}
+
+fn truncate_utf8(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
 }
 
 #[async_trait::async_trait]
@@ -172,12 +285,12 @@ pub trait SessionPathResolver: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait ToolResultArtifactStore: Send + Sync {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<ToolResultArtifactSlice, StorageError>;
 
     async fn write_tool_result_artifact(
@@ -300,5 +413,48 @@ pub trait SessionStore:
         _snapshot: CompactSnapshotInput,
     ) -> Result<Option<String>, StorageError> {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consumer_audit_keeps_totals_and_bounded_recent_records() {
+        let mut state = EventConsumerState::default();
+        let record_count = EVENT_CONSUMER_AUDIT_RECORD_LIMIT + 2;
+        let error = "故".repeat(EVENT_CONSUMER_ERROR_MAX_BYTES);
+
+        for index in 0..record_count {
+            state.revision = index as u64;
+            state.record_quarantine(index as u64, 20, &error).unwrap();
+            state
+                .record_skip(
+                    index.checked_sub(1).map(|seq| seq as u64),
+                    Some(index as u64),
+                )
+                .unwrap();
+        }
+
+        assert_eq!(state.quarantined_count, record_count as u64);
+        assert_eq!(state.skipped_count, record_count as u64);
+        assert_eq!(state.quarantined.len(), EVENT_CONSUMER_AUDIT_RECORD_LIMIT);
+        assert_eq!(state.skips.len(), EVENT_CONSUMER_AUDIT_RECORD_LIMIT);
+        assert_eq!(state.quarantined[0].seq, 2);
+        assert!(
+            state
+                .quarantined
+                .iter()
+                .all(|record| record.last_error.len() <= EVENT_CONSUMER_ERROR_MAX_BYTES)
+        );
+        state.validate_audit_bounds().unwrap();
+
+        state.quarantined_count = 0;
+        assert!(matches!(
+            state.validate_audit_bounds(),
+            Err(StorageError::CorruptLog(message))
+                if message.contains("quarantine count")
+        ));
     }
 }

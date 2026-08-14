@@ -858,7 +858,7 @@ fn prefix_fingerprint(model: &SessionReadModel, source_seq: u64) -> String {
             .map(|message| message.message.clone())
             .collect(),
     );
-    transcript_prefix_fingerprint(&model.system_prompt.text, &prefix)
+    transcript_prefix_fingerprint(&model.system_prompt.text, &prefix).unwrap()
 }
 
 fn rewrite_event(

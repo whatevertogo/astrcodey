@@ -64,7 +64,7 @@ pub(in crate::http) fn streaming_tool_call_block(
     ConversationBlockDto::ToolCall {
         id,
         name: name.to_owned(),
-        arguments: arguments.map_or_else(String::new, |value| format_args_inline(name, value)),
+        arguments: arguments.map_or_else(String::new, format_args_inline),
         text: String::new(),
         status: ToolCallStatusDto::Streaming,
         metadata: None,

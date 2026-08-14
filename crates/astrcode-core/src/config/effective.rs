@@ -162,8 +162,6 @@ pub struct AgentSettings {
     pub max_depth: usize,
     /// 单轮中允许同时执行的并行工具调用数上限。
     pub tool_max_parallel_calls: usize,
-    /// Shell 工具默认超时时间（秒）。LLM 可通过参数覆盖，上限 600。
-    pub shell_timeout_secs: u64,
     /// 工具审批模式。
     pub approval_mode: crate::permission::ApprovalMode,
 }
@@ -173,7 +171,6 @@ impl Default for AgentSettings {
         Self {
             max_depth: super::defaults::DEFAULT_AGENT_MAX_DEPTH,
             tool_max_parallel_calls: super::defaults::DEFAULT_AGENT_TOOL_MAX_PARALLEL_CALLS,
-            shell_timeout_secs: super::defaults::DEFAULT_SHELL_TIMEOUT_SECS,
             approval_mode: crate::permission::ApprovalMode::default(),
         }
     }

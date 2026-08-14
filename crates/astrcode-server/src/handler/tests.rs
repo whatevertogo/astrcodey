@@ -646,8 +646,8 @@ impl LlmProvider for ReadThenEditAcrossTurnsLlm {
                     name: "edit".into(),
                     arguments: serde_json::json!({
                         "path": "note.txt",
-                        "oldStr": "alpha",
-                        "newStr": "gamma"
+                        "oldText": "alpha",
+                        "newText": "gamma"
                     })
                     .to_string(),
                 });
@@ -773,14 +773,12 @@ fn test_runtime_with_settings(
         Duration::from_secs(1),
     ));
     let context_assembler = Arc::new(LlmContextAssembler::new(context_settings));
-    let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
     let runtime_services = crate::config_manager::assemble_session_runtime_services(
         llm_provider.clone(),
         llm_provider,
         effective,
         extension_runner.clone(),
         context_assembler.clone(),
-        std::sync::Arc::clone(&shell_timeout_secs),
     );
     let config = Arc::new(crate::config_manager::ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
@@ -788,7 +786,6 @@ fn test_runtime_with_settings(
         )),
         astrcode_core::config::Config::default(),
         Arc::clone(&extension_runner),
-        shell_timeout_secs,
         Arc::clone(&runtime_services),
     ));
     let session_manager = Arc::new(crate::session_manager::SessionManager::new(
@@ -822,6 +819,18 @@ fn test_runtime_with_llm(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntim
 
 fn test_runtime() -> Arc<ServerRuntime> {
     test_runtime_with_llm(Arc::new(MockLlm))
+}
+
+async fn register_coding_extension(runtime: &ServerRuntime) {
+    let extension = astrcode_bundled_extensions::bundled_extensions(&Default::default())
+        .into_iter()
+        .find(|extension| extension.manifest().id() == "astrcode-coding")
+        .expect("coding extension is included in server test features");
+    runtime
+        .extension_runner()
+        .register(extension)
+        .await
+        .expect("register coding extension");
 }
 
 fn test_scheduler(runtime: &Arc<ServerRuntime>) -> Arc<crate::turn_scheduler::TurnScheduler> {
@@ -1879,6 +1888,7 @@ async fn read_before_edit_guard_survives_across_turns() {
     let runtime = test_runtime_with_llm(Arc::new(ReadThenEditAcrossTurnsLlm {
         call_count: AtomicUsize::new(0),
     }));
+    register_coding_extension(&runtime).await;
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -1914,7 +1924,12 @@ async fn read_before_edit_guard_survives_across_turns() {
             } if call_id.as_str() == "edit-call"
                 && tool_name == "edit"
                 && result.is_error
-                && result.metadata.get("staleFile") == Some(&serde_json::json!(true))
+                && result.metadata.get("errorCode")
+                    == Some(&serde_json::json!(
+                        astrcode_extension_sdk::WireErrorCode::StaleFile.as_str()
+                    ))
+                && result.metadata.get("errorDetails").and_then(|details| details.get("reason"))
+                    == Some(&serde_json::json!("changed"))
         )
     }));
 }
@@ -2863,6 +2878,7 @@ async fn streaming_tool_call_completed_executes_tools() {
         call_count: AtomicUsize::new(0),
     });
     let runtime = test_runtime_with_llm(llm);
+    register_coding_extension(&runtime).await;
     let event_tx = event_channel(128);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(runtime.clone(), event_tx);

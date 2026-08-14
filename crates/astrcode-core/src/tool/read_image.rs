@@ -1,6 +1,6 @@
 //! read 工具成功时内联图片的 tool result content 契约。
 //!
-//! 生产方：`astrcode_tools` 的 `read_image_file_result`。
+//! Provider-facing image result helpers shared by extension-authored tools.
 //! 消费方：`astrcode_ai::tool_result_wire` 在送模边界解析为 provider 图片块。
 
 use serde::{Deserialize, Serialize};

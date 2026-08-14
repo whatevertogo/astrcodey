@@ -314,6 +314,7 @@ pub enum ExtensionCapabilityDto {
     ConsumeCustomEvents,
     WorkspaceRead,
     WorkspaceWrite,
+    ToolResultRead,
     ProcessSpawn,
     NetworkClient,
     ProviderRequest,
@@ -336,6 +337,7 @@ impl_wire_values!(ExtensionCapabilityDto {
     ConsumeCustomEvents,
     WorkspaceRead,
     WorkspaceWrite,
+    ToolResultRead,
     ProcessSpawn,
     NetworkClient,
     ProviderRequest,
@@ -349,17 +351,13 @@ impl_wire_values!(ExtensionCapabilityDto {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolOriginDto {
-    Builtin,
     Bundled,
     Extension,
-    Sdk,
 }
 
 impl_domain_to_wire_conversion!(ToolOrigin => ToolOriginDto {
-    Builtin,
     Bundled,
     Extension,
-    Sdk,
 });
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
@@ -436,10 +434,7 @@ mod tests {
             AgentSessionStatusDto::ALL,
             &["running", "completed", "failed"],
         );
-        assert_wire_values(
-            ToolOriginDto::ALL,
-            &["builtin", "bundled", "extension", "sdk"],
-        );
+        assert_wire_values(ToolOriginDto::ALL, &["bundled", "extension"]);
         assert_wire_values(ExecutionModeDto::ALL, &["sequential", "parallel"]);
         assert_wire_values(
             ExtensionCapabilityDto::ALL,
@@ -456,6 +451,7 @@ mod tests {
                 "consume_custom_events",
                 "workspace_read",
                 "workspace_write",
+                "tool_result_read",
                 "process_spawn",
                 "network_client",
                 "provider_request",

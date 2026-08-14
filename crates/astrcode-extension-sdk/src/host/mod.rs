@@ -2,21 +2,30 @@ mod client;
 mod domain_client;
 mod error;
 mod llm_mapping;
+mod workspace_patch;
 
 use std::sync::Arc;
 
-use astrcode_extension_contract::{HostContextRequirement, WireErrorCode};
-pub use astrcode_extension_contract::{HostOperation, host::*};
 pub use client::{
     ExtensionHttpClient, ModelClient, NetworkClient, ProcessClient, SessionControlClient,
-    SessionHistoryClient, SessionInspectClient, SessionStateClient, WorkspaceClient,
+    SessionHistoryClient, SessionInspectClient, SessionStateClient, ToolResultClient,
+    WorkspaceClient,
 };
 use domain_client::HostClientTransport;
 pub use error::*;
 pub use llm_mapping::HostLlmCollectedStreamOutput;
 use serde_json::Value;
+pub use workspace_patch::{
+    WorkspacePatchPathError, WorkspacePatchPaths, analyze_unified_diff_paths,
+    normalize_unified_diff_path,
+};
 
-use crate::{extension::ExtensionCapability, model_stream::ModelStream};
+pub use crate::wire::{HostOperation, host::*};
+use crate::{
+    extension::ExtensionCapability,
+    model_stream::ModelStream,
+    wire::{HostContextRequirement, WireErrorCode},
+};
 
 /// Instance-scoped access to typed host domains.
 #[derive(Clone)]
@@ -141,6 +150,11 @@ impl ExtensionHost {
         Ok(WorkspaceClient::new(self.clone()))
     }
 
+    pub fn tool_results(&self) -> Result<ToolResultClient, HostError> {
+        self.inner.scope.preflight(HostOperation::ToolResultRead)?;
+        Ok(ToolResultClient::new(self.clone()))
+    }
+
     pub fn process(&self) -> Result<ProcessClient, HostError> {
         self.inner
             .scope
@@ -199,7 +213,7 @@ impl HostClientTransport for ExtensionHost {
         HostError::new(code, message)
     }
 
-    fn payload_error(error: astrcode_extension_contract::protocol::ErrorPayload) -> Self::Error {
+    fn payload_error(error: crate::wire::protocol::ErrorPayload) -> Self::Error {
         HostError::from(error)
     }
 }
@@ -209,11 +223,6 @@ impl HostClientTransport for ExtensionHost {
 pub mod internal {
     use std::{any::Any, collections::BTreeMap, sync::Arc, time::Duration};
 
-    use astrcode_extension_contract::WireErrorCode;
-    pub use astrcode_extension_contract::{
-        HOST_OPERATION_SPECS, HostBackendRequirement, HostOp, HostOperationGroup,
-        HostOperationSpec, operations,
-    };
     use async_trait::async_trait;
     use serde_json::Value;
     use tokio_util::sync::CancellationToken;
@@ -230,11 +239,17 @@ pub mod internal {
             SessionControlClient as TypedSessionControlClient,
             SessionHistoryClient as TypedSessionHistoryClient,
             SessionInspectClient as TypedSessionInspectClient,
-            SessionStateClient as TypedSessionStateClient, WorkspaceClient as TypedWorkspaceClient,
+            SessionStateClient as TypedSessionStateClient,
+            ToolResultClient as TypedToolResultClient, WorkspaceClient as TypedWorkspaceClient,
         },
         llm_mapping::{
             llm_chat_request, llm_message_to_wire, llm_messages_from_wire, llm_messages_to_wire,
         },
+    };
+    use crate::wire::WireErrorCode;
+    pub use crate::wire::{
+        HOST_OPERATION_SPECS, HostBackendRequirement, HostOp, HostOperationGroup,
+        HostOperationSpec, operations,
     };
 
     /// Host-only redirect policy used by the outbound-network backend port.

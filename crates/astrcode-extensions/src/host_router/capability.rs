@@ -2,7 +2,6 @@
 //! catalog. Dispatch grouping and backend requirements live on `HostOperationSpec`; this module
 //! only interprets them against the router's configured backends and the call context.
 
-use astrcode_extension_contract::WireErrorCode;
 use astrcode_extension_sdk::{
     extension::ExtensionCapability,
     host::{
@@ -10,6 +9,7 @@ use astrcode_extension_sdk::{
         internal::{HOST_OPERATION_SPECS, HostBackendRequirement, HostOperationSpec},
     },
     s5r::ErrorPayload,
+    wire::WireErrorCode,
 };
 
 pub(super) fn lookup(name: &str) -> Result<&'static HostOperationSpec, ErrorPayload> {
@@ -57,6 +57,7 @@ fn backend_available(
         HostBackendRequirement::WorkspaceDirAndTasks => {
             router.workspace.has_root(ctx.working_dir.as_deref()) && ctx.tasks.is_some()
         },
+        HostBackendRequirement::ToolResultReader => ctx.tool_result_reader.is_some(),
         HostBackendRequirement::ProcessWorkingDir => {
             router.process.is_available(ctx.working_dir.as_deref())
         },

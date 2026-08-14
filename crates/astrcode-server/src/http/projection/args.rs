@@ -5,8 +5,8 @@ use crate::presentation::inline_preview;
 const MAX_ARGUMENT_SUMMARY_CHARS: usize = 140;
 
 /// 将工具调用参数 JSON 格式化为单行摘要文本。
-pub(in crate::http) fn format_args_inline(tool_name: &str, args: &serde_json::Value) -> String {
-    if let Some(summary) = tool_argument_summary(tool_name, args) {
+pub(in crate::http) fn format_args_inline(args: &serde_json::Value) -> String {
+    if let Some(summary) = primary_argument(args) {
         return inline_preview(&summary, MAX_ARGUMENT_SUMMARY_CHARS);
     }
 
@@ -31,38 +31,18 @@ pub(in crate::http) fn format_args_inline(tool_name: &str, args: &serde_json::Va
     }
 }
 
-fn tool_argument_summary(tool_name: &str, args: &serde_json::Value) -> Option<String> {
-    match tool_name {
-        "agent" => {
-            let description = string_arg(args, "description");
-            let subagent_type =
-                string_arg(args, "subagentType").or_else(|| string_arg(args, "subagent_type"));
-            match (description, subagent_type) {
-                (Some(description), Some(subagent_type)) => {
-                    Some(format!("{description} ({subagent_type})"))
-                },
-                (Some(description), None) => Some(description.to_string()),
-                (None, Some(subagent_type)) => Some(format!("subagent: {subagent_type}")),
-                (None, None) => string_arg(args, "prompt").map(str::to_string),
-            }
-        },
-        "shell" => string_arg(args, "command").map(|command| format!("$ {command}")),
-        "read" | "write" | "edit" => string_arg(args, "path").map(str::to_string),
-        "glob" => string_arg(args, "pattern").map(|pattern| format!("pattern: {pattern}")),
-        "grep" => {
-            let pattern = string_arg(args, "pattern").or_else(|| string_arg(args, "query"));
-            let path = string_arg(args, "path").or_else(|| string_arg(args, "glob"));
-            match (pattern, path) {
-                (Some(pattern), Some(path)) => Some(format!("{pattern} in {path}")),
-                (Some(pattern), None) => Some(format!("pattern: {pattern}")),
-                (None, Some(path)) => Some(path.to_string()),
-                (None, None) => None,
-            }
-        },
-        "patch" => Some("workspace patch".into()),
-        "todoWrite" => todo_write_argument_summary(args),
-        _ => None,
-    }
+fn primary_argument(args: &serde_json::Value) -> Option<String> {
+    const KEYS: [&str; 7] = [
+        "description",
+        "command",
+        "path",
+        "pattern",
+        "query",
+        "prompt",
+        "action",
+    ];
+    KEYS.into_iter()
+        .find_map(|key| string_arg(args, key).map(str::to_owned))
 }
 
 fn string_arg<'a>(args: &'a serde_json::Value, key: &str) -> Option<&'a str> {
@@ -79,52 +59,18 @@ fn json_value_inline(value: &serde_json::Value) -> String {
     }
 }
 
-fn todo_write_argument_summary(args: &serde_json::Value) -> Option<String> {
-    let todos = args.get("todos")?.as_array()?;
-    if todos.is_empty() {
-        return Some("todoWrite · no items".into());
-    }
-
-    let mut pending = 0u32;
-    let mut in_progress = 0u32;
-    let mut completed = 0u32;
-    for item in todos {
-        match item.get("status").and_then(serde_json::Value::as_str) {
-            Some("pending") => pending += 1,
-            Some("in_progress") => in_progress += 1,
-            Some("completed") => completed += 1,
-            _ => {},
-        }
-    }
-
-    let mut parts = vec!["todoWrite".to_string()];
-    if pending > 0 {
-        parts.push(format!("{pending} pending"));
-    }
-    if in_progress > 0 {
-        parts.push(format!("{in_progress} in-progress"));
-    }
-    if completed > 0 {
-        parts.push(format!("{completed} done"));
-    }
-    Some(parts.join(" · "))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn todo_write_argument_summary_counts_statuses() {
-        let summary = todo_write_argument_summary(&serde_json::json!({
-            "todos": [
-                { "content": "A", "activeForm": "Doing A", "status": "in_progress" },
-                { "content": "B", "activeForm": "Doing B", "status": "pending" },
-                { "content": "C", "activeForm": "Doing C", "status": "completed" },
-            ]
-        }))
-        .expect("summary");
+    fn generic_summary_prefers_stable_human_readable_keys() {
+        let args = serde_json::json!({
+            "command": "cargo test",
+            "path": "Cargo.toml",
+            "timeout": 30
+        });
 
-        assert_eq!(summary, "todoWrite · 1 pending · 1 in-progress · 1 done");
+        assert_eq!(format_args_inline(&args), "cargo test");
     }
 }

@@ -138,7 +138,8 @@ fn validate_rewrite_fingerprint_against(
             .map(|message| message.message.clone())
             .collect(),
     );
-    let actual = transcript_prefix_fingerprint(system_prompt, &prefix);
+    let actual = transcript_prefix_fingerprint(system_prompt, &prefix)
+        .map_err(|error| ProjectionError::TranscriptFingerprintSerialization(error.to_string()))?;
     if actual == *expected {
         return Ok(());
     }
@@ -376,30 +377,12 @@ fn apply_tool_terminal(
 }
 
 impl SessionModelContext {
-    pub(crate) fn tool_calls_needing_interruption(
+    pub(crate) fn requested_tool_calls(
         &self,
-        pending_tool_calls: &HashSet<ToolCallId>,
-    ) -> Vec<UnansweredToolCall> {
-        let mut pending = self.pending_requested_tool_calls(pending_tool_calls);
-        let mut seen = pending
-            .iter()
-            .map(|call| call.call_id.clone())
-            .collect::<HashSet<_>>();
-
-        for call in self.tail_unanswered_tool_calls() {
-            if seen.insert(call.call_id.clone()) {
-                pending.push(call);
-            }
-        }
-        pending
-    }
-
-    fn pending_requested_tool_calls(
-        &self,
-        pending_tool_calls: &HashSet<ToolCallId>,
+        call_ids: &HashSet<ToolCallId>,
     ) -> Vec<UnansweredToolCall> {
         let mut seen = HashSet::new();
-        let mut pending = Vec::new();
+        let mut calls = Vec::new();
         for message in &self.messages {
             if message.message.role != LlmRole::Assistant {
                 continue;
@@ -408,18 +391,18 @@ impl SessionModelContext {
                 let LlmContent::ToolCall { call_id, name, .. } = content else {
                     continue;
                 };
-                if pending_tool_calls.contains(call_id.as_str()) && seen.insert(call_id.as_str()) {
-                    pending.push(UnansweredToolCall {
+                if call_ids.contains(call_id.as_str()) && seen.insert(call_id.as_str()) {
+                    calls.push(UnansweredToolCall {
                         call_id: call_id.clone(),
                         tool_name: name.clone(),
                     });
                 }
             }
         }
-        pending
+        calls
     }
 
-    fn tail_unanswered_tool_calls(&self) -> Vec<UnansweredToolCall> {
+    pub(crate) fn tail_unanswered_tool_calls(&self) -> Vec<UnansweredToolCall> {
         let Some(last_assistant_index) = self.messages.iter().rposition(|message| {
             message.message.role == LlmRole::Assistant
                 && message

@@ -10,7 +10,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use astrcode_core::event::EventPayload;
+use astrcode_core::{event::EventPayload, tool::SessionOperations};
 use astrcode_extension_sdk::{
     extension::*,
     runtime_ports::{
@@ -18,7 +18,6 @@ use astrcode_extension_sdk::{
         SessionOperationsProvider, ToolCatalogProvider,
         TurnExtensionView as RuntimeTurnExtensionView, TurnExtensionViewProvider, TurnHooks,
     },
-    tool::SessionOperations,
 };
 use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, RwLock, Semaphore, mpsc};
 
@@ -35,6 +34,7 @@ mod retirement;
 mod snapshot;
 mod supervisor;
 mod tool_adapter;
+mod tool_catalog_cache;
 
 pub use commands::{
     CommandSource, ResolvedCommandSurface, ResolvedSlashCommand, ShadowedSlashCommand,
@@ -113,6 +113,14 @@ pub(crate) struct ExtensionView {
 pub struct ExtensionUiContributions {
     pub keybindings: Vec<Keybinding>,
     pub status_items: Vec<StatusItem>,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("invalid configuration for extension {extension_id}: {source}")]
+pub struct ExtensionConfigValidationError {
+    extension_id: String,
+    #[source]
+    source: Box<ExtensionError>,
 }
 
 struct LifecycleCoordination {
@@ -434,6 +442,19 @@ impl ExtensionRunner {
 
         let tasks = ExtensionTasks::new_suspended(id.clone());
         let ext_config = extension_config(&self.extension_configs.read(), &id);
+        let runtime_config = ExtensionConfig::from_runtime(&id, ext_config.clone());
+
+        self.record_stage_running(&id, DiagnosticStage::Start);
+        let start_started = std::time::Instant::now();
+        if let Err(error) = ext.validate_config(&runtime_config) {
+            self.record_stage_result(
+                &id,
+                DiagnosticStage::Start,
+                Some(start_started.elapsed()),
+                StageOutcome::Failed(error.to_string()),
+            );
+            return Err(error);
+        }
 
         let startup_event_tx = self.bindings.read().startup_event_tx.clone();
         let call = self
@@ -452,7 +473,7 @@ impl ExtensionRunner {
             .retain_cancellation_after_context_drop();
         let ctx = ExtensionStartContext::from_runtime(
             call,
-            ExtensionConfig::from_runtime(&id, ext_config.clone()),
+            runtime_config,
             startup_working_dir.map(std::path::PathBuf::from),
         );
         let pending_registration = self.retirements.pending_registration(
@@ -462,8 +483,6 @@ impl ExtensionRunner {
             operation_guard,
             self.operation_timeout,
         );
-        self.record_stage_running(&id, DiagnosticStage::Start);
-        let start_started = std::time::Instant::now();
         let start_result = self.run_with_timeout(ext.start(ctx)).await;
         if let Err(error) = start_result {
             self.record_stage_result(
@@ -562,10 +581,14 @@ impl ExtensionRunner {
         extension_id: &str,
         reason: StopReason,
     ) -> Result<bool, ExtensionError> {
-        Ok(self
+        let removed = self
             .unregister_with_retirement(extension_id, reason)
             .await?
-            .is_some())
+            .is_some();
+        if removed && reason != StopReason::Reload {
+            self.cleanup_extension_resources(extension_id);
+        }
+        Ok(removed)
     }
 
     pub(crate) async fn unregister_with_retirement(
@@ -786,6 +809,32 @@ impl ExtensionRunner {
         *self.extension_configs.write() = configs;
     }
 
+    /// Validate a complete candidate config map against every currently loaded extension.
+    ///
+    /// This does not replace the runner's expected config or invoke lifecycle callbacks, so a
+    /// failed candidate can be rejected before the host persists or publishes it.
+    pub async fn validate_extension_configs(
+        &self,
+        configs: &BTreeMap<String, serde_json::Value>,
+    ) -> Result<(), ExtensionConfigValidationError> {
+        let extensions = self.registry.extensions.read().await;
+        for hosted in extensions.iter() {
+            let extension_id = hosted.manifest.id();
+            let config = ExtensionConfig::from_runtime(
+                extension_id,
+                extension_config(configs, extension_id),
+            );
+            hosted
+                .extension
+                .validate_config(&config)
+                .map_err(|source| ExtensionConfigValidationError {
+                    extension_id: extension_id.to_owned(),
+                    source: Box::new(source),
+                })?;
+        }
+        Ok(())
+    }
+
     /// 通知所有已注册扩展其配置已变更。
     ///
     /// 将当前 `extension_configs` 与各已发布扩展保存的快照做 diff，
@@ -850,11 +899,16 @@ impl ExtensionRunner {
                 continue;
             }
 
+            let runtime_config = ExtensionConfig::from_runtime(&extension_id, new_config.clone());
+            if let Err(error) = extension.validate_config(&runtime_config) {
+                errors.push(format!(
+                    "config validation failed for {extension_id}: {error}"
+                ));
+                continue;
+            }
+
             if let Err(error) = self
-                .run_with_timeout(extension.on_config_changed(ExtensionConfig::from_runtime(
-                    &extension_id,
-                    new_config.clone(),
-                )))
+                .run_with_timeout(extension.on_config_changed(runtime_config))
                 .await
             {
                 errors.push(format!(
@@ -1096,7 +1150,11 @@ impl ExtensionView {
                     return Ok(PreToolUseResult::Block { reason });
                 },
                 PreToolUseResult::Ask { prompt, rule_key } => {
-                    return Ok(PreToolUseResult::Ask { prompt, rule_key });
+                    return Ok(PreToolUseResult::Ask {
+                        prompt,
+                        rule_key: rule_key
+                            .map(|rule_key| format!("extension:{extension_id}:{rule_key}")),
+                    });
                 },
                 PreToolUseResult::ModifyInput { tool_input } => {
                     ctx.replace_tool_input(tool_input);

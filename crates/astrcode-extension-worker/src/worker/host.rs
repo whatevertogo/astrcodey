@@ -1,9 +1,6 @@
 //! Worker 侧调用宿主的抽象（可注入 mock）。
 
-use std::{
-    future::Future,
-    sync::{Arc, OnceLock},
-};
+use std::{future::Future, sync::Arc};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -14,7 +11,7 @@ use crate::{
         HostClientTransport, TypedEventClient, TypedExtensionHttpClient, TypedModelClient,
         TypedNetworkClient, TypedProcessClient, TypedSessionControlClient,
         TypedSessionHistoryClient, TypedSessionInspectClient, TypedSessionStateClient,
-        TypedWorkspaceClient,
+        TypedToolResultClient, TypedWorkspaceClient,
     },
     model_stream::ModelStream,
     s5r::ErrorPayload,
@@ -26,16 +23,22 @@ pub use crate::{
         HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitOutput,
         HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmContent,
         HostLlmMessage, HostLlmRole, HostNetworkRedirectPolicy, HostNetworkRequest,
-        HostNetworkResponse, HostOperation, HostProcessOutput, HostProcessRequest,
-        HostSessionCancelOutput, HostSessionDeliveryOutput, HostSessionExecutionView,
-        HostSessionInputRequest, HostSessionProviderMessagesOutput, HostSessionStateReadOutput,
-        HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
-        HostSessionSummary, HostSessionTokenUsage, HostSessionTokenUsageOutput,
-        HostSessionTranscript, HostSessionTranscriptMessage, HostWorkspaceEditOutput,
+        HostNetworkResponse, HostOperation, HostProcessHandleOutput, HostProcessInputAction,
+        HostProcessInputRequest, HostProcessIo, HostProcessListOutput, HostProcessOutput,
+        HostProcessReadOutput, HostProcessReadRequest, HostProcessRequest,
+        HostProcessResizeRequest, HostProcessStartRequest, HostProcessState,
+        HostProcessStatusOutput, HostProcessTargetRequest, HostSessionCancelOutput,
+        HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
+        HostSessionProviderMessagesOutput, HostSessionStateReadOutput, HostSessionStateReadRequest,
+        HostSessionStateWriteRequest, HostSessionSummariesOutput, HostSessionSummary,
+        HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
+        HostSessionTranscriptMessage, HostToolResultReadOutput, HostToolResultReadRequest,
+        HostWorkspaceApplyPatchOutput, HostWorkspaceApplyPatchRequest, HostWorkspaceEditOutput,
         HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
-        HostWorkspaceGrepMatch, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
-        HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
-        HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
+        HostWorkspaceGrepContextLine, HostWorkspaceGrepEntry, HostWorkspaceGrepMode,
+        HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
+        HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
+        HostWorkspaceReadRequest, HostWorkspaceTextChange, HostWorkspaceWriteOutput,
         HostWorkspaceWriteRequest,
     },
     session::{
@@ -67,11 +70,11 @@ pub trait HostApi: Send + Sync {
 }
 
 pub(crate) struct V3PeerHostApi {
-    peer: astrcode_extension_contract::PeerHandle,
+    peer: astrcode_extension_sdk::wire::PeerHandle,
 }
 
 impl V3PeerHostApi {
-    pub fn new(peer: astrcode_extension_contract::PeerHandle) -> Self {
+    pub fn new(peer: astrcode_extension_sdk::wire::PeerHandle) -> Self {
         Self { peer }
     }
 }
@@ -106,8 +109,8 @@ impl HostApi for V3PeerHostApi {
     }
 }
 
-fn v3_invoke_error_to_payload(error: astrcode_extension_contract::InvokeError) -> ErrorPayload {
-    use astrcode_extension_contract::InvokeError;
+fn v3_invoke_error_to_payload(error: astrcode_extension_sdk::wire::InvokeError) -> ErrorPayload {
+    use astrcode_extension_sdk::wire::InvokeError;
 
     match error {
         InvokeError::Local(error) | InvokeError::Remote(error) => error,
@@ -121,20 +124,14 @@ fn v3_invoke_error_to_payload(error: astrcode_extension_contract::InvokeError) -
     }
 }
 
-static HOST_API: OnceLock<Arc<dyn HostApi>> = OnceLock::new();
-
 tokio::task_local! {
     static SCOPED_HOST_API: Arc<dyn HostApi>;
 }
 
-/// 在 `Worker::run_stdio` 启动前由运行时注入。
-pub(crate) fn set_host_api(api: Arc<dyn HostApi>) -> Result<(), ()> {
-    HOST_API.set(api).map_err(|_| ())
-}
-
-/// 在一个异步作用域内使用指定宿主 API，供 worker 单元测试隔离 mock。
+/// 在一个入站调用作用域内绑定宿主 API。
 ///
-/// 该作用域不会自动传播到 `tokio::spawn` 创建的新任务。
+/// 该作用域不会传播到 `tokio::spawn` 创建的新任务；脱离当前调用后继续访问宿主必须失败，
+/// 否则新任务会绕过 planning 与本次调用的 resource lease。
 pub async fn with_host_api<T>(api: Arc<dyn HostApi>, future: impl Future<Output = T>) -> T {
     SCOPED_HOST_API.scope(api, future).await
 }
@@ -176,6 +173,7 @@ pub type SessionControlClient = TypedSessionControlClient<WorkerHostTransport>;
 pub type SessionHistoryClient = TypedSessionHistoryClient<WorkerHostTransport>;
 pub type SessionStateClient = TypedSessionStateClient<WorkerHostTransport>;
 pub type SessionInspectClient = TypedSessionInspectClient<WorkerHostTransport>;
+pub type ToolResultClient = TypedToolResultClient<WorkerHostTransport>;
 pub type WorkspaceClient = TypedWorkspaceClient<WorkerHostTransport>;
 pub type ProcessClient = TypedProcessClient<WorkerHostTransport>;
 pub type NetworkClient = TypedNetworkClient<WorkerHostTransport>;
@@ -217,6 +215,10 @@ impl HostClient {
         WorkspaceClient::new(WorkerHostTransport)
     }
 
+    pub const fn tool_results() -> ToolResultClient {
+        ToolResultClient::new(WorkerHostTransport)
+    }
+
     pub const fn process() -> ProcessClient {
         ProcessClient::new(WorkerHostTransport)
     }
@@ -231,13 +233,12 @@ impl HostClient {
 }
 
 fn host_api() -> Result<Arc<dyn HostApi>, ErrorPayload> {
-    if let Ok(api) = SCOPED_HOST_API.try_with(Arc::clone) {
-        return Ok(api);
-    }
-    HOST_API
-        .get()
-        .cloned()
-        .ok_or_else(|| ErrorPayload::new(WireErrorCode::HostNotReady, "host peer not ready"))
+    SCOPED_HOST_API.try_with(Arc::clone).map_err(|_| {
+        ErrorPayload::new(
+            WireErrorCode::ContextUnavailable,
+            "host API is only available while handling an invocation",
+        )
+    })
 }
 
 fn supported_host_api(operation: HostOperation) -> Result<Arc<dyn HostApi>, ErrorPayload> {
@@ -253,6 +254,7 @@ fn supported_host_api(operation: HostOperation) -> Result<Arc<dyn HostApi>, Erro
 }
 
 /// Invokes a raw host capability for transport or request-context integration tests.
+#[cfg(any(test, feature = "testing"))]
 pub async fn invoke_host(capability: &str, input: Value) -> Result<Value, ErrorPayload> {
     host_api()?.call(capability, input).await
 }
@@ -449,13 +451,13 @@ mod host_tests {
             assert_eq!(input["messages"][0]["role"], "user");
             Ok(ModelStream::from_stream(
                 futures_util::stream::iter([
-                    astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
+                    astrcode_extension_sdk::wire::protocol::ModelStreamEvent::ContentDelta {
                         content: "ty".into(),
                     },
-                    astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
+                    astrcode_extension_sdk::wire::protocol::ModelStreamEvent::ContentDelta {
                         content: "ped".into(),
                     },
-                    astrcode_extension_contract::protocol::ModelStreamEvent::Completed {
+                    astrcode_extension_sdk::wire::protocol::ModelStreamEvent::Completed {
                         output: json!({ "content": "typed", "model": "main_llm" }),
                     },
                 ]),
@@ -551,6 +553,15 @@ mod host_tests {
             HostOperation::LlmMainChat,
             HostOperation::LlmSmallChat,
             HostOperation::ProcessSpawn,
+            HostOperation::ProcessStart,
+            HostOperation::ProcessRead,
+            HostOperation::ProcessInput,
+            HostOperation::ProcessInput,
+            HostOperation::ProcessResize,
+            HostOperation::ProcessStatus,
+            HostOperation::ProcessPromote,
+            HostOperation::ProcessKill,
+            HostOperation::ProcessList,
             HostOperation::NetworkClient,
             HostOperation::ExtensionHttpPublic,
             HostOperation::SessionRootCreate,
@@ -574,6 +585,8 @@ mod host_tests {
             HostOperation::SessionReadEvents,
             HostOperation::SessionStateRead,
             HostOperation::SessionStateWrite,
+            HostOperation::WorkspaceApplyPatch,
+            HostOperation::ToolResultRead,
             HostOperation::WorkspaceRead,
             HostOperation::WorkspaceWrite,
             HostOperation::WorkspaceEdit,
@@ -615,6 +628,30 @@ mod host_tests {
             expect_backend_error(HostClient::models().small_chat_collected(messages())).await;
             expect_backend_error(HostClient::process().spawn(HostProcessRequest::new("true")))
                 .await;
+            expect_backend_error(
+                HostClient::process().start(HostProcessStartRequest::pipes("true")),
+            )
+            .await;
+            let process_target = || HostProcessTargetRequest {
+                id: "process-1".into(),
+            };
+            expect_backend_error(HostClient::process().read(HostProcessReadRequest {
+                id: "process-1".into(),
+                wait_ms: None,
+            }))
+            .await;
+            expect_backend_error(HostClient::process().write("process-1", "continue\n")).await;
+            expect_backend_error(HostClient::process().close_stdin("process-1")).await;
+            expect_backend_error(HostClient::process().resize(HostProcessResizeRequest {
+                id: "process-1".into(),
+                rows: 24,
+                cols: 80,
+            }))
+            .await;
+            expect_backend_error(HostClient::process().status(process_target())).await;
+            expect_backend_error(HostClient::process().promote(process_target())).await;
+            expect_backend_error(HostClient::process().kill(process_target())).await;
+            expect_backend_error(HostClient::process().list()).await;
             expect_backend_error(
                 HostClient::network().send(HostNetworkRequest::get("https://example.com")),
             )
@@ -686,21 +723,37 @@ mod host_tests {
                 }),
             )
             .await;
+            expect_backend_error(HostClient::workspace().apply_patch(
+                HostWorkspaceApplyPatchRequest {
+                    patch: "*** Begin Patch\n*** End Patch".into(),
+                },
+            ))
+            .await;
+            expect_backend_error(HostClient::tool_results().read(HostToolResultReadRequest {
+                artifact_id: "result.txt".into(),
+                byte_offset: 0,
+                max_bytes: 1_024,
+            }))
+            .await;
             expect_backend_error(HostClient::workspace().read(HostWorkspaceReadRequest {
                 path: "notes.txt".into(),
                 max_bytes: None,
+                line_offset: 0,
+                line_limit: None,
             }))
             .await;
             expect_backend_error(HostClient::workspace().write(HostWorkspaceWriteRequest {
                 path: "notes.txt".into(),
                 content: "hello".into(),
+                create_dirs: false,
             }))
             .await;
             expect_backend_error(HostClient::workspace().edit(HostWorkspaceEditRequest {
                 path: "notes.txt".into(),
-                old_text: "hello".into(),
-                new_text: "hi".into(),
+                old_text: Some("hello".into()),
+                new_text: Some("hi".into()),
                 replace_all: false,
+                edits: Vec::new(),
             }))
             .await;
             expect_backend_error(HostClient::workspace().list(HostWorkspaceListRequest {
@@ -712,16 +765,26 @@ mod host_tests {
             expect_backend_error(HostClient::workspace().grep(HostWorkspaceGrepRequest {
                 pattern: "hello".into(),
                 path: None,
+                offset: 0,
                 max_matches: None,
                 max_bytes: None,
                 max_line_chars: None,
+                recursive: true,
+                multiline: false,
+                path_filters: Vec::new(),
+                before_context: 0,
+                after_context: 0,
+                mode: HostWorkspaceGrepMode::FilesWithMatches,
             }))
             .await;
             expect_backend_error(HostClient::workspace().glob(HostWorkspaceGlobRequest {
                 pattern: "**/*.rs".into(),
                 root: None,
+                offset: 0,
                 max_matches: None,
-                include_ignored: false,
+                respect_gitignore: true,
+                include_hidden: true,
+                include_directories: true,
             }))
             .await;
             expect_backend_error(HostClient::session_inspect().list()).await;
@@ -839,5 +902,24 @@ mod host_tests {
                 "{marker}"
             );
         }
+
+        let host = Arc::new(LimitedHost::default());
+        let error = with_host_api(host.clone(), async {
+            tokio::spawn(async {
+                HostClient::events()
+                    .emit(HostEventEmitRequest {
+                        event_type: "detached".into(),
+                        schema_version: 1,
+                        payload: json!({}),
+                    })
+                    .await
+            })
+            .await
+            .unwrap()
+            .unwrap_err()
+        })
+        .await;
+        assert_eq!(error.code_enum(), Some(WireErrorCode::ContextUnavailable));
+        assert_eq!(host.calls.load(Ordering::SeqCst), 0);
     }
 }

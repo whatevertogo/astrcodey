@@ -2,6 +2,37 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::llm::{LlmContent, LlmMessage, LlmRole};
+
+pub const COMPACT_SUMMARY_MARKER: &str = "<compact_summary>";
+pub const POST_COMPACT_CONTEXT_MARKER: &str = "<post_compact_context>";
+
+/// 判断消息是否是 compact 后注入的 synthetic context message。
+pub fn is_compact_summary_message(message: &LlmMessage) -> bool {
+    message.role == LlmRole::User
+        && message
+            .content
+            .iter()
+            .filter_map(LlmContent::as_text)
+            .any(is_compact_summary_text)
+}
+
+/// 检测文本内容是否以 compact summary 标记开头。
+pub fn is_compact_summary_text(content: &str) -> bool {
+    content.trim_start().starts_with(COMPACT_SUMMARY_MARKER)
+}
+
+/// 判断消息是否是 compact/post-compact 注入的 synthetic context message。
+pub fn is_synthetic_context_message(message: &LlmMessage) -> bool {
+    is_compact_summary_message(message)
+        || (message.role == LlmRole::User
+            && message
+                .content
+                .iter()
+                .filter_map(LlmContent::as_text)
+                .any(|text| text.trim_start().starts_with(POST_COMPACT_CONTEXT_MARKER)))
+}
+
 /// 触发 compact 的来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

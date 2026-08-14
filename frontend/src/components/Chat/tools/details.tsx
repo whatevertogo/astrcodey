@@ -150,7 +150,8 @@ export function ShellToolDetails({ block }: { block: ToolCall }) {
   const cwd = stringValue(meta, 'cwd') || stringValue(args, 'cwd')
   const shell = stringValue(meta, 'shell')
   const exitCode = numberValue(meta, 'exitCode')
-  const timeout = numberValue(args, 'timeout')
+  const timeout =
+    numberValue(meta, 'timeoutSecs') ?? numberValue(args, 'timeout')
   const timedOut = boolValue(meta, 'timedOut')
   const stdoutBytes = numberValue(meta, 'stdoutBytes')
   const stderrBytes = numberValue(meta, 'stderrBytes')
@@ -242,6 +243,32 @@ export function ReadToolDetails({ block }: { block: ToolCall }) {
           <MetaRow label="offset" value={offset} />
           <MetaRow label="chars" value={returnedChars} />
           <MetaRow label="charOffset" value={charOffset} />
+          <MetaRow label="next" value={paginationLabel(meta)} />
+        </MetaGrid>
+      </div>
+      <ReadContentPreview text={block.text || '(no content)'} />
+    </div>
+  )
+}
+
+export function ToolResultDetails({ block }: { block: ToolCall }) {
+  const args = toolArgs(block)
+  const meta = toolMeta(block)
+  const artifactId =
+    stringValue(meta, 'artifactId') || stringValue(args, 'artifactId')
+  const totalBytes = numberValue(meta, 'bytes')
+  const returnedBytes = numberValue(meta, 'returnedBytes')
+  const byteOffset =
+    numberValue(meta, 'byteOffset') ?? numberValue(args, 'byteOffset')
+
+  return (
+    <div className="min-w-0 divide-y divide-border/70">
+      <div className="pb-3">
+        <MetaGrid>
+          <MetaRow label="artifact" value={artifactId} />
+          <MetaRow label="size" value={formatBytes(totalBytes)} />
+          <MetaRow label="returned" value={formatBytes(returnedBytes)} />
+          <MetaRow label="byteOffset" value={byteOffset} />
           <MetaRow label="next" value={paginationLabel(meta)} />
         </MetaGrid>
       </div>

@@ -382,7 +382,6 @@ mod tests {
             effective,
             extension_runner,
             context_assembler,
-            std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
         )
     }
 

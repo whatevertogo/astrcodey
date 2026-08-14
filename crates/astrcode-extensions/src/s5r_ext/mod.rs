@@ -5,7 +5,6 @@ mod v3_session;
 
 use std::{path::Path, sync::Arc};
 
-use astrcode_extension_contract::{HandlerEffect, HandlerId, HandlerKind, HandlerResult};
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
@@ -18,9 +17,11 @@ use astrcode_extension_sdk::{
         LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
         PreToolUseContext, PreToolUseHandler, PreToolUseResult, PromptBuildContext,
         PromptBuildHandler, PromptContributions, ProviderContext, ProviderHandler, ProviderResult,
-        Registrar, ToolContext, ToolHandler,
+        Registrar, ToolContext, ToolHandler, ToolPlanContext,
     },
-    tool::ExecutionMode,
+    s5r::{ToolInvocationPhase, ToolInvocationRequest, ToolInvocationScope, ToolPlanDto},
+    tool::{ExecutionMode, ToolPlan},
+    wire::{HandlerEffect, HandlerId, HandlerKind, HandlerResult},
 };
 use serde_json::{Value, json};
 
@@ -357,8 +358,50 @@ struct S5rToolHandler {
     execution_mode: ExecutionMode,
 }
 
+fn serialize_tool_invocation(request: ToolInvocationRequest) -> Result<Value, ExtensionError> {
+    serde_json::to_value(request)
+        .map_err(|error| ExtensionError::Internal(format!("serialize tool invocation: {error}")))
+}
+
 #[async_trait::async_trait]
 impl ToolHandler for S5rToolHandler {
+    async fn plan(&self, ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        let tool_name = ctx.tool_name().to_owned();
+        let event = serialize_tool_invocation(ToolInvocationRequest {
+            phase: ToolInvocationPhase::Plan,
+            arguments: ctx.raw_arguments().clone(),
+            scope: ToolInvocationScope {
+                session_id: ctx.session_id().to_string(),
+                working_dir: ctx.working_dir().to_string_lossy().into_owned(),
+                turn_id: ctx.turn_id().map(str::to_owned),
+                tool_call_id: ctx.call_id().map(str::to_owned),
+            },
+        })?;
+        let invoke_context = InvokeContext {
+            extension_id: self.extension_id.clone(),
+            session_id: Some(ctx.session_id().to_string()),
+            tool_call_id: ctx.call_id().map(str::to_owned),
+            working_dir: Some(ctx.working_dir().to_string_lossy().into_owned()),
+            cancel_token: Some(ctx.cancellation().clone()),
+            planning: true,
+            ..InvokeContext::default()
+        };
+        let handler = handler_id(&self.extension_id, HandlerKind::Tool, &tool_name)?;
+        let response = self
+            .session
+            .invoke_handler_once(&handler, event, &invoke_context, self.execution_mode)
+            .await?;
+        if response.effect != HandlerEffect::ToolPlan {
+            return Err(ExtensionError::Internal(format!(
+                "tool planner returned {:?}, expected tool_plan",
+                response.effect
+            )));
+        }
+        serde_json::from_value::<ToolPlanDto>(response.data)
+            .map(ToolPlan::from)
+            .map_err(|error| ExtensionError::Internal(format!("parse tool plan: {error}")))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,
@@ -370,18 +413,16 @@ impl ToolHandler for S5rToolHandler {
         let tool_call_id = ctx.call_id().map(str::to_owned);
         let turn_id = ctx.turn_id().map(str::to_owned);
         let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
-        let event = json!({
-            "on": "tool",
-            "name": &tool_name,
-            "input": {
-                "tool_name": &tool_name,
-                "arguments": arguments,
-                "working_dir": working_dir,
-                "session_id": session_id,
-                "turn_id": turn_id,
-                "tool_call_id": tool_call_id,
-            }
-        });
+        let event = serialize_tool_invocation(ToolInvocationRequest {
+            phase: ToolInvocationPhase::Execute,
+            arguments,
+            scope: ToolInvocationScope {
+                session_id,
+                working_dir,
+                turn_id,
+                tool_call_id,
+            },
+        })?;
         let hid = handler_id(&self.extension_id, HandlerKind::Tool, &tool_name)?;
         let resp = self
             .session

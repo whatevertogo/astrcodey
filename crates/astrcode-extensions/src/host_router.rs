@@ -7,10 +7,13 @@ mod llm;
 mod network;
 mod path;
 mod process;
+mod process_handles;
 mod session;
 mod session_inspect;
+mod tool_result;
 mod wire;
 mod workspace;
+mod workspace_patch;
 
 use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
 
@@ -20,10 +23,12 @@ use astrcode_core::{
         LiveEventPayload,
     },
     llm::LlmProvider,
-    tool::SessionOperations,
+    tool::{
+        FileObservationStore, SessionOperations, ToolResultArtifactReader,
+        access::{HostResource, ResourceAccess, ResourceLease},
+    },
     types::EventId,
 };
-use astrcode_extension_contract::{HostContextRequirement, WireErrorCode};
 use astrcode_extension_sdk::{
     extension::{
         CustomEventDeclaration, ExtensionCapability, ExtensionError, ExtensionHttpRequest,
@@ -34,6 +39,7 @@ use astrcode_extension_sdk::{
         internal::{HostOperationGroup, OutboundNetworkService},
     },
     s5r::ErrorPayload,
+    wire::{HostContextRequirement, WireErrorCode},
 };
 use astrcode_storage::{EventReader, SessionReader};
 pub(crate) use capability::supported_operation_catalog;
@@ -77,8 +83,8 @@ where
 }
 
 /// 无返回值宿主操作的统一成功响应。
-pub(super) const fn acknowledgement() -> astrcode_extension_contract::host::Acknowledgement {
-    astrcode_extension_contract::host::Acknowledgement { ok: true }
+pub(super) const fn acknowledgement() -> astrcode_extension_sdk::wire::host::Acknowledgement {
+    astrcode_extension_sdk::wire::host::Acknowledgement { ok: true }
 }
 
 /// 单次宿主操作的固定管线：按 spec 线缆名解析请求、调用 typed handler、序列化契约输出。
@@ -200,8 +206,16 @@ pub struct InvokeContext {
     pub tool_call_id: Option<String>,
     pub session_store_dir: Option<PathBuf>,
     pub session_ops: Option<Arc<dyn SessionOperations>>,
+    /// Session-owned read-before-edit observations used by workspace Host operations.
+    pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
+    /// Durable tool-result artifact reader scoped by the current session.
+    pub tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
     pub event_tx: Option<EventSender>,
     pub event_causation: Option<(EventId, u8)>,
+    /// Present only for tool execution; every actual Host operation must fit this lease.
+    pub resource_lease: Option<ResourceLease>,
+    /// Tool planning contexts reject every nested Host operation.
+    pub planning: bool,
     pub working_dir: Option<String>,
     pub cancel_token: Option<CancellationToken>,
     pub tasks: Option<ExtensionTasks>,
@@ -283,6 +297,16 @@ impl HostRouter {
         self.network.service()
     }
 
+    /// Drops all transient Host resources owned by a durable session.
+    pub fn cleanup_session_resources(&self, session_id: &str) {
+        self.process.cleanup_session(session_id);
+    }
+
+    /// Drops all transient Host resources owned by an extension identity.
+    pub fn cleanup_extension_resources(&self, extension_id: &str) {
+        self.process.cleanup_extension(extension_id);
+    }
+
     async fn invoke_group(
         &self,
         group: HostOperationGroup,
@@ -300,26 +324,9 @@ impl HostRouter {
             HostOperationGroup::Context => {
                 context::invoke(operation, &input, context, &self.session_state_writes).await
             },
-            HostOperationGroup::Workspace => {
-                self.workspace
-                    .invoke(
-                        operation,
-                        input,
-                        context.working_dir.as_deref(),
-                        context.tasks.as_ref(),
-                    )
-                    .await
-            },
-            HostOperationGroup::Process => {
-                self.process
-                    .invoke(
-                        operation,
-                        input,
-                        context.working_dir.as_deref(),
-                        context.cancel_token.as_ref(),
-                    )
-                    .await
-            },
+            HostOperationGroup::Workspace => self.workspace.invoke(operation, input, context).await,
+            HostOperationGroup::ToolResult => tool_result::invoke(operation, input, context).await,
+            HostOperationGroup::Process => self.process.invoke(operation, input, context).await,
             HostOperationGroup::Network => {
                 self.network
                     .invoke(operation, input, context.cancel_token.as_ref())
@@ -341,16 +348,21 @@ impl HostRouter {
         ctx: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
         ensure_invoke_active(ctx)?;
+        ensure_not_planning(ctx)?;
         let spec = capability::lookup(cap)?;
         capability::authorize(spec, &ctx.declared_capabilities)?;
         ensure_required_context(spec.operation, ctx)?;
+        enforce_resource_lease(spec.operation, &input, ctx)?;
 
         // Boxing at the group boundary keeps the public invoke future independent of the
         // combined stack size of every backend dispatcher.
         let invoke = Box::pin(self.invoke_group(spec.group, spec.operation, input, ctx));
         // ProcessRunner must observe cancellation so it can terminate the process group and reap
         // the direct child before returning.
-        let backend_owns_cancellation = spec.operation == HostOperation::ProcessSpawn;
+        let backend_owns_cancellation = matches!(
+            spec.operation,
+            HostOperation::ProcessSpawn | HostOperation::ProcessRead
+        );
         if spec.cancelable
             && !backend_owns_cancellation
             && let Some(token) = &ctx.cancel_token
@@ -376,11 +388,13 @@ impl HostRouter {
         capability: &str,
         input: Value,
         context: &InvokeContext,
-    ) -> Result<astrcode_extension_contract::ModelEventStream, ErrorPayload> {
+    ) -> Result<astrcode_extension_sdk::wire::ModelEventStream, ErrorPayload> {
         ensure_invoke_active(context)?;
+        ensure_not_planning(context)?;
         let spec = capability::lookup(capability)?;
         capability::authorize(spec, &context.declared_capabilities)?;
         ensure_required_context(spec.operation, context)?;
+        enforce_resource_lease(spec.operation, &input, context)?;
         if !spec.supports_stream {
             return Err(ErrorPayload::new(
                 WireErrorCode::StreamNotSupported,
@@ -398,6 +412,154 @@ impl HostRouter {
                 format!("streaming capability {capability} has no stream handler"),
             )),
         }
+    }
+}
+
+fn ensure_not_planning(ctx: &InvokeContext) -> Result<(), ErrorPayload> {
+    if ctx.planning {
+        return Err(ErrorPayload::new(
+            WireErrorCode::PermissionDenied,
+            "Host operations are unavailable during tool planning",
+        ));
+    }
+    Ok(())
+}
+
+fn enforce_resource_lease(
+    operation: HostOperation,
+    input: &Value,
+    ctx: &InvokeContext,
+) -> Result<(), ErrorPayload> {
+    let Some(lease) = &ctx.resource_lease else {
+        return Ok(());
+    };
+    let required = required_resource_accesses(operation, input, ctx)?;
+    if required.iter().all(|required| lease.permits(required)) {
+        return Ok(());
+    }
+    Err(ErrorPayload::new(
+        WireErrorCode::PermissionDenied,
+        format!(
+            "{} exceeds the resource lease for this tool call",
+            operation.wire_name()
+        ),
+    ))
+}
+
+fn required_resource_accesses(
+    operation: HostOperation,
+    input: &Value,
+    ctx: &InvokeContext,
+) -> Result<Vec<ResourceAccess>, ErrorPayload> {
+    use astrcode_extension_sdk::host::{
+        HostToolResultReadRequest, HostWorkspaceApplyPatchRequest, HostWorkspaceEditRequest,
+        HostWorkspaceGlobRequest, HostWorkspaceGrepRequest, HostWorkspaceListRequest,
+        HostWorkspaceReadRequest, HostWorkspaceWriteRequest, analyze_unified_diff_paths,
+    };
+
+    let working_dir = || {
+        ctx.working_dir.as_deref().ok_or_else(|| {
+            ErrorPayload::new(
+                WireErrorCode::ContextUnavailable,
+                format!("{} requires a workspace", operation.wire_name()),
+            )
+        })
+    };
+    let workspace_path = |path: &str| -> Result<PathBuf, ErrorPayload> {
+        Ok(PathBuf::from(working_dir()?).join(path))
+    };
+
+    match operation {
+        HostOperation::WorkspaceRead => {
+            let request: HostWorkspaceReadRequest =
+                parse_wire_request(input, operation.wire_name())?;
+            Ok(vec![ResourceAccess::read_file(workspace_path(
+                &request.path,
+            )?)])
+        },
+        HostOperation::ToolResultRead => {
+            let _: HostToolResultReadRequest = parse_wire_request(input, operation.wire_name())?;
+            Ok(vec![ResourceAccess::host(HostResource::ToolResultArtifact)])
+        },
+        HostOperation::WorkspaceWrite => {
+            let request: HostWorkspaceWriteRequest =
+                parse_wire_request(input, operation.wire_name())?;
+            Ok(vec![ResourceAccess::write_file(workspace_path(
+                &request.path,
+            )?)])
+        },
+        HostOperation::WorkspaceEdit => {
+            let request: HostWorkspaceEditRequest =
+                parse_wire_request(input, operation.wire_name())?;
+            Ok(vec![ResourceAccess::read_write_file(workspace_path(
+                &request.path,
+            )?)])
+        },
+        HostOperation::WorkspaceApplyPatch => {
+            let request: HostWorkspaceApplyPatchRequest =
+                parse_wire_request(input, operation.wire_name())?;
+            let paths = analyze_unified_diff_paths(&request.patch).map_err(|error| {
+                ErrorPayload::new(WireErrorCode::InvalidInput, error.to_string())
+            })?;
+            paths
+                .into_iter()
+                .flat_map(|paths| [paths.old_path, paths.new_path])
+                .flatten()
+                .map(|path| workspace_path(&path).map(ResourceAccess::read_write_file))
+                .collect()
+        },
+        HostOperation::WorkspaceList => {
+            let request: HostWorkspaceListRequest =
+                parse_wire_request(input, operation.wire_name())?;
+            Ok(vec![ResourceAccess::search_file(
+                workspace_path(&request.path)?,
+                true,
+            )])
+        },
+        HostOperation::WorkspaceGrep => {
+            let request: HostWorkspaceGrepRequest =
+                parse_wire_request(input, operation.wire_name())?;
+            Ok(vec![ResourceAccess::search_file(
+                workspace_path(request.path.as_deref().unwrap_or("."))?,
+                true,
+            )])
+        },
+        HostOperation::WorkspaceGlob => {
+            let request: HostWorkspaceGlobRequest =
+                parse_wire_request(input, operation.wire_name())?;
+            Ok(vec![ResourceAccess::search_file(
+                workspace_path(request.root.as_deref().unwrap_or("."))?,
+                true,
+            )])
+        },
+        HostOperation::ProcessSpawn
+        | HostOperation::ProcessStart
+        | HostOperation::ProcessRead
+        | HostOperation::ProcessInput
+        | HostOperation::ProcessResize
+        | HostOperation::ProcessStatus
+        | HostOperation::ProcessPromote
+        | HostOperation::ProcessKill
+        | HostOperation::ProcessList => Ok(vec![ResourceAccess::host(HostResource::Process)]),
+        _ => match operation.spec().group {
+            HostOperationGroup::Llm => Ok(vec![ResourceAccess::host(HostResource::Model)]),
+            HostOperationGroup::Session => Ok(vec![ResourceAccess::host(HostResource::Session)]),
+            HostOperationGroup::Network => Ok(vec![ResourceAccess::host(HostResource::Network)]),
+            HostOperationGroup::ToolResult => {
+                Ok(vec![ResourceAccess::host(HostResource::ToolResultArtifact)])
+            },
+            HostOperationGroup::ExtensionHttp => {
+                Ok(vec![ResourceAccess::host(HostResource::ExtensionHttp)])
+            },
+            HostOperationGroup::Context if operation == HostOperation::EventEmit => {
+                Ok(vec![ResourceAccess::host(HostResource::Event)])
+            },
+            HostOperationGroup::Context => Ok(vec![ResourceAccess::host(HostResource::Session)]),
+            HostOperationGroup::Workspace | HostOperationGroup::Process => Err(ErrorPayload::new(
+                WireErrorCode::InvalidCapabilityRegistry,
+                format!("{} has no resource mapping", operation.wire_name()),
+            )),
+        },
     }
 }
 
@@ -1091,6 +1253,69 @@ mod tests {
             std::fs::read_to_string(workspace.path().join("edit.txt")).expect("read workspace"),
             "old value"
         );
+    }
+
+    #[tokio::test]
+    async fn tool_resource_lease_rejects_actual_access_outside_the_approved_plan() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        std::fs::write(workspace.path().join("approved.txt"), "approved").expect("seed approved");
+        std::fs::write(workspace.path().join("other.txt"), "other").expect("seed other");
+        let root = workspace.path().to_string_lossy().into_owned();
+        let lease =
+            ResourceLease::from_plan(&astrcode_core::tool::access::ToolPlan::from_resources([
+                ResourceAccess::read_file(workspace.path().join("approved.txt")),
+            ]));
+        let router = HostRouter::from_backends(HostBackends {
+            default_working_dir: Some(root.clone()),
+            ..Default::default()
+        });
+        let ctx = InvokeContext {
+            working_dir: Some(root),
+            declared_capabilities: vec![
+                ExtensionCapability::WorkspaceRead,
+                ExtensionCapability::ProcessSpawn,
+            ],
+            resource_lease: Some(lease),
+            ..Default::default()
+        };
+
+        let approved = router
+            .invoke(
+                "astrcode.workspace.read",
+                json!({"path": "approved.txt"}),
+                &ctx,
+            )
+            .await
+            .expect("approved read");
+        assert_eq!(approved["content"], "approved");
+
+        for (operation, input) in [
+            ("astrcode.workspace.read", json!({"path": "other.txt"})),
+            (
+                "astrcode.process.spawn",
+                json!({"command": "echo", "args": ["bypass"]}),
+            ),
+        ] {
+            let error = router
+                .invoke(operation, input, &ctx)
+                .await
+                .expect_err("actual access outside lease must fail");
+            assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
+        }
+
+        let planning = InvokeContext {
+            planning: true,
+            ..ctx
+        };
+        let error = router
+            .invoke(
+                "astrcode.workspace.read",
+                json!({"path": "approved.txt"}),
+                &planning,
+            )
+            .await
+            .expect_err("planning cannot call Host operations");
+        assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
     }
 
     #[tokio::test]
@@ -2185,10 +2410,10 @@ mod tests {
         let mut completed = None;
         while let Some(event) = events.next().await {
             match event {
-                astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
+                astrcode_extension_sdk::wire::protocol::ModelStreamEvent::ContentDelta {
                     content,
                 } => deltas.push(content),
-                astrcode_extension_contract::protocol::ModelStreamEvent::Completed { output } => {
+                astrcode_extension_sdk::wire::protocol::ModelStreamEvent::Completed { output } => {
                     completed = Some(output);
                 },
                 _ => {},

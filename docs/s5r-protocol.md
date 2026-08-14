@@ -1,7 +1,7 @@
 # S5R 3.0 扩展线缆协议
 
-> 可执行契约位于 `astrcode-extension-contract`。宿主与 worker 都直接依赖该 crate；
-> worker 侧组装位于 `astrcode-extension-worker`，宿主不依赖 worker runtime。
+> 可执行契约位于 `astrcode-extension-sdk::wire`。SDK 同时拥有作者 API 与 wire，但二者保持
+> 单向逻辑边界；worker 侧组装位于 `astrcode-extension-worker`，宿主不依赖 worker runtime。
 
 S5R 3.0 不兼容 1.0/2.0 worker，也不提供双协议运行。旧 manifest 与 wire 数据在边界拒绝，
 但宿主不会主动删除它们。
@@ -67,7 +67,7 @@ worker 不会因未协商它们而初始化失败。
 
 `result` 是以 `status = success | failure` 标记的闭合枚举：success 必须携带
 `output`，failure 必须携带结构化 `error`，不存在两者同时缺失或同时出现的状态。
-handler 返回的 effect 也是 contract enum，未知或与 handler 类别不匹配的 effect
+handler 返回的 effect 也是 wire enum，未知或与 handler 类别不匹配的 effect
 在宿主边界拒绝。
 
 `invoke` request id 在同一 peer 上必须唯一。nested invoke 的 parent 必须仍是当前连接上的活跃
@@ -96,16 +96,23 @@ delta、tool-call、usage，最后恰好一个 `completed` 或 `failed`。终态
 |---|---|
 | `s5r.runtime.ping` | peer runtime 内建 liveness round-trip |
 | `handler.invoke` | 宿主调用 worker 注册的 tool、command、hook、HTTP 或 event handler |
-| `astrcode.*` | worker 调用宿主能力；由 contract operation catalog 定义 |
+| `astrcode.*` | worker 调用宿主能力；由 SDK wire operation catalog 定义 |
+
+Tool handler 使用同一个 handler identity 和严格的 `ToolInvocationRequest`。请求只包含
+`phase: ToolInvocationPhase`、最终 `arguments` 与宿主归属的 `scope`，不重复传 handler 已经确定的
+tool 名称或旧式 `on` 标签。`Plan` 先返回 `HandlerEffect::ToolPlan` 与 `ToolPlanDto`；权限通过并
+签发 lease 后，`Execute` 才返回正常工具 effect。plan 阶段不安装反向 Host API，不能产生 I/O；execute 阶段的每个
+`astrcode.*` 调用仍会依据本次调用的 resource lease 再校验。Host 与 worker 对未知 phase、请求
+或 plan DTO 中的未知字段、以及错误 effect 都直接拒绝，不提供旧式单阶段或旧 envelope 回退。
 
 `host_operations` 是去重的 operation 名字符串列表，只表示该 Host 版本实现了哪些 operation。
-operation 的类型化参数、返回值、能力要求和 stream/cancel 属性由共享 contract 定义，不在握手中
+operation 的类型化参数、返回值、能力要求和 stream/cancel 属性由共享 wire 模块定义，不在握手中
 重复传输。Worker 可通过
 `HostClient::host_supports(HostOperation)` 查询，typed client 也会在缺失时本地返回
 `unsupported`；返回 `true` 不代表 Worker 已获授权、当前 session/workspace context 存在，
 也不代表具体 backend 可用。宿主仍固定执行 manifest capability → runtime context/scope →
 backend 检查。`WireErrorCode` 单点定义在
-`astrcode-extension-contract`，字符串为
+`astrcode-extension-sdk::wire`，字符串为
 snake_case，废弃后不得复用；未知错误码必须在 `ErrorPayload.code: String` / `HostError.code`
 中无损透传。generation gate 关闭后，排队和新调用统一返回 `extension_draining`。
 
@@ -124,7 +131,7 @@ snake_case，废弃后不得复用；未知错误码必须在 `ErrorPayload.code
 任意语言 worker 都可以运行同一套线缆验收：
 
 ```bash
-cargo run -p astrcode-extension-contract --bin s5r-conformance -- \
+cargo run -p astrcode-extension-sdk --bin s5r-conformance -- \
   --extension-id <worker-extension-id> -- <worker-command> [args...]
 ```
 

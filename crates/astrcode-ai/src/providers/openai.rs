@@ -237,7 +237,7 @@ mod tests {
                 "required": ["path"]
             }),
             strict: false,
-            origin: ToolOrigin::Builtin,
+            origin: ToolOrigin::Bundled,
             execution_mode: ExecutionMode::Parallel,
         }
     }

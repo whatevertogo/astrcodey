@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use astrcode_core::{
     config::ContextSettings,
     llm::{
-        LlmContent, LlmError, LlmMessage, LlmRole, provider_transcript, provider_visible_messages,
+        LlmError, LlmMessage, provider_transcript, provider_visible_messages,
         token_estimate::{
             estimate_provider_message_tokens, estimate_provider_request_tokens,
             estimate_tool_definition_tokens,
@@ -13,9 +13,6 @@ use astrcode_core::{
 };
 
 use crate::prompt_engine::system_messages_from_prompt;
-
-pub const COMPACT_SUMMARY_MARKER: &str = "<compact_summary>";
-pub const POST_COMPACT_CONTEXT_MARKER: &str = "<post_compact_context>";
 
 /// 同一 durable revision 下的完整 provider context。
 ///
@@ -173,32 +170,6 @@ impl From<LlmError> for CompactError {
     }
 }
 
-/// 判断消息是否是 compact 后注入的 synthetic context message。
-pub fn is_compact_summary_message(message: &LlmMessage) -> bool {
-    message.role == LlmRole::User
-        && message
-            .content
-            .iter()
-            .filter_map(LlmContent::as_text)
-            .any(is_compact_summary_text)
-}
-
-/// 检测文本内容是否以 compact summary 标记开头。
-pub fn is_compact_summary_text(content: &str) -> bool {
-    content.trim_start().starts_with(COMPACT_SUMMARY_MARKER)
-}
-
-/// 判断消息是否是 compact/post-compact 注入的 synthetic context message。
-pub fn is_synthetic_context_message(message: &LlmMessage) -> bool {
-    is_compact_summary_message(message)
-        || (message.role == LlmRole::User
-            && message
-                .content
-                .iter()
-                .filter_map(LlmContent::as_text)
-                .any(|text| text.trim_start().starts_with(POST_COMPACT_CONTEXT_MARKER)))
-}
-
 /// 粗略识别 provider 返回的上下文过长错误。
 ///
 /// 这里故意排除 rate limit / quota 等错误，避免把限流误判为可 compact 重试。
@@ -263,7 +234,7 @@ mod tests {
             description: "Read a file".into(),
             parameters: json!({"type": "object"}),
             strict: false,
-            origin: ToolOrigin::Builtin,
+            origin: ToolOrigin::Bundled,
             execution_mode: ExecutionMode::Sequential,
         }];
 

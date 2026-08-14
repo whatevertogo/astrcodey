@@ -195,6 +195,11 @@ struct TodoWriteHandler;
 
 #[async_trait::async_trait]
 impl ToolHandler for TodoWriteHandler {
+    async fn plan(&self, ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        let _: TodoArgs = ctx.arguments()?;
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
     async fn execute(&self, ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
         let input: TodoArgs = ctx.arguments()?;
         let state_dir = ctx.paths().session_data_dir()?;
@@ -438,7 +443,8 @@ pub trait ExtensionHttpHandler: Send + Sync {
 
 | Handler | 输入 | 输出语义 |
 |---|---|---|
-| `ToolHandler::execute` | `ToolContext` | `ToolExecutionResult::Completed` 或 `CompletedWithDiscoveredTools`；保留当前 turn 工具发现语义，不用 metadata 暗示控制流。`From<ToolResult>` 覆盖常见路径。 |
+| `ToolHandler::plan` | `ToolPlanContext` | 只把最终参数解释成 `ToolPlan`；无 Host、event、task 或 persistence。 |
+| `ToolHandler::execute` | `ToolContext` | 权限与 lease 已建立后执行；返回 `ToolExecutionResult::Completed` 或 `CompletedWithDiscoveredTools`。 |
 | `CommandHandler::execute` | `CommandContext` | Display、Handled、StartTurn 等互斥 command decision。 |
 | `CommandHandler::complete` | `CommandCompletionContext` | 光标位置对应的补全集合；只有 command 声明支持补全时调用。 |
 | `ExtensionHttpHandler::handle` | `HttpContext` | 结构化 JSON response；status 和 body 在返回边界校验。 |
@@ -451,19 +457,25 @@ SDK 为无状态 handler 提供 closure adapter：
 ```rust
 reg.tool(
     tool("ping").description("Return pong").build(),
-    tool_handler(|_ctx| async { Ok(ToolResult::success("pong")) }),
+    tool_handler(
+        |_ctx| async { Ok(ToolPlan::default()) },
+        |_ctx| async { Ok(ToolResult::success("pong")) },
+    ),
 );
 
 reg.tool(
     tool("greet").parameters(greet_schema()).build(),
-    tool_handler_args(|args: GreetArgs, _ctx| async move {
-        Ok(ToolResult::success(format!("hello, {}", args.name)))
-    }),
+    tool_handler_args(
+        |_args: GreetArgs, _ctx| async move { Ok(ToolPlan::default()) },
+        |args: GreetArgs, _ctx| async move {
+            Ok(ToolResult::success(format!("hello, {}", args.name)))
+        },
+    ),
 );
 ```
 
-`tool_handler_args` 只调用 `ToolContext::arguments<T>()`，错误仍走同一 `InvalidInput` 模型；它
-不生成 schema，也不根据 Rust 类型推断 provider strict。其它 adapter 只在确实能消除重复
+`tool_handler_args` 在 plan 与 execute 两个阶段分别解码同一最终参数，错误仍走同一
+`InvalidInput` 模型；它不生成 schema，也不根据 Rust 类型推断 provider strict。其它 adapter 只在确实能消除重复
 boilerplate 时提供，例如 `http_handler`、`command_handler`，不为每个 hook 机械复制一组函数。
 
 ### 7.5 Builder
@@ -760,8 +772,8 @@ impl HostError {
     pub fn code_enum(&self) -> Option<WireErrorCode>;
 }
 
-// `astrcode_extension_contract::WireErrorCode`（`astrcode_core::wire` re-export），
-// 宿主与 worker 共享的线缆错误码，单点定义在 contract：
+// `astrcode_extension_sdk::WireErrorCode`（定义于 `sdk::wire`），
+// 宿主与 worker 共享的线缆错误码，单点定义在 SDK wire 模块：
 // 通用码 PermissionDenied、BackendUnavailable、ContextUnavailable、InvalidInput、
 // Cancelled、Timeout、Transport 等，以及 network、session 等领域码。
 ```
@@ -1032,7 +1044,7 @@ compatibility 层。
 - 当前 registration validation：
   [`registration.rs`](../crates/astrcode-extensions/src/runner/registration.rs)
 - 当前 S5R runtime：[`s5r_ext/`](../crates/astrcode-extensions/src/s5r_ext/) 与
-  [`astrcode-extension-contract/src/`](../crates/astrcode-extension-contract/src/)
+  [`astrcode-extension-sdk/src/wire/`](../crates/astrcode-extension-sdk/src/wire/)
 
 Vvbot 参考锚点：
 

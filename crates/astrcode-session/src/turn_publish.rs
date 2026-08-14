@@ -791,7 +791,7 @@ mod tests {
             ),
         );
         runtime_services
-            .turn_runtime_view()
+            .pin_extension_view()
             .await
             .unwrap()
             .turn_hooks()

@@ -192,7 +192,7 @@ impl SessionCommandService {
         let outcome = compact_manual_session(&session, keep_recent_turns)
             .await
             .map_err(HandlerError::Session)?;
-        if outcome == ManualCompactionOutcome::Compacted {
+        if matches!(outcome, ManualCompactionOutcome::Compacted { .. }) {
             let state = session.read_model().await.map_err(HandlerError::Session)?;
             self.event_bus.send_session_resumed(&state);
         }
@@ -329,8 +329,8 @@ impl SessionCommandService {
             .compact_session_in_operation(operation, keep_recent_turns)
             .await?
         {
-            ManualCompactionOutcome::Compacted => CommandInvocation::Handled {
-                message: "compact completed".into(),
+            ManualCompactionOutcome::Compacted { messages_removed } => CommandInvocation::Handled {
+                message: format!("compact completed; {messages_removed} messages removed"),
             },
             ManualCompactionOutcome::Skipped { message } => CommandInvocation::Handled { message },
         };

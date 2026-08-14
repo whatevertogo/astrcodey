@@ -463,7 +463,7 @@ mod tests {
             description: "Read a file".into(),
             parameters: serde_json::json!({"type": "object"}),
             strict: false,
-            origin: ToolOrigin::Builtin,
+            origin: ToolOrigin::Bundled,
             execution_mode: ExecutionMode::Parallel,
         }];
         let config = AnthropicRequestConfig {
@@ -504,7 +504,7 @@ mod tests {
                     description: String::new(),
                     parameters: serde_json::json!({"type": "object"}),
                     strict,
-                    origin: ToolOrigin::Builtin,
+                    origin: ToolOrigin::Bundled,
                     execution_mode: ExecutionMode::Parallel,
                 }],
                 supported,

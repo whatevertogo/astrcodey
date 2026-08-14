@@ -9,8 +9,9 @@ use astrcode_extension_sdk::{
         ExtensionCapability, ExtensionError, ExtensionManifest, HookMode, HookResult,
         LifecycleContext, LifecyclePayload, PreToolUseContext, PreToolUsePayload, PreToolUseResult,
         Registrar, RuntimeHookCallContext, RuntimeLifecycleContext, RuntimePreToolUseContext,
-        ToolContext, ToolHandler,
+        ToolContext, ToolHandler, ToolPlanContext,
     },
+    tool::ToolPlan,
 };
 use astrcode_extensions::{Extension, runner::ExtensionRunner};
 use astrcode_session::ToolRegistry;
@@ -117,6 +118,10 @@ struct EchoToolHandler;
 
 #[async_trait::async_trait]
 impl ToolHandler for EchoToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::default())
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,
@@ -184,6 +189,10 @@ struct FixedToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for FixedToolHandler {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::default())
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,

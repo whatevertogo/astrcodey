@@ -151,7 +151,7 @@ mod tests {
             description: "Read a file".into(),
             parameters: json!({"type": "object"}),
             strict: false,
-            origin: crate::tool::ToolOrigin::Builtin,
+            origin: crate::tool::ToolOrigin::Bundled,
             execution_mode: crate::tool::ExecutionMode::Sequential,
         }];
         assert!(estimate_tool_definition_tokens(&tools) > 0);

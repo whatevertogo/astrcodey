@@ -64,7 +64,6 @@ pub fn assemble_session_runtime_services_for_test(
     effective: astrcode_core::config::EffectiveConfig,
     extension_runner: std::sync::Arc<astrcode_extensions::runner::ExtensionRunner>,
     context_assembler: std::sync::Arc<astrcode_context::context_assembler::LlmContextAssembler>,
-    shell_timeout_secs: std::sync::Arc<std::sync::atomic::AtomicU64>,
 ) -> std::sync::Arc<astrcode_session::SessionRuntimeServices> {
     crate::config_manager::assemble_session_runtime_services(
         llm,
@@ -72,7 +71,6 @@ pub fn assemble_session_runtime_services_for_test(
         effective,
         extension_runner,
         context_assembler,
-        shell_timeout_secs,
     )
 }
 

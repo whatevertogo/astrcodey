@@ -344,7 +344,7 @@ async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
 
     let outcome = compact_task.await.unwrap().unwrap();
     assert!(
-        outcome == ManualCompactionOutcome::Compacted,
+        matches!(outcome, ManualCompactionOutcome::Compacted { .. }),
         "idle compact should preserve the concurrent tail, got {outcome:?}"
     );
     assert_eq!(

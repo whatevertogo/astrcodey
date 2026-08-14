@@ -14,9 +14,7 @@ use astrcode_extension_sdk::{
     extension::{
         ExtensionError, PromptBuildPayload, RuntimeHookCallContext, RuntimePromptBuildContext,
     },
-    runtime_ports::{
-        PromptContributor, ToolCatalogCompleteness, ToolCatalogProvider, ToolCatalogScope,
-    },
+    runtime_ports::{PromptContributor, ToolCatalogProvider, ToolCatalogScope},
     shell::resolve_shell,
 };
 
@@ -24,16 +22,13 @@ use crate::ToolRegistry;
 
 pub(crate) struct BuiltBaseToolRegistry {
     pub registry: ToolRegistry,
-    pub completeness: ToolCatalogCompleteness,
     pub revision: u64,
 }
 
 /// 构建一个工作目录绑定的工具表快照。
 ///
-/// Session 快照缓存未命中时调用；工具执行期间只读取构建出的快照。
-///
 /// 返回未应用 session 工具边界的完整工具表。Session 在此快照之上派生筛选后的
-/// 不可变 registry，使工具边界变化不必重新执行动态工具发现。
+/// 不可变 registry；动态发现和 catalog 缓存由 Extension Runtime 负责。
 pub(crate) async fn build_base_tool_registry(
     tool_catalog: &dyn ToolCatalogProvider,
     scope: &ToolCatalogScope,
@@ -59,7 +54,6 @@ pub(crate) async fn build_base_tool_registry(
 
     Ok(BuiltBaseToolRegistry {
         registry: tool_registry,
-        completeness: catalog.completeness,
         revision: catalog.revision,
     })
 }

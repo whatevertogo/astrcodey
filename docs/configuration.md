@@ -44,7 +44,6 @@ compactThresholdPercent = 83.5
 compactKeepRecentTurns = 1
 agentMaxDepth = 2
 agentToolMaxParallelCalls = 5
-shellTimeoutSecs = 120
 approvalMode = "manual"
 
 [permissions]
@@ -112,7 +111,6 @@ provider = "duckduckgo"
 | `postCompactMaxTokensPerFile` | `5000` | 单文件恢复 token 上限 |
 | `agentMaxDepth` | `2` | 子 Agent 最大嵌套深度（root=0） |
 | `agentToolMaxParallelCalls` | `5` | 单轮并行工具调用上限 |
-| `shellTimeoutSecs` | `120` | Shell 工具默认超时（秒）；LLM 可传更短值，上限 600 |
 | `allowApiKeyShellCommand` | `false` | 是否允许 `apiKey` 使用 `!command` 从 shell 读取密钥 |
 | `approvalMode` | `"manual"` | **全局**审批模式：`"manual"` 需确认；`"yolo"` 跳过 Ask。对所有 session 生效（每轮 turn 从有效配置读取，非「每个 session 单独记忆」）。Web 设置页保存后写入本字段。CLI/TUI 进程内启动时，若未设置此项则**默认 yolo**；`astrcode tui --manual` / `--yolo` 可强制覆盖。HTTP `server` 子命令未设置时仍为 `manual`。 |
 | `extensionStates` | `{}` | 扩展启停，见 §7 |
@@ -155,8 +153,8 @@ allow = [{ tool = "read" }]
 | `capabilities` | 可选：`supportsPromptCacheKey`、`promptCacheRetention`（`inMemory` / `24h`）、`supportsStreamUsage`、`supportsStrictToolUse` |
 
 `supportsStrictToolUse` 控制是否把工具自身的 `strict` 声明发送给 provider。旧配置缺少该字段时按
-`false` 处理；OpenAI-compatible 网关需确认兼容后显式开启。内置工具和内置扩展工具默认声明
-`strict`（MCP 暂不声明）。发送前会从工具的自然参数契约编译 provider 专用 Schema：
+`false` 处理；OpenAI-compatible 网关需确认兼容后显式开启。第一方 bundled Extension 工具默认
+声明 `strict`（MCP 暂不声明）。发送前会从工具的自然参数契约编译 provider 专用 Schema：
 
 - OpenAI：递归关闭额外属性，并把可选字段转换为 required + nullable；
 - Anthropic：递归关闭额外属性，移除其 strict 子集不支持、但仍由执行器校验的约束关键字；
@@ -167,10 +165,12 @@ OpenAI strict 可能因此为原本可选的字段返回 `null`。工具注册�
 null 不会被吞掉。执行器看到的仍是原始工具契约。
 
 Anthropic 还限制单次请求中的 strict 工具、可选参数和 union 数量。超过硬上限时，wire 副本按
-Builtin → Bundled → Extension → SDK 的顺序尽可能保留 strict，并在必要时把部分 optional 编译
+Bundled → Extension 的顺序尽可能保留 strict，并在必要时把部分 optional 编译
 为 nullable union；仍无法容纳的工具仅在该次 Anthropic 请求中降级为非 strict，并输出包含工具
-名的 warning。当前 8 个核心工具的自然 Schema 合计 44 个 optional，超过其 `24 optional + 16
-union` 的理论容量，因此 `terminal` 会稳定成为溢出项；注册表中的原始 strict 定义不会被修改。
+名的 warning。Coding Extension 的 9 个工具（`read`、`read_tool_result`、`write`、`edit`、
+`patch`、`glob`、`grep`、`shell`、`terminal`）会优先保留在 strict 子集中；若全部第一方工具的
+聚合 Schema 超限，确定性降级的是其余 bundled 工具，而不是固定降级某个 coding 工具。注册表中
+的原始 strict 定义不会被修改。
 
 该开关只表示 provider 支持 OpenAI / Anthropic 的**逐工具** strict 契约，不代表所有厂商的等价
 能力都能复用同一字段：
@@ -243,6 +243,7 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 
 | 扩展 ID | 默认 | 说明 |
 |---------|------|------|
+| `astrcode-coding` | 启用 | workspace、shell 与 terminal 工具 |
 | `astrcode-agent-tools` | 启用 | 子 Agent 工具 |
 | `astrcode-mcp` | 启用 | MCP 客户端 |
 | `astrcode-skill` | 启用 | Skill 斜杠命令 |
@@ -267,7 +268,18 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 
 键为扩展 ID，值为扩展自行反序列化的配置值（`ExtensionStartContext::config().deserialize()`）。TOML 中无法表达 `null`，需要“未设置”语义时请省略字段。
 
-### 8.1 `astrcode.memory`
+### 8.1 `astrcode-coding`
+
+| 字段 | 默认 | 说明 |
+|------|------|------|
+| `shellTimeoutSecs` | `120` | `shell` 未显式提供 `timeout` 时使用；范围 1–600 秒，热更新只影响后续调用 |
+
+```toml
+[extensions.astrcode-coding]
+shellTimeoutSecs = 180
+```
+
+### 8.2 `astrcode.memory`
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
@@ -292,7 +304,7 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 > `~/.astrcode/projects/<project_key>/extension_data/astrcode.memory/` 不再读取，也不会自动
 > 迁移。如需保留旧数据，升级前手动复制到上述新目录。
 
-### 8.2 `astrcode-web-tools`
+### 8.3 `astrcode-web-tools`
 
 | 工具 | 名称 |
 |------|------|
@@ -324,7 +336,7 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 
 `fetch-url` 阻止 localhost 与私网地址（SSRF 防护）。
 
-### 8.3 `astrcode-channels`
+### 8.4 `astrcode-channels`
 
 ```toml
 [extensions.astrcode-channels.telegram]
@@ -341,7 +353,7 @@ maxReplyChars = 3500
 
 未设置 `allowAllChats: true` 时应配置 `allowedChatIds` 白名单。`botToken` 可直接写 token，更推荐 `botTokenEnv`。Telegram 创建的顶层 session 绑定扩展启动时的宿主 workspace，通道配置不能覆盖该路径。
 
-### 8.4 MCP（**不在** `extensions` 内）
+### 8.5 MCP（**不在** `extensions` 内）
 
 MCP 服务器仅通过 `mcp.json` 配置，由 `astrcode-mcp` 扩展加载。
 

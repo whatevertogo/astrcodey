@@ -6,12 +6,12 @@
 
 ## 总览
 
-AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上 `src-tauri` 的桌面壳 `astrcode-desktop`。
+AstrCode 当前 workspace 有 28 个成员：`crates/` 下 27 个 crate，加上 `src-tauri` 的桌面壳 `astrcode-desktop`。
 
 整体分层可以按依赖方向理解：
 
-1. 基础领域与线缆契约层：`astrcode-core`、`astrcode-session-projection`、`astrcode-protocol`、`astrcode-extension-contract`。
-2. 基础能力实现层：`astrcode-ai`、`astrcode-storage`、`astrcode-context`、`astrcode-tools`、`astrcode-log`。
+1. 基础领域与线缆契约层：`astrcode-core`、`astrcode-session-projection`、`astrcode-protocol`；S5R 线缆契约在 `astrcode-extension-sdk::wire` 内保持独立模块边界。
+2. 基础能力实现层：`astrcode-ai`、`astrcode-storage`、`astrcode-context`、`astrcode-log`。
 3. 会话运行时层：`astrcode-session`。
 4. 扩展系统层：作者面 `astrcode-extension-sdk`、外部进程运行时 `astrcode-extension-worker`、宿主 `astrcode-extensions`，以及 `astrcode-bundled-extensions` 和各 `astrcode-extension-*` 内置扩展。
 5. 服务与客户端层：`astrcode-server`、`astrcode-client`。
@@ -32,14 +32,13 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 | `astrcode-storage` | `crates/astrcode-storage` | lib | JSONL EventLog、快照、session 仓库、配置与 artifact 存储 |
 | `astrcode-session-projection` | `crates/astrcode-session-projection` | lib | session read model、summary 和纯事件 reducer |
 | `astrcode-context` | `crates/astrcode-context` | lib | prompt 组装、上下文裁剪、token 预算、compact |
-| `astrcode-tools` | `crates/astrcode-tools` | lib | 内置文件工具、shell、terminal、后台 shell 与工具 catalog |
 | `astrcode-session` | `crates/astrcode-session` | lib | session/turn 运行时、工具管线、权限链、compact 持久化 |
-| `astrcode-extension-contract` | `crates/astrcode-extension-contract` | lib | S5R wire DTO、稳定错误码、帧传输与 `Peer` 状态机 |
-| `astrcode-extension-sdk` | `crates/astrcode-extension-sdk` | lib | 扩展作者公开 SDK、进程内扩展作者面（s5r wire 契约与运行时位于 contract/worker） |
+| `astrcode-extension-sdk` | `crates/astrcode-extension-sdk` | lib | 扩展作者 API、Host 客户端，以及逻辑隔离的 S5R wire/peer 契约 |
 | `astrcode-extension-worker` | `crates/astrcode-extension-worker` | lib | s5r worker 运行时：`run_stdio`、handler dispatch、远程 `HostClient` |
 | `astrcode-extensions` | `crates/astrcode-extensions` | lib | 扩展加载、hook 分发、host router、s5r 子进程运行 |
 | `astrcode-bundled-extensions` | `crates/astrcode-bundled-extensions` | lib | 第一方内置扩展组合根 |
 | `astrcode-extension-agent-tools` | `crates/astrcode-extension-agent-tools` | lib | `agent` 子 Agent 委派工具 |
+| `astrcode-extension-coding` | `crates/astrcode-extension-coding` | lib | 只经 SDK Host 能力实现的文件、搜索、shell 与 terminal 工具 |
 | `astrcode-extension-mcp` | `crates/astrcode-extension-mcp` | lib | MCP server 发现、预热、工具搜索和工具调用 |
 | `astrcode-extension-skill` | `crates/astrcode-extension-skill` | lib | Claude-style Skill 发现、`Skill` 工具、skill slash command |
 | `astrcode-extension-todo-tool` | `crates/astrcode-extension-todo-tool` | lib | `todoWrite` session-local 进度列表 |
@@ -127,7 +126,9 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 
 - `event_log`：JSONL EventLog 读写，维护事件 seq 和 append-only 持久化。
 - `snapshot`：快照管理，用于恢复时减少重放成本。
-- `session_repo`：文件系统 session repository，负责 session 目录、列表、fork/recycle/delete/restore 等操作。
+- `session_repo`：文件系统 session repository，负责 session 目录、列表、fork/recycle/delete/restore，
+  以及版本化的 durable event-consumer checkpoint。consumer state 使用同步后原子替换，保存
+  quarantine/skip 单调总数和最近 128 条有界审计。
 - `config_store`：配置文件原子读写。
 - `tool_artifacts`：大工具结果文件名、写入、切片和摘要引用。
 - `traits`：独立调用方使用 journal、事件读取、状态读取、路径和 artifact 窄端口；
@@ -175,30 +176,6 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 
 测试线索：`tests/token_budget_gate.rs` 覆盖预算门控；`prompt_engine.rs`、`context_assembler.rs`、`compaction/*`、`post_compact_enricher.rs` 有单元测试。改 compact contract 或 prompt section 顺序时必须跑相关测试。
 
-## `astrcode-tools`
-
-路径：`crates/astrcode-tools`
-
-职责：实现内置工具，并通过 `ToolCatalogProvider` 提供带 revision 的完整 catalog snapshot。这里是具体工具能力，不是工具调度；调度和权限在 `astrcode-session`。
-
-主要模块：
-
-- `files/read.rs`：`read` 文件读取工具，含范围读取、图片/二进制处理等契约。
-- `files/write.rs`：`write` 文件写入工具。
-- `files/edit.rs`：`edit` 精确 old/new 替换，支持多编辑原子验证后一次写回。
-- `files/patch.rs`：`patch` unified diff 应用。
-- `files/glob.rs`：`glob` 文件匹配。
-- `files/grep.rs`：`grep` 文本搜索。
-- `files/shared.rs`：文件工具共享路径检查、展示、读写辅助。
-- `shell_tool.rs`：`shell` 命令执行，包括超时、输出截断和权限上下文。
-- `terminal_tool.rs`：交互式 terminal/pty 工具，支持 session 级清理。
-- `background_shell.rs`：后台 shell spawn/adopt/status 与 session 清理。
-- `registry.rs`：`BuiltinToolCatalog`、`builtin_tools`、`default_tool_catalog`。
-
-依赖边界：依赖 `astrcode-core` 工具与路径原语、`astrcode-extension-sdk` catalog 和 shell 契约。它不直接依赖 session，所以工具可由任意宿主注入到不同运行时。
-
-测试线索：文件工具、shell、terminal、background shell、registry 均有模块内测试。工具 metadata 只承载展示/诊断数据；客户端 renderer 按工具名本地解释。
-
 ## `astrcode-session`
 
 路径：`crates/astrcode-session`
@@ -209,8 +186,8 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 
 - `Session`、`SessionCreateParams`、`SessionError`：session handle 和创建参数。
 - `SessionRuntimeState`：同一 session 的进程内共享状态和事件排序边界。
-- `SessionRuntimeServices`、`SessionExtensionPorts`：server composition root 注入的 context、窄 extension ports、tool catalog、post-compact enrichment 等能力。
-- `ToolRegistry`：由单个 turn 显式持有的不可变工具快照；session 按运行时代次缓存并复用。
+- `SessionRuntimeServices`、`SessionExtensionPorts`：server composition root 注入的 context、窄 extension ports、post-compact enrichment 等能力；工具 catalog 只来自当前 extension generation。
+- `ToolRegistry`：由单个 turn 显式持有的不可变工具快照；session 只应用 durable selection，不拥有发现缓存。
 - `TurnHandle`、`TurnOutput`、`RunTurnResult`：turn 运行和停止控制。
 
 主要模块：
@@ -221,7 +198,7 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 - `session_runtime`：进程内 runtime state，持有 event sink、file observation store、审批状态和不可变工具快照缓存。
 - `session_runtime_services`：跨 session 共享的运行时服务。
 - `session_extension_ports`：runtime snapshot、tool catalog、prompt contribution、turn hooks、session operations 五个窄端口。
-- `session_tools`：按 catalog revision、working directory 和工具选择缓存快照，处理 partial TTL 与 single-flight。
+- Extension Runtime 按 generation 与 scope 缓存完整 catalog，并拥有 partial TTL 与 single-flight；session 仅把选择结果冻结进本轮 registry。
 - `runtime_stability`：在扩展发布期间以有截止时间的封顶退避等待稳定 generation。
 - `session_setup`：缓存未命中时构建工具快照，保留 partial diagnostics，并装配 prompt 快照。
 - `tool_registry`：工具定义、执行句柄和 prompt metadata 的不可变快照。
@@ -248,7 +225,7 @@ pipeline 不再接收第二份 `turn_id`。前端同样不复制 conversation ph
 `ConversationControlStateDto.phase` 是远端事实，本地只叠加请求尚未到达 live event 的
 `compactSubmitting` 短窗口。
 
-依赖边界：依赖 `astrcode-core`、`astrcode-context`、`astrcode-extension-sdk`、`astrcode-storage` 和 `astrcode-session-projection`。它刻意不依赖 `astrcode-tools`、`astrcode-extensions`、`astrcode-server`；server 在 composition root 通过 `SessionRuntimeServices` 注入这些能力。
+依赖边界：依赖 `astrcode-core`、`astrcode-context`、`astrcode-extension-sdk`、`astrcode-storage` 和 `astrcode-session-projection`。它刻意不依赖 `astrcode-extensions`、`astrcode-server` 或任何具体扩展；server 在 composition root 通过 `SessionRuntimeServices` 注入这些能力。
 
 测试线索：`tests/session_resume.rs`、`tests/ssot_turn_history.rs`、`tests/compact_persist_conflict.rs` 覆盖恢复、历史唯一事实源和 compact 并发；`compaction/pipeline/tests.rs` 覆盖 hook、fsync、checkpoint 与唯一终态顺序；模块内测试覆盖权限链、工具 JSON 修复、工具结果、turn 发布等。
 
@@ -265,48 +242,29 @@ pipeline 不再接收第二份 `turn_id`。前端同样不复制 conversation ph
 - `extension`：扩展 trait、hook、registrar、HTTP/event 契约、host-attributed call context、namespaced paths 和能力声明。
 - `tool`：core 工具契约与扩展专用的私有字段 `ToolContext`。
 - `host`：按能力和调用上下文裁剪的类型化宿主域，包括 model、session history/control、workspace、network、process 和 extension HTTP。
-- `runtime_ports`：Session 消费的 tool catalog、prompt contribution、turn hooks 和 session operations 窄端口；`ToolCatalogScope` 同时携带 working dir 与 session store dir。
+- `runtime_ports`：Session 消费的 tool catalog、prompt contribution、turn hooks 和 session operations 窄端口；`ToolCatalogScope` 只携带 discovery 真正使用的 working directory。
 - `llm`、`permission`、`config`：按扩展需要 re-export 的稳定 core 契约。
 - `hostpaths`：扩展可用的相对路径解析和路径边界校验，并暴露产品级用户目录与数据目录。
 - `frontmatter`、`shell`：扩展文件解析和宿主 shell 检测。
 - `builder`：进程内扩展 handler 辅助函数。
 - `manifest`：扩展 manifest 校验。
-- `s5r`：s5r 子进程协议消息、capabilities、effects。
+- `wire`：S5R wire DTO、稳定错误码、Host operation catalog、frame 与角色化 `Peer` 状态机；是物理并入 SDK、逻辑独立的线缆边界。
+- `s5r`：面向作者的 S5R 类型与 `HandlerResult` 领域转换。
 - `session`：扩展侧 session 相关 re-export。
 - `prelude`：面向进程内扩展的便捷导入集合；s5r worker 的 `worker_prelude` 与运行时组装位于 `astrcode-extension-worker`。
+- `testing`：只在 `testing` feature 下导出的 context builder、mock host 与 registration/lifecycle harness。
 
-依赖边界：依赖 `astrcode-extension-contract` 和 `astrcode-core`。worker prelude 组合 contract
-wire DTO 与 handler 所需的精选 SDK/domain 类型，但不暴露宿主实现 crate；bundled（进程内）
+依赖边界：依赖 `astrcode-core`。worker prelude 组合 `sdk::wire` DTO 与 handler 所需的精选 SDK/domain 类型，但不暴露宿主实现 crate；bundled（进程内）
 作者面可共享更多 core 类型。两类扩展都通过 capability-gated typed host API 访问宿主能力；
 运行时负责注入不可伪造的 extension/session/turn 归属。
 
 测试线索：`builder.rs`、`manifest.rs` 有单元测试。修改 SDK 类型等同修改扩展 ABI，需要同步内置扩展和 s5r 测试。
 
-## `astrcode-extension-contract`
-
-路径：`crates/astrcode-extension-contract`
-
-职责：S5R 宿主与 worker 共享的稳定 wire 契约。它只承载跨 S5R 边界的值和交换这些值所需的传输状态，刻意不依赖任何宿主领域 crate。
-
-主要模块：
-
-- `protocol`：握手 `InitializeMsg`/`InitializeOutput`、`result` 消息与 feature 协商等线缆消息。
-- `error`：稳定错误码 `WireErrorCode`。
-- `frame`：stdio 帧传输 `FrameTransport`/`StdioFrameTransport`。
-- `peer`、`peer_runtime`：Host/Worker 角色化的 `Uninitialized → Initialized → Ready` 状态机，activate、invoke/stream/cancel 驱动与嵌套 invoke。
-- `operation`：`astrcode.*` 宿主操作 catalog 及上下文/后端需求描述。
-- `manifest`、`custom_event`：`InitializeOutput.manifest` 的严格 typed manifest、custom-event 声明与订阅契约。
-- `capability`、`effects`、`extension_http`、`host`、`session`、`session_inspect`、`stream`：能力 wire 名、`HandlerResult` 与其余跨边界 DTO。
-
-依赖边界：无 workspace 内部依赖，只依赖 serde、tokio 等基础库。SDK、宿主和 worker 都以它为 wire 事实来源；manifest 的 capability、tool mode、hook event/mode 与 handler id 也只在此定义。
-
-测试线索：各模块内单元测试覆盖握手状态机、帧编解码、错误码和 wire DTO 序列化。
-
 ## `astrcode-extension-worker`
 
 路径：`crates/astrcode-extension-worker`
 
-职责：s5r worker（子进程）侧运行时。磁盘扩展通过它把 handler 暴露给宿主；authoring 契约本身仍由 SDK 和 contract crate 拥有。
+职责：s5r worker（子进程）侧运行时。磁盘扩展通过它把 handler 暴露给宿主；authoring 与 wire 契约均由 SDK 拥有。
 
 主要模块：
 
@@ -315,8 +273,9 @@ wire DTO 与 handler 所需的精选 SDK/domain 类型，但不暴露宿主实�
 - `worker/host`：远程 `HostClient` 和各能力域客户端，经嵌套 invoke 调用宿主能力。
 - `worker/builder`：worker handler 注册辅助函数。
 - `worker_prelude`：磁盘扩展作者的一站式导入集合。
+- `testing`：只在 `testing` feature 下导出的 scoped `HostApi` transport seam；raw invoke 不进入默认生产 API。
 
-依赖边界：依赖 `astrcode-extension-sdk` 和 `astrcode-extension-contract`，不依赖宿主内部 crate。
+依赖边界：只依赖 `astrcode-extension-sdk`，不依赖宿主内部 crate。
 
 测试线索：`worker/registry.rs`、`worker/host.rs` 等模块内测试覆盖 handler dispatch、取消和宿主调用错误路径。
 
@@ -336,7 +295,7 @@ wire DTO 与 handler 所需的精选 SDK/domain 类型，但不暴露宿主实�
 - `s5r_ext`：s5r 子进程扩展协议、session、加载和运行。
 
 依赖边界：依赖 `astrcode-core`、`astrcode-context`、`astrcode-session-projection`、
-`astrcode-storage`、`astrcode-extension-sdk` 和 `astrcode-extension-contract`。它不依赖某个
+`astrcode-storage` 和 `astrcode-extension-sdk`。它不依赖某个
 具体内置扩展；内置扩展组合在 `astrcode-bundled-extensions`。
 
 测试线索：`tests/loader_integration_test.rs`、`tests/s5r_e2e_test.rs`、`tests/workspace_read_security.rs` 覆盖加载、s5r 端到端和 workspace read 安全边界；`tests/s5r-guest` 是测试用 guest 程序。
@@ -356,12 +315,22 @@ wire DTO 与 handler 所需的精选 SDK/domain 类型，但不暴露宿主实�
 
 Feature：
 
-- `default` 包含 agent-tools、mcp、skill、todo-tool、mode、goal、memory、channels、web-tools。
+- `default` 包含 agent-tools、coding、mcp、skill、todo-tool、mode、goal、memory、channels、web-tools。
 - 单独 feature 对应每个内置扩展，便于裁剪二进制。
 
 依赖边界：依赖内置扩展 crate 和 `astrcode-extensions`/`astrcode-extension-sdk`。这是少数允许直接依赖所有内置扩展的 composition crate。
 
 测试线索：单元测试覆盖默认启用策略和显式配置优先级。
+
+## `astrcode-extension-coding`
+
+路径：`crates/astrcode-extension-coding`
+
+职责：作为普通第一方扩展提供 `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell` 和 `terminal`。schema、展示语义和工具级编排属于本 crate；路径约束、原子文件操作、artifact ID 解析、进程/PTY、增量输出与生命周期所有权属于 Host。
+
+关键边界：只依赖 `astrcode-extension-sdk`，不直接访问 filesystem、artifact storage 或 process API。每个工具都先返回 `ToolPlan`，再由 session 完成权限与 lease，执行时 Host 对具体 operation 二次校验 lease。工具参数不包含 `maxOutputTokens` 一类平台调优字段；Host 有界增量读取与 session 统一 inline/artifact 预算对所有扩展提供相同结果控制。持久化结果通过 `ToolResultClient` 和 session-scoped opaque `artifactId` 读取，不伪装成 workspace path。
+
+测试线索：SDK registration 测试覆盖工具集合、严格 schema、能力声明和 plan；宿主集成测试覆盖 workspace/process 的真实 Host 路由。
 
 ## `astrcode-extension-agent-tools`
 
@@ -671,7 +640,7 @@ authoring API 重构把数据根目录从旧的 `~/.astrcode/memory/` 与
 - broadcast lag 时通过 rehydrate/snapshot 机制让客户端恢复。
 - extension runtime 在 bootstrap 后绑定到 session manager、event bus、host services。
 
-依赖边界：依赖几乎所有核心实现 crate：`astrcode-ai`、`astrcode-bundled-extensions`、`astrcode-context`、`astrcode-core`、`astrcode-extensions`、`astrcode-log`、`astrcode-protocol`、`astrcode-session`、`astrcode-session-projection`、`astrcode-storage`、`astrcode-tools`。它是后端 composition root。
+依赖边界：依赖几乎所有核心实现 crate：`astrcode-ai`、`astrcode-bundled-extensions`、`astrcode-context`、`astrcode-core`、`astrcode-extensions`、`astrcode-log`、`astrcode-protocol`、`astrcode-session`、`astrcode-session-projection`、`astrcode-storage`。它是后端 composition root；具体工具仅通过 bundled extension composition 接入。
 
 测试线索：`tests/http_routes.rs`、`tests/session_operations_test.rs`、`tests/turn_scheduler_behavior_test.rs`、`tests/extension_integration_test.rs` 覆盖 HTTP、session operations、turn scheduler 和扩展集成；模块内测试覆盖 child session、session manager、HTTP projection 等。
 

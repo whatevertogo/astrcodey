@@ -17,7 +17,6 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     permission::ApprovalHistoryStore,
     session_event_sink::{SessionEventObserver, SessionEventPublishError, SessionEventSink},
-    session_tools::SessionToolCache,
     tool_exec::InMemoryFileObservationStore,
 };
 
@@ -121,12 +120,6 @@ pub enum ToolApprovalResolveError {
     ReceiverDropped { call_id: ToolCallId },
 }
 
-/// 执行工具所需的进程内资源。
-struct ToolResources {
-    file_observation_store: Arc<dyn FileObservationStore>,
-    registry_snapshots: SessionToolCache,
-}
-
 struct PendingApproval {
     registration: Arc<()>,
     sender: oneshot::Sender<ApprovalDecision>,
@@ -208,12 +201,12 @@ impl ApprovalRuntime {
 /// 单个 session 在当前进程内持有的瞬态状态。
 ///
 /// 持久化事实仍以 [`SessionStore`] 为准；同一 sid 的并存 [`crate::Session`] 通过
-/// [`crate::SessionResourceStore`] 共享这里的工具缓存、审批状态和事件排序 lane。
+/// [`crate::SessionResourceStore`] 共享这里的文件观察、审批状态和事件排序 lane。
 pub struct SessionRuntimeState {
     session_id: SessionId,
     store: Arc<dyn SessionStore>,
     event_sink: Arc<SessionEventSink>,
-    tools: ToolResources,
+    file_observation_store: Arc<dyn FileObservationStore>,
     approvals: ApprovalRuntime,
     creation: Mutex<SessionCreationState>,
     lifecycle_initialized: OnceCell<()>,
@@ -319,10 +312,7 @@ impl SessionRuntimeState {
             session_id,
             store,
             event_sink,
-            tools: ToolResources {
-                file_observation_store: Arc::new(InMemoryFileObservationStore::default()),
-                registry_snapshots: SessionToolCache::new(),
-            },
+            file_observation_store: Arc::new(InMemoryFileObservationStore::default()),
             approvals: ApprovalRuntime::new(),
             creation: Mutex::new(SessionCreationState::Ready),
             lifecycle_initialized: OnceCell::new(),
@@ -330,11 +320,7 @@ impl SessionRuntimeState {
     }
 
     pub fn file_observation_store(&self) -> Arc<dyn FileObservationStore> {
-        Arc::clone(&self.tools.file_observation_store)
-    }
-
-    pub(crate) fn tool_registry_cache(&self) -> &SessionToolCache {
-        &self.tools.registry_snapshots
+        Arc::clone(&self.file_observation_store)
     }
 
     pub fn session_id(&self) -> &SessionId {

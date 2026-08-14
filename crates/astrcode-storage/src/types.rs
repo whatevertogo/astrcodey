@@ -20,5 +20,5 @@ pub struct ToolResultArtifactInput {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolResultArtifactRef {
     pub bytes: usize,
-    pub path: Option<String>,
+    pub artifact_id: String,
 }

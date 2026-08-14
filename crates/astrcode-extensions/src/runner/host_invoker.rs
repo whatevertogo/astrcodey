@@ -5,7 +5,7 @@ use std::{
 
 use astrcode_core::{
     event::{EventDeliveryReceipt, EventSendError, EventSender},
-    tool::SessionOperations,
+    tool::{SessionOperations, access::ResourceLease},
     types::SessionId,
 };
 use astrcode_extension_sdk::{
@@ -33,6 +33,9 @@ pub(super) struct ExtensionCallContextInput {
     pub(super) session_store_dir: Option<PathBuf>,
     pub(super) event_tx: Option<EventSender>,
     pub(super) event_causation: Option<(astrcode_core::types::EventId, u8)>,
+    pub(super) resource_lease: Option<ResourceLease>,
+    pub(super) file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
+    pub(super) tool_result_reader: Option<Arc<dyn astrcode_core::tool::ToolResultArtifactReader>>,
     pub(super) cancellation: CancellationToken,
 }
 
@@ -41,6 +44,7 @@ struct BoundCustomEventSink {
     extension_id: String,
     event_tx: EventSender,
     causation: Option<(astrcode_core::types::EventId, u8)>,
+    resource_lease: Option<ResourceLease>,
 }
 
 fn bind_custom_event_sink(
@@ -48,6 +52,7 @@ fn bind_custom_event_sink(
     declarations: &[CustomEventDeclaration],
     event_tx: EventSender,
     causation: Option<(astrcode_core::types::EventId, u8)>,
+    resource_lease: Option<ResourceLease>,
 ) -> Option<Arc<dyn CustomEventSink>> {
     if declarations.is_empty() {
         return None;
@@ -56,7 +61,25 @@ fn bind_custom_event_sink(
         extension_id: extension_id.to_owned(),
         event_tx,
         causation,
+        resource_lease,
     }))
+}
+
+impl BoundCustomEventSink {
+    fn ensure_permitted(&self) -> Result<(), EventSendError> {
+        let permitted = self.resource_lease.as_ref().is_none_or(|lease| {
+            lease.permits(&astrcode_core::tool::access::ResourceAccess::host(
+                astrcode_core::tool::access::HostResource::Event,
+            ))
+        });
+        if permitted {
+            Ok(())
+        } else {
+            Err(EventSendError::PublishFailed(
+                "custom event exceeds the resource lease for this tool call".into(),
+            ))
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -68,6 +91,7 @@ impl CustomEventSink for BoundCustomEventSink {
         durable: bool,
         payload: serde_json::Value,
     ) -> Result<EventDeliveryReceipt, EventSendError> {
+        self.ensure_permitted()?;
         self.event_tx
             .send_confirmed(crate::host_router::custom_event_payload(
                 &self.extension_id,
@@ -87,6 +111,7 @@ impl CustomEventSink for BoundCustomEventSink {
         durable: bool,
         payload: serde_json::Value,
     ) -> Result<(), EventSendError> {
+        self.ensure_permitted()?;
         self.event_tx.send(crate::host_router::custom_event_payload(
             &self.extension_id,
             event_type,
@@ -107,6 +132,9 @@ impl ExtensionCallContextInput {
             session_store_dir: None,
             event_tx: None,
             event_causation: None,
+            resource_lease: None,
+            file_observation_store: None,
+            tool_result_reader: None,
             cancellation,
         }
     }
@@ -124,6 +152,9 @@ impl ExtensionCallContextInput {
                 .map(std::path::Path::to_path_buf),
             event_tx: runtime.event_tx().cloned(),
             event_causation: None,
+            resource_lease: None,
+            file_observation_store: None,
+            tool_result_reader: None,
             cancellation,
         }
     }
@@ -161,6 +192,9 @@ impl ExtensionCallContextFactory {
             session_store_dir,
             event_tx,
             event_causation,
+            resource_lease,
+            file_observation_store,
+            tool_result_reader,
             cancellation,
         } = input;
         let cancellation = linked_call_cancellation(&tasks, cancellation);
@@ -175,6 +209,7 @@ impl ExtensionCallContextFactory {
                 declarations,
                 event_tx.clone(),
                 event_causation.clone(),
+                resource_lease.clone(),
             )
         });
         let session_ops = if capabilities.iter().any(|capability| {
@@ -200,8 +235,12 @@ impl ExtensionCallContextFactory {
             tool_call_id,
             session_store_dir: session_store_dir.clone(),
             session_ops,
+            file_observation_store,
+            tool_result_reader,
             event_tx,
             event_causation,
+            resource_lease,
+            planning: false,
             working_dir: working_dir
                 .as_deref()
                 .map(|path| path.to_string_lossy().into_owned()),
@@ -275,6 +314,21 @@ impl ExtensionRunner {
             Arc::clone(&bindings.host_router),
             Arc::clone(&bindings.session_ops),
         )
+    }
+
+    /// Releases every transient Host resource owned by one session.
+    pub fn cleanup_session_resources(&self, session_id: &SessionId) {
+        self.bindings
+            .read()
+            .host_router
+            .cleanup_session_resources(session_id.as_str());
+    }
+
+    pub(super) fn cleanup_extension_resources(&self, extension_id: &str) {
+        self.bindings
+            .read()
+            .host_router
+            .cleanup_extension_resources(extension_id);
     }
 }
 
@@ -355,7 +409,7 @@ mod tests {
     use std::time::Duration;
 
     use astrcode_core::llm::{LlmEvent, LlmMessage, LlmProvider, ModelLimits};
-    use astrcode_extension_contract::WireErrorCode;
+    use astrcode_extension_sdk::wire::WireErrorCode;
 
     use super::*;
     use crate::host_router::HostBackends;
@@ -380,6 +434,9 @@ mod tests {
                     session_store_dir: Some(session_store_dir.clone()),
                     event_tx: None,
                     event_causation: None,
+                    resource_lease: None,
+                    file_observation_store: None,
+                    tool_result_reader: None,
                     cancellation: cancellation.clone(),
                 },
             );

@@ -12,9 +12,11 @@ use astrcode_extension_sdk::{
         Extension, ExtensionCall, ExtensionCapability, ExtensionError, ExtensionHttpHandler,
         ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
         ExtensionStopContext, HookMode, HookResult, HttpContext, LifecycleContext, LifecycleEvent,
-        LifecycleHandler, Registrar, ToolContext, ToolHandler,
+        LifecycleHandler, Registrar, ToolContext, ToolHandler, ToolPlanContext,
     },
-    tool::{ToolExecutionResult, ToolPromptMetadata, ToolPromptTag, ToolResult},
+    tool::{
+        HostResource, ToolExecutionResult, ToolPlan, ToolPromptMetadata, ToolPromptTag, ToolResult,
+    },
 };
 use model::{
     ASK_USER_TOOL_NAME, AnswerRequest, AskUserInput, PendingQuestion, tool_definition,
@@ -121,6 +123,10 @@ struct AskUserToolHandler {
 
 #[async_trait::async_trait]
 impl ToolHandler for AskUserToolHandler {
+    async fn plan(&self, _context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Event))
+    }
+
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
         let tool_name = context.tool_name();
         if tool_name != ASK_USER_TOOL_NAME {

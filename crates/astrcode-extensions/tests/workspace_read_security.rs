@@ -2,8 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use astrcode_extension_contract::WireErrorCode;
-use astrcode_extension_sdk::{extension::ExtensionCapability, s5r::ErrorPayload};
+use astrcode_extension_sdk::{
+    extension::ExtensionCapability, host::HOST_WORKSPACE_MAX_FILE_BYTES, s5r::ErrorPayload,
+    wire::WireErrorCode,
+};
 use astrcode_extensions::host_router::{HostBackends, HostRouter, InvokeContext};
 use serde_json::{Value, json};
 
@@ -73,7 +75,7 @@ async fn workspace_read_allows_file_under_root() {
 async fn workspace_read_rejects_oversize_file() {
     let (_dir, root) = temp_workspace();
     let big = root.join("huge.bin");
-    let data = vec![b'x'; 1024 * 1024 + 1];
+    let data = vec![b'x'; HOST_WORKSPACE_MAX_FILE_BYTES + 1];
     std::fs::write(&big, &data).unwrap();
 
     let err = read_workspace(&root, "huge.bin").await.unwrap_err();

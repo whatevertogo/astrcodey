@@ -14,7 +14,10 @@ use astrcode_core::{
         CustomEventData, DurableEvent, DurableEventPayload, Event, EventPayload, EventSender,
         LiveEvent, LiveEventPayload, PersistedSystemPrompt, SessionStarted, SystemPromptSource,
     },
-    tool::{SessionToolSelection, access::ResourceAccess},
+    tool::{
+        SessionToolSelection, ToolCapabilities, ToolExecutionContext, ToolPlanningContext,
+        access::{HostResource, ResourceLease},
+    },
     types::SessionId,
 };
 use astrcode_extension_sdk::{
@@ -36,18 +39,16 @@ use astrcode_extension_sdk::{
         ProviderResult, Registrar, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
         RuntimePreToolUseContext, RuntimeProviderContext, RuntimeUserMessageEnvelopeContext,
         SlashCommand, StatusItem, StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext,
-        ToolDiscoveryHandler, ToolHandler, ToolHookTarget, UserMessageEnvelopeContext,
-        UserMessageEnvelopeHandler, UserMessageEnvelopePayload, UserMessageEnvelopeResult,
+        ToolDiscoveryHandler, ToolHandler, ToolHookTarget, ToolPlanContext,
+        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopePayload,
+        UserMessageEnvelopeResult,
     },
     host::{HostSessionStateReadRequest, HostSessionStateWriteRequest},
     runtime_ports::{
         RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness,
         TurnExtensionViewProvider,
     },
-    tool::{
-        ExecutionMode, ToolCapabilities, ToolDefinition, ToolExecutionContext, ToolOrigin,
-        ToolResult,
-    },
+    tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolPlan, ToolResult},
 };
 use astrcode_storage::{SessionEventJournal, SessionPathResolver, SessionStore};
 use serde::Deserialize;
@@ -58,7 +59,6 @@ use super::{
     CommandSource, CustomEventConsumerAction, CustomEventSession, ExtensionHttpDispatchResult,
     ExtensionRunner, ExtensionRuntimeState,
 };
-use crate::runner::tool_adapter::normalize_stringified_booleans;
 
 fn extension_manifest(
     id: impl Into<String>,
@@ -359,6 +359,10 @@ impl Extension for StateProbeExtension {
 
 #[async_trait::async_trait]
 impl ToolHandler for StateProbeTool {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,
@@ -542,6 +546,10 @@ impl Extension for SmallModelProbeExtension {
 
 #[async_trait::async_trait]
 impl ToolHandler for SmallModelProbeTool {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Model))
+    }
+
     async fn execute(
         &self,
         ctx: ToolContext,
@@ -577,7 +585,10 @@ impl Extension for TargetedPreHookExtension {
 impl PreToolUseHandler for CountingPreHook {
     async fn handle(&self, _ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
-        Ok(PreToolUseResult::Allow)
+        Ok(PreToolUseResult::Ask {
+            prompt: "approve target".into(),
+            rule_key: Some("dangerous".into()),
+        })
     }
 }
 
@@ -1713,7 +1724,10 @@ async fn extension_tool_receives_session_state_by_default() {
             },
             ..Default::default()
         },
-    );
+    )
+    .with_resource_lease(ResourceLease::from_plan(&ToolPlan::host(
+        HostResource::Session,
+    )));
 
     let result = tool.execute(json!({}), &ctx).await.unwrap();
     assert_eq!(result.content, "true");
@@ -1780,7 +1794,10 @@ async fn extension_tool_receives_small_model_only_when_declared() {
                 },
                 ..Default::default()
             },
-        );
+        )
+        .with_resource_lease(ResourceLease::from_plan(&ToolPlan::host(
+            HostResource::Model,
+        )));
 
         let result = tool.execute(json!({}), &ctx).await.unwrap();
         assert_eq!(result.content, expected);
@@ -1806,11 +1823,18 @@ async fn targeted_pre_tool_hook_only_runs_for_matching_tool() {
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 
-    runner
+    let result = runner
         .emit_pre_tool_use(base_ctx("targetTool"))
         .await
         .unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        result,
+        PreToolUseResult::Ask {
+            rule_key: Some(rule_key),
+            ..
+        } if rule_key == "extension:targeted-pre-hook:dangerous"
+    ));
 
     let diagnostics = runner.diagnostics_snapshot();
     let hook_diagnostics = diagnostics.get("targeted-pre-hook").unwrap();
@@ -2094,38 +2118,6 @@ async fn startup_timeout_drops_suspended_tasks_and_rolls_back_partial_start() {
         Some(StopReason::StartupFailed)
     );
     assert_eq!(runner.count().await, 0);
-}
-
-#[test]
-fn stringified_boolean_normalization_follows_nested_schema() {
-    let schema = json!({
-        "type": "object",
-        "properties": {
-            "items": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "enabled": { "type": "boolean" },
-                        "label": { "type": "string" }
-                    }
-                }
-            }
-        }
-    });
-    let mut arguments = json!({
-        "items": [
-            {"enabled": "true", "label": "true"},
-            {"enabled": "FALSE", "label": "false"},
-            {"enabled": "yes", "label": "unchanged"}
-        ]
-    });
-
-    assert_eq!(normalize_stringified_booleans(&mut arguments, &schema), 2);
-    assert_eq!(arguments["items"][0]["enabled"], true);
-    assert_eq!(arguments["items"][1]["enabled"], false);
-    assert_eq!(arguments["items"][2]["enabled"], "yes");
-    assert_eq!(arguments["items"][0]["label"], "true");
 }
 
 #[tokio::test]
@@ -2483,7 +2475,7 @@ async fn cached_command_does_not_block_retirement_and_becomes_unavailable() {
 }
 
 #[tokio::test]
-async fn session_control_tools_declare_no_resource_conflicts() {
+async fn extension_tools_plan_the_resource_domain_their_handler_uses() {
     let runner = ExtensionRunner::new(Duration::from_secs(1));
     runner
         .register(Arc::new(SmallModelProbeExtension {
@@ -2492,25 +2484,28 @@ async fn session_control_tools_declare_no_resource_conflicts() {
         }))
         .await
         .unwrap();
-    let session_control_tool = runner
+    let model_tool = runner
         .tool_catalog_snapshot_typed("D:/workspace")
         .await
         .tools
         .into_iter()
         .next()
         .unwrap();
-    assert!(
-        session_control_tool
-            .resource_accesses(&json!({}), Path::new("D:/workspace"))
-            .unwrap()
-            .is_empty()
+    let planning = ToolPlanningContext::new(
+        SessionId::new("session"),
+        "D:/workspace",
+        Some("call-model".into()),
+    );
+    assert_eq!(
+        model_tool.plan(&json!({}), &planning).await.unwrap(),
+        ToolPlan::host(HostResource::Model)
     );
 
     runner
         .register(Arc::new(StateProbeExtension))
         .await
         .unwrap();
-    let default_tool = runner
+    let state_tool = runner
         .tool_catalog_snapshot_typed("D:/workspace")
         .await
         .tools
@@ -2518,10 +2513,8 @@ async fn session_control_tools_declare_no_resource_conflicts() {
         .find(|tool| tool.definition().name == "stateProbe")
         .unwrap();
     assert_eq!(
-        default_tool
-            .resource_accesses(&json!({}), Path::new("D:/workspace"))
-            .unwrap(),
-        vec![ResourceAccess::all()]
+        state_tool.plan(&json!({}), &planning).await.unwrap(),
+        ToolPlan::host(HostResource::Session)
     );
 }
 

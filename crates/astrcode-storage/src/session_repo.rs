@@ -3,9 +3,11 @@
 //! 管理按项目组织的会话事件日志，目录结构为：
 //! `~/.astrcode/projects/<project>/sessions/<session>/`
 
+#[cfg(unix)]
+use std::fs::File;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
-    fs::File,
+    io::Write as _,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock, Weak},
 };
@@ -35,7 +37,9 @@ use crate::{
     StorageError, ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
     event_log::EventLog,
     snapshot::SnapshotManager,
-    tool_artifacts::{slice_tool_result, write_tool_result_file},
+    tool_artifacts::{
+        read_tool_result_file, validate_tool_result_artifact_id, write_tool_result_file,
+    },
 };
 
 fn validate_storage_session_id(id: &SessionId) -> Result<(), StorageError> {
@@ -95,7 +99,7 @@ fn event_consumer_state_path(
         .join(format!("{digest:x}.state.json")))
 }
 
-const EVENT_CONSUMER_STATE_VERSION: u8 = 2;
+const EVENT_CONSUMER_STATE_VERSION: u8 = 3;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -105,20 +109,28 @@ struct PersistedEventConsumerState {
     paused: bool,
     revision: u64,
     consecutive_failures: u32,
+    quarantined_count: u64,
+    skipped_count: u64,
     quarantined: Vec<EventConsumerQuarantine>,
     skips: Vec<EventConsumerSkip>,
 }
 
-impl From<PersistedEventConsumerState> for EventConsumerState {
-    fn from(state: PersistedEventConsumerState) -> Self {
-        Self {
+impl TryFrom<PersistedEventConsumerState> for EventConsumerState {
+    type Error = StorageError;
+
+    fn try_from(state: PersistedEventConsumerState) -> Result<Self, Self::Error> {
+        let state = Self {
             checkpoint: state.cursor,
             paused: state.paused,
             revision: state.revision,
             consecutive_failures: state.consecutive_failures,
+            quarantined_count: state.quarantined_count,
+            skipped_count: state.skipped_count,
             quarantined: state.quarantined,
             skips: state.skips,
-        }
+        };
+        state.validate_audit_bounds()?;
+        Ok(state)
     }
 }
 
@@ -130,6 +142,8 @@ impl From<&EventConsumerState> for PersistedEventConsumerState {
             paused: state.paused,
             revision: state.revision,
             consecutive_failures: state.consecutive_failures,
+            quarantined_count: state.quarantined_count,
+            skipped_count: state.skipped_count,
             quarantined: state.quarantined.clone(),
             skips: state.skips.clone(),
         }
@@ -157,21 +171,66 @@ async fn read_event_consumer_state(path: &Path) -> Result<EventConsumerState, St
             path.display()
         )));
     }
-    Ok(state.into())
+    state.try_into()
 }
 
 async fn write_event_consumer_state(
     path: &Path,
     state: &EventConsumerState,
 ) -> Result<(), StorageError> {
+    state.validate_audit_bounds()?;
+    let bytes = serde_json::to_vec(&PersistedEventConsumerState::from(state))?;
+    let path = path.to_owned();
+    tokio::task::spawn_blocking(move || replace_durable_file(&path, &bytes))
+        .await
+        .map_err(|error| {
+            StorageError::Io(std::io::Error::other(format!(
+                "event consumer state writer stopped: {error}"
+            )))
+        })??;
+    Ok(())
+}
+
+fn replace_durable_file(path: &Path, bytes: &[u8]) -> Result<(), StorageError> {
     let parent = path.parent().ok_or_else(|| {
         StorageError::InvalidId("event consumer state has no parent directory".into())
     })?;
-    tokio::fs::create_dir_all(parent).await?;
-    let bytes = serde_json::to_vec(&PersistedEventConsumerState::from(state))?;
+    let parent_created = !parent.exists();
+    std::fs::create_dir_all(parent)?;
+    if parent_created {
+        sync_directory(parent.parent())?;
+    }
+
     let temporary = path.with_extension("json.tmp");
-    tokio::fs::write(&temporary, bytes).await?;
-    tokio::fs::rename(&temporary, path).await?;
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, path)?;
+        sync_directory(Some(parent))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
+    result.map_err(StorageError::Io)
+}
+
+#[cfg(unix)]
+pub(crate) fn sync_directory(directory: Option<&Path>) -> std::io::Result<()> {
+    if let Some(directory) = directory {
+        File::open(directory)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn sync_directory(_directory: Option<&Path>) -> std::io::Result<()> {
     Ok(())
 }
 
@@ -752,35 +811,43 @@ impl FileSystemSessionRepository {
 
 #[async_trait::async_trait]
 impl ToolResultArtifactStore for FileSystemSessionRepository {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<ToolResultArtifactSlice, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-
-        let path = PathBuf::from(path);
+        validate_tool_result_artifact_id(artifact_id)
+            .map_err(|message| StorageError::InvalidId(message.into()))?;
         let artifact_dir = meta.dir.join("tool-results");
-        if !path.exists() {
-            return Err(StorageError::NotFound(session_id.clone()));
-        }
         let session_dir = tokio::fs::canonicalize(&meta.dir).await?;
         let artifact_dir = tokio::fs::canonicalize(artifact_dir).await?;
-        let canonical_path = tokio::fs::canonicalize(&path).await?;
+        let path = artifact_dir.join(artifact_id);
+        let canonical_path = match tokio::fs::canonicalize(&path).await {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(StorageError::NotFound(session_id.clone()));
+            },
+            Err(error) => return Err(StorageError::Io(error)),
+        };
         if !artifact_dir.starts_with(&session_dir) || !canonical_path.starts_with(&artifact_dir) {
             return Err(StorageError::InvalidId(
-                "tool result path is outside this session artifact directory".into(),
+                "tool result artifact resolves outside this session artifact directory".into(),
             ));
         }
-        let content = tokio::fs::read_to_string(canonical_path).await?;
-        Ok(slice_tool_result(
-            &path.to_string_lossy(),
-            &content,
-            char_offset,
-            max_chars,
-        ))
+        let artifact_id = artifact_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            read_tool_result_file(&canonical_path, &artifact_id, byte_offset, max_bytes)
+        })
+        .await
+        .map_err(|error| {
+            StorageError::Io(std::io::Error::other(format!(
+                "tool result artifact reader stopped: {error}"
+            )))
+        })?
+        .map_err(StorageError::Io)
     }
 
     async fn write_tool_result_artifact(
@@ -790,7 +857,14 @@ impl ToolResultArtifactStore for FileSystemSessionRepository {
     ) -> Result<ToolResultArtifactRef, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
         let dir = meta.dir.join("tool-results");
-        Ok(write_tool_result_file(&dir, &artifact)?)
+        tokio::task::spawn_blocking(move || write_tool_result_file(&dir, &artifact))
+            .await
+            .map_err(|error| {
+                StorageError::Io(std::io::Error::other(format!(
+                    "tool result artifact writer stopped: {error}"
+                )))
+            })?
+            .map_err(StorageError::Io)
     }
 }
 
@@ -981,13 +1055,7 @@ impl SessionStore for FileSystemSessionRepository {
             .ok_or_else(|| StorageError::CorruptLog("consumer failure count overflow".into()))?;
         let attempts = state.consecutive_failures;
         let outcome = if attempts >= quarantine_after {
-            if !state.quarantined.iter().any(|record| record.seq == seq) {
-                state.quarantined.push(EventConsumerQuarantine {
-                    seq,
-                    attempts,
-                    last_error: error.to_owned(),
-                });
-            }
+            state.record_quarantine(seq, attempts, error)?;
             state.checkpoint = Some(seq);
             state.consecutive_failures = 0;
             EventConsumerFailureOutcome::Quarantined { attempts }
@@ -1042,11 +1110,7 @@ impl SessionStore for FileSystemSessionRepository {
         if reset == EventConsumerCheckpointReset::StreamHead
             && state.checkpoint != previous_checkpoint
         {
-            state.skips.push(EventConsumerSkip {
-                from_seq: previous_checkpoint,
-                to_seq: state.checkpoint,
-                revision: state.revision,
-            });
+            state.record_skip(previous_checkpoint, state.checkpoint)?;
         }
         write_event_consumer_state(&path, &state).await?;
         Ok(state)

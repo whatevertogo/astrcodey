@@ -37,4 +37,6 @@ pub enum ProjectionError {
         expected: String,
         actual: String,
     },
+    #[error("transcript fingerprint could not be computed: {0}")]
+    TranscriptFingerprintSerialization(String),
 }

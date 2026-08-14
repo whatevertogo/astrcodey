@@ -6,19 +6,22 @@ mod registry;
 
 use std::{collections::BTreeSet, io, sync::Arc};
 
-pub use astrcode_extension_contract::InvocationCancellation as CancelToken;
-use astrcode_extension_contract::ProcessStdioTransport;
+pub use astrcode_extension_sdk::wire::InvocationCancellation as CancelToken;
+use astrcode_extension_sdk::wire::ProcessStdioTransport;
 pub use builder::{
     command_handler, continuation_handler, continuation_handler_args, custom_event_handler,
     custom_event_handler_args, hook_handler, hook_handler_args, http_handler, parse_hook_input,
-    parse_tool_arguments, tool_handler, tool_handler_args,
+    parse_tool_arguments, tool_handler, tool_handler_args, tool_planner, tool_planner_args,
 };
 pub use host::{
     EventClient, ExtensionHttpClient, HostClient, HostConfigureSessionToolsOutput,
     HostConfigureSessionToolsRequest, HostCreateSessionOutput, HostCreateSessionRequest,
     HostEventEmitOutput, HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput,
     HostLlmContent, HostLlmMessage, HostLlmRole, HostNetworkRedirectPolicy, HostNetworkRequest,
-    HostNetworkResponse, HostOperation, HostProcessOutput, HostProcessRequest,
+    HostNetworkResponse, HostOperation, HostProcessHandleOutput, HostProcessInputAction,
+    HostProcessInputRequest, HostProcessIo, HostProcessListOutput, HostProcessOutput,
+    HostProcessReadOutput, HostProcessReadRequest, HostProcessRequest, HostProcessResizeRequest,
+    HostProcessStartRequest, HostProcessState, HostProcessStatusOutput, HostProcessTargetRequest,
     HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionCancelOutput,
     HostSessionDeliveryOutput, HostSessionEvent, HostSessionEventsPageOutput,
     HostSessionEventsPageRequest, HostSessionExecutionView, HostSessionInputRequest,
@@ -27,24 +30,27 @@ pub use host::{
     HostSessionSummariesOutput, HostSessionSummary, HostSessionTargetRequest,
     HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
     HostSessionTranscriptMessage, HostSubmitTurnOutput, HostSubmitTurnRequest,
-    HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
-    HostWorkspaceGlobRequest, HostWorkspaceGrepMatch, HostWorkspaceGrepOutput,
+    HostToolResultReadOutput, HostToolResultReadRequest, HostWorkspaceApplyPatchOutput,
+    HostWorkspaceApplyPatchRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
+    HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepContextLine,
+    HostWorkspaceGrepEntry, HostWorkspaceGrepMode, HostWorkspaceGrepOutput,
     HostWorkspaceGrepRequest, HostWorkspaceListEntry, HostWorkspaceListOutput,
     HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
-    HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient, NetworkClient, ProcessClient,
-    SessionControlClient, SessionHistoryClient, SessionInspectClient, SessionStateClient,
-    WorkspaceClient,
+    HostWorkspaceTextChange, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient,
+    NetworkClient, ProcessClient, SessionControlClient, SessionHistoryClient, SessionInspectClient,
+    SessionStateClient, ToolResultClient, WorkspaceClient,
 };
 pub use registry::{
     CommandHandlerFn, ContinuationHandlerFn, CustomEventHandlerFn, HookHandlerFn, HttpHandlerFn,
-    ToolHandlerFn, WorkerCallContext, WorkerCommandContext, WorkerCustomEventContext,
-    WorkerInvocationContext,
+    ToolHandlerFn, ToolPlannerFn, WorkerCallContext, WorkerCommandContext,
+    WorkerCustomEventContext, WorkerInvocationContext, WorkerToolPlanContext,
 };
 use serde_json::json;
 
 use crate::WireErrorCode;
 
 /// Explicit transport seam for worker integration tests. Not part of the author prelude.
+#[cfg(any(test, feature = "testing"))]
 pub mod testing {
     pub use super::host::{HostApi, invoke_host, with_host_api};
 }
@@ -57,7 +63,7 @@ use crate::{
     s5r::{HandlerEffect, HandlerResult},
     tool::ToolDefinition,
     worker::{
-        host::{V3PeerHostApi, set_host_api, with_host_api},
+        host::{V3PeerHostApi, with_host_api},
         registry::HandlerRegistry,
     },
 };
@@ -102,9 +108,10 @@ impl Worker {
     pub fn tool(
         &mut self,
         def: impl Into<ToolDefinition>,
+        planner: ToolPlannerFn,
         handler: ToolHandlerFn,
     ) -> Result<&mut Self, ErrorPayload> {
-        self.registry.register_tool(def.into(), handler)?;
+        self.registry.register_tool(def.into(), planner, handler)?;
         Ok(self)
     }
 
@@ -202,7 +209,7 @@ impl Worker {
 
     /// Runs this worker over the S5R 3.0 stdio transport.
     pub async fn run_stdio(mut self) -> Result<(), ErrorPayload> {
-        use astrcode_extension_contract::{
+        use astrcode_extension_sdk::wire::{
             FeatureName, Peer as V3Peer, PeerInfo as V3PeerInfo, WorkerInitialization,
         };
 
@@ -227,20 +234,14 @@ impl Worker {
         .accept_activation()
         .await
         .map_err(v3_peer_error_to_payload)?;
-        let (handle, driver) = peer.into_runtime();
-        set_host_api(Arc::new(V3PeerHostApi::new(handle))).map_err(|_| {
-            ErrorPayload::new(
-                WireErrorCode::HostApiAlreadySet,
-                "host API already initialized",
-            )
-        })?;
+        let (_handle, driver) = peer.into_runtime();
         let handler = Arc::new(V3WorkerInvokeHandler {
             registry: Arc::new(self.registry),
         });
         match driver.run(handler).await {
             Ok(()) => Ok(()),
-            Err(astrcode_extension_contract::PeerError::Frame(
-                astrcode_extension_contract::frame::FrameError::Io(error),
+            Err(astrcode_extension_sdk::wire::PeerError::Frame(
+                astrcode_extension_sdk::wire::frame::FrameError::Io(error),
             )) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(()),
             Err(error) => Err(v3_peer_error_to_payload(error)),
         }
@@ -254,68 +255,68 @@ struct V3WorkerInvokeHandler {
 }
 
 #[async_trait::async_trait]
-impl astrcode_extension_contract::PeerInvokeHandler for V3WorkerInvokeHandler {
+impl astrcode_extension_sdk::wire::PeerInvokeHandler for V3WorkerInvokeHandler {
     async fn invoke(
         &self,
-        invocation: astrcode_extension_contract::InboundInvoke,
+        invocation: astrcode_extension_sdk::wire::InboundInvoke,
     ) -> Result<
-        astrcode_extension_contract::InvocationResponse,
-        astrcode_extension_contract::protocol::ErrorPayload,
+        astrcode_extension_sdk::wire::InvocationResponse,
+        astrcode_extension_sdk::wire::protocol::ErrorPayload,
     > {
         if invocation.request.operation == crate::s5r::CAP_RUNTIME_PING {
-            return Ok(astrcode_extension_contract::InvocationResponse::Unary(
+            return Ok(astrcode_extension_sdk::wire::InvocationResponse::Unary(
                 json!({ "ok": true }),
             ));
         }
         match invocation.request.operation.as_str() {
-            astrcode_extension_contract::protocol::CONFORMANCE_UNARY => {
-                return Ok(astrcode_extension_contract::InvocationResponse::Unary(
+            astrcode_extension_sdk::wire::protocol::CONFORMANCE_UNARY => {
+                return Ok(astrcode_extension_sdk::wire::InvocationResponse::Unary(
                     invocation.request.input,
                 ));
             },
-            astrcode_extension_contract::protocol::CONFORMANCE_STREAM => {
+            astrcode_extension_sdk::wire::protocol::CONFORMANCE_STREAM => {
                 let output = invocation.request.input;
                 let events = futures_util::stream::iter([
-                    astrcode_extension_contract::protocol::ModelStreamEvent::Started,
-                    astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
+                    astrcode_extension_sdk::wire::protocol::ModelStreamEvent::Started,
+                    astrcode_extension_sdk::wire::protocol::ModelStreamEvent::ContentDelta {
                         content: "first".into(),
                     },
-                    astrcode_extension_contract::protocol::ModelStreamEvent::ContentDelta {
+                    astrcode_extension_sdk::wire::protocol::ModelStreamEvent::ContentDelta {
                         content: "second".into(),
                     },
-                    astrcode_extension_contract::protocol::ModelStreamEvent::Completed { output },
+                    astrcode_extension_sdk::wire::protocol::ModelStreamEvent::Completed { output },
                 ]);
-                return Ok(astrcode_extension_contract::InvocationResponse::Stream(
+                return Ok(astrcode_extension_sdk::wire::InvocationResponse::Stream(
                     Box::pin(events),
                 ));
             },
-            astrcode_extension_contract::protocol::CONFORMANCE_NESTED => {
+            astrcode_extension_sdk::wire::protocol::CONFORMANCE_NESTED => {
                 let output = invocation
                     .nested
                     .invoke(
-                        astrcode_extension_contract::protocol::CONFORMANCE_HOST_ECHO,
+                        astrcode_extension_sdk::wire::protocol::CONFORMANCE_HOST_ECHO,
                         invocation.request.input,
                     )
                     .await
                     .map_err(|error| {
-                        astrcode_extension_contract::protocol::ErrorPayload::new(
-                            astrcode_extension_contract::WireErrorCode::NestedFailed,
+                        astrcode_extension_sdk::wire::protocol::ErrorPayload::new(
+                            astrcode_extension_sdk::wire::WireErrorCode::NestedFailed,
                             error.to_string(),
                         )
                     })?;
-                return Ok(astrcode_extension_contract::InvocationResponse::Unary(
+                return Ok(astrcode_extension_sdk::wire::InvocationResponse::Unary(
                     output,
                 ));
             },
-            astrcode_extension_contract::protocol::CONFORMANCE_WAIT_FOR_CANCEL => {
+            astrcode_extension_sdk::wire::protocol::CONFORMANCE_WAIT_FOR_CANCEL => {
                 invocation.cancellation.cancelled().await;
-                return Err(astrcode_extension_contract::protocol::ErrorPayload::new(
-                    astrcode_extension_contract::WireErrorCode::Cancelled,
+                return Err(astrcode_extension_sdk::wire::protocol::ErrorPayload::new(
+                    astrcode_extension_sdk::wire::WireErrorCode::Cancelled,
                     "conformance invocation cancelled",
                 ));
             },
-            astrcode_extension_contract::protocol::CONFORMANCE_UNKNOWN_ERROR => {
-                return Err(astrcode_extension_contract::protocol::ErrorPayload {
+            astrcode_extension_sdk::wire::protocol::CONFORMANCE_UNKNOWN_ERROR => {
+                return Err(astrcode_extension_sdk::wire::protocol::ErrorPayload {
                     code: "future_conformance_error".into(),
                     message: "unknown error code preservation probe".into(),
                     hint: None,
@@ -326,7 +327,7 @@ impl astrcode_extension_contract::PeerInvokeHandler for V3WorkerInvokeHandler {
             _ => {},
         }
         if invocation.request.operation != crate::s5r::CAP_HANDLER_INVOKE {
-            return Err(astrcode_extension_contract::protocol::ErrorPayload::new(
+            return Err(astrcode_extension_sdk::wire::protocol::ErrorPayload::new(
                 WireErrorCode::UnknownCapability,
                 format!(
                     "worker does not handle capability {}",
@@ -343,20 +344,20 @@ impl astrcode_extension_contract::PeerInvokeHandler for V3WorkerInvokeHandler {
         )
         .await?;
         let output = serde_json::to_value(result).map_err(|error| {
-            astrcode_extension_contract::protocol::ErrorPayload::new(
-                astrcode_extension_contract::WireErrorCode::SerializationFailed,
+            astrcode_extension_sdk::wire::protocol::ErrorPayload::new(
+                astrcode_extension_sdk::wire::WireErrorCode::SerializationFailed,
                 format!("serialize S5R 3.0 handler result: {error}"),
             )
         })?;
-        Ok(astrcode_extension_contract::InvocationResponse::Unary(
+        Ok(astrcode_extension_sdk::wire::InvocationResponse::Unary(
             output,
         ))
     }
 }
 
-fn v3_peer_error_to_payload(error: astrcode_extension_contract::PeerError) -> ErrorPayload {
+fn v3_peer_error_to_payload(error: astrcode_extension_sdk::wire::PeerError) -> ErrorPayload {
     match error {
-        astrcode_extension_contract::PeerError::Remote(error) => error,
+        astrcode_extension_sdk::wire::PeerError::Remote(error) => error,
         error => ErrorPayload::new(WireErrorCode::Transport, error.to_string()),
     }
 }

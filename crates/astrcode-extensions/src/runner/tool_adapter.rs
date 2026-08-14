@@ -1,24 +1,24 @@
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Weak},
+    time::Duration,
 };
 
-use astrcode_core::tool::access::ResourceAccess;
+use astrcode_core::tool::{
+    Tool, ToolError, ToolExecutionContext, ToolExecutionResult, ToolPlanningContext,
+};
 use astrcode_extension_sdk::{
     extension::*,
     runtime_ports::{
         ToolCatalogCompleteness, ToolCatalogDiagnostic, ToolCatalogProvider, ToolCatalogScope,
         ToolCatalogSnapshot,
     },
-    tool::{
-        ExecutionMode, Tool, ToolDefinition, ToolError, ToolExecutionContext, ToolExecutionResult,
-        ToolResult,
-    },
+    tool::{ExecutionMode, ToolDefinition, ToolPlan, ToolResult},
 };
 
 use super::{
     ExtensionCallContextFactory, ExtensionCallContextInput, ExtensionGenerationEntry,
-    ExtensionRunner, ExtensionView,
+    ExtensionRunner, ExtensionView, tool_catalog_cache::CatalogCacheLookup,
 };
 
 impl ExtensionView {
@@ -26,7 +26,6 @@ impl ExtensionView {
     pub async fn tool_catalog_snapshot_typed(&self, working_dir: &str) -> ToolCatalogSnapshot {
         let scope = ToolCatalogScope {
             working_dir: working_dir.to_owned(),
-            session_store_dir: None,
         };
         self.tool_catalog_snapshot_for_scope(&scope).await
     }
@@ -35,6 +34,22 @@ impl ExtensionView {
         &self,
         scope: &ToolCatalogScope,
     ) -> ToolCatalogSnapshot {
+        loop {
+            match self.index.tool_catalog_cache.lookup_or_reserve(scope) {
+                CatalogCacheLookup::Hit(snapshot) => return snapshot,
+                CatalogCacheLookup::Wait(mut notification) => {
+                    let _ = notification.changed().await;
+                },
+                CatalogCacheLookup::Build(build) => {
+                    let snapshot = self.build_tool_catalog_snapshot(scope).await;
+                    build.complete(snapshot.clone());
+                    return snapshot;
+                },
+            }
+        }
+    }
+
+    async fn build_tool_catalog_snapshot(&self, scope: &ToolCatalogScope) -> ToolCatalogSnapshot {
         let working_dir = &scope.working_dir;
         let index = &self.index;
         let mut tools: Vec<Arc<dyn Tool>> = Vec::new();
@@ -145,6 +160,7 @@ struct HandlerTool {
     extension_id: Arc<str>,
     capabilities: Arc<[ExtensionCapability]>,
     generation: Weak<ExtensionGenerationEntry>,
+    operation_timeout: Duration,
     call_context_factory: ExtensionCallContextFactory,
 }
 
@@ -165,58 +181,9 @@ impl HandlerTool {
             extension_id: Arc::clone(&generation.extension_id),
             capabilities: Arc::clone(&generation.capabilities),
             generation: Arc::downgrade(generation),
+            operation_timeout: view.operation_timeout,
             call_context_factory: view.call_context_factory.clone(),
         }
-    }
-}
-
-// Providers occasionally stringify booleans despite the declared tool schema.
-// Normalize only schema-declared boolean fields at the plugin boundary so HTTP,
-// configuration and persistence DTOs remain strict.
-pub(super) fn normalize_stringified_booleans(
-    arguments: &mut serde_json::Value,
-    schema: &serde_json::Value,
-) -> usize {
-    match arguments {
-        serde_json::Value::String(raw) if schema["type"] == "boolean" => {
-            let normalized = match raw.trim().to_ascii_lowercase().as_str() {
-                "true" => Some(true),
-                "false" => Some(false),
-                _ => None,
-            };
-            if let Some(normalized) = normalized {
-                *arguments = serde_json::Value::Bool(normalized);
-                1
-            } else {
-                0
-            }
-        },
-        serde_json::Value::Object(values) => schema["properties"]
-            .as_object()
-            .map(|properties| {
-                values
-                    .iter_mut()
-                    .filter_map(|(name, value)| {
-                        properties
-                            .get(name)
-                            .map(|field_schema| normalize_stringified_booleans(value, field_schema))
-                    })
-                    .sum()
-            })
-            .unwrap_or_default(),
-        serde_json::Value::Array(values) => match &schema["items"] {
-            serde_json::Value::Array(item_schemas) => values
-                .iter_mut()
-                .zip(item_schemas)
-                .map(|(value, item_schema)| normalize_stringified_booleans(value, item_schema))
-                .sum(),
-            serde_json::Value::Object(_) => values
-                .iter_mut()
-                .map(|value| normalize_stringified_booleans(value, &schema["items"]))
-                .sum(),
-            _ => 0,
-        },
-        _ => 0,
     }
 }
 
@@ -234,26 +201,54 @@ impl Tool for HandlerTool {
         self.prompt_metadata.clone()
     }
 
-    fn resource_accesses(
+    async fn plan(
         &self,
-        _arguments: &serde_json::Value,
-        _working_dir: &Path,
-    ) -> Result<Vec<ResourceAccess>, ToolError> {
-        // SessionControl 工具（如 agent）在父 turn 内只编排子 session，不直接碰文件；
-        // Session-control tools coordinate through their own runtime state and
-        // do not touch file resources.
-        if self
-            .capabilities
-            .contains(&ExtensionCapability::SessionControl)
-        {
-            return Ok(Vec::new());
+        arguments: &serde_json::Value,
+        ctx: &ToolPlanningContext,
+    ) -> Result<ToolPlan, ToolError> {
+        let generation = self
+            .generation
+            .upgrade()
+            .ok_or_else(|| ToolError::NotFound(self.definition.name.clone()))?;
+        let draining = generation.admission.draining_token();
+        let _admission = generation
+            .admission
+            .acquire()
+            .await
+            .map_err(extension_plan_error)?;
+        let cancellation = ctx.cancellation().child_token();
+        let plan_context = ToolPlanContext::from_runtime(
+            generation.extension_id.to_string(),
+            ctx.session_id.clone(),
+            PathBuf::from(&ctx.working_dir),
+            self.definition.name.clone(),
+            arguments.clone(),
+            cancellation.clone(),
+        )
+        .with_turn_id(ctx.turn_id.as_ref().map(ToString::to_string))
+        .with_call_id(ctx.tool_call_id.clone());
+        let planning =
+            tokio::time::timeout(self.operation_timeout, self.handler.plan(plan_context));
+        tokio::select! {
+            biased;
+            () = ctx.cancellation().cancelled() => {
+                cancellation.cancel();
+                Err(ToolError::Execution("tool planning cancelled".into()))
+            },
+            () = draining.cancelled() => {
+                cancellation.cancel();
+                Err(extension_plan_error(generation.admission.draining_error()))
+            },
+            result = planning => match result {
+                Ok(result) => result.map_err(extension_plan_error),
+                Err(_) => Err(ToolError::Timeout(self.operation_timeout.as_millis() as u64)),
+            },
         }
-        Ok(vec![ResourceAccess::all()])
     }
 
     async fn execute(
         &self,
-        mut arguments: serde_json::Value,
+        arguments: serde_json::Value,
         ctx: &ToolExecutionContext,
     ) -> Result<ToolExecutionResult, ToolError> {
         let Some(generation) = self.generation.upgrade() else {
@@ -264,16 +259,6 @@ impl Tool for HandlerTool {
             )
             .into());
         };
-        let normalized_booleans =
-            normalize_stringified_booleans(&mut arguments, &self.definition.parameters);
-        if normalized_booleans > 0 {
-            tracing::debug!(
-                extension_id = %generation.extension_id,
-                tool_name = %self.definition.name,
-                normalized_booleans,
-                "normalized stringified boolean extension tool arguments"
-            );
-        }
         let draining = generation.admission.draining_token();
         let _admission = match generation.admission.acquire().await {
             Ok(permit) => permit,
@@ -287,6 +272,11 @@ impl Tool for HandlerTool {
             },
         };
         let call_cancellation = ctx.cancellation().child_token();
+        let resource_lease = ctx.resource_lease().cloned().ok_or_else(|| {
+            ToolError::Execution(
+                "extension tool execution requires an approved resource lease".into(),
+            )
+        })?;
         let session_id = ctx.scope.session_id.clone();
         let turn_id = ctx.turn_id().map(ToString::to_string);
         let working_dir = PathBuf::from(&self.working_dir);
@@ -302,6 +292,9 @@ impl Tool for HandlerTool {
                 session_store_dir: ctx.capabilities.paths.store_dir.clone(),
                 event_tx: ctx.scope.event_tx.clone(),
                 event_causation: None,
+                resource_lease: Some(resource_lease),
+                file_observation_store: ctx.capabilities.files.observation_store.clone(),
+                tool_result_reader: ctx.capabilities.host.result_reader.clone(),
                 cancellation: call_cancellation.clone(),
             },
         );
@@ -355,6 +348,15 @@ impl Tool for HandlerTool {
     }
 }
 
+fn extension_plan_error(error: ExtensionError) -> ToolError {
+    match error {
+        ExtensionError::InvalidInput { message, .. } => ToolError::InvalidArguments(message),
+        ExtensionError::Timeout(timeout_ms) => ToolError::Timeout(timeout_ms),
+        ExtensionError::Blocked { reason } => ToolError::Blocked { reason },
+        other => ToolError::Execution(other.to_string()),
+    }
+}
+
 /// 将 [`ExtensionError`] 转换为结构化的错误 [`ToolResult`]。
 fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionError) -> ToolResult {
     use astrcode_extension_sdk::tool::tool_metadata;
@@ -401,8 +403,8 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
         ),
         ExtensionError::Internal(message) => (
             format!("Tool `{tool_name}` failed: {message}"),
-            "Try different arguments or use a builtin tool as an alternative. Do not retry the \
-             identical call.",
+            "Try different arguments or use another available tool. Do not retry the identical \
+             call.",
         ),
         registration_error => (
             format!("Tool `{tool_name}` failed: {registration_error}"),
@@ -431,14 +433,14 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
         metadata.insert(
             "errorCode".into(),
             serde_json::json!(
-                astrcode_extension_contract::WireErrorCode::ExtensionDraining.as_str()
+                astrcode_extension_sdk::wire::WireErrorCode::ExtensionDraining.as_str()
             ),
         );
     }
     if matches!(&err, ExtensionError::Cancelled) {
         metadata.insert(
             "errorCode".into(),
-            serde_json::json!(astrcode_extension_contract::WireErrorCode::Cancelled.as_str()),
+            serde_json::json!(astrcode_extension_sdk::wire::WireErrorCode::Cancelled.as_str()),
         );
     }
     if let ExtensionError::Host(error) = &err {
@@ -446,6 +448,9 @@ fn extension_error_result(tool_name: &str, extension_id: &str, err: ExtensionErr
         metadata.insert("retryable".into(), serde_json::json!(error.retryable));
         if let Some(hint) = &error.hint {
             metadata.insert("hint".into(), serde_json::json!(hint));
+        }
+        if let Some(details) = &error.details {
+            metadata.insert("errorDetails".into(), details.clone());
         }
     }
 
@@ -463,42 +468,50 @@ mod tests {
                 ExtensionError::Draining {
                     extension_id: "extension-a".into(),
                 },
-                astrcode_extension_contract::WireErrorCode::ExtensionDraining.as_str(),
+                astrcode_extension_sdk::wire::WireErrorCode::ExtensionDraining.as_str(),
+                None,
             ),
             (
                 ExtensionError::Cancelled,
-                astrcode_extension_contract::WireErrorCode::Cancelled.as_str(),
+                astrcode_extension_sdk::wire::WireErrorCode::Cancelled.as_str(),
+                None,
             ),
             (
                 ExtensionError::InvalidInput {
-                    code: astrcode_extension_contract::WireErrorCode::InvalidInput
+                    code: astrcode_extension_sdk::wire::WireErrorCode::InvalidInput
                         .as_str()
                         .into(),
                     message: "bad input".into(),
                     hint: None,
                 },
-                astrcode_extension_contract::WireErrorCode::InvalidInput.as_str(),
+                astrcode_extension_sdk::wire::WireErrorCode::InvalidInput.as_str(),
+                None,
             ),
             (
                 ExtensionError::Host(
-                    astrcode_extension_contract::protocol::ErrorPayload {
+                    astrcode_extension_sdk::wire::protocol::ErrorPayload {
                         code: "future_worker_error".into(),
                         message: "worker failed".into(),
                         hint: None,
                         retryable: false,
-                        details: None,
+                        details: Some(serde_json::json!({ "revision": 3 })),
                     }
                     .into(),
                 ),
                 "future_worker_error",
+                Some(serde_json::json!({ "revision": 3 })),
             ),
         ];
 
-        for (error, expected_code) in cases {
+        for (error, expected_code, expected_details) in cases {
             let result = extension_error_result("probe", "extension-a", error);
             assert_eq!(
                 result.metadata.get("errorCode"),
                 Some(&serde_json::json!(expected_code))
+            );
+            assert_eq!(
+                result.metadata.get("errorDetails"),
+                expected_details.as_ref()
             );
         }
     }

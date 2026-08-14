@@ -1,17 +1,17 @@
 //! Tool Gate 权限策略与链组装。
 
 mod configured;
-mod cwd_outside_write_ask;
 mod default_read_approve;
 mod fallback_allow;
 mod git_cwd_write_approve;
 mod git_path_ask;
+mod opaque_resource_ask;
 mod paths;
+mod process_resource_ask;
 mod runtime;
 mod sensitive_file_ask;
 mod session_approval_history;
 mod session_tool_selection;
-mod shell_broad_access_ask;
 mod yolo_mode_approve;
 
 use std::{path::Path, sync::Arc};
@@ -22,7 +22,7 @@ pub(crate) use runtime::{
 };
 pub(crate) use session_approval_history::ApprovalHistoryStore;
 
-/// 根据有效配置与会话审批记忆构建默认权限链。
+/// 根据有效配置构建默认权限链。
 ///
 /// 链构造约定（工具管线唯一入口，经 `TurnToolContext::for_turn`）：
 /// - Yolo 全覆盖由链保证：`yolo_mode_approve`（priority 50）先于一切 Ask 策略 （65+）恒 Allow，各
@@ -30,10 +30,7 @@ pub(crate) use session_approval_history::ApprovalHistoryStore;
 /// - 链以显式兜底策略收尾（`fallback_allow`，priority 999）：链本身不做隐式拒绝；
 ///   `PermissionChain::decide` 的全 Pass → Deny 分支仅兜底无终态策略的链 （如 lifecycle 空链）。
 /// - 策略按 priority 升序声明，与 `PermissionChain::new` 的 debug_assert 一致。
-pub(crate) fn build_default_chain(
-    effective: &EffectiveConfig,
-    history: Arc<ApprovalHistoryStore>,
-) -> Arc<PermissionChain> {
+pub(crate) fn build_default_chain(effective: &EffectiveConfig) -> Arc<PermissionChain> {
     let policies: Vec<Box<dyn PermissionPolicy>> = vec![
         Box::new(configured::ConfiguredPolicy::new(
             &effective.permissions.deny,
@@ -41,9 +38,6 @@ pub(crate) fn build_default_chain(
         )),
         Box::new(session_tool_selection::SessionToolSelectionPolicy),
         Box::new(yolo_mode_approve::YoloModeApprovePolicy),
-        Box::new(session_approval_history::SessionApprovalHistoryPolicy::new(
-            Arc::clone(&history),
-        )),
         Box::new(configured::ConfiguredPolicy::new(
             &effective.permissions.allow,
             configured::ConfiguredEffect::Allow,
@@ -54,8 +48,8 @@ pub(crate) fn build_default_chain(
         )),
         Box::new(sensitive_file_ask::SensitiveFileAskPolicy::new()),
         Box::new(git_path_ask::GitPathAskPolicy),
-        Box::new(shell_broad_access_ask::ShellBroadAccessAskPolicy),
-        Box::new(cwd_outside_write_ask::CwdOutsideWriteAskPolicy),
+        Box::new(process_resource_ask::ProcessResourceAskPolicy),
+        Box::new(opaque_resource_ask::OpaqueResourceAskPolicy),
         Box::new(default_read_approve::DefaultReadApprovePolicy),
         Box::new(git_cwd_write_approve::GitCwdWriteApprovePolicy),
         Box::new(fallback_allow::FallbackAllowPolicy),
@@ -91,7 +85,6 @@ mod tests {
             agent: AgentSettings {
                 max_depth: 2,
                 tool_max_parallel_calls: 4,
-                shell_timeout_secs: 120,
                 approval_mode,
             },
             permissions: Default::default(),
@@ -103,17 +96,19 @@ mod tests {
     fn manual_shell_falls_through_to_ask() {
         let effective = test_effective(ApprovalMode::Manual);
         let history = Arc::new(ApprovalHistoryStore::default());
-        let chain = build_default_chain(&effective, history);
+        let chain = build_default_chain(&effective);
         let input = serde_json::json!({"command": "ls"});
         let ctx = PermissionContext {
             tool_name: "shell",
             tool_input: &input,
             working_dir: std::path::Path::new("/project"),
-            resource_accesses: &[],
+            resource_accesses: &[astrcode_core::tool::access::ResourceAccess::host(
+                astrcode_core::tool::access::HostResource::Process,
+            )],
             approval_mode: ApprovalMode::Manual,
             tool_selection: None,
         };
-        let decision = chain.decide(&ctx);
+        let decision = chain.decide(&ctx, &history);
         assert!(matches!(decision, PermissionDecision::Ask { .. }));
     }
 
@@ -121,24 +116,26 @@ mod tests {
     fn yolo_skips_shell_ask() {
         let effective = test_effective(ApprovalMode::Yolo);
         let history = Arc::new(ApprovalHistoryStore::default());
-        let chain = build_default_chain(&effective, history);
+        let chain = build_default_chain(&effective);
         let input = serde_json::json!({"command": "ls"});
         let ctx = PermissionContext {
             tool_name: "shell",
             tool_input: &input,
             working_dir: std::path::Path::new("/project"),
-            resource_accesses: &[],
+            resource_accesses: &[astrcode_core::tool::access::ResourceAccess::host(
+                astrcode_core::tool::access::HostResource::Process,
+            )],
             approval_mode: ApprovalMode::Yolo,
             tool_selection: None,
         };
-        assert_eq!(chain.decide(&ctx), PermissionDecision::Allow);
+        assert_eq!(chain.decide(&ctx, &history), PermissionDecision::Allow);
     }
 
     #[test]
     fn manual_unknown_tool_allowed_by_fallback() {
         let effective = test_effective(ApprovalMode::Manual);
         let history = Arc::new(ApprovalHistoryStore::default());
-        let chain = build_default_chain(&effective, history);
+        let chain = build_default_chain(&effective);
         let input = serde_json::json!({"query": "test"});
         let ctx = PermissionContext {
             tool_name: "web_search",
@@ -148,6 +145,6 @@ mod tests {
             approval_mode: ApprovalMode::Manual,
             tool_selection: None,
         };
-        assert_eq!(chain.decide(&ctx), PermissionDecision::Allow);
+        assert_eq!(chain.decide(&ctx, &history), PermissionDecision::Allow);
     }
 }

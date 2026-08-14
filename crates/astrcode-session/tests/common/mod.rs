@@ -131,8 +131,12 @@ fn test_runtime_services_with_context_and_extensions(
     let context_assembler: Arc<dyn ContextAssembler> = Arc::new(TestContextAssembler {
         settings: context.clone(),
     });
-    let tool_catalog =
-        tool_catalog.unwrap_or_else(|| Arc::new(NoopRuntimePorts) as Arc<dyn ToolCatalogProvider>);
+    let extension_ports = if let Some(tool_catalog) = tool_catalog {
+        let noop = Arc::new(NoopRuntimePorts);
+        SessionExtensionPorts::from_immutable_ports(tool_catalog, noop.clone(), noop.clone(), noop)
+    } else {
+        extension_ports
+    };
     Arc::new(SessionRuntimeServices::new(
         llm.clone(),
         llm,
@@ -140,7 +144,6 @@ fn test_runtime_services_with_context_and_extensions(
         extension_ports,
         context_assembler,
         Arc::new(NoopPostCompactEnricher),
-        tool_catalog,
     ))
 }
 

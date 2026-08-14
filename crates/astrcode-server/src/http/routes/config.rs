@@ -23,7 +23,7 @@ use axum::{
 
 use super::{
     super::{HttpState, bad_request_response, internal_error_response},
-    ConfigRequestError, notify_extensions_config_changed, reload_extension_registry, update_config,
+    ConfigRequestError, reload_extension_registry, update_config,
 };
 use crate::{
     bootstrap::{self, BootstrapOptions},
@@ -282,11 +282,15 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
                 format!("Reloaded config is invalid: {error}"),
             ),
             ConfigUpdateError::Provider(error) => bad_request_response("invalid_provider", error),
+            ConfigUpdateError::ExtensionValidation(error) => {
+                bad_request_response("invalid_extension_config", error)
+            },
+            ConfigUpdateError::ExtensionApply(error) => {
+                internal_error_response("extension_config_apply_failed", error)
+            },
             ConfigUpdateError::Store(error) => internal_error_response("reload_failed", error),
         };
     }
-    // 通知扩展配置已变更（针对已运行扩展的配置热更新）
-    notify_extensions_config_changed(&state).await;
     // 重载扩展（处理启用/禁用状态变化）
     let _ = reload_extension_registry(&state).await;
 

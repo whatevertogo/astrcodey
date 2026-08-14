@@ -7,7 +7,7 @@ use astrcode_extension_sdk::{
 
 use super::{
     ExtensionRunner, HostedExtension, retirement::ExtensionIndexLease,
-    supervisor::ExtensionAdmission,
+    supervisor::ExtensionAdmission, tool_catalog_cache::ToolCatalogCache,
 };
 
 pub(super) type ExtensionHandler<H> = (String, HookMode, Arc<H>);
@@ -72,6 +72,7 @@ pub(super) struct HandlerIndex {
     pub(super) status_items: Vec<StatusItem>,
     pub(super) http_routes: Vec<HttpRouteEntry>,
     pub(super) extensions: HashMap<String, Arc<ExtensionGenerationEntry>>,
+    pub(super) tool_catalog_cache: ToolCatalogCache,
     _publication_leases: Vec<ExtensionIndexLease>,
 }
 
@@ -239,6 +240,7 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         status_items,
         http_routes,
         extensions: indexed_extensions,
+        tool_catalog_cache: ToolCatalogCache::default(),
         _publication_leases: publication_leases,
     }
 }

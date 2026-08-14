@@ -537,7 +537,7 @@ mod tests {
             description: "read a file".into(),
             parameters: serde_json::json!({"type":"object"}),
             strict: false,
-            origin: ToolOrigin::Builtin,
+            origin: ToolOrigin::Bundled,
             execution_mode: ExecutionMode::Parallel,
         };
         let messages = [LlmMessage::system("sys"), LlmMessage::user("hi")];

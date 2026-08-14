@@ -312,20 +312,20 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
              │           │           │
     ┌────────┴───┐ ┌─────┴─────┐ ┌───┴──────────┐
     │ astrcode-ai│ │astrcode-  │ │ astrcode-    │
-    │            │ │extensions │ │ tools        │
-    │ Anthropic  │ │Hook system│ │File/shell/   │
-    │ OpenAI     │ │Ext SDK    │ │task tools    │
-    │ compatible │ │IPC ext    │ │              │
+    │            │ │context    │ │ extensions   │
+    │ Anthropic  │ │Token      │ │Host runtime  │
+    │ OpenAI     │ │budget and │ │hooks + S5R   │
+    │ compatible │ │compaction │ │capabilities  │
     │ SSE+retry  │ │           │ │              │
-    └────────┬───┘ └─────┬─────┘ └──────────────┘
-             │           │
-   ┌─────────┴──┐  ┌────┴─────────────────────────┐
-   │astrcode-   │  │ Extension layer             │
-   │ context    │  │ bundled-extensions          │
-   │ Token budget│  │ sdk · mode · goal · skill  │
-   │ Auto-compact│  │ todo · agent-tools · mcp   │
-   └────────────┘  │ memory · channels · web-tools │
-                   │ + disk IPC extensions         │
+    └────────────┘ └───────────┘ └──────┬───────┘
+                                      │
+                   ┌──────────────────┴─────────┐
+                   │ Extension layer             │
+                   │ bundled-extensions          │
+                   │ astrcode-extension-coding   │
+                   │ mode · goal · skill · todo  │
+                   │ agent-tools · mcp · memory  │
+                   │ channels · web-tools + IPC  │
                    └────────────────────────────┘
         ┌─────────────────────────────────────┐
         │              Shared layer            │
@@ -336,13 +336,12 @@ For detailed configuration documentation, see [Configuration Guide](docs/configu
 
 ## Crates
 
-The Cargo workspace under [`crates/`](crates/) contains **28 crates**, plus [`src-tauri/`](src-tauri/) as the desktop shell (**29 workspace members** total). Crates are grouped by architectural layer (details in [Architecture](docs/architecture.md)).
+The Cargo workspace under [`crates/`](crates/) contains **27 crates**, plus [`src-tauri/`](src-tauri/) as the desktop shell (**28 workspace members** total). Crates are grouped by architectural layer (details in [Architecture](docs/architecture.md)).
 
 ### Layer 0: Foundation Contracts
 
 | Crate | Description |
 |---|---|
-| [`astrcode-extension-contract`](crates/astrcode-extension-contract) | S5R wire DTOs, stable error codes, framing, and peer state machine |
 | [`astrcode-core`](crates/astrcode-core) | Shared domain types, traits, config system, and prompt composition |
 | [`astrcode-session-projection`](crates/astrcode-session-projection) | Pure durable-event reducer and session read model |
 | [`astrcode-protocol`](crates/astrcode-protocol) | JSON-RPC 2.0 wire types, commands, events, and HTTP/UI DTOs |
@@ -354,7 +353,6 @@ The Cargo workspace under [`crates/`](crates/) contains **28 crates**, plus [`sr
 | [`astrcode-ai`](crates/astrcode-ai) | Multi-provider LLM layer (Anthropic and OpenAI-compatible providers), SSE streaming, and retry |
 | [`astrcode-storage`](crates/astrcode-storage) | JSONL event log, snapshots, config persistence, and file locking |
 | [`astrcode-context`](crates/astrcode-context) | Token estimation, context window budgeting, auto-compact, and prompt engine |
-| [`astrcode-tools`](crates/astrcode-tools) | Built-in tools: read, write, edit, patch, glob, grep, shell, terminal, and task |
 | [`astrcode-log`](crates/astrcode-log) | File rotation, stderr output, and env-filter logging |
 
 ### Layer 2: Session Runtime
@@ -367,11 +365,12 @@ The Cargo workspace under [`crates/`](crates/) contains **28 crates**, plus [`sr
 
 | Crate | Description |
 |---|---|
-| [`astrcode-extension-sdk`](crates/astrcode-extension-sdk) | Stable authoring API for in-process extensions, typed host clients, manifests, and registration |
+| [`astrcode-extension-sdk`](crates/astrcode-extension-sdk) | Extension authoring API plus the shared S5R wire, framing, peer, and host-operation contract |
 | [`astrcode-extension-worker`](crates/astrcode-extension-worker) | S5R subprocess worker runtime, handler dispatch, and remote typed `HostClient` |
 | [`astrcode-extensions`](crates/astrcode-extensions) | Host-side extension lifecycle, hook dispatch, capability gating, and disk IPC loader |
 | [`astrcode-bundled-extensions`](crates/astrcode-bundled-extensions) | Composition root that registers all first-party extension crates |
 | [`astrcode-extension-agent-tools`](crates/astrcode-extension-agent-tools) | Sub-agent delegation and agent discovery (Claude Code compatible) |
+| [`astrcode-extension-coding`](crates/astrcode-extension-coding) | Nine first-party tools—read, read_tool_result, write, edit, patch, glob, grep, shell, and terminal—using only SDK host capabilities |
 | [`astrcode-extension-mcp`](crates/astrcode-extension-mcp) | MCP client: stdio/HTTP transports, persistent process pool, pre-warm, and health checks |
 | [`astrcode-extension-skill`](crates/astrcode-extension-skill) | Slash-command skill discovery and Skill tool dispatch |
 | [`astrcode-extension-todo-tool`](crates/astrcode-extension-todo-tool) | Progress-tracking todo list tool |

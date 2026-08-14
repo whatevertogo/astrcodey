@@ -1,6 +1,6 @@
 # S5R 3.0 implementation decisions
 
-Status: implemented; acceptance gaps remain
+Status: Phase 0 implemented
 
 S5R 3.0 was built as a sequence of mergeable changes on top of the extension authoring API. The
 production composition root now accepts only S5R 3.0. The transitional S5R 2.0 peer and adapters
@@ -8,13 +8,13 @@ were crate-private and have been removed; old on-disk data is rejected at its bo
 
 ## Dependency direction
 
-`astrcode-extension-contract` owns wire DTOs, operation and error catalogs, framing, and the peer
-session state machine. It has no dependency on host domain crates. Both the worker runtime and
-`astrcode-extensions` depend on the contract; the host never depends on the worker runtime.
-`WireErrorCode` is defined once in the contract; `astrcode-extension-sdk` re-exports it for authors.
-The worker prelude combines wire DTOs from the contract with the curated SDK/domain author types
-needed by handlers; it does not expose host implementation crates. Bundled extensions may share
-additional `astrcode-core` types because they run in-process.
+`astrcode-extension-sdk::wire` owns wire DTOs, operation and error catalogs, framing, and the peer
+session state machine. This module does not depend on the SDK authoring surface or host domain
+crates. Both the worker runtime and `astrcode-extensions` consume the same wire module; the host
+never depends on the worker runtime. `WireErrorCode` is defined once in `wire` and re-exported at
+the SDK root for authors. The worker prelude combines wire DTOs with the curated SDK/domain author
+types needed by handlers; it does not expose host implementation crates. Bundled extensions may
+share additional `astrcode-core` types because they run in-process.
 
 `astrcode-extension-worker` owns only worker-side assembly: `run_stdio`, handler dispatch, and the
 remote host transport. Bundled extensions depend on the SDK and use typed calls without wire
@@ -69,10 +69,12 @@ cancellation within their existing timeout, stop the extension, initialize and v
 replacement, atomically replace the handler index, then publish the ready snapshot.
 Dual-generation reload is not implemented.
 
-The supervisor actor currently owns lifecycle state, the generation gate, permits, and the watch
-snapshot. `RetirementSupervisor` still owns task cancellation and `S5rV3Session` still owns the
-worker process. Moving those resources behind the actor command boundary remains required before
-the stronger single-owner lifecycle claim can be considered complete.
+The supervisor actor owns lifecycle decisions, the generation gate, permits, and the watch
+snapshot. `RetirementSupervisor` owns cancellation and the retirement barrier;
+`S5rV3Session` owns the worker process. This split is the Phase 0 ownership boundary rather than an
+incomplete single actor: each resource has one writer and lifecycle transitions still pass through
+the supervisor. Moving process and retirement resources behind the actor command boundary should
+only be considered if a concrete cross-owner race or new atomic operation requires it.
 
 ## Protocol and persistence boundaries
 
@@ -84,6 +86,12 @@ Durable session custom events share the session journal order and use independen
 consumer checkpoints. Delivery is at least once, keyed by a stable event id. Old wire and consumer
 formats are not migrated or deleted; unsupported data is rejected at its boundary.
 
+Consumer state version 3 is replaced atomically after flushing and syncing the temporary file;
+Unix also syncs the containing directory metadata. Quarantine and manual-skip totals are monotonic,
+while only the latest 128 audit records are retained and individual error text is bounded to 4 KiB.
+This keeps the operational history useful without allowing the control file or each rewrite to grow
+without bound.
+
 ## Observability
 
 The stable span names are `extension.lifecycle`, `extension.invoke`, `extension.stream`,
@@ -92,11 +100,12 @@ consumer/session sequence, frame direction and byte count where applicable; payl
 are never recorded. Invocation permits, retries, quarantine, checkpoint failures and unknown wire
 codes are emitted at their owning boundary.
 
-## Outstanding acceptance
+## Post-Phase-0 follow-ups
 
-- Global live custom-event delivery is not wired to a process-wide event bus; session live and
-  session durable delivery are implemented.
+- A process-wide live custom-event bus is intentionally outside Phase 0; session live and session
+  durable delivery cover the current product paths.
 - The bundled and worker paths have independent behavior and E2E coverage, but do not yet run one
-  shared parity fixture.
+  shared parity fixture. Add one when shared author-facing behavior expands enough to justify the
+  additional fixture ownership.
 - TTFT and reload-window p95 thresholds have not been benchmarked on the three CI operating
-  systems; the spans and counters needed to produce that report are present only in part.
+  systems. This is a performance baseline follow-up, not a correctness acceptance gate.

@@ -195,10 +195,8 @@ fn tool_delta_note(tools: &[ToolDefinition]) -> Option<PostCompactNote> {
 
 fn tool_origin_name(origin: ToolOrigin) -> &'static str {
     match origin {
-        ToolOrigin::Builtin => "builtin",
         ToolOrigin::Bundled => "bundled",
         ToolOrigin::Extension => "extension",
-        ToolOrigin::Sdk => "sdk",
     }
 }
 
@@ -363,7 +361,7 @@ mod tests {
             description: "read files".into(),
             parameters: json!({}),
             strict: false,
-            origin: ToolOrigin::Builtin,
+            origin: ToolOrigin::Bundled,
             execution_mode: astrcode_core::tool::ExecutionMode::Parallel,
         }];
         let mut compaction = CompactResult {
@@ -403,7 +401,7 @@ mod tests {
         assert!(restored.contains("Agent Task Status"));
         assert!(restored.contains("inspect compact"));
         assert!(restored.contains("Available Tool Delta"));
-        assert!(restored.contains("read (builtin)"));
+        assert!(restored.contains("read (bundled)"));
     }
 
     #[test]

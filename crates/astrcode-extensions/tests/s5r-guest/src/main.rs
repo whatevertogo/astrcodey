@@ -31,6 +31,35 @@ static PARALLEL_PEAK: AtomicU32 = AtomicU32::new(0);
 
 const EXT_ID: &str = "s5r-guest-demo";
 
+fn no_resources() -> ToolPlannerFn {
+    tool_planner(|_| async { Ok(ToolPlan::default()) })
+}
+
+fn host_resource(resource: HostResource) -> ToolPlannerFn {
+    tool_planner(move |_| async move {
+        Ok(ToolPlan::new(ResourceSet::new([ResourceAccess::host(
+            resource,
+        )])))
+    })
+}
+
+fn read_probe() -> ToolPlannerFn {
+    tool_planner(|ctx| async move {
+        Ok(ToolPlan::new(ResourceSet::new([
+            ResourceAccess::read_file(ctx.working_dir().join("probe.txt")),
+        ])))
+    })
+}
+
+fn workspace_text(output: HostWorkspaceReadOutput) -> Result<String, ErrorPayload> {
+    match output {
+        HostWorkspaceReadOutput::Text { content, .. } => Ok(content),
+        HostWorkspaceReadOutput::Image { .. } | HostWorkspaceReadOutput::Binary { .. } => Err(
+            ErrorPayload::new(WireErrorCode::InvalidResponse, "probe.txt must be UTF-8 text"),
+        ),
+    }
+}
+
 #[derive(Deserialize)]
 struct GreetArgs {
     name: String,
@@ -109,6 +138,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .description("Returns pong")
             .parameters(json!({ "type": "object", "properties": {} }))
             .build(),
+        no_resources(),
         tool_handler(|_ctx| async { Ok(tool_text("pong", false)) }),
     )?;
 
@@ -117,6 +147,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .description("Return the host-attributed tool call context")
             .parameters(json!({ "type": "object", "properties": {} }))
             .build(),
+        no_resources(),
         tool_handler(|ctx| async move {
             Ok(tool_text(
                 json!({
@@ -137,6 +168,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .description("Write and read extension-scoped session state")
             .parameters(json!({ "type": "object", "properties": {} }))
             .build(),
+        host_resource(HostResource::Session),
         tool_handler(|_ctx| async move {
             HostClient::session_state()
                 .write(HostSessionStateWriteRequest {
@@ -185,6 +217,7 @@ async fn run() -> Result<(), ErrorPayload> {
                 "required": ["name"]
             }))
             .build(),
+        no_resources(),
         tool_handler_args(|args: GreetArgs, _ctx| async move {
             Ok(tool_text(format!("hello, {}!", args.name), false))
         }),
@@ -202,6 +235,7 @@ async fn run() -> Result<(), ErrorPayload> {
                 "required": ["a", "b"]
             }))
             .build(),
+        no_resources(),
         tool_handler_args(|args: AddArgs, _ctx| async move {
             Ok(tool_text(
                 format!("{} + {} = {}", args.a, args.b, args.a + args.b),
@@ -219,6 +253,7 @@ async fn run() -> Result<(), ErrorPayload> {
                 "required": ["prompt"]
             }))
             .build(),
+        host_resource(HostResource::Model),
         tool_handler_args(|args: AskLlmArgs, _ctx| async move {
             let output = HostClient::models()
                 .small_chat(vec![LlmMessage::user(args.prompt)])
@@ -232,6 +267,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .description("Pipeline tool continuation probe")
             .parameters(json!({ "type": "object" }))
             .build(),
+        no_resources(),
         tool_handler(|ctx| async move {
             assert_eq!(ctx.session_id(), "e2e-session");
             assert_eq!(ctx.working_dir(), std::path::Path::new("/tmp"));
@@ -245,6 +281,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .description("Pipeline status")
             .parameters(json!({ "type": "object" }))
             .build(),
+        no_resources(),
         tool_handler(|_ctx| async move {
             let step_1_calls = PIPELINE_STEP_1_CALLS.load(Ordering::SeqCst);
             let step_2_calls = PIPELINE_STEP_2_CALLS.load(Ordering::SeqCst);
@@ -265,15 +302,18 @@ async fn run() -> Result<(), ErrorPayload> {
             .description("Read probe.txt")
             .parameters(json!({ "type": "object" }))
             .build(),
+        read_probe(),
         tool_handler(|_ctx| async move {
             let output = HostClient::workspace()
                 .read(HostWorkspaceReadRequest {
                     path: "probe.txt".into(),
                     max_bytes: None,
+                    line_offset: 0,
+                    line_limit: None,
                 })
                 .await?;
             Ok(tool_text(
-                format!("read probe.txt: {}", output.content),
+                format!("read probe.txt: {}", workspace_text(output)?),
                 false,
             ))
         }),
@@ -289,6 +329,7 @@ async fn run() -> Result<(), ErrorPayload> {
             }))
             .execution_mode(ExecutionMode::Parallel)
             .build(),
+        read_probe(),
         tool_handler_args(|args: ParallelReadArgs, _ctx| async move {
             let _active = ParallelCallGuard::enter();
             tokio::time::sleep(Duration::from_millis(args.delay_ms)).await;
@@ -296,11 +337,13 @@ async fn run() -> Result<(), ErrorPayload> {
                 .read(HostWorkspaceReadRequest {
                     path: "probe.txt".into(),
                     max_bytes: None,
+                    line_offset: 0,
+                    line_limit: None,
                 })
                 .await?;
             let peak = PARALLEL_PEAK.load(Ordering::SeqCst);
             Ok(tool_text(
-                format!("content={} peak={peak}", output.content),
+                format!("content={} peak={peak}", workspace_text(output)?),
                 false,
             ))
         }),
@@ -311,6 +354,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .description("List host-visible sessions")
             .parameters(json!({ "type": "object" }))
             .build(),
+        host_resource(HostResource::Session),
         tool_handler(|_ctx| async move {
             let output = HostClient::session_inspect().list().await?;
             Ok(tool_text(
@@ -325,6 +369,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .description("Dispatch to another extension's public HTTP route")
             .parameters(json!({ "type": "object" }))
             .build(),
+        host_resource(HostResource::ExtensionHttp),
         tool_handler(|_ctx| async move {
             let forged = astrcode_extension_worker::testing::invoke_host(
                 "astrcode.extension.http.public",
@@ -362,6 +407,7 @@ async fn run() -> Result<(), ErrorPayload> {
             .description("Slow tool for cancel E2E")
             .parameters(json!({ "type": "object" }))
             .build(),
+        no_resources(),
         tool_handler(|ctx| async move {
             for _ in 0..200 {
                 if ctx.cancel_token().is_cancelled() {

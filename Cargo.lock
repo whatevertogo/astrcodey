@@ -212,7 +212,6 @@ dependencies = [
  "astrcode-bundled-extensions",
  "astrcode-core",
  "astrcode-extension-sdk",
- "astrcode-tools",
  "async-trait",
  "futures-util",
  "getrandom 0.3.4",
@@ -229,6 +228,7 @@ dependencies = [
  "astrcode-extension-agent-tools",
  "astrcode-extension-ask-user",
  "astrcode-extension-channels",
+ "astrcode-extension-coding",
  "astrcode-extension-goal",
  "astrcode-extension-mcp",
  "astrcode-extension-memory",
@@ -397,18 +397,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "astrcode-extension-contract"
+name = "astrcode-extension-coding"
 version = "0.3.14"
 dependencies = [
+ "astrcode-extension-sdk",
  "async-trait",
- "base64 0.22.1",
- "futures-util",
+ "regex",
  "serde",
  "serde_json",
- "thiserror 2.0.19",
- "tokio",
- "tokio-util",
- "tracing",
 ]
 
 [[package]]
@@ -470,8 +466,8 @@ name = "astrcode-extension-sdk"
 version = "0.3.14"
 dependencies = [
  "astrcode-core",
- "astrcode-extension-contract",
  "async-trait",
+ "base64 0.22.1",
  "futures-util",
  "serde",
  "serde_json",
@@ -526,7 +522,6 @@ dependencies = [
 name = "astrcode-extension-worker"
 version = "0.3.14"
 dependencies = [
- "astrcode-extension-contract",
  "astrcode-extension-sdk",
  "async-trait",
  "futures-util",
@@ -541,28 +536,31 @@ name = "astrcode-extensions"
 version = "0.3.14"
 dependencies = [
  "arc-swap",
- "astrcode-context",
  "astrcode-core",
- "astrcode-extension-contract",
  "astrcode-extension-sdk",
  "astrcode-session-projection",
  "astrcode-storage",
  "async-trait",
+ "base64 0.22.1",
  "futures-util",
  "globset",
+ "ignore",
  "libc",
  "parking_lot",
+ "portable-pty",
  "process-wrap",
  "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2",
+ "similar",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
  "walkdir",
 ]
 
@@ -606,7 +604,6 @@ dependencies = [
  "astrcode-session",
  "astrcode-session-projection",
  "astrcode-storage",
- "astrcode-tools",
  "async-trait",
  "axum",
  "futures-util",
@@ -676,32 +673,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "toml 1.1.4+spec-1.1.0",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "astrcode-tools"
-version = "0.3.14"
-dependencies = [
- "astrcode-core",
- "astrcode-extension-sdk",
- "async-trait",
- "base64 0.22.1",
- "globset",
- "grep-regex",
- "grep-searcher",
- "ignore",
- "libc",
- "parking_lot",
- "portable-pty",
- "regex",
- "serde",
- "serde_json",
- "sha2",
- "similar",
- "tempfile",
- "tokio",
  "tracing",
  "uuid",
 ]
@@ -925,7 +896,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f7dc094d718f2e1c1559ad110e27eeaae14a5465d3d56dd6dbd793079fbd530"
 dependencies = [
  "memchr",
- "regex-automata",
  "serde_core",
 ]
 
@@ -1819,15 +1789,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "encoding_rs_io"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1cc3c5651fb62ab8aa3103998dade57efdd028544bd300516baa31840c252a83"
-dependencies = [
- "encoding_rs",
-]
-
-[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2402,43 +2363,6 @@ dependencies = [
  "glib-sys",
  "libc",
  "system-deps",
-]
-
-[[package]]
-name = "grep-matcher"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9417543f4870fc8f1c8e1af870afae2431007626d9e703fce6471c468d33847"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "grep-regex"
-version = "0.1.14"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ce0c256c3ad82bcc07b812c15a45ec1d398122e8e15124f96695234db7112ef"
-dependencies = [
- "bstr",
- "grep-matcher",
- "log",
- "regex-automata",
- "regex-syntax",
-]
-
-[[package]]
-name = "grep-searcher"
-version = "0.1.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72348823a0eafc4bc2e9051064f28b5b42cc100b571b3a35d67918d711efcbc6"
-dependencies = [
- "bstr",
- "encoding_rs",
- "encoding_rs_io",
- "grep-matcher",
- "log",
- "memchr",
- "memmap2",
 ]
 
 [[package]]
@@ -3319,15 +3243,6 @@ name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
-
-[[package]]
-name = "memmap2"
-version = "0.9.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1219ed1b7f229ee7104d281dd01d6802fe28bb6e95d292942c4daacdeb798c0"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "memmem"
@@ -5378,9 +5293,9 @@ checksum = "3a219298ac11a56ea9a6d2120044824d6f01aeb034955e7af7bc16858527deea"
 
 [[package]]
 name = "similar"
-version = "3.1.1"
+version = "3.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e6505efef05804732ed8a3f2d4f279429eb485bd69d5b0cc6b19cc02005cda16"
+checksum = "85ee016af5d736b69fc89e19254540fa4b5f5492853fb5503920f084011c78b6"
 dependencies = [
  "bstr",
 ]

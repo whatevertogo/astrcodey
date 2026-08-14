@@ -10,10 +10,10 @@ use std::{
 };
 
 use astrcode_core::config::defaults::astrcode_dir;
-use astrcode_extension_contract::protocol::S5R_VERSION;
 use astrcode_extension_sdk::{
     extension::{Extension, ExtensionPackageManifest, StopReason},
     manifest::validate_extension_id,
+    wire::protocol::S5R_VERSION,
 };
 use sha2::{Digest, Sha256};
 

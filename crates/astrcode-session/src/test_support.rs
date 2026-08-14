@@ -169,6 +169,5 @@ pub(crate) fn test_runtime_services_with_hooks(
         crate::SessionExtensionPorts::with_turn_hooks(turn_hooks),
         Arc::new(NoopContextAssembler::new(ContextSettings::default())),
         Arc::new(NoopPostCompactEnricher),
-        Arc::new(NoopRuntimePorts),
     ))
 }

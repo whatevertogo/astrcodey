@@ -684,7 +684,7 @@ mod tests {
         extension::{
             CommandDiscovery, CommandDiscoveryContext, ExtensionCommandResult, ExtensionError,
         },
-        tool::ToolResult,
+        tool::{ToolPlan, ToolResult},
     };
 
     struct EmptyCommandDiscovery;
@@ -739,7 +739,10 @@ mod tests {
             tool("  review  ")
                 .parameters(serde_json::json!({"type": "object"}))
                 .build(),
-            tool_handler(|_| async { Ok(ToolResult::success("ok")) }),
+            tool_handler(
+                |_| async { Ok(ToolPlan::default()) },
+                |_| async { Ok(ToolResult::success("ok")) },
+            ),
         );
         registrar.command(
             command("  inspect  ").build(),

@@ -1,7 +1,6 @@
 //! 从 durable projection 派生运行时 context。
 
 use astrcode_context::ContextSnapshot;
-use astrcode_core::llm::{LlmContent, LlmRole};
 use astrcode_session_projection::SessionReadModel;
 
 pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
@@ -43,22 +42,6 @@ pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
         usage.model_context_window,
         covered_messages,
     )
-}
-
-/// 已提交 tool 结果内容的字符总量（用于 tool 结果预算）。
-pub(crate) fn committed_tool_result_content_len(model: &SessionReadModel) -> usize {
-    model
-        .model_context
-        .messages
-        .iter()
-        .map(|entry| &entry.message)
-        .filter(|message| message.role == LlmRole::Tool)
-        .flat_map(|message| message.content.iter())
-        .filter_map(|content| match content {
-            LlmContent::ToolResult { content, .. } => Some(content.len()),
-            _ => None,
-        })
-        .sum()
 }
 
 #[cfg(test)]
@@ -129,30 +112,5 @@ mod tests {
                     )
                 })
         }));
-    }
-
-    #[test]
-    fn committed_tool_result_content_len_sums_tool_messages() {
-        let mut model = sample_model();
-        model.model_context.messages.push(SequencedLlmMessage {
-            message: LlmMessage {
-                role: LlmRole::Tool,
-                content: vec![LlmContent::ToolResult {
-                    tool_call_id: "c1".into(),
-                    content: "abcdef".into(),
-                    is_error: false,
-                }],
-                name: Some("tool".into()),
-                reasoning_content: None,
-            },
-            updated_seq: 1,
-            source: None,
-        });
-        model.model_context.messages.push(SequencedLlmMessage {
-            message: LlmMessage::user("hi"),
-            updated_seq: 2,
-            source: None,
-        });
-        assert_eq!(committed_tool_result_content_len(&model), 6);
     }
 }

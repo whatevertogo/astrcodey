@@ -2625,15 +2625,15 @@ impl SessionReader for TestEventStore {
 
 #[async_trait::async_trait]
 impl ToolResultArtifactStore for TestEventStore {
-    async fn read_tool_result_artifact_by_path(
+    async fn read_tool_result_artifact(
         &self,
         session_id: &SessionId,
-        path: &str,
-        char_offset: usize,
-        max_chars: usize,
+        artifact_id: &str,
+        byte_offset: usize,
+        max_bytes: usize,
     ) -> Result<ToolResultArtifactSlice, StorageError> {
         self.inner
-            .read_tool_result_artifact_by_path(session_id, path, char_offset, max_chars)
+            .read_tool_result_artifact(session_id, artifact_id, byte_offset, max_bytes)
             .await
     }
 
@@ -2844,14 +2844,12 @@ async fn runtime_with_event_store(
         .await
         .unwrap();
     let context_assembler = Arc::new(LlmContextAssembler::new(ContextSettings::default()));
-    let shell_timeout_secs = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1));
     let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         llm_provider.clone(),
         llm_provider,
         effective,
         extension_runner.clone(),
         context_assembler.clone(),
-        std::sync::Arc::clone(&shell_timeout_secs),
     );
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
@@ -2862,7 +2860,6 @@ async fn runtime_with_event_store(
         )),
         astrcode_core::config::Config::default(),
         Arc::clone(&extension_runner),
-        shell_timeout_secs,
         Arc::clone(&capabilities),
     ));
     let session_manager = Arc::new(SessionManager::new(

@@ -16,8 +16,8 @@ use super::{
     types::ExtensionError,
 };
 use crate::{
-    extension::ToolContext,
-    tool::{ToolDefinition, ToolExecutionResult, ToolPromptMetadata},
+    extension::{ToolContext, ToolPlanContext},
+    tool::{ToolDefinition, ToolExecutionResult, ToolPlan, ToolPromptMetadata},
 };
 
 /// PreToolUse 钩子处理器。
@@ -80,6 +80,9 @@ pub trait UserMessageEnvelopeHandler: Send + Sync {
 /// 工具执行处理器。
 #[async_trait::async_trait]
 pub trait ToolHandler: Send + Sync {
+    /// Interpret the final tool arguments into the resources required by execution.
+    async fn plan(&self, ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError>;
+
     async fn execute(&self, ctx: ToolContext) -> Result<ToolExecutionResult, ExtensionError>;
 }
 
