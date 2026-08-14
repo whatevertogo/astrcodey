@@ -51,7 +51,7 @@ pub struct ShadowedSlashCommand {
 impl ExtensionView {
     fn extension_command_context(
         &self,
-        index: &HandlerIndex,
+        index: &Arc<HandlerIndex>,
         extension_id: &str,
         command_name: &str,
         argument: &str,

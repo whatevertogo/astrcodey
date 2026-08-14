@@ -272,7 +272,7 @@ impl crate::host_router::PublicHttpDispatcher for ExtensionRunner {
     async fn dispatch_public_http(
         &self,
         caller_extension_id: &str,
-        mut request: ExtensionHttpRequest,
+        request: ExtensionHttpRequest,
     ) -> Result<ExtensionHttpResponse, ExtensionError> {
         let view = self.extension_view().await;
         dispatch_public_http_from_view(&view, caller_extension_id, request).await
