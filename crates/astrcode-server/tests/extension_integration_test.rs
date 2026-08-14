@@ -2,7 +2,10 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-use astrcode_core::tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolResult};
+use astrcode_core::tool::{
+    ExecutionMode, ToolDefinition, ToolExecutionContext, ToolOrigin, ToolPlanningContext,
+    ToolResult, access::ResourceLease,
+};
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
@@ -342,19 +345,17 @@ async fn extension_tools_are_adapted_into_tool_registry() {
     let definitions = tool_registry.list_definitions();
     assert!(definitions.iter().any(|def| def.name == "extensionEcho"));
 
-    let ctx = astrcode_core::tool::ToolExecutionContext::new(
-        "test".into(),
-        String::new(),
-        None,
-        None,
-        Default::default(),
-    );
+    let arguments = serde_json::json!({ "text": "hello" });
+    let planning = ToolPlanningContext::new("test".into(), "/workspace", None);
+    let plan = tool_registry
+        .plan("extensionEcho", &arguments, &planning)
+        .await
+        .unwrap();
+    let ctx =
+        ToolExecutionContext::new("test".into(), "/workspace", None, None, Default::default())
+            .with_resource_lease(ResourceLease::from_plan(&plan));
     let result = tool_registry
-        .execute(
-            "extensionEcho",
-            serde_json::json!({ "text": "hello" }),
-            &ctx,
-        )
+        .execute("extensionEcho", arguments, &ctx)
         .await
         .unwrap();
     assert_eq!(result.content, "/workspace:hello");
