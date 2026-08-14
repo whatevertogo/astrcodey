@@ -13,21 +13,21 @@ use crate::{
 const POST_COMPACT_CONTEXT_END: &str = "</post_compact_context>";
 const TRUNCATION_MARKER: &str = "\n\n[... file content truncated after compaction; use read on \
                                  this path if more detail is needed]";
-pub(crate) const POST_COMPACT_TRUNCATION_MARKER: &str = "\n\n[... post-compact context truncated]";
+const POST_COMPACT_TRUNCATION_MARKER: &str = "\n\n[... post-compact context truncated]";
 
 #[derive(Debug, Clone)]
-pub struct PostCompactFile {
-    pub path: String,
-    pub content: String,
+pub(crate) struct PostCompactFile {
+    pub(crate) path: String,
+    pub(crate) content: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct PostCompactNote {
-    pub title: String,
-    pub body: String,
+pub(crate) struct PostCompactNote {
+    pub(crate) title: String,
+    pub(crate) body: String,
 }
 
-pub fn recent_read_paths(
+pub(crate) fn recent_read_paths(
     source_messages: &[LlmMessage],
     retained_messages: &[LlmMessage],
     settings: &ContextSettings,
@@ -50,7 +50,7 @@ pub fn recent_read_paths(
     paths
 }
 
-pub fn agent_status_note(
+pub(crate) fn agent_status_note(
     messages: &[LlmMessage],
     max_entries: usize,
     max_chars: usize,
@@ -93,7 +93,7 @@ pub fn agent_status_note(
     })
 }
 
-pub fn append_post_compact_context(
+pub(crate) fn append_post_compact_context(
     compaction: &mut crate::CompactResult,
     files: Vec<PostCompactFile>,
     notes: Vec<PostCompactNote>,
@@ -104,7 +104,7 @@ pub fn append_post_compact_context(
     }
 }
 
-pub fn post_compact_context_message(
+fn post_compact_context_message(
     files: Vec<PostCompactFile>,
     notes: Vec<PostCompactNote>,
     settings: &ContextSettings,

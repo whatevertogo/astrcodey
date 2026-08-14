@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::collections::BTreeMap;
 
 use astrcode_extension_sdk::{
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
@@ -7,12 +7,12 @@ use astrcode_extension_sdk::{
     },
     tool::{
         ExecutionMode, ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
+        ToolResult,
     },
 };
 use serde::Deserialize;
 
 use super::absolute_path;
-use crate::result::success;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -34,11 +34,10 @@ impl ToolHandler for PatchHandler {
             .map(|path| {
                 ResourceAccess::read_write_file(absolute_path(context.working_dir(), &path))
             });
-        Ok(ToolPlan::from_resources(accesses))
+        Ok(ToolPlan::new(accesses))
     }
 
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
-        let started_at = Instant::now();
         let args: PatchArgs = context.arguments()?;
         let output = context
             .host()
@@ -83,7 +82,7 @@ impl ToolHandler for PatchHandler {
             ("filesFailed".into(), serde_json::json!(failed)),
             ("files".into(), serde_json::json!(files)),
         ]);
-        let mut result = success(started_at, content, metadata);
+        let mut result = ToolResult::success(content).with_metadata(metadata);
         if failed > 0 {
             result.is_error = true;
             result.error = output

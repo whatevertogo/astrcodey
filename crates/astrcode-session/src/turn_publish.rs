@@ -91,6 +91,13 @@ impl TurnEvents {
         }
     }
 
+    pub(crate) async fn sync_durable_events(&self) -> Result<(), TurnError> {
+        self.session
+            .sync_durable_events()
+            .await
+            .map_err(TurnError::from)
+    }
+
     async fn persist_durable(
         &self,
         payload: DurableEventPayload,
@@ -397,10 +404,13 @@ mod tests {
     use astrcode_extension_sdk::{
         extension::{
             CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, LifecycleEvent,
-            PostToolUseResult, PreToolUsePayload, PreToolUseResult, ProviderEvent, ProviderResult,
-            RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
-            RuntimePostToolUseContext, RuntimePreToolUseContext, RuntimeProviderContext,
-            RuntimeUserMessageEnvelopeContext, UserMessageEnvelopeResult,
+            PostToolUseResult, PreToolUseAdmission, ProviderEvent, ProviderResult,
+            UserMessageEnvelopeResult,
+            internal::{
+                RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
+                RuntimePostToolUseContext, RuntimePreToolUseContext, RuntimeProviderContext,
+                RuntimeUserMessageEnvelopeContext, runtime_pre_tool_use_context,
+            },
         },
         runtime_ports::TurnHooks,
     };
@@ -646,7 +656,7 @@ mod tests {
         async fn emit_pre_tool_use(
             &self,
             ctx: RuntimePreToolUseContext,
-        ) -> Result<PreToolUseResult, ExtensionError> {
+        ) -> Result<PreToolUseAdmission, ExtensionError> {
             let tx = ctx
                 .call()
                 .event_tx()
@@ -674,7 +684,7 @@ mod tests {
                 },
             )))
             .map_err(|_| ExtensionError::Internal("turn event sender closed".into()))?;
-            Ok(PreToolUseResult::Allow)
+            Ok(PreToolUseAdmission::Allow)
         }
 
         async fn emit_post_tool_use(
@@ -769,8 +779,10 @@ mod tests {
         let turn_id = new_turn_id();
         let publisher = Arc::new(TurnEvents::new(session.clone(), turn_id.clone()));
         let model = session.read_model().await.unwrap();
+        let runtime_generation = runtime_services.pin_runtime_generation();
         let mut tool_context = crate::tool_exec::TurnToolContext::for_turn(
             &session,
+            &runtime_generation,
             &model,
             turn_id,
             model.identity.tool_selection.clone(),
@@ -780,15 +792,13 @@ mod tests {
         let bridge = TurnEventBridge::start(Arc::clone(&publisher), &mut tool_context.shared);
 
         let call = tool_context.shared.hook_call_context();
-        let ctx = RuntimePreToolUseContext::new(
+        let ctx = runtime_pre_tool_use_context(
             call,
-            PreToolUsePayload::new(
-                "call-1".into(),
-                "any",
-                serde_json::json!({}),
-                tool_context.shared.approval_mode,
-                vec![],
-            ),
+            "call-1".into(),
+            "any",
+            serde_json::json!({}),
+            tool_context.shared.approval_mode,
+            vec![],
         );
         runtime_services
             .pin_extension_view()

@@ -8,7 +8,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use astrcode_context::{context_assembler::LlmContextAssembler, is_compact_summary_message};
+use astrcode_context::is_compact_summary_message;
 use astrcode_core::{
     compaction::CompactStrategy,
     config::{
@@ -17,14 +17,15 @@ use astrcode_core::{
     },
     event::{DurableEvent, DurableEventPayload, EventPayload, LiveEventPayload, Phase},
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
-    tool::ToolDefinition,
     types::{SessionId, ToolCallId, new_session_id},
 };
 use astrcode_extension_sdk::{
-    builder::manifest,
+    builder::{command, manifest},
     extension::{
-        CommandContext, ExtensionCommandResult, ExtensionError, ExtensionManifest, HookMode,
-        HookResult, LifecycleContext, LifecycleEvent, Registrar, SlashCommand,
+        CommandAvailability, CommandCompletionContext, CommandCompletions, CommandContext,
+        ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionManifest, HookMode,
+        HookResult, LifecycleContext, LifecycleEvent, Registrar, SessionCommandIntent,
+        SessionCommandKind,
     },
 };
 use astrcode_extensions::Extension;
@@ -34,7 +35,6 @@ use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::{broadcast, mpsc};
 
 use super::*;
-use crate::session_command_contract::CommandSource;
 
 fn test_extension_manifest(id: impl Into<String>) -> ExtensionManifest {
     manifest(id)
@@ -64,14 +64,16 @@ struct ReactiveCompactLlm {
     calls: AtomicUsize,
 }
 struct ExhaustedReactiveCompactLlm;
-struct AutoCompactFailingLlm;
+#[derive(Default)]
+struct AutoCompactFailingLlm {
+    compact_calls: AtomicUsize,
+}
 
 #[async_trait::async_trait]
 impl LlmProvider for MockLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::ContentDelta {
@@ -121,11 +123,11 @@ impl LlmProvider for MockLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for ReactiveCompactLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let messages = request.messages;
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         let is_compact_request = messages.last().is_some_and(|message| {
             message.role == LlmRole::User
@@ -205,11 +207,11 @@ impl LlmProvider for ReactiveCompactLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for ExhaustedReactiveCompactLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let messages = request.messages;
         let is_compact_request = messages.last().is_some_and(|message| {
             message.role == LlmRole::User
                 && message_to_dto(message)
@@ -243,11 +245,11 @@ impl LlmProvider for ExhaustedReactiveCompactLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for AutoCompactFailingLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let messages = request.messages;
         let is_compact_request = messages.last().is_some_and(|message| {
             message.role == LlmRole::User
                 && message_to_dto(message)
@@ -255,6 +257,7 @@ impl LlmProvider for AutoCompactFailingLlm {
                     .contains("Do not call tools")
         });
         if is_compact_request {
+            self.compact_calls.fetch_add(1, Ordering::SeqCst);
             return Err(LlmError::transport("compact llm failed"));
         }
 
@@ -322,6 +325,24 @@ struct StaticCommandExtension {
     command_name: &'static str,
 }
 
+struct InteractiveCommandProbeExtension {
+    execute_calls: Arc<AtomicUsize>,
+    completion_calls: Arc<AtomicUsize>,
+}
+
+struct InteractiveCommandProbeHandler {
+    execute_calls: Arc<AtomicUsize>,
+    completion_calls: Arc<AtomicUsize>,
+}
+
+struct BusyCompactProbeExtension {
+    execute_calls: Arc<AtomicUsize>,
+}
+
+struct BusyCompactProbeHandler {
+    execute_calls: Arc<AtomicUsize>,
+}
+
 #[async_trait::async_trait]
 impl Extension for RecordingLifecycleExtension {
     fn manifest(&self) -> ExtensionManifest {
@@ -368,14 +389,10 @@ impl Extension for StaticCommandExtension {
     fn register(&self, reg: &mut Registrar) {
         let command_name = self.command_name;
         reg.command(
-            SlashCommand {
-                name: command_name.into(),
-                description: "Static test command".into(),
-                args_schema: None,
-                requires_idle: false,
-                argument_completions: false,
-                priority: 0,
-            },
+            command(command_name)
+                .description("Static test command")
+                .priority(10)
+                .build(),
             Arc::new(StaticCommandHandler {
                 command_name: command_name.to_string(),
             }),
@@ -394,6 +411,86 @@ impl astrcode_extension_sdk::extension::CommandHandler for StaticCommandHandler 
             return Ok(ExtensionCommandResult::display("extension command", false));
         }
         Err(ExtensionError::NotFound(ctx.command_name().into()))
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for InteractiveCommandProbeExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        test_extension_manifest("interactive-command-probe")
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.command(
+            command("interactive-probe")
+                .description("Interactive command admission probe")
+                .argument_completions(true)
+                .availability(CommandAvailability::InteractiveOnly)
+                .build(),
+            Arc::new(InteractiveCommandProbeHandler {
+                execute_calls: Arc::clone(&self.execute_calls),
+                completion_calls: Arc::clone(&self.completion_calls),
+            }),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl astrcode_extension_sdk::extension::CommandHandler for InteractiveCommandProbeHandler {
+    async fn execute(
+        &self,
+        _ctx: CommandContext,
+    ) -> Result<ExtensionCommandResult, ExtensionError> {
+        self.execute_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ExtensionCommandResult::handled("interactive probe handled"))
+    }
+
+    async fn complete(
+        &self,
+        _ctx: CommandCompletionContext,
+    ) -> Result<CommandCompletions, ExtensionError> {
+        self.completion_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(CommandCompletions::default())
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for BusyCompactProbeExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("busy-compact-probe")
+            .version("test")
+            .description("Busy compact admission probe")
+            .capability(ExtensionCapability::SessionCommand)
+            .build()
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.command(
+            command("compact")
+                .description("Busy compact admission probe")
+                .requires_idle(true)
+                .priority(200)
+                .host_command(SessionCommandKind::CompactSession)
+                .build(),
+            Arc::new(BusyCompactProbeHandler {
+                execute_calls: Arc::clone(&self.execute_calls),
+            }),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl astrcode_extension_sdk::extension::CommandHandler for BusyCompactProbeHandler {
+    async fn execute(
+        &self,
+        _ctx: CommandContext,
+    ) -> Result<ExtensionCommandResult, ExtensionError> {
+        self.execute_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(ExtensionCommandResult::host_command(
+            SessionCommandIntent::CompactSession {
+                keep_recent_turns: None,
+            },
+        ))
     }
 }
 
@@ -516,10 +613,9 @@ impl astrcode_extension_sdk::extension::LifecycleHandler for FailingSessionStart
 
 #[async_trait::async_trait]
 impl LlmProvider for PendingLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         future::pending().await
     }
@@ -534,10 +630,9 @@ impl LlmProvider for PendingLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for BlockFirstThenImmediateLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst);
         if call == 0 {
@@ -563,10 +658,9 @@ impl LlmProvider for BlockFirstThenImmediateLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for DelayedLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let _ = self.started.send(true);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -592,10 +686,9 @@ impl LlmProvider for DelayedLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for StreamErrorLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::Error {
@@ -614,10 +707,9 @@ impl LlmProvider for StreamErrorLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for ReadThenEditAcrossTurnsLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let call = self.call_count.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -677,11 +769,11 @@ impl LlmProvider for ReadThenEditAcrossTurnsLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for CapturingLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let messages = request.messages;
         *self.messages.lock().unwrap() = messages;
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::ContentDelta {
@@ -772,13 +864,11 @@ fn test_runtime_with_settings(
     let extension_runner = Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
         Duration::from_secs(1),
     ));
-    let context_assembler = Arc::new(LlmContextAssembler::new(context_settings));
     let runtime_services = crate::config_manager::assemble_session_runtime_services(
         llm_provider.clone(),
         llm_provider,
         effective,
         extension_runner.clone(),
-        context_assembler.clone(),
     );
     let config = Arc::new(crate::config_manager::ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
@@ -787,6 +877,7 @@ fn test_runtime_with_settings(
         astrcode_core::config::Config::default(),
         Arc::clone(&extension_runner),
         Arc::clone(&runtime_services),
+        std::path::PathBuf::from("."),
     ));
     let session_manager = Arc::new(crate::session_manager::SessionManager::new(
         Arc::clone(&event_store),
@@ -831,6 +922,18 @@ async fn register_coding_extension(runtime: &ServerRuntime) {
         .register(extension)
         .await
         .expect("register coding extension");
+}
+
+async fn register_session_commands(runtime: &ServerRuntime) {
+    let extension = astrcode_bundled_extensions::bundled_extensions(&Default::default())
+        .into_iter()
+        .find(|extension| extension.manifest().id() == "astrcode-session-commands")
+        .expect("session command extension is included in server test features");
+    runtime
+        .extension_runner()
+        .register(extension)
+        .await
+        .expect("register session command extension");
 }
 
 fn test_scheduler(runtime: &Arc<ServerRuntime>) -> Arc<crate::turn_scheduler::TurnScheduler> {
@@ -965,8 +1068,11 @@ impl TestCommandActor {
     async fn command_list_for_session(
         &self,
         session_id: SessionId,
+        include_interactive: bool,
     ) -> Result<CommandList, HandlerError> {
-        self.session_commands.command_list(&session_id, true).await
+        self.session_commands
+            .command_list(&session_id, include_interactive)
+            .await
     }
 
     async fn invoke_command_for_session(
@@ -977,6 +1083,17 @@ impl TestCommandActor {
     ) -> Result<CommandInvocation, HandlerError> {
         self.session_commands
             .invoke_named_command(session_id, command_name, arguments)
+            .await
+    }
+
+    async fn complete_command_for_session(
+        &self,
+        session_id: SessionId,
+        command_name: String,
+        argument: String,
+    ) -> Result<CommandCompletions, HandlerError> {
+        self.session_commands
+            .complete_command(session_id, command_name, argument, None)
             .await
     }
 }
@@ -2012,6 +2129,15 @@ async fn slash_compact_rejects_running_turn_without_input_or_compaction_events()
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let runtime = test_runtime_with_llm(Arc::new(PendingLlm));
+    register_session_commands(&runtime).await;
+    let compact_handler_calls = Arc::new(AtomicUsize::new(0));
+    runtime
+        .extension_runner
+        .register(Arc::new(BusyCompactProbeExtension {
+            execute_calls: Arc::clone(&compact_handler_calls),
+        }))
+        .await
+        .unwrap();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
 
     let sid = handler.create_session(".".into()).await.unwrap();
@@ -2051,6 +2177,7 @@ async fn slash_compact_rejects_running_turn_without_input_or_compaction_events()
                     if input.text.eq_ignore_ascii_case("/compact")
             )
     }));
+    assert_eq!(compact_handler_calls.load(Ordering::SeqCst), 0);
 
     handler.abort_session(sid).await.unwrap();
 }
@@ -2113,6 +2240,7 @@ async fn slash_compact_uses_backend_command_without_user_message() {
         Arc::new(MockLlm),
         astrcode_context::ContextSettings::default(),
     );
+    register_session_commands(&runtime).await;
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -2159,21 +2287,27 @@ async fn slash_compact_uses_backend_command_without_user_message() {
 }
 
 #[tokio::test]
-async fn unknown_slash_command_falls_through_as_regular_prompt() {
+async fn unknown_slash_command_is_rejected_without_writing_user_input() {
     let runtime = test_runtime();
     let event_tx = event_channel(1024);
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
     let sid = handler.create_session(".".into()).await.unwrap();
 
-    // /missing-command 不是已知斜杠命令，应作为普通 prompt 提交并启动 turn
-    let result = handler
+    let error = handler
         .submit_input_for_session(sid.clone(), "/missing-command".into())
-        .await;
+        .await
+        .unwrap_err();
+    assert!(matches!(error, HandlerError::UnknownCommand(name) if name == "missing-command"));
 
-    assert!(
-        matches!(&result, Ok(PromptSubmission::Accepted { .. })),
-        "expected Accepted, got {result:?}"
-    );
+    let events = runtime.event_store().replay_events(&sid).await.unwrap();
+    assert!(events.iter().all(|event| {
+        !matches!(&event.payload, DurableEventPayload::UserMessage { text, .. } if text == "/missing-command")
+            && !matches!(
+                &event.payload,
+                DurableEventPayload::UserInputAccepted { input }
+                    if input.text == "/missing-command"
+            )
+    }));
 }
 
 #[tokio::test]
@@ -2323,12 +2457,12 @@ async fn skill_slash_command_uses_skill_content_as_user_message() {
 }
 
 #[tokio::test]
-async fn command_list_keeps_reserved_and_extension_priority_over_skills() {
+async fn session_commands_share_extension_resolution_and_transport_admission() {
     let workspace = unique_workspace("slash-command-priority");
     write_project_skill(
         &workspace,
         "compact",
-        "---\ndescription: Skill named compact.\n---\nShould never override builtin.",
+        "---\ndescription: Skill named compact.\n---\nShould not override an extension.",
     );
     write_project_skill(
         &workspace,
@@ -2336,6 +2470,7 @@ async fn command_list_keeps_reserved_and_extension_priority_over_skills() {
         "---\ndescription: Skill named reviewnow.\n---\nShould not override extension.",
     );
     let runtime = test_runtime();
+    register_session_commands(&runtime).await;
     runtime
         .extension_runner
         .register(astrcode_extension_skill::extension())
@@ -2349,6 +2484,16 @@ async fn command_list_keeps_reserved_and_extension_priority_over_skills() {
         }))
         .await
         .unwrap();
+    let interactive_execute_calls = Arc::new(AtomicUsize::new(0));
+    let interactive_completion_calls = Arc::new(AtomicUsize::new(0));
+    runtime
+        .extension_runner
+        .register(Arc::new(InteractiveCommandProbeExtension {
+            execute_calls: Arc::clone(&interactive_execute_calls),
+            completion_calls: Arc::clone(&interactive_completion_calls),
+        }))
+        .await
+        .unwrap();
     let event_tx = event_channel(1024);
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
     let sid = handler
@@ -2356,23 +2501,94 @@ async fn command_list_keeps_reserved_and_extension_priority_over_skills() {
         .await
         .unwrap();
 
-    let commands = handler
-        .command_list_for_session(sid)
+    let interactive_commands = handler
+        .command_list_for_session(sid.clone(), true)
+        .await
+        .unwrap()
+        .commands;
+    let noninteractive_commands = handler
+        .command_list_for_session(sid.clone(), false)
         .await
         .unwrap()
         .commands;
 
-    let compact_commands = commands
+    let compact_commands = interactive_commands
         .iter()
         .filter(|command| command.name == "compact")
         .collect::<Vec<_>>();
     assert_eq!(compact_commands.len(), 1);
-    assert_eq!(compact_commands[0].source, CommandSource::Builtin);
-    let reviewnow = commands
+    assert_eq!(
+        compact_commands[0].extension_id,
+        "astrcode-session-commands"
+    );
+    let reviewnow = interactive_commands
         .iter()
         .find(|command| command.name == "reviewnow")
         .expect("reviewnow command");
-    assert_eq!(reviewnow.source, CommandSource::Extension);
+    assert_eq!(reviewnow.extension_id, "test-extension");
+    assert!(
+        interactive_commands
+            .iter()
+            .any(|command| command.name == "model")
+    );
+    assert!(
+        interactive_commands
+            .iter()
+            .any(|command| command.name == "interactive-probe")
+    );
+    assert!(
+        noninteractive_commands
+            .iter()
+            .all(|command| command.name != "model" && command.name != "interactive-probe")
+    );
+    assert!(
+        noninteractive_commands
+            .iter()
+            .any(|command| command.name == "compact")
+    );
+
+    for command_name in ["model", "interactive-probe"] {
+        let error = handler
+            .invoke_command_for_session(sid.clone(), command_name.into(), String::new())
+            .await
+            .unwrap_err();
+        assert!(matches!(error, HandlerError::InvalidRequest(_)));
+    }
+    let completion_error = handler
+        .complete_command_for_session(sid.clone(), "interactive-probe".into(), String::new())
+        .await
+        .unwrap_err();
+    assert!(matches!(completion_error, HandlerError::InvalidRequest(_)));
+    assert_eq!(interactive_execute_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(interactive_completion_calls.load(Ordering::SeqCst), 0);
+
+    let compact_argument_error = handler
+        .invoke_command_for_session(sid.clone(), "compact".into(), "not-a-number".into())
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        compact_argument_error,
+        HandlerError::InvalidRequest(_)
+    ));
+
+    let mut notifications = handler.event_bus.subscribe_all_notifications();
+    handler
+        .handle(ClientCommand::ExecuteExtensionCommand {
+            command_name: "model".into(),
+            arguments: String::new(),
+        })
+        .await
+        .unwrap();
+    loop {
+        let notification = tokio::time::timeout(Duration::from_secs(1), notifications.recv())
+            .await
+            .expect("model selector notification should arrive")
+            .expect("notification channel should stay open");
+        if let ClientNotification::UiRequest { request_id, .. } = notification {
+            assert_eq!(request_id, "model.target");
+            break;
+        }
+    }
     let _ = fs::remove_dir_all(workspace);
 }
 
@@ -2736,8 +2952,9 @@ async fn auto_compact_uses_configured_keep_recent_turns() {
 
 #[tokio::test]
 async fn auto_compact_breaker_skips_llm_but_still_runs_deterministic_compact() {
+    let llm = Arc::new(AutoCompactFailingLlm::default());
     let runtime = test_runtime_with_settings(
-        Arc::new(AutoCompactFailingLlm),
+        llm.clone(),
         astrcode_context::ContextSettings {
             compact_threshold_percent: 0.0,
             compact_circuit_breaker_threshold: 1,
@@ -2802,6 +3019,11 @@ async fn auto_compact_breaker_skips_llm_but_still_runs_deterministic_compact() {
     }
     // 断路器只阻止再次调用 LLM，阈值仍满足时会做确定性 compact。
     assert_eq!(second_compactions, 1);
+    assert_eq!(
+        llm.compact_calls.load(Ordering::SeqCst),
+        1,
+        "the second turn must reuse the session-scoped open breaker"
+    );
 }
 
 // ─── 流式工具调用测试 ──────────────────────────────────────────────────
@@ -2814,10 +3036,9 @@ struct StreamingToolCallLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for StreamingToolCallLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let call = self.call_count.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::unbounded_channel();

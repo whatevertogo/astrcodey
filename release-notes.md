@@ -68,7 +68,7 @@
 - bundled 与 S5R 扩展共用类型化 host 契约、稳定错误码和同一宿主分发目录。
 - S5R manifest 中的 capability、tool mode、hook event/mode 和 handler id 均由
   contract enum/newtype 表达；未知值在握手边界直接拒绝。
-- custom event 支持发布回执、持久化 consumer checkpoint、顺序重试、raw-event SSE 和
+- custom event 支持发布回执、持久化 consumer checkpoint、顺序重试和
   authenticated consumer 管理接口。
 
 ### ⚡ Performance

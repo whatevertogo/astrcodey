@@ -4,6 +4,8 @@
 > 方法：作者本人逐文件/逐改动审阅 + 7 个并行 review agent 覆盖各 crate。
 > 日期：2026-08-14。
 > 本文件是过程与结论的持久记录，不是架构文档。
+> 本文第 6、7 节冻结在该轮审计结束时；当前候选状态与最终验收以
+> `pr-47-local-candidate-first-principles-review.md` 为准。
 
 ---
 
@@ -11,7 +13,7 @@
 
 - 371 文件，**+44,109 / −20,107，净新增 ~24k**。
 - 删的 ~20k 是旧 S5R 2.0 peer/adapter（文档明确"transitional S5R 2.0 … have been removed"）。
-- 41k Rust 里**大量是内联测试**（contract crate 测试占比 12–73%；`peer_runtime.rs` 2300 行中 965 行是 `mod tests`）。
+- 41k Rust 里**大量是内联测试**（当时的 contract/当前 SDK wire 模块测试占比 12–73%；`peer_runtime.rs` 约 2300 行中近千行是 `mod tests`）。
 - 这是一次 **S5R 2.0 → 3.0 协议重写**，不是无脑堆量。分层经核验无环、职责清晰。
 
 ---
@@ -28,7 +30,7 @@
 | 6 | 分析 drain_stderr | s5r_ext/session_support.rs | 本人（结论：不改） |
 | 7 | 分析 capability 投机面 | capability.rs + 全仓 rg 消费者 | 本人（结论：仅 LiveConversation） |
 | 8 | 全量整洁度审计 | ai/client/eval、cli/context/tools、core/storage/server、bundled extensions | 4 agent |
-| 9 | 修复②：utf8_prefix | common.rs + anthropic/parser.rs + openai/parser.rs（删函数+3 调用点+import+测试） | 本人编辑 |
+| 9 | 尝试②：utf8_prefix | 曾改用 `str::floor_char_boundary`；随后被 Rust 1.88 MSRV 验证否决并恢复为有界 UTF-8 helper | 本人编辑 + MSRV 验证 |
 | 10 | 验证 | fmt（本人 8 文件）、clippy（core/projection/ai）、fingerprint 测试 3/3 | 本人 cargo |
 
 ---
@@ -40,10 +42,11 @@
 - **改法**：`transcript_prefix_fingerprint` 返回 `Result<String, serde_json::Error>`；4 个调用点分别映射：projection 加 `ProjectionError::TranscriptFingerprintSerialization(String)`；persistence 复用既有 `SessionError::Storage(StorageError::Serialization(_))`（无新枚举面）。
 - **验证**：core+projection 编译通过；fingerprint 3 测试通过；fmt/clippy 干净。**你随后把 `.map(|m| serde_json::to_string(m))` 收紧成 `.map(serde_json::to_string)`，已接受。**
 
-### 修复② `astrcode-ai` — `utf8_prefix` → `str::floor_char_boundary`
-- **问题**：`common.rs::utf8_prefix` 手写实现等价于 std 的 `floor_char_boundary`（1.80 稳定，MSRV 1.88）。违反 AGENTS.md"重写 std 已提供功能属 review 意见"。3 处调用：common.rs:447、anthropic/parser.rs:417、openai/parser.rs:536。
-- **改法**：删 `utf8_prefix`，3 调用点改为 `&x[..x.floor_char_boundary(n)]`；清理两处 import；删除错挂在 `stream_text_delta_…` 测试上的 orphan 断言。
-- **验证**：astrcode-ai 编译/clippy 干净；fmt 干净。
+### 修复② `astrcode-ai` — 保留 MSRV-safe `utf8_prefix`
+- **初始误判**：曾把本地 UTF-8 前缀 helper 改成 `str::floor_char_boundary`，并误记为 Rust 1.80 稳定。
+- **真实边界**：该 API 在项目 MSRV Rust 1.88 中不可用；nightly/default toolchain 通过不能替代 MSRV 验证。
+- **最终改法**：恢复一个局部、带 UTF-8 边界测试的 `utf8_prefix`，由 common/parser 三条截断路径复用；不复制三份实现。
+- **验证**：Rust 1.88 下 `astrcode-ai` 与 workspace all-target check 通过；默认 toolchain fmt/clippy 通过。
 
 ---
 
@@ -81,7 +84,7 @@
 ### Medium（应处理）
 | 位置 | 问题 | 状态 |
 |---|---|---|
-| ai `utf8_prefix` ×3 | 重写 std `floor_char_boundary` | ✅ 已修 |
+| ai UTF-8 bounded prefix ×3 | nightly 可用的 `floor_char_boundary` 不满足 Rust 1.88 MSRV | ✅ 已恢复共享 helper 并通过 MSRV |
 | core `fingerprint.rs:36` expect | 持久化路径 expect | ✅ 已修 |
 | mode+goal `session_data_dir` | 跨扩展重复 helper | ⏸ 待你定（活跃编辑区） |
 
@@ -106,7 +109,7 @@
 - `host_router/process.rs`（你 WIP）`vars_os()` 修非 UTF8 env key panic + 正确 `unsafe`/SAFETY。
 
 ### 之前评审已记录、本轮复核仍成立
-- `peer_runtime.rs`（2300 行）建议沿 6 接缝拆子模块；crate 名 "contract" 实打包 DTO+重 runtime，可考虑拆 `extension-wire`/`extension-peer` 或文档说明。
+- `peer_runtime.rs`（约 2300 行）仍建议按 handle/driver/inbound/stream/tests 接缝在 SDK `wire/peer_runtime/` 内拆分；独立 contract crate 已删除，不应重新建立平行 crate。
 - DTO 命名 `Dto` 后缀不统一；魔法常量（`MAX_REENTRANCY=8` 等）散落。
 - `stable_hash_hex` 是 FNV-1a 非密码学，勿用于完整性/安全。
 

@@ -44,10 +44,9 @@ struct ToolLoopLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for ToolLoopLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let round = self.calls.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -125,10 +124,9 @@ struct FailingGenerateLlm;
 
 #[async_trait::async_trait]
 impl LlmProvider for FailingGenerateLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         Err(LlmError::ClientError {
             status: 429,
@@ -171,10 +169,9 @@ async fn provider_start_error_is_persisted_as_durable_error() {
 
 #[async_trait::async_trait]
 impl LlmProvider for UsageLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::Usage {
@@ -210,7 +207,7 @@ async fn top_level_turn_persists_the_current_main_model_before_running() {
         common::spawn_session_with_services(Arc::new(UsageLlm)).await;
     let mut effective = services.read_effective().as_ref().clone();
     effective.llm.model_id = "new-main-model".into();
-    services.update_effective(effective);
+    services.publish_runtime_generation(effective, services.llm(), services.small_llm());
 
     let handle = session
         .submit("use current model".into(), new_turn_id(), None)
@@ -290,10 +287,9 @@ struct NoUsageCountingLlm;
 
 #[async_trait::async_trait]
 impl LlmProvider for NoUsageCountingLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
@@ -356,10 +352,9 @@ struct ThinkingToolsLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for ThinkingToolsLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let round = self.calls.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -428,10 +423,9 @@ struct DelayThenCompleteLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for DelayThenCompleteLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let round = self.calls.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::unbounded_channel();
@@ -472,10 +466,9 @@ struct EarlyCompletedToolLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for EarlyCompletedToolLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let round = self.calls.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = mpsc::unbounded_channel();

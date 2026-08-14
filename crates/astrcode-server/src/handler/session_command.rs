@@ -1,9 +1,12 @@
 //! 交互式 handler 对 session-scoped command 服务的薄适配。
 
 use astrcode_core::types::SessionId;
+use astrcode_extension_sdk::extension::SessionCommandIntent;
 use astrcode_protocol::events::ClientNotification;
 
-use super::{CommandHandler, CommandInvocation, HandlerError, PromptSubmission, slash};
+use super::{
+    CommandHandler, CommandInvocation, CommandOutcome, HandlerError, PromptSubmission, slash,
+};
 use crate::{
     protocol_mapping::{command_info_to_stdio_dto, keybinding_to_dto, status_item_to_info_dto},
     session_command_contract::{CommandList, ParsedSlashCommand},
@@ -63,15 +66,22 @@ impl CommandHandler {
         session_id: SessionId,
         command: ParsedSlashCommand,
     ) -> Result<CommandInvocation, HandlerError> {
-        if command.name.trim().trim_start_matches('/') == "model" {
-            self.start_model_selection();
-            return Ok(CommandInvocation::Handled {
-                message: "model selection started".into(),
-            });
+        match self
+            .session_commands
+            .invoke_interactive_command(session_id, command)
+            .await?
+        {
+            CommandOutcome::Invocation(invocation) => Ok(invocation),
+            CommandOutcome::SessionCommand(SessionCommandIntent::SelectModel) => {
+                self.start_model_selection();
+                Ok(CommandInvocation::Handled {
+                    message: "model selection started".into(),
+                })
+            },
+            CommandOutcome::SessionCommand(SessionCommandIntent::CompactSession { .. }) => Err(
+                HandlerError::InvalidRequest("compact command was not executed by the host".into()),
+            ),
         }
-        self.session_commands
-            .invoke_command(session_id, command)
-            .await
     }
 
     pub(in crate::handler) async fn execute_command_for_session(
@@ -79,10 +89,9 @@ impl CommandHandler {
         session_id: SessionId,
         command: ParsedSlashCommand,
     ) -> Result<PromptSubmission, HandlerError> {
-        Ok(self
-            .invoke_command_for_session(session_id, command)
-            .await?
-            .into_prompt_submission())
+        Ok(CommandInvocation::into_prompt_submission(
+            self.invoke_command_for_session(session_id, command).await?,
+        ))
     }
 
     pub(in crate::handler) async fn command_list_for_working_dir(

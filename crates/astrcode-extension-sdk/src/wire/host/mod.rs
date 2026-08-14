@@ -181,14 +181,53 @@ pub mod session_state;
 pub mod tool_result;
 pub mod workspace;
 
-pub use event::*;
-pub use llm::*;
-pub use network::*;
-pub use process::*;
-pub use session::*;
-pub use session_state::*;
-pub use tool_result::*;
-pub use workspace::*;
+pub use event::{HostEventEmitOutput, HostEventEmitRequest};
+pub use llm::{HostLlmChatOutput, HostLlmChatRequest, HostLlmContent, HostLlmMessage, HostLlmRole};
+pub use network::{
+    HOST_NETWORK_DEFAULT_TIMEOUT_MS, HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_REQUEST_BODY_BYTES,
+    HOST_NETWORK_MAX_TIMEOUT_MS, HostNetworkRedirectPolicy, HostNetworkRequest,
+    HostNetworkResponse,
+};
+pub use process::{
+    HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_STDIN_BYTES, HOST_PROCESS_MAX_TIMEOUT_MS,
+    HOST_PROCESS_MAX_WAIT_MS, HostProcessHandleOutput, HostProcessInputAction,
+    HostProcessInputRequest, HostProcessLifetime, HostProcessListOutput, HostProcessOutput,
+    HostProcessReadOutput, HostProcessReadRequest, HostProcessRequest, HostProcessStartRequest,
+    HostProcessState, HostProcessStatusOutput, HostProcessTargetRequest,
+};
+pub use session::{
+    HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostSessionCancelOutput,
+    HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
+    HostSessionProviderMessagesOutput, HostSessionSummariesOutput, HostSessionSummary,
+    HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
+    HostSessionTranscriptMessage,
+};
+pub use session_state::{
+    HOST_SESSION_STATE_KEY_MAX_LENGTH, HOST_SESSION_STATE_VALUE_MAX_BYTES,
+    HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
+};
+pub use tool_result::{
+    HOST_TOOL_RESULT_DEFAULT_MAX_BYTES, HOST_TOOL_RESULT_MAX_BYTES, HOST_TOOL_RESULT_MIN_BYTES,
+    HostToolResultReadOutput, HostToolResultReadRequest,
+};
+pub use workspace::{
+    HOST_WORKSPACE_GLOB_DEFAULT_MAX_MATCHES, HOST_WORKSPACE_GREP_DEFAULT_MAX_BYTES,
+    HOST_WORKSPACE_GREP_DEFAULT_MAX_LINE_CHARS, HOST_WORKSPACE_GREP_DEFAULT_MAX_MATCHES,
+    HOST_WORKSPACE_LIST_DEFAULT_DEPTH, HOST_WORKSPACE_LIST_DEFAULT_LIMIT,
+    HOST_WORKSPACE_LIST_MAX_DEPTH, HOST_WORKSPACE_LIST_MAX_ENTRIES, HOST_WORKSPACE_MAX_DIFF_BYTES,
+    HOST_WORKSPACE_MAX_FILE_BYTES, HOST_WORKSPACE_MAX_IMAGE_BYTES, HOST_WORKSPACE_MAX_LINE_LIMIT,
+    HOST_WORKSPACE_MAX_PATCH_BYTES, HOST_WORKSPACE_MAX_TEXT_OUTPUT_BYTES,
+    HOST_WORKSPACE_SEARCH_MAX_CONTEXT_LINES, HOST_WORKSPACE_SEARCH_MAX_LINE_CHARS,
+    HOST_WORKSPACE_SEARCH_MAX_MATCHES, HOST_WORKSPACE_SEARCH_MAX_OUTPUT_BYTES,
+    HostWorkspaceApplyPatchOutput, HostWorkspaceApplyPatchRequest, HostWorkspaceEditOutput,
+    HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+    HostWorkspaceGrepContextLine, HostWorkspaceGrepEntry, HostWorkspaceGrepMode,
+    HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
+    HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspacePatchChange,
+    HostWorkspacePatchChangeKind, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
+    HostWorkspaceTextChange, HostWorkspaceTextEdit, HostWorkspaceWriteOutput,
+    HostWorkspaceWriteRequest,
+};
 
 #[cfg(test)]
 mod tests {
@@ -199,7 +238,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::*;
-    use crate::wire::session::{SessionPhaseDto, SessionToolSelectionDto};
+    use crate::wire::session::{SessionMessageOriginDto, SessionPhaseDto, SessionToolSelectionDto};
 
     fn assert_strict_round_trip<T>(contract: T)
     where
@@ -265,7 +304,7 @@ mod tests {
                 key: "goal".into(),
                 content: "active".into(),
             },
-            HostLlmChatRequest::new(vec![user_message()]),
+            HostLlmChatRequest::new(vec![user_message()]).with_max_output_tokens(512),
             HostLlmChatOutput {
                 content: "hello".into(),
                 model: "main".into(),
@@ -286,7 +325,7 @@ mod tests {
                 session_id: session_id(),
                 messages: vec![HostSessionTranscriptMessage {
                     message: user_message(),
-                    source: Some("user".into()),
+                    origin: Some(SessionMessageOriginDto::TurnAborted),
                 }],
             },
             HostSessionProviderMessagesOutput {
@@ -316,7 +355,7 @@ mod tests {
                 stderr_truncated: false,
                 combined_truncated: false,
             },
-            HostProcessStartRequest::pipes("cat"),
+            HostProcessStartRequest::new("cat"),
             HostProcessHandleOutput {
                 id: "process-1".into(),
             },
@@ -334,7 +373,6 @@ mod tests {
             },
             HostProcessStatusOutput {
                 id: "process-1".into(),
-                io: HostProcessIo::Pipes,
                 state: HostProcessState::Running {},
             },
             HostProcessInputRequest::write("process-1", "hello"),
@@ -762,7 +800,7 @@ mod tests {
 
         let encoded_over_limit =
             base64::Engine::encode(&STANDARD, vec![0; HOST_NETWORK_MAX_REQUEST_BODY_BYTES + 1]);
-        assert!(encoded_over_limit.len() <= HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS);
+        assert!(encoded_over_limit.len() <= network::HOST_NETWORK_MAX_REQUEST_BODY_WIRE_CHARS);
         assert!(
             serde_json::from_value::<HostNetworkRequest>(json!({
                 "url": "https://example.com",

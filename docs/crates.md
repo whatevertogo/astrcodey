@@ -6,7 +6,7 @@
 
 ## 总览
 
-AstrCode 当前 workspace 有 28 个成员：`crates/` 下 27 个 crate，加上 `src-tauri` 的桌面壳 `astrcode-desktop`。
+AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上 `src-tauri` 的桌面壳 `astrcode-desktop`。
 
 整体分层可以按依赖方向理解：
 
@@ -38,9 +38,10 @@ AstrCode 当前 workspace 有 28 个成员：`crates/` 下 27 个 crate，加上
 | `astrcode-extensions` | `crates/astrcode-extensions` | lib | 扩展加载、hook 分发、host router、s5r 子进程运行 |
 | `astrcode-bundled-extensions` | `crates/astrcode-bundled-extensions` | lib | 第一方内置扩展组合根 |
 | `astrcode-extension-agent-tools` | `crates/astrcode-extension-agent-tools` | lib | `agent` 子 Agent 委派工具 |
-| `astrcode-extension-coding` | `crates/astrcode-extension-coding` | lib | 只经 SDK Host 能力实现的文件、搜索、shell 与 terminal 工具 |
+| `astrcode-extension-coding` | `crates/astrcode-extension-coding` | lib | 只经 SDK Host 能力实现的文件、搜索与受监管 shell 工具 |
 | `astrcode-extension-mcp` | `crates/astrcode-extension-mcp` | lib | MCP server 发现、预热、工具搜索和工具调用 |
 | `astrcode-extension-skill` | `crates/astrcode-extension-skill` | lib | Claude-style Skill 发现、`Skill` 工具、skill slash command |
+| `astrcode-extension-session-commands` | `crates/astrcode-extension-session-commands` | lib | 声明 `/compact`、`/model` 及其类型化 Host command intent |
 | `astrcode-extension-todo-tool` | `crates/astrcode-extension-todo-tool` | lib | `todoWrite` session-local 进度列表 |
 | `astrcode-extension-mode` | `crates/astrcode-extension-mode` | lib | code/plan 模式切换与 plan artifact |
 | `astrcode-extension-ask-user` | `crates/astrcode-extension-ask-user` | lib | `askUser` 挂起交互、受保护 HTTP 与实时事件 |
@@ -315,18 +316,28 @@ pipeline 不再接收第二份 `turn_id`。前端同样不复制 conversation ph
 
 Feature：
 
-- `default` 包含 agent-tools、coding、mcp、skill、todo-tool、mode、goal、memory、channels、web-tools。
+- `default` 包含 agent-tools、coding、mcp、skill、session-commands、todo-tool、mode、ask-user、goal、memory、channels、web-tools。
 - 单独 feature 对应每个内置扩展，便于裁剪二进制。
 
 依赖边界：依赖内置扩展 crate 和 `astrcode-extensions`/`astrcode-extension-sdk`。这是少数允许直接依赖所有内置扩展的 composition crate。
 
 测试线索：单元测试覆盖默认启用策略和显式配置优先级。
 
+## `astrcode-extension-session-commands`
+
+路径：`crates/astrcode-extension-session-commands`
+
+职责：作为普通第一方扩展声明 `/compact` 与 `/model` 的名称、描述、transport availability、idle admission 和类型化 Host execution。handler 只解析参数并返回 `SessionCommandIntent`；它不依赖 session/server，也不复制 compact 或 model selector 状态机。
+
+关键边界：只依赖 `astrcode-extension-sdk`。扩展 manifest 必须声明 `SessionCommand` capability，命令 declaration 必须声明匹配的 `SessionCommandKind`；runner 在 handler 结果边界再次校验 capability 和 intent kind。server 在现有 session operation guard 内解释 intent，且在执行 handler 前统一应用 transport 与 busy admission。
+
+测试线索：server 的多样命令测试覆盖 list/execute/complete 的统一 availability、interactive model selector、非交互拒绝、compact 参数错误，以及 busy compact 不调用 handler、不写用户消息。
+
 ## `astrcode-extension-coding`
 
 路径：`crates/astrcode-extension-coding`
 
-职责：作为普通第一方扩展提供 `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell` 和 `terminal`。schema、展示语义和工具级编排属于本 crate；路径约束、原子文件操作、artifact ID 解析、进程/PTY、增量输出与生命周期所有权属于 Host。
+职责：作为普通第一方扩展提供 `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep` 和 `shell`。schema、展示语义和工具级编排属于本 crate；路径约束、原子文件操作、artifact ID 解析、受监管进程、增量输出与生命周期所有权属于 Host。交互式 PTY 不在产品能力中：迁移前评估的 portable-pty 无法让 Host 在 spawn 前跨平台建立可证明的进程树所有权，因此最终没有保留该依赖或降级实现。
 
 关键边界：只依赖 `astrcode-extension-sdk`，不直接访问 filesystem、artifact storage 或 process API。每个工具都先返回 `ToolPlan`，再由 session 完成权限与 lease，执行时 Host 对具体 operation 二次校验 lease。工具参数不包含 `maxOutputTokens` 一类平台调优字段；Host 有界增量读取与 session 统一 inline/artifact 预算对所有扩展提供相同结果控制。持久化结果通过 `ToolResultClient` 和 session-scoped opaque `artifactId` 读取，不伪装成 workspace path。
 
@@ -676,7 +687,7 @@ authoring API 重构把数据根目录从旧的 `~/.astrcode/memory/` 与
 - `tui/app.rs`、`tui/app/handle_event.rs`：TUI app 状态和事件处理。
 - `tui/frame`：frame event stream。
 - `tui/composer.rs`：输入区/编辑器。
-- `tui/custom_terminal.rs`、`terminal.rs`、`terminal_probe.rs`：终端能力、PTY/terminal 会话。
+- `tui/custom_terminal.rs`、`terminal.rs`、`terminal_probe.rs`：CLI 自身的终端 I/O、viewport 与能力探测；这是 TUI 展示层，不是 Coding Extension 已删除的 PTY process/`terminal` 工具。
 - `tui/keybinding.rs`：键位处理。
 - `tui/render`：scrollback 和 visual render spec。
 - `tui/streaming`：流式输出 chunking、commit tick、controller。

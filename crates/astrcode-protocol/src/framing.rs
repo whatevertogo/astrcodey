@@ -11,17 +11,12 @@ use crate::{commands::ClientCommand, events::ClientNotification};
 /// 协议版本号标识符。
 pub const PROTOCOL_VERSION: u32 = 1;
 
-fn default_jsonrpc() -> String {
-    "2.0".into()
-}
-
 /// 线缆上的 JSON-RPC 2.0 帧消息。
 ///
 /// 兼容 JSON-RPC 2.0 规范，支持请求（带 `id` + `method`）、
 /// 响应（带 `id` + `result`/`error`）和通知（无 `id`）三种模式。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcMessage {
-    #[serde(default = "default_jsonrpc")]
     pub jsonrpc: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<u64>,
@@ -97,7 +92,7 @@ pub fn command_to_jsonrpc_request(
     let method = object
         .remove("method")
         .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "unknown".into());
+        .ok_or_else(|| serde_json::Error::custom("command method tag is missing or invalid"))?;
     let mut msg = JsonRpcMessage::new();
     msg.id = Some(id);
     msg.method = Some(method);
@@ -132,7 +127,7 @@ pub fn notification_to_jsonrpc_message(
     let event = object
         .remove("event")
         .and_then(|v| v.as_str().map(|s| s.to_string()))
-        .unwrap_or_else(|| "unknown".into());
+        .ok_or_else(|| serde_json::Error::custom("notification event tag is missing or invalid"))?;
     let mut msg = JsonRpcMessage::new();
     msg.method = Some(event);
     msg.params = object.remove("data");

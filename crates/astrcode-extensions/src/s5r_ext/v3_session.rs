@@ -282,11 +282,13 @@ impl S5rV3Session {
         *self.host_invoke.detached_invoke_context.write() = Some(context);
     }
 
-    pub(crate) async fn activate(&self) -> Result<(), ExtensionError> {
+    pub(crate) async fn activate(&self, config: Value) -> Result<(), ExtensionError> {
         let peer = self.initialized_peer.lock().take().ok_or_else(|| {
             ExtensionError::Internal("S5R 3.0 session is not awaiting activation".into())
         })?;
-        let peer = match tokio::time::timeout(ACTIVATE_TIMEOUT, peer.activate("activate-1")).await {
+        let peer = match tokio::time::timeout(ACTIVATE_TIMEOUT, peer.activate("activate-1", config))
+            .await
+        {
             Ok(Ok(peer)) => peer,
             Ok(Err(error)) => {
                 self.shutdown().await;

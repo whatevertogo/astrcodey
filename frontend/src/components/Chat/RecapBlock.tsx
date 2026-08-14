@@ -7,8 +7,8 @@ interface RecapBlockProps {
   block: Extract<ConversationBlock, { kind: 'recap' }>
 }
 
-function sourceLabel(source: string | undefined): string {
-  return source === 'manual' ? '手动回顾' : source ? `回顾 · ${source}` : '回顾'
+function sourceLabel(source: string): string {
+  return source === 'manual' ? '手动回顾' : `回顾 · ${source}`
 }
 
 function RecapBlock({ block }: RecapBlockProps) {

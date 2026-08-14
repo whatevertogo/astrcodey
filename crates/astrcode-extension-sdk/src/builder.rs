@@ -6,13 +6,14 @@ use serde::de::DeserializeOwned;
 
 use crate::{
     extension::{
-        CommandContext, CommandHandler, ContinueAfterStopContext, ContinueAfterStopResult,
-        CustomEventDeclaration, DEFAULT_CUSTOM_EVENT_DURABLE,
-        DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES, DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION,
-        ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionHttpAccess,
-        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute,
-        ExtensionManifest, ExtensionManifestError, HttpContext, Keybinding, SlashCommand,
-        StatusItem, ToolContext, ToolHandler, ToolPlanContext,
+        CommandAvailability, CommandContext, CommandExecution, CommandHandler,
+        ContinueAfterStopContext, ContinueAfterStopResult, CustomEventDeclaration,
+        DEFAULT_CUSTOM_EVENT_DURABLE, DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
+        DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION, ExtensionCapability, ExtensionCommandResult,
+        ExtensionError, ExtensionHttpAccess, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest, ExtensionManifestError,
+        HttpContext, Keybinding, SessionCommandKind, SlashCommand, StatusItem, ToolContext,
+        ToolHandler, ToolPlanContext,
     },
     tool::{
         ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
@@ -92,6 +93,8 @@ pub fn command(name: impl Into<String>) -> SlashCommandBuilder {
             requires_idle: false,
             argument_completions: false,
             priority: 0,
+            availability: CommandAvailability::AllTransports,
+            execution: CommandExecution::Extension,
         },
     }
 }
@@ -123,6 +126,16 @@ impl SlashCommandBuilder {
 
     pub fn priority(mut self, priority: i32) -> Self {
         self.command.priority = priority;
+        self
+    }
+
+    pub fn availability(mut self, availability: CommandAvailability) -> Self {
+        self.command.availability = availability;
+        self
+    }
+
+    pub fn host_command(mut self, command: SessionCommandKind) -> Self {
+        self.command.execution = CommandExecution::Host(command);
         self
     }
 
@@ -601,8 +614,8 @@ mod tests {
         WireErrorCode,
         extension::{
             ContinueAfterStopContext, ContinueAfterStopPayload, ContinueAfterStopResult,
-            ExtensionCall, ExtensionHttpRequest, RuntimeContinueAfterStopContext,
-            RuntimeHookCallContext,
+            ExtensionCall, ExtensionHttpRequest,
+            internal::{RuntimeContinueAfterStopContext, RuntimeHookCallContext},
         },
         testing::{CommandContextBuilder, HttpContextBuilder, ToolContextBuilder},
         tool::ToolResult,

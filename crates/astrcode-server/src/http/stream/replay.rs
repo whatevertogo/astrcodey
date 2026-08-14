@@ -2,7 +2,6 @@ use astrcode_core::{
     event::Event,
     types::{Cursor, SessionId},
 };
-use astrcode_storage::StorageError;
 
 use crate::{SessionManagerError, bootstrap::ServerRuntime};
 
@@ -32,13 +31,6 @@ impl ReplayError {
             Self::InvalidCursor { .. } | Self::CursorAhead { .. } | Self::LimitExceeded { .. }
         )
     }
-
-    pub(super) fn is_session_not_found(&self) -> bool {
-        matches!(
-            self,
-            Self::Session(SessionManagerError::Storage(StorageError::NotFound(_)))
-        )
-    }
 }
 
 pub(super) fn parse_replay_cursor(cursor: &str) -> Result<u64, ReplayError> {
@@ -47,7 +39,7 @@ pub(super) fn parse_replay_cursor(cursor: &str) -> Result<u64, ReplayError> {
     })
 }
 
-pub(super) async fn latest_event_seq(
+async fn latest_event_seq(
     runtime: &ServerRuntime,
     session_id: &SessionId,
 ) -> Result<u64, ReplayError> {

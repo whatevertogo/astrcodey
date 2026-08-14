@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use astrcode_core::{
     config::ContextSettings,
     llm::{
-        LlmError, LlmMessage, provider_transcript, provider_visible_messages,
+        LlmError, LlmMessage, TranscriptMessage, provider_transcript_messages,
+        provider_visible_messages,
         token_estimate::{
             estimate_provider_message_tokens, estimate_provider_request_tokens,
             estimate_tool_definition_tokens,
@@ -22,6 +23,7 @@ pub struct ContextSnapshot {
     pub source_seq: u64,
     pub system_prompt: String,
     pub messages: Vec<LlmMessage>,
+    transcript_messages: Vec<TranscriptMessage>,
     input_token_anchor: Option<InputTokenAnchor>,
 }
 
@@ -34,12 +36,38 @@ struct InputTokenAnchor {
 
 impl ContextSnapshot {
     pub fn new(source_seq: u64, system_prompt: String, messages: Vec<LlmMessage>) -> Self {
+        Self::from_transcript(
+            source_seq,
+            system_prompt,
+            messages.into_iter().map(TranscriptMessage::plain).collect(),
+        )
+    }
+
+    pub fn from_transcript(
+        source_seq: u64,
+        system_prompt: String,
+        messages: Vec<TranscriptMessage>,
+    ) -> Self {
+        let transcript_messages = provider_transcript_messages(messages);
         Self {
             source_seq,
             system_prompt,
-            messages: provider_transcript(messages),
+            messages: transcript_messages
+                .iter()
+                .map(|entry| entry.message.clone())
+                .collect(),
+            transcript_messages,
             input_token_anchor: None,
         }
+    }
+
+    /// 返回 compact 原样保留的 provider transcript 尾部及其 durable 元数据。
+    pub fn retained_transcript_messages(
+        &self,
+        retained_messages: &[LlmMessage],
+    ) -> Option<&[TranscriptMessage]> {
+        let start = self.messages.len().checked_sub(retained_messages.len())?;
+        (self.messages[start..] == *retained_messages).then_some(&self.transcript_messages[start..])
     }
 
     /// 绑定 provider usage 覆盖的 transcript 前缀。
@@ -47,14 +75,15 @@ impl ContextSnapshot {
         mut self,
         context_tokens: usize,
         model_context_window: usize,
-        covered_messages: Vec<LlmMessage>,
+        covered_message_count: usize,
     ) -> Self {
-        let covered_message_count = provider_transcript(covered_messages).len();
-        self.input_token_anchor = Some(InputTokenAnchor {
-            context_tokens,
-            model_context_window,
-            covered_message_count,
-        });
+        if covered_message_count <= self.messages.len() {
+            self.input_token_anchor = Some(InputTokenAnchor {
+                context_tokens,
+                model_context_window,
+                covered_message_count,
+            });
+        }
         self
     }
 
@@ -222,8 +251,8 @@ mod tests {
     #[test]
     fn input_estimate_reuses_only_matching_provider_usage_prefix() {
         let covered_messages = vec![LlmMessage::user("first"), LlmMessage::assistant("response")];
-        let snapshot = ContextSnapshot::new(2, "system".into(), covered_messages.clone())
-            .with_input_token_anchor(655_859, 1_000_000, covered_messages);
+        let snapshot = ContextSnapshot::new(2, "system".into(), covered_messages)
+            .with_input_token_anchor(655_859, 1_000_000, 2);
         let request_messages = snapshot.request_messages(vec![
             LlmMessage::user("first"),
             LlmMessage::assistant("response"),

@@ -4,7 +4,9 @@ use astrcode_core::{
 };
 use tempfile::tempdir;
 
-use super::{EventLog, parse_event_line, replay_events_at_path};
+use super::{
+    EventLog, parse_event_line, read_summary_at_path, replay_events_at_path, sync_existing_log,
+};
 use crate::{
     StorageError,
     test_support::{started_event, user_event},
@@ -118,12 +120,51 @@ fn event_log_rejects_each_invalid_committed_stream_shape() {
 
         assert!(
             matches!(
-                replay_events_at_path(&path, None, None),
+                replay_events_at_path(&path, None, None, None),
                 Err(StorageError::CorruptLog(_))
             ),
             "case {index} unexpectedly passed"
         );
     }
+}
+
+#[test]
+fn cold_reads_stop_at_the_length_confirmed_before_a_concurrent_append() {
+    use std::io::Write;
+
+    let dir = tempdir().unwrap();
+    let path = dir.path().join("cold-read-race.jsonl");
+    let session_id = SessionId::new("cold-read-race");
+    let started = StoredEvent::new(0, started_event(&session_id));
+    std::fs::write(
+        &path,
+        format!("{}\n", serde_json::to_string(&started).unwrap()),
+    )
+    .unwrap();
+
+    let confirmed_len = sync_existing_log(&path).unwrap();
+    let late = StoredEvent::new(1, user_event(&session_id, "late unconfirmed event"));
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    writeln!(writer, "{}", serde_json::to_string(&late).unwrap()).unwrap();
+    writer.flush().unwrap();
+
+    let replay = replay_events_at_path(&path, Some(confirmed_len), None, None).unwrap();
+    let summary = read_summary_at_path(&path, session_id, Some(confirmed_len))
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.len(), 1);
+    assert_eq!(summary.latest_cursor.to_string(), "0");
+    assert!(summary.first_user_message.is_none());
+    assert_eq!(
+        replay_events_at_path(&path, None, None, None)
+            .unwrap()
+            .len(),
+        2,
+        "fixture must contain a complete late record"
+    );
 }
 
 #[test]

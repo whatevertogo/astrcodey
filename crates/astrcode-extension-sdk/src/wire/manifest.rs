@@ -52,8 +52,46 @@ pub enum ManifestToolMode {
 #[serde(deny_unknown_fields)]
 pub struct ManifestCommand {
     pub name: String,
-    #[serde(default)]
     pub description: String,
+    #[serde(deserialize_with = "deserialize_required_option")]
+    pub args_schema: Option<Value>,
+    pub requires_idle: bool,
+    pub argument_completions: bool,
+    pub priority: i32,
+    pub availability: CommandAvailability,
+    pub execution: CommandExecution,
+}
+
+/// Slash command visibility across transports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandAvailability {
+    AllTransports,
+    InteractiveOnly,
+}
+
+/// Declares whether an extension handler or the host owns execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "command", rename_all = "snake_case")]
+pub enum CommandExecution {
+    Extension,
+    Host(SessionCommandKind),
+}
+
+/// Privileged session commands implemented by the host behind its operation gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCommandKind {
+    CompactSession,
+    SelectModel,
+}
+
+fn deserialize_required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(deserializer)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,9 +163,11 @@ pub enum LifecycleEvent {
     TurnAborted,
     StepStart,
     StepEnd,
+    ToolInputTransform,
     PreToolUse,
     PostToolUse,
     BeforeProviderRequest,
+    ProviderContribution,
     AfterProviderResponse,
     ContinueAfterStop,
     UserPromptSubmit,
@@ -147,9 +187,11 @@ impl LifecycleEvent {
             Self::TurnAborted => "turn_aborted",
             Self::StepStart => "step_start",
             Self::StepEnd => "step_end",
+            Self::ToolInputTransform => "tool_input_transform",
             Self::PreToolUse => "pre_tool_use",
             Self::PostToolUse => "post_tool_use",
             Self::BeforeProviderRequest => "before_provider_request",
+            Self::ProviderContribution => "provider_contribution",
             Self::AfterProviderResponse => "after_provider_response",
             Self::ContinueAfterStop => "continue_after_stop",
             Self::UserPromptSubmit => "user_prompt_submit",
@@ -250,7 +292,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn initialize_manifest_preserves_hook_limits_and_rejects_unknown_values() {
+    fn initialize_manifest_preserves_required_shapes_and_rejects_unknown_values() {
         let manifest = InitializeManifest {
             capabilities: Vec::new(),
             tools: Vec::new(),
@@ -261,13 +303,36 @@ mod tests {
                     max_per_turn: Some(ContinueAfterStopLimit::unlimited()),
                 },
             }],
-            commands: Vec::new(),
+            commands: vec![ManifestCommand {
+                name: "inspect".into(),
+                description: "Inspect session state".into(),
+                args_schema: Some(serde_json::json!({ "type": "string" })),
+                requires_idle: true,
+                argument_completions: true,
+                priority: 17,
+                availability: CommandAvailability::InteractiveOnly,
+                execution: CommandExecution::Host(SessionCommandKind::SelectModel),
+            }],
             http_routes: Vec::new(),
             custom_events: Vec::new(),
             custom_event_subscriptions: Vec::new(),
         };
         let value = serde_json::to_value(manifest).unwrap();
         assert_eq!(value["hooks"][0]["options"]["max_per_turn"], -1);
+        let command = &value["commands"][0];
+        assert_eq!(
+            command["args_schema"],
+            serde_json::json!({ "type": "string" })
+        );
+        assert_eq!(command["requires_idle"], true);
+        assert_eq!(command["argument_completions"], true);
+        assert_eq!(command["priority"], 17);
+        assert_eq!(command["availability"], "interactive_only");
+        assert_eq!(
+            command["execution"],
+            serde_json::json!({"kind": "host", "command": "select_model"})
+        );
+        serde_json::from_value::<InitializeManifest>(value).unwrap();
 
         for invalid in [
             serde_json::json!({"future_field": true}),
@@ -281,6 +346,37 @@ mod tests {
             }]}),
         ] {
             assert!(serde_json::from_value::<InitializeManifest>(invalid).is_err());
+        }
+
+        let command = serde_json::json!({
+            "name": "inspect",
+            "description": "Inspect session state",
+            "args_schema": null,
+            "requires_idle": false,
+            "argument_completions": false,
+            "priority": 0,
+            "availability": "all_transports",
+            "execution": {"kind": "extension"}
+        });
+        for required_field in [
+            "name",
+            "description",
+            "args_schema",
+            "requires_idle",
+            "argument_completions",
+            "priority",
+            "availability",
+            "execution",
+        ] {
+            let mut incomplete = command.clone();
+            incomplete.as_object_mut().unwrap().remove(required_field);
+            assert!(
+                serde_json::from_value::<InitializeManifest>(
+                    serde_json::json!({"commands": [incomplete]})
+                )
+                .is_err(),
+                "missing command field {required_field} must be rejected"
+            );
         }
     }
 }

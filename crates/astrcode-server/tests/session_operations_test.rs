@@ -10,17 +10,15 @@ use std::{
     time::Duration,
 };
 
-use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
     event::{DurableEvent, DurableEventPayload, StoredEvent},
-    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
+    llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
     tool::{
         CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionDeliveryOutcome,
         SessionLifecycleState, SessionOperations, SubmitTurnRequest, SubmitTurnResult,
-        ToolDefinition,
     },
     types::{Cursor, SessionId, new_session_id, new_turn_id},
 };
@@ -86,10 +84,9 @@ impl GateLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for GateLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let gate = Arc::clone(&self.gate);
@@ -116,10 +113,9 @@ impl LlmProvider for GateLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for StaticTextLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::ContentDelta {
@@ -421,6 +417,13 @@ impl SessionEventJournal for BlockingChildCreateStore {
         self.inner.append_events(events).await
     }
 
+    async fn append_events_and_sync(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        self.inner.append_events_and_sync(events).await
+    }
+
     async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
         let mut fail_sync_session = self.fail_sync_session.lock().await;
         if fail_sync_session.as_ref() == Some(session_id) {
@@ -431,6 +434,23 @@ impl SessionEventJournal for BlockingChildCreateStore {
         }
         drop(fail_sync_session);
         self.inner.sync_durable_events(session_id).await
+    }
+
+    async fn retry_uncertain_sync(
+        &self,
+        session_id: &SessionId,
+        expected_through_seq: u64,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        self.inner
+            .retry_uncertain_sync(session_id, expected_through_seq)
+            .await
+    }
+
+    async fn ensure_no_uncertain_durability(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), StorageError> {
+        self.inner.ensure_no_uncertain_durability(session_id).await
     }
 }
 
@@ -549,7 +569,6 @@ fn build_test_ops_with_llm(
     llm_provider: Arc<dyn LlmProvider>,
 ) -> Arc<ServerSessionOperations> {
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    let context_assembler = Arc::new(LlmContextAssembler::new(Default::default()));
     let effective = EffectiveConfig {
         llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -603,7 +622,6 @@ fn build_test_ops_with_llm(
         llm_provider,
         effective,
         extension_runner.clone(),
-        context_assembler,
     );
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&store),

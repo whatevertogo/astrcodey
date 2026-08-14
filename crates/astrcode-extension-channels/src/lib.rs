@@ -10,6 +10,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use astrcode_extension_sdk::extension::internal::extension_config;
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
@@ -134,6 +136,10 @@ impl Extension for TelegramChannelsExtension {
 
     fn register(&self, _: &mut Registrar) {}
 
+    fn validate_config(&self, config: &ExtensionConfig) -> Result<(), ExtensionError> {
+        Self::load_config(config).map(|_| ())
+    }
+
     async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
         let config = Self::load_config(ctx.config())?;
         let session_control = ctx.host().session_control().map_err(|error| {
@@ -160,14 +166,6 @@ impl Extension for TelegramChannelsExtension {
         self.runtime.lock().take();
         Ok(())
     }
-
-    async fn on_config_changed(&self, config: ExtensionConfig) -> Result<(), ExtensionError> {
-        let parsed = Self::load_config(&config)?;
-        if let Some(runtime) = self.runtime.lock().as_ref() {
-            runtime.update_config(parsed);
-        }
-        Ok(())
-    }
 }
 
 struct TelegramRuntime {
@@ -189,10 +187,6 @@ impl TelegramRuntime {
             session_control,
             telegram,
         }
-    }
-
-    fn update_config(&self, config: ChannelsConfig) {
-        *self.config.lock() = config;
     }
 
     fn current_config(&self) -> ChannelsConfig {
@@ -869,7 +863,7 @@ mod tests {
 
     #[test]
     fn nested_config_deserializes_with_defaults() {
-        let cfg = TelegramChannelsExtension::load_config(&ExtensionConfig::from_runtime(
+        let cfg = TelegramChannelsExtension::load_config(&extension_config(
             "test",
             json!({
                 "telegram": {
@@ -922,9 +916,7 @@ mod tests {
             }),
             json!({ "telegram": { "workingDir": "/removed" } }),
         ] {
-            let result = TelegramChannelsExtension::load_config(&ExtensionConfig::from_runtime(
-                "test", config,
-            ));
+            let result = TelegramChannelsExtension::load_config(&extension_config("test", config));
             assert!(result.is_err());
         }
     }

@@ -10,9 +10,11 @@ pub enum HandlerEffect {
     ToolOutcome,
     ToolPlan,
     Block,
-    ModifiedInput,
+    Ask,
+    ReplaceToolInput,
     ReplaceMessages,
     AppendMessages,
+    ProviderContribution,
     ContinueOneStep,
     PromptContributions,
     CompactContributions,
@@ -20,6 +22,26 @@ pub enum HandlerEffect {
     CustomEventAck,
     CustomEventRetry,
     CustomEventDeadLetter,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "message_effect", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ProviderContributionEffect {
+    Unchanged {},
+    ReplaceMessages {
+        messages: Vec<crate::llm::LlmMessage>,
+    },
+    AppendMessages {
+        messages: Vec<crate::llm::LlmMessage>,
+    },
+}
+
+/// Strict S5R result data for the provider-contribution prepare phase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderContributionData {
+    pub contribution_id: String,
+    pub effect: ProviderContributionEffect,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,6 +114,27 @@ mod tests {
                 "kind": "text"
             }))
             .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ProviderContributionData>(serde_json::json!({
+                "contribution_id": "pending-1",
+                "effect": {
+                    "message_effect": "append_messages"
+                }
+            }))
+            .is_err(),
+            "message-bearing effects require messages"
+        );
+        assert!(
+            serde_json::from_value::<ProviderContributionData>(serde_json::json!({
+                "contribution_id": "pending-1",
+                "effect": {
+                    "message_effect": "unchanged",
+                    "messages": []
+                }
+            }))
+            .is_err(),
+            "unchanged cannot carry a parallel messages field"
         );
     }
 }

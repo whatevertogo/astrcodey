@@ -12,9 +12,9 @@ use astrcode_core::{
     user_input::UserInput,
 };
 use astrcode_extension_sdk::extension::{
-    CommandCompletions, ExtensionCommandResult, ExtensionError, RuntimeHookCallContext,
+    CommandAvailability, CommandCompletions, CommandExecution, ExtensionCommandResult,
+    ExtensionError, SessionCommandIntent, SessionCommandKind, internal::RuntimeHookCallContext,
 };
-use astrcode_extensions::runner::CommandSource as ExtensionCommandSource;
 use astrcode_session::compaction::{ManualCompactionOutcome, compact_manual_session};
 
 use crate::{
@@ -22,7 +22,7 @@ use crate::{
     delivery_gates::SessionOperationGuard,
     server_event_bus::ServerEventBus,
     session_command_contract::{
-        CommandInfo, CommandInvocation, CommandList, CommandSource, HandlerError,
+        CommandInfo, CommandInvocation, CommandList, CommandOutcome, HandlerError,
         ParsedSlashCommand, PromptSubmission, parse_slash_command,
     },
     turn_scheduler::{DeliveryOutcome, InputDelivery, TurnCompletion, TurnScheduler},
@@ -36,8 +36,14 @@ pub(crate) struct SessionCommandService {
 }
 
 enum CommandDispatch {
-    Completed(CommandInvocation),
+    Completed(CommandOutcome),
     StartTurn(UserInput),
+}
+
+#[derive(Clone, Copy)]
+enum CommandTransport {
+    NonInteractive,
+    Interactive,
 }
 
 impl SessionCommandService {
@@ -79,23 +85,19 @@ impl SessionCommandService {
             .map_err(|error| HandlerError::InvalidRequest(error.to_string()))?;
 
         let operation = self.scheduler.begin_session_operation(&session_id).await?;
-        let has_active_turn = self.scheduler.registry().has_active(&session_id);
         if let Some(command) = parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
-            && (command.name == "compact" || !has_active_turn)
         {
-            match self
-                .dispatch_command_in_operation(&operation, command)
+            let dispatch = self
+                .dispatch_command_in_operation(
+                    &operation,
+                    command,
+                    CommandTransport::NonInteractive,
+                )
+                .await?;
+            return self
+                .finish_command_dispatch(operation, dispatch)
                 .await
-            {
-                Err(HandlerError::UnknownCommand(_)) => {},
-                other => {
-                    let dispatch = other?;
-                    return self
-                        .finish_command_dispatch(operation, dispatch)
-                        .await
-                        .map(CommandInvocation::into_prompt_submission);
-                },
-            }
+                .and_then(CommandOutcome::into_prompt_submission);
         }
 
         self.scheduler
@@ -275,14 +277,24 @@ impl SessionCommandService {
         Ok(new_session_id)
     }
 
-    pub(crate) async fn invoke_command(
+    pub(crate) async fn invoke_interactive_command(
         &self,
         session_id: SessionId,
         command: ParsedSlashCommand,
-    ) -> Result<CommandInvocation, HandlerError> {
+    ) -> Result<CommandOutcome, HandlerError> {
+        self.invoke_command(session_id, command, CommandTransport::Interactive)
+            .await
+    }
+
+    async fn invoke_command(
+        &self,
+        session_id: SessionId,
+        command: ParsedSlashCommand,
+        transport: CommandTransport,
+    ) -> Result<CommandOutcome, HandlerError> {
         let operation = self.scheduler.begin_session_operation(&session_id).await?;
         let dispatch = self
-            .dispatch_command_in_operation(&operation, command)
+            .dispatch_command_in_operation(&operation, command, transport)
             .await?;
         self.finish_command_dispatch(operation, dispatch).await
     }
@@ -291,57 +303,20 @@ impl SessionCommandService {
         &self,
         operation: &SessionOperationGuard,
         command: ParsedSlashCommand,
+        transport: CommandTransport,
     ) -> Result<CommandDispatch, HandlerError> {
         let command = normalize_command(command)?;
-        let session_id = operation.session_id();
-
-        if command.name == "compact" {
-            return self
-                .dispatch_compact_command(operation, &command.arguments)
-                .await;
-        }
-
-        if command.name == "model" {
-            return Err(HandlerError::InvalidRequest(
-                "interactive model selection is only available on interactive transports".into(),
-            ));
-        }
-
-        self.dispatch_extension_command(session_id, command).await
-    }
-
-    async fn dispatch_compact_command(
-        &self,
-        operation: &SessionOperationGuard,
-        arguments: &str,
-    ) -> Result<CommandDispatch, HandlerError> {
-        let arguments = arguments.trim();
-        let keep_recent_turns = if arguments.is_empty() {
-            None
-        } else {
-            Some(arguments.parse::<usize>().map_err(|_| {
-                HandlerError::InvalidRequest(
-                    "compact expects an optional non-negative integer".into(),
-                )
-            })?)
-        };
-        let invocation = match self
-            .compact_session_in_operation(operation, keep_recent_turns)
-            .await?
-        {
-            ManualCompactionOutcome::Compacted { messages_removed } => CommandInvocation::Handled {
-                message: format!("compact completed; {messages_removed} messages removed"),
-            },
-            ManualCompactionOutcome::Skipped { message } => CommandInvocation::Handled { message },
-        };
-        Ok(CommandDispatch::Completed(invocation))
+        self.dispatch_extension_command(operation, command, transport)
+            .await
     }
 
     async fn dispatch_extension_command(
         &self,
-        session_id: &SessionId,
+        operation: &SessionOperationGuard,
         command: ParsedSlashCommand,
+        transport: CommandTransport,
     ) -> Result<CommandDispatch, HandlerError> {
+        let session_id = operation.session_id();
         let context = self.command_context(session_id).await?;
         let resolved = self
             .runtime
@@ -351,9 +326,16 @@ impl SessionCommandService {
             .into_iter()
             .find(|resolved| resolved.command.name == command.name)
             .ok_or_else(|| HandlerError::UnknownCommand(command.name.clone()))?;
+        admit_resolved_command(&resolved, transport)?;
 
         if resolved.command.requires_idle && self.session_is_busy(session_id).await {
-            return Err(HandlerError::TurnAlreadyRunning);
+            return if resolved.command.execution
+                == CommandExecution::Host(SessionCommandKind::CompactSession)
+            {
+                Err(HandlerError::CompactBlocked)
+            } else {
+                Err(HandlerError::TurnAlreadyRunning)
+            };
         }
 
         match self
@@ -376,16 +358,13 @@ impl SessionCommandService {
                     content.clone(),
                     is_error,
                 );
-                Ok(CommandDispatch::Completed(CommandInvocation::Display {
-                    content,
-                    is_error,
-                }))
+                Ok(CommandDispatch::Completed(CommandOutcome::Invocation(
+                    CommandInvocation::Display { content, is_error },
+                )))
             },
-            Ok(ExtensionCommandResult::Handled { message }) => {
-                Ok(CommandDispatch::Completed(CommandInvocation::Handled {
-                    message,
-                }))
-            },
+            Ok(ExtensionCommandResult::Handled { message }) => Ok(CommandDispatch::Completed(
+                CommandOutcome::Invocation(CommandInvocation::Handled { message }),
+            )),
             Ok(ExtensionCommandResult::StartTurn { instructions }) => {
                 let user_text = if instructions.trim().is_empty() {
                     visible_command_text(&command)
@@ -394,20 +373,50 @@ impl SessionCommandService {
                 };
                 Ok(CommandDispatch::StartTurn(UserInput::text_only(user_text)))
             },
+            Ok(ExtensionCommandResult::HostCommand { intent }) => {
+                self.dispatch_session_command(operation, intent).await
+            },
             Err(ExtensionError::NotFound(name)) => Err(HandlerError::UnknownCommand(
                 name.trim_start_matches('/').to_string(),
             )),
+            Err(ExtensionError::InvalidInput { message, .. }) => {
+                Err(HandlerError::InvalidRequest(message))
+            },
             Err(error) => Err(HandlerError::Extension(error)),
         }
+    }
+
+    async fn dispatch_session_command(
+        &self,
+        operation: &SessionOperationGuard,
+        intent: SessionCommandIntent,
+    ) -> Result<CommandDispatch, HandlerError> {
+        let SessionCommandIntent::CompactSession { keep_recent_turns } = intent else {
+            return Ok(CommandDispatch::Completed(CommandOutcome::SessionCommand(
+                intent,
+            )));
+        };
+        let invocation = match self
+            .compact_session_in_operation(operation, keep_recent_turns)
+            .await?
+        {
+            ManualCompactionOutcome::Compacted { messages_removed } => CommandInvocation::Handled {
+                message: format!("compact completed; {messages_removed} messages removed"),
+            },
+            ManualCompactionOutcome::Skipped { message } => CommandInvocation::Handled { message },
+        };
+        Ok(CommandDispatch::Completed(CommandOutcome::Invocation(
+            invocation,
+        )))
     }
 
     async fn finish_command_dispatch(
         &self,
         operation: SessionOperationGuard,
         command: CommandDispatch,
-    ) -> Result<CommandInvocation, HandlerError> {
+    ) -> Result<CommandOutcome, HandlerError> {
         let input = match command {
-            CommandDispatch::Completed(invocation) => return Ok(invocation),
+            CommandDispatch::Completed(outcome) => return Ok(outcome),
             CommandDispatch::StartTurn(input) => input,
         };
         match self
@@ -415,7 +424,11 @@ impl SessionCommandService {
             .deliver_input_in_operation(operation, input, InputDelivery::StartNew)
             .await?
         {
-            DeliveryOutcome::Started { turn_id } => Ok(CommandInvocation::Started { turn_id }),
+            DeliveryOutcome::Started { turn_id } => {
+                Ok(CommandOutcome::Invocation(CommandInvocation::Started {
+                    turn_id,
+                }))
+            },
             DeliveryOutcome::Injected { .. } | DeliveryOutcome::Queued { .. } => Err(
                 HandlerError::InvalidRequest("command start returned a non-started outcome".into()),
             ),
@@ -434,8 +447,10 @@ impl SessionCommandService {
                 name: command_name,
                 arguments,
             },
+            CommandTransport::NonInteractive,
         )
-        .await
+        .await?
+        .into_noninteractive()
     }
 
     pub(crate) async fn complete_command(
@@ -451,10 +466,6 @@ impl SessionCommandService {
                 "command must not be empty".into(),
             ));
         }
-        if matches!(command_name.as_str(), "compact" | "model") {
-            return Ok(CommandCompletions::default());
-        }
-
         let context = self.command_context(&session_id).await?;
         let resolved = self
             .runtime
@@ -464,6 +475,7 @@ impl SessionCommandService {
             .into_iter()
             .find(|resolved| resolved.command.name == command_name)
             .ok_or_else(|| HandlerError::UnknownCommand(command_name.clone()))?;
+        admit_resolved_command(&resolved, CommandTransport::NonInteractive)?;
         if !resolved.command.argument_completions {
             return Ok(CommandCompletions::default());
         }
@@ -497,29 +509,30 @@ impl SessionCommandService {
         working_dir: &str,
         include_interactive: bool,
     ) -> CommandList {
-        let mut commands = builtin_commands(include_interactive);
         let extension_surface = self
             .runtime
             .extension_runner()
             .resolve_command_surface(working_dir)
             .await;
-        for resolved in extension_surface.commands {
-            if commands
-                .iter()
-                .any(|command| command.name == resolved.command.name)
-            {
-                continue;
-            }
-            commands.push(CommandInfo {
+        let transport = if include_interactive {
+            CommandTransport::Interactive
+        } else {
+            CommandTransport::NonInteractive
+        };
+        let commands = extension_surface
+            .commands
+            .into_iter()
+            .filter(|resolved| command_is_available(resolved, transport))
+            .map(|resolved| CommandInfo {
                 name: resolved.command.name,
+                extension_id: resolved.extension_id,
                 description: resolved.command.description,
                 needs_argument: resolved.command.args_schema.is_some(),
                 requires_idle: resolved.command.requires_idle,
                 argument_completions: resolved.command.argument_completions,
                 priority: resolved.command.priority,
-                source: command_source(resolved.source),
-            });
-        }
+            })
+            .collect();
         CommandList {
             commands,
             keybindings: extension_surface.ui.keybindings,
@@ -541,14 +554,7 @@ impl SessionCommandService {
         Ok(RuntimeHookCallContext::new(
             session_id.to_string(),
             working_dir,
-            ModelSelection::simple(
-                self.runtime
-                    .config_manager()
-                    .read_effective()
-                    .llm
-                    .model_id
-                    .clone(),
-            ),
+            ModelSelection::simple(state.identity.model_id.clone()),
             self.runtime
                 .session_manager()
                 .session_store_dir(session_id)
@@ -601,33 +607,23 @@ fn visible_command_text(command: &ParsedSlashCommand) -> String {
     }
 }
 
-fn command_source(source: ExtensionCommandSource) -> CommandSource {
-    match source {
-        ExtensionCommandSource::Extension => CommandSource::Extension,
-        ExtensionCommandSource::Skill => CommandSource::Skill,
+fn admit_resolved_command(
+    resolved: &astrcode_extensions::runner::ResolvedSlashCommand,
+    transport: CommandTransport,
+) -> Result<(), HandlerError> {
+    if command_is_available(resolved, transport) {
+        return Ok(());
     }
+    Err(HandlerError::InvalidRequest(format!(
+        "command /{} is only available on interactive transports",
+        resolved.command.name
+    )))
 }
 
-fn builtin_commands(include_interactive: bool) -> Vec<CommandInfo> {
-    let mut commands = vec![CommandInfo {
-        name: "compact".into(),
-        description: "Compact the current session context".into(),
-        needs_argument: false,
-        requires_idle: true,
-        argument_completions: false,
-        priority: 0,
-        source: CommandSource::Builtin,
-    }];
-    if include_interactive {
-        commands.push(CommandInfo {
-            name: "model".into(),
-            description: "Select the active AI model".into(),
-            needs_argument: false,
-            requires_idle: false,
-            argument_completions: false,
-            priority: 0,
-            source: CommandSource::Builtin,
-        });
-    }
-    commands
+fn command_is_available(
+    resolved: &astrcode_extensions::runner::ResolvedSlashCommand,
+    transport: CommandTransport,
+) -> bool {
+    resolved.command.availability == CommandAvailability::AllTransports
+        || matches!(transport, CommandTransport::Interactive)
 }

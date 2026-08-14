@@ -26,10 +26,11 @@ use astrcode_extension_sdk::{
     builder::{ExtensionToolDefinition, manifest},
     extension::{
         CommandContext, CommandHandler, Extension, ExtensionCall, ExtensionCapability,
-        ExtensionCommandResult, ExtensionError, ExtensionManifest, ExtensionPaths, HookMode,
-        PreToolUseContext, PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderHandler,
-        ProviderResult, Registrar, SlashCommand, StatusItemUpdatePayload, ToolContext, ToolHandler,
-        ToolPlanContext,
+        ExtensionCommandResult, ExtensionError, ExtensionManifest, ExtensionPaths,
+        PreToolUseContext, PreToolUseHandler, PreToolUseResult, PreparedProviderContribution,
+        PreparedProviderEffect, ProviderContext, ProviderContributionHandler,
+        ProviderContributionId, ProviderSettlementContext, Registrar, SlashCommand,
+        StatusItemUpdatePayload, ToolContext, ToolHandler, ToolPlanContext,
     },
     llm::LlmMessage,
     permission::ApprovalMode,
@@ -90,13 +91,12 @@ impl Extension for ModeExtension {
             }),
         );
         reg.on_pre_tool_use(
-            HookMode::Blocking,
             100,
             Arc::new(ModePreToolUseHandler {
                 catalog: Arc::clone(&catalog),
             }),
         );
-        reg.on_before_provider_request(HookMode::Blocking, 50, Arc::new(ModeProviderHandler));
+        reg.on_provider_contribution(50, Arc::new(ModeProviderHandler));
         // 注册快捷键：Shift+Tab 切换模式
         reg.keybinding(astrcode_extension_sdk::extension::Keybinding {
             key: "shift+tab".into(),
@@ -120,6 +120,8 @@ impl Extension for ModeExtension {
                 requires_idle: false,
                 argument_completions: false,
                 priority: 0,
+                availability: astrcode_extension_sdk::extension::CommandAvailability::AllTransports,
+                execution: astrcode_extension_sdk::extension::CommandExecution::Extension,
             },
             Arc::new(ModeSlashCommandHandler {
                 catalog: Arc::clone(&catalog),
@@ -261,20 +263,30 @@ impl CommandHandler for ModeSlashCommandHandler {
 }
 
 #[async_trait::async_trait]
-impl ProviderHandler for ModeProviderHandler {
-    async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
+impl ProviderContributionHandler for ModeProviderHandler {
+    async fn prepare(
+        &self,
+        ctx: ProviderContext,
+    ) -> Result<Option<PreparedProviderContribution>, ExtensionError> {
         let base = session_data_dir(ctx.paths())?;
         let mode_root = store::mode_dir_from_base(base);
-        let mut state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
+        let state = store::load_mode_state(&mode_root).map_err(ExtensionError::Internal)?;
 
-        if let Some(context) = state.pending_transition_context.take() {
-            store::save_mode_state(&mode_root, &state).map_err(ExtensionError::Internal)?;
-            return Ok(ProviderResult::AppendMessages {
-                messages: vec![LlmMessage::user(context)],
-            });
+        if let Some(pending) = state.pending_transition {
+            return Ok(Some(PreparedProviderContribution::new(
+                ProviderContributionId::new(pending.id),
+                PreparedProviderEffect::AppendMessages(vec![LlmMessage::user(pending.context)]),
+            )));
         }
 
-        Ok(ProviderResult::Allow)
+        Ok(None)
+    }
+
+    async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError> {
+        let base = session_data_dir(ctx.paths())?;
+        let mode_root = store::mode_dir_from_base(base);
+        store::acknowledge_mode_transition(&mode_root, ctx.contribution_id().as_str())
+            .map_err(ExtensionError::Internal)
     }
 }
 

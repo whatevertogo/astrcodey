@@ -10,6 +10,8 @@
 //! 本模块不含具体 provider 实现与 HTTP/重试逻辑（位于 `astrcode-ai`），也不含
 //! 具体工具的展示特判（属于 server 投影层）。
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{message_attachment::MessageAttachment, tool::ToolDefinition};
@@ -135,6 +137,33 @@ pub struct LlmMessage {
     /// 推理内容（仅 assistant 消息）。部分 provider（如 DeepSeek）要求将此字段回传。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
+}
+
+/// Provider 不可见、但会随 transcript rewrite 与 fork 持久化的消息来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptMessageOrigin {
+    TurnAborted,
+    ToolCallFailed,
+    ToolCallCancelled,
+}
+
+/// 一条 durable provider transcript 消息及其非 provider 元数据。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TranscriptMessage {
+    pub message: LlmMessage,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<TranscriptMessageOrigin>,
+}
+
+impl TranscriptMessage {
+    pub fn plain(message: LlmMessage) -> Self {
+        Self {
+            message,
+            origin: None,
+        }
+    }
 }
 
 impl LlmMessage {
@@ -289,7 +318,6 @@ pub fn attachments_from_user_message(message: &LlmMessage) -> Vec<MessageAttachm
         .collect()
 }
 
-pub const TURN_ABORTED_SOURCE: &str = "turn_aborted";
 const TURN_ABORTED_GUIDANCE: &str = concat!(
     "The user interrupted the previous turn on purpose. ",
     "Any running tools/commands may still be running in the background. ",
@@ -309,9 +337,16 @@ pub fn turn_aborted_context_message() -> LlmMessage {
 /// tool result。这里是所有 provider request 的最后一道边界，负责过滤空消息、
 /// 合并旧日志中的拆分 assistant/tool-call 消息，并裁掉尚未结算的半轮工具调用。
 pub fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
+    provider_visible_transcript(messages.into_iter().map(TranscriptMessage::plain).collect())
+        .into_iter()
+        .map(|entry| entry.message)
+        .collect()
+}
+
+fn provider_visible_transcript(messages: Vec<TranscriptMessage>) -> Vec<TranscriptMessage> {
     let mut messages = messages
         .into_iter()
-        .filter(LlmMessage::has_provider_visible_content)
+        .filter(|entry| entry.message.has_provider_visible_content())
         .collect::<Vec<_>>();
     normalize_tool_call_messages(&mut messages);
     truncate_incomplete_tool_protocol(&mut messages);
@@ -323,41 +358,51 @@ pub fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
 /// system prompt 单独参与指纹与请求组装（见
 /// `crate::event::transcript_prefix_fingerprint`），因此 transcript 只保留对话消息。
 pub fn provider_transcript(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
-    let mut messages = provider_visible_messages(messages);
-    messages.retain(|message| message.role != LlmRole::System);
+    provider_transcript_messages(messages.into_iter().map(TranscriptMessage::plain).collect())
+        .into_iter()
+        .map(|entry| entry.message)
+        .collect()
+}
+
+/// 归一化 durable transcript，同时保持每条保留消息的来源元数据。
+pub fn provider_transcript_messages(messages: Vec<TranscriptMessage>) -> Vec<TranscriptMessage> {
+    let mut messages = provider_visible_transcript(messages);
+    messages.retain(|entry| entry.message.role != LlmRole::System);
     messages
 }
 
-fn normalize_tool_call_messages(messages: &mut Vec<LlmMessage>) {
-    let mut merged: Vec<LlmMessage> = Vec::with_capacity(messages.len());
-    for message in messages.drain(..) {
-        let has_tool_calls = message.role == LlmRole::Assistant
-            && message
+fn normalize_tool_call_messages(messages: &mut Vec<TranscriptMessage>) {
+    let mut merged: Vec<TranscriptMessage> = Vec::with_capacity(messages.len());
+    for entry in messages.drain(..) {
+        let has_tool_calls = entry.message.role == LlmRole::Assistant
+            && entry
+                .message
                 .content
                 .iter()
                 .any(|c| matches!(c, LlmContent::ToolCall { .. }));
         if has_tool_calls
             && let Some(last) = merged.last_mut()
-            && last.role == LlmRole::Assistant
+            && last.message.role == LlmRole::Assistant
         {
-            last.content.extend(message.content);
-            if last.reasoning_content.is_none() {
-                last.reasoning_content = message.reasoning_content;
+            last.message.content.extend(entry.message.content);
+            if last.message.reasoning_content.is_none() {
+                last.message.reasoning_content = entry.message.reasoning_content;
             }
+            last.origin = last.origin.or(entry.origin);
             continue;
         }
-        merged.push(message);
+        merged.push(entry);
     }
     *messages = merged;
 }
 
-fn truncate_incomplete_tool_protocol(messages: &mut Vec<LlmMessage>) {
+fn truncate_incomplete_tool_protocol(messages: &mut Vec<TranscriptMessage>) {
     use std::collections::HashSet;
 
     let mut pending: Option<(usize, HashSet<String>, HashSet<String>)> = None;
 
     for index in 0..messages.len() {
-        let message = &messages[index];
+        let message = &messages[index].message;
         if message.role == LlmRole::Tool {
             let tool_result_ids: Vec<String> = message
                 .content
@@ -850,21 +895,10 @@ pub trait LlmProvider: Send + Sync {
     ///
     /// 返回一个通道接收端，按到达顺序产生 [`LlmEvent`] 值。
     /// 当流式输出完成或出错时通道关闭。
-    async fn generate(
-        &self,
-        messages: Vec<LlmMessage>,
-        tools: Vec<ToolDefinition>,
-    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError>;
-
-    /// 使用请求级参数生成流式响应。
-    ///
-    /// 旧 provider 默认忽略请求级输出上限；需要支持动态预算的 provider 覆盖此方法。
     async fn generate_request(
         &self,
         request: LlmRequest,
-    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        self.generate(request.messages, request.tools).await
-    }
+    ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, LlmError>;
 
     /// 统计一次 provider request 的 input token。
     async fn count_input_tokens(
@@ -884,6 +918,40 @@ pub trait LlmProvider: Send + Sync {
 
     /// 返回模型的上下文窗口限制。
     fn model_limits(&self) -> ModelLimits;
+}
+
+/// 一次运行时操作固定的主/小模型 provider 组合。
+///
+/// 这是进程内能力，不是 wire 或持久化契约。运行时边界显式传递该组合，避免配置发布前
+/// 已开始的操作在执行中途静默切换 provider。
+#[derive(Clone)]
+pub struct LlmProviderBindings {
+    main: Arc<dyn LlmProvider>,
+    small: Arc<dyn LlmProvider>,
+}
+
+impl LlmProviderBindings {
+    pub fn new(main: Arc<dyn LlmProvider>, small: Arc<dyn LlmProvider>) -> Self {
+        Self { main, small }
+    }
+
+    pub fn main(&self) -> &Arc<dyn LlmProvider> {
+        &self.main
+    }
+
+    pub fn small(&self) -> &Arc<dyn LlmProvider> {
+        &self.small
+    }
+}
+
+impl std::fmt::Debug for LlmProviderBindings {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LlmProviderBindings")
+            .field("main", &"<provider>")
+            .field("small", &"<provider>")
+            .finish()
+    }
 }
 
 /// 模型的上下文窗口限制。

@@ -8,7 +8,10 @@ use astrcode_core::{
     compaction::CompactTrigger, message_attachment::MessageAttachment, types::ToolCallId,
 };
 use async_trait::async_trait;
-pub use harnesses::*;
+pub use harnesses::{
+    ExtensionLifecycleHarness, LifecycleHarnessError, LifecycleHarnessEvent, MockExtensionHost,
+    MockHostInvocation, RegisteredExtension, RegistrationHarness,
+};
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
@@ -21,10 +24,13 @@ use crate::{
         ExtensionPaths, ExtensionTasks, HttpContext, LifecycleContext, LifecyclePayload,
         PostToolUseContext, PostToolUsePayload, PreToolUseContext, PreToolUsePayload,
         PromptBuildContext, PromptBuildPayload, ProviderContext, ProviderPayload,
-        RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
-        RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
-        RuntimePromptBuildContext, RuntimeProviderContext, RuntimeUserMessageEnvelopeContext,
-        SessionCallContext, ToolContext, UserMessageEnvelopeContext, UserMessageEnvelopePayload,
+        ProviderRequestId, SessionCallContext, ToolContext, UserMessageEnvelopeContext,
+        UserMessageEnvelopePayload,
+        internal::{
+            RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
+            RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
+            RuntimePromptBuildContext, RuntimeProviderContext, RuntimeUserMessageEnvelopeContext,
+        },
     },
     host::{
         ExtensionHost, HostError, HostOperation,
@@ -390,7 +396,10 @@ impl HookContextBuilder {
 
     pub fn build_provider(self, messages: Vec<LlmMessage>) -> ProviderContext {
         let (call, runtime_call) = self.into_parts();
-        let input = RuntimeProviderContext::new(runtime_call, ProviderPayload::new(messages));
+        let input = RuntimeProviderContext::new(
+            runtime_call,
+            ProviderPayload::new(ProviderRequestId::new("test-provider-request"), messages),
+        );
         ProviderContext::from_runtime(call, &input)
     }
 

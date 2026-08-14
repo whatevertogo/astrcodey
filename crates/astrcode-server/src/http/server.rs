@@ -6,13 +6,11 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(feature = "testing")]
-use astrcode_protocol::events::ClientNotification;
 use astrcode_protocol::http::RunInfoDto;
 use axum::{
     Router,
     extract::DefaultBodyLimit,
-    http::{HeaderName, Method, header},
+    http::{Method, header},
     middleware,
     routing::{any, delete, get, post, put},
 };
@@ -34,19 +32,6 @@ const MAX_PROMPT_HTTP_BODY_BYTES: usize = crate::turn_scheduler::MAX_PROMPT_TEXT
     + 64 * 1024;
 const RUN_INFO_TEMPFILE_PREFIX: &str = ".run.json.";
 
-#[cfg(feature = "testing")]
-#[derive(Clone)]
-pub struct TestEventPublisher {
-    event_bus: Arc<ServerEventBus>,
-}
-
-#[cfg(feature = "testing")]
-impl TestEventPublisher {
-    pub fn send_notification(&self, notification: ClientNotification) {
-        self.event_bus.send_notification(notification);
-    }
-}
-
 /// HTTP server startup and runtime errors.
 #[derive(Debug, thiserror::Error)]
 pub enum HttpServerError {
@@ -62,14 +47,6 @@ pub enum HttpServerError {
 pub fn router(server_app: Arc<ServerApp>) -> Result<(Router, String), HttpServerError> {
     let (router, auth_token, _) = router_parts(server_app);
     Ok((router, auth_token))
-}
-
-#[cfg(feature = "testing")]
-pub fn router_with_event_publisher(
-    server_app: Arc<ServerApp>,
-) -> Result<(Router, String, TestEventPublisher), HttpServerError> {
-    let (router, auth_token, event_bus) = router_parts(server_app);
-    Ok((router, auth_token, TestEventPublisher { event_bus }))
 }
 
 fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
@@ -93,7 +70,6 @@ fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
             header::CONTENT_TYPE,
             header::AUTHORIZATION,
             header::CACHE_CONTROL,
-            HeaderName::from_static("last-event-id"),
         ]);
 
     let protected_api = Router::new()
@@ -110,7 +86,6 @@ fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
             put(sessions::configure_session_tools),
         )
         .route("/api/sessions/{id}/stream", get(stream::session_stream))
-        .route("/api/sessions/{id}/events", get(stream::raw_event_stream))
         .route(
             "/api/sessions/{id}/event-consumers",
             get(event_consumers::list_event_consumers),

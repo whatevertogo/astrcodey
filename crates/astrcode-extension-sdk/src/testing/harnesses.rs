@@ -182,7 +182,6 @@ impl RegistrationHarness {
 pub enum LifecycleHarnessEvent {
     Start,
     TasksActivated,
-    ConfigChanged,
     TasksCancelled,
     TasksDrained,
     Stop(StopReason),
@@ -207,7 +206,7 @@ pub enum LifecycleHarnessError {
     StartupRollback { start: String, stop: String },
 }
 
-/// Small lifecycle runtime for verifying start/config/tasks/stop ordering in extension tests.
+/// Small lifecycle runtime for verifying start/tasks/stop ordering in extension tests.
 pub struct ExtensionLifecycleHarness {
     extension: Arc<dyn Extension>,
     registered: RegisteredExtension,
@@ -331,22 +330,6 @@ impl ExtensionLifecycleHarness {
         self.tasks.activate();
         self.events.push(LifecycleHarnessEvent::TasksActivated);
         self.state = LifecycleState::Started;
-        Ok(())
-    }
-
-    pub async fn config_changed(&mut self, config: Value) -> Result<(), LifecycleHarnessError> {
-        if self.state != LifecycleState::Started {
-            return Err(LifecycleHarnessError::InvalidTransition(
-                "config change requires a started extension",
-            ));
-        }
-        self.extension
-            .on_config_changed(ExtensionConfig::from_runtime(
-                self.registered.manifest().id(),
-                config,
-            ))
-            .await?;
-        self.events.push(LifecycleHarnessEvent::ConfigChanged);
         Ok(())
     }
 
@@ -475,17 +458,12 @@ mod tests {
 
         let mut lifecycle = ExtensionLifecycleHarness::new(Arc::new(LifecycleProbe)).unwrap();
         lifecycle.start().await.unwrap();
-        lifecycle
-            .config_changed(json!({ "enabled": true }))
-            .await
-            .unwrap();
         lifecycle.stop(StopReason::Reload).await.unwrap();
         assert_eq!(
             lifecycle.events(),
             &[
                 LifecycleHarnessEvent::Start,
                 LifecycleHarnessEvent::TasksActivated,
-                LifecycleHarnessEvent::ConfigChanged,
                 LifecycleHarnessEvent::TasksCancelled,
                 LifecycleHarnessEvent::TasksDrained,
                 LifecycleHarnessEvent::Stop(StopReason::Reload),

@@ -45,6 +45,7 @@ macro_rules! extension_capabilities {
 
 extension_capabilities! {
     SessionControl => "session_control",
+    SessionCommand => "session_command",
     SessionInspect => "session_inspect",
     PublicHttp => "public_http",
     AuthenticatedHttp => "authenticated_http",
@@ -75,6 +76,7 @@ mod tests {
         let mut wires = std::collections::HashSet::new();
         for capability in [
             ExtensionCapability::SessionControl,
+            ExtensionCapability::SessionCommand,
             ExtensionCapability::SessionInspect,
             ExtensionCapability::PublicHttp,
             ExtensionCapability::AuthenticatedHttp,

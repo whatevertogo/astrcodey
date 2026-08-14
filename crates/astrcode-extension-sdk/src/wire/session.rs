@@ -5,6 +5,15 @@ use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 
+/// Projection-only provenance attached to a provider-visible session message.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMessageOriginDto {
+    TurnAborted,
+    ToolCallFailed,
+    ToolCallCancelled,
+}
+
 /// 插件 session API 共用的工具选择线缆契约。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]

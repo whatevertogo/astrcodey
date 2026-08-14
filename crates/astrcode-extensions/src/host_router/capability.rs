@@ -38,8 +38,8 @@ fn backend_available(
     ctx: &super::InvokeContext,
 ) -> bool {
     match backend {
-        HostBackendRequirement::MainLlm => router.llm.has_main(),
-        HostBackendRequirement::SmallLlm => router.llm.has_small(),
+        HostBackendRequirement::MainLlm => router.llm.has_main(ctx.llm_providers.as_ref()),
+        HostBackendRequirement::SmallLlm => router.llm.has_small(ctx.llm_providers.as_ref()),
         HostBackendRequirement::SessionEventReader => router.session.has_event_reader(),
         HostBackendRequirement::SessionReader => router.session.has_session_reader(),
         HostBackendRequirement::SessionOperations => ctx.session_ops.is_some(),

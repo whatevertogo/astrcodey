@@ -8,6 +8,7 @@ use std::{
 };
 
 pub use astrcode_core::config::defaults::{astrcode_dir, user_home_dir};
+use fs2::FileExt;
 
 /// Resolve `path` against `base_dir` unless it is already absolute.
 pub fn resolve_path(base_dir: &Path, path: &Path) -> PathBuf {
@@ -76,8 +77,59 @@ pub fn read_json_state<T: serde::de::DeserializeOwned>(path: &Path) -> std::io::
 
 /// 以 pretty JSON 原子写入状态文件（内部使用 [`write_file_atomic`]）。
 pub fn write_json_state<T: serde::Serialize>(path: &Path, state: &T) -> std::io::Result<()> {
+    with_state_file_lock(path, || write_json_state_unlocked(path, state))
+}
+
+/// Atomically read, update, and replace one JSON state file under its sibling lock file.
+pub fn update_json_state<T, R>(
+    path: &Path,
+    update: impl FnOnce(Option<T>) -> std::io::Result<(Option<T>, R)>,
+) -> std::io::Result<R>
+where
+    T: serde::de::DeserializeOwned + serde::Serialize,
+{
+    with_state_file_lock(path, || {
+        let (state, result) = update(read_json_state(path)?)?;
+        if let Some(state) = state {
+            write_json_state_unlocked(path, &state)?;
+        }
+        Ok(result)
+    })
+}
+
+fn write_json_state_unlocked<T: serde::Serialize>(path: &Path, state: &T) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
     write_file_atomic(path, &json)
+}
+
+fn with_state_file_lock<R>(
+    path: &Path,
+    operation: impl FnOnce() -> io::Result<R>,
+) -> io::Result<R> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, "state path has no file name")
+        })?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(parent.join(format!(".{file_name}.lock")))?;
+    lock.lock_exclusive()?;
+    let result = operation();
+    let unlock_result = FileExt::unlock(&lock);
+    match (result, unlock_result) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(value), Ok(())) => Ok(value),
+    }
 }
 
 /// Return whether `candidate` stays inside `root`.

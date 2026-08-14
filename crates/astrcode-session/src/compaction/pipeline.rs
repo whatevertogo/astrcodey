@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use astrcode_context::{
-    CompactError, CompactResult, CompactSummaryRenderOptions, ContextSnapshot,
+    CompactError, CompactResult, CompactSummaryRenderOptions, ContextAssembler, ContextSnapshot,
     PostCompactEnrichInput,
     compaction::{
         LlmCompactAttempt, compact_messages_deterministic, compact_messages_with_fallback,
@@ -17,8 +17,8 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        CompactEvent, CompactPayload, CompactResult as TypedCompactResult, ExtensionError,
-        RuntimeCompactContext, RuntimeHookCallContext,
+        CompactEvent, CompactResult as TypedCompactResult, ExtensionError,
+        internal::{RuntimeCompactContext, RuntimeHookCallContext, runtime_compact_context},
     },
     runtime_ports::TurnHooks,
 };
@@ -30,6 +30,7 @@ use crate::{SessionError, projection_context::context_snapshot, session::Session
 pub(crate) struct CompactionPipeline<'a> {
     pub session: &'a Session,
     pub llm: Arc<dyn LlmProvider>,
+    pub context_assembler: Arc<dyn ContextAssembler>,
     pub extension_runner: &'a dyn TurnHooks,
     pub hook_call: RuntimeHookCallContext,
     pub pre_hook_message_count: usize,
@@ -50,7 +51,7 @@ pub(crate) enum CompactionPipelineOutcome {
     Failed {
         error: SessionError,
         llm_attempt: LlmCompactAttempt,
-        source_snapshot: Option<ContextSnapshot>,
+        source_snapshot: Option<Box<ContextSnapshot>>,
     },
 }
 
@@ -148,7 +149,7 @@ impl CompactionPipeline<'_> {
                     return CompactionPipelineOutcome::Failed {
                         error,
                         llm_attempt: LlmCompactAttempt::NotAttempted,
-                        source_snapshot: Some(source_snapshot),
+                        source_snapshot: Some(Box::new(source_snapshot)),
                     };
                 },
             }
@@ -156,7 +157,7 @@ impl CompactionPipeline<'_> {
             None
         };
 
-        let context_assembler = self.session.runtime_services().context_assembler_arc();
+        let context_assembler = &self.context_assembler;
         let keep_recent_turns = self
             .strategy
             .keep_recent_turns()
@@ -232,7 +233,7 @@ impl CompactionPipeline<'_> {
             return CompactionPipelineOutcome::Failed {
                 error,
                 llm_attempt: execution.llm_attempt,
-                source_snapshot: Some(source_snapshot),
+                source_snapshot: Some(Box::new(source_snapshot)),
             };
         }
 
@@ -336,15 +337,13 @@ struct CompactHookContext {
 
 impl CompactHookContext {
     fn build_context(&self, compaction: Option<&CompactResult>) -> RuntimeCompactContext {
-        RuntimeCompactContext::new(
+        runtime_compact_context(
             self.call.clone(),
-            CompactPayload::new(
-                self.trigger,
-                self.message_count,
-                compaction.map(|compaction| compaction.pre_tokens),
-                compaction.map(|compaction| compaction.post_tokens),
-                compaction.map(|compaction| compaction.summary.clone()),
-            ),
+            self.trigger,
+            self.message_count,
+            compaction.map(|compaction| compaction.pre_tokens),
+            compaction.map(|compaction| compaction.post_tokens),
+            compaction.map(|compaction| compaction.summary.clone()),
         )
     }
 }

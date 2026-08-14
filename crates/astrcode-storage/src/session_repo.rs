@@ -3,10 +3,9 @@
 //! 管理按项目组织的会话事件日志，目录结构为：
 //! `~/.astrcode/projects/<project>/sessions/<session>/`
 
-#[cfg(unix)]
-use std::fs::File;
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
+    fs::File,
     io::Write as _,
     path::{Path, PathBuf},
     sync::{Arc, OnceLock, Weak},
@@ -100,6 +99,9 @@ fn event_consumer_state_path(
 }
 
 const EVENT_CONSUMER_STATE_VERSION: u8 = 3;
+
+/// Initial reason recorded on a durability marker while fsync is in flight.
+const FSYNC_CONFIRMATION_PENDING: &str = "fsync confirmation is pending";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -276,8 +278,220 @@ struct SessionMeta {
     ///
     /// 这是进程内 storage 一致性边界；OS owner lease 只处理跨进程目录所有权。
     commit_lane: Semaphore,
+    /// 一次 fsync 返回模糊失败后的 sticky 状态。
+    ///
+    /// `PendingProjection` 持有已写入 EventLog 但尚未对读模型可见的精确批次；
+    /// `Published` 表示普通 buffered append 早已可见，但后续 fsync 的结果不确定。
+    uncertain_durability: Mutex<Option<UncertainDurability>>,
     /// 串行化 durable consumer 状态，避免慢订阅者阻塞事件日志提交。
     consumer_state_lane: Semaphore,
+}
+
+enum UncertainDurability {
+    PendingProjection {
+        batch: PreparedProjectionBatch,
+        through_seq: u64,
+        reason: String,
+    },
+    Published {
+        through_seq: u64,
+        reason: String,
+    },
+}
+
+impl UncertainDurability {
+    const fn through_seq(&self) -> u64 {
+        match self {
+            Self::PendingProjection { through_seq, .. } | Self::Published { through_seq, .. } => {
+                *through_seq
+            },
+        }
+    }
+
+    fn reason(&self) -> &str {
+        match self {
+            Self::PendingProjection { reason, .. } | Self::Published { reason, .. } => reason,
+        }
+    }
+
+    fn set_reason(&mut self, reason: String) {
+        match self {
+            Self::PendingProjection {
+                reason: current, ..
+            }
+            | Self::Published {
+                reason: current, ..
+            } => *current = reason,
+        }
+    }
+
+    fn error(&self, session_id: &SessionId) -> StorageError {
+        StorageError::DurabilityUncertain {
+            session_id: session_id.clone(),
+            through_seq: self.through_seq(),
+            reason: self.reason().to_owned(),
+        }
+    }
+}
+
+impl SessionMeta {
+    async fn acquire_commit_lane(&self) -> Result<tokio::sync::SemaphorePermit<'_>, StorageError> {
+        self.commit_lane
+            .acquire()
+            .await
+            .map_err(|_| StorageError::Io(std::io::Error::other("session commit lane closed")))
+    }
+
+    async fn acquire_confirmed_commit_lane(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<tokio::sync::SemaphorePermit<'_>, StorageError> {
+        let permit = self.acquire_commit_lane().await?;
+        self.ensure_no_uncertain_durability(session_id)?;
+        Ok(permit)
+    }
+
+    fn ensure_no_uncertain_durability(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        match self.uncertain_durability.lock().as_ref() {
+            Some(uncertain) => Err(uncertain.error(session_id)),
+            None => Ok(()),
+        }
+    }
+}
+
+fn uncertain_seq_mismatch(expected: u64, actual: u64) -> StorageError {
+    StorageError::InvalidEvent(format!(
+        "durability confirmation expected pending seq {expected}, found {actual}"
+    ))
+}
+
+fn sequence_overflow() -> StorageError {
+    StorageError::CorruptLog("session event sequence overflow".into())
+}
+
+fn append_session_id(events: &[DurableEvent]) -> Result<SessionId, StorageError> {
+    events
+        .first()
+        .map(|event| event.session_id.clone())
+        .ok_or_else(|| StorageError::InvalidEvent("event batch cannot be empty".into()))
+}
+
+/// The event log must sit exactly at the batch's first seq before an append.
+async fn ensure_log_positioned_for(
+    meta: &SessionMeta,
+    prepared: &PreparedProjectionBatch,
+) -> Result<(), StorageError> {
+    let expected_seq = prepared.first_seq();
+    let log_next_seq = meta.log.count().await?;
+    if log_next_seq != expected_seq {
+        return Err(StorageError::CorruptLog(format!(
+            "event log next seq {log_next_seq} does not match projection next seq {expected_seq}"
+        )));
+    }
+    Ok(())
+}
+
+fn update_uncertain_reason(
+    meta: &SessionMeta,
+    session_id: &SessionId,
+    expected_through_seq: u64,
+    reason: String,
+) -> StorageError {
+    let mut state = meta.uncertain_durability.lock();
+    let Some(uncertain) = state.as_mut() else {
+        return StorageError::CorruptLog(
+            "durability marker disappeared before fsync completed".into(),
+        );
+    };
+    if uncertain.through_seq() != expected_through_seq {
+        return uncertain_seq_mismatch(expected_through_seq, uncertain.through_seq());
+    }
+    uncertain.set_reason(reason);
+    uncertain.error(session_id)
+}
+
+fn clear_uncertain(
+    meta: &SessionMeta,
+    expected_through_seq: u64,
+) -> Result<UncertainDurability, StorageError> {
+    let mut state = meta.uncertain_durability.lock();
+    match state.take() {
+        Some(uncertain) if uncertain.through_seq() == expected_through_seq => Ok(uncertain),
+        Some(uncertain) => {
+            let actual_through_seq = uncertain.through_seq();
+            // Put the marker back: only the expected boundary may be cleared.
+            *state = Some(uncertain);
+            Err(uncertain_seq_mismatch(
+                expected_through_seq,
+                actual_through_seq,
+            ))
+        },
+        None => Err(StorageError::CorruptLog(
+            "durability marker disappeared before confirmation completed".into(),
+        )),
+    }
+}
+
+async fn apply_confirmed_projection(
+    meta: &SessionMeta,
+    expected_through_seq: u64,
+) -> Result<Vec<StoredEvent>, StorageError> {
+    let pending_batch = {
+        let state = meta.uncertain_durability.lock();
+        let Some(uncertain) = state.as_ref() else {
+            return Err(StorageError::CorruptLog(
+                "durability marker disappeared before projection publication".into(),
+            ));
+        };
+        if uncertain.through_seq() != expected_through_seq {
+            return Err(uncertain_seq_mismatch(
+                expected_through_seq,
+                uncertain.through_seq(),
+            ));
+        }
+        match uncertain {
+            UncertainDurability::PendingProjection { batch, .. } => Some(batch.clone()),
+            UncertainDurability::Published { .. } => None,
+        }
+    };
+
+    let Some(batch) = pending_batch else {
+        clear_uncertain(meta, expected_through_seq)?;
+        return Ok(Vec::new());
+    };
+    let log_next_seq = meta.log.count().await?;
+    let expected_next_seq = expected_through_seq
+        .checked_add(1)
+        .ok_or_else(sequence_overflow)?;
+    // A live pending marker implies its append already committed, so the log
+    // must sit exactly past the batch; anything else is corruption.
+    if log_next_seq != expected_next_seq {
+        return Err(StorageError::CorruptLog(format!(
+            "event log next seq {log_next_seq} does not match pending durability boundary \
+             {expected_next_seq}"
+        )));
+    }
+
+    let projection_next_seq = meta
+        .projection
+        .snapshot()
+        .await
+        .stats
+        .last_seq
+        .checked_add(1)
+        .ok_or_else(sequence_overflow)?;
+    // The commit lane blocks other appends while the marker is alive, so the
+    // projection cannot have advanced past the pending batch.
+    let stored = if projection_next_seq == batch.first_seq() {
+        meta.projection.apply_committed(batch).await
+    } else {
+        return Err(StorageError::CorruptLog(format!(
+            "projection next seq {projection_next_seq} does not match pending batch start {}",
+            batch.first_seq()
+        )));
+    };
+    clear_uncertain(meta, expected_through_seq)?;
+    Ok(stored)
 }
 
 struct SessionProjection {
@@ -424,6 +638,18 @@ impl FileSystemSessionRepository {
     #[cfg(feature = "testing")]
     pub fn for_testing(projects_base: PathBuf) -> Self {
         Self::with_projects_base(projects_base)
+    }
+
+    #[cfg(feature = "testing")]
+    pub async fn fail_next_durable_sync_for_testing(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), StorageError> {
+        self.get_or_open_meta(session_id)
+            .await?
+            .log
+            .fail_next_sync()
+            .await
     }
 
     /// 根据 `working_dir` 计算新会话的存储目录。
@@ -593,6 +819,7 @@ impl FileSystemSessionRepository {
             dir,
             projection: SessionProjection::new(projection),
             commit_lane: Semaphore::new(1),
+            uncertain_durability: Mutex::new(None),
             consumer_state_lane: Semaphore::new(1),
         });
 
@@ -666,6 +893,7 @@ impl EventReader for FileSystemSessionRepository {
         session_id: &SessionId,
     ) -> Result<Vec<StoredEvent>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
         meta.log.replay_all().await
     }
 
@@ -681,6 +909,7 @@ impl EventReader for FileSystemSessionRepository {
         cursor: &Cursor,
     ) -> Result<Vec<StoredEvent>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
         let seq = parse_cursor(cursor)?;
         meta.log.replay_after(seq).await
     }
@@ -692,6 +921,7 @@ impl EventReader for FileSystemSessionRepository {
         max_events: usize,
     ) -> Result<Vec<StoredEvent>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
         let seq = parse_cursor(cursor)?;
         meta.log.replay_after_limited(seq, max_events).await
     }
@@ -702,6 +932,7 @@ impl EventReader for FileSystemSessionRepository {
         max_events: usize,
     ) -> Result<Vec<StoredEvent>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
         meta.log.replay_from_start_limited(max_events).await
     }
 
@@ -934,6 +1165,7 @@ impl SessionEventJournal for FileSystemSessionRepository {
                 dir,
                 projection: SessionProjection::new(projection),
                 commit_lane: Semaphore::new(1),
+                uncertain_durability: Mutex::new(None),
                 consumer_state_lane: Semaphore::new(1),
             }),
         );
@@ -945,32 +1177,133 @@ impl SessionEventJournal for FileSystemSessionRepository {
         &self,
         events: Vec<DurableEvent>,
     ) -> Result<Vec<StoredEvent>, StorageError> {
-        let session_id = events
-            .first()
-            .map(|event| event.session_id.clone())
-            .ok_or_else(|| StorageError::InvalidEvent("event batch cannot be empty".into()))?;
+        let session_id = append_session_id(&events)?;
         let meta = self.get_or_open_meta(&session_id).await?;
-        let _permit =
-            meta.commit_lane.acquire().await.map_err(|_| {
-                StorageError::Io(std::io::Error::other("session commit lane closed"))
-            })?;
+        let _permit = meta.acquire_confirmed_commit_lane(&session_id).await?;
         let prepared = meta.projection.prepare_batch(events).await?;
-        let expected_seq = prepared.first_seq();
-        let log_next_seq = meta.log.count().await?;
-        if log_next_seq != expected_seq {
-            return Err(StorageError::CorruptLog(format!(
-                "event log next seq {log_next_seq} does not match projection next seq \
-                 {expected_seq}"
-            )));
-        }
+        ensure_log_positioned_for(&meta, &prepared).await?;
         let committed = meta.log.append_prepared_batch(prepared).await?;
         let stored = meta.projection.apply_committed(committed).await;
         Ok(stored)
     }
 
+    async fn append_events_and_sync(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let session_id = append_session_id(&events)?;
+        let meta = self.get_or_open_meta(&session_id).await?;
+        let _permit = meta.acquire_confirmed_commit_lane(&session_id).await?;
+        let prepared = meta.projection.prepare_batch(events).await?;
+        ensure_log_positioned_for(&meta, &prepared).await?;
+
+        let through_seq = prepared
+            .events()
+            .last()
+            .map(|event| event.seq)
+            .ok_or_else(crate::error::short_batch_result)?;
+        *meta.uncertain_durability.lock() = Some(UncertainDurability::PendingProjection {
+            batch: prepared.clone(),
+            through_seq,
+            reason: FSYNC_CONFIRMATION_PENDING.into(),
+        });
+        if let Err(error) = meta.log.append_prepared_batch(prepared).await {
+            // The append failed before any bytes were committed, so the marker
+            // is always safe to drop; keep the original append error.
+            let _ = clear_uncertain(&meta, through_seq);
+            return Err(error);
+        }
+        if let Err(error) = meta.log.force_sync().await {
+            return Err(update_uncertain_reason(
+                &meta,
+                &session_id,
+                through_seq,
+                error.to_string(),
+            ));
+        }
+
+        apply_confirmed_projection(&meta, through_seq).await
+    }
+
     async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        meta.log.force_sync().await
+        let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
+        let next_seq = meta.log.count().await?;
+        let through_seq = next_seq.checked_sub(1).ok_or_else(|| {
+            StorageError::CorruptLog("created session has an empty event log".into())
+        })?;
+        *meta.uncertain_durability.lock() = Some(UncertainDurability::Published {
+            through_seq,
+            reason: FSYNC_CONFIRMATION_PENDING.into(),
+        });
+
+        if let Err(error) = meta.log.force_sync().await {
+            return Err(update_uncertain_reason(
+                &meta,
+                session_id,
+                through_seq,
+                error.to_string(),
+            ));
+        }
+        clear_uncertain(&meta, through_seq)?;
+        Ok(())
+    }
+
+    async fn retry_uncertain_sync(
+        &self,
+        session_id: &SessionId,
+        expected_through_seq: u64,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.acquire_commit_lane().await?;
+        let pending_through_seq = meta
+            .uncertain_durability
+            .lock()
+            .as_ref()
+            .map(UncertainDurability::through_seq);
+        if let Some(actual_through_seq) = pending_through_seq {
+            if actual_through_seq != expected_through_seq {
+                return Err(uncertain_seq_mismatch(
+                    expected_through_seq,
+                    actual_through_seq,
+                ));
+            }
+        } else {
+            let log_next_seq = meta.log.count().await?;
+            let projection = meta.projection.snapshot().await;
+            let expected_next_seq = expected_through_seq
+                .checked_add(1)
+                .ok_or_else(sequence_overflow)?;
+            if log_next_seq == expected_next_seq
+                && projection.stats.last_seq == expected_through_seq
+            {
+                return Ok(Vec::new());
+            }
+            return Err(StorageError::InvalidEvent(format!(
+                "session {session_id} has no pending durability confirmation for seq \
+                 {expected_through_seq}"
+            )));
+        }
+
+        if let Err(error) = meta.log.force_sync().await {
+            return Err(update_uncertain_reason(
+                &meta,
+                session_id,
+                expected_through_seq,
+                error.to_string(),
+            ));
+        }
+
+        apply_confirmed_projection(&meta, expected_through_seq).await
+    }
+
+    async fn ensure_no_uncertain_durability(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), StorageError> {
+        let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
+        Ok(())
     }
 }
 
@@ -994,7 +1327,8 @@ impl SessionStore for FileSystemSessionRepository {
         seq: u64,
     ) -> Result<EventConsumerCheckpointOutcome, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        let _permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
+        let _commit_permit = meta.acquire_confirmed_commit_lane(session_id).await?;
+        let _consumer_permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
             StorageError::Io(std::io::Error::other("event consumer state lane closed"))
         })?;
         let event_count = meta.log.count().await?;
@@ -1032,7 +1366,8 @@ impl SessionStore for FileSystemSessionRepository {
             ));
         }
         let meta = self.get_or_open_meta(session_id).await?;
-        let _permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
+        let _commit_permit = meta.acquire_confirmed_commit_lane(session_id).await?;
+        let _consumer_permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
             StorageError::Io(std::io::Error::other("event consumer state lane closed"))
         })?;
         let event_count = meta.log.count().await?;
@@ -1073,7 +1408,8 @@ impl SessionStore for FileSystemSessionRepository {
         paused: bool,
     ) -> Result<EventConsumerState, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        let _permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
+        let _commit_permit = meta.acquire_confirmed_commit_lane(session_id).await?;
+        let _consumer_permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
             StorageError::Io(std::io::Error::other("event consumer state lane closed"))
         })?;
         let path = event_consumer_state_path(&meta.dir, consumer_id)?;
@@ -1092,7 +1428,8 @@ impl SessionStore for FileSystemSessionRepository {
         reset: EventConsumerCheckpointReset,
     ) -> Result<EventConsumerState, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
-        let _permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
+        let _commit_permit = meta.acquire_confirmed_commit_lane(session_id).await?;
+        let _consumer_permit = meta.consumer_state_lane.acquire().await.map_err(|_| {
             StorageError::Io(std::io::Error::other("event consumer state lane closed"))
         })?;
         let path = event_consumer_state_path(&meta.dir, consumer_id)?;
@@ -1122,6 +1459,7 @@ impl SessionStore for FileSystemSessionRepository {
         cursor: &Cursor,
     ) -> Result<(), StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
         let model = meta.projection.snapshot().await;
         let latest_cursor = model.cursor();
         // Checkpoints are only written when the cursor matches the current
@@ -1137,8 +1475,7 @@ impl SessionStore for FileSystemSessionRepository {
     }
 
     async fn open_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
-        let _ = self.get_or_open_meta(session_id).await?;
-        Ok(())
+        self.ensure_no_uncertain_durability(session_id).await
     }
 
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
@@ -1241,6 +1578,7 @@ impl SessionStore for FileSystemSessionRepository {
         snapshot: CompactSnapshotInput,
     ) -> Result<Option<String>, StorageError> {
         let meta = self.get_or_open_meta(session_id).await?;
+        let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
 
         let dir = meta.dir.join("compact-snapshots");
         tokio::fs::create_dir_all(&dir).await?;

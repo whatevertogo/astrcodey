@@ -10,6 +10,8 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(test)]
+use astrcode_extension_sdk::extension::internal::command_discovery_context;
 use astrcode_extension_sdk::{
     builder::{ExtensionToolDefinition, manifest},
     discovery::DiscoveryCache,
@@ -97,7 +99,7 @@ impl ToolHandler for SkillToolHandler {
     async fn plan(&self, ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
         let home = hostpaths::user_home_dir();
         let roots = skill_roots(ctx.working_dir(), Some(&home));
-        Ok(ToolPlan::from_resources(
+        Ok(ToolPlan::new(
             roots
                 .into_iter()
                 .map(|root| ResourceAccess::search_file(root.dir, true)),
@@ -171,6 +173,9 @@ impl CommandDiscoveryHandler for SkillCommandDiscovery {
                     requires_idle: false,
                     argument_completions: false,
                     priority: 0,
+                    availability:
+                        astrcode_extension_sdk::extension::CommandAvailability::AllTransports,
+                    execution: astrcode_extension_sdk::extension::CommandExecution::Extension,
                 };
                 DiscoveredCommand::new(
                     cmd,
@@ -787,7 +792,7 @@ mod tests {
             .call()
             .clone();
         let commands = discovery
-            .discover(CommandDiscoveryContext::from_runtime(call, &workspace, 1))
+            .discover(command_discovery_context(call, &workspace, 1))
             .await
             .unwrap();
 

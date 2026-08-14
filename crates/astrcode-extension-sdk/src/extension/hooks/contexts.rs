@@ -8,12 +8,13 @@ use std::{
 
 use astrcode_core::{
     compaction::CompactTrigger,
+    llm::LlmProviderBindings,
     message_attachment::MessageAttachment,
     types::{SessionId, ToolCallId},
 };
 use tokio_util::sync::CancellationToken;
 
-use super::types::ExchangeSummary;
+use super::types::{ExchangeSummary, ProviderContributionId, ProviderRequestId};
 use crate::{
     config::ModelSelection,
     extension::{ExtensionCall, ExtensionCallContext, SessionCallContext, WorkspaceCallContext},
@@ -33,6 +34,7 @@ pub struct RuntimeHookCallContext {
     model: ModelSelection,
     session_store_dir: Option<PathBuf>,
     event_tx: Option<crate::event::EventSender>,
+    llm_providers: Option<LlmProviderBindings>,
     cancellation: CancellationToken,
 }
 
@@ -50,6 +52,7 @@ impl RuntimeHookCallContext {
             model,
             session_store_dir,
             event_tx: None,
+            llm_providers: None,
             cancellation: CancellationToken::new(),
         }
     }
@@ -61,6 +64,11 @@ impl RuntimeHookCallContext {
 
     pub fn with_event_tx(mut self, event_tx: Option<crate::event::EventSender>) -> Self {
         self.event_tx = event_tx;
+        self
+    }
+
+    pub fn with_llm_providers(mut self, llm_providers: LlmProviderBindings) -> Self {
+        self.llm_providers = Some(llm_providers);
         self
     }
 
@@ -93,6 +101,10 @@ impl RuntimeHookCallContext {
         self.event_tx.as_ref()
     }
 
+    pub fn llm_providers(&self) -> Option<&LlmProviderBindings> {
+        self.llm_providers.as_ref()
+    }
+
     pub fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
     }
@@ -113,8 +125,7 @@ pub struct HookContext<P> {
 
 impl<P> HookContext<P> {
     /// Attributes a per-extension view of the dispatcher input at its current state.
-    #[doc(hidden)]
-    pub fn from_runtime(call: ExtensionCallContext, input: &HookInput<P>) -> Self
+    pub(crate) fn from_runtime(call: ExtensionCallContext, input: &HookInput<P>) -> Self
     where
         P: Clone,
     {
@@ -184,7 +195,7 @@ pub struct HookInput<P> {
 }
 
 impl<P> HookInput<P> {
-    pub fn new(call: RuntimeHookCallContext, payload: P) -> Self {
+    pub(crate) fn new(call: RuntimeHookCallContext, payload: P) -> Self {
         Self { call, payload }
     }
 
@@ -192,7 +203,7 @@ impl<P> HookInput<P> {
         &self.call
     }
 
-    pub fn map_payload(mut self, map: impl FnOnce(P) -> P) -> Self {
+    pub(crate) fn map_payload(mut self, map: impl FnOnce(P) -> P) -> Self {
         self.payload = map(self.payload);
         self
     }
@@ -221,8 +232,7 @@ pub struct ContinueAfterStopPayload {
 }
 
 impl ContinueAfterStopPayload {
-    #[doc(hidden)]
-    pub fn new(
+    pub(crate) fn new(
         assistant_text: impl Into<String>,
         finish_reason: impl Into<String>,
         continuations_this_turn: u32,
@@ -261,8 +271,7 @@ pub struct UserMessageEnvelopePayload {
 }
 
 impl UserMessageEnvelopePayload {
-    #[doc(hidden)]
-    pub fn new(text: impl Into<String>, attachments: Vec<MessageAttachment>) -> Self {
+    pub(crate) fn new(text: impl Into<String>, attachments: Vec<MessageAttachment>) -> Self {
         Self {
             text: Arc::from(text.into()),
             attachments: attachments.into(),
@@ -277,13 +286,11 @@ impl UserMessageEnvelopePayload {
         &self.attachments
     }
 
-    #[doc(hidden)]
-    pub fn replace_text(&mut self, text: String) {
+    pub(crate) fn replace_text(&mut self, text: String) {
         self.text = Arc::from(text);
     }
 
-    #[doc(hidden)]
-    pub fn append_text(&mut self, text: &str) {
+    pub(crate) fn append_text(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
@@ -313,8 +320,7 @@ pub struct PreToolUsePayload {
 }
 
 impl PreToolUsePayload {
-    #[doc(hidden)]
-    pub fn new(
+    pub(crate) fn new(
         call_id: ToolCallId,
         tool_name: impl Into<String>,
         tool_input: serde_json::Value,
@@ -350,8 +356,7 @@ impl PreToolUsePayload {
         &self.available_tools
     }
 
-    #[doc(hidden)]
-    pub fn replace_tool_input(&mut self, tool_input: serde_json::Value) {
+    pub(crate) fn replace_tool_input(&mut self, tool_input: serde_json::Value) {
         self.tool_input = tool_input;
     }
 }
@@ -372,8 +377,7 @@ pub struct PostToolUsePayload {
 }
 
 impl PostToolUsePayload {
-    #[doc(hidden)]
-    pub fn new(
+    pub(crate) fn new(
         call_id: ToolCallId,
         tool_name: impl Into<String>,
         tool_input: serde_json::Value,
@@ -403,8 +407,7 @@ impl PostToolUsePayload {
         &self.tool_result
     }
 
-    #[doc(hidden)]
-    pub fn replace_result_content(&mut self, content: String) {
+    pub(crate) fn replace_result_content(&mut self, content: String) {
         self.tool_result.error = self.tool_result.is_error.then(|| content.clone());
         self.tool_result.content = content;
     }
@@ -419,28 +422,34 @@ pub type RuntimePostToolUseContext = HookInput<PostToolUsePayload>;
 /// Provider 钩子载荷。
 #[derive(Clone, Debug)]
 pub struct ProviderPayload {
+    request_id: ProviderRequestId,
     messages: Arc<[crate::llm::LlmMessage]>,
 }
 
 impl ProviderPayload {
-    #[doc(hidden)]
-    pub fn new(messages: Vec<crate::llm::LlmMessage>) -> Self {
+    pub(crate) fn new(
+        request_id: ProviderRequestId,
+        messages: Vec<crate::llm::LlmMessage>,
+    ) -> Self {
         Self {
+            request_id,
             messages: messages.into(),
         }
+    }
+
+    pub fn request_id(&self) -> &ProviderRequestId {
+        &self.request_id
     }
 
     pub fn messages(&self) -> &[crate::llm::LlmMessage] {
         &self.messages
     }
 
-    #[doc(hidden)]
-    pub fn replace_messages(&mut self, messages: Vec<crate::llm::LlmMessage>) {
+    pub(crate) fn replace_messages(&mut self, messages: Vec<crate::llm::LlmMessage>) {
         self.messages = messages.into();
     }
 
-    #[doc(hidden)]
-    pub fn append_messages(&mut self, messages: Vec<crate::llm::LlmMessage>) {
+    pub(crate) fn append_messages(&mut self, messages: Vec<crate::llm::LlmMessage>) {
         let mut merged = self.messages.to_vec();
         merged.extend(messages);
         self.messages = merged.into();
@@ -453,6 +462,59 @@ pub type ProviderContext = HookContext<ProviderPayload>;
 #[doc(hidden)]
 pub type RuntimeProviderContext = HookInput<ProviderPayload>;
 
+/// Durable-success acknowledgement for one exact prepared provider contribution.
+#[derive(Clone, Debug)]
+pub struct ProviderSettlementPayload {
+    request_id: ProviderRequestId,
+    contribution_id: ProviderContributionId,
+}
+
+impl ProviderSettlementPayload {
+    pub(crate) fn new(
+        request_id: ProviderRequestId,
+        contribution_id: ProviderContributionId,
+    ) -> Self {
+        Self {
+            request_id,
+            contribution_id,
+        }
+    }
+
+    pub fn request_id(&self) -> &ProviderRequestId {
+        &self.request_id
+    }
+
+    pub fn contribution_id(&self) -> &ProviderContributionId {
+        &self.contribution_id
+    }
+}
+
+/// Extension-attributed acknowledgement delivered after the provider request and its assistant
+/// durable facts have committed.
+pub type ProviderSettlementContext = HookContext<ProviderSettlementPayload>;
+
+/// Runtime facts needed to attribute provider acknowledgements to their original handlers.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct RuntimeProviderSettlementContext {
+    call: RuntimeHookCallContext,
+    request_id: ProviderRequestId,
+}
+
+impl RuntimeProviderSettlementContext {
+    pub(crate) fn new(call: RuntimeHookCallContext, request_id: ProviderRequestId) -> Self {
+        Self { call, request_id }
+    }
+
+    pub fn call(&self) -> &RuntimeHookCallContext {
+        &self.call
+    }
+
+    pub fn request_id(&self) -> &ProviderRequestId {
+        &self.request_id
+    }
+}
+
 /// PromptBuild 钩子载荷。
 #[derive(Clone, Debug)]
 pub struct PromptBuildPayload {
@@ -460,8 +522,7 @@ pub struct PromptBuildPayload {
 }
 
 impl PromptBuildPayload {
-    #[doc(hidden)]
-    pub fn new(tools: Vec<ToolDefinition>) -> Self {
+    pub(crate) fn new(tools: Vec<ToolDefinition>) -> Self {
         Self {
             tools: tools.into(),
         }
@@ -492,8 +553,7 @@ pub struct CompactPayload {
 }
 
 impl CompactPayload {
-    #[doc(hidden)]
-    pub fn new(
+    pub(crate) fn new(
         trigger: CompactTrigger,
         message_count: usize,
         pre_tokens: Option<usize>,
@@ -544,16 +604,14 @@ pub struct LifecyclePayload {
 }
 
 impl LifecyclePayload {
-    #[doc(hidden)]
-    pub fn new(last_exchange: Option<ExchangeSummary>) -> Self {
+    pub(crate) fn new(last_exchange: Option<ExchangeSummary>) -> Self {
         Self {
             last_exchange,
             mid_turn_user_messages_synced: 0,
         }
     }
 
-    #[doc(hidden)]
-    pub fn for_step_start(mut self, mid_turn_user_messages_synced: u32) -> Self {
+    pub(crate) fn for_step_start(mut self, mid_turn_user_messages_synced: u32) -> Self {
         self.mid_turn_user_messages_synced = mid_turn_user_messages_synced;
         self
     }
@@ -581,8 +639,7 @@ pub struct ToolDiscoveryContext {
 }
 
 impl ToolDiscoveryContext {
-    #[doc(hidden)]
-    pub fn from_runtime(
+    pub(crate) fn from_runtime(
         call: ExtensionCallContext,
         working_dir: impl Into<PathBuf>,
         generation: u64,
@@ -626,8 +683,7 @@ pub struct CommandDiscoveryContext {
 }
 
 impl CommandDiscoveryContext {
-    #[doc(hidden)]
-    pub fn from_runtime(
+    pub(crate) fn from_runtime(
         call: ExtensionCallContext,
         working_dir: impl Into<PathBuf>,
         generation: u64,
@@ -677,8 +733,7 @@ pub struct CommandContext {
 }
 
 impl CommandContext {
-    #[doc(hidden)]
-    pub fn from_runtime(
+    pub(crate) fn from_runtime(
         call: SessionCallContext,
         working_dir: PathBuf,
         model: ModelSelection,
@@ -737,8 +792,7 @@ pub struct CommandCompletionContext {
 }
 
 impl CommandCompletionContext {
-    #[doc(hidden)]
-    pub fn for_runtime(command: CommandContext, cursor: usize) -> Self {
+    pub(crate) fn for_runtime(command: CommandContext, cursor: usize) -> Self {
         Self {
             call: command.call,
             working_dir: command.working_dir,

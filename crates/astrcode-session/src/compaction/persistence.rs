@@ -13,16 +13,27 @@ pub(crate) async fn persist_compaction(
     snapshot: &ContextSnapshot,
     strategy: CompactStrategy,
 ) -> Result<(), SessionError> {
+    let retained_messages = snapshot
+        .retained_transcript_messages(&compaction.retained_messages)
+        .ok_or_else(|| {
+            StorageError::InvalidEvent(
+                "compact retained messages are not the source transcript suffix".into(),
+            )
+        })?;
     let fingerprint = transcript_prefix_fingerprint(&snapshot.system_prompt, &snapshot.messages)
         .map_err(|error| SessionError::Storage(StorageError::Serialization(error)))?;
     let event = session
-        .emit_durable(
+        .emit_durable_and_sync(
             None,
-            transcript_rewritten_payload(compaction, snapshot.source_seq, fingerprint, strategy),
+            transcript_rewritten_payload(
+                compaction,
+                retained_messages,
+                snapshot.source_seq,
+                fingerprint,
+                strategy,
+            ),
         )
         .await?;
-
-    session.sync_durable_events().await?;
 
     if let Err(error) = session.checkpoint(&event.seq.to_string()).await {
         tracing::warn!(

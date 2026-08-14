@@ -3,7 +3,13 @@
 //! 通过 crate feature `testing` 暴露给跨 crate 集成测试；本 crate 内单元测试也可启用该 feature。
 //! 不要用 `#[cfg(test)]` 单独 gating：否则 `astrcode-server` 等集成测试无法链接此模块。
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
+};
 
 use astrcode_core::{
     event::{DurableEvent, DurableEventPayload, StoredEvent},
@@ -31,6 +37,8 @@ use crate::{
 #[derive(Default)]
 pub struct InMemoryEventStore {
     sessions: Mutex<HashMap<SessionId, InMemorySession>>,
+    fail_next_sync: AtomicBool,
+    sync_count: AtomicUsize,
 }
 
 struct InMemorySession {
@@ -53,6 +61,14 @@ impl InMemoryEventStore {
     /// 创建新的空内存存储。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn fail_next_sync(&self) {
+        self.fail_next_sync.store(true, Ordering::Release);
+    }
+
+    pub fn sync_count(&self) -> usize {
+        self.sync_count.load(Ordering::Acquire)
     }
 }
 
@@ -271,6 +287,19 @@ impl SessionEventJournal for InMemoryEventStore {
         let stored_events = prepared.apply_to_model(&mut session.projection);
         session.events.extend(stored_events.iter().cloned());
         Ok(stored_events)
+    }
+
+    async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
+        if !self.sessions.lock().await.contains_key(session_id) {
+            return Err(StorageError::NotFound(session_id.clone()));
+        }
+        self.sync_count.fetch_add(1, Ordering::AcqRel);
+        if self.fail_next_sync.swap(false, Ordering::AcqRel) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected durable sync failure",
+            )));
+        }
+        Ok(())
     }
 }
 

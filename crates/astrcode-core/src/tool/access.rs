@@ -92,65 +92,29 @@ impl ResourceAccess {
     }
 }
 
-/// 工具在一次调用中声明的完整资源集合。
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ResourceSet(Vec<ResourceAccess>);
-
-impl ResourceSet {
-    pub fn new(resources: impl IntoIterator<Item = ResourceAccess>) -> Self {
-        Self(resources.into_iter().collect())
-    }
-
-    pub fn as_slice(&self) -> &[ResourceAccess] {
-        &self.0
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &ResourceAccess> {
-        self.0.iter()
-    }
-
-    pub fn into_vec(self) -> Vec<ResourceAccess> {
-        self.0
-    }
-}
-
-impl From<Vec<ResourceAccess>> for ResourceSet {
-    fn from(resources: Vec<ResourceAccess>) -> Self {
-        Self(resources)
-    }
-}
-
 /// 工具对最终参数的纯资源规划结果。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ToolPlan {
-    resources: ResourceSet,
+    resources: Vec<ResourceAccess>,
 }
 
 impl ToolPlan {
-    pub fn new(resources: impl Into<ResourceSet>) -> Self {
+    pub fn new(resources: impl IntoIterator<Item = ResourceAccess>) -> Self {
         Self {
-            resources: resources.into(),
+            resources: resources.into_iter().collect(),
         }
     }
 
     pub fn opaque() -> Self {
-        Self::from_resources([ResourceAccess::Opaque])
-    }
-
-    pub fn from_resources(resources: impl IntoIterator<Item = ResourceAccess>) -> Self {
-        Self::new(ResourceSet::new(resources))
+        Self::new([ResourceAccess::Opaque])
     }
 
     pub fn host(resource: HostResource) -> Self {
-        Self::from_resources([ResourceAccess::host(resource)])
+        Self::new([ResourceAccess::host(resource)])
     }
 
-    pub fn resources(&self) -> &ResourceSet {
+    pub fn resources(&self) -> &[ResourceAccess] {
         &self.resources
-    }
-
-    pub fn into_resources(self) -> ResourceSet {
-        self.resources
     }
 }
 
@@ -166,7 +130,7 @@ pub struct ResourceLease {
 impl ResourceLease {
     pub fn from_plan(plan: &ToolPlan) -> Self {
         Self {
-            resources: Arc::from(plan.resources().as_slice()),
+            resources: Arc::from(plan.resources()),
         }
     }
 
@@ -253,12 +217,12 @@ mod tests {
 
     #[test]
     fn resource_lease_enforces_domain_operation_and_recursive_path_boundaries() {
-        let lease = ResourceLease::from_plan(&ToolPlan::new(ResourceSet::new([
+        let lease = ResourceLease::from_plan(&ToolPlan::new([
             ResourceAccess::search_file("/workspace/src", true),
             ResourceAccess::read_write_file("/workspace/Cargo.toml"),
             ResourceAccess::host(HostResource::Process),
             ResourceAccess::host(HostResource::ToolResultArtifact),
-        ])));
+        ]));
 
         let cases = [
             (
@@ -284,7 +248,7 @@ mod tests {
         }
 
         let non_recursive =
-            ResourceLease::from_plan(&ToolPlan::from_resources([ResourceAccess::search_file(
+            ResourceLease::from_plan(&ToolPlan::new([ResourceAccess::search_file(
                 "/workspace/src",
                 false,
             )]));

@@ -14,8 +14,8 @@ use astrcode_core::{
         DurableEvent, DurableEventPayload, Event, PersistedSystemPrompt, SessionStarted,
         StoredEvent, SystemPromptSource,
     },
-    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    tool::{SessionToolSelection, ToolDefinition},
+    llm::{LlmError, LlmEvent, LlmProvider, LlmRequest, ModelLimits},
+    tool::SessionToolSelection,
     types::SessionId,
 };
 use astrcode_extension_sdk::runtime_ports::{NoopRuntimePorts, TurnHooks};
@@ -48,10 +48,9 @@ pub(crate) struct UnusedLlm;
 
 #[async_trait::async_trait]
 impl LlmProvider for UnusedLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         unreachable!("test does not call the LLM")
     }
@@ -162,7 +161,7 @@ pub(crate) fn test_runtime_services_with_hooks(
     turn_hooks: Arc<dyn TurnHooks>,
 ) -> Arc<crate::SessionRuntimeServices> {
     let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
-    Arc::new(crate::SessionRuntimeServices::new(
+    Arc::new(crate::SessionRuntimeServices::new_with_context_assembler(
         llm.clone(),
         llm,
         test_effective_config(ContextSettings::default()),

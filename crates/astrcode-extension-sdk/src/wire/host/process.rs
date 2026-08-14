@@ -6,8 +6,6 @@ pub const HOST_PROCESS_DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const HOST_PROCESS_MAX_TIMEOUT_MS: u64 = 600_000;
 pub const HOST_PROCESS_MAX_STDIN_BYTES: usize = 1024 * 1024;
 pub const HOST_PROCESS_MAX_WAIT_MS: u64 = 600_000;
-pub const HOST_PROCESS_DEFAULT_PTY_ROWS: u16 = 24;
-pub const HOST_PROCESS_DEFAULT_PTY_COLS: u16 = 80;
 
 use super::{deserialize_bounded_utf8, deserialize_optional_bounded_utf8, serialize_bounded_utf8};
 
@@ -64,18 +62,6 @@ pub struct HostProcessOutput {
     pub combined_truncated: bool,
 }
 
-/// I/O transport used by a session-owned process handle.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum HostProcessIo {
-    #[default]
-    Pipes,
-    Pty {
-        rows: u16,
-        cols: u16,
-    },
-}
-
 /// Lifetime owner for a process handle.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -97,32 +83,19 @@ pub struct HostProcessStartRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     #[serde(default)]
-    pub io: HostProcessIo,
-    #[serde(default)]
     pub lifetime: HostProcessLifetime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
 }
 
 impl HostProcessStartRequest {
-    pub fn pipes(command: impl Into<String>) -> Self {
+    pub fn new(command: impl Into<String>) -> Self {
         Self {
             command: command.into(),
             args: Vec::new(),
             cwd: None,
-            io: HostProcessIo::Pipes,
             lifetime: HostProcessLifetime::Session,
             timeout_ms: None,
-        }
-    }
-
-    pub fn pty(command: impl Into<String>) -> Self {
-        Self {
-            io: HostProcessIo::Pty {
-                rows: HOST_PROCESS_DEFAULT_PTY_ROWS,
-                cols: HOST_PROCESS_DEFAULT_PTY_COLS,
-            },
-            ..Self::pipes(command)
         }
     }
 }
@@ -238,17 +211,8 @@ impl HostProcessInputRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct HostProcessResizeRequest {
-    pub id: String,
-    pub rows: u16,
-    pub cols: u16,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub struct HostProcessStatusOutput {
     pub id: String,
-    pub io: HostProcessIo,
     pub state: HostProcessState,
 }
 

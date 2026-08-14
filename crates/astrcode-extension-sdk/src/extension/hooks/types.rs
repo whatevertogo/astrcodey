@@ -45,6 +45,14 @@ pub struct ToolHookRegistration<H: ?Sized> {
     pub handler: Arc<H>,
 }
 
+/// 一个同步工具参数变换或准入处理器的注册声明。
+#[derive(Clone)]
+pub struct ToolUseRegistration<H: ?Sized> {
+    pub priority: i32,
+    pub target: ToolHookTarget,
+    pub handler: Arc<H>,
+}
+
 #[derive(Clone)]
 pub struct ContinueAfterStopRegistration<H: ?Sized> {
     pub priority: i32,
@@ -104,6 +112,54 @@ impl CompactContributions {
 pub enum ProviderEvent {
     BeforeRequest,
     AfterResponse,
+}
+
+/// Host identity for one concrete provider request attempt.
+///
+/// A retry after context compaction receives a new identity. Extensions must use this value only
+/// to correlate a prepared contribution with its eventual durable-success acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProviderRequestId(String);
+
+impl ProviderRequestId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ProviderRequestId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// Extension-owned identity for the exact pending state represented by a provider contribution.
+///
+/// The identity must change whenever that pending state is replaced. The host returns it only
+/// after the corresponding provider request and assistant durable facts have committed.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProviderContributionId(String);
+
+impl ProviderContributionId {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(value.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ProviderContributionId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
 }
 
 // ─── Extension error ───────────────────────────────────────────────────

@@ -2,16 +2,18 @@
 
 use std::sync::Arc;
 
-use astrcode_context::{ContextPrepareInput, ContextSnapshot};
+use astrcode_context::{ContextAssembler, ContextPrepareInput, ContextSnapshot};
 use astrcode_core::{
     compaction::CompactStrategy,
     llm::{LlmMessage, LlmProvider},
     tool::ToolDefinition,
 };
-use astrcode_extension_sdk::{extension::RuntimeHookCallContext, runtime_ports::TurnHooks};
+use astrcode_extension_sdk::{
+    extension::internal::RuntimeHookCallContext, runtime_ports::TurnHooks,
+};
 
 use super::{
-    circuit_breaker::CompactCircuitBreaker,
+    circuit_breaker::{CompactAttemptPermit, CompactCircuitBreaker},
     pipeline::{CompactionPipeline, CompactionPipelineOutcome, try_provider_input_tokens},
 };
 use crate::{
@@ -38,6 +40,7 @@ pub(crate) struct PreparedProviderHistory {
 pub(crate) struct CompactionHost<'a> {
     pub session: &'a Session,
     pub llm: &'a Arc<dyn LlmProvider>,
+    pub context_assembler: &'a Arc<dyn ContextAssembler>,
     pub hook_call: RuntimeHookCallContext,
     pub extension_runner: &'a dyn TurnHooks,
     pub breaker: &'a parking_lot::Mutex<CompactCircuitBreaker>,
@@ -48,7 +51,6 @@ pub(crate) async fn plan_auto_compaction(
     snapshot: &ContextSnapshot,
     tools: &[ToolDefinition],
 ) -> Option<CompactionPlan> {
-    let context_assembler = host.session.runtime_services().context_assembler_arc();
     let provider_input_tokens = try_provider_input_tokens(
         host.session,
         host.llm,
@@ -57,19 +59,21 @@ pub(crate) async fn plan_auto_compaction(
         "compact_gate",
     )
     .await;
-    let threshold_met = context_assembler.should_auto_compact(&ContextPrepareInput {
-        messages: snapshot.messages.clone(),
-        system_prompt: Some(&snapshot.system_prompt),
-        model_limits: host.llm.model_limits(),
-        provider_input_tokens,
-    });
-    if !context_assembler.auto_compact_enabled() || !threshold_met {
+    let threshold_met = host
+        .context_assembler
+        .should_auto_compact(&ContextPrepareInput {
+            messages: snapshot.messages.clone(),
+            system_prompt: Some(&snapshot.system_prompt),
+            model_limits: host.llm.model_limits(),
+            provider_input_tokens,
+        });
+    if !host.context_assembler.auto_compact_enabled() || !threshold_met {
         return None;
     }
 
     Some(CompactionPlan {
         strategy: CompactStrategy::Auto,
-        use_llm: host.breaker.lock().should_attempt(),
+        use_llm: true,
     })
 }
 
@@ -81,7 +85,6 @@ pub(crate) async fn prepare_provider_history(
     tools: &[ToolDefinition],
     publisher: &TurnEvents,
 ) -> Result<PreparedProviderHistory, TurnError> {
-    let context_assembler = host.session.runtime_services().context_assembler_arc();
     let snapshot = match plan {
         Some(plan) => {
             let (snapshot, _) = run_compaction(
@@ -103,7 +106,8 @@ pub(crate) async fn prepare_provider_history(
         state.all_tool_snapshots(),
         state.active_deferred_tools(),
     );
-    let messages = context_assembler
+    let messages = host
+        .context_assembler
         .prepare_messages(ContextPrepareInput {
             messages,
             system_prompt: Some(&snapshot.system_prompt),
@@ -148,10 +152,20 @@ async fn run_compaction(
     publisher: &TurnEvents,
 ) -> Result<(ContextSnapshot, CompactionOutcome), TurnError> {
     let CompactionPlan { strategy, use_llm } = plan;
-    let records_breaker_attempt = matches!(strategy, CompactStrategy::Auto) && use_llm;
+    let breaker_attempt = if matches!(strategy, CompactStrategy::Auto) && use_llm {
+        CompactAttemptPermit::acquire(host.breaker)
+    } else {
+        None
+    };
+    let use_llm = if matches!(strategy, CompactStrategy::Auto) {
+        use_llm && breaker_attempt.is_some()
+    } else {
+        use_llm
+    };
     let outcome = CompactionPipeline {
         session: host.session,
         llm: Arc::clone(host.llm),
+        context_assembler: Arc::clone(host.context_assembler),
         extension_runner: host.extension_runner,
         hook_call: host.hook_call.clone(),
         pre_hook_message_count: probe_message_count,
@@ -162,15 +176,22 @@ async fn run_compaction(
     .run()
     .await;
 
-    if records_breaker_attempt {
-        host.breaker.lock().finish_attempt(outcome.llm_attempt());
+    if let Some(attempt) = breaker_attempt {
+        attempt.finish(outcome.llm_attempt());
     }
-    // append 已更新进程内 projection 但 fsync 失败时，本 turn 仍必须沿用冻结的原上下文。
+    let outcome = match outcome {
+        CompactionPipelineOutcome::Failed { error, .. }
+            if error.uncertain_through_seq().is_some() =>
+        {
+            return Err(error.into());
+        },
+        outcome => outcome,
+    };
     let fallback_snapshot = match &outcome {
         CompactionPipelineOutcome::Failed {
             source_snapshot: Some(snapshot),
             ..
-        } => Some(snapshot.clone()),
+        } => Some(snapshot.as_ref().clone()),
         _ => None,
     };
     let result = match outcome {

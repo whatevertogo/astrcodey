@@ -121,11 +121,22 @@
       "delta": {
         "kind": "agentSessionUpdated",
         "agentSession": {
+          "kind": "spawned",
           "childSessionId": "child-contract",
           "toolCallId": "tool-agent",
           "agentName": "explorer",
-          "task": "inspect",
-          "status": "running",
+          "task": "inspect"
+        }
+      }
+    },
+    {
+      "sessionId": "session-contract",
+      "cursor": { "value": "12" },
+      "delta": {
+        "kind": "agentSessionUpdated",
+        "agentSession": {
+          "kind": "progress",
+          "childSessionId": "child-contract",
           "phase": "calling_tool",
           "currentTool": "read"
         }
@@ -133,7 +144,7 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "12" },
+      "cursor": { "value": "13" },
       "delta": {
         "kind": "statusItemUpdate",
         "id": "branch",
@@ -142,7 +153,7 @@
     },
     {
       "sessionId": "session-contract",
-      "cursor": { "value": "13" },
+      "cursor": { "value": "14" },
       "delta": {
         "kind": "updateControlState",
         "control": {
@@ -177,7 +188,7 @@
       "canSubmitPrompt": true,
       "canRequestCompact": true
     },
-    "cursor": "13",
+    "cursor": "14",
     "agentSessions": [
       {
         "childSessionId": "child-contract",

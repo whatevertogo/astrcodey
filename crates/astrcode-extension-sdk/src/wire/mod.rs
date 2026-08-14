@@ -21,7 +21,10 @@ pub mod stream;
 
 pub use capability::ExtensionCapability;
 pub use custom_event::{CustomEventDeclaration, CustomEventSourceFilter, CustomEventSubscription};
-pub use effects::{CallContinuation, HandlerEffect, HandlerResult, ToolOutcome};
+pub use effects::{
+    CallContinuation, HandlerEffect, HandlerResult, ProviderContributionData,
+    ProviderContributionEffect, ToolOutcome,
+};
 pub use error::WireErrorCode;
 pub use frame::{FrameTransport, ProcessStdioTransport, StdioFrameTransport};
 pub use manifest::{CompactEvent, HookMode, LifecycleEvent};
@@ -35,7 +38,7 @@ pub use peer::{
 };
 pub use peer_runtime::{
     InboundInvoke, InvocationCancellation, InvocationResponse, InvokeError, ModelEventStream,
-    PeerDriver, PeerHandle, PeerInvokeHandler, PeerStream, model_event_stream,
+    PeerDriver, PeerHandle, PeerInvokeHandler, PeerStream,
 };
 pub use protocol::{
     ActivateMsg, ActivateOutput, ErrorPayload, FeatureName, HandlerId, HandlerInvokeRequest,

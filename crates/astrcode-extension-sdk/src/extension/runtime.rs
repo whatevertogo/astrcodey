@@ -19,7 +19,7 @@ pub use crate::wire::ExtensionCapability;
 /// 扩展专有配置的包装类型。
 ///
 /// 包装用户 `config.toml` 中 `extensions.<id>` 下的扩展配置，
-/// 扩展在 `start()` 或 `on_config_changed()` 时通过 `deserialize::<T>()` 获取。
+/// 扩展在 `start()` 时通过 `deserialize::<T>()` 获取。配置变化会创建新的扩展实例。
 #[derive(Clone, Debug)]
 pub struct ExtensionConfig {
     extension_id: Arc<str>,
@@ -36,8 +36,7 @@ impl Default for ExtensionConfig {
 }
 
 impl ExtensionConfig {
-    #[doc(hidden)]
-    pub fn from_runtime(extension_id: impl Into<String>, value: serde_json::Value) -> Self {
+    pub(crate) fn from_runtime(extension_id: impl Into<String>, value: serde_json::Value) -> Self {
         Self {
             extension_id: Arc::from(extension_id.into()),
             value,
@@ -82,6 +81,10 @@ impl ExtensionConfig {
                 .as_object()
                 .is_some_and(|object| object.is_empty())
     }
+
+    pub(crate) fn value(&self) -> &serde_json::Value {
+        &self.value
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -123,8 +126,7 @@ pub struct ExtensionStopContext {
 }
 
 impl ExtensionStopContext {
-    #[doc(hidden)]
-    pub const fn from_runtime(reason: StopReason) -> Self {
+    pub(crate) const fn from_runtime(reason: StopReason) -> Self {
         Self { reason }
     }
 
@@ -197,12 +199,11 @@ impl Drop for ExtensionTaskCompletion {
 }
 
 impl ExtensionTasks {
-    pub fn new(extension_id: impl Into<String>) -> Self {
+    pub(crate) fn new(extension_id: impl Into<String>) -> Self {
         Self::with_lifecycle(extension_id, ExtensionTaskLifecycle::Active)
     }
 
-    #[doc(hidden)]
-    pub fn new_suspended(extension_id: impl Into<String>) -> Self {
+    pub(crate) fn new_suspended(extension_id: impl Into<String>) -> Self {
         Self::with_lifecycle(extension_id, ExtensionTaskLifecycle::Suspended)
     }
 
@@ -221,8 +222,7 @@ impl ExtensionTasks {
         self.shutdown.clone()
     }
 
-    #[doc(hidden)]
-    pub fn activate(&self) {
+    pub(crate) fn activate(&self) {
         self.lifecycle.send_if_modified(|lifecycle| {
             if *lifecycle == ExtensionTaskLifecycle::Suspended {
                 *lifecycle = ExtensionTaskLifecycle::Active;
@@ -380,7 +380,7 @@ impl ExtensionTasks {
             })?
     }
 
-    pub fn cancel(&self) {
+    pub(crate) fn cancel(&self) {
         // Keep the state-first lock order used by `spawn` so shutdown and admission linearize.
         let _state_guard = self.lock_state();
         self.shutdown.cancel();
@@ -404,7 +404,7 @@ impl ExtensionTasks {
     /// must-finish 任务会在超过共享预算后继续等待；普通后台任务只使用同一个绝对截止时间的
     /// 剩余预算。调用方应先调用 [`Self::cancel`]，使等待期间不能再登记新任务。
     /// 仅在任务集合确实清空时返回 `true`；`false` 表示中止后仍有后台任务未回收。
-    pub async fn wait(&self, timeout: Duration) -> bool {
+    pub(crate) async fn wait(&self, timeout: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + timeout;
         if !self
             .wait_until_no_tasks(Some(ExtensionTaskKind::MustFinish), Some(deadline))

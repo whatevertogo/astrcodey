@@ -1,6 +1,4 @@
-use astrcode_core::tool::access::{
-    FileOperation, HostResource, ResourceAccess, ResourceSet, ToolPlan,
-};
+use astrcode_core::tool::access::{FileOperation, HostResource, ResourceAccess, ToolPlan};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -107,9 +105,7 @@ impl From<&ResourceAccess> for ResourceAccessDto {
 
 impl From<ToolPlanDto> for ToolPlan {
     fn from(plan: ToolPlanDto) -> Self {
-        ToolPlan::new(ResourceSet::new(
-            plan.resources.into_iter().map(ResourceAccess::from),
-        ))
+        ToolPlan::new(plan.resources.into_iter().map(ResourceAccess::from))
     }
 }
 
@@ -187,7 +183,8 @@ mod tests {
 
     #[test]
     fn tool_plan_wire_round_trip_preserves_resources_and_rejects_unknown_fields() {
-        let plan = ToolPlan::from_resources([
+        let plan = ToolPlan::new([
+            ResourceAccess::host(HostResource::Process),
             ResourceAccess::search_file("/workspace/src", true),
             ResourceAccess::host(HostResource::Process),
             ResourceAccess::Opaque,

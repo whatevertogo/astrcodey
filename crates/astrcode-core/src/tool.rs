@@ -825,9 +825,11 @@ pub struct ToolFileServices {
     pub observation_store: Option<Arc<dyn FileObservationStore>>,
 }
 
-/// 宿主侧服务：artifact 读取与 FFI 工具目录。
+/// 宿主侧服务：turn 模型绑定、artifact 读取与 FFI 工具目录。
 #[derive(Clone, Default)]
 pub struct ToolHostServices {
+    /// 拥有此工具调用的 turn 固定的 provider generation。
+    pub llm_providers: Option<crate::llm::LlmProviderBindings>,
     /// 当前 session 的工具结果 artifact 读取能力（仅 `read` 工具需要）。
     pub result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
     /// 当前可用的工具定义列表（仅 FFI bridge 需要）。
@@ -1038,6 +1040,7 @@ impl std::fmt::Debug for ToolFileServices {
 impl std::fmt::Debug for ToolHostServices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ToolHostServices")
+            .field("llm_providers", &self.llm_providers)
             .field(
                 "available_tools",
                 &self.available_tools.as_ref().map(|t| t.len()),

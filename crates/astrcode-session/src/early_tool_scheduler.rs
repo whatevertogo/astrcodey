@@ -203,6 +203,7 @@ mod tests {
     use std::sync::Arc;
 
     use astrcode_core::{
+        llm::LlmProviderBindings,
         permission::ApprovalMode,
         tool::{ExecutionMode, LlmModelIds, SessionToolSelection, ToolResult},
         types::new_session_id,
@@ -212,6 +213,7 @@ mod tests {
     use super::*;
     use crate::{
         permission::{ApprovalHistoryStore, PermissionChain},
+        test_support::UnusedLlm,
         tool_exec::{ToolCallRuntimeContext, ToolRuntimeCapabilities, TurnToolContext},
         turn_context::SharedTurnContext,
     };
@@ -264,6 +266,10 @@ mod tests {
                     turn_id: None,
                     working_dir: "/workspace".into(),
                     model_id: "model".into(),
+                    llm_providers: LlmProviderBindings::new(
+                        Arc::new(UnusedLlm),
+                        Arc::new(UnusedLlm),
+                    ),
                     session_store_dir: None,
                     turn_event_sender: None,
                     approval_mode: ApprovalMode::default(),

@@ -287,12 +287,6 @@ pub trait Extension: Send + Sync {
     async fn health(&self) -> Result<(), ExtensionError> {
         Ok(())
     }
-    async fn on_config_changed(
-        &self,
-        config: ExtensionConfig,
-    ) -> Result<(), ExtensionError> {
-        Ok(())
-    }
 }
 ```
 
@@ -300,10 +294,9 @@ pub trait Extension: Send + Sync {
 |---|---|---|
 | `manifest()` | 返回稳定身份、展示信息和显式 capability。宿主可以调用多次。 | 必须纯函数；不得读取配置、文件或网络。未来增加可选元数据通过 builder 和私有字段完成。 |
 | `register()` | 同步声明工具、命令、HTTP、事件和 hook。每个实例安装时调用一次。 | 不返回运行时资源，不启动任务；新增注册族进入 `ExtensionRegistrations`，不能给 `HostedExtension` 增加平行 vector。 |
-| `start()` | 在注册校验成功后、注册尚未对 turn 可见前初始化资源。 | 失败时宿主调用 `stop(StartupFailed)`；普通 task 在 batch 发布前挂起。不得裸 `tokio::spawn`。 |
-| `stop()` | 释放资源；reload、disable、shutdown 和 startup rollback 均可触发。 | 必须幂等并容忍部分初始化；与 config callback 串行；旧 generation view 释放后才调用。 |
+| `start()` | 在注册与配置校验成功后、候选代尚未对 turn 可见前初始化资源。 | 通过 `ctx.config()` 读取本实例完整配置；失败时宿主调用 `stop(StartupFailed)`。普通 task 在 batch 发布前挂起，Host I/O 与事件发送在候选阶段被 typed gate 拒绝，不得裸 `tokio::spawn`。 |
+| `stop()` | 释放资源；reload、disable、shutdown 和 startup rollback 均可触发。 | 必须幂等并容忍部分初始化；旧 generation view 释放后才调用。配置变化通过 fresh instance replacement 完成，不对活动实例执行可变 reconfigure。 |
 | `health()` | 只读检查当前扩展能否服务新请求。 | 有统一超时；不得修复状态或触发 reload；详细诊断由结构化 health DTO 后续独立扩展。 |
-| `on_config_changed()` | 仅在配置值发生变化时更新动态行为。 | 与 `stop()` 串行；不能改变静态 registrations。当前没有 `ReloadRequired` 结果，静态声明变化必须通过 source reload。 |
 
 历史上的 `id()` 和 `capabilities()` 已由 `manifest()` 替代。`Extension` trait 只用于进程内 Rust
 扩展，工作区迁移已一次完成，没有保留双轨 trait。
@@ -359,6 +352,8 @@ impl Registrar {
     pub fn declare_custom_event(&mut self, event: CustomEventDeclaration);
     pub fn on_custom_event(&mut self, subscription: CustomEventSubscription, handler: Arc<dyn CustomEventHandler>);
 
+    pub fn on_tool_input_transform(&mut self, priority: i32, handler: Arc<dyn ToolInputTransformHandler>);
+    pub fn on_tool_input_transform_for(&mut self, target: ToolHookTarget, priority: i32, handler: Arc<dyn ToolInputTransformHandler>);
     pub fn on_pre_tool_use(&mut self, priority: i32, handler: Arc<dyn PreToolUseHandler>);
     pub fn on_pre_tool_use_for(&mut self, target: ToolHookTarget, priority: i32, handler: Arc<dyn PreToolUseHandler>);
     pub fn on_post_tool_use(&mut self, priority: i32, handler: Arc<dyn PostToolUseHandler>);
@@ -398,7 +393,8 @@ impl Registrar {
 
 | API | 触发点 | mode / 返回值语义 | 必需 capability |
 |---|---|---|---|
-| `on_pre_tool_use[_for]` | 工具副作用之前 | `Blocking` 可 Allow、Block、Ask、ModifyInput；`Advisory` / `NonBlocking` 只观察，结果丢弃。 | 只有 blocking 需要 `tool_intercept`。 |
+| `on_tool_input_transform[_for]` | 工具参数规范化之前 | blocking-only；按 priority 折叠 `Unchanged` / `Replace`，不能作准入决策。 | `tool_intercept`。 |
+| `on_pre_tool_use[_for]` | 参数变换和规范化之后、工具副作用之前 | blocking-only；可 Allow、Block 或 Ask。所有 handler 读取同一最终参数，Ask 聚合且 Block 覆盖。 | `tool_intercept`。 |
 | `on_post_tool_use[_for]` | 工具结果生成之后、交给模型之前 | blocking 可修改可见结果或阻断后续；`Advisory` / `NonBlocking` 只观察，结果丢弃。 | 只有 blocking 需要 `tool_intercept`。 |
 | `on_before_provider_request` | provider 请求最终 wire 编码之前 | blocking 可阻断、替换或追加 messages；按 priority 串行合成。 | `provider_request`。 |
 | `on_after_provider_response` | provider 响应完成之后 | 永远是 observer；错误记录诊断，不改写已完成响应。 | `provider_request`。 |
@@ -512,12 +508,19 @@ impl SlashCommandBuilder {
     pub fn requires_idle(self, value: bool) -> Self;
     pub fn argument_completions(self, value: bool) -> Self;
     pub fn priority(self, value: i32) -> Self;
+    pub fn availability(self, value: CommandAvailability) -> Self;
+    pub fn host_command(self, value: SessionCommandKind) -> Self;
     pub fn build(self) -> SlashCommand;
 }
 ```
 
-这些字段只描述客户端交互契约；server 仍在执行时重新检查 session/turn 状态。声明
-`argument_completions(true)` 但 handler 未实现补全时安装失败，而不是运行时返回空列表掩盖配置错误。
+`availability` 是 list、execute、complete 共用的 transport admission；例如
+`InteractiveOnly` 命令不会进入非交互列表，也不会在 HTTP 调用中先执行 handler 再报错。
+`host_command` 只声明一个类型化宿主 intent，Extension 不持有宿主服务或 operation gate；使用它的
+Extension 必须声明 `SessionCommand` capability，宿主会在注册、动态发现、返回结果三个边界校验
+declaration、capability 与 intent 一致。server 仍在调用 handler 前重新检查 session/turn 状态。
+
+声明 `argument_completions(true)` 但 handler 未实现补全时安装失败，而不是运行时返回空列表掩盖配置错误。
 
 #### `http_route()`、`keybinding()`、`status_item()`、`custom_event()`
 

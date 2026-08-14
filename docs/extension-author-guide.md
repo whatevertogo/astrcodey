@@ -127,7 +127,7 @@ worker.tool(
     tool("save").description("Save text").parameters(/* strict schema */).build(),
     tool_planner_args(|args: SaveArgs, ctx| async move {
         let path = ctx.working_dir().join(args.path);
-        Ok(ToolPlan::from_resources([ResourceAccess::write_file(path)]))
+        Ok(ToolPlan::new([ResourceAccess::write_file(path)]))
     }),
     tool_handler_args(|args: SaveArgs, _ctx| async move {
         let output = HostClient::workspace().write(HostWorkspaceWriteRequest {
@@ -168,6 +168,12 @@ worker.capability(ExtensionCapability::SmallModel);
 let out = HostClient::models().small_chat(vec![
     LlmMessage::user("tag this line"),
 ]).await?;
+
+// 只限制本次模型生成；默认 main_chat/small_chat 不覆盖 provider 上限
+let request = llm_chat_request(vec![
+    LlmMessage::user("summarize in at most 512 tokens"),
+]).with_max_output_tokens(512);
+let out = HostClient::models().small_chat_request(request).await?;
 
 // 受限子进程（总超时包含并发排队，cwd 必须在 workspace 内）
 worker.capability(ExtensionCapability::ProcessSpawn);
@@ -219,6 +225,13 @@ let response = HostClient::extension_http().dispatch_public(
 ).await?;
 ```
 
+`max_output_tokens` 必须大于 0；Host 把它作为本次 provider request 的上限，provider 仍会将其
+限制在模型配置的最大输出内。这是模型生成预算，不是 tool result 的字节截断参数。
+
+在具有 turn attribution 的 hook 或 tool handler 中，`ModelClient` 使用 Session 为该 turn 固定的
+main/small provider binding；运行中 reload 不会把旧 turn 切到新 provider。只有 startup 或其他
+明确没有 turn attribution 的调用使用 live fallback。扩展不应缓存或自行解析 provider handle。
+
 `network.client` 的作者 API 以原始字节返回响应 body，S5R 线缆使用 base64。请求的
 body 解码后不得超过 10 MiB，`max_bytes` 不得超过 10 MiB，`timeout_ms` 必须位于
 `1..=60_000`；`Manual` 不跟随重定向，
@@ -226,9 +239,11 @@ body 解码后不得超过 10 MiB，`max_bytes` 不得超过 10 MiB，`timeout_m
 web-tools 共享宿主的全局并发上限，当前协议不提供 extension 级公平配额。
 进程请求的 `stdin` 以 UTF-8 字节计最多 1 MiB。
 
-`workspace_write`、`process_spawn` 与 `network_client` 都是敏感授权；只在插件确实需要时声明。前者拒绝越界、symlink 和密钥类路径；进程执行不是
-操作系统沙箱，后者允许访问宿主网络可达的 HTTP(S) 地址。两者均有并发、总超时和
-I/O 大小限制，并响应会话取消。
+`workspace_write`、`process_spawn` 与 `network_client` 都是敏感授权；只在插件确实需要时声明。
+前者拒绝越界、symlink 和密钥类路径；进程能力只提供 Host-supervised stdin/stdout/stderr pipes，
+Unix 由 process group、Windows 由 Job Object 管理进程树，不提供 PTY 或 resize，也不是操作系统
+sandbox；后者允许访问宿主网络可达的 HTTP(S) 地址。这些能力均有并发、总超时和 I/O 大小限制，
+并响应会话取消。
 
 S5R 同时支持 `public_http` 和复用宿主 bearer token 的 `authenticated_http`；两者都不能
 注册在 `/api` 下。s5r 工具默认串行；显式声明 `ExecutionMode::Parallel` 时，宿主会在同一

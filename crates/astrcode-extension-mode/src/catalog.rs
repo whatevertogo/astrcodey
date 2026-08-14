@@ -33,7 +33,7 @@ impl std::fmt::Display for ModeId {
 }
 
 /// Tools blocked in plan mode.
-const PLAN_RESTRICTED_TOOLS: &[&str] = &["write", "edit", "patch", "shell", "terminal"];
+const PLAN_RESTRICTED_TOOLS: &[&str] = &["write", "edit", "patch", "shell"];
 
 /// Declarative definition of an agent running mode.
 #[derive(Debug, Clone)]
@@ -91,7 +91,7 @@ pub(crate) fn validate_transition(
     Ok(())
 }
 
-pub(crate) fn builtin_mode_specs() -> Vec<ModeSpec> {
+fn builtin_mode_specs() -> Vec<ModeSpec> {
     let transitions = vec![ModeId::code(), ModeId::plan()];
     vec![
         ModeSpec {

@@ -8,6 +8,8 @@ use std::{
     time::Duration,
 };
 
+#[cfg(test)]
+use astrcode_extension_sdk::host::HOST_NETWORK_DEFAULT_TIMEOUT_MS;
 use astrcode_extension_sdk::{
     host::{
         HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS, HostNetworkRedirectPolicy,
@@ -35,10 +37,6 @@ use tokio_util::sync::CancellationToken;
 
 use super::{backend_unavailable, invalid_group_operation, parse_wire_request, wire_payload};
 
-#[cfg(test)]
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const MAX_TIMEOUT: Duration = Duration::from_secs(60);
-const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
 const MAX_CONCURRENT_REQUESTS: usize = 64;
 const MAX_REDIRECTS: usize = 10;
 
@@ -181,7 +179,9 @@ impl OutboundNetworkService for RestrictedNetworkService {
         input: OutboundNetworkRequest,
         cancel_token: Option<CancellationToken>,
     ) -> Result<OutboundNetworkResponse, OutboundNetworkError> {
-        let timeout = input.timeout.min(MAX_TIMEOUT);
+        let timeout = input
+            .timeout
+            .min(Duration::from_millis(HOST_NETWORK_MAX_TIMEOUT_MS));
         let deadline = Instant::now() + timeout;
         let client = match input.redirect_policy {
             NetworkRedirectPolicy::Follow => &self.follow_redirects_client,
@@ -215,7 +215,7 @@ impl OutboundNetworkService for RestrictedNetworkService {
         if !input.body.is_empty() {
             request = request.body(input.body);
         }
-        let max_bytes = input.max_bytes.min(MAX_RESPONSE_BYTES);
+        let max_bytes = input.max_bytes.min(HOST_NETWORK_MAX_BYTES);
         let _permit = self.acquire_permit(deadline, cancel_token.as_ref()).await?;
 
         let operation = async move {
@@ -496,8 +496,8 @@ mod tests {
             method: "GET".into(),
             headers: BTreeMap::new(),
             body: Vec::new(),
-            max_bytes: MAX_RESPONSE_BYTES,
-            timeout: DEFAULT_TIMEOUT,
+            max_bytes: HOST_NETWORK_MAX_BYTES,
+            timeout: Duration::from_millis(HOST_NETWORK_DEFAULT_TIMEOUT_MS),
             redirect_policy: NetworkRedirectPolicy::Follow,
         }
     }

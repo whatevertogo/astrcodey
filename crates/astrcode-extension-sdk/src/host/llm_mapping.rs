@@ -6,21 +6,13 @@ use crate::{
     wire::{WireErrorCode, host::*, protocol::ErrorPayload},
 };
 
-/// A completed model stream with its ordered text deltas.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostLlmCollectedStreamOutput {
-    pub content: String,
-    pub model: String,
-    pub chunks: Vec<String>,
-}
-
 pub(crate) async fn collect_model_stream(
     mut stream: ModelStream,
-) -> Result<HostLlmCollectedStreamOutput, ErrorPayload> {
-    let mut chunks = Vec::new();
+) -> Result<HostLlmChatOutput, ErrorPayload> {
+    let mut streamed_content = String::new();
     while let Some(event) = stream.next().await {
         match event {
-            ModelStreamEvent::ContentDelta { content } => chunks.push(content),
+            ModelStreamEvent::ContentDelta { content } => streamed_content.push_str(&content),
             ModelStreamEvent::Completed { output } => {
                 let model = output
                     .get("model")
@@ -36,12 +28,8 @@ pub(crate) async fn collect_model_stream(
                     .get("content")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_owned)
-                    .unwrap_or_else(|| chunks.concat());
-                return Ok(HostLlmCollectedStreamOutput {
-                    content,
-                    model,
-                    chunks,
-                });
+                    .unwrap_or(streamed_content);
+                return Ok(HostLlmChatOutput { content, model });
             },
             ModelStreamEvent::Failed { error } => return Err(error),
             _ => {},
@@ -53,6 +41,7 @@ pub(crate) async fn collect_model_stream(
     ))
 }
 
+/// Builds an author-facing host request from domain LLM messages.
 pub fn llm_chat_request(messages: Vec<LlmMessage>) -> HostLlmChatRequest {
     HostLlmChatRequest::new(llm_messages_to_wire(messages))
 }
@@ -204,7 +193,6 @@ mod tests {
         .unwrap();
         assert_eq!(collected.content, "hello");
         assert_eq!(collected.model, "main");
-        assert_eq!(collected.chunks, ["hel", "lo"]);
 
         let missing_model = collect_model_stream(stream([ModelStreamEvent::Completed {
             output: json!({ "content": "hello" }),

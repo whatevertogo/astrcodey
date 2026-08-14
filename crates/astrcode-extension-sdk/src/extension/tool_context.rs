@@ -29,9 +29,8 @@ pub struct ToolContext {
 }
 
 impl ToolContext {
-    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
-    pub fn from_runtime(
+    pub(crate) fn from_runtime(
         call: SessionCallContext,
         working_dir: PathBuf,
         tool_name: impl Into<String>,

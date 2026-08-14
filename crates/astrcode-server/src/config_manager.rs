@@ -3,40 +3,127 @@
 //! 封装 `config_store` / `raw_config` 的唯一写入路径；`effective` 和 `llm_provider`
 //! 的存储位置统一在 [`SessionRuntimeServices`] 内。更新会串行执行并在落盘前完成解析与
 //! provider 构建和扩展配置验证，避免并发 snapshot-modify-save 丢更新，也避免无效配置
-//! 被持久化或发布。扩展运行态应用失败会返回给调用方，不会伪装成成功。
+//! 被持久化或发布。扩展使用独立候选实例完成启动验证，失败时保留上一已提交代。
 
-use std::sync::Arc;
+use std::{
+    future::Future,
+    panic::AssertUnwindSafe,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use astrcode_ai::create_provider;
-use astrcode_context::{
-    context_assembler::LlmContextAssembler, post_compact_enricher::DefaultPostCompactEnricher,
-};
+use astrcode_context::post_compact_enricher::DefaultPostCompactEnricher;
 use astrcode_core::{
     config::{Config, ConfigStore, ConfigStoreError, EffectiveConfig, LlmSettings, ResolveError},
     llm::{LlmClientConfig, LlmProvider},
 };
-use astrcode_extensions::runner::{ExtensionConfigValidationError, ExtensionRunner};
+use astrcode_extensions::{
+    loader::{DiskExtensionSource, ExtensionLoadContext, prepare_extension_generation},
+    runner::{ExtensionConfigValidationError, ExtensionRunner, PreparedExtensionGeneration},
+};
 use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices};
+use futures_util::FutureExt;
 use parking_lot::RwLock;
+use tokio::sync::{Notify, oneshot};
 
 pub struct ConfigManager {
     config_store: Arc<dyn ConfigStore>,
-    raw_config: RwLock<Config>,
+    raw_config: Arc<RwLock<Config>>,
     extension_runner: Arc<ExtensionRunner>,
+    extension_working_dir: PathBuf,
     /// 共享给所有 session 的运行时能力。
     ///
     /// `effective` 与 `llm_provider` 的真正存储位置在这里，避免双份事实。
     runtime_services: Arc<SessionRuntimeServices>,
-    update_lock: tokio::sync::Mutex<()>,
+    update_lock: Arc<tokio::sync::Mutex<()>>,
+    transactions: ConfigTransactionTasks,
 }
 
+#[derive(Debug, thiserror::Error)]
 pub(crate) enum ConfigUpdateError<E> {
+    #[error("config mutation: {0}")]
     Mutation(E),
+    #[error("config resolution: {0}")]
     Resolve(ResolveError),
+    #[error("provider construction: {0}")]
     Provider(astrcode_core::llm::LlmError),
+    #[error(transparent)]
     ExtensionValidation(ExtensionConfigValidationError),
-    ExtensionApply(String),
+    #[error("extension candidate: {0}")]
+    ExtensionCandidate(String),
+    #[error("config store: {0}")]
     Store(ConfigStoreError),
+    #[error(transparent)]
+    Transaction(#[from] ConfigTransactionError),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ConfigTransactionError {
+    #[error(
+        "config publication task stopped before reporting its result; runtime state is unknown"
+    )]
+    RuntimeStopped,
+}
+
+#[derive(Clone, Copy)]
+enum ConfigPersistence {
+    Save,
+    AlreadyPersisted,
+}
+
+enum ConfigPublicationError {
+    ExtensionValidation(ExtensionConfigValidationError),
+    ExtensionCandidate(String),
+    Store(ConfigStoreError),
+}
+
+#[derive(Default)]
+struct ConfigTransactionTasks {
+    state: Arc<ConfigTransactionState>,
+}
+
+#[derive(Default)]
+struct ConfigTransactionState {
+    pending: AtomicUsize,
+    completed: Notify,
+}
+
+struct ConfigTransactionCompletion {
+    state: Arc<ConfigTransactionState>,
+}
+
+impl Drop for ConfigTransactionCompletion {
+    fn drop(&mut self) {
+        self.state.pending.fetch_sub(1, Ordering::AcqRel);
+        self.state.completed.notify_waiters();
+    }
+}
+
+impl ConfigTransactionTasks {
+    fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
+        self.state.pending.fetch_add(1, Ordering::AcqRel);
+        let completion = ConfigTransactionCompletion {
+            state: Arc::clone(&self.state),
+        };
+        tokio::spawn(async move {
+            let _completion = completion;
+            task.await;
+        });
+    }
+
+    async fn drain(&self) {
+        loop {
+            let completed = self.state.completed.notified();
+            if self.state.pending.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            completed.await;
+        }
+    }
 }
 
 struct PreparedConfig {
@@ -65,14 +152,12 @@ pub(crate) fn assemble_session_runtime_services(
     small_llm: Arc<dyn LlmProvider>,
     effective: EffectiveConfig,
     extension_runner: Arc<ExtensionRunner>,
-    context_assembler: Arc<LlmContextAssembler>,
 ) -> Arc<SessionRuntimeServices> {
     Arc::new(SessionRuntimeServices::new(
         llm,
         small_llm,
         effective,
         SessionExtensionPorts::from_adapter(extension_runner),
-        context_assembler,
         Arc::new(DefaultPostCompactEnricher),
     ))
 }
@@ -87,21 +172,22 @@ impl ConfigManager {
         raw_config: Config,
         effective: EffectiveConfig,
         extension_runner: Arc<astrcode_extensions::runner::ExtensionRunner>,
-        context_assembler: Arc<astrcode_context::context_assembler::LlmContextAssembler>,
+        extension_working_dir: PathBuf,
     ) -> Result<(Self, Arc<SessionRuntimeServices>), astrcode_core::llm::LlmError> {
         let runtime_services = assemble_session_runtime_services(
             build_provider_from_settings(&effective.llm)?,
             build_provider_from_settings(&effective.small_llm)?,
             effective,
             extension_runner.clone(),
-            context_assembler,
         );
         let manager = Self {
             config_store,
-            raw_config: RwLock::new(raw_config),
+            raw_config: Arc::new(RwLock::new(raw_config)),
             extension_runner,
+            extension_working_dir,
             runtime_services: Arc::clone(&runtime_services),
-            update_lock: tokio::sync::Mutex::new(()),
+            update_lock: Arc::new(tokio::sync::Mutex::new(())),
+            transactions: ConfigTransactionTasks::default(),
         };
         Ok((manager, runtime_services))
     }
@@ -113,22 +199,17 @@ impl ConfigManager {
         raw_config: Config,
         extension_runner: Arc<ExtensionRunner>,
         runtime_services: Arc<SessionRuntimeServices>,
+        extension_working_dir: PathBuf,
     ) -> Self {
         Self {
             config_store,
-            raw_config: RwLock::new(raw_config),
+            raw_config: Arc::new(RwLock::new(raw_config)),
             extension_runner,
+            extension_working_dir,
             runtime_services,
-            update_lock: tokio::sync::Mutex::new(()),
+            update_lock: Arc::new(tokio::sync::Mutex::new(())),
+            transactions: ConfigTransactionTasks::default(),
         }
-    }
-
-    fn extension_runner(&self) -> &ExtensionRunner {
-        &self.extension_runner
-    }
-
-    pub fn runtime_services(&self) -> &Arc<SessionRuntimeServices> {
-        &self.runtime_services
     }
 
     pub fn read_effective(&self) -> Arc<EffectiveConfig> {
@@ -162,49 +243,154 @@ impl ConfigManager {
         &self,
         update: impl FnOnce(&mut Config) -> Result<T, E>,
     ) -> Result<T, ConfigUpdateError<E>> {
-        let _update = self.update_lock.lock().await;
+        let update_guard = Arc::clone(&self.update_lock).lock_owned().await;
         let mut candidate = self.raw_config_snapshot();
         let result = update(&mut candidate).map_err(ConfigUpdateError::Mutation)?;
         let prepared = Self::prepare(candidate)?;
-        self.validate_extension_configs(&prepared).await?;
-        self.config_store
-            .save(&prepared.raw)
-            .await
-            .map_err(ConfigUpdateError::Store)?;
-        self.publish(prepared);
-        self.apply_extension_configs().await?;
+        let publication =
+            self.start_publication_transaction(update_guard, prepared, ConfigPersistence::Save);
+        Self::await_publication(publication).await?;
         Ok(result)
+    }
+
+    fn start_publication_transaction(
+        &self,
+        update: tokio::sync::OwnedMutexGuard<()>,
+        prepared: PreparedConfig,
+        persistence: ConfigPersistence,
+    ) -> oneshot::Receiver<Result<(), ConfigPublicationError>> {
+        let config_store = Arc::clone(&self.config_store);
+        let raw_config = Arc::clone(&self.raw_config);
+        let runtime_services = Arc::clone(&self.runtime_services);
+        let extension_runner = Arc::clone(&self.extension_runner);
+        let extension_working_dir = self.extension_working_dir.clone();
+        let (result_tx, result_rx) = oneshot::channel();
+        self.transactions.spawn(async move {
+            let _update = update;
+            let extension_candidate = AssertUnwindSafe(Self::prepare_extension_candidate(
+                &extension_runner,
+                &extension_working_dir,
+                &prepared,
+            ))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                Err(ConfigPublicationError::ExtensionCandidate(
+                    "extension candidate preparation panicked".into(),
+                ))
+            });
+            let extension_candidate = match extension_candidate {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    let _ = result_tx.send(Err(error));
+                    return;
+                },
+            };
+            let publication = AssertUnwindSafe(async move {
+                if matches!(persistence, ConfigPersistence::Save)
+                    && let Err(error) = config_store.save(&prepared.raw).await
+                {
+                    extension_candidate.abort().await;
+                    return Err(ConfigPublicationError::Store(error));
+                }
+                extension_candidate
+                    .commit_with(|extension_generation| {
+                        Self::publish_to(
+                            &raw_config,
+                            &runtime_services,
+                            prepared,
+                            extension_generation,
+                        );
+                    })
+                    .await;
+                Ok(())
+            })
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                tracing::error!(
+                    "config publication panicked after ownership transfer; aborting to avoid \
+                     mixed generations"
+                );
+                std::process::abort();
+            });
+            let _ = result_tx.send(publication);
+        });
+        result_rx
+    }
+
+    async fn await_publication<E>(
+        result_rx: oneshot::Receiver<Result<(), ConfigPublicationError>>,
+    ) -> Result<(), ConfigUpdateError<E>> {
+        match result_rx.await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(ConfigPublicationError::ExtensionValidation(error))) => {
+                Err(ConfigUpdateError::ExtensionValidation(error))
+            },
+            Ok(Err(ConfigPublicationError::ExtensionCandidate(error))) => {
+                Err(ConfigUpdateError::ExtensionCandidate(error))
+            },
+            Ok(Err(ConfigPublicationError::Store(error))) => Err(ConfigUpdateError::Store(error)),
+            Err(_) => Err(ConfigUpdateError::Transaction(
+                ConfigTransactionError::RuntimeStopped,
+            )),
+        }
     }
 
     pub(crate) async fn apply_loaded_config<E>(
         &self,
         config: Config,
     ) -> Result<(), ConfigUpdateError<E>> {
-        let _update = self.update_lock.lock().await;
+        let update = Arc::clone(&self.update_lock).lock_owned().await;
         let prepared = Self::prepare(config)?;
-        self.validate_extension_configs(&prepared).await?;
-        self.publish(prepared);
-        self.apply_extension_configs().await?;
-        Ok(())
+        let publication = self.start_publication_transaction(
+            update,
+            prepared,
+            ConfigPersistence::AlreadyPersisted,
+        );
+        Self::await_publication(publication).await
     }
 
-    async fn validate_extension_configs<E>(
-        &self,
+    pub(crate) async fn initialize_extensions<E>(&self) -> Result<(), ConfigUpdateError<E>> {
+        let update = Arc::clone(&self.update_lock).lock_owned().await;
+        let prepared = Self::prepare(self.raw_config_snapshot())?;
+        let publication = self.start_publication_transaction(
+            update,
+            prepared,
+            ConfigPersistence::AlreadyPersisted,
+        );
+        Self::await_publication(publication).await
+    }
+
+    pub(crate) async fn reload_extensions<E>(&self) -> Result<(), ConfigUpdateError<E>> {
+        self.initialize_extensions().await
+    }
+
+    async fn prepare_extension_candidate(
+        extension_runner: &Arc<ExtensionRunner>,
+        extension_working_dir: &std::path::Path,
         prepared: &PreparedConfig,
-    ) -> Result<(), ConfigUpdateError<E>> {
-        self.extension_runner()
-            .validate_extension_configs(&prepared.effective.extensions.extension_configs)
-            .await
-            .map_err(ConfigUpdateError::ExtensionValidation)
-    }
-
-    async fn apply_extension_configs<E>(&self) -> Result<(), ConfigUpdateError<E>> {
-        let errors = self.extension_runner().notify_config_changed().await;
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(ConfigUpdateError::ExtensionApply(errors.join("; ")))
-        }
+    ) -> Result<PreparedExtensionGeneration, ConfigPublicationError> {
+        astrcode_bundled_extensions::validate_bundled_extension_configs(
+            &prepared.effective.extensions.extension_configs,
+        )
+        .map_err(ConfigPublicationError::ExtensionValidation)?;
+        let bundled_source = astrcode_bundled_extensions::BundledExtensionSource::new(
+            prepared.effective.extensions.extension_states.clone(),
+        );
+        let disk_source =
+            DiskExtensionSource::new(prepared.effective.extensions.extension_states.clone());
+        prepare_extension_generation(
+            extension_runner,
+            &ExtensionLoadContext {
+                working_dir: Some(extension_working_dir.to_string_lossy().into_owned()),
+                host_router: Some(extension_runner.host_router()),
+            },
+            &[&bundled_source, &disk_source],
+            &prepared.effective.extensions.extension_configs,
+        )
+        .await
+        .map_err(|errors| ConfigPublicationError::ExtensionCandidate(errors.join("; ")))
     }
 
     fn prepare<E>(config: Config) -> Result<PreparedConfig, ConfigUpdateError<E>> {
@@ -224,26 +410,24 @@ impl ConfigManager {
         })
     }
 
-    fn publish(&self, prepared: PreparedConfig) {
-        let changed = {
-            let old_effective = self.read_effective();
-            old_effective.extensions.extension_configs
-                != prepared.effective.extensions.extension_configs
-        };
-        self.runtime_services.update_effective(prepared.effective);
-        self.runtime_services.swap_llm(prepared.llm);
-        self.runtime_services.swap_small_llm(prepared.small_llm);
-        *self.raw_config.write() = prepared.raw;
-        if changed {
-            let effective = self.read_effective();
-            let configs: std::collections::BTreeMap<_, _> = effective
-                .extensions
-                .extension_configs
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            self.extension_runner().update_extension_configs(configs);
-        }
+    fn publish_to(
+        raw_config: &RwLock<Config>,
+        runtime_services: &SessionRuntimeServices,
+        prepared: PreparedConfig,
+        extension_generation: u64,
+    ) {
+        runtime_services.publish_runtime_generation_for_extension(
+            prepared.effective,
+            prepared.llm,
+            prepared.small_llm,
+            extension_generation,
+        );
+        *raw_config.write() = prepared.raw;
+    }
+
+    pub(crate) async fn drain_transactions(&self) {
+        let _update = Arc::clone(&self.update_lock).lock_owned().await;
+        self.transactions.drain().await;
     }
 }
 

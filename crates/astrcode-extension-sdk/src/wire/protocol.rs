@@ -226,6 +226,7 @@ pub struct InitializeOutput {
 #[serde(deny_unknown_fields)]
 pub struct ActivateMsg {
     pub id: String,
+    pub config: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

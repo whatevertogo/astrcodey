@@ -1,13 +1,14 @@
 //! Tool result artifact file helpers.
 
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::{ErrorKind, Read, Seek, SeekFrom, Write},
     path::{Component, Path},
 };
 
 use astrcode_core::tool::ToolResultArtifactSlice;
 use sha2::{Digest, Sha256};
+use tempfile::NamedTempFile;
 
 use crate::{ToolResultArtifactInput, ToolResultArtifactRef, session_repo::sync_directory};
 
@@ -60,12 +61,15 @@ pub(crate) fn write_tool_result_file(
     input: &ToolResultArtifactInput,
 ) -> std::io::Result<ToolResultArtifactRef> {
     std::fs::create_dir_all(dir)?;
+    let mut temporary = NamedTempFile::new_in(dir)?;
+    temporary.write_all(input.content.as_bytes())?;
+    temporary.as_file().sync_all()?;
+
     for suffix in 0..1000 {
         let file_name = tool_result_artifact_id(&input.tool_name, &input.call_id, suffix);
         let path = dir.join(&file_name);
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                file.write_all(input.content.as_bytes())?;
+        match temporary.persist_noclobber(&path) {
+            Ok(file) => {
                 file.sync_all()?;
                 sync_artifact_directories(dir)?;
                 return Ok(ToolResultArtifactRef {
@@ -73,7 +77,8 @@ pub(crate) fn write_tool_result_file(
                     artifact_id: file_name,
                 });
             },
-            Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
+                temporary = error.file;
                 if fs::read(&path)? == input.content.as_bytes() {
                     File::open(&path)?.sync_all()?;
                     sync_artifact_directories(dir)?;
@@ -83,7 +88,7 @@ pub(crate) fn write_tool_result_file(
                     });
                 }
             },
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.error),
         }
     }
     Err(std::io::Error::new(
@@ -268,6 +273,14 @@ mod tests {
         let third_path = dir.join(&third.artifact_id);
         assert_eq!(std::fs::read_to_string(&first_path).unwrap(), "a界bcdef");
         assert_eq!(std::fs::read_to_string(&third_path).unwrap(), "changed");
+        assert!(
+            std::fs::read_dir(&dir).unwrap().all(|entry| !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with('.')),
+            "successful writes must not leave temporary files"
+        );
 
         let page = read_tool_result_file(&first_path, &first.artifact_id, 1, 4).unwrap();
         assert_eq!(page.content, "界b");

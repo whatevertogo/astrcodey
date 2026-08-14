@@ -33,8 +33,7 @@ pub struct HttpContext {
 }
 
 impl HttpContext {
-    #[doc(hidden)]
-    pub fn from_runtime(
+    pub(crate) fn from_runtime(
         call: ExtensionCallContext,
         route: ExtensionHttpRoute,
         request: ExtensionHttpRequest,

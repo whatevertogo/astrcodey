@@ -151,7 +151,7 @@ fn default_category() -> String {
 #[async_trait::async_trait]
 impl ToolHandler for MemorySaveHandler {
     async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
-        Ok(ToolPlan::from_resources([
+        Ok(ToolPlan::new([
             ResourceAccess::host(HostResource::Session),
             ResourceAccess::host(HostResource::Event),
             ResourceAccess::host(HostResource::Model),
@@ -254,7 +254,7 @@ struct DeleteArgs {
 #[async_trait::async_trait]
 impl ToolHandler for MemoryDeleteHandler {
     async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
-        Ok(ToolPlan::from_resources([
+        Ok(ToolPlan::new([
             ResourceAccess::host(HostResource::Session),
             ResourceAccess::host(HostResource::Event),
         ]))

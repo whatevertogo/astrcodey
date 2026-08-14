@@ -19,7 +19,7 @@ pub use model::{
 };
 pub use model_context::{
     CompactionView, ContextUsageView, SequencedLlmMessage, SessionModelContext,
-    SessionSystemPrompt, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE, UnansweredToolCall,
+    SessionSystemPrompt, UnansweredToolCall,
 };
 pub use presentation::{SessionArtifactView, SessionPresentation};
 pub use reducer::{

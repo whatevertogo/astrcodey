@@ -21,12 +21,11 @@ use crate::{extension::ExtensionHttpDispatchRequest, llm::LlmMessage};
 pub use crate::{
     host::{
         HostConfigureSessionToolsOutput, HostConfigureSessionToolsRequest, HostEventEmitOutput,
-        HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput, HostLlmContent,
+        HostEventEmitRequest, HostLlmChatOutput, HostLlmChatRequest, HostLlmContent,
         HostLlmMessage, HostLlmRole, HostNetworkRedirectPolicy, HostNetworkRequest,
         HostNetworkResponse, HostOperation, HostProcessHandleOutput, HostProcessInputAction,
-        HostProcessInputRequest, HostProcessIo, HostProcessListOutput, HostProcessOutput,
-        HostProcessReadOutput, HostProcessReadRequest, HostProcessRequest,
-        HostProcessResizeRequest, HostProcessStartRequest, HostProcessState,
+        HostProcessInputRequest, HostProcessListOutput, HostProcessOutput, HostProcessReadOutput,
+        HostProcessReadRequest, HostProcessRequest, HostProcessStartRequest, HostProcessState,
         HostProcessStatusOutput, HostProcessTargetRequest, HostSessionCancelOutput,
         HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
         HostSessionProviderMessagesOutput, HostSessionStateReadOutput, HostSessionStateReadRequest,
@@ -39,7 +38,7 @@ pub use crate::{
         HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListEntry,
         HostWorkspaceListOutput, HostWorkspaceListRequest, HostWorkspaceReadOutput,
         HostWorkspaceReadRequest, HostWorkspaceTextChange, HostWorkspaceWriteOutput,
-        HostWorkspaceWriteRequest,
+        HostWorkspaceWriteRequest, llm_chat_request,
     },
     session::{
         HostCreateSessionOutput, HostCreateSessionRequest, HostRecycleSessionRequest,
@@ -557,7 +556,6 @@ mod host_tests {
             HostOperation::ProcessRead,
             HostOperation::ProcessInput,
             HostOperation::ProcessInput,
-            HostOperation::ProcessResize,
             HostOperation::ProcessStatus,
             HostOperation::ProcessPromote,
             HostOperation::ProcessKill,
@@ -628,10 +626,8 @@ mod host_tests {
             expect_backend_error(HostClient::models().small_chat_collected(messages())).await;
             expect_backend_error(HostClient::process().spawn(HostProcessRequest::new("true")))
                 .await;
-            expect_backend_error(
-                HostClient::process().start(HostProcessStartRequest::pipes("true")),
-            )
-            .await;
+            expect_backend_error(HostClient::process().start(HostProcessStartRequest::new("true")))
+                .await;
             let process_target = || HostProcessTargetRequest {
                 id: "process-1".into(),
             };
@@ -642,12 +638,6 @@ mod host_tests {
             .await;
             expect_backend_error(HostClient::process().write("process-1", "continue\n")).await;
             expect_backend_error(HostClient::process().close_stdin("process-1")).await;
-            expect_backend_error(HostClient::process().resize(HostProcessResizeRequest {
-                id: "process-1".into(),
-                rows: 24,
-                cols: 80,
-            }))
-            .await;
             expect_backend_error(HostClient::process().status(process_target())).await;
             expect_backend_error(HostClient::process().promote(process_target())).await;
             expect_backend_error(HostClient::process().kill(process_target())).await;
@@ -823,7 +813,7 @@ mod host_tests {
                 .main_chat_collected(vec![LlmMessage::user("hello")])
                 .await
                 .unwrap();
-            assert_eq!(stream.chunks, ["ty", "ped"]);
+            assert_eq!(stream.content, "typed");
 
             let network = HostClient::network()
                 .send(HostNetworkRequest::get("https://example.com"))

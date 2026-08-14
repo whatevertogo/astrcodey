@@ -8,6 +8,7 @@ import {
 } from './types'
 import type {
   AgentSessionLink,
+  AgentSessionUpdate,
   ConversationBlock,
   ConversationControlState,
   ConversationCursor,
@@ -58,7 +59,9 @@ function requiredString(source: JsonObject, name: string): string {
 
 function optionalString(source: JsonObject, name: string): string | undefined {
   const value = source[name]
-  if (value == null || typeof value !== 'string') return undefined
+  if (value == null) return undefined
+  if (typeof value !== 'string')
+    throw new ProtocolDecodeError(`expected string ${name}`)
   return value
 }
 
@@ -75,8 +78,8 @@ function optionalObject(
   name: string
 ): Record<string, unknown> | undefined {
   const value = source[name]
-  if (value == null || typeof value !== 'object' || Array.isArray(value))
-    return undefined
+  if (value == null) return undefined
+  if (!isObject(value)) throw new ProtocolDecodeError(`expected object ${name}`)
   return value as Record<string, unknown>
 }
 
@@ -105,15 +108,13 @@ function decodeObject(value: unknown, context: string): JsonObject {
 
 function stringEnumDecoder<const Values extends readonly string[]>(
   context: string,
-  values: Values,
-  fallback?: Values[number]
+  values: Values
 ): (value: unknown) => Values[number] {
   const members = new Set<string>(values)
   return (value) => {
     if (typeof value === 'string' && members.has(value)) {
       return value as Values[number]
     }
-    if (fallback !== undefined) return fallback
     throw new ProtocolDecodeError(`invalid ${context} ${String(value)}`)
   }
 }
@@ -130,8 +131,7 @@ const decodeToolOutputStream = stringEnumDecoder(
 )
 const decodeAgentSessionStatus = stringEnumDecoder(
   'agent session status',
-  AGENT_SESSION_STATUSES,
-  'running'
+  AGENT_SESSION_STATUSES
 )
 const decodeApprovalDecision = stringEnumDecoder(
   'approval decision',
@@ -178,7 +178,6 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
         id,
         text: requiredString(object, 'text'),
         attachments,
-        source: optionalString(object, 'source'),
       }
     }
     case 'assistant':
@@ -216,7 +215,7 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
         kind,
         id,
         text: requiredString(object, 'text'),
-        source: optionalString(object, 'source'),
+        source: requiredString(object, 'source'),
       }
     case 'systemNote':
       return { kind, id, text: requiredString(object, 'text') }
@@ -226,8 +225,8 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
         id,
         summary: requiredString(object, 'summary'),
         trigger: requiredString(object, 'trigger'),
-        preTokens: optionalNumber(object, 'preTokens') ?? 0,
-        postTokens: optionalNumber(object, 'postTokens') ?? 0,
+        preTokens: requiredNumber(object, 'preTokens'),
+        postTokens: requiredNumber(object, 'postTokens'),
         transcriptPath: optionalString(object, 'transcriptPath'),
       }
     default:
@@ -302,15 +301,12 @@ export function decodeConversationDelta(value: unknown): ConversationDelta {
         kind,
         blockId: requiredString(object, 'blockId'),
         arguments: requiredString(object, 'arguments'),
-        argumentsJson:
-          object.argumentsJson && typeof object.argumentsJson === 'object'
-            ? (object.argumentsJson as Record<string, unknown>)
-            : undefined,
+        argumentsJson: optionalObject(object, 'argumentsJson'),
       }
     case 'agentSessionUpdated':
       return {
         kind,
-        agentSession: decodeAgentSessionLink(object.agentSession),
+        agentSession: decodeAgentSessionUpdate(object.agentSession),
       }
     case 'agentSessionRemoved':
       return {
@@ -436,16 +432,50 @@ function decodeAgentSessionLink(value: unknown): AgentSessionLink {
   return {
     childSessionId: requiredString(object, 'childSessionId'),
     toolCallId: optionalString(object, 'toolCallId'),
-    agentName: optionalString(object, 'agentName'),
-    task: optionalString(object, 'task'),
-    status:
-      object.status == null
-        ? undefined
-        : decodeAgentSessionStatus(object.status),
+    agentName: requiredString(object, 'agentName'),
+    task: requiredString(object, 'task'),
+    status: decodeAgentSessionStatus(object.status),
     finalSessionId: optionalString(object, 'finalSessionId'),
     summary: optionalString(object, 'summary'),
     error: optionalString(object, 'error'),
-    phase: object.phase == null ? undefined : decodePhase(object.phase),
-    currentTool: optionalString(object, 'currentTool'),
+  }
+}
+
+function decodeAgentSessionUpdate(value: unknown): AgentSessionUpdate {
+  const object = decodeObject(value, 'agent session update')
+  const kind = requiredString(object, 'kind')
+  const childSessionId = requiredString(object, 'childSessionId')
+  switch (kind) {
+    case 'spawned':
+      return {
+        kind,
+        childSessionId,
+        toolCallId: optionalString(object, 'toolCallId'),
+        agentName: requiredString(object, 'agentName'),
+        task: requiredString(object, 'task'),
+      }
+    case 'completed':
+      return {
+        kind,
+        childSessionId,
+        finalSessionId: requiredString(object, 'finalSessionId'),
+        summary: requiredString(object, 'summary'),
+      }
+    case 'failed':
+      return {
+        kind,
+        childSessionId,
+        finalSessionId: requiredString(object, 'finalSessionId'),
+        error: requiredString(object, 'error'),
+      }
+    case 'progress':
+      return {
+        kind,
+        childSessionId,
+        phase: decodePhase(object.phase),
+        currentTool: optionalString(object, 'currentTool'),
+      }
+    default:
+      throw new ProtocolDecodeError(`invalid agent session update kind ${kind}`)
   }
 }

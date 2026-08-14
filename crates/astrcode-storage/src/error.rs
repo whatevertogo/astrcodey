@@ -24,6 +24,15 @@ pub enum StorageError {
     /// 调用方提交的持久事件不能作为会话的下一条事实。
     #[error("Invalid durable event: {0}")]
     InvalidEvent(String),
+    /// EventLog 已写入完整记录，但 fsync 的结果不可确定。
+    ///
+    /// 在明确的 sync retry 或重新打开会话前，该会话不得继续写入新事件。
+    #[error("Durability is uncertain for session {session_id} through seq {through_seq}: {reason}")]
+    DurabilityUncertain {
+        session_id: SessionId,
+        through_seq: u64,
+        reason: String,
+    },
     /// 持久事件流不能构造合法的会话状态。
     #[error("Corrupt session event log: {0}")]
     CorruptLog(String),
@@ -55,6 +64,13 @@ impl StorageError {
                     | std::io::ErrorKind::NotConnected
             ),
             _ => false,
+        }
+    }
+
+    pub const fn uncertain_through_seq(&self) -> Option<u64> {
+        match self {
+            Self::DurabilityUncertain { through_seq, .. } => Some(*through_seq),
+            _ => None,
         }
     }
 }

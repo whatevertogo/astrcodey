@@ -137,7 +137,7 @@ fn test_runtime_services_with_context_and_extensions(
     } else {
         extension_ports
     };
-    Arc::new(SessionRuntimeServices::new(
+    Arc::new(SessionRuntimeServices::new_with_context_assembler(
         llm.clone(),
         llm,
         effective_config(context),

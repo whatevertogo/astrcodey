@@ -5,16 +5,15 @@ use std::collections::BTreeMap;
 use astrcode_context::is_synthetic_context_message;
 use astrcode_core::{
     event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, TranscriptRewriteReason},
-    llm::{LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, attachments_from_user_message},
+    llm::{
+        LlmContent, LlmMessage, LlmRole, TranscriptMessageOrigin, attachments_from_user_message,
+    },
     types::ToolCallId,
 };
 use astrcode_protocol::http::{
     ConversationBlockDto, ConversationBlockStatusDto, ToolCallStatusDto,
 };
-use astrcode_session_projection::{
-    CompactionView, SequencedLlmMessage, SessionArtifactView, TOOL_CALL_CANCELLED_SOURCE,
-    TOOL_CALL_FAILED_SOURCE,
-};
+use astrcode_session_projection::{CompactionView, SequencedLlmMessage, SessionArtifactView};
 
 use super::{args::format_args_inline, non_empty_metadata};
 
@@ -95,7 +94,6 @@ pub(in crate::http) fn block_from_payload(event: &Event) -> Option<ConversationB
             id: message_id.to_string(),
             text: text.clone(),
             attachments: attachments.iter().cloned().map(Into::into).collect(),
-            source: None,
         }),
         DurableEventPayload::AssistantMessageCompleted {
             message_id,
@@ -231,8 +229,10 @@ fn sequenced_message_blocks(
 
     for (index, seq_msg) in messages.iter().enumerate() {
         let message = &seq_msg.message;
-        let source = &seq_msg.source;
-        if source.as_deref() == Some(TURN_ABORTED_SOURCE) || is_synthetic_context_message(message) {
+        let origin = seq_msg.origin;
+        if origin == Some(TranscriptMessageOrigin::TurnAborted)
+            || is_synthetic_context_message(message)
+        {
             continue;
         }
         let id = format!("snapshot-message-{index}");
@@ -246,7 +246,6 @@ fn sequenced_message_blocks(
                         .into_iter()
                         .map(Into::into)
                         .collect(),
-                    source: source.clone(),
                 },
             }),
             LlmRole::Assistant => {
@@ -294,7 +293,7 @@ fn sequenced_message_blocks(
                     message,
                     id,
                     seq_msg.updated_seq,
-                    source.as_deref(),
+                    origin,
                 );
             },
             LlmRole::System => blocks.push(SequencedConversationBlock {
@@ -316,7 +315,7 @@ fn push_tool_result_block(
     message: &LlmMessage,
     fallback_id: String,
     seq: u64,
-    source: Option<&str>,
+    origin: Option<TranscriptMessageOrigin>,
 ) {
     let fallback_name = message.name.clone().unwrap_or_else(|| "tool".into());
     let mut pushed_result = false;
@@ -330,7 +329,7 @@ fn push_tool_result_block(
         else {
             continue;
         };
-        let status = tool_status_from_message(source);
+        let status = tool_status_from_message(origin);
         if let Some(block_index) = tool_block_indices.get(tool_call_id)
             && let Some(SequencedConversationBlock {
                 block:
@@ -371,7 +370,7 @@ fn push_tool_result_block(
                 name: fallback_name,
                 arguments: String::new(),
                 text: visible_ui_text(message),
-                status: tool_status_from_message(source),
+                status: tool_status_from_message(origin),
                 metadata: None,
                 approval: None,
                 arguments_json: None,
@@ -380,10 +379,10 @@ fn push_tool_result_block(
     }
 }
 
-fn tool_status_from_message(source: Option<&str>) -> ToolCallStatusDto {
-    match source {
-        Some(TOOL_CALL_FAILED_SOURCE) => ToolCallStatusDto::Failed,
-        Some(TOOL_CALL_CANCELLED_SOURCE) => ToolCallStatusDto::Cancelled,
+fn tool_status_from_message(origin: Option<TranscriptMessageOrigin>) -> ToolCallStatusDto {
+    match origin {
+        Some(TranscriptMessageOrigin::ToolCallFailed) => ToolCallStatusDto::Failed,
+        Some(TranscriptMessageOrigin::ToolCallCancelled) => ToolCallStatusDto::Cancelled,
         // `ToolResult.is_error` describes result semantics, not tool-call lifecycle.
         _ => ToolCallStatusDto::Complete,
     }
@@ -406,9 +405,12 @@ fn transcript_artifact_block(artifact: &SessionArtifactView) -> ConversationBloc
             id: id.clone(),
             message: message.clone(),
         },
-        SessionArtifactView::SystemNote { id, text, .. } => ConversationBlockDto::SystemNote {
+        SessionArtifactView::Recap {
+            id, text, source, ..
+        } => ConversationBlockDto::Recap {
             id: id.clone(),
             text: text.clone(),
+            source: source.clone(),
         },
     }
 }
@@ -429,26 +431,24 @@ fn visible_ui_text(message: &LlmMessage) -> String {
 #[cfg(test)]
 mod tests {
     use astrcode_core::llm::{
-        LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, turn_aborted_context_message,
+        LlmContent, LlmMessage, LlmRole, TranscriptMessageOrigin, turn_aborted_context_message,
     };
-    use astrcode_session_projection::{
-        SequencedLlmMessage, TOOL_CALL_CANCELLED_SOURCE, TOOL_CALL_FAILED_SOURCE,
-    };
+    use astrcode_session_projection::SequencedLlmMessage;
 
     use super::*;
 
     #[test]
-    fn transcript_blocks_hides_turn_aborted_context() {
+    fn transcript_blocks_interprets_message_origins() {
         let messages = vec![
             SequencedLlmMessage {
                 message: LlmMessage::user("visible"),
                 updated_seq: 1,
-                source: None,
+                origin: None,
             },
             SequencedLlmMessage {
                 message: turn_aborted_context_message(),
                 updated_seq: 2,
-                source: Some(TURN_ABORTED_SOURCE.into()),
+                origin: Some(TranscriptMessageOrigin::TurnAborted),
             },
         ];
 
@@ -459,42 +459,7 @@ mod tests {
             &blocks[0],
             ConversationBlockDto::User { text, .. } if text == "visible"
         ));
-    }
 
-    #[test]
-    fn transcript_blocks_only_exposes_precise_fork_points() {
-        let messages = [
-            SequencedLlmMessage {
-                message: LlmMessage::assistant("compacted reply"),
-                updated_seq: 5,
-                source: None,
-            },
-            SequencedLlmMessage {
-                message: LlmMessage::assistant("tail reply"),
-                updated_seq: 8,
-                source: None,
-            },
-        ];
-
-        let blocks = transcript_blocks(&messages, &[], Some(5));
-
-        assert!(matches!(
-            blocks.as_slice(),
-            [
-                ConversationBlockDto::Assistant {
-                    storage_seq: None,
-                    ..
-                },
-                ConversationBlockDto::Assistant {
-                    storage_seq: Some(8),
-                    ..
-                }
-            ]
-        ));
-    }
-
-    #[test]
-    fn transcript_blocks_restore_tool_terminal_statuses() {
         let cases = [
             ("complete", None, false, ToolCallStatusDto::Complete),
             (
@@ -505,13 +470,13 @@ mod tests {
             ),
             (
                 "failed",
-                Some(TOOL_CALL_FAILED_SOURCE),
+                Some(TranscriptMessageOrigin::ToolCallFailed),
                 true,
                 ToolCallStatusDto::Failed,
             ),
             (
                 "cancelled",
-                Some(TOOL_CALL_CANCELLED_SOURCE),
+                Some(TranscriptMessageOrigin::ToolCallCancelled),
                 true,
                 ToolCallStatusDto::Cancelled,
             ),
@@ -532,23 +497,22 @@ mod tests {
                 reasoning_content: None,
             },
             updated_seq: 1,
-            source: None,
+            origin: None,
         }];
         messages.extend(
             cases
                 .iter()
                 .enumerate()
                 .map(
-                    |(index, (call_id, source, is_error, _))| SequencedLlmMessage {
+                    |(index, (call_id, origin, is_error, _))| SequencedLlmMessage {
                         message: LlmMessage::tool("probe", *call_id, *call_id, *is_error),
                         updated_seq: index as u64 + 2,
-                        source: source.map(str::to_owned),
+                        origin: *origin,
                     },
                 ),
         );
 
-        let blocks = transcript_blocks(&messages, &[], None);
-        let statuses = blocks
+        let statuses = transcript_blocks(&messages, &[], None)
             .iter()
             .map(|block| {
                 let ConversationBlockDto::ToolCall { status, .. } = block else {
@@ -565,5 +529,37 @@ mod tests {
                 .map(|(_, _, _, status)| status)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn transcript_blocks_only_exposes_precise_fork_points() {
+        let messages = [
+            SequencedLlmMessage {
+                message: LlmMessage::assistant("compacted reply"),
+                updated_seq: 5,
+                origin: None,
+            },
+            SequencedLlmMessage {
+                message: LlmMessage::assistant("tail reply"),
+                updated_seq: 8,
+                origin: None,
+            },
+        ];
+
+        let blocks = transcript_blocks(&messages, &[], Some(5));
+
+        assert!(matches!(
+            blocks.as_slice(),
+            [
+                ConversationBlockDto::Assistant {
+                    storage_seq: None,
+                    ..
+                },
+                ConversationBlockDto::Assistant {
+                    storage_seq: Some(8),
+                    ..
+                }
+            ]
+        ));
     }
 }

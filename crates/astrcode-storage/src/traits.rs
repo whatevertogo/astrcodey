@@ -312,13 +312,28 @@ pub trait SessionEventJournal: Send + Sync {
 
     /// Atomically append one or more consecutive events from the same session.
     ///
-    /// Implementations must commit the whole batch or leave both the event log and projection
-    /// unchanged. Sequence numbers are assigned in input order, and the returned batch has
+    /// Implementations commit the whole batch as one recoverable append before advancing their
+    /// projection. Sequence numbers are assigned in input order, and the returned batch has
     /// exactly one stored event per input event.
     async fn append_events(
         &self,
         events: Vec<DurableEvent>,
     ) -> Result<Vec<StoredEvent>, StorageError>;
+
+    /// Append a batch and fsync it before making it visible through the read model.
+    ///
+    /// Implementations with an in-memory projection must not apply the batch until fsync
+    /// succeeds. If fsync returns an ambiguous failure after the write, they must retain that
+    /// exact batch for [`Self::retry_uncertain_sync`] and reject later mutations.
+    ///
+    /// Default: delegates to [`Self::append_events`], for implementations without a durability
+    /// barrier (mirroring the [`Self::sync_durable_events`] default).
+    async fn append_events_and_sync(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        self.append_events(events).await
+    }
 
     async fn append_event(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         self.append_events(vec![event])
@@ -328,6 +343,30 @@ pub trait SessionEventJournal: Send + Sync {
     }
 
     async fn sync_durable_events(&self, _session_id: &SessionId) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Retry fsync for the exact sequence boundary left uncertain by a prior durable operation.
+    ///
+    /// Newly confirmed records are returned so the ordered event sink can publish them after
+    /// durability confirmation. An empty result means no unpublished batch remains.
+    ///
+    /// Default: `Ok(Vec::new())`, for implementations that never report uncertain durability.
+    async fn retry_uncertain_sync(
+        &self,
+        _session_id: &SessionId,
+        _expected_through_seq: u64,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Reject operation admission while this process owns an ambiguous fsync result.
+    ///
+    /// Default: `Ok(())`, for implementations that never report uncertain durability.
+    async fn ensure_no_uncertain_durability(
+        &self,
+        _session_id: &SessionId,
+    ) -> Result<(), StorageError> {
         Ok(())
     }
 }

@@ -30,8 +30,7 @@ pub struct ToolPlanContext {
 }
 
 impl ToolPlanContext {
-    #[doc(hidden)]
-    pub fn from_runtime(
+    pub(crate) fn from_runtime(
         extension_id: impl Into<String>,
         session_id: SessionId,
         working_dir: PathBuf,
@@ -51,14 +50,12 @@ impl ToolPlanContext {
         }
     }
 
-    #[doc(hidden)]
-    pub fn with_turn_id(mut self, turn_id: Option<String>) -> Self {
+    pub(crate) fn with_turn_id(mut self, turn_id: Option<String>) -> Self {
         self.turn_id = turn_id.map(Arc::from);
         self
     }
 
-    #[doc(hidden)]
-    pub fn with_call_id(mut self, call_id: Option<String>) -> Self {
+    pub(crate) fn with_call_id(mut self, call_id: Option<String>) -> Self {
         self.call_id = call_id.map(Arc::from);
         self
     }

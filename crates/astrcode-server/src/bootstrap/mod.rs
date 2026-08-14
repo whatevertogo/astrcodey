@@ -10,11 +10,9 @@ use std::{
     time::Duration,
 };
 
-use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{config::ConfigStore, tool::SessionOperations};
 use astrcode_extensions::{
     host_router::{HostBackends, build_host_router_with_public_http_dispatcher},
-    loader::{DiskExtensionSource, ExtensionLoadContext, sync_extension_sources},
     runner::ExtensionRunner,
 };
 use astrcode_session::SessionRuntimeServices;
@@ -68,11 +66,10 @@ pub(crate) async fn load_merged_config(
     Ok(config)
 }
 
-pub use crate::config_manager::ConfigManager;
 use crate::{
-    child_session::ChildSessionCoordinator, session_manager::SessionManager,
-    session_operations::ServerSessionOperations, turn_registry::TurnRegistry,
-    turn_scheduler::TurnScheduler,
+    child_session::ChildSessionCoordinator, config_manager::ConfigManager,
+    session_manager::SessionManager, session_operations::ServerSessionOperations,
+    turn_registry::TurnRegistry, turn_scheduler::TurnScheduler,
 };
 
 // ─── ServerRuntime ───────────────────────────────────────────────────────
@@ -93,35 +90,35 @@ pub struct ServerRuntime {
 }
 
 impl ServerRuntime {
-    pub fn event_store(&self) -> &Arc<dyn SessionStore> {
+    pub(crate) fn event_store(&self) -> &Arc<dyn SessionStore> {
         &self.event_store
     }
 
-    pub fn config_manager(&self) -> &Arc<ConfigManager> {
+    pub(crate) fn config_manager(&self) -> &Arc<ConfigManager> {
         &self.config_manager
     }
 
-    pub fn session_manager(&self) -> &Arc<SessionManager> {
+    pub(crate) fn session_manager(&self) -> &Arc<SessionManager> {
         &self.session_manager
     }
 
-    pub fn scheduler(&self) -> &Arc<TurnScheduler> {
+    pub(crate) fn scheduler(&self) -> &Arc<TurnScheduler> {
         &self.scheduler
     }
 
-    pub fn extension_runner(&self) -> &Arc<ExtensionRunner> {
+    pub(crate) fn extension_runner(&self) -> &Arc<ExtensionRunner> {
         &self.extension_runner
     }
 
-    pub fn runtime_services(&self) -> &Arc<SessionRuntimeServices> {
+    pub(crate) fn runtime_services(&self) -> &Arc<SessionRuntimeServices> {
         &self.runtime_services
     }
 
-    pub fn startup_working_dir(&self) -> &PathBuf {
+    pub(crate) fn startup_working_dir(&self) -> &PathBuf {
         &self.startup_working_dir
     }
 
-    pub fn shutdown_token(&self) -> &tokio_util::sync::CancellationToken {
+    pub(crate) fn shutdown_token(&self) -> &tokio_util::sync::CancellationToken {
         &self.shutdown_token
     }
 }
@@ -157,13 +154,12 @@ pub async fn bootstrap() -> Result<ServerRuntime, BootstrapError> {
 /// 启动顺序：
 /// 1. 加载并解析配置
 /// 2. 确定启动工作目录
-/// 3. 构建提示词组装器
-/// 4. 初始化存储后端
-/// 5. 创建空的扩展运行器
-/// 6. 组装 ConfigManager（内部构建 providers）
-/// 7. 创建 turn scheduler 与 session ops
-/// 8. 加载扩展（从 runtime services 获取 LLM 与 session ops）
-/// 9. 返回共享运行时容器
+/// 3. 初始化存储后端
+/// 4. 创建空的扩展运行器
+/// 5. 组装 ConfigManager（内部构建 providers 与 context assembler）
+/// 6. 创建 turn scheduler 与 session ops
+/// 7. 加载扩展（从 runtime services 获取 LLM 与 session ops）
+/// 8. 返回共享运行时容器
 pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, BootstrapError> {
     // 1. 读取配置并解析成 EffectiveConfig。
     //
@@ -184,11 +180,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
 
     let effective = config_resolve::resolve_effective_config(&config_store, &config).await;
 
-    // 3. 构建提示词组装器。
-    let context_settings = effective.context.clone();
-    let context_assembler = Arc::new(LlmContextAssembler::new(context_settings));
-
-    // 4. 初始化事件存储（步骤号延续上文「构建提示词组装器」之后）。
+    // 3. 初始化事件存储。
     //
     // 测试启动（config_path.is_some()）使用内存存储，避免污染真实会话目录；
     // 正常启动按项目路径选择文件系统会话仓库。
@@ -203,13 +195,13 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         Arc::new(astrcode_storage::session_repo::FileSystemSessionRepository::new());
     let event_store = store;
 
-    // 5. 创建空的扩展运行器。
+    // 4. 创建空的扩展运行器。
     //
     // 先创建空 runner，后续加载 extensions 填充它。
     // ConfigManager 持有 Arc 引用，加载后的扩展对已创建的 session 立即可见。
     let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(30)));
 
-    // 6. 组装 ConfigManager 与 session runtime services。
+    // 5. 组装 ConfigManager 与 session runtime services。
     //
     // ConfigManager 内部从 effective 构建 providers，不需要外部注入。
     // 二者共享同一份 effective/llm_provider 存储，配置写入直接更新 runtime services。
@@ -219,11 +211,11 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
             config,
             effective,
             Arc::clone(&extension_runner),
-            Arc::clone(&context_assembler),
+            cwd.clone(),
         )?;
     let config_manager = Arc::new(config_manager);
 
-    // 7. 创建 session manager、turn scheduler 与 session ops。
+    // 6. 创建 session manager、turn scheduler 与 session ops。
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
         Arc::clone(&runtime_services),
@@ -247,17 +239,17 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
     });
     extension_runner.bind_session_ops(Arc::clone(&session_ops));
 
-    // 8. 加载扩展。
-    let load_errors = load_extensions_into_runner(
+    // 7. 加载扩展。
+    bind_extension_host_router(
         &extension_runner,
         &runtime_services,
         Arc::clone(&event_store),
         &cwd,
-    )
-    .await;
-    for err in &load_errors {
-        tracing::warn!("Extension load error: {err}");
-    }
+    );
+    config_manager
+        .initialize_extensions::<std::convert::Infallible>()
+        .await
+        .map_err(|error| BootstrapError::Extension(error.to_string()))?;
     if let Err(error) = session_manager
         .replay_custom_events(&extension_runner)
         .await
@@ -265,7 +257,7 @@ pub async fn bootstrap_with(opts: BootstrapOptions) -> Result<ServerRuntime, Boo
         tracing::warn!(%error, "failed to replay durable custom events");
     }
 
-    // 9. 返回运行时容器。
+    // 8. 返回运行时容器。
     Ok(ServerRuntime {
         event_store,
         config_manager,
@@ -285,37 +277,14 @@ pub enum BootstrapError {
     Config(#[from] astrcode_core::config::ConfigStoreError),
     #[error("LLM provider: {0}")]
     Llm(#[from] astrcode_core::llm::LlmError),
-}
-
-#[cfg(feature = "testing")]
-impl ServerRuntime {
-    /// 集成测试用：从已组装的部件构造运行时（避免测试直接访问私有字段）。
-    #[allow(clippy::too_many_arguments)] // 字段与 `ServerRuntime` 一一对应，拆 struct 无收益
-    pub fn assemble_for_test(
-        event_store: Arc<dyn SessionStore>,
-        config_manager: Arc<ConfigManager>,
-        session_manager: Arc<SessionManager>,
-        scheduler: Arc<TurnScheduler>,
-        extension_runner: Arc<ExtensionRunner>,
-        runtime_services: Arc<SessionRuntimeServices>,
-        startup_working_dir: PathBuf,
-    ) -> Self {
-        Self {
-            event_store,
-            config_manager,
-            session_manager,
-            scheduler,
-            extension_runner,
-            runtime_services,
-            startup_working_dir,
-            shutdown_token: tokio_util::sync::CancellationToken::new(),
-        }
-    }
+    #[error("Extension runtime: {0}")]
+    Extension(String),
 }
 
 impl ServerRuntime {
     /// 停止所有扩展运行态任务。可重复调用。
     pub async fn shutdown_extensions(&self) {
+        self.config_manager().drain_transactions().await;
         for error in self.extension_runner().shutdown().await {
             tracing::warn!("extension shutdown error: {error}");
         }
@@ -323,13 +292,13 @@ impl ServerRuntime {
 
     /// 按当前配置重载扩展集合；新 turn 会直接解析新的工具快照。
     pub async fn reload_extensions(&self) -> Vec<String> {
-        let errors = load_extensions_into_runner(
-            self.extension_runner(),
-            self.runtime_services(),
-            Arc::clone(self.event_store()),
-            self.startup_working_dir(),
-        )
-        .await;
+        let errors = self
+            .config_manager()
+            .reload_extensions::<std::convert::Infallible>()
+            .await
+            .err()
+            .map(|error| vec![error.to_string()])
+            .unwrap_or_default();
         if let Err(error) = self
             .session_manager()
             .replay_custom_events(self.extension_runner())
@@ -342,27 +311,12 @@ impl ServerRuntime {
 }
 
 /// 将扩展加载到已有的 runner 中。
-async fn load_extensions_into_runner(
+fn bind_extension_host_router(
     runner: &Arc<ExtensionRunner>,
     runtime_services: &SessionRuntimeServices,
     session_store: Arc<dyn SessionStore>,
     cwd: &std::path::Path,
-) -> Vec<String> {
-    let effective = runtime_services.read_effective();
-
-    // 先将扩展配置注入运行器，这样 register 时可查到
-    let configs: BTreeMap<_, _> = effective
-        .extensions
-        .extension_configs
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
-    runner.update_extension_configs(configs);
-
-    let bundled_source = astrcode_bundled_extensions::BundledExtensionSource::new(
-        effective.extensions.extension_states.clone(),
-    );
-    let disk_source = DiskExtensionSource::new(effective.extensions.extension_states.clone());
+) {
     let working_dir = cwd.to_string_lossy().into_owned();
     let event_reader: Arc<dyn EventReader> = session_store.clone();
     let session_reader: Arc<dyn SessionReader> = session_store;
@@ -382,15 +336,6 @@ async fn load_extensions_into_runner(
         runner.public_http_dispatcher(),
     );
     runner.bind_host_router(Arc::clone(&host_router));
-    sync_extension_sources(
-        runner,
-        &ExtensionLoadContext {
-            working_dir: Some(working_dir),
-            host_router: Some(host_router),
-        },
-        &[&bundled_source, &disk_source],
-    )
-    .await
 }
 
 // ─── SessionResourceCleanup 实现 ────────────────────────────────────────

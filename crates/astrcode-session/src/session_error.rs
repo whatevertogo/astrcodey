@@ -28,4 +28,12 @@ impl SessionError {
     pub fn is_retryable(&self) -> bool {
         matches!(self, Self::EventPublish(error) if error.is_retryable())
     }
+
+    pub(crate) fn uncertain_through_seq(&self) -> Option<u64> {
+        match self {
+            Self::Storage(error) => error.uncertain_through_seq(),
+            Self::EventPublish(error) => error.uncertain_through_seq(),
+            _ => None,
+        }
+    }
 }

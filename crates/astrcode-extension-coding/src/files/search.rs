@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{collections::BTreeMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
@@ -8,12 +8,12 @@ use astrcode_extension_sdk::{
     },
     tool::{
         ExecutionMode, ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
+        ToolResult,
     },
 };
 use serde::Deserialize;
 
 use super::absolute_path;
-use crate::result::success;
 
 const DEFAULT_GLOB_MAX_RESULTS: usize = 100;
 const DEFAULT_GREP_MAX_MATCHES: usize = 250;
@@ -56,14 +56,13 @@ impl ToolHandler for GlobHandler {
         let args: GlobArgs = context.arguments()?;
         validate_glob(&args)?;
         let root = args.root.as_deref().unwrap_or(".");
-        Ok(ToolPlan::from_resources([ResourceAccess::search_file(
+        Ok(ToolPlan::new([ResourceAccess::search_file(
             absolute_path(context.working_dir(), root),
             true,
         )]))
     }
 
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
-        let started_at = Instant::now();
         let args: GlobArgs = context.arguments()?;
         validate_glob(&args)?;
         let offset = args.offset.unwrap_or(0);
@@ -117,7 +116,7 @@ impl ToolHandler for GlobHandler {
         if let Some(total_matches) = total_matches {
             metadata.insert("totalMatches".into(), serde_json::json!(total_matches));
         }
-        Ok(success(started_at, content, metadata).into())
+        Ok(ToolResult::success(content).with_metadata(metadata).into())
     }
 }
 
@@ -177,14 +176,13 @@ impl ToolHandler for GrepHandler {
     async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
         let args: GrepArgs = context.arguments()?;
         validate_grep(&args)?;
-        Ok(ToolPlan::from_resources([ResourceAccess::search_file(
+        Ok(ToolPlan::new([ResourceAccess::search_file(
             absolute_path(context.working_dir(), args.path.as_deref().unwrap_or(".")),
             true,
         )]))
     }
 
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
-        let started_at = Instant::now();
         let args: GrepArgs = context.arguments()?;
         validate_grep(&args)?;
         let pattern = host_pattern(&args);
@@ -224,10 +222,8 @@ impl ToolHandler for GrepHandler {
         };
         append_pagination_notice(&mut content, has_more, next_offset);
         append_scan_limit_notice(&mut content, scan_truncated);
-        Ok(success(
-            started_at,
-            content,
-            BTreeMap::from([
+        Ok(ToolResult::success(content)
+            .with_metadata(BTreeMap::from([
                 ("pattern".into(), serde_json::json!(args.pattern)),
                 ("literal".into(), serde_json::json!(args.literal)),
                 ("returned".into(), serde_json::json!(rendered.len())),
@@ -256,9 +252,8 @@ impl ToolHandler for GrepHandler {
                     "outputMode".into(),
                     serde_json::json!(args.output_mode.as_str()),
                 ),
-            ]),
-        )
-        .into())
+            ]))
+            .into())
     }
 }
 

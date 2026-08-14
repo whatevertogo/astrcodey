@@ -8,7 +8,8 @@ use std::{
 };
 
 use astrcode_extension_sdk::extension::{
-    Extension, ExtensionError, ExtensionStopContext, ExtensionTasks, StopReason,
+    Extension, ExtensionError, ExtensionTasks, StopReason,
+    internal::{cancel_extension_tasks, extension_stop_context, wait_extension_tasks},
 };
 use futures_util::FutureExt;
 use tokio::{
@@ -17,58 +18,7 @@ use tokio::{
 };
 
 use super::{HostedExtension, supervisor::ExtensionSupervisor};
-
-/// Tracks turn-scoped views that may still dispatch through their captured handlers.
-pub(super) struct ActiveTurnViews {
-    active: AtomicUsize,
-    released: Notify,
-}
-
-impl ActiveTurnViews {
-    pub(super) fn new() -> Arc<Self> {
-        Arc::new(Self {
-            active: AtomicUsize::new(0),
-            released: Notify::new(),
-        })
-    }
-
-    pub(super) fn acquire(self: &Arc<Self>) -> ActiveTurnViewLease {
-        self.active.fetch_add(1, Ordering::AcqRel);
-        ActiveTurnViewLease {
-            views: Arc::clone(self),
-        }
-    }
-
-    pub(super) async fn wait_until_idle(&self, timeout: std::time::Duration) -> Result<(), usize> {
-        let wait = async {
-            loop {
-                let released = self.released.notified();
-                if self.active.load(Ordering::Acquire) == 0 {
-                    return;
-                }
-                released.await;
-            }
-        };
-        if tokio::time::timeout(timeout, wait).await.is_ok() {
-            return Ok(());
-        }
-        let active = self.active.load(Ordering::Acquire);
-        if active == 0 { Ok(()) } else { Err(active) }
-    }
-}
-
-/// RAII 租约：持有期间计入活跃 turn 视图数，drop 时递减并在归零时唤醒等待者。
-pub(super) struct ActiveTurnViewLease {
-    views: Arc<ActiveTurnViews>,
-}
-
-impl Drop for ActiveTurnViewLease {
-    fn drop(&mut self) {
-        if self.views.active.fetch_sub(1, Ordering::AcqRel) == 1 {
-            self.views.released.notify_waiters();
-        }
-    }
-}
+use crate::host_router::{ExtensionGenerationGate, ExtensionInstanceId, HostRouter};
 
 /// Tracks published indexes that can still dispatch into one extension instance.
 pub(super) struct ExtensionPublicationLease {
@@ -109,6 +59,16 @@ impl ExtensionPublicationLease {
             Err(published_indexes)
         }
     }
+
+    async fn wait_until_fully_unpublished(&self) {
+        loop {
+            let released = self.released.notified();
+            if self.published_indexes.load(Ordering::Acquire) == 0 {
+                return;
+            }
+            released.await;
+        }
+    }
 }
 
 pub(super) struct ExtensionIndexLease(Arc<ExtensionPublicationLease>);
@@ -144,8 +104,10 @@ struct RetirementWork {
     extension_id: String,
     extension: Arc<dyn Extension>,
     tasks: ExtensionTasks,
+    generation_gate: ExtensionGenerationGate,
     publication_lease: Option<Arc<ExtensionPublicationLease>>,
     supervisor: Option<ExtensionSupervisor>,
+    cleanup_host_resources: Option<(Arc<HostRouter>, ExtensionInstanceId)>,
 }
 
 /// Owns a registration after its runtime resources exist but before publication.
@@ -155,10 +117,13 @@ struct RetirementWork {
 pub(super) struct PendingRegistration<'a> {
     supervisor: &'a RetirementSupervisor,
     extension_id: String,
+    instance_id: ExtensionInstanceId,
     extension: Option<Arc<dyn Extension>>,
     tasks: Option<ExtensionTasks>,
+    generation_gate: ExtensionGenerationGate,
     operation_guard: Option<OwnedMutexGuard<()>>,
     operation_timeout: std::time::Duration,
+    host_router: Arc<HostRouter>,
 }
 
 pub(crate) struct RetirementTicket {
@@ -206,8 +171,10 @@ impl PendingRegistration<'_> {
             extension_id: self.extension_id.clone(),
             extension: self.extension.take()?,
             tasks: self.tasks.take()?,
+            generation_gate: self.generation_gate.clone(),
             publication_lease: None,
             supervisor: None,
+            cleanup_host_resources: Some((Arc::clone(&self.host_router), self.instance_id)),
         })
     }
 
@@ -229,10 +196,16 @@ impl PendingRegistration<'_> {
             .retire_registration(work, self.operation_timeout, operation_guard))
     }
 
-    pub(super) fn disarm(mut self) {
+    pub(super) fn disarm(mut self) -> Result<OwnedMutexGuard<()>, ExtensionRetirementError> {
+        let operation_guard = self.operation_guard.take().ok_or_else(|| {
+            ExtensionRetirementError::new(format!(
+                "pending registration lost its lifecycle gate for {}",
+                self.extension_id
+            ))
+        })?;
         self.extension.take();
         self.tasks.take();
-        self.operation_guard.take();
+        Ok(operation_guard)
     }
 }
 
@@ -320,18 +293,24 @@ impl RetirementSupervisor {
     pub(super) fn pending_registration(
         &self,
         extension_id: String,
+        instance_id: ExtensionInstanceId,
         extension: Arc<dyn Extension>,
         tasks: ExtensionTasks,
+        generation_gate: ExtensionGenerationGate,
         operation_guard: OwnedMutexGuard<()>,
         operation_timeout: std::time::Duration,
+        host_router: Arc<HostRouter>,
     ) -> PendingRegistration<'_> {
         PendingRegistration {
             supervisor: self,
             extension_id,
+            instance_id,
             extension: Some(extension),
             tasks: Some(tasks),
+            generation_gate,
             operation_guard: Some(operation_guard),
             operation_timeout,
+            host_router,
         }
     }
 
@@ -341,13 +320,16 @@ impl RetirementSupervisor {
         reason: StopReason,
         operation_timeout: std::time::Duration,
         operation_guard: OwnedMutexGuard<()>,
+        cleanup_host_resources: Arc<HostRouter>,
     ) -> RetirementTicket {
         let work = RetirementWork {
             extension_id: hosted.manifest.id().to_owned(),
             extension: hosted.extension,
             tasks: hosted.tasks,
+            generation_gate: hosted.generation_gate,
             publication_lease: Some(hosted.publication_lease),
             supervisor: Some(hosted.supervisor),
+            cleanup_host_resources: Some((cleanup_host_resources, hosted.instance_id)),
         };
         self.spawn_ticketed_retirement(work, reason, operation_timeout, operation_guard)
     }
@@ -378,7 +360,28 @@ impl RetirementSupervisor {
             operation_timeout,
             operation_guard,
             None,
+            false,
         );
+    }
+
+    pub(super) fn retire_replaced(
+        &self,
+        hosted: HostedExtension,
+        reason: StopReason,
+        operation_timeout: std::time::Duration,
+        operation_guard: OwnedMutexGuard<()>,
+        cleanup_host_resources: Arc<HostRouter>,
+    ) {
+        let work = RetirementWork {
+            extension_id: hosted.manifest.id().to_owned(),
+            extension: hosted.extension,
+            tasks: hosted.tasks,
+            generation_gate: hosted.generation_gate,
+            publication_lease: Some(hosted.publication_lease),
+            supervisor: Some(hosted.supervisor),
+            cleanup_host_resources: Some((cleanup_host_resources, hosted.instance_id)),
+        };
+        self.spawn_retirement(work, reason, operation_timeout, operation_guard, None, true);
     }
 
     fn spawn_ticketed_retirement(
@@ -396,6 +399,7 @@ impl RetirementSupervisor {
             operation_timeout,
             operation_guard,
             Some(outcome_tx),
+            false,
         );
         RetirementTicket {
             retirement_id,
@@ -412,6 +416,7 @@ impl RetirementSupervisor {
         operation_timeout: std::time::Duration,
         operation_guard: OwnedMutexGuard<()>,
         outcome: Option<oneshot::Sender<RetirementTicketOutcome>>,
+        drain_publication_first: bool,
     ) -> u64 {
         let mut tasks = self.tasks.lock();
         self.collect_ready(&mut tasks);
@@ -430,25 +435,35 @@ impl RetirementSupervisor {
         tasks.spawn(async move {
             let mut work = work;
             let supervisor = work.supervisor.take();
+            let supervisor_control = supervisor.as_ref().map(ExtensionSupervisor::control);
+            let cleanup_host_resources = work.cleanup_host_resources.take();
             let result = AssertUnwindSafe(async move {
-                work.tasks.cancel();
-                let publication_drain_error = if let Some(publication_lease) =
-                    work.publication_lease
-                    && let Err(published_indexes) = publication_lease
+                let mut errors = Vec::new();
+                if let Some(publication_lease) = work.publication_lease {
+                    if drain_publication_first {
+                        publication_lease.wait_until_fully_unpublished().await;
+                    } else if let Err(published_indexes) = publication_lease
                         .wait_until_unpublished(operation_timeout)
                         .await
+                    {
+                        errors.push(format!(
+                            "timed out waiting for {published_indexes} published extension \
+                             index(es)"
+                        ));
+                    }
+                }
+                work.generation_gate.deactivate();
+                cancel_extension_tasks(&work.tasks);
+                if drain_publication_first
+                    && let Some(supervisor) = supervisor_control
+                    && let Err(error) = supervisor.begin_draining().await
                 {
-                    Some(ExtensionError::Internal(format!(
-                        "timed out waiting for {published_indexes} published extension index(es)"
-                    )))
-                } else {
-                    None
-                };
-                let tasks_stopped = work.tasks.wait(operation_timeout).await;
+                    errors.push(error.to_string());
+                }
+                let tasks_stopped = wait_extension_tasks(&work.tasks, operation_timeout).await;
                 let stop_result = match tokio::time::timeout(
                     operation_timeout,
-                    work.extension
-                        .stop(ExtensionStopContext::from_runtime(reason)),
+                    work.extension.stop(extension_stop_context(reason)),
                 )
                 .await
                 {
@@ -456,26 +471,22 @@ impl RetirementSupervisor {
                     Err(_) => Err(ExtensionError::Timeout(operation_timeout.as_millis() as u64)),
                 };
                 if !tasks_stopped {
-                    return match stop_result {
-                        Ok(()) => Err(ExtensionError::Internal(
-                            "managed extension tasks remained active after abort".into(),
-                        )),
-                        Err(stop_error) => Err(ExtensionError::Internal(format!(
-                            "managed extension tasks remained active after abort; stop also \
-                             failed: {stop_error}"
-                        ))),
-                    };
+                    errors.push("managed extension tasks remained active after abort".into());
                 }
-                match (publication_drain_error, stop_result) {
-                    (None, stop_result) => stop_result,
-                    (Some(drain_error), Ok(())) => Err(drain_error),
-                    (Some(drain_error), Err(stop_error)) => Err(ExtensionError::Internal(format!(
-                        "{drain_error}; stop also failed: {stop_error}"
-                    ))),
+                if let Err(error) = stop_result {
+                    errors.push(format!("stop failed: {error}"));
+                }
+                if errors.is_empty() {
+                    Ok(())
+                } else {
+                    Err(ExtensionError::Internal(errors.join("; ")))
                 }
             })
             .catch_unwind()
             .await;
+            if let Some((host_router, instance_id)) = cleanup_host_resources {
+                host_router.cleanup_extension_resources(instance_id);
+            }
             let supervisor_failure = match &result {
                 Ok(Ok(())) => None,
                 Ok(Err(error)) => Some(error.to_string()),

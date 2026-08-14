@@ -12,9 +12,7 @@ use astrcode_extension_sdk::{
         CustomEventDeclaration, ExtensionHttpDispatchRequest, ExtensionHttpMethod,
         ExtensionHttpResponse, ExtensionHttpRoute,
     },
-    s5r::{
-        CallContinuation, ErrorPayload, HandlerEffect, HandlerResult,
-    },
+    s5r::{CallContinuation, ErrorPayload, HandlerEffect, HandlerResult},
     tool::ExecutionMode,
 };
 use astrcode_extension_worker::worker_prelude::*;
@@ -36,27 +34,26 @@ fn no_resources() -> ToolPlannerFn {
 }
 
 fn host_resource(resource: HostResource) -> ToolPlannerFn {
-    tool_planner(move |_| async move {
-        Ok(ToolPlan::new(ResourceSet::new([ResourceAccess::host(
-            resource,
-        )])))
-    })
+    tool_planner(move |_| async move { Ok(ToolPlan::new([ResourceAccess::host(resource)])) })
 }
 
 fn read_probe() -> ToolPlannerFn {
     tool_planner(|ctx| async move {
-        Ok(ToolPlan::new(ResourceSet::new([
-            ResourceAccess::read_file(ctx.working_dir().join("probe.txt")),
-        ])))
+        Ok(ToolPlan::new([ResourceAccess::read_file(
+            ctx.working_dir().join("probe.txt"),
+        )]))
     })
 }
 
 fn workspace_text(output: HostWorkspaceReadOutput) -> Result<String, ErrorPayload> {
     match output {
         HostWorkspaceReadOutput::Text { content, .. } => Ok(content),
-        HostWorkspaceReadOutput::Image { .. } | HostWorkspaceReadOutput::Binary { .. } => Err(
-            ErrorPayload::new(WireErrorCode::InvalidResponse, "probe.txt must be UTF-8 text"),
-        ),
+        HostWorkspaceReadOutput::Image { .. } | HostWorkspaceReadOutput::Binary { .. } => {
+            Err(ErrorPayload::new(
+                WireErrorCode::InvalidResponse,
+                "probe.txt must be UTF-8 text",
+            ))
+        },
     }
 }
 
@@ -382,7 +379,8 @@ async fn run() -> Result<(), ErrorPayload> {
                 }),
             )
             .await;
-            if !matches!(&forged, Err(error) if error.code == WireErrorCode::InvalidInput.as_str()) {
+            if !matches!(&forged, Err(error) if error.code == WireErrorCode::InvalidInput.as_str())
+            {
                 return Err(ErrorPayload::new(
                     WireErrorCode::InvalidInput,
                     format!("host accepted forged path params: {forged:?}"),
@@ -420,13 +418,31 @@ async fn run() -> Result<(), ErrorPayload> {
     )?;
 
     worker.command(
-        "demo",
-        "Demo slash command",
-        command_handler(|_ctx| async {
-            Ok(HandlerResult::effect(
-                HandlerEffect::Ok,
-                json!({ "kind": "display", "content": "s5r guest demo works!", "is_error": false }),
-            ))
+        command("demo")
+            .description("Demo slash command")
+            .arguments(json!({ "type": "string" }))
+            .requires_idle(true)
+            .argument_completions(true)
+            .priority(17)
+            .availability(CommandAvailability::InteractiveOnly)
+            .build(),
+        command_handler(|ctx| async move {
+            let data = match ctx.invocation() {
+                WorkerCommandInvocation::Complete { cursor } => json!({
+                    "items": [{
+                        "label": ctx.argument(),
+                        "insert_text": format!("{}-value", ctx.argument()),
+                        "detail": cursor.to_string()
+                    }],
+                    "truncated": false
+                }),
+                WorkerCommandInvocation::Execute => json!({
+                    "kind": "display",
+                    "content": format!("s5r guest {} works!", ctx.command_name()),
+                    "is_error": false
+                }),
+            };
+            Ok(HandlerResult::effect(HandlerEffect::Ok, data))
         }),
     )?;
 

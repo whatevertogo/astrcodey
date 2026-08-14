@@ -49,7 +49,7 @@ The runner rejects privileged registrations that omit their capability:
 | Custom event subscription | `consume_custom_events` |
 | Compact hook | `session_history` |
 | Before/after provider hook or user-message envelope | `provider_request` |
-| Blocking pre/post tool hook | `tool_intercept` |
+| Tool input transform, pre-tool admission, or blocking post-tool hook | `tool_intercept` |
 | Continue after stop | `turn_continuation_control` |
 
 ## Hook Families
@@ -58,7 +58,8 @@ The runner rejects privileged registrations that omit their capability:
 | --- | --- | --- | --- | --- |
 | Lifecycle | `on_lifecycle(event, mode, priority, handler)` | `LifecycleContext` | `emit_lifecycle` | Only `TurnStart` and `UserPromptSubmit` may be Blocking. Other lifecycle events are observe-only and reject Blocking registration. |
 | Prompt build | `on_prompt_build(priority, handler)` | `PromptBuildContext` | `collect_prompt_contributions` | Contributions merge in stable priority order. Initial construction may precede durable `SessionStarted`. |
-| Pre tool use | `on_pre_tool_use*` | `PreToolUseContext` | `emit_pre_tool_use` | Blocking handlers may modify input, ask, or block. Advisory/nonblocking handlers cannot change flow. |
+| Tool input transform | `on_tool_input_transform*` | `PreToolUseContext` | `transform_tool_input` | Blocking-only transforms fold in stable priority order. Each handler sees the preceding transform's output. |
+| Pre tool use | `on_pre_tool_use*` | `PreToolUseContext` | `emit_pre_tool_use` | Blocking-only admission. Every handler sees the same normalized final input; Ask requirements accumulate and any Block wins. |
 | Post tool use | `on_post_tool_use*` | `PostToolUseContext` | `emit_post_tool_use` | Runs after a completed tool result, including semantic errors. Blocking handlers may replace visible content or block; observer results are ignored. |
 | Before provider request | `on_before_provider_request(mode, priority, handler)` | `ProviderContext` | `emit_provider(BeforeRequest, ...)` | Blocking handlers may replace/append messages or block only the current provider call. |
 | After provider response | `on_after_provider_response(priority, handler)` | `ProviderContext` | `emit_provider(AfterResponse, ...)` | Registrar fixes the mode to Advisory. The handler observes the completed response; returned block/message mutations are discarded and cannot rewrite turn output. |

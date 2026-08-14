@@ -266,7 +266,7 @@ export function toolActivityFor(block: ToolBlock): ToolActivity {
     }
   }
 
-  if (block.name === 'shell' || block.name === 'terminal') {
+  if (block.name === 'shell') {
     return {
       kind: 'command',
       title: '运行命令',

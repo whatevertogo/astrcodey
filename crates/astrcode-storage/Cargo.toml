@@ -25,7 +25,7 @@ tracing = { workspace = true }
 parking_lot = { workspace = true }
 fs2 = { workspace = true }
 sha2 = { workspace = true }
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = { workspace = true }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }

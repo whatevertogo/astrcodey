@@ -8,7 +8,10 @@ use astrcode_core::tool::{
     Tool, ToolError, ToolExecutionContext, ToolExecutionResult, ToolPlanningContext,
 };
 use astrcode_extension_sdk::{
-    extension::*,
+    extension::{
+        internal::{tool_context, tool_discovery_context, tool_plan_context},
+        *,
+    },
     runtime_ports::{
         ToolCatalogCompleteness, ToolCatalogDiagnostic, ToolCatalogProvider, ToolCatalogScope,
         ToolCatalogSnapshot,
@@ -76,11 +79,9 @@ impl ExtensionView {
             );
             let discovered = match call {
                 Ok(call) => {
-                    let ctx = ToolDiscoveryContext::from_runtime(
-                        call,
-                        PathBuf::from(working_dir),
-                        self.generation(),
-                    );
+                    let cancellation = call.cancellation().clone();
+                    let ctx =
+                        tool_discovery_context(call, PathBuf::from(working_dir), self.generation());
                     self.run_recorded_hook(
                         ext_id,
                         "tool_discovery",
@@ -217,16 +218,16 @@ impl Tool for HandlerTool {
             .await
             .map_err(extension_plan_error)?;
         let cancellation = ctx.cancellation().child_token();
-        let plan_context = ToolPlanContext::from_runtime(
+        let plan_context = tool_plan_context(
             generation.extension_id.to_string(),
             ctx.session_id.clone(),
+            ctx.turn_id.as_ref().map(ToString::to_string),
             PathBuf::from(&ctx.working_dir),
             self.definition.name.clone(),
+            ctx.tool_call_id.clone(),
             arguments.clone(),
             cancellation.clone(),
-        )
-        .with_turn_id(ctx.turn_id.as_ref().map(ToString::to_string))
-        .with_call_id(ctx.tool_call_id.clone());
+        );
         let planning =
             tokio::time::timeout(self.operation_timeout, self.handler.plan(plan_context));
         tokio::select! {
@@ -271,7 +272,6 @@ impl Tool for HandlerTool {
                 .into());
             },
         };
-        let call_cancellation = ctx.cancellation().child_token();
         let resource_lease = ctx.resource_lease().cloned().ok_or_else(|| {
             ToolError::Execution(
                 "extension tool execution requires an approved resource lease".into(),
@@ -282,6 +282,7 @@ impl Tool for HandlerTool {
         let working_dir = PathBuf::from(&self.working_dir);
         let call = self.call_context_factory.make_extension_call_context(
             &generation.extension_id,
+            generation.instance_id,
             &generation.capabilities,
             &generation.custom_event_declarations,
             generation.tasks.clone(),
@@ -295,9 +296,12 @@ impl Tool for HandlerTool {
                 resource_lease: Some(resource_lease),
                 file_observation_store: ctx.capabilities.files.observation_store.clone(),
                 tool_result_reader: ctx.capabilities.host.result_reader.clone(),
-                cancellation: call_cancellation.clone(),
+                llm_providers: ctx.capabilities.host.llm_providers.clone(),
+                generation_gate: generation.generation_gate.clone(),
+                cancellation: ctx.cancellation().child_token(),
             },
         );
+        let _call_lifetime = call.cancellation().clone().drop_guard();
         let main_model_id = self
             .capabilities
             .contains(&ExtensionCapability::MainModel)
@@ -314,8 +318,10 @@ impl Tool for HandlerTool {
             .available_tools
             .clone()
             .unwrap_or_default();
-        let ctx = ToolContext::from_runtime(
-            SessionCallContext::from_runtime(call, session_id, turn_id),
+        let ctx = tool_context(
+            call,
+            session_id,
+            turn_id,
             working_dir,
             self.definition.name.clone(),
             ctx.scope.tool_call_id.clone(),
@@ -328,7 +334,6 @@ impl Tool for HandlerTool {
             biased;
             result = self.handler.execute(ctx) => result,
             () = draining.cancelled() => {
-                call_cancellation.cancel();
                 Err(generation.admission.draining_error())
             },
         };

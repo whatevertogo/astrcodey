@@ -17,7 +17,6 @@ dev-mode = ["dep:astrcode-eval"]
 astrcode-server = { path = "../astrcode-server" }
 astrcode-client = { path = "../astrcode-client" }
 astrcode-core = { path = "../astrcode-core" }
-astrcode-context = { path = "../astrcode-context" }
 astrcode-protocol = { path = "../astrcode-protocol" }
 astrcode-eval = { path = "../astrcode-eval", optional = true }
 astrcode-log = { path = "../astrcode-log" }

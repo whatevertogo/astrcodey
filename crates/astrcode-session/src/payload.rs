@@ -7,6 +7,7 @@ use astrcode_core::{
         CompactionDetails, DurableEventPayload, LiveEventPayload, SystemPromptSource,
         TranscriptRewriteReason,
     },
+    llm::TranscriptMessage,
     types::SessionId,
 };
 
@@ -49,6 +50,7 @@ pub fn system_prompt_configured_payload(
 /// `transcript_prefix_fingerprint`，提交时 projection 重算不匹配则拒绝写入。
 pub(crate) fn transcript_rewritten_payload(
     compaction: &CompactResult,
+    retained_messages: &[TranscriptMessage],
     source_seq: u64,
     source_fingerprint: String,
     strategy: CompactStrategy,
@@ -57,8 +59,9 @@ pub(crate) fn transcript_rewritten_payload(
     let messages = compaction
         .summary_messages
         .iter()
-        .chain(&compaction.retained_messages)
         .cloned()
+        .map(TranscriptMessage::plain)
+        .chain(retained_messages.iter().cloned())
         .collect();
     DurableEventPayload::TranscriptRewritten {
         source_seq,
@@ -121,7 +124,7 @@ mod tests {
     use astrcode_core::{
         compaction::CompactStrategy,
         event::{DurableEventPayload, TranscriptRewriteReason},
-        llm::LlmMessage,
+        llm::{LlmMessage, TranscriptMessage, TranscriptMessageOrigin},
     };
 
     use super::transcript_rewritten_payload;
@@ -140,6 +143,10 @@ mod tests {
 
         let rewrite = transcript_rewritten_payload(
             &compaction,
+            &[TranscriptMessage {
+                message: LlmMessage::user("retained"),
+                origin: Some(TranscriptMessageOrigin::TurnAborted),
+            }],
             7,
             "fingerprint".to_owned(),
             CompactStrategy::Manual {
@@ -156,6 +163,8 @@ mod tests {
                 reason: TranscriptRewriteReason::Compaction(details),
             } if source_fingerprint == "fingerprint"
                 && messages.len() == 2
+                && messages[0].origin.is_none()
+                && messages[1].origin == Some(TranscriptMessageOrigin::TurnAborted)
                 && details.trigger == "manual_command"
                 && details.transcript_path.as_deref() == Some("compact.jsonl")
         ));

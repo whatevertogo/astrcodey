@@ -10,9 +10,12 @@ use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
         ExtensionCapability, ExtensionError, ExtensionManifest, HookMode, HookResult,
-        LifecycleContext, LifecyclePayload, PreToolUseContext, PreToolUsePayload, PreToolUseResult,
-        Registrar, RuntimeHookCallContext, RuntimeLifecycleContext, RuntimePreToolUseContext,
+        LifecycleContext, PreToolUseAdmission, PreToolUseContext, PreToolUseResult, Registrar,
         ToolContext, ToolHandler, ToolPlanContext,
+        internal::{
+            RuntimeHookCallContext, RuntimeLifecycleContext, RuntimePreToolUseContext,
+            runtime_lifecycle_context, runtime_pre_tool_use_context,
+        },
     },
     tool::ToolPlan,
 };
@@ -43,7 +46,7 @@ impl Extension for SecurityExtension {
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.on_pre_tool_use(HookMode::Blocking, 0, Arc::new(SecurityHandler));
+        reg.on_pre_tool_use(0, Arc::new(SecurityHandler));
     }
 }
 
@@ -75,7 +78,7 @@ impl Extension for AlwaysBlockExtension {
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.on_pre_tool_use(HookMode::Blocking, 0, Arc::new(AlwaysBlockHandler));
+        reg.on_pre_tool_use(0, Arc::new(AlwaysBlockHandler));
     }
 }
 
@@ -272,20 +275,18 @@ fn hook_call(session_id: &str, model_id: &str) -> RuntimeHookCallContext {
 }
 
 fn pre_tool_use_context(command: &str) -> RuntimePreToolUseContext {
-    RuntimePreToolUseContext::new(
+    runtime_pre_tool_use_context(
         hook_call("test-session", "test-model"),
-        PreToolUsePayload::new(
-            "call-1".into(),
-            "shell",
-            serde_json::json!({ "command": command }),
-            astrcode_core::permission::ApprovalMode::Manual,
-            Vec::new(),
-        ),
+        "call-1".into(),
+        "shell",
+        serde_json::json!({ "command": command }),
+        astrcode_core::permission::ApprovalMode::Manual,
+        Vec::new(),
     )
 }
 
 fn lifecycle_context(session_id: &str, model_id: &str) -> RuntimeLifecycleContext {
-    RuntimeLifecycleContext::new(hook_call(session_id, model_id), LifecyclePayload::new(None))
+    runtime_lifecycle_context(hook_call(session_id, model_id), None, 0)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────
@@ -373,7 +374,7 @@ async fn blocking_extension_returns_block_outcome() {
     let ctx = pre_tool_use_context("pwd");
     let result = runner.emit_pre_tool_use(ctx).await.unwrap();
     match result {
-        PreToolUseResult::Block { reason } => {
+        PreToolUseAdmission::Block { reason } => {
             assert_eq!(reason, "blocked by AlwaysBlockExtension");
         },
         other => panic!("Expected Block, got {other:?}"),
@@ -387,7 +388,7 @@ async fn allow_extension_returns_allow_outcome() {
 
     let ctx = pre_tool_use_context("pwd");
     let result = runner.emit_pre_tool_use(ctx).await.unwrap();
-    assert!(matches!(result, PreToolUseResult::Allow));
+    assert!(matches!(result, PreToolUseAdmission::Allow));
 }
 
 #[tokio::test]
@@ -398,7 +399,7 @@ async fn pre_tool_use_extension_can_inspect_tool_payload() {
     let ctx = pre_tool_use_context("rm -rf /");
     let result = runner.emit_pre_tool_use(ctx).await.unwrap();
     match result {
-        PreToolUseResult::Block { reason } => {
+        PreToolUseAdmission::Block { reason } => {
             assert_eq!(reason, "dangerous shell command");
         },
         other => panic!("Expected Block, got {other:?}"),
@@ -457,7 +458,7 @@ async fn dispatch_with_no_registered_extensions_is_noop() {
 
     let pre_ctx = pre_tool_use_context("pwd");
     let result = runner.emit_pre_tool_use(pre_ctx).await.unwrap();
-    assert!(matches!(result, PreToolUseResult::Allow));
+    assert!(matches!(result, PreToolUseAdmission::Allow));
 }
 
 #[tokio::test]
@@ -482,7 +483,7 @@ async fn extension_subscribes_only_to_matching_events() {
     let pre_ctx = pre_tool_use_context("pwd");
     let result = runner.emit_pre_tool_use(pre_ctx).await.unwrap();
     match result {
-        PreToolUseResult::Block { reason } => {
+        PreToolUseAdmission::Block { reason } => {
             assert_eq!(reason, "blocked by AlwaysBlockExtension");
         },
         other => panic!("Expected Block, got {other:?}"),

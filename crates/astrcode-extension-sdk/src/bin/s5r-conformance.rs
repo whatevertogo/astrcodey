@@ -132,7 +132,9 @@ async fn run_behavior_suite_with_child(
     )
     .initialize(initialization)
     .await?;
-    let peer = peer.activate("conformance-activate").await?;
+    let peer = peer
+        .activate("conformance-activate", serde_json::Value::Null)
+        .await?;
     let (handle, driver) = peer.into_runtime();
     let shutdown = CancellationToken::new();
     let driver_task =

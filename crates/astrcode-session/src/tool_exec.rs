@@ -17,7 +17,7 @@ use super::{
     session::Session,
     tool_types::{ExecutableToolInvocation, ToolExecutionOutcome, ToolResultCommit},
 };
-use crate::ToolRegistry;
+use crate::{ToolRegistry, session_runtime_services::RuntimeGenerationView};
 
 // ─── Runtime context types ──────────────────────────────────────────────
 
@@ -31,21 +31,24 @@ pub(crate) struct TurnToolContext {
 impl TurnToolContext {
     pub(crate) fn for_turn(
         session: &Session,
+        runtime_generation: &RuntimeGenerationView,
         session_state: &astrcode_session_projection::SessionReadModel,
         turn_id: TurnId,
         tool_selection: astrcode_core::tool::SessionToolSelection,
         session_store_dir: Option<std::path::PathBuf>,
         cancellation_token: CancellationToken,
     ) -> Self {
-        let runtime_services = session.runtime_services();
-        let effective = runtime_services.read_effective();
+        let effective = runtime_generation.effective();
         let approval_history = session.runtime().approval_history();
-        let permission_chain = crate::permission::build_default_chain(&effective);
+        let permission_chain = crate::permission::build_default_chain(effective);
+        let llm_providers =
+            runtime_generation.llm_bindings_for_model_id(&session_state.identity.model_id);
         let shared = crate::turn_context::SharedTurnContext {
             session_id: session.id().clone(),
             turn_id: Some(turn_id),
             working_dir: session_state.identity.working_dir.clone(),
             model_id: session_state.identity.model_id.clone(),
+            llm_providers,
             session_store_dir,
             turn_event_sender: None,
             approval_mode: effective.agent.approval_mode,
@@ -54,7 +57,7 @@ impl TurnToolContext {
             approval_history,
             cancellation_token,
         };
-        let capabilities = ToolRuntimeCapabilities::from_session(session, &shared);
+        let capabilities = ToolRuntimeCapabilities::from_session(session, &shared, effective);
         Self {
             shared,
             capabilities,
@@ -76,10 +79,13 @@ pub(crate) struct ToolRuntimeCapabilities {
 }
 
 impl ToolRuntimeCapabilities {
-    fn from_session(session: &Session, shared: &crate::turn_context::SharedTurnContext) -> Self {
+    fn from_session(
+        session: &Session,
+        shared: &crate::turn_context::SharedTurnContext,
+        effective: &astrcode_core::config::EffectiveConfig,
+    ) -> Self {
         let runtime = Arc::clone(&session.runtime);
         let runtime_services = session.runtime_services();
-        let effective = runtime_services.read_effective();
         Self {
             file_observation_store: Some(runtime.file_observation_store()),
             session_ops: runtime_services.session_ops(),
@@ -214,6 +220,7 @@ fn tool_capabilities_from_runtime(
             observation_store: capabilities.file_observation_store.clone(),
         },
         host: ToolHostServices {
+            llm_providers: Some(turn.shared.llm_providers.clone()),
             result_reader: tool_result_reader,
             available_tools: Some(tools.as_ref().to_vec()),
         },
@@ -357,6 +364,7 @@ impl FileObservationStore for InMemoryFileObservationStore {
 #[cfg(test)]
 mod tests {
     use astrcode_core::{
+        llm::LlmProviderBindings,
         permission::ApprovalMode,
         tool::{ExecutionMode, SessionToolSelection, Tool, ToolError, ToolOrigin, ToolResult},
         types::SessionId,
@@ -365,6 +373,7 @@ mod tests {
     use super::*;
     use crate::{
         permission::{ApprovalHistoryStore, PermissionChain},
+        test_support::UnusedLlm,
         turn_context::SharedTurnContext,
     };
 
@@ -432,6 +441,10 @@ mod tests {
                     turn_id: Some(TurnId::new("turn-source")),
                     working_dir: "/workspace".into(),
                     model_id: "model".into(),
+                    llm_providers: LlmProviderBindings::new(
+                        Arc::new(UnusedLlm),
+                        Arc::new(UnusedLlm),
+                    ),
                     session_store_dir: None,
                     turn_event_sender: None,
                     approval_mode: ApprovalMode::default(),

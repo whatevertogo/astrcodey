@@ -17,19 +17,21 @@ mod yolo_mode_approve;
 use std::{path::Path, sync::Arc};
 
 use astrcode_core::config::{EffectiveConfig, defaults::extension_data_dir};
+#[cfg(test)]
+pub(crate) use runtime::PermissionRequirement;
 pub(crate) use runtime::{
-    PermissionChain, PermissionContext, PermissionDecision, PermissionPolicy,
+    PermissionChain, PermissionContext, PermissionPolicy, PermissionResolution, PolicyDecision,
 };
 pub(crate) use session_approval_history::ApprovalHistoryStore;
 
 /// 根据有效配置构建默认权限链。
 ///
 /// 链构造约定（工具管线唯一入口，经 `TurnToolContext::for_turn`）：
-/// - Yolo 全覆盖由链保证：`yolo_mode_approve`（priority 50）先于一切 Ask 策略 （65+）恒 Allow，各
-///   Ask 策略不再自行判 Yolo。
-/// - 链以显式兜底策略收尾（`fallback_allow`，priority 999）：链本身不做隐式拒绝；
-///   `PermissionChain::decide` 的全 Pass → Deny 分支仅兜底无终态策略的链 （如 lifecycle 空链）。
-/// - 策略按 priority 升序声明，与 `PermissionChain::new` 的 debug_assert 一致。
+/// - vector 声明顺序是策略优先级的唯一事实来源。
+/// - Yolo 全覆盖由链保证：`yolo_mode_approve` 先于一切 Ask 策略恒 Allow，各 Ask 策略不再自行判
+///   Yolo。
+/// - 链以显式 `fallback_allow` 收尾：链本身不做隐式拒绝； `PermissionChain::decide` 的全 Pass →
+///   Deny 分支仅兜底无终态策略的链 （如 lifecycle 空链）。
 pub(crate) fn build_default_chain(effective: &EffectiveConfig) -> Arc<PermissionChain> {
     let policies: Vec<Box<dyn PermissionPolicy>> = vec![
         Box::new(configured::ConfiguredPolicy::new(
@@ -93,23 +95,39 @@ mod tests {
     }
 
     #[test]
-    fn manual_shell_falls_through_to_ask() {
+    fn manual_multi_resource_tool_collects_independent_approvals() {
         let effective = test_effective(ApprovalMode::Manual);
         let history = Arc::new(ApprovalHistoryStore::default());
         let chain = build_default_chain(&effective);
         let input = serde_json::json!({"command": "ls"});
+        let resources = [
+            astrcode_core::tool::access::ResourceAccess::host(
+                astrcode_core::tool::access::HostResource::Process,
+            ),
+            astrcode_core::tool::access::ResourceAccess::Opaque,
+        ];
         let ctx = PermissionContext {
-            tool_name: "shell",
+            tool_name: "external_tool",
             tool_input: &input,
             working_dir: std::path::Path::new("/project"),
-            resource_accesses: &[astrcode_core::tool::access::ResourceAccess::host(
-                astrcode_core::tool::access::HostResource::Process,
-            )],
+            resource_accesses: &resources,
             approval_mode: ApprovalMode::Manual,
             tool_selection: None,
         };
         let decision = chain.decide(&ctx, &history);
-        assert!(matches!(decision, PermissionDecision::Ask { .. }));
+        let PermissionResolution::Ask { requirements } = decision else {
+            panic!("both independent resources must require approval");
+        };
+        assert_eq!(
+            requirements
+                .iter()
+                .map(|requirement| requirement.rule_key.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                Some("process-resource:external_tool"),
+                Some("opaque-resource:external_tool"),
+            ]
+        );
     }
 
     #[test]
@@ -128,7 +146,7 @@ mod tests {
             approval_mode: ApprovalMode::Yolo,
             tool_selection: None,
         };
-        assert_eq!(chain.decide(&ctx, &history), PermissionDecision::Allow);
+        assert_eq!(chain.decide(&ctx, &history), PermissionResolution::Allow);
     }
 
     #[test]
@@ -145,6 +163,6 @@ mod tests {
             approval_mode: ApprovalMode::Manual,
             tool_selection: None,
         };
-        assert_eq!(chain.decide(&ctx, &history), PermissionDecision::Allow);
+        assert_eq!(chain.decide(&ctx, &history), PermissionResolution::Allow);
     }
 }

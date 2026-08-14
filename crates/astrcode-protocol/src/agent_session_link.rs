@@ -1,111 +1,64 @@
-//! 子 Agent 会话链接线缆 DTO 与增量构造逻辑。
+//! 子 Agent 会话链接线缆 DTO:snapshot 全量基线与增量更新载荷。
 
 use serde::{Deserialize, Serialize};
 
 pub use crate::wire::AgentSessionStatusDto;
 use crate::wire::PhaseDto;
 
-/// 子 Agent 会话链接（HTTP/SSE/JSON-RPC 共用线缆 DTO，camelCase 序列化）。
-///
-/// `status` 为 `None` 时表示增量 patch 不改动终态（仅更新 phase / currentTool）。
+/// 完整的子 Agent 会话链接，用于 snapshot 基线。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(optional_fields))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AgentSessionLinkDto {
     pub child_session_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status: Option<AgentSessionStatusDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_name: String,
+    pub task: String,
+    pub status: AgentSessionStatusDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub final_session_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub phase: Option<PhaseDto>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub current_tool: Option<String>,
 }
 
-impl AgentSessionLinkDto {
-    fn empty_patch(child_session_id: impl AsRef<str>) -> Self {
-        Self {
-            child_session_id: child_session_id.as_ref().to_owned(),
-            tool_call_id: None,
-            agent_name: None,
-            task: None,
-            status: None,
-            final_session_id: None,
-            summary: None,
-            error: None,
-            phase: None,
-            current_tool: None,
-        }
-    }
-
-    /// `AgentSessionSpawned` 事件投影。
-    pub fn spawned(
-        child_session_id: impl AsRef<str>,
-        tool_call_id: Option<&str>,
-        agent_name: impl AsRef<str>,
-        task: impl AsRef<str>,
-    ) -> Self {
-        Self {
-            tool_call_id: tool_call_id.map(str::to_owned),
-            agent_name: Some(agent_name.as_ref().to_string()),
-            task: Some(task.as_ref().to_string()),
-            status: Some(AgentSessionStatusDto::Running),
-            phase: Some(PhaseDto::Thinking),
-            ..Self::empty_patch(child_session_id)
-        }
-    }
-
-    /// `AgentSessionCompleted` 事件投影。
-    pub fn completed(
-        child_session_id: impl AsRef<str>,
-        final_session_id: impl AsRef<str>,
-        summary: impl AsRef<str>,
-    ) -> Self {
-        Self {
-            status: Some(AgentSessionStatusDto::Completed),
-            final_session_id: Some(final_session_id.as_ref().to_string()),
-            summary: Some(summary.as_ref().to_string()),
-            ..Self::empty_patch(child_session_id)
-        }
-    }
-
-    /// `AgentSessionFailed` 事件投影。
-    pub fn failed(
-        child_session_id: impl AsRef<str>,
-        final_session_id: impl AsRef<str>,
-        error: impl AsRef<str>,
-    ) -> Self {
-        Self {
-            status: Some(AgentSessionStatusDto::Failed),
-            final_session_id: Some(final_session_id.as_ref().to_string()),
-            error: Some(error.as_ref().to_string()),
-            ..Self::empty_patch(child_session_id)
-        }
-    }
-
-    /// 子 session 阶段刷新；省略 status，避免覆盖终态。
-    pub fn phase_only(
-        child_session_id: impl AsRef<str>,
+/// 子 Agent 会话的合法增量。每个 variant 只携带该事件能够改变的字段。
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[cfg_attr(feature = "typescript", ts(optional_fields))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum AgentSessionUpdateDto {
+    Spawned {
+        child_session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        agent_name: String,
+        task: String,
+    },
+    Completed {
+        child_session_id: String,
+        final_session_id: String,
+        summary: String,
+    },
+    Failed {
+        child_session_id: String,
+        final_session_id: String,
+        error: String,
+    },
+    Progress {
+        child_session_id: String,
         phase: PhaseDto,
+        #[serde(skip_serializing_if = "Option::is_none")]
         current_tool: Option<String>,
-    ) -> Self {
-        Self {
-            phase: Some(phase),
-            current_tool,
-            ..Self::empty_patch(child_session_id)
-        }
-    }
+    },
 }
 
 #[cfg(test)]
@@ -114,74 +67,64 @@ mod tests {
 
     use super::*;
 
-    fn snapshot_entry(status: AgentSessionStatusDto) -> AgentSessionLinkDto {
-        AgentSessionLinkDto {
+    #[test]
+    fn full_snapshot_and_typed_updates_keep_distinct_contracts() {
+        let snapshot = AgentSessionLinkDto {
             child_session_id: "child-1".into(),
             tool_call_id: Some("tool-1".into()),
-            agent_name: Some("explorer".into()),
-            task: Some("scan repo".into()),
-            status: Some(status),
+            agent_name: "explorer".into(),
+            task: "scan repo".into(),
+            status: AgentSessionStatusDto::Running,
             final_session_id: None,
             summary: None,
             error: None,
-            phase: None,
-            current_tool: None,
-        }
-    }
-
-    #[test]
-    fn snapshot_entry_includes_status_on_wire() {
-        let dto = snapshot_entry(AgentSessionStatusDto::Running);
-        let value = serde_json::to_value(&dto).unwrap();
+        };
+        let value = serde_json::to_value(&snapshot).unwrap();
         assert_eq!(value["status"], json!("running"));
         assert_eq!(value["childSessionId"], json!("child-1"));
         assert_eq!(value["agentName"], json!("explorer"));
-    }
+        assert!(
+            serde_json::from_value::<AgentSessionLinkDto>(json!({
+                "childSessionId": "child-1",
+                "agentName": "explorer",
+                "task": "scan repo",
+                "status": "running",
+                "phase": "thinking"
+            }))
+            .is_err()
+        );
 
-    #[test]
-    fn phase_only_patch_omits_status_on_wire() {
-        let dto =
-            AgentSessionLinkDto::phase_only("child-1", PhaseDto::CallingTool, Some("read".into()));
-        let value = serde_json::to_value(&dto).unwrap();
-        assert!(value.get("status").is_none());
-        assert_eq!(value["phase"], json!("calling_tool"));
-        assert_eq!(value["currentTool"], json!("read"));
-    }
-
-    #[test]
-    fn spawned_preserves_optional_tool_call_and_running_status() {
-        let attributed =
-            AgentSessionLinkDto::spawned("child-1", Some("tool-1"), "reviewer", "review diff");
-        let unattributed = AgentSessionLinkDto::spawned("child-2", None, "worker", "run task");
-
-        assert_eq!(attributed.tool_call_id.as_deref(), Some("tool-1"));
-        assert_eq!(attributed.status, Some(AgentSessionStatusDto::Running));
-        assert_eq!(attributed.phase, Some(PhaseDto::Thinking));
-        assert!(unattributed.tool_call_id.is_none());
-    }
-
-    #[test]
-    fn terminal_outcomes_set_status_and_payload() {
-        let completed = AgentSessionLinkDto::completed("child-1", "child-1", "done");
-        assert_eq!(completed.status, Some(AgentSessionStatusDto::Completed));
-        assert_eq!(completed.summary.as_deref(), Some("done"));
-        assert!(completed.error.is_none());
-
-        let failed = AgentSessionLinkDto::failed("child-1", "child-1", "timeout");
-        assert_eq!(failed.status, Some(AgentSessionStatusDto::Failed));
-        assert_eq!(failed.error.as_deref(), Some("timeout"));
-        assert!(failed.summary.is_none());
-    }
-
-    #[test]
-    fn wire_roundtrip_camel_case() {
-        let original = snapshot_entry(AgentSessionStatusDto::Completed);
-        let json = serde_json::to_string(&original).unwrap();
-        assert!(json.contains("childSessionId"));
-        assert!(!json.contains("child_session_id"));
-
-        let restored: AgentSessionLinkDto = serde_json::from_str(&json).unwrap();
-        assert_eq!(restored.child_session_id, original.child_session_id);
-        assert_eq!(restored.status, original.status);
+        let updates = [
+            AgentSessionUpdateDto::Spawned {
+                child_session_id: "child-1".into(),
+                tool_call_id: Some("tool-1".into()),
+                agent_name: "explorer".into(),
+                task: "scan repo".into(),
+            },
+            AgentSessionUpdateDto::Progress {
+                child_session_id: "child-1".into(),
+                phase: PhaseDto::CallingTool,
+                current_tool: Some("read".into()),
+            },
+            AgentSessionUpdateDto::Completed {
+                child_session_id: "child-1".into(),
+                final_session_id: "child-final".into(),
+                summary: "done".into(),
+            },
+        ];
+        let values = updates.map(|update| serde_json::to_value(update).unwrap());
+        assert_eq!(values[0]["kind"], json!("spawned"));
+        assert_eq!(values[1]["phase"], json!("calling_tool"));
+        assert!(values[1].get("status").is_none());
+        assert_eq!(values[2]["summary"], json!("done"));
+        assert!(
+            serde_json::from_value::<AgentSessionUpdateDto>(json!({
+                "kind": "progress",
+                "childSessionId": "child-1",
+                "phase": "thinking",
+                "status": "running"
+            }))
+            .is_err()
+        );
     }
 }

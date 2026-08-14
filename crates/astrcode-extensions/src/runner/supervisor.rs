@@ -89,7 +89,13 @@ impl ExtensionSupervisorControl {
         self.commands
             .send(SupervisorCommand::BeginDraining { completed })
             .map_err(|_| self.unavailable_error())?;
-        completion.await.map_err(|_| self.unavailable_error())?
+        completion.await.map_err(|_| self.unavailable_error())??;
+        let permits = Arc::clone(&self.admission.permits)
+            .acquire_many_owned(EXTENSION_INVOCATION_CAPACITY)
+            .await
+            .map_err(|_| self.unavailable_error())?;
+        drop(permits);
+        Ok(())
     }
 
     fn unavailable_error(&self) -> ExtensionError {
@@ -201,80 +207,40 @@ async fn run_supervisor(
     permits: Arc<Semaphore>,
     draining: CancellationToken,
 ) {
-    let mut drain_permits = None;
-    let mut drain_task: Option<
-        JoinHandle<Result<OwnedSemaphorePermit, tokio::sync::AcquireError>>,
-    > = None;
     loop {
-        tokio::select! {
-            command = commands.recv() => {
-                let Some(command) = command else {
-                    if let Some(task) = drain_task.take() {
-                        task.abort();
-                    }
-                    break;
-                };
-                match command {
-                    SupervisorCommand::MarkReady { generation } => {
-                        if matches!(
-                            snapshot.state,
-                            SupervisorState::Initializing | SupervisorState::Ready
-                        ) {
-                            snapshot.generation = generation;
-                            snapshot.state = SupervisorState::Ready;
-                            snapshots.send_replace(snapshot.clone());
-                        }
-                    },
-                    SupervisorCommand::BeginDraining { completed } => {
-                        if !matches!(snapshot.state, SupervisorState::Draining) {
-                            snapshot.state = SupervisorState::Draining;
-                            snapshots.send_replace(snapshot.clone());
-                            drain_task = Some(tokio::spawn(
-                                Arc::clone(&permits)
-                                    .acquire_many_owned(EXTENSION_INVOCATION_CAPACITY),
-                            ));
-                            draining.cancel();
-                        }
-                        let _ = completed.send(Ok(()));
-                    },
-                    SupervisorCommand::Finish { failure, completed } => {
-                        if let Some(task) = drain_task.take() {
-                            task.abort();
-                        }
-                        permits.close();
-                        snapshot.state = failure
-                            .map(SupervisorState::Failed)
-                            .unwrap_or(SupervisorState::Stopped);
-                        snapshots.send_replace(snapshot.clone());
-                        let _ = completed.send(());
-                        break;
-                    },
+        let Some(command) = commands.recv().await else {
+            break;
+        };
+        match command {
+            SupervisorCommand::MarkReady { generation } => {
+                if matches!(
+                    snapshot.state,
+                    SupervisorState::Initializing | SupervisorState::Ready
+                ) {
+                    snapshot.generation = generation;
+                    snapshot.state = SupervisorState::Ready;
+                    snapshots.send_replace(snapshot.clone());
                 }
             },
-            drained = async {
-                match &mut drain_task {
-                    Some(task) => Some(task.await),
-                    None => std::future::pending().await,
+            SupervisorCommand::BeginDraining { completed } => {
+                if !matches!(snapshot.state, SupervisorState::Draining) {
+                    snapshot.state = SupervisorState::Draining;
+                    snapshots.send_replace(snapshot.clone());
+                    draining.cancel();
                 }
-            } => {
-                drain_task = None;
-                match drained {
-                    Some(Ok(Ok(all_permits))) => {
-                        permits.close();
-                        drain_permits = Some(all_permits);
-                    },
-                    Some(Ok(Err(error))) => {
-                        tracing::warn!(%error, "extension admission drain failed");
-                    },
-                    Some(Err(error)) => {
-                        tracing::warn!(%error, "extension admission drain task failed");
-                    },
-                    None => {},
-                }
+                let _ = completed.send(Ok(()));
+            },
+            SupervisorCommand::Finish { failure, completed } => {
+                permits.close();
+                snapshot.state = failure
+                    .map(SupervisorState::Failed)
+                    .unwrap_or(SupervisorState::Stopped);
+                snapshots.send_replace(snapshot.clone());
+                let _ = completed.send(());
+                break;
             },
         }
     }
-    drop(drain_permits);
 }
 
 #[cfg(test)]
@@ -298,6 +264,8 @@ mod tests {
             admission.acquire().await,
             Err(ExtensionError::Draining { .. })
         ));
+        assert!(!drain.is_finished());
+        drop(held);
         drain.await.unwrap().unwrap();
         assert!(matches!(
             admission.acquire().await,
@@ -307,6 +275,5 @@ mod tests {
 
         supervisor.finish(None).await;
         assert_eq!(admission.snapshot().state, SupervisorState::Stopped);
-        drop(held);
     }
 }

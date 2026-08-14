@@ -1,42 +1,67 @@
 use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 
-use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
     config::{
-        Config, ConfigStore, ModelConfig, Profile, ProviderAuthScheme, ProviderCapabilities,
-        ProviderWireFormat,
+        Config, ConfigOverlay, ConfigStore, ConfigStoreError, ModelConfig, Profile,
+        ProviderAuthScheme, ProviderCapabilities, ProviderWireFormat,
     },
     tool::{ToolCapabilities, ToolExecutionContext, ToolPlanningContext, access::ResourceLease},
     types::SessionId,
 };
-use astrcode_extension_sdk::{
-    builder::manifest,
-    extension::{Extension, ExtensionConfig, ExtensionError, ExtensionManifest},
-};
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_storage::config_store::FileConfigStore;
 use serde_json::json;
+use tokio::sync::Notify;
 
 use super::{ConfigManager, ConfigUpdateError};
 
 const CODING_EXTENSION_ID: &str = "astrcode-coding";
-const APPLY_FAILURE_EXTENSION_ID: &str = "config-apply-failure";
 
-struct ApplyFailingExtension;
+struct BlockingConfigStore {
+    inner: FileConfigStore,
+    save_entered: Notify,
+    save_release: Notify,
+}
+
+impl BlockingConfigStore {
+    fn new(path: std::path::PathBuf) -> Self {
+        Self {
+            inner: FileConfigStore::new(path),
+            save_entered: Notify::new(),
+            save_release: Notify::new(),
+        }
+    }
+}
 
 #[async_trait::async_trait]
-impl Extension for ApplyFailingExtension {
-    fn manifest(&self) -> ExtensionManifest {
-        manifest(APPLY_FAILURE_EXTENSION_ID)
-            .version("test")
-            .description("Config apply failure probe")
-            .build()
+impl ConfigStore for BlockingConfigStore {
+    async fn load(&self) -> Result<Config, ConfigStoreError> {
+        self.inner.load().await
     }
 
-    async fn on_config_changed(&self, _config: ExtensionConfig) -> Result<(), ExtensionError> {
-        Err(ExtensionError::Internal(
-            "injected config apply failure".into(),
-        ))
+    async fn save(&self, config: &Config) -> Result<(), ConfigStoreError> {
+        self.save_entered.notify_one();
+        self.save_release.notified().await;
+        self.inner.save(config).await
+    }
+
+    fn path(&self) -> std::path::PathBuf {
+        self.inner.path()
+    }
+
+    async fn load_overlay(
+        &self,
+        working_dir: &str,
+    ) -> Result<Option<ConfigOverlay>, ConfigStoreError> {
+        self.inner.load_overlay(working_dir).await
+    }
+
+    async fn save_overlay(
+        &self,
+        working_dir: &str,
+        overlay: &ConfigOverlay,
+    ) -> Result<(), ConfigStoreError> {
+        self.inner.save_overlay(working_dir, overlay).await
     }
 }
 
@@ -68,6 +93,15 @@ fn set_coding_timeout(config: &mut Config, timeout_secs: u64) {
     config.extensions.get_or_insert_with(BTreeMap::new).insert(
         CODING_EXTENSION_ID.into(),
         json!({ "shellTimeoutSecs": timeout_secs }),
+    );
+}
+
+fn enable_only_coding(config: &mut Config) {
+    config.runtime.extension_states = Some(
+        astrcode_bundled_extensions::bundled_extension_ids()
+            .into_iter()
+            .map(|id| (id.to_owned(), id == CODING_EXTENSION_ID))
+            .collect(),
     );
 }
 
@@ -108,27 +142,23 @@ async fn shell_timeout_secs(runner: &ExtensionRunner, working_dir: &Path) -> u64
 }
 
 #[tokio::test]
-async fn extension_config_changes_validate_before_commit_and_report_apply_failures() {
+async fn extension_config_candidate_is_published_only_after_validation_and_save() {
     let temp_dir = tempfile::tempdir().unwrap();
     let config_path = temp_dir.path().join("config.toml");
     let config_store: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(config_path.clone()));
-    let raw = test_config();
+    let mut raw = test_config();
+    enable_only_coding(&mut raw);
     let effective = raw.clone().into_effective().unwrap();
-    let context_assembler = Arc::new(LlmContextAssembler::new(effective.context.clone()));
     let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    let coding = astrcode_bundled_extensions::bundled_extensions(&BTreeMap::new())
-        .into_iter()
-        .find(|extension| extension.manifest().id() == CODING_EXTENSION_ID)
-        .expect("bundled composition must include coding");
-    runner.register(coding).await.unwrap();
-    let (manager, _) = ConfigManager::from_loaded_config(
+    let (manager, runtime_services) = ConfigManager::from_loaded_config(
         config_store,
         raw,
         effective,
         Arc::clone(&runner),
-        context_assembler,
+        temp_dir.path().to_path_buf(),
     )
     .unwrap();
+    manager.initialize_extensions::<()>().await.unwrap();
 
     let invalid: Result<(), ConfigUpdateError<()>> = manager
         .update_and_save(|candidate| {
@@ -165,6 +195,7 @@ async fn extension_config_changes_validate_before_commit_and_report_apply_failur
     let valid: Result<(), ConfigUpdateError<()>> = manager
         .update_and_save(|candidate| {
             set_coding_timeout(candidate, 180);
+            candidate.runtime.compact_threshold_percent = Some(42.0);
             Ok(())
         })
         .await;
@@ -178,34 +209,141 @@ async fn extension_config_changes_validate_before_commit_and_report_apply_failur
         )]))
     );
     assert_eq!(shell_timeout_secs(&runner, temp_dir.path()).await, 180);
-
-    runner
-        .register(Arc::new(ApplyFailingExtension))
-        .await
-        .unwrap();
-    let apply_failure: Result<(), ConfigUpdateError<()>> = manager
-        .update_and_save(|candidate| {
-            candidate
-                .extensions
-                .get_or_insert_with(BTreeMap::new)
-                .insert(
-                    APPLY_FAILURE_EXTENSION_ID.into(),
-                    json!({ "enabled": true }),
-                );
-            Ok(())
-        })
-        .await;
-    let Err(ConfigUpdateError::ExtensionApply(error)) = apply_failure else {
-        panic!("on_config_changed failure must be returned to the caller");
-    };
-    assert!(error.contains(APPLY_FAILURE_EXTENSION_ID));
-    let persisted = manager.config_store().load().await.unwrap();
     assert_eq!(
-        persisted
-            .extensions
-            .and_then(|configs| configs.get(APPLY_FAILURE_EXTENSION_ID).cloned()),
-        Some(json!({ "enabled": true })),
-        "runtime apply happens after the candidate is durably committed"
+        runtime_services
+            .read_effective()
+            .context
+            .compact_threshold_percent,
+        42.0,
+        "context settings must publish with the same runtime generation"
     );
+
+    assert!(runner.shutdown().await.is_empty());
+}
+
+#[tokio::test]
+async fn cancelled_config_request_is_owned_through_publication_and_shutdown() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join("config.toml");
+    let store = Arc::new(BlockingConfigStore::new(config_path));
+    let config_store: Arc<dyn ConfigStore> = store.clone();
+    let mut raw = test_config();
+    enable_only_coding(&mut raw);
+    let effective = raw.clone().into_effective().unwrap();
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    let (manager, runtime_services) = ConfigManager::from_loaded_config(
+        config_store,
+        raw,
+        effective,
+        Arc::clone(&runner),
+        temp_dir.path().to_path_buf(),
+    )
+    .unwrap();
+    let manager = Arc::new(manager);
+    manager.initialize_extensions::<()>().await.unwrap();
+
+    let save_entered = store.save_entered.notified();
+    let update = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        async move {
+            let result: Result<(), ConfigUpdateError<()>> = manager
+                .update_and_save(|candidate| {
+                    set_coding_timeout(candidate, 180);
+                    candidate.runtime.compact_threshold_percent = Some(42.0);
+                    Ok(())
+                })
+                .await;
+            result
+        }
+    });
+    save_entered.await;
+    update.abort();
+    assert!(update.await.unwrap_err().is_cancelled());
+
+    let shutdown = tokio::spawn({
+        let manager = Arc::clone(&manager);
+        let runner = Arc::clone(&runner);
+        async move {
+            manager.drain_transactions().await;
+            runner.shutdown().await
+        }
+    });
+    assert!(
+        !shutdown.is_finished(),
+        "shutdown must wait for the owned config transaction"
+    );
+    store.save_release.notify_one();
+    assert!(shutdown.await.unwrap().is_empty());
+
+    assert_eq!(
+        manager.raw_config_snapshot().extensions,
+        Some(BTreeMap::from([(
+            CODING_EXTENSION_ID.into(),
+            json!({ "shellTimeoutSecs": 180 }),
+        )]))
+    );
+    assert_eq!(
+        runtime_services
+            .read_effective()
+            .context
+            .compact_threshold_percent,
+        42.0
+    );
+    let persisted = store.load().await.unwrap();
+    assert_eq!(persisted.runtime.compact_threshold_percent, Some(42.0));
+    assert_eq!(
+        persisted.extensions,
+        Some(BTreeMap::from([(
+            CODING_EXTENSION_ID.into(),
+            json!({ "shellTimeoutSecs": 180 }),
+        )]))
+    );
+}
+
+#[tokio::test]
+async fn disabled_bundled_extension_configs_validate_before_commit() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir.path().join("config.toml");
+    let config_store: Arc<dyn ConfigStore> = Arc::new(FileConfigStore::new(config_path.clone()));
+    let raw = test_config();
+    let effective = raw.clone().into_effective().unwrap();
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    let (manager, _) = ConfigManager::from_loaded_config(
+        config_store,
+        raw,
+        effective,
+        Arc::clone(&runner),
+        temp_dir.path().to_path_buf(),
+    )
+    .unwrap();
+    let initial_effective = manager.read_effective();
+
+    for (extension_id, invalid_config) in [
+        ("astrcode.memory", json!({ "maxContexts": "many" })),
+        ("astrcode-channels", json!({ "unexpected": true })),
+    ] {
+        let result: Result<(), ConfigUpdateError<()>> = manager
+            .update_and_save(|candidate| {
+                candidate
+                    .runtime
+                    .extension_states
+                    .get_or_insert_with(BTreeMap::new)
+                    .insert(extension_id.into(), false);
+                candidate
+                    .extensions
+                    .get_or_insert_with(BTreeMap::new)
+                    .insert(extension_id.into(), invalid_config);
+                Ok(())
+            })
+            .await;
+        let Err(ConfigUpdateError::ExtensionValidation(error)) = result else {
+            panic!("disabled {extension_id} config must fail before commit");
+        };
+        assert!(error.to_string().contains(extension_id), "{error}");
+        assert!(manager.raw_config_snapshot().extensions.is_none());
+        assert!(Arc::ptr_eq(&initial_effective, &manager.read_effective()));
+        assert!(!config_path.exists());
+    }
+
     assert!(runner.shutdown().await.is_empty());
 }

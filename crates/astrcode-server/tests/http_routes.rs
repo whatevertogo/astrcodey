@@ -4,12 +4,12 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     time::Duration,
 };
 
-use astrcode_context::{ContextSettings, context_assembler::LlmContextAssembler};
+use astrcode_context::ContextSettings;
 use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
@@ -18,8 +18,8 @@ use astrcode_core::{
         CustomEventData, DurableEvent, DurableEventPayload, LiveEvent, LiveEventPayload,
         StoredEvent,
     },
-    llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    tool::{SessionToolSelection, ToolDefinition, ToolResult, ToolResultArtifactSlice},
+    llm::{LlmContent, LlmError, LlmEvent, LlmProvider, ModelLimits},
+    tool::{SessionToolSelection, ToolResult, ToolResultArtifactSlice},
     types::{Cursor, SessionId, new_message_id},
 };
 use astrcode_extension_sdk::{
@@ -37,18 +37,19 @@ use astrcode_protocol::{
     http::{
         ApplyProviderPresetResponseDto, CommandCompletionResponse, CommandInvokeResponse,
         CompactSessionResponse, ConfigureSessionToolsResponse, ConversationBlockDto,
-        ConversationErrorEnvelopeDto, ConversationSnapshotResponseDto, CreateSessionResponseDto,
+        ConversationSnapshotResponseDto, CreateSessionResponseDto,
         CustomEventConsumerListResponseDto, CustomEventConsumerStatusDto, PromptSubmitResponse,
         ProviderCatalogResponseDto, SlashCommandListResponseDto, ToolSelectionDto,
     },
-    wire::{CommandSourceDto, ProviderAuthSchemeDto, ProviderWireFormatDto},
+    wire::{ProviderAuthSchemeDto, ProviderWireFormatDto},
 };
 use astrcode_server::{
     bootstrap::{ServerApp, ServerRuntime},
-    http::{router as app_router, router_with_event_publisher},
+    http::router as app_router,
     test_support::{
-        ChildSessionCoordinator, ConfigManager, MAX_PROMPT_TEXT_BYTES, SessionManager,
-        TurnRegistry, TurnScheduler,
+        ChildSessionCoordinator, ConfigManager, MAX_PROMPT_TEXT_BYTES, ServerRuntimeTestExt,
+        SessionManager, TurnRegistry, TurnScheduler, assemble_server_runtime,
+        router_with_event_bus,
     },
 };
 use astrcode_session_projection::{SessionReadModel, SessionSummary};
@@ -63,7 +64,7 @@ use axum::{
     http::{Method, Request, StatusCode, header},
 };
 use http_body_util::BodyExt;
-use tokio::sync::{Notify, mpsc};
+use tokio::sync::mpsc;
 use tower::ServiceExt;
 
 fn router(
@@ -151,10 +152,9 @@ impl CustomEventHandler for EventConsumerHttpHandler {
 
 #[async_trait::async_trait]
 impl LlmProvider for ImmediateLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::ContentDelta {
@@ -180,10 +180,9 @@ struct SummaryLlm;
 
 #[async_trait::async_trait]
 impl LlmProvider for PendingLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         std::future::pending().await
     }
@@ -198,10 +197,9 @@ impl LlmProvider for PendingLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for SummaryLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::ContentDelta {
@@ -569,25 +567,6 @@ async fn provider_catalog_route_returns_endpoint_presets() {
             .any(|endpoint| endpoint.base_url.as_deref()
                 == Some("https://ark.cn-beijing.volces.com/api/v3"))
     );
-}
-
-#[tokio::test]
-async fn active_selection_rejects_unknown_approval_mode_with_structured_error() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(runtime).unwrap();
-
-    let response = post_json(
-        app,
-        "/api/config/active-selection",
-        r#"{"activeProfile":"test","activeModel":"test","approvalMode":"future"}"#,
-        &token,
-    )
-    .await;
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let error: ConversationErrorEnvelopeDto =
-        serde_json::from_slice(&body_bytes(response).await).unwrap();
-    assert_eq!(error.code, "invalid_approval_mode");
 }
 
 #[tokio::test]
@@ -1364,8 +1343,7 @@ async fn stream_preserves_global_updates_during_replay_drain() {
 #[tokio::test]
 async fn stream_preserves_ask_user_events_during_replay_drain() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token, events) =
-        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let (app, token, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
 
@@ -1424,8 +1402,7 @@ async fn stream_preserves_ask_user_events_during_replay_drain() {
 #[tokio::test]
 async fn stream_suppresses_current_session_ask_user_global_copy() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token, events) =
-        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let (app, token, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
     let session_id = create_session(app.clone(), &token).await;
 
     let response = app
@@ -1472,205 +1449,6 @@ async fn stream_suppresses_current_session_ask_user_global_copy() {
 
     let duplicate = tokio::time::timeout(Duration::from_millis(250), body.frame()).await;
     assert!(duplicate.is_err(), "global copy should not be delivered");
-}
-
-#[tokio::test]
-async fn raw_event_stream_replays_and_filters_durable_and_live_custom_events() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token, events) =
-        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
-    let sid = SessionId::from(session_id.clone());
-
-    runtime
-        .event_store()
-        .append_events(vec![
-            DurableEvent::session(
-                sid.clone(),
-                DurableEventPayload::CustomEvent(CustomEventData {
-                    extension_id: "producer".into(),
-                    event_type: "job.completed".into(),
-                    schema_version: 1,
-                    causation_id: None,
-                    cascade_depth: 0,
-                    payload: serde_json::json!({"jobId": "durable-job"}),
-                }),
-            ),
-            DurableEvent::session(
-                sid.clone(),
-                DurableEventPayload::CustomEvent(CustomEventData {
-                    extension_id: "ignored".into(),
-                    event_type: "job.completed".into(),
-                    schema_version: 1,
-                    causation_id: None,
-                    cascade_depth: 0,
-                    payload: serde_json::json!({"jobId": "ignored-job"}),
-                }),
-            ),
-        ])
-        .await
-        .unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .header("authorization", format!("Bearer {token}"))
-                .header("last-event-id", "0")
-                .uri(format!(
-                    "/api/sessions/{session_id}/events?extensionId=producer&eventType=job.\
-                     completed"
-                ))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-
-    events.send_notification(ClientNotification::Event(
-        LiveEvent::session(
-            sid,
-            LiveEventPayload::CustomEvent(CustomEventData {
-                extension_id: "producer".into(),
-                event_type: "job.completed".into(),
-                schema_version: 1,
-                causation_id: None,
-                cascade_depth: 0,
-                payload: serde_json::json!({"jobId": "live-job"}),
-            }),
-        )
-        .into(),
-    ));
-
-    let body = read_sse_until(response.into_body(), "live-job").await;
-    assert!(body.contains("durable-job"));
-    assert!(body.contains(r#""durability":"durable""#));
-    assert!(body.contains(r#""durability":"live""#));
-    assert!(!body.contains("ignored-job"));
-}
-
-#[tokio::test]
-async fn raw_event_stream_buffers_events_while_validating_and_maps_replay_errors() {
-    let latest_cursor = Arc::new(LatestCursorControl::default());
-    let event_store = Arc::new(TestEventStore::with_latest_cursor_control(Arc::clone(
-        &latest_cursor,
-    ))) as Arc<dyn SessionStore>;
-    let runtime = runtime_with_event_store(Arc::new(ImmediateLlm), event_store).await;
-    let (app, token, publisher) =
-        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
-    let session_id = create_session(app.clone(), &token).await;
-    let sid = SessionId::from(session_id.clone());
-    let raw_request = |session_id: &str, query: &str| {
-        let query = if query.is_empty() {
-            String::new()
-        } else {
-            format!("?{query}")
-        };
-        Request::builder()
-            .method(Method::GET)
-            .header("authorization", format!("Bearer {token}"))
-            .uri(format!("/api/sessions/{session_id}/events{query}"))
-            .body(Body::empty())
-            .unwrap()
-    };
-
-    latest_cursor.block_next();
-    let response_task = tokio::spawn({
-        let app = app.clone();
-        let request = raw_request(&session_id, "");
-        async move { app.oneshot(request).await.unwrap() }
-    });
-    latest_cursor.wait_until_blocked().await;
-
-    let durable = runtime
-        .event_store()
-        .append_event(DurableEvent::session(
-            sid.clone(),
-            DurableEventPayload::CustomEvent(CustomEventData {
-                extension_id: "producer".into(),
-                event_type: "job.completed".into(),
-                schema_version: 1,
-                causation_id: None,
-                cascade_depth: 0,
-                payload: serde_json::json!({"jobId": "setup-durable"}),
-            }),
-        ))
-        .await
-        .unwrap();
-    publisher.send_notification(ClientNotification::Event(durable.into()));
-    publisher.send_notification(ClientNotification::Event(
-        LiveEvent::session(
-            sid.clone(),
-            LiveEventPayload::CustomEvent(CustomEventData {
-                extension_id: "producer".into(),
-                event_type: "job.completed".into(),
-                schema_version: 1,
-                causation_id: None,
-                cascade_depth: 0,
-                payload: serde_json::json!({"jobId": "setup-live"}),
-            }),
-        )
-        .into(),
-    ));
-    latest_cursor.resume();
-
-    let response = response_task.await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = read_sse_until(response.into_body(), "setup-live").await;
-    assert!(body.contains("setup-durable"));
-
-    let invalid = app
-        .clone()
-        .oneshot(raw_request(&session_id, "cursor=not-a-cursor"))
-        .await
-        .unwrap();
-    assert_eq!(invalid.status(), StatusCode::CONFLICT);
-
-    let ahead = app
-        .clone()
-        .oneshot(raw_request(&session_id, "cursor=18446744073709551615"))
-        .await
-        .unwrap();
-    assert_eq!(ahead.status(), StatusCode::CONFLICT);
-
-    let missing = app
-        .clone()
-        .oneshot(raw_request("missing-raw-session", ""))
-        .await
-        .unwrap();
-    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
-
-    latest_cursor.fail_next();
-    let internal = app
-        .clone()
-        .oneshot(raw_request(&session_id, ""))
-        .await
-        .unwrap();
-    assert_eq!(internal.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-    let overflow = (0..1_000)
-        .map(|index| {
-            DurableEvent::session(
-                sid.clone(),
-                DurableEventPayload::CustomEvent(CustomEventData {
-                    extension_id: "producer".into(),
-                    event_type: "job.completed".into(),
-                    schema_version: 1,
-                    causation_id: None,
-                    cascade_depth: 0,
-                    payload: serde_json::json!({"index": index}),
-                }),
-            )
-        })
-        .collect();
-    runtime.event_store().append_events(overflow).await.unwrap();
-    let over_limit = app
-        .oneshot(raw_request(&session_id, "cursor=0"))
-        .await
-        .unwrap();
-    assert_eq!(over_limit.status(), StatusCode::CONFLICT);
 }
 
 #[tokio::test]
@@ -2100,8 +1878,7 @@ async fn stream_ignores_events_from_other_sessions() {
 #[tokio::test]
 async fn stream_projects_tracked_child_events_to_parent_stream() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token, events) =
-        router_with_event_publisher(ServerApp::new(Arc::clone(&runtime))).unwrap();
+    let (app, token, events) = router_with_event_bus(ServerApp::new(Arc::clone(&runtime))).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let parent_sid = SessionId::from(session_id.clone());
     let child_sid = SessionId::from(format!("{session_id}-child"));
@@ -2181,7 +1958,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
         .iter()
         .find(|command| command.name == "compact")
         .expect("compact command");
-    assert_eq!(compact.source, CommandSourceDto::Builtin);
+    assert_eq!(compact.extension_id, "astrcode-session-commands");
     assert!(!compact.needs_argument);
     assert!(compact.requires_idle);
     assert!(!compact.argument_completions);
@@ -2191,7 +1968,7 @@ async fn command_list_route_exposes_backend_slash_commands() {
         .iter()
         .find(|command| command.name == "mode")
         .expect("mode extension command");
-    assert_eq!(mode_cmd.source, CommandSourceDto::Extension);
+    assert_eq!(mode_cmd.extension_id, "astrcode-mode");
 
     let shift_tab = body
         .keybindings
@@ -2524,61 +2301,14 @@ async fn read_sse_until(mut body: Body, needle: &str) -> String {
 struct TestEventStore {
     inner: InMemoryEventStore,
     temp_dir: PathBuf,
-    latest_cursor: Arc<LatestCursorControl>,
 }
 
 impl TestEventStore {
     fn new() -> Self {
-        Self::with_latest_cursor_control(Arc::new(LatestCursorControl::default()))
-    }
-
-    fn with_latest_cursor_control(latest_cursor: Arc<LatestCursorControl>) -> Self {
         Self {
             inner: InMemoryEventStore::new(),
             temp_dir: std::env::temp_dir(),
-            latest_cursor,
         }
-    }
-}
-
-#[derive(Default)]
-struct LatestCursorControl {
-    block_next: AtomicBool,
-    fail_next: AtomicBool,
-    blocked: Notify,
-    resume: Notify,
-}
-
-impl LatestCursorControl {
-    fn block_next(&self) {
-        assert!(!self.block_next.swap(true, Ordering::AcqRel));
-    }
-
-    async fn wait_until_blocked(&self) {
-        tokio::time::timeout(Duration::from_secs(1), self.blocked.notified())
-            .await
-            .expect("latest_cursor should be reached");
-    }
-
-    fn resume(&self) {
-        self.resume.notify_one();
-    }
-
-    fn fail_next(&self) {
-        assert!(!self.fail_next.swap(true, Ordering::AcqRel));
-    }
-
-    async fn before_read(&self) -> Result<(), StorageError> {
-        if self.block_next.swap(false, Ordering::AcqRel) {
-            self.blocked.notify_one();
-            self.resume.notified().await;
-        }
-        if self.fail_next.swap(false, Ordering::AcqRel) {
-            return Err(StorageError::Io(std::io::Error::other(
-                "injected latest cursor failure",
-            )));
-        }
-        Ok(())
     }
 }
 
@@ -2592,7 +2322,6 @@ impl EventReader for TestEventStore {
     }
 
     async fn latest_cursor(&self, session_id: &SessionId) -> Result<Option<Cursor>, StorageError> {
-        self.latest_cursor.before_read().await?;
         self.inner.latest_cursor(session_id).await
     }
 
@@ -2843,13 +2572,11 @@ async fn runtime_with_event_store(
         .register(astrcode_extension_mode::extension())
         .await
         .unwrap();
-    let context_assembler = Arc::new(LlmContextAssembler::new(ContextSettings::default()));
     let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         llm_provider.clone(),
         llm_provider,
         effective,
         extension_runner.clone(),
-        context_assembler.clone(),
     );
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
@@ -2861,6 +2588,7 @@ async fn runtime_with_event_store(
         astrcode_core::config::Config::default(),
         Arc::clone(&extension_runner),
         Arc::clone(&capabilities),
+        std::path::PathBuf::from("."),
     ));
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&event_store),
@@ -2874,7 +2602,7 @@ async fn runtime_with_event_store(
         Arc::clone(&child_sessions),
     ));
     child_sessions.spawn_completion_watcher(Arc::clone(&scheduler));
-    Arc::new(ServerRuntime::assemble_for_test(
+    Arc::new(assemble_server_runtime(
         event_store,
         config,
         session_manager,

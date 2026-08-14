@@ -1,9 +1,15 @@
 //! 集成测试构造内部编排组件（需 `testing` feature）。
 
+use std::sync::Arc;
+
+use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_storage::SessionStore;
+use axum::Router;
+
+use crate::{ServerEventBus, bootstrap::ServerRuntime, http::HttpServerError};
 pub use crate::{
     child_session::ChildSessionCoordinator,
     config_manager::ConfigManager,
-    server_event_bus::ServerEventBus,
     session_manager::SessionManager,
     session_operations::ServerSessionOperations,
     turn_registry::TurnRegistry,
@@ -12,6 +18,58 @@ pub use crate::{
         StartedExecution, TurnScheduleError, TurnScheduler,
     },
 };
+
+/// Test-only access to runtime components that are private to server orchestration.
+pub trait ServerRuntimeTestExt {
+    fn event_store(&self) -> &Arc<dyn SessionStore>;
+    fn config_manager(&self) -> &Arc<ConfigManager>;
+    fn extension_runner(&self) -> &Arc<ExtensionRunner>;
+}
+
+impl ServerRuntimeTestExt for ServerRuntime {
+    fn event_store(&self) -> &Arc<dyn SessionStore> {
+        ServerRuntime::event_store(self)
+    }
+
+    fn config_manager(&self) -> &Arc<ConfigManager> {
+        ServerRuntime::config_manager(self)
+    }
+
+    fn extension_runner(&self) -> &Arc<ExtensionRunner> {
+        ServerRuntime::extension_runner(self)
+    }
+}
+
+pub fn router_with_event_bus(
+    server_app: Arc<crate::bootstrap::ServerApp>,
+) -> Result<(Router, String, Arc<ServerEventBus>), HttpServerError> {
+    let event_bus = Arc::clone(server_app.event_bus());
+    let (router, auth_token) = crate::http::router(server_app)?;
+    Ok((router, auth_token, event_bus))
+}
+
+/// Builds a runtime from already assembled test components.
+#[allow(clippy::too_many_arguments)] // Mirrors the runtime's owned components.
+pub fn assemble_server_runtime(
+    event_store: Arc<dyn SessionStore>,
+    config_manager: Arc<ConfigManager>,
+    session_manager: Arc<SessionManager>,
+    scheduler: Arc<TurnScheduler>,
+    extension_runner: Arc<ExtensionRunner>,
+    runtime_services: Arc<astrcode_session::SessionRuntimeServices>,
+    startup_working_dir: std::path::PathBuf,
+) -> ServerRuntime {
+    ServerRuntime {
+        event_store,
+        config_manager,
+        session_manager,
+        scheduler,
+        extension_runner,
+        runtime_services,
+        startup_working_dir,
+        shutdown_token: tokio_util::sync::CancellationToken::new(),
+    }
+}
 
 pub fn session_started_event_for_test(
     session_id: astrcode_core::types::SessionId,
@@ -63,14 +121,12 @@ pub fn assemble_session_runtime_services_for_test(
     small_llm: std::sync::Arc<dyn astrcode_core::llm::LlmProvider>,
     effective: astrcode_core::config::EffectiveConfig,
     extension_runner: std::sync::Arc<astrcode_extensions::runner::ExtensionRunner>,
-    context_assembler: std::sync::Arc<astrcode_context::context_assembler::LlmContextAssembler>,
 ) -> std::sync::Arc<astrcode_session::SessionRuntimeServices> {
     crate::config_manager::assemble_session_runtime_services(
         llm,
         small_llm,
         effective,
         extension_runner,
-        context_assembler,
     )
 }
 
@@ -88,6 +144,17 @@ pub async fn recycle_completed_session_for_test(
                 crate::turn_scheduler::CompletedRecycleOutcome::Recycled
             )
         })
+}
+
+pub async fn release_completed_execution_for_test(
+    scheduler: &TurnScheduler,
+    session_id: &astrcode_core::types::SessionId,
+    turn_id: &astrcode_core::types::TurnId,
+    finalization: Option<&astrcode_session::TurnFinalization>,
+) {
+    scheduler
+        .release_completed_execution(session_id, turn_id, finalization)
+        .await;
 }
 
 pub async fn finish_and_watch_next_for_test(

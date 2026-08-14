@@ -188,11 +188,14 @@ impl ModelSelectionFlow {
                 ConfigUpdateError::ExtensionValidation(error) => HandlerError::InvalidRequest(
                     format!("Invalid extension configuration: {error}"),
                 ),
-                ConfigUpdateError::ExtensionApply(error) => HandlerError::InvalidRequest(format!(
-                    "Failed to apply extension configuration: {error}"
-                )),
+                ConfigUpdateError::ExtensionCandidate(error) => HandlerError::InvalidRequest(
+                    format!("Failed to prepare extension generation: {error}"),
+                ),
                 ConfigUpdateError::Store(error) => {
                     HandlerError::InvalidRequest(format!("Failed to write config: {error}"))
+                },
+                ConfigUpdateError::Transaction(error) => {
+                    HandlerError::Internal(format!("Failed to publish model selection: {error}"))
                 },
             })
     }

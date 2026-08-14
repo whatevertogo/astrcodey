@@ -43,7 +43,10 @@ pub(crate) fn lifecycle_event_allows_blocking(event: &LifecycleEvent) -> bool {
 pub fn fixed_hook_mode(event: &LifecycleEvent) -> Option<HookMode> {
     match event {
         LifecycleEvent::AfterProviderResponse => Some(HookMode::Advisory),
-        LifecycleEvent::ContinueAfterStop
+        LifecycleEvent::ToolInputTransform
+        | LifecycleEvent::PreToolUse
+        | LifecycleEvent::ProviderContribution
+        | LifecycleEvent::ContinueAfterStop
         | LifecycleEvent::UserMessageEnvelope
         | LifecycleEvent::PromptBuild => Some(HookMode::Blocking),
         _ => None,
@@ -58,9 +61,7 @@ pub fn hook_mode_is_supported(event: &LifecycleEvent, mode: HookMode) -> bool {
     mode != HookMode::Blocking
         || matches!(
             event,
-            LifecycleEvent::PreToolUse
-                | LifecycleEvent::PostToolUse
-                | LifecycleEvent::BeforeProviderRequest
+            LifecycleEvent::PostToolUse | LifecycleEvent::BeforeProviderRequest
         )
         || lifecycle_event_allows_blocking(event)
 }

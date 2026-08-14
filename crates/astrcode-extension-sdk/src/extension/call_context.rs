@@ -42,9 +42,7 @@ impl Drop for CallCancellation {
 }
 
 impl ExtensionCallContext {
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_runtime(
+    pub(crate) fn from_runtime(
         extension_id: impl Into<String>,
         paths: ExtensionPaths,
         host: ExtensionHost,
@@ -69,8 +67,7 @@ impl ExtensionCallContext {
     ///
     /// The runtime uses this only for startup contexts whose signal represents the whole
     /// extension generation and may be cloned into managed background tasks.
-    #[doc(hidden)]
-    pub fn retain_cancellation_after_context_drop(self) -> Self {
+    pub(crate) fn retain_cancellation_after_context_drop(self) -> Self {
         self.cancellation
             .cancel_on_drop
             .store(false, Ordering::Release);
@@ -143,8 +140,10 @@ pub struct WorkspaceCallContext {
 }
 
 impl WorkspaceCallContext {
-    #[doc(hidden)]
-    pub fn from_runtime(call: ExtensionCallContext, working_dir: impl Into<PathBuf>) -> Self {
+    pub(crate) fn from_runtime(
+        call: ExtensionCallContext,
+        working_dir: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             call,
             working_dir: working_dir.into(),
@@ -181,8 +180,7 @@ pub struct SessionCallContext {
 }
 
 impl SessionCallContext {
-    #[doc(hidden)]
-    pub fn from_runtime(
+    pub(crate) fn from_runtime(
         call: ExtensionCallContext,
         session_id: SessionId,
         turn_id: Option<String>,
@@ -245,8 +243,7 @@ pub struct ExtensionStartContext {
 }
 
 impl ExtensionStartContext {
-    #[doc(hidden)]
-    pub fn from_runtime(
+    pub(crate) fn from_runtime(
         call: ExtensionCallContext,
         config: ExtensionConfig,
         startup_working_dir: Option<PathBuf>,

@@ -34,8 +34,7 @@ use handlers::{
 use parking_lot::RwLock;
 use store::MemoryStorePool;
 use turn_recall::{
-    MemoryProjectRecallDeliveryProvider, MemoryProjectRecallTurnEndHandler, ProjectRecallBuffer,
-    SessionPrefsCache,
+    MemoryProjectRecallDeliveryProvider, MemoryProjectRecallTurnEndHandler, SessionPrefsCache,
 };
 
 use crate::config::MemoryConfig;
@@ -45,12 +44,10 @@ pub fn extension() -> Arc<dyn Extension> {
     let store_pool = Arc::new(MemoryStorePool::new());
     let pipeline = Arc::new(handlers::MemoryPipelineCoordinator::default());
     let session_prefs = Arc::new(SessionPrefsCache::default());
-    let project_recall_buffer = Arc::new(ProjectRecallBuffer::default());
     Arc::new(MemoryExtension {
         store_pool,
         pipeline,
         session_prefs,
-        project_recall_buffer,
         config: Arc::new(RwLock::new(MemoryConfig::default())),
     })
 }
@@ -59,7 +56,6 @@ struct MemoryExtension {
     store_pool: Arc<MemoryStorePool>,
     pipeline: Arc<handlers::MemoryPipelineCoordinator>,
     session_prefs: Arc<SessionPrefsCache>,
-    project_recall_buffer: Arc<ProjectRecallBuffer>,
     config: Arc<RwLock<MemoryConfig>>,
 }
 
@@ -74,6 +70,12 @@ impl Extension for MemoryExtension {
             .capability(ExtensionCapability::EmitCustomEvents)
             .capability(ExtensionCapability::ProviderRequest)
             .build()
+    }
+
+    fn validate_config(&self, config: &ExtensionConfig) -> Result<(), ExtensionError> {
+        MemoryConfig::from_extension_config(config)
+            .map(|_| ())
+            .map_err(Into::into)
     }
 
     async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
@@ -97,15 +99,9 @@ impl Extension for MemoryExtension {
         Ok(())
     }
 
-    async fn on_config_changed(&self, config: ExtensionConfig) -> Result<(), ExtensionError> {
-        *self.config.write() = MemoryConfig::from_extension_config(&config)?;
-        Ok(())
-    }
-
     async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
         self.pipeline.reset();
         self.session_prefs.reset();
-        self.project_recall_buffer.reset();
         Ok(())
     }
 
@@ -140,11 +136,9 @@ impl Extension for MemoryExtension {
                 session_prefs: self.session_prefs.clone(),
             }),
         );
-        reg.on_before_provider_request(
-            HookMode::Blocking,
+        reg.on_provider_contribution(
             40,
             Arc::new(MemoryProjectRecallDeliveryProvider {
-                buffer: self.project_recall_buffer.clone(),
                 config: self.config.clone(),
             }),
         );
@@ -154,7 +148,6 @@ impl Extension for MemoryExtension {
             0,
             Arc::new(MemoryProjectRecallTurnEndHandler {
                 store_pool: self.store_pool.clone(),
-                buffer: self.project_recall_buffer.clone(),
                 config: self.config.clone(),
             }),
         );

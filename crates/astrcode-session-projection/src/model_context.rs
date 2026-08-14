@@ -9,8 +9,8 @@ use astrcode_core::{
         TranscriptRewriteReason, transcript_prefix_fingerprint,
     },
     llm::{
-        LlmContent, LlmMessage, LlmRole, TURN_ABORTED_SOURCE, provider_transcript,
-        turn_aborted_context_message,
+        LlmContent, LlmMessage, LlmRole, TranscriptMessage, TranscriptMessageOrigin,
+        provider_transcript, turn_aborted_context_message,
     },
     types::ToolCallId,
 };
@@ -37,23 +37,19 @@ pub struct SequencedLlmMessage {
     pub message: LlmMessage,
     /// 普通消息记录最近更新它的事件 seq；rewrite 输出锚定到其 source seq。
     pub updated_seq: u64,
-    /// provider 不可见的消息来源标记。
-    #[serde(default)]
-    pub source: Option<String>,
+    /// provider 不可见的投影来源元数据。
+    pub origin: Option<TranscriptMessageOrigin>,
 }
 
 impl SequencedLlmMessage {
-    pub(crate) fn plain(message: LlmMessage, updated_seq: u64) -> Self {
+    fn plain(message: LlmMessage, updated_seq: u64) -> Self {
         Self {
             message,
             updated_seq,
-            source: None,
+            origin: None,
         }
     }
 }
-
-pub const TOOL_CALL_FAILED_SOURCE: &str = "tool_call_failed";
-pub const TOOL_CALL_CANCELLED_SOURCE: &str = "tool_call_cancelled";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnansweredToolCall {
@@ -231,7 +227,7 @@ fn apply_provider_event(
         DurableEventPayload::TurnAbortedContext => messages.push(SequencedLlmMessage {
             message: turn_aborted_context_message(),
             updated_seq: event_seq,
-            source: Some(TURN_ABORTED_SOURCE.into()),
+            origin: Some(TranscriptMessageOrigin::TurnAborted),
         }),
         DurableEventPayload::AssistantMessageCompleted {
             text,
@@ -295,7 +291,7 @@ fn apply_provider_event(
             tool_name,
             error.clone(),
             true,
-            Some(TOOL_CALL_FAILED_SOURCE),
+            Some(TranscriptMessageOrigin::ToolCallFailed),
             event_seq,
         ),
         DurableEventPayload::ToolCallCancelled {
@@ -309,7 +305,7 @@ fn apply_provider_event(
             tool_name,
             format!("Tool cancelled: {reason}"),
             true,
-            Some(TOOL_CALL_CANCELLED_SOURCE),
+            Some(TranscriptMessageOrigin::ToolCallCancelled),
             event_seq,
         ),
         DurableEventPayload::TranscriptRewritten {
@@ -322,8 +318,11 @@ fn apply_provider_event(
         } => {
             *messages = forked
                 .iter()
-                .cloned()
-                .map(|message| SequencedLlmMessage::plain(message, event_seq))
+                .map(|entry| SequencedLlmMessage {
+                    message: entry.message.clone(),
+                    updated_seq: event_seq,
+                    origin: entry.origin,
+                })
                 .collect();
         },
         _ => {},
@@ -332,7 +331,7 @@ fn apply_provider_event(
 
 fn apply_transcript_rewrite(
     current: &mut Vec<SequencedLlmMessage>,
-    rewritten: &[LlmMessage],
+    rewritten: &[TranscriptMessage],
     source_seq: u64,
 ) {
     let tail = current
@@ -341,11 +340,10 @@ fn apply_transcript_rewrite(
         .cloned();
     *current = rewritten
         .iter()
-        .cloned()
-        .map(|message| SequencedLlmMessage {
-            message,
+        .map(|entry| SequencedLlmMessage {
+            message: entry.message.clone(),
             updated_seq: source_seq,
-            source: None,
+            origin: entry.origin,
         })
         .chain(tail)
         .collect();
@@ -357,7 +355,7 @@ fn apply_tool_terminal(
     tool_name: &str,
     content: String,
     is_error: bool,
-    source: Option<&str>,
+    origin: Option<TranscriptMessageOrigin>,
     event_seq: u64,
 ) {
     messages.push(SequencedLlmMessage {
@@ -372,7 +370,7 @@ fn apply_tool_terminal(
             reasoning_content: None,
         },
         updated_seq: event_seq,
-        source: source.map(str::to_owned),
+        origin,
     });
 }
 

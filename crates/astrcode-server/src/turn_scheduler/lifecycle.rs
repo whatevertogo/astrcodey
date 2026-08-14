@@ -173,7 +173,8 @@ impl TurnScheduler {
     }
 
     /// completion 已产出但 task 可能尚未退出；只按 turn identity 非破坏性移除。
-    pub async fn release_completed_execution(
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) async fn release_completed_execution(
         &self,
         session_id: &SessionId,
         turn_id: &TurnId,

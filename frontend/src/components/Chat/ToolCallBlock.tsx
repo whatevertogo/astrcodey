@@ -212,7 +212,7 @@ function ToolCallDetailsPanel({
 
 function toolIconName(name: string): IconName {
   const lower = name.toLowerCase()
-  if (lower.includes('shell') || lower.includes('terminal')) return 'monitor'
+  if (lower.includes('shell')) return 'monitor'
   if (lower.includes('approval') || lower.includes('gate')) return 'shield'
   return 'plug'
 }

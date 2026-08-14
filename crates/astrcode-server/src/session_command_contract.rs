@@ -1,23 +1,17 @@
 use astrcode_core::types::TurnId;
+use astrcode_extension_sdk::extension::SessionCommandIntent;
 
 use crate::{session_manager::SessionManagerError, turn_scheduler::TurnScheduleError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandInfo {
     pub name: String,
+    pub extension_id: String,
     pub description: String,
     pub needs_argument: bool,
     pub requires_idle: bool,
     pub argument_completions: bool,
     pub priority: i32,
-    pub source: CommandSource,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CommandSource {
-    Builtin,
-    Extension,
-    Skill,
 }
 
 #[derive(Debug, Clone)]
@@ -39,6 +33,34 @@ pub enum CommandInvocation {
     Display { content: String, is_error: bool },
     Handled { message: String },
     Started { turn_id: TurnId },
+}
+
+#[derive(Debug)]
+pub(crate) enum CommandOutcome {
+    Invocation(CommandInvocation),
+    SessionCommand(SessionCommandIntent),
+}
+
+impl CommandOutcome {
+    pub(crate) fn into_noninteractive(self) -> Result<CommandInvocation, HandlerError> {
+        match self {
+            Self::Invocation(invocation) => Ok(invocation),
+            Self::SessionCommand(SessionCommandIntent::SelectModel) => {
+                Err(HandlerError::InvalidRequest(
+                    "interactive model selection is only available on interactive transports"
+                        .into(),
+                ))
+            },
+            Self::SessionCommand(SessionCommandIntent::CompactSession { .. }) => Err(
+                HandlerError::InvalidRequest("compact command was not executed by the host".into()),
+            ),
+        }
+    }
+
+    pub(crate) fn into_prompt_submission(self) -> Result<PromptSubmission, HandlerError> {
+        self.into_noninteractive()
+            .map(CommandInvocation::into_prompt_submission)
+    }
 }
 
 impl CommandInvocation {

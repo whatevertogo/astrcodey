@@ -12,8 +12,10 @@ use astrcode_extension_sdk::{
         CommandContext, CommandHandler, ContinueAfterStopContext, ContinueAfterStopHandler,
         ContinueAfterStopOptions, ContinueAfterStopResult, Extension, ExtensionCall,
         ExtensionCapability, ExtensionCommandResult, ExtensionError, ExtensionManifest,
-        ExtensionPaths, HookMode, ProviderContext, ProviderHandler, ProviderResult, Registrar,
-        SlashCommand, ToolContext, ToolHandler, ToolPlanContext,
+        ExtensionPaths, HookMode, PreparedProviderContribution, PreparedProviderEffect,
+        ProviderContext, ProviderContributionHandler, ProviderContributionId, ProviderHandler,
+        ProviderResult, ProviderSettlementContext, Registrar, SlashCommand, ToolContext,
+        ToolHandler, ToolPlanContext,
     },
     host::ExtensionHost,
     llm::LlmMessage,
@@ -149,6 +151,7 @@ impl Extension for GoalExtension {
             Arc::new(GoalToolHandler),
         );
         reg.on_before_provider_request(HookMode::Blocking, 40, Arc::new(GoalProviderHandler));
+        reg.on_provider_contribution(40, Arc::new(GoalProviderHandler));
         reg.on_continue_after_stop(
             40,
             ContinueAfterStopOptions::unlimited(),
@@ -162,6 +165,8 @@ impl Extension for GoalExtension {
                 requires_idle: false,
                 argument_completions: false,
                 priority: 0,
+                availability: astrcode_extension_sdk::extension::CommandAvailability::AllTransports,
+                execution: astrcode_extension_sdk::extension::CommandExecution::Extension,
             },
             Arc::new(GoalSlashCommandHandler),
         );
@@ -206,47 +211,78 @@ struct GoalProviderHandler;
 impl ProviderHandler for GoalProviderHandler {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
         let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
-        let Some(mut goal) = store.load().map_err(ExtensionError::Internal)? else {
+        let Some(goal) = store.load().map_err(ExtensionError::Internal)? else {
             return Ok(ProviderResult::Allow);
+        };
+        if !goal.status.can_auto_continue() || goal.continuation_prompt_pending.is_some() {
+            return Ok(ProviderResult::Allow);
+        }
+
+        let usage = usage_for_goal(ctx.host(), ctx.session_id(), &goal).await;
+        if budget_reached(&goal, &usage) {
+            return Ok(ProviderResult::Allow);
+        }
+
+        Ok(ProviderResult::AppendMessages {
+            messages: vec![LlmMessage::user(goal_context_message(&goal, &usage, false))],
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl ProviderContributionHandler for GoalProviderHandler {
+    async fn prepare(
+        &self,
+        ctx: ProviderContext,
+    ) -> Result<Option<PreparedProviderContribution>, ExtensionError> {
+        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
+        let Some(goal) = store.load().map_err(ExtensionError::Internal)? else {
+            return Ok(None);
         };
 
         let session_id = ctx.session_id();
         let usage = usage_for_goal(ctx.host(), session_id, &goal).await;
         if goal.status == GoalStatus::BudgetLimited {
-            let should_prompt = goal.take_budget_limit_prompt_pending();
-            if should_prompt {
-                store.save(&goal).map_err(ExtensionError::Internal)?;
-                return Ok(ProviderResult::AppendMessages {
-                    messages: vec![LlmMessage::user(budget_limit_message(&goal, &usage))],
-                });
+            if let Some(contribution_id) = goal.budget_limit_prompt_pending.clone() {
+                return Ok(Some(PreparedProviderContribution::new(
+                    ProviderContributionId::new(contribution_id),
+                    PreparedProviderEffect::AppendMessages(vec![LlmMessage::user(
+                        budget_limit_message(&goal, &usage),
+                    )]),
+                )));
             }
-            return Ok(ProviderResult::Allow);
+            return Ok(None);
         }
 
         if !goal.status.can_auto_continue() {
-            return Ok(ProviderResult::Allow);
+            return Ok(None);
         }
 
-        if apply_budget_limit(&mut goal, &usage) {
-            let should_prompt = goal.take_budget_limit_prompt_pending();
-            store.save(&goal).map_err(ExtensionError::Internal)?;
-            if should_prompt {
-                return Ok(ProviderResult::AppendMessages {
-                    messages: vec![LlmMessage::user(budget_limit_message(&goal, &usage))],
-                });
-            }
-            return Ok(ProviderResult::Allow);
+        if budget_reached(&goal, &usage) {
+            return Ok(Some(PreparedProviderContribution::new(
+                ProviderContributionId::new(goal.budget_transition_contribution_id()),
+                PreparedProviderEffect::AppendMessages(vec![LlmMessage::user(
+                    budget_limit_message(&goal, &usage),
+                )]),
+            )));
         }
 
-        let continuation = goal.take_continuation_prompt_pending();
-        store.save(&goal).map_err(ExtensionError::Internal)?;
-        Ok(ProviderResult::AppendMessages {
-            messages: vec![LlmMessage::user(goal_context_message(
-                &goal,
-                &usage,
-                continuation,
-            ))],
-        })
+        let Some(contribution_id) = goal.continuation_prompt_pending.clone() else {
+            return Ok(None);
+        };
+        Ok(Some(PreparedProviderContribution::new(
+            ProviderContributionId::new(contribution_id),
+            PreparedProviderEffect::AppendMessages(vec![LlmMessage::user(goal_context_message(
+                &goal, &usage, true,
+            ))]),
+        )))
+    }
+
+    async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError> {
+        let store = GoalStore::new(goal_dir_from_base(session_data_dir(ctx.paths())?));
+        store
+            .acknowledge_provider_contribution(ctx.contribution_id().as_str())
+            .map_err(ExtensionError::Internal)
     }
 }
 
@@ -561,18 +597,20 @@ fn goal_report_text(report: &GoalReport) -> String {
 }
 
 fn apply_budget_limit(goal: &mut GoalState, usage: &GoalUsage) -> bool {
-    if goal.status != GoalStatus::Active {
-        return false;
-    }
-    let (Some(budget), Some(used)) = (goal.token_budget, usage.tokens_used) else {
-        return false;
-    };
-    if used < budget {
+    if !budget_reached(goal, usage) {
         return false;
     }
     goal.set_status(GoalStatus::BudgetLimited);
     goal.mark_budget_limit_prompt_pending();
     true
+}
+
+fn budget_reached(goal: &GoalState, usage: &GoalUsage) -> bool {
+    goal.status == GoalStatus::Active
+        && matches!(
+            (goal.token_budget, usage.tokens_used),
+            (Some(budget), Some(used)) if used >= budget
+        )
 }
 
 fn goal_context_message(goal: &GoalState, usage: &GoalUsage, continuation: bool) -> String {
@@ -798,8 +836,8 @@ mod tests {
 
         assert!(apply_budget_limit(&mut goal, &usage));
         assert_eq!(goal.status, GoalStatus::BudgetLimited);
-        assert!(!goal.continuation_prompt_pending);
-        assert!(goal.budget_limit_prompt_pending);
+        assert!(goal.continuation_prompt_pending.is_none());
+        assert!(goal.budget_limit_prompt_pending.is_some());
     }
 
     #[test]

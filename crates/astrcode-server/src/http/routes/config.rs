@@ -23,7 +23,7 @@ use axum::{
 
 use super::{
     super::{HttpState, bad_request_response, internal_error_response},
-    ConfigRequestError, reload_extension_registry, update_config,
+    ConfigRequestError, update_config,
 };
 use crate::{
     bootstrap::{self, BootstrapOptions},
@@ -285,15 +285,15 @@ pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Re
             ConfigUpdateError::ExtensionValidation(error) => {
                 bad_request_response("invalid_extension_config", error)
             },
-            ConfigUpdateError::ExtensionApply(error) => {
-                internal_error_response("extension_config_apply_failed", error)
+            ConfigUpdateError::ExtensionCandidate(error) => {
+                internal_error_response("extension_candidate_failed", error)
             },
             ConfigUpdateError::Store(error) => internal_error_response("reload_failed", error),
+            ConfigUpdateError::Transaction(error) => {
+                internal_error_response("config_publication_failed", error)
+            },
         };
     }
-    // 重载扩展（处理启用/禁用状态变化）
-    let _ = reload_extension_registry(&state).await;
-
     Json(ConfigReloadResponseDto {
         active_profile,
         active_model,
@@ -307,12 +307,7 @@ pub(in crate::http) async fn update_active_selection(
     State(state): State<HttpState>,
     Json(request): Json<UpdateActiveSelectionRequest>,
 ) -> Response {
-    let Ok(approval_mode) = ApprovalMode::try_from(request.approval_mode) else {
-        return bad_request_response(
-            "invalid_approval_mode",
-            "Invalid approvalMode; expected \"manual\" or \"yolo\"",
-        );
-    };
+    let approval_mode = ApprovalMode::from(request.approval_mode);
 
     let update_result = update_config(&state, |candidate| {
         candidate.active_profile = request.active_profile;

@@ -15,14 +15,23 @@ mod wire;
 mod workspace;
 mod workspace_patch;
 
-use std::{collections::HashMap, future::Future, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    future::Future,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use astrcode_core::{
     event::{
         CustomEventData, DurableEventPayload, EventDeliveryReceipt, EventPayload, EventSender,
         LiveEventPayload,
     },
-    llm::LlmProvider,
+    llm::{LlmProvider, LlmProviderBindings},
     tool::{
         FileObservationStore, SessionOperations, ToolResultArtifactReader,
         access::{HostResource, ResourceAccess, ResourceLease},
@@ -184,6 +193,12 @@ where
 }
 
 fn ensure_invoke_active(ctx: &InvokeContext) -> Result<(), ErrorPayload> {
+    if !ctx.generation_gate.is_active() {
+        return Err(ErrorPayload::new(
+            WireErrorCode::HostNotReady,
+            "extension generation is not active",
+        ));
+    }
     if ctx
         .cancel_token
         .as_ref()
@@ -197,10 +212,57 @@ fn ensure_invoke_active(ctx: &InvokeContext) -> Result<(), ErrorPayload> {
     Ok(())
 }
 
+/// Shared publication gate for calls retained by one extension generation.
+#[derive(Clone)]
+pub struct ExtensionGenerationGate(Arc<AtomicBool>);
+
+impl ExtensionGenerationGate {
+    pub(crate) fn candidate() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub(crate) fn activate(&self) {
+        self.0.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn deactivate(&self) {
+        self.0.store(false, Ordering::Release);
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+}
+
+impl Default for ExtensionGenerationGate {
+    fn default() -> Self {
+        Self(Arc::new(AtomicBool::new(true)))
+    }
+}
+
+/// Host-internal owner identity for one instantiated extension generation.
+#[doc(hidden)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ExtensionInstanceId(uuid::Uuid);
+
+impl ExtensionInstanceId {
+    pub(crate) fn new() -> Self {
+        Self(uuid::Uuid::new_v4())
+    }
+}
+
+impl Default for ExtensionInstanceId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// 单次 guest→host invoke 的运行时上下文。
 #[derive(Clone, Default)]
 pub struct InvokeContext {
     pub extension_id: String,
+    #[doc(hidden)]
+    pub extension_instance_id: ExtensionInstanceId,
     pub session_id: Option<String>,
     /// 当前宿主工具调用 ID；非工具入口不存在该归属。
     pub tool_call_id: Option<String>,
@@ -210,6 +272,8 @@ pub struct InvokeContext {
     pub file_observation_store: Option<Arc<dyn FileObservationStore>>,
     /// Durable tool-result artifact reader scoped by the current session.
     pub tool_result_reader: Option<Arc<dyn ToolResultArtifactReader>>,
+    /// 操作拥有者固定的 provider generation；无作用域和启动期调用不存在。
+    pub llm_providers: Option<LlmProviderBindings>,
     pub event_tx: Option<EventSender>,
     pub event_causation: Option<(EventId, u8)>,
     /// Present only for tool execution; every actual Host operation must fit this lease.
@@ -221,6 +285,7 @@ pub struct InvokeContext {
     pub tasks: Option<ExtensionTasks>,
     pub event_declarations: HashMap<String, CustomEventDeclaration>,
     pub declared_capabilities: Vec<ExtensionCapability>,
+    pub generation_gate: ExtensionGenerationGate,
     /// 当前调用是否在 peer 专用 I/O 线程上（同步 host import；IPC 子进程共用）。
     pub on_peer_io_thread: bool,
 }
@@ -302,9 +367,9 @@ impl HostRouter {
         self.process.cleanup_session(session_id);
     }
 
-    /// Drops all transient Host resources owned by an extension identity.
-    pub fn cleanup_extension_resources(&self, extension_id: &str) {
-        self.process.cleanup_extension(extension_id);
+    /// Drops all transient Host resources owned by one extension instance.
+    pub(crate) fn cleanup_extension_resources(&self, instance_id: ExtensionInstanceId) {
+        self.process.cleanup_extension(instance_id);
     }
 
     async fn invoke_group(
@@ -317,7 +382,12 @@ impl HostRouter {
         match group {
             HostOperationGroup::Llm => {
                 self.llm
-                    .invoke(operation, input, context.cancel_token.as_ref())
+                    .invoke(
+                        operation,
+                        input,
+                        context.llm_providers.as_ref(),
+                        context.cancel_token.as_ref(),
+                    )
                     .await
             },
             HostOperationGroup::Session => self.session.invoke(operation, input, context).await,
@@ -404,7 +474,12 @@ impl HostRouter {
         match spec.group {
             HostOperationGroup::Llm => {
                 self.llm
-                    .invoke_event_stream(spec.operation, input, context.cancel_token.as_ref())
+                    .invoke_event_stream(
+                        spec.operation,
+                        input,
+                        context.llm_providers.as_ref(),
+                        context.cancel_token.as_ref(),
+                    )
                     .await
             },
             _ => Err(ErrorPayload::new(
@@ -456,7 +531,6 @@ fn required_resource_accesses(
         HostWorkspaceGlobRequest, HostWorkspaceGrepRequest, HostWorkspaceListRequest,
         HostWorkspaceReadRequest, HostWorkspaceWriteRequest, analyze_unified_diff_paths,
     };
-
     let working_dir = || {
         ctx.working_dir.as_deref().ok_or_else(|| {
             ErrorPayload::new(
@@ -536,7 +610,6 @@ fn required_resource_accesses(
         | HostOperation::ProcessStart
         | HostOperation::ProcessRead
         | HostOperation::ProcessInput
-        | HostOperation::ProcessResize
         | HostOperation::ProcessStatus
         | HostOperation::ProcessPromote
         | HostOperation::ProcessKill
@@ -743,7 +816,9 @@ mod tests {
             DurableEvent, DurableEventPayload, ParentSessionRef, PersistedSystemPrompt,
             SessionStarted, SystemPromptSource,
         },
-        llm::{LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmTokenUsage, ModelLimits},
+        llm::{
+            LlmContent, LlmEvent, LlmMessage, LlmProvider, LlmRequest, LlmTokenUsage, ModelLimits,
+        },
         permission::ApprovalDecision,
         tool::{
             CreateRootSessionRequest, CreateSessionRequest, SessionAccess, SessionApiError,
@@ -753,11 +828,15 @@ mod tests {
         },
         types::MessageId,
     };
-    use astrcode_extension_sdk::host::{
-        HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_REQUEST_BODY_BYTES, HOST_NETWORK_MAX_TIMEOUT_MS,
-        HOST_PROCESS_MAX_TIMEOUT_MS, HOST_SESSION_STATE_KEY_MAX_LENGTH,
-        HOST_SESSION_STATE_VALUE_MAX_BYTES, HostLlmChatOutput, HostNetworkRedirectPolicy,
-        HostNetworkRequest, HostNetworkResponse, HostProcessRequest, HostWorkspaceGrepRequest,
+    use astrcode_extension_sdk::{
+        extension::internal::{cancel_extension_tasks, extension_tasks, wait_extension_tasks},
+        host::{
+            HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_REQUEST_BODY_BYTES,
+            HOST_NETWORK_MAX_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS,
+            HOST_SESSION_STATE_KEY_MAX_LENGTH, HOST_SESSION_STATE_VALUE_MAX_BYTES,
+            HostLlmChatOutput, HostNetworkRedirectPolicy, HostNetworkRequest, HostNetworkResponse,
+            HostProcessRequest, HostWorkspaceGrepRequest,
+        },
     };
     use astrcode_storage::{
         EventReader, SessionEventJournal, SessionReader, StorageError,
@@ -804,7 +883,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn persistent_blocking_io_remains_owned_after_the_caller_is_dropped() {
-        let tasks = ExtensionTasks::new("persistent-io-test");
+        let tasks = extension_tasks("persistent-io-test");
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let completed = Arc::new(AtomicBool::new(false));
@@ -831,10 +910,11 @@ mod tests {
                 .is_cancelled()
         );
 
-        tasks.cancel();
+        cancel_extension_tasks(&tasks);
         let draining_tasks = tasks.clone();
-        let drain =
-            tokio::spawn(async move { draining_tasks.wait(Duration::from_millis(20)).await });
+        let drain = tokio::spawn(async move {
+            wait_extension_tasks(&draining_tasks, Duration::from_millis(20)).await
+        });
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert!(!drain.is_finished(), "retirement must wait for host writes");
         assert!(!completed.load(Ordering::SeqCst));
@@ -1121,7 +1201,7 @@ mod tests {
             ..Default::default()
         });
         let ctx = InvokeContext {
-            tasks: Some(ExtensionTasks::new("strict-input-test")),
+            tasks: Some(extension_tasks("strict-input-test")),
             working_dir: Some(workspace.path().to_string_lossy().into_owned()),
             declared_capabilities: vec![
                 ExtensionCapability::WorkspaceRead,
@@ -1261,10 +1341,9 @@ mod tests {
         std::fs::write(workspace.path().join("approved.txt"), "approved").expect("seed approved");
         std::fs::write(workspace.path().join("other.txt"), "other").expect("seed other");
         let root = workspace.path().to_string_lossy().into_owned();
-        let lease =
-            ResourceLease::from_plan(&astrcode_core::tool::access::ToolPlan::from_resources([
-                ResourceAccess::read_file(workspace.path().join("approved.txt")),
-            ]));
+        let lease = ResourceLease::from_plan(&astrcode_core::tool::access::ToolPlan::new([
+            ResourceAccess::read_file(workspace.path().join("approved.txt")),
+        ]));
         let router = HostRouter::from_backends(HostBackends {
             default_working_dir: Some(root.clone()),
             ..Default::default()
@@ -1445,7 +1524,7 @@ mod tests {
             extension_id: "stateful-test".into(),
             session_id: Some("stateful-test-session".into()),
             session_store_dir: Some(temp.path().to_path_buf()),
-            tasks: Some(ExtensionTasks::new("stateful-test")),
+            tasks: Some(extension_tasks("stateful-test")),
             declared_capabilities: Vec::new(),
             ..Default::default()
         };
@@ -2349,10 +2428,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn llm_capability_preserves_typed_messages_and_collected_stream_contract() {
-        let provider = Arc::new(CapturingLlm::default());
+    async fn llm_capability_preserves_typed_requests_and_collected_stream_contract() {
+        let main_provider = Arc::new(CapturingLlm::default());
+        let small_provider = Arc::new(CapturingLlm::default());
         let router = HostRouter::from_backends(HostBackends {
-            main_llm: Some(provider.clone()),
+            main_llm: Some(main_provider.clone()),
+            small_llm: Some(small_provider.clone()),
             ..Default::default()
         });
         let messages = vec![
@@ -2384,17 +2465,27 @@ mod tests {
             },
             LlmMessage::tool("lookup", "call-1", "done", false),
         ];
-        let input = serde_json::to_value(astrcode_extension_sdk::host::internal::llm_chat_request(
-            messages.clone(),
-        ))
-        .expect("serialize typed model request");
+        let default_request = astrcode_extension_sdk::host::llm_chat_request(messages.clone());
+        assert_eq!(default_request.max_output_tokens, None);
+        let default_input =
+            serde_json::to_value(default_request).expect("serialize default model request");
+        assert!(default_input.get("maxOutputTokens").is_none());
+        let capped_input = serde_json::to_value(
+            astrcode_extension_sdk::host::llm_chat_request(messages.clone())
+                .with_max_output_tokens(321),
+        )
+        .expect("serialize capped model request");
+        assert_eq!(capped_input["maxOutputTokens"], 321);
         let ctx = InvokeContext {
-            declared_capabilities: vec![ExtensionCapability::MainModel],
+            declared_capabilities: vec![
+                ExtensionCapability::MainModel,
+                ExtensionCapability::SmallModel,
+            ],
             ..Default::default()
         };
 
         let output = router
-            .invoke("astrcode.llm.main_chat", input.clone(), &ctx)
+            .invoke("astrcode.llm.main_chat", capped_input, &ctx)
             .await
             .expect("invoke typed main model");
         let output = serde_json::from_value::<HostLlmChatOutput>(output)
@@ -2403,9 +2494,9 @@ mod tests {
         assert_eq!(output.model, "main_llm");
 
         let mut events = router
-            .invoke_event_stream("astrcode.llm.main_chat", input.clone(), &ctx)
+            .invoke_event_stream("astrcode.llm.small_chat", default_input, &ctx)
             .await
-            .expect("open typed model stream");
+            .expect("open typed small-model stream");
         let mut deltas = Vec::new();
         let mut completed = None;
         while let Some(event) = events.next().await {
@@ -2422,12 +2513,38 @@ mod tests {
         assert_eq!(deltas, ["hello ", "world"]);
         let completed = completed.expect("completed stream event");
         assert_eq!(completed["content"], "hello world");
-        assert_eq!(completed["model"], "main_llm");
+        assert_eq!(completed["model"], "small_llm");
 
         {
-            let captured = provider.messages.lock().expect("captured messages");
-            assert_eq!(captured.as_slice(), &[messages.clone(), messages]);
+            let captured = main_provider.requests.lock().expect("main requests");
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].messages, messages);
+            assert_eq!(captured[0].max_output_tokens, Some(321));
+            assert!(captured[0].tools.is_empty());
         }
+        {
+            let captured = small_provider.requests.lock().expect("small requests");
+            assert_eq!(captured.len(), 1);
+            assert_eq!(captured[0].messages, messages);
+            assert_eq!(captured[0].max_output_tokens, None);
+            assert!(captured[0].tools.is_empty());
+        }
+
+        let zero_limit = router
+            .invoke(
+                "astrcode.llm.main_chat",
+                json!({
+                    "messages": [{
+                        "role": "user",
+                        "content": [{ "type": "text", "text": "hello" }]
+                    }],
+                    "maxOutputTokens": 0
+                }),
+                &ctx,
+            )
+            .await
+            .expect_err("zero output limit must be rejected at the host boundary");
+        assert_eq!(zero_limit.code_enum(), Some(WireErrorCode::InvalidInput));
 
         let legacy = router
             .invoke(
@@ -2490,11 +2607,10 @@ mod tests {
             declared_capabilities: vec![ExtensionCapability::MainModel],
             ..Default::default()
         };
-        let llm_input =
-            serde_json::to_value(astrcode_extension_sdk::host::internal::llm_chat_request(
-                vec![LlmMessage::user("hello")],
-            ))
-            .expect("serialize LLM request");
+        let llm_input = serde_json::to_value(astrcode_extension_sdk::host::llm_chat_request(vec![
+            LlmMessage::user("hello"),
+        ]))
+        .expect("serialize LLM request");
         let invoke = llm_router.invoke("astrcode.llm.main_chat", llm_input, &llm_ctx);
         tokio::pin!(invoke);
         tokio::select! {
@@ -2509,7 +2625,7 @@ mod tests {
         assert_eq!(error.code_enum(), Some(WireErrorCode::Cancelled));
         assert!(
             llm_dropped.load(Ordering::SeqCst),
-            "cancelling the caller must drop LlmProvider::generate"
+            "cancelling the caller must drop LlmProvider::generate_request"
         );
     }
 
@@ -2521,16 +2637,15 @@ mod tests {
 
     #[derive(Default)]
     struct CapturingLlm {
-        messages: Mutex<Vec<Vec<LlmMessage>>>,
+        requests: Mutex<Vec<LlmRequest>>,
         stalled: Option<(Arc<Notify>, Arc<AtomicBool>)>,
     }
 
     #[async_trait::async_trait]
     impl LlmProvider for CapturingLlm {
-        async fn generate(
+        async fn generate_request(
             &self,
-            messages: Vec<LlmMessage>,
-            _tools: Vec<astrcode_core::tool::ToolDefinition>,
+            request: LlmRequest,
         ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, astrcode_core::llm::LlmError>
         {
             if let Some((started, dropped)) = &self.stalled {
@@ -2538,10 +2653,10 @@ mod tests {
                 started.notify_one();
                 std::future::pending::<()>().await;
             }
-            self.messages
+            self.requests
                 .lock()
-                .expect("captured messages")
-                .push(messages);
+                .expect("captured requests")
+                .push(request);
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
             tx.send(LlmEvent::ContentDelta {
                 delta: "hello ".into(),

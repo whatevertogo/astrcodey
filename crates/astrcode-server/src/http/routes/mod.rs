@@ -59,12 +59,15 @@ pub(in crate::http) async fn update_config<T>(
             ConfigUpdateError::ExtensionValidation(error) => ConfigUpdateHttpError(Box::new(
                 bad_request_response("invalid_extension_config", error),
             )),
-            ConfigUpdateError::ExtensionApply(error) => ConfigUpdateHttpError(Box::new(
-                internal_error_response("extension_config_apply_failed", error),
+            ConfigUpdateError::ExtensionCandidate(error) => ConfigUpdateHttpError(Box::new(
+                internal_error_response("extension_candidate_failed", error),
             )),
             ConfigUpdateError::Store(error) => {
                 ConfigUpdateHttpError(Box::new(internal_error_response("save_failed", error)))
             },
+            ConfigUpdateError::Transaction(error) => ConfigUpdateHttpError(Box::new(
+                internal_error_response("config_publication_failed", error),
+            )),
         })?;
     Ok(result)
 }

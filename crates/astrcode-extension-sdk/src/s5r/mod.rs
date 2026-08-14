@@ -8,7 +8,8 @@ pub use tool_plan::{
 };
 
 pub use crate::wire::{
-    CallContinuation, HandlerEffect, HandlerResult,
+    CallContinuation, HandlerEffect, HandlerResult, ProviderContributionData,
+    ProviderContributionEffect,
     protocol::{
         ActivateMsg, ActivateOutput, CAP_HANDLER_INVOKE, CAP_RUNTIME_PING, CancelMsg, ErrorPayload,
         HandlerId, HandlerInvokeRequest, HandlerKind, InitializeMsg, InitializeOutput, InvokeMsg,

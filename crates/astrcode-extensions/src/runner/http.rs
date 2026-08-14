@@ -1,6 +1,9 @@
 use std::sync::{Arc, Weak};
 
-use astrcode_extension_sdk::extension::{internal::match_extension_http_route, *};
+use astrcode_extension_sdk::extension::{
+    internal::{http_context, match_extension_http_route},
+    *,
+};
 
 use super::{ExtensionCallContextInput, ExtensionRunner, ExtensionView};
 
@@ -111,7 +114,8 @@ impl ExtensionView {
             &entry.extension_id,
             ExtensionCallContextInput::unscoped(cancellation.clone()),
         )?;
-        let ctx = HttpContext::from_runtime(
+        let cancellation = call.cancellation().clone();
+        let ctx = http_context(
             call,
             entry.route.clone(),
             request,

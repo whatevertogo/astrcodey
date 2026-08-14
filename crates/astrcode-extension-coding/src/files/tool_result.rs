@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::collections::BTreeMap;
 
 use astrcode_extension_sdk::{
     WireErrorCode,
@@ -9,11 +9,10 @@ use astrcode_extension_sdk::{
     },
     tool::{
         ExecutionMode, HostResource, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
+        ToolResult,
     },
 };
 use serde::Deserialize;
-
-use crate::result::success;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -36,7 +35,6 @@ impl ToolHandler for ReadToolResultHandler {
     }
 
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
-        let started_at = Instant::now();
         let args: ReadToolResultArgs = context.arguments()?;
         validate(&args)?;
         let output = context
@@ -54,10 +52,8 @@ impl ToolHandler for ReadToolResultHandler {
                 "\n\n[Truncated. Continue with byteOffset={next}.]"
             ));
         }
-        Ok(success(
-            started_at,
-            content,
-            BTreeMap::from([
+        Ok(ToolResult::success(content)
+            .with_metadata(BTreeMap::from([
                 ("artifactId".into(), serde_json::json!(output.artifact_id)),
                 ("bytes".into(), serde_json::json!(output.bytes)),
                 ("byteOffset".into(), serde_json::json!(output.byte_offset)),
@@ -70,9 +66,8 @@ impl ToolHandler for ReadToolResultHandler {
                     "nextByteOffset".into(),
                     serde_json::json!(output.next_byte_offset),
                 ),
-            ]),
-        )
-        .into())
+            ]))
+            .into())
     }
 }
 

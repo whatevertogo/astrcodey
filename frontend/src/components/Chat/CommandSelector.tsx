@@ -105,15 +105,15 @@ export default function CommandSelector({
       ) : (
         filteredOptions.map((option, index) => {
           const previousOption = index > 0 ? filteredOptions[index - 1] : null
+          const skill = isSkillCommand(option)
           const showHeader =
-            !previousOption || previousOption.source !== option.source
-          const headerText = sourceLabel(option.source)
+            !previousOption || isSkillCommand(previousOption) !== skill
 
           return (
-            <div key={`${option.source}-${option.name}`}>
+            <div key={`${option.extensionId}-${option.name}`}>
               {showHeader && (
                 <div className="px-3 py-1.5 mt-1 first:mt-0 text-[11px] font-semibold text-text-muted tracking-wider">
-                  {headerText}
+                  {skill ? '技能' : '插件'}
                 </div>
               )}
               <button
@@ -139,7 +139,7 @@ export default function CommandSelector({
                   )}
                 >
                   <CommandIcon
-                    source={option.source}
+                    extensionId={option.extensionId}
                     selected={index === selectedIndex}
                   />
                 </span>
@@ -175,25 +175,20 @@ export default function CommandSelector({
   )
 }
 
-function sourceLabel(source: SlashCommandInfo['source']): string {
-  switch (source) {
-    case 'builtin':
-      return '内置命令'
-    case 'skill':
-      return '技能'
-    case 'extension':
-      return '插件'
-  }
+const SKILL_EXTENSION_ID = 'astrcode-skill'
+
+function isSkillCommand(command: SlashCommandInfo): boolean {
+  return command.extensionId === SKILL_EXTENSION_ID
 }
 
 function CommandIcon({
-  source,
+  extensionId,
   selected,
 }: {
-  source: SlashCommandInfo['source']
+  extensionId: string
   selected: boolean
 }) {
-  if (source === 'skill') {
+  if (extensionId === SKILL_EXTENSION_ID) {
     return (
       <svg
         className={cn(

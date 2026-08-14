@@ -36,7 +36,11 @@ impl TurnScheduler {
         &self,
         session_id: &SessionId,
     ) -> Result<SessionOperationGuard, TurnScheduleError> {
-        self.delivery_gates.begin(session_id).await
+        let operation = self.delivery_gates.begin(session_id).await?;
+        self.session_manager
+            .recover_durability_for_operation(session_id)
+            .await?;
+        Ok(operation)
     }
 
     pub(crate) async fn deliver_input_in_operation(

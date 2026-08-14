@@ -2,9 +2,10 @@
 
 use astrcode_extension_sdk::{
     extension::{
-        CompactContributions, CompactResult, ContinueAfterStopResult, ExtensionCommandResult,
-        ExtensionError, ExtensionHttpResponse, HookResult, PostToolUseResult, PreToolUseResult,
-        PromptContributions, ProviderResult,
+        CommandCompletions, CompactContributions, CompactResult, ContinueAfterStopResult,
+        ExtensionCommandResult, ExtensionError, ExtensionHttpResponse, HookResult,
+        PostToolUseResult, PreToolUseResult, PreparedProviderContribution, PreparedProviderEffect,
+        PromptContributions, ProviderContributionId, ProviderResult, ToolInputTransformResult,
     },
     tool::ToolResult,
     wire::{HandlerEffect, HandlerId, HandlerKind, HandlerResult, ToolOutcome},
@@ -20,6 +21,41 @@ pub(crate) fn parse_http_response(
     }
     serde_json::from_value(resp.data.clone())
         .map_err(|error| ExtensionError::Internal(format!("parse HTTP response: {error}")))
+}
+
+pub(crate) fn parse_provider_contribution(
+    resp: &HandlerResult,
+) -> Result<Option<PreparedProviderContribution>, ExtensionError> {
+    if resp.effect == HandlerEffect::Ok {
+        return Ok(None);
+    }
+    if resp.effect != HandlerEffect::ProviderContribution {
+        return Err(unexpected_effect("provider_contribution", resp.effect));
+    }
+    let data = serde_json::from_value::<astrcode_extension_sdk::wire::ProviderContributionData>(
+        resp.data.clone(),
+    )
+    .map_err(|error| ExtensionError::Internal(format!("parse provider contribution: {error}")))?;
+    if data.contribution_id.trim().is_empty() {
+        return Err(ExtensionError::Internal(
+            "provider contribution id cannot be empty".into(),
+        ));
+    }
+    let effect = match data.effect {
+        astrcode_extension_sdk::wire::ProviderContributionEffect::Unchanged {} => {
+            PreparedProviderEffect::Unchanged
+        },
+        astrcode_extension_sdk::wire::ProviderContributionEffect::ReplaceMessages { messages } => {
+            PreparedProviderEffect::ReplaceMessages(messages)
+        },
+        astrcode_extension_sdk::wire::ProviderContributionEffect::AppendMessages { messages } => {
+            PreparedProviderEffect::AppendMessages(messages)
+        },
+    };
+    Ok(Some(PreparedProviderContribution::new(
+        ProviderContributionId::new(data.contribution_id),
+        effect,
+    )))
 }
 
 pub(crate) fn handler_id(
@@ -55,6 +91,16 @@ pub(crate) fn parse_command_result(
         .map_err(|e| ExtensionError::Internal(format!("parse command result: {e}")))
 }
 
+pub(crate) fn parse_command_completions(
+    resp: &HandlerResult,
+) -> Result<CommandCompletions, ExtensionError> {
+    if resp.effect != HandlerEffect::Ok {
+        return Err(unexpected_effect("command_complete", resp.effect));
+    }
+    serde_json::from_value(resp.data.clone())
+        .map_err(|error| ExtensionError::Internal(format!("parse command completions: {error}")))
+}
+
 pub(crate) fn parse_pre_tool_use_result(
     resp: &HandlerResult,
 ) -> Result<PreToolUseResult, ExtensionError> {
@@ -63,11 +109,23 @@ pub(crate) fn parse_pre_tool_use_result(
         HandlerEffect::Block => Ok(PreToolUseResult::Block {
             reason: required_data_string(resp, "reason")?,
         }),
-        HandlerEffect::ModifiedInput => {
-            let tool_input = required_data_value(resp, "tool_input")?;
-            Ok(PreToolUseResult::ModifyInput { tool_input })
-        },
+        HandlerEffect::Ask => Ok(PreToolUseResult::Ask {
+            prompt: required_data_string(resp, "prompt")?,
+            rule_key: optional_data_string(resp, "rule_key")?,
+        }),
         effect => Err(unexpected_effect("pre_tool_use", effect)),
+    }
+}
+
+pub(crate) fn parse_tool_input_transform_result(
+    resp: &HandlerResult,
+) -> Result<ToolInputTransformResult, ExtensionError> {
+    match resp.effect {
+        HandlerEffect::Ok => Ok(ToolInputTransformResult::Unchanged),
+        HandlerEffect::ReplaceToolInput => Ok(ToolInputTransformResult::Replace {
+            tool_input: required_data_value(resp, "tool_input")?,
+        }),
+        effect => Err(unexpected_effect("tool_input_transform", effect)),
     }
 }
 
@@ -182,21 +240,76 @@ fn required_data_string(result: &HandlerResult, field: &str) -> Result<String, E
         })
 }
 
+fn optional_data_string(
+    result: &HandlerResult,
+    field: &str,
+) -> Result<Option<String>, ExtensionError> {
+    match result.data.get(field) {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(value)) => Ok(Some(value.clone())),
+        Some(_) => Err(ExtensionError::Internal(format!(
+            "effect={:?} requires optional string data.{field}",
+            result.effect
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn handler_results_reject_missing_mistyped_and_mismatched_payloads() {
+    fn handler_results_keep_transform_and_admission_effects_disjoint_and_strict() {
         let missing_reason = HandlerResult::effect(HandlerEffect::Block, serde_json::json!({}));
         let invalid_reason =
             HandlerResult::effect(HandlerEffect::Block, serde_json::json!({"reason": false}));
         let missing_messages =
             HandlerResult::effect(HandlerEffect::AppendMessages, serde_json::json!({}));
+        let ask = HandlerResult::effect(
+            HandlerEffect::Ask,
+            serde_json::json!({"prompt": "approve", "rule_key": "dangerous"}),
+        );
+        let replace = HandlerResult::effect(
+            HandlerEffect::ReplaceToolInput,
+            serde_json::json!({"tool_input": {"canonical": true}}),
+        );
+        let contribution = HandlerResult::effect(
+            HandlerEffect::ProviderContribution,
+            serde_json::json!({
+                "contribution_id": "pending-1",
+                "effect": {"message_effect": "unchanged"}
+            }),
+        );
+        let invalid_contribution = HandlerResult::effect(
+            HandlerEffect::ProviderContribution,
+            serde_json::json!({
+                "settlement": "transient",
+                "effect": {"message_effect": "unchanged"}
+            }),
+        );
 
         assert!(parse_pre_tool_use_result(&missing_reason).is_err());
         assert!(parse_lifecycle_result(&invalid_reason).is_err());
         assert!(parse_provider_result(&missing_messages).is_err());
         assert!(parse_tool_result(&HandlerResult::ok()).is_err());
+        assert!(matches!(
+            parse_pre_tool_use_result(&ask),
+            Ok(PreToolUseResult::Ask { prompt, rule_key })
+                if prompt == "approve" && rule_key.as_deref() == Some("dangerous")
+        ));
+        assert!(matches!(
+            parse_tool_input_transform_result(&replace),
+            Ok(ToolInputTransformResult::Replace { tool_input })
+                if tool_input == serde_json::json!({"canonical": true})
+        ));
+        assert!(parse_pre_tool_use_result(&replace).is_err());
+        assert!(parse_tool_input_transform_result(&ask).is_err());
+        let (contribution_id, effect) = parse_provider_contribution(&contribution)
+            .unwrap()
+            .unwrap()
+            .into_parts();
+        assert_eq!(contribution_id.as_str(), "pending-1");
+        assert!(matches!(effect, PreparedProviderEffect::Unchanged));
+        assert!(parse_provider_contribution(&invalid_contribution).is_err());
     }
 }

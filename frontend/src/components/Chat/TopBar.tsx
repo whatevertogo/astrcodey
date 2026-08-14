@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import type { AgentSessionStatus } from '../../services/types'
 import { useAppStore } from '../../store/conversation'
 import type { SessionStreamStatus } from '../../store/sessionStreamController'
 import { cn } from '../../lib/utils'
@@ -32,7 +33,7 @@ interface TopBarProps {
   onToggleSidebar: () => void
 }
 
-function statusDotClass(status: string | undefined): string {
+function statusDotClass(status: AgentSessionStatus): string {
   switch (status) {
     case 'running':
       return 'text-accent'
@@ -40,8 +41,6 @@ function statusDotClass(status: string | undefined): string {
       return 'text-success'
     case 'failed':
       return 'text-danger'
-    default:
-      return 'text-text-muted'
   }
 }
 
@@ -160,16 +159,16 @@ export default function TopBar({
                   <span className="min-w-0 flex-1">
                     <span className="flex min-w-0 items-center gap-2">
                       <span className="truncate font-medium text-text-primary">
-                        {agent.agentName || '子会话'}
+                        {agent.agentName}
                       </span>
                       <span className="shrink-0 text-[11px] text-text-secondary">
                         {agent.status === 'running' && agent.phase
                           ? PHASE_LABELS[agent.phase]
-                          : STATUS_LABELS[agent.status ?? 'running']}
+                          : STATUS_LABELS[agent.status]}
                       </span>
                     </span>
                     <span className="block truncate text-text-secondary">
-                      {agent.task || ''}
+                      {agent.task}
                     </span>
                     {agent.status === 'running' && agent.currentTool && (
                       <span className="block truncate text-[11px] text-text-secondary">

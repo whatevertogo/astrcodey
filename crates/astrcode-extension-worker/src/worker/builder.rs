@@ -109,7 +109,7 @@ where
     F: Fn(WorkerCommandContext) -> Fut + Send + Sync + 'static,
     Fut: Future<Output = Result<HandlerResult, ErrorPayload>> + Send + 'static,
 {
-    Arc::new(move |_event, ctx| Box::pin(f(ctx)))
+    Arc::new(move |ctx| Box::pin(f(ctx)))
 }
 
 /// Handler for a continuation emitted by another worker handler.

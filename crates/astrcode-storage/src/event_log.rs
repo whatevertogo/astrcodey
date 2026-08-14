@@ -172,12 +172,13 @@ fn parse_event_line(
 
 fn scan_events_at_path(
     path: &Path,
+    max_bytes: Option<u64>,
     mut visit: impl FnMut(StoredEvent) -> Result<bool, StorageError>,
 ) -> Result<(), StorageError> {
     let file = File::open(path).map_err(|e| {
         StorageError::Io(std::io::Error::new(e.kind(), enhance_open_error(path, e)))
     })?;
-    let mut reader = BufReader::new(file);
+    let mut reader = BufReader::new(file.take(max_bytes.unwrap_or(u64::MAX)));
     let mut validator = EventStreamValidator::default();
     let mut line_number = 0usize;
     loop {
@@ -212,6 +213,7 @@ fn scan_events_at_path(
 
 fn replay_events_at_path(
     path: &Path,
+    max_bytes: Option<u64>,
     after_seq: Option<u64>,
     max_events: Option<usize>,
 ) -> Result<Vec<StoredEvent>, StorageError> {
@@ -219,7 +221,7 @@ fn replay_events_at_path(
         return Ok(Vec::new());
     }
     let mut events = Vec::new();
-    scan_events_at_path(path, |event| {
+    scan_events_at_path(path, max_bytes, |event| {
         if after_seq.is_none_or(|seq| event.seq > seq) {
             events.push(event);
         }
@@ -228,13 +230,16 @@ fn replay_events_at_path(
     Ok(events)
 }
 
-fn read_first_and_last_at_path(path: &Path) -> Result<EventLogEnds, StorageError> {
+fn read_first_and_last_at_path(
+    path: &Path,
+    max_bytes: Option<u64>,
+) -> Result<EventLogEnds, StorageError> {
     if !path.exists() {
         return Ok((None, None));
     }
     let mut first: Option<StoredEvent> = None;
     let mut last: Option<StoredEvent> = None;
-    scan_events_at_path(path, |event| {
+    scan_events_at_path(path, max_bytes, |event| {
         if first.is_none() {
             first = Some(event.clone());
         }
@@ -247,12 +252,13 @@ fn read_first_and_last_at_path(path: &Path) -> Result<EventLogEnds, StorageError
 fn read_summary_at_path(
     path: &Path,
     session_id: astrcode_core::types::SessionId,
+    max_bytes: Option<u64>,
 ) -> Result<Option<SessionSummary>, StorageError> {
     if !path.exists() {
         return Ok(None);
     }
     let mut projection = SessionSummaryProjection::new(session_id);
-    scan_events_at_path(path, |event| {
+    scan_events_at_path(path, max_bytes, |event| {
         projection
             .apply(&event)
             .map_err(|error| StorageError::CorruptLog(format!("{}: {error}", path.display())))?;
@@ -268,6 +274,11 @@ fn read_summary_at_path(
 
 const CHANNEL_CAPACITY: usize = 1024;
 
+#[cfg(test)]
+static FAIL_NEXT_OPEN_SYNC_PATHS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+> = std::sync::OnceLock::new();
+
 enum WriteCommand {
     AppendBatch {
         events: Vec<DurableEvent>,
@@ -280,6 +291,10 @@ enum WriteCommand {
     FlushSync {
         done: oneshot::Sender<Result<(), StorageError>>,
     },
+    #[cfg(any(test, feature = "testing"))]
+    FailNextSync {
+        done: oneshot::Sender<()>,
+    },
     Shutdown,
 }
 
@@ -291,6 +306,8 @@ struct WriterState {
     path: PathBuf,
     dirty: bool,
     poisoned: Option<String>,
+    #[cfg(any(test, feature = "testing"))]
+    fail_next_sync: bool,
 }
 
 impl WriterState {
@@ -315,6 +332,8 @@ impl WriterState {
             path,
             dirty: false,
             poisoned: None,
+            #[cfg(any(test, feature = "testing"))]
+            fail_next_sync: false,
         })
     }
 
@@ -427,6 +446,12 @@ impl WriterState {
         if !self.dirty {
             return Ok(());
         }
+        #[cfg(any(test, feature = "testing"))]
+        if std::mem::take(&mut self.fail_next_sync) {
+            return Err(StorageError::Io(std::io::Error::other(
+                "injected fsync failure",
+            )));
+        }
         self.writer.flush().map_err(|e| {
             StorageError::Io(std::io::Error::new(
                 e.kind(),
@@ -467,6 +492,11 @@ fn write_loop(
             },
             WriteCommand::FlushSync { done } => {
                 let _ = done.send(state.flush_and_sync());
+            },
+            #[cfg(any(test, feature = "testing"))]
+            WriteCommand::FailNextSync { done } => {
+                state.fail_next_sync = true;
+                let _ = done.send(());
             },
             WriteCommand::Shutdown => break,
         }
@@ -525,6 +555,8 @@ fn create_at_path(
             path,
             dirty: false,
             poisoned: None,
+            #[cfg(any(test, feature = "testing"))]
+            fail_next_sync: false,
         },
         stored_event,
     ))
@@ -539,7 +571,8 @@ fn open_at_path(path: PathBuf) -> Result<WriterState, StorageError> {
         .into());
     }
     recover_incomplete_tail(&path)?;
-    let (first, last) = read_first_and_last_at_path(&path)?;
+    let confirmed_len = sync_existing_log(&path)?;
+    let (first, last) = read_first_and_last_at_path(&path, Some(confirmed_len))?;
     let first = first
         .as_ref()
         .ok_or_else(|| StorageError::CorruptLog(format!("{} is empty", path.display())))?;
@@ -547,6 +580,53 @@ fn open_at_path(path: PathBuf) -> Result<WriterState, StorageError> {
         .and_then(|event| event.seq.checked_add(1))
         .ok_or_else(|| StorageError::CorruptLog("session event sequence overflow".into()))?;
     WriterState::open_append(path, first.session_id.clone(), next_seq)
+}
+
+/// A previous process may have observed an ambiguous fsync result. Existing records are not
+/// eligible for replay until the file has been durably confirmed in this process.
+fn sync_existing_log(path: &Path) -> Result<u64, StorageError> {
+    #[cfg(test)]
+    if take_fail_next_open_sync(path) {
+        return Err(StorageError::Io(std::io::Error::other(
+            "injected fsync failure",
+        )));
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)
+        .map_err(|error| {
+            StorageError::Io(std::io::Error::new(
+                error.kind(),
+                enhance_open_error(path, error),
+            ))
+        })?;
+    let confirmed_len = file.metadata().map_err(StorageError::Io)?.len();
+    file.sync_all().map_err(|error| {
+        StorageError::Io(std::io::Error::new(
+            error.kind(),
+            enhance_sync_error(path, error),
+        ))
+    })?;
+    Ok(confirmed_len)
+}
+
+#[cfg(test)]
+fn take_fail_next_open_sync(path: &Path) -> bool {
+    FAIL_NEXT_OPEN_SYNC_PATHS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(path)
+}
+
+#[cfg(test)]
+fn fail_next_open_sync(path: PathBuf) {
+    FAIL_NEXT_OPEN_SYNC_PATHS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path);
 }
 
 /// Treat the terminating newline as the commit marker for a JSONL record.
@@ -649,7 +729,11 @@ impl EventLog {
     }
 
     pub(crate) async fn replay_read_only(path: PathBuf) -> Result<Vec<StoredEvent>, StorageError> {
-        run_blocking_io(move || replay_events_at_path(&path, None, None)).await
+        run_blocking_io(move || {
+            let confirmed_len = sync_existing_log(&path)?;
+            replay_events_at_path(&path, Some(confirmed_len), None, None)
+        })
+        .await
     }
 
     fn from_writer_state(state: WriterState) -> Self {
@@ -722,7 +806,7 @@ impl EventLog {
     /// Replay all events from the beginning.
     pub async fn replay_all(&self) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
-        run_blocking_io(move || replay_events_at_path(&path, None, None)).await
+        run_blocking_io(move || replay_events_at_path(&path, None, None, None)).await
     }
 
     /// Replay at most `max_events` events from the beginning of the log.
@@ -731,7 +815,7 @@ impl EventLog {
         max_events: usize,
     ) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
-        run_blocking_io(move || replay_events_at_path(&path, None, Some(max_events))).await
+        run_blocking_io(move || replay_events_at_path(&path, None, None, Some(max_events))).await
     }
 
     /// Replay events whose assigned seq is greater than `seq`.
@@ -740,7 +824,7 @@ impl EventLog {
     /// occurred after the snapshot point need to be replayed, not the whole log.
     pub async fn replay_after(&self, seq: u64) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
-        run_blocking_io(move || replay_events_at_path(&path, Some(seq), None)).await
+        run_blocking_io(move || replay_events_at_path(&path, None, Some(seq), None)).await
     }
 
     /// Replay at most `max_events` events after `seq`, stopping the file scan
@@ -751,7 +835,8 @@ impl EventLog {
         max_events: usize,
     ) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
-        run_blocking_io(move || replay_events_at_path(&path, Some(seq), Some(max_events))).await
+        run_blocking_io(move || replay_events_at_path(&path, None, Some(seq), Some(max_events)))
+            .await
     }
 
     /// Count total events (lock-free read of the writer thread's seq counter).
@@ -773,13 +858,33 @@ impl EventLog {
             .map_err(|_| StorageError::Io(std::io::Error::other("event log writer dropped")))?
     }
 
+    #[cfg(any(test, feature = "testing"))]
+    pub(crate) async fn fail_next_sync(&self) -> Result<(), StorageError> {
+        let (done, rx) = oneshot::channel();
+        self.tx
+            .send(WriteCommand::FailNextSync { done })
+            .await
+            .map_err(|_| StorageError::Io(std::io::Error::other("event log writer closed")))?;
+        rx.await
+            .map_err(|_| StorageError::Io(std::io::Error::other("event log writer dropped")))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_next_open_sync_for_testing(path: PathBuf) {
+        fail_next_open_sync(path);
+    }
+
     /// Project a session-list summary directly from an event log.
     pub(crate) async fn read_summary(
         path: &Path,
         session_id: astrcode_core::types::SessionId,
     ) -> Result<Option<SessionSummary>, StorageError> {
         let path = path.to_path_buf();
-        run_blocking_io(move || read_summary_at_path(&path, session_id)).await
+        run_blocking_io(move || {
+            let confirmed_len = sync_existing_log(&path)?;
+            read_summary_at_path(&path, session_id, Some(confirmed_len))
+        })
+        .await
     }
 }
 

@@ -1,6 +1,5 @@
 //! Apply ClientNotification to App state.
 
-use astrcode_context::is_compact_summary_text;
 use astrcode_core::event::{
     CustomEventData, DurableEventPayload, Event, EventPayload, LiveEventPayload,
 };
@@ -763,10 +762,7 @@ fn apply_session_resumed(app: &mut App, session_id: &str, snapshot: &SessionSnap
             astrcode_protocol::wire::MessageRoleDto::Tool => MessageRole::Tool,
         };
 
-        let is_compact_summary = message
-            .is_compact_summary
-            .unwrap_or_else(|| is_compact_summary_text(&message.content));
-        let label = if is_compact_summary {
+        let label = if message.is_compact_summary {
             "Compacted"
         } else {
             match &role {
@@ -1163,7 +1159,7 @@ mod tests {
     }
 
     #[test]
-    fn resumed_snapshot_prefers_explicit_compact_summary_semantics() {
+    fn resumed_snapshot_uses_explicit_compact_summary_semantics() {
         let mut app = make_app();
         let snapshot = SessionSnapshot {
             session_id: "session".into(),
@@ -1172,17 +1168,12 @@ mod tests {
                 MessageDto {
                     role: MessageRoleDto::System,
                     content: "<compact_summary>legacy-looking text</compact_summary>".into(),
-                    is_compact_summary: Some(false),
+                    is_compact_summary: false,
                 },
                 MessageDto {
                     role: MessageRoleDto::System,
                     content: "summary without a marker".into(),
-                    is_compact_summary: Some(true),
-                },
-                MessageDto {
-                    role: MessageRoleDto::System,
-                    content: "  <compact_summary>legacy summary</compact_summary>".into(),
-                    is_compact_summary: None,
+                    is_compact_summary: true,
                 },
             ],
             model_id: "model".into(),
@@ -1194,7 +1185,6 @@ mod tests {
 
         assert_eq!(app.messages[0].label, "System");
         assert_eq!(app.messages[1].label, "Compacted");
-        assert_eq!(app.messages[2].label, "Compacted");
     }
 
     #[test]

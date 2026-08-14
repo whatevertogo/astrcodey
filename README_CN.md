@@ -336,7 +336,7 @@ AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。旧�
 
 ## Crate 一览
 
-Cargo workspace 在 [`crates/`](crates/) 下包含 **27 个 crate**，另有 [`src-tauri/`](src-tauri/) 作为桌面壳（workspace 共 **28 个成员**）。按架构分层如下（详见[架构设计](docs/architecture.md)）。
+Cargo workspace 在 [`crates/`](crates/) 下包含 **28 个 crate**，另有 [`src-tauri/`](src-tauri/) 作为桌面壳（workspace 共 **29 个成员**）。按架构分层如下（详见[架构设计](docs/architecture.md)）。
 
 ### Layer 0：基础契约层
 

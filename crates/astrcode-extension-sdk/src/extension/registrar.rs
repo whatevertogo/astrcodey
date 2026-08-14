@@ -3,13 +3,14 @@ use std::{collections::HashSet, sync::Arc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CommandDiscoveryHandler, CommandHandler, CompactEvent, CompactHandler,
+    CommandDiscoveryHandler, CommandExecution, CommandHandler, CompactEvent, CompactHandler,
     ContinueAfterStopHandler, ContinueAfterStopOptions, ContinueAfterStopRegistration,
     CustomEventDeclaration, CustomEventHandler, CustomEventSubscription, ExtensionCapability,
     ExtensionHttpAccess, ExtensionHttpHandler, ExtensionHttpRoute, ExtensionHttpRouteRegistration,
     ExtensionManifest, HookMode, LifecycleEvent, LifecycleHandler, MAX_CUSTOM_EVENT_PAYLOAD_BYTES,
-    PostToolUseHandler, PreToolUseHandler, PromptBuildHandler, ProviderEvent, ProviderHandler,
-    SlashCommand, ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
+    PostToolUseHandler, PreToolUseHandler, PromptBuildHandler, ProviderContributionHandler,
+    ProviderEvent, ProviderHandler, SlashCommand, ToolDiscoveryHandler, ToolHandler,
+    ToolHookRegistration, ToolHookTarget, ToolInputTransformHandler, ToolUseRegistration,
     UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
     registration_validation::{
         canonical_registration_name, extension_http_route_patterns_conflict,
@@ -53,9 +54,11 @@ pub struct ExtensionRegistrations {
     http_routes: Vec<ExtensionHttpRouteRegistration>,
     keybindings: Vec<Keybinding>,
     status_items: Vec<StatusItem>,
-    pre_tool_use: Vec<ToolHookRegistration<dyn PreToolUseHandler>>,
+    tool_input_transform: Vec<ToolUseRegistration<dyn ToolInputTransformHandler>>,
+    pre_tool_use: Vec<ToolUseRegistration<dyn PreToolUseHandler>>,
     post_tool_use: Vec<ToolHookRegistration<dyn PostToolUseHandler>>,
     provider: Vec<(ProviderEvent, HookMode, i32, Arc<dyn ProviderHandler>)>,
+    provider_contributions: Vec<(i32, Arc<dyn ProviderContributionHandler>)>,
     prompt_build: Vec<(i32, Arc<dyn PromptBuildHandler>)>,
     compact: Vec<(CompactEvent, i32, Arc<dyn CompactHandler>)>,
     continue_after_stop: Vec<ContinueAfterStopRegistration<dyn ContinueAfterStopHandler>>,
@@ -169,24 +172,40 @@ impl Registrar {
             });
     }
 
-    pub fn on_pre_tool_use(
+    pub fn on_tool_input_transform(
         &mut self,
-        mode: HookMode,
         priority: i32,
-        handler: Arc<dyn PreToolUseHandler>,
+        handler: Arc<dyn ToolInputTransformHandler>,
     ) {
-        self.on_pre_tool_use_for(ToolHookTarget::All, mode, priority, handler);
+        self.on_tool_input_transform_for(ToolHookTarget::All, priority, handler);
+    }
+
+    pub fn on_tool_input_transform_for(
+        &mut self,
+        target: ToolHookTarget,
+        priority: i32,
+        handler: Arc<dyn ToolInputTransformHandler>,
+    ) {
+        self.registrations
+            .tool_input_transform
+            .push(ToolUseRegistration {
+                priority,
+                target,
+                handler,
+            });
+    }
+
+    pub fn on_pre_tool_use(&mut self, priority: i32, handler: Arc<dyn PreToolUseHandler>) {
+        self.on_pre_tool_use_for(ToolHookTarget::All, priority, handler);
     }
 
     pub fn on_pre_tool_use_for(
         &mut self,
         target: ToolHookTarget,
-        mode: HookMode,
         priority: i32,
         handler: Arc<dyn PreToolUseHandler>,
     ) {
-        self.registrations.pre_tool_use.push(ToolHookRegistration {
-            mode,
+        self.registrations.pre_tool_use.push(ToolUseRegistration {
             priority,
             target,
             handler,
@@ -241,6 +260,18 @@ impl Registrar {
             priority,
             handler,
         ));
+    }
+
+    /// Register a request-local contribution whose pending state is settled only after durable
+    /// provider success.
+    pub fn on_provider_contribution(
+        &mut self,
+        priority: i32,
+        handler: Arc<dyn ProviderContributionHandler>,
+    ) {
+        self.registrations
+            .provider_contributions
+            .push((priority, handler));
     }
 
     pub fn on_prompt_build(&mut self, priority: i32, handler: Arc<dyn PromptBuildHandler>) {
@@ -327,7 +358,11 @@ impl ExtensionRegistrations {
         &self.http_routes
     }
 
-    pub fn pre_tool_use(&self) -> &[ToolHookRegistration<dyn PreToolUseHandler>] {
+    pub fn tool_input_transforms(&self) -> &[ToolUseRegistration<dyn ToolInputTransformHandler>] {
+        &self.tool_input_transform
+    }
+
+    pub fn pre_tool_use(&self) -> &[ToolUseRegistration<dyn PreToolUseHandler>] {
         &self.pre_tool_use
     }
 
@@ -337,6 +372,10 @@ impl ExtensionRegistrations {
 
     pub fn provider(&self) -> &[(ProviderEvent, HookMode, i32, Arc<dyn ProviderHandler>)] {
         &self.provider
+    }
+
+    pub fn provider_contributions(&self) -> &[(i32, Arc<dyn ProviderContributionHandler>)] {
+        &self.provider_contributions
     }
 
     pub fn prompt_build(&self) -> &[(i32, Arc<dyn PromptBuildHandler>)] {
@@ -414,16 +453,14 @@ impl ExtensionRegistrations {
         require_capability(
             extension_id,
             capabilities,
-            !self.provider.is_empty(),
+            !self.provider.is_empty() || !self.provider_contributions.is_empty(),
             "provider",
             ExtensionCapability::ProviderRequest,
         )?;
         require_capability(
             extension_id,
             capabilities,
-            self.pre_tool_use
-                .iter()
-                .any(|registration| registration.mode == HookMode::Blocking),
+            !self.tool_input_transform.is_empty() || !self.pre_tool_use.is_empty(),
             "pre_tool_use",
             ExtensionCapability::ToolIntercept,
         )?;
@@ -442,6 +479,15 @@ impl ExtensionRegistrations {
             !self.continue_after_stop.is_empty(),
             "continue_after_stop",
             ExtensionCapability::TurnContinuationControl,
+        )?;
+        require_capability(
+            extension_id,
+            capabilities,
+            self.commands
+                .iter()
+                .any(|(command, _)| matches!(command.execution, CommandExecution::Host(_))),
+            "command",
+            ExtensionCapability::SessionCommand,
         )?;
 
         for (event, mode, _, _) in &self.lifecycle {

@@ -253,7 +253,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         cursor: snapshot.cursor.value,
         activeSessionTitle: snapshot.sessionTitle,
         workingDir: sessionItem?.workingDir ?? null,
-        agentSessions: snapshot.agentSessions ?? [],
+        agentSessions: snapshot.agentSessions,
       })
 
       const sessionStream = startSessionStream(
@@ -308,7 +308,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         control: snapshot.control,
         cursor: snapshot.cursor.value,
         activeSessionTitle: snapshot.sessionTitle,
-        agentSessions: snapshot.agentSessions ?? [],
+        agentSessions: snapshot.agentSessions,
       })
       return snapshot.cursor.value
     } catch (err) {
@@ -560,7 +560,6 @@ export const useAppStore = create<AppState>((set, get) => ({
           response.message.trim() &&
           response.message !== 'command handled'
         ) {
-          // 内置命令（compact/model 等）走 HTTP；扩展斜杠命令走 SSE，避免重复展示。
           set((current) => ({
             blocks: [...current.blocks, commandNoteBlock(response.message)],
           }))

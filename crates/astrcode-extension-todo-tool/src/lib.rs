@@ -7,8 +7,9 @@ use astrcode_extension_sdk::{
     extension::{
         Extension, ExtensionCall, ExtensionCapability, ExtensionError, ExtensionManifest,
         ExtensionPaths, HookMode, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
-        ProviderContext, ProviderHandler, ProviderResult, Registrar, ToolContext, ToolHandler,
-        ToolPlanContext,
+        PreparedProviderContribution, PreparedProviderEffect, ProviderContext,
+        ProviderContributionHandler, ProviderContributionId, ProviderSettlementContext, Registrar,
+        ToolContext, ToolHandler, ToolPlanContext,
     },
     tool::{
         ExecutionMode, HostResource, ToolDefinition, ToolOrigin, ToolPlan, ToolPromptMetadata,
@@ -63,7 +64,7 @@ impl Extension for TodoToolExtension {
                 .with_prompt(todo_write_prompt()),
             Arc::new(TodoWriteToolHandler),
         );
-        reg.on_before_provider_request(HookMode::Blocking, 0, Arc::new(TodoReminderHandler));
+        reg.on_provider_contribution(0, Arc::new(TodoReminderHandler));
         reg.on_post_tool_use(HookMode::Blocking, 0, Arc::new(TodoPostToolUseHandler));
     }
 }
@@ -100,11 +101,22 @@ impl ToolHandler for TodoWriteToolHandler {
 struct TodoReminderHandler;
 
 #[async_trait::async_trait]
-impl ProviderHandler for TodoReminderHandler {
-    async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
+impl ProviderContributionHandler for TodoReminderHandler {
+    async fn prepare(
+        &self,
+        ctx: ProviderContext,
+    ) -> Result<Option<PreparedProviderContribution>, ExtensionError> {
         let root = todo_root(ctx.paths())?;
         ProgressReminder::new(root)
-            .before_provider_request()
+            .prepare_provider_request()
+            .map(Some)
+            .map_err(ExtensionError::Internal)
+    }
+
+    async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError> {
+        let root = todo_root(ctx.paths())?;
+        ProgressReminder::new(root)
+            .acknowledge_provider_cycle(ctx.contribution_id().as_str())
             .map_err(ExtensionError::Internal)
     }
 }
@@ -114,7 +126,7 @@ struct TodoPostToolUseHandler;
 #[async_trait::async_trait]
 impl PostToolUseHandler for TodoPostToolUseHandler {
     async fn handle(&self, ctx: PostToolUseContext) -> Result<PostToolUseResult, ExtensionError> {
-        if ctx.tool_name() == TODO_WRITE_TOOL_NAME {
+        if ctx.tool_name() == TODO_WRITE_TOOL_NAME && !ctx.tool_result().is_error {
             let root = todo_root(ctx.paths())?;
             ProgressReminder::new(root)
                 .record_todo_write()
@@ -301,6 +313,7 @@ impl ProgressListStore {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 struct ProgressReminderState {
+    revision: u64,
     assistant_cycles_since_todo_write: u32,
     assistant_cycles_since_reminder: u32,
 }
@@ -314,37 +327,64 @@ impl ProgressReminder {
         Self { root }
     }
 
-    fn before_provider_request(&self) -> Result<ProviderResult, String> {
-        let mut state = self.load_state()?;
-        state.assistant_cycles_since_todo_write =
-            state.assistant_cycles_since_todo_write.saturating_add(1);
-        state.assistant_cycles_since_reminder =
-            state.assistant_cycles_since_reminder.saturating_add(1);
-
+    fn prepare_provider_request(&self) -> Result<PreparedProviderContribution, String> {
+        let state = self.load_state()?;
+        let next_todo_cycles = state.assistant_cycles_since_todo_write.saturating_add(1);
+        let next_reminder_cycles = state.assistant_cycles_since_reminder.saturating_add(1);
         let items = ProgressListStore::new(self.root.clone()).load_items()?;
         let should_remind = !items.is_empty()
-            && state.assistant_cycles_since_todo_write >= REMINDER_THRESHOLD
-            && state.assistant_cycles_since_reminder >= REMINDER_THRESHOLD;
-
-        let result = if should_remind {
-            state.assistant_cycles_since_reminder = 0;
-            ProviderResult::AppendMessages {
-                messages: vec![astrcode_extension_sdk::llm::LlmMessage::user(
-                    reminder_message(&items),
-                )],
-            }
+            && next_todo_cycles >= REMINDER_THRESHOLD
+            && next_reminder_cycles >= REMINDER_THRESHOLD;
+        let effect = if should_remind {
+            PreparedProviderEffect::AppendMessages(vec![
+                astrcode_extension_sdk::llm::LlmMessage::user(reminder_message(&items)),
+            ])
         } else {
-            ProviderResult::Allow
+            PreparedProviderEffect::Unchanged
         };
+        Ok(PreparedProviderContribution::new(
+            ProviderContributionId::new(format!("todo-cycle:{}", state.revision)),
+            effect,
+        ))
+    }
 
-        self.save_state(&state)?;
-        Ok(result)
+    fn acknowledge_provider_cycle(&self, contribution_id: &str) -> Result<(), String> {
+        let items = ProgressListStore::new(self.root.clone()).load_items()?;
+        astrcode_extension_sdk::hostpaths::update_json_state(
+            &self.root.join(REMINDER_STATE_FILE),
+            |state: Option<ProgressReminderState>| {
+                let mut state = state.unwrap_or_default();
+                if contribution_id != format!("todo-cycle:{}", state.revision) {
+                    return Ok((None, ()));
+                }
+                state.assistant_cycles_since_todo_write =
+                    state.assistant_cycles_since_todo_write.saturating_add(1);
+                state.assistant_cycles_since_reminder =
+                    state.assistant_cycles_since_reminder.saturating_add(1);
+                if !items.is_empty()
+                    && state.assistant_cycles_since_todo_write >= REMINDER_THRESHOLD
+                    && state.assistant_cycles_since_reminder >= REMINDER_THRESHOLD
+                {
+                    state.assistant_cycles_since_reminder = 0;
+                }
+                state.revision = state.revision.saturating_add(1);
+                Ok((Some(state), ()))
+            },
+        )
+        .map_err(|error| format!("ack reminder state: {error}"))
     }
 
     fn record_todo_write(&self) -> Result<(), String> {
-        let mut state = self.load_state()?;
-        state.assistant_cycles_since_todo_write = 0;
-        self.save_state(&state)
+        astrcode_extension_sdk::hostpaths::update_json_state(
+            &self.root.join(REMINDER_STATE_FILE),
+            |state: Option<ProgressReminderState>| {
+                let mut state = state.unwrap_or_default();
+                state.assistant_cycles_since_todo_write = 0;
+                state.revision = state.revision.saturating_add(1);
+                Ok((Some(state), ()))
+            },
+        )
+        .map_err(|error| format!("update reminder state after todo write: {error}"))
     }
 
     fn load_state(&self) -> Result<ProgressReminderState, String> {
@@ -354,6 +394,7 @@ impl ProgressReminder {
             .unwrap_or_default())
     }
 
+    #[cfg(test)]
     fn save_state(&self, state: &ProgressReminderState) -> Result<(), String> {
         astrcode_extension_sdk::hostpaths::write_json_state(
             &self.root.join(REMINDER_STATE_FILE),
@@ -804,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn before_provider_request_injects_stale_nonempty_todo_reminder() {
+    fn provider_cycle_is_retryable_and_acknowledges_only_its_exact_revision() {
         let root = reminder_root("stale");
         let store = ProgressListStore::new(root.clone());
         store
@@ -824,15 +865,25 @@ mod tests {
         let reminder = ProgressReminder::new(root);
         reminder
             .save_state(&ProgressReminderState {
+                revision: 7,
                 assistant_cycles_since_todo_write: REMINDER_THRESHOLD - 1,
                 assistant_cycles_since_reminder: REMINDER_THRESHOLD - 1,
             })
             .unwrap();
 
-        let effect = reminder.before_provider_request().unwrap();
+        let first = reminder.prepare_provider_request().unwrap();
+        let retry = reminder.prepare_provider_request().unwrap();
+        let (first_id, effect) = first.into_parts();
+        let (retry_id, _) = retry.into_parts();
+        assert_eq!(retry_id, first_id, "failure must leave the cycle retryable");
+        assert_eq!(
+            reminder.load_state().unwrap().revision,
+            7,
+            "prepare must not commit counters"
+        );
 
         let messages = match effect {
-            ProviderResult::AppendMessages { messages } => messages,
+            PreparedProviderEffect::AppendMessages(messages) => messages,
             _ => panic!("stale todo list should inject a provider reminder"),
         };
         assert!(text_exists(
@@ -840,6 +891,28 @@ mod tests {
             "The todoWrite tool has not been used recently"
         ));
         assert!(text_exists(&messages, "Replace task tools"));
+
+        reminder.record_todo_write().unwrap();
+        let after_write = reminder.load_state().unwrap();
+        assert_eq!(after_write.revision, 8);
+        assert_eq!(after_write.assistant_cycles_since_todo_write, 0);
+        reminder
+            .acknowledge_provider_cycle(first_id.as_str())
+            .unwrap();
+        assert_eq!(
+            reminder.load_state().unwrap(),
+            after_write,
+            "an old ack must not clear or advance state updated in flight"
+        );
+
+        let current = reminder.prepare_provider_request().unwrap();
+        let (current_id, _) = current.into_parts();
+        reminder
+            .acknowledge_provider_cycle(current_id.as_str())
+            .unwrap();
+        let settled = reminder.load_state().unwrap();
+        assert_eq!(settled.revision, 9);
+        assert_eq!(settled.assistant_cycles_since_todo_write, 1);
     }
 
     #[test]
@@ -848,35 +921,15 @@ mod tests {
         let reminder = ProgressReminder::new(root);
         reminder
             .save_state(&ProgressReminderState {
+                revision: 0,
                 assistant_cycles_since_todo_write: REMINDER_THRESHOLD - 1,
                 assistant_cycles_since_reminder: REMINDER_THRESHOLD - 1,
             })
             .unwrap();
 
-        let effect = reminder.before_provider_request().unwrap();
+        let (_, effect) = reminder.prepare_provider_request().unwrap().into_parts();
 
-        assert!(matches!(effect, ProviderResult::Allow));
-    }
-
-    #[test]
-    fn post_tool_use_resets_todo_write_staleness() {
-        let root = reminder_root("post-tool-reset");
-        let reminder = ProgressReminder::new(root);
-        reminder
-            .save_state(&ProgressReminderState {
-                assistant_cycles_since_todo_write: REMINDER_THRESHOLD,
-                assistant_cycles_since_reminder: REMINDER_THRESHOLD,
-            })
-            .unwrap();
-        reminder.record_todo_write().unwrap();
-
-        assert_eq!(
-            reminder
-                .load_state()
-                .unwrap()
-                .assistant_cycles_since_todo_write,
-            0
-        );
+        assert!(matches!(effect, PreparedProviderEffect::Unchanged));
     }
 
     #[test]

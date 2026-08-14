@@ -10,7 +10,7 @@ astrcode-core = { path = "../astrcode-core" }
 astrcode-session-projection = { path = "../astrcode-session-projection" }
 astrcode-storage = { path = "../astrcode-storage" }
 astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
-tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt", "macros"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
@@ -29,7 +29,6 @@ walkdir = { workspace = true }
 sha2 = { workspace = true }
 similar = { workspace = true }
 uuid = { workspace = true }
-portable-pty = { workspace = true }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }

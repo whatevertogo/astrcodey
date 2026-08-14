@@ -4,11 +4,96 @@ use astrcode_core::tool::{SessionOperations, Tool};
 
 use crate::extension::{
     CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, LifecycleEvent,
-    PostToolUseResult, PreToolUseResult, PromptContributions, ProviderEvent, ProviderResult,
-    RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
-    RuntimePostToolUseContext, RuntimePreToolUseContext, RuntimePromptBuildContext,
-    RuntimeProviderContext, RuntimeUserMessageEnvelopeContext, UserMessageEnvelopeResult,
+    PostToolUseResult, PreToolUseAdmission, PromptContributions, ProviderContributionHandler,
+    ProviderContributionId, ProviderEvent, ProviderResult, UserMessageEnvelopeResult,
+    internal::{
+        RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
+        RuntimePostToolUseContext, RuntimePreToolUseContext, RuntimePromptBuildContext,
+        RuntimeProviderContext, RuntimeProviderSettlementContext,
+        RuntimeUserMessageEnvelopeContext,
+    },
 };
+
+/// Opaque acknowledgements paired with one prepared provider request.
+///
+/// Session code may only carry this value from preparation to settlement. Handler identity stays
+/// inside the pinned extension generation, so a hot reload cannot redirect an acknowledgement to
+/// a replacement instance.
+#[doc(hidden)]
+#[derive(Clone, Default)]
+pub struct ProviderRequestAcknowledgements {
+    entries: Vec<ProviderRequestAcknowledgement>,
+}
+
+#[derive(Clone)]
+struct ProviderRequestAcknowledgement {
+    extension_id: String,
+    handler: Arc<dyn ProviderContributionHandler>,
+    contribution_id: ProviderContributionId,
+}
+
+impl ProviderRequestAcknowledgements {
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[doc(hidden)]
+    pub fn push_runtime(
+        &mut self,
+        extension_id: String,
+        handler: Arc<dyn ProviderContributionHandler>,
+        contribution_id: ProviderContributionId,
+    ) {
+        self.entries.push(ProviderRequestAcknowledgement {
+            extension_id,
+            handler,
+            contribution_id,
+        });
+    }
+
+    #[doc(hidden)]
+    pub fn into_runtime_entries(
+        self,
+    ) -> impl Iterator<
+        Item = (
+            String,
+            Arc<dyn ProviderContributionHandler>,
+            ProviderContributionId,
+        ),
+    > {
+        self.entries
+            .into_iter()
+            .map(|entry| (entry.extension_id, entry.handler, entry.contribution_id))
+    }
+}
+
+/// Aggregated request-local message effect and its opaque success acknowledgements.
+#[doc(hidden)]
+pub struct ProviderRequestPreparation {
+    result: ProviderResult,
+    acknowledgements: ProviderRequestAcknowledgements,
+}
+
+impl ProviderRequestPreparation {
+    #[doc(hidden)]
+    pub fn from_runtime(
+        result: ProviderResult,
+        acknowledgements: ProviderRequestAcknowledgements,
+    ) -> Self {
+        Self {
+            result,
+            acknowledgements,
+        }
+    }
+
+    pub fn without_acknowledgements(result: ProviderResult) -> Self {
+        Self::from_runtime(result, ProviderRequestAcknowledgements::default())
+    }
+
+    pub fn into_parts(self) -> (ProviderResult, ProviderRequestAcknowledgements) {
+        (self.result, self.acknowledgements)
+    }
+}
 
 /// Publication state shared by all runtime ports used to prepare one turn.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,11 +177,18 @@ pub trait PromptContributor: Send + Sync {
 /// Dispatches turn and session lifecycle hooks.
 #[async_trait::async_trait]
 pub trait TurnHooks: Send + Sync {
+    async fn transform_tool_input(
+        &self,
+        ctx: RuntimePreToolUseContext,
+    ) -> Result<serde_json::Value, ExtensionError> {
+        Ok(ctx.tool_input().clone())
+    }
+
     async fn emit_pre_tool_use(
         &self,
         _ctx: RuntimePreToolUseContext,
-    ) -> Result<PreToolUseResult, ExtensionError> {
-        Ok(PreToolUseResult::Allow)
+    ) -> Result<PreToolUseAdmission, ExtensionError> {
+        Ok(PreToolUseAdmission::Allow)
     }
 
     async fn emit_post_tool_use(
@@ -112,6 +204,23 @@ pub trait TurnHooks: Send + Sync {
         _ctx: RuntimeProviderContext,
     ) -> Result<ProviderResult, ExtensionError> {
         Ok(ProviderResult::Allow)
+    }
+
+    async fn prepare_provider_request(
+        &self,
+        ctx: RuntimeProviderContext,
+    ) -> Result<ProviderRequestPreparation, ExtensionError> {
+        self.emit_provider(ProviderEvent::BeforeRequest, ctx)
+            .await
+            .map(ProviderRequestPreparation::without_acknowledgements)
+    }
+
+    async fn acknowledge_provider_request(
+        &self,
+        _ctx: RuntimeProviderSettlementContext,
+        _acknowledgements: ProviderRequestAcknowledgements,
+    ) -> Result<(), ExtensionError> {
+        Ok(())
     }
 
     async fn emit_compact(

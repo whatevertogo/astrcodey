@@ -8,16 +8,19 @@ use std::{path::Path, sync::Arc};
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        CommandContext, CommandHandler, CompactContext, CompactHandler, CompactResult,
-        ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopResult,
-        CustomEventContext, CustomEventDisposition, CustomEventHandler, Extension, ExtensionCall,
-        ExtensionCallContext, ExtensionCommandResult, ExtensionError, ExtensionHttpHandler,
-        ExtensionHttpResponse, ExtensionPackageManifest, ExtensionStartContext,
-        ExtensionStopContext, HookResult, HttpContext, LifecycleContext, LifecycleEvent,
-        LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
-        PreToolUseContext, PreToolUseHandler, PreToolUseResult, PromptBuildContext,
-        PromptBuildHandler, PromptContributions, ProviderContext, ProviderHandler, ProviderResult,
-        Registrar, ToolContext, ToolHandler, ToolPlanContext,
+        CommandCompletionContext, CommandCompletions, CommandContext, CommandHandler,
+        CompactContext, CompactHandler, CompactResult, ContinueAfterStopContext,
+        ContinueAfterStopHandler, ContinueAfterStopResult, CustomEventContext,
+        CustomEventDisposition, CustomEventHandler, Extension, ExtensionCall, ExtensionCallContext,
+        ExtensionCommandResult, ExtensionError, ExtensionHttpHandler, ExtensionHttpResponse,
+        ExtensionPackageManifest, ExtensionStartContext, ExtensionStopContext, HookResult,
+        HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler, PostToolUseContext,
+        PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
+        PreToolUseResult, PreparedProviderContribution, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, ProviderContext, ProviderContributionHandler, ProviderHandler,
+        ProviderResult, ProviderSettlementContext, Registrar, ToolContext, ToolHandler,
+        ToolInputTransformHandler, ToolInputTransformResult, ToolPlanContext,
+        internal::extension_config_value,
     },
     s5r::{ToolInvocationPhase, ToolInvocationRequest, ToolInvocationScope, ToolPlanDto},
     tool::{ExecutionMode, ToolPlan},
@@ -30,9 +33,10 @@ use crate::{
     host_router::{HostRouter, InvokeContext},
     s5r_ext::v3_session::S5rV3Session as S5rSession,
     s5r_handler::{
-        handler_id, parse_command_result, parse_compact_result, parse_continue_after_stop_result,
-        parse_http_response, parse_lifecycle_result, parse_post_tool_use_result,
-        parse_pre_tool_use_result, parse_prompt_build_result, parse_provider_result,
+        handler_id, parse_command_completions, parse_command_result, parse_compact_result,
+        parse_continue_after_stop_result, parse_http_response, parse_lifecycle_result,
+        parse_post_tool_use_result, parse_pre_tool_use_result, parse_prompt_build_result,
+        parse_provider_contribution, parse_provider_result, parse_tool_input_transform_result,
         parse_tool_result,
     },
 };
@@ -172,9 +176,18 @@ impl Extension for S5rExtension {
                     mode,
                     options,
                 } => match event {
+                    LifecycleEvent::ToolInputTransform => {
+                        reg.on_tool_input_transform(
+                            0,
+                            Arc::new(S5rToolInputTransformHandler {
+                                session,
+                                ext_id,
+                                on: event_name.into(),
+                            }),
+                        );
+                    },
                     LifecycleEvent::PreToolUse => {
                         reg.on_pre_tool_use(
-                            *mode,
                             0,
                             Arc::new(S5rPreToolUseHandler {
                                 session,
@@ -199,6 +212,16 @@ impl Extension for S5rExtension {
                             *mode,
                             0,
                             Arc::new(S5rProviderHandler {
+                                session,
+                                ext_id,
+                                on: event_name.into(),
+                            }),
+                        );
+                    },
+                    LifecycleEvent::ProviderContribution => {
+                        reg.on_provider_contribution(
+                            0,
+                            Arc::new(S5rProviderContributionHandler {
                                 session,
                                 ext_id,
                                 on: event_name.into(),
@@ -268,7 +291,9 @@ impl Extension for S5rExtension {
                 )
             })?;
         self.session.set_detached_invoke_context(invoke_context);
-        self.session.activate().await
+        self.session
+            .activate(extension_config_value(ctx.config()).clone())
+            .await
     }
 
     async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
@@ -446,7 +471,7 @@ impl CommandHandler for S5rCommandHandler {
             "name": ctx.command_name(),
             "input": {
                 "command_name": ctx.command_name(),
-                "arguments": ctx.argument(),
+                "argument": ctx.argument(),
                 "working_dir": ctx.working_dir().display().to_string(),
                 "session_id": ctx.session_id().to_string(),
                 "model": ctx.model(),
@@ -458,6 +483,40 @@ impl CommandHandler for S5rCommandHandler {
             .invoke_handler_with_continuations(&hid, event, &invoke_ctx, ExecutionMode::Sequential)
             .await?;
         parse_command_result(&resp)
+    }
+
+    async fn complete(
+        &self,
+        ctx: CommandCompletionContext,
+    ) -> Result<CommandCompletions, ExtensionError> {
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
+        let event = json!({
+            "on": "command_complete",
+            "name": ctx.command_name(),
+            "input": {
+                "command_name": ctx.command_name(),
+                "argument": ctx.argument(),
+                "cursor": ctx.cursor(),
+                "working_dir": ctx.working_dir().display().to_string(),
+                "session_id": ctx.session_id().to_string(),
+                "model": ctx.model(),
+            }
+        });
+        let handler_id = handler_id(&self.extension_id, HandlerKind::Command, ctx.command_name())?;
+        let response = self
+            .session
+            .invoke_handler_with_continuations(
+                &handler_id,
+                event,
+                &invoke_ctx,
+                ExecutionMode::Sequential,
+            )
+            .await?;
+        parse_command_completions(&response)
+    }
+
+    fn supports_argument_completions(&self) -> bool {
+        true
     }
 }
 
@@ -478,6 +537,34 @@ s5r_hook_handler!(
     parse_pre_tool_use_result
 );
 
+struct S5rToolInputTransformHandler {
+    session: Arc<S5rSession>,
+    ext_id: String,
+    on: String,
+}
+
+#[async_trait::async_trait]
+impl ToolInputTransformHandler for S5rToolInputTransformHandler {
+    async fn transform(
+        &self,
+        ctx: PreToolUseContext,
+    ) -> Result<ToolInputTransformResult, ExtensionError> {
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
+        let input = json!({
+            "session_id": ctx.session_id().to_string(),
+            "working_dir": ctx.working_dir().display().to_string(),
+            "model": ctx.model(),
+            "tool_call_id": ctx.call_id(),
+            "tool_name": ctx.tool_name(),
+            "tool_input": ctx.tool_input(),
+            "available_tools": ctx.available_tools(),
+        });
+        let response =
+            invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
+        parse_tool_input_transform_result(&response)
+    }
+}
+
 s5r_hook_handler!(
     S5rPostToolUseHandler,
     PostToolUseHandler,
@@ -496,19 +583,77 @@ s5r_hook_handler!(
     parse_post_tool_use_result
 );
 
-s5r_hook_handler!(
-    S5rProviderHandler,
-    ProviderHandler,
-    ProviderContext,
-    ProviderResult,
-    |ctx| json!({
-        "session_id": ctx.session_id().to_string(),
-        "working_dir": ctx.working_dir().display().to_string(),
-        "model": ctx.model(),
-        "messages": ctx.messages(),
-    }),
-    parse_provider_result
-);
+struct S5rProviderHandler {
+    session: Arc<S5rSession>,
+    ext_id: String,
+    on: String,
+}
+
+#[async_trait::async_trait]
+impl ProviderHandler for S5rProviderHandler {
+    async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError> {
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
+        let input = json!({
+            "request_id": ctx.request_id(),
+            "session_id": ctx.session_id().to_string(),
+            "working_dir": ctx.working_dir().display().to_string(),
+            "model": ctx.model(),
+            "messages": ctx.messages(),
+        });
+        let response =
+            invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
+        parse_provider_result(&response)
+    }
+}
+
+struct S5rProviderContributionHandler {
+    session: Arc<S5rSession>,
+    ext_id: String,
+    on: String,
+}
+
+#[async_trait::async_trait]
+impl ProviderContributionHandler for S5rProviderContributionHandler {
+    async fn prepare(
+        &self,
+        ctx: ProviderContext,
+    ) -> Result<Option<PreparedProviderContribution>, ExtensionError> {
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
+        let input = json!({
+            "phase": "prepare",
+            "request_id": ctx.request_id(),
+            "session_id": ctx.session_id().to_string(),
+            "working_dir": ctx.working_dir().display().to_string(),
+            "model": ctx.model(),
+            "messages": ctx.messages(),
+        });
+        let response =
+            invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
+        parse_provider_contribution(&response)
+    }
+
+    async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError> {
+        let invoke_ctx = require_transport_invoke_ctx(ctx.call())?;
+        let input = json!({
+            "phase": "acknowledge",
+            "request_id": ctx.request_id(),
+            "contribution_id": ctx.contribution_id(),
+            "session_id": ctx.session_id().to_string(),
+            "working_dir": ctx.working_dir().display().to_string(),
+            "model": ctx.model(),
+        });
+        let response =
+            invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
+        if response.effect == HandlerEffect::Ok {
+            Ok(())
+        } else {
+            Err(ExtensionError::Internal(format!(
+                "provider contribution acknowledgement returned {:?}, expected ok",
+                response.effect
+            )))
+        }
+    }
+}
 
 s5r_hook_handler!(
     S5rContinueAfterStopHandler,

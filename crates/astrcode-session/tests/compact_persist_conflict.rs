@@ -10,7 +10,6 @@ use astrcode_core::{
     config::ContextSettings,
     event::DurableEventPayload,
     llm::{LlmContent, LlmError, LlmEvent, LlmMessage, LlmProvider, LlmRole, ModelLimits},
-    tool::ToolDefinition,
     types::{SessionId, new_message_id, new_turn_id},
 };
 use astrcode_session::Session;
@@ -140,11 +139,11 @@ struct RaceOnCompactLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for RaceOnCompactLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        let messages = request.messages;
         let (tx, rx) = mpsc::unbounded_channel();
 
         if is_compact_summary_request(&messages) {
@@ -273,8 +272,8 @@ async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
     assert!(
         model.presentation.artifacts.iter().any(|artifact| matches!(
             artifact,
-            SessionArtifactView::SystemNote { text, .. }
-                if text == "concurrent race during compact"
+            SessionArtifactView::Recap { text, source, .. }
+                if text == "concurrent race during compact" && source == "test"
         )),
         "projection must preserve artifacts appended during compact"
     );
@@ -356,8 +355,8 @@ async fn compact_idle_session_preserves_tail_when_cursor_advances_during_llm() {
     assert!(
         model.presentation.artifacts.iter().any(|artifact| matches!(
             artifact,
-            SessionArtifactView::SystemNote { text, .. }
-                if text == "race during idle compact"
+            SessionArtifactView::Recap { text, source, .. }
+                if text == "race during idle compact" && source == "test"
         )),
         "projection must preserve artifacts appended during compact"
     );

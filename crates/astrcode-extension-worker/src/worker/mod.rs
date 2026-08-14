@@ -4,7 +4,7 @@ mod builder;
 mod host;
 mod registry;
 
-use std::{collections::BTreeSet, io, sync::Arc};
+use std::{collections::BTreeSet, future::Future, io, pin::Pin, sync::Arc};
 
 pub use astrcode_extension_sdk::wire::InvocationCancellation as CancelToken;
 use astrcode_extension_sdk::wire::ProcessStdioTransport;
@@ -16,33 +16,33 @@ pub use builder::{
 pub use host::{
     EventClient, ExtensionHttpClient, HostClient, HostConfigureSessionToolsOutput,
     HostConfigureSessionToolsRequest, HostCreateSessionOutput, HostCreateSessionRequest,
-    HostEventEmitOutput, HostEventEmitRequest, HostLlmChatOutput, HostLlmCollectedStreamOutput,
+    HostEventEmitOutput, HostEventEmitRequest, HostLlmChatOutput, HostLlmChatRequest,
     HostLlmContent, HostLlmMessage, HostLlmRole, HostNetworkRedirectPolicy, HostNetworkRequest,
     HostNetworkResponse, HostOperation, HostProcessHandleOutput, HostProcessInputAction,
-    HostProcessInputRequest, HostProcessIo, HostProcessListOutput, HostProcessOutput,
-    HostProcessReadOutput, HostProcessReadRequest, HostProcessRequest, HostProcessResizeRequest,
-    HostProcessStartRequest, HostProcessState, HostProcessStatusOutput, HostProcessTargetRequest,
-    HostRecycleSessionRequest, HostRootSubmitTurnRequest, HostSessionCancelOutput,
-    HostSessionDeliveryOutput, HostSessionEvent, HostSessionEventsPageOutput,
-    HostSessionEventsPageRequest, HostSessionExecutionView, HostSessionInputRequest,
-    HostSessionProviderMessagesOutput, HostSessionReactivateOutput, HostSessionStateOutput,
-    HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
-    HostSessionSummariesOutput, HostSessionSummary, HostSessionTargetRequest,
-    HostSessionTokenUsage, HostSessionTokenUsageOutput, HostSessionTranscript,
-    HostSessionTranscriptMessage, HostSubmitTurnOutput, HostSubmitTurnRequest,
-    HostToolResultReadOutput, HostToolResultReadRequest, HostWorkspaceApplyPatchOutput,
-    HostWorkspaceApplyPatchRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
-    HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepContextLine,
-    HostWorkspaceGrepEntry, HostWorkspaceGrepMode, HostWorkspaceGrepOutput,
-    HostWorkspaceGrepRequest, HostWorkspaceListEntry, HostWorkspaceListOutput,
-    HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
-    HostWorkspaceTextChange, HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient,
-    NetworkClient, ProcessClient, SessionControlClient, SessionHistoryClient, SessionInspectClient,
-    SessionStateClient, ToolResultClient, WorkspaceClient,
+    HostProcessInputRequest, HostProcessListOutput, HostProcessOutput, HostProcessReadOutput,
+    HostProcessReadRequest, HostProcessRequest, HostProcessStartRequest, HostProcessState,
+    HostProcessStatusOutput, HostProcessTargetRequest, HostRecycleSessionRequest,
+    HostRootSubmitTurnRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
+    HostSessionEvent, HostSessionEventsPageOutput, HostSessionEventsPageRequest,
+    HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
+    HostSessionReactivateOutput, HostSessionStateOutput, HostSessionStateReadOutput,
+    HostSessionStateReadRequest, HostSessionStateWriteRequest, HostSessionSummariesOutput,
+    HostSessionSummary, HostSessionTargetRequest, HostSessionTokenUsage,
+    HostSessionTokenUsageOutput, HostSessionTranscript, HostSessionTranscriptMessage,
+    HostSubmitTurnOutput, HostSubmitTurnRequest, HostToolResultReadOutput,
+    HostToolResultReadRequest, HostWorkspaceApplyPatchOutput, HostWorkspaceApplyPatchRequest,
+    HostWorkspaceEditOutput, HostWorkspaceEditRequest, HostWorkspaceGlobOutput,
+    HostWorkspaceGlobRequest, HostWorkspaceGrepContextLine, HostWorkspaceGrepEntry,
+    HostWorkspaceGrepMode, HostWorkspaceGrepOutput, HostWorkspaceGrepRequest,
+    HostWorkspaceListEntry, HostWorkspaceListOutput, HostWorkspaceListRequest,
+    HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceTextChange,
+    HostWorkspaceWriteOutput, HostWorkspaceWriteRequest, ModelClient, NetworkClient, ProcessClient,
+    SessionControlClient, SessionHistoryClient, SessionInspectClient, SessionStateClient,
+    ToolResultClient, WorkspaceClient, llm_chat_request,
 };
 pub use registry::{
     CommandHandlerFn, ContinuationHandlerFn, CustomEventHandlerFn, HookHandlerFn, HttpHandlerFn,
-    ToolHandlerFn, ToolPlannerFn, WorkerCallContext, WorkerCommandContext,
+    ToolHandlerFn, ToolPlannerFn, WorkerCallContext, WorkerCommandContext, WorkerCommandInvocation,
     WorkerCustomEventContext, WorkerInvocationContext, WorkerToolPlanContext,
 };
 use serde_json::json;
@@ -71,7 +71,13 @@ use crate::{
 pub struct Worker {
     version: String,
     registry: HandlerRegistry,
+    activation: Option<ActivationHandler>,
 }
+
+type ActivationHandler = Box<
+    dyn FnOnce(serde_json::Value) -> Pin<Box<dyn Future<Output = Result<(), ErrorPayload>> + Send>>
+        + Send,
+>;
 
 impl Worker {
     pub fn new(extension_id: impl Into<String>, version: impl Into<String>) -> Self {
@@ -79,7 +85,18 @@ impl Worker {
         Self {
             version: version.into(),
             registry: HandlerRegistry::new(extension_id),
+            activation: None,
         }
+    }
+
+    /// Handles the complete host-owned configuration before this worker generation is published.
+    pub fn on_activate<F, Fut>(&mut self, handler: F) -> &mut Self
+    where
+        F: FnOnce(serde_json::Value) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<(), ErrorPayload>> + Send + 'static,
+    {
+        self.activation = Some(Box::new(move |config| Box::pin(handler(config))));
+        self
     }
 
     /// 声明 manifest 能力。
@@ -138,6 +155,19 @@ impl Worker {
         Ok(self)
     }
 
+    /// Register a stateful provider contribution prepare/acknowledge handler.
+    ///
+    /// The handler receives `phase = "prepare"` before a request and
+    /// `phase = "acknowledge"` only after durable provider success.
+    pub fn on_provider_contribution(
+        &mut self,
+        handler: HookHandlerFn,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_fixed_hook(LifecycleEvent::ProviderContribution, handler)?;
+        Ok(self)
+    }
+
     /// 注册同步收集 prompt contributions 的 hook。
     pub fn on_prompt_build(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
         self.registry
@@ -189,11 +219,10 @@ impl Worker {
     /// 注册 slash command。
     pub fn command(
         &mut self,
-        name: impl Into<String>,
-        description: impl Into<String>,
+        command: crate::extension::SlashCommand,
         handler: CommandHandlerFn,
     ) -> Result<&mut Self, ErrorPayload> {
-        self.registry.register_command(name, description, handler)?;
+        self.registry.register_command(command, handler)?;
         Ok(self)
     }
 
@@ -221,6 +250,7 @@ impl Worker {
         ]);
         let mut initialization = WorkerInitialization::new(self.registry.take_manifest());
         initialization.supported_features = supported;
+        let activation = self.activation.take();
         let peer = V3Peer::new(
             ProcessStdioTransport::new(),
             V3PeerInfo {
@@ -231,7 +261,12 @@ impl Worker {
         .accept(initialization)
         .await
         .map_err(v3_peer_error_to_payload)?
-        .accept_activation()
+        .accept_activation(move |config| async move {
+            match activation {
+                Some(handler) => handler(config).await,
+                None => Ok(()),
+            }
+        })
         .await
         .map_err(v3_peer_error_to_payload)?;
         let (_handle, driver) = peer.into_runtime();

@@ -11,7 +11,7 @@ use std::{
 
 use astrcode_core::config::defaults::astrcode_dir;
 use astrcode_extension_sdk::{
-    extension::{Extension, ExtensionPackageManifest, StopReason},
+    extension::{Extension, ExtensionPackageManifest},
     manifest::validate_extension_id,
     wire::protocol::S5R_VERSION,
 };
@@ -19,12 +19,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     host_router::HostRouter,
-    runner::{ExtensionRunner, RegisteredSourceExtension},
+    runner::{ExtensionRunner, PreparedExtensionGeneration, SourceGenerationEntry},
 };
 
 type CandidateLoadFuture = Pin<Box<dyn Future<Output = Result<Arc<dyn Extension>, String>> + Send>>;
 type CandidateLoader = Box<dyn FnOnce() -> CandidateLoadFuture + Send>;
-type CurrentSourceMap<'a> = HashMap<&'a str, &'a RegisteredSourceExtension>;
 
 /// 来源发现出的扩展候选。构造候选不会启动扩展。
 ///
@@ -99,271 +98,168 @@ pub trait ExtensionSource: Send + Sync {
     fn is_enabled(&self, _extension_id: &str) -> bool {
         true
     }
-
-    /// 判断已注册来源键是否属于当前来源，用于发现阶段整体失败时保留运行实例。
-    fn owns_source_key(&self, _source_key: &str) -> bool {
-        false
-    }
 }
 
-pub async fn sync_extension_sources(
+pub async fn prepare_extension_generation(
     runner: &Arc<ExtensionRunner>,
     ctx: &ExtensionLoadContext,
     sources: &[&dyn ExtensionSource],
-) -> Vec<String> {
-    let _reconcile = runner.lock_source_reconcile().await;
-    let current_ids = runner.registered_extension_ids().await;
+    configs: &BTreeMap<String, serde_json::Value>,
+) -> Result<PreparedExtensionGeneration, Vec<String>> {
+    let source_transaction = runner.begin_source_transaction().await;
     let current_sources = runner.registered_source_extensions().await;
-    let current_by_source: CurrentSourceMap<'_> = current_sources
+    let current_by_source = current_sources
         .iter()
         .map(|current| (current.key.as_str(), current))
-        .collect();
-    let current_by_id: CurrentSourceMap<'_> = current_sources
-        .iter()
-        .map(|current| (current.id.as_str(), current))
-        .collect();
-    let plan = build_reconcile_plan(
-        runner,
-        ctx,
-        sources,
-        &current_ids,
-        &current_sources,
-        &current_by_source,
-    )
-    .await;
-    apply_reconcile_plan(
-        runner,
-        ctx,
-        &current_ids,
-        &current_by_source,
-        &current_by_id,
-        plan,
-    )
-    .await
-}
-
-struct ReconcilePlan {
-    desired_extensions: Vec<DesiredExtension>,
-    desired_ids: HashSet<String>,
-    protected_ids: HashSet<String>,
-    errors: Vec<String>,
-}
-
-async fn build_reconcile_plan(
-    runner: &ExtensionRunner,
-    ctx: &ExtensionLoadContext,
-    sources: &[&dyn ExtensionSource],
-    current_ids: &[String],
-    current_sources: &[RegisteredSourceExtension],
-    current_by_source: &CurrentSourceMap<'_>,
-) -> ReconcilePlan {
-    let mut desired_extensions = Vec::new();
-    let mut desired_ids = HashSet::new();
+        .collect::<HashMap<_, _>>();
+    let mut discovered = Vec::new();
     let mut source_keys = HashSet::new();
-    let mut protected_ids = HashSet::new();
+    let mut extension_ids = HashSet::new();
     let mut errors = Vec::new();
 
     for source in sources {
         let discovery = source.discover(ctx).await;
         for failure in discovery.failures {
-            let current_source = failure
-                .source_key
-                .as_deref()
-                .and_then(|source_key| current_by_source.get(source_key).copied());
-            let extension_id = current_source
-                .map(|current| current.id.as_str())
-                .or(failure.extension_id.as_deref());
+            let extension_id = failure.extension_id.as_deref().or_else(|| {
+                failure
+                    .source_key
+                    .as_deref()
+                    .and_then(|key| current_by_source.get(key))
+                    .map(|current| current.id.as_str())
+            });
             if let Some(extension_id) = extension_id {
-                if source.is_enabled(extension_id)
-                    && current_ids.iter().any(|id| id == extension_id)
-                {
-                    protected_ids.insert(extension_id.to_string());
-                }
                 runner.record_extension_load_failure(
                     extension_id,
                     failure.message.clone(),
                     failure.duration_ms.map(Duration::from_millis),
-                );
-            } else {
-                protected_ids.extend(
-                    current_sources
-                        .iter()
-                        .filter(|current| {
-                            source.owns_source_key(&current.key) && source.is_enabled(&current.id)
-                        })
-                        .map(|current| current.id.clone()),
                 );
             }
             errors.push(failure.message);
         }
 
         for candidate in discovery.candidates {
-            let ExtensionCandidate {
-                source_key,
-                fingerprint,
-                extension_id,
-                load,
-            } = candidate;
-            if !source_keys.insert(source_key.clone()) {
-                errors.push(format!("duplicate extension source key: {source_key}"));
+            if !source.is_enabled(&candidate.extension_id) {
                 continue;
             }
-            if !source.is_enabled(&extension_id) {
+            if !source_keys.insert(candidate.source_key.clone()) {
+                errors.push(format!(
+                    "duplicate extension source key: {}",
+                    candidate.source_key
+                ));
                 continue;
             }
-            let current_source = current_by_source.get(source_key.as_str()).copied();
-            if let Some(current) = current_source
-                .filter(|current| current.id == extension_id && current.fingerprint == fingerprint)
-            {
-                if desired_ids.insert(current.id.clone()) {
-                    desired_extensions.push(DesiredExtension::Retain {
-                        id: current.id.clone(),
-                    });
-                }
+            if !extension_ids.insert(candidate.extension_id.clone()) {
+                errors.push(format!(
+                    "duplicate extension id: {}",
+                    candidate.extension_id
+                ));
                 continue;
             }
-
-            if desired_ids.insert(extension_id.clone()) {
-                desired_extensions.push(DesiredExtension::Start {
-                    id: extension_id,
-                    source_key,
-                    fingerprint,
-                    load,
-                });
-            }
+            discovered.push(candidate);
         }
     }
-
-    ReconcilePlan {
-        desired_extensions,
-        desired_ids,
-        protected_ids,
-        errors,
+    if !errors.is_empty() {
+        return Err(errors);
     }
-}
 
-async fn apply_reconcile_plan(
-    runner: &ExtensionRunner,
-    ctx: &ExtensionLoadContext,
-    current_ids: &[String],
-    current_by_source: &CurrentSourceMap<'_>,
-    current_by_id: &CurrentSourceMap<'_>,
-    plan: ReconcilePlan,
-) -> Vec<String> {
-    let ReconcilePlan {
-        desired_extensions,
-        desired_ids,
-        protected_ids,
-        mut errors,
-    } = plan;
-    let desired_order = desired_extensions
-        .iter()
-        .map(DesiredExtension::id)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let mut pending_task_activations = Vec::new();
-    let batch_publication = runner.begin_source_batch_publication();
-
-    for desired in desired_extensions {
-        let DesiredExtension::Start {
-            id,
+    let mut entries = Vec::with_capacity(discovered.len());
+    for candidate in discovered {
+        let ExtensionCandidate {
             source_key,
             fingerprint,
+            extension_id,
             load,
-        } = desired
-        else {
-            continue;
-        };
-        let mut replaced_ids = Vec::new();
-        if let Some(current) = current_by_source.get(source_key.as_str()) {
-            replaced_ids.push(current.id.as_str());
-        }
-        if let Some(current) = current_by_id.get(id.as_str()) {
-            replaced_ids.push(current.id.as_str());
-        } else if current_ids.iter().any(|current_id| current_id == &id) {
-            replaced_ids.push(id.as_str());
-        }
-        replaced_ids.sort_unstable();
-        replaced_ids.dedup();
-
-        let mut replacement_blocked = false;
-        let mut retirements = Vec::new();
-        for replaced_id in &replaced_ids {
-            match runner
-                .unregister_with_retirement(replaced_id, StopReason::Reload)
-                .await
-            {
-                Ok(Some(retirement)) => retirements.push((*replaced_id, retirement)),
-                Ok(None) => {},
-                Err(error) => {
-                    errors.push(format!("failed to reload extension {replaced_id}: {error}"));
-                    replacement_blocked = true;
-                },
-            }
-        }
-        for (replaced_id, retirement) in retirements {
-            if let Err(error) = retirement.wait().await {
-                errors.push(format!(
-                    "failed to retire extension {replaced_id} before starting {id}: {error}"
-                ));
-                replacement_blocked = true;
-            }
-        }
-        if replacement_blocked {
+        } = candidate;
+        let config = configs
+            .get(&extension_id)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let fingerprint = configured_source_fingerprint(&fingerprint, &config);
+        if current_by_source
+            .get(source_key.as_str())
+            .is_some_and(|current| current.id == extension_id && current.fingerprint == fingerprint)
+        {
+            entries.push(SourceGenerationEntry::Retain {
+                id: extension_id,
+                key: source_key,
+                fingerprint,
+            });
             continue;
         }
         let started = Instant::now();
         let extension = match load()
             .await
-            .and_then(|extension| ensure_candidate_identity(&id, extension))
+            .and_then(|extension| ensure_candidate_identity(&extension_id, extension))
         {
             Ok(extension) => extension,
             Err(error) => {
-                runner.record_extension_load_failure(&id, error.clone(), Some(started.elapsed()));
+                runner.record_extension_load_failure(
+                    &extension_id,
+                    error.clone(),
+                    Some(started.elapsed()),
+                );
                 errors.push(error);
                 continue;
             },
         };
-        runner.record_extension_load_success(&id, Some(started.elapsed()));
-        match runner
-            .register_deferred(
-                extension,
-                ctx.working_dir.as_deref(),
-                source_key,
-                fingerprint,
-            )
-            .await
-        {
-            Ok(Some(activation)) => pending_task_activations.push(activation),
-            Ok(None) => {},
-            Err(error) => {
-                errors.push(format!("failed to start extension {id}: {error}"));
-            },
-        }
+        runner.record_extension_load_success(&extension_id, Some(started.elapsed()));
+        entries.push(SourceGenerationEntry::Start {
+            extension,
+            key: source_key,
+            fingerprint,
+            config,
+        });
+    }
+    if !errors.is_empty() {
+        return Err(errors);
     }
 
-    for id in current_ids
-        .iter()
-        .filter(|id| !desired_ids.contains(*id) && !protected_ids.contains(*id))
-    {
-        if let Err(error) = runner.unregister(id, StopReason::Disabled).await {
-            errors.push(format!("failed to stop extension {id}: {error}"));
-        }
-    }
-    let mut publication_order = desired_order;
-    publication_order.extend(
-        current_ids
-            .iter()
-            .filter(|id| protected_ids.contains(*id) && !desired_ids.contains(*id))
-            .cloned(),
-    );
-    runner.reorder_source_extensions(&publication_order).await;
-    drop(batch_publication);
-    for activation in pending_task_activations {
-        activation.activate();
-    }
+    runner
+        .prepare_source_generation(source_transaction, entries, ctx.working_dir.as_deref())
+        .await
+        .map_err(|error| vec![error.to_string()])
+}
 
-    errors
+fn configured_source_fingerprint(source: &str, config: &serde_json::Value) -> String {
+    let mut hasher = Sha256::new();
+    hash_fingerprint_component(&mut hasher, source.as_bytes());
+    hash_canonical_json(&mut hasher, config);
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn hash_canonical_json(hasher: &mut Sha256, value: &serde_json::Value) {
+    match value {
+        serde_json::Value::Null => hasher.update(b"null"),
+        serde_json::Value::Bool(value) => {
+            hasher.update(b"bool");
+            hasher.update([u8::from(*value)]);
+        },
+        serde_json::Value::Number(value) => {
+            hasher.update(b"number");
+            hash_fingerprint_component(hasher, value.to_string().as_bytes());
+        },
+        serde_json::Value::String(value) => {
+            hasher.update(b"string");
+            hash_fingerprint_component(hasher, value.as_bytes());
+        },
+        serde_json::Value::Array(values) => {
+            hasher.update(b"array");
+            hasher.update((values.len() as u64).to_le_bytes());
+            for value in values {
+                hash_canonical_json(hasher, value);
+            }
+        },
+        serde_json::Value::Object(values) => {
+            hasher.update(b"object");
+            hasher.update((values.len() as u64).to_le_bytes());
+            let mut entries = values.iter().collect::<Vec<_>>();
+            entries.sort_by(|left, right| left.0.cmp(right.0));
+            for (key, value) in entries {
+                hash_fingerprint_component(hasher, key.as_bytes());
+                hash_canonical_json(hasher, value);
+            }
+        },
+    }
 }
 
 /// 磁盘 s5r 扩展源（`~/.astrcode/extensions/` 与项目 `.astrcode/extensions/`）。
@@ -388,30 +284,6 @@ impl ExtensionSource for DiskExtensionSource {
             .get(extension_id)
             .copied()
             .unwrap_or(true)
-    }
-
-    fn owns_source_key(&self, source_key: &str) -> bool {
-        source_key.starts_with("disk:")
-    }
-}
-
-enum DesiredExtension {
-    Retain {
-        id: String,
-    },
-    Start {
-        id: String,
-        source_key: String,
-        fingerprint: String,
-        load: CandidateLoader,
-    },
-}
-
-impl DesiredExtension {
-    fn id(&self) -> &str {
-        match self {
-            Self::Retain { id } | Self::Start { id, .. } => id,
-        }
     }
 }
 
@@ -438,15 +310,6 @@ async fn discover_all(
     }
 
     result
-}
-
-#[doc(hidden)]
-pub async fn load_extensions_from_dir_for_test(
-    dir: &Path,
-    host_router: &Option<Arc<HostRouter>>,
-) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
-    let discovery = discover_from_dir(dir, host_router.clone()).await;
-    load_discovered(discovery).await
 }
 
 async fn discover_from_dir(
@@ -483,32 +346,6 @@ async fn discover_from_dir(
     }
 
     result
-}
-
-async fn load_discovered(
-    discovery: DiscoverExtensionsResult,
-) -> (Vec<Arc<dyn Extension>>, Vec<String>) {
-    let mut extensions = Vec::new();
-    let mut errors = discovery
-        .failures
-        .into_iter()
-        .map(|failure| failure.message)
-        .collect::<Vec<_>>();
-    for candidate in discovery.candidates {
-        let ExtensionCandidate {
-            extension_id, load, ..
-        } = candidate;
-        match load()
-            .await
-            .and_then(|extension| ensure_candidate_identity(&extension_id, extension))
-        {
-            Ok(extension) => extensions.push(extension),
-            Err(message) => {
-                errors.push(message);
-            },
-        }
-    }
-    (extensions, errors)
 }
 
 async fn extension_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
@@ -733,5 +570,24 @@ mod tests {
         assert_eq!(first, unchanged);
         assert_ne!(first, changed_binary);
         assert_ne!(changed_binary, changed_manifest);
+    }
+
+    #[test]
+    fn configured_fingerprint_is_canonical_and_tracks_extension_owned_values() {
+        let first = configured_source_fingerprint(
+            "bundled:test",
+            &serde_json::json!({ "maxOutputTokens": 2048, "nested": { "b": 2, "a": 1 } }),
+        );
+        let reordered = configured_source_fingerprint(
+            "bundled:test",
+            &serde_json::json!({ "nested": { "a": 1, "b": 2 }, "maxOutputTokens": 2048 }),
+        );
+        let changed = configured_source_fingerprint(
+            "bundled:test",
+            &serde_json::json!({ "nested": { "a": 1, "b": 2 }, "maxOutputTokens": 4096 }),
+        );
+
+        assert_eq!(first, reordered);
+        assert_ne!(first, changed);
     }
 }

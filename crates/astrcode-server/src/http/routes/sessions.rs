@@ -434,10 +434,7 @@ pub(in crate::http) async fn fork_session(
 ) -> Response {
     tracing::info!(session_id = %session_id, "POST fork session");
     let source_id = SessionId::from(session_id);
-    let at_cursor = request
-        .storage_seq
-        .map(|seq| seq.to_string())
-        .or(request.turn_id);
+    let at_cursor = request.storage_seq.map(|seq| seq.to_string());
     match state
         .app
         .session_commands()

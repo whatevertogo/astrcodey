@@ -8,10 +8,14 @@ use std::{
     sync::Arc,
 };
 
-use astrcode_extension_sdk::wire::manifest::{
-    InitializeManifest, ManifestCommand, ManifestHook, ManifestHookEvent, ManifestHookOptions,
-    ManifestHttpRoute, ManifestTool, ManifestToolMode,
+use astrcode_extension_sdk::{
+    config::ModelSelection,
+    wire::manifest::{
+        InitializeManifest, ManifestCommand, ManifestHook, ManifestHookEvent, ManifestHookOptions,
+        ManifestHttpRoute, ManifestTool, ManifestToolMode,
+    },
 };
+use serde::Deserialize;
 use serde_json::Value;
 
 use super::CancelToken;
@@ -66,9 +70,7 @@ pub type CustomEventHandlerFn = Arc<
 >;
 
 pub type CommandHandlerFn = Arc<
-    dyn Fn(Value, WorkerCommandContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>>
-        + Send
-        + Sync,
+    dyn Fn(WorkerCommandContext) -> BoxFuture<Result<HandlerResult, ErrorPayload>> + Send + Sync,
 >;
 
 pub type HttpHandlerFn = Arc<
@@ -174,6 +176,56 @@ impl WorkerInvocationContext {
 #[derive(Clone)]
 pub struct WorkerCommandContext {
     scoped: WorkerSessionWorkspaceContext,
+    command_name: String,
+    argument: String,
+    model: ModelSelection,
+    invocation: WorkerCommandInvocation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkerCommandInvocation {
+    Execute,
+    Complete { cursor: usize },
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "on", rename_all = "snake_case")]
+enum WorkerCommandEvent {
+    Command { input: WorkerCommandInput },
+    CommandComplete { input: WorkerCommandCompletionInput },
+}
+
+impl WorkerCommandEvent {
+    fn into_parts(self) -> (WorkerCommandInput, WorkerCommandInvocation) {
+        match self {
+            Self::Command { input } => (input, WorkerCommandInvocation::Execute),
+            Self::CommandComplete { input } => (
+                WorkerCommandInput {
+                    command_name: input.command_name,
+                    argument: input.argument,
+                    model: input.model,
+                },
+                WorkerCommandInvocation::Complete {
+                    cursor: input.cursor,
+                },
+            ),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct WorkerCommandInput {
+    command_name: String,
+    argument: String,
+    model: ModelSelection,
+}
+
+#[derive(Deserialize)]
+struct WorkerCommandCompletionInput {
+    command_name: String,
+    argument: String,
+    cursor: usize,
+    model: ModelSelection,
 }
 
 impl WorkerCommandContext {
@@ -187,6 +239,22 @@ impl WorkerCommandContext {
 
     pub fn working_dir(&self) -> &Path {
         &self.scoped.working_dir
+    }
+
+    pub fn command_name(&self) -> &str {
+        &self.command_name
+    }
+
+    pub fn argument(&self) -> &str {
+        &self.argument
+    }
+
+    pub fn model(&self) -> &ModelSelection {
+        &self.model
+    }
+
+    pub const fn invocation(&self) -> WorkerCommandInvocation {
+        self.invocation
     }
 
     pub fn cancel_token(&self) -> &CancelToken {
@@ -281,9 +349,35 @@ impl WorkerCallFacts {
         })
     }
 
-    fn into_command(self) -> Result<WorkerCommandContext, ErrorPayload> {
+    fn into_command(
+        self,
+        event: Value,
+        registered_name: &str,
+    ) -> Result<WorkerCommandContext, ErrorPayload> {
         let (scoped, _, _) = self.into_scoped("command")?;
-        Ok(WorkerCommandContext { scoped })
+        let event = serde_json::from_value::<WorkerCommandEvent>(event).map_err(|error| {
+            ErrorPayload::new(
+                WireErrorCode::InvalidInput,
+                format!("invalid command invocation: {error}"),
+            )
+        })?;
+        let (input, invocation) = event.into_parts();
+        if input.command_name != registered_name {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidInput,
+                format!(
+                    "command invocation name {} does not match handler {registered_name}",
+                    input.command_name
+                ),
+            ));
+        }
+        Ok(WorkerCommandContext {
+            scoped,
+            command_name: input.command_name,
+            argument: input.argument,
+            model: input.model,
+            invocation,
+        })
     }
 
     fn into_custom_event(self) -> Result<WorkerCustomEventContext, ErrorPayload> {
@@ -604,21 +698,27 @@ impl HandlerRegistry {
 
     pub(crate) fn register_command(
         &mut self,
-        name: impl Into<String>,
-        description: impl Into<String>,
+        mut command: crate::extension::SlashCommand,
         handler: CommandHandlerFn,
     ) -> Result<(), ErrorPayload> {
-        let mut name = name.into();
-        canonical_registration_name(&mut name);
-        if has_duplicate_registration_name(self.commands.keys().map(String::as_str), &name) {
+        canonical_registration_name(&mut command.name);
+        if has_duplicate_registration_name(self.commands.keys().map(String::as_str), &command.name)
+        {
             return Err(ErrorPayload::new(
                 WireErrorCode::DuplicateRegistration,
-                format!("duplicate command registration: {name}"),
+                format!("duplicate command registration: {}", command.name),
             ));
         }
+        let name = command.name.clone();
         self.manifest.commands.push(ManifestCommand {
-            name: name.clone(),
-            description: description.into(),
+            name: command.name,
+            description: command.description,
+            args_schema: command.args_schema,
+            requires_idle: command.requires_idle,
+            argument_completions: command.argument_completions,
+            priority: command.priority,
+            availability: command.availability,
+            execution: command.execution,
         });
         self.commands.insert(name, handler);
         Ok(())
@@ -743,7 +843,7 @@ impl HandlerRegistry {
                         format!("unknown command: {name}"),
                     )
                 })?;
-                handler(event, facts.into_command()?).await
+                handler(facts.into_command(event, name)?).await
             },
             astrcode_extension_sdk::wire::HandlerKind::Http => {
                 let handler = self.http_routes.get(name).ok_or_else(|| {
@@ -785,6 +885,7 @@ fn fixed_worker_hook_hint(event: &LifecycleEvent) -> &'static str {
         LifecycleEvent::AfterProviderResponse => {
             "use Worker::on_after_provider_response(...) instead"
         },
+        LifecycleEvent::ProviderContribution => "use Worker::on_provider_contribution(...) instead",
         LifecycleEvent::ContinueAfterStop => "use Worker::on_continue_after_stop(...) instead",
         LifecycleEvent::PromptBuild => "use Worker::on_prompt_build(...) instead",
         _ => "use the dedicated fixed-mode Worker registration method instead",
@@ -929,8 +1030,13 @@ mod tests {
             .unwrap();
         registry
             .register_command(
-                "  inspect  ",
-                "Inspect state",
+                crate::builder::command("  inspect  ")
+                    .description("Inspect state")
+                    .arguments(json!({ "type": "string" }))
+                    .requires_idle(true)
+                    .argument_completions(true)
+                    .priority(17)
+                    .build(),
                 crate::worker::command_handler(|_| async {
                     Ok(HandlerResult::effect(HandlerEffect::Ok, json!({})))
                 }),
@@ -950,6 +1056,21 @@ mod tests {
             ManifestToolMode::Sequential
         );
         assert_eq!(registry.manifest.commands[0].name, "inspect");
+        assert_eq!(
+            registry.manifest.commands[0].args_schema,
+            Some(json!({ "type": "string" }))
+        );
+        assert!(registry.manifest.commands[0].requires_idle);
+        assert!(registry.manifest.commands[0].argument_completions);
+        assert_eq!(registry.manifest.commands[0].priority, 17);
+        assert_eq!(
+            registry.manifest.commands[0].availability,
+            crate::extension::CommandAvailability::AllTransports
+        );
+        assert_eq!(
+            registry.manifest.commands[0].execution,
+            crate::extension::CommandExecution::Extension
+        );
         assert_eq!(
             registry.manifest.custom_events[0].event_type,
             "review.completed"

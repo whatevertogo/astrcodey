@@ -147,6 +147,8 @@ const frameState = {
     {
       childSessionId: 'child-1',
       toolCallId: 'tool-agent',
+      agentName: 'explorer',
+      task: 'inspect',
       status: 'running',
       phase: 'calling_tool',
       currentTool: 'read',
@@ -168,6 +170,7 @@ const framePatch = reduceConversationDeltas(
     {
       kind: 'agentSessionUpdated',
       agentSession: {
+        kind: 'progress',
         childSessionId: 'child-1',
         phase: 'calling_tool',
         currentTool: 'read',

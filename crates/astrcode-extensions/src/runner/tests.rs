@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -11,7 +10,7 @@ use std::{
 use astrcode_core::{
     config::ModelSelection,
     event::{
-        CustomEventData, DurableEvent, DurableEventPayload, Event, EventPayload, EventSender,
+        CustomEventData, DurableEvent, DurableEventPayload, Event, EventSender,
         LiveEvent, LiveEventPayload, PersistedSystemPrompt, SessionStarted, SystemPromptSource,
     },
     tool::{
@@ -22,32 +21,36 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     WireErrorCode,
-    builder::{custom_event, manifest},
+    builder::{command, custom_event, manifest},
     extension::{
-        CommandCompletionContext, CommandCompletionItem, CommandCompletions, CommandContext,
-        CommandHandler, CompactContext, CompactEvent, CompactHandler, CompactResult,
-        ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopOptions,
-        ContinueAfterStopPayload, ContinueAfterStopResult, CustomEventContext,
+        CommandAvailability, CommandCompletionContext, CommandCompletionItem, CommandCompletions,
+        CommandContext, CommandExecution, CommandHandler, CompactContext, CompactEvent,
+        CompactHandler, CompactResult, ContinueAfterStopContext, ContinueAfterStopHandler,
+        ContinueAfterStopOptions, ContinueAfterStopResult, CustomEventContext,
         CustomEventDisposition, CustomEventHandler, CustomEventSubscription, Extension,
-        ExtensionCall, ExtensionCapability, ExtensionCommandResult, ExtensionConfig,
-        ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest,
-        ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest, ExtensionStartContext,
-        ExtensionStopContext, ExtensionTasks, HookMode, HookResult, HttpContext, LifecycleContext,
-        LifecycleEvent, LifecycleHandler, PostToolUseContext, PostToolUseHandler,
-        PostToolUseResult, PreToolUseContext, PreToolUseHandler, PreToolUsePayload,
-        PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler, ProviderPayload,
-        ProviderResult, Registrar, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
-        RuntimePreToolUseContext, RuntimeProviderContext, RuntimeUserMessageEnvelopeContext,
-        SlashCommand, StatusItem, StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext,
-        ToolDiscoveryHandler, ToolHandler, ToolHookTarget, ToolPlanContext,
-        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopePayload,
-        UserMessageEnvelopeResult,
+        ExtensionCall, ExtensionCapability, ExtensionCommandResult, ExtensionError,
+        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
+        ExtensionHttpRoute, ExtensionManifest, ExtensionStartContext, ExtensionStopContext,
+        ExtensionTasks, HookMode, HookResult, HttpContext, LifecycleContext, LifecycleEvent,
+        LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
+        PreToolUseAdmission, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
+        ProviderContext, ProviderEvent, ProviderHandler, ProviderRequestId, ProviderResult,
+        Registrar, SessionCommandIntent, SessionCommandKind, SlashCommand, StopReason, ToolContext,
+        ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler, ToolHookTarget,
+        ToolInputTransformHandler, ToolInputTransformResult, ToolPlanContext,
+        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+        internal::{
+            RuntimeContinueAfterStopContext, RuntimeHookCallContext, RuntimePreToolUseContext,
+            RuntimeUserMessageEnvelopeContext, runtime_continue_after_stop_context,
+            runtime_pre_tool_use_context, runtime_provider_context,
+            runtime_user_message_envelope_context, wait_extension_tasks,
+        },
     },
-    host::{HostSessionStateReadRequest, HostSessionStateWriteRequest},
-    runtime_ports::{
-        RuntimeSnapshotProvider, RuntimeSnapshotState, ToolCatalogCompleteness,
-        TurnExtensionViewProvider,
+    host::{
+        HostProcessHandleOutput, HostProcessListOutput, HostProcessStartRequest,
+        HostSessionStateReadRequest, HostSessionStateWriteRequest,
     },
+    runtime_ports::{ToolCatalogCompleteness, ToolCatalogProvider},
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolPlan, ToolResult},
 };
 use astrcode_storage::{SessionEventJournal, SessionPathResolver, SessionStore};
@@ -56,8 +59,8 @@ use serde_json::json;
 use tokio::sync::{Notify, mpsc};
 
 use super::{
-    CommandSource, CustomEventConsumerAction, CustomEventSession, ExtensionHttpDispatchResult,
-    ExtensionRunner, ExtensionRuntimeState,
+    CustomEventConsumerAction, CustomEventSession, ExtensionHttpDispatchResult, ExtensionRunner,
+    ExtensionRuntimeState,
 };
 
 fn extension_manifest(
@@ -83,10 +86,6 @@ struct ManagedTaskExtension {
     expected_reason: StopReason,
 }
 
-struct DeferredTaskExtension {
-    task_started: Arc<AtomicBool>,
-}
-
 struct StartupDirectoryExtension {
     received: Arc<Mutex<Option<StartupContextSnapshot>>>,
 }
@@ -97,7 +96,7 @@ struct StartupContextSnapshot {
     startup_working_dir: Option<PathBuf>,
     global_data_dir: Option<PathBuf>,
     session_context_available: bool,
-    config_version: u64,
+    config_version: Option<u64>,
     cancelled: bool,
 }
 
@@ -105,22 +104,22 @@ struct StartupEventExtension;
 
 struct UnhealthyExtension;
 
-struct ConfigChangeProbeExtension(Arc<ConfigChangeProbeState>);
-
-#[derive(Default)]
-struct ConfigChangeProbeState {
-    calls: AtomicUsize,
-    fail_next: AtomicBool,
-    block_version: AtomicUsize,
-    entered: Notify,
-    release: Notify,
-    applied_version: AtomicUsize,
-    stopped: AtomicBool,
-}
-
 struct StateProbeExtension;
 
 struct StateProbeTool;
+
+struct CallScopeProbeExtension {
+    retained: Arc<Mutex<Option<ToolContext>>>,
+}
+
+struct CallScopeProbeTool {
+    retained: Arc<Mutex<Option<ToolContext>>>,
+}
+
+#[derive(Deserialize)]
+struct CallScopeProbeArguments {
+    fail: bool,
+}
 
 struct ToolRetirementProbeExtension {
     stopped: Arc<AtomicUsize>,
@@ -128,6 +127,12 @@ struct ToolRetirementProbeExtension {
 
 struct RetirementFailureExtension {
     fail_stop: bool,
+}
+
+struct RetirementCleanupExtension {
+    stop_entered: Arc<Notify>,
+    stop_release: Arc<Notify>,
+    stopped: Arc<AtomicBool>,
 }
 
 struct SlowToolDiscoveryExtension;
@@ -202,6 +207,35 @@ struct TargetedPreHookExtension {
 
 struct CountingPreHook {
     calls: Arc<AtomicUsize>,
+}
+
+enum PreToolProbeBehavior {
+    Transform {
+        field: &'static str,
+        value: serde_json::Value,
+    },
+    Admission(PreToolUseResult),
+}
+
+struct PreToolPhaseProbeExtension {
+    id: &'static str,
+    label: &'static str,
+    priority: i32,
+    behavior: PreToolProbeBehavior,
+    observed: Arc<Mutex<Vec<(&'static str, serde_json::Value)>>>,
+}
+
+struct TransformProbeHandler {
+    label: &'static str,
+    field: &'static str,
+    value: serde_json::Value,
+    observed: Arc<Mutex<Vec<(&'static str, serde_json::Value)>>>,
+}
+
+struct AdmissionProbeHandler {
+    label: &'static str,
+    decision: PreToolUseResult,
+    observed: Arc<Mutex<Vec<(&'static str, serde_json::Value)>>>,
 }
 
 struct GenerationProbeExtension {
@@ -281,6 +315,7 @@ enum CapabilityRegistration {
     BlockingPreTool,
     BlockingPostTool,
     ContinueAfterStop,
+    SessionCommand,
 }
 
 struct RegistrationProbeExtension {
@@ -297,43 +332,6 @@ struct RegistrationProbeHandler;
 struct CommandProbe {
     label: &'static str,
     argument_completions: bool,
-}
-
-#[async_trait::async_trait]
-impl Extension for ConfigChangeProbeExtension {
-    fn manifest(&self) -> ExtensionManifest {
-        extension_manifest("config-change-probe", &[])
-    }
-
-    fn register(&self, registrar: &mut Registrar) {
-        registrar.status_item(StatusItem {
-            id: "config-change-probe".into(),
-            text: String::new(),
-            priority: 0,
-            tooltip: None,
-        });
-    }
-
-    async fn on_config_changed(&self, config: ExtensionConfig) -> Result<(), ExtensionError> {
-        self.0.calls.fetch_add(1, Ordering::SeqCst);
-        let value: serde_json::Value = config.deserialize().unwrap();
-        let version = value["version"].as_u64().unwrap() as usize;
-        if self.0.block_version.load(Ordering::SeqCst) == version {
-            self.0.entered.notify_one();
-            self.0.release.notified().await;
-        }
-        if self.0.fail_next.swap(false, Ordering::SeqCst) {
-            Err(ExtensionError::Internal("injected config failure".into()))
-        } else {
-            self.0.applied_version.store(version, Ordering::SeqCst);
-            Ok(())
-        }
-    }
-
-    async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
-        self.0.stopped.store(true, Ordering::SeqCst);
-        Ok(())
-    }
 }
 
 #[async_trait::async_trait]
@@ -373,6 +371,50 @@ impl ToolHandler for StateProbeTool {
             Default::default(),
         )
         .into())
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for CallScopeProbeExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("call-scope-probe", &[ExtensionCapability::EmitCustomEvents])
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        reg.declare_custom_event(custom_event("call_scope_probe").durable(false).build());
+        reg.tool(
+            ToolDefinition {
+                name: "callScopeProbe".into(),
+                description: String::new(),
+                parameters: json!({"type": "object"}),
+                strict: false,
+                origin: ToolOrigin::Extension,
+                execution_mode: ExecutionMode::Sequential,
+            },
+            Arc::new(CallScopeProbeTool {
+                retained: Arc::clone(&self.retained),
+            }),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolHandler for CallScopeProbeTool {
+    async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
+        Ok(ToolPlan::host(HostResource::Session))
+    }
+
+    async fn execute(
+        &self,
+        ctx: ToolContext,
+    ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
+        let arguments = ctx.arguments::<CallScopeProbeArguments>()?;
+        *self.retained.lock().unwrap() = Some(ctx);
+        if arguments.fail {
+            Err(ExtensionError::Internal("injected handler failure".into()))
+        } else {
+            Ok(ToolResult::text("ok".into(), false, Default::default()).into())
+        }
     }
 }
 
@@ -418,6 +460,24 @@ impl Extension for RetirementFailureExtension {
 }
 
 #[async_trait::async_trait]
+impl Extension for RetirementCleanupExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest(
+            "retirement-cleanup-probe",
+            &[ExtensionCapability::ProcessSpawn],
+        )
+    }
+
+    async fn stop(&self, ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
+        assert_eq!(ctx.reason(), StopReason::Disabled);
+        self.stop_entered.notify_one();
+        self.stop_release.notified().await;
+        self.stopped.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
 impl Extension for SlowToolDiscoveryExtension {
     fn manifest(&self) -> ExtensionManifest {
         extension_manifest("slow-discovery", &[])
@@ -450,6 +510,8 @@ impl Extension for CommandProbeExtension {
                 requires_idle: false,
                 argument_completions: self.argument_completions,
                 priority: self.priority,
+                availability: CommandAvailability::AllTransports,
+                execution: CommandExecution::Extension,
             },
             Arc::new(CommandProbe {
                 label: self.id,
@@ -572,7 +634,6 @@ impl Extension for TargetedPreHookExtension {
     fn register(&self, reg: &mut Registrar) {
         reg.on_pre_tool_use_for(
             ToolHookTarget::names(["targetTool"]),
-            HookMode::Blocking,
             0,
             Arc::new(CountingPreHook {
                 calls: Arc::clone(&self.calls),
@@ -593,14 +654,74 @@ impl PreToolUseHandler for CountingPreHook {
 }
 
 #[async_trait::async_trait]
+impl Extension for PreToolPhaseProbeExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest(self.id, &[ExtensionCapability::ToolIntercept])
+    }
+
+    fn register(&self, reg: &mut Registrar) {
+        match &self.behavior {
+            PreToolProbeBehavior::Transform { field, value } => reg.on_tool_input_transform(
+                self.priority,
+                Arc::new(TransformProbeHandler {
+                    label: self.label,
+                    field,
+                    value: value.clone(),
+                    observed: Arc::clone(&self.observed),
+                }),
+            ),
+            PreToolProbeBehavior::Admission(decision) => reg.on_pre_tool_use(
+                self.priority,
+                Arc::new(AdmissionProbeHandler {
+                    label: self.label,
+                    decision: decision.clone(),
+                    observed: Arc::clone(&self.observed),
+                }),
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolInputTransformHandler for TransformProbeHandler {
+    async fn transform(
+        &self,
+        ctx: PreToolUseContext,
+    ) -> Result<ToolInputTransformResult, ExtensionError> {
+        self.observed
+            .lock()
+            .unwrap()
+            .push((self.label, ctx.tool_input().clone()));
+        let mut transformed = ctx.tool_input().clone();
+        transformed
+            .as_object_mut()
+            .unwrap()
+            .insert(self.field.into(), self.value.clone());
+        Ok(ToolInputTransformResult::Replace {
+            tool_input: transformed,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl PreToolUseHandler for AdmissionProbeHandler {
+    async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
+        self.observed
+            .lock()
+            .unwrap()
+            .push((self.label, ctx.tool_input().clone()));
+        Ok(self.decision.clone())
+    }
+}
+
+#[async_trait::async_trait]
 impl Extension for GenerationProbeExtension {
     fn manifest(&self) -> ExtensionManifest {
         extension_manifest("generation-probe", &[ExtensionCapability::ToolIntercept])
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.on_pre_tool_use(
-            HookMode::Blocking,
+        reg.on_tool_input_transform(
             0,
             Arc::new(GenerationProbeHook {
                 label: self.label,
@@ -662,13 +783,16 @@ impl Extension for CancelledStartupExtension {
 }
 
 #[async_trait::async_trait]
-impl PreToolUseHandler for GenerationProbeHook {
-    async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
+impl ToolInputTransformHandler for GenerationProbeHook {
+    async fn transform(
+        &self,
+        ctx: PreToolUseContext,
+    ) -> Result<ToolInputTransformResult, ExtensionError> {
         if let Some(call_started) = &self.call_started {
             call_started.notify_one();
             ctx.cancellation().cancelled().await;
         }
-        Ok(PreToolUseResult::ModifyInput {
+        Ok(ToolInputTransformResult::Replace {
             tool_input: json!({ "generation": self.label }),
         })
     }
@@ -842,7 +966,7 @@ impl Extension for RegistrationProbeExtension {
                 reg.on_after_provider_response(0, Arc::new(RegistrationProbeHandler));
             },
             CapabilityRegistration::BlockingPreTool => {
-                reg.on_pre_tool_use(HookMode::Blocking, 0, Arc::new(RegistrationProbeHandler));
+                reg.on_pre_tool_use(0, Arc::new(RegistrationProbeHandler));
             },
             CapabilityRegistration::BlockingPostTool => {
                 reg.on_post_tool_use(HookMode::Blocking, 0, Arc::new(RegistrationProbeHandler));
@@ -854,6 +978,14 @@ impl Extension for RegistrationProbeExtension {
                     Arc::new(RegistrationProbeHandler),
                 );
             },
+            CapabilityRegistration::SessionCommand => {
+                reg.command(
+                    command("compact-probe")
+                        .host_command(SessionCommandKind::CompactSession)
+                        .build(),
+                    Arc::new(RegistrationProbeHandler),
+                );
+            },
         }
     }
 }
@@ -862,6 +994,20 @@ impl Extension for RegistrationProbeExtension {
 impl CompactHandler for RegistrationProbeHandler {
     async fn handle(&self, _ctx: CompactContext) -> Result<CompactResult, ExtensionError> {
         Ok(CompactResult::Allow)
+    }
+}
+
+#[async_trait::async_trait]
+impl CommandHandler for RegistrationProbeHandler {
+    async fn execute(
+        &self,
+        _ctx: CommandContext,
+    ) -> Result<ExtensionCommandResult, ExtensionError> {
+        Ok(ExtensionCommandResult::host_command(
+            SessionCommandIntent::CompactSession {
+                keep_recent_turns: None,
+            },
+        ))
     }
 }
 
@@ -940,29 +1086,26 @@ fn runtime_hook_call() -> RuntimeHookCallContext {
 }
 
 fn continue_after_stop_ctx(continuations_this_turn: u32) -> RuntimeContinueAfterStopContext {
-    RuntimeContinueAfterStopContext::new(
+    runtime_continue_after_stop_context(
         runtime_hook_call(),
-        ContinueAfterStopPayload::new("done", "stop", continuations_this_turn),
+        "done",
+        "stop",
+        continuations_this_turn,
     )
 }
 
 fn user_message_envelope_ctx(text: &str) -> RuntimeUserMessageEnvelopeContext {
-    RuntimeUserMessageEnvelopeContext::new(
-        runtime_hook_call(),
-        UserMessageEnvelopePayload::new(text, Vec::new()),
-    )
+    runtime_user_message_envelope_context(runtime_hook_call(), text, Vec::new())
 }
 
 fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> RuntimePreToolUseContext {
-    RuntimePreToolUseContext::new(
+    runtime_pre_tool_use_context(
         runtime_hook_call(),
-        PreToolUsePayload::new(
-            "call-1".into(),
-            tool_name,
-            tool_input,
-            astrcode_core::permission::ApprovalMode::Manual,
-            Vec::new(),
-        ),
+        "call-1".into(),
+        tool_name,
+        tool_input,
+        astrcode_core::permission::ApprovalMode::Manual,
+        Vec::new(),
     )
 }
 
@@ -979,7 +1122,7 @@ impl Extension for StartupDirectoryExtension {
             startup_working_dir: ctx.startup_working_dir().map(Path::to_path_buf),
             global_data_dir: ctx.paths().global_data_dir().map(Path::to_path_buf),
             session_context_available: ctx.paths().session_data_dir().is_ok(),
-            config_version: config["version"].as_u64().unwrap(),
+            config_version: config["version"].as_u64(),
             cancelled: ctx.cancellation().is_cancelled(),
         });
         Ok(())
@@ -1043,21 +1186,6 @@ impl Extension for ManagedTaskExtension {
     }
 }
 
-#[async_trait::async_trait]
-impl Extension for DeferredTaskExtension {
-    fn manifest(&self) -> ExtensionManifest {
-        extension_manifest("deferred-task", &[])
-    }
-
-    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
-        let task_started = Arc::clone(&self.task_started);
-        ctx.tasks().spawn("deferred", async move {
-            task_started.store(true, Ordering::SeqCst);
-        });
-        Ok(())
-    }
-}
-
 #[tokio::test]
 async fn privileged_registrations_require_their_declared_capabilities() {
     let cases = [
@@ -1100,6 +1228,11 @@ async fn privileged_registrations_require_their_declared_capabilities() {
             CapabilityRegistration::ContinueAfterStop,
             "continue_after_stop",
             ExtensionCapability::TurnContinuationControl,
+        ),
+        (
+            CapabilityRegistration::SessionCommand,
+            "command",
+            ExtensionCapability::SessionCommand,
         ),
     ];
 
@@ -1271,7 +1404,7 @@ async fn reload_cancels_active_call_before_pinned_generation_retires() {
     assert_eq!(active_call_view.generation(), version_one_generation);
     let mut active_call = tokio::spawn(async move {
         active_call_view
-            .emit_pre_tool_use(pre_tool_use_ctx("probe", json!({})))
+            .transform_tool_input(pre_tool_use_ctx("probe", json!({})))
             .await
     });
     tokio::time::timeout(Duration::from_secs(1), version_one_call_started.notified())
@@ -1308,11 +1441,7 @@ async fn reload_cancels_active_call_before_pinned_generation_retires() {
         .expect("reload must cancel the active v1 call before its pinned view is released")
         .unwrap()
         .unwrap();
-    assert!(matches!(
-        version_one_result,
-        PreToolUseResult::ModifyInput { tool_input }
-            if tool_input == json!({ "generation": "v1" })
-    ));
+    assert_eq!(version_one_result, json!({ "generation": "v1" }));
     assert_eq!(version_one_stops.load(Ordering::SeqCst), 0);
     assert_eq!(lifecycle.lock().unwrap().as_slice(), &["v1"]);
     assert!(
@@ -1341,16 +1470,12 @@ async fn reload_cancels_active_call_before_pinned_generation_retires() {
     assert!(version_two_view.generation() > version_one_generation);
     let turn_view = runner.turn_extension_view();
     assert_eq!(turn_view.generation(), version_two_view.generation());
-    assert_eq!(
-        turn_view.tool_catalog().revision(),
-        version_two_view.generation()
-    );
-    let version_two_result = version_two_view.emit_pre_tool_use(context()).await.unwrap();
-    assert!(matches!(
-        version_two_result,
-        PreToolUseResult::ModifyInput { tool_input }
-            if tool_input == json!({ "generation": "v2" })
-    ));
+    assert_eq!(turn_view.revision(), version_two_view.generation());
+    let version_two_result = version_two_view
+        .transform_tool_input(context())
+        .await
+        .unwrap();
+    assert_eq!(version_two_result, json!({ "generation": "v2" }));
 
     drop(version_two_view);
     drop(turn_view);
@@ -1448,7 +1573,7 @@ async fn cancelled_start_hands_registration_to_the_retirement_barrier() {
         .unwrap()
         .clone()
         .expect("startup should expose its task owner");
-    assert!(tasks.wait(Duration::from_millis(10)).await);
+    assert!(wait_extension_tasks(&tasks, Duration::from_millis(10)).await);
     assert!(matches!(
         tasks.run_to_completion("late-write", async {}).await,
         Err(astrcode_extension_sdk::extension::ExtensionTaskError::ShuttingDown { .. })
@@ -1547,38 +1672,93 @@ async fn retirement_tickets_isolate_reload_failures_by_generation() {
     assert!(errors[0].contains("intentional stop failure"));
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn deferred_task_handle_activates_published_registration_on_drop() {
-    let task_started = Arc::new(AtomicBool::new(false));
+async fn retirement_cleans_only_its_instance_resources_after_stop() {
+    let workspace = tempfile::tempdir().unwrap();
+    let stop_entered = Arc::new(Notify::new());
+    let stop_release = Arc::new(Notify::new());
+    let stopped = Arc::new(AtomicBool::new(false));
     let runner = ExtensionRunner::new(Duration::from_secs(1));
-    let activation = runner
-        .register_deferred(
-            Arc::new(DeferredTaskExtension {
-                task_started: Arc::clone(&task_started),
-            }),
-            None,
-            "test:deferred-task".into(),
-            "v1".into(),
+    runner
+        .register(Arc::new(RetirementCleanupExtension {
+            stop_entered: Arc::clone(&stop_entered),
+            stop_release: Arc::clone(&stop_release),
+            stopped: Arc::clone(&stopped),
+        }))
+        .await
+        .unwrap();
+    let (instance_id, generation_gate) = {
+        let extensions = runner.registry.extensions.read().await;
+        (
+            extensions[0].instance_id,
+            extensions[0].generation_gate.clone(),
+        )
+    };
+    let router = runner.host_router();
+    let invoke_context = crate::host_router::InvokeContext {
+        extension_id: "retirement-cleanup-probe".into(),
+        extension_instance_id: instance_id,
+        session_id: Some("retirement-cleanup-session".into()),
+        working_dir: Some(workspace.path().to_string_lossy().into_owned()),
+        declared_capabilities: vec![ExtensionCapability::ProcessSpawn],
+        generation_gate,
+        ..Default::default()
+    };
+    let mut inspection_context = invoke_context.clone();
+    inspection_context.generation_gate = Default::default();
+    let mut request = HostProcessStartRequest::new("/bin/sh");
+    request.args = vec!["-c".into(), "sleep 30".into()];
+    let started = router
+        .invoke(
+            "astrcode.process.start",
+            serde_json::to_value(request).unwrap(),
+            &invoke_context,
         )
         .await
-        .unwrap()
-        .expect("new registration should return an activation handle");
+        .unwrap();
+    let started: HostProcessHandleOutput = serde_json::from_value(started).unwrap();
+    let old_view = runner.turn_extension_view();
 
-    assert_eq!(
-        runner.registered_extension_ids().await,
-        vec!["deferred-task"]
+    assert!(
+        runner
+            .unregister("retirement-cleanup-probe", StopReason::Disabled)
+            .await
+            .unwrap()
     );
-    tokio::task::yield_now().await;
-    assert!(!task_started.load(Ordering::SeqCst));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(25), stop_entered.notified())
+            .await
+            .is_err(),
+        "retirement must keep the old instance active while its index is pinned"
+    );
+    drop(old_view);
+    tokio::time::timeout(Duration::from_secs(1), stop_entered.notified())
+        .await
+        .unwrap();
+    let revoked = router
+        .invoke("astrcode.process.list", json!({}), &invoke_context)
+        .await
+        .unwrap_err();
+    assert_eq!(revoked.code_enum(), Some(WireErrorCode::HostNotReady));
+    let listed = router
+        .invoke("astrcode.process.list", json!({}), &inspection_context)
+        .await
+        .unwrap();
+    let listed: HostProcessListOutput = serde_json::from_value(listed).unwrap();
+    assert_eq!(listed.processes.len(), 1);
+    assert_eq!(listed.processes[0].id, started.id);
+    assert!(!stopped.load(Ordering::Acquire));
 
-    drop(activation);
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while !task_started.load(Ordering::SeqCst) {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .unwrap();
+    stop_release.notify_one();
+    assert!(runner.shutdown().await.is_empty());
+    assert!(stopped.load(Ordering::Acquire));
+    let listed = router
+        .invoke("astrcode.process.list", json!({}), &inspection_context)
+        .await
+        .unwrap();
+    let listed: HostProcessListOutput = serde_json::from_value(listed).unwrap();
+    assert!(listed.processes.is_empty());
 }
 
 #[tokio::test]
@@ -1623,10 +1803,6 @@ async fn shutdown_is_terminal_and_idempotent() {
 async fn register_builds_attributed_startup_context() {
     let received = Arc::new(Mutex::new(None));
     let runner = ExtensionRunner::new(Duration::from_secs(1));
-    runner.update_extension_configs(BTreeMap::from([(
-        "startup-directory".into(),
-        json!({ "version": 7 }),
-    )]));
 
     runner
         .register_with_startup_working_dir(
@@ -1649,36 +1825,26 @@ async fn register_builds_attributed_startup_context() {
                     .join("startup-directory")
             ),
             session_context_available: false,
-            config_version: 7,
+            config_version: None,
             cancelled: false,
         })
     );
 }
 
 #[tokio::test]
-async fn start_can_emit_declared_event_through_bound_startup_channel() {
+async fn candidate_start_cannot_emit_host_events_before_publication() {
     let runner = ExtensionRunner::new(Duration::from_secs(1));
     let (event_tx, mut event_rx) = mpsc::unbounded_channel();
     runner.bind_startup_event_channel(event_tx);
 
-    runner
+    let error = runner
         .register(Arc::new(StartupEventExtension))
         .await
-        .unwrap();
-
-    let event = event_rx.recv().await.unwrap();
-    assert!(matches!(
-        event,
-        EventPayload::Durable(DurableEventPayload::CustomEvent(CustomEventData {
-            extension_id,
-            event_type,
-            schema_version: 1,
-            payload,
-            ..
-        })) if extension_id == "startup-event"
-            && event_type == "startup_ready"
-            && payload == json!({"ready": true})
-    ));
+        .expect_err("candidate startup must not publish Host side effects");
+    assert!(error.to_string().contains("generation is not active"));
+    assert!(event_rx.try_recv().is_err());
+    assert!(runner.registered_extension_ids().await.is_empty());
+    assert!(runner.shutdown().await.is_empty());
 }
 
 #[tokio::test]
@@ -1731,6 +1897,75 @@ async fn extension_tool_receives_session_state_by_default() {
 
     let result = tool.execute(json!({}), &ctx).await.unwrap();
     assert_eq!(result.content, "true");
+}
+
+#[tokio::test]
+async fn extension_tool_call_context_expires_after_handler_completion() {
+    let session_store = tempfile::tempdir().unwrap();
+    let events_sent = Arc::new(AtomicUsize::new(0));
+    let retained = Arc::new(Mutex::new(None));
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    runner
+        .register(Arc::new(CallScopeProbeExtension {
+            retained: Arc::clone(&retained),
+        }))
+        .await
+        .unwrap();
+    let tool = runner
+        .tool_catalog_snapshot_typed("D:/workspace")
+        .await
+        .tools
+        .into_iter()
+        .next()
+        .unwrap();
+    let event_tx = EventSender::new({
+        let events_sent = Arc::clone(&events_sent);
+        move |_| {
+            events_sent.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    });
+    let ctx = ToolExecutionContext::new(
+        "session".into(),
+        "D:/workspace",
+        None,
+        Some(event_tx),
+        ToolCapabilities {
+            paths: astrcode_core::tool::ToolSessionPaths {
+                store_dir: Some(session_store.path().to_path_buf()),
+            },
+            ..Default::default()
+        },
+    )
+    .with_resource_lease(ResourceLease::from_plan(&ToolPlan::host(
+        HostResource::Session,
+    )));
+
+    for fail in [false, true] {
+        tool.execute(json!({"fail": fail}), &ctx).await.unwrap();
+        let retained_context = retained.lock().unwrap().take().unwrap();
+        assert!(
+            retained_context.cancellation().is_cancelled(),
+            "call context must expire after handler completion (fail={fail})"
+        );
+        let host_error = retained_context
+            .host()
+            .session_state()
+            .unwrap()
+            .read(HostSessionStateReadRequest {
+                key: "retained".into(),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(host_error.code_enum(), Some(WireErrorCode::Cancelled));
+        let event_error = retained_context
+            .events()
+            .emit("call_scope_probe", &json!({"fail": fail}))
+            .await
+            .unwrap_err();
+        assert!(event_error.to_string().contains("no longer active"));
+    }
+    assert_eq!(events_sent.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -1830,16 +2065,145 @@ async fn targeted_pre_tool_hook_only_runs_for_matching_tool() {
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert!(matches!(
         result,
-        PreToolUseResult::Ask {
-            rule_key: Some(rule_key),
-            ..
-        } if rule_key == "extension:targeted-pre-hook:dangerous"
+        PreToolUseAdmission::Ask { requirements }
+            if requirements[0].rule_key.as_deref()
+                == Some("extension:targeted-pre-hook:dangerous")
     ));
 
     let diagnostics = runner.diagnostics_snapshot();
     let hook_diagnostics = diagnostics.get("targeted-pre-hook").unwrap();
     assert_eq!(hook_diagnostics.hook_calls, 1);
     assert_eq!(hook_diagnostics.last_hook.as_deref(), Some("pre_tool_use"));
+}
+
+#[tokio::test]
+async fn pre_tool_use_transforms_then_composes_admission_on_final_input() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let runner = ExtensionRunner::new(Duration::from_secs(1));
+    let extensions = [
+        PreToolPhaseProbeExtension {
+            id: "transform-first",
+            label: "transform-first",
+            priority: 100,
+            behavior: PreToolProbeBehavior::Transform {
+                field: "first",
+                value: json!(true),
+            },
+            observed: Arc::clone(&observed),
+        },
+        PreToolPhaseProbeExtension {
+            id: "transform-second",
+            label: "transform-second",
+            priority: 0,
+            behavior: PreToolProbeBehavior::Transform {
+                field: "second",
+                value: json!(2),
+            },
+            observed: Arc::clone(&observed),
+        },
+        PreToolPhaseProbeExtension {
+            id: "ask-first",
+            label: "ask-first",
+            priority: 100,
+            behavior: PreToolProbeBehavior::Admission(PreToolUseResult::Ask {
+                prompt: "first approval".into(),
+                rule_key: Some("first".into()),
+            }),
+            observed: Arc::clone(&observed),
+        },
+        PreToolPhaseProbeExtension {
+            id: "ask-second",
+            label: "ask-second",
+            priority: 50,
+            behavior: PreToolProbeBehavior::Admission(PreToolUseResult::Ask {
+                prompt: "second approval".into(),
+                rule_key: Some("second".into()),
+            }),
+            observed: Arc::clone(&observed),
+        },
+        PreToolPhaseProbeExtension {
+            id: "block-last",
+            label: "block-last",
+            priority: 0,
+            behavior: PreToolProbeBehavior::Admission(PreToolUseResult::Block {
+                reason: "blocked after asks".into(),
+            }),
+            observed: Arc::clone(&observed),
+        },
+    ];
+    for extension in extensions {
+        runner.register(Arc::new(extension)).await.unwrap();
+    }
+
+    let final_input = runner
+        .transform_tool_input(pre_tool_use_ctx("probe", json!({"raw": true})))
+        .await
+        .unwrap();
+    assert_eq!(
+        final_input,
+        json!({"raw": true, "first": true, "second": 2})
+    );
+    assert_eq!(
+        observed.lock().unwrap().as_slice(),
+        &[
+            ("transform-first", json!({"raw": true})),
+            ("transform-second", json!({"raw": true, "first": true})),
+        ]
+    );
+
+    observed.lock().unwrap().clear();
+    let blocked = runner
+        .emit_pre_tool_use(pre_tool_use_ctx("probe", final_input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        blocked,
+        PreToolUseAdmission::Block {
+            reason: "blocked after asks".into()
+        }
+    );
+    assert_eq!(
+        observed.lock().unwrap().as_slice(),
+        &[
+            ("ask-first", final_input.clone()),
+            ("ask-second", final_input.clone()),
+            ("block-last", final_input.clone()),
+        ]
+    );
+
+    assert!(
+        runner
+            .unregister("block-last", StopReason::Disabled)
+            .await
+            .unwrap()
+    );
+    observed.lock().unwrap().clear();
+    let admission = runner
+        .emit_pre_tool_use(pre_tool_use_ctx("probe", final_input.clone()))
+        .await
+        .unwrap();
+    assert_eq!(
+        admission,
+        PreToolUseAdmission::Ask {
+            requirements: vec![
+                astrcode_extension_sdk::extension::PreToolUseRequirement {
+                    prompt: "first approval".into(),
+                    rule_key: Some("extension:ask-first:first".into()),
+                },
+                astrcode_extension_sdk::extension::PreToolUseRequirement {
+                    prompt: "second approval".into(),
+                    rule_key: Some("extension:ask-second:second".into()),
+                },
+            ]
+        }
+    );
+    assert_eq!(
+        observed.lock().unwrap().as_slice(),
+        &[
+            ("ask-first", final_input.clone()),
+            ("ask-second", final_input),
+        ]
+    );
 }
 
 #[tokio::test]
@@ -1865,160 +2229,6 @@ async fn diagnostics_records_register_and_start_failure_states() {
             .as_deref()
             .is_some_and(|error| error.contains("startup dependency missing"))
     );
-}
-
-#[tokio::test]
-async fn config_notifications_are_ordered_idempotent_and_retry_failures() {
-    let state = Arc::new(ConfigChangeProbeState::default());
-    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    let config =
-        |version| BTreeMap::from([("config-change-probe".into(), json!({"version": version}))]);
-    runner.update_extension_configs(config(1));
-    runner
-        .register(Arc::new(ConfigChangeProbeExtension(Arc::clone(&state))))
-        .await
-        .unwrap();
-    let stable_generation = || match runner.runtime_snapshot_state() {
-        RuntimeSnapshotState::Stable(generation) => generation,
-        RuntimeSnapshotState::Updating => panic!("runtime must be stable after update completion"),
-    };
-    let registered_generation = stable_generation();
-    assert!(registered_generation > 0);
-
-    runner.update_extension_configs(config(2));
-    assert!(runner.notify_config_changed().await.is_empty());
-    let version_two_generation = stable_generation();
-    assert!(version_two_generation > registered_generation);
-    assert!(runner.notify_config_changed().await.is_empty());
-    assert_eq!(stable_generation(), version_two_generation);
-    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(state.applied_version.load(Ordering::SeqCst), 2);
-
-    state.fail_next.store(true, Ordering::SeqCst);
-    runner.update_extension_configs(config(3));
-    assert_eq!(runner.notify_config_changed().await.len(), 1);
-    let failed_generation = stable_generation();
-    assert!(failed_generation > version_two_generation);
-    assert!(runner.notify_config_changed().await.is_empty());
-    let version_three_generation = stable_generation();
-    assert!(version_three_generation > failed_generation);
-    assert!(runner.notify_config_changed().await.is_empty());
-    assert_eq!(stable_generation(), version_three_generation);
-    assert_eq!(state.calls.load(Ordering::SeqCst), 3);
-    assert_eq!(state.applied_version.load(Ordering::SeqCst), 3);
-
-    state.block_version.store(4, Ordering::SeqCst);
-    runner.update_extension_configs(config(4));
-    let notify_v4 = {
-        let runner = Arc::clone(&runner);
-        tokio::spawn(async move { runner.notify_config_changed().await })
-    };
-    state.entered.notified().await;
-    assert_eq!(
-        runner.runtime_snapshot_state(),
-        RuntimeSnapshotState::Updating
-    );
-    runner.update_extension_configs(config(5));
-    let notify_v5 = {
-        let runner = Arc::clone(&runner);
-        tokio::spawn(async move { runner.notify_config_changed().await })
-    };
-    tokio::task::yield_now().await;
-    assert_eq!(state.applied_version.load(Ordering::SeqCst), 3);
-    state.release.notify_one();
-    assert!(notify_v4.await.unwrap().is_empty());
-    assert!(notify_v5.await.unwrap().is_empty());
-    assert!(matches!(
-        runner.runtime_snapshot_state(),
-        RuntimeSnapshotState::Stable(_)
-    ));
-    assert_eq!(state.applied_version.load(Ordering::SeqCst), 5);
-
-    state.block_version.store(6, Ordering::SeqCst);
-    runner.update_extension_configs(config(6));
-    let notify_v6 = {
-        let runner = Arc::clone(&runner);
-        tokio::spawn(async move { runner.notify_config_changed().await })
-    };
-    state.entered.notified().await;
-    let unregister = {
-        let runner = Arc::clone(&runner);
-        tokio::spawn(async move {
-            runner
-                .unregister("config-change-probe", StopReason::Disabled)
-                .await
-        })
-    };
-    tokio::task::yield_now().await;
-    assert!(
-        tokio::time::timeout(
-            Duration::from_millis(250),
-            runner.register(Arc::new(StateProbeExtension)),
-        )
-        .await
-        .unwrap()
-        .unwrap()
-    );
-    assert!(!state.stopped.load(Ordering::SeqCst));
-    state.release.notify_one();
-    assert!(notify_v6.await.unwrap().is_empty());
-    assert!(unregister.await.unwrap().unwrap());
-    assert!(runner.shutdown().await.is_empty());
-    assert!(state.stopped.load(Ordering::SeqCst));
-}
-
-#[tokio::test]
-async fn config_update_waits_for_turn_views_and_recovers_after_wait_timeout() {
-    let state = Arc::new(ConfigChangeProbeState::default());
-    let runner = Arc::new(ExtensionRunner::new(Duration::from_millis(100)));
-    let config =
-        |version| BTreeMap::from([("config-change-probe".into(), json!({"version": version}))]);
-    runner.update_extension_configs(config(1));
-    runner
-        .register(Arc::new(ConfigChangeProbeExtension(Arc::clone(&state))))
-        .await
-        .unwrap();
-
-    let version_one_view = runner.turn_extension_view();
-    let version_one_generation = version_one_view.generation();
-    runner.update_extension_configs(config(2));
-    let notify_version_two = {
-        let runner = Arc::clone(&runner);
-        tokio::spawn(async move { runner.notify_config_changed().await })
-    };
-    tokio::time::timeout(Duration::from_secs(1), async {
-        while runner.runtime_snapshot_state() != RuntimeSnapshotState::Updating {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("config update must publish Updating before waiting for turn views");
-    assert_eq!(state.calls.load(Ordering::SeqCst), 0);
-
-    drop(version_one_view);
-    assert!(notify_version_two.await.unwrap().is_empty());
-    assert_eq!(state.applied_version.load(Ordering::SeqCst), 2);
-    let version_two_view = runner.turn_extension_view();
-    assert!(version_two_view.generation() > version_one_generation);
-
-    runner.update_extension_configs(config(3));
-    let errors = runner.notify_config_changed().await;
-    assert_eq!(errors.len(), 1);
-    assert!(errors[0].contains("active turn extension view"));
-    assert!(errors[0].contains("was not applied"));
-    assert_eq!(state.calls.load(Ordering::SeqCst), 1);
-    let stable_generation = match runner.runtime_snapshot_state() {
-        RuntimeSnapshotState::Stable(generation) => generation,
-        RuntimeSnapshotState::Updating => panic!("timed out update must restore stable state"),
-    };
-    let recovered_view = runner.turn_extension_view();
-    assert_eq!(recovered_view.generation(), stable_generation);
-    drop(recovered_view);
-
-    drop(version_two_view);
-    assert!(runner.notify_config_changed().await.is_empty());
-    assert_eq!(state.applied_version.load(Ordering::SeqCst), 3);
-    assert!(runner.shutdown().await.is_empty());
 }
 
 #[tokio::test]
@@ -2074,7 +2284,11 @@ async fn operation_timeout_bounds_advisory_hooks_and_stop() {
     let result = runner
         .emit_provider(
             ProviderEvent::AfterResponse,
-            RuntimeProviderContext::new(runtime_hook_call(), ProviderPayload::new(Vec::new())),
+            runtime_provider_context(
+                runtime_hook_call(),
+                ProviderRequestId::new("operation-timeout"),
+                Vec::new(),
+            ),
         )
         .await
         .unwrap();
@@ -2131,7 +2345,11 @@ async fn provider_response_hook_observes_without_blocking() {
     let result = runner
         .emit_provider(
             ProviderEvent::AfterResponse,
-            RuntimeProviderContext::new(runtime_hook_call(), ProviderPayload::new(Vec::new())),
+            runtime_provider_context(
+                runtime_hook_call(),
+                ProviderRequestId::new("provider-response"),
+                Vec::new(),
+            ),
         )
         .await
         .unwrap();
@@ -2329,7 +2547,7 @@ async fn registry_snapshot_exposes_registered_extension_declarations() {
 }
 
 #[tokio::test]
-async fn command_resolution_uses_source_priority_then_declared_priority() {
+async fn command_resolution_uses_declared_priority_then_extension_id() {
     let runner = ExtensionRunner::new(Duration::from_secs(1));
     runner
         .register(Arc::new(CommandProbeExtension {
@@ -2365,12 +2583,13 @@ async fn command_resolution_uses_source_priority_then_declared_priority() {
         .find(|command| command.command.name == "demo")
         .expect("demo command");
 
-    assert_eq!(demo.extension_id, "normal-high");
-    assert_eq!(demo.source, CommandSource::Extension);
+    assert_eq!(demo.extension_id, "astrcode-skill");
     assert_eq!(demo.shadowed.len(), 2);
-    assert!(demo.shadowed.iter().any(|command| {
-        command.extension_id == "astrcode-skill" && command.source == CommandSource::Skill
-    }));
+    assert!(
+        demo.shadowed
+            .iter()
+            .any(|command| command.extension_id == "normal-high" && command.priority == 5)
+    );
 }
 
 #[tokio::test]
@@ -2384,6 +2603,8 @@ async fn command_completion_dispatches_to_resolved_handler() {
             requires_idle: false,
             argument_completions: true,
             priority: 0,
+            availability: CommandAvailability::AllTransports,
+            execution: CommandExecution::Extension,
         },
         Arc::new(ExecuteOnlyCommandProbe),
     );

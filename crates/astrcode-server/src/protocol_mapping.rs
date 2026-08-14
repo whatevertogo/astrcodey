@@ -15,24 +15,25 @@ use astrcode_protocol::{
         CustomEventDeclarationDto, CustomEventSourceFilterDto, CustomEventSubscriptionDto,
         ExtensionSlashCommandDto, SlashCommandInfoDto, StatusItemDto,
     },
-    wire::{CommandSourceDto, ExtensionCapabilityDto, ExtensionHttpMethodDto, MessageRoleDto},
+    wire::{
+        CommandAvailabilityDto, CommandExecutionDto, ExtensionCapabilityDto,
+        ExtensionHttpMethodDto, MessageRoleDto, SessionCommandKindDto,
+    },
 };
 use astrcode_session_projection::{AgentSessionLinkView, AgentSessionStatus, SessionReadModel};
 
-use crate::session_command_contract::{CommandInfo, CommandSource};
+use crate::session_command_contract::CommandInfo;
 
 pub(crate) fn agent_session_link_to_dto(link: &AgentSessionLinkView) -> AgentSessionLinkDto {
     AgentSessionLinkDto {
         child_session_id: link.child_session_id.to_string(),
         tool_call_id: link.tool_call_id.as_ref().map(ToString::to_string),
-        agent_name: Some(link.agent_name.clone()),
-        task: Some(link.task.clone()),
-        status: Some(agent_session_status_to_dto(link.status)),
+        agent_name: link.agent_name.clone(),
+        task: link.task.clone(),
+        status: agent_session_status_to_dto(link.status),
         final_session_id: link.final_session_id.as_ref().map(ToString::to_string),
         summary: link.summary.clone(),
         error: link.error.clone(),
-        phase: None,
-        current_tool: None,
     }
 }
 
@@ -74,7 +75,7 @@ pub(crate) fn message_to_dto(message: &LlmMessage) -> MessageDto {
     MessageDto {
         role,
         content,
-        is_compact_summary: Some(is_compact_summary),
+        is_compact_summary,
     }
 }
 
@@ -104,6 +105,7 @@ pub(crate) fn extension_capability_to_dto(
 ) -> ExtensionCapabilityDto {
     match capability {
         ExtensionCapability::SessionControl => ExtensionCapabilityDto::SessionControl,
+        ExtensionCapability::SessionCommand => ExtensionCapabilityDto::SessionCommand,
         ExtensionCapability::SessionInspect => ExtensionCapabilityDto::SessionInspect,
         ExtensionCapability::PublicHttp => ExtensionCapabilityDto::PublicHttp,
         ExtensionCapability::AuthenticatedHttp => ExtensionCapabilityDto::AuthenticatedHttp,
@@ -167,32 +169,24 @@ pub(crate) fn status_item_to_info_dto(item: StatusItem) -> StatusItemInfoDto {
 pub(crate) fn command_info_to_stdio_dto(command: CommandInfo) -> ExtensionCommandInfoDto {
     ExtensionCommandInfoDto {
         name: command.name,
+        extension_id: command.extension_id,
         description: command.description,
         needs_argument: command.needs_argument,
         requires_idle: command.requires_idle,
         argument_completions: command.argument_completions,
         priority: command.priority,
-        source: command_source_to_dto(command.source),
     }
 }
 
 pub(crate) fn command_info_to_http_dto(command: CommandInfo) -> SlashCommandInfoDto {
     SlashCommandInfoDto {
         name: command.name,
+        extension_id: command.extension_id,
         description: command.description,
         needs_argument: command.needs_argument,
         requires_idle: command.requires_idle,
         argument_completions: command.argument_completions,
         priority: command.priority,
-        source: command_source_to_dto(command.source),
-    }
-}
-
-fn command_source_to_dto(source: CommandSource) -> CommandSourceDto {
-    match source {
-        CommandSource::Builtin => CommandSourceDto::Builtin,
-        CommandSource::Extension => CommandSourceDto::Extension,
-        CommandSource::Skill => CommandSourceDto::Skill,
     }
 }
 
@@ -204,6 +198,29 @@ pub(crate) fn extension_slash_command_to_dto(command: SlashCommand) -> Extension
         requires_idle: command.requires_idle,
         argument_completions: command.argument_completions,
         priority: command.priority,
+        availability: match command.availability {
+            astrcode_extension_sdk::extension::CommandAvailability::AllTransports => {
+                CommandAvailabilityDto::AllTransports
+            },
+            astrcode_extension_sdk::extension::CommandAvailability::InteractiveOnly => {
+                CommandAvailabilityDto::InteractiveOnly
+            },
+        },
+        execution: match command.execution {
+            astrcode_extension_sdk::extension::CommandExecution::Extension => {
+                CommandExecutionDto::Extension
+            },
+            astrcode_extension_sdk::extension::CommandExecution::Host(command) => {
+                CommandExecutionDto::Host(match command {
+                    astrcode_extension_sdk::extension::SessionCommandKind::CompactSession => {
+                        SessionCommandKindDto::CompactSession
+                    },
+                    astrcode_extension_sdk::extension::SessionCommandKind::SelectModel => {
+                        SessionCommandKindDto::SelectModel
+                    },
+                })
+            },
+        },
     }
 }
 
@@ -235,7 +252,6 @@ pub(crate) fn custom_event_subscription_to_dto(
 
 #[cfg(test)]
 mod tests {
-    use astrcode_context::is_compact_summary_text;
     use astrcode_core::{
         llm::{LlmContent, LlmMessage, LlmRole},
         types::{SessionId, ToolCallId},
@@ -260,10 +276,9 @@ mod tests {
 
         assert_eq!(dto.child_session_id, "child-1");
         assert_eq!(dto.tool_call_id.as_deref(), Some("tool-1"));
-        assert_eq!(dto.status, Some(AgentSessionStatusDto::Completed));
+        assert_eq!(dto.status, AgentSessionStatusDto::Completed);
         assert_eq!(dto.final_session_id.as_deref(), Some("child-final"));
         assert_eq!(dto.summary.as_deref(), Some("done"));
-        assert!(dto.phase.is_none());
     }
 
     #[test]
@@ -272,7 +287,7 @@ mod tests {
         let regular = message_to_dto(&regular);
         assert_eq!(regular.role, MessageRoleDto::User);
         assert_eq!(regular.content, "Hello, how are you?");
-        assert_eq!(regular.is_compact_summary, Some(false));
+        assert!(!regular.is_compact_summary);
         assert_eq!(
             serde_json::to_value(&regular).unwrap(),
             serde_json::json!({
@@ -287,7 +302,7 @@ mod tests {
         let compact = message_to_dto(&compact);
         assert_eq!(compact.role, MessageRoleDto::System);
         assert!(compact.content.contains("<compact_summary>"));
-        assert_eq!(compact.is_compact_summary, Some(true));
+        assert!(compact.is_compact_summary);
         assert_eq!(
             serde_json::to_value(&compact).unwrap(),
             serde_json::json!({
@@ -296,48 +311,32 @@ mod tests {
                 "is_compact_summary": true
             })
         );
-
-        let legacy: MessageDto = serde_json::from_value(serde_json::json!({
-            "role": "system",
-            "content": "Legacy system message"
-        }))
-        .unwrap();
-        assert_eq!(legacy.is_compact_summary, None);
-        assert!(!is_compact_summary_text(&legacy.content));
     }
 
     #[test]
-    fn command_mapping_preserves_sources_at_each_transport_boundary() {
-        let cases = [
-            (CommandSource::Builtin, CommandSourceDto::Builtin),
-            (CommandSource::Extension, CommandSourceDto::Extension),
-            (CommandSource::Skill, CommandSourceDto::Skill),
-        ];
+    fn command_mapping_preserves_extension_identity_at_each_transport_boundary() {
+        let command = CommandInfo {
+            name: "review".into(),
+            extension_id: "review-extension".into(),
+            description: "Review the current changes".into(),
+            needs_argument: true,
+            requires_idle: true,
+            argument_completions: true,
+            priority: 7,
+        };
 
-        for (source, expected_source) in cases {
-            let command = CommandInfo {
-                name: "review".into(),
-                description: "Review the current changes".into(),
-                needs_argument: true,
-                requires_idle: true,
-                argument_completions: true,
-                priority: 7,
-                source,
-            };
+        let stdio = command_info_to_stdio_dto(command.clone());
+        assert_eq!(stdio.name, command.name);
+        assert_eq!(stdio.extension_id, command.extension_id);
 
-            let stdio = command_info_to_stdio_dto(command.clone());
-            assert_eq!(stdio.name, command.name);
-            assert_eq!(stdio.source, expected_source);
-
-            let http = command_info_to_http_dto(command);
-            assert_eq!(http.name, stdio.name);
-            assert_eq!(http.description, stdio.description);
-            assert_eq!(http.needs_argument, stdio.needs_argument);
-            assert_eq!(http.requires_idle, stdio.requires_idle);
-            assert_eq!(http.argument_completions, stdio.argument_completions);
-            assert_eq!(http.priority, stdio.priority);
-            assert_eq!(http.source, expected_source);
-        }
+        let http = command_info_to_http_dto(command);
+        assert_eq!(http.name, stdio.name);
+        assert_eq!(http.extension_id, stdio.extension_id);
+        assert_eq!(http.description, stdio.description);
+        assert_eq!(http.needs_argument, stdio.needs_argument);
+        assert_eq!(http.requires_idle, stdio.requires_idle);
+        assert_eq!(http.argument_completions, stdio.argument_completions);
+        assert_eq!(http.priority, stdio.priority);
     }
 
     fn simple_text_message(text: &str) -> LlmMessage {

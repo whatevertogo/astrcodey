@@ -5,14 +5,25 @@ use serde_json::Value;
 
 /// Typed request shared by bundled and worker model clients.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HostLlmChatRequest {
     pub messages: Vec<HostLlmMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<usize>,
 }
 
 impl HostLlmChatRequest {
     pub fn new(messages: Vec<HostLlmMessage>) -> Self {
-        Self { messages }
+        Self {
+            messages,
+            max_output_tokens: None,
+        }
+    }
+
+    /// Caps this request's generated output without changing the configured model limit.
+    pub fn with_max_output_tokens(mut self, max_output_tokens: usize) -> Self {
+        self.max_output_tokens = Some(max_output_tokens);
+        self
     }
 }
 

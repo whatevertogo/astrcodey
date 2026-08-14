@@ -2,13 +2,14 @@
 
 mod files;
 mod process;
-mod result;
 
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
 
+#[cfg(test)]
+use astrcode_extension_sdk::extension::internal::extension_config;
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
@@ -102,10 +103,6 @@ impl Extension for CodingExtension {
     async fn start(&self, context: ExtensionStartContext) -> Result<(), ExtensionError> {
         self.apply_config(context.config())
     }
-
-    async fn on_config_changed(&self, config: ExtensionConfig) -> Result<(), ExtensionError> {
-        self.apply_config(&config)
-    }
 }
 
 #[cfg(test)]
@@ -150,8 +147,7 @@ mod tests {
                 "patch",
                 "glob",
                 "grep",
-                "shell",
-                "terminal"
+                "shell"
             ]
         );
         for tool in tools {
@@ -174,7 +170,7 @@ mod tests {
     fn coding_config_validation_is_pure_and_application_updates_the_timeout() {
         let extension = CodingExtension::default();
         extension
-            .apply_config(&ExtensionConfig::from_runtime(
+            .apply_config(&extension_config(
                 EXTENSION_ID,
                 serde_json::json!({ "shellTimeoutSecs": 180 }),
             ))
@@ -185,7 +181,7 @@ mod tests {
         );
 
         let error = extension
-            .validate_config(&ExtensionConfig::from_runtime(
+            .validate_config(&extension_config(
                 EXTENSION_ID,
                 serde_json::json!({ "shellTimeoutSecs": 0 }),
             ))

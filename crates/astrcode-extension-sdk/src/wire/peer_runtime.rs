@@ -451,7 +451,7 @@ pub enum InvocationResponse {
     Stream(ModelEventStream),
 }
 
-pub fn model_event_stream(receiver: mpsc::Receiver<ModelStreamEvent>) -> ModelEventStream {
+fn model_event_stream(receiver: mpsc::Receiver<ModelStreamEvent>) -> ModelEventStream {
     Box::pin(ReceiverModelStream { receiver })
 }
 
@@ -544,6 +544,9 @@ where
         let mut cancelled = CancelledRequests::default();
         let mut inbound = HashMap::<String, InvocationCancellation>::new();
         let mut tasks = JoinSet::<Result<TaskCompletion, PeerError>>::new();
+        // A frame read may already have consumed bytes when another select branch wins.
+        // Replace it only after the complete frame has been handed to the driver.
+        let mut next_frame = Box::pin(read_next_frame(Arc::clone(&self.transport)));
         let result = loop {
             tokio::select! {
                 () = shutdown.cancelled() => break Ok(()),
@@ -593,7 +596,7 @@ where
                         }
                     }
                 }
-                frame = crate::wire::frame::read_traced_frame(self.transport.as_ref()) => {
+                frame = &mut next_frame => {
                     let message = match frame {
                         Ok(frame) => match parse_wire_message(&frame) {
                             Ok(message) => message,
@@ -611,6 +614,7 @@ where
                     ) {
                         break Err(error);
                     }
+                    next_frame.set(read_next_frame(Arc::clone(&self.transport)));
                 }
             }
         };
@@ -839,6 +843,13 @@ where
             ),
         }
     }
+}
+
+async fn read_next_frame<T>(transport: Arc<T>) -> Result<Vec<u8>, crate::wire::frame::FrameError>
+where
+    T: FrameTransport + 'static,
+{
+    crate::wire::frame::read_traced_frame(transport.as_ref()).await
 }
 
 async fn run_inbound<H>(
@@ -1357,6 +1368,19 @@ mod tests {
         release: Semaphore,
     }
 
+    // Models a frame reader that has consumed bytes before it becomes pending.
+    struct ReadGate {
+        armed: AtomicBool,
+        interrupted: AtomicBool,
+        started: Notify,
+        release: Semaphore,
+    }
+
+    struct ReadAttempt<'a> {
+        gate: &'a ReadGate,
+        completed: bool,
+    }
+
     struct DropNotify(Arc<Notify>);
 
     impl Drop for DropNotify {
@@ -1386,9 +1410,50 @@ mod tests {
         }
     }
 
+    impl ReadGate {
+        fn new() -> Self {
+            Self {
+                armed: AtomicBool::new(false),
+                interrupted: AtomicBool::new(false),
+                started: Notify::new(),
+                release: Semaphore::new(0),
+            }
+        }
+
+        fn arm(&self) {
+            assert!(!self.armed.swap(true, Ordering::AcqRel));
+        }
+
+        async fn wait_if_armed(&self) -> Result<(), FrameError> {
+            if self.interrupted.swap(false, Ordering::AcqRel) {
+                return Err(FrameError::HeaderTooLong);
+            }
+            if !self.armed.swap(false, Ordering::AcqRel) {
+                return Ok(());
+            }
+            let mut attempt = ReadAttempt {
+                gate: self,
+                completed: false,
+            };
+            self.started.notify_one();
+            self.release.acquire().await.unwrap().forget();
+            attempt.completed = true;
+            Ok(())
+        }
+    }
+
+    impl Drop for ReadAttempt<'_> {
+        fn drop(&mut self) {
+            if !self.completed {
+                self.gate.interrupted.store(true, Ordering::Release);
+            }
+        }
+    }
+
     struct ChannelTransport {
         inbound: AsyncMutex<mpsc::Receiver<Vec<u8>>>,
         outbound: mpsc::Sender<Vec<u8>>,
+        read_gate: Arc<ReadGate>,
         write_gate: Arc<WriteGate>,
     }
 
@@ -1400,11 +1465,13 @@ mod tests {
                 Self {
                     inbound: AsyncMutex::new(left_rx),
                     outbound: right_tx,
+                    read_gate: Arc::new(ReadGate::new()),
                     write_gate: Arc::new(WriteGate::new()),
                 },
                 Self {
                     inbound: AsyncMutex::new(right_rx),
                     outbound: left_tx,
+                    read_gate: Arc::new(ReadGate::new()),
                     write_gate: Arc::new(WriteGate::new()),
                 },
             )
@@ -1414,6 +1481,7 @@ mod tests {
     #[async_trait::async_trait]
     impl FrameTransport for ChannelTransport {
         async fn read_frame(&self) -> Result<Vec<u8>, FrameError> {
+            self.read_gate.wait_if_armed().await?;
             self.inbound.lock().await.recv().await.ok_or_else(|| {
                 FrameError::Io(io::Error::new(
                     io::ErrorKind::UnexpectedEof,
@@ -1625,12 +1693,14 @@ mod tests {
         host_driver: PeerDriver<ChannelTransport>,
         worker_handle: PeerHandle,
         worker_driver: PeerDriver<ChannelTransport>,
+        host_read_gate: Arc<ReadGate>,
         host_write_gate: Arc<WriteGate>,
         host_inbound_tx: mpsc::Sender<Vec<u8>>,
     }
 
     async fn ready_peer_pair(features: BTreeSet<FeatureName>) -> ReadyPeerPair {
         let (host_transport, worker_transport) = ChannelTransport::pair();
+        let host_read_gate = Arc::clone(&host_transport.read_gate);
         let host_write_gate = Arc::clone(&host_transport.write_gate);
         let host_inbound_tx = worker_transport.outbound.clone();
         let host = Peer::new(host_transport, peer_info("host"));
@@ -1645,8 +1715,10 @@ mod tests {
             worker.accept(worker_initialization)
         );
         let (host, worker) = tokio::join!(
-            host.unwrap().0.activate("activate-1"),
-            worker.unwrap().accept_activation()
+            host.unwrap()
+                .0
+                .activate("activate-1", serde_json::Value::Null),
+            worker.unwrap().accept_activation(|_| async { Ok(()) })
         );
         let (host_handle, host_driver) = host.unwrap().into_runtime();
         let (worker_handle, worker_driver) = worker.unwrap().into_runtime();
@@ -1655,9 +1727,64 @@ mod tests {
             host_driver,
             worker_handle,
             worker_driver,
+            host_read_gate,
             host_write_gate,
             host_inbound_tx,
         }
+    }
+
+    #[tokio::test]
+    async fn command_dispatch_does_not_cancel_an_in_progress_frame_read() {
+        let ReadyPeerPair {
+            host_handle,
+            host_driver,
+            worker_driver,
+            host_read_gate,
+            ..
+        } = ready_peer_pair(BTreeSet::new()).await;
+        let delayed_started = Arc::new(Notify::new());
+        let delayed_release = Arc::new(Notify::new());
+        let host_shutdown = CancellationToken::new();
+        let worker_shutdown = CancellationToken::new();
+
+        host_read_gate.arm();
+        let host_task =
+            tokio::spawn(host_driver.run_until(Arc::new(HostHandler), host_shutdown.clone()));
+        let worker_task = tokio::spawn(worker_driver.run_until(
+            Arc::new(DelayedEchoWorkerHandler {
+                started: Arc::clone(&delayed_started),
+                release: Arc::clone(&delayed_release),
+            }),
+            worker_shutdown.clone(),
+        ));
+        timeout(Duration::from_secs(1), host_read_gate.started.notified())
+            .await
+            .expect("host driver should begin its frame read");
+
+        let invocation = tokio::spawn(async move {
+            host_handle
+                .invoke("worker.delayed_echo", serde_json::json!({ "routed": true }))
+                .await
+        });
+        timeout(Duration::from_secs(1), delayed_started.notified())
+            .await
+            .expect("driver should dispatch a command while the frame read is pending");
+        host_read_gate.release.add_permits(1);
+        delayed_release.notify_one();
+
+        assert_eq!(
+            timeout(Duration::from_secs(1), invocation)
+                .await
+                .expect("invocation should complete after the frame read resumes")
+                .unwrap()
+                .unwrap(),
+            serde_json::json!({ "routed": true })
+        );
+
+        host_shutdown.cancel();
+        worker_shutdown.cancel();
+        assert!(host_task.await.unwrap().is_ok());
+        assert!(worker_task.await.unwrap().is_ok());
     }
 
     #[tokio::test]
@@ -2016,6 +2143,7 @@ mod tests {
             host_driver,
             worker_handle,
             worker_driver,
+            host_read_gate: _,
             host_write_gate,
             host_inbound_tx,
         } = ready_peer_pair(BTreeSet::new()).await;

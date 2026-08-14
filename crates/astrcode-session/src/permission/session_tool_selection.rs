@@ -1,20 +1,16 @@
-use super::{PermissionContext, PermissionDecision, PermissionPolicy};
+use super::{PermissionContext, PermissionPolicy, PolicyDecision};
 
 pub(super) struct SessionToolSelectionPolicy;
 
 impl PermissionPolicy for SessionToolSelectionPolicy {
-    fn priority(&self) -> u32 {
-        20
-    }
-
-    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
+    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PolicyDecision {
         let Some(selection) = ctx.tool_selection else {
-            return PermissionDecision::Pass;
+            return PolicyDecision::Pass;
         };
         if selection.allows(ctx.tool_name) {
-            return PermissionDecision::Pass;
+            return PolicyDecision::Pass;
         }
-        PermissionDecision::Deny {
+        PolicyDecision::Deny {
             reason: format!(
                 "Tool '{}' is outside this session's selection",
                 ctx.tool_name

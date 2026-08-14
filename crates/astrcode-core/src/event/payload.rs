@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::{PersistedSystemPrompt, SystemPromptSource, envelope::ToolOutputStream};
 use crate::{
     compaction::CompactStrategy,
-    llm::{LlmMessage, LlmTokenUsage},
+    llm::{LlmTokenUsage, TranscriptMessage},
     message_attachment::MessageAttachment,
     permission::{ApprovalDecision, ApprovalSource},
     tool::{SessionToolSelection, ToolResult},
@@ -44,15 +44,10 @@ pub struct CustomEventData {
     pub extension_id: String,
     pub event_type: String,
     pub schema_version: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub causation_id: Option<EventId>,
-    #[serde(default, skip_serializing_if = "is_zero")]
     pub cascade_depth: u8,
     pub payload: serde_json::Value,
-}
-
-const fn is_zero(value: &u8) -> bool {
-    *value == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -88,8 +83,6 @@ pub enum DurableEventPayload {
         fingerprint: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         extra_system_prompt: Option<String>,
-        // `default` 兼容旧日志：Native 是默认来源，序列化时被省略，缺失等价于 Native。
-        #[serde(default, skip_serializing_if = "SystemPromptSource::is_native")]
         source: SystemPromptSource,
     },
     AgentSessionSpawned {
@@ -98,7 +91,7 @@ pub enum DurableEventPayload {
         task: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_selection: Option<SessionToolSelection>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         tool_call_id: Option<ToolCallId>,
     },
     AgentSessionCompleted {
@@ -137,7 +130,7 @@ pub enum DurableEventPayload {
         text: String,
         attachments: Vec<MessageAttachment>,
         /// 对应 `UserInputAccepted` 的 durable seq；直接启动或 turn 中注入时为空。
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(skip_serializing_if = "Option::is_none")]
         accepted_seq: Option<u64>,
     },
     RecapGenerated {
@@ -188,8 +181,6 @@ pub enum DurableEventPayload {
         call_id: ToolCallId,
         tool_name: String,
         error: String,
-        // `default` 兼容旧日志：空 metadata 序列化时被省略，反序列化时缺失等价于空 map。
-        #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
         metadata: std::collections::BTreeMap<String, serde_json::Value>,
         #[serde(skip_serializing_if = "Option::is_none")]
         duration_ms: Option<u64>,
@@ -213,7 +204,7 @@ pub enum DurableEventPayload {
         /// 被替换前缀（system prompt + provider 视角消息）的 `transcript_prefix_fingerprint`；
         /// 提交时必须与 projection 重算结果一致。
         source_fingerprint: String,
-        messages: Vec<LlmMessage>,
+        messages: Vec<TranscriptMessage>,
         reason: TranscriptRewriteReason,
     },
     SessionForked {
@@ -221,14 +212,13 @@ pub enum DurableEventPayload {
         source_cursor: Cursor,
         #[serde(skip_serializing_if = "Option::is_none")]
         first_user_message: Option<String>,
-        messages: Vec<LlmMessage>,
+        messages: Vec<TranscriptMessage>,
     },
     ErrorOccurred {
         code: i32,
         message: String,
         recoverable: bool,
     },
-    #[serde(alias = "extension_event")]
     CustomEvent(CustomEventData),
 }
 
@@ -300,7 +290,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn custom_event_accepts_the_legacy_tag_and_serializes_the_canonical_tag() {
+    fn durable_payload_uses_canonical_tags_and_requires_complete_facts() {
         let payload = DurableEventPayload::CustomEvent(CustomEventData {
             extension_id: "ext".into(),
             event_type: "thing".into(),
@@ -312,49 +302,43 @@ mod tests {
         let canonical = serde_json::to_value(&payload).unwrap();
         assert_eq!(canonical["type"], "custom_event");
         assert!(canonical.get("causation_id").is_none());
-
-        let mut legacy = canonical.clone();
-        legacy["type"] = serde_json::json!("extension_event");
+        assert_eq!(canonical["cascade_depth"], 0);
         assert_eq!(
-            serde_json::from_value::<DurableEventPayload>(canonical).unwrap(),
+            serde_json::from_value::<DurableEventPayload>(canonical.clone()).unwrap(),
             payload
         );
-        let legacy_payload = serde_json::from_value::<DurableEventPayload>(legacy).unwrap();
-        assert_eq!(legacy_payload, payload);
+
+        let mut incomplete_custom_event = canonical;
+        incomplete_custom_event
+            .as_object_mut()
+            .unwrap()
+            .remove("cascade_depth");
+        assert!(serde_json::from_value::<DurableEventPayload>(incomplete_custom_event).is_err());
+
+        let mut configured = serde_json::json!({
+            "type": "system_prompt_configured",
+            "text": "hi",
+            "fingerprint": "fp",
+            "source": "native"
+        });
+        assert!(serde_json::from_value::<DurableEventPayload>(configured.clone()).is_ok());
+        configured.as_object_mut().unwrap().remove("source");
+        assert!(serde_json::from_value::<DurableEventPayload>(configured).is_err());
+
+        let mut failed = serde_json::json!({
+            "type": "tool_call_failed",
+            "call_id": "c1",
+            "tool_name": "t",
+            "error": "boom",
+            "metadata": {},
+            "arguments": "{}"
+        });
+        let decoded = serde_json::from_value::<DurableEventPayload>(failed.clone()).unwrap();
         assert_eq!(
-            serde_json::to_value(legacy_payload).unwrap()["type"],
-            "custom_event"
+            serde_json::to_value(decoded).unwrap()["metadata"],
+            serde_json::json!({})
         );
-    }
-
-    #[test]
-    fn tool_call_failed_accepts_missing_empty_metadata() {
-        // 旧日志写入时空 metadata 被省略；缺失必须等价于空 map，否则整个会话无法重放。
-        let json = r#"{"type":"tool_call_failed","call_id":"c1","tool_name":"t","error":"boom","arguments":"{}"}"#;
-        let payload = serde_json::from_str::<DurableEventPayload>(json).unwrap();
-        let DurableEventPayload::ToolCallFailed { ref metadata, .. } = payload else {
-            panic!("expected tool_call_failed");
-        };
-        assert!(metadata.is_empty());
-
-        // 写读往返：空 metadata 序列化时省略，再读回仍为空 map。
-        let roundtrip = serde_json::to_string(&payload).unwrap();
-        assert!(!roundtrip.contains("metadata"));
-        let payload = serde_json::from_str::<DurableEventPayload>(&roundtrip).unwrap();
-        let DurableEventPayload::ToolCallFailed { metadata, .. } = payload else {
-            panic!("expected tool_call_failed");
-        };
-        assert!(metadata.is_empty());
-    }
-
-    #[test]
-    fn system_prompt_configured_accepts_missing_native_source() {
-        // 旧日志写入 Native 来源时省略 source 字段；缺失必须等价于 Native。
-        let json = r#"{"type":"system_prompt_configured","text":"hi","fingerprint":"fp"}"#;
-        let payload = serde_json::from_str::<DurableEventPayload>(json).unwrap();
-        let DurableEventPayload::SystemPromptConfigured { source, .. } = payload else {
-            panic!("expected system_prompt_configured");
-        };
-        assert_eq!(source, SystemPromptSource::Native);
+        failed.as_object_mut().unwrap().remove("metadata");
+        assert!(serde_json::from_value::<DurableEventPayload>(failed).is_err());
     }
 }

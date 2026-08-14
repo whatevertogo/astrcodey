@@ -9,7 +9,7 @@
 
 AstrCode 的工具系统应当只有一个产品概念：**Extension 提供的工具**。
 
-第一方 `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell` 和 `terminal`
+第一方 `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep` 和 `shell`
 不应继续通过独立的 `astrcode-tools`、`BuiltinToolCatalog` 和 server 专用清理器进入
 session。它们应当成为一个正常的第一方 bundled Extension，与其他 Extension 一样完成：
 
@@ -38,9 +38,9 @@ session。它们应当成为一个正常的第一方 bundled Extension，与其�
 
 这是**删除物理 crate、保留逻辑边界**，不是把 wire DTO、作者 API 和宿主实现混成一层。
 
-## 2. 当前问题
+## 2. 迁移前问题
 
-当前实现已经有统一 Extension Runtime，但第一方编码工具仍从旁路进入 session，因此系统存在
+迁移前实现已经有统一 Extension Runtime，但第一方编码工具仍从旁路进入 session，因此系统存在
 两套工具来源和两套资源所有权。
 
 ### 2.1 两套工具 catalog
@@ -94,7 +94,7 @@ Host capability。
 
 ### 2.4 server 知道具体工具资源
 
-terminal 和 background shell 使用各自的全局 registry。server 在 session delete/recycle 后
+迁移前的 terminal 和 background shell 使用各自的全局 registry。server 在 session delete/recycle 后
 直接调用 `astrcode-tools` 的清理函数。
 
 这意味着 server 不只是 composition root，还知道具体工具实现的资源模型。新增一个具有
@@ -106,8 +106,8 @@ session 生命周期的工具时，开发者必须同时修改工具 crate、ser
 Extension HostRouter 已经提供 workspace read/write/edit/glob/grep 和 process spawn。编码工具又
 直接实现了相近的文件与进程能力。
 
-但两者现在并不等价：编码工具还有 patch、artifact 读取、read-before-edit observation、后台
-shell、PTY terminal 和特殊结果展示。目标不是删除一份代码后假定另一份天然等价，而是明确
+但两者当时并不等价：编码工具还有 patch、artifact 读取、read-before-edit observation、后台
+shell、PTY terminal 和特殊结果展示。迁移没有假定两份实现天然等价，而是明确
 分离：
 
 - Host Runtime 拥有安全、资源和操作原语；
@@ -120,7 +120,7 @@ shell、PTY terminal 和特殊结果展示。目标不是删除一份代码后�
 1. **一个工具来源**：session 只从一个不可变 Extension turn view 获取工具。
 2. **一个作者模型**：第一方、第三方、进程内和 worker 工具使用相同 Tool API。
 3. **一个权限管线**：所有工具都按“最终参数 → plan → approve → lease → execute”执行。
-4. **一个资源所有者**：长寿命进程、PTY 和临时资源由 Host session scope 统一拥有。
+4. **一个资源所有者**：长寿命进程和临时资源由 Host session scope 统一拥有。
 5. **一个 generation 边界**：同一 turn 的工具、prompt 和 hooks 来自同一 Extension view。
 6. **无 server 工具特例**：server 不识别具体工具名、实现 crate 或清理函数。
 7. **无 native 逃生口**：Extension SDK 不向作者暴露 raw `ToolExecutionContext`。
@@ -181,6 +181,15 @@ shell、PTY terminal 和特殊结果展示。目标不是删除一份代码后�
   固定的 generation。
 - reload 只影响后续 turn；已经开始的 turn 不切换 handler。
 - Extension Runtime 不得在调用途中以“获取最新”为由绕过 pinned generation。
+- Session 在首个 turn hook 前固定 core `RuntimeGenerationView`，并从中派生本 turn 的
+  `LlmProviderBindings`。该 binding 必须通过 hook/tool call context 和 `InvokeContext` 显式传到
+  `HostRouter`；session-scoped `ModelClient` 不得重新读取 live provider。
+- startup 或没有 turn attribution 的调用可以显式使用 live provider fallback；该 fallback 不得被
+  隐式用于具有 turn attribution 的 hook 或 tool call。
+
+`ExtensionTurnView` 与 core `RuntimeGenerationView` 当前仍在两个独立边界固定。上述约束解决的是
+active turn 内 Host LLM 漂移，不表示 core config generation 与 Extension publication 已经原子化；
+两者共享 revision/commit barrier 仍是独立的配置发布问题。
 
 ### 5.3 权限与资源
 
@@ -246,7 +255,7 @@ flowchart TB
 | `astrcode-extension-sdk`      | Extension 作者 API、typed HostClient、runtime port 和逻辑隔离的 S5R/wire contract。 |
 | `astrcode-extensions`         | Extension 加载、generation、索引、调用调度、HostRouter 和 session resource scope。 |
 | `astrcode-extension-worker`   | 将 SDK Extension/handler 适配到 S5R worker transport。                             |
-| `astrcode-extension-coding`   | 九个 provider-visible 编码工具的 schema、plan、调用和结果展示。                    |
+| `astrcode-extension-coding`   | 八个 provider-visible 编码工具的 schema、plan、调用和结果展示。                    |
 | `astrcode-bundled-extensions` | 产品组合根：返回本产品链接的第一方 Extension 集合。                                |
 | `astrcode-session`            | turn、权限、审批、provider context、工具管线和 Compact；只消费 Extension port。    |
 | `astrcode-server`             | 进程 composition、operation gate、HTTP/SSE/ACP 边界和 runtime wiring。             |
@@ -297,7 +306,7 @@ resource lease 裁剪后的 typed `HostClient`，不会接触 storage 或 projec
 | ToolPlan                         | session tool call                         | plan 到 execute 结束               | 否                           |
 | ResourceLease                    | Host resource scheduler                   | 单 tool call                       | 否                           |
 | file observation                 | Extension session resource scope          | session                            | 否                           |
-| process/PTY handle               | Extension session resource scope          | session 或显式 kill                | 否                           |
+| process handle                   | Extension session resource scope          | call、session 或显式 kill          | 否                           |
 | Extension 业务状态               | 对应 Extension 的 session state namespace | session                            | 按 capability 契约决定       |
 | durable event/tool artifact      | storage                                   | session/recycle policy             | 是                           |
 
@@ -369,9 +378,10 @@ stateDiagram-v2
 - 发布新 index 时不得等待 hook、worker 或 I/O；
 - `Draining` 拒绝新调用，已有调用持有 permit；
 - stop 失败只产生有界诊断，不回滚已经发布的新 generation；
-- disable/uninstall 在旧调用 drain 后清理该 Extension ID 的 session-scoped resources；
-- 同 ID reload 默认保留该 Extension 的 session-scoped resources，使新 generation 能继续访问旧
-  handle；如未来需要 breaking resource schema，必须显式提升资源 namespace version。
+- reload/disable/uninstall 在旧 view 与调用 drain、旧实例 stop 尝试结束后，按不可见的
+  `ExtensionInstanceId` 清理该实例的 session-scoped resources；
+- 同 ID 的新旧 generation 使用不同 Host resource owner，不能互相 list/read/input/kill。新代若需要
+  跨代状态，必须通过 Extension 自己的持久化契约重建，不能继承旧代的活资源句柄。
 
 ### 7.4 Extension turn view
 
@@ -527,19 +537,22 @@ pub struct ToolPlanContext {
 
 ```rust
 pub struct ToolPlan {
-    pub resources: ResourceSet,
+    resources: Vec<ResourceAccess>,
 }
 ```
 
-planner 不得返回或改写参数。参数在 JSON repair、`PreToolUse` 和 schema 校验后已经冻结，plan 与
-execute 必须接收完全相同的值。这样不会再产生“审批基于一份规范化参数，执行却基于另一份参数”
-的一致性边界。
+planner 不得返回或改写参数。参数先经过 JSON repair 和全部 `ToolInputTransform`，再由 Session
+统一 normalize 并做 schema 校验；全部 `PreToolUse` admission handler 只观察这份 canonical
+arguments。进入 plan 后参数已经冻结，plan 与 execute 必须接收完全相同的值。这样不会再产生
+“审批基于一份规范化参数，执行却基于另一份参数”的一致性边界。
 
 相对路径解释、缺省 action、timeout 上限和 patch 路径提取应由同一 Extension generation 内的纯
 参数解析代码完成：plan 使用解析结果声明资源，execute 使用相同解析规则发起 Host 请求。若两者
 仍然产生偏差，Host operation 的 lease 校验必须拒绝超出 plan 的实际访问。
 
-`ResourceSet` 使用 core 的领域资源类型，在 S5R 边界映射为显式 DTO。至少表达：
+`ToolPlan` 直接按声明顺序保存 core 的领域资源类型，在 S5R 边界映射为显式
+DTO。它不再包装一层没有独立不变式的集合类型；`ToolPlan::new` 是唯一通用的 iterator
+构造入口，`resources()` 只读暴露切片。资源顺序和重复声明保持不变。`ResourceAccess` 至少表达：
 
 ```rust
 pub enum ResourceAccess {
@@ -595,17 +608,19 @@ sequenceDiagram
     participant Host
 
     Model->>Session: tool name + JSON arguments
-    Session->>Session: JSON repair + schema decode
-    Session->>Hooks: PreToolUse
-    Hooks-->>Session: allow / block / modified arguments
-    Session->>Session: validate final arguments
-    Session->>Tool: plan(final arguments)
-    Tool-->>Session: ResourceSet
-    Session->>Permission: evaluate ResourceSet
+    Session->>Session: JSON repair
+    Session->>Hooks: ToolInputTransform(raw arguments)
+    Hooks-->>Session: deterministically folded arguments
+    Session->>Session: normalize + schema decode canonical arguments
+    Session->>Hooks: PreToolUse admission(canonical arguments)
+    Hooks-->>Session: all asks or terminal block
+    Session->>Tool: plan(canonical arguments)
+    Tool-->>Session: ToolPlan(resources)
+    Session->>Permission: combine hook asks + core policy for resources
     Permission-->>Session: approve / ask / deny
     Session->>Host: acquire resources and issue lease
     Host-->>Session: ResourceLease
-    Session->>Tool: execute(same final arguments, scoped HostClient)
+    Session->>Tool: execute(same canonical arguments, scoped HostClient)
     Tool->>Host: typed host operations
     Host->>Host: capability + lease + boundary validation
     Host-->>Tool: typed result
@@ -617,24 +632,29 @@ sequenceDiagram
 固定顺序：
 
 1. 解析模型输出并做现有 JSON repair；
-2. 执行 `PreToolUse`，允许 block 或修改输入；
-3. 对最终输入重新做 schema 校验；
-4. 调用 pinned generation 的 `plan()`；
-5. 权限链基于 `ToolPlan.resources` 决策；
-6. 获取资源调度许可并签发 lease；
-7. 使用同一份最终参数调用同 generation 的 `execute()`；
-8. 每个 Host operation 强制验证 lease；
-9. 执行 `PostToolUse`；
-10. 按现有工具结果策略持久化或发布。
+2. 全部匹配的 `ToolInputTransformHandler` 按确定的 priority/order 折叠输入，后一个 transform 观察
+   前一个的输出；
+3. Session 对折叠结果执行一次 normalize 与 schema/typed decode，得到 canonical arguments；
+4. 全部匹配的 `PreToolUseHandler` 观察同一份 canonical arguments：任一 `Block` 立即拒绝，否则聚合
+   全部 `Ask` requirements；
+5. 调用 pinned Extension generation 的 `plan()`；
+6. 权限链基于 `ToolPlan.resources` 组合 hook asks 与 core policy；
+7. 获取资源调度许可并签发 lease；
+8. 使用同一份 canonical arguments 调用同 generation 的 `execute()`；
+9. 每个 Host operation 强制验证 lease；
+10. 执行 `PostToolUse`；
+11. 按现有工具结果策略持久化或发布。
 
-不能缓存跨 tool call 的 `ToolPlan`，也不能在 hook 修改参数后复用旧 plan。
+不能缓存跨 tool call 的 `ToolPlan`，不能在 transform 后复用旧 plan，也不能让 admission handler
+改写参数。参数变换和准入判断是两个独立阶段，不再通过一个“首个 Ask/Block/Replace 胜出”的结果
+类型混合控制流。
 
 ### 8.7 三层授权
 
 一个 Host 操作必须依次通过：
 
 1. **Extension capability**：manifest 是否允许使用该能力族；
-2. **Session permission**：本次 tool call 的 ResourceSet 是否经过策略/用户审批；
+2. **Session permission**：本次 tool call 的 `ToolPlan.resources` 是否经过策略/用户审批；
 3. **Resource lease**：实际请求是否属于本次批准的具体范围。
 
 例如，工具声明只读 `src/lib.rs`，实际 execute 请求写 `src/main.rs`，即使该 Extension manifest
@@ -657,7 +677,7 @@ Coding Extension 只定义工具语义，不直接使用：
 
 - `std::fs` / `tokio::fs` 修改 workspace；
 - `tokio::process::Command` 启动 shell；
-- PTY library；
+- PTY library；平台不暴露无法证明跨平台进程树所有权的 PTY capability；
 - session repository；
 - raw event sink；
 - global process registry。
@@ -737,20 +757,14 @@ Coding Extension 对模型提供显式 `read_tool_result` 工具。普通 `read`
 
 ### 9.5 ProcessClient
 
-当前 foreground shell、background shell 和 terminal 本质都是 session-scoped process。目标
-Host API 使用一个统一 process service：
+foreground shell 和 background shell 共享一个 session-scoped process service。平台只暴露由
+Host 在 spawn 前建立进程树监管的 pipes process；不提供 PTY 或 resize 旁路：
 
 ```rust
-pub enum ProcessIo {
-    Pipes,
-    Pty { rows: u16, cols: u16 },
-}
-
 pub struct HostProcessStartRequest {
     pub command: String,
     pub args: Vec<String>,
     pub cwd: Option<String>,
-    pub io: ProcessIo,
     pub lifetime: ProcessLifetime,
     pub timeout_ms: Option<u64>,
 }
@@ -758,14 +772,20 @@ pub struct HostProcessStartRequest {
 
 Host 提供：
 
-- `start`：启动 pipes/PTY 进程并返回 opaque handle；
-- `read`：增量读取 stdout/stderr 或 PTY 输出；
-- `input(write)`：向 stdin/PTY 写入；
-- `input(close)`：关闭 pipes stdin，让等待 EOF 的进程可以结束；PTY 不支持该动作；
-- `resize`：调整 PTY；
+- `spawn`：运行一个 call-owned pipes process 并收集有界输出；
+- `start`：启动 call-owned 或 session-owned pipes process 并返回 opaque handle；
+- `read`：增量读取 stdout/stderr；
+- `input(write)`：向 stdin 写入；
+- `input(close)`：关闭 stdin，让等待 EOF 的进程可以结束；
 - `status`：读取运行状态和 exit code；
+- `promote`：把仍运行的 call-owned handle 原子提升为 session-owned；
 - `kill`：终止并回收；
 - `list`：只列出当前 session、当前 Extension 可见的 handle。
+
+所有 spawn 统一经过 Runtime 的 `process_supervision.rs`：Unix 在 spawn 前创建独立 process group，
+terminate 与 Drop 都面向整个 group；Windows 生产路径在 spawn 时绑定带 `KillOnDrop` 的 Job Object。
+Unix descendant-tree 已由真实子孙进程回归覆盖；Windows Job Object 仍需要真实 Windows runner 用
+descendant PID 完成验收，cross-compile 或 Unix 测试不能替代该证据。
 
 `read` 与 `status` 在进程结束后还返回 typed termination：`exited`、`timed_out`、`killed` 或
 `cancelled`。Host 负责观察真实生命周期并确定终态；Extension 不从 exit code、空输出或错误文本
@@ -776,8 +796,10 @@ Coding Extension 把这些原语组合成：
 - `shell` foreground：`start(Pipes)`，写入可选输入并关闭 stdin，随后循环 `read`；
 - `shell` background：`start(Pipes)` + 后续 `status/read`；
 - 自动转后台：foreground handle 转为 session-owned handle，不复制进程；
-- `terminal start`：`start(Pty)`；
-- `terminal write/read/resize/kill/list`：对应 typed ProcessClient 操作。
+
+PTY/terminal 没有保留降级实现。`portable-pty` 把 spawn 隐藏在 opaque API 后，Host 无法在 Windows
+创建进程前绑定 Job Object，也无法在所有平台证明 session close 会覆盖完整 descendant tree；因此
+删除该产品能力比只 kill 直接 child 更符合 fail-closed 的资源所有权契约。
 
 Coding Extension 自己拥有 Shell 产品语义：timeout 配置、命令与 cwd 展示、sudo 认证诊断以及严格
 pipeline 状态。对支持 `pipefail` 的 POSIX/WSL shell 显式启用；所选 shell 无法保证 pipeline 任一
@@ -875,14 +897,14 @@ stateDiagram-v2
 5. 执行并确认 durable delete/recycle；
 6. 从 runtime/session index 移除 session；
 7. commit close；
-8. 统一 drop resource scope：kill process、PTY，清理 observation、state 和 custom-event lane；
+8. 统一 drop resource scope：kill process，清理 observation、state 和 custom-event lane；
 9. 发出有界 tracing/metrics。
 
 如果第 4 或第 5 步失败：
 
 - abort close；
 - 恢复 admission；
-- 保留 process/PTY 和其他资源；
+- 保留 process 和其他资源；
 - 不调用工具特定 cleanup；
 - 返回原始有类型错误。
 
@@ -910,12 +932,11 @@ crates/astrcode-extension-coding/src/
 │   ├── write.rs
 │   ├── edit.rs
 │   ├── patch.rs
-│   └── search.rs
+│   ├── search.rs
+│   └── tool_result.rs
 ├── process/
 │   ├── mod.rs
-│   ├── shell.rs
-│   └── terminal.rs
-└── result.rs
+│   └── shell.rs
 ```
 
 文件唯一职责：
@@ -929,9 +950,8 @@ crates/astrcode-extension-coding/src/
 | `files/edit.rs`       | edit 参数语义、原子多编辑计划和结果映射。                     |
 | `files/patch.rs`      | patch 解析、受影响路径 plan 和 Host apply_patch 调用。        |
 | `files/search.rs`     | glob/grep schema、只读 tree plan 和结果映射。                 |
+| `files/tool_result.rs`| opaque artifact 分页 schema、plan 和 ToolResultClient 映射。 |
 | `process/shell.rs`    | shell 参数、命令策略、foreground/background 展示语义。        |
-| `process/terminal.rs` | PTY action schema 与 ProcessClient 组合。                     |
-| `result.rs`           | 编码工具共同的 ToolResult 展示构造；不放 I/O 或控制流。       |
 
 只有逻辑确实复用或提取能澄清重要流程时才增加共享函数。不得重新创建模糊的 `utils.rs`、
 `helpers.rs` 或 `manager.rs`。
@@ -953,27 +973,28 @@ crates/astrcode-extension-coding/src/
 - `astrcode-context`；
 - `astrcode-protocol`。
 
-workspace I/O、process/PTY 和 artifact 实现不能因为“这是第一方 Extension”而加入依赖。
+workspace I/O、process 和 artifact 实现不能因为“这是第一方 Extension”而加入依赖。
 
 ### 11.3 Shell 超时
 
 shell 调用可通过 `timeout` 显式指定 1 到 600 秒；省略时读取 Coding Extension 自己的
 `shellTimeoutSecs` 配置，默认 120 秒。平台删除旧的 `runtime.shellTimeoutSecs`，server 和 session
-都不再了解 shell 配置。Extension 在 `start` / `on_config_changed` 边界校验并原子更新默认值；已经
-构造完成的单次 Host process request 固定当次 timeout，配置热更新只影响后续调用。
+都不再了解 shell 配置。Coding Extension 在候选实例的 `validate_config` / `start` 边界读取并固定
+默认值；配置变化会构造新实例，校验或启动失败不会修改已发布实例。已经构造完成的单次 Host
+process request 固定当次 timeout，新代发布只影响后续 turn。
 
 ### 11.4 工具资源计划示例
 
 | 工具       | 典型 plan                                                                          |
 | ---------- | ---------------------------------------------------------------------------------- |
-| `read`     | 单路径只读；目录读取为 subtree read；artifact 为当前 session artifact read。       |
+| `read`     | 单路径只读；目录读取为 subtree read。                                               |
+| `read_tool_result` | 当前 session 的 opaque artifact read；不接受宿主路径。                    |
 | `write`    | 单路径读写，包含可能创建的父目录语义。                                             |
 | `edit`     | 每个目标文件读写；多编辑先收集全部路径再返回一个原子 plan。                        |
 | `patch`    | 解析 patch 后列出全部 create/update/delete/rename 路径；解析不完整即失败。         |
 | `glob`     | 指定 root subtree read。                                                           |
 | `grep`     | 指定 root subtree read。                                                           |
 | `shell`    | process + broad workspace access；除非命令语言已被可靠限制，否则不伪装成精确路径。 |
-| `terminal` | process/PTY access；具体 handle 操作还受 owner 绑定检查。                          |
 
 ### 11.5 Provider-visible 契约
 
@@ -1095,7 +1116,7 @@ Session
 - registration 校验；
 - tool name 冲突规则；
 - 最终参数与 plan 顺序；
-- ResourceSet 含义；
+- ToolPlan 中 ResourceAccess 的顺序与含义；
 - permission 与 ResourceLease；
 - cancellation 结果；
 - timeout 分类；
@@ -1146,7 +1167,7 @@ Session
 - RuntimeIndex 使用 immutable `Arc` + 原子替换；
 - generation 构建和 Extension start 不持有发布锁；
 - process map 只在查找/插入/删除时短暂持锁；
-- child wait、PTY read/write、hook、worker invoke 和 cleanup 等 `.await` 均在锁外；
+- child wait、process read/write、hook、worker invoke 和 cleanup 等 `.await` 均在锁外；
 - tool resource scheduler 以 lease guard 表达所有权，不依赖调用方手工 unlock；
 - 不启动无 owner、无 cancellation、无 tracing 的后台任务。
 
@@ -1166,7 +1187,7 @@ close、Extension disable 和显式 kill 控制。
 
 ### 15.3 并行执行
 
-现有 execution mode 仍决定候选工具能否并行。ResourceSet/lease 再提供实际冲突约束：
+现有 execution mode 仍决定候选工具能否并行。`ToolPlan.resources`/lease 再提供实际冲突约束：
 
 - 两个互不相交的 read 可以并行；
 - 同一路径 read/read 可以并行；
@@ -1263,8 +1284,17 @@ S5R worker 是进程隔离和协议隔离，不天然是 OS sandbox。除非 lau
 - reload 只影响新 turn；
 - duplicate tool name 阻止发布；
 - old generation drain 后退休；
-- 同 Extension ID reload 保留 session process handle；
-- disable 清理该 Extension 的 handles。
+- 同 Extension ID reload 时新旧 process handle 按 instance 隔离；
+- old view drain 与 stop 后只清理旧 instance 的 handles，disable 清理被禁用 instance 的 handles。
+
+同一多样场景还应覆盖工具 hook 的两阶段语义：两个 transform 按固定顺序折叠，后一个看到前一个
+结果；两个 Ask 都进入最终 requirements；更晚的 Block 仍会被执行并终止调用；planner 与 execute
+收到同一份 canonical arguments。
+
+另用一个跨 Session/Runtime 的 reload 场景验证 turn-scoped Host LLM binding：旧 turn 的 hook 与
+tool 在 live provider reload 后仍调用旧 main/small provider，新 turn 调用新 provider；没有 turn
+attribution 的 startup/unscoped 调用才使用 live fallback。该测试只证明 turn binding，不证明 core
+generation 与 Extension publication 原子化。
 
 ### 18.3 permission 与 lease
 
@@ -1281,7 +1311,7 @@ S5R worker 是进程隔离和协议隔离，不天然是 OS sandbox。除非 lau
 
 ### 18.4 Coding Extension
 
-复用现有 fixtures，建立一个表驱动行为测试覆盖九个工具的代表性路径：
+复用现有 fixtures，建立一个表驱动行为测试覆盖八个工具的代表性路径：
 
 - read 后 edit 成功；外部修改后 stale edit 失败；
 - write/create；
@@ -1290,7 +1320,6 @@ S5R worker 是进程隔离和协议隔离，不天然是 OS sandbox。除非 lau
 - glob/grep 有界输出、真实 ignore 语义和可推进的分页；
 - foreground shell；
 - background shell status/read/kill；
-- PTY start/write/read/resize/kill；
 - artifact read。
 
 测试应通过 fake HostClient 验证 Extension 生成的 plan 和 host request，不在 Extension crate 里重新
@@ -1300,12 +1329,16 @@ S5R worker 是进程隔离和协议隔离，不天然是 OS sandbox。除非 lau
 
 一个 session lifecycle 集成测试覆盖：
 
-1. 启动 pipes process 和 PTY；
-2. durable close 失败，两个资源仍可见；
+1. 启动 call-owned 和 session-owned pipes process；
+2. durable close 失败，session-owned resource 仍可见；
 3. 重试 close 成功；
 4. 所有 process group 被终止；
 5. cleanup 幂等；
 6. 其他 session 的 process 不受影响。
+
+Unix 测试必须启动真实 descendant 并验证 terminate 与 Drop 都清理整个 process group。Windows
+必须在真实 runner 上通过 `cmd.exe` 启动 descendant，验证 Job Object 在 kill、session close 和
+Host drop 后都不留下子孙；该 Windows 验收当前仍待执行。
 
 ### 18.6 transport parity
 
@@ -1335,27 +1368,30 @@ S5R conformance 必须继续覆盖：
 - worker exit；
 - unknown wire error passthrough。
 
-## 19. 实施与提交计划
+## 19. 迁移实施记录（历史）
 
-这次重整不提供运行时双轨、旧参数 alias、迁移 adapter 或 feature flag。实施可以按阶段形成可编译、
-可验证的中间提交，但每个生产入口一旦切换就只保留最终 Extension Runtime 路径。Compact/Projection
-重整应与本章分开提交，避免两组架构变化互相掩盖。
+> **迁移前历史**：本章保留从 builtin/contract 双路径收敛到当前 Extension-only 架构时使用的文件
+> 映射和分阶段顺序，用于解释代码来源，不表示这些路径或 PTY blocker 仍存在。
+
+这次重整没有保留运行时双轨、旧参数 alias、迁移 adapter 或 feature flag。每个生产入口切换后只
+保留最终 Extension Runtime 路径；下列阶段是已完成迁移的历史记录。当前契约、剩余验收和风险分别
+以第 5—18 节及第 21 节为准。
 
 ### 当前文件到目标职责的映射
 
 | 当前位置                                                                | 目标位置/动作                             | 迁移后的职责                                                                                     |
 | ----------------------------------------------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| `astrcode-core/src/tool/access.rs`                                      | 原地演进                                  | 最小领域 `ResourceSet`；不含审批或 Host 实现。                                                   |
+| `astrcode-core/src/tool/access.rs`                                      | 原地演进                                  | 最小领域 `ResourceAccess`/`ToolPlan`；不含审批或 Host 实现。                                      |
 | `astrcode-extension-sdk/src/extension/hooks/handlers.rs`                | 原地演进                                  | 作者侧 `ToolHandler::plan/execute`。                                                             |
 | `astrcode-extension-sdk/src/extension/registrar.rs`                     | 原地演进                                  | definition、prompt metadata 与同一 handler 的原子注册。                                          |
 | `astrcode-extension-sdk/src/runtime_ports.rs`                           | 收敛                                      | SDK-owned `ExtensionRuntimePort`、opaque `ExtensionTurnView`；删除 composite catalog。           |
 | `astrcode-extensions/src/runner/tool_adapter.rs`                        | Runtime adapter                           | 将 in-process/S5R handler 适配为 session 可调用的 plan/execute handle，并持有 generation lease。 |
 | `astrcode-extensions/src/runner/*`                                      | 原地收敛为 Runtime                        | generation、immutable index、discovery cache、admission、draining。                              |
 | `astrcode-extensions/src/host_router/workspace.rs`                      | Runtime Host workspace                    | 安全路径、I/O、patch、artifact、observation 和 lease enforcement。                               |
-| `astrcode-extensions/src/host_router/process.rs`                        | Runtime Host process                      | pipes/PTY、handle registry、process group、session resource ownership。                          |
+| `astrcode-extensions/src/host_router/process.rs`                        | Runtime Host process                      | supervised pipes、handle registry、process group/Job Object、session resource ownership。        |
 | `astrcode-tools/src/files/*.rs`                                         | 拆分到 Coding Extension 与 Host workspace | schema/展示进 Coding Extension；安全 I/O 原语进 Host。                                           |
 | `astrcode-tools/src/shell_tool/*`                                       | 拆分到 Coding Extension 与 Host process   | 命令/结果语义进 Coding Extension；spawn/stream/kill 进 Host。                                    |
-| `astrcode-tools/src/terminal_tool.rs`                                   | 拆分到 Coding Extension 与 Host process   | terminal action 进 Coding Extension；PTY 生命周期进 Host。                                       |
+| `astrcode-tools/src/terminal_tool.rs`                                   | 删除                                      | PTY 无法满足可证明的跨平台进程树所有权，不保留降级路径。                                         |
 | `astrcode-tools/src/background_shell/*`                                 | 合入 Host process                         | 不再有独立 background registry。                                                                 |
 | `astrcode-tools/src/registry.rs`                                        | 删除                                      | 不再存在 builtin catalog。                                                                       |
 | `astrcode-session/src/tool_pipeline/*`                                  | 原地演进                                  | final args → plan → permission → lease → execute。                                               |
@@ -1363,7 +1399,7 @@ S5R conformance 必须继续覆盖：
 | `astrcode-session/src/session_tools.rs`                                 | 删除                                      | discovery/cache 归 Runtime；session 只应用 durable tool selection。                              |
 | `astrcode-session/src/session_runtime.rs`                               | 收敛                                      | 不再拥有 Extension catalog cache；审批等 session 自有状态保留。                                  |
 | `astrcode-server/src/config_manager.rs`                                 | 删除 builtin wiring                       | 只注入 Runtime 与其他 session 服务。                                                             |
-| `astrcode-server/src/bootstrap/mod.rs`                                  | 删除工具特例                              | 不再创建 terminal/background cleanup。                                                           |
+| `astrcode-server/src/bootstrap/mod.rs`                                  | 删除工具特例                              | 不再创建工具专用 process cleanup。                                                               |
 | `astrcode-server/src/session_resource_cleanup.rs`                       | 保留通用 cleanup port                     | durable close 成功后通知 Runtime 清理 session resource scope；不出现工具特例。                   |
 | `astrcode-bundled-extensions/src/lib.rs`                                | 增加 Coding Extension                     | 仍只负责产品组合。                                                                               |
 | `astrcode-extension-contract/src/host/*`                                | 移入 SDK `host/`                          | Host operation DTO 与 operation identity。                                                       |
@@ -1378,14 +1414,14 @@ S5R conformance 必须继续覆盖：
 - 从包含当前 S5R、step lifecycle 和 session runtime 改动的完整基线工作；
 - 若主 checkout 有并发脏改动，创建隔离 worktree；
 - 记录八个迁移来源工具以及目标新增 `read_tool_result` 的 definition/schema/prompt/result fixtures；
-- 记录 session close 与 terminal/background shell 的真实行为；
+- 记录迁移前 session close 与 terminal/background shell 的真实行为，并明确 PTY 不进入最终契约；
 - 记录当前 S5R conformance 结果。
 
 退出条件：存在可比较的行为基线，且没有把其他未提交工作混入迁移。
 
 ### 阶段 1：补 ToolPlan 和 ResourceLease
 
-- 在 core/SDK 定义最小 ResourceSet 和 ToolPlan；
+- 在 core/SDK 定义最小 ResourceAccess 和 ToolPlan；
 - Extension registration 支持 `plan/execute`；
 - Session ToolPipeline 固定为 final-args → plan → permission → lease → execute；
 - HostRouter 强制 lease；
@@ -1403,7 +1439,7 @@ adapter。
 
 - Host workspace 补齐 patch、artifact 和 observation；
 - 建立统一 session process service；
-- foreground/background/PTY 使用同一 handle model；
+- foreground/background 使用同一 supervised handle model；
 - session close 使用 resource scope commit/abort；
 - server 不新增新的工具特定 cleanup。
 
@@ -1412,7 +1448,7 @@ adapter。
 ### 阶段 3：引入 Coding Extension
 
 - 创建 `astrcode-extension-coding`；
-- 使用正常 manifest/registrar 注册九个工具；
+- 使用正常 manifest/registrar 注册八个工具；
 - 所有副作用通过 typed HostClient；
 - 加入 `astrcode-bundled-extensions`；
 - 使用基线 fixture 验证仍被保留的产品行为；
@@ -1485,7 +1521,7 @@ Coding Extension 与旧 builtin 不得同时注册；生产组合切换时同步
 
 ### 20.3 server/session
 
-- [x] server 生产分支不按 `read`/`shell`/`terminal` 等具体工具名解释行为；
+- [x] server 生产分支不按具体工具名解释行为；
 - [x] server 不调用工具 crate 清理函数；
 - [x] session 每个 turn 只冻结一个 ExtensionTurnView；
 - [x] prompt/schema/execute 使用同一 view；
@@ -1509,18 +1545,28 @@ Coding Extension 与旧 builtin 不得同时注册；生产组合切换时同步
 - 没有第一方工具通过 raw core execution context 获取特权；
 - session close 不依赖 Extension handler 配合即可清理 Host resources；
 - S5R 和 in-process adapter 使用同一 ToolPlan/ToolResult 语义。
+- Host process operation 只提供 supervised stdin/stdout/stderr pipes；Coding registration、operation
+  catalog 与生产依赖中都不存在 `terminal`、resize 或 `portable-pty` 旁路。
+- session-scoped hook/tool 的 Host LLM 调用显式继承 turn-pinned `LlmProviderBindings`；只有
+  startup/unscoped 调用允许 live fallback。该项不替代 core/Extension 原子发布验收。
 
 ### 21.2 行为验收
 
-- 九个 Coding tools 的产品能力被 Extension/Host 契约覆盖，不依赖已删除的内置路径；
-- 精确文件 ResourceSet 不退化为 All；
+- 八个 Coding tools 的产品能力被 Extension/Host 契约覆盖，不依赖已删除的内置路径；
+- 精确文件 ResourceAccess 不退化为 All；
 - 未批准路径的实际 Host 操作被拒绝；
 - 不同文件 read 保持并行；
 - stale edit、patch 原子性和 artifact read 保持；
-- foreground/background/PTY 的取消和 close 行为明确且通过测试；
+- foreground/background process 的取消、进程树终止和 close 行为明确且通过测试；
+- `ToolInputTransform` 按稳定顺序完成全部变换，normalize 后的 canonical arguments 由所有
+  `PreToolUse` admission handler、planner、permission 与 executor 共同使用；Ask 聚合，Block 终止；
 - reload 不改变 active turn 的工具；
-- reload 同 Extension ID 不意外杀死 session-owned process；
+- reload 后旧 turn 的 Host main/small model 仍绑定旧 provider，新 turn 绑定新 provider；
+- reload 同 Extension ID 不允许新旧 generation 互相操作 process，并在旧代 drain 后只回收旧代资源；
 - disable/uninstall 与 session close 可以清理 process group。
+
+Unix process-group descendant 回归已经覆盖当前实现；Windows Job Object 的真实 descendant-tree CI
+仍是发布验收项，在该 runner 通过前不能把跨平台进程树清理写成已完成验收。
 
 ### 21.3 验证命令
 
@@ -1564,7 +1610,7 @@ transport 不是统一模型的目的。
 拒绝原因：权限、资源 lease、session cleanup 和 worker parity 无法由 Host 强制；全局 registry 会再次
 出现。
 
-### 22.5 让 `SessionShutdown` hook 清理 terminal/shell
+### 22.5 让 `SessionShutdown` hook 清理 shell process
 
 拒绝原因：hook 可以失败、超时、panic 或根本不存在，不能承担强制资源回收不变式。
 
@@ -1628,14 +1674,14 @@ transport 不是统一模型的目的。
 
 astrcode-extension-coding
   → 只依赖 SDK
-  → 注册 read/read_tool_result/write/edit/patch/glob/grep/shell/terminal
+  → 注册 read/read_tool_result/write/edit/patch/glob/grep/shell
   → plan 声明资源
   → execute 只调用 scoped HostClient
 
 server
   → 只做 composition 和外部协议
   → 不构造 builtin catalog
-  → 不认识 terminal/background shell cleanup
+  → 不认识具体 process tool cleanup
 ```
 
 最终系统只有一条可解释路径：

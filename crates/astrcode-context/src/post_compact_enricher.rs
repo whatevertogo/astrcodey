@@ -13,7 +13,7 @@ use astrcode_core::{
 
 use crate::{
     CompactResult, PostCompactEnrichInput, PostCompactEnricher,
-    compaction::{
+    compaction::post_compact::{
         PostCompactFile, PostCompactNote, agent_status_note, append_post_compact_context,
         recent_read_paths,
     },
@@ -41,10 +41,10 @@ struct PostCompactCollectInput {
 #[async_trait::async_trait]
 impl PostCompactEnricher for DefaultPostCompactEnricher {
     async fn enrich(&self, compaction: &mut CompactResult, input: PostCompactEnrichInput<'_>) {
-        let retained_messages = std::mem::take(&mut compaction.retained_messages);
+        let session_id = input.session_id;
         let collect_input = PostCompactCollectInput {
             source_messages: input.source_messages.to_vec(),
-            retained_messages,
+            retained_messages: compaction.retained_messages.clone(),
             working_dir: input.working_dir.to_string(),
             system_prompt: input.system_prompt.map(str::to_string),
             tools: input.tools.to_vec(),
@@ -52,27 +52,26 @@ impl PostCompactEnricher for DefaultPostCompactEnricher {
             session_store_dir: input.session_store_dir,
         };
         let settings = collect_input.settings.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let collected = collect_post_compact_context(&collect_input);
-            (collect_input.retained_messages, collected)
-        })
-        .await;
-        let (files, notes) = match result {
-            Ok((retained_messages, collected)) => {
-                compaction.retained_messages = retained_messages;
-                collected
-            },
-            Err(panic) => {
-                tracing::warn!(
-                    session_id = input.session_id,
-                    "post-compact context collection panicked, skipping enrichment: {panic}"
-                );
-                return;
-            },
-        };
+        let collected =
+            tokio::task::spawn_blocking(move || collect_post_compact_context(&collect_input)).await;
 
-        append_post_compact_context(compaction, files, notes, &settings);
+        if let Err(panic) = apply_post_compact_collection(compaction, &settings, collected) {
+            tracing::warn!(
+                session_id,
+                "post-compact context collection panicked, skipping enrichment: {panic}"
+            );
+        }
     }
+}
+
+fn apply_post_compact_collection(
+    compaction: &mut CompactResult,
+    settings: &ContextSettings,
+    collected: Result<(Vec<PostCompactFile>, Vec<PostCompactNote>), tokio::task::JoinError>,
+) -> Result<(), tokio::task::JoinError> {
+    let (files, notes) = collected?;
+    append_post_compact_context(compaction, files, notes, settings);
+    Ok(())
 }
 
 fn collect_post_compact_context(
@@ -329,6 +328,36 @@ mod tests {
         assert!(restored.contains("fresh disk content"));
         assert!(!restored.contains("old content"));
         assert!(!restored.contains("outside content"));
+    }
+
+    #[tokio::test]
+    async fn collector_panic_preserves_compaction_result() {
+        let retained_messages = vec![
+            LlmMessage::user("retained user message"),
+            LlmMessage::assistant("retained assistant message"),
+        ];
+        let summary_messages = vec![LlmMessage::user("summary")];
+        let mut compaction = CompactResult {
+            pre_tokens: 100,
+            post_tokens: 10,
+            summary: "summary".into(),
+            messages_removed: 2,
+            summary_messages: summary_messages.clone(),
+            retained_messages: retained_messages.clone(),
+            transcript_path: None,
+        };
+        let settings = ContextSettings::default();
+
+        let collected =
+            tokio::task::spawn_blocking(|| -> (Vec<PostCompactFile>, Vec<PostCompactNote>) {
+                panic!("collector panic")
+            })
+            .await;
+        let result = apply_post_compact_collection(&mut compaction, &settings, collected);
+
+        assert!(result.unwrap_err().is_panic());
+        assert_eq!(compaction.retained_messages, retained_messages);
+        assert_eq!(compaction.summary_messages, summary_messages);
     }
 
     #[test]

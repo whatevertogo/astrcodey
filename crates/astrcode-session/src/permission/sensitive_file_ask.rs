@@ -1,7 +1,7 @@
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use super::{
-    PermissionContext, PermissionDecision, PermissionPolicy,
+    PermissionContext, PermissionPolicy, PolicyDecision,
     paths::{extract_tool_paths, path_for_matching, path_matches_glob},
 };
 
@@ -56,11 +56,7 @@ fn build_sensitive_globset() -> Result<GlobSet, globset::Error> {
 }
 
 impl PermissionPolicy for SensitiveFileAskPolicy {
-    fn priority(&self) -> u32 {
-        90
-    }
-
-    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
+    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PolicyDecision {
         for path in extract_tool_paths(ctx.tool_input) {
             // globset 构建失败时退化为全部路径敏感（fail-closed）。
             let is_sensitive = self
@@ -69,7 +65,7 @@ impl PermissionPolicy for SensitiveFileAskPolicy {
                 .is_none_or(|globset| path_matches_glob(&path, ctx.working_dir, globset));
             if is_sensitive {
                 let rel = path_for_matching(&path, ctx.working_dir);
-                return PermissionDecision::Ask {
+                return PolicyDecision::Ask {
                     prompt: if self.globset.is_some() {
                         format!("Access sensitive path `{}`?", path.display())
                     } else {
@@ -83,12 +79,12 @@ impl PermissionPolicy for SensitiveFileAskPolicy {
             }
         }
         if let Some(pattern) = sensitive_grep_glob(ctx, self.globset.as_ref()) {
-            return PermissionDecision::Ask {
+            return PolicyDecision::Ask {
                 prompt: format!("Search sensitive path pattern `{pattern}`?"),
                 rule_key: Some(format!("sensitive:{pattern}")),
             };
         }
-        PermissionDecision::Pass
+        PolicyDecision::Pass
     }
 }
 
@@ -140,10 +136,7 @@ mod tests {
             approval_mode: ApprovalMode::Manual,
             tool_selection: None,
         };
-        assert!(matches!(
-            policy.evaluate(&ctx),
-            PermissionDecision::Ask { .. }
-        ));
+        assert!(matches!(policy.evaluate(&ctx), PolicyDecision::Ask { .. }));
     }
 
     #[test]
@@ -168,7 +161,7 @@ mod tests {
                 tool_selection: None,
             };
             assert!(
-                matches!(policy.evaluate(&ctx), PermissionDecision::Ask { .. }),
+                matches!(policy.evaluate(&ctx), PolicyDecision::Ask { .. }),
                 "path {path} should trigger ask"
             );
         }
@@ -194,7 +187,7 @@ mod tests {
                 tool_selection: None,
             };
             assert_eq!(
-                matches!(policy.evaluate(&ctx), PermissionDecision::Ask { .. }),
+                matches!(policy.evaluate(&ctx), PolicyDecision::Ask { .. }),
                 should_ask,
                 "unexpected decision for grep glob {glob}"
             );

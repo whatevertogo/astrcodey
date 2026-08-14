@@ -1,5 +1,4 @@
 mod shell;
-mod terminal;
 
 use std::sync::{Arc, atomic::AtomicU64};
 
@@ -14,10 +13,5 @@ pub(super) fn register(registrar: &mut Registrar, default_shell_timeout_secs: Ar
     registrar.tool(
         ExtensionToolDefinition::from_definition(shell::definition()).with_prompt(system_prompt()),
         Arc::new(shell::ShellHandler::new(default_shell_timeout_secs)),
-    );
-    registrar.tool(
-        ExtensionToolDefinition::from_definition(terminal::definition())
-            .with_prompt(system_prompt()),
-        Arc::new(terminal::TerminalHandler),
     );
 }

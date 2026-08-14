@@ -9,6 +9,7 @@ use std::{
 
 use astrcode_core::{
     event::{DurableEventPayload, Phase, StoredEvent},
+    llm::TranscriptMessageOrigin,
     session_lineage::{ParentChainWalkError, collect_parent_chain},
     tool::{
         CreateRootSessionRequest as CoreCreateRootSessionRequest, CreateSessionRequest,
@@ -34,7 +35,8 @@ use astrcode_extension_sdk::{
         HostRootSubmitTurnRequest, HostSessionEvent, HostSessionEventsPageOutput,
         HostSessionEventsPageRequest, HostSessionReactivateOutput, HostSessionStateOutput,
         HostSessionTargetRequest, HostSubmitTurnOutput, HostSubmitTurnRequest,
-        SessionLifecycleStateDto, SessionToolSelectionDto,
+        SessionLifecycleStateDto, SessionMessageOriginDto, SessionToolSelectionDto,
+        tool_selection_to_dto,
     },
     wire::{
         WireErrorCode,
@@ -412,7 +414,7 @@ impl SessionGroup {
             .filter(|message| extension_visible_message(&message.message))
             .map(|message| HostSessionTranscriptMessage {
                 message: llm_message_to_wire(message.message.clone()),
-                source: message.source.clone(),
+                origin: message.origin.map(message_origin_dto),
             })
             .collect();
         Ok(HostSessionTranscript {
@@ -525,6 +527,14 @@ impl SessionGroup {
             .as_ref()
             .map(Arc::clone)
             .ok_or_else(|| backend_unavailable("session_read not configured"))
+    }
+}
+
+pub(super) fn message_origin_dto(origin: TranscriptMessageOrigin) -> SessionMessageOriginDto {
+    match origin {
+        TranscriptMessageOrigin::TurnAborted => SessionMessageOriginDto::TurnAborted,
+        TranscriptMessageOrigin::ToolCallFailed => SessionMessageOriginDto::ToolCallFailed,
+        TranscriptMessageOrigin::ToolCallCancelled => SessionMessageOriginDto::ToolCallCancelled,
     }
 }
 
@@ -789,7 +799,7 @@ async fn configure_tools(
         .await
         .map_err(session_api_error)?;
     Ok(HostConfigureSessionToolsOutput {
-        selection: tool_selection_output(effective),
+        selection: tool_selection_to_dto(effective),
     })
 }
 
@@ -1081,13 +1091,6 @@ pub(super) fn phase_output(phase: Phase) -> astrcode_extension_sdk::session::Ses
         Phase::CallingTool => SessionPhaseDto::CallingTool,
         Phase::Compacting => SessionPhaseDto::Compacting,
         Phase::Error => SessionPhaseDto::Error,
-    }
-}
-
-pub(super) fn tool_selection_output(selection: SessionToolSelection) -> SessionToolSelectionDto {
-    match selection {
-        SessionToolSelection::All { except } => SessionToolSelectionDto::All { except },
-        SessionToolSelection::Only { names } => SessionToolSelectionDto::Only { names },
     }
 }
 

@@ -28,6 +28,7 @@ pub(crate) struct ToolCalls {
     extension_runner: Arc<dyn TurnHooks>,
     session: Session,
     cancellation_token: CancellationToken,
+    max_parallel_tool_calls: usize,
 }
 
 impl ToolCalls {
@@ -52,6 +53,7 @@ impl ToolCalls {
         extension_runner: Arc<dyn TurnHooks>,
         session: Session,
         cancellation_token: CancellationToken,
+        max_parallel_tool_calls: usize,
     ) -> Self {
         Self {
             turn,
@@ -59,6 +61,7 @@ impl ToolCalls {
             extension_runner,
             session,
             cancellation_token,
+            max_parallel_tool_calls,
         }
     }
 
@@ -74,6 +77,10 @@ impl ToolCalls {
 
     pub(crate) fn shared_mut(&mut self) -> &mut SharedTurnContext {
         &mut self.turn.shared
+    }
+
+    pub(crate) fn max_parallel_tool_calls(&self) -> usize {
+        self.max_parallel_tool_calls
     }
 
     /// 构建工具调用的运行时上下文。

@@ -18,13 +18,13 @@ use astrcode_protocol::{
     events::ClientNotification,
     http::{
         ConversationBlockDto, ConversationCursorDto, ConversationDeltaDto,
-        ConversationStreamEnvelopeDto, RawEventDurabilityDto, RawEventEnvelopeDto,
+        ConversationStreamEnvelopeDto,
     },
 };
 use astrcode_session_projection::AgentSessionStatus;
 use axum::{
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{
         IntoResponse, Response,
         sse::{Event as SseEvent, KeepAlive, Sse},
@@ -32,7 +32,7 @@ use axum::{
 };
 use child_sessions::ChildSessionTracker;
 use futures_util::{StreamExt, stream};
-use replay::{ReplayError, latest_event_seq, parse_replay_cursor, replay_after_cursor};
+use replay::{parse_replay_cursor, replay_after_cursor};
 use serde::Deserialize;
 use tokio::sync::broadcast;
 use uuid::Uuid;
@@ -77,194 +77,6 @@ enum LiveInput {
 #[derive(Debug, Deserialize)]
 pub(super) struct StreamQuery {
     cursor: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct RawEventStreamQuery {
-    cursor: Option<String>,
-    extension_id: Option<String>,
-    event_type: Option<String>,
-    durability: Option<RawEventDurabilityDto>,
-}
-
-impl RawEventStreamQuery {
-    fn matches(&self, event: &Event) -> bool {
-        if self.durability.is_some_and(|durability| {
-            matches!(durability, RawEventDurabilityDto::Durable) != event.seq.is_some()
-        }) {
-            return false;
-        }
-        if self.extension_id.is_none() && self.event_type.is_none() {
-            return true;
-        }
-        let Some(extension_event) = event.payload.custom_event() else {
-            return false;
-        };
-        self.extension_id
-            .as_deref()
-            .is_none_or(|extension_id| extension_id == extension_event.extension_id)
-            && self
-                .event_type
-                .as_deref()
-                .is_none_or(|event_type| event_type == extension_event.event_type)
-    }
-}
-
-/// raw events 端点:`payload` 字段直接暴露 event log 的持久化 serde 形状
-/// (`EventPayload` 的存储格式),而非独立稳定的 HTTP schema——它随存储格式演化,
-/// 消费方需要按存储版本兼容处理。这是有意的契约决定,不要把 payload 当作稳定 API。
-pub(in crate::http) async fn raw_event_stream(
-    State(http_state): State<HttpState>,
-    Path(raw_session_id): Path<String>,
-    Query(query): Query<RawEventStreamQuery>,
-    headers: HeaderMap,
-) -> Response {
-    let session_id = SessionId::from(raw_session_id);
-    let replay_cursor = match query.cursor.as_deref() {
-        Some(cursor) => Some(cursor),
-        None => match headers.get("last-event-id") {
-            Some(value) => match value.to_str() {
-                Ok("") => None,
-                Ok(value) => Some(value),
-                Err(_) => {
-                    return error_response(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_last_event_id",
-                        "Last-Event-ID must be valid text",
-                    );
-                },
-            },
-            None => None,
-        },
-    };
-    let replay_cursor = match replay_cursor {
-        Some(cursor) => match parse_replay_cursor(cursor) {
-            Ok(cursor) => Some(cursor),
-            Err(error) => return raw_replay_error_response(&session_id, error),
-        },
-        None => None,
-    };
-
-    let event_rx = http_state
-        .app
-        .event_bus()
-        .subscribe_conversation_events(&session_id);
-    let replay_result = match replay_cursor {
-        Some(cursor) => replay_after_cursor(http_state.app.runtime(), &session_id, cursor).await,
-        None => latest_event_seq(http_state.app.runtime(), &session_id)
-            .await
-            .map(|_| Vec::new()),
-    };
-    let replayed = match replay_result {
-        Ok(replayed) => replayed,
-        Err(error) => {
-            drop(event_rx);
-            http_state
-                .app
-                .event_bus()
-                .prune_conversation_fanout(&session_id);
-            return raw_replay_error_response(&session_id, error);
-        },
-    };
-    let replay_max_seq = replayed.iter().filter_map(|event| event.seq).max();
-    let replay_filter = query.clone();
-    let replay_stream = stream::iter(
-        replayed
-            .into_iter()
-            .filter(move |event| replay_filter.matches(event))
-            .filter_map(|event| raw_event_sse_item(&event)),
-    );
-    let live_stream = stream::unfold(
-        (event_rx, query, replay_max_seq, session_id),
-        |(mut event_rx, query, replay_max_seq, session_id)| async move {
-            loop {
-                match event_rx.recv().await {
-                    Ok(event) => {
-                        if event.session_id != session_id
-                            || already_replayed(replay_max_seq, event.seq)
-                            || !query.matches(&event)
-                        {
-                            continue;
-                        }
-                        let Some(item) = raw_event_sse_item(&event) else {
-                            continue;
-                        };
-                        return Some((item, (event_rx, query, replay_max_seq, session_id)));
-                    },
-                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
-                        let gap = SseEvent::default()
-                            .event("gap")
-                            .data(serde_json::json!({ "dropped": dropped }).to_string());
-                        return Some((Ok(gap), (event_rx, query, replay_max_seq, session_id)));
-                    },
-                    Err(broadcast::error::RecvError::Closed) => return None,
-                }
-            }
-        },
-    );
-    let connected = stream::iter([Ok(SseEvent::default().comment("connected"))]);
-    Sse::new(connected.chain(replay_stream).chain(live_stream))
-        .keep_alive(KeepAlive::default())
-        .into_response()
-}
-
-fn raw_replay_error_response(session_id: &SessionId, error: ReplayError) -> Response {
-    if error.is_cursor_unavailable() {
-        return error_response(
-            StatusCode::CONFLICT,
-            "event_cursor_unavailable",
-            "Event cursor is invalid, ahead of the session, or exceeds the replay limit",
-        );
-    }
-    if error.is_session_not_found() {
-        return error_response(
-            StatusCode::NOT_FOUND,
-            "session_not_found",
-            "Session not found",
-        );
-    }
-    tracing::warn!(%session_id, %error, "failed to open raw event stream");
-    error_response(
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "event_stream_failed",
-        "Failed to read session events",
-    )
-}
-
-fn raw_event_sse_item(event: &Event) -> Option<SseItem> {
-    let payload = match serde_json::to_value(&event.payload) {
-        Ok(payload) => payload,
-        Err(error) => {
-            tracing::warn!(event_id = %event.id, %error, "failed to serialize raw SSE event");
-            return None;
-        },
-    };
-    let dto = RawEventEnvelopeDto {
-        id: event.id.to_string(),
-        session_id: event.session_id.to_string(),
-        turn_id: event.turn_id.as_ref().map(ToString::to_string),
-        cursor: event.seq.map(|seq| seq.to_string()),
-        durability: if event.seq.is_some() {
-            RawEventDurabilityDto::Durable
-        } else {
-            RawEventDurabilityDto::Live
-        },
-        timestamp: event.timestamp.to_rfc3339(),
-        payload,
-    };
-    let data = match serde_json::to_string(&dto) {
-        Ok(data) => data,
-        Err(error) => {
-            tracing::warn!(event_id = %event.id, %error, "failed to encode raw SSE event");
-            return None;
-        },
-    };
-    let mut item = SseEvent::default().event("event").data(data);
-    if let Some(seq) = event.seq {
-        item = item.id(seq.to_string());
-    }
-    Some(Ok(item))
 }
 
 pub(in crate::http) async fn session_stream(

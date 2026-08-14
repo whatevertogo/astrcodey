@@ -6,8 +6,7 @@ use astrcode_extension_sdk::{
     host::{
         EmptyRequest, HOST_PROCESS_DEFAULT_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS, HostOperation,
         HostProcessInputRequest, HostProcessOutput, HostProcessReadRequest, HostProcessRequest,
-        HostProcessResizeRequest, HostProcessStartRequest, HostProcessTargetRequest,
-        internal::HostOperationGroup,
+        HostProcessStartRequest, HostProcessTargetRequest, internal::HostOperationGroup,
     },
     s5r::ErrorPayload,
     wire::WireErrorCode,
@@ -24,10 +23,12 @@ use super::{
     InvokeContext, acknowledgement, dispatch, invalid_group_operation,
     path::canonicalize_workspace_path, process_handles::ProcessHandleStore, run_blocking_io,
 };
+use crate::process_supervision::SupervisedCommand;
 
 const MAX_CONCURRENT_PROCESSES: usize = 8;
 const MAX_STREAM_BYTES: usize = 1024 * 1024;
 const MAX_COMBINED_BYTES: usize = 1024 * 1024;
+const TERMINATION_GRACE: Duration = Duration::from_secs(2);
 
 const NONINTERACTIVE_ENV: &[(&str, &str)] = &[
     ("PAGER", "cat"),
@@ -80,7 +81,7 @@ impl ProcessGroup {
             context
                 .session_id
                 .as_deref()
-                .map(|session_id| (session_id, context.extension_id.as_str()))
+                .map(|session_id| (session_id, context.extension_instance_id))
                 .ok_or_else(|| {
                     ErrorPayload::new(
                         WireErrorCode::ContextUnavailable,
@@ -97,91 +98,82 @@ impl ProcessGroup {
                 .await
             },
             HostOperation::ProcessStart => {
-                let (session_id, extension_id) = owner()?;
+                let (session_id, extension_instance_id) = owner()?;
                 dispatch::<HostProcessStartRequest, _, _>(operation, &input, |request| {
                     self.handles.start(
                         request,
                         working_dir,
                         session_id,
-                        extension_id,
+                        extension_instance_id,
                         context.cancel_token.as_ref(),
                     )
                 })
                 .await
             },
             HostOperation::ProcessRead => {
-                let (session_id, extension_id) = owner()?;
+                let (session_id, extension_instance_id) = owner()?;
                 dispatch::<HostProcessReadRequest, _, _>(operation, &input, |request| {
                     self.handles.read(
                         request,
                         session_id,
-                        extension_id,
+                        extension_instance_id,
                         context.cancel_token.as_ref(),
                     )
                 })
                 .await
             },
             HostOperation::ProcessInput => {
-                let (session_id, extension_id) = owner()?;
+                let (session_id, extension_instance_id) = owner()?;
                 dispatch::<HostProcessInputRequest, _, _>(operation, &input, |request| async move {
                     self.handles
-                        .input(request, session_id, extension_id)
+                        .input(request, session_id, extension_instance_id)
                         .await?;
                     Ok(acknowledgement())
                 })
                 .await
             },
-            HostOperation::ProcessResize => {
-                let (session_id, extension_id) = owner()?;
-                dispatch::<HostProcessResizeRequest, _, _>(
+            HostOperation::ProcessStatus => {
+                let (session_id, extension_instance_id) = owner()?;
+                dispatch::<HostProcessTargetRequest, _, _>(
                     operation,
                     &input,
                     |request| async move {
                         self.handles
-                            .resize(request, session_id, extension_id)
-                            .await?;
-                        Ok(acknowledgement())
+                            .status(request, session_id, extension_instance_id)
                     },
                 )
                 .await
             },
-            HostOperation::ProcessStatus => {
-                let (session_id, extension_id) = owner()?;
-                dispatch::<HostProcessTargetRequest, _, _>(
-                    operation,
-                    &input,
-                    |request| async move { self.handles.status(request, session_id, extension_id) },
-                )
-                .await
-            },
             HostOperation::ProcessPromote => {
-                let (session_id, extension_id) = owner()?;
+                let (session_id, extension_instance_id) = owner()?;
                 dispatch::<HostProcessTargetRequest, _, _>(
                     operation,
                     &input,
                     |request| async move {
-                        self.handles.promote(request, session_id, extension_id)?;
+                        self.handles
+                            .promote(request, session_id, extension_instance_id)?;
                         Ok(acknowledgement())
                     },
                 )
                 .await
             },
             HostOperation::ProcessKill => {
-                let (session_id, extension_id) = owner()?;
+                let (session_id, extension_instance_id) = owner()?;
                 dispatch::<HostProcessTargetRequest, _, _>(
                     operation,
                     &input,
                     |request| async move {
-                        self.handles.kill(request, session_id, extension_id).await?;
+                        self.handles
+                            .kill(request, session_id, extension_instance_id)?;
                         Ok(acknowledgement())
                     },
                 )
                 .await
             },
             HostOperation::ProcessList => {
-                let (session_id, extension_id) = owner()?;
+                let (session_id, extension_instance_id) = owner()?;
                 dispatch::<EmptyRequest, _, _>(operation, &input, |_| async move {
-                    Ok(self.handles.list(session_id, extension_id))
+                    Ok(self.handles.list(session_id, extension_instance_id))
                 })
                 .await
             },
@@ -200,8 +192,8 @@ impl ProcessGroup {
         self.handles.cleanup_session(session_id);
     }
 
-    pub(super) fn cleanup_extension(&self, extension_id: &str) {
-        self.handles.cleanup_extension(extension_id);
+    pub(super) fn cleanup_extension(&self, extension_instance_id: super::ExtensionInstanceId) {
+        self.handles.cleanup_extension(extension_instance_id);
     }
 }
 
@@ -250,37 +242,24 @@ impl ProcessRunner {
         process
             .args(args)
             .current_dir(cwd)
-            .kill_on_drop(true)
-            .env_clear()
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        for (key, value) in safe_child_env() {
-            process.env(key, value);
-        }
-        for (key, value) in NONINTERACTIVE_ENV {
-            process.env(key, value);
-        }
         if stdin.is_some() {
             process.stdin(Stdio::piped());
         }
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            process.as_std_mut().process_group(0);
-        }
+        configure_process(&mut process);
 
-        let mut child = process
+        let mut child = SupervisedCommand::new(process)
             .spawn()
             .map_err(|error| ErrorPayload::new(WireErrorCode::SpawnFailed, error.to_string()))?;
-        let child_pid = child.id();
-        let mut child_stdin = child.stdin.take();
-        let mut stdout = child.stdout.take().ok_or_else(|| {
+        let mut child_stdin = child.take_stdin();
+        let mut stdout = child.take_stdout().ok_or_else(|| {
             ErrorPayload::new(
                 WireErrorCode::ProcessFailed,
                 "child stdout pipe unavailable",
             )
         })?;
-        let mut stderr = child.stderr.take().ok_or_else(|| {
+        let mut stderr = child.take_stderr().ok_or_else(|| {
             ErrorPayload::new(
                 WireErrorCode::ProcessFailed,
                 "child stderr pipe unavailable",
@@ -390,7 +369,7 @@ impl ProcessRunner {
                 combined_truncated,
             }),
             Err(error) => {
-                terminate_child(&mut child, child_pid).await;
+                let _ = child.terminate(TERMINATION_GRACE).await;
                 Err(error)
             },
         }
@@ -431,13 +410,6 @@ where
     } else {
         std::future::pending().await
     }
-}
-
-async fn terminate_child(child: &mut tokio::process::Child, child_pid: Option<u32>) {
-    kill_process_group(child_pid);
-    #[cfg(not(unix))]
-    let _ = child.start_kill();
-    let _ = child.wait().await;
 }
 
 pub(super) fn resolve_cwd(
@@ -504,16 +476,6 @@ pub(super) fn configure_process(command: &mut tokio::process::Command) {
     }
 }
 
-pub(super) fn configure_pty_process(command: &mut portable_pty::CommandBuilder) {
-    command.env_clear();
-    for (key, value) in safe_child_env() {
-        command.env(key, value);
-    }
-    for (key, value) in NONINTERACTIVE_ENV {
-        command.env(key, value);
-    }
-}
-
 fn filter_safe_child_env(
     environment: impl Iterator<Item = (OsString, OsString)>,
 ) -> impl Iterator<Item = (OsString, OsString)> {
@@ -526,19 +488,6 @@ fn filter_safe_child_env(
 fn cancelled() -> ErrorPayload {
     ErrorPayload::new(WireErrorCode::Cancelled, "process cancelled")
 }
-
-#[cfg(unix)]
-fn kill_process_group(pid: Option<u32>) {
-    if let Some(pid) = pid {
-        // SAFETY: the child was started as the leader of its own process group.
-        unsafe {
-            let _ = libc::kill(-(pid as i32), libc::SIGKILL);
-        }
-    }
-}
-
-#[cfg(not(unix))]
-fn kill_process_group(_pid: Option<u32>) {}
 
 #[cfg(test)]
 mod tests {
@@ -564,7 +513,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn child_environment_is_bounded_for_pipe_and_pty_processes() {
+    fn child_environment_is_bounded() {
         let key = OsString::from_vec(b"ASTRCODE_INVALID_ENV_\xff".to_vec());
         let inherited = filter_safe_child_env(
             vec![
@@ -577,12 +526,6 @@ mod tests {
 
         assert_eq!(inherited.len(), 1);
         assert_eq!(inherited[0].0, "PATH");
-
-        let mut pty = portable_pty::CommandBuilder::new("ignored");
-        assert!(pty.get_env("CARGO_MANIFEST_DIR").is_some());
-        configure_pty_process(&mut pty);
-        assert!(pty.get_env("CARGO_MANIFEST_DIR").is_none());
-        assert_eq!(pty.get_env("PAGER"), Some(std::ffi::OsStr::new("cat")));
     }
 
     #[cfg(unix)]

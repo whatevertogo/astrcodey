@@ -1,6 +1,6 @@
 use astrcode_core::tool::access::ResourceAccess;
 
-use super::{PermissionContext, PermissionDecision, PermissionPolicy};
+use super::{PermissionContext, PermissionPolicy, PolicyDecision};
 
 pub(super) struct OpaqueResourceAskPolicy;
 
@@ -9,17 +9,13 @@ pub(super) fn rule_key(tool_name: &str) -> String {
 }
 
 impl PermissionPolicy for OpaqueResourceAskPolicy {
-    fn priority(&self) -> u32 {
-        120
-    }
-
-    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
+    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PolicyDecision {
         if ctx
             .resource_accesses
             .iter()
             .any(|access| matches!(access, ResourceAccess::Opaque))
         {
-            return PermissionDecision::Ask {
+            return PolicyDecision::Ask {
                 prompt: format!(
                     "Tool `{}` may perform external side effects that AstrCode cannot scope",
                     ctx.tool_name
@@ -27,6 +23,6 @@ impl PermissionPolicy for OpaqueResourceAskPolicy {
                 rule_key: Some(rule_key(ctx.tool_name)),
             };
         }
-        PermissionDecision::Pass
+        PolicyDecision::Pass
     }
 }

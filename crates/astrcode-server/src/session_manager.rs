@@ -7,7 +7,7 @@ use std::{
 
 use astrcode_core::{
     event::{DurableEventPayload, Event, PersistedSystemPrompt, StoredEvent},
-    llm::LlmMessage,
+    llm::TranscriptMessage,
     tool::SessionToolSelection,
     types::{Cursor, SessionId, TurnId},
 };
@@ -36,7 +36,7 @@ struct ForkCreationInput {
     initial_system_prompt: PersistedSystemPrompt,
     source_cursor: Cursor,
     first_user_message: Option<String>,
-    messages: Vec<LlmMessage>,
+    messages: Vec<TranscriptMessage>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -517,6 +517,29 @@ impl SessionManager {
         Ok(())
     }
 
+    pub(crate) async fn recover_durability_for_operation(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<(), SessionManagerError> {
+        let through_seq = match self
+            .event_store
+            .ensure_no_uncertain_durability(session_id)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(StorageError::DurabilityUncertain { through_seq, .. }) => through_seq,
+            Err(error) => return Err(error.into()),
+        };
+        self.event_sink
+            .retry_uncertain_sync(self.event_store.clone(), session_id, through_seq)
+            .await
+            .map_err(SessionError::from)?;
+        self.event_store
+            .ensure_no_uncertain_durability(session_id)
+            .await?;
+        Ok(())
+    }
+
     pub(crate) async fn shutdown_event_sink(&self) {
         self.event_sink.shutdown().await;
     }
@@ -694,7 +717,10 @@ impl SessionManager {
             first_user_message,
             messages: transcript_messages
                 .into_iter()
-                .map(|message| message.message)
+                .map(|entry| TranscriptMessage {
+                    message: entry.message,
+                    origin: entry.origin,
+                })
                 .collect(),
         };
         let new_sid = input.session_id.clone();
@@ -1069,12 +1095,12 @@ mod tests {
         time::Duration,
     };
 
-    use astrcode_context::{NoopPostCompactEnricher, context_assembler::LlmContextAssembler};
+    use astrcode_context::NoopPostCompactEnricher;
     use astrcode_core::{
         config::{EffectiveConfig, LlmSettings},
         event::{CustomEventData, DurableEvent, DurableEventPayload, Event, StoredEvent},
-        llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-        tool::{ToolDefinition, ToolResultArtifactSlice},
+        llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
+        tool::ToolResultArtifactSlice,
         types::ToolCallId,
     };
     use astrcode_extension_sdk::{
@@ -1082,7 +1108,7 @@ mod tests {
         extension::{
             CustomEventContext, CustomEventDisposition, CustomEventHandler,
             CustomEventSubscription, Extension, ExtensionCapability, ExtensionError,
-            ExtensionManifest, LifecycleEvent, Registrar, RuntimeLifecycleContext,
+            ExtensionManifest, LifecycleEvent, Registrar, internal::RuntimeLifecycleContext,
         },
         runtime_ports::{NoopRuntimePorts, TurnHooks},
     };
@@ -1105,10 +1131,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for UnusedLlm {
-        async fn generate(
+        async fn generate_request(
             &self,
-            _messages: Vec<LlmMessage>,
-            _tools: Vec<ToolDefinition>,
+            _request: astrcode_core::llm::LlmRequest,
         ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
             unreachable!("creation compensation tests do not run a turn")
         }
@@ -1147,7 +1172,6 @@ mod tests {
                 hooks,
                 noop.clone(),
             ),
-            Arc::new(LlmContextAssembler::new(Default::default())),
             Arc::new(NoopPostCompactEnricher),
         ))
     }
@@ -1570,6 +1594,25 @@ mod tests {
             self.inner.append_events(events).await
         }
 
+        async fn append_events_and_sync(
+            &self,
+            events: Vec<DurableEvent>,
+        ) -> Result<Vec<StoredEvent>, StorageError> {
+            for _ in &events {
+                let append_number = self.append_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if self.fail_append_at.load(Ordering::SeqCst) == append_number {
+                    return Err(StorageError::InvalidEvent(INJECTED_APPEND_ERROR.into()));
+                }
+            }
+            let sync_number = self.sync_count.fetch_add(1, Ordering::SeqCst) + 1;
+            if self.fail_sync_at.load(Ordering::SeqCst) == sync_number {
+                return Err(StorageError::InvalidEvent(
+                    "injected event-lane release failure".into(),
+                ));
+            }
+            self.inner.append_events_and_sync(events).await
+        }
+
         async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
             let sync_number = self.sync_count.fetch_add(1, Ordering::SeqCst) + 1;
             if self.fail_sync_at.load(Ordering::SeqCst) == sync_number {
@@ -1578,6 +1621,23 @@ mod tests {
                 ));
             }
             self.inner.sync_durable_events(session_id).await
+        }
+
+        async fn retry_uncertain_sync(
+            &self,
+            session_id: &SessionId,
+            expected_through_seq: u64,
+        ) -> Result<Vec<StoredEvent>, StorageError> {
+            self.inner
+                .retry_uncertain_sync(session_id, expected_through_seq)
+                .await
+        }
+
+        async fn ensure_no_uncertain_durability(
+            &self,
+            session_id: &SessionId,
+        ) -> Result<(), StorageError> {
+            self.inner.ensure_no_uncertain_durability(session_id).await
         }
     }
 
@@ -2219,6 +2279,82 @@ mod tests {
         let mut expected = vec![root.id().clone(), child.id().clone()];
         expected.sort();
         assert_eq!(entered, expected);
+    }
+
+    #[tokio::test]
+    async fn operation_admission_retries_exact_uncertain_sync_once_before_publish() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Arc::new(FileSystemSessionRepository::for_testing(
+            temp.path().join("projects"),
+        ));
+        let store_port: Arc<dyn SessionStore> = store.clone();
+        let manager = Arc::new(SessionManager::new(
+            Arc::clone(&store_port),
+            test_runtime_services(),
+            vec![],
+        ));
+        let session_id = manager.create("/workspace").await.unwrap().id().clone();
+        store
+            .fail_next_durable_sync_for_testing(&session_id)
+            .await
+            .unwrap();
+        let error = store
+            .append_events_and_sync(vec![DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::UserMessage {
+                    message_id: astrcode_core::types::new_message_id(),
+                    text: "pending".into(),
+                    attachments: Vec::new(),
+                    accepted_seq: None,
+                },
+            )])
+            .await
+            .unwrap_err();
+        let pending_seq = error.uncertain_through_seq().unwrap();
+        let child_sessions = Arc::new(crate::child_session::ChildSessionCoordinator::new(
+            Arc::clone(&manager),
+        ));
+        let scheduler = crate::turn_scheduler::TurnScheduler::new(
+            Arc::clone(&manager),
+            Arc::new(crate::turn_registry::TurnRegistry::new()),
+            child_sessions,
+        );
+        let mut published = manager
+            .event_bus()
+            .subscribe_conversation_events(&session_id);
+
+        store
+            .fail_next_durable_sync_for_testing(&session_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            scheduler.begin_session_operation(&session_id).await,
+            Err(crate::turn_scheduler::TurnScheduleError::SessionManager(
+                SessionManagerError::Session(SessionError::EventPublish(
+                    astrcode_session::SessionEventPublishError::Storage(error)
+                ))
+            )) if error.uncertain_through_seq() == Some(pending_seq)
+        ));
+        assert_eq!(
+            store
+                .session_read_model(&session_id)
+                .await
+                .unwrap()
+                .stats
+                .last_seq,
+            pending_seq - 1
+        );
+        assert!(published.try_recv().is_err());
+
+        assert!(scheduler.begin_session_operation(&session_id).await.is_ok());
+        let event = published.recv().await.unwrap();
+        assert_eq!(event.seq, Some(pending_seq));
+        assert!(matches!(
+            event.payload,
+            astrcode_core::event::EventPayload::Durable(DurableEventPayload::UserMessage { .. })
+        ));
+        assert!(scheduler.begin_session_operation(&session_id).await.is_ok());
+        assert!(published.try_recv().is_err());
     }
 
     #[tokio::test]

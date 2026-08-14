@@ -33,6 +33,7 @@ pub struct SessionSummaryProjection {
 ///
 /// The batch retains only its events. Rewrite validation clones the narrow provider-input state,
 /// never the complete read model.
+#[derive(Clone)]
 pub struct PreparedProjectionBatch {
     first_seq: u64,
     events: Vec<StoredEvent>,

@@ -53,6 +53,13 @@ impl SessionEventPublishError {
             _ => false,
         }
     }
+
+    pub(crate) fn uncertain_through_seq(&self) -> Option<u64> {
+        match self {
+            Self::Storage(error) => error.uncertain_through_seq(),
+            _ => None,
+        }
+    }
 }
 
 pub struct SessionEventSink {
@@ -239,6 +246,17 @@ impl SessionEventSink {
             .await
     }
 
+    /// Append and fsync one event in the same ordered lane before publishing it.
+    pub async fn append_and_sync(
+        &self,
+        journal: Arc<dyn SessionEventJournal>,
+        event: DurableEvent,
+    ) -> Result<StoredEvent, SessionEventPublishError> {
+        self.lane(&event.session_id, journal)?
+            .commit(DurableCommit::AppendAndSync, event)
+            .await
+    }
+
     pub fn publish_live(
         &self,
         journal: Arc<dyn SessionEventJournal>,
@@ -263,6 +281,17 @@ impl SessionEventSink {
         session_id: &SessionId,
     ) -> Result<(), SessionEventPublishError> {
         self.lane(session_id, journal)?.sync().await
+    }
+
+    pub async fn retry_uncertain_sync(
+        &self,
+        journal: Arc<dyn SessionEventJournal>,
+        session_id: &SessionId,
+        expected_through_seq: u64,
+    ) -> Result<(), SessionEventPublishError> {
+        self.lane(session_id, journal)?
+            .retry_uncertain_sync(expected_through_seq)
+            .await
     }
 
     pub async fn release(
@@ -319,15 +348,20 @@ enum PublishCommand {
     Sync {
         reply: oneshot::Sender<Result<(), SessionEventPublishError>>,
     },
+    RetryUncertainSync {
+        expected_through_seq: u64,
+        reply: oneshot::Sender<Result<(), SessionEventPublishError>>,
+    },
     Shutdown {
         reply: oneshot::Sender<Result<(), SessionEventPublishError>>,
     },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum DurableCommit {
     Create,
     Append,
+    AppendAndSync,
 }
 
 struct SessionEventLane {
@@ -401,6 +435,17 @@ impl SessionEventLane {
         self.request(|reply| PublishCommand::Sync { reply }).await
     }
 
+    async fn retry_uncertain_sync(
+        &self,
+        expected_through_seq: u64,
+    ) -> Result<(), SessionEventPublishError> {
+        self.request(|reply| PublishCommand::RetryUncertainSync {
+            expected_through_seq,
+            reply,
+        })
+        .await
+    }
+
     async fn shutdown(&self) -> Result<(), SessionEventPublishError> {
         let result = self
             .request(|reply| PublishCommand::Shutdown { reply })
@@ -448,10 +493,10 @@ async fn run_lane(
                 while events.len() < MAX_DURABLE_BATCH_SIZE {
                     match commands.try_recv() {
                         Ok(PublishCommand::Durable {
-                            kind: DurableCommit::Append,
+                            kind: next_kind,
                             event,
                             reply,
-                        }) => {
+                        }) if next_kind == kind => {
                             events.push(event);
                             replies.push(reply);
                         },
@@ -463,9 +508,12 @@ async fn run_lane(
                     }
                 }
 
-                match journal
-                    .append_events(events)
-                    .await
+                let result = match kind {
+                    DurableCommit::Append => journal.append_events(events).await,
+                    DurableCommit::AppendAndSync => journal.append_events_and_sync(events).await,
+                    DurableCommit::Create => unreachable!("create commits are handled above"),
+                };
+                match result
                     .map_err(SessionEventPublishError::from)
                     .and_then(|stored_events| {
                         if stored_events.len() == replies.len() {
@@ -499,6 +547,19 @@ async fn run_lane(
             PublishCommand::Sync { reply } => {
                 sync_lane(&journal, &session_id, reply).await;
             },
+            PublishCommand::RetryUncertainSync {
+                expected_through_seq,
+                reply,
+            } => {
+                let result = retry_uncertain_sync(
+                    journal.as_ref(),
+                    observer.as_ref(),
+                    &session_id,
+                    expected_through_seq,
+                )
+                .await;
+                let _ = reply.send(result);
+            },
             PublishCommand::Shutdown { reply } => {
                 commands.close();
                 shutdown_reply = Some(reply);
@@ -523,11 +584,27 @@ async fn sync_lane(
     let _ = reply.send(result);
 }
 
+async fn retry_uncertain_sync(
+    journal: &dyn SessionEventJournal,
+    observer: &dyn SessionEventObserver,
+    session_id: &SessionId,
+    expected_through_seq: u64,
+) -> Result<(), SessionEventPublishError> {
+    let confirmed = journal
+        .retry_uncertain_sync(session_id, expected_through_seq)
+        .await
+        .map_err(SessionEventPublishError::from)?;
+    for stored in confirmed {
+        publish_durable(observer, DurableCommit::AppendAndSync, &stored);
+    }
+    Ok(())
+}
+
 fn publish_durable(observer: &dyn SessionEventObserver, kind: DurableCommit, stored: &StoredEvent) {
     let event = Event::from(stored);
     let capture_name = match kind {
         DurableCommit::Create => "session.create",
-        DurableCommit::Append => "session.append_event",
+        DurableCommit::Append | DurableCommit::AppendAndSync => "session.append_event",
     };
     perf_snapshot::capture_event(capture_name, &event);
     observer.publish(Arc::new(event));
@@ -541,9 +618,19 @@ mod tests {
         task::Poll,
     };
 
-    use astrcode_core::event::{
-        CustomEventData, DurableEventPayload, EventPayload, LiveEventPayload,
+    use astrcode_core::{
+        compaction::CompactStrategy,
+        event::{
+            CompactionDetails, CustomEventData, DurableEventPayload, EventPayload,
+            LiveEventPayload, PersistedSystemPrompt, SessionStarted, SystemPromptSource,
+            TranscriptRewriteReason, transcript_prefix_fingerprint,
+        },
+        llm::{LlmMessage, TranscriptMessage},
+        tool::SessionToolSelection,
+        types::new_message_id,
     };
+    use astrcode_storage::{SessionReader, session_repo::FileSystemSessionRepository};
+    use tempfile::tempdir;
     use tokio::sync::{Semaphore, mpsc};
 
     use super::*;
@@ -605,11 +692,39 @@ mod tests {
             Ok(stored)
         }
 
+        async fn append_events_and_sync(
+            &self,
+            events: Vec<DurableEvent>,
+        ) -> Result<Vec<StoredEvent>, StorageError> {
+            let session_id = events
+                .first()
+                .map(|event| event.session_id.clone())
+                .ok_or_else(|| StorageError::InvalidEvent("event batch cannot be empty".into()))?;
+            let stored = self.append_events(events).await?;
+            self.sync_durable_events(&session_id).await?;
+            Ok(stored)
+        }
+
         async fn sync_durable_events(&self, _session_id: &SessionId) -> Result<(), StorageError> {
             self.sync_count.fetch_add(1, Ordering::AcqRel);
             if self.fail_next_sync.swap(false, Ordering::AcqRel) {
                 return Err(StorageError::Unsupported("injected sync failure".into()));
             }
+            Ok(())
+        }
+
+        async fn retry_uncertain_sync(
+            &self,
+            _session_id: &SessionId,
+            _expected_through_seq: u64,
+        ) -> Result<Vec<StoredEvent>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn ensure_no_uncertain_durability(
+            &self,
+            _session_id: &SessionId,
+        ) -> Result<(), StorageError> {
             Ok(())
         }
     }
@@ -621,6 +736,146 @@ mod tests {
             Poll::Ready(_) => panic!("event command completed before the commit gate opened"),
         })
         .await;
+    }
+
+    #[tokio::test]
+    async fn synced_append_is_published_only_after_exact_uncertain_retry() {
+        let dir = tempdir().unwrap();
+        let session_id = SessionId::new("sink-uncertain-compact");
+        let journal = Arc::new(FileSystemSessionRepository::for_testing(
+            dir.path().join("projects"),
+        ));
+        let journal_port: Arc<dyn SessionEventJournal> = journal.clone();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+        let sink = SessionEventSink::new(ChannelObserver::new(events_tx));
+
+        sink.create(
+            Arc::clone(&journal_port),
+            DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::SessionStarted(SessionStarted {
+                    working_dir: "/workspace".into(),
+                    model_id: "model-a".into(),
+                    parent: None,
+                    tool_selection: SessionToolSelection::default(),
+                    source_extension: None,
+                    initial_system_prompt: PersistedSystemPrompt {
+                        text: "system".into(),
+                        fingerprint: "fingerprint".into(),
+                        extra_system_prompt: None,
+                        source: SystemPromptSource::Native,
+                    },
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+        sink.append(
+            Arc::clone(&journal_port),
+            DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::UserMessage {
+                    message_id: new_message_id(),
+                    text: "original".into(),
+                    attachments: Vec::new(),
+                    accepted_seq: None,
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        sink.sync(Arc::clone(&journal_port), &session_id)
+            .await
+            .unwrap();
+        assert_eq!(events_rx.recv().await.unwrap().seq, Some(0));
+        assert_eq!(events_rx.recv().await.unwrap().seq, Some(1));
+
+        let before = journal.session_read_model(&session_id).await.unwrap();
+        let provider_messages = before
+            .model_context
+            .messages
+            .iter()
+            .map(|message| message.message.clone())
+            .collect::<Vec<_>>();
+        journal
+            .fail_next_durable_sync_for_testing(&session_id)
+            .await
+            .unwrap();
+        let error = sink
+            .append_and_sync(
+                Arc::clone(&journal_port),
+                DurableEvent::session(
+                    session_id.clone(),
+                    DurableEventPayload::TranscriptRewritten {
+                        source_seq: before.stats.last_seq,
+                        source_fingerprint: transcript_prefix_fingerprint(
+                            &before.system_prompt.text,
+                            &provider_messages,
+                        )
+                        .unwrap(),
+                        messages: vec![TranscriptMessage::plain(LlmMessage::user("summary"))],
+                        reason: TranscriptRewriteReason::Compaction(CompactionDetails {
+                            trigger: "manual".into(),
+                            pre_tokens: 10,
+                            post_tokens: 2,
+                            summary: "summary".into(),
+                            transcript_path: None,
+                            strategy: CompactStrategy::Manual {
+                                keep_recent_turns: None,
+                            },
+                        }),
+                    },
+                ),
+            )
+            .await
+            .unwrap_err();
+        let pending_seq = error.uncertain_through_seq().unwrap();
+        assert_eq!(pending_seq, 2);
+        assert!(events_rx.try_recv().is_err());
+        assert_eq!(
+            journal
+                .session_read_model(&session_id)
+                .await
+                .unwrap()
+                .stats
+                .last_seq,
+            1
+        );
+        assert!(
+            sink.sync(Arc::clone(&journal_port), &session_id)
+                .await
+                .is_err()
+        );
+        assert!(sink.release(journal.as_ref(), &session_id).await.is_err());
+        assert!(events_rx.try_recv().is_err());
+        assert!(
+            sink.retry_uncertain_sync(Arc::clone(&journal_port), &session_id, pending_seq + 1)
+                .await
+                .is_err()
+        );
+
+        sink.retry_uncertain_sync(Arc::clone(&journal_port), &session_id, pending_seq)
+            .await
+            .unwrap();
+        let published = events_rx.recv().await.unwrap();
+        assert_eq!(published.seq, Some(pending_seq));
+        assert!(matches!(
+            published.payload,
+            EventPayload::Durable(DurableEventPayload::TranscriptRewritten { .. })
+        ));
+        sink.retry_uncertain_sync(journal_port, &session_id, pending_seq)
+            .await
+            .unwrap();
+        assert!(events_rx.try_recv().is_err());
+        assert_eq!(
+            journal
+                .session_read_model(&session_id)
+                .await
+                .unwrap()
+                .stats
+                .last_seq,
+            pending_seq
+        );
     }
 
     #[tokio::test]

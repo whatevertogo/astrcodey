@@ -7,7 +7,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use astrcode_protocol::{agent_session_link::AgentSessionLinkDto, http::*, wire::*};
+use astrcode_protocol::{
+    agent_session_link::{AgentSessionLinkDto, AgentSessionUpdateDto},
+    http::*,
+    wire::*,
+};
 use serde::Serialize;
 use ts_rs::{Config, TS};
 
@@ -131,8 +135,6 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         ExtensionStageDiagnosticsDto,
         ExtensionListResponseDto,
         ExtensionReloadResponseDto,
-        RawEventEnvelopeDto,
-        RawEventDurabilityDto,
         SetExtensionEnabledRequest,
         SetExtensionEnabledResponseDto,
         ProfileDto,
@@ -158,11 +160,13 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         ModelListResponseDto,
         ModelTestResponseDto,
         AgentSessionLinkDto,
+        AgentSessionUpdateDto,
         PhaseDto,
         ToolOutputStreamDto,
         ApprovalDecisionDto,
         ApprovalModeDto,
-        CommandSourceDto,
+        CommandAvailabilityDto,
+        CommandExecutionDto,
         ExtensionSourceDto,
         ExtensionStageStatusDto,
         MessageRoleDto,
@@ -172,6 +176,7 @@ fn export_types(output_dir: &Path) -> Result<(), Box<dyn Error>> {
         ThinkingLevelDto,
         AgentSessionStatusDto,
         ExtensionCapabilityDto,
+        SessionCommandKindDto,
         ToolOriginDto,
         ExecutionModeDto,
     );
@@ -184,7 +189,16 @@ fn write_wire_values(output_dir: &Path) -> Result<(), Box<dyn Error>> {
     push_wire_values(&mut output, "TOOL_OUTPUT_STREAMS", ToolOutputStreamDto::ALL)?;
     push_wire_values(&mut output, "APPROVAL_DECISIONS", ApprovalDecisionDto::ALL)?;
     push_wire_values(&mut output, "APPROVAL_MODES", ApprovalModeDto::ALL)?;
-    push_wire_values(&mut output, "COMMAND_SOURCES", CommandSourceDto::ALL)?;
+    push_wire_values(
+        &mut output,
+        "COMMAND_AVAILABILITIES",
+        CommandAvailabilityDto::ALL,
+    )?;
+    push_wire_values(
+        &mut output,
+        "SESSION_COMMAND_KINDS",
+        SessionCommandKindDto::ALL,
+    )?;
     push_wire_values(&mut output, "EXTENSION_SOURCES", ExtensionSourceDto::ALL)?;
     push_wire_values(
         &mut output,

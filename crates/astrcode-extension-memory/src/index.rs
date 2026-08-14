@@ -93,7 +93,7 @@ fn word_jaccard(a: &str, b: &str) -> f64 {
 }
 
 /// Find an existing record that should be updated instead of adding a duplicate.
-pub(crate) fn find_similar_record_index(records: &[MemoryRecord], content: &str) -> Option<usize> {
+fn find_similar_record_index(records: &[MemoryRecord], content: &str) -> Option<usize> {
     let norm_new = normalize_content(content);
     if norm_new.len() < 8 {
         return None;

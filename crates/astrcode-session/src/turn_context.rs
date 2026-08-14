@@ -1,10 +1,17 @@
 //! Turn 基础设施 — 事件通道、共享上下文、错误类型。
 
-use astrcode_core::{config::ModelSelection, llm::LlmMessage, types::*};
+use astrcode_core::{
+    config::ModelSelection,
+    llm::{LlmMessage, LlmProviderBindings},
+    types::*,
+};
 use astrcode_extension_sdk::{
     extension::{
-        ExchangeSummary, ExtensionError, LifecycleEvent, LifecyclePayload, ProviderPayload,
-        RuntimeHookCallContext, RuntimeLifecycleContext, RuntimeProviderContext,
+        ExchangeSummary, ExtensionError, LifecycleEvent,
+        internal::{
+            RuntimeHookCallContext, RuntimeLifecycleContext, RuntimeProviderContext,
+            runtime_lifecycle_context, runtime_provider_context,
+        },
     },
     runtime_ports::TurnHooks,
 };
@@ -50,6 +57,7 @@ pub(crate) struct SharedTurnContext {
     pub(crate) turn_id: Option<TurnId>,
     pub(crate) working_dir: String,
     pub(crate) model_id: String,
+    pub(crate) llm_providers: LlmProviderBindings,
     pub(crate) session_store_dir: Option<std::path::PathBuf>,
     /// 当前 turn 的事件 ingress（`TurnEventBridge` 在 `process_prompt` 期间注入）。
     pub(crate) turn_event_sender: Option<crate::turn_publish::TurnEventSender>,
@@ -70,7 +78,7 @@ impl SharedTurnContext {
 
     /// 构造扩展 lifecycle hook 的 ctx。
     pub(crate) fn lifecycle_ctx(&self) -> RuntimeLifecycleContext {
-        RuntimeLifecycleContext::new(self.hook_call_context(), LifecyclePayload::new(None))
+        runtime_lifecycle_context(self.hook_call_context(), None, 0)
     }
 
     /// 构造带当轮消息摘要的 lifecycle hook ctx（用于 TurnEnd）。
@@ -79,12 +87,13 @@ impl SharedTurnContext {
         user_message: String,
         assistant_message: String,
     ) -> RuntimeLifecycleContext {
-        RuntimeLifecycleContext::new(
+        runtime_lifecycle_context(
             self.hook_call_context(),
-            LifecyclePayload::new(Some(ExchangeSummary {
+            Some(ExchangeSummary {
                 user_message,
                 assistant_message,
-            })),
+            }),
+            0,
         )
     }
 
@@ -96,6 +105,7 @@ impl SharedTurnContext {
             self.session_store_dir.clone(),
         )
         .with_event_tx(self.turn_event_tx())
+        .with_llm_providers(self.llm_providers.clone())
         .with_cancellation(self.cancellation_token.clone());
         match &self.turn_id {
             Some(turn_id) => call.with_turn_id(turn_id.to_string()),
@@ -104,8 +114,12 @@ impl SharedTurnContext {
     }
 
     /// 构造 provider hook 的 ctx，附带本次 LLM 请求的 messages。
-    pub(crate) fn provider_ctx(&self, messages: Vec<LlmMessage>) -> RuntimeProviderContext {
-        RuntimeProviderContext::new(self.hook_call_context(), ProviderPayload::new(messages))
+    pub(crate) fn provider_ctx(
+        &self,
+        request_id: astrcode_extension_sdk::extension::ProviderRequestId,
+        messages: Vec<LlmMessage>,
+    ) -> RuntimeProviderContext {
+        runtime_provider_context(self.hook_call_context(), request_id, messages)
     }
 
     /// 构造各 tool hook ctx 共用的 `ModelSelection`。

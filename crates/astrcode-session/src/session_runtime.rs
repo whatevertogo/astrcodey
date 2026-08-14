@@ -1,6 +1,7 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use astrcode_core::{
+    config::ContextSettings,
     event::{
         DurableEvent, EventDeliveryReceipt, EventPayload, EventPublisher, EventSendError,
         EventSender, LiveEvent,
@@ -15,6 +16,7 @@ use tokio::sync::{OnceCell, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
+    compaction::CompactCircuitBreaker,
     permission::ApprovalHistoryStore,
     session_event_sink::{SessionEventObserver, SessionEventPublishError, SessionEventSink},
     tool_exec::InMemoryFileObservationStore,
@@ -208,6 +210,7 @@ pub struct SessionRuntimeState {
     event_sink: Arc<SessionEventSink>,
     file_observation_store: Arc<dyn FileObservationStore>,
     approvals: ApprovalRuntime,
+    compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
     creation: Mutex<SessionCreationState>,
     lifecycle_initialized: OnceCell<()>,
 }
@@ -308,12 +311,17 @@ impl SessionRuntimeState {
         store: Arc<dyn SessionStore>,
         event_sink: Arc<SessionEventSink>,
     ) -> Self {
+        let context = ContextSettings::default();
         Self {
             session_id,
             store,
             event_sink,
             file_observation_store: Arc::new(InMemoryFileObservationStore::default()),
             approvals: ApprovalRuntime::new(),
+            compact_circuit_breaker: Mutex::new(CompactCircuitBreaker::new(
+                context.compact_circuit_breaker_threshold,
+                Duration::from_secs(context.compact_circuit_breaker_cooldown_secs),
+            )),
             creation: Mutex::new(SessionCreationState::Ready),
             lifecycle_initialized: OnceCell::new(),
         }
@@ -367,6 +375,10 @@ impl SessionRuntimeState {
 
     pub fn approval_history(&self) -> Arc<ApprovalHistoryStore> {
         Arc::clone(&self.approvals.history)
+    }
+
+    pub(crate) fn compact_circuit_breaker(&self) -> &Mutex<CompactCircuitBreaker> {
+        &self.compact_circuit_breaker
     }
 
     /// Blocks [`Self::wait_for_creation`] until the returned guard commits or fails.

@@ -8,20 +8,19 @@ use crate::{
     host::{
         Acknowledgement, EmptyRequest, HostConfigureSessionToolsOutput,
         HostConfigureSessionToolsRequest, HostEventEmitOutput, HostLlmChatOutput,
-        HostLlmCollectedStreamOutput, HostNetworkRequest, HostNetworkResponse, HostOperation,
+        HostLlmChatRequest, HostNetworkRequest, HostNetworkResponse, HostOperation,
         HostProcessHandleOutput, HostProcessInputRequest, HostProcessListOutput, HostProcessOutput,
-        HostProcessReadOutput, HostProcessReadRequest, HostProcessRequest,
-        HostProcessResizeRequest, HostProcessStartRequest, HostProcessStatusOutput,
-        HostProcessTargetRequest, HostSessionCancelOutput, HostSessionDeliveryOutput,
-        HostSessionExecutionView, HostSessionInputRequest, HostSessionProviderMessagesOutput,
-        HostSessionStateReadOutput, HostSessionStateReadRequest, HostSessionStateWriteRequest,
-        HostSessionSummariesOutput, HostSessionTokenUsageOutput, HostSessionTranscript,
-        HostToolResultReadOutput, HostToolResultReadRequest, HostWorkspaceApplyPatchOutput,
-        HostWorkspaceApplyPatchRequest, HostWorkspaceEditOutput, HostWorkspaceEditRequest,
-        HostWorkspaceGlobOutput, HostWorkspaceGlobRequest, HostWorkspaceGrepOutput,
-        HostWorkspaceGrepRequest, HostWorkspaceListOutput, HostWorkspaceListRequest,
-        HostWorkspaceReadOutput, HostWorkspaceReadRequest, HostWorkspaceWriteOutput,
-        HostWorkspaceWriteRequest,
+        HostProcessReadOutput, HostProcessReadRequest, HostProcessRequest, HostProcessStartRequest,
+        HostProcessStatusOutput, HostProcessTargetRequest, HostSessionCancelOutput,
+        HostSessionDeliveryOutput, HostSessionExecutionView, HostSessionInputRequest,
+        HostSessionProviderMessagesOutput, HostSessionStateReadOutput, HostSessionStateReadRequest,
+        HostSessionStateWriteRequest, HostSessionSummariesOutput, HostSessionTokenUsageOutput,
+        HostSessionTranscript, HostToolResultReadOutput, HostToolResultReadRequest,
+        HostWorkspaceApplyPatchOutput, HostWorkspaceApplyPatchRequest, HostWorkspaceEditOutput,
+        HostWorkspaceEditRequest, HostWorkspaceGlobOutput, HostWorkspaceGlobRequest,
+        HostWorkspaceGrepOutput, HostWorkspaceGrepRequest, HostWorkspaceListOutput,
+        HostWorkspaceListRequest, HostWorkspaceReadOutput, HostWorkspaceReadRequest,
+        HostWorkspaceWriteOutput, HostWorkspaceWriteRequest,
     },
     llm::LlmMessage,
     model_stream::ModelStream,
@@ -115,14 +114,28 @@ impl<T: HostClientTransport> ModelClient<T> {
         &self,
         messages: Vec<LlmMessage>,
     ) -> Result<HostLlmChatOutput, T::Error> {
-        invoke::<operations::LlmMainChat, _>(&self.transport, &llm_chat_request(messages)).await
+        self.main_chat_request(llm_chat_request(messages)).await
+    }
+
+    pub async fn main_chat_request(
+        &self,
+        request: HostLlmChatRequest,
+    ) -> Result<HostLlmChatOutput, T::Error> {
+        invoke::<operations::LlmMainChat, _>(&self.transport, &request).await
     }
 
     pub async fn small_chat(
         &self,
         messages: Vec<LlmMessage>,
     ) -> Result<HostLlmChatOutput, T::Error> {
-        invoke::<operations::LlmSmallChat, _>(&self.transport, &llm_chat_request(messages)).await
+        self.small_chat_request(llm_chat_request(messages)).await
+    }
+
+    pub async fn small_chat_request(
+        &self,
+        request: HostLlmChatRequest,
+    ) -> Result<HostLlmChatOutput, T::Error> {
+        invoke::<operations::LlmSmallChat, _>(&self.transport, &request).await
     }
 
     /// Starts a main-model stream and exposes each event as it arrives.
@@ -130,8 +143,15 @@ impl<T: HostClientTransport> ModelClient<T> {
         &self,
         messages: Vec<LlmMessage>,
     ) -> Result<ModelStream, T::Error> {
-        invoke_stream::<operations::LlmMainChat, _>(&self.transport, &llm_chat_request(messages))
+        self.main_chat_events_request(llm_chat_request(messages))
             .await
+    }
+
+    pub async fn main_chat_events_request(
+        &self,
+        request: HostLlmChatRequest,
+    ) -> Result<ModelStream, T::Error> {
+        invoke_stream::<operations::LlmMainChat, _>(&self.transport, &request).await
     }
 
     /// Starts a small-model stream and exposes each event as it arrives.
@@ -139,26 +159,47 @@ impl<T: HostClientTransport> ModelClient<T> {
         &self,
         messages: Vec<LlmMessage>,
     ) -> Result<ModelStream, T::Error> {
-        invoke_stream::<operations::LlmSmallChat, _>(&self.transport, &llm_chat_request(messages))
+        self.small_chat_events_request(llm_chat_request(messages))
             .await
     }
 
-    /// Runs the main model stream and returns all ordered text deltas after completion.
+    pub async fn small_chat_events_request(
+        &self,
+        request: HostLlmChatRequest,
+    ) -> Result<ModelStream, T::Error> {
+        invoke_stream::<operations::LlmSmallChat, _>(&self.transport, &request).await
+    }
+
+    /// Runs the main model stream and returns its completed response.
     pub async fn main_chat_collected(
         &self,
         messages: Vec<LlmMessage>,
-    ) -> Result<HostLlmCollectedStreamOutput, T::Error> {
-        collect_stream::<operations::LlmMainChat, _>(&self.transport, &llm_chat_request(messages))
+    ) -> Result<HostLlmChatOutput, T::Error> {
+        self.main_chat_collected_request(llm_chat_request(messages))
             .await
     }
 
-    /// Runs the small model stream and returns all ordered text deltas after completion.
+    pub async fn main_chat_collected_request(
+        &self,
+        request: HostLlmChatRequest,
+    ) -> Result<HostLlmChatOutput, T::Error> {
+        collect_stream::<operations::LlmMainChat, _>(&self.transport, &request).await
+    }
+
+    /// Runs the small model stream and returns its completed response.
     pub async fn small_chat_collected(
         &self,
         messages: Vec<LlmMessage>,
-    ) -> Result<HostLlmCollectedStreamOutput, T::Error> {
-        collect_stream::<operations::LlmSmallChat, _>(&self.transport, &llm_chat_request(messages))
+    ) -> Result<HostLlmChatOutput, T::Error> {
+        self.small_chat_collected_request(llm_chat_request(messages))
             .await
+    }
+
+    pub async fn small_chat_collected_request(
+        &self,
+        request: HostLlmChatRequest,
+    ) -> Result<HostLlmChatOutput, T::Error> {
+        collect_stream::<operations::LlmSmallChat, _>(&self.transport, &request).await
     }
 }
 
@@ -445,10 +486,6 @@ impl<T: HostClientTransport> ProcessClient<T> {
         .await
     }
 
-    pub async fn resize(&self, request: HostProcessResizeRequest) -> Result<(), T::Error> {
-        invoke_ack::<operations::ProcessResize, _>(&self.transport, &request).await
-    }
-
     pub async fn status(
         &self,
         request: HostProcessTargetRequest,
@@ -498,7 +535,7 @@ where
 async fn collect_stream<Op, T>(
     transport: &T,
     input: &Op::Request,
-) -> Result<HostLlmCollectedStreamOutput, T::Error>
+) -> Result<HostLlmChatOutput, T::Error>
 where
     T: HostClientTransport,
     Op: HostOp,

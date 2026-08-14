@@ -41,9 +41,8 @@ pub struct CustomEventContext {
 }
 
 impl CustomEventContext {
-    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
-    pub fn from_runtime(
+    pub(crate) fn from_runtime(
         call: ExtensionCallContext,
         session_id: SessionId,
         turn_id: Option<String>,

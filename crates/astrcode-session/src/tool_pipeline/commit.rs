@@ -4,7 +4,7 @@ use std::{
 };
 
 use astrcode_extension_sdk::extension::{
-    PostToolUsePayload, PostToolUseResult, RuntimePostToolUseContext,
+    PostToolUseResult, internal::runtime_post_tool_use_context,
 };
 
 use super::{
@@ -120,14 +120,12 @@ impl ToolCalls {
         }
 
         let hook_call = self.turn.shared.hook_call_context();
-        let post_ctx = RuntimePostToolUseContext::new(
+        let post_ctx = runtime_post_tool_use_context(
             hook_call,
-            PostToolUsePayload::new(
-                call.call_id.clone().into(),
-                call.name.clone(),
-                call.tool_input.clone(),
-                result.result.clone(),
-            ),
+            call.call_id.clone().into(),
+            call.name.clone(),
+            call.tool_input.clone(),
+            result.result.clone(),
         );
 
         match self.extension_runner.emit_post_tool_use(post_ctx).await? {

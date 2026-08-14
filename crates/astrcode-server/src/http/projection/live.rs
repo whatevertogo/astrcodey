@@ -4,7 +4,7 @@ use astrcode_core::event::{
     CustomEventData, DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase,
 };
 use astrcode_protocol::{
-    agent_session_link::AgentSessionLinkDto,
+    agent_session_link::AgentSessionUpdateDto,
     http::{ConversationControlStateDto, ConversationDeltaDto, LlmRetryStatusDto, ToolApprovalDto},
 };
 
@@ -100,32 +100,34 @@ fn durable_event_to_deltas(
             tool_selection: _,
             tool_call_id,
         } => vec![ConversationDeltaDto::AgentSessionUpdated {
-            agent_session: AgentSessionLinkDto::spawned(
-                child_session_id,
-                tool_call_id
-                    .as_ref()
-                    .map(astrcode_core::types::ToolCallId::as_str),
-                agent_name,
-                task,
-            ),
+            agent_session: AgentSessionUpdateDto::Spawned {
+                child_session_id: child_session_id.to_string(),
+                tool_call_id: tool_call_id.as_ref().map(ToString::to_string),
+                agent_name: agent_name.clone(),
+                task: task.clone(),
+            },
         }],
         DurableEventPayload::AgentSessionCompleted {
             child_session_id,
             final_session_id,
             summary,
         } => vec![ConversationDeltaDto::AgentSessionUpdated {
-            agent_session: AgentSessionLinkDto::completed(
-                child_session_id,
-                final_session_id,
-                summary,
-            ),
+            agent_session: AgentSessionUpdateDto::Completed {
+                child_session_id: child_session_id.to_string(),
+                final_session_id: final_session_id.to_string(),
+                summary: summary.clone(),
+            },
         }],
         DurableEventPayload::AgentSessionFailed {
             child_session_id,
             final_session_id,
             error,
         } => vec![ConversationDeltaDto::AgentSessionUpdated {
-            agent_session: AgentSessionLinkDto::failed(child_session_id, final_session_id, error),
+            agent_session: AgentSessionUpdateDto::Failed {
+                child_session_id: child_session_id.to_string(),
+                final_session_id: final_session_id.to_string(),
+                error: error.clone(),
+            },
         }],
         DurableEventPayload::AgentSessionRecycled { child_session_id } => {
             vec![ConversationDeltaDto::AgentSessionRemoved {

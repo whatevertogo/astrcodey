@@ -6,7 +6,7 @@ use astrcode_core::{
     config::ModelSelection, event::SystemPromptSource, tool::SessionToolSelection, types::*,
 };
 use astrcode_extension_sdk::{
-    extension::RuntimeHookCallContext,
+    extension::internal::RuntimeHookCallContext,
     runtime_ports::{ToolCatalogScope, TurnExtensionView},
 };
 use astrcode_session_projection::SessionReadModel;
@@ -19,7 +19,7 @@ use crate::{
     session_error::SessionError,
 };
 
-pub(crate) fn normalize_extra_system_prompt(extra_system_prompt: Option<&str>) -> Option<String> {
+fn normalize_extra_system_prompt(extra_system_prompt: Option<&str>) -> Option<String> {
     extra_system_prompt.and_then(|prompt| {
         let trimmed = prompt.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())

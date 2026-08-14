@@ -66,6 +66,7 @@ impl From<GoalUpdateStatus> for GoalStatus {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GoalState {
     pub schema_version: u32,
+    pub revision: u64,
     pub goal_id: String,
     pub objective: String,
     pub status: GoalStatus,
@@ -75,10 +76,8 @@ pub(crate) struct GoalState {
     pub token_usage_baseline: Option<u64>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-    #[serde(default)]
-    pub continuation_prompt_pending: bool,
-    #[serde(default)]
-    pub budget_limit_prompt_pending: bool,
+    pub continuation_prompt_pending: Option<String>,
+    pub budget_limit_prompt_pending: Option<String>,
     #[serde(default)]
     pub continuation_count: u64,
 }
@@ -92,6 +91,7 @@ impl GoalState {
         let now = Utc::now();
         Self {
             schema_version: GOAL_SCHEMA_VERSION,
+            revision: 1,
             goal_id: uuid::Uuid::new_v4().to_string(),
             objective,
             status: GoalStatus::Active,
@@ -99,8 +99,8 @@ impl GoalState {
             token_usage_baseline,
             created_at: now,
             updated_at: now,
-            continuation_prompt_pending: false,
-            budget_limit_prompt_pending: false,
+            continuation_prompt_pending: None,
+            budget_limit_prompt_pending: None,
             continuation_count: 0,
         }
     }
@@ -113,45 +113,53 @@ impl GoalState {
     }
 
     pub(crate) fn touch(&mut self) {
+        self.revision = self.revision.saturating_add(1);
         self.updated_at = Utc::now();
     }
 
     pub(crate) fn mark_continuation_pending(&mut self) {
-        self.continuation_prompt_pending = true;
+        self.continuation_prompt_pending = Some(uuid::Uuid::new_v4().to_string());
         self.continuation_count = self.continuation_count.saturating_add(1);
         self.touch();
     }
 
-    pub(crate) fn take_continuation_prompt_pending(&mut self) -> bool {
-        let pending = self.continuation_prompt_pending;
-        self.continuation_prompt_pending = false;
-        if pending {
-            self.touch();
-        }
-        pending
-    }
-
     pub(crate) fn mark_budget_limit_prompt_pending(&mut self) {
-        self.budget_limit_prompt_pending = true;
+        self.budget_limit_prompt_pending = Some(uuid::Uuid::new_v4().to_string());
         self.touch();
     }
 
-    pub(crate) fn take_budget_limit_prompt_pending(&mut self) -> bool {
-        let pending = self.budget_limit_prompt_pending;
-        self.budget_limit_prompt_pending = false;
-        if pending {
+    pub(crate) fn budget_transition_contribution_id(&self) -> String {
+        format!("goal-budget-transition:{}:{}", self.goal_id, self.revision)
+    }
+
+    pub(crate) fn acknowledge_provider_contribution(&mut self, contribution_id: &str) -> bool {
+        if self.continuation_prompt_pending.as_deref() == Some(contribution_id) {
+            self.continuation_prompt_pending = None;
             self.touch();
+            return true;
         }
-        pending
+        if self.budget_limit_prompt_pending.as_deref() == Some(contribution_id) {
+            self.budget_limit_prompt_pending = None;
+            self.touch();
+            return true;
+        }
+        if self.status == GoalStatus::Active
+            && self.budget_transition_contribution_id() == contribution_id
+        {
+            self.set_status(GoalStatus::BudgetLimited);
+            self.budget_limit_prompt_pending = None;
+            return true;
+        }
+        false
     }
 
     pub(crate) fn set_status(&mut self, status: GoalStatus) {
         self.status = status;
         if status != GoalStatus::Active {
-            self.continuation_prompt_pending = false;
+            self.continuation_prompt_pending = None;
         }
         if status != GoalStatus::BudgetLimited {
-            self.budget_limit_prompt_pending = false;
+            self.budget_limit_prompt_pending = None;
         }
         self.touch();
     }
@@ -178,6 +186,22 @@ impl GoalStore {
             ));
         }
         Ok(state)
+    }
+
+    pub(crate) fn acknowledge_provider_contribution(
+        &self,
+        contribution_id: &str,
+    ) -> Result<(), String> {
+        hostpaths::update_json_state(&self.state_path(), |state: Option<GoalState>| {
+            let Some(mut state) = state else {
+                return Ok((None, ()));
+            };
+            if !state.acknowledge_provider_contribution(contribution_id) {
+                return Ok((None, ()));
+            }
+            Ok((Some(state), ()))
+        })
+        .map_err(|error| format!("ack goal provider contribution: {error}"))
     }
 
     pub(crate) fn save(&self, state: &GoalState) -> Result<(), String> {
@@ -365,8 +389,8 @@ mod tests {
             .expect("update should succeed");
 
         assert_eq!(updated.status, GoalStatus::Blocked);
-        assert!(!updated.continuation_prompt_pending);
-        assert!(!updated.budget_limit_prompt_pending);
+        assert!(updated.continuation_prompt_pending.is_none());
+        assert!(updated.budget_limit_prompt_pending.is_none());
     }
 
     #[test]
@@ -411,7 +435,11 @@ mod tests {
         let original_baseline = state.token_usage_baseline;
         // 累积一次续跑，记录此时的 baseline 和 count，验证 adjust_budget 不重置它们。
         state.mark_continuation_pending();
-        state.take_continuation_prompt_pending();
+        let contribution_id = state
+            .continuation_prompt_pending
+            .clone()
+            .expect("continuation contribution");
+        assert!(state.acknowledge_provider_contribution(&contribution_id));
         store.save(&state).expect("save before budget limit");
         let state_before_limit = store.load().unwrap().unwrap();
         let expected_count = state_before_limit.continuation_count;
@@ -426,6 +454,42 @@ mod tests {
         // baseline 与 continuation_count 应保留，体现"追加额度"而非重建。
         assert_eq!(adjusted.token_usage_baseline, original_baseline);
         assert_eq!(adjusted.continuation_count, expected_count);
+    }
+
+    #[test]
+    fn provider_ack_is_retryable_and_cannot_settle_newer_goal_state() {
+        let store = GoalStore::new(test_root("exact-provider-ack"));
+        let mut state = store
+            .create("Finish work".into(), Some(100), Some(0))
+            .unwrap();
+        state.mark_continuation_pending();
+        let first = state.continuation_prompt_pending.clone().unwrap();
+        let unchanged = state.clone();
+        assert!(!state.acknowledge_provider_contribution("different"));
+        assert_eq!(state, unchanged, "failed cycles must retain pending state");
+
+        state.mark_continuation_pending();
+        let newer = state.continuation_prompt_pending.clone().unwrap();
+        store.save(&state).unwrap();
+        store.acknowledge_provider_contribution(&first).unwrap();
+        assert_eq!(
+            store
+                .load()
+                .unwrap()
+                .unwrap()
+                .continuation_prompt_pending
+                .as_deref(),
+            Some(newer.as_str())
+        );
+        store.acknowledge_provider_contribution(&newer).unwrap();
+        assert!(
+            store
+                .load()
+                .unwrap()
+                .unwrap()
+                .continuation_prompt_pending
+                .is_none()
+        );
     }
 
     #[test]

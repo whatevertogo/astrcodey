@@ -18,8 +18,6 @@ use astrcode_extension_sdk::{
 };
 use serde::Deserialize;
 
-use crate::result::{completed_error, success};
-
 const AUTO_BACKGROUND_AFTER_MS: u64 = 30_000;
 const MAX_TIMEOUT_SECS: u64 = 600;
 const MAX_FOREGROUND_OUTPUT_BYTES: usize = 1024 * 1024;
@@ -117,7 +115,6 @@ impl ToolHandler for ShellHandler {
     }
 
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
-        let started_at = Instant::now();
         let args: ShellArgs = context.arguments()?;
         validate(&args)?;
         let process = context.host().process()?;
@@ -129,7 +126,7 @@ impl ToolHandler for ShellHandler {
                     wait_ms: Some(args.block_until_ms.unwrap_or(0)),
                 })
                 .await?;
-            return Ok(render_process_result(started_at, output, args.intent).into());
+            return Ok(render_process_result(output, args.intent).into());
         }
 
         let shell = resolve_shell();
@@ -138,7 +135,7 @@ impl ToolHandler for ShellHandler {
             .cwd
             .clone()
             .unwrap_or_else(|| context.working_dir().display().to_string());
-        let mut request = HostProcessStartRequest::pipes(shell.path.clone());
+        let mut request = HostProcessStartRequest::new(shell.path.clone());
         request.args = shell_args(shell.family, &command);
         request.cwd = args.cwd.clone();
         let timeout_secs = args
@@ -157,15 +154,8 @@ impl ToolHandler for ShellHandler {
         process.close_stdin(handle.id.clone()).await?;
 
         if args.run_in_background {
-            let mut result = background_result(
-                started_at,
-                handle.id,
-                args.intent.clone(),
-                String::new(),
-                0,
-                0,
-                0,
-            );
+            let mut result =
+                background_result(handle.id, args.intent.clone(), String::new(), 0, 0, 0);
             add_invocation_metadata(
                 &mut result,
                 &args,
@@ -191,7 +181,6 @@ impl ToolHandler for ShellHandler {
                     })
                     .await?;
                 let mut result = background_result(
-                    started_at,
                     handle.id,
                     args.intent.clone(),
                     combined.content,
@@ -221,7 +210,6 @@ impl ToolHandler for ShellHandler {
             combined.push(&output.combined);
             if !output.state.is_running() {
                 let mut result = render_completed(
-                    started_at,
                     ProcessPresentation {
                         id: output.id,
                         content: combined.content,
@@ -461,15 +449,10 @@ fn sudo_authentication_failed(output: &str) -> bool {
     .any(|needle| lower.contains(needle))
 }
 
-fn render_process_result(
-    started_at: Instant,
-    output: HostProcessReadOutput,
-    intent: Option<String>,
-) -> ToolResult {
+fn render_process_result(output: HostProcessReadOutput, intent: Option<String>) -> ToolResult {
     if output.state.is_running() {
         let output = ProcessPresentation::from(output);
         background_result(
-            started_at,
             output.id,
             intent,
             output.content,
@@ -478,15 +461,11 @@ fn render_process_result(
             output.dropped_bytes,
         )
     } else {
-        render_completed(started_at, output.into(), intent)
+        render_completed(output.into(), intent)
     }
 }
 
-fn render_completed(
-    started_at: Instant,
-    output: ProcessPresentation,
-    intent: Option<String>,
-) -> ToolResult {
+fn render_completed(output: ProcessPresentation, intent: Option<String>) -> ToolResult {
     let ProcessPresentation {
         id,
         content: combined,
@@ -546,14 +525,13 @@ fn render_completed(
     };
     let content = format!("{process_status}\nOutput:\n{output}");
     if execution_status == "succeeded" {
-        success(started_at, content, metadata)
+        ToolResult::success(content).with_metadata(metadata)
     } else {
-        completed_error(started_at, content, metadata)
+        ToolResult::error(content).with_metadata(metadata)
     }
 }
 
 fn background_result(
-    started_at: Instant,
     id: String,
     intent: Option<String>,
     output: String,
@@ -566,19 +544,15 @@ fn background_result(
     } else {
         format!("Process is running in background: {id}\nOutput so far:\n{output}")
     };
-    success(
-        started_at,
-        content,
-        BTreeMap::from([
-            ("shellId".into(), serde_json::json!(id)),
-            ("executionStatus".into(), serde_json::json!("running")),
-            ("timedOut".into(), serde_json::json!(false)),
-            ("stdoutBytes".into(), serde_json::json!(stdout_bytes)),
-            ("stderrBytes".into(), serde_json::json!(stderr_bytes)),
-            ("droppedBytes".into(), serde_json::json!(dropped_bytes)),
-            ("intent".into(), serde_json::json!(intent)),
-        ]),
-    )
+    ToolResult::success(content).with_metadata(BTreeMap::from([
+        ("shellId".into(), serde_json::json!(id)),
+        ("executionStatus".into(), serde_json::json!("running")),
+        ("timedOut".into(), serde_json::json!(false)),
+        ("stdoutBytes".into(), serde_json::json!(stdout_bytes)),
+        ("stderrBytes".into(), serde_json::json!(stderr_bytes)),
+        ("droppedBytes".into(), serde_json::json!(dropped_bytes)),
+        ("intent".into(), serde_json::json!(intent)),
+    ]))
 }
 
 fn invalid(message: impl Into<String>) -> ExtensionError {
@@ -600,7 +574,7 @@ pub(super) fn definition() -> ToolDefinition {
                 "Executes a {shell} command and returns output. Working directory persists, shell \
                  state does not.\n\n",
                 "When NOT to use:\n- File search or reading files → `grep`/`glob`/`read`\n",
-                "- Interactive REPL or debugger sessions → `terminal`\n\n",
+                "- Interactive commands that require a TTY are not supported\n\n",
                 "Tips:\n- Set runInBackground for commands expected to exceed ~30s.\n",
                 "- Foreground commands still running after ~30s are promoted to a session-owned \
                  background process.\n",
@@ -676,5 +650,45 @@ mod tests {
         assert!(sudo_authentication_failed(
             "sudo: a terminal is required to read the password"
         ));
+    }
+
+    #[test]
+    fn rendered_process_results_leave_timing_to_the_session() {
+        let succeeded = render_completed(
+            ProcessPresentation {
+                id: "success".into(),
+                content: "done".into(),
+                stdout_bytes: 4,
+                stderr_bytes: 0,
+                dropped_bytes: 0,
+                state: HostProcessState::Exited { status: Some(0) },
+            },
+            Some("verify".into()),
+        );
+        let failed = render_completed(
+            ProcessPresentation {
+                id: "failure".into(),
+                content: "broken".into(),
+                stdout_bytes: 0,
+                stderr_bytes: 6,
+                dropped_bytes: 0,
+                state: HostProcessState::Exited { status: Some(2) },
+            },
+            None,
+        );
+        let running = background_result("running".into(), None, "partial".into(), 7, 0, 0);
+
+        assert!(!succeeded.is_error);
+        assert_eq!(succeeded.error, None);
+        assert_eq!(succeeded.metadata["executionStatus"], "succeeded");
+        assert!(failed.is_error);
+        assert_eq!(failed.error.as_deref(), Some(failed.content.as_str()));
+        assert_eq!(failed.metadata["executionStatus"], "failed");
+        assert_eq!(running.metadata["executionStatus"], "running");
+        assert!(
+            [&succeeded, &failed, &running]
+                .into_iter()
+                .all(|result| result.duration_ms.is_none())
+        );
     }
 }

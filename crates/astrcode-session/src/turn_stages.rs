@@ -288,8 +288,11 @@ impl TurnState {
 
 pub(crate) struct PreparedProviderRequest {
     pub(crate) llm: std::sync::Arc<dyn astrcode_core::llm::LlmProvider>,
+    pub(crate) request_id: astrcode_extension_sdk::extension::ProviderRequestId,
     pub(crate) messages: Vec<astrcode_core::llm::LlmMessage>,
     pub(crate) max_output_tokens: usize,
+    pub(crate) acknowledgements:
+        astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
 }
 
 #[cfg(test)]

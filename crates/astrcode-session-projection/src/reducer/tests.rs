@@ -7,17 +7,17 @@ use astrcode_core::{
         SessionStarted, StoredEvent, SystemPromptSource, TranscriptRewriteReason,
         transcript_prefix_fingerprint,
     },
-    llm::{LlmMessage, LlmRole, LlmTokenUsage, provider_transcript},
+    llm::{
+        LlmMessage, LlmRole, LlmTokenUsage, TranscriptMessage, TranscriptMessageOrigin,
+        provider_transcript,
+    },
     permission::{ApprovalDecision, ApprovalSource},
     tool::{SessionToolSelection, ToolResult},
     types::{SessionId, ToolCallId, TurnId, new_message_id},
 };
 
 use super::{PreparedProjectionBatch, ProjectionError, SessionReadModelProjection, reduce, replay};
-use crate::{
-    AgentSessionStatus, SessionArtifactView, SessionReadModel, TOOL_CALL_CANCELLED_SOURCE,
-    TOOL_CALL_FAILED_SOURCE,
-};
+use crate::{AgentSessionStatus, SessionArtifactView, SessionReadModel};
 
 fn event(seq: u64, session_id: &SessionId, payload: DurableEventPayload) -> StoredEvent {
     StoredEvent::new(seq, DurableEvent::session(session_id.clone(), payload))
@@ -145,7 +145,7 @@ fn prepared_batches_update_in_place_and_validate_rewrites_against_prior_batch_ev
         DurableEventPayload::TranscriptRewritten {
             source_seq: 4,
             source_fingerprint: prefix_fingerprint(&expected, 4),
-            messages: vec![LlmMessage::user("summary")],
+            messages: vec![TranscriptMessage::plain(LlmMessage::user("summary"))],
             reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                 trigger: "manual".into(),
                 pre_tokens: 100,
@@ -210,7 +210,7 @@ fn transcript_rewrite_does_not_change_active_execution_state() {
                 DurableEventPayload::TranscriptRewritten {
                     source_seq: 1,
                     source_fingerprint: fingerprint,
-                    messages: vec![LlmMessage::user("summary")],
+                    messages: vec![TranscriptMessage::plain(LlmMessage::user("summary"))],
                     reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                         trigger: trigger.into(),
                         pre_tokens: 100,
@@ -326,7 +326,12 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
     assert_eq!(model.model_context.messages[2].message.role, LlmRole::Tool);
     assert!(matches!(
         model.presentation.artifacts.as_slice(),
-        [SessionArtifactView::SystemNote { text, .. }] if text == "recap"
+        [SessionArtifactView::Recap {
+            id,
+            text,
+            source,
+            seq: 5,
+        }] if id == &events[5].id.to_string() && text == "recap" && source == "manual"
     ));
     assert!(model.execution.pending_tool_calls.is_empty());
     assert_eq!(model.cursor(), "7");
@@ -369,9 +374,15 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
             DurableEventPayload::TranscriptRewritten {
                 source_seq: 7,
                 source_fingerprint: prefix_fingerprint(&model, 7),
-                messages: vec![LlmMessage::user(
-                    "<compact_summary>summary</compact_summary>",
-                )],
+                messages: vec![
+                    TranscriptMessage::plain(LlmMessage::user(
+                        "<compact_summary>summary</compact_summary>",
+                    )),
+                    TranscriptMessage {
+                        message: LlmMessage::user("retained aborted context"),
+                        origin: Some(TranscriptMessageOrigin::TurnAborted),
+                    },
+                ],
                 reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                     trigger: "manual".into(),
                     pre_tokens: 100,
@@ -387,7 +398,7 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
         &mut model,
     )
     .unwrap();
-    assert_eq!(model.model_context.messages.len(), 2);
+    assert_eq!(model.model_context.messages.len(), 3);
     assert!(
         model.model_context.messages[0]
             .message
@@ -395,14 +406,23 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
             .contains("summary")
     );
     assert!(
-        model.model_context.messages[1]
+        model.model_context.messages[2]
             .message
             .joined_display_text("\n")
             .contains("concurrent tail")
     );
+    assert_eq!(
+        model.model_context.messages[1].origin,
+        Some(TranscriptMessageOrigin::TurnAborted)
+    );
     assert!(matches!(
         model.presentation.artifacts.as_slice(),
-        [SessionArtifactView::SystemNote { text, .. }] if text == "tail artifact"
+        [SessionArtifactView::Recap {
+            text,
+            source,
+            seq: 9,
+            ..
+        }] if text == "tail artifact" && source == "manual"
     ));
     assert!(model.model_context.usage.is_none());
     assert!(matches!(
@@ -430,7 +450,10 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
                         .model_context
                         .messages
                         .iter()
-                        .map(|message| message.message.clone())
+                        .map(|entry| TranscriptMessage {
+                            message: entry.message.clone(),
+                            origin: entry.origin,
+                        })
                         .collect(),
                 },
             ),
@@ -438,6 +461,10 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
     )
     .unwrap();
     assert_eq!(fork.first_user_message(), Some("inspect"));
+    assert_eq!(
+        fork.model_context.messages[1].origin,
+        Some(TranscriptMessageOrigin::TurnAborted)
+    );
 }
 
 #[test]
@@ -661,6 +688,12 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
         turn_event(
             17,
             &session_id,
+            &turn_id,
+            DurableEventPayload::TurnAbortedContext,
+        ),
+        turn_event(
+            18,
+            &session_id,
             &other_turn_id,
             DurableEventPayload::TurnCompleted {
                 finish_reason: "stale".into(),
@@ -713,21 +746,20 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
         Some("failed")
     );
     assert_eq!(
-        before_matching_completion.model_context.messages[2]
-            .source
-            .as_deref(),
-        Some(TOOL_CALL_FAILED_SOURCE)
-    );
-    assert_eq!(
-        before_matching_completion.model_context.messages[3]
-            .source
-            .as_deref(),
-        Some(TOOL_CALL_CANCELLED_SOURCE)
+        before_matching_completion.model_context.messages[2..]
+            .iter()
+            .map(|message| message.origin)
+            .collect::<Vec<_>>(),
+        vec![
+            Some(TranscriptMessageOrigin::ToolCallFailed),
+            Some(TranscriptMessageOrigin::ToolCallCancelled),
+            Some(TranscriptMessageOrigin::TurnAborted),
+        ]
     );
 
     projection
         .apply(&turn_event(
-            18,
+            19,
             &session_id,
             &turn_id,
             DurableEventPayload::TurnCompleted {
@@ -749,13 +781,16 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
                 &fork_id,
                 DurableEventPayload::SessionForked {
                     source_session_id: session_id.clone(),
-                    source_cursor: "18".into(),
+                    source_cursor: "19".into(),
                     first_user_message: completed.first_user_message().map(str::to_owned),
                     messages: completed
                         .model_context
                         .messages
                         .iter()
-                        .map(|message| message.message.clone())
+                        .map(|entry| TranscriptMessage {
+                            message: entry.message.clone(),
+                            origin: entry.origin,
+                        })
                         .collect(),
                 },
             ),
@@ -764,8 +799,19 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
     .unwrap();
     let forked_from = fork.identity.forked_from.as_ref().unwrap();
     assert_eq!(forked_from.session_id, session_id);
-    assert_eq!(forked_from.cursor, "18");
+    assert_eq!(forked_from.cursor, "19");
     assert_eq!(fork.first_user_message(), Some("matrix prompt"));
+    assert_eq!(
+        fork.model_context.messages[2..]
+            .iter()
+            .map(|message| message.origin)
+            .collect::<Vec<_>>(),
+        vec![
+            Some(TranscriptMessageOrigin::ToolCallFailed),
+            Some(TranscriptMessageOrigin::ToolCallCancelled),
+            Some(TranscriptMessageOrigin::TurnAborted),
+        ]
+    );
 }
 
 #[test]
@@ -805,7 +851,7 @@ fn projection_rejects_invalid_stream_shapes_without_mutating_valid_state() {
             DurableEventPayload::TranscriptRewritten {
                 source_seq: 1,
                 source_fingerprint: String::new(),
-                messages: vec![LlmMessage::user("future rewrite")],
+                messages: vec![TranscriptMessage::plain(LlmMessage::user("future rewrite"))],
                 reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                     trigger: "manual".into(),
                     pre_tokens: 10,
@@ -874,7 +920,7 @@ fn rewrite_event(
         DurableEventPayload::TranscriptRewritten {
             source_seq,
             source_fingerprint,
-            messages: vec![LlmMessage::user(summary)],
+            messages: vec![TranscriptMessage::plain(LlmMessage::user(summary))],
             reason: TranscriptRewriteReason::Compaction(CompactionDetails {
                 trigger: "manual".into(),
                 pre_tokens: 100,

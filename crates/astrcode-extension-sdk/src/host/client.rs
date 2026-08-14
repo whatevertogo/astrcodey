@@ -16,12 +16,11 @@ use crate::{
     extension::ExtensionHttpDispatchRequest,
     host::{
         HostConfigureSessionToolsRequest, HostNetworkRequest, HostProcessReadRequest,
-        HostProcessRequest, HostProcessResizeRequest, HostProcessStartRequest,
-        HostProcessTargetRequest, HostSessionInputRequest, HostSessionStateReadRequest,
-        HostSessionStateWriteRequest, HostToolResultReadRequest, HostWorkspaceApplyPatchRequest,
-        HostWorkspaceEditRequest, HostWorkspaceGlobRequest, HostWorkspaceGrepMode,
-        HostWorkspaceGrepRequest, HostWorkspaceListRequest, HostWorkspaceReadRequest,
-        HostWorkspaceWriteRequest,
+        HostProcessRequest, HostProcessStartRequest, HostProcessTargetRequest,
+        HostSessionInputRequest, HostSessionStateReadRequest, HostSessionStateWriteRequest,
+        HostToolResultReadRequest, HostWorkspaceApplyPatchRequest, HostWorkspaceEditRequest,
+        HostWorkspaceGlobRequest, HostWorkspaceGrepMode, HostWorkspaceGrepRequest,
+        HostWorkspaceListRequest, HostWorkspaceReadRequest, HostWorkspaceWriteRequest,
     },
     llm::LlmMessage,
     session::{
@@ -155,7 +154,6 @@ mod tests {
             HostOperation::ProcessRead,
             HostOperation::ProcessInput,
             HostOperation::ProcessInput,
-            HostOperation::ProcessResize,
             HostOperation::ProcessStatus,
             HostOperation::ProcessPromote,
             HostOperation::ProcessKill,
@@ -239,7 +237,10 @@ mod tests {
         let messages = || vec![LlmMessage::user("hello")];
         expect_backend_error(host.models().main_chat(messages())).await;
         expect_backend_error(host.models().small_chat(messages())).await;
-        expect_backend_error(host.models().main_chat_collected(messages())).await;
+        expect_backend_error(host.models().main_chat_collected_request(
+            crate::host::llm_chat_request(messages()).with_max_output_tokens(512),
+        ))
+        .await;
         expect_backend_error(host.models().small_chat_collected(messages())).await;
         expect_backend_error(
             host.process()
@@ -250,7 +251,7 @@ mod tests {
         expect_backend_error(
             host.process()
                 .unwrap()
-                .start(HostProcessStartRequest::pipes("true")),
+                .start(HostProcessStartRequest::new("true")),
         )
         .await;
         let process_target = || HostProcessTargetRequest {
@@ -263,12 +264,6 @@ mod tests {
         .await;
         expect_backend_error(host.process().unwrap().write("process-1", "continue\n")).await;
         expect_backend_error(host.process().unwrap().close_stdin("process-1")).await;
-        expect_backend_error(host.process().unwrap().resize(HostProcessResizeRequest {
-            id: "process-1".into(),
-            rows: 24,
-            cols: 80,
-        }))
-        .await;
         expect_backend_error(host.process().unwrap().status(process_target())).await;
         expect_backend_error(host.process().unwrap().promote(process_target())).await;
         expect_backend_error(host.process().unwrap().kill(process_target())).await;

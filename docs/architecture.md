@@ -153,7 +153,13 @@ Compact 是一个**严格的 XML contract**：
 - **可选预测性压缩**：根据 turn token 增长估算，在超出窗口前提前 compact
 - **前缀校验**：`TranscriptRewritten` 携带冻结时的 `source_seq + source_fingerprint`；
   projection 在 append 前重算前缀指纹，冲突时拒绝事件，同时保留 source seq 后的并发 tail
-- **durable 边界**：追加 rewrite 后必须通过 EventLog fsync，之后才允许 `PostCompact` 和成功响应；checkpoint 只是 best-effort 加速器
+- **durable 边界**：rewrite 在同一 session lane 内按 append → fsync → projection/observer
+  publish 提交；模糊 fsync 失败保留 sticky `DurabilityUncertain` 并阻断后续
+  mutation。下一次 operation admission 只用该错误携带的 exact seq 尝试一次恢复；
+  reopen 与 cold read 必须在任何 replay/restore 前固定文件长度并真实 fsync EventLog；
+  scan 只读该 confirmed prefix，失败时不暴露 projection 或 summary。
+  `PostCompact` 和成功响应只发生在本次调用观察到确认之后；checkpoint 只是
+  best-effort 加速器
 
 `CompactStrategy` 是调用链唯一传递的策略事实，trigger 与 manual 的
 `keep_recent_turns` 均由它派生。turn id 只来自 hook call context，不再沿多个函数重复转手。
@@ -203,7 +209,7 @@ Identity → System → Task Guidelines → Communication → Environment
 
 ### 分层工具而非全 bash
 
-Coding Extension 注册 9 个第一方工具（read / read_tool_result / write / edit / patch / glob / grep / shell / terminal）：
+Coding Extension 注册 8 个第一方工具（read / read_tool_result / write / edit / patch / glob / grep / shell）：
 
 - **为什么不全用 bash**：Codex 可以全 bash 是因为模型足够强。对能力较弱的模型，结构化工具（edit 的 oldStr/newStr 精确替换、patch 的 unified diff）比让模型写 shell 命令更可靠
 - edit 支持 `edits` 数组做原子多编辑，先全部验证再一次性写回
@@ -212,6 +218,9 @@ Coding Extension 注册 9 个第一方工具（read / read_tool_result / write /
 ### 工具管线
 
 - `ToolPipeline` 管理完整的 预处理 → 执行 → 提交 流程
+- 参数先由全部 `ToolInputTransform` 按固定顺序折叠，再统一 normalize；全部 `PreToolUse` handler
+  只在同一份 canonical arguments 上做 Allow/Ask/Block 准入。Ask 聚合，任一 Block 终止；planner、
+  permission 与 executor 随后共享这份参数
 - 并行执行用 `JoinSet` 做水位控制（MAX_PARALLEL_TOOL_CALLS = 5），一个任务完成立即补位
 - LLM 输出的 JSON 参数解析失败时尝试修复（`parse_and_repair_json`），容错弱模型的格式问题
 - 工具结果有**全局消息预算**：总字符数超限时按大小降序优先持久化最大的结果
@@ -239,7 +248,9 @@ Coding Extension 注册 9 个第一方工具（read / read_tool_result / write /
 
 扩展订阅 agent 生命周期事件；控制型 hook 可以拦截或修改操作，通知型 hook 只观察：
 
-- `PreToolUse` / `PostToolUse` — 检查、修改或阻止工具执行
+- `ToolInputTransform` — 在规范化前按确定顺序变换工具参数
+- `PreToolUse` — 在最终参数上聚合 Ask / Block 准入决策
+- `PostToolUse` — 检查、修改或阻止工具结果
 - `BeforeProviderRequest` / `AfterProviderResponse` — 修改消息或阻止 LLM 调用
 - `PreCompact` / `PostCompact` — 注入 compact 指令
 - `PromptBuild` — 贡献 system prompt 片段
@@ -247,7 +258,7 @@ Coding Extension 注册 9 个第一方工具（read / read_tool_result / write /
 
 ### 三种钩子模式
 
-- **Blocking**：同步执行，可返回 Block / ModifiedInput / ModifiedResult
+- **Blocking**：同步执行，可返回所属 hook 明确定义的控制结果
 - **NonBlocking**：即发即弃，使用快照上下文，不阻塞主流程
 - **Advisory**：结果仅记录日志，不强制执行
 

@@ -21,62 +21,62 @@ mod tool_plan_context;
 
 /// Runtime-only construction seam. This module is intentionally absent from author preludes.
 #[doc(hidden)]
-pub mod internal {
-    use std::sync::Arc;
-
-    use astrcode_core::event::{EventDeliveryReceipt, EventSendError};
-    use async_trait::async_trait;
-
-    pub use super::registration_validation::{
-        canonical_registration_name, custom_event_subscription_matches,
-        extension_http_route_patterns_conflict, fixed_hook_mode, has_duplicate_registration_name,
-        hook_mode_is_supported, match_extension_http_route, normalize_custom_event_subscription,
-        validate_custom_event_subscription, validate_extension_http_route,
-    };
-    use super::{CustomEventDeclaration, CustomEventEmitter};
-
-    /// Host-bound event ingress. Extension authors emit through [`CustomEventEmitter`].
-    #[async_trait]
-    pub trait CustomEventSink: Send + Sync {
-        async fn emit(
-            &self,
-            event_type: &str,
-            schema_version: u32,
-            durable: bool,
-            payload: serde_json::Value,
-        ) -> Result<EventDeliveryReceipt, EventSendError>;
-
-        fn try_emit(
-            &self,
-            event_type: &str,
-            schema_version: u32,
-            durable: bool,
-            payload: serde_json::Value,
-        ) -> Result<(), EventSendError>;
-    }
-
-    pub fn custom_event_emitter(
-        declarations: impl IntoIterator<Item = CustomEventDeclaration>,
-        sink: Option<Arc<dyn CustomEventSink>>,
-    ) -> CustomEventEmitter {
-        CustomEventEmitter::from_runtime(declarations, sink)
-    }
-}
+pub mod internal;
 
 pub use astrcode_core::{
     compaction::{CompactStrategy, CompactTrigger},
     tool::SessionToolSelection,
 };
-pub use call_context::*;
-pub use events::*;
-pub use hooks::*;
-pub use http::*;
-pub use lifecycle::*;
-pub use package_manifest::*;
-pub use paths::*;
-pub use registrar::*;
-pub use runtime::*;
-pub use tool_context::*;
-pub use tool_plan_context::*;
+pub use call_context::{
+    ExtensionCall, ExtensionCallContext, ExtensionStartContext, SessionCallContext,
+    WorkspaceCallContext,
+};
+pub use events::{
+    CustomEventContext, CustomEventDeclaration, CustomEventDisposition, CustomEventEmitError,
+    CustomEventEmitter, CustomEventHandler, CustomEventSourceFilter, CustomEventSubscription,
+    DEFAULT_CUSTOM_EVENT_DURABLE, DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
+    DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION, LifecycleEvent, MAX_CUSTOM_EVENT_PAYLOAD_BYTES,
+    MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN,
+};
+pub use hooks::{
+    CommandAvailability, CommandCompletionContext, CommandCompletionItem, CommandCompletions,
+    CommandContext, CommandDiscovery, CommandDiscoveryContext, CommandDiscoveryHandler,
+    CommandExecution, CommandHandler, CompactContext, CompactContributions, CompactEvent,
+    CompactHandler, CompactPayload, CompactResult, ContinueAfterStopContext,
+    ContinueAfterStopHandler, ContinueAfterStopLimit, ContinueAfterStopOptions,
+    ContinueAfterStopPayload, ContinueAfterStopRegistration, ContinueAfterStopResult,
+    DiscoveredCommand, DiscoveredTool, ExchangeSummary, ExtensionCommandResult, ExtensionError,
+    HookContext, HookMode, HookResult, LifecycleContext, LifecycleHandler, LifecyclePayload,
+    PostToolUseContext, PostToolUseHandler, PostToolUsePayload, PostToolUseResult,
+    PreToolUseAdmission, PreToolUseContext, PreToolUseHandler, PreToolUsePayload,
+    PreToolUseRequirement, PreToolUseResult, PreparedProviderContribution, PreparedProviderEffect,
+    PromptBuildContext, PromptBuildHandler, PromptBuildPayload, PromptContributions,
+    ProviderContext, ProviderContributionHandler, ProviderContributionId, ProviderEvent,
+    ProviderHandler, ProviderPayload, ProviderRequestId, ProviderResult, ProviderSettlementContext,
+    ProviderSettlementPayload, SessionCommandIntent, SessionCommandKind, SlashCommand,
+    StatusItemUpdatePayload, ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler,
+    ToolHandler, ToolHookRegistration, ToolHookTarget, ToolInputTransformHandler,
+    ToolInputTransformResult, ToolUseRegistration, UserMessageEnvelopeContext,
+    UserMessageEnvelopeHandler, UserMessageEnvelopePayload, UserMessageEnvelopeRegistration,
+    UserMessageEnvelopeResult,
+};
+pub use http::{
+    DEFAULT_EXTENSION_HTTP_BODY_BYTES, ExtensionHttpAccess, ExtensionHttpDispatchRequest,
+    ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
+    ExtensionHttpRoute, ExtensionHttpRouteRegistration, HttpContext, MAX_EXTENSION_HTTP_BODY_BYTES,
+};
+pub use lifecycle::Extension;
+pub use package_manifest::{ExtensionPackageManifest, ExtensionPackageProtocol};
+pub use paths::{ExtensionPathError, ExtensionPaths};
+pub use registrar::{
+    CustomEventRegistration, ExtensionRegistrations, Keybinding, Registrar, RegistrationError,
+    StatusItem, ToolRegistration,
+};
+pub use runtime::{
+    ExtensionCapability, ExtensionConfig, ExtensionConfigError, ExtensionStopContext,
+    ExtensionTaskError, ExtensionTasks, StopReason,
+};
+pub use tool_context::ToolContext;
+pub use tool_plan_context::ToolPlanContext;
 
 pub use crate::manifest::{ExtensionManifest, ExtensionManifestError};

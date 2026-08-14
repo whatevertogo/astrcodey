@@ -202,16 +202,6 @@ host_operations! {
         response: crate::wire::host::Acknowledgement,
         description: "Write or close stdin for a session-owned process",
     }
-    ProcessResize {
-        name: "astrcode.process.resize",
-        required: Some(ExtensionCapability::ProcessSpawn),
-        context: Session,
-        group: Process,
-        backend: ProcessWorkingDir,
-        request: crate::wire::host::HostProcessResizeRequest,
-        response: crate::wire::host::Acknowledgement,
-        description: "Resize a session-owned PTY",
-    }
     ProcessStatus {
         name: "astrcode.process.status",
         required: Some(ExtensionCapability::ProcessSpawn),

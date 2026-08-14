@@ -16,7 +16,6 @@ import {
   ReadToolDetails,
   SearchToolDetails,
   ShellToolDetails,
-  TerminalToolDetails,
   ToolResultDetails,
 } from './details'
 import { registerToolRenderer } from './registry'
@@ -197,41 +196,4 @@ registerToolRenderer({
     if (block.status === 'streaming') return null
     return undefined
   },
-})
-
-registerToolRenderer({
-  id: 'builtin:terminal',
-  priority: 100,
-  match: ({ block }) => block.name === 'terminal',
-  summary: ({ args, meta }) => {
-    const action = stringValue(args, 'action')
-    const id = stringValue(meta, 'id') || stringValue(args, 'id')
-    const command = stringValue(meta, 'command') || stringValue(args, 'command')
-    const bytesSent = numberValue(meta, 'bytesSent')
-    const alive = boolValue(meta, 'alive')
-    const exitCode = numberValue(meta, 'exitCode')
-    const count = numberValue(meta, 'count')
-    const status =
-      alive != null
-        ? alive
-          ? 'alive'
-          : 'exited'
-        : exitCode != null
-          ? `exit ${exitCode}`
-          : ''
-    return compactLine(
-      [
-        'terminal',
-        action,
-        command && truncateMiddle(command, 72),
-        id && truncateMiddle(id, 36),
-        bytesSent != null && formatBytes(bytesSent),
-        count != null && `${count} active`,
-        status,
-      ]
-        .filter(Boolean)
-        .join(' ')
-    )
-  },
-  render: ({ block }) => <TerminalToolDetails block={block} />,
 })

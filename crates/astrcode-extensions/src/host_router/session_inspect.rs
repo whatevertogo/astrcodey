@@ -10,6 +10,7 @@ use astrcode_core::{
 use astrcode_extension_sdk::{
     host::HostOperation,
     s5r::ErrorPayload,
+    session::tool_selection_to_dto,
     wire::{
         WireErrorCode,
         session_inspect::{
@@ -29,7 +30,7 @@ use astrcode_storage::{SessionReader, StorageError};
 
 use super::{
     HOST_INVOKE_TIMEOUT,
-    session::{phase_output, storage_error, tool_selection_output},
+    session::{message_origin_dto, phase_output, storage_error},
 };
 
 pub(super) async fn list(
@@ -186,7 +187,7 @@ pub(super) fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel
         created_at: stats.created_at.to_rfc3339(),
         updated_at: stats.updated_at.to_rfc3339(),
         parent_session_id: identity.parent.map(|parent| parent.session_id.to_string()),
-        tool_selection: Some(tool_selection_output(identity.tool_selection)),
+        tool_selection: Some(tool_selection_to_dto(identity.tool_selection)),
         source_extension: identity.source_extension,
         agent_sessions: model
             .agent_sessions
@@ -219,7 +220,7 @@ fn sequenced_message_dto(message: SequencedLlmMessage) -> SessionInspectSequence
     SessionInspectSequencedMessage {
         message: message_dto(message.message),
         updated_seq: message.updated_seq,
-        source: message.source,
+        origin: message.origin.map(message_origin_dto),
     }
 }
 
@@ -298,7 +299,7 @@ mod tests {
             DurableEvent, DurableEventPayload, PersistedSystemPrompt, Phase, SessionStarted,
             StoredEvent, SystemPromptSource,
         },
-        llm::LlmMessage,
+        llm::{LlmMessage, TranscriptMessageOrigin},
         tool::SessionToolSelection,
     };
     use astrcode_session_projection::replay;
@@ -333,9 +334,9 @@ mod tests {
         .unwrap();
         model.execution.phase = Phase::CallingTool;
         model.model_context.messages.push(SequencedLlmMessage {
-            message: LlmMessage::user("hello"),
+            message: LlmMessage::tool("probe", "call-1", "failed", true),
             updated_seq: 2,
-            source: None,
+            origin: Some(TranscriptMessageOrigin::ToolCallFailed),
         });
 
         let value = serde_json::to_value(SessionInspectReadModelOutput {
@@ -347,7 +348,11 @@ mod tests {
         assert_eq!(value["read_model"]["phase"], "calling_tool");
         assert_eq!(
             value["read_model"]["messages"][0]["message"]["content"][0]["type"],
-            "text"
+            "tool_result"
+        );
+        assert_eq!(
+            value["read_model"]["messages"][0]["origin"],
+            "tool_call_failed"
         );
     }
 

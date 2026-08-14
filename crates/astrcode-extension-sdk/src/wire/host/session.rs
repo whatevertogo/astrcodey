@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::llm::HostLlmMessage;
-use crate::wire::session::{SessionPhaseDto, SessionToolSelectionDto};
+use crate::wire::session::{SessionMessageOriginDto, SessionPhaseDto, SessionToolSelectionDto};
 
 /// Stable summary returned by the narrow session-history domain.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -28,7 +28,7 @@ pub struct HostSessionSummariesOutput {
 #[serde(deny_unknown_fields)]
 pub struct HostSessionTranscriptMessage {
     pub message: HostLlmMessage,
-    pub source: Option<String>,
+    pub origin: Option<SessionMessageOriginDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

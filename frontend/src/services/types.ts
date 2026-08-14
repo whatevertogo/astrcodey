@@ -2,7 +2,9 @@
 // limited to frontend state and the strictly decoded conversation/SSE model.
 
 import type {
+  AgentSessionLinkDto,
   AgentSessionStatusDto,
+  AgentSessionUpdateDto,
   ApprovalDecisionDto,
   ApprovalModeDto,
   ApplyProviderPresetRequest,
@@ -129,19 +131,12 @@ export type SessionListResponse = SessionListResponseDto
 
 export type AgentSessionStatus = AgentSessionStatusDto
 
-export interface AgentSessionLink {
-  childSessionId: string
-  toolCallId?: string
-  agentName?: string
-  task?: string
-  /** 省略时表示仅更新 phase/currentTool，不改动终态 status */
-  status?: AgentSessionStatus
-  finalSessionId?: string
-  summary?: string
-  error?: string
+export type AgentSessionLink = AgentSessionLinkDto & {
   phase?: Phase
   currentTool?: string
 }
+
+export type AgentSessionUpdate = AgentSessionUpdateDto
 
 export type ConversationCursor = ConversationCursorDto
 
@@ -159,7 +154,6 @@ export type ConversationBlock =
       id: string
       text: string
       attachments?: PromptAttachmentWire[]
-      source?: string
     }
   | {
       kind: 'assistant'
@@ -181,7 +175,7 @@ export type ConversationBlock =
       approval?: ToolApproval
     }
   | { kind: 'error'; id: string; message: string }
-  | { kind: 'recap'; id: string; text: string; source?: string }
+  | { kind: 'recap'; id: string; text: string; source: string }
   | { kind: 'systemNote'; id: string; text: string }
   | {
       kind: 'compactSummary'
@@ -264,7 +258,7 @@ export type ConversationDelta =
       arguments: string
       argumentsJson?: Record<string, unknown>
     }
-  | { kind: 'agentSessionUpdated'; agentSession: AgentSessionLink }
+  | { kind: 'agentSessionUpdated'; agentSession: AgentSessionUpdate }
   | { kind: 'agentSessionRemoved'; childSessionId: string }
   | { kind: 'statusItemUpdate'; id: string; text: string }
   | { kind: 'extensionRegistryChanged' }

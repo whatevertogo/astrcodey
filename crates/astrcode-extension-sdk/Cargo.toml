@@ -7,18 +7,25 @@ description = "Stable authoring surface for AstrCode extensions"
 
 [features]
 default = []
+conformance = ["tokio/macros"]
 testing = []
+
+[[bin]]
+name = "s5r-conformance"
+path = "src/bin/s5r-conformance.rs"
+required-features = ["conformance"]
 
 [dependencies]
 astrcode-core = { path = "../astrcode-core" }
 async-trait = { workspace = true }
 base64 = { workspace = true }
 futures-util = { workspace = true }
+fs2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_path_to_error = { workspace = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "io-std", "macros", "process", "rt-multi-thread", "sync", "time"] }
+tokio = { workspace = true, features = ["io-util", "io-std", "process", "rt", "sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 

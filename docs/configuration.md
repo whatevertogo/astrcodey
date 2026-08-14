@@ -21,7 +21,10 @@ AstrCode 默认使用 **TOML 配置文件 + 环境变量** 管理 LLM、运行�
 
 **项目覆盖生效范围**：在 `astrcode-server` / CLI 启动时，对 **启动时的工作目录**（默认 `std::env::current_dir()`）读取 `.astrcode/config.toml` 并合并；旧 `.astrcode/config.json` 在 TOML 不存在时作为 fallback。之后在其他目录创建的 session 仍使用已合并后的全局有效配置；若需按仓库分别覆盖，请在该仓库目录下启动进程。
 
-**热更新**：修改 `~/.astrcode/config.toml` 后可通过设置页或 `POST` 重载；已运行 session 的 per-session 快照需同步（服务端在重载后会调用 `sync_session_model_bindings`）。扩展通过 `on_config_changed()` 接收 `extensions` 段变更。
+**热更新**：修改 `~/.astrcode/config.toml` 后可通过设置页或 `POST` 重载。宿主先解析 core
+配置，并在当前运行代之外构造发生变化的 Extension 实例；所有候选完成配置校验和 `start()` 后才
+保存配置并发布新代。任一候选失败时会被停止并丢弃，磁盘与运行态继续使用上一已提交代。未变化
+Extension 的来源指纹与规范化配置完全相同时复用原实例，不会因无关 core 配置更新而重启。
 
 ---
 
@@ -167,10 +170,12 @@ null 不会被吞掉。执行器看到的仍是原始工具契约。
 Anthropic 还限制单次请求中的 strict 工具、可选参数和 union 数量。超过硬上限时，wire 副本按
 Bundled → Extension 的顺序尽可能保留 strict，并在必要时把部分 optional 编译
 为 nullable union；仍无法容纳的工具仅在该次 Anthropic 请求中降级为非 strict，并输出包含工具
-名的 warning。Coding Extension 的 9 个工具（`read`、`read_tool_result`、`write`、`edit`、
-`patch`、`glob`、`grep`、`shell`、`terminal`）会优先保留在 strict 子集中；若全部第一方工具的
-聚合 Schema 超限，确定性降级的是其余 bundled 工具，而不是固定降级某个 coding 工具。注册表中
-的原始 strict 定义不会被修改。
+名的 warning。Bundled composition catalog 把 Coding Extension 放在其他第一方工具之前，因而
+`read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell` 优先保留 strict。
+八个 Coding Schema 按稳定顺序参与 Anthropic strict-tool 预算；若与其他 bundled Extension 的
+schema 合计超过 provider 容量，wire compiler 只对本次请求中靠后的超限项做确定性降级，注册表中的
+原始 strict 定义不会被修改。不要通过提高本地上限或把可选字段强制改成非 nullable required 来
+伪装全部工具均可 strict：前者会被 provider 拒绝，后者会改变模型可见的工具语义。
 
 该开关只表示 provider 支持 OpenAI / Anthropic 的**逐工具** strict 契约，不代表所有厂商的等价
 能力都能复用同一字段：
@@ -243,7 +248,7 @@ thinkingCapability = { wireMapping = "open_ai_chat", allowedEffort = [], canDisa
 
 | 扩展 ID | 默认 | 说明 |
 |---------|------|------|
-| `astrcode-coding` | 启用 | workspace、shell 与 terminal 工具 |
+| `astrcode-coding` | 启用 | workspace 与受监管 shell 工具 |
 | `astrcode-agent-tools` | 启用 | 子 Agent 工具 |
 | `astrcode-mcp` | 启用 | MCP 客户端 |
 | `astrcode-skill` | 启用 | Skill 斜杠命令 |

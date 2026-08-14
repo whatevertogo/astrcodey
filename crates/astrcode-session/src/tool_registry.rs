@@ -94,7 +94,7 @@ impl ToolRegistry {
         }
     }
 
-    /// Normalize provider quirks once, after PreToolUse and before plan/permission/execute.
+    /// Normalize provider quirks once, after input transforms and before admission/planning.
     pub(crate) fn normalize_final_arguments(
         &self,
         name: &str,

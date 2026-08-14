@@ -18,10 +18,20 @@ impl CommandHandler {
             text: text.clone(),
             attachments,
         };
+        if let Some(command) = parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
+        {
+            match self.execute_command_for_session(sid.clone(), command).await {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    self.send_error(slash::command_error_code(&error), &error.to_string());
+                    return Err(error);
+                },
+            }
+        }
         if self.scheduler.registry().has_active(&sid) {
             return self.inject_mid_turn_message_for_session(&sid, text).await;
         }
-        match self.submit_input_for_session(sid.clone(), input).await {
+        match self.session_commands.submit_input(sid, input).await {
             Ok(_) => Ok(()),
             Err(error) => {
                 self.send_error(slash::command_error_code(&error), &error.to_string());
@@ -60,18 +70,5 @@ impl CommandHandler {
         text: String,
     ) -> Result<PromptSubmission, HandlerError> {
         self.session_commands.inject_input(sid, text).await
-    }
-
-    pub(crate) async fn submit_input_for_session(
-        &mut self,
-        sid: SessionId,
-        input: UserInput,
-    ) -> Result<PromptSubmission, HandlerError> {
-        if let Some(command) = parse_slash_command(&input.text).filter(ParsedSlashCommand::has_name)
-            && command.name == "model"
-        {
-            return self.execute_command_for_session(sid, command).await;
-        }
-        self.session_commands.submit_input(sid, input).await
     }
 }

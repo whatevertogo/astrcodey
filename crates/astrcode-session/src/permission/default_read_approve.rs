@@ -1,17 +1,13 @@
-use super::{PermissionContext, PermissionDecision, PermissionPolicy};
+use super::{PermissionContext, PermissionPolicy, PolicyDecision};
 
 pub(super) struct DefaultReadApprovePolicy;
 
 impl PermissionPolicy for DefaultReadApprovePolicy {
-    fn priority(&self) -> u32 {
-        130
-    }
-
-    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
+    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PolicyDecision {
         if matches!(ctx.tool_name, "read" | "grep" | "glob") {
-            PermissionDecision::Allow
+            PolicyDecision::Allow
         } else {
-            PermissionDecision::Pass
+            PolicyDecision::Pass
         }
     }
 }
@@ -35,7 +31,7 @@ mod tests {
         };
         assert_eq!(
             DefaultReadApprovePolicy.evaluate(&ctx),
-            PermissionDecision::Allow
+            PolicyDecision::Allow
         );
     }
 }

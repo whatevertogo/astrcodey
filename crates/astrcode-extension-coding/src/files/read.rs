@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::collections::BTreeMap;
 
 use astrcode_extension_sdk::{
     WireErrorCode,
@@ -12,7 +12,6 @@ use astrcode_extension_sdk::{
 use serde::Deserialize;
 
 use super::absolute_path;
-use crate::result::{completed_error, success};
 
 const DEFAULT_MAX_CHARS: usize = 20_000;
 const MAX_RETURNED_CHARS: usize = 30_000;
@@ -38,16 +37,16 @@ impl ToolHandler for ReadHandler {
     async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
         let args: ReadArgs = context.arguments()?;
         validate(&args)?;
-        Ok(ToolPlan::from_resources([ResourceAccess::read_file(
-            absolute_path(context.working_dir(), &args.path),
-        )]))
+        Ok(ToolPlan::new([ResourceAccess::read_file(absolute_path(
+            context.working_dir(),
+            &args.path,
+        ))]))
     }
 
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
-        let started_at = Instant::now();
         let args: ReadArgs = context.arguments()?;
         validate(&args)?;
-        let result = read_workspace(&context, &args, started_at).await?;
+        let result = read_workspace(&context, &args).await?;
         Ok(result.into())
     }
 }
@@ -55,7 +54,6 @@ impl ToolHandler for ReadHandler {
 async fn read_workspace(
     context: &ToolContext,
     args: &ReadArgs,
-    started_at: Instant,
 ) -> Result<ToolResult, ExtensionError> {
     let output = match context
         .host()
@@ -70,11 +68,12 @@ async fn read_workspace(
     {
         Ok(output) => output,
         Err(error) if error.code_enum() == Some(WireErrorCode::InvalidInput) => {
-            return Ok(completed_error(
-                started_at,
-                error.message,
-                BTreeMap::from([("path".into(), serde_json::json!(args.path))]),
-            ));
+            return Ok(
+                ToolResult::error(error.message).with_metadata(BTreeMap::from([(
+                    "path".into(),
+                    serde_json::json!(args.path),
+                )])),
+            );
         },
         Err(error) => return Err(error.into()),
     };
@@ -88,7 +87,6 @@ async fn read_workspace(
             has_more_lines,
         } => Ok(render_text(
             args,
-            started_at,
             content,
             bytes,
             total_lines,
@@ -104,33 +102,28 @@ async fn read_workspace(
             let content = ReadToolInlinePayload::image(&media_type, data_base64)
                 .to_content_string()
                 .map_err(|error| ExtensionError::Internal(error.to_string()))?;
-            Ok(success(
-                started_at,
-                content,
-                BTreeMap::from([
-                    ("path".into(), serde_json::json!(args.path)),
-                    ("bytes".into(), serde_json::json!(bytes)),
-                    ("fileType".into(), serde_json::json!("image")),
-                    ("mediaType".into(), serde_json::json!(media_type)),
-                ]),
-            ))
-        },
-        HostWorkspaceReadOutput::Binary { bytes } => Ok(success(
-            started_at,
-            format!("Binary file: {}", args.path),
-            BTreeMap::from([
+            Ok(ToolResult::success(content).with_metadata(BTreeMap::from([
                 ("path".into(), serde_json::json!(args.path)),
                 ("bytes".into(), serde_json::json!(bytes)),
-                ("binary".into(), serde_json::json!(true)),
-            ]),
-        )),
+                ("fileType".into(), serde_json::json!("image")),
+                ("mediaType".into(), serde_json::json!(media_type)),
+            ])))
+        },
+        HostWorkspaceReadOutput::Binary { bytes } => Ok(ToolResult::success(format!(
+            "Binary file: {}",
+            args.path
+        ))
+        .with_metadata(BTreeMap::from([
+            ("path".into(), serde_json::json!(args.path)),
+            ("bytes".into(), serde_json::json!(bytes)),
+            ("binary".into(), serde_json::json!(true)),
+        ]))),
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn render_text(
     args: &ReadArgs,
-    started_at: Instant,
     content: String,
     bytes: usize,
     total_lines: usize,
@@ -160,32 +153,28 @@ fn render_text(
              and charOffset=0.]"
         ));
     }
-    success(
-        started_at,
-        content,
-        BTreeMap::from([
-            ("path".into(), serde_json::json!(args.path)),
-            ("bytes".into(), serde_json::json!(bytes)),
-            ("totalLines".into(), serde_json::json!(total_lines)),
-            ("shownLines".into(), serde_json::json!(returned_lines)),
-            ("offset".into(), serde_json::json!(line_offset)),
-            ("nextOffset".into(), serde_json::json!(next_line_offset)),
-            ("charOffset".into(), serde_json::json!(char_offset)),
-            ("maxChars".into(), serde_json::json!(max_chars)),
-            ("returnedChars".into(), serde_json::json!(returned_chars)),
-            ("nextCharOffset".into(), serde_json::json!(next_char_offset)),
-            (
-                "hasMore".into(),
-                serde_json::json!(char_more || has_more_lines),
-            ),
-            (
-                "truncated".into(),
-                serde_json::json!(char_more || has_more_lines),
-            ),
-            ("lineTruncated".into(), serde_json::json!(has_more_lines)),
-            ("charTruncated".into(), serde_json::json!(char_more)),
-        ]),
-    )
+    ToolResult::success(content).with_metadata(BTreeMap::from([
+        ("path".into(), serde_json::json!(args.path)),
+        ("bytes".into(), serde_json::json!(bytes)),
+        ("totalLines".into(), serde_json::json!(total_lines)),
+        ("shownLines".into(), serde_json::json!(returned_lines)),
+        ("offset".into(), serde_json::json!(line_offset)),
+        ("nextOffset".into(), serde_json::json!(next_line_offset)),
+        ("charOffset".into(), serde_json::json!(char_offset)),
+        ("maxChars".into(), serde_json::json!(max_chars)),
+        ("returnedChars".into(), serde_json::json!(returned_chars)),
+        ("nextCharOffset".into(), serde_json::json!(next_char_offset)),
+        (
+            "hasMore".into(),
+            serde_json::json!(char_more || has_more_lines),
+        ),
+        (
+            "truncated".into(),
+            serde_json::json!(char_more || has_more_lines),
+        ),
+        ("lineTruncated".into(), serde_json::json!(has_more_lines)),
+        ("charTruncated".into(), serde_json::json!(char_more)),
+    ]))
 }
 
 fn slice_chars(value: &str, offset: usize, max: usize) -> (String, usize, bool) {

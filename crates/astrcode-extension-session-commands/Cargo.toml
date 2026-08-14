@@ -1,0 +1,10 @@
+[package]
+name = "astrcode-extension-session-commands"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "First-party session command declarations"
+
+[dependencies]
+astrcode-extension-sdk = { path = "../astrcode-extension-sdk" }
+async-trait = { workspace = true }

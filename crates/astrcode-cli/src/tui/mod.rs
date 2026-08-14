@@ -309,7 +309,7 @@ async fn handle_key(
             } else {
                 app.composer.backspace();
             }
-            app.sync_slash_filter_pub();
+            app.sync_slash_filter();
         },
         KeyCode::Delete => {
             app.composer.delete();
@@ -374,7 +374,7 @@ async fn handle_key(
                 return Ok(());
             }
             app.composer.insert_char(ch);
-            app.sync_slash_filter_pub();
+            app.sync_slash_filter();
         },
         _ => {},
     }
@@ -503,15 +503,6 @@ async fn execute_slash_command(
                     .map_err(io_error)?;
                 app.status_text = "Resuming session".into();
             }
-        },
-        SlashCommand::Compact => {
-            client
-                .send_command(&ClientCommand::Compact {
-                    keep_recent_turns: None,
-                })
-                .await
-                .map_err(io_error)?;
-            app.status_text = "Compacting session".into();
         },
         SlashCommand::Recap => {
             client

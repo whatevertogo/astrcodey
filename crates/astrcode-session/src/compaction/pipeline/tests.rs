@@ -14,7 +14,8 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        CompactEvent, CompactResult as HookCompactResult, ExtensionError, RuntimeCompactContext,
+        CompactEvent, CompactResult as HookCompactResult, ExtensionError,
+        internal::RuntimeCompactContext,
     },
     runtime_ports::TurnHooks,
 };
@@ -160,6 +161,18 @@ impl SessionEventJournal for RecordingStore {
     ) -> Result<Vec<StoredEvent>, StorageError> {
         self.calls.lock().push("append");
         self.inner.append_events(events).await
+    }
+
+    async fn append_events_and_sync(
+        &self,
+        events: Vec<DurableEvent>,
+    ) -> Result<Vec<StoredEvent>, StorageError> {
+        self.calls.lock().push("append");
+        self.calls.lock().push("sync");
+        if self.fail_sync.swap(false, Ordering::SeqCst) {
+            return Err(StorageError::InvalidEvent("injected sync failure".into()));
+        }
+        self.inner.append_events_and_sync(events).await
     }
 
     async fn sync_durable_events(&self, session_id: &SessionId) -> Result<(), StorageError> {
@@ -366,6 +379,12 @@ async fn pipeline_orders_durability_hooks_and_exactly_one_terminal_for_each_outc
         let outcome = CompactionPipeline {
             session: &session,
             llm: session.runtime_services().llm(),
+            context_assembler: Arc::clone(
+                session
+                    .runtime_services()
+                    .pin_runtime_generation()
+                    .context_assembler(),
+            ),
             extension_runner: hooks.as_ref(),
             hook_call,
             pre_hook_message_count: model.model_context.messages.len(),

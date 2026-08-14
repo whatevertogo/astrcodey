@@ -211,7 +211,7 @@ impl App {
         }
     }
 
-    fn sync_slash_filter(&mut self) {
+    pub(super) fn sync_slash_filter(&mut self) {
         let input = self.composer.text().to_string();
         if input.starts_with('/') {
             let filter = input
@@ -225,11 +225,6 @@ impl App {
         } else if self.show_slash_palette {
             self.close_slash();
         }
-    }
-
-    /// Public alias for use from the main loop (mod.rs).
-    pub fn sync_slash_filter_pub(&mut self) {
-        self.sync_slash_filter();
     }
 
     // ─── Transcript helpers ───────────────────────────────────────────────────

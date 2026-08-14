@@ -5,14 +5,18 @@ use std::{
 
 use astrcode_core::{
     event::{EventDeliveryReceipt, EventSendError, EventSender},
+    llm::LlmProviderBindings,
     tool::{SessionOperations, access::ResourceLease},
     types::SessionId,
 };
 use astrcode_extension_sdk::{
     extension::{
         CustomEventDeclaration, ExtensionCallContext, ExtensionCapability, ExtensionError,
-        ExtensionPaths, ExtensionTasks, RuntimeHookCallContext,
-        internal::{CustomEventSink, custom_event_emitter},
+        ExtensionTasks,
+        internal::{
+            CustomEventSink, RuntimeHookCallContext, custom_event_emitter, extension_call_context,
+            extension_paths,
+        },
     },
     host::{
         ExtensionHost, HostError, HostOperation,
@@ -24,7 +28,9 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use super::{ExtensionRunner, ExtensionView, HandlerIndex};
-use crate::host_router::{HostRouter, InvokeContext, decls_to_map};
+use crate::host_router::{
+    ExtensionGenerationGate, ExtensionInstanceId, HostRouter, InvokeContext, decls_to_map,
+};
 
 pub(super) struct ExtensionCallContextInput {
     pub(super) session_id: Option<SessionId>,
@@ -36,6 +42,8 @@ pub(super) struct ExtensionCallContextInput {
     pub(super) resource_lease: Option<ResourceLease>,
     pub(super) file_observation_store: Option<Arc<dyn astrcode_core::tool::FileObservationStore>>,
     pub(super) tool_result_reader: Option<Arc<dyn astrcode_core::tool::ToolResultArtifactReader>>,
+    pub(super) llm_providers: Option<LlmProviderBindings>,
+    pub(super) generation_gate: ExtensionGenerationGate,
     pub(super) cancellation: CancellationToken,
 }
 
@@ -45,6 +53,8 @@ struct BoundCustomEventSink {
     event_tx: EventSender,
     causation: Option<(astrcode_core::types::EventId, u8)>,
     resource_lease: Option<ResourceLease>,
+    cancellation: CancellationToken,
+    generation_gate: ExtensionGenerationGate,
 }
 
 fn bind_custom_event_sink(
@@ -53,6 +63,8 @@ fn bind_custom_event_sink(
     event_tx: EventSender,
     causation: Option<(astrcode_core::types::EventId, u8)>,
     resource_lease: Option<ResourceLease>,
+    cancellation: CancellationToken,
+    generation_gate: ExtensionGenerationGate,
 ) -> Option<Arc<dyn CustomEventSink>> {
     if declarations.is_empty() {
         return None;
@@ -62,11 +74,23 @@ fn bind_custom_event_sink(
         event_tx,
         causation,
         resource_lease,
+        cancellation,
+        generation_gate,
     }))
 }
 
 impl BoundCustomEventSink {
     fn ensure_permitted(&self) -> Result<(), EventSendError> {
+        if !self.generation_gate.is_active() {
+            return Err(EventSendError::PublishFailed(
+                "extension generation is not active".into(),
+            ));
+        }
+        if self.cancellation.is_cancelled() {
+            return Err(EventSendError::PublishFailed(
+                "extension call is no longer active".into(),
+            ));
+        }
         let permitted = self.resource_lease.as_ref().is_none_or(|lease| {
             lease.permits(&astrcode_core::tool::access::ResourceAccess::host(
                 astrcode_core::tool::access::HostResource::Event,
@@ -135,6 +159,8 @@ impl ExtensionCallContextInput {
             resource_lease: None,
             file_observation_store: None,
             tool_result_reader: None,
+            llm_providers: None,
+            generation_gate: ExtensionGenerationGate::default(),
             cancellation,
         }
     }
@@ -155,6 +181,8 @@ impl ExtensionCallContextInput {
             resource_lease: None,
             file_observation_store: None,
             tool_result_reader: None,
+            llm_providers: runtime.llm_providers().cloned(),
+            generation_gate: ExtensionGenerationGate::default(),
             cancellation,
         }
     }
@@ -180,6 +208,7 @@ impl ExtensionCallContextFactory {
     pub(super) fn make_extension_call_context(
         &self,
         extension_id: &str,
+        extension_instance_id: ExtensionInstanceId,
         capabilities: &[ExtensionCapability],
         declarations: &[CustomEventDeclaration],
         tasks: ExtensionTasks,
@@ -195,6 +224,8 @@ impl ExtensionCallContextFactory {
             resource_lease,
             file_observation_store,
             tool_result_reader,
+            llm_providers,
+            generation_gate,
             cancellation,
         } = input;
         let cancellation = linked_call_cancellation(&tasks, cancellation);
@@ -210,6 +241,8 @@ impl ExtensionCallContextFactory {
                 event_tx.clone(),
                 event_causation.clone(),
                 resource_lease.clone(),
+                cancellation.clone(),
+                generation_gate.clone(),
             )
         });
         let session_ops = if capabilities.iter().any(|capability| {
@@ -231,12 +264,14 @@ impl ExtensionCallContextFactory {
         };
         let invoke_context = InvokeContext {
             extension_id: extension_id.to_owned(),
+            extension_instance_id,
             session_id: session_id.as_ref().map(|session_id| session_id.to_string()),
             tool_call_id,
             session_store_dir: session_store_dir.clone(),
             session_ops,
             file_observation_store,
             tool_result_reader,
+            llm_providers,
             event_tx,
             event_causation,
             resource_lease,
@@ -248,6 +283,7 @@ impl ExtensionCallContextFactory {
             tasks: Some(tasks.clone()),
             event_declarations: decls_to_map(declarations),
             declared_capabilities: capabilities.to_vec(),
+            generation_gate,
             on_peer_io_thread: false,
         };
         let scope = HostScope::new(
@@ -264,14 +300,14 @@ impl ExtensionCallContextFactory {
             scope,
         );
         let global_store_dir = astrcode_core::config::defaults::astrcode_dir();
-        let paths = ExtensionPaths::from_runtime(
+        let paths = extension_paths(
             extension_id,
             Some(&global_store_dir),
             session_store_dir.as_deref(),
         );
         let events = custom_event_emitter(declarations.iter().cloned(), event_sink);
 
-        ExtensionCallContext::from_runtime(extension_id, paths, host, events, tasks, cancellation)
+        extension_call_context(extension_id, paths, host, events, tasks, cancellation)
     }
 }
 
@@ -301,6 +337,10 @@ impl ExtensionRunner {
         self.bindings.write().host_router = router;
     }
 
+    pub fn host_router(&self) -> Arc<HostRouter> {
+        Arc::clone(&self.bindings.read().host_router)
+    }
+
     /// Returns the process-wide restricted network backend retained across reloads.
     pub fn outbound_network_service(
         &self,
@@ -323,13 +363,6 @@ impl ExtensionRunner {
             .host_router
             .cleanup_session_resources(session_id.as_str());
     }
-
-    pub(super) fn cleanup_extension_resources(&self, extension_id: &str) {
-        self.bindings
-            .read()
-            .host_router
-            .cleanup_extension_resources(extension_id);
-    }
 }
 
 impl ExtensionView {
@@ -345,15 +378,17 @@ impl ExtensionView {
         &self,
         index: &HandlerIndex,
         extension_id: &str,
-        input: ExtensionCallContextInput,
+        mut input: ExtensionCallContextInput,
     ) -> Result<ExtensionCallContext, ExtensionError> {
         let generation = index.extensions.get(extension_id).ok_or_else(|| {
             ExtensionError::Internal(format!(
                 "missing generation entry for extension {extension_id}"
             ))
         })?;
+        input.generation_gate = generation.generation_gate.clone();
         Ok(self.call_context_factory.make_extension_call_context(
             extension_id,
+            generation.instance_id,
             &generation.capabilities,
             &generation.custom_event_declarations,
             generation.tasks.clone(),
@@ -409,7 +444,7 @@ mod tests {
     use std::time::Duration;
 
     use astrcode_core::llm::{LlmEvent, LlmMessage, LlmProvider, ModelLimits};
-    use astrcode_extension_sdk::wire::WireErrorCode;
+    use astrcode_extension_sdk::{extension::internal::extension_tasks, wire::WireErrorCode};
 
     use super::*;
     use crate::host_router::HostBackends;
@@ -424,9 +459,10 @@ mod tests {
             .extension_call_context_factory()
             .make_extension_call_context(
                 "review-extension",
+                ExtensionInstanceId::new(),
                 &[ExtensionCapability::SessionControl],
                 &[],
-                ExtensionTasks::new("review-extension"),
+                extension_tasks("review-extension"),
                 ExtensionCallContextInput {
                     session_id: Some(session_id.clone()),
                     tool_call_id: Some("call-1".into()),
@@ -437,6 +473,8 @@ mod tests {
                     resource_lease: None,
                     file_observation_store: None,
                     tool_result_reader: None,
+                    llm_providers: None,
+                    generation_gate: ExtensionGenerationGate::default(),
                     cancellation: cancellation.clone(),
                 },
             );
@@ -477,10 +515,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LlmProvider for DelayedLlm {
-        async fn generate(
+        async fn generate_request(
             &self,
-            _messages: Vec<LlmMessage>,
-            _tools: Vec<astrcode_core::tool::ToolDefinition>,
+            _request: astrcode_core::llm::LlmRequest,
         ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, astrcode_core::llm::LlmError>
         {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
@@ -516,9 +553,9 @@ mod tests {
                 ..Default::default()
             },
         };
-        let input = serde_json::to_value(astrcode_extension_sdk::host::internal::llm_chat_request(
-            vec![LlmMessage::user("hello")],
-        ))
+        let input = serde_json::to_value(astrcode_extension_sdk::host::llm_chat_request(vec![
+            LlmMessage::user("hello"),
+        ]))
         .unwrap();
 
         let result = tokio::time::timeout(

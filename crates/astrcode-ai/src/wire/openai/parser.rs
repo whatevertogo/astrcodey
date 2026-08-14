@@ -9,7 +9,7 @@ use astrcode_core::{
 use tokio::sync::mpsc;
 
 use crate::{
-    common::{send_event, stream_text_delta, token_usage_has_value},
+    common::{send_event, stream_text_delta, token_usage_has_value, utf8_prefix},
     stream_decoder::clean_json_fragment,
 };
 
@@ -533,7 +533,7 @@ fn process_sse_data(
         "Failed to parse {} SSE data: {} bytes, preview: {:?}",
         api_mode_name,
         data.len(),
-        &data[..data.floor_char_boundary(80)]
+        utf8_prefix(data, 80)
     );
 }
 

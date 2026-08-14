@@ -69,43 +69,34 @@ const agentSession = decodeConversationStreamEnvelope({
   delta: {
     kind: 'agentSessionUpdated',
     agentSession: {
+      kind: 'spawned',
       childSessionId: 'child-session',
       toolCallId: 'tool-call-1',
       agentName: 'explorer',
       task: 'inspect code',
-      status: 'running',
-      finalSessionId: 'leaf-session',
-      summary: 'done',
-      error: 'interrupted',
-      phase: 'calling_tool',
-      currentTool: 'read',
     },
   },
 })
 assert.equal(agentSession.delta.kind, 'agentSessionUpdated')
 assert.equal(agentSession.delta.agentSession.toolCallId, 'tool-call-1')
-assert.equal(agentSession.delta.agentSession.finalSessionId, 'leaf-session')
-assert.equal(agentSession.delta.agentSession.summary, 'done')
-assert.equal(agentSession.delta.agentSession.error, 'interrupted')
-assert.equal(agentSession.delta.agentSession.phase, 'calling_tool')
-assert.equal(agentSession.delta.agentSession.currentTool, 'read')
+assert.equal(agentSession.delta.agentSession.kind, 'spawned')
 
-const sparseAgentSession = decodeConversationStreamEnvelope({
+const progressAgentSession = decodeConversationStreamEnvelope({
   sessionId: 'parent-session',
   cursor: { value: '9' },
   delta: {
     kind: 'agentSessionUpdated',
     agentSession: {
+      kind: 'progress',
       childSessionId: 'child-session',
       phase: 'thinking',
     },
   },
 })
-assert.equal(sparseAgentSession.delta.kind, 'agentSessionUpdated')
-assert.equal(sparseAgentSession.delta.agentSession.status, undefined)
-assert.equal(sparseAgentSession.delta.agentSession.agentName, undefined)
-assert.equal(sparseAgentSession.delta.agentSession.task, undefined)
-assert.equal(sparseAgentSession.delta.agentSession.currentTool, undefined)
+assert.equal(progressAgentSession.delta.kind, 'agentSessionUpdated')
+assert.equal(progressAgentSession.delta.agentSession.kind, 'progress')
+assert.equal(progressAgentSession.delta.agentSession.phase, 'thinking')
+assert.equal(progressAgentSession.delta.agentSession.currentTool, undefined)
 
 const customEvent = decodeConversationStreamEnvelope({
   sessionId: 'session-1',
@@ -295,9 +286,21 @@ const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
       status: 'complete',
     },
   ],
-  agentSessions: [],
+  agentSessions: [
+    {
+      childSessionId: 'child-session',
+      toolCallId: 'tool-call-1',
+      agentName: 'explorer',
+      task: 'inspect code',
+      status: 'running',
+    },
+  ],
 })
 assert.equal(snapshotWithoutAttachmentFields.blocks.length, 2)
+assert.equal(
+  snapshotWithoutAttachmentFields.agentSessions[0].agentName,
+  'explorer'
+)
 assert.deepEqual(snapshotWithoutAttachmentFields.control.retryStatus, {
   status: 503,
   attempt: 2,
@@ -322,6 +325,63 @@ assert.deepEqual(transportRetrySnapshot.control.retryStatus, {
   maxRetries: 3,
   delayMs: 500,
 })
+
+for (const [description, decode] of [
+  [
+    'unknown agent status',
+    () =>
+      decodeConversationSnapshot({
+        ...snapshotWithoutAttachmentFields,
+        agentSessions: [
+          {
+            childSessionId: 'child',
+            agentName: 'worker',
+            task: 'test',
+            status: 'future',
+          },
+        ],
+      }),
+  ],
+  [
+    'non-object tool arguments',
+    () =>
+      decodeConversationDelta({
+        kind: 'patchArguments',
+        blockId: 'tool-1',
+        arguments: '[]',
+        argumentsJson: [],
+      }),
+  ],
+  [
+    'recap without its required source',
+    () =>
+      decodeConversationBlock({
+        kind: 'recap',
+        id: 'recap-1',
+        text: 'summary',
+      }),
+  ],
+  [
+    'compact summary without token counts',
+    () =>
+      decodeConversationBlock({
+        kind: 'compactSummary',
+        id: 'compact-1',
+        summary: 'summary',
+        trigger: 'manual',
+      }),
+  ],
+  [
+    'snapshot without agent sessions',
+    () =>
+      decodeConversationSnapshot({
+        ...snapshotWithoutAttachmentFields,
+        agentSessions: undefined,
+      }),
+  ],
+]) {
+  assert.throws(decode, ProtocolDecodeError, description)
+}
 
 assert.deepEqual(
   decodeConversationDelta({ kind: 'resetBlock', blockId: 'assistant-1' }),

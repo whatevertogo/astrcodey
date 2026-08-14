@@ -12,9 +12,10 @@ pub enum SessionArtifactView {
         message: String,
         seq: u64,
     },
-    SystemNote {
+    Recap {
         id: String,
         text: String,
+        source: String,
         seq: u64,
     },
 }
@@ -22,7 +23,7 @@ pub enum SessionArtifactView {
 impl SessionArtifactView {
     pub fn seq(&self) -> u64 {
         match self {
-            Self::Error { seq, .. } | Self::SystemNote { seq, .. } => *seq,
+            Self::Error { seq, .. } | Self::Recap { seq, .. } => *seq,
         }
     }
 }
@@ -58,14 +59,13 @@ pub(crate) fn apply_event(event: &StoredEvent, presentation: &mut SessionPresent
                 seq: event.seq,
             });
         },
-        DurableEventPayload::RecapGenerated { text, .. } => {
-            presentation
-                .artifacts
-                .push(SessionArtifactView::SystemNote {
-                    id: event.id.to_string(),
-                    text: text.clone(),
-                    seq: event.seq,
-                });
+        DurableEventPayload::RecapGenerated { text, source } => {
+            presentation.artifacts.push(SessionArtifactView::Recap {
+                id: event.id.to_string(),
+                text: text.clone(),
+                source: source.clone(),
+                seq: event.seq,
+            });
         },
         _ => {},
     }

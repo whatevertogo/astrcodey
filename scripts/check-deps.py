@@ -55,6 +55,7 @@ LAYERS: dict[str, int] = {
     "astrcode-extension-memory": 4,
     "astrcode-extension-channels": 4,
     "astrcode-extension-web-tools": 4,
+    "astrcode-extension-session-commands": 4,
     # L5 – Runtime and composition
     "astrcode-client": 5,
     "astrcode-bundled-extensions": 5,
@@ -99,6 +100,7 @@ CONCRETE_EXTENSION_CRATES: frozenset[str] = frozenset(
         "astrcode-extension-memory",
         "astrcode-extension-mode",
         "astrcode-extension-skill",
+        "astrcode-extension-session-commands",
         "astrcode-extension-todo-tool",
         "astrcode-extension-web-tools",
     }

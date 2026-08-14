@@ -1873,7 +1873,6 @@ mod tests {
             "glob",
             "grep",
             "shell",
-            "terminal",
         ] {
             assert!(
                 definitions

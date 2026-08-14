@@ -40,25 +40,43 @@ macro_rules! impl_domain_to_wire_conversion {
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum CommandSourceDto {
-    Builtin,
-    Extension,
-    Skill,
+pub enum CommandAvailabilityDto {
+    AllTransports,
+    InteractiveOnly,
 }
 
-impl_wire_values!(CommandSourceDto {
-    Builtin,
-    Extension,
-    Skill,
+impl_wire_values!(CommandAvailabilityDto {
+    AllTransports,
+    InteractiveOnly,
 });
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionCommandKindDto {
+    CompactSession,
+    SelectModel,
+}
+
+impl_wire_values!(SessionCommandKindDto {
+    CompactSession,
+    SelectModel,
+});
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "command", rename_all = "snake_case")]
+pub enum CommandExecutionDto {
+    Extension,
+    Host(SessionCommandKindDto),
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionSourceDto {
     Builtin,
     Disk,
-    #[default]
     Unknown,
 }
 
@@ -69,10 +87,9 @@ impl_wire_values!(ExtensionSourceDto {
 });
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionStageStatusDto {
-    #[default]
     Unknown,
     Running,
     Succeeded,
@@ -139,10 +156,9 @@ macro_rules! impl_bidirectional_wire_conversion {
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PhaseDto {
-    #[default]
     Idle,
     Thinking,
     Streaming,
@@ -188,30 +204,14 @@ impl_bidirectional_wire_conversion!(ApprovalDecision => ApprovalDecisionDto {
 });
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalModeDto {
-    #[default]
     Manual,
     Yolo,
-    #[serde(other, skip_serializing)]
-    #[cfg_attr(feature = "typescript", ts(skip))]
-    Unsupported,
 }
 
-impl_domain_to_wire_conversion!(ApprovalMode => ApprovalModeDto { Manual, Yolo });
-
-impl TryFrom<ApprovalModeDto> for ApprovalMode {
-    type Error = ();
-
-    fn try_from(value: ApprovalModeDto) -> Result<Self, Self::Error> {
-        match value {
-            ApprovalModeDto::Manual => Ok(Self::Manual),
-            ApprovalModeDto::Yolo => Ok(Self::Yolo),
-            ApprovalModeDto::Unsupported => Err(()),
-        }
-    }
-}
+impl_bidirectional_wire_conversion!(ApprovalMode => ApprovalModeDto { Manual, Yolo });
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,10 +283,9 @@ impl From<astrcode_core::llm::thinking::ThinkingCapability> for ThinkingCapabili
 }
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentSessionStatusDto {
-    #[default]
     Running,
     Completed,
     Failed,
@@ -303,6 +302,7 @@ impl_wire_values!(AgentSessionStatusDto {
 #[serde(rename_all = "snake_case")]
 pub enum ExtensionCapabilityDto {
     SessionControl,
+    SessionCommand,
     SessionInspect,
     PublicHttp,
     AuthenticatedHttp,
@@ -326,6 +326,7 @@ pub enum ExtensionCapabilityDto {
 
 impl_wire_values!(ExtensionCapabilityDto {
     SessionControl,
+    SessionCommand,
     SessionInspect,
     PublicHttp,
     AuthenticatedHttp,
@@ -361,10 +362,9 @@ impl_domain_to_wire_conversion!(ToolOrigin => ToolOriginDto {
 });
 
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionModeDto {
-    #[default]
     Sequential,
     Parallel,
 }
@@ -408,12 +408,22 @@ mod tests {
             &["allow_once", "deny_once", "allow_always", "deny_always"],
         );
         assert_wire_values(ApprovalModeDto::ALL, &["manual", "yolo"]);
-        assert_eq!(
-            serde_json::from_str::<ApprovalModeDto>(r#""future_mode""#).unwrap(),
-            ApprovalModeDto::Unsupported
+        assert!(serde_json::from_str::<ApprovalModeDto>(r#""future_mode""#).is_err());
+        assert_wire_values(
+            CommandAvailabilityDto::ALL,
+            &["all_transports", "interactive_only"],
         );
-        assert!(serde_json::to_string(&ApprovalModeDto::Unsupported).is_err());
-        assert_wire_values(CommandSourceDto::ALL, &["builtin", "extension", "skill"]);
+        assert_wire_values(
+            SessionCommandKindDto::ALL,
+            &["compact_session", "select_model"],
+        );
+        assert_eq!(
+            serde_json::to_value(CommandExecutionDto::Host(
+                SessionCommandKindDto::CompactSession
+            ))
+            .unwrap(),
+            serde_json::json!({"kind": "host", "command": "compact_session"})
+        );
         assert_wire_values(ExtensionSourceDto::ALL, &["builtin", "disk", "unknown"]);
         assert_wire_values(
             ExtensionStageStatusDto::ALL,
@@ -440,6 +450,7 @@ mod tests {
             ExtensionCapabilityDto::ALL,
             &[
                 "session_control",
+                "session_command",
                 "session_inspect",
                 "public_http",
                 "authenticated_http",

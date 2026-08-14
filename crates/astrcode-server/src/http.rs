@@ -20,8 +20,6 @@ mod routes;
 mod server;
 mod stream;
 
-#[cfg(feature = "testing")]
-pub use server::router_with_event_publisher;
 pub use server::{HttpServerError, router, run_http_server};
 
 /// HTTP router shared state.

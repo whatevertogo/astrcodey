@@ -12,15 +12,17 @@ use super::{
 
 pub(super) type ExtensionHandler<H> = (String, HookMode, Arc<H>);
 pub(super) type ToolExtensionHandler<H> = (String, HookMode, ToolHookTarget, Arc<H>);
-pub(super) type ContinueAfterStopExtensionHandler<H> = (String, ContinueAfterStopOptions, Arc<H>);
+pub(super) type ToolUseExtensionHandler<H> = (String, ToolHookTarget, Arc<H>);
+type ContinueAfterStopExtensionHandler<H> = (String, ContinueAfterStopOptions, Arc<H>);
 pub(super) type SimpleExtensionHandler<H> = (String, Arc<H>);
-pub(super) type CustomEventExtensionHandler =
-    (String, CustomEventSubscription, Arc<dyn CustomEventHandler>);
+type CustomEventExtensionHandler = (String, CustomEventSubscription, Arc<dyn CustomEventHandler>);
 type Prioritized<T> = (i32, T);
 type PrioritizedEvent<K, T> = (K, i32, T);
 
 pub(super) struct ExtensionGenerationEntry {
     pub(super) extension_id: Arc<str>,
+    pub(super) instance_id: crate::host_router::ExtensionInstanceId,
+    pub(super) generation_gate: crate::host_router::ExtensionGenerationGate,
     pub(super) capabilities: Arc<[ExtensionCapability]>,
     pub(super) custom_event_declarations: Vec<CustomEventDeclaration>,
     pub(super) tasks: ExtensionTasks,
@@ -54,9 +56,11 @@ pub(super) struct HttpRouteEntry {
 #[allow(clippy::type_complexity)]
 pub(super) struct HandlerIndex {
     pub(super) generation: u64,
-    pub(super) pre_tool_use: Vec<ToolExtensionHandler<dyn PreToolUseHandler>>,
+    pub(super) tool_input_transform: Vec<ToolUseExtensionHandler<dyn ToolInputTransformHandler>>,
+    pub(super) pre_tool_use: Vec<ToolUseExtensionHandler<dyn PreToolUseHandler>>,
     pub(super) post_tool_use: Vec<ToolExtensionHandler<dyn PostToolUseHandler>>,
     pub(super) provider: HashMap<ProviderEvent, Vec<ExtensionHandler<dyn ProviderHandler>>>,
+    pub(super) provider_contributions: Vec<SimpleExtensionHandler<dyn ProviderContributionHandler>>,
     pub(super) prompt_build: Vec<SimpleExtensionHandler<dyn PromptBuildHandler>>,
     pub(super) compact: HashMap<CompactEvent, Vec<SimpleExtensionHandler<dyn CompactHandler>>>,
     pub(super) continue_after_stop:
@@ -77,9 +81,11 @@ pub(super) struct HandlerIndex {
 }
 
 pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u64) -> HandlerIndex {
+    let mut tool_input_transform = Vec::new();
     let mut pre_tool_use = Vec::new();
     let mut post_tool_use = Vec::new();
     let mut provider = Vec::new();
+    let mut provider_contributions = Vec::new();
     let mut prompt_build = Vec::new();
     let mut compact = Vec::new();
     let mut continue_after_stop = Vec::new();
@@ -105,18 +111,29 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         let extension_id = manifest.id().to_owned();
         let generation_entry = Arc::new(ExtensionGenerationEntry {
             extension_id: Arc::from(extension_id.as_str()),
+            instance_id: hosted.instance_id,
+            generation_gate: hosted.generation_gate.clone(),
             capabilities: Arc::from(manifest.capabilities()),
             custom_event_declarations: registrations.custom_event_declarations().to_vec(),
             tasks: hosted.tasks.clone(),
             admission: hosted.supervisor.admission(),
         });
         publication_leases.push(hosted.publication_lease.acquire());
+        for registration in registrations.tool_input_transforms() {
+            tool_input_transform.push((
+                registration.priority,
+                (
+                    extension_id.clone(),
+                    registration.target.clone(),
+                    Arc::clone(&registration.handler),
+                ),
+            ));
+        }
         for registration in registrations.pre_tool_use() {
             pre_tool_use.push((
                 registration.priority,
                 (
                     extension_id.clone(),
-                    registration.mode,
                     registration.target.clone(),
                     Arc::clone(&registration.handler),
                 ),
@@ -139,6 +156,9 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
                 *priority,
                 (extension_id.clone(), *mode, Arc::clone(handler)),
             ));
+        }
+        for (priority, handler) in registrations.provider_contributions() {
+            provider_contributions.push((*priority, (extension_id.clone(), Arc::clone(handler))));
         }
         for (priority, handler) in registrations.prompt_build() {
             prompt_build.push((*priority, (extension_id.clone(), Arc::clone(handler))));
@@ -223,9 +243,11 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
 
     HandlerIndex {
         generation,
+        tool_input_transform: handlers_by_priority(tool_input_transform),
         pre_tool_use: handlers_by_priority(pre_tool_use),
         post_tool_use: handlers_by_priority(post_tool_use),
         provider: handlers_by_event(provider),
+        provider_contributions: handlers_by_priority(provider_contributions),
         prompt_build: handlers_by_priority(prompt_build),
         compact: handlers_by_event(compact),
         continue_after_stop: handlers_by_priority(continue_after_stop),
@@ -272,7 +294,8 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
         return;
     }
 
-    let mut pre: Vec<(&str, i32, HookMode, ToolHookTarget)> = Vec::new();
+    let mut transform: Vec<(&str, i32, ToolHookTarget)> = Vec::new();
+    let mut pre: Vec<(&str, i32, ToolHookTarget)> = Vec::new();
     let mut post: Vec<(&str, i32, HookMode, ToolHookTarget)> = Vec::new();
     let mut provider: Vec<(&str, ProviderEvent, i32, HookMode)> = Vec::new();
     let mut prompt: Vec<(&str, i32)> = Vec::new();
@@ -286,13 +309,11 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
         let manifest = &hosted.manifest;
         let registrations = &manifest.registrations;
         let id = manifest.id();
+        for registration in registrations.tool_input_transforms() {
+            transform.push((id, registration.priority, registration.target.clone()));
+        }
         for registration in registrations.pre_tool_use() {
-            pre.push((
-                id,
-                registration.priority,
-                registration.mode,
-                registration.target.clone(),
-            ));
+            pre.push((id, registration.priority, registration.target.clone()));
         }
         for registration in registrations.post_tool_use() {
             post.push((
@@ -316,6 +337,7 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
         }
     }
 
+    transform.sort_by_key(|x| std::cmp::Reverse(x.1));
     pre.sort_by_key(|x| std::cmp::Reverse(x.1));
     post.sort_by_key(|x| std::cmp::Reverse(x.1));
     provider.sort_by_key(|x| std::cmp::Reverse(x.2));
@@ -323,6 +345,9 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
     compact.sort_by_key(|x| std::cmp::Reverse(x.2));
     lifecycle.sort_by_key(|x| std::cmp::Reverse(x.2));
 
+    if !transform.is_empty() {
+        tracing::debug!(target: "astrcode_extensions", order = ?transform, "tool_input_transform dispatch order");
+    }
     if !pre.is_empty() {
         tracing::debug!(target: "astrcode_extensions", order = ?pre, "pre_tool_use dispatch order");
     }

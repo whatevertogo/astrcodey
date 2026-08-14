@@ -7,7 +7,7 @@ use std::sync::{
 
 use astrcode_core::{
     event::{PersistedSystemPrompt, SystemPromptSource},
-    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
+    llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
     tool::{
         ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
         ToolOrigin,
@@ -16,8 +16,8 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        ExtensionError, LifecycleEvent, PromptContributions, RuntimeLifecycleContext,
-        RuntimePromptBuildContext,
+        ExtensionError, LifecycleEvent, PromptContributions,
+        internal::{RuntimeLifecycleContext, RuntimePromptBuildContext},
     },
     runtime_ports::{
         NoopRuntimePorts, PromptContributor, ToolCatalogProvider, ToolCatalogScope,
@@ -116,10 +116,9 @@ impl PromptContributor for FailingPromptContributor {
 
 #[async_trait::async_trait]
 impl LlmProvider for UnusedLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         unreachable!("test does not run a turn")
     }

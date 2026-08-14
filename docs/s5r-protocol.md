@@ -38,6 +38,11 @@ S5R 3.0 不兼容 1.0/2.0 worker，也不提供双协议运行。旧 manifest �
 4. Host 发送唯一一条 `activate`；Worker 完成空 `kind = "activate"` 成功响应后，双方进入
    `Ready`，随后才启动 driver 并允许双向 `invoke`。
 
+`manifest.commands` 的每项必须完整携带 `name`、`description`、`args_schema`（无 schema 时
+显式为 `null`）、`requires_idle`、`argument_completions`、`priority`、`availability` 与
+`execution`。这些字段没有旧格式默认值；缺字段会使 initialize 失败，避免 worker command 在
+跨进程后静默退化成另一份宿主默认契约。
+
 required feature 必须同时出现在本方 supported 集合中。协商结果严格等于双方 supported 的交集，
 并且必须覆盖双方 required 集合。首版 feature：
 
@@ -131,7 +136,7 @@ snake_case，废弃后不得复用；未知错误码必须在 `ErrorPayload.code
 任意语言 worker 都可以运行同一套线缆验收：
 
 ```bash
-cargo run -p astrcode-extension-sdk --bin s5r-conformance -- \
+cargo run -p astrcode-extension-sdk --features conformance --bin s5r-conformance -- \
   --extension-id <worker-extension-id> -- <worker-command> [args...]
 ```
 

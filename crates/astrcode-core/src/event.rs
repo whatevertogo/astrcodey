@@ -137,7 +137,6 @@ pub struct PersistedSystemPrompt {
     pub fingerprint: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extra_system_prompt: Option<String>,
-    #[serde(default, skip_serializing_if = "SystemPromptSource::is_native")]
     pub source: SystemPromptSource,
 }
 
@@ -148,12 +147,6 @@ pub enum SystemPromptSource {
     #[default]
     Native,
     Inherited,
-}
-
-impl SystemPromptSource {
-    pub(crate) fn is_native(&self) -> bool {
-        *self == Self::Native
-    }
 }
 
 #[cfg(test)]

@@ -1,16 +1,16 @@
-use std::{collections::BTreeMap, time::Instant};
+use std::collections::BTreeMap;
 
 use astrcode_extension_sdk::{
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
     host::{HostWorkspaceEditRequest, HostWorkspaceTextEdit},
     tool::{
         ExecutionMode, ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
+        ToolResult,
     },
 };
 use serde::Deserialize;
 
 use super::{absolute_path, text_change_metadata};
-use crate::result::success;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -35,6 +35,26 @@ struct TextEdit {
     replace_all: bool,
 }
 
+impl EditArgs {
+    fn into_host_request(self) -> HostWorkspaceEditRequest {
+        HostWorkspaceEditRequest {
+            path: self.path,
+            old_text: self.old_text,
+            new_text: self.new_text,
+            replace_all: self.replace_all,
+            edits: self
+                .edits
+                .into_iter()
+                .map(|edit| HostWorkspaceTextEdit {
+                    old_text: edit.old_text,
+                    new_text: edit.new_text,
+                    replace_all: edit.replace_all,
+                })
+                .collect(),
+        }
+    }
+}
+
 pub(super) struct EditHandler;
 
 #[async_trait::async_trait]
@@ -42,34 +62,18 @@ impl ToolHandler for EditHandler {
     async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
         let args: EditArgs = context.arguments()?;
         validate(&args)?;
-        Ok(ToolPlan::from_resources([ResourceAccess::read_write_file(
+        Ok(ToolPlan::new([ResourceAccess::read_write_file(
             absolute_path(context.working_dir(), &args.path),
         )]))
     }
 
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
-        let started_at = Instant::now();
         let args: EditArgs = context.arguments()?;
         validate(&args)?;
-        let edits = args
-            .edits
-            .into_iter()
-            .map(|edit| HostWorkspaceTextEdit {
-                old_text: clean_quotes(&edit.old_text),
-                new_text: clean_quotes(&edit.new_text),
-                replace_all: edit.replace_all,
-            })
-            .collect();
         let output = context
             .host()
             .workspace()?
-            .edit(HostWorkspaceEditRequest {
-                path: args.path,
-                old_text: args.old_text.map(|value| clean_quotes(&value)),
-                new_text: args.new_text.map(|value| clean_quotes(&value)),
-                replace_all: args.replace_all,
-                edits,
-            })
+            .edit(args.into_host_request())
             .await?;
         let mut metadata = text_change_metadata(&output.change);
         metadata.extend(BTreeMap::from([
@@ -83,7 +87,9 @@ impl ToolHandler for EditHandler {
                 serde_json::json!(output.replacements),
             ),
         ]));
-        Ok(success(started_at, format!("Edited {}", output.path), metadata).into())
+        Ok(ToolResult::success(format!("Edited {}", output.path))
+            .with_metadata(metadata)
+            .into())
     }
 }
 
@@ -113,12 +119,6 @@ fn invalid(message: impl Into<String>) -> ExtensionError {
         message: message.into(),
         hint: Some("provide one or more exact replacements copied from `read` output".into()),
     }
-}
-
-fn clean_quotes(value: &str) -> String {
-    value
-        .replace(['\u{201C}', '\u{201D}'], "\"")
-        .replace(['\u{2018}', '\u{2019}'], "'")
 }
 
 pub(super) fn definition() -> ToolDefinition {
@@ -163,5 +163,68 @@ pub(super) fn definition() -> ToolDefinition {
             ],
             "additionalProperties": false
         }),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exact_edit_preserves_straight_and_curly_quotes() {
+        let source = "let value = \"same\";\nlet value = “same”;\n";
+        let replacement = "let value = “changed”; // keep 'straight' and ‘curly’";
+        let request = EditArgs {
+            path: "quotes.rs".into(),
+            old_text: Some("let value = “same”;".into()),
+            new_text: Some(replacement.into()),
+            replace_all: false,
+            edits: Vec::new(),
+        }
+        .into_host_request();
+
+        let old_text = request.old_text.as_deref().unwrap();
+        let new_text = request.new_text.as_deref().unwrap();
+        assert_eq!(new_text, replacement);
+        assert_eq!(
+            source.replacen(old_text, new_text, 1),
+            format!("let value = \"same\";\n{replacement}\n")
+        );
+
+        let batch = EditArgs {
+            path: "quotes.rs".into(),
+            old_text: None,
+            new_text: None,
+            replace_all: false,
+            edits: vec![
+                TextEdit {
+                    old_text: "let straight = \"same\";".into(),
+                    new_text: "let straight = “changed”;".into(),
+                    replace_all: false,
+                },
+                TextEdit {
+                    old_text: "let curly = “same”;".into(),
+                    new_text: "let curly = \"changed\";".into(),
+                    replace_all: true,
+                },
+            ],
+        }
+        .into_host_request();
+
+        assert_eq!(
+            batch.edits,
+            [
+                HostWorkspaceTextEdit {
+                    old_text: "let straight = \"same\";".into(),
+                    new_text: "let straight = “changed”;".into(),
+                    replace_all: false,
+                },
+                HostWorkspaceTextEdit {
+                    old_text: "let curly = “same”;".into(),
+                    new_text: "let curly = \"changed\";".into(),
+                    replace_all: true,
+                },
+            ]
+        );
     }
 }

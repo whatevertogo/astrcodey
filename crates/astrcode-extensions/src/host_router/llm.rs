@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use astrcode_core::llm::{LlmError, LlmEvent, LlmMessage, LlmProvider};
+use astrcode_core::llm::{LlmError, LlmEvent, LlmProvider, LlmProviderBindings, LlmRequest};
 use astrcode_extension_sdk::{
     host::{
         HostLlmChatOutput, HostLlmChatRequest, HostOperation,
@@ -35,36 +35,26 @@ impl LlmGroup {
         &self,
         operation: HostOperation,
         input: Value,
+        bindings: Option<&LlmProviderBindings>,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<Value, ErrorPayload> {
-        let (provider, model_label) = self.provider_for(operation)?;
-        invoke_llm_chat(provider, model_label, input, cancel_token).await
+        let (provider, model_label) = self.provider_for(operation, bindings)?;
+        invoke_llm_chat(&provider, model_label, input, cancel_token).await
     }
 
     pub(super) async fn invoke_event_stream(
         &self,
         operation: HostOperation,
         input: Value,
+        bindings: Option<&LlmProviderBindings>,
         cancel_token: Option<&CancellationToken>,
     ) -> Result<ModelEventStream, ErrorPayload> {
-        let (provider, model_label) = self.provider_for(operation)?;
-        let request = serde_json::from_value::<HostLlmChatRequest>(input).map_err(|error| {
-            ErrorPayload::new(
-                WireErrorCode::InvalidInput,
-                format!("invalid {model_label}.chat request: {error}"),
-            )
-        })?;
-        if request.messages.is_empty() {
-            return Err(ErrorPayload::new(
-                WireErrorCode::InvalidInput,
-                "messages must contain at least one typed LLM message",
-            ));
-        }
-        let messages = llm_messages_from_wire(request.messages);
+        let (provider, model_label) = self.provider_for(operation, bindings)?;
+        let request = parse_llm_request(input, model_label)?;
         let receiver = super::run_until_deadline(
             async {
                 provider
-                    .generate(messages, vec![])
+                    .generate_request(request)
                     .await
                     .map_err(llm_error_payload)
             },
@@ -180,10 +170,21 @@ impl LlmGroup {
     fn provider_for(
         &self,
         operation: HostOperation,
-    ) -> Result<(&Arc<dyn LlmProvider>, &'static str), ErrorPayload> {
+        bindings: Option<&LlmProviderBindings>,
+    ) -> Result<(Arc<dyn LlmProvider>, &'static str), ErrorPayload> {
         let (provider, model_label) = match operation {
-            HostOperation::LlmMainChat => (self.main.as_ref(), "main_llm"),
-            HostOperation::LlmSmallChat => (self.small.as_ref(), "small_llm"),
+            HostOperation::LlmMainChat => (
+                bindings
+                    .map(LlmProviderBindings::main)
+                    .or(self.main.as_ref()),
+                "main_llm",
+            ),
+            HostOperation::LlmSmallChat => (
+                bindings
+                    .map(LlmProviderBindings::small)
+                    .or(self.small.as_ref()),
+                "small_llm",
+            ),
             _ => return Err(invalid_group_operation(operation, HostOperationGroup::Llm)),
         };
         let provider = provider.ok_or_else(|| {
@@ -192,15 +193,15 @@ impl LlmGroup {
                 format!("{model_label} not configured"),
             )
         })?;
-        Ok((provider, model_label))
+        Ok((Arc::clone(provider), model_label))
     }
 
-    pub(super) fn has_main(&self) -> bool {
-        self.main.is_some()
+    pub(super) fn has_main(&self, bindings: Option<&LlmProviderBindings>) -> bool {
+        bindings.is_some() || self.main.is_some()
     }
 
-    pub(super) fn has_small(&self) -> bool {
-        self.small.is_some()
+    pub(super) fn has_small(&self, bindings: Option<&LlmProviderBindings>) -> bool {
+        bindings.is_some() || self.small.is_some()
     }
 }
 
@@ -210,23 +211,10 @@ async fn invoke_llm_chat(
     input: Value,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<Value, ErrorPayload> {
-    let request = serde_json::from_value::<HostLlmChatRequest>(input).map_err(|error| {
-        ErrorPayload::new(
-            WireErrorCode::InvalidInput,
-            format!("invalid {model_label}.chat request: {error}"),
-        )
-    })?;
-
-    if request.messages.is_empty() {
-        return Err(ErrorPayload::new(
-            WireErrorCode::InvalidInput,
-            "messages must contain at least one typed LLM message",
-        ));
-    }
-    let messages = llm_messages_from_wire(request.messages);
+    let request = parse_llm_request(input, model_label)?;
 
     super::run_until_deadline(
-        run_host_llm_chat(&**provider, model_label, messages),
+        run_host_llm_chat(&**provider, model_label, request),
         Instant::now() + HOST_INVOKE_TIMEOUT,
         cancel_token,
         || {
@@ -240,13 +228,40 @@ async fn invoke_llm_chat(
     .await
 }
 
+fn parse_llm_request(input: Value, model_label: &'static str) -> Result<LlmRequest, ErrorPayload> {
+    let request = serde_json::from_value::<HostLlmChatRequest>(input).map_err(|error| {
+        ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            format!("invalid {model_label}.chat request: {error}"),
+        )
+    })?;
+
+    if request.messages.is_empty() {
+        return Err(ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            "messages must contain at least one typed LLM message",
+        ));
+    }
+    if request.max_output_tokens == Some(0) {
+        return Err(ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            "maxOutputTokens must be greater than zero",
+        ));
+    }
+    Ok(LlmRequest {
+        messages: llm_messages_from_wire(request.messages),
+        tools: vec![],
+        max_output_tokens: request.max_output_tokens,
+    })
+}
+
 async fn run_host_llm_chat(
     provider: &dyn LlmProvider,
     model_label: &str,
-    messages: Vec<LlmMessage>,
+    request: LlmRequest,
 ) -> Result<Value, ErrorPayload> {
     let mut rx = provider
-        .generate(messages, vec![])
+        .generate_request(request)
         .await
         .map_err(llm_error_payload)?;
 

@@ -9,9 +9,9 @@ use std::{
 
 use astrcode_core::{
     event::{CustomEventData, DurableEventPayload, EventPayload},
-    llm::{LlmEvent, LlmMessage, LlmProvider},
+    llm::{LlmEvent, LlmProvider},
     tool::{
-        ExecutionMode, Tool, ToolCapabilities, ToolDefinition, ToolExecutionContext,
+        ExecutionMode, Tool, ToolCapabilities, ToolExecutionContext,
         access::{FileOperation, HostResource, ResourceAccess, ResourceLease, ToolPlan},
     },
     types::TurnId,
@@ -20,20 +20,41 @@ use astrcode_extension_sdk::{
     builder::manifest,
     config::ModelSelection,
     extension::{
-        Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
-        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
-        ExtensionHttpRoute, ExtensionManifest, ExtensionPackageManifest, ExtensionStopContext,
-        HookMode, HttpContext, LifecycleEvent, LifecyclePayload, PreToolUsePayload,
-        PreToolUseResult, Registrar, RuntimeHookCallContext, RuntimeLifecycleContext,
-        RuntimePreToolUseContext, StopReason,
+        CommandAvailability, CommandExecution, Extension, ExtensionCapability,
+        ExtensionCommandResult, ExtensionError, ExtensionHttpHandler, ExtensionHttpMethod,
+        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
+        ExtensionPackageManifest, HttpContext, LifecycleEvent, PreToolUseAdmission, Registrar,
+        StopReason,
+        internal::{
+            RuntimeHookCallContext, RuntimePreToolUseContext, extension_stop_context,
+            runtime_lifecycle_context, runtime_pre_tool_use_context,
+        },
     },
 };
 use astrcode_extensions::{
     HostBackends, build_host_router, build_host_router_with_public_http_dispatcher,
-    loader::load_extensions_from_dir_for_test, runner::ExtensionRunner, s5r_ext::S5rExtension,
+    loader::{
+        DiskExtensionSource, ExtensionLoadContext, ExtensionSource, prepare_extension_generation,
+    },
+    runner::ExtensionRunner,
+    s5r_ext::S5rExtension,
 };
 use astrcode_storage::{EventReader, SessionReader, in_memory::InMemoryEventStore};
 use async_trait::async_trait;
+
+async fn sync_extension_sources(
+    runner: &Arc<ExtensionRunner>,
+    ctx: &ExtensionLoadContext,
+    sources: &[&dyn ExtensionSource],
+) -> Vec<String> {
+    match prepare_extension_generation(runner, ctx, sources, &BTreeMap::new()).await {
+        Ok(candidate) => {
+            candidate.commit_with(|_| {}).await;
+            Vec::new()
+        },
+        Err(errors) => errors,
+    }
+}
 
 fn guest_binary_path() -> std::path::PathBuf {
     let base = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -135,10 +156,9 @@ impl Extension for DispatchTargetExtension {
 
 #[async_trait]
 impl LlmProvider for MockLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<tokio::sync::mpsc::UnboundedReceiver<LlmEvent>, astrcode_core::llm::LlmError> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tx.send(LlmEvent::ContentDelta {
@@ -271,7 +291,7 @@ fn full_host_test_lease(working_dir: &str) -> ResourceLease {
         ]
         .map(ResourceAccess::host),
     );
-    ResourceLease::from_plan(&ToolPlan::from_resources(resources))
+    ResourceLease::from_plan(&ToolPlan::new(resources))
 }
 
 fn runtime_hook_call() -> RuntimeHookCallContext {
@@ -279,15 +299,13 @@ fn runtime_hook_call() -> RuntimeHookCallContext {
 }
 
 fn pre_tool_use_ctx(tool_name: &str, tool_input: serde_json::Value) -> RuntimePreToolUseContext {
-    RuntimePreToolUseContext::new(
+    runtime_pre_tool_use_context(
         runtime_hook_call(),
-        PreToolUsePayload::new(
-            "call-1".into(),
-            tool_name,
-            tool_input,
-            astrcode_core::permission::ApprovalMode::Manual,
-            Vec::new(),
-        ),
+        "call-1".into(),
+        tool_name,
+        tool_input,
+        astrcode_core::permission::ApprovalMode::Manual,
+        Vec::new(),
     )
 }
 
@@ -325,7 +343,6 @@ async fn s5r_manifest_registers_tools_hooks_and_capabilities() {
             .any(|tool| tool.definition().name == "greet")
     );
     assert_eq!(registrations.pre_tool_use().len(), 1);
-    assert_eq!(registrations.pre_tool_use()[0].mode, HookMode::Blocking);
     assert!(matches!(
         registrations.pre_tool_use()[0].target,
         astrcode_extension_sdk::extension::ToolHookTarget::All
@@ -601,18 +618,16 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
     let runner = runner_with_s5r(mock_router()).await;
 
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let ctx = RuntimePreToolUseContext::new(
+    let ctx = runtime_pre_tool_use_context(
         runtime_hook_call().with_event_tx(Some(tx.into())),
-        PreToolUsePayload::new(
-            "call-1".into(),
-            "emit_hook_probe",
-            serde_json::json!({}),
-            astrcode_core::permission::ApprovalMode::Manual,
-            Vec::new(),
-        ),
+        "call-1".into(),
+        "emit_hook_probe",
+        serde_json::json!({}),
+        astrcode_core::permission::ApprovalMode::Manual,
+        Vec::new(),
     );
     let result = runner.emit_pre_tool_use(ctx).await.unwrap();
-    assert!(matches!(result, PreToolUseResult::Allow));
+    assert!(matches!(result, PreToolUseAdmission::Allow));
 
     let payload = tokio::time::timeout(Duration::from_secs(3), rx.recv())
         .await
@@ -637,7 +652,7 @@ async fn s5r_pre_tool_use_blocks_and_emits_event() {
         serde_json::json!({ "command": "rm -rf /important/data" }),
     );
     match runner.emit_pre_tool_use(block_ctx).await.unwrap() {
-        PreToolUseResult::Block { reason } => assert!(reason.contains("rm -rf")),
+        PreToolUseAdmission::Block { reason } => assert!(reason.contains("rm -rf")),
         other => panic!("expected Block, got {other:?}"),
     }
 }
@@ -653,6 +668,18 @@ async fn s5r_demo_command() {
         .into_iter()
         .find(|resolved| resolved.command.name == "demo")
         .expect("demo command");
+    assert_eq!(
+        resolved.command.args_schema,
+        Some(serde_json::json!({ "type": "string" }))
+    );
+    assert!(resolved.command.requires_idle);
+    assert!(resolved.command.argument_completions);
+    assert_eq!(resolved.command.priority, 17);
+    assert_eq!(
+        resolved.command.availability,
+        CommandAvailability::InteractiveOnly
+    );
+    assert_eq!(resolved.command.execution, CommandExecution::Extension);
     let result = runner
         .invoke_resolved_command_typed(&resolved, "", &runtime)
         .await
@@ -668,6 +695,14 @@ async fn s5r_demo_command() {
         },
         other => panic!("unexpected command result: {other:?}"),
     }
+    let completions = runner
+        .complete_resolved_command_typed(&resolved, "demo", 4, &runtime)
+        .await
+        .unwrap();
+    assert_eq!(completions.items.len(), 1);
+    assert_eq!(completions.items[0].label, "demo");
+    assert_eq!(completions.items[0].insert_text, "demo-value");
+    assert_eq!(completions.items[0].detail.as_deref(), Some("4"));
 }
 
 #[tokio::test]
@@ -678,7 +713,7 @@ async fn s5r_turn_end_continuations_and_pipeline() {
     runner
         .emit_lifecycle(
             LifecycleEvent::TurnEnd,
-            RuntimeLifecycleContext::new(runtime_hook_call(), LifecyclePayload::new(None)),
+            runtime_lifecycle_context(runtime_hook_call(), None, 0),
         )
         .await
         .unwrap();
@@ -707,12 +742,8 @@ async fn s5r_turn_end_continuations_and_pipeline() {
 #[tokio::test]
 async fn s5r_loader_discovers_manifest() {
     let guest = ensure_guest_built();
-    let suffix = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("astrcode-s5r-loader-{suffix}"));
-    let ext_dir = root.join("demo");
+    let root = tempfile::tempdir().unwrap();
+    let ext_dir = root.path().join(".astrcode/extensions/demo");
     fs::create_dir_all(&ext_dir).unwrap();
     fs::write(
         ext_dir.join("extension.json"),
@@ -725,11 +756,20 @@ async fn s5r_loader_discovers_manifest() {
     )
     .unwrap();
 
-    let (exts, errors) = load_extensions_from_dir_for_test(&root, &Some(minimal_router())).await;
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    let source = DiskExtensionSource::new(BTreeMap::new());
+    let errors = sync_extension_sources(
+        &runner,
+        &ExtensionLoadContext {
+            working_dir: Some(root.path().to_string_lossy().into_owned()),
+            host_router: Some(minimal_router()),
+        },
+        &[&source],
+    )
+    .await;
     assert!(errors.is_empty(), "{errors:?}");
-    assert_eq!(exts.len(), 1);
-    assert_eq!(exts[0].manifest().id(), "s5r-guest-demo");
-    let _ = fs::remove_dir_all(&root);
+    assert_eq!(runner.registered_extension_ids().await, ["s5r-guest-demo"]);
+    assert!(runner.shutdown().await.is_empty());
 }
 
 #[tokio::test]
@@ -756,7 +796,7 @@ async fn s5r_load_rejects_package_and_handshake_id_mismatch() {
 #[tokio::test]
 async fn s5r_stop_shuts_down_process() {
     let ext = load_s5r(minimal_router()).await;
-    ext.stop(ExtensionStopContext::from_runtime(StopReason::Disabled))
+    ext.stop(extension_stop_context(StopReason::Disabled))
         .await
         .expect("stop");
     ext.health().await.expect_err("process should be gone");
@@ -774,7 +814,7 @@ async fn s5r_cancel_on_stop_during_slow_tool() {
     });
 
     tokio::time::sleep(Duration::from_millis(300)).await;
-    ext.stop(ExtensionStopContext::from_runtime(StopReason::Disabled))
+    ext.stop(extension_stop_context(StopReason::Disabled))
         .await
         .expect("stop");
 

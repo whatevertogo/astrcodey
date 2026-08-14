@@ -1,19 +1,15 @@
 use astrcode_core::permission::ApprovalMode;
 
-use super::{PermissionContext, PermissionDecision, PermissionPolicy};
+use super::{PermissionContext, PermissionPolicy, PolicyDecision};
 
 pub(super) struct YoloModeApprovePolicy;
 
 impl PermissionPolicy for YoloModeApprovePolicy {
-    fn priority(&self) -> u32 {
-        50
-    }
-
-    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
+    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PolicyDecision {
         if ctx.approval_mode == ApprovalMode::Yolo {
-            PermissionDecision::Allow
+            PolicyDecision::Allow
         } else {
-            PermissionDecision::Pass
+            PolicyDecision::Pass
         }
     }
 }

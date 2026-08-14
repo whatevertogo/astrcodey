@@ -72,7 +72,7 @@ impl WireError for StorageError {
             Self::AlreadyExists(_) => WireErrorCode::SessionAlreadyExists,
             Self::InvalidId(_) => WireErrorCode::InvalidInput,
             Self::Unsupported(_) => WireErrorCode::Unsupported,
-            Self::Io(_) => WireErrorCode::StorageIoError,
+            Self::Io(_) | Self::DurabilityUncertain { .. } => WireErrorCode::StorageIoError,
             Self::Serialization(_) | Self::InvalidEvent(_) | Self::CorruptLog(_) => {
                 WireErrorCode::CorruptSessionData
             },

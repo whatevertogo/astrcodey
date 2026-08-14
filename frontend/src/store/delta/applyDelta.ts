@@ -7,7 +7,7 @@ import type {
 } from '../../services/types'
 import { decodePendingAskUserQuestion } from '../../services/protocol'
 import type { AppState } from '../types'
-import { mergeAgentSession, upsertBlock } from './blockHelpers'
+import { applyAgentSessionUpdate, upsertBlock } from './blockHelpers'
 import {
   applyCoalescedDeltas,
   coalesceDeltas,
@@ -195,20 +195,24 @@ export function reduceConversationDeltas(
       }
 
       case 'agentSessionUpdated': {
-        const incoming = delta.agentSession
+        const update = delta.agentSession
         const index = agentSessions.findIndex(
-          (session) => session.childSessionId === incoming.childSessionId
+          (session) => session.childSessionId === update.childSessionId
         )
         if (index === -1) {
-          agentSessions = [...agentSessions, incoming]
+          const nextSession = applyAgentSessionUpdate(undefined, update)
+          if (!nextSession) break
+          agentSessions = [...agentSessions, nextSession]
           break
         }
 
-        const merged = mergeAgentSession(agentSessions[index], incoming)
-        if (sameAgentSession(agentSessions[index], merged)) break
+        const current = agentSessions[index]
+        const nextSession = applyAgentSessionUpdate(current, update)
+        if (!nextSession) break
+        if (sameAgentSession(current, nextSession)) break
 
         const next = [...agentSessions]
-        next[index] = merged
+        next[index] = nextSession
         agentSessions = next
         break
       }

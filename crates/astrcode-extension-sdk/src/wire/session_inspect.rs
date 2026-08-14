@@ -9,7 +9,9 @@ use serde_json::json;
 
 use crate::wire::{
     host::deserialize_non_empty_string,
-    session::{SessionLifecycleStateDto, SessionPhaseDto, SessionToolSelectionDto},
+    session::{
+        SessionLifecycleStateDto, SessionMessageOriginDto, SessionPhaseDto, SessionToolSelectionDto,
+    },
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -105,7 +107,7 @@ pub enum SessionInspectContent {
 pub struct SessionInspectSequencedMessage {
     pub message: SessionInspectMessage,
     pub updated_seq: u64,
-    pub source: Option<String>,
+    pub origin: Option<SessionMessageOriginDto>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -257,7 +259,7 @@ mod tests {
             "messages": [{
                 "message": message_wire(),
                 "updated_seq": 1,
-                "source": null
+                "origin": null
             }],
             "working_dir": "/workspace",
             "model_id": "main",

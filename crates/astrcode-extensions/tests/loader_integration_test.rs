@@ -1,8 +1,11 @@
 //! 集成测试：扩展加载器边界条件与 manifest 解析。
 
-use std::sync::{
-    Arc, Weak,
-    atomic::{AtomicBool, AtomicUsize, Ordering},
+use std::{
+    collections::BTreeMap,
+    sync::{
+        Arc, Weak,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+    },
 };
 
 use astrcode_extension_sdk::{
@@ -21,11 +24,25 @@ use astrcode_extension_sdk::{
 use astrcode_extensions::{
     loader::{
         DiscoverExtensionsResult, ExtensionCandidate, ExtensionLoadContext, ExtensionLoadFailure,
-        ExtensionSource, sync_extension_sources,
+        ExtensionSource, prepare_extension_generation,
     },
     runner::{ExtensionHttpDispatchResult, ExtensionRunner, ExtensionStageStatus},
 };
 use tokio::sync::Notify;
+
+async fn sync_extension_sources(
+    runner: &Arc<ExtensionRunner>,
+    ctx: &ExtensionLoadContext,
+    sources: &[&dyn ExtensionSource],
+) -> Vec<String> {
+    match prepare_extension_generation(runner, ctx, sources, &BTreeMap::new()).await {
+        Ok(candidate) => {
+            candidate.commit_with(|_| {}).await;
+            Vec::new()
+        },
+        Err(errors) => errors,
+    }
+}
 
 fn test_manifest(id: impl Into<String>) -> ExtensionManifest {
     manifest(id)
@@ -237,39 +254,31 @@ impl Extension for CountingExtension {
     }
 }
 
-struct RetirementControlledExtension {
+struct StartFailingExtension {
     id: &'static str,
     starts: Arc<AtomicUsize>,
     stops: Arc<AtomicUsize>,
-    stop_entered: Arc<Notify>,
-    stop_release: Option<Arc<Notify>>,
-    stop_error: Option<&'static str>,
 }
 
 #[async_trait::async_trait]
-impl Extension for RetirementControlledExtension {
+impl Extension for StartFailingExtension {
     fn manifest(&self) -> ExtensionManifest {
         test_manifest(self.id)
     }
 
     async fn start(&self, _ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
         self.starts.fetch_add(1, Ordering::SeqCst);
-        Ok(())
+        Err(ExtensionError::Internal(
+            "injected candidate startup failure".into(),
+        ))
     }
 
     async fn stop(
         &self,
         _ctx: astrcode_extension_sdk::extension::ExtensionStopContext,
     ) -> Result<(), ExtensionError> {
-        self.stop_entered.notify_one();
-        if let Some(stop_release) = &self.stop_release {
-            stop_release.notified().await;
-        }
         self.stops.fetch_add(1, Ordering::SeqCst);
-        match self.stop_error {
-            Some(message) => Err(ExtensionError::Internal(message.into())),
-            None => Ok(()),
-        }
+        Ok(())
     }
 }
 
@@ -323,10 +332,6 @@ impl ExtensionSource for UnavailableFingerprintSource {
             }],
             ..Default::default()
         }
-    }
-
-    fn owns_source_key(&self, source_key: &str) -> bool {
-        source_key.starts_with("source:")
     }
 }
 
@@ -538,70 +543,69 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
         .expect("second replacement should reach its start barrier");
     assert_eq!(
         runner.runtime_snapshot_state(),
-        RuntimeSnapshotState::Updating
+        RuntimeSnapshotState::Stable(initial_generation),
+        "candidate startup must not disturb the committed generation"
     );
 
-    let mut concurrent_reader = {
+    let concurrent_reader = {
         let runner = Arc::clone(&runner);
         tokio::spawn(async move { published_tool_catalog(&runner).await })
     };
-    let mut concurrent_http_reader = {
+    let concurrent_http_reader = {
         let runner = Arc::clone(&runner);
         tokio::spawn(async move { published_http_tool(&runner, "/catalog/catalog-b").await })
     };
-    let mut concurrent_registry_reader = {
+    let concurrent_registry_reader = {
         let runner = Arc::clone(&runner);
         tokio::spawn(async move { runner.registry_snapshot().await })
     };
-    let mut concurrent_command_surface = {
+    let concurrent_command_surface = {
         let runner = Arc::clone(&runner);
         tokio::spawn(async move { runner.resolve_command_surface("/workspace").await })
     };
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut concurrent_reader,)
+    let (concurrent_generation, concurrent_tools) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), concurrent_reader)
             .await
-            .is_err(),
-        "an extension view must not expose a partially replaced tool catalog"
+            .expect("readers should keep using the committed generation")
+            .unwrap();
+    assert_eq!(concurrent_generation, initial_generation);
+    assert_eq!(concurrent_tools, ["oldA", "oldB"]);
+    assert_eq!(
+        concurrent_http_reader.await.unwrap(),
+        "oldB",
+        "candidate routes must remain unpublished"
+    );
+    let concurrent_registry = concurrent_registry_reader.await.unwrap();
+    assert!(
+        concurrent_registry
+            .extensions
+            .iter()
+            .flat_map(|extension| &extension.tools)
+            .all(|tool| tool.name.starts_with("old"))
     );
     assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            &mut concurrent_http_reader,
-        )
-        .await
-        .is_err(),
-        "HTTP dispatch must not expose a partially replaced route catalog"
-    );
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            &mut concurrent_registry_reader,
-        )
-        .await
-        .is_err(),
-        "registry snapshots must not expose partially replaced declarations"
-    );
-    assert!(
-        tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            &mut concurrent_command_surface,
-        )
-        .await
-        .is_err(),
-        "command and UI contributions must wait for one stable generation"
+        concurrent_command_surface
+            .await
+            .unwrap()
+            .commands
+            .iter()
+            .all(|command| command.command.name.starts_with("old"))
     );
 
     start_release.notify_one();
     assert!(reload.await.unwrap().is_empty());
-    let (final_generation, final_names) = concurrent_reader.await.unwrap();
+    let (final_generation, final_names) = published_tool_catalog(&runner).await;
     assert_eq!(final_names, ["newA", "newB"]);
     assert!(final_generation > initial_generation);
     assert_eq!(
         runner.runtime_snapshot_state(),
         RuntimeSnapshotState::Stable(final_generation)
     );
-    assert_eq!(concurrent_http_reader.await.unwrap(), "newB");
-    let registry = concurrent_registry_reader.await.unwrap();
+    assert_eq!(
+        published_http_tool(&runner, "/catalog/catalog-b").await,
+        "newB"
+    );
+    let registry = runner.registry_snapshot().await;
     let mut registry_tools = registry
         .extensions
         .into_iter()
@@ -610,7 +614,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
         .collect::<Vec<_>>();
     registry_tools.sort();
     assert_eq!(registry_tools, ["newA", "newB"]);
-    let surface = concurrent_command_surface.await.unwrap();
+    let surface = runner.resolve_command_surface("/workspace").await;
     let mut command_names = surface
         .commands
         .iter()
@@ -726,26 +730,22 @@ async fn sync_sources_reconciles_only_changed_sources_and_preserves_source_order
 }
 
 #[tokio::test]
-async fn sync_sources_waits_for_renamed_retirement_and_blocks_failed_replacement() {
+async fn failed_candidate_batch_is_discarded_without_disturbing_the_committed_generation() {
     let runner = Arc::new(ExtensionRunner::new(std::time::Duration::from_secs(1)));
     let old_starts = Arc::new(AtomicUsize::new(0));
     let old_stops = Arc::new(AtomicUsize::new(0));
-    let stop_entered = Arc::new(Notify::new());
-    let stop_release = Arc::new(Notify::new());
-    let new_starts = Arc::new(AtomicUsize::new(0));
-    let new_stops = Arc::new(AtomicUsize::new(0));
-    let replacement_loads = Arc::new(AtomicUsize::new(0));
+    let replacement_starts = Arc::new(AtomicUsize::new(0));
+    let replacement_stops = Arc::new(AtomicUsize::new(0));
+    let failing_starts = Arc::new(AtomicUsize::new(0));
+    let failing_stops = Arc::new(AtomicUsize::new(0));
     let initial = FingerprintSource {
         entries: vec![(
-            "source:renamed",
+            "source:stable",
             "v1",
-            Arc::new(RetirementControlledExtension {
-                id: "rename-v1",
+            Arc::new(CountingExtension {
+                id: "stable",
                 starts: Arc::clone(&old_starts),
                 stops: Arc::clone(&old_stops),
-                stop_entered: Arc::clone(&stop_entered),
-                stop_release: Some(Arc::clone(&stop_release)),
-                stop_error: None,
             }),
         )],
         loads: Arc::new(AtomicUsize::new(0)),
@@ -756,110 +756,49 @@ async fn sync_sources_waits_for_renamed_retirement_and_blocks_failed_replacement
     };
     let errors = sync_extension_sources(&runner, &ctx, &[&initial]).await;
     assert!(errors.is_empty(), "initial sync failed: {errors:?}");
-
-    let mut replacement = {
-        let runner = Arc::clone(&runner);
-        let new_starts = Arc::clone(&new_starts);
-        let new_stops = Arc::clone(&new_stops);
-        let replacement_loads = Arc::clone(&replacement_loads);
-        tokio::spawn(async move {
-            let updated = FingerprintSource {
-                entries: vec![(
-                    "source:renamed",
-                    "v2",
-                    Arc::new(CountingExtension {
-                        id: "rename-v2",
-                        starts: new_starts,
-                        stops: new_stops,
-                    }),
-                )],
-                loads: replacement_loads,
-            };
-            sync_extension_sources(
-                &runner,
-                &ExtensionLoadContext {
-                    working_dir: None,
-                    host_router: None,
-                },
-                &[&updated],
-            )
-            .await
-        })
+    let initial_generation = match runner.runtime_snapshot_state() {
+        RuntimeSnapshotState::Stable(generation) => generation,
+        RuntimeSnapshotState::Updating => unreachable!("completed sync must be stable"),
     };
-    tokio::time::timeout(std::time::Duration::from_secs(1), stop_entered.notified())
-        .await
-        .expect("renamed source should begin retiring its previous extension id");
-    assert_eq!(replacement_loads.load(Ordering::SeqCst), 0);
-    assert_eq!(new_starts.load(Ordering::SeqCst), 0);
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_millis(50), &mut replacement)
-            .await
-            .is_err(),
-        "the renamed extension must not start before the old id finishes retirement"
-    );
-
-    stop_release.notify_one();
-    assert!(
-        tokio::time::timeout(std::time::Duration::from_secs(1), &mut replacement)
-            .await
-            .expect("renamed replacement should resume after retirement")
-            .unwrap()
-            .is_empty()
-    );
-    assert_eq!(old_starts.load(Ordering::SeqCst), 1);
-    assert_eq!(old_stops.load(Ordering::SeqCst), 1);
-    assert_eq!(replacement_loads.load(Ordering::SeqCst), 1);
-    assert_eq!(new_starts.load(Ordering::SeqCst), 1);
-    assert_eq!(runner.registered_extension_ids().await, ["rename-v2"]);
-    assert!(runner.shutdown().await.is_empty());
-
-    let runner = Arc::new(ExtensionRunner::new(std::time::Duration::from_secs(1)));
-    let failed_starts = Arc::new(AtomicUsize::new(0));
-    let failed_stops = Arc::new(AtomicUsize::new(0));
-    let replacement_starts = Arc::new(AtomicUsize::new(0));
-    let failed_replacement_loads = Arc::new(AtomicUsize::new(0));
-    let initial = FingerprintSource {
-        entries: vec![(
-            "source:failed",
-            "v1",
-            Arc::new(RetirementControlledExtension {
-                id: "failed-v1",
-                starts: Arc::clone(&failed_starts),
-                stops: Arc::clone(&failed_stops),
-                stop_entered: Arc::new(Notify::new()),
-                stop_release: None,
-                stop_error: Some("injected retirement failure"),
-            }),
-        )],
-        loads: Arc::new(AtomicUsize::new(0)),
+    let candidate_loads = Arc::new(AtomicUsize::new(0));
+    let candidate = FingerprintSource {
+        entries: vec![
+            (
+                "source:stable",
+                "v2",
+                Arc::new(CountingExtension {
+                    id: "stable",
+                    starts: Arc::clone(&replacement_starts),
+                    stops: Arc::clone(&replacement_stops),
+                }),
+            ),
+            (
+                "source:failing",
+                "v1",
+                Arc::new(StartFailingExtension {
+                    id: "failing",
+                    starts: Arc::clone(&failing_starts),
+                    stops: Arc::clone(&failing_stops),
+                }),
+            ),
+        ],
+        loads: Arc::clone(&candidate_loads),
     };
-    assert!(
-        sync_extension_sources(&runner, &ctx, &[&initial])
-            .await
-            .is_empty()
-    );
-    let updated = FingerprintSource {
-        entries: vec![(
-            "source:failed",
-            "v2",
-            Arc::new(CountingExtension {
-                id: "failed-v2",
-                starts: Arc::clone(&replacement_starts),
-                stops: Arc::new(AtomicUsize::new(0)),
-            }),
-        )],
-        loads: Arc::clone(&failed_replacement_loads),
-    };
-    let errors = sync_extension_sources(&runner, &ctx, &[&updated]).await;
+    let errors = sync_extension_sources(&runner, &ctx, &[&candidate]).await;
 
-    assert_eq!(failed_starts.load(Ordering::SeqCst), 1);
-    assert_eq!(failed_stops.load(Ordering::SeqCst), 1);
-    assert_eq!(failed_replacement_loads.load(Ordering::SeqCst), 0);
-    assert_eq!(replacement_starts.load(Ordering::SeqCst), 0);
-    assert!(runner.registered_extension_ids().await.is_empty());
     assert_eq!(errors.len(), 1);
-    assert!(errors[0].contains("failed to retire extension failed-v1"));
-    assert!(errors[0].contains("before starting failed-v2"));
-    assert!(errors[0].contains("injected retirement failure"));
+    assert!(errors[0].contains("injected candidate startup failure"));
+    assert_eq!(candidate_loads.load(Ordering::SeqCst), 2);
+    assert_eq!(old_starts.load(Ordering::SeqCst), 1);
+    assert_eq!(old_stops.load(Ordering::SeqCst), 0);
+    assert_eq!(replacement_starts.load(Ordering::SeqCst), 1);
+    assert_eq!(replacement_stops.load(Ordering::SeqCst), 1);
+    assert_eq!(failing_starts.load(Ordering::SeqCst), 1);
+    assert_eq!(failing_stops.load(Ordering::SeqCst), 1);
+    assert_eq!(runner.registered_extension_ids().await, ["stable"]);
+    assert_eq!(
+        runner.runtime_snapshot_state(),
+        RuntimeSnapshotState::Stable(initial_generation)
+    );
     assert!(runner.shutdown().await.is_empty());
 }

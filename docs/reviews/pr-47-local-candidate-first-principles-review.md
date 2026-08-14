@@ -1,10 +1,10 @@
 # PR #47 本地候选：从零设计审查与收敛记录
 
-> 日期：2026-08-14  
-> 分支：`whatevertogo/s5r3-phase-0`  
-> 远端 PR：[feat(extensions): S5R 3.0 协议升级与作者/宿主契约统一（Phase 0，WIP）](https://github.com/whatevertogo/astrcodey/pull/47)  
-> 审查对象：远端 PR head `5a0ece23216f2321a32e64d61f84eacf94420f9e`，以及其上的本地未提交候选  
-> 设计前提：不保留旧架构兼容路径；以长期可维护性、单一事实来源、清晰依赖方向和可证明的安全边界为优先级  
+> 日期：2026-08-14
+> 分支：`whatevertogo/s5r3-phase-0`
+> 远端 PR：[feat(extensions): S5R 3.0 协议升级与作者/宿主契约统一（Phase 0，WIP）](https://github.com/whatevertogo/astrcodey/pull/47)
+> 审查对象：远端 PR head `c9c07e58ef4f2ab4e300f808b1fbcdfa9d031c6d`，以及其上的本地未提交候选
+> 设计前提：不保留旧架构兼容路径；以长期可维护性、单一事实来源、清晰依赖方向和可证明的安全边界为优先级
 > 关系：`docs/architecture/unified-extension-tool-runtime.md` 规定最终 Extension 工具架构；本文记录为什么这样设计、当前实现到达了哪里、审查中修了什么以及还不能忽略什么
 
 ## 0. 如何阅读本文
@@ -40,12 +40,28 @@
 
 | 差异面 | 当前规模 | 含义 |
 | --- | ---: | --- |
-| `origin/main...HEAD` | 367 files，`+44,058 / -19,985` | 已推送到 PR #47 的 S5R 3.0 大重构 |
-| `HEAD` 到本地工作区 | 236 files，约 `+5.4k / -19.5k` | 本轮删除旧工具/contract 路径、Projection/Compact 收敛和问题修复 |
-| `origin/main` 到本地工作区 | 393 files，约 `+40.6k / -30.6k` | 用户最终会审阅的实际本地候选 |
+| `origin/main...HEAD` | 444 files，`+57,614 / -30,614` | 已推送到 PR #47 的 S5R 3.0 大重构 |
+| `HEAD` 到本地工作区 | 229 files，`+5,457 / -3,447` | 本轮 Projection/Compact 收敛、边界清理和问题修复 |
+| `origin/main` 到本地工作区 | 480 files，`+61,101 / -32,091` | 用户最终会审阅的实际本地候选 |
 
-远端 PR 当前为 `OPEN`、`MERGEABLE`，远端 head 的旧 CI 全绿。那些检查只证明提交
-`5a0ece2`，**不能证明当前未提交候选**。本地候选必须重新完成 Rust、前端、协议生成、依赖边界和 S5R 验证。
+远端 PR 当前为 `OPEN`、`MERGEABLE`，但远端 head `c9c07e5` 的 Test、三平台 MSRV、
+Windows check 与 Contract Test 仍失败；其他 fmt、Clippy、依赖方向、安全和前端静态检查通过。
+这些结果只描述远端 head，**不能证明当前未提交候选**。本轮已重新完成 Rust、前端、
+协议生成、依赖边界、Rust 1.88 和 S5R conformance 的本地验证；只有推送后触发的新 CI
+才能替代远端失败结果并证明 Windows 等本机无法覆盖的平台。
+
+远端六个红 check 实际是四个已知根因，而不是六套独立设计失败：
+
+| 远端 check | `c9c07e5` 根因 | 当前本地候选 |
+| --- | --- | --- |
+| Test | conformance 仍引用已删除的 `astrcode-extension-contract` package | CI 改为 SDK `conformance` feature/bin；完整 workspace test 与 conformance 均通过 |
+| MSRV Ubuntu/macOS/Windows | Rust 1.88 不支持 `str::floor_char_boundary` | 恢复一个共享、带 UTF-8 边界测试的 `utf8_prefix`；完整 workspace 与 guest 1.88 check 通过 |
+| MSRV Windows / Check Windows | `File` 只在 `cfg(unix)` 下导入，Windows production path 仍使用 | `std::fs::File` 改成跨平台导入；只能由新 Windows CI 完整证明 |
+| Contract Test | lockfile 的 `nanoid 3.3.17` 命中高危 advisory | 更新为 3.3.18；本地 `npm audit` 为 0、contract test 通过 |
+
+这些失败都发生在 job 前段：远端 workspace tests、三个完整 MSRV workspace checks、Windows 后续
+编译、frontend build 和 build matrix 因此前置失败被跳过。因此“本地修掉日志里第一个错误”不等于
+下一轮矩阵必绿，尤其不能在 macOS 上替代 Windows 验收。
 
 ### 1.2 为什么变化很多
 
@@ -78,6 +94,13 @@
 9. Compact snapshot → summary → fingerprint → append → fsync → hook；
 10. Extension 配置 candidate → validation → persistence → publication → runtime apply。
 
+语义影响复核不是按文本行数猜范围。对 core LLM/event、ContextSnapshot、model-context projection、
+Compact persistence、fork producer 和 AgentSession wire 七个高风险文件执行 `sem diff`，得到 80 个实体级
+变化（16 added、25 modified、19 deleted、20 moved）。其中 `TranscriptMessage` 的传递影响明确到
+`context_snapshot`、manual/auto/reactive Compact、provider prepare 与 turn recovery；因此验证必须覆盖
+Context、Projection、Session 和 Server，不能只跑 core serde round-trip。`sem` 默认不包含未跟踪文件，
+所以新 SDK internal façade 和生成的 AgentSession update 仍需由 Cargo/TypeScript 全链单独验收。
+
 ---
 
 ## 2. 执行摘要
@@ -99,25 +122,42 @@
 
 ### 2.2 当前还不能宣称“完全收口”
 
-本地候选仍有一个明确的高优先级架构阻塞：**PTY 进程树所有权没有跨平台闭环**。`portable-pty`
-自己 spawn 并只返回 opaque child；现有 Host supervisor 不能在 spawn 前建立 Unix process-group/Windows
-Job Object 的统一所有权，也不能覆盖 spawn cancellation 到 handle 注册之间的窗口。只给 Unix 发 group
-signal 或在 Windows spawn 后补挂 Job，都不是可证明正确的跨平台方案。
+PTY 的架构阻塞已经用 fail-closed 的产品决策解决，而不是用半套 supervisor 掩盖：最终 Coding
+Extension 只注册 8 个工具，不再提供 `terminal`；生产依赖中已删除 `portable-pty`，Host operation
+catalog 也不再有 PTY/resize。所有 Host process 都是由 Host 自己 spawn 的 supervised pipes：Unix
+在 spawn 前建立独立 process group，Windows 路径使用 Job Object。Unix descendant-tree 已有真实
+终止回归；Windows Job Object 路径仍必须由新一轮真实 Windows CI 证明，macOS 编译或 Unix E2E
+不能替代这项验收。
 
-此外还有几个应明确保留在 merge assessment 中的风险：
+本轮同时收口了两个此前的 turn 内一致性缺口：
 
-- 多个 `PreToolUse` Extension 中，首个 `Ask` 仍会短路后续 Extension gate；
-- 外部 S5R Extension 的配置纯校验能力尚未达到与进程内 Extension 完全对等；
+- `PreToolUse` 已拆成有确定顺序的 input transform 与 admission 两阶段。全部 transform 先折叠成
+  canonical args；admission 在同一份参数上收集全部 Ask，任意 Block 覆盖，然后 Session 再与 core
+  permission requirements 组合；
+- Session 在首个 turn hook 前固定 main/small `LlmProviderBindings`，并显式贯穿 hook/tool call 到
+  HostRouter。旧 turn 在 reload 后继续使用旧 provider，新 turn 才使用新 provider；只有明确的
+  startup/unscoped 调用使用 live fallback。
+
+这两项修复不改变 config/runtime publication 的剩余边界。仍应明确保留在 merge assessment 中的风险：
+
+- core runtime generation 与 Extension runtime generation 仍是两个发布边界，config reload 不能被描述为全运行时原子；
+- Extension reload 仍缺 generation-aware reconcile，child session 仍用当前 model ID 字符串反推 tier；
+- Compact fsync 模糊失败采用“本次调用未观察到确认”的 `Failed` 语义；后续 exact retry/reopen
+  可能确认 rewrite，而 `PostCompact` 不是最终 durable rewrite 的 exactly-once 通知；
+- `/compact`、`/model` 仍是 server-owned 命令，因为 SDK 尚无对应 typed Host operation；
+- ask-user 的 global custom-event 路由与 stdio 禁用仍按具体 Extension ID 特判，尚未进入通用
+  event audience / transport requirement 契约；
 - `read_tool_result` 尚缺一条穿过 Coding → lease → HostRouter → Session/Storage → commit 的整链集成测试；
-- artifact fsync retry 已修，但还缺故障注入和 temp → fsync → rename 的完整原子写证明；
-- 当前未提交候选尚需完整验证，远端旧绿灯不能代替。
+- artifact 已收敛为同目录 temp → file fsync → no-clobber persist → directory fsync，但还缺 fsync/rename 故障注入；
+- 本地候选已经完成整仓、MSRV、frontend 与 conformance 验证，但远端 head 仍是旧提交；
+  新候选在推送并通过多平台 CI 前不能宣称跨平台验收完成。
 
 ### 2.3 不应重新引入的“简化”
 
 以下做法看起来文件少，实际会破坏边界：
 
 - 把 bundled Extension 直接做回 `astrcode_core::tool::Tool` 特权路径；
-- 让 server 识别 `shell`、`terminal`、`read_tool_result` 等具体工具名；
+- 让 server 识别 `shell`、`read_tool_result` 等具体工具名；
 - 让 Extension planner 直接访问 Host，以“顺便校验路径/进程”为由产生副作用；
 - 把 ResourceLease 当成 capability 的别名，而不在每次 Host 操作再次校验；
 - 把 system prompt 和所有 user/assistant/tool 消息拆成两个可独立变更的 projection；
@@ -143,7 +183,8 @@ signal 或在 Windows spawn 后补挂 Job，都不是可证明正确的跨平台
 ### 3.2 工具调用
 
 1. provider 看到的 definition、真正 planner、真正 executor 必须来自同一 Extension generation。
-2. PreToolUse 修改后必须重新 normalize 并按最终参数 plan。
+2. ToolInputTransform 折叠后必须统一 normalize；PreToolUse、plan 与 execute 只能观察同一份
+   canonical 参数。
 3. planner 必须是无副作用声明阶段；HostClient 在 planning scope 中 fail closed。
 4. approval 只批准 plan，不直接批准任意后续 Host 调用。
 5. execute 必须携带不可由 Extension 作者构造的 call-scoped ResourceLease。
@@ -151,7 +192,8 @@ signal 或在 Windows spawn 后补挂 Job，都不是可证明正确的跨平台
 7. Extension Ask、core resource Ask 和显式 Deny 必须可组合；任何 Deny 优先。
 8. approval memory 只能消解产生它的确切 rule key，不能跳过后续策略。
 9. ToolResult 的大小策略必须与工具身份无关，并在 durable commit 前统一执行。
-10. 长寿命进程、PTY、后台 task 必须有明确 session/extension owner、取消、回收和 tracing。
+10. 长寿命 pipes process 与后台 task 必须有明确 session/extension owner、取消、回收和 tracing；
+    无法满足同一所有权契约的 PTY capability 不进入产品面。
 
 ### 3.3 Projection 与 Compact
 
@@ -161,10 +203,11 @@ signal 或在 Windows spawn 后补挂 Job，都不是可证明正确的跨平台
 4. Compact snapshot 必须在 PreCompact 之后重读并冻结。
 5. rewrite 必须覆盖完整 turn 前缀，保留 source seq 之后的 tail。
 6. rewrite 必须用 system prompt + source prefix fingerprint 拒绝 stale source。
-7. EventLog fsync 成功前不得发送成功终态或 PostCompact。
-8. checkpoint 是 rewrite durable 后的恢复优化；失败不回滚已 durable rewrite。
-9. manual、auto、reactive 共用一个同步 pipeline，只在入口策略和失败处理上不同。
-10. 每次尝试恰好一个 `Started` 和一个 `Completed`/`Skipped`/`Failed`。
+7. provider 不可见的 typed message origin 必须随 retained rewrite 与 fork 一起持久化，不能靠 projection 魔法字符串重建。
+8. EventLog fsync 成功前不得发送成功终态或 PostCompact。
+9. checkpoint 是 rewrite durable 后的恢复优化；失败不回滚已 durable rewrite。
+10. manual、auto、reactive 共用一个同步 pipeline，只在入口策略和失败处理上不同。
+11. 每次尝试恰好一个 `Started` 和一个 `Completed`/`Skipped`/`Failed`。
 
 ### 3.4 边界与 DTO
 
@@ -189,7 +232,7 @@ flowchart TB
     SDK["astrcode-extension-sdk<br/>author API + HostClient + wire/S5R"]
     Worker["astrcode-extension-worker<br/>SDK ↔ S5R worker adapter"]
     Runtime["astrcode-extensions<br/>generation / dispatch / HostRouter"]
-    Coding["astrcode-extension-coding<br/>九个编码工具"]
+    Coding["astrcode-extension-coding<br/>八个编码工具"]
     Other["其他具体 astrcode-extension-*"]
     Bundled["astrcode-bundled-extensions<br/>唯一产品组合根"]
     Session["astrcode-session<br/>turn / approval / tool pipeline / compact"]
@@ -262,6 +305,29 @@ s5r/*        framing/peer/protocol state
 
 因此当前最优设计是**逻辑模块隔离，不做 Cargo feature gate**。未来只有出现明确的 no-wire consumer 且收益可测量时，才考虑 gate transport/runtime 实现；不能 gate 被 manifest、HostClient 和 catalog 共同引用的契约类型。
 
+### 4.4 PeerDriver 的 frame read 必须 cancellation-safe
+
+`PeerDriver` 同时等待 shutdown、control、outbound command、owned task、writer 和 inbound frame。
+这里不能在每轮 `tokio::select!` 中临时创建新的 `read_frame()` future：底层 framing read
+可能已经消费 header 或部分 payload；如果 command/task 分支先完成，临时 read future 被 drop，
+下一轮就会从 payload 中间重新寻找 header。高并发 S5R 测试把该生产竞态稳定放大为：
+
+```text
+partial frame read
+    → command branch wins
+        → read future cancelled after consuming bytes
+            → next loop parses remaining payload as header
+                → Frame(HeaderTooLong)
+                    → PeerClosed while worker process is still alive
+```
+
+正确 owner 是 `PeerDriver::run_until` 自身持有的单一 pinned `next_frame` future。其他分支完成时
+继续保留它，只在一个完整 frame 已解码并交给 driver 后才 replace。这个修复不是增加 read worker
+或第二条 transport 状态机；它只是把原本隐含在底层 stream 中的 partial-read 状态提升到真正的
+lifecycle owner。确定性回归用 cancellation-sensitive read gate 在半读期间强制 command dispatch；
+修复前触发 synthetic `HeaderTooLong`，修复后同一 invocation 正常完成。实际 S5R guest 另做了
+64 次、16 并发压力验证，并重新通过 18/18 E2E。
+
 ---
 
 ## 5. 所有工具统一走 Extension
@@ -280,10 +346,12 @@ sequenceDiagram
 
     P->>S: tool name + raw arguments
     S->>S: parse / visibility check
-    S->>H: PreToolUse(args)
-    H-->>S: allow / modify / ask / block
-    S->>S: normalize final args
-    S->>E: plan(final args, planning context)
+    S->>H: ToolInputTransform(raw args)
+    H-->>S: deterministically folded args
+    S->>S: normalize canonical args
+    S->>H: PreToolUse admission(canonical args)
+    H-->>S: all asks or terminal block
+    S->>E: plan(canonical args, planning context)
     E-->>S: ToolPlan(ResourceAccess[])
     S->>A: evaluate extension asks + core policies
     A-->>S: deny or approved requirements
@@ -315,9 +383,9 @@ sequenceDiagram
 
 | 旧责任 | 新 owner |
 | --- | --- |
-| `read/write/edit/patch/glob/grep/shell/terminal/read_tool_result` schema 与产品语义 | `astrcode-extension-coding` |
+| `read/read_tool_result/write/edit/patch/glob/grep/shell` schema 与产品语义 | `astrcode-extension-coding` |
 | workspace 路径、read-before-write observation、patch、搜索原语 | Extension Runtime `HostRouter::workspace` |
-| pipes/PTY process、handle、session cleanup | Extension Runtime process resource scope |
+| supervised pipes process、handle、session cleanup | Extension Runtime process resource scope |
 | provider-visible tool catalog | 冻结的 `ExtensionView` |
 | approval 和执行编排 | Session tool pipeline |
 | 大结果预算和 durable artifact | Session + Storage |
@@ -327,7 +395,7 @@ sequenceDiagram
 
 ### 5.3 Coding Extension 的唯一职责
 
-Coding Extension 负责九个面向模型的工具契约：
+Coding Extension 负责八个面向模型的工具契约：
 
 ```text
 read
@@ -338,7 +406,6 @@ patch
 glob
 grep
 shell
-terminal
 ```
 
 它应当知道：
@@ -347,7 +414,7 @@ terminal
 - 哪些最终参数对应哪些 ResourceAccess；
 - 如何组合 typed WorkspaceClient、ProcessClient、ToolResultClient；
 - 对模型友好的成功/错误/分页/超时展示；
-- shell/terminal 的产品语义与扩展配置。
+- shell foreground/background 的产品语义与扩展配置。
 
 它不应知道：
 
@@ -358,7 +425,28 @@ terminal
 - HTTP/frontend DTO；
 - provider tokenizer 或全局上下文预算。
 
-### 5.4 planner 为什么不能调用 Host
+### 5.4 strict tool 是 provider wire 预算，不是 Extension 身份
+
+八个 Coding 工具都在注册表中声明严格的原始参数契约。删除 `terminal` 后，这八个契约在
+Anthropic 编译中处于 first-party 优先集合并保持 strict；但“注册为 strict”仍不等于任意一次
+请求里的**全部第一方与第三方工具**都能同时启用 provider-side strict。Anthropic 对单次请求同时
+限制 strict 工具数量、optional 参数数量和 union 数量，其他 bundled/Extension 工具加入后仍可能
+超过聚合容量。
+
+最干净的处理是在 provider wire 边界确定性编译，而不是污染 Extension 原始 schema：
+
+1. bundled composition catalog 把 Coding 放在其他第一方工具之前；
+2. Coding 内按产品优先级保持 `read` 到 `shell` 的稳定顺序；
+3. wire compiler 依次接纳可满足聚合限制的 schema，只在该次 Anthropic 请求中降级后续超限项；
+4. 一条 first-party 全 catalog 测试锁定八个 Coding 工具都留在 strict 子集，并验证最终 strict 子集
+   满足 Anthropic 聚合限制；
+5. 注册表、执行器校验和其他 provider 的原始 schema 均不被修改。
+
+不能为了让测试显示“全部 first-party 工具都 strict”而提高本地常量；provider 仍会拒绝。也不能把可选字段强行改成
+非 nullable required；那会改变模型可见语义。这里应测试的是确定性优先级和不修改原契约，而不是
+一个违反 provider 容量的愿望值。
+
+### 5.5 planner 为什么不能调用 Host
 
 plan 的作用是把最终参数解释成资源意图，不是“试运行”。如果 planning 可以访问 Host：
 
@@ -369,7 +457,7 @@ plan 的作用是把最终参数解释成资源意图，不是“试运行”。
 
 当前 Worker HostClient 已改成只认 invocation task-local scope；在 handler 内 `tokio::spawn` 后脱离 scope，会返回 `ContextUnavailable`，不再静默回退到全局/detached peer。这个 fail-closed 行为是正确边界，不应为“方便异步”恢复全局 Host API。
 
-### 5.5 approval 必须组合，不是二选一
+### 5.6 approval 必须组合，不是二选一
 
 Extension hook Ask 表示扩展自有业务 gate；core Ask 表示资源或平台安全 gate。两者不是替代关系。例如：
 
@@ -390,25 +478,31 @@ opaque-resource:<tool_name>
 
 记住第一条 `AllowAlways` 只表示跳过第一条 Ask，然后继续评估后续策略；不能直接把整个工具调用标记 Allow。
 
-### 5.6 为什么 Process approval 按资源而不是工具名
+### 5.7 为什么 Process approval 按资源而不是工具名
 
-只匹配 `shell|terminal` 会让名为 `run_tests`、`build`、`deploy` 的 Extension 工具通过
+只匹配 `shell` 会让名为 `run_tests`、`build`、`deploy` 的 Extension 工具通过
 `HostResource::Process` 启动任意命令而不触发 manual approval。工具名属于展示契约，不是安全边界。
 
 当前 `ProcessResourceAskPolicy` 检查 plan 中的 `ResourceAccess::Host(HostResource::Process)`，因此任何进程型工具都进入同一策略。命令参数只用于生成更清晰的 prompt，不用于决定是否需要审批。
 
-### 5.7 当前 PreToolUse 仍需最终收口的语义
+### 5.8 PreToolUse 两阶段已经收口
 
-Runtime 目前顺序执行匹配的 PreToolUse handler：`ModifyInput` 会继续，但首个 `Ask` 或 `Block` 会立即返回。`Block` 短路是合理的；首个 `Ask` 短路会让后续 Extension 的 Ask/Block/ModifyInput 不被观察。
+当前实现没有继续扩张原先同时承担变换与准入的结果 enum，而是把两类职责编码成不同注册类型和
+不同 runtime port：
 
-从零设计的干净方案不是给当前 enum 再加几个特殊分支，而是把两类职责分开：
+1. **transform phase**：`ToolInputTransformHandler` 按固定 priority/order 依次折叠
+   `Unchanged | Replace`；后一个 handler 看到前一个 handler 的输出；
+2. Session 对 transform 输出执行一次 `normalize_final_arguments`，得到 canonical args；失败即拒绝，
+   不进入 admission、plan 或 execute；
+3. **admission phase**：全部匹配的 `PreToolUseHandler` 只返回 `Allow | Ask | Block`，且都观察同一份
+   canonical args；无 Block 时所有 Ask 聚合为 `PreToolUseAdmission::Ask { requirements }`，Block 是
+   terminal deny；
+4. Session 把每条 Extension requirement 与 core permission requirements 独立结算，approval memory
+   只消解 exact rule key；
+5. planner 与 executor 都接收同一份 canonical args。
 
-1. **transform phase**：按确定顺序组合 `ModifyInput`，最终得到 canonical args；
-2. **admission phase**：在相同 canonical args 上收集所有 Ask，并让任意 Block 覆盖；
-3. Session 对 Extension admission requirements 与 core permission requirements 一次组合；
-4. plan 始终针对 transform 后最终参数执行。
-
-在没有明确 hook ordering、冲突和 wire contract 之前，不应做只支持“两个 Ask”的半聚合类型。当前问题应保持可见，作为后续协议级收口，而不是塞进 Session workaround。
+一条多 Extension 回归同时覆盖两次顺序变换、两个 Ask 聚合、后置 Block 覆盖，以及
+admission/plan/permission 对 canonical args 的一致观察。这里已不再是 merge blocker。
 
 ---
 
@@ -446,7 +540,8 @@ pub enum ResourceAccess {
 
 ### 6.3 Process handle 所有权
 
-handle 必须绑定 `(session_id, extension_id, process_id)`，并由 Host session resource scope 持有。
+最终 Host process capability 只接受 stdin/stdout/stderr pipes，不存在 PTY mode 或 resize。handle 必须
+绑定 `(session_id, extension_id, process_id)`，并由 Host session resource scope 持有。
 
 必须满足：
 
@@ -454,38 +549,40 @@ handle 必须绑定 `(session_id, extension_id, process_id)`，并由 Host sessi
 - call-owned process 随 invocation cancellation 终止并释放 quota；
 - session-owned process 可跨单次调用读取，但随 session close 回收；
 - Extension reload 的访问策略明确，不依赖 handler 内 static；
-- pipes 与 PTY 都终止整个进程树，而不是只 kill 直接 child；
+- Unix process group 或 Windows Job Object 终止完整进程树，而不是只 kill direct child；
 - spawn 成功到 handle 登记之间由 RAII owner 覆盖。
 
 本轮已修：
 
 - `Call + cancellation=None` 不再静默降级为 Session lifetime，而是 fail closed；
 - call-owned read cancellation 先从 handle store 移除，再终止，避免重复取消耗尽 quota；
-- PTY 与 pipes 一样执行 `env_clear + allowlist + noninteractive env`；
+- `ProcessSpawn`、foreground/background handle 与 S5R worker 进程统一复用 `SupervisedCommand`；
+- Unix 在 spawn 前建立独立 process group，terminate 先发 `SIGTERM`，grace 后发 `SIGKILL`，Drop
+  同样覆盖整个 group；
+- Windows `SupervisedCommand` 使用 `process-wrap` 的 `JobObject + KillOnDrop`，不再存在另一个未受管
+  的 PTY spawn 路径；
+- 所有 Host process 都执行 `env_clear + allowlist + noninteractive env`；
 - `/bin/sh` process E2E 明确 `#[cfg(unix)]`，跨平台 fail-closed 测试不依赖 shell。
 
-### 6.4 PTY 为什么仍是阻塞项
+### 6.4 PTY 阻塞的最终处理：删除能力，不保留降级路径
 
-当前 pipes 可由 `SupervisedCommand` 自己 spawn，因此能在 Unix 建立 process group、在 Windows 用
-Job Object 包住进程树。PTY 由 `portable_pty::SlavePty::spawn_command` 内部 spawn，只返回 opaque
-`Child`：
+> **迁移前历史**：早期本地候选曾包含 `terminal` 工具与 `portable-pty`。由于该库内部 spawn 并只
+> 返回 opaque child，Host 无法用与 pipes 相同的 spawn-before-register RAII owner 证明 Windows
+> Job Object、取消窗口和 descendant cleanup。这是当时的真实 blocker，不是当前产品能力。
 
-- Unix 实现虽然调用 `setsid()`，当前 controller 仍只 kill/wait 直接 child；
-- Windows ConPTY 直接 `CreateProcessW`，没有 `CREATE_SUSPENDED`；
-- 正确绑定 Windows Job Object 需要 suspended spawn → assign job → resume，spawn 后补挂存在逃逸窗口；
-- `spawn_blocking` future 被取消、writer/reader 初始化失败或 handle 插入前失败，都可能留下未登记 child。
+最终没有 fork `portable-pty`、手写 ConPTY，也没有保留“Unix 看起来可用、Windows 尽力而为”的
+平台分叉。当前状态是：
 
-最干净的长期方案二选一：
+- Coding Extension 只注册 8 个工具，`terminal` 已删除；
+- `process/terminal.rs`、`portable-pty` dependency、PTY wire DTO、`ProcessResize` operation 与
+  HostRouter resize dispatch 均已删除；
+- `ProcessClient` 只公开 supervised pipes 的 spawn/start/read/input/status/promote/kill/list；
+- shell foreground/background 都由同一个 Host process service 组合；
+- 文档、协议和测试不得再把 PTY cleanup 当成当前承诺。
 
-1. Host supervision 层自己拥有 openpty/ConPTY 创建与 process spawn，返回统一 `SupervisedPtyChild`；
-2. fork/upstream `portable-pty`，增加 pre-spawn flags、suspended spawn 和 child-supervisor handoff hook。
-
-在此之前，不接受以下“看起来修了”的方案：
-
-- 只在 Unix 对 direct pid 发 process-group signal；
-- Windows spawn 后再 attach Job Object；
-- 只给 opaque child 包一个 Drop，但仍无法管 descendants；
-- 把风险写进注释后宣称 session cleanup 已闭环。
+当前跨平台剩余项不是“补 PTY”，而是用真实 Windows runner 验收已有 pipes Job Object 路径：启动
+`cmd.exe` descendant tree，分别触发 kill、timeout、cancellation、Drop/session cleanup，并确认后代
+PID 全部消失。在该 CI 通过前，只能说 Windows owner 已实现并可编译，不能说真实进程树已验收。
 
 ---
 
@@ -530,6 +627,27 @@ Job Object 包住进程树。PTY 由 `portable_pty::SlavePty::spawn_command` 内
 模型请求级 `LlmRequest.max_output_tokens` 和 Compact 的 `compact_max_output_tokens` 必须保留。它们由
 Context/Session 根据模型限制、当前 prompt token 和最小输出预算计算，并直接传给 provider。删除这些字段会失去真正的 token 边界；它们与旧工具兼容字段同名相似但语义完全不同。
 
+本轮同时删除了 provider 的旧双入口：`LlmProvider` 不再要求 `generate(messages, tools)`，也不再让
+默认 `generate_request` 静默丢弃 request options。唯一入口现在是 `generate_request(LlmRequest)`；
+所有 provider、live wrapper、host router、调用方和测试 mock 都显式构造/转发同一请求。
+
+Extension 获得等价但不降级的 typed 能力：
+
+```text
+llm_chat_request(Vec<LlmMessage>)
+    .with_max_output_tokens(n)
+        → ModelClient::*_request
+            → HostLlmChatRequest.maxOutputTokens
+                → HostRouter shared parse
+                    → core LlmRequest
+                        → provider
+```
+
+`None` 明确表示使用模型/runtime 默认预算；`0` 在 Host 信任边界拒绝；大于 provider 能力的值最终由
+真实 provider 的 `ModelLimits::effective_output_cap` 钳制。这里不使用自由 JSON options bag，也不把
+token 预算塞回 shell/read 等工具 schema。普通 `main_chat(messages)` 仍只是上述请求的 `None` 便捷入口，
+不会形成第二条 provider 语义路径。
+
 ---
 
 ## 8. Tool-result artifact 设计
@@ -562,15 +680,21 @@ ID 可以从 tool name + call ID 确定性哈希得到，但不能把原始 tool
 新 artifact 成功返回前必须完成：
 
 ```text
-write all bytes
-    → file sync_all
-        → tool-results directory fsync
-            → parent session directory fsync
+same-directory temporary file
+    → write all bytes
+        → temporary file sync_all
+            → persist_noclobber to deterministic final name
+                → final file sync_all
+                    → tool-results directory fsync
+                        → parent session directory fsync
 ```
 
-本轮修正了 retry 漏洞：如果第一次 file/dir fsync 失败但文件已经存在，下一次相同输入不能仅比较内容后直接成功；现在 existing-content 路径会重新 sync file 与两级目录。
+本轮同时修正了两类故障：
 
-仍建议最终把写入改成统一的 `temp → write → file fsync → no-replace rename → dir fsync` primitive，并配故障注入。当前 direct `create_new` 若在 `write_all` 中途失败，可能留下 partial final-name 文件；重试会使用 suffix，功能可继续但会留下 orphan。这个问题不应和已修的 fsync retry 混为一谈。
+- `write_all` 失败只会留下 temp，不再污染合法的 final-name；
+- 如果第一次 file/dir fsync 失败但 final 文件已经存在，下一次相同输入会重新 sync file 与两级目录，不会仅比较内容就返回成功。
+
+剩余验收缺口是可控的 write/fsync/persist/directory-sync 故障注入，不是再加一条业务分支。
 
 ---
 
@@ -764,7 +888,18 @@ enum LlmCompactAttempt {
 - `Succeeded`：关闭 breaker 并清零；
 - `NotAttempted`：closed 状态保留既有失败；half-open 回到 cooldown。
 
-从零设计还可以让 `should_attempt()` 返回一个 attempt permit，由 Drop/finish 保证 half-open probe 不因 task cancellation 永久挂起。但在没有可复现取消缺口前，不值得再加一个抽象；当前 tri-state 已解决已确认回归。
+状态 owner 必须是 session runtime，不能是每个 turn 新建的 `TurnLoop`。否则第一个 turn 的 LLM Compact 失败会随 runner 析构，第二个 turn 又从空 breaker 开始，threshold 永远无法跨 turn 累积。当前 breaker 放在 `SessionRuntimeState`，每轮仅用 pinned runtime generation 的新配置调用 `configure()`，更新 threshold/cooldown 但不丢 session-local failure history。
+
+tri-state 只解决“这次有没有真正请求 LLM”，还不能保证调用方一定结算 half-open probe。
+如果 turn future 在 Compact await 中被取消，手写的 `should_attempt()` / `finish_attempt()` 配对会永久留下
+`half_open_attempt_in_flight=true`。当前实现因此让 breaker 返回 RAII attempt permit：
+
+- acquire 成功才代表本次拥有 probe；
+- `finish(Succeeded | Failed | NotAttempted)` 消费 permit 并显式结算；
+- future 取消、panic unwind 或任意早退导致 permit Drop 时，half-open 回到 cooldown；
+- permit 与 `run_compaction` 放在同一控制流附近，不把结算责任散到 turn 的多个 return 分支。
+
+这是一个有明确触发器的生命周期抽象，不是为了“以后可能取消”而增加的层次。
 
 ### 11.5 Compact 文件职责
 
@@ -779,80 +914,168 @@ enum LlmCompactAttempt {
 | `projection_context.rs` | `SessionReadModel` → `ContextSnapshot`，不承载 Compact policy |
 | `payload.rs` | durable/live payload construction，不承载控制流 |
 
-### 11.6 fsync 失败后的可见性仍需明确
+### 11.6 fsync 失败后的确定语义
 
-当前 append 会先更新进程内 projection，再单独调用 fsync；若 fsync 失败，当前 turn 会显式沿用冻结的旧 snapshot，且不会 PostCompact/Completed。这保证了当前请求不把未确认 rewrite 当成功。
+实现选择了单 confirmed projection，不引入 candidate read model。Compact rewrite 在同一
+session commit lane 内依次执行：
 
-但从零设计必须继续明确：**fsync 失败后是否允许 session 接受后续 turn**。进程内 projection 已看到 rewrite，而磁盘 durable 状态不确定；简单回滚也不安全，因为写入可能实际上已经到达磁盘。
+1. 基于当前 projection 准备 exact batch；
+2. 在内存中先安装带 `through_seq` 的 sticky pending marker；
+3. append 完整 JSONL 记录并 fsync；
+4. fsync 成功后才 apply projection，再由有序 sink 发布 observer event；
+5. 最后执行 best-effort checkpoint 与 `PostCompact`。
 
-最强语义是二选一：
+fsync 返回模糊失败时，pending batch 不进入 projection，也不发布 observer；
+storage 返回 `DurabilityUncertain { through_seq, .. }`，并阻断后续 append、replay、
+consumer checkpoint、snapshot 和 turn operation admission。该错误不是普通可重试错误：
+重放原 durable event 可能重复产生领域事实。唯一进程内恢复原语是带原
+`through_seq` 的显式 sync retry；错 seq 必须拒绝，成功过的同 seq retry 是幂等的。
 
-1. storage 提供 append+fsync+projection publish 的单个 durable-confirmed 提交边界；或
-2. fsync 失败后把 session 标记为 storage-degraded，阻止后续 mutation，直到重开/replay 重新确定事实。
+进程重启时不需要持久化 pending marker，但 reopen 不能直接信任完整换行记录：
+`EventLog::open` 与 cold summary/read-only replay 入口必须绕过运行期 dirty 快路径，
+在任何 replay、snapshot restore 或 projection publish 前先固定 pre-sync file length，再
+真实执行 file sync；随后 scan 只能读取该 confirmed prefix，不能越界读入并发追加的
+完整但未确认记录。sync 失败则 read/open 失败，不暴露 projection 或 summary。
+只有完成 newline 的记录可在 sync 后 replay，不完整尾仍按现有 tail recovery 丢弃。
 
-这不是引入异步 Compact 或第二读模型，而是完善 durable event sink 的通用提交语义。当前实现已有本 turn fallback，但应把跨 turn 行为列为持久化风险，不应只靠日志 warning。
+production 的进程内恢复入口位于 operation admission：它只捕获 typed
+`DurabilityUncertain`，在已有 operation gate 内经同一 event sink lane 使用错误携带的
+exact `through_seq` 重试一次，并在成功后重新检查 storage gate。持续 EIO 仍阻断本次
+operation；普通 turn completion、release、shutdown 和普通 sync 都不会暗中确认，
+也不暴露 raw seq 的管理端点。
+
+`CompactionFailed` 表示本次调用没有观察到 durability confirmation，不表示
+rewrite 永远不会在 retry/reopen 后生效。`PostCompact` 是进程观察到成功后的
+best-effort hook，不是每个最终 durable rewrite 的 exactly-once 通知。
+
+### 11.7 enrich 失败不能改变可提交 candidate
+
+post-compact enrich 是 best-effort 阶段，不能先破坏 `CompactResult`，再寄希望于后台收集成功。
+旧实现为了把 retained tail 移入 `spawn_blocking`，先对
+`compaction.retained_messages` 执行 `mem::take`；blocking task panic、future 取消或其他
+`JoinError` 会直接返回，留下一个空 retained tail。空 tail 又是合法后缀，后续 persistence
+可能只写 summary，静默删除没有被摘要覆盖的近期消息。
+
+当前收集阶段只读取 retained tail 的 owned snapshot；`CompactResult` 保持不变。blocking task
+成功返回 files/notes 后，才在同一同步提交点追加 enrichment summary；`JoinError` 只告警并保留
+原 summary 与 retained tail。一个真实 panic task 回归锁定了这个不变量。这里允许一次有界 clone，
+因为它换取的是“失败前后 candidate 完全相同”的事务边界，而不是为了 API 方便复制消息。
 
 ---
 
 ## 12. Extension 配置：candidate validation 必须先于保存和发布
 
-### 12.1 已确认的旧错误流
+### 12.1 被删除的可变热更模型
 
-旧流程是：
+旧流程先保存并发布 core 配置，再对活动 Extension 实例调用可失败的配置回调。非法值、回调失败或
+请求取消都可能留下“磁盘与 core 已更新、Extension 仍是旧状态”的组合。给这个组合增加
+`Applied | Degraded` 状态只能更准确地描述裂缝，不能消除裂缝，因此生产接口不再提供活动实例的
+`on_config_changed`、expected-config cache 或补偿式重试。
+
+### 12.2 已提交 runtime generation
+
+一次配置事务的发布单位由同一 epoch 的两部分组成：
+
+- core：`EffectiveConfig`、main/small provider、`ContextAssembler`；
+- Extension：包含完整 handler catalog 的 `HandlerIndex`，以及每个已配置 Extension 实例的
+  registrations、tasks、generation gate 和 Host instance identity。
+
+source fingerprint 与规范化后的完整 Extension config 一起构成候选 identity。identity 完全相同的
+实例直接进入 `Retain`，所以只修改 Compact threshold 等 core 字段不会重启 Extension；新增、启停、
+来源变化或配置变化才进入 `Start`。这不是局部字段 apply，而是 changed instance 的 fresh replacement。
+
+### 12.3 prepare 必须在旧代之外完成
+
+`ConfigManager::update_lock` 串行化同一配置源的更新；Runner 的 source transaction 从 discovery 一直
+持有到 commit 或 abort，旧 snapshot 不可能在等待 source lock 前被捕获后反向覆盖新代。prepare 顺序：
+
+1. resolve core config，并构造新 providers/context settings；
+2. 验证所有 first-party config，包括当前 disabled 的 bundled Extension；
+3. discovery 只产生 `source_key + source fingerprint + extension id + lazy factory`；
+4. 对 identity 变化的候选才调用 factory、`register()`、冲突校验和 `validate_config()`；
+5. 给每个 fresh instance 分配独立 `ExtensionInstanceId`，在 candidate generation gate 下调用 `start()`；
+6. S5R worker 在 `Activate` 中收到完整 JSON config，并可用 typed error 拒绝激活；
+7. candidate managed tasks 保持 suspended，所有 Host invoke/stream 和 custom event emitter 明确返回
+   `HostNotReady`/publish failure，不能依靠“任务碰巧尚未调度”推断无副作用。
+
+任一 discovery、load、register、validate、start 或 S5R activation 失败都会停止本批已经启动的 fresh
+instances、取消其 managed/call resources，并按 instance identity 清理 Host-owned resources。旧 index、
+core generation、raw snapshot 和磁盘配置均不变。Extension 若绕过 Host API 直接制造外部事实，宿主
+无法回滚；author contract 因此禁止 candidate startup 执行不可撤销外部写入。
+
+### 12.4 save 与 coherent publication
+
+prepare 成功后，`ConfigManager` 先把 update guard、candidate、待保存 config 和 publication sender
+移交给自己拥有的 must-finish transaction，再让 HTTP 调用等待结果。请求 future 此后被取消只会放弃
+响应，不会取消 save→commit；从磁盘 reload 的配置不再重复保存，但 commit 同样由该 transaction
+接管。shutdown 必须先 drain 这些 transaction，再停止 Runner。transaction 与 ConfigManager 的栈上
+借用无关，即使请求或 manager handle 被 Drop，也不会把已经开始的提交 task abort。
+
+保存失败会 abort 整个 candidate。保存成功后的 publication 不再包含可失败的 Extension 回调、动态
+查找或显式 panic 分支：retained identity 和 retiring operation gate 映射都在保存前、仍持有 source
+transaction 时校验；保存后只移动已经准备好的值并发布：
 
 ```text
-parse candidate
-    → save/publish raw + effective config
-        → update runner expected config
-            → on_config_changed
-                → Extension 才发现非法值并拒绝
+begin Updating
+    install candidate HandlerIndex
+    publish raw + core RuntimeGeneration(extension_epoch)
+    synchronously activate candidate gates and suspended tasks
+drop publication guard
+    Stable(extension_epoch)   # 唯一线性化点
 ```
 
-例如 Coding Extension 要求 `shellTimeoutSecs` 在 `1..=600`。写入 `0` 时，HTTP 可以显示 reload 成功，磁盘/effective config 已是新值，但运行中 Extension 仍保留旧值；重启后又可能 start 失败。用户观察、运行态和重启语义分叉。
+`Stable(epoch)` 之后只有旧代 retirement 与 diagnostics，不能再有决定本次 commit 成败的动作。turn 在
+首个 hook 前按以下顺序取得 coherent view：读取 core `Arc` 与其 expected extension epoch，确认 Runner
+处于同 epoch 的 `Stable`，取得 Extension view，再复查 Runner state/epoch 与 core `Arc` identity。任一
+检查漂移就重试。因此同一 turn 的 effective config、providers、context assembler、handler catalog 与
+Extension Host LLM bindings 必然来自同一已提交 epoch；manual Compact 使用同一入口。
 
-### 12.2 当前收敛方向
+保存后的代码路径不把 unwind 包装成可恢复的事务错误：一旦内部 invariant 被破坏而 panic，进程立即
+fail-stop，重启时从已经保存的配置重新构造完整 generation。这样不会让仍在运行的服务把“磁盘新代、
+runtime 旧代”伪装成 last-known-good；正常的候选错误和存储错误都在这个不可失败边界之前返回 typed
+error。
 
-SDK `Extension` 增加无副作用：
+### 12.5 旧代 drain、取消与 Host resource ownership
 
-```rust
-fn validate_config(&self, config: &ExtensionConfig) -> Result<(), ExtensionError>
-```
+发布不强制取消已经 pin 旧 view 的 active turn。每个 HandlerIndex 持有其引用到的 publication lease；
+replacement retirement 先等待旧 index lease 全部释放，再关闭 admission、取消 managed tasks 与 retained
+call cancellation；同一时点把旧 `GenerationGate` 设为 inactive，因此 retained startup/handler Host
+client 与 event emitter 都会 fail closed。关闭 admission 后会取得整代 invocation capacity，明确等待
+所有已接纳 handler 释放 permit，再等待 managed task 退出并调用 `stop(Reload|Disabled)`。commit 在
+最后一个 publication 前 await 之后才移动 candidate entries，并在 `Stable` 后第一次 await 之前把所有
+旧实例同步交给 retirement supervisor，因此请求取消不会把已经启动的 candidate 或已卸载的旧实例
+直接 Drop 掉。
 
-ConfigManager 在 save/publish candidate 前调用 Runner 对全部已加载 Extension 做 validation。invalid candidate 必须：
+Host process handle 的 owner 是 `(session_id, ExtensionInstanceId)`，不是用户可见 `extension_id`。同名
+新旧实例并存时不能互相 list/read/input/kill；Reload、Disabled、Shutdown 和 StartupFailed 都在各自
+lease drain 与 stop 尝试结束后，只清理对应 instance 的 session-lifetime handles。Drop/cancellation 能
+撤权并回收 Host-owned resources，但已经提交到外部系统的事实仍不可回滚，这也是 startup purity 约束
+存在的原因。
 
-- 不写磁盘；
-- 不替换 raw/effective snapshot；
-- 不替换 runner expected config；
-- 不触发 runtime apply；
-- HTTP 返回明确失败，而不是 warning + 200 success。
+普通 background task 在共享 shutdown budget 后会被 abort；`MustFinish` 只用于本地 session state、
+workspace 和 memory 等持久化临界区，超过 budget 后会告警但继续等待，避免用强制取消制造半写入。
+因此上述 cleanup 对正常返回的 Host I/O 是 eventual guarantee，不是无条件的时间上界：如果底层文件
+系统调用永久卡死，旧 instance 的 stop 与 Host resource cleanup 也会被推迟。turn context 只能撤销后续
+Host 权限并取消 owned task，既不能回滚已经发生的外部事实，也不能安全中断已经进入内核的持久写。
 
-valid candidate 才进入 commit，然后 `on_config_changed` 只负责应用已验证值。
+### 12.6 Extension-owned config 与 S5R parity
 
-### 12.3 从零设计的完整两阶段协议
+Server 只把每个 Extension 的原始 JSON 值纳入 canonical fingerprint 并传入候选，不解释
+`shellTimeoutSecs`、`maxOutputTokens` 等作者字段。进程内 Extension 通过 `ExtensionConfig` 做 typed
+deserialize/validation；S5R `ActivateMsg` 携带同一完整 config，worker activation handler 在 ready 前
+确认或拒绝。不存在 Reconfigure/on-config-changed 兼容路径：配置变化总是生成 fresh instance，失败则
+保留 last-known-good generation。
 
-最干净的长期模型：
+如果未来需要 manifest JSON schema，它只能作为无需实例化的早期错误报告层；不能替代 Extension
+自己的运行时 invariant 校验，也不能在 validation 失败时卸载旧代。`maxOutputTokens` 之类行为应成为
+Extension author contract 或 Host typed request 的字段，而不是为了兼容旧 builtin 在 core 中保留同名
+影子配置。
 
-```text
-prepare(candidate)
-    core resolve/provider build
-    declarative schema validation
-    each extension pure validate_config
-    no mutation
+### 12.7 模型 tier 不能由当前 model ID 字符串反推
 
-commit(prepared)
-    persist config atomically
-    publish raw/effective/expected config
-    apply runtime callbacks
-    surface structured apply errors / degraded status
-```
+child session 创建时持久化了当时 small model A；如果配置后来切到 small model B，`llm_for_model_id(A)` 既不等于当前 small B，也不等于当前 main，现实现会静默路由到 main provider。这使 durable identity 显示 A，实际执行却是 main。
 
-纯 validation 失败必须原子拒绝整个 candidate。commit 后的 apply 失败属于 operational failure，不能假装 candidate 未提交，也不能静默 200；应返回结构化错误并标记对应 Extension degraded/last-known-state。
-
-### 12.4 S5R parity
-
-进程内 Extension 可以直接调用 Rust `validate_config`。外部 S5R Extension 若也支持 extension-owned config，最终需要同等契约：优先 manifest declarative JSON schema；只有 schema 无法表达的 invariant 才使用纯 validate operation。
-
-不要通过把 config 内容塞进 bundled fingerprint、强制 unload/reload 来“验证”：这会先丢掉 last-known-good generation，并把输入错误变成生命周期故障。
+从零设计应持久化语义绑定而非偶然字符串：`ModelBinding::{Main, Small, Exact}`。每轮在 pinned generation 解析 tier；`Small` 跟随该代 small provider，`Exact` 不存在时返回 typed error，绝不能 fallback main。
 
 ---
 
@@ -872,11 +1095,16 @@ Server 可以：
 Server 不可以：
 
 - 按名字识别具体 Coding tool；
-- 直接清理 shell/terminal registry；
+- 直接清理具体工具的 process registry；
 - 自己拼 builtin + extension catalog；
 - 解释 durable event 成第二套 session 状态；
 - 拥有 Compact worker/pending state；
 - 复制 Session 的 manual compaction outcome enum。
+
+同一原则也适用于测试 API：`ServerRuntime` 的组件 getter、测试 router/event publisher 和竞态探针
+不应常驻生产 public surface。当前候选把它们集中在 feature-gated `test_support`；正式 crate root 只保留
+CLI/bootstrap/HTTP 真正跨 crate 使用的入口。测试仍覆盖生产 router 和同一个 `ServerEventBus`，而不是
+另造一套测试 transport。
 
 ### 13.2 `/compact`
 
@@ -914,6 +1142,54 @@ path 已包含 session ID，不应回传重复字段；没有后台任务就不�
 
 Shell details 应优先显示执行 metadata 的实际 `timeoutSecs`，再 fallback 到模型 args 的 `timeout`。这样 extension 默认值或热更新后的真实生效值不会在 UI 中消失。
 
+### 13.5 产品斜杠命令也由 Extension 声明
+
+provider-visible tool 已只来自 Extension generation；Server 不再构造 Coding builtin catalog。
+`/compact` 与 `/model` 现在也由只依赖 SDK 的 `astrcode-extension-session-commands` 声明，Server 不再保存 builtin command 表或按命令名特判。两条命令仍有不同于普通 Extension command 的 Host 责任：
+
+- `/compact` 需要复用已经持有的 session operation guard，调用 Session 唯一同步 Compact pipeline；
+- `/model` 需要返回一个 transport 受控的交互选择意图，而不是让 Extension 直接操作 TUI/HTTP；
+- `SessionControlClient` 当前没有 compact，ModelClient 也不拥有 session model catalog/selection。
+
+SDK 因此用 `CommandExecution::Host(SessionCommandKind)` 声明执行 owner，handler 只返回种类匹配的 `SessionCommandIntent`。注册和结果边界都要求 `session_command` capability；Server 在 handler 前用同一 declaration 完成 transport/busy admission，并在已经持有的 operation guard 内执行 Compact 或把 `SelectModel` 交给交互 actor。list、execute、completion 共用同一个 availability 判断，非交互 transport 不会先调用 `InteractiveOnly` handler 再拒绝。冲突解析只使用声明 priority 和稳定 extension ID/name，不再按 `astrcode-skill` 生成伪 source/隐式优先级；wire 直接携带真实 `extension_id`，skill 图标只是 frontend presentation。非空 `/name` 始终是命令语法，未知或被禁用时返回 `UnknownCommand`，不会再降级成 durable `UserMessage`。这样 Extension 拥有命令声明、参数解析和 UX，Host 保留唯一状态机，却没有字符串特判或 `SessionOperations` 重入。
+
+### 13.6 custom-event audience 与 transport requirement 不能按 Extension ID 特判
+
+ServerEventBus 目前只把 `astrcode-ask-user` 的两个 event type 转为 global custom event；stdio 启动也
+通过 `disabled_extension_ids={"astrcode-ask-user"}` 排除它。这两处都泄漏了具体 Extension 产品知识。
+
+长期契约应分别表达两个事实：
+
+1. custom-event declaration 声明 delivery audience（默认 Session，可选 Global）；Host 在 emit 时根据
+   已验证 declaration 把 audience 写入内部 event，ServerEventBus 只按 audience 通用 fan-out；
+2. manifest/declaration 声明 required transport capabilities；bootstrap 提供
+   `TransportProfile`，stdio 不提供 authenticated HTTP，于是 loader 产生通用 admission diagnostic。
+
+不要把“声明了 AuthenticatedHttp capability”直接猜成 required：capability 是授权面，requirement 是
+加载前置条件，两者生命周期不同。也不要仅把 ask-user 字符串移成共享常量，那只会统一特判，
+不会删除特判。
+
+### 13.7 snapshot、delta 与 raw EventLog 必须是三种不同契约
+
+本轮把 `AgentSessionLinkDto` 从“full snapshot 和 patch 共用、几乎所有字段都是 Option”拆成：
+
+- `AgentSessionLinkDto`：snapshot 基线，`agentName/task/status` 必填；
+- `AgentSessionUpdateDto`：tagged `spawned/completed/failed/progress`，每个 variant 只携带该事件能改变的字段；
+- frontend 的 `AgentSessionLink` 可额外持有 live-only `phase/currentTool`，但这不是伪装成 snapshot 可选字段的 wire 事实。
+
+Frontend 不再手写一份重复 wire interface：full link 与 update 直接复用 Rust 生成 DTO，只在 full link
+上交叉叠加两个 UI 瞬态字段。这样新增必填 durable 字段会让协议生成/TypeScript 编译同时失败，而不是
+被手写 `?` 或 `?? []` 静默吞掉。
+
+Rust DTO 拒绝未知字段，frontend decoder 对必填值、enum、optional object/string 的类型错误也直接失败；
+缺失/null 只有在契约确实表达“没有值”时才映射为 `undefined`。同样，Recap 在 projection 中保留
+`source` 并在 live/reconnect 都映射成 Recap；永远不可见的 User block `source` 被删除。
+
+未经消费的 `/api/sessions/{id}/events` raw SSE 已删除。它曾直接暴露 durable `EventPayload` serde
+形状，要求客户端跟随 storage format，违反“Server 做 wire mapping、frontend 不解释 durable event”。
+保留的是稳定的 conversation stream 和 Extension custom-event subscription/checkpoint，不是另一条
+EventLog HTTP 旁路。
+
 ---
 
 ## 14. 文件职责清单
@@ -923,6 +1199,7 @@ Shell details 应优先显示执行 metadata 的实际 `timeoutSecs`，再 fallb
 | 区域 | 唯一职责 |
 | --- | --- |
 | `extension/*` | 作者注册、handler、hook、lifecycle、manifest、纯 config validation |
+| `extension/internal.rs` | 唯一 runtime SPI façade；host-only constructors/mutators 不从作者根 API 暴露 |
 | `host/*` | typed domain clients、Host error mapping、author-facing call API |
 | `wire/*` | 严格 S5R DTO、operation/error catalog、frame 与 bounded decoding |
 | `s5r/*` | peer/session/protocol state、nested invoke、stream/cancel |
@@ -942,7 +1219,8 @@ Shell details 应优先显示执行 metadata 的实际 `timeoutSecs`，再 fallb
 | `runner/supervisor.rs` | Extension generation lifecycle/admission/drain |
 | `host_router/capability.rs` | operation lookup、manifest capability、backend availability |
 | `host_router/workspace*.rs` | workspace path/observation/patch/search 原语 |
-| `host_router/process*.rs` | process handle、I/O、lifetime、session ownership |
+| `process_supervision.rs` | 跨平台 spawn owner；Unix process group、Windows Job Object、terminate/Drop |
+| `host_router/process*.rs` | supervised pipes contract、handle、I/O、lifetime、session ownership |
 | `host_router/tool_result.rs` | session-scoped artifact read adapter |
 | `s5r_ext/*` | worker transport 到相同 runtime semantics 的 adapter |
 
@@ -950,7 +1228,7 @@ Shell details 应优先显示执行 metadata 的实际 `timeoutSecs`，再 fallb
 
 | 文件 | 唯一职责 |
 | --- | --- |
-| `lib.rs` | manifest、config、九个工具注册 |
+| `lib.rs` | manifest、config、八个工具注册 |
 | `files/read.rs` | read schema/plan/display |
 | `files/write.rs` | write schema/plan/display |
 | `files/edit.rs` | exact edit schema/plan/display |
@@ -958,8 +1236,9 @@ Shell details 应优先显示执行 metadata 的实际 `timeoutSecs`，再 fallb
 | `files/search.rs` | glob/grep 产品语义 |
 | `files/tool_result.rs` | opaque artifact pagination tool |
 | `process/shell.rs` | foreground/background shell 产品状态机 |
-| `process/terminal.rs` | PTY terminal 产品状态机 |
-| `result.rs` | Coding 工具共享但有明确领域语义的结果构造 |
+
+Coding 不再拥有 `result.rs` 计时包装；Session tool executor 是 `duration_ms` 的唯一权威 owner，文件与
+进程工具直接构造带自身 metadata 的 `ToolResult`。shell 只保留 promotion deadline 所需的 `Instant`。
 
 ### 14.4 Storage
 
@@ -979,17 +1258,26 @@ Storage 不应知道 `read_tool_result` 的 provider schema，也不应决定 30
 
 | 严重度 | 问题 | 修复 | 验证重点 |
 | --- | --- | --- | --- |
-| High | 非 `shell|terminal` 名称的 Process 工具在 manual 模式可能无审批启动进程 | 按 `HostResource::Process` Ask，不按工具名 | `shell/terminal/run_tests` 同一多样测试 |
+| High | 非 `shell` 名称的 Process 工具在 manual 模式可能无审批启动进程 | 按 `HostResource::Process` Ask，不按工具名 | `shell/run_tests` 同一多样测试 |
+| High | 旧 PreToolUse 的首个 Ask 会跳过后续 transform/Ask/Block | 独立 `ToolInputTransformHandler` 与 `PreToolUseHandler`；先折叠 canonical args，再聚合 admission | 两次变换 + 两个 Ask + 后置 Block + canonical plan 多样回归 |
 | High | Extension Ask 获批后可能直接执行，绕过 core resource permission | `PreparedToolApproval[]` 组合 Extension/Core 要求，Deny 覆盖 | 双 Ask + deny-wins 测试 |
+| High | 同一 `ToolPlan` 的 Process + Opaque 资源仅评估第一个 Ask，批准后却签发完整 lease | policy 保留单条 `PermissionDecision`，chain 用 `PermissionResolution` 累积全部独立 requirement | Process + Opaque 两条 rule key + Deny override |
 | High | approval memory 的 AllowAlways 可能跳过后续策略 | history 只消解当前 exact rule，然后继续 chain | 记住第一 Ask 后仍命中第二 Ask |
+| High | Extension handler 将 clone 的 `ToolContext` 留在 managed task 后，handler 返回不会结束 call token，call-scoped lease 可继续使用 | HandlerTool 持有 combined call token 的 `drop_guard()` | success + handler error 后外留 context 均 cancelled |
 | High | Worker task-local Host scope 丢失后回退到全局 peer，可绕过 planning/lease | 删除全局 HostApi fallback，scope 外 `ContextUnavailable` | handler 内 spawned task fail closed |
+| High | `PeerDriver` 每轮重建 frame read future，其他 select 分支可取消半读并把 payload 误解析为 header | driver 持有单一 pinned `next_frame`，只在完整 frame dispatch 后替换 | cancellation-sensitive read gate + 64 次/16 并发 + S5R 18/18 |
 | High | `read_tool_result` 允许 60k page，而 Session 超过 30k 再 artifact 化，形成嵌套/递归 artifact | SDK page max 改为 20k，Coding 复用 SDK 常量 | 最大页严格低于 inline threshold |
+| High | turn 内 Extension ModelClient 通过全局 live handle 绕过 pinned provider generation | 从 pinned core generation 派生 `LlmProviderBindings`，显式贯穿 hook/tool/InvokeContext；live 仅作 unscoped fallback | reload 后旧 turn hook/tool 仍用 old main/small，新 turn 用 new |
 | Medium | `Call + no cancellation` 静默变 Session lifetime | fail closed | 跨平台纯测试 |
 | Medium | call-owned read cancellation 只 kill 不移除 handle，可能耗尽 quota | pointer-safe remove 后 terminate | 综合 process handle 测试 |
-| Medium | PTY 继承完整 Host env，与 pipes 策略不一致 | PTY 同样 `env_clear + allowlist + NONINTERACTIVE_ENV` | env 定向测试 |
+| High | 迁移中的 PTY 由 opaque spawn 绕过统一进程树 owner，Windows 无法证明 descendant cleanup | 删除 `terminal`、`portable-pty`、PTY/resize wire；Host 只保留 `SupervisedCommand` pipes | Coding 八工具 + 无 PTY operation/dependency + Unix group 回归；Windows 真实 CI 待验收 |
 | Medium | Compact skip/前置失败被当成 LLM 成功，错误关闭 breaker | `NotAttempted/Succeeded/Failed` 三态 | closed failure 保留 + half-open skip 回 cooldown |
+| High | Compact breaker 由每轮 `TurnLoop` 拥有，失败计数无法跨 turn 累积 | 移入 `SessionRuntimeState`，配置更新不清除 failure history | 两 turn 均触发 Compact 但 LLM summary 只调一次 |
+| High | post-compact collector panic/取消时，预先 `mem::take` 的 retained tail 不会恢复，后续可持久化 summary-only rewrite | collector 读取 owned snapshot；仅成功后提交 enrichment，失败不改 candidate | 真实 blocking panic 后 summary/retained 完全不变 |
 | Medium | artifact 首次 fsync 失败后重试只比较内容，可能不再 sync file/dir | existing-content 路径重新 sync file + child/parent dir | artifact targeted tests |
+| Medium | artifact 在 final name 上直接 `create_new + write_all`，中途失败留下 partial orphan | 同目录 `NamedTempFile` + fsync + `persist_noclobber` | collision/reuse 多样测试 + 无 temp 遗留 |
 | High | invalid Extension config 先保存/发布，再由 lifecycle 拒绝，HTTP 仍显示成功 | candidate 先 pure validate，再 save/publish/apply | invalid 不落盘/不发布，valid 热更新 |
+| High | config reload 分别替换 effective/main/small，且 context assembler 永久停留在 bootstrap 值 | 单一 `RuntimeGeneration` 原子发布，turn 入口一次 pin | old/new generation 同时持有 + context threshold 热更新 |
 | Medium | wire capability 新值未加入 protocol-owned 稳定值测试 | 加 `tool_result_read` | protocol enum wire test |
 | Medium | frontend 无 `read_tool_result` 专用 renderer | 新 renderer 与 details | registry contract test |
 | Low | shell 默认/热更新 timeout 不显示实际值 | metadata `timeoutSecs` 优先于 args | renderer 多样测试 |
@@ -997,7 +1285,21 @@ Storage 不应知道 `read_tool_result` 的 provider schema，也不应决定 30
 | Medium | Worker 测试仍构造旧 char cursor 字段 | 改 byte offset/max bytes | worker tests compile/run |
 | Medium | SDK domain client operation coverage 漏新 Process/WorkspacePatch/ToolResult | 一条 catalog 多样测试覆盖所有 operation | SDK targeted test |
 | Low | 依赖检查未强制 server/runtime 不依赖具体 Extension | concrete Extension 完整清单 + composition root guard | `scripts/check-deps.py` |
-| Low | README/config/architecture 仍写旧 crate、八工具、旧 strict 行为 | 更新为 27 crates + Tauri、九个 Coding 工具、单 Extension 路径 | 文档与 dependency check |
+| Low | 迁移前 README/config/architecture 曾写旧 crate、过时工具数量、PTY 阻塞或旧 strict overflow | 更新为 28 crates + Tauri、八个 Coding 工具、supervised pipes 单 Extension 路径 | 文档与 dependency check |
+| High | Compact rewrite 曾先更新 projection/observer，随后才单独 fsync | sink lane 使用 append-and-sync，确认后才 apply/publish；模糊失败保留 exact seq uncertainty | fsync EIO、取消、observer once、admission retry |
+| High | reopen/cold summary 可能扫描到尚未确认的完整 newline | open 前真实 sync；cold read 固定 pre-sync length 并 bounded scan | late append 竞争与持续 EIO |
+| High | disabled bundled config 未经过 loaded-instance validator，S5R config 被 no-op 接受 | bundled composition 对完整 catalog 做 pure validate；当前 S5R 对非空 config 明确拒绝 | disabled Memory/Channels 与 S5R diverse config |
+| High | provider 旧 `generate`/`generate_request` 双入口可静默丢掉 request options | `LlmProvider` 只保留 `generate_request(LlmRequest)`，全部 provider/caller/mock 迁移 | 全仓无旧入口，`maxOutputTokens` 穿透 HostRouter |
+| Medium | Recap durable event 在 projection 中降成 SystemNote 并丢 `source` | presentation 保留显式 Recap variant；删除无生产者的 SystemNote | live 与 reconnect wire 类型/来源一致 |
+| Medium | typed message origin 在 Compact rewrite/fork 后退化为 `None` | core-owned `TranscriptMessage` envelope；rewrite retained 与 fork 逐条持久化 origin | 精确后缀继承、fork replay、旧 raw shape 拒绝 |
+| Medium | AgentSession snapshot 与 patch 共用全 Optional DTO | required full link + tagged update；frontend 严格 decode/按 variant merge | spawned/progress/terminal 多样 reducer fixture |
+| Medium | raw EventLog SSE 把 storage serde 当公开 HTTP 契约 | 删除未消费 `/events` endpoint、RawEvent DTO/TS 与 replay helper | conversation/custom-event 稳定入口不受影响 |
+| Medium | SDK `doc(hidden)` runtime constructor 仍能从作者根 API 伪造 Host context | 构造器降 `pub(crate)`；跨 crate runtime 只走 `extension::internal` façade | 反查无旧构造路径，author prelude 保持白名单 |
+| Low | Coding 每个工具重复计算 `duration_ms`，随后又被 Session 覆写 | 删除 `result.rs` 计时层；Session executor 成为唯一 owner | success/error/running 结果均由 Session 补时间 |
+| Low | `ResourceSet` 只是无校验 `Vec` 包装并与 `ToolPlan` 双构造器重复 | `ToolPlan` 直接持有资源列表，只保留一个 iterator 构造入口 | SDK wire/lease/S5R 保持顺序与重复项语义 |
+| Low | `ModelStreamSender` 和 collected `chunks` 只有测试消费，却扩大 SDK 生产 API | 删除 sender/channel/backpressure 假 API；collected 返回既有 chat output | 流式入口仍由 `ModelStream::from_stream` 唯一拥有 |
+| Low | server 正式 API 暴露只为 integration test 使用的 runtime getter/router helper | 收回 `test_support`，生产 router/runtime 只保留真实入口 | server 全测试与 CLI check |
+| Low | Anthropic 测试假定整个 first-party catalog 都可 strict，违反 provider 聚合容量 | provider wire 按稳定优先级编译/降级；Extension 原 schema 不变 | 八个 Coding tool 保持 strict，后续 overflow 确定性降级且 accepted subset 合法 |
 
 ---
 
@@ -1010,15 +1312,20 @@ Storage 不应知道 `read_tool_result` 的 provider schema，也不应决定 30
 - 不恢复旧 tool `maxOutputTokens` 字段；
 - 不为旧 char cursor 提供 alias；
 - internal projection snapshot 升 v5，旧 v4 snapshot 忽略并从 EventLog replay；
-- durable event 仍可作为当前 EventLog 重建来源，但不增加旧缺字段的 serde alias 或迁移 adapter；
-- 不改已有 `CompactEvent::{PreCompact, PostCompact}`、S5R 当前 wire names 和
-  `TranscriptRewritten` 的安全语义，除非明确做下一次协议版本。
+- durable event 的当前完整 shape 是重建来源；缺失 system prompt source、tool failure metadata 等事实时直接拒绝，不用 `serde(default)` 补值；
+- `TranscriptRewritten` 与 `SessionForked` 的消息从 raw `Vec<LlmMessage>` 改成
+  `Vec<TranscriptMessage>`，旧日志不再可读；这是为了让 typed origin 在 rewrite/fork 后仍是 durable 事实；
+- 保留 `CompactEvent::{PreCompact, PostCompact}`、S5R 当前 wire names、`TranscriptRewritten`
+  tag/fingerprint/前缀替换安全语义；不保留旧 nested message shape adapter。
 
 “不兼容”不等于“无版本边界”：S5R、snapshot、durable event 仍必须明确拒绝旧数据，错误要可诊断，不能用 default 把损坏伪装成成功。
 
 ---
 
-## 17. 最适合长期维护的实施顺序
+## 17. 最适合长期维护的实施顺序（迁移记录）
+
+> **迁移历史**：以下顺序解释本地候选如何从旧 builtin/contract/PTY 路径收敛到当前结构。已经
+> 删除的路径不是当前 blocker；当前剩余验收以第 2.2、18、19 和 20 节为准。
 
 ### 阶段 A：先固定事实与边界
 
@@ -1031,7 +1338,7 @@ Storage 不应知道 `read_tool_result` 的 provider schema，也不应决定 30
 
 1. 在 SDK 定义 ToolPlan、HostResource、typed process/workspace/tool-result clients；
 2. HostRouter 实现 capability + lease + input validation；
-3. Coding Extension 迁移九个工具；
+3. Coding Extension 迁移八个工具；
 4. bundled composition 注册 Coding；
 5. Session 只消费 Extension turn view；
 6. server 删除 builtin 构造与 cleanup；
@@ -1060,7 +1367,8 @@ Storage 不应知道 `read_tool_result` 的 provider schema，也不应决定 30
 2. Host task-local fail closed；
 3. tool-result artifact budget/pagination/durability；
 4. config two-phase validation；
-5. PTY supervision 做跨平台完整实现，不做半修；
+5. 删除无法满足统一 supervision 的 PTY/terminal 产品路径，只保留 Unix process group / Windows
+   Job Object 监管的 pipes；
 6. 补最少但覆盖整链的集成场景。
 
 ### 阶段 F：提交拆分建议
@@ -1099,9 +1407,13 @@ Storage 不应知道 `read_tool_result` 的 provider schema，也不应决定 30
 
 - 替换 source prefix；
 - 保留并发 tail；
+- summary/enrich 消息 origin 为空，retained 后缀保留 typed origin；
 - 清 usage 与 coverage 内 artifact；
 - 追加 compaction metadata；
 - stale fingerprint 拒绝。
+
+同一多样场景再 fork rewrite 后的消息，验证 `TurnAborted/ToolCallFailed/ToolCallCancelled` origin
+经过 EventLog → projection → fork event → child replay 仍不丢失；旧 raw message event shape 应明确解码失败。
 
 另验证 root `tool_calls_needing_interruption()` 的跨 projection 组合，以及 v4 ignored/v5 round-trip。
 
@@ -1109,6 +1421,8 @@ Storage 不应知道 `read_tool_result` 的 provider schema，也不应决定 30
 
 用一条多样场景覆盖：
 
+- 两个 input transform 按确定顺序折叠为 canonical args；
+- admission handler 都观察 canonical args，两个 Ask 聚合，后置 Block 覆盖；
 - Extension Ask + Process Ask 都出现；
 - 第一条 AllowAlways 后第二条仍需 Ask；
 - 任一 Deny 不执行；
@@ -1158,25 +1472,66 @@ Storage 不应知道 `read_tool_result` 的 provider schema，也不应决定 30
 
 - 不 spawn 的 fail-closed 测试在所有平台跑；
 - POSIX shell 综合执行只在 Unix 跑；
-- Windows 若声明 PTY/process tree 支持，必须有真实 `cmd.exe`/ConPTY descendant PID E2E；
+- 产品不声明 PTY/ConPTY；operation catalog、Coding registration 与依赖扫描都应证明没有
+  `terminal`/resize/`portable-pty` 旁路；
+- Unix 用真实 descendant PID 验证 process group 的 terminate 与 Drop；
+- Windows 必须用真实 `cmd.exe` descendant PID 验证 Job Object，而不是只做 cross-compile；
 - session close、kill、timeout、spawn cancellation 都验证 descendants 消失，而不只验证 direct child exit。
+
+当前 Unix process-group 回归已通过；Windows Job Object 已进入生产实现，但真实 Windows runner
+验收仍待新 CI，不能在本地 macOS 上标记完成。
+
+### 18.7 turn-scoped Host LLM
+
+一条 hook + tool 多样回归冻结 old main/small bindings，发布新 live providers 后验证：
+
+- 旧 turn 的 lifecycle hook 与工具 Host ModelClient 都返回 old main/small；
+- 新 turn 的 hook 与工具都返回 new main/small；
+- Session 的 envelope hook 在 publication 发生前已经持有 old bindings，后续 prompt/provider/tool hooks
+  不混代；
+- unscoped Host LLM contract 仍使用 live fallback。
+
+这只验收 turn binding，不把 core 与 Extension 的两个 publication 边界误写成原子 generation。
 
 ---
 
 ## 19. 验收命令
 
-当前本地候选完成后必须运行：
+workspace 的 `default-members` 只有 `astrcode-cli`，因此不带 `--workspace` 的
+`cargo test --all-features` 只会执行 CLI 测试，不能作为整仓验收。当前本地候选完成后必须运行：
 
 ```bash
 cargo fmt --all -- --check
 python3 scripts/check-deps.py
 git diff --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace --all-features
+RUSTUP_TOOLCHAIN=1.88.0 cargo check --workspace --all-targets --all-features
+RUSTUP_TOOLCHAIN=1.88.0 cargo check \
+  --manifest-path crates/astrcode-extensions/tests/s5r-guest/Cargo.toml --all-targets
+cargo build --release \
+  --manifest-path crates/astrcode-extensions/tests/s5r-guest/Cargo.toml
+cargo run -p astrcode-extension-sdk --features conformance --bin s5r-conformance -- \
+  --extension-id s5r-guest-demo -- \
+  crates/astrcode-extensions/tests/s5r-guest/target/release/s5r_guest_demo
 cd frontend && npm run generate:protocol
 cd frontend && npm run check
 cd frontend && npm run build
 ```
+
+### 19.1 本轮最新执行状态
+
+| 验收 | 当前结果 |
+| --- | --- |
+| `cargo fmt --all -- --check` | 通过 |
+| `git diff --check` | 通过 |
+| `python3 scripts/check-deps.py` | 通过，28 个 workspace crate |
+| workspace 全 targets/all features Clippy | 通过；仅有 `nix 0.28.0` future-incompatibility 提示 |
+| workspace 全 features Test | 通过；包含 S5R E2E 18/18、SDK 87、Extensions 110、Server/Session/Storage 与全部 doctest |
+| frontend protocol/check/build | 全部通过；`npm audit --audit-level=high` 为 0 vulnerabilities |
+| Rust 1.88 MSRV + guest check | 完整 workspace all targets/all features 与独立 guest all targets 均通过 |
+| S5R guest conformance | 通过 initialize/activate、unary、streaming、nested invoke、cancel、unknown error、shutdown 与 malformed/oversized frame |
+| Windows process-tree E2E | 待新 Windows CI；Job Object production path 已实现，本地 macOS/Unix 验证不能替代真实 descendant cleanup |
 
 同时保留关键定向验证：
 
@@ -1204,22 +1559,28 @@ cargo test -p astrcode-server --features testing
 - 具体第一方 Extension 只有 bundled composition root 生产依赖；
 - Coding 工具只依赖 Extension SDK；
 - `astrcode-tools` 删除；
+- Coding 最终只注册 8 个工具，PTY/terminal/resize 产品路径删除；
+- Host process 只有 supervised pipes，Unix process group owner 已有真实 descendant 回归；
 - `astrcode-extension-contract` 删除，wire/S5R 逻辑边界保留；
 - Projection 按职责拆，消息全序保留；
 - Compact 同步 pipeline；
 - 通用 tool-result artifact；
 - approval/resource lease 安全链明显比旧名字匹配更强；
+- PreToolUse transform/admission 两阶段与 turn-scoped Host LLM binding 已收口；
 - server/frontend 旧状态与具体工具知识正在删除；
 - 文档和 dependency guard 与目标态一致。
 
 ### 20.2 合并前必须满足
 
-1. 当前未提交候选完整 Rust/frontend/协议/依赖验证全绿；
-2. Runner config validation 改动通过 Clippy 且 invalid candidate 不落盘/不发布；
-3. server/frontend 定向回归全绿；
-4. 对 PTY supervision 做明确决定：本 PR 实现完整跨平台 owner，或禁用/标注未满足的 PTY 能力；不能在文档中宣称已保证 process-tree cleanup 而代码只 kill direct child；
-5. 至少把 `read_tool_result` 整链测试作为 acceptance gap 明确记录；
-6. 新提交触发远端多平台 CI，而不是复用旧 head 结果。
+1. `[x]` 当前未提交候选完整 Rust/frontend/协议/依赖/MSRV/conformance 验证全绿；
+2. `[x]` Runner config validation 通过 Clippy，invalid loaded/disabled bundled candidate 不落盘、不发布；
+3. `[x]` server/frontend 定向与整仓回归全绿；
+4. `[x]` `PreToolUse` 已拆成 transform/admission 两阶段；全部 Ask 聚合，Block 覆盖，plan 使用 canonical args；
+5. `[x]` PTY supervision 已作最终决定：删除 `terminal`/PTY/resize/`portable-pty`，Host 只提供 supervised pipes；
+6. `[x]` turn-scoped Host LLM binding 已覆盖 hook 与 tool，旧 turn 不随 live provider publication 漂移；
+7. `[ ]` 对 config/runtime generation 做范围决定：若宣称原子 runtime reload，就必须把 core、Extension view 与 turn 内 Host model binding 放进同一代；否则明确降级当前承诺并另立阻塞任务；
+8. `[x]` `read_tool_result` 整链测试缺口与 artifact fault-injection 缺口已明确记录，未伪装成已验收能力；
+9. `[ ]` 新提交触发远端多平台 CI，并在真实 Windows runner 验证 Job Object descendant cleanup，而不是复用旧 head 结果。
 
 ### 20.3 最终设计结论
 

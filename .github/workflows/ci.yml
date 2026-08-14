@@ -57,7 +57,7 @@ jobs:
         run: cargo build --release --manifest-path crates/astrcode-extensions/tests/s5r-guest/Cargo.toml
       - name: Run S5R 3.0 worker conformance
         run: >-
-          cargo run -p astrcode-extension-contract --bin s5r-conformance --
+          cargo run -p astrcode-extension-sdk --features conformance --bin s5r-conformance --
           --extension-id s5r-guest-demo --
           crates/astrcode-extensions/tests/s5r-guest/target/release/s5r_guest_demo
       - run: cargo test --workspace --all-features

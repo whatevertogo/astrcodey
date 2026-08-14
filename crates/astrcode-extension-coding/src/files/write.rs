@@ -1,16 +1,14 @@
-use std::time::Instant;
-
 use astrcode_extension_sdk::{
     extension::{ExtensionCall, ExtensionError, ToolContext, ToolHandler, ToolPlanContext},
     host::HostWorkspaceWriteRequest,
     tool::{
         ExecutionMode, ResourceAccess, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
+        ToolResult,
     },
 };
 use serde::Deserialize;
 
 use super::{absolute_path, text_change_metadata};
-use crate::result::success;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -27,13 +25,13 @@ pub(super) struct WriteHandler;
 impl ToolHandler for WriteHandler {
     async fn plan(&self, context: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
         let args: WriteArgs = context.arguments()?;
-        Ok(ToolPlan::from_resources([ResourceAccess::write_file(
-            absolute_path(context.working_dir(), &args.path),
-        )]))
+        Ok(ToolPlan::new([ResourceAccess::write_file(absolute_path(
+            context.working_dir(),
+            &args.path,
+        ))]))
     }
 
     async fn execute(&self, context: ToolContext) -> Result<ToolExecutionResult, ExtensionError> {
-        let started_at = Instant::now();
         let args: WriteArgs = context.arguments()?;
         let output = context
             .host()
@@ -59,7 +57,7 @@ impl ToolHandler for WriteHandler {
         let mut metadata = text_change_metadata(&output.change);
         metadata.insert("path".into(), serde_json::json!(output.path));
         metadata.insert("created".into(), serde_json::json!(created));
-        Ok(success(started_at, content, metadata).into())
+        Ok(ToolResult::success(content).with_metadata(metadata).into())
     }
 }
 

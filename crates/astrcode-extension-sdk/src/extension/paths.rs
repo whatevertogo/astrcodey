@@ -16,8 +16,7 @@ pub struct ExtensionPaths {
 }
 
 impl ExtensionPaths {
-    #[doc(hidden)]
-    pub fn from_runtime(
+    pub(crate) fn from_runtime(
         extension_id: &str,
         global_store_dir: Option<&Path>,
         session_store_dir: Option<&Path>,

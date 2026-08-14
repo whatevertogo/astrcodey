@@ -29,7 +29,7 @@ use crate::{
 impl ToolCalls {
     /// 执行已预处理的工具调用。
     ///
-    /// 只读工具按连续批次并发执行；写入、shell、terminal 以及审批/阻止结果都会先刷新当前
+    /// 只读工具按连续批次并发执行；写入、shell 以及审批/阻止结果都会先刷新当前
     /// 只读批次，再按原始顺序串行处理。
     pub(crate) async fn execute_and_commit(
         &self,
@@ -320,7 +320,7 @@ impl ToolCalls {
         if batch.is_empty() {
             return Ok(());
         }
-        let max_parallel = self.session.runtime_services().max_parallel_tool_calls();
+        let max_parallel = self.max_parallel_tool_calls();
         let mut pending = std::mem::take(batch).into_iter();
         let mut join_set = JoinSet::new();
 

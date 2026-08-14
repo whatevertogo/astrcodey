@@ -160,6 +160,13 @@ impl StdioClientTransport {
                     );
                     continue;
                 };
+                if message.jsonrpc != "2.0" {
+                    tracing::warn!(
+                        version = %message.jsonrpc,
+                        "unsupported JSON-RPC version on server stdout, skipping"
+                    );
+                    continue;
+                }
                 if let Ok(event) = notification_from_jsonrpc_message(&message) {
                     let _ = tx.send(event);
                     continue;

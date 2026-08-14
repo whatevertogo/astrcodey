@@ -15,8 +15,8 @@ pub trait Extension: Send + Sync {
     ///
     /// The host calls this before persisting or publishing a candidate config.
     /// Configuration parsing and invariant checks belong here; resource access
-    /// and state mutation belong in [`Extension::start`] or
-    /// [`Extension::on_config_changed`].
+    /// and state mutation belong in [`Extension::start`]. A configuration change
+    /// creates a fresh extension generation instead of mutating a published one.
     fn validate_config(&self, _config: &ExtensionConfig) -> Result<(), ExtensionError> {
         Ok(())
     }
@@ -30,10 +30,6 @@ pub trait Extension: Send + Sync {
     }
 
     async fn health(&self) -> Result<(), ExtensionError> {
-        Ok(())
-    }
-
-    async fn on_config_changed(&self, _config: ExtensionConfig) -> Result<(), ExtensionError> {
         Ok(())
     }
 }

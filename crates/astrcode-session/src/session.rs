@@ -12,9 +12,7 @@ use astrcode_core::{
     },
     types::*,
 };
-use astrcode_extension_sdk::extension::{
-    LifecycleEvent, LifecyclePayload, RuntimeLifecycleContext,
-};
+use astrcode_extension_sdk::extension::{LifecycleEvent, internal::runtime_lifecycle_context};
 use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{
     CompactSnapshotInput, StorageError, ToolResultArtifactInput, ToolResultArtifactRef,
@@ -206,6 +204,19 @@ impl Session {
             .await?)
     }
 
+    pub(crate) async fn emit_durable_and_sync(
+        &self,
+        turn_id: Option<&TurnId>,
+        payload: DurableEventPayload,
+    ) -> Result<astrcode_core::event::StoredEvent, SessionError> {
+        let event = DurableEvent::new(self.id().clone(), turn_id.cloned(), payload);
+        Ok(self
+            .runtime
+            .event_sink()
+            .append_and_sync(self.runtime.store().clone(), event)
+            .await?)
+    }
+
     pub(crate) async fn sync_durable_events(&self) -> Result<(), SessionError> {
         self.runtime
             .event_sink()
@@ -274,9 +285,10 @@ pub async fn emit_lifecycle_for_read_model(
     session_store_dir: Option<std::path::PathBuf>,
     event: LifecycleEvent,
 ) -> Result<(), SessionError> {
-    let ctx = RuntimeLifecycleContext::new(
+    let ctx = runtime_lifecycle_context(
         hook_call_context_for_read_model(session_id, model, session_store_dir),
-        LifecyclePayload::new(None),
+        None,
+        0,
     );
     runtime_services
         .pin_extension_view()

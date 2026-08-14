@@ -144,7 +144,9 @@ session 用 plan 完成权限决策并签发 resource lease；`execute` 中的�
 | 命令 | `CommandContext` / `CommandCompletionContext` | command name、argument、model；补全额外包含 cursor |
 | HTTP | `HttpContext` | route、已校验 request、可选 caller extension；`json<T>()` 解码 body |
 | 动态发现 | `ToolDiscoveryContext` / `CommandDiscoveryContext` | workspace 与 discovery generation |
-| Hook | `PreToolUseContext`、`PostToolUseContext`、`ProviderContext`、`PromptBuildContext`、`CompactContext`、`ContinueAfterStopContext`、`UserMessageEnvelopeContext`、`LifecycleContext` | 只增加该 hook 的输入；公共 attribution 仍通过同名 accessor 读取 |
+| Hook | `PreToolUseContext`、`PostToolUseContext`、`ProviderContext`、`PromptBuildContext`、`CompactContext`、`ContinueAfterStopContext`、`UserMessageEnvelopeContext`、`LifecycleContext` | `ToolInputTransformHandler` 与 `PreToolUseHandler` 共用只读的 `PreToolUseContext`，但前者只变换输入、后者只做 Allow/Ask/Block 准入；其他 context 也只增加所属 hook 的输入 |
+
+`SlashCommand` 是 list、execute、completion 共用的完整声明：参数 schema、idle 要求、completion、priority、transport availability 和 execution owner 只定义一次。命令冲突只比较显式 priority，再用 extension ID/name 确定稳定顺序；runtime 不按某个产品 Extension ID 推断“skill”来源或隐式优先级。普通命令由 extension handler 完成；`Host(SessionCommandKind)` 命令只能由声明 `session_command` capability 的扩展注册，并且 handler 只能返回种类匹配的 `SessionCommandIntent`。server 在 handler 前执行 transport/busy admission，再在同一个 session operation guard 内解释 intent，因此扩展不能重入 operation gate 或复制 Host 状态机。非空 `/name` 始终按命令语法解析；未知或被禁用的命令返回类型化错误，不会降级写成用户消息，只有裸 `/` 仍可作为普通输入。
 
 生产代码不能用 struct literal 构造这些 context；测试在 SDK 依赖启用 `testing` feature 后，
 从 `astrcode_extension_sdk::testing` 使用 builder。
@@ -158,13 +160,13 @@ session 用 plan 完成权限决策并签发 resource lease；`execute` 中的�
 
 | 入口 | Capability | 调用范围与示例 |
 |------|------------|----------------|
-| `host.models()` | `main_model` / `small_model` | `main_chat`、`small_chat`；`*_chat_events` 返回渐进式 `ModelStream`，`*_chat_collected` 返回完成后的最终 content、model 与有序 chunks。 |
+| `host.models()` | `main_model` / `small_model` | `main_chat`、`small_chat` 默认使用 provider 输出上限；`llm_chat_request(...).with_max_output_tokens(n)` 配合对应的 `*_request` 入口可限制单次生成。`*_chat_events` 返回渐进式 `ModelStream`，`*_chat_collected` 返回最终 content 与 model。 |
 | `host.session_control()?` | `session_control` 或 `input_delivery` | `create_root`、`submit_root_turn`、`root_state` 使用 `input_delivery`；子 session 的创建、提交、注入、中断、取消、状态、工具配置、回收与重新激活使用 session-scoped `session_control`。`cancel_turn` 返回 `HostSessionCancelOutput { cancelled }`。 |
 | `host.session_history()?` | `session_history` | 当前 session 及其已授权后代的 `list_summaries`、`transcript`、`provider_messages`、`token_usage`、`events_page` 与 `snapshot`。 |
 | `host.session_inspect()?` | `session_inspect` | 全局跨 session 只读能力；只授予确需全局观察的扩展。 |
 | `host.tool_results()?` | `tool_result_read` | `read(HostToolResultReadRequest)` 分页读取当前 session 的持久化工具结果；artifact ID 是不含路径语义的 opaque token。 |
 | `host.workspace()?` | `workspace_read` / `workspace_write` | 必须有 workspace context；read/list/grep/glob 与 write/edit 分别重新校验所需能力。 |
-| `host.process()?` | `process_spawn` | 在受限 workspace cwd 启动进程；不是 OS sandbox。 |
+| `host.process()?` | `process_spawn` | 在受限 workspace cwd 启动 Host-supervised pipes process；不提供 PTY/resize，也不是 OS sandbox。 |
 | `host.network()?` | `network_client` | 受限公网 HTTP(S)，拒绝本机、内网和链路本地目标；body 在作者 API 中是原始字节，线缆使用 base64。`max_bytes <= 10 MiB`，`timeout_ms` 为 `1..=60_000`，`Manual` 返回有界 3xx body。 |
 | `host.extension_http()?` | `public_http_dispatch` | 调用另一扩展的公开路由；同步自调用被拒绝。 |
 | `ctx.events()` | `emit_custom_events` | 只能发射 manifest 已声明的事件。 |
@@ -173,6 +175,11 @@ session 用 plan 完成权限决策并签发 resource lease；`execute` 中的�
 `HostError` 无损保存 `code`、`message`、`hint`、`retryable` 和 `details`；
 `HostError::code_enum()` 将已知 code 解析为 `WireErrorCode`，未知 code 返回 `None`，原始字符串仍
 保留在 `HostError::code` 中。
+
+具有 turn attribution 的 hook/tool context 会携带本 turn 固定的 main/small provider binding；
+`host.models()` 的 session-scoped 调用始终使用该 binding，即使 live provider 已 reload。只有 startup
+或其他明确没有 turn attribution 的调用使用 live fallback。这个约束防止单 turn 内模型漂移，
+不表示 core config generation 与 Extension publication 已经原子化。
 
 工具结果读取要求 session context，不能借 artifact ID 跨 session 访问。`max_bytes` 必须在
 `4..=20_000`，默认 20,000；`byte_offset` 是 UTF-8 字节偏移，必须使用上页返回的
@@ -228,10 +235,11 @@ async fn bundled_extension_uses_the_real_authoring_boundaries() {
 
 | 扩展 ID | Crate | 默认 | 说明 |
 |---------|-------|------|------|
-| `astrcode-coding` | `astrcode-extension-coding` | 启用 | `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell`、`terminal` |
+| `astrcode-coding` | `astrcode-extension-coding` | 启用 | `read`、`read_tool_result`、`write`、`edit`、`patch`、`glob`、`grep`、`shell` |
 | `astrcode-agent-tools` | `astrcode-extension-agent-tools` | 启用 | 子 Agent 委派与发现 |
 | `astrcode-mcp` | `astrcode-extension-mcp` | 启用 | MCP 客户端（stdio/HTTP） |
 | `astrcode-skill` | `astrcode-extension-skill` | 启用 | 斜杠命令 Skill 发现与调度 |
+| `astrcode-session-commands` | `astrcode-extension-session-commands` | 启用 | 声明 `/compact`、`/model` 和类型化 Host command intent |
 | `astrcode-todo-tool` | `astrcode-extension-todo-tool` | 启用 | Todo 进度追踪工具 |
 | `astrcode-mode` | `astrcode-extension-mode` | 启用 | Code / Plan 模式切换 |
 | `astrcode-goal` | `astrcode-extension-goal` | 启用 | Codex-style session goal 与自动续跑 |
@@ -336,15 +344,15 @@ operation。`host_supports == true` 不是授权或可用性承诺；每次调�
 | `emit_custom_events` | `astrcode.event.emit` | 发射 manifest 已声明的扩展事件。 |
 | `consume_custom_events` | custom event subscription | 注册并消费符合 source filter 的扩展事件。 |
 | `provider_request` | Provider 与 user-message hooks | 读取或改写 provider 请求、观察 provider 响应，并变换 durable user-message envelope；after-response 返回值不会改写 turn。 |
-| `tool_intercept` | Blocking pre/post tool hooks | 阻断或改写工具输入、结果。 |
+| `tool_intercept` | Blocking tool transform/admission 与 post-tool hooks | `ToolInputTransform` 先按确定顺序折叠输入；Session normalize 后，全部 `PreToolUse` handler 在同一 canonical arguments 上聚合 Ask 或返回 Block；`PostToolUse` 处理结果。 |
 | `turn_continuation_control` | Continue-after-stop hook | 决定 LLM 自然停止后是否继续一个 agent step。 |
 | `tool_result_read` | `astrcode.tool_result.read` | 读取当前 session 拥有的 opaque 工具结果 artifact；按 `4..=20_000` UTF-8 字节分页，并使用响应中的 `next_byte_offset` 续读。 |
 | `workspace_read` | `astrcode.workspace.read/list/grep/glob` | 有界读取、目录遍历、正则搜索和 glob；拒绝越界路径、symlink 和密钥类路径，默认忽略 `.git`/`node_modules`。 |
 | `workspace_write` | `astrcode.workspace.write` / `astrcode.workspace.edit` | 创建、替换或精确编辑工作区内的非敏感文件；拒绝越界路径、symlink 和密钥类路径。 |
-| `process_spawn` | `astrcode.process.spawn` | 在工作区目录运行子进程。并发、总时长、stdin 和输出均受限；取消/超时会清理进程组。 |
+| `process_spawn` | `astrcode.process.*` | 在工作区目录运行并管理受监管的 stdin/stdout/stderr pipes process。并发、总时长、stdin 和输出均受限；Unix 用 process group、Windows 用 Job Object 管理完整进程树；不提供 PTY 或 resize operation。 |
 | `network_client` | `astrcode.network.client` | 向公网发起 HTTP(S) 请求。worker 与进程内扩展共用同一个宿主出站网络服务；统一拒绝本机、内网、链路本地地址及解析到这些地址的域名。作者 API 接收原始响应字节，线缆使用 base64；`max_bytes <= 10 MiB`，`timeout_ms` 为 `1..=60_000`，`Manual` 不跟随重定向但返回有界 3xx body。同名响应头不保留重复值，并通过 `final_url` 返回最终地址。并发、总时长和重定向次数均受限；并发上限全局共享，当前不承诺 extension 级公平配额。 |
 
-`workspace_write`、`process_spawn` 与 `network_client` 均为敏感授权。`process_spawn` 是进程执行授权，不是操作系统级沙箱；`network_client` 仅提供受限公网访问，
+`workspace_write`、`process_spawn` 与 `network_client` 均为敏感授权。`process_spawn` 是进程执行授权，不是操作系统级沙箱；它只提供 Host-supervised pipes，Unix descendant-tree 已有真实回归，Windows Job Object 的真实 Windows CI 仍待验收。`network_client` 仅提供受限公网访问，
 不用于调用宿主本机或内网服务。只应给确实需要这些权限的插件声明相应 capability。
 Worker 使用与 bundled 同名的类型化领域方法，例如
 `HostClient::process().spawn(...)` 与 `HostClient::network().send(...)`。通用 raw invoke 仅保留在
@@ -383,13 +391,6 @@ fingerprint 以及无需启动进程即可读取的权威 extension ID；reconci
 
 以下接口位于 bearer 认证后的 `/api` 管理面，不是扩展作者的 host capability：
 
-Phase 0 有意保留 raw event SSE 作为认证后的诊断与运维接口；frontend 和扩展运行时不依赖它，
-其 durable `payload` 也不承诺独立于 EventLog 的长期 wire 兼容。
-
-- `GET /api/sessions/{id}/events` 返回 raw event SSE。`cursor` query 优先于
-  `Last-Event-ID`，并可按 `extensionId`、`eventType`、`durability` 过滤；游标只适用于
-  durable event。响应 `payload` 是事件日志的持久化 serde 形状，不是独立稳定的 HTTP
-  schema。无效、超前或超过 replay 上限的游标返回 `409`；实时订阅落后时发送 `gap` 事件。
 - `GET /api/sessions/{id}/event-consumers` 返回 custom-event subscription 的 pause、
   checkpoint、pending 与失败计数。
 - `POST /api/sessions/{id}/event-consumers/control` 接受 `extensionId`、`subscriptionId`

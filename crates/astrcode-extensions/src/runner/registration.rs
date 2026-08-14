@@ -3,12 +3,12 @@ use astrcode_extension_sdk::extension::{
     ExtensionRegistrations, internal::extension_http_route_patterns_conflict,
 };
 
-use super::HostedExtension;
+use super::manifest::ResolvedExtensionManifest;
 
 pub(super) fn validate_registration_conflicts(
     extension_id: &str,
     registrations: &ExtensionRegistrations,
-    existing_extensions: &[HostedExtension],
+    existing_extensions: &[&ResolvedExtensionManifest],
 ) -> Result<(), ExtensionError> {
     validate_tool_registrations(extension_id, registrations, existing_extensions)?;
     validate_http_route_registrations(
@@ -21,23 +21,18 @@ pub(super) fn validate_registration_conflicts(
 fn validate_tool_registrations(
     extension_id: &str,
     registrations: &ExtensionRegistrations,
-    existing_extensions: &[HostedExtension],
+    existing_extensions: &[&ResolvedExtensionManifest],
 ) -> Result<(), ExtensionError> {
     for registration in registrations.tools() {
         let definition = registration.definition();
         if let Some(existing) = existing_extensions.iter().find(|existing| {
             existing
-                .manifest
                 .registrations
                 .tools()
                 .iter()
                 .any(|existing| existing.definition().name == definition.name)
         }) {
-            return Err(tool_conflict(
-                extension_id,
-                &definition.name,
-                existing.manifest.id(),
-            ));
+            return Err(tool_conflict(extension_id, &definition.name, existing.id()));
         }
     }
     Ok(())
@@ -58,7 +53,7 @@ fn tool_conflict(
 fn validate_http_route_registrations(
     extension_id: &str,
     routes: &[ExtensionHttpRouteRegistration],
-    existing_extensions: &[HostedExtension],
+    existing_extensions: &[&ResolvedExtensionManifest],
 ) -> Result<(), ExtensionError> {
     let invalid = |reason| ExtensionError::InvalidRegistration {
         extension_id: extension_id.to_owned(),
@@ -76,16 +71,11 @@ fn validate_http_route_registrations(
             )));
         }
         if existing_extensions.iter().any(|hosted| {
-            hosted
-                .manifest
-                .registrations
-                .http_routes()
-                .iter()
-                .any(|existing| {
-                    existing.route.access == ExtensionHttpAccess::Public
-                        && existing.route.method == route.method
-                        && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
-                })
+            hosted.registrations.http_routes().iter().any(|existing| {
+                existing.route.access == ExtensionHttpAccess::Public
+                    && existing.route.method == route.method
+                    && extension_http_route_patterns_conflict(&existing.route.path, &route.path)
+            })
         }) {
             return Err(invalid(format!(
                 "public route conflicts with an existing {} route: {}",

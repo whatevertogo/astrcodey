@@ -209,6 +209,7 @@ where
     pub async fn activate(
         self,
         request_id: impl Into<String>,
+        config: serde_json::Value,
     ) -> Result<Peer<T, Ready>, PeerError> {
         let request_id = request_id.into();
         if request_id.is_empty() {
@@ -218,6 +219,7 @@ where
         }
         self.write(&WireMessage::Activate(ActivateMsg {
             id: request_id.clone(),
+            config,
         }))
         .await?;
         let WireMessage::Result(result) = self.read().await? else {
@@ -247,17 +249,30 @@ impl<T> Peer<T, WorkerInitialized>
 where
     T: FrameTransport + 'static,
 {
-    pub async fn accept_activation(self) -> Result<Peer<T, Ready>, PeerError> {
-        let WireMessage::Activate(activate) = self.read().await? else {
+    pub async fn accept_activation<F, Fut>(self, handler: F) -> Result<Peer<T, Ready>, PeerError>
+    where
+        F: FnOnce(serde_json::Value) -> Fut,
+        Fut: std::future::Future<Output = Result<(), ErrorPayload>>,
+    {
+        let WireMessage::Activate(activation) = self.read().await? else {
             return Err(PeerError::UnexpectedMessage("activate request"));
         };
-        if activate.id.is_empty() {
+        if activation.id.is_empty() {
             let error = ErrorPayload::new(
                 WireErrorCode::InvalidRequest,
                 "activate request id must not be empty",
             );
             self.write(&WireMessage::Result(ResultMsg::failure(
-                activate.id,
+                activation.id,
+                ResultKind::Activate,
+                error.clone(),
+            )))
+            .await?;
+            return Err(PeerError::Remote(error));
+        }
+        if let Err(error) = handler(activation.config).await {
+            self.write(&WireMessage::Result(ResultMsg::failure(
+                activation.id,
                 ResultKind::Activate,
                 error.clone(),
             )))
@@ -265,7 +280,7 @@ where
             return Err(PeerError::Remote(error));
         }
         self.write(&WireMessage::Result(ResultMsg::success(
-            activate.id,
+            activation.id,
             ResultKind::Activate,
             serde_json::to_value(ActivateOutput {})?,
         )))
@@ -581,13 +596,49 @@ mod tests {
         assert_eq!(worker_peer.name, "worker");
         assert!(manifest.tools.is_empty());
 
-        let (host, worker) = tokio::join!(host.activate("activate-1"), worker.accept_activation());
+        let expected_config = serde_json::json!({ "maxOutputTokens": 2048 });
+        let observed_config = Arc::new(Mutex::new(None));
+        let worker_config = Arc::clone(&observed_config);
+        let (host, worker) = tokio::join!(
+            host.activate("activate-1", expected_config.clone()),
+            worker.accept_activation(move |config| async move {
+                *worker_config.lock().await = Some(config);
+                Ok(())
+            })
+        );
         let host = host.unwrap();
         let worker = worker.unwrap();
+        assert_eq!(*observed_config.lock().await, Some(expected_config));
         let (host, _) = host.into_runtime();
         let (worker, _) = worker.into_runtime();
         assert!(!host.host_supports("astrcode.test"));
         assert!(worker.host_supports("astrcode.test"));
+    }
+
+    #[tokio::test]
+    async fn activation_reports_worker_config_rejection_to_both_peers() {
+        let (host_transport, worker_transport) = DuplexTransport::pair();
+        let host = Peer::new(host_transport, info("host"));
+        let worker = Peer::new(worker_transport, info("worker"));
+        let (host, worker) = tokio::join!(
+            host.initialize(HostInitialization::new("initialize-1", "worker")),
+            worker.accept(WorkerInitialization::new(InitializeManifest::default()))
+        );
+        let (host, _, _) = host.unwrap();
+        let worker = worker.unwrap();
+        let (host_result, worker_result) = tokio::join!(
+            host.activate("activate-1", serde_json::json!({ "invalid": true })),
+            worker.accept_activation(|config| async move {
+                assert_eq!(config, serde_json::json!({ "invalid": true }));
+                Err(ErrorPayload::new(
+                    WireErrorCode::InvalidRequest,
+                    "invalid extension config",
+                ))
+            })
+        );
+
+        assert!(matches!(host_result, Err(PeerError::Remote(_))));
+        assert!(matches!(worker_result, Err(PeerError::Remote(_))));
     }
 
     #[tokio::test]
@@ -641,7 +692,7 @@ mod tests {
             .unwrap();
 
         assert!(matches!(
-            worker.accept_activation().await,
+            worker.accept_activation(|_| async { Ok(()) }).await,
             Err(PeerError::UnexpectedMessage("activate request"))
         ));
     }

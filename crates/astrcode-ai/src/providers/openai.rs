@@ -98,15 +98,6 @@ impl StandardProvider {
 
 #[async_trait::async_trait]
 impl LlmProvider for StandardProvider {
-    async fn generate(
-        &self,
-        messages: Vec<LlmMessage>,
-        tools: Vec<ToolDefinition>,
-    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
-        self.generate_request(LlmRequest::new(messages, tools))
-            .await
-    }
-
     async fn generate_request(
         &self,
         request: LlmRequest,
@@ -342,7 +333,7 @@ mod tests {
         invalid.parameters = serde_json::json!({"type": "string"});
 
         let result = provider
-            .generate(vec![LlmMessage::user("hi")], vec![invalid])
+            .generate_request(LlmRequest::new(vec![LlmMessage::user("hi")], vec![invalid]))
             .await;
 
         assert!(matches!(

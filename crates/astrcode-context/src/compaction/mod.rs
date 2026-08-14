@@ -21,21 +21,15 @@ const MAX_SUMMARY_LINE_CHARS: usize = 320;
 mod assemble;
 mod parse;
 mod plan;
-mod post_compact;
+pub(crate) mod post_compact;
 mod prompt;
 
-pub use assemble::{CompactSummaryEnvelope, format_compact_summary};
-pub use parse::{CompactParseError, ParsedCompactOutput, parse_compact_output};
+use parse::{CompactParseError, parse_compact_output};
 use plan::{PreparedCompactInput, visible_message_text};
-pub use post_compact::{
-    PostCompactFile, PostCompactNote, agent_status_note, append_post_compact_context,
-    recent_read_paths,
-};
 
-pub use crate::{
+use crate::{
     COMPACT_SUMMARY_MARKER, CompactError, CompactResult, CompactSkipReason,
-    CompactSummaryRenderOptions, is_compact_summary_message, is_compact_summary_text,
-    is_prompt_too_long_message, is_synthetic_context_message,
+    CompactSummaryRenderOptions, is_prompt_too_long_message, is_synthetic_context_message,
 };
 
 pub struct CompactExecution {
@@ -93,7 +87,7 @@ fn compact_messages_with_render_options_and_keep(
 }
 
 /// 使用调用方提供的文本请求函数生成 compact summary。
-pub async fn compact_messages_with_request<F, Fut>(
+async fn compact_messages_with_request<F, Fut>(
     messages: &[LlmMessage],
     system_prompt: Option<&str>,
     settings: &ContextSettings,
@@ -246,14 +240,10 @@ fn should_retry_prompt_too_long(error: &CompactError) -> bool {
     ) || is_prompt_too_long_message(&error.to_string())
 }
 
-pub fn parse_compact_summary_message(content: &str) -> Option<CompactSummaryEnvelope> {
-    assemble::parse_compact_summary_message(content)
-}
-
 /// 是否可在 `split_after` 所指的 message 之后切分压缩边界（Kimi `canSplitAfter` 语义）。
 ///
 /// `keep_start` 为保留区首条消息下标时，应对 `split_after = keep_start - 1` 调用本函数。
-pub fn can_split_after(messages: &[LlmMessage], split_after: usize) -> bool {
+fn can_split_after(messages: &[LlmMessage], split_after: usize) -> bool {
     let Some(message) = messages.get(split_after) else {
         return true;
     };
@@ -560,7 +550,7 @@ The summary should preserve the compact contract and omit this scratchpad later.
 
     #[test]
     fn summary_formatting_and_message_round_trip_strip_scratchpad_markup() {
-        let formatted = format_compact_summary(
+        let formatted = assemble::format_compact_summary(
             r#"
 <analysis>
 scratchpad that should not survive
@@ -590,7 +580,9 @@ scratchpad that should not survive
         assert!(message.contains("Resume directly: do not acknowledge this summary"));
         assert!(message.contains("read the full transcript at C:\\Users\\18794"));
         assert_eq!(
-            parse_compact_summary_message(&message).unwrap().summary,
+            assemble::parse_compact_summary_message(&message)
+                .unwrap()
+                .summary,
             "1. Primary Request and Intent:\n   keep user intent"
         );
     }
@@ -641,7 +633,9 @@ scratchpad that should not survive
         assert_eq!(result.messages_removed, 4);
         assert_eq!(result.retained_messages.len(), 1);
         assert_eq!(visible_message_text(&result.retained_messages[0]), "recent");
-        assert!(is_compact_summary_message(&result.summary_messages[0]));
+        assert!(crate::is_compact_summary_message(
+            &result.summary_messages[0]
+        ));
         assert!(visible_message_text(&result.summary_messages[0]).contains("Summary:\n"));
     }
 

@@ -121,6 +121,10 @@ impl Extension for WebToolsExtension {
             .build()
     }
 
+    fn validate_config(&self, config: &ExtensionConfig) -> Result<(), ExtensionError> {
+        load_config(config).map(|_| ()).map_err(Into::into)
+    }
+
     async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
         let network = ctx
             .host()
@@ -135,11 +139,6 @@ impl Extension for WebToolsExtension {
         shared.update_config(load_config(ctx.config())?);
         shared.small_llm = small_llm;
         shared.outbound_network = Some(network);
-        Ok(())
-    }
-
-    async fn on_config_changed(&self, config: ExtensionConfig) -> Result<(), ExtensionError> {
-        self.shared.write().update_config(load_config(&config)?);
         Ok(())
     }
 
@@ -220,7 +219,7 @@ struct FetchUrlToolHandler {
 #[async_trait::async_trait]
 impl ToolHandler for FetchUrlToolHandler {
     async fn plan(&self, _ctx: ToolPlanContext) -> Result<ToolPlan, ExtensionError> {
-        Ok(ToolPlan::from_resources([
+        Ok(ToolPlan::new([
             ResourceAccess::host(HostResource::Network),
             ResourceAccess::host(HostResource::Model),
         ]))

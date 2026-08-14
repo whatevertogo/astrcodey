@@ -176,7 +176,7 @@ pub(crate) fn handle_switch_mode(
 
     let context = transition_context(&current_id, &target_id, state.user_initiated);
 
-    state.pending_transition_context = context;
+    state.replace_pending_transition(context);
     store::save_mode_state(mode_root, &state)?;
 
     Ok(ToolResult::text(

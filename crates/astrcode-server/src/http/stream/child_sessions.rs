@@ -4,7 +4,7 @@ use astrcode_core::{
     event::{DurableEventPayload, Event, Phase},
     types::SessionId,
 };
-use astrcode_protocol::{agent_session_link::AgentSessionLinkDto, http::ConversationDeltaDto};
+use astrcode_protocol::{agent_session_link::AgentSessionUpdateDto, http::ConversationDeltaDto};
 
 use crate::server_event_bus::agent_session_progress;
 
@@ -75,11 +75,11 @@ impl ChildSessionTracker {
         let (phase, current_tool) = progress;
 
         Some(ConversationDeltaDto::AgentSessionUpdated {
-            agent_session: AgentSessionLinkDto::phase_only(
-                initial_child_id,
-                phase.into(),
+            agent_session: AgentSessionUpdateDto::Progress {
+                child_session_id: initial_child_id.to_string(),
+                phase: phase.into(),
                 current_tool,
-            ),
+            },
         })
     }
 }

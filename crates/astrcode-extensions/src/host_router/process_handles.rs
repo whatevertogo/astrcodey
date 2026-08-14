@@ -1,26 +1,18 @@
-//! Session-owned foreground/background/PTY process handles.
+//! Session-owned process handles.
 
-use std::{
-    collections::HashMap,
-    io::{Read, Write},
-    process::Stdio,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, process::Stdio, sync::Arc, time::Duration};
 
 use astrcode_extension_sdk::{
     host::{
         HOST_PROCESS_MAX_WAIT_MS, HostProcessHandleOutput, HostProcessInputAction,
-        HostProcessInputRequest, HostProcessIo, HostProcessLifetime, HostProcessListOutput,
-        HostProcessReadOutput, HostProcessReadRequest, HostProcessResizeRequest,
-        HostProcessStartRequest, HostProcessState, HostProcessStatusOutput,
+        HostProcessInputRequest, HostProcessLifetime, HostProcessListOutput, HostProcessReadOutput,
+        HostProcessReadRequest, HostProcessStartRequest, HostProcessState, HostProcessStatusOutput,
         HostProcessTargetRequest,
     },
     s5r::ErrorPayload,
     wire::WireErrorCode,
 };
 use parking_lot::Mutex;
-use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     sync::{Mutex as AsyncMutex, Notify, OwnedSemaphorePermit, Semaphore},
@@ -29,8 +21,8 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    process::{configure_process, configure_pty_process, resolve_cwd, validated_timeout},
-    run_blocking_io,
+    ExtensionInstanceId,
+    process::{configure_process, resolve_cwd, validated_timeout},
 };
 use crate::process_supervision::{SupervisedChild, SupervisedCommand};
 
@@ -84,13 +76,10 @@ struct ProcessOutputState {
     termination: Option<ProcessTermination>,
 }
 
-enum ProcessController {
-    Pipes {
-        stdin: Arc<AsyncMutex<Option<tokio::process::ChildStdin>>>,
-        cancel: CancellationToken,
-        task: Mutex<Option<JoinHandle<()>>>,
-    },
-    Pty(Arc<PtyController>),
+struct ProcessController {
+    stdin: Arc<AsyncMutex<Option<tokio::process::ChildStdin>>>,
+    cancel: CancellationToken,
+    task: Mutex<Option<JoinHandle<()>>>,
 }
 
 enum ProcessLifetimeOwner {
@@ -101,8 +90,7 @@ enum ProcessLifetimeOwner {
 struct ProcessEntry {
     id: String,
     session_id: String,
-    extension_id: String,
-    io: HostProcessIo,
+    extension_instance_id: ExtensionInstanceId,
     output: Mutex<ProcessOutputState>,
     output_changed: Notify,
     requested_termination: Mutex<Option<ProcessTermination>>,
@@ -113,13 +101,9 @@ struct ProcessEntry {
 
 impl ProcessEntry {
     fn status(&self) -> HostProcessStatusOutput {
-        if let ProcessController::Pty(controller) = &self.controller {
-            controller.refresh_status(self);
-        }
         let output = self.output.lock();
         HostProcessStatusOutput {
             id: self.id.clone(),
-            io: self.io.clone(),
             state: process_state(&output),
         }
     }
@@ -133,9 +117,6 @@ impl ProcessEntry {
     }
 
     fn take_output(&self) -> HostProcessReadOutput {
-        if let ProcessController::Pty(controller) = &self.controller {
-            controller.refresh_status(self);
-        }
         let mut output = self.output.lock();
         let (stdout, stdout_dropped) = output.stdout.take();
         let (stderr, stderr_dropped) = output.stderr.take();
@@ -184,10 +165,7 @@ impl ProcessEntry {
 
     fn cancel(&self, termination: ProcessTermination) {
         self.request_termination(termination);
-        match &self.controller {
-            ProcessController::Pipes { cancel, .. } => cancel.cancel(),
-            ProcessController::Pty(controller) => controller.kill(self),
-        }
+        self.controller.cancel.cancel();
     }
 
     fn request_termination(&self, termination: ProcessTermination) {
@@ -234,112 +212,6 @@ fn process_state(output: &ProcessOutputState) -> HostProcessState {
     }
 }
 
-struct PtyController {
-    writer: Mutex<Option<Box<dyn Write + Send>>>,
-    master: Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>,
-    child: Mutex<Option<Box<dyn portable_pty::Child + Send + Sync>>>,
-    reader: Mutex<Option<std::thread::JoinHandle<()>>>,
-    timeout_cancel: CancellationToken,
-    timeout_task: Mutex<Option<JoinHandle<()>>>,
-}
-
-impl PtyController {
-    fn refresh_status(&self, entry: &ProcessEntry) {
-        let status = {
-            let mut child = self.child.lock();
-            let status = child
-                .as_mut()
-                .and_then(|child| child.try_wait().ok().flatten())
-                .map(|status| status.exit_code() as i32);
-            if status.is_some() {
-                child.take();
-            }
-            status
-        };
-        if status.is_some() {
-            self.timeout_cancel.cancel();
-            entry.finish(status, ProcessTermination::Exited);
-        }
-    }
-
-    fn wait_for_exit(&self, entry: &ProcessEntry) {
-        let status = self
-            .child
-            .lock()
-            .take()
-            .and_then(|mut child| match child.wait() {
-                Ok(status) => Some(status),
-                Err(error) => {
-                    tracing::warn!(process_id = %entry.id, %error, "PTY wait failed");
-                    None
-                },
-            })
-            .map(|status| status.exit_code() as i32);
-        self.timeout_cancel.cancel();
-        entry.finish(status, ProcessTermination::Exited);
-    }
-
-    fn kill(&self, entry: &ProcessEntry) {
-        self.timeout_cancel.cancel();
-        if let Some(mut child) = self.child.lock().take() {
-            if let Err(error) = child.kill() {
-                tracing::warn!(process_id = %entry.id, %error, "PTY kill failed");
-            }
-            let status = match child.wait() {
-                Ok(status) => Some(status.exit_code() as i32),
-                Err(error) => {
-                    tracing::warn!(process_id = %entry.id, %error, "PTY reap failed");
-                    None
-                },
-            };
-            let termination = entry
-                .requested_termination
-                .lock()
-                .unwrap_or(ProcessTermination::Killed);
-            entry.finish(status, termination);
-        } else {
-            let status = entry.output.lock().status;
-            let termination = entry
-                .requested_termination
-                .lock()
-                .unwrap_or(ProcessTermination::Killed);
-            entry.finish(status, termination);
-        }
-        self.writer.lock().take();
-        self.master.lock().take();
-        if let Some(reader) = self.reader.lock().take()
-            && let Err(error) = reader.join()
-        {
-            tracing::warn!(process_id = %entry.id, ?error, "PTY reader thread panicked");
-        }
-    }
-}
-
-impl Drop for PtyController {
-    fn drop(&mut self) {
-        self.timeout_cancel.cancel();
-        if let Some(task) = self.timeout_task.get_mut().take() {
-            task.abort();
-        }
-        if let Some(mut child) = self.child.get_mut().take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        self.writer.get_mut().take();
-        self.master.get_mut().take();
-        self.reader.get_mut().take();
-    }
-}
-
-struct ProcessStartScope {
-    cwd: std::path::PathBuf,
-    session_id: String,
-    extension_id: String,
-    process_permit: OwnedSemaphorePermit,
-    handle_permit: OwnedSemaphorePermit,
-    lifetime_owner: ProcessLifetimeOwner,
-}
-
 pub(super) struct ProcessHandleStore {
     entries: Mutex<HashMap<String, Arc<ProcessEntry>>>,
     session_process_permits: Mutex<HashMap<String, Arc<Semaphore>>>,
@@ -362,10 +234,10 @@ impl ProcessHandleStore {
         request: HostProcessStartRequest,
         working_dir: Option<&str>,
         session_id: &str,
-        extension_id: &str,
+        extension_instance_id: ExtensionInstanceId,
         call_cancellation: Option<&CancellationToken>,
     ) -> Result<HostProcessHandleOutput, ErrorPayload> {
-        validate_start_request(&request)?;
+        let timeout = validate_start_request(&request)?;
         let lifetime_owner = match request.lifetime {
             HostProcessLifetime::Call => {
                 ProcessLifetimeOwner::Call(call_cancellation.cloned().ok_or_else(|| {
@@ -394,34 +266,6 @@ impl ProcessHandleStore {
             .clone()
             .try_acquire_owned()
             .map_err(|_| process_limit_error())?;
-        let scope = ProcessStartScope {
-            cwd,
-            session_id: session_id.to_owned(),
-            extension_id: extension_id.to_owned(),
-            process_permit,
-            handle_permit,
-            lifetime_owner,
-        };
-        match request.io.clone() {
-            HostProcessIo::Pipes => self.start_pipes(request, scope).await,
-            HostProcessIo::Pty { rows, cols } => self.start_pty(request, rows, cols, scope).await,
-        }
-    }
-
-    async fn start_pipes(
-        &self,
-        request: HostProcessStartRequest,
-        scope: ProcessStartScope,
-    ) -> Result<HostProcessHandleOutput, ErrorPayload> {
-        let ProcessStartScope {
-            cwd,
-            session_id,
-            extension_id,
-            process_permit,
-            handle_permit,
-            lifetime_owner,
-        } = scope;
-        let timeout = validated_timeout(request.timeout_ms)?;
         let mut command = tokio::process::Command::new(&request.command);
         command
             .args(&request.args)
@@ -453,9 +297,8 @@ impl ProcessHandleStore {
         let id = format!("process-{}", uuid::Uuid::new_v4());
         let entry = Arc::new(ProcessEntry {
             id: id.clone(),
-            session_id,
-            extension_id,
-            io: HostProcessIo::Pipes,
+            session_id: session_id.to_owned(),
+            extension_instance_id,
             output: Mutex::new(ProcessOutputState {
                 running: true,
                 ..Default::default()
@@ -463,7 +306,7 @@ impl ProcessHandleStore {
             output_changed: Notify::new(),
             requested_termination: Mutex::new(None),
             lifetime_owner: Mutex::new(lifetime_owner),
-            controller: ProcessController::Pipes {
+            controller: ProcessController {
                 stdin: Arc::clone(&stdin),
                 cancel: cancel.clone(),
                 task: Mutex::new(None),
@@ -477,157 +320,7 @@ impl ProcessHandleStore {
             let _permit = process_permit;
             run_pipe_process(task_entry, child, stdout, stderr, stdin, cancel, timeout).await;
         });
-        let ProcessController::Pipes { task: owner, .. } = &entry.controller else {
-            return Err(ErrorPayload::new(
-                WireErrorCode::HostRuntimeFailed,
-                "pipe process created with an invalid controller",
-            ));
-        };
-        *owner.lock() = Some(task);
-        Ok(HostProcessHandleOutput { id })
-    }
-
-    async fn start_pty(
-        &self,
-        request: HostProcessStartRequest,
-        rows: u16,
-        cols: u16,
-        scope: ProcessStartScope,
-    ) -> Result<HostProcessHandleOutput, ErrorPayload> {
-        let ProcessStartScope {
-            cwd,
-            session_id,
-            extension_id,
-            process_permit,
-            handle_permit,
-            lifetime_owner,
-        } = scope;
-        let timeout = validated_timeout(request.timeout_ms)?;
-        if rows == 0 || cols == 0 {
-            return Err(ErrorPayload::new(
-                WireErrorCode::InvalidInput,
-                "PTY rows and cols must be greater than zero",
-            ));
-        }
-        let command = request.command;
-        let args = request.args;
-        let parts = tokio::task::spawn_blocking(move || {
-            let pair = NativePtySystem::default()
-                .openpty(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .map_err(process_error)?;
-            let mut process = CommandBuilder::new(&command);
-            process.args(args);
-            process.cwd(cwd);
-            configure_pty_process(&mut process);
-            let child = pair.slave.spawn_command(process).map_err(process_error)?;
-            drop(pair.slave);
-            let writer = pair.master.take_writer().map_err(process_error)?;
-            let reader = pair.master.try_clone_reader().map_err(process_error)?;
-            Ok::<_, ErrorPayload>((pair.master, writer, reader, child))
-        })
-        .await
-        .map_err(|error| {
-            ErrorPayload::new(
-                WireErrorCode::HostRuntimeFailed,
-                format!("PTY start task failed: {error}"),
-            )
-        })??;
-        let (master, writer, mut reader, child) = parts;
-        let timeout_cancel = CancellationToken::new();
-        let controller = Arc::new(PtyController {
-            writer: Mutex::new(Some(writer)),
-            master: Mutex::new(Some(master)),
-            child: Mutex::new(Some(child)),
-            reader: Mutex::new(None),
-            timeout_cancel: timeout_cancel.clone(),
-            timeout_task: Mutex::new(None),
-        });
-        let id = format!("process-{}", uuid::Uuid::new_v4());
-        let entry = Arc::new(ProcessEntry {
-            id: id.clone(),
-            session_id,
-            extension_id,
-            io: HostProcessIo::Pty { rows, cols },
-            output: Mutex::new(ProcessOutputState {
-                running: true,
-                ..Default::default()
-            }),
-            output_changed: Notify::new(),
-            requested_termination: Mutex::new(None),
-            lifetime_owner: Mutex::new(lifetime_owner),
-            controller: ProcessController::Pty(Arc::clone(&controller)),
-            _handle_permit: handle_permit,
-        });
-        self.entries.lock().insert(id.clone(), Arc::clone(&entry));
-
-        let reader_entry = Arc::clone(&entry);
-        let reader_controller = Arc::clone(&controller);
-        let reader_timeout_cancel = timeout_cancel.clone();
-        let reader_handle = std::thread::Builder::new()
-            .name(format!("astrcode-process-reader-{id}"))
-            .spawn(move || {
-                let _permit = process_permit;
-                let mut buffer = [0_u8; 4096];
-                loop {
-                    match reader.read(&mut buffer) {
-                        Ok(0) => break,
-                        Ok(read) => reader_entry.append_stdout(&buffer[..read]),
-                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                        Err(error) => {
-                            tracing::warn!(process_id = %reader_entry.id, %error, "PTY read failed");
-                            break;
-                        },
-                    }
-                }
-                reader_controller.wait_for_exit(&reader_entry);
-                reader_timeout_cancel.cancel();
-            })
-            .map_err(|error| {
-                self.entries.lock().remove(&id);
-                entry.request_termination(ProcessTermination::Killed);
-                controller.kill(&entry);
-                ErrorPayload::new(WireErrorCode::HostRuntimeFailed, error.to_string())
-            })?;
-        *controller.reader.lock() = Some(reader_handle);
-
-        let timeout_entry = Arc::downgrade(&entry);
-        let timeout_controller = Arc::downgrade(&controller);
-        let call_entry = Arc::clone(&entry);
-        let timeout_task = tokio::spawn(async move {
-            tokio::select! {
-                () = tokio::time::sleep(timeout) => {
-                    let Some(entry) = timeout_entry.upgrade() else {
-                        return;
-                    };
-                    let Some(controller) = timeout_controller.upgrade() else {
-                        return;
-                    };
-                    entry.request_termination(ProcessTermination::TimedOut);
-                    if let Err(error) = tokio::task::spawn_blocking(move || controller.kill(&entry)).await {
-                        tracing::warn!(%error, "PTY timeout termination task failed");
-                    }
-                },
-                () = call_owner_cancelled(call_entry) => {
-                    let Some(entry) = timeout_entry.upgrade() else {
-                        return;
-                    };
-                    let Some(controller) = timeout_controller.upgrade() else {
-                        return;
-                    };
-                    entry.request_termination(ProcessTermination::Cancelled);
-                    if let Err(error) = tokio::task::spawn_blocking(move || controller.kill(&entry)).await {
-                        tracing::warn!(%error, "PTY cancellation task failed");
-                    }
-                },
-                () = timeout_cancel.cancelled() => {},
-            }
-        });
-        *controller.timeout_task.lock() = Some(timeout_task);
+        *entry.controller.task.lock() = Some(task);
         Ok(HostProcessHandleOutput { id })
     }
 
@@ -635,7 +328,7 @@ impl ProcessHandleStore {
         &self,
         request: HostProcessReadRequest,
         session_id: &str,
-        extension_id: &str,
+        extension_instance_id: ExtensionInstanceId,
         cancellation: Option<&CancellationToken>,
     ) -> Result<HostProcessReadOutput, ErrorPayload> {
         let wait_ms = request.wait_ms.unwrap_or(0);
@@ -645,7 +338,7 @@ impl ProcessHandleStore {
                 format!("wait_ms must not exceed {HOST_PROCESS_MAX_WAIT_MS}"),
             ));
         }
-        let entry = self.owned_entry(&request.id, session_id, extension_id)?;
+        let entry = self.owned_entry(&request.id, session_id, extension_instance_id)?;
         if wait_ms > 0 {
             let notified = entry.output_changed.notified();
             if !entry.has_unread_output_or_stopped() {
@@ -656,11 +349,7 @@ impl ProcessHandleStore {
                         () = cancellation.cancelled() => {
                             if entry.is_call_owned() {
                                 self.remove_entry_if_same(&request.id, &entry);
-                                self.cancel_entry(
-                                    Arc::clone(&entry),
-                                    ProcessTermination::Cancelled,
-                                )
-                                .await?;
+                                entry.cancel(ProcessTermination::Cancelled);
                             }
                             return Err(ErrorPayload::new(WireErrorCode::Cancelled, "process read cancelled"));
                         },
@@ -686,12 +375,12 @@ impl ProcessHandleStore {
         &self,
         request: HostProcessInputRequest,
         session_id: &str,
-        extension_id: &str,
+        extension_instance_id: ExtensionInstanceId,
     ) -> Result<(), ErrorPayload> {
-        let entry = self.owned_entry(&request.id, session_id, extension_id)?;
-        match (&entry.controller, request.action) {
-            (ProcessController::Pipes { stdin, .. }, HostProcessInputAction::Write { input }) => {
-                let mut stdin = stdin.lock().await;
+        let entry = self.owned_entry(&request.id, session_id, extension_instance_id)?;
+        match request.action {
+            HostProcessInputAction::Write { input } => {
+                let mut stdin = entry.controller.stdin.lock().await;
                 let stdin = stdin
                     .as_mut()
                     .ok_or_else(|| process_not_running(&request.id))?;
@@ -702,74 +391,21 @@ impl ProcessHandleStore {
                     ErrorPayload::new(WireErrorCode::StdinFailed, error.to_string())
                 })
             },
-            (ProcessController::Pipes { stdin, .. }, HostProcessInputAction::Close) => {
-                stdin.lock().await.take();
+            HostProcessInputAction::Close => {
+                entry.controller.stdin.lock().await.take();
                 Ok(())
             },
-            (ProcessController::Pty(controller), HostProcessInputAction::Write { input }) => {
-                let controller = Arc::clone(controller);
-                let id = request.id;
-                run_blocking_io(move || {
-                    let mut writer = controller.writer.lock();
-                    let writer = writer.as_mut().ok_or_else(|| process_not_running(&id))?;
-                    writer.write_all(input.as_bytes()).map_err(process_error)?;
-                    writer.flush().map_err(process_error)
-                })
-                .await
-            },
-            (ProcessController::Pty(_), HostProcessInputAction::Close) => Err(ErrorPayload::new(
-                WireErrorCode::InvalidInput,
-                "PTY process handles do not have a closable stdin pipe",
-            )),
         }
-    }
-
-    pub(super) async fn resize(
-        &self,
-        request: HostProcessResizeRequest,
-        session_id: &str,
-        extension_id: &str,
-    ) -> Result<(), ErrorPayload> {
-        if request.rows == 0 || request.cols == 0 {
-            return Err(ErrorPayload::new(
-                WireErrorCode::InvalidInput,
-                "PTY rows and cols must be greater than zero",
-            ));
-        }
-        let entry = self.owned_entry(&request.id, session_id, extension_id)?;
-        let ProcessController::Pty(controller) = &entry.controller else {
-            return Err(ErrorPayload::new(
-                WireErrorCode::InvalidInput,
-                "only PTY process handles can be resized",
-            ));
-        };
-        let controller = Arc::clone(controller);
-        let id = request.id;
-        run_blocking_io(move || {
-            controller
-                .master
-                .lock()
-                .as_mut()
-                .ok_or_else(|| process_not_running(&id))?
-                .resize(PtySize {
-                    rows: request.rows,
-                    cols: request.cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .map_err(process_error)
-        })
-        .await
     }
 
     pub(super) fn status(
         &self,
         request: HostProcessTargetRequest,
         session_id: &str,
-        extension_id: &str,
+        extension_instance_id: ExtensionInstanceId,
     ) -> Result<HostProcessStatusOutput, ErrorPayload> {
         Ok(self
-            .owned_entry(&request.id, session_id, extension_id)?
+            .owned_entry(&request.id, session_id, extension_instance_id)?
             .status())
     }
 
@@ -777,53 +413,36 @@ impl ProcessHandleStore {
         &self,
         request: HostProcessTargetRequest,
         session_id: &str,
-        extension_id: &str,
+        extension_instance_id: ExtensionInstanceId,
     ) -> Result<(), ErrorPayload> {
-        self.owned_entry(&request.id, session_id, extension_id)?
+        self.owned_entry(&request.id, session_id, extension_instance_id)?
             .promote()
     }
 
-    pub(super) async fn kill(
+    pub(super) fn kill(
         &self,
         request: HostProcessTargetRequest,
         session_id: &str,
-        extension_id: &str,
+        extension_instance_id: ExtensionInstanceId,
     ) -> Result<(), ErrorPayload> {
-        let entry = self.remove_owned_entry(&request.id, session_id, extension_id)?;
-        self.cancel_entry(entry, ProcessTermination::Killed).await
+        let entry = self.remove_owned_entry(&request.id, session_id, extension_instance_id)?;
+        entry.cancel(ProcessTermination::Killed);
+        Ok(())
     }
 
-    async fn cancel_entry(
+    pub(super) fn list(
         &self,
-        entry: Arc<ProcessEntry>,
-        termination: ProcessTermination,
-    ) -> Result<(), ErrorPayload> {
-        entry.request_termination(termination);
-        let pty = match &entry.controller {
-            ProcessController::Pty(controller) => Some(Arc::clone(controller)),
-            ProcessController::Pipes { .. } => None,
-        };
-        match pty {
-            Some(controller) => {
-                run_blocking_io(move || {
-                    controller.kill(&entry);
-                    Ok(())
-                })
-                .await
-            },
-            None => {
-                entry.cancel(termination);
-                Ok(())
-            },
-        }
-    }
-
-    pub(super) fn list(&self, session_id: &str, extension_id: &str) -> HostProcessListOutput {
+        session_id: &str,
+        extension_instance_id: ExtensionInstanceId,
+    ) -> HostProcessListOutput {
         let mut processes = self
             .entries
             .lock()
             .values()
-            .filter(|entry| entry.session_id == session_id && entry.extension_id == extension_id)
+            .filter(|entry| {
+                entry.session_id == session_id
+                    && entry.extension_instance_id == extension_instance_id
+            })
             .map(|entry| entry.status())
             .collect::<Vec<_>>();
         processes.sort_by(|left, right| left.id.cmp(&right.id));
@@ -839,8 +458,10 @@ impl ProcessHandleStore {
         }
     }
 
-    pub(super) fn cleanup_extension(&self, extension_id: &str) {
-        let entries = remove_matching(&self.entries, |entry| entry.extension_id == extension_id);
+    pub(super) fn cleanup_extension(&self, extension_instance_id: ExtensionInstanceId) {
+        let entries = remove_matching(&self.entries, |entry| {
+            entry.extension_instance_id == extension_instance_id
+        });
         for entry in entries {
             entry.cancel(ProcessTermination::Killed);
         }
@@ -850,12 +471,15 @@ impl ProcessHandleStore {
         &self,
         id: &str,
         session_id: &str,
-        extension_id: &str,
+        extension_instance_id: ExtensionInstanceId,
     ) -> Result<Arc<ProcessEntry>, ErrorPayload> {
         self.entries
             .lock()
             .get(id)
-            .filter(|entry| entry.session_id == session_id && entry.extension_id == extension_id)
+            .filter(|entry| {
+                entry.session_id == session_id
+                    && entry.extension_instance_id == extension_instance_id
+            })
             .cloned()
             .ok_or_else(|| unknown_process(id))
     }
@@ -864,11 +488,11 @@ impl ProcessHandleStore {
         &self,
         id: &str,
         session_id: &str,
-        extension_id: &str,
+        extension_instance_id: ExtensionInstanceId,
     ) -> Result<Arc<ProcessEntry>, ErrorPayload> {
         let mut entries = self.entries.lock();
         let owned = entries.get(id).is_some_and(|entry| {
-            entry.session_id == session_id && entry.extension_id == extension_id
+            entry.session_id == session_id && entry.extension_instance_id == extension_instance_id
         });
         if !owned {
             return Err(unknown_process(id));
@@ -973,15 +597,14 @@ async fn pump_output(mut stream: impl AsyncRead + Unpin, entry: Arc<ProcessEntry
     }
 }
 
-fn validate_start_request(request: &HostProcessStartRequest) -> Result<(), ErrorPayload> {
+fn validate_start_request(request: &HostProcessStartRequest) -> Result<Duration, ErrorPayload> {
     if request.command.trim().is_empty() {
         return Err(ErrorPayload::new(
             WireErrorCode::InvalidInput,
             "command must not be empty",
         ));
     }
-    validated_timeout(request.timeout_ms)?;
-    Ok(())
+    validated_timeout(request.timeout_ms)
 }
 
 fn remove_matching(
@@ -1030,10 +653,6 @@ fn process_handle_limit_error() -> ErrorPayload {
     )
 }
 
-fn process_error(error: impl std::fmt::Display) -> ErrorPayload {
-    ErrorPayload::new(WireErrorCode::ProcessFailed, error.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -1044,10 +663,11 @@ mod tests {
     #[tokio::test]
     async fn call_owned_process_requires_invocation_cancellation() {
         let store = ProcessHandleStore::default();
-        let mut request = HostProcessStartRequest::pipes("unused");
+        let owner = ExtensionInstanceId::new();
+        let mut request = HostProcessStartRequest::new("unused");
         request.lifetime = HostProcessLifetime::Call;
         let error = store
-            .start(request, None, "session-a", "extension-a", None)
+            .start(request, None, "session-a", owner, None)
             .await
             .expect_err("call-owned process requires cancellation ownership");
         assert_eq!(error.code_enum(), Some(WireErrorCode::ContextUnavailable));
@@ -1058,19 +678,15 @@ mod tests {
     async fn process_handles_are_incremental_and_owner_scoped() {
         let workspace = tempdir().expect("workspace");
         let store = ProcessHandleStore::default();
-        let mut request = HostProcessStartRequest::pipes("/bin/sh");
+        let owner = ExtensionInstanceId::new();
+        let replacement_owner = ExtensionInstanceId::new();
+        let mut request = HostProcessStartRequest::new("/bin/sh");
         request.args = vec![
             "-c".into(),
             "printf first; sleep 0.05; printf second".into(),
         ];
         let started = store
-            .start(
-                request,
-                workspace.path().to_str(),
-                "session-a",
-                "extension-a",
-                None,
-            )
+            .start(request, workspace.path().to_str(), "session-a", owner, None)
             .await
             .expect("start process");
 
@@ -1080,9 +696,19 @@ mod tests {
                     id: started.id.clone(),
                 },
                 "session-b",
-                "extension-a",
+                owner,
             )
             .expect_err("another session must not see the handle");
+        assert_eq!(denied.code_enum(), Some(WireErrorCode::InvalidInput));
+        let denied = store
+            .status(
+                HostProcessTargetRequest {
+                    id: started.id.clone(),
+                },
+                "session-a",
+                replacement_owner,
+            )
+            .expect_err("a replacement generation must not see the old handle");
         assert_eq!(denied.code_enum(), Some(WireErrorCode::InvalidInput));
 
         let mut output = String::new();
@@ -1096,7 +722,7 @@ mod tests {
                         wait_ms: Some(1_000),
                     },
                     "session-a",
-                    "extension-a",
+                    owner,
                     None,
                 )
                 .await
@@ -1117,7 +743,7 @@ mod tests {
         );
 
         let call_cancellation = CancellationToken::new();
-        let mut promoted_request = HostProcessStartRequest::pipes("/bin/sh");
+        let mut promoted_request = HostProcessStartRequest::new("/bin/sh");
         promoted_request.args = vec!["-c".into(), "sleep 0.05; printf survived".into()];
         promoted_request.lifetime = HostProcessLifetime::Call;
         let promoted = store
@@ -1125,7 +751,7 @@ mod tests {
                 promoted_request,
                 workspace.path().to_str(),
                 "session-a",
-                "extension-a",
+                owner,
                 Some(&call_cancellation),
             )
             .await
@@ -1136,7 +762,7 @@ mod tests {
                     id: promoted.id.clone(),
                 },
                 "session-a",
-                "extension-a",
+                owner,
             )
             .expect("promote process");
         call_cancellation.cancel();
@@ -1151,7 +777,7 @@ mod tests {
                         wait_ms: Some(1_000),
                     },
                     "session-a",
-                    "extension-a",
+                    owner,
                     None,
                 )
                 .await
@@ -1165,14 +791,14 @@ mod tests {
         assert_eq!(promoted_output, "survived");
         assert!(!promoted_running);
 
-        let mut stdin_request = HostProcessStartRequest::pipes("/bin/sh");
+        let mut stdin_request = HostProcessStartRequest::new("/bin/sh");
         stdin_request.args = vec!["-c".into(), "cat".into()];
         let stdin_process = store
             .start(
                 stdin_request,
                 workspace.path().to_str(),
                 "session-a",
-                "extension-a",
+                owner,
                 None,
             )
             .await
@@ -1181,7 +807,7 @@ mod tests {
             .input(
                 HostProcessInputRequest::write(&stdin_process.id, "input through pipe"),
                 "session-a",
-                "extension-a",
+                owner,
             )
             .await
             .expect("write stdin");
@@ -1189,7 +815,7 @@ mod tests {
             .input(
                 HostProcessInputRequest::close(&stdin_process.id),
                 "session-a",
-                "extension-a",
+                owner,
             )
             .await
             .expect("close stdin");
@@ -1203,7 +829,7 @@ mod tests {
                         wait_ms: Some(1_000),
                     },
                     "session-a",
-                    "extension-a",
+                    owner,
                     None,
                 )
                 .await
@@ -1218,7 +844,7 @@ mod tests {
         assert!(!stdin_running);
 
         let owner_cancellation = CancellationToken::new();
-        let mut cancelled_request = HostProcessStartRequest::pipes("/bin/sh");
+        let mut cancelled_request = HostProcessStartRequest::new("/bin/sh");
         cancelled_request.args = vec!["-c".into(), "sleep 5".into()];
         cancelled_request.lifetime = HostProcessLifetime::Call;
         let cancelled = store
@@ -1226,7 +852,7 @@ mod tests {
                 cancelled_request,
                 workspace.path().to_str(),
                 "session-a",
-                "extension-a",
+                owner,
                 Some(&owner_cancellation),
             )
             .await
@@ -1240,18 +866,64 @@ mod tests {
                     wait_ms: Some(1_000),
                 },
                 "session-a",
-                "extension-a",
+                owner,
                 Some(&read_cancellation),
             )
             .await
             .expect_err("cancelled read must stop its call-owned process");
         assert_eq!(error.code_enum(), Some(WireErrorCode::Cancelled));
         assert!(
-            store.list("session-a", "extension-a").processes.is_empty(),
+            store.list("session-a", owner).processes.is_empty(),
             "cancelled call-owned process must release its retained handle"
         );
 
-        let mut timeout_request = HostProcessStartRequest::pipes("/bin/sh");
+        let mut old_generation_request = HostProcessStartRequest::new("/bin/sh");
+        old_generation_request.args = vec!["-c".into(), "sleep 5".into()];
+        let old_generation = store
+            .start(
+                old_generation_request,
+                workspace.path().to_str(),
+                "session-a",
+                owner,
+                None,
+            )
+            .await
+            .expect("start old-generation process");
+        let mut replacement_request = HostProcessStartRequest::new("/bin/sh");
+        replacement_request.args = vec!["-c".into(), "sleep 5".into()];
+        let replacement = store
+            .start(
+                replacement_request,
+                workspace.path().to_str(),
+                "session-a",
+                replacement_owner,
+                None,
+            )
+            .await
+            .expect("start replacement-generation process");
+        store.cleanup_extension(owner);
+        assert!(store.list("session-a", owner).processes.is_empty());
+        assert_eq!(
+            store.list("session-a", replacement_owner).processes,
+            [HostProcessStatusOutput {
+                id: replacement.id,
+                state: HostProcessState::Running {},
+            }]
+        );
+        assert!(
+            store
+                .status(
+                    HostProcessTargetRequest {
+                        id: old_generation.id,
+                    },
+                    "session-a",
+                    owner,
+                )
+                .is_err()
+        );
+        store.cleanup_extension(replacement_owner);
+
+        let mut timeout_request = HostProcessStartRequest::new("/bin/sh");
         timeout_request.args = vec!["-c".into(), "sleep 1".into()];
         timeout_request.timeout_ms = Some(10);
         let timed_out = store
@@ -1259,7 +931,7 @@ mod tests {
                 timeout_request,
                 workspace.path().to_str(),
                 "session-a",
-                "extension-a",
+                owner,
                 None,
             )
             .await
@@ -1271,7 +943,7 @@ mod tests {
                     wait_ms: Some(3_000),
                 },
                 "session-a",
-                "extension-a",
+                owner,
                 None,
             )
             .await

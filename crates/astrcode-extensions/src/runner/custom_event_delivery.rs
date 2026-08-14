@@ -15,7 +15,7 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::extension::{
     CustomEventContext, CustomEventDisposition, CustomEventHandler, CustomEventSubscription,
-    internal::custom_event_subscription_matches,
+    internal::{custom_event_context, custom_event_subscription_matches},
 };
 use astrcode_storage::{EventConsumerCheckpointOutcome, EventConsumerFailureOutcome, SessionStore};
 use tokio::sync::{Notify, OwnedSemaphorePermit, mpsc};
@@ -448,6 +448,8 @@ impl CustomEventConsumer {
                 resource_lease: None,
                 file_observation_store: None,
                 tool_result_reader: None,
+                llm_providers: None,
+                generation_gate: crate::host_router::ExtensionGenerationGate::default(),
                 cancellation: self.cancellation.clone(),
             },
         ) {
@@ -462,7 +464,8 @@ impl CustomEventConsumer {
                 return None;
             },
         };
-        let context = CustomEventContext::from_runtime(
+        let cancellation = call.cancellation().clone();
+        let context = custom_event_context(
             call,
             event.session_id.clone(),
             event.turn_id.as_ref().map(ToString::to_string),
@@ -480,7 +483,7 @@ impl CustomEventConsumer {
             view: Arc::clone(&self.view),
             extension_id: self.extension_id.clone(),
             consumer_id: self.consumer_id.clone(),
-            cancellation: self.cancellation.clone(),
+            cancellation,
             handler: Arc::clone(&self.handler),
             metrics: Arc::clone(&self.metrics),
             context,
@@ -657,7 +660,7 @@ impl ExtensionRunner {
             return true;
         }
 
-        let view = self.turn_extension_view_with_lease();
+        let view = self.turn_extension_view();
         let mut fully_admitted = true;
         for (extension_id, subscription, handler) in &view.index.custom_event {
             if !custom_event_subscription_matches(
@@ -724,7 +727,7 @@ impl ExtensionRunner {
         session_id: &astrcode_core::types::SessionId,
         session: CustomEventSession,
     ) -> bool {
-        let view = self.turn_extension_view_with_lease();
+        let view = self.turn_extension_view();
         let mut fully_admitted = true;
         for (extension_id, subscription, handler) in &view.index.custom_event {
             let Some(lane) =

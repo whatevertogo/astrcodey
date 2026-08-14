@@ -67,7 +67,7 @@ impl ServerApp {
         &self.session_commands
     }
 
-    pub fn scheduler(&self) -> &Arc<TurnScheduler> {
+    pub(crate) fn scheduler(&self) -> &Arc<TurnScheduler> {
         self.runtime.scheduler()
     }
 

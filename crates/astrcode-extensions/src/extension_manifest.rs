@@ -139,7 +139,7 @@ fn registration_from_manifest(
 
 /// 解析 `<extension_id>:<kind>:<name>` 形式的 handler 标识，校验归属与格式。
 /// 格式本身由 [`HandlerId`] 单点定义；这里只补充「必须归属调用方扩展」的宿主约束。
-pub(crate) fn parse_handler_id<'a>(
+fn parse_handler_id<'a>(
     extension_id: &str,
     handler_id: &'a HandlerId,
 ) -> Result<(astrcode_extension_sdk::wire::HandlerKind, &'a str), String> {
@@ -189,10 +189,12 @@ fn normalize_command(command: ManifestCommand) -> SlashCommand {
     SlashCommand {
         name: command.name,
         description: command.description,
-        args_schema: None,
-        requires_idle: false,
-        argument_completions: false,
-        priority: 0,
+        args_schema: command.args_schema,
+        requires_idle: command.requires_idle,
+        argument_completions: command.argument_completions,
+        priority: command.priority,
+        availability: command.availability,
+        execution: command.execution,
     }
 }
 
@@ -294,7 +296,16 @@ mod tests {
                     "strict": true
                 }
             ],
-            "commands": [{"name": "defaulted-command"}],
+            "commands": [{
+                "name": "typed-command",
+                "description": "Command metadata",
+                "args_schema": null,
+                "requires_idle": true,
+                "argument_completions": false,
+                "priority": 7,
+                "availability": "all_transports",
+                "execution": {"kind": "extension"}
+            }],
             "hooks": [{"on": "turn_end", "mode": "non_blocking"}],
             "custom_events": [{"event_type": "defaulted.event"}]
         }))
@@ -318,7 +329,9 @@ mod tests {
         assert!(registration.tools[1].strict);
         assert!(registration.capabilities.is_empty());
         assert!(registration.http_routes.is_empty());
-        assert_eq!(registration.commands[0].description, "");
+        assert_eq!(registration.commands[0].description, "Command metadata");
+        assert!(registration.commands[0].requires_idle);
+        assert_eq!(registration.commands[0].priority, 7);
         assert!(matches!(
             &registration.subscriptions[0],
             HookSubscription::Lifecycle { mode, options, .. }
@@ -344,7 +357,18 @@ mod tests {
     #[test]
     fn s5r_hook_modes_match_dispatch_contract() {
         let cases = [
+            ("tool_input_transform", "blocking", None),
+            (
+                "tool_input_transform",
+                "advisory",
+                Some("tool_input_transform requires blocking mode"),
+            ),
             ("pre_tool_use", "blocking", None),
+            (
+                "pre_tool_use",
+                "non_blocking",
+                Some("pre_tool_use requires blocking mode"),
+            ),
             ("post_tool_use", "advisory", None),
             ("before_provider_request", "non_blocking", None),
             ("turn_start", "blocking", None),

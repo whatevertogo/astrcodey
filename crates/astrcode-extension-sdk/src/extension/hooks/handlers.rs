@@ -7,11 +7,13 @@ use super::{
     contexts::{
         CommandCompletionContext, CommandContext, CommandDiscoveryContext, CompactContext,
         ContinueAfterStopContext, LifecycleContext, PostToolUseContext, PreToolUseContext,
-        PromptBuildContext, ProviderContext, ToolDiscoveryContext, UserMessageEnvelopeContext,
+        PromptBuildContext, ProviderContext, ProviderSettlementContext, ToolDiscoveryContext,
+        UserMessageEnvelopeContext,
     },
     results::{
         CompactResult, ContinueAfterStopResult, HookResult, PostToolUseResult, PreToolUseResult,
-        ProviderResult, UserMessageEnvelopeResult,
+        PreparedProviderContribution, ProviderResult, ToolInputTransformResult,
+        UserMessageEnvelopeResult,
     },
     types::ExtensionError,
 };
@@ -20,7 +22,16 @@ use crate::{
     tool::{ToolDefinition, ToolExecutionResult, ToolPlan, ToolPromptMetadata},
 };
 
-/// PreToolUse 钩子处理器。
+/// 工具参数变换处理器。
+#[async_trait::async_trait]
+pub trait ToolInputTransformHandler: Send + Sync {
+    async fn transform(
+        &self,
+        ctx: PreToolUseContext,
+    ) -> Result<ToolInputTransformResult, ExtensionError>;
+}
+
+/// PreToolUse 准入处理器。
 #[async_trait::async_trait]
 pub trait PreToolUseHandler: Send + Sync {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError>;
@@ -36,6 +47,18 @@ pub trait PostToolUseHandler: Send + Sync {
 #[async_trait::async_trait]
 pub trait ProviderHandler: Send + Sync {
     async fn handle(&self, ctx: ProviderContext) -> Result<ProviderResult, ExtensionError>;
+}
+
+/// Stateful request-local contribution with an explicit prepare/acknowledge lifecycle.
+#[async_trait::async_trait]
+pub trait ProviderContributionHandler: Send + Sync {
+    async fn prepare(
+        &self,
+        ctx: ProviderContext,
+    ) -> Result<Option<PreparedProviderContribution>, ExtensionError>;
+
+    /// Acknowledge one exact pending contribution after its provider cycle is durably committed.
+    async fn acknowledge(&self, ctx: ProviderSettlementContext) -> Result<(), ExtensionError>;
 }
 
 /// PromptBuild 钩子处理器。

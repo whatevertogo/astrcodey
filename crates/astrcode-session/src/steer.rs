@@ -44,7 +44,7 @@ mod tests {
             .map(|(updated_seq, message)| SequencedLlmMessage {
                 message,
                 updated_seq: updated_seq as u64,
-                source: None,
+                origin: None,
             })
             .collect();
         model

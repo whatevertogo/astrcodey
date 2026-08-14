@@ -34,7 +34,7 @@ pub use actor::CommandHandle;
 use model_selection::ModelSelectionController;
 
 pub(crate) use crate::session_command_contract::{
-    CommandInvocation, HandlerError, PromptSubmission,
+    CommandInvocation, CommandOutcome, HandlerError, PromptSubmission,
 };
 #[cfg(test)]
 pub(crate) use crate::{session_command_contract::CommandList, turn_scheduler::TurnCompletion};

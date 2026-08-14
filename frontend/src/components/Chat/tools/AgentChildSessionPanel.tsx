@@ -19,7 +19,7 @@ export function AgentChildSessionPanel({
   agent,
   onOpenChild,
 }: AgentChildSessionPanelProps) {
-  const status = agent.status ?? 'running'
+  const status = agent.status
   const phaseLabel =
     agent.phase != null ? (PHASE_LABELS[agent.phase] ?? agent.phase) : null
 
@@ -29,7 +29,7 @@ export function AgentChildSessionPanel({
         <span className="font-semibold uppercase tracking-wider text-accent">
           子 Agent
         </span>
-        <span className="text-text-primary">{agent.agentName ?? '子会话'}</span>
+        <span className="text-text-primary">{agent.agentName}</span>
         <span
           className={cn(
             'rounded-full px-2 py-0.5 text-[11px] font-medium',
@@ -55,9 +55,7 @@ export function AgentChildSessionPanel({
           </span>
         )}
       </div>
-      {agent.task && (
-        <p className="text-[13px] text-text-secondary">{agent.task}</p>
-      )}
+      <p className="text-[13px] text-text-secondary">{agent.task}</p>
       {status === 'running' && (
         <button
           type="button"

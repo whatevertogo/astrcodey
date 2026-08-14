@@ -4,7 +4,7 @@
 //! 分发扩展钩子事件，并将事件流式传输给客户端。
 //! Agent 是无状态的短暂对象，处理完一个回合后即被丢弃。
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use astrcode_context::token_budget::{
     PromptTokenSnapshot, compact_threshold_tokens, request_max_output_tokens,
@@ -19,21 +19,24 @@ use astrcode_core::{
     types::*,
 };
 use astrcode_extension_sdk::extension::{
-    ContinueAfterStopPayload, ContinueAfterStopResult, LifecycleEvent, ProviderEvent,
-    ProviderResult, RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
+    ContinueAfterStopResult, LifecycleEvent, ProviderEvent, ProviderRequestId, ProviderResult,
+    internal::{
+        RuntimeLifecycleContext, runtime_continue_after_stop_context,
+        runtime_lifecycle_for_step_start, runtime_provider_settlement_context,
+    },
 };
-use parking_lot::Mutex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     compaction::{
-        CompactCircuitBreaker, CompactionHost, PreparedProviderHistory, plan_auto_compaction,
-        prepare_provider_history, run_reactive_compaction,
+        CompactionHost, PreparedProviderHistory, plan_auto_compaction, prepare_provider_history,
+        run_reactive_compaction,
     },
     llm_stream::{StreamOutcome, consume_llm_stream, non_empty_reasoning_content},
     projection_context::context_snapshot,
     session::Session,
+    session_runtime_services::RuntimeGenerationView,
     steer::{count_visible_user_messages, has_pending_mid_turn_user_messages},
     tool_deduplicator::ToolCallDeduplicator,
     tool_exec::TurnToolContext,
@@ -64,10 +67,10 @@ pub(crate) async fn drive_agent(
 pub(crate) struct TurnLoop {
     session: Session,
     llm: Arc<dyn astrcode_core::llm::LlmProvider>,
+    runtime_generation: RuntimeGenerationView,
     cancellation_token: CancellationToken,
     extension_hooks: Arc<dyn astrcode_extension_sdk::runtime_ports::TurnHooks>,
     tools: ToolCalls,
-    compact_circuit_breaker: Mutex<CompactCircuitBreaker>,
 }
 
 /// Step 阶段间共享的 hook/publisher/lifecycle 上下文。
@@ -79,8 +82,10 @@ struct StepHooks<'a> {
 
 /// LLM 请求被消费前抓取的快照，供 outcome 后续阶段使用。
 struct LlmRequestSnapshot {
+    request_id: ProviderRequestId,
     messages: Vec<LlmMessage>,
     context_window: usize,
+    acknowledgements: astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
 }
 
 impl TurnLoop {
@@ -93,7 +98,7 @@ impl TurnLoop {
     }
 
     fn max_parallel_tool_calls(&self) -> usize {
-        self.session.runtime_services().max_parallel_tool_calls()
+        self.runtime_generation.max_parallel_tool_calls()
     }
 
     fn shared(&self) -> &SharedTurnContext {
@@ -114,9 +119,10 @@ impl TurnLoop {
         let host = CompactionHost {
             session: &self.session,
             llm: &self.llm,
+            context_assembler: self.runtime_generation.context_assembler(),
             hook_call: self.shared().hook_call_context(),
             extension_runner,
-            breaker: &self.compact_circuit_breaker,
+            breaker: self.session.runtime().compact_circuit_breaker(),
         };
         run_reactive_compaction(&host, state, publisher).await
     }
@@ -127,8 +133,8 @@ impl TurnLoop {
         turn: TurnToolContext,
         tool_registry: Arc<crate::ToolRegistry>,
         extension_hooks: Arc<dyn astrcode_extension_sdk::runtime_ports::TurnHooks>,
+        runtime_generation: RuntimeGenerationView,
     ) -> Result<Self, TurnError> {
-        let runtime_services = session.runtime_services();
         let cancellation_token = turn.shared.cancellation_token.clone();
         let tools = ToolCalls::new(
             turn,
@@ -136,19 +142,26 @@ impl TurnLoop {
             Arc::clone(&extension_hooks),
             session.clone(),
             cancellation_token.clone(),
+            runtime_generation.max_parallel_tool_calls(),
         );
-        let context_settings = runtime_services.context_assembler().settings();
-        let compact_circuit_breaker = Mutex::new(CompactCircuitBreaker::new(
-            context_settings.compact_circuit_breaker_threshold,
-            Duration::from_secs(context_settings.compact_circuit_breaker_cooldown_secs),
-        ));
+        let context_settings = runtime_generation.context_assembler().settings();
+        session
+            .runtime()
+            .compact_circuit_breaker()
+            .lock()
+            .configure(
+                context_settings.compact_circuit_breaker_threshold,
+                std::time::Duration::from_secs(
+                    context_settings.compact_circuit_breaker_cooldown_secs,
+                ),
+            );
         Ok(Self {
             session,
             llm,
+            runtime_generation,
             cancellation_token,
             extension_hooks,
             tools,
-            compact_circuit_breaker,
         })
     }
 
@@ -295,9 +308,7 @@ impl TurnLoop {
         user_text: &str,
     ) -> Result<StepOutcome, TurnError> {
         let mid_turn_synced = self.sync_mid_turn_user_messages(publisher, state).await?;
-        let step_ctx = lifecycle_ctx
-            .clone()
-            .map_payload(|payload| payload.for_step_start(mid_turn_synced));
+        let step_ctx = runtime_lifecycle_for_step_start(lifecycle_ctx.clone(), mid_turn_synced);
 
         extension_runner
             .emit_lifecycle(LifecycleEvent::StepStart, step_ctx)
@@ -321,8 +332,10 @@ impl TurnLoop {
         // 其它工具必须在完整 assistant 消息和 intent 都提交后执行，避免进程在流式
         // 早执行与事件提交之间退出后无法判断副作用是否发生。
         let request = LlmRequestSnapshot {
+            request_id: prepared.request_id.clone(),
             messages: prepared.messages.clone(),
             context_window: prepared.llm.model_limits().max_input_tokens,
+            acknowledgements: prepared.acknowledgements.clone(),
         };
         let dedup_for_early = state.tool_deduplicator_mut();
         let outcome = match self
@@ -395,6 +408,13 @@ impl TurnLoop {
         }
         self.persist_token_usage(hooks.publisher, usage, request.context_window)
             .await?;
+        self.acknowledge_provider_request(
+            hooks.extension_runner,
+            hooks.publisher,
+            &request.request_id,
+            &request.acknowledgements,
+        )
+        .await?;
         on_step_end_best_effort(hooks.extension_runner, hooks.lifecycle_ctx).await;
 
         if self
@@ -421,6 +441,7 @@ impl TurnLoop {
         let output = self
             .postprocess_complete_stage(
                 hooks.extension_runner,
+                request.request_id,
                 user_text.to_string(),
                 state,
                 finish_reason,
@@ -473,9 +494,17 @@ impl TurnLoop {
         self.persist_token_usage(hooks.publisher, usage, request.context_window)
             .await?;
 
-        let hook_messages = state.provider_response_messages(request.messages);
+        let LlmRequestSnapshot {
+            request_id,
+            messages,
+            acknowledgements,
+            ..
+        } = request;
+        let hook_messages = state.provider_response_messages(messages);
         self.tools_stage(
             hooks.extension_runner,
+            request_id,
+            acknowledgements,
             state,
             &tool_calls,
             early_results,
@@ -515,9 +544,10 @@ impl TurnLoop {
         let host = CompactionHost {
             session: &self.session,
             llm: &self.llm,
+            context_assembler: self.runtime_generation.context_assembler(),
             hook_call: self.shared().hook_call_context(),
             extension_runner,
-            breaker: &self.compact_circuit_breaker,
+            breaker: self.session.runtime().compact_circuit_breaker(),
         };
         let model = publisher.snapshot_model().await?;
         let snapshot = context_snapshot(&model);
@@ -539,8 +569,9 @@ impl TurnLoop {
             tracing::debug!("injecting tool deduplication system-reminder");
             messages.push(LlmMessage::user(reminder));
         }
-        let messages = self
-            .apply_before_provider_request_hook(extension_runner, messages)
+        let request_id = ProviderRequestId::new(uuid::Uuid::new_v4().to_string());
+        let (messages, acknowledgements) = self
+            .apply_before_provider_request_hook(extension_runner, request_id.clone(), messages)
             .await?;
         let model_limits = llm.model_limits();
         let model_context_window = model_limits.max_input_tokens;
@@ -552,8 +583,7 @@ impl TurnLoop {
             ),
             threshold_tokens: compact_threshold_tokens(
                 model_context_window,
-                self.session
-                    .runtime_services()
+                self.runtime_generation
                     .context_assembler()
                     .settings()
                     .compact_threshold_percent,
@@ -571,8 +601,10 @@ impl TurnLoop {
             )?;
         Ok(PreparedProviderRequest {
             llm,
+            request_id,
             messages,
             max_output_tokens,
+            acknowledgements,
         })
     }
 
@@ -642,6 +674,34 @@ impl TurnLoop {
         Ok(())
     }
 
+    async fn acknowledge_provider_request(
+        &self,
+        extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        publisher: &TurnEvents,
+        request_id: &ProviderRequestId,
+        acknowledgements: &astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
+    ) -> Result<(), TurnError> {
+        if acknowledgements.is_empty() {
+            return Ok(());
+        }
+        publisher.sync_durable_events().await?;
+        let context = runtime_provider_settlement_context(
+            self.shared().hook_call_context(),
+            request_id.clone(),
+        );
+        if let Err(error) = extension_runner
+            .acknowledge_provider_request(context, acknowledgements.clone())
+            .await
+        {
+            tracing::warn!(
+                request_id = %request_id,
+                error = %error,
+                "provider cycle committed but one or more contribution acknowledgements failed"
+            );
+        }
+        Ok(())
+    }
+
     async fn with_usage_fallback(
         &self,
         mut outcome: StreamOutcome,
@@ -667,7 +727,7 @@ impl TurnLoop {
         request_messages: Vec<LlmMessage>,
         tools: &[ToolDefinition],
     ) -> Option<LlmTokenUsage> {
-        let effective = self.session.runtime_services().read_effective();
+        let effective = self.runtime_generation.effective();
         let (input_tokens, source) = match llm
             .count_input_tokens(request_messages.clone(), tools.to_vec())
             .await
@@ -714,14 +774,21 @@ impl TurnLoop {
     async fn tools_stage(
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        request_id: ProviderRequestId,
+        acknowledgements: astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
         state: &mut TurnState,
         tool_calls: &[crate::tool_types::StreamedToolCall],
         early_results: Vec<crate::early_tool_scheduler::EarlyExecutionEntry>,
         publisher: &Arc<TurnEvents>,
         hook_messages: Vec<LlmMessage>,
     ) -> Result<(), TurnError> {
-        self.dispatch_after_provider_response(extension_runner, hook_messages, state)
-            .await?;
+        self.dispatch_after_provider_response(
+            extension_runner,
+            request_id.clone(),
+            hook_messages,
+            state,
+        )
+        .await?;
 
         let visible_tools = state.visible_tools();
 
@@ -730,6 +797,13 @@ impl TurnLoop {
             .prepare_tool_batch(tool_calls, early_results, &visible_tools, state)
             .await?;
         self.tools.declare_tool_batch(&plan, publisher).await?;
+        self.acknowledge_provider_request(
+            extension_runner,
+            publisher,
+            &request_id,
+            &acknowledgements,
+        )
+        .await?;
 
         let discovered_tools = match self
             .tools
@@ -753,12 +827,13 @@ impl TurnLoop {
     async fn postprocess_complete_stage(
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        request_id: ProviderRequestId,
         user_text: String,
         state: &mut TurnState,
         finish_reason: String,
         hook_messages: Vec<LlmMessage>,
     ) -> Result<TurnOutput, TurnError> {
-        self.dispatch_after_provider_response(extension_runner, hook_messages, state)
+        self.dispatch_after_provider_response(extension_runner, request_id, hook_messages, state)
             .await?;
         let end_ctx = self
             .shared()
@@ -782,15 +857,23 @@ impl TurnLoop {
     async fn apply_before_provider_request_hook(
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        request_id: ProviderRequestId,
         send_messages: Vec<LlmMessage>,
-    ) -> Result<Vec<LlmMessage>, TurnError> {
-        match extension_runner
-            .emit_provider(
-                ProviderEvent::BeforeRequest,
-                self.shared().provider_ctx(send_messages.clone()),
+    ) -> Result<
+        (
+            Vec<LlmMessage>,
+            astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
+        ),
+        TurnError,
+    > {
+        let preparation = extension_runner
+            .prepare_provider_request(
+                self.shared()
+                    .provider_ctx(request_id, send_messages.clone()),
             )
-            .await?
-        {
+            .await?;
+        let (result, acknowledgements) = preparation.into_parts();
+        let messages = match result {
             ProviderResult::Block { reason } => Err(TurnError::ProviderBlocked { reason }),
             ProviderResult::ReplaceMessages { messages } => {
                 tracing::debug!(
@@ -811,7 +894,8 @@ impl TurnLoop {
                 Ok(provider_visible_messages(combined))
             },
             ProviderResult::Allow => Ok(send_messages),
-        }
+        }?;
+        Ok((messages, acknowledgements))
     }
 
     async fn start_provider_stream(
@@ -850,10 +934,11 @@ impl TurnLoop {
     async fn dispatch_after_provider_response(
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
+        request_id: ProviderRequestId,
         messages: Vec<LlmMessage>,
         state: &mut TurnState,
     ) -> Result<(), TurnError> {
-        let ctx = self.shared().provider_ctx(messages);
+        let ctx = self.shared().provider_ctx(request_id, messages);
         match extension_runner
             .emit_provider(ProviderEvent::AfterResponse, ctx)
             .await?
@@ -933,13 +1018,11 @@ impl TurnLoop {
         state: &mut TurnState,
     ) -> Result<bool, TurnError> {
         let call = self.shared().hook_call_context();
-        let ctx = RuntimeContinueAfterStopContext::new(
+        let ctx = runtime_continue_after_stop_context(
             call,
-            ContinueAfterStopPayload::new(
-                assistant_text,
-                finish_reason,
-                state.continue_after_stop_count(),
-            ),
+            assistant_text,
+            finish_reason,
+            state.continue_after_stop_count(),
         );
         let decision = extension_runner.emit_continue_after_stop(ctx).await?;
         if decision == ContinueAfterStopResult::ContinueOneStep {

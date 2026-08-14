@@ -97,42 +97,45 @@ fn apply_pending_tool_approvals(
 mod tests {
     use astrcode_core::{
         event::{
-            DurableEvent, DurableEventPayload, PersistedSystemPrompt, SessionStarted, StoredEvent,
-            SystemPromptSource,
+            DurableEvent, DurableEventPayload, Event, PersistedSystemPrompt, SessionStarted,
+            StoredEvent, SystemPromptSource,
         },
         llm::{LlmContent, LlmMessage, LlmRole},
         tool::SessionToolSelection,
+        types::{SessionId, new_message_id},
     };
-    use astrcode_protocol::http::ToolCallStatusDto;
+    use astrcode_protocol::http::{ConversationDeltaDto, ToolCallStatusDto};
     use astrcode_session_projection::replay;
 
     use super::*;
+    use crate::http::projection::live::event_to_deltas;
+
+    fn session_started_event(session_id: SessionId) -> StoredEvent {
+        StoredEvent::new(
+            0,
+            DurableEvent::session(
+                session_id,
+                DurableEventPayload::SessionStarted(SessionStarted {
+                    working_dir: "D:/work/project".into(),
+                    model_id: "model".into(),
+                    parent: None,
+                    tool_selection: SessionToolSelection::default(),
+                    source_extension: None,
+                    initial_system_prompt: PersistedSystemPrompt {
+                        text: "system".into(),
+                        fingerprint: "fingerprint".into(),
+                        extra_system_prompt: None,
+                        source: SystemPromptSource::Native,
+                    },
+                }),
+            ),
+        )
+    }
 
     fn session_read_model(session_id: &str) -> SessionReadModel {
-        let session_id: astrcode_core::types::SessionId = session_id.into();
-        replay(
-            session_id.clone(),
-            &[StoredEvent::new(
-                0,
-                DurableEvent::session(
-                    session_id,
-                    DurableEventPayload::SessionStarted(SessionStarted {
-                        working_dir: "D:/work/project".into(),
-                        model_id: "model".into(),
-                        parent: None,
-                        tool_selection: SessionToolSelection::default(),
-                        source_extension: None,
-                        initial_system_prompt: PersistedSystemPrompt {
-                            text: "system".into(),
-                            fingerprint: "fingerprint".into(),
-                            extra_system_prompt: None,
-                            source: SystemPromptSource::Native,
-                        },
-                    }),
-                ),
-            )],
-        )
-        .unwrap()
+        let session_id: SessionId = session_id.into();
+        let started = session_started_event(session_id.clone());
+        replay(session_id, &[started]).unwrap()
     }
 
     fn session_with_tool_call(
@@ -158,7 +161,7 @@ mod tests {
                     reasoning_content: None,
                 },
                 updated_seq: 1,
-                source: None,
+                origin: None,
             });
         session
     }
@@ -173,7 +176,7 @@ mod tests {
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::assistant("hello"),
                 updated_seq: 4,
-                source: None,
+                origin: None,
             });
 
         let dto = conversation_to_dto(&session, None);
@@ -203,7 +206,7 @@ mod tests {
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::tool("read", "tool-1", "file contents", false),
                 updated_seq: 2,
-                source: None,
+                origin: None,
             });
 
         let dto = conversation_to_dto(&session, None);
@@ -273,7 +276,7 @@ mod tests {
             .push(astrcode_session_projection::SequencedLlmMessage {
                 message: LlmMessage::user("latest user"),
                 updated_seq: 1,
-                source: None,
+                origin: None,
             });
         session.model_context.compactions.push(CompactionView {
             trigger: "auto_threshold".into(),
@@ -307,5 +310,79 @@ mod tests {
             other => panic!("expected CompactSummary, got {other:?}"),
         }
         assert!(matches!(&dto.blocks[1], ConversationBlockDto::User { .. }));
+    }
+
+    #[test]
+    fn recap_keeps_the_same_shape_in_live_delta_and_reconnected_snapshot() {
+        let session_id = SessionId::new("session-recap");
+        let recap = StoredEvent::new(
+            2,
+            DurableEvent::session(
+                session_id.clone(),
+                DurableEventPayload::RecapGenerated {
+                    text: "Decisions and next steps".into(),
+                    source: "manual".into(),
+                },
+            ),
+        );
+        let events = vec![
+            session_started_event(session_id.clone()),
+            StoredEvent::new(
+                1,
+                DurableEvent::session(
+                    session_id.clone(),
+                    DurableEventPayload::UserMessage {
+                        message_id: new_message_id(),
+                        text: "Summarize this session".into(),
+                        attachments: Vec::new(),
+                        accepted_seq: None,
+                    },
+                ),
+            ),
+            recap.clone(),
+            StoredEvent::new(
+                3,
+                DurableEvent::session(
+                    session_id.clone(),
+                    DurableEventPayload::ErrorOccurred {
+                        code: 500,
+                        message: "A later display artifact".into(),
+                        recoverable: true,
+                    },
+                ),
+            ),
+        ];
+
+        let live_deltas = event_to_deltas(&Event::from(&recap), true);
+        let [
+            ConversationDeltaDto::AppendBlock {
+                block:
+                    ConversationBlockDto::Recap {
+                        id: live_id,
+                        text: live_text,
+                        source: live_source,
+                    },
+            },
+        ] = live_deltas.as_slice()
+        else {
+            panic!("unexpected recap live deltas: {live_deltas:?}");
+        };
+
+        let session = replay(session_id, &events).unwrap();
+        let snapshot = conversation_to_dto(&session, None);
+
+        assert_eq!(snapshot.cursor.value, "3");
+        assert!(matches!(
+            snapshot.blocks.as_slice(),
+            [
+                ConversationBlockDto::User { text, .. },
+                ConversationBlockDto::Recap { id, text: recap_text, source },
+                ConversationBlockDto::Error { message, .. },
+            ] if text == "Summarize this session"
+                && id == live_id
+                && recap_text == live_text
+                && source == live_source
+                && message == "A later display artifact"
+        ));
     }
 }

@@ -1,6 +1,6 @@
 use astrcode_core::tool::access::{HostResource, ResourceAccess};
 
-use super::{PermissionContext, PermissionDecision, PermissionPolicy};
+use super::{PermissionContext, PermissionPolicy, PolicyDecision};
 
 pub(super) struct ProcessResourceAskPolicy;
 
@@ -9,17 +9,13 @@ pub(super) fn rule_key(tool_name: &str) -> String {
 }
 
 impl PermissionPolicy for ProcessResourceAskPolicy {
-    fn priority(&self) -> u32 {
-        110
-    }
-
-    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PermissionDecision {
+    fn evaluate(&self, ctx: &PermissionContext<'_>) -> PolicyDecision {
         if !ctx
             .resource_accesses
             .iter()
             .any(|access| matches!(access, ResourceAccess::Host(HostResource::Process)))
         {
-            return PermissionDecision::Pass;
+            return PolicyDecision::Pass;
         }
 
         let command = ctx
@@ -35,7 +31,7 @@ impl PermissionPolicy for ProcessResourceAskPolicy {
             ),
             None => format!("Allow tool `{}` to control a process?", ctx.tool_name),
         };
-        PermissionDecision::Ask {
+        PolicyDecision::Ask {
             prompt,
             rule_key: Some(rule_key(ctx.tool_name)),
         }
@@ -55,7 +51,7 @@ mod tests {
     fn every_process_backed_tool_requires_approval() {
         let input = serde_json::json!({"command": "cargo test"});
         let process = [ResourceAccess::host(HostResource::Process)];
-        for tool_name in ["shell", "terminal", "run_tests"] {
+        for tool_name in ["shell", "run_tests"] {
             let ctx = PermissionContext {
                 tool_name,
                 tool_input: &input,
@@ -66,7 +62,7 @@ mod tests {
             };
             assert!(matches!(
                 ProcessResourceAskPolicy.evaluate(&ctx),
-                PermissionDecision::Ask { .. }
+                PolicyDecision::Ask { .. }
             ));
         }
     }

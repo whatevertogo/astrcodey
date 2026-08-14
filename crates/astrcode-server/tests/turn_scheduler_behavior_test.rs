@@ -8,14 +8,12 @@ use std::{
     time::Duration,
 };
 
-use astrcode_context::context_assembler::LlmContextAssembler;
 use astrcode_core::{
     config::{
         EffectiveConfig, ExtensionSettings, LlmSettings, ProviderAuthScheme, ProviderWireFormat,
     },
     event::{DurableEvent, DurableEventPayload, StoredEvent},
-    llm::{LlmError, LlmEvent, LlmMessage, LlmProvider, ModelLimits},
-    tool::ToolDefinition,
+    llm::{LlmError, LlmEvent, LlmProvider, ModelLimits},
     types::{SessionId, new_message_id, new_session_id, new_turn_id},
 };
 use astrcode_extension_sdk::{
@@ -28,9 +26,9 @@ use astrcode_extension_sdk::{
 use astrcode_extensions::runner::ExtensionRunner;
 use astrcode_server::test_support::{
     ChildSessionCoordinator, DeliveryOutcome, InputDelivery, MAX_PENDING_INPUTS_PER_SESSION,
-    MAX_PROMPT_TEXT_BYTES, SessionManager, TurnRegistry, TurnScheduleError, TurnScheduler,
-    recycle_completed_session_for_test, session_started_event_for_test,
-    start_with_completion_for_test,
+    MAX_PROMPT_TEXT_BYTES, SessionManager, StartedExecution, TurnRegistry, TurnScheduleError,
+    TurnScheduler, recycle_completed_session_for_test, release_completed_execution_for_test,
+    session_started_event_for_test, start_with_completion_for_test,
 };
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
 use tokio::sync::{Semaphore, mpsc};
@@ -41,7 +39,7 @@ trait UntrackedStartForTest {
         &self,
         session_id: SessionId,
         input: astrcode_core::user_input::UserInput,
-    ) -> Result<astrcode_server::StartedExecution, TurnScheduleError>;
+    ) -> Result<StartedExecution, TurnScheduleError>;
 }
 
 #[async_trait::async_trait]
@@ -50,7 +48,7 @@ impl UntrackedStartForTest for TurnScheduler {
         &self,
         session_id: SessionId,
         input: astrcode_core::user_input::UserInput,
-    ) -> Result<astrcode_server::StartedExecution, TurnScheduleError> {
+    ) -> Result<StartedExecution, TurnScheduleError> {
         start_with_completion_for_test(self, session_id, input).await
     }
 }
@@ -70,10 +68,9 @@ struct FailSecondEnvelopeHandler {
 
 #[async_trait::async_trait]
 impl LlmProvider for StaticTextLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let _ = tx.send(LlmEvent::ContentDelta { delta: "ok".into() });
@@ -93,10 +90,9 @@ impl LlmProvider for StaticTextLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for PendingLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         std::future::pending().await
     }
@@ -111,10 +107,9 @@ impl LlmProvider for PendingLlm {
 
 #[async_trait::async_trait]
 impl LlmProvider for GateFirstLlm {
-    async fn generate(
+    async fn generate_request(
         &self,
-        _messages: Vec<LlmMessage>,
-        _tools: Vec<ToolDefinition>,
+        _request: astrcode_core::llm::LlmRequest,
     ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
         if self.calls.fetch_add(1, Ordering::AcqRel) == 0 {
             self.release.acquire().await.unwrap().forget();
@@ -195,7 +190,6 @@ fn build_scheduler_with_runtime(
     llm: Arc<dyn LlmProvider>,
     extension_runner: Arc<ExtensionRunner>,
 ) -> TurnScheduler {
-    let context_assembler = Arc::new(LlmContextAssembler::new(Default::default()));
     let effective = EffectiveConfig {
         llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -249,7 +243,6 @@ fn build_scheduler_with_runtime(
         llm,
         effective,
         extension_runner.clone(),
-        context_assembler,
     );
     let session_manager = Arc::new(SessionManager::new(
         Arc::clone(&store),
@@ -749,8 +742,7 @@ async fn release_completed_execution_is_non_destructive() {
     let turn_id = started.turn_id;
     let result = started.handle.wait().await.unwrap();
 
-    scheduler
-        .release_completed_execution(&sid, &turn_id, Some(&result.finalization))
+    release_completed_execution_for_test(&scheduler, &sid, &turn_id, Some(&result.finalization))
         .await;
 
     assert_eq!(

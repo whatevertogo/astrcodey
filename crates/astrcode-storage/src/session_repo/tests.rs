@@ -1,7 +1,12 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    event::{DurableEvent, DurableEventPayload, ParentSessionRef, Phase},
+    compaction::CompactStrategy,
+    event::{
+        CompactionDetails, DurableEvent, DurableEventPayload, ParentSessionRef, Phase,
+        TranscriptRewriteReason, transcript_prefix_fingerprint,
+    },
+    llm::{LlmMessage, TranscriptMessage},
     types::{SessionId, TurnId},
 };
 use tempfile::tempdir;
@@ -11,6 +16,7 @@ use crate::{
     EventConsumerCheckpointOutcome, EventConsumerCheckpointReset, EventConsumerFailureOutcome,
     EventReader, SessionEventJournal, SessionPathResolver, SessionReader, SessionStore,
     StorageError, ToolResultArtifactInput, ToolResultArtifactStore,
+    event_log::EventLog,
     test_support::{started_event, user_event},
 };
 
@@ -197,6 +203,132 @@ async fn filesystem_repository_rebuilds_grouped_projection_and_snapshot_tail() {
     assert_eq!(model.stats.event_count, 3);
     assert_eq!(model.model_context.messages.len(), 2);
     assert_eq!(reopened.replay_events(&session_id).await.unwrap().len(), 3);
+}
+
+#[tokio::test]
+async fn synced_append_stays_hidden_and_sticky_until_exact_retry_or_reopen() {
+    let dir = tempdir().unwrap();
+    let session_id = SessionId::new("uncertain-compact");
+    let repo = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    repo.create_session(started_event(&session_id))
+        .await
+        .unwrap();
+    repo.append_event(user_event(&session_id, "original"))
+        .await
+        .unwrap();
+    repo.sync_durable_events(&session_id).await.unwrap();
+
+    let before = repo.session_read_model(&session_id).await.unwrap();
+    let rewrite = DurableEvent::session(
+        session_id.clone(),
+        DurableEventPayload::TranscriptRewritten {
+            source_seq: before.stats.last_seq,
+            source_fingerprint: transcript_prefix_fingerprint(
+                &before.system_prompt.text,
+                &before
+                    .model_context
+                    .messages
+                    .iter()
+                    .map(|message| message.message.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap(),
+            messages: vec![TranscriptMessage::plain(LlmMessage::user("summary"))],
+            reason: TranscriptRewriteReason::Compaction(CompactionDetails {
+                trigger: "manual".into(),
+                pre_tokens: 10,
+                post_tokens: 2,
+                summary: "summary".into(),
+                transcript_path: None,
+                strategy: CompactStrategy::Manual {
+                    keep_recent_turns: None,
+                },
+            }),
+        },
+    );
+    let meta = repo.get_or_open_meta(&session_id).await.unwrap();
+    meta.log.fail_next_sync().await.unwrap();
+
+    let error = repo
+        .append_events_and_sync(vec![rewrite])
+        .await
+        .unwrap_err();
+    let pending_seq = error.uncertain_through_seq().unwrap();
+    assert_eq!(pending_seq, 2);
+    assert!(!error.is_retryable());
+    let still_confirmed = repo.session_read_model(&session_id).await.unwrap();
+    assert_eq!(still_confirmed.stats.last_seq, 1);
+    assert_eq!(still_confirmed.first_user_message(), Some("original"));
+    assert!(matches!(
+        repo.ensure_no_uncertain_durability(&session_id).await,
+        Err(StorageError::DurabilityUncertain { through_seq: 2, .. })
+    ));
+    assert!(matches!(
+        repo.replay_events(&session_id).await,
+        Err(StorageError::DurabilityUncertain { through_seq: 2, .. })
+    ));
+    assert!(matches!(
+        repo.append_event(user_event(&session_id, "must be blocked"))
+            .await,
+        Err(StorageError::DurabilityUncertain { through_seq: 2, .. })
+    ));
+    assert!(matches!(
+        repo.checkpoint_event_consumer(&session_id, "test-consumer", 0, 2)
+            .await,
+        Err(StorageError::DurabilityUncertain { through_seq: 2, .. })
+    ));
+    assert!(matches!(
+        repo.retry_uncertain_sync(&session_id, pending_seq + 1)
+            .await,
+        Err(StorageError::InvalidEvent(_))
+    ));
+
+    let confirmed = repo
+        .retry_uncertain_sync(&session_id, pending_seq)
+        .await
+        .unwrap();
+    assert_eq!(confirmed.len(), 1);
+    assert!(
+        repo.retry_uncertain_sync(&session_id, pending_seq)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let compacted = repo.session_read_model(&session_id).await.unwrap();
+    assert_eq!(compacted.stats.last_seq, 2);
+    assert_eq!(compacted.model_context.messages.len(), 1);
+    assert_eq!(
+        compacted.model_context.messages[0]
+            .message
+            .joined_display_text("\n"),
+        "summary"
+    );
+
+    meta.log.fail_next_sync().await.unwrap();
+    let reopen_error = repo
+        .append_events_and_sync(vec![user_event(&session_id, "survives reopen")])
+        .await
+        .unwrap_err();
+    assert_eq!(reopen_error.uncertain_through_seq(), Some(3));
+    let event_log_path = FileSystemSessionRepository::event_log_path(&meta.dir, &session_id);
+    drop(meta);
+    drop(repo);
+
+    let reopened = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    EventLog::fail_next_open_sync_for_testing(event_log_path.clone());
+    assert!(matches!(
+        reopened.list_session_summaries().await,
+        Err(StorageError::Io(error)) if error.to_string().contains("injected fsync failure")
+    ));
+    EventLog::fail_next_open_sync_for_testing(event_log_path);
+    assert!(matches!(
+        reopened.session_read_model(&session_id).await,
+        Err(StorageError::Io(error)) if error.to_string().contains("injected fsync failure")
+    ));
+    let recovered = reopened.session_read_model(&session_id).await.unwrap();
+    assert_eq!(recovered.stats.last_seq, 3);
+    assert_eq!(recovered.first_user_message(), Some("original"));
+    assert_eq!(recovered.model_context.messages.len(), 2);
 }
 
 #[tokio::test]
