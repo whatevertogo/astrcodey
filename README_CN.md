@@ -273,7 +273,7 @@ cargo run --features dev-mode -- eval
 
 ## 配置
 
-AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。旧版 `config.json` 仍会作为迁移 fallback 读取，并在首次加载后自动写出 `config.toml`。配置支持多个 LLM Provider、模型选择、运行时行为调优和项目级覆盖。
+AstrCode 使用存储在 `~/.astrcode/config.toml` 的 TOML 配置系统。配置支持多个 LLM Provider、模型选择、运行时行为调优和项目级覆盖。
 
 **主要配置特性：**
 - 多 Provider 支持（Anthropic 与 OpenAI 兼容 Provider）
@@ -370,7 +370,7 @@ Cargo workspace 在 [`crates/`](crates/) 下包含 **28 个 crate**，另有 [`s
 | [`astrcode-extensions`](crates/astrcode-extensions) | 宿主侧扩展生命周期、钩子分发、能力门控与磁盘 IPC 加载 |
 | [`astrcode-bundled-extensions`](crates/astrcode-bundled-extensions) | 组合根：注册全部第一方扩展 crate |
 | [`astrcode-extension-agent-tools`](crates/astrcode-extension-agent-tools) | 子 Agent 委派与 Agent 发现（兼容 Claude Code 格式） |
-| [`astrcode-extension-coding`](crates/astrcode-extension-coding) | 只通过 SDK Host 能力实现的 9 个第一方工具：read、read_tool_result、write、edit、patch、glob、grep、shell、terminal |
+| [`astrcode-extension-coding`](crates/astrcode-extension-coding) | 只通过 SDK Host 能力实现的 8 个第一方工具：read、read_tool_result、write、edit、patch、glob、grep、shell |
 | [`astrcode-extension-mcp`](crates/astrcode-extension-mcp) | MCP 客户端：stdio/HTTP 传输、常驻进程池、预热与健康检查 |
 | [`astrcode-extension-skill`](crates/astrcode-extension-skill) | 斜杠命令技能发现与 Skill 工具调度 |
 | [`astrcode-extension-todo-tool`](crates/astrcode-extension-todo-tool) | 进度追踪 Todo 工具 |

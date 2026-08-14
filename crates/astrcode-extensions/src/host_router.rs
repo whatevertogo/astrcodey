@@ -28,8 +28,8 @@ use std::{
 
 use astrcode_core::{
     event::{
-        CustomEventData, DurableEventPayload, EventDeliveryReceipt, EventPayload, EventSender,
-        LiveEventPayload,
+        CustomEventAudience, CustomEventData, DurableEventPayload, EventDeliveryReceipt,
+        EventPayload, EventSender, LiveEventPayload,
     },
     llm::{LlmProvider, LlmProviderBindings},
     tool::{
@@ -40,8 +40,8 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        CustomEventDeclaration, ExtensionCapability, ExtensionError, ExtensionHttpRequest,
-        ExtensionHttpResponse, ExtensionTaskError, ExtensionTasks,
+        CustomEventDeclaration, CustomEventDelivery, ExtensionCapability, ExtensionError,
+        ExtensionHttpRequest, ExtensionHttpResponse, ExtensionTaskError, ExtensionTasks,
     },
     host::{
         HostOperation,
@@ -286,6 +286,8 @@ pub struct InvokeContext {
     pub event_declarations: HashMap<String, CustomEventDeclaration>,
     pub declared_capabilities: Vec<ExtensionCapability>,
     pub generation_gate: ExtensionGenerationGate,
+    /// Extension-to-extension HTTP dispatcher bound to the caller's runtime snapshot.
+    pub(crate) public_http_dispatcher: Option<Arc<dyn PublicHttpDispatcher>>,
     /// 当前调用是否在 peer 专用 I/O 线程上（同步 host import；IPC 子进程共用）。
     pub on_peer_io_thread: bool,
 }
@@ -403,9 +405,7 @@ impl HostRouter {
                     .await
             },
             HostOperationGroup::ExtensionHttp => {
-                self.extension_http
-                    .invoke(operation, input, &context.extension_id)
-                    .await
+                self.extension_http.invoke(operation, input, context).await
             },
         }
     }
@@ -708,9 +708,9 @@ fn validated_custom_event_payload(
     payload: Value,
 ) -> Result<EventPayload, ExtensionError> {
     validate_emit(declarations, event_type, schema_version, &payload)?;
-    let durable = declarations
+    let delivery = declarations
         .get(event_type)
-        .map(|declaration| declaration.durable)
+        .map(|declaration| declaration.delivery)
         .ok_or_else(|| {
             ExtensionError::Internal(format!("undeclared custom event type: {event_type}"))
         })?;
@@ -718,7 +718,7 @@ fn validated_custom_event_payload(
         extension_id,
         event_type,
         schema_version,
-        durable,
+        delivery,
         causation,
         payload,
     ))
@@ -728,25 +728,35 @@ pub(crate) fn custom_event_payload(
     extension_id: &str,
     event_type: &str,
     schema_version: u32,
-    durable: bool,
+    delivery: CustomEventDelivery,
     causation: Option<(EventId, u8)>,
     payload: Value,
 ) -> EventPayload {
     let (causation_id, cascade_depth) = causation
         .map(|(event_id, depth)| (Some(event_id), depth.saturating_add(1)))
         .unwrap_or((None, 0));
+    let audience = match delivery {
+        CustomEventDelivery::SessionDurable | CustomEventDelivery::SessionLive => {
+            CustomEventAudience::Session
+        },
+        CustomEventDelivery::GlobalLive => CustomEventAudience::Global,
+    };
     let event = CustomEventData {
         extension_id: extension_id.to_owned(),
         event_type: event_type.to_owned(),
         schema_version,
+        audience,
         causation_id,
         cascade_depth,
         payload,
     };
-    if durable {
-        EventPayload::Durable(DurableEventPayload::CustomEvent(event))
-    } else {
-        EventPayload::Live(LiveEventPayload::CustomEvent(event))
+    match delivery {
+        CustomEventDelivery::SessionDurable => {
+            EventPayload::Durable(DurableEventPayload::CustomEvent(event))
+        },
+        CustomEventDelivery::SessionLive | CustomEventDelivery::GlobalLive => {
+            EventPayload::Live(LiveEventPayload::CustomEvent(event))
+        },
     }
 }
 
@@ -929,7 +939,7 @@ mod tests {
         let declarations = decls_to_map(&[CustomEventDeclaration {
             event_type: "probe.completed".into(),
             schema_version: 2,
-            durable: true,
+            delivery: CustomEventDelivery::SessionDurable,
             max_payload_bytes: 8,
         }]);
 
@@ -947,18 +957,41 @@ mod tests {
         }
 
         let parent_id = EventId::new("parent-event");
-        let EventPayload::Durable(DurableEventPayload::CustomEvent(event)) = custom_event_payload(
-            "consumer",
-            "probe.completed",
-            2,
-            true,
-            Some((parent_id.clone(), 3)),
-            json!({}),
-        ) else {
-            panic!("durable declaration must produce a durable custom event");
-        };
-        assert_eq!(event.causation_id, Some(parent_id));
-        assert_eq!(event.cascade_depth, 4);
+        for (delivery, expected_audience, expected_durable) in [
+            (
+                CustomEventDelivery::SessionDurable,
+                CustomEventAudience::Session,
+                true,
+            ),
+            (
+                CustomEventDelivery::SessionLive,
+                CustomEventAudience::Session,
+                false,
+            ),
+            (
+                CustomEventDelivery::GlobalLive,
+                CustomEventAudience::Global,
+                false,
+            ),
+        ] {
+            let payload = custom_event_payload(
+                "consumer",
+                "probe.completed",
+                2,
+                delivery,
+                Some((parent_id.clone(), 3)),
+                json!({}),
+            );
+            let (event, durable) = match payload {
+                EventPayload::Durable(DurableEventPayload::CustomEvent(event)) => (event, true),
+                EventPayload::Live(LiveEventPayload::CustomEvent(event)) => (event, false),
+                _ => panic!("custom-event delivery must produce a custom-event payload"),
+            };
+            assert_eq!(event.audience, expected_audience);
+            assert_eq!(event.causation_id, Some(parent_id.clone()));
+            assert_eq!(event.cascade_depth, 4);
+            assert_eq!(durable, expected_durable);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -6,7 +6,7 @@
 use std::sync::Arc;
 
 use astrcode_core::{
-    event::{DurableEvent, DurableEventPayload, StoredEvent},
+    event::{CustomEventAudience, DurableEvent, DurableEventPayload, StoredEvent},
     types::SessionId,
 };
 
@@ -284,6 +284,13 @@ fn validate_next_event_details(
     }
     if matches!(event.payload, DurableEventPayload::SessionStarted(_)) {
         return Err(ProjectionError::DuplicateSessionStarted(seq));
+    }
+    if matches!(
+        &event.payload,
+        DurableEventPayload::CustomEvent(event)
+            if event.audience != CustomEventAudience::Session
+    ) {
+        return Err(ProjectionError::InvalidDurableCustomEventAudience(seq));
     }
     if let DurableEventPayload::TranscriptRewritten { source_seq, .. } = &event.payload
         && *source_seq > current_seq

@@ -121,6 +121,7 @@ fn with_state_file_lock<R>(
         .read(true)
         .write(true)
         .create(true)
+        .truncate(false)
         .open(parent.join(format!(".{file_name}.lock")))?;
     lock.lock_exclusive()?;
     let result = operation();

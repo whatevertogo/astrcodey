@@ -163,6 +163,7 @@ struct HandlerTool {
     generation: Weak<ExtensionGenerationEntry>,
     operation_timeout: Duration,
     call_context_factory: ExtensionCallContextFactory,
+    public_http_dispatcher: Arc<dyn crate::host_router::PublicHttpDispatcher>,
 }
 
 impl HandlerTool {
@@ -184,6 +185,7 @@ impl HandlerTool {
             generation: Arc::downgrade(generation),
             operation_timeout: view.operation_timeout,
             call_context_factory: view.call_context_factory.clone(),
+            public_http_dispatcher: view.public_http_dispatcher_for_index(&view.index),
         }
     }
 }
@@ -298,6 +300,7 @@ impl Tool for HandlerTool {
                 tool_result_reader: ctx.capabilities.host.result_reader.clone(),
                 llm_providers: ctx.capabilities.host.llm_providers.clone(),
                 generation_gate: generation.generation_gate.clone(),
+                public_http_dispatcher: Some(Arc::clone(&self.public_http_dispatcher)),
                 cancellation: ctx.cancellation().child_token(),
             },
         );

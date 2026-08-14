@@ -409,7 +409,6 @@ pub enum ConversationBlockDto {
     User {
         id: String,
         text: String,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<PromptAttachmentDto>,
     },
     Assistant {
@@ -660,12 +659,21 @@ pub struct ExtensionSlashCommandDto {
 
 /// 扩展可发射事件的声明。
 #[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomEventDeliveryDto {
+    SessionDurable,
+    SessionLive,
+    GlobalLive,
+}
+
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CustomEventDeclarationDto {
     pub event_type: String,
     pub schema_version: u32,
-    pub durable: bool,
+    pub delivery: CustomEventDeliveryDto,
     pub max_payload_bytes: usize,
 }
 
@@ -746,6 +754,7 @@ pub struct CustomEventConsumerListResponseDto {
 pub struct ExtensionDeclarationDto {
     pub id: String,
     pub capabilities: Vec<ExtensionCapabilityDto>,
+    pub required_transport_features: Vec<TransportFeatureDto>,
     pub tools: Vec<ToolDefinitionDto>,
     pub dynamic_tools: bool,
     pub commands: Vec<ExtensionSlashCommandDto>,
@@ -755,6 +764,14 @@ pub struct ExtensionDeclarationDto {
     pub custom_events: Vec<CustomEventDeclarationDto>,
     pub custom_event_subscriptions: Vec<CustomEventSubscriptionDto>,
     pub http_routes: Vec<ExtensionHttpRouteDto>,
+}
+
+/// Host transport features required before an extension can be loaded.
+#[cfg_attr(feature = "typescript", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportFeatureDto {
+    AuthenticatedHttp,
 }
 
 /// 扩展注册的工具定义。

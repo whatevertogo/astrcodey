@@ -24,7 +24,7 @@ use crate::{
     extension::{
         CompactEvent, ContinueAfterStopOptions, CustomEventDeclaration, CustomEventSubscription,
         ExtensionCapability, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
-        HookMode, LifecycleEvent,
+        HookMode, LifecycleEvent, TransportFeature,
         internal::{
             canonical_registration_name, extension_http_route_patterns_conflict, fixed_hook_mode,
             has_duplicate_registration_name, hook_mode_is_supported,
@@ -484,6 +484,12 @@ impl HandlerRegistry {
     pub(crate) fn declare_capability(&mut self, cap: ExtensionCapability) {
         if !self.manifest.capabilities.contains(&cap) {
             self.manifest.capabilities.push(cap);
+        }
+    }
+
+    pub(crate) fn require_transport(&mut self, feature: TransportFeature) {
+        if !self.manifest.required_transport_features.contains(&feature) {
+            self.manifest.required_transport_features.push(feature);
         }
     }
 
@@ -1045,7 +1051,7 @@ mod tests {
         registry.declare_custom_event(CustomEventDeclaration {
             event_type: "  review.completed  ".into(),
             schema_version: 1,
-            durable: true,
+            delivery: crate::extension::CustomEventDelivery::SessionDurable,
             max_payload_bytes: 1024,
         });
 

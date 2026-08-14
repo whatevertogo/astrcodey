@@ -111,9 +111,9 @@ pub enum ProviderResult {
     },
 }
 
-/// Compact 钩子结果。
+/// PreCompact hook result.
 #[derive(Debug, Clone)]
-pub enum CompactResult {
+pub enum PreCompactResult {
     Allow,
     Block { reason: String },
     Contributions(CompactContributions),

@@ -8,7 +8,7 @@ use crate::{
     extension::{
         CommandAvailability, CommandContext, CommandExecution, CommandHandler,
         ContinueAfterStopContext, ContinueAfterStopResult, CustomEventDeclaration,
-        DEFAULT_CUSTOM_EVENT_DURABLE, DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
+        CustomEventDelivery, DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
         DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION, ExtensionCapability, ExtensionCommandResult,
         ExtensionError, ExtensionHttpAccess, ExtensionHttpHandler, ExtensionHttpMethod,
         ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest, ExtensionManifestError,
@@ -19,6 +19,7 @@ use crate::{
         ExecutionMode, ToolDefinition, ToolExecutionResult, ToolOrigin, ToolPlan,
         ToolPromptMetadata,
     },
+    transport::TransportFeature,
 };
 
 // ─── Extension manifest builder ────────────────────────────────────────
@@ -31,6 +32,7 @@ pub fn manifest(id: impl Into<String>) -> ExtensionManifestBuilder {
         version: String::new(),
         description: None,
         capabilities: Vec::new(),
+        required_transport_features: Vec::new(),
     }
 }
 
@@ -40,6 +42,7 @@ pub struct ExtensionManifestBuilder {
     version: String,
     description: Option<String>,
     capabilities: Vec<ExtensionCapability>,
+    required_transport_features: Vec<TransportFeature>,
 }
 
 impl ExtensionManifestBuilder {
@@ -65,6 +68,13 @@ impl ExtensionManifestBuilder {
         self
     }
 
+    pub fn requires_transport(mut self, feature: TransportFeature) -> Self {
+        if !self.required_transport_features.contains(&feature) {
+            self.required_transport_features.push(feature);
+        }
+        self
+    }
+
     pub fn build(self) -> ExtensionManifest {
         ExtensionManifest::new(
             self.id,
@@ -72,6 +82,7 @@ impl ExtensionManifestBuilder {
             self.version,
             self.description,
             self.capabilities,
+            self.required_transport_features,
         )
     }
 
@@ -250,7 +261,7 @@ pub fn custom_event(event_type: impl Into<String>) -> CustomEventDeclarationBuil
         event: CustomEventDeclaration {
             event_type: event_type.into(),
             schema_version: DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION,
-            durable: DEFAULT_CUSTOM_EVENT_DURABLE,
+            delivery: CustomEventDelivery::SessionDurable,
             max_payload_bytes: DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
         },
     }
@@ -266,8 +277,8 @@ impl CustomEventDeclarationBuilder {
         self
     }
 
-    pub fn durable(mut self, durable: bool) -> Self {
-        self.event.durable = durable;
+    pub fn delivery(mut self, delivery: CustomEventDelivery) -> Self {
+        self.event.delivery = delivery;
         self
     }
 
@@ -691,11 +702,11 @@ mod tests {
 
         let event = custom_event("review.completed")
             .schema_version(2)
-            .durable(false)
+            .delivery(CustomEventDelivery::GlobalLive)
             .max_payload_bytes(2048)
             .build();
         assert_eq!(event.schema_version, 2);
-        assert!(!event.durable);
+        assert_eq!(event.delivery, CustomEventDelivery::GlobalLive);
         assert_eq!(event.max_payload_bytes, 2048);
     }
 

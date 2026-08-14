@@ -250,6 +250,7 @@ pub(in crate::http) async fn remove_provider_preset(
 pub(in crate::http) async fn reload_config(State(state): State<HttpState>) -> Response {
     let reload_opts = BootstrapOptions {
         working_dir: Some(state.app.runtime().startup_working_dir().clone()),
+        transport_profile: state.app.runtime().transport_profile().clone(),
         ..BootstrapOptions::default()
     };
     let config = match bootstrap::load_merged_config(

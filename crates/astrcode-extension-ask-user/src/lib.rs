@@ -12,7 +12,7 @@ use astrcode_extension_sdk::{
         Extension, ExtensionCall, ExtensionCapability, ExtensionError, ExtensionHttpHandler,
         ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute, ExtensionManifest,
         ExtensionStopContext, HookMode, HookResult, HttpContext, LifecycleContext, LifecycleEvent,
-        LifecycleHandler, Registrar, ToolContext, ToolHandler, ToolPlanContext,
+        LifecycleHandler, Registrar, ToolContext, ToolHandler, ToolPlanContext, TransportFeature,
     },
     tool::{
         HostResource, ToolExecutionResult, ToolPlan, ToolPromptMetadata, ToolPromptTag, ToolResult,
@@ -53,6 +53,7 @@ impl Extension for AskUserExtension {
         manifest(EXTENSION_ID)
             .version(env!("CARGO_PKG_VERSION"))
             .description(env!("CARGO_PKG_DESCRIPTION"))
+            .requires_transport(TransportFeature::AuthenticatedHttp)
             .capability(ExtensionCapability::AuthenticatedHttp)
             .capability(ExtensionCapability::EmitCustomEvents)
             .build()
@@ -376,7 +377,7 @@ mod tests {
             &self,
             event_type: &str,
             _schema_version: u32,
-            _durable: bool,
+            _delivery: astrcode_extension_sdk::extension::CustomEventDelivery,
             payload: serde_json::Value,
         ) -> Result<EventDeliveryReceipt, EventSendError> {
             self.record(event_type, payload);
@@ -387,7 +388,7 @@ mod tests {
             &self,
             event_type: &str,
             _schema_version: u32,
-            _durable: bool,
+            _delivery: astrcode_extension_sdk::extension::CustomEventDelivery,
             payload: serde_json::Value,
         ) -> Result<(), EventSendError> {
             self.record(event_type, payload);

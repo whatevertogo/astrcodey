@@ -621,7 +621,7 @@ impl FileSystemSessionRepository {
         Self::with_projects_base(astrcode_dir().join("projects"))
     }
 
-    fn with_projects_base(projects_base: PathBuf) -> Self {
+    pub(crate) fn with_projects_base(projects_base: PathBuf) -> Self {
         if let Err(e) = std::fs::create_dir_all(&projects_base) {
             tracing::warn!(
                 "Failed to create projects dir {}: {e}",
@@ -636,12 +636,7 @@ impl FileSystemSessionRepository {
     }
 
     #[cfg(feature = "testing")]
-    pub fn for_testing(projects_base: PathBuf) -> Self {
-        Self::with_projects_base(projects_base)
-    }
-
-    #[cfg(feature = "testing")]
-    pub async fn fail_next_durable_sync_for_testing(
+    pub(crate) async fn fail_next_durable_sync(
         &self,
         session_id: &SessionId,
     ) -> Result<(), StorageError> {

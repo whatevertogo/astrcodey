@@ -16,6 +16,7 @@ use tokio::{
     sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, oneshot},
     task::JoinSet,
 };
+use tracing::Instrument;
 
 use super::{HostedExtension, supervisor::ExtensionSupervisor};
 use crate::host_router::{ExtensionGenerationGate, ExtensionInstanceId, HostRouter};
@@ -116,14 +117,18 @@ struct RetirementWork {
 /// guard to the retirement supervisor, so cancellation cannot abandon startup rollback.
 pub(super) struct PendingRegistration<'a> {
     supervisor: &'a RetirementSupervisor,
-    extension_id: String,
-    instance_id: ExtensionInstanceId,
-    extension: Option<Arc<dyn Extension>>,
-    tasks: Option<ExtensionTasks>,
-    generation_gate: ExtensionGenerationGate,
+    resources: Option<PendingRegistrationResources>,
     operation_guard: Option<OwnedMutexGuard<()>>,
     operation_timeout: std::time::Duration,
-    host_router: Arc<HostRouter>,
+}
+
+pub(super) struct PendingRegistrationResources {
+    pub(super) extension_id: String,
+    pub(super) instance_id: ExtensionInstanceId,
+    pub(super) extension: Arc<dyn Extension>,
+    pub(super) tasks: ExtensionTasks,
+    pub(super) generation_gate: ExtensionGenerationGate,
+    pub(super) host_router: Arc<HostRouter>,
 }
 
 pub(crate) struct RetirementTicket {
@@ -167,28 +172,28 @@ impl RetirementCompletion {
 
 impl PendingRegistration<'_> {
     fn take_work(&mut self) -> Option<RetirementWork> {
+        let resources = self.resources.take()?;
         Some(RetirementWork {
-            extension_id: self.extension_id.clone(),
-            extension: self.extension.take()?,
-            tasks: self.tasks.take()?,
-            generation_gate: self.generation_gate.clone(),
+            extension_id: resources.extension_id,
+            extension: resources.extension,
+            tasks: resources.tasks,
+            generation_gate: resources.generation_gate,
             publication_lease: None,
             supervisor: None,
-            cleanup_host_resources: Some((Arc::clone(&self.host_router), self.instance_id)),
+            cleanup_host_resources: Some((resources.host_router, resources.instance_id)),
         })
     }
 
     pub(super) fn retire(mut self) -> Result<RetirementTicket, ExtensionRetirementError> {
         let Some(work) = self.take_work() else {
-            return Err(ExtensionRetirementError::new(format!(
-                "pending registration lost startup resources for {}",
-                self.extension_id
-            )));
+            return Err(ExtensionRetirementError::new(
+                "pending registration lost startup resources",
+            ));
         };
         let Some(operation_guard) = self.operation_guard.take() else {
             return Err(ExtensionRetirementError::new(format!(
                 "pending registration lost its lifecycle gate for {}",
-                self.extension_id
+                work.extension_id
             )));
         };
         Ok(self
@@ -198,13 +203,9 @@ impl PendingRegistration<'_> {
 
     pub(super) fn disarm(mut self) -> Result<OwnedMutexGuard<()>, ExtensionRetirementError> {
         let operation_guard = self.operation_guard.take().ok_or_else(|| {
-            ExtensionRetirementError::new(format!(
-                "pending registration lost its lifecycle gate for {}",
-                self.extension_id
-            ))
+            ExtensionRetirementError::new("pending registration lost its lifecycle gate")
         })?;
-        self.extension.take();
-        self.tasks.take();
+        self.resources.take();
         Ok(operation_guard)
     }
 }
@@ -292,25 +293,15 @@ impl RetirementSupervisor {
 
     pub(super) fn pending_registration(
         &self,
-        extension_id: String,
-        instance_id: ExtensionInstanceId,
-        extension: Arc<dyn Extension>,
-        tasks: ExtensionTasks,
-        generation_gate: ExtensionGenerationGate,
+        resources: PendingRegistrationResources,
         operation_guard: OwnedMutexGuard<()>,
         operation_timeout: std::time::Duration,
-        host_router: Arc<HostRouter>,
     ) -> PendingRegistration<'_> {
         PendingRegistration {
             supervisor: self,
-            extension_id,
-            instance_id,
-            extension: Some(extension),
-            tasks: Some(tasks),
-            generation_gate,
+            resources: Some(resources),
             operation_guard: Some(operation_guard),
             operation_timeout,
-            host_router,
         }
     }
 
@@ -432,7 +423,8 @@ impl RetirementSupervisor {
             finished: false,
             _operation_guard: operation_guard,
         };
-        tasks.spawn(async move {
+        let span = tracing::info_span!("extension.retirement", %extension_id, ?reason);
+        let retirement = async move {
             let mut work = work;
             let supervisor = work.supervisor.take();
             let supervisor_control = supervisor.as_ref().map(ExtensionSupervisor::control);
@@ -514,7 +506,8 @@ impl RetirementSupervisor {
                     _completion: completion,
                 });
             }
-        });
+        };
+        tasks.spawn(retirement.instrument(span));
         retirement_id
     }
 

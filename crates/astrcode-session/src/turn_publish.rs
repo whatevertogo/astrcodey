@@ -403,11 +403,10 @@ mod tests {
     };
     use astrcode_extension_sdk::{
         extension::{
-            CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, LifecycleEvent,
-            PostToolUseResult, PreToolUseAdmission, ProviderEvent, ProviderResult,
-            UserMessageEnvelopeResult,
+            ContinueAfterStopResult, ExtensionError, LifecycleEvent, PostToolUseResult,
+            PreToolUseAdmission, ProviderEvent, ProviderResult, UserMessageEnvelopeResult,
             internal::{
-                RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
+                RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
                 RuntimePostToolUseContext, RuntimePreToolUseContext, RuntimeProviderContext,
                 RuntimeUserMessageEnvelopeContext, runtime_pre_tool_use_context,
             },
@@ -554,6 +553,7 @@ mod tests {
             extension_id: "receipt-probe".into(),
             event_type: "receipt.published".into(),
             schema_version: 1,
+            audience: astrcode_core::event::CustomEventAudience::Session,
             causation_id: None,
             cascade_depth: 0,
             payload: serde_json::json!({ "status": "ok" }),
@@ -667,6 +667,7 @@ mod tests {
                     extension_id: "emit-probe".into(),
                     event_type: "emit.probe".into(),
                     schema_version: 1,
+                    audience: astrcode_core::event::CustomEventAudience::Session,
                     causation_id: None,
                     cascade_depth: 0,
                     payload: serde_json::json!({ "probe": true }),
@@ -678,6 +679,7 @@ mod tests {
                     extension_id: "emit-probe".into(),
                     event_type: "emit.live".into(),
                     schema_version: 1,
+                    audience: astrcode_core::event::CustomEventAudience::Session,
                     causation_id: None,
                     cascade_depth: 0,
                     payload: serde_json::json!({ "probe": true }),
@@ -700,14 +702,6 @@ mod tests {
             _ctx: RuntimeProviderContext,
         ) -> Result<ProviderResult, ExtensionError> {
             Ok(ProviderResult::Allow)
-        }
-
-        async fn emit_compact(
-            &self,
-            _event: CompactEvent,
-            _ctx: RuntimeCompactContext,
-        ) -> Result<CompactResult, ExtensionError> {
-            Ok(CompactResult::Allow)
         }
 
         async fn emit_continue_after_stop(
@@ -756,6 +750,7 @@ mod tests {
                             extension_id: "turn-end-probe".into(),
                             event_type: "turn.end.error".into(),
                             schema_version: 1,
+                            audience: astrcode_core::event::CustomEventAudience::Session,
                             causation_id: None,
                             cascade_depth: 0,
                             payload: serde_json::json!({}),

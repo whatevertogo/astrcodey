@@ -899,6 +899,7 @@ fn test_runtime_with_settings(
         scheduler,
         extension_runner,
         runtime_services,
+        transport_profile: Default::default(),
         startup_working_dir: std::env::temp_dir(),
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     })

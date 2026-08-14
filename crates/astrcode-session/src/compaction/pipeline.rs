@@ -3,10 +3,11 @@
 use std::sync::Arc;
 
 use astrcode_context::{
-    CompactError, CompactResult, CompactSummaryRenderOptions, ContextAssembler, ContextSnapshot,
-    PostCompactEnrichInput,
+    CompactError, CompactResult, CompactRetainedContext as ContextRetainedContext,
+    CompactSummaryRenderOptions, ContextAssembler, ContextSnapshot,
     compaction::{
-        LlmCompactAttempt, compact_messages_deterministic, compact_messages_with_fallback,
+        LlmCompactAttempt, append_compact_retained_context, compact_messages_deterministic,
+        compact_messages_with_fallback,
     },
 };
 use astrcode_core::{
@@ -17,8 +18,10 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        CompactEvent, CompactResult as TypedCompactResult, ExtensionError,
-        internal::{RuntimeCompactContext, RuntimeHookCallContext, runtime_compact_context},
+        CompactContributions, CompactRetainedContext, ExtensionError, PreCompactResult,
+        internal::{
+            RuntimeHookCallContext, runtime_post_compact_context, runtime_pre_compact_context,
+        },
     },
     runtime_ports::TurnHooks,
 };
@@ -33,7 +36,7 @@ pub(crate) struct CompactionPipeline<'a> {
     pub context_assembler: Arc<dyn ContextAssembler>,
     pub extension_runner: &'a dyn TurnHooks,
     pub hook_call: RuntimeHookCallContext,
-    pub pre_hook_message_count: usize,
+    pub pre_hook_messages: Vec<LlmMessage>,
     pub tools: &'a [ToolDefinition],
     pub strategy: CompactStrategy,
     pub use_llm: bool,
@@ -96,17 +99,16 @@ impl CompactionPipeline<'_> {
 
     async fn run_inner(&self) -> CompactionPipelineOutcome {
         let trigger = self.strategy.trigger();
-        let custom_instructions = match collect_compact_instructions(
+        let contributions = match collect_compact_contributions(
             self.extension_runner,
-            CompactHookContext {
-                call: self.hook_call.clone(),
-                trigger,
-                message_count: self.pre_hook_message_count,
-            },
+            self.hook_call.clone(),
+            trigger,
+            self.pre_hook_messages.clone(),
+            self.context_assembler.settings().post_compact_max_files,
         )
         .await
         {
-            Ok(PreCompactOutcome::Ready(instructions)) => instructions,
+            Ok(PreCompactOutcome::Ready(contributions)) => contributions,
             Ok(PreCompactOutcome::Blocked(reason)) => {
                 return CompactionPipelineOutcome::Skipped { message: reason };
             },
@@ -164,7 +166,7 @@ impl CompactionPipeline<'_> {
             .or(context_assembler.settings().compact_keep_recent_turns);
         let render_options = CompactSummaryRenderOptions {
             transcript_path,
-            custom_instructions: custom_instructions.clone(),
+            custom_instructions: contributions.instructions.clone(),
         };
         let execution = if self.use_llm {
             let max_output_tokens = context_assembler.settings().compact_max_output_tokens;
@@ -172,7 +174,7 @@ impl CompactionPipeline<'_> {
                 &source_snapshot.messages,
                 Some(&source_snapshot.system_prompt),
                 context_assembler.settings(),
-                &custom_instructions,
+                &contributions.instructions,
                 &render_options,
                 keep_recent_turns,
                 |messages| {
@@ -198,6 +200,15 @@ impl CompactionPipeline<'_> {
         };
 
         let mut compaction = execution.result;
+        append_compact_retained_context(
+            &mut compaction,
+            contributions
+                .retained_context
+                .into_iter()
+                .map(map_retained_context)
+                .collect(),
+            context_assembler.settings(),
+        );
         update_compaction_token_counts(
             self.session,
             &self.llm,
@@ -206,25 +217,6 @@ impl CompactionPipeline<'_> {
             &mut compaction,
         )
         .await;
-        self.session
-            .runtime_services()
-            .post_compact_enricher()
-            .enrich(
-                &mut compaction,
-                PostCompactEnrichInput {
-                    session_id: self.session.id().as_str(),
-                    source_messages: &source_snapshot.messages,
-                    working_dir: &source_model.identity.working_dir,
-                    system_prompt: Some(&source_snapshot.system_prompt),
-                    tools: self.tools,
-                    settings: context_assembler.settings(),
-                    session_store_dir: self
-                        .hook_call
-                        .session_store_dir()
-                        .map(std::path::Path::to_path_buf),
-                },
-            )
-            .await;
 
         if let Err(error) =
             persist_compaction(self.session, &compaction, &source_snapshot, self.strategy).await
@@ -237,13 +229,14 @@ impl CompactionPipeline<'_> {
             };
         }
 
-        let post_hook = CompactHookContext {
-            call: self.hook_call.clone(),
+        if let Err(error) = dispatch_post_compact(
+            self.extension_runner,
+            self.hook_call.clone(),
             trigger,
-            message_count: source_snapshot.messages.len(),
-        };
-        if let Err(error) =
-            dispatch_post_compact(self.extension_runner, post_hook, &compaction).await
+            source_snapshot.messages.len(),
+            &compaction,
+        )
+        .await
         {
             tracing::warn!(error = %error, "PostCompact extension dispatch failed");
         }
@@ -329,63 +322,69 @@ async fn update_compaction_token_counts(
     }
 }
 
-struct CompactHookContext {
-    call: RuntimeHookCallContext,
-    trigger: CompactTrigger,
-    message_count: usize,
-}
-
-impl CompactHookContext {
-    fn build_context(&self, compaction: Option<&CompactResult>) -> RuntimeCompactContext {
-        runtime_compact_context(
-            self.call.clone(),
-            self.trigger,
-            self.message_count,
-            compaction.map(|compaction| compaction.pre_tokens),
-            compaction.map(|compaction| compaction.post_tokens),
-            compaction.map(|compaction| compaction.summary.clone()),
-        )
-    }
-}
-
 enum PreCompactOutcome {
-    Ready(Vec<String>),
+    Ready(CompactContributions),
     Blocked(String),
 }
 
-async fn collect_compact_instructions(
+async fn collect_compact_contributions(
     extension_runner: &dyn TurnHooks,
-    input: CompactHookContext,
+    call: RuntimeHookCallContext,
+    trigger: CompactTrigger,
+    source_messages: Vec<LlmMessage>,
+    retained_file_limit: usize,
 ) -> Result<PreCompactOutcome, ExtensionError> {
     let result = extension_runner
-        .emit_compact(CompactEvent::PreCompact, input.build_context(None))
+        .collect_pre_compact(runtime_pre_compact_context(
+            call,
+            trigger,
+            source_messages,
+            retained_file_limit,
+        ))
         .await?;
     Ok(match result {
-        TypedCompactResult::Contributions(contributions) => PreCompactOutcome::Ready(
-            contributions
+        PreCompactResult::Contributions(mut contributions) => {
+            contributions.instructions = contributions
                 .instructions
                 .into_iter()
                 .map(|instruction| instruction.trim().to_string())
                 .filter(|instruction| !instruction.is_empty())
-                .collect(),
-        ),
-        TypedCompactResult::Block { reason } => PreCompactOutcome::Blocked(reason),
-        TypedCompactResult::Allow => PreCompactOutcome::Ready(Vec::new()),
+                .collect();
+            PreCompactOutcome::Ready(contributions)
+        },
+        PreCompactResult::Block { reason } => PreCompactOutcome::Blocked(reason),
+        PreCompactResult::Allow => PreCompactOutcome::Ready(CompactContributions::default()),
     })
 }
 
 async fn dispatch_post_compact(
     extension_runner: &dyn TurnHooks,
-    input: CompactHookContext,
+    call: RuntimeHookCallContext,
+    trigger: CompactTrigger,
+    message_count: usize,
     compaction: &CompactResult,
 ) -> Result<(), ExtensionError> {
     extension_runner
-        .emit_compact(
-            CompactEvent::PostCompact,
-            input.build_context(Some(compaction)),
-        )
-        .await?;
-    Ok(())
+        .notify_post_compact(runtime_post_compact_context(
+            call,
+            trigger,
+            message_count,
+            compaction.pre_tokens,
+            compaction.post_tokens,
+            compaction.summary.clone(),
+        ))
+        .await
+}
+
+fn map_retained_context(contribution: CompactRetainedContext) -> ContextRetainedContext {
+    match contribution {
+        CompactRetainedContext::File { path, content } => {
+            ContextRetainedContext::File { path, content }
+        },
+        CompactRetainedContext::Note { title, body } => {
+            ContextRetainedContext::Note { title, body }
+        },
+    }
 }
 
 async fn request_compact_summary(

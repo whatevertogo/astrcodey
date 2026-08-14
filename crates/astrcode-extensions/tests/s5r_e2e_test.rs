@@ -763,6 +763,7 @@ async fn s5r_loader_discovers_manifest() {
         &ExtensionLoadContext {
             working_dir: Some(root.path().to_string_lossy().into_owned()),
             host_router: Some(minimal_router()),
+            transport_profile: Default::default(),
         },
         &[&source],
     )

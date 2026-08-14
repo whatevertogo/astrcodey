@@ -135,7 +135,10 @@ impl ExtensionStopContext {
     }
 }
 
-/// 宿主管理的插件后台任务集合。
+/// 宿主管理的插件代际任务集合。
+///
+/// 扩展只能在 [`super::ExtensionStartContext`] 中取得它。普通 handler 应把工作提交给
+/// 启动阶段创建的 worker，而不是让 turn/call 上下文产生代际任务。
 #[derive(Clone)]
 pub struct ExtensionTasks {
     extension_id: Arc<str>,

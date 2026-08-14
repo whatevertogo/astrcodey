@@ -4,11 +4,13 @@
 
 pub mod config_store;
 mod error;
-pub mod event_log;
+mod event_log;
 #[cfg(feature = "testing")]
 pub mod in_memory;
 pub mod session_repo;
 pub(crate) mod snapshot;
+#[cfg(feature = "testing")]
+pub mod testing;
 pub(crate) mod tool_artifacts;
 mod traits;
 mod types;

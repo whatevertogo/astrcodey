@@ -44,20 +44,6 @@ pub(crate) struct ResolvedToolRegistrySnapshot {
 }
 
 impl Session {
-    /// Resolves the immutable tool registry used by one operation or turn.
-    ///
-    /// The registry is returned to the caller and pinned for the operation.
-    /// The Extension Runtime owns catalog discovery and caching; Session only applies its durable
-    /// selection and pins the resulting registry for this operation.
-    pub async fn tool_registry_snapshot(
-        &self,
-        working_dir: &str,
-    ) -> Result<Arc<ToolRegistry>, SessionError> {
-        let runtime_view = self.runtime_services.pin_extension_view().await?;
-        self.tool_registry_snapshot_for_view(&runtime_view, working_dir)
-            .await
-    }
-
     pub(crate) async fn tool_registry_snapshot_for_view(
         &self,
         runtime_view: &TurnExtensionView,

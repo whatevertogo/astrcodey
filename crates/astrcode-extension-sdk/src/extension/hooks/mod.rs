@@ -11,35 +11,37 @@ pub use commands::{
     ExtensionCommandResult, SessionCommandIntent, SessionCommandKind, SlashCommand,
 };
 pub use contexts::{
-    CommandCompletionContext, CommandContext, CommandDiscoveryContext, CompactContext,
-    CompactPayload, ContinueAfterStopContext, ContinueAfterStopPayload, HookContext,
-    LifecycleContext, LifecyclePayload, PostToolUseContext, PostToolUsePayload, PreToolUseContext,
-    PreToolUsePayload, PromptBuildContext, PromptBuildPayload, ProviderContext, ProviderPayload,
-    ProviderSettlementContext, ProviderSettlementPayload, ToolDiscoveryContext,
-    UserMessageEnvelopeContext, UserMessageEnvelopePayload,
+    CommandCompletionContext, CommandContext, CommandDiscoveryContext, ContinueAfterStopContext,
+    ContinueAfterStopPayload, HookContext, LifecycleContext, LifecyclePayload, PostCompactContext,
+    PostCompactPayload, PostToolUseContext, PostToolUsePayload, PreCompactContext,
+    PreCompactPayload, PreToolUseContext, PreToolUsePayload, PromptBuildContext,
+    PromptBuildPayload, ProviderContext, ProviderPayload, ProviderSettlementContext,
+    ProviderSettlementPayload, ToolDiscoveryContext, UserMessageEnvelopeContext,
+    UserMessageEnvelopePayload,
 };
 // `extension::internal` is the only public path to dispatcher-owned hook inputs.
 pub use contexts::{
-    HookInput, RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
-    RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
-    RuntimePromptBuildContext, RuntimeProviderContext, RuntimeProviderSettlementContext,
-    RuntimeUserMessageEnvelopeContext,
+    HookInput, RuntimeContinueAfterStopContext, RuntimeHookCallContext, RuntimeLifecycleContext,
+    RuntimePostCompactContext, RuntimePostToolUseContext, RuntimePreCompactContext,
+    RuntimePreToolUseContext, RuntimePromptBuildContext, RuntimeProviderContext,
+    RuntimeProviderSettlementContext, RuntimeUserMessageEnvelopeContext,
 };
 pub use handlers::{
-    CommandDiscovery, CommandDiscoveryHandler, CommandHandler, CompactHandler,
-    ContinueAfterStopHandler, DiscoveredCommand, DiscoveredTool, LifecycleHandler,
-    PostToolUseHandler, PreToolUseHandler, PromptBuildHandler, ProviderContributionHandler,
+    CommandDiscovery, CommandDiscoveryHandler, CommandHandler, ContinueAfterStopHandler,
+    DiscoveredCommand, DiscoveredTool, LifecycleHandler, PostCompactHandler, PostToolUseHandler,
+    PreCompactHandler, PreToolUseHandler, PromptBuildHandler, ProviderContributionHandler,
     ProviderHandler, ToolDiscovery, ToolDiscoveryHandler, ToolHandler, ToolInputTransformHandler,
     UserMessageEnvelopeHandler,
 };
 pub use results::{
-    CompactResult, ContinueAfterStopResult, HookResult, PostToolUseResult, PreToolUseAdmission,
+    ContinueAfterStopResult, HookResult, PostToolUseResult, PreCompactResult, PreToolUseAdmission,
     PreToolUseRequirement, PreToolUseResult, PreparedProviderContribution, PreparedProviderEffect,
     ProviderResult, ToolInputTransformResult, UserMessageEnvelopeResult,
 };
 pub use types::{
-    CompactContributions, CompactEvent, ContinueAfterStopLimit, ContinueAfterStopOptions,
-    ContinueAfterStopRegistration, ExchangeSummary, ExtensionError, HookMode, PromptContributions,
-    ProviderContributionId, ProviderEvent, ProviderRequestId, StatusItemUpdatePayload,
-    ToolHookRegistration, ToolHookTarget, ToolUseRegistration, UserMessageEnvelopeRegistration,
+    CompactContributions, CompactEvent, CompactRetainedContext, ContinueAfterStopLimit,
+    ContinueAfterStopOptions, ContinueAfterStopRegistration, ExchangeSummary, ExtensionError,
+    HookMode, PromptContributions, ProviderContributionId, ProviderEvent, ProviderRequestId,
+    StatusItemUpdatePayload, ToolHookRegistration, ToolHookTarget, ToolUseRegistration,
+    UserMessageEnvelopeRegistration,
 };

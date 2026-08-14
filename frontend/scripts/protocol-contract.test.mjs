@@ -199,15 +199,21 @@ assert.throws(
   ProtocolDecodeError
 )
 
-// User blocks omit `attachments` when empty (serde skip_serializing_if).
-const userWithoutAttachments = decodeConversationBlock({
+const userWithoutAttachments = {
   kind: 'user',
   id: 'u-1',
   text: 'hello',
+}
+assert.throws(
+  () => decodeConversationBlock(userWithoutAttachments),
+  ProtocolDecodeError
+)
+const userWithEmptyAttachments = decodeConversationBlock({
+  ...userWithoutAttachments,
+  attachments: [],
 })
-assert.equal(userWithoutAttachments.kind, 'user')
-assert.equal(userWithoutAttachments.text, 'hello')
-assert.equal(userWithoutAttachments.attachments, undefined)
+assert.equal(userWithEmptyAttachments.kind, 'user')
+assert.deepEqual(userWithEmptyAttachments.attachments, [])
 
 for (const status of ['failed', 'cancelled']) {
   const toolBlock = decodeConversationBlock({

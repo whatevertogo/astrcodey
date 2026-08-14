@@ -220,6 +220,7 @@ mod tests {
                 extension_id: "extension".into(),
                 event_type: "event".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: serde_json::json!(["scalar-compatible"]),

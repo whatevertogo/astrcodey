@@ -2,9 +2,9 @@
 
 use astrcode_extension_sdk::{
     extension::{
-        CommandCompletions, CompactContributions, CompactResult, ContinueAfterStopResult,
-        ExtensionCommandResult, ExtensionError, ExtensionHttpResponse, HookResult,
-        PostToolUseResult, PreToolUseResult, PreparedProviderContribution, PreparedProviderEffect,
+        CommandCompletions, CompactContributions, ContinueAfterStopResult, ExtensionCommandResult,
+        ExtensionError, ExtensionHttpResponse, HookResult, PostToolUseResult, PreCompactResult,
+        PreToolUseResult, PreparedProviderContribution, PreparedProviderEffect,
         PromptContributions, ProviderContributionId, ProviderResult, ToolInputTransformResult,
     },
     tool::ToolResult,
@@ -192,15 +192,29 @@ pub(crate) fn parse_prompt_build_result(
         .map_err(|e| ExtensionError::Internal(format!("parse PromptContributions: {e}")))
 }
 
-pub(crate) fn parse_compact_result(resp: &HandlerResult) -> Result<CompactResult, ExtensionError> {
+pub(crate) fn parse_pre_compact_result(
+    resp: &HandlerResult,
+) -> Result<PreCompactResult, ExtensionError> {
     match resp.effect {
-        HandlerEffect::Ok => return Ok(CompactResult::Allow),
+        HandlerEffect::Ok => return Ok(PreCompactResult::Allow),
         HandlerEffect::CompactContributions => {},
-        effect => return Err(unexpected_effect("compact", effect)),
+        effect => return Err(unexpected_effect("pre_compact", effect)),
     }
     let contributions: CompactContributions = serde_json::from_value(resp.data.clone())
         .map_err(|e| ExtensionError::Internal(format!("parse CompactContributions: {e}")))?;
-    Ok(CompactResult::Contributions(contributions))
+    Ok(PreCompactResult::Contributions(contributions))
+}
+
+pub(crate) fn parse_post_compact_result(resp: &HandlerResult) -> Result<(), ExtensionError> {
+    if resp.effect != HandlerEffect::Ok {
+        return Err(unexpected_effect("post_compact", resp.effect));
+    }
+    if !resp.data.is_null() {
+        return Err(ExtensionError::Internal(
+            "post_compact notification must return no data".into(),
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn parse_lifecycle_result(resp: &HandlerResult) -> Result<HookResult, ExtensionError> {
@@ -287,6 +301,22 @@ mod tests {
                 "effect": {"message_effect": "unchanged"}
             }),
         );
+        let compact = HandlerResult::effect(
+            HandlerEffect::CompactContributions,
+            serde_json::json!({
+                "instructions": ["preserve the plan"],
+                "retained_context": [
+                    {"kind": "note", "title": "Plan", "body": "typed boundary"},
+                    {"kind": "file", "path": "src/lib.rs", "content": "fresh"}
+                ]
+            }),
+        );
+        let incomplete_compact = HandlerResult::effect(
+            HandlerEffect::CompactContributions,
+            serde_json::json!({"instructions": []}),
+        );
+        let post_with_data =
+            HandlerResult::effect(HandlerEffect::Ok, serde_json::json!({"ignored": true}));
 
         assert!(parse_pre_tool_use_result(&missing_reason).is_err());
         assert!(parse_lifecycle_result(&invalid_reason).is_err());
@@ -311,5 +341,15 @@ mod tests {
         assert_eq!(contribution_id.as_str(), "pending-1");
         assert!(matches!(effect, PreparedProviderEffect::Unchanged));
         assert!(parse_provider_contribution(&invalid_contribution).is_err());
+        assert!(matches!(
+            parse_pre_compact_result(&compact),
+            Ok(PreCompactResult::Contributions(contributions))
+                if contributions.instructions == ["preserve the plan"]
+                    && contributions.retained_context.len() == 2
+        ));
+        assert!(parse_pre_compact_result(&incomplete_compact).is_err());
+        assert!(parse_post_compact_result(&HandlerResult::ok()).is_ok());
+        assert!(parse_post_compact_result(&post_with_data).is_err());
+        assert!(parse_post_compact_result(&compact).is_err());
     }
 }

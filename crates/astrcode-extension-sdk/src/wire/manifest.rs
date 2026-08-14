@@ -7,11 +7,13 @@ use crate::wire::{
     ExtensionCapability, HandlerId,
     custom_event::{CustomEventDeclaration, CustomEventSubscription},
     extension_http::ExtensionHttpRoute,
+    transport::TransportFeature,
 };
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InitializeManifest {
+    pub required_transport_features: Vec<TransportFeature>,
     #[serde(default)]
     pub capabilities: Vec<ExtensionCapability>,
     #[serde(default)]
@@ -294,6 +296,7 @@ mod tests {
     #[test]
     fn initialize_manifest_preserves_required_shapes_and_rejects_unknown_values() {
         let manifest = InitializeManifest {
+            required_transport_features: vec![TransportFeature::AuthenticatedHttp],
             capabilities: Vec::new(),
             tools: Vec::new(),
             hooks: vec![ManifestHook {
@@ -332,13 +335,32 @@ mod tests {
             command["execution"],
             serde_json::json!({"kind": "host", "command": "select_model"})
         );
-        serde_json::from_value::<InitializeManifest>(value).unwrap();
+        let decoded = serde_json::from_value::<InitializeManifest>(value.clone()).unwrap();
+        assert_eq!(
+            decoded.required_transport_features,
+            [TransportFeature::AuthenticatedHttp]
+        );
+
+        let mut missing_transport_requirements = value;
+        missing_transport_requirements
+            .as_object_mut()
+            .unwrap()
+            .remove("required_transport_features");
+        assert!(
+            serde_json::from_value::<InitializeManifest>(missing_transport_requirements).is_err()
+        );
 
         for invalid in [
-            serde_json::json!({"future_field": true}),
-            serde_json::json!({"hooks": [{"on": "unknown", "mode": "blocking"}]}),
-            serde_json::json!({"hooks": [{"on": "turn_end", "mode": "unknown"}]}),
-            serde_json::json!({"tools": [{
+            serde_json::json!({"required_transport_features": [], "future_field": true}),
+            serde_json::json!({
+                "required_transport_features": [],
+                "hooks": [{"on": "unknown", "mode": "blocking"}]
+            }),
+            serde_json::json!({
+                "required_transport_features": [],
+                "hooks": [{"on": "turn_end", "mode": "unknown"}]
+            }),
+            serde_json::json!({"required_transport_features": [], "tools": [{
                 "name": "tool",
                 "description": "",
                 "parameters": {},
@@ -371,9 +393,10 @@ mod tests {
             let mut incomplete = command.clone();
             incomplete.as_object_mut().unwrap().remove(required_field);
             assert!(
-                serde_json::from_value::<InitializeManifest>(
-                    serde_json::json!({"commands": [incomplete]})
-                )
+                serde_json::from_value::<InitializeManifest>(serde_json::json!({
+                    "required_transport_features": [],
+                    "commands": [incomplete]
+                }))
                 .is_err(),
                 "missing command field {required_field} must be rejected"
             );

@@ -3,11 +3,22 @@
 use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION: u32 = 1;
-pub const DEFAULT_CUSTOM_EVENT_DURABLE: bool = true;
 pub const DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const MAX_CUSTOM_EVENT_PAYLOAD_BYTES: usize = 1024 * 1024;
 /// Shared subscription-id limit for in-process and worker registration paths.
 pub const MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN: usize = 64;
+
+/// Storage and transport scope selected once in the producer declaration.
+///
+/// There is deliberately no `GlobalDurable` variant: global fan-out is a live transport concern,
+/// while durable events always belong to exactly one session journal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomEventDelivery {
+    SessionDurable,
+    SessionLive,
+    GlobalLive,
+}
 
 /// Custom-event type declared by an extension.
 ///
@@ -17,11 +28,8 @@ pub const MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN: usize = 64;
 #[serde(deny_unknown_fields)]
 pub struct CustomEventDeclaration {
     pub event_type: String,
-    #[serde(default = "default_custom_event_schema_version")]
     pub schema_version: u32,
-    #[serde(default = "default_custom_event_durable")]
-    pub durable: bool,
-    #[serde(default = "default_custom_event_max_payload_bytes")]
+    pub delivery: CustomEventDelivery,
     pub max_payload_bytes: usize,
 }
 
@@ -38,7 +46,6 @@ pub enum CustomEventSourceFilter {
 #[serde(deny_unknown_fields)]
 pub struct CustomEventSubscription {
     pub id: String,
-    #[serde(default = "default_consumer_version")]
     pub consumer_version: u32,
     pub event_type: String,
     pub source: CustomEventSourceFilter,
@@ -83,30 +90,56 @@ const fn default_consumer_version() -> u32 {
     1
 }
 
-const fn default_custom_event_schema_version() -> u32 {
-    DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION
-}
-
-const fn default_custom_event_durable() -> bool {
-    DEFAULT_CUSTOM_EVENT_DURABLE
-}
-
-const fn default_custom_event_max_payload_bytes() -> usize {
-    DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn declarations_are_strict() {
-        assert!(
-            serde_json::from_value::<CustomEventDeclaration>(serde_json::json!({
-                "event_type": "test.completed",
-                "unexpected": true
-            }))
-            .is_err()
+    fn custom_event_contracts_are_strict() {
+        let declaration = serde_json::json!({
+            "event_type": "test.completed",
+            "schema_version": 1,
+            "delivery": "global_live",
+            "max_payload_bytes": 1024
+        });
+        assert_eq!(
+            serde_json::from_value::<CustomEventDeclaration>(declaration.clone())
+                .unwrap()
+                .delivery,
+            CustomEventDelivery::GlobalLive
         );
+
+        for field in [
+            "event_type",
+            "schema_version",
+            "delivery",
+            "max_payload_bytes",
+        ] {
+            let mut incomplete = declaration.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<CustomEventDeclaration>(incomplete).is_err(),
+                "missing {field} must be rejected"
+            );
+        }
+
+        let mut unknown = declaration;
+        unknown["unexpected"] = serde_json::Value::Bool(true);
+        assert!(serde_json::from_value::<CustomEventDeclaration>(unknown).is_err());
+
+        let subscription = serde_json::json!({
+            "id": "review-consumer",
+            "consumer_version": 1,
+            "event_type": "review.completed",
+            "source": { "kind": "any" }
+        });
+        for field in ["id", "consumer_version", "event_type", "source"] {
+            let mut incomplete = subscription.clone();
+            incomplete.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<CustomEventSubscription>(incomplete).is_err(),
+                "missing subscription field {field} must be rejected"
+            );
+        }
     }
 }

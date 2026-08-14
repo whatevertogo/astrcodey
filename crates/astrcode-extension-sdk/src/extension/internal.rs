@@ -15,20 +15,21 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    CommandCompletionContext, CommandContext, CommandDiscoveryContext, CompactPayload,
-    ContinueAfterStopPayload, CustomEventContext, CustomEventDeclaration, CustomEventEmitter,
+    CommandCompletionContext, CommandContext, CommandDiscoveryContext, ContinueAfterStopPayload,
+    CustomEventContext, CustomEventDeclaration, CustomEventDelivery, CustomEventEmitter,
     ExchangeSummary, ExtensionCallContext, ExtensionConfig, ExtensionHttpRequest,
     ExtensionHttpRoute, ExtensionPaths, ExtensionStartContext, ExtensionStopContext,
-    ExtensionTasks, HookContext, HttpContext, LifecyclePayload, PostToolUsePayload,
-    PreToolUsePayload, PromptBuildPayload, ProviderContributionId, ProviderPayload,
-    ProviderRequestId, ProviderSettlementPayload, StopReason, ToolContext, ToolDiscoveryContext,
-    ToolPlanContext, UserMessageEnvelopePayload,
+    ExtensionTasks, HookContext, HttpContext, LifecyclePayload, PostCompactPayload,
+    PostToolUsePayload, PreCompactPayload, PreToolUsePayload, PromptBuildPayload,
+    ProviderContributionId, ProviderPayload, ProviderRequestId, ProviderSettlementPayload,
+    StopReason, ToolContext, ToolDiscoveryContext, ToolPlanContext, UserMessageEnvelopePayload,
 };
 pub use super::{
     hooks::{
-        HookInput, RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
-        RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
-        RuntimePromptBuildContext, RuntimeProviderContext, RuntimeProviderSettlementContext,
+        HookInput, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
+        RuntimeLifecycleContext, RuntimePostCompactContext, RuntimePostToolUseContext,
+        RuntimePreCompactContext, RuntimePreToolUseContext, RuntimePromptBuildContext,
+        RuntimeProviderContext, RuntimeProviderSettlementContext,
         RuntimeUserMessageEnvelopeContext,
     },
     registration_validation::{
@@ -53,7 +54,7 @@ pub trait CustomEventSink: Send + Sync {
         &self,
         event_type: &str,
         schema_version: u32,
-        durable: bool,
+        delivery: CustomEventDelivery,
         payload: serde_json::Value,
     ) -> Result<EventDeliveryReceipt, EventSendError>;
 
@@ -61,7 +62,7 @@ pub trait CustomEventSink: Send + Sync {
         &self,
         event_type: &str,
         schema_version: u32,
-        durable: bool,
+        delivery: CustomEventDelivery,
         payload: serde_json::Value,
     ) -> Result<(), EventSendError>;
 }
@@ -114,10 +115,9 @@ pub fn extension_call_context(
     paths: ExtensionPaths,
     host: ExtensionHost,
     events: CustomEventEmitter,
-    tasks: ExtensionTasks,
     cancellation: CancellationToken,
 ) -> ExtensionCallContext {
-    ExtensionCallContext::from_runtime(extension_id, paths, host, events, tasks, cancellation)
+    ExtensionCallContext::from_runtime(extension_id, paths, host, events, cancellation)
 }
 
 pub fn retain_call_cancellation(context: ExtensionCallContext) -> ExtensionCallContext {
@@ -126,10 +126,11 @@ pub fn retain_call_cancellation(context: ExtensionCallContext) -> ExtensionCallC
 
 pub fn extension_start_context(
     call: ExtensionCallContext,
+    tasks: ExtensionTasks,
     config: ExtensionConfig,
     startup_working_dir: Option<PathBuf>,
 ) -> ExtensionStartContext {
-    ExtensionStartContext::from_runtime(call, config, startup_working_dir)
+    ExtensionStartContext::from_runtime(call, tasks, config, startup_working_dir)
 }
 
 pub fn custom_event_emitter(
@@ -298,17 +299,29 @@ pub fn runtime_prompt_build_context(
     HookInput::new(call, PromptBuildPayload::new(tools))
 }
 
-pub fn runtime_compact_context(
+pub fn runtime_pre_compact_context(
+    call: RuntimeHookCallContext,
+    trigger: astrcode_core::compaction::CompactTrigger,
+    source_messages: Vec<LlmMessage>,
+    retained_file_limit: usize,
+) -> RuntimePreCompactContext {
+    HookInput::new(
+        call,
+        PreCompactPayload::new(trigger, source_messages, retained_file_limit),
+    )
+}
+
+pub fn runtime_post_compact_context(
     call: RuntimeHookCallContext,
     trigger: astrcode_core::compaction::CompactTrigger,
     message_count: usize,
-    pre_tokens: Option<usize>,
-    post_tokens: Option<usize>,
-    summary: Option<String>,
-) -> RuntimeCompactContext {
+    pre_tokens: usize,
+    post_tokens: usize,
+    summary: String,
+) -> RuntimePostCompactContext {
     HookInput::new(
         call,
-        CompactPayload::new(trigger, message_count, pre_tokens, post_tokens, summary),
+        PostCompactPayload::new(trigger, message_count, pre_tokens, post_tokens, summary),
     )
 }
 

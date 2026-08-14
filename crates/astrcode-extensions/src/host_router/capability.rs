@@ -62,7 +62,9 @@ fn backend_available(
             router.process.is_available(ctx.working_dir.as_deref())
         },
         HostBackendRequirement::NetworkService => router.network.is_available(),
-        HostBackendRequirement::PublicHttpDispatcher => router.extension_http.is_available(),
+        HostBackendRequirement::PublicHttpDispatcher => router
+            .extension_http
+            .is_available(ctx.public_http_dispatcher.as_ref()),
     }
 }
 

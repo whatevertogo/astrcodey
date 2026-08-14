@@ -32,27 +32,28 @@ pub use call_context::{
     WorkspaceCallContext,
 };
 pub use events::{
-    CustomEventContext, CustomEventDeclaration, CustomEventDisposition, CustomEventEmitError,
-    CustomEventEmitter, CustomEventHandler, CustomEventSourceFilter, CustomEventSubscription,
-    DEFAULT_CUSTOM_EVENT_DURABLE, DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
+    CustomEventContext, CustomEventDeclaration, CustomEventDelivery, CustomEventDisposition,
+    CustomEventEmitError, CustomEventEmitter, CustomEventHandler, CustomEventSourceFilter,
+    CustomEventSubscription, DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
     DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION, LifecycleEvent, MAX_CUSTOM_EVENT_PAYLOAD_BYTES,
     MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN,
 };
 pub use hooks::{
     CommandAvailability, CommandCompletionContext, CommandCompletionItem, CommandCompletions,
     CommandContext, CommandDiscovery, CommandDiscoveryContext, CommandDiscoveryHandler,
-    CommandExecution, CommandHandler, CompactContext, CompactContributions, CompactEvent,
-    CompactHandler, CompactPayload, CompactResult, ContinueAfterStopContext,
-    ContinueAfterStopHandler, ContinueAfterStopLimit, ContinueAfterStopOptions,
-    ContinueAfterStopPayload, ContinueAfterStopRegistration, ContinueAfterStopResult,
-    DiscoveredCommand, DiscoveredTool, ExchangeSummary, ExtensionCommandResult, ExtensionError,
-    HookContext, HookMode, HookResult, LifecycleContext, LifecycleHandler, LifecyclePayload,
+    CommandExecution, CommandHandler, CompactContributions, CompactEvent, CompactRetainedContext,
+    ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopLimit,
+    ContinueAfterStopOptions, ContinueAfterStopPayload, ContinueAfterStopRegistration,
+    ContinueAfterStopResult, DiscoveredCommand, DiscoveredTool, ExchangeSummary,
+    ExtensionCommandResult, ExtensionError, HookContext, HookMode, HookResult, LifecycleContext,
+    LifecycleHandler, LifecyclePayload, PostCompactContext, PostCompactHandler, PostCompactPayload,
     PostToolUseContext, PostToolUseHandler, PostToolUsePayload, PostToolUseResult,
-    PreToolUseAdmission, PreToolUseContext, PreToolUseHandler, PreToolUsePayload,
-    PreToolUseRequirement, PreToolUseResult, PreparedProviderContribution, PreparedProviderEffect,
-    PromptBuildContext, PromptBuildHandler, PromptBuildPayload, PromptContributions,
-    ProviderContext, ProviderContributionHandler, ProviderContributionId, ProviderEvent,
-    ProviderHandler, ProviderPayload, ProviderRequestId, ProviderResult, ProviderSettlementContext,
+    PreCompactContext, PreCompactHandler, PreCompactPayload, PreCompactResult, PreToolUseAdmission,
+    PreToolUseContext, PreToolUseHandler, PreToolUsePayload, PreToolUseRequirement,
+    PreToolUseResult, PreparedProviderContribution, PreparedProviderEffect, PromptBuildContext,
+    PromptBuildHandler, PromptBuildPayload, PromptContributions, ProviderContext,
+    ProviderContributionHandler, ProviderContributionId, ProviderEvent, ProviderHandler,
+    ProviderPayload, ProviderRequestId, ProviderResult, ProviderSettlementContext,
     ProviderSettlementPayload, SessionCommandIntent, SessionCommandKind, SlashCommand,
     StatusItemUpdatePayload, ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler,
     ToolHandler, ToolHookRegistration, ToolHookTarget, ToolInputTransformHandler,
@@ -79,4 +80,7 @@ pub use runtime::{
 pub use tool_context::ToolContext;
 pub use tool_plan_context::ToolPlanContext;
 
-pub use crate::manifest::{ExtensionManifest, ExtensionManifestError};
+pub use crate::{
+    manifest::{ExtensionManifest, ExtensionManifestError},
+    transport::TransportFeature,
+};

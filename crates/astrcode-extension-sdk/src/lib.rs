@@ -55,6 +55,7 @@ pub mod model_stream;
 pub mod runtime_ports;
 pub mod s5r;
 pub mod session;
+pub mod transport;
 pub mod wire;
 
 pub use wire::WireErrorCode;
@@ -74,9 +75,9 @@ pub mod prelude {
         extension::{
             CommandAvailability, CommandCompletionContext, CommandContext, CommandDiscovery,
             CommandDiscoveryContext, CommandDiscoveryHandler, CommandExecution, CommandHandler,
-            CompactContext, CompactContributions, CompactEvent, CompactHandler, CompactResult,
-            ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopLimit,
-            ContinueAfterStopOptions, ContinueAfterStopResult, CustomEventContext,
+            CompactContributions, CompactEvent, CompactRetainedContext, ContinueAfterStopContext,
+            ContinueAfterStopHandler, ContinueAfterStopLimit, ContinueAfterStopOptions,
+            ContinueAfterStopResult, CustomEventContext, CustomEventDelivery,
             CustomEventDisposition, CustomEventEmitError, CustomEventEmitter, CustomEventHandler,
             CustomEventSubscription, DiscoveredCommand, DiscoveredTool, Extension, ExtensionCall,
             ExtensionCallContext, ExtensionCapability, ExtensionCommandResult, ExtensionConfig,
@@ -84,17 +85,18 @@ pub mod prelude {
             ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
             ExtensionHttpRoute, ExtensionManifest, ExtensionPathError, ExtensionPaths,
             ExtensionStartContext, ExtensionTaskError, ExtensionTasks, HookMode, HookResult,
-            HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler, PostToolUseContext,
-            PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
-            PreToolUseResult, PromptBuildContext, PromptBuildHandler, PromptContributions,
-            PreparedProviderContribution, PreparedProviderEffect, ProviderContext,
-            ProviderContributionHandler, ProviderContributionId, ProviderEvent, ProviderHandler,
-            ProviderRequestId, ProviderResult, ProviderSettlementContext, Registrar,
-            SessionCommandIntent, SessionCommandKind, SlashCommand,
-            StatusItemUpdatePayload, StopReason, ToolContext, ToolDiscovery,
-            ToolDiscoveryContext, ToolDiscoveryHandler,
-            ToolHandler, ToolInputTransformHandler, ToolInputTransformResult, ToolPlanContext,
-            UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+            HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler, PostCompactContext,
+            PostCompactHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
+            PreCompactContext, PreCompactHandler, PreCompactResult, PreToolUseContext,
+            PreToolUseHandler, PreToolUseResult, PreparedProviderContribution,
+            PreparedProviderEffect, PromptBuildContext, PromptBuildHandler, PromptContributions,
+            ProviderContext, ProviderContributionHandler, ProviderContributionId, ProviderEvent,
+            ProviderHandler, ProviderRequestId, ProviderResult, ProviderSettlementContext,
+            Registrar, SessionCommandIntent, SessionCommandKind, SlashCommand,
+            StatusItemUpdatePayload, StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext,
+            ToolDiscoveryHandler, ToolHandler, ToolInputTransformHandler, ToolInputTransformResult,
+            ToolPlanContext, TransportFeature, UserMessageEnvelopeContext,
+            UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
         },
         host::{
             ExtensionHost, ExtensionHttpClient, HostConfigureSessionToolsOutput,

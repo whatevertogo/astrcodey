@@ -12,10 +12,9 @@ use super::{
     internal::CustomEventSink,
 };
 pub use crate::wire::custom_event::{
-    CustomEventDeclaration, CustomEventSourceFilter, CustomEventSubscription,
-    DEFAULT_CUSTOM_EVENT_DURABLE, DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES,
-    DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION, MAX_CUSTOM_EVENT_PAYLOAD_BYTES,
-    MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN,
+    CustomEventDeclaration, CustomEventDelivery, CustomEventSourceFilter, CustomEventSubscription,
+    DEFAULT_CUSTOM_EVENT_MAX_PAYLOAD_BYTES, DEFAULT_CUSTOM_EVENT_SCHEMA_VERSION,
+    MAX_CUSTOM_EVENT_PAYLOAD_BYTES, MAX_CUSTOM_EVENT_SUBSCRIPTION_ID_LEN,
 };
 use crate::wire::effects::{HandlerEffect, HandlerResult};
 // ─── Lifecycle Events ────────────────────────────────────────────────────
@@ -170,7 +169,7 @@ pub trait CustomEventHandler: Send + Sync {
 /// Extension-scoped event emitter with immutable declaration attribution.
 ///
 /// The runtime constructs this value from the same registration aggregate used by dispatch.
-/// Authors choose only the event name and payload; schema version and durability come from the
+/// Authors choose only the event name and payload; schema version and delivery come from the
 /// declaration and cannot be changed per emission.
 #[derive(Clone, Default)]
 pub struct CustomEventEmitter {
@@ -209,7 +208,7 @@ impl CustomEventEmitter {
             .emit(
                 event_type,
                 declaration.schema_version,
-                declaration.durable,
+                declaration.delivery,
                 payload,
             )
             .await
@@ -231,7 +230,7 @@ impl CustomEventEmitter {
             .try_emit(
                 event_type,
                 declaration.schema_version,
-                declaration.durable,
+                declaration.delivery,
                 payload,
             )
             .map_err(|error| map_send_error(event_type, error))
@@ -350,7 +349,7 @@ mod emitter_tests {
             &self,
             event_type: &str,
             schema_version: u32,
-            _durable: bool,
+            _delivery: CustomEventDelivery,
             payload: serde_json::Value,
         ) -> Result<EventDeliveryReceipt, EventSendError> {
             self.record(event_type, schema_version, payload);
@@ -361,7 +360,7 @@ mod emitter_tests {
             &self,
             event_type: &str,
             schema_version: u32,
-            _durable: bool,
+            _delivery: CustomEventDelivery,
             payload: serde_json::Value,
         ) -> Result<(), EventSendError> {
             self.record(event_type, schema_version, payload);
@@ -376,7 +375,7 @@ mod emitter_tests {
             [CustomEventDeclaration {
                 event_type: "review.completed".into(),
                 schema_version: 3,
-                durable: true,
+                delivery: CustomEventDelivery::SessionDurable,
                 max_payload_bytes: 1024,
             }],
             Some(sink.clone()),
@@ -429,7 +428,7 @@ mod emitter_tests {
             [CustomEventDeclaration {
                 event_type: "review.completed".into(),
                 schema_version: 1,
-                durable: false,
+                delivery: CustomEventDelivery::SessionLive,
                 max_payload_bytes: 1024,
             }],
             None,
@@ -443,7 +442,7 @@ mod emitter_tests {
             [CustomEventDeclaration {
                 event_type: "review.completed".into(),
                 schema_version: 1,
-                durable: false,
+                delivery: CustomEventDelivery::SessionLive,
                 max_payload_bytes: 2,
             }],
             Some(sink),

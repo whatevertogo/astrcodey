@@ -1,6 +1,6 @@
 //! In-process Rust extension identity and capability manifest.
 
-use crate::extension::ExtensionCapability;
+use crate::{extension::ExtensionCapability, transport::TransportFeature};
 
 /// Stable authoring manifest returned by [`crate::extension::Extension::manifest`].
 ///
@@ -14,6 +14,7 @@ pub struct ExtensionManifest {
     version: String,
     description: Option<String>,
     capabilities: Vec<ExtensionCapability>,
+    required_transport_features: Vec<TransportFeature>,
 }
 
 impl ExtensionManifest {
@@ -23,6 +24,7 @@ impl ExtensionManifest {
         version: String,
         description: Option<String>,
         capabilities: Vec<ExtensionCapability>,
+        required_transport_features: Vec<TransportFeature>,
     ) -> Self {
         Self {
             id,
@@ -30,6 +32,7 @@ impl ExtensionManifest {
             version,
             description,
             capabilities,
+            required_transport_features,
         }
     }
 
@@ -51,6 +54,10 @@ impl ExtensionManifest {
 
     pub fn capabilities(&self) -> &[ExtensionCapability] {
         &self.capabilities
+    }
+
+    pub fn required_transport_features(&self) -> &[TransportFeature] {
+        &self.required_transport_features
     }
 
     pub fn validate(&self) -> Result<(), ExtensionManifestError> {

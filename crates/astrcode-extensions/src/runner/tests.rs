@@ -10,8 +10,8 @@ use std::{
 use astrcode_core::{
     config::ModelSelection,
     event::{
-        CustomEventData, DurableEvent, DurableEventPayload, Event, EventSender,
-        LiveEvent, LiveEventPayload, PersistedSystemPrompt, SessionStarted, SystemPromptSource,
+        CustomEventData, DurableEvent, DurableEventPayload, Event, EventSender, LiveEvent,
+        LiveEventPayload, PersistedSystemPrompt, SessionStarted, SystemPromptSource,
     },
     tool::{
         SessionToolSelection, ToolCapabilities, ToolExecutionContext, ToolPlanningContext,
@@ -24,21 +24,22 @@ use astrcode_extension_sdk::{
     builder::{command, custom_event, manifest},
     extension::{
         CommandAvailability, CommandCompletionContext, CommandCompletionItem, CommandCompletions,
-        CommandContext, CommandExecution, CommandHandler, CompactContext, CompactEvent,
-        CompactHandler, CompactResult, ContinueAfterStopContext, ContinueAfterStopHandler,
-        ContinueAfterStopOptions, ContinueAfterStopResult, CustomEventContext,
-        CustomEventDisposition, CustomEventHandler, CustomEventSubscription, Extension,
-        ExtensionCall, ExtensionCapability, ExtensionCommandResult, ExtensionError,
-        ExtensionHttpHandler, ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse,
-        ExtensionHttpRoute, ExtensionManifest, ExtensionStartContext, ExtensionStopContext,
-        ExtensionTasks, HookMode, HookResult, HttpContext, LifecycleContext, LifecycleEvent,
-        LifecycleHandler, PostToolUseContext, PostToolUseHandler, PostToolUseResult,
-        PreToolUseAdmission, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
-        ProviderContext, ProviderEvent, ProviderHandler, ProviderRequestId, ProviderResult,
-        Registrar, SessionCommandIntent, SessionCommandKind, SlashCommand, StopReason, ToolContext,
-        ToolDiscovery, ToolDiscoveryContext, ToolDiscoveryHandler, ToolHandler, ToolHookTarget,
-        ToolInputTransformHandler, ToolInputTransformResult, ToolPlanContext,
-        UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
+        CommandContext, CommandExecution, CommandHandler, ContinueAfterStopContext,
+        ContinueAfterStopHandler, ContinueAfterStopOptions, ContinueAfterStopResult,
+        CustomEventContext, CustomEventDelivery, CustomEventDisposition, CustomEventHandler,
+        CustomEventSubscription, Extension, ExtensionCall, ExtensionCapability,
+        ExtensionCommandResult, ExtensionError, ExtensionHttpDispatchRequest, ExtensionHttpHandler,
+        ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionHttpRoute,
+        ExtensionManifest, ExtensionStartContext, ExtensionStopContext, ExtensionTasks, HookMode,
+        HookResult, HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler,
+        PostToolUseContext, PostToolUseHandler, PostToolUseResult, PreCompactContext,
+        PreCompactHandler, PreCompactResult, PreToolUseAdmission, PreToolUseContext,
+        PreToolUseHandler, PreToolUseResult, ProviderContext, ProviderEvent, ProviderHandler,
+        ProviderRequestId, ProviderResult, Registrar, SessionCommandIntent, SessionCommandKind,
+        SlashCommand, StopReason, ToolContext, ToolDiscovery, ToolDiscoveryContext,
+        ToolDiscoveryHandler, ToolHandler, ToolHookTarget, ToolInputTransformHandler,
+        ToolInputTransformResult, ToolPlanContext, UserMessageEnvelopeContext,
+        UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
         internal::{
             RuntimeContinueAfterStopContext, RuntimeHookCallContext, RuntimePreToolUseContext,
             RuntimeUserMessageEnvelopeContext, runtime_continue_after_stop_context,
@@ -53,15 +54,18 @@ use astrcode_extension_sdk::{
     runtime_ports::{ToolCatalogCompleteness, ToolCatalogProvider},
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolPlan, ToolResult},
 };
-use astrcode_storage::{SessionEventJournal, SessionPathResolver, SessionStore};
+use astrcode_storage::{
+    SessionEventJournal, SessionPathResolver, SessionStore, testing::filesystem_session_repository,
+};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{Notify, mpsc};
 
 use super::{
     CustomEventConsumerAction, CustomEventSession, ExtensionHttpDispatchResult, ExtensionRunner,
-    ExtensionRuntimeState,
+    ExtensionRuntimeState, SourceGenerationEntry,
 };
+use crate::host_router::{HostBackends, build_host_router_with_public_http_dispatcher};
 
 fn extension_manifest(
     id: impl Into<String>,
@@ -147,6 +151,18 @@ struct HttpProbeExtension {
 
 struct HttpProbeHandler;
 
+struct GenerationHttpCaller;
+
+struct GenerationHttpCallerHandler;
+
+struct GenerationHttpTarget {
+    label: &'static str,
+}
+
+struct GenerationHttpTargetHandler {
+    label: &'static str,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HttpProbeBody {
@@ -191,6 +207,68 @@ impl Extension for HttpProbeExtension {
 
     fn register(&self, registrar: &mut Registrar) {
         registrar.http_route(self.route.clone(), Arc::new(HttpProbeHandler));
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for GenerationHttpCaller {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest(
+            "generation-http-caller",
+            &[
+                ExtensionCapability::ToolIntercept,
+                ExtensionCapability::PublicHttp,
+            ],
+        )
+    }
+
+    fn register(&self, registrar: &mut Registrar) {
+        registrar.on_pre_tool_use(0, Arc::new(GenerationHttpCallerHandler));
+    }
+}
+
+#[async_trait::async_trait]
+impl PreToolUseHandler for GenerationHttpCallerHandler {
+    async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
+        let response = ctx
+            .host()
+            .extension_http()?
+            .dispatch_public(ExtensionHttpDispatchRequest::new(
+                ExtensionHttpMethod::Get,
+                "/generation",
+            ))
+            .await?;
+        let label = response.body["generation"]
+            .as_str()
+            .ok_or_else(|| ExtensionError::Internal("missing generation label".into()))?;
+        Ok(PreToolUseResult::Ask {
+            prompt: label.to_owned(),
+            rule_key: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for GenerationHttpTarget {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("generation-http-target", &[ExtensionCapability::PublicHttp])
+    }
+
+    fn register(&self, registrar: &mut Registrar) {
+        registrar.http_route(
+            ExtensionHttpRoute::public(ExtensionHttpMethod::Get, "/generation"),
+            Arc::new(GenerationHttpTargetHandler { label: self.label }),
+        );
+    }
+}
+
+#[async_trait::async_trait]
+impl ExtensionHttpHandler for GenerationHttpTargetHandler {
+    async fn handle(&self, _ctx: HttpContext) -> Result<ExtensionHttpResponse, ExtensionError> {
+        Ok(ExtensionHttpResponse::json(
+            200,
+            json!({ "generation": self.label }),
+        ))
     }
 }
 
@@ -381,7 +459,11 @@ impl Extension for CallScopeProbeExtension {
     }
 
     fn register(&self, reg: &mut Registrar) {
-        reg.declare_custom_event(custom_event("call_scope_probe").durable(false).build());
+        reg.declare_custom_event(
+            custom_event("call_scope_probe")
+                .delivery(CustomEventDelivery::SessionLive)
+                .build(),
+        );
         reg.tool(
             ToolDefinition {
                 name: "callScopeProbe".into(),
@@ -946,11 +1028,7 @@ impl Extension for RegistrationProbeExtension {
                 reg.declare_custom_event(custom_event("probe").build());
             },
             CapabilityRegistration::Compact => {
-                reg.on_compact(
-                    CompactEvent::PreCompact,
-                    0,
-                    Arc::new(RegistrationProbeHandler),
-                );
+                reg.on_pre_compact(0, Arc::new(RegistrationProbeHandler));
             },
             CapabilityRegistration::UserMessageEnvelope => {
                 reg.on_user_message_envelope(0, Arc::new(RegistrationProbeHandler));
@@ -991,9 +1069,9 @@ impl Extension for RegistrationProbeExtension {
 }
 
 #[async_trait::async_trait]
-impl CompactHandler for RegistrationProbeHandler {
-    async fn handle(&self, _ctx: CompactContext) -> Result<CompactResult, ExtensionError> {
-        Ok(CompactResult::Allow)
+impl PreCompactHandler for RegistrationProbeHandler {
+    async fn handle(&self, _ctx: PreCompactContext) -> Result<PreCompactResult, ExtensionError> {
+        Ok(PreCompactResult::Allow)
     }
 }
 
@@ -2805,6 +2883,90 @@ async fn public_http_route_dispatches_with_path_params() {
 }
 
 #[tokio::test]
+async fn extension_http_uses_the_callers_pinned_generation_while_external_http_uses_current() {
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+    runner.bind_host_router(build_host_router_with_public_http_dispatcher(
+        HostBackends::default(),
+        runner.clone(),
+    ));
+
+    let source_transaction = runner.begin_source_transaction().await;
+    runner
+        .prepare_source_generation(
+            source_transaction,
+            vec![
+                SourceGenerationEntry::Start {
+                    extension: Arc::new(GenerationHttpCaller),
+                    key: "generation-http-caller".into(),
+                    fingerprint: "caller-v1".into(),
+                    config: json!({}),
+                },
+                SourceGenerationEntry::Start {
+                    extension: Arc::new(GenerationHttpTarget { label: "v1" }),
+                    key: "generation-http-target".into(),
+                    fingerprint: "target-v1".into(),
+                    config: json!({}),
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap()
+        .commit_with(|_| {})
+        .await;
+    let version_one_view = runner.extension_view().await;
+
+    let source_transaction = runner.begin_source_transaction().await;
+    runner
+        .prepare_source_generation(
+            source_transaction,
+            vec![
+                SourceGenerationEntry::Retain {
+                    id: "generation-http-caller".into(),
+                    key: "generation-http-caller".into(),
+                    fingerprint: "caller-v1".into(),
+                },
+                SourceGenerationEntry::Start {
+                    extension: Arc::new(GenerationHttpTarget { label: "v2" }),
+                    key: "generation-http-target".into(),
+                    fingerprint: "target-v2".into(),
+                    config: json!({}),
+                },
+            ],
+            None,
+        )
+        .await
+        .unwrap()
+        .commit_with(|_| {})
+        .await;
+
+    let old_turn_admission = version_one_view
+        .emit_pre_tool_use(pre_tool_use_ctx("probe", json!({})))
+        .await
+        .unwrap();
+    let PreToolUseAdmission::Ask { requirements } = old_turn_admission else {
+        panic!("the caller should return its target generation");
+    };
+    assert_eq!(requirements.len(), 1);
+    assert_eq!(requirements[0].prompt, "v1");
+
+    let external = runner
+        .dispatch_public_http_route(
+            ExtensionHttpRequest::new(ExtensionHttpMethod::Get, "/generation"),
+            &[],
+        )
+        .await
+        .unwrap();
+    let ExtensionHttpDispatchResult::Response(response) = external else {
+        panic!("the current external route should be available");
+    };
+    assert_eq!(response.body["generation"], "v2");
+
+    drop(version_one_view);
+    assert!(runner.shutdown().await.is_empty());
+}
+
+#[tokio::test]
 async fn authenticated_http_routes_are_capability_checked_and_extension_scoped() {
     let runner = ExtensionRunner::new(Duration::from_secs(1));
     let missing_capability = runner
@@ -3069,6 +3231,7 @@ async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() 
                 extension_id: "producer".into(),
                 event_type: "job.completed".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: json!({"jobId": "job-1"}),
@@ -3083,6 +3246,7 @@ async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() 
                 extension_id: "producer".into(),
                 event_type: "job.completed".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: json!({"jobId": "job-2"}),
@@ -3145,6 +3309,7 @@ async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() 
                 extension_id: "producer".into(),
                 event_type: "job.completed".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: json!({"jobId": "job-3"}),
@@ -3205,6 +3370,7 @@ async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() 
                 extension_id: "producer".into(),
                 event_type: "job.completed".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: json!({"jobId": "job-4"}),
@@ -3251,6 +3417,7 @@ async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() 
                 extension_id: "producer".into(),
                 event_type: "job.completed".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: json!({"jobId": "live-fails"}),
@@ -3290,6 +3457,7 @@ async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() 
                 extension_id: "producer".into(),
                 event_type: "job.completed".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: json!({"jobId": "dead-letter"}),
@@ -3326,6 +3494,7 @@ async fn durable_custom_event_reconciles_from_checkpoint_and_retries_in_order() 
                 extension_id: "producer".into(),
                 event_type: "job.ignored".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: json!({}),
@@ -3403,6 +3572,7 @@ async fn skip_to_stream_head_waits_for_in_flight_delivery_and_suppresses_its_ret
                 extension_id: "producer".into(),
                 event_type: "job.completed".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: json!({"jobId": "blocked"}),
@@ -3459,11 +3629,7 @@ async fn custom_event_delivery_has_session_state_and_quiescence_blocks_new_admis
         .unwrap();
 
     let projects = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        astrcode_storage::session_repo::FileSystemSessionRepository::for_testing(
-            projects.path().into(),
-        ),
-    );
+    let store = Arc::new(filesystem_session_repository(projects.path().into()));
     let session_id = SessionId::new("stateful-custom-event");
     store
         .create_session(DurableEvent::session(
@@ -3491,6 +3657,7 @@ async fn custom_event_delivery_has_session_state_and_quiescence_blocks_new_admis
                 extension_id: "producer".into(),
                 event_type: "job.completed".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: json!({"jobId": "stateful"}),

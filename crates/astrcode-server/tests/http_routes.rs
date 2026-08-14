@@ -1385,6 +1385,7 @@ async fn stream_preserves_ask_user_events_during_replay_drain() {
                 extension_id: "astrcode-ask-user".into(),
                 event_type: "ask_user.pending".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Global,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: serde_json::json!({ "callId": "call-1" }),
@@ -1431,6 +1432,7 @@ async fn stream_suppresses_current_session_ask_user_global_copy() {
                 extension_id: "astrcode-ask-user".into(),
                 event_type: "ask_user.pending".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Global,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: serde_json::json!({ "callId": "current-session-call" }),
@@ -1469,6 +1471,7 @@ async fn event_consumer_http_control_reports_pending_events_and_updates_persiste
                 extension_id: "producer".into(),
                 event_type: "job.completed".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: serde_json::json!({"jobId": "durable-job"}),
@@ -1499,6 +1502,7 @@ async fn event_consumer_http_control_reports_pending_events_and_updates_persiste
                 extension_id: "producer".into(),
                 event_type: "job.completed".into(),
                 schema_version: 1,
+                audience: astrcode_core::event::CustomEventAudience::Session,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: serde_json::json!({"jobId": "pending-job"}),
@@ -2091,7 +2095,11 @@ async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
 
 #[tokio::test]
 async fn compact_route_returns_same_session_and_hydrates_post_compact_context() {
-    let runtime = runtime(Arc::new(SummaryLlm)).await;
+    let coding = astrcode_bundled_extensions::bundled_extensions(&BTreeMap::new())
+        .into_iter()
+        .find(|extension| extension.manifest().id() == "astrcode-coding")
+        .expect("bundled coding extension");
+    let runtime = runtime_with_extensions(Arc::new(SummaryLlm), vec![coding]).await;
     let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
@@ -2172,8 +2180,15 @@ async fn compact_route_returns_same_session_and_hydrates_post_compact_context() 
         &token,
     )
     .await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body: CompactSessionResponse = serde_json::from_slice(&body_bytes(response).await).unwrap();
+    let status = response.status();
+    let response_body = body_bytes(response).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "compact response: {}",
+        String::from_utf8_lossy(&response_body)
+    );
+    let body: CompactSessionResponse = serde_json::from_slice(&response_body).unwrap();
     assert!(body.compacted, "compact should complete synchronously");
 
     let state = runtime
@@ -2497,12 +2512,20 @@ impl SessionStore for TestEventStore {
 }
 
 async fn runtime(llm_provider: Arc<dyn LlmProvider>) -> Arc<ServerRuntime> {
-    runtime_with_event_store(llm_provider, Arc::new(TestEventStore::new())).await
+    runtime_with_extensions(llm_provider, Vec::new()).await
+}
+
+async fn runtime_with_extensions(
+    llm_provider: Arc<dyn LlmProvider>,
+    extensions: Vec<Arc<dyn Extension>>,
+) -> Arc<ServerRuntime> {
+    runtime_with_event_store(llm_provider, Arc::new(TestEventStore::new()), extensions).await
 }
 
 async fn runtime_with_event_store(
     llm_provider: Arc<dyn LlmProvider>,
     event_store: Arc<dyn SessionStore>,
+    extensions: Vec<Arc<dyn Extension>>,
 ) -> Arc<ServerRuntime> {
     static NEXT_CONFIG_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -2572,6 +2595,9 @@ async fn runtime_with_event_store(
         .register(astrcode_extension_mode::extension())
         .await
         .unwrap();
+    for extension in extensions {
+        extension_runner.register(extension).await.unwrap();
+    }
     let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         llm_provider.clone(),
         llm_provider,

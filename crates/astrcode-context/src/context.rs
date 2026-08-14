@@ -1,7 +1,4 @@
-use std::path::PathBuf;
-
 use astrcode_core::{
-    config::ContextSettings,
     llm::{
         LlmError, LlmMessage, TranscriptMessage, provider_transcript_messages,
         provider_visible_messages,
@@ -139,6 +136,27 @@ pub struct CompactSummaryRenderOptions {
     pub custom_instructions: Vec<String>,
 }
 
+/// Extension-owned context retained alongside a compact summary.
+///
+/// The context crate intentionally treats both variants as opaque content. Extension-specific
+/// discovery and freshness rules are applied before values cross into this crate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CompactRetainedContext {
+    File { path: String, content: String },
+    Note { title: String, body: String },
+}
+
+impl CompactRetainedContext {
+    pub(crate) fn estimated_tokens(&self) -> usize {
+        let (label, content) = match self {
+            Self::File { path, content } => (path, content),
+            Self::Note { title, body } => (title, body),
+        };
+        crate::token_budget::estimate_text_tokens(label)
+            .saturating_add(crate::token_budget::estimate_text_tokens(content))
+    }
+}
+
 /// 压缩操作的结果。
 ///
 /// 记录压缩前后的 token 数量以及生成的摘要文本。
@@ -217,28 +235,6 @@ pub fn is_prompt_too_long_message(message: &str) -> bool {
         .iter()
         .any(|needle| lower.contains(needle));
     positive && !negative
-}
-
-pub struct PostCompactEnrichInput<'a> {
-    pub session_id: &'a str,
-    pub source_messages: &'a [LlmMessage],
-    pub working_dir: &'a str,
-    pub system_prompt: Option<&'a str>,
-    pub tools: &'a [ToolDefinition],
-    pub settings: &'a ContextSettings,
-    pub session_store_dir: Option<PathBuf>,
-}
-
-#[async_trait::async_trait]
-pub trait PostCompactEnricher: Send + Sync {
-    async fn enrich(&self, compaction: &mut CompactResult, input: PostCompactEnrichInput<'_>);
-}
-
-pub struct NoopPostCompactEnricher;
-
-#[async_trait::async_trait]
-impl PostCompactEnricher for NoopPostCompactEnricher {
-    async fn enrich(&self, _compaction: &mut CompactResult, _input: PostCompactEnrichInput<'_>) {}
 }
 
 #[cfg(test)]

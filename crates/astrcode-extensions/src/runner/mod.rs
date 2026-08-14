@@ -14,22 +14,23 @@ use astrcode_core::{event::EventPayload, tool::SessionOperations};
 use astrcode_extension_sdk::{
     extension::{
         internal::{
-            RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
-            RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
-            RuntimePromptBuildContext, RuntimeProviderContext, RuntimeProviderSettlementContext,
-            RuntimeUserMessageEnvelopeContext, activate_extension_tasks,
-            append_provider_messages, append_user_message_text, author_hook_context,
-            author_provider_settlement_context, extension_config, extension_start_context,
-            replace_post_tool_result, replace_pre_tool_input, replace_provider_messages,
-            replace_user_message_text, retain_call_cancellation, suspended_extension_tasks,
+            RuntimeContinueAfterStopContext, RuntimeHookCallContext, RuntimeLifecycleContext,
+            RuntimePostCompactContext, RuntimePostToolUseContext, RuntimePreCompactContext,
+            RuntimePreToolUseContext, RuntimePromptBuildContext, RuntimeProviderContext,
+            RuntimeProviderSettlementContext, RuntimeUserMessageEnvelopeContext,
+            activate_extension_tasks, append_provider_messages, append_user_message_text,
+            author_hook_context, author_provider_settlement_context, extension_config,
+            extension_start_context, replace_post_tool_result, replace_pre_tool_input,
+            replace_provider_messages, replace_user_message_text, retain_call_cancellation,
+            suspended_extension_tasks,
         },
         *,
     },
     runtime_ports::{
         PromptContributor, ProviderRequestAcknowledgements, ProviderRequestPreparation,
         RuntimeSnapshotProvider, RuntimeSnapshotState, SessionOperationsProvider,
-        ToolCatalogProvider,
-        TurnExtensionView as RuntimeTurnExtensionView, TurnExtensionViewProvider, TurnHooks,
+        ToolCatalogProvider, TurnExtensionView as RuntimeTurnExtensionView,
+        TurnExtensionViewProvider, TurnHooks,
     },
 };
 use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, RwLock, Semaphore, mpsc};
@@ -71,7 +72,9 @@ use index::{
 };
 use manifest::ResolvedExtensionManifest;
 use registration::validate_registration_conflicts;
-use retirement::{ExtensionPublicationLease, RetirementSupervisor, RetirementTicket};
+use retirement::{
+    ExtensionPublicationLease, PendingRegistrationResources, RetirementSupervisor, RetirementTicket,
+};
 pub use snapshot::{
     ExtensionDeclarationSnapshot, ExtensionRegistrySnapshot, ExtensionRuntimeState,
 };
@@ -272,7 +275,7 @@ enum PreparedSourceEntry {
         key: String,
         fingerprint: String,
     },
-    Start(PreparedSourceExtension),
+    Start(Box<PreparedSourceExtension>),
 }
 
 struct ResolvedSourceExtension {
@@ -289,7 +292,7 @@ enum ResolvedSourceEntry {
         key: String,
         fingerprint: String,
     },
-    Start(ResolvedSourceExtension),
+    Start(Box<ResolvedSourceExtension>),
 }
 
 pub struct PreparedExtensionGeneration {
@@ -364,8 +367,12 @@ impl PreparedExtensionGeneration {
             match entry {
                 PreparedSourceEntry::Retain { .. } => {},
                 PreparedSourceEntry::Start(prepared) => {
-                    fresh_operation_guards.push(prepared.operation_guard);
-                    next.push(prepared.hosted);
+                    let PreparedSourceExtension {
+                        hosted,
+                        operation_guard,
+                    } = *prepared;
+                    fresh_operation_guards.push(operation_guard);
+                    next.push(hosted);
                 },
             }
         }
@@ -397,10 +404,7 @@ impl PreparedExtensionGeneration {
         drop(lifecycle);
         drop(publication);
 
-        for (hosted, operation_guard) in previous
-            .into_iter()
-            .zip(retiring_operation_guards.into_iter())
-        {
+        for (hosted, operation_guard) in previous.into_iter().zip(retiring_operation_guards) {
             let reason = if desired_ids.contains(hosted.manifest.id()) {
                 StopReason::Reload
             } else {
@@ -423,7 +427,7 @@ impl PreparedExtensionGeneration {
             .drain(..)
             .filter_map(|entry| match entry {
                 PreparedSourceEntry::Retain { .. } => None,
-                PreparedSourceEntry::Start(prepared) => Some(prepared),
+                PreparedSourceEntry::Start(prepared) => Some(*prepared),
             })
             .collect();
         self.runner.abort_prepared_source_extensions(prepared).await;
@@ -438,11 +442,15 @@ impl Drop for PreparedExtensionGeneration {
             let PreparedSourceEntry::Start(prepared) = entry else {
                 continue;
             };
+            let PreparedSourceExtension {
+                hosted,
+                operation_guard,
+            } = *prepared;
             self.runner.retirements.retire(
-                prepared.hosted,
+                hosted,
                 StopReason::StartupFailed,
                 self.runner.operation_timeout,
-                prepared.operation_guard,
+                operation_guard,
                 self.runner.host_router(),
             );
         }
@@ -629,18 +637,21 @@ impl ExtensionRunner {
         );
         let ctx = extension_start_context(
             call,
+            tasks.clone(),
             runtime_config,
             startup_working_dir.map(std::path::PathBuf::from),
         );
         let pending_registration = self.retirements.pending_registration(
-            id.clone(),
-            instance_id,
-            Arc::clone(&ext),
-            tasks.clone(),
-            generation_gate.clone(),
+            PendingRegistrationResources {
+                extension_id: id.clone(),
+                instance_id,
+                extension: Arc::clone(&ext),
+                tasks: tasks.clone(),
+                generation_gate: generation_gate.clone(),
+                host_router: self.host_router(),
+            },
             operation_guard,
             self.operation_timeout,
-            self.host_router(),
         );
         let start_result = self.run_with_timeout(ext.start(ctx)).await;
         if let Err(error) = start_result {
@@ -1010,16 +1021,18 @@ impl ExtensionRunner {
                         Some(started.elapsed()),
                         StageOutcome::Succeeded,
                     );
-                    resolved.push(ResolvedSourceEntry::Start(ResolvedSourceExtension {
-                        extension,
-                        manifest: ResolvedExtensionManifest {
-                            author: manifest,
-                            registrations,
+                    resolved.push(ResolvedSourceEntry::Start(Box::new(
+                        ResolvedSourceExtension {
+                            extension,
+                            manifest: ResolvedExtensionManifest {
+                                author: manifest,
+                                registrations,
+                            },
+                            key,
+                            fingerprint,
+                            config,
                         },
-                        key,
-                        fingerprint,
-                        config,
-                    }));
+                    )));
                 },
             }
         }
@@ -1047,7 +1060,7 @@ impl ExtensionRunner {
                 .collect::<Vec<_>>();
             for candidate in resolved.iter().filter_map(|entry| match entry {
                 ResolvedSourceEntry::Retain { .. } => None,
-                ResolvedSourceEntry::Start(candidate) => Some(candidate),
+                ResolvedSourceEntry::Start(candidate) => Some(candidate.as_ref()),
             }) {
                 validate_registration_conflicts(
                     candidate.manifest.id(),
@@ -1060,7 +1073,7 @@ impl ExtensionRunner {
 
         for candidate in resolved.iter().filter_map(|entry| match entry {
             ResolvedSourceEntry::Retain { .. } => None,
-            ResolvedSourceEntry::Start(candidate) => Some(candidate),
+            ResolvedSourceEntry::Start(candidate) => Some(candidate.as_ref()),
         }) {
             let config = extension_config(candidate.manifest.id(), candidate.config.clone());
             candidate.extension.validate_config(&config)?;
@@ -1116,10 +1129,10 @@ impl ExtensionRunner {
                     fingerprint,
                 },
                 ResolvedSourceEntry::Start(candidate) => match self
-                    .start_source_candidate(candidate, startup_working_dir)
+                    .start_source_candidate(*candidate, startup_working_dir)
                     .await
                 {
-                    Ok(candidate) => PreparedSourceEntry::Start(candidate),
+                    Ok(candidate) => PreparedSourceEntry::Start(Box::new(candidate)),
                     Err(error) => {
                         prepared_generation.abort().await;
                         return Err(error);
@@ -1171,18 +1184,21 @@ impl ExtensionRunner {
         );
         let context = extension_start_context(
             call,
+            tasks.clone(),
             runtime_config,
             startup_working_dir.map(std::path::PathBuf::from),
         );
         let pending = self.retirements.pending_registration(
-            extension_id.clone(),
-            instance_id,
-            Arc::clone(&extension),
-            tasks.clone(),
-            generation_gate.clone(),
+            PendingRegistrationResources {
+                extension_id: extension_id.clone(),
+                instance_id,
+                extension: Arc::clone(&extension),
+                tasks: tasks.clone(),
+                generation_gate: generation_gate.clone(),
+                host_router: self.host_router(),
+            },
             operation_guard,
             self.operation_timeout,
-            self.host_router(),
         );
 
         self.record_stage_running(&extension_id, DiagnosticStage::Start);
@@ -1786,46 +1802,59 @@ impl ExtensionView {
         Ok(collected)
     }
 
-    /// Compact 钩子分发。
-    pub async fn emit_compact(
+    /// Collect ordered contributions before compacting.
+    pub async fn collect_pre_compact(
         &self,
-        event: CompactEvent,
-        ctx: RuntimeCompactContext,
-    ) -> Result<CompactResult, ExtensionError> {
+        ctx: RuntimePreCompactContext,
+    ) -> Result<PreCompactResult, ExtensionError> {
         let index = &self.index;
-        let handlers = index.compact.get(&event);
-
-        let Some(handlers) = handlers else {
-            return Ok(CompactResult::Allow);
-        };
-
         let mut collected = CompactContributions::default();
-        for (extension_id, handler) in handlers {
+        for (extension_id, handler) in &index.pre_compact {
             let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
             let handler_ctx = author_hook_context(call, &ctx);
             let result = self
                 .run_recorded_hook(
                     extension_id,
-                    "compact",
+                    "pre_compact",
                     cancellation,
                     handler.handle(handler_ctx),
                 )
                 .await?;
             match result {
-                CompactResult::Block { reason } => {
-                    return Ok(CompactResult::Block { reason });
+                PreCompactResult::Block { reason } => {
+                    return Ok(PreCompactResult::Block { reason });
                 },
-                CompactResult::Contributions(c) => {
+                PreCompactResult::Contributions(c) => {
                     collected.merge(c);
                 },
-                CompactResult::Allow => {},
+                PreCompactResult::Allow => {},
             }
         }
-        if collected.instructions.is_empty() {
-            Ok(CompactResult::Allow)
+        if collected.instructions.is_empty() && collected.retained_context.is_empty() {
+            Ok(PreCompactResult::Allow)
         } else {
-            Ok(CompactResult::Contributions(collected))
+            Ok(PreCompactResult::Contributions(collected))
         }
+    }
+
+    /// Notify extensions only after the compact rewrite is durable.
+    pub async fn notify_post_compact(
+        &self,
+        ctx: RuntimePostCompactContext,
+    ) -> Result<(), ExtensionError> {
+        let index = &self.index;
+        for (extension_id, handler) in &index.post_compact {
+            let (call, cancellation) = self.make_hook_call_context(extension_id, ctx.call())?;
+            let handler_ctx = author_hook_context(call, &ctx);
+            self.run_recorded_hook(
+                extension_id,
+                "post_compact",
+                cancellation,
+                handler.handle(handler_ctx),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     /// LLM 自然结束（无 tool call）后询问扩展是否再跑一个 step。
@@ -2038,12 +2067,18 @@ impl ExtensionRunner {
             .await
     }
 
-    pub async fn emit_compact(
+    pub async fn collect_pre_compact(
         &self,
-        event: CompactEvent,
-        ctx: RuntimeCompactContext,
-    ) -> Result<CompactResult, ExtensionError> {
-        self.extension_view().await.emit_compact(event, ctx).await
+        ctx: RuntimePreCompactContext,
+    ) -> Result<PreCompactResult, ExtensionError> {
+        self.extension_view().await.collect_pre_compact(ctx).await
+    }
+
+    pub async fn notify_post_compact(
+        &self,
+        ctx: RuntimePostCompactContext,
+    ) -> Result<(), ExtensionError> {
+        self.extension_view().await.notify_post_compact(ctx).await
     }
 
     pub async fn emit_continue_after_stop(
@@ -2136,12 +2171,18 @@ impl TurnHooks for ExtensionView {
         ExtensionView::acknowledge_provider_request(self, ctx, acknowledgements).await
     }
 
-    async fn emit_compact(
+    async fn collect_pre_compact(
         &self,
-        event: CompactEvent,
-        ctx: RuntimeCompactContext,
-    ) -> Result<CompactResult, ExtensionError> {
-        ExtensionView::emit_compact(self, event, ctx).await
+        ctx: RuntimePreCompactContext,
+    ) -> Result<PreCompactResult, ExtensionError> {
+        ExtensionView::collect_pre_compact(self, ctx).await
+    }
+
+    async fn notify_post_compact(
+        &self,
+        ctx: RuntimePostCompactContext,
+    ) -> Result<(), ExtensionError> {
+        ExtensionView::notify_post_compact(self, ctx).await
     }
 
     async fn emit_continue_after_stop(

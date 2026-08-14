@@ -58,7 +58,7 @@ pub mod testing {
 use crate::{
     extension::{
         CompactEvent, ContinueAfterStopOptions, CustomEventSubscription, ExtensionCapability,
-        HookMode, LifecycleEvent,
+        HookMode, LifecycleEvent, TransportFeature,
     },
     s5r::{HandlerEffect, HandlerResult},
     tool::ToolDefinition,
@@ -102,6 +102,12 @@ impl Worker {
     /// 声明 manifest 能力。
     pub fn capability(&mut self, cap: ExtensionCapability) -> &mut Self {
         self.registry.declare_capability(cap);
+        self
+    }
+
+    /// Require an ingress feature before the host admits this worker.
+    pub fn require_transport(&mut self, feature: TransportFeature) -> &mut Self {
+        self.registry.require_transport(feature);
         self
     }
 
@@ -182,7 +188,10 @@ impl Worker {
         Ok(self)
     }
 
-    /// 注册 post-compact 同步通知与 contributions hook。
+    /// 注册 durable rewrite 成功后的 post-compact 通知 hook。
+    ///
+    /// Handler 必须返回 [`HandlerResult::ok`](crate::s5r::HandlerResult::ok)；宿主拒绝任何
+    /// contribution 或附带数据的结果。
     pub fn on_post_compact(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
         self.registry
             .register_compact_hook(CompactEvent::PostCompact, handler)?;

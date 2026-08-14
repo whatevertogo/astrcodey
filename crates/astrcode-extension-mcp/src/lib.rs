@@ -16,9 +16,9 @@ use std::{
 use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
-        DiscoveredTool, Extension, ExtensionCall, ExtensionCapability, ExtensionError,
-        ExtensionManifest, ExtensionStartContext, ExtensionStopContext, HookMode, HookResult,
-        LifecycleContext, LifecycleEvent, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
+        DiscoveredTool, Extension, ExtensionCapability, ExtensionError, ExtensionManifest,
+        ExtensionStartContext, ExtensionStopContext, HookMode, HookResult, LifecycleContext,
+        LifecycleEvent, LifecycleHandler, PromptBuildContext, PromptBuildHandler,
         PromptContributions, Registrar, ToolContext, ToolDiscovery, ToolDiscoveryContext,
         ToolDiscoveryHandler, ToolHandler, ToolPlanContext,
     },

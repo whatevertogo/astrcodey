@@ -3,15 +3,16 @@ use std::{collections::HashSet, sync::Arc};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    CommandDiscoveryHandler, CommandExecution, CommandHandler, CompactEvent, CompactHandler,
-    ContinueAfterStopHandler, ContinueAfterStopOptions, ContinueAfterStopRegistration,
-    CustomEventDeclaration, CustomEventHandler, CustomEventSubscription, ExtensionCapability,
-    ExtensionHttpAccess, ExtensionHttpHandler, ExtensionHttpRoute, ExtensionHttpRouteRegistration,
-    ExtensionManifest, HookMode, LifecycleEvent, LifecycleHandler, MAX_CUSTOM_EVENT_PAYLOAD_BYTES,
-    PostToolUseHandler, PreToolUseHandler, PromptBuildHandler, ProviderContributionHandler,
-    ProviderEvent, ProviderHandler, SlashCommand, ToolDiscoveryHandler, ToolHandler,
-    ToolHookRegistration, ToolHookTarget, ToolInputTransformHandler, ToolUseRegistration,
-    UserMessageEnvelopeHandler, UserMessageEnvelopeRegistration,
+    CommandDiscoveryHandler, CommandExecution, CommandHandler, ContinueAfterStopHandler,
+    ContinueAfterStopOptions, ContinueAfterStopRegistration, CustomEventDeclaration,
+    CustomEventHandler, CustomEventSubscription, ExtensionCapability, ExtensionHttpAccess,
+    ExtensionHttpHandler, ExtensionHttpRoute, ExtensionHttpRouteRegistration, ExtensionManifest,
+    HookMode, LifecycleEvent, LifecycleHandler, MAX_CUSTOM_EVENT_PAYLOAD_BYTES, PostCompactHandler,
+    PostToolUseHandler, PreCompactHandler, PreToolUseHandler, PromptBuildHandler,
+    ProviderContributionHandler, ProviderEvent, ProviderHandler, SlashCommand,
+    ToolDiscoveryHandler, ToolHandler, ToolHookRegistration, ToolHookTarget,
+    ToolInputTransformHandler, ToolUseRegistration, UserMessageEnvelopeHandler,
+    UserMessageEnvelopeRegistration,
     registration_validation::{
         canonical_registration_name, extension_http_route_patterns_conflict,
         has_duplicate_registration_name, lifecycle_event_allows_blocking,
@@ -60,7 +61,8 @@ pub struct ExtensionRegistrations {
     provider: Vec<(ProviderEvent, HookMode, i32, Arc<dyn ProviderHandler>)>,
     provider_contributions: Vec<(i32, Arc<dyn ProviderContributionHandler>)>,
     prompt_build: Vec<(i32, Arc<dyn PromptBuildHandler>)>,
-    compact: Vec<(CompactEvent, i32, Arc<dyn CompactHandler>)>,
+    pre_compact: Vec<(i32, Arc<dyn PreCompactHandler>)>,
+    post_compact: Vec<(i32, Arc<dyn PostCompactHandler>)>,
     continue_after_stop: Vec<ContinueAfterStopRegistration<dyn ContinueAfterStopHandler>>,
     user_message_envelope: Vec<UserMessageEnvelopeRegistration<dyn UserMessageEnvelopeHandler>>,
     lifecycle: Vec<(LifecycleEvent, HookMode, i32, Arc<dyn LifecycleHandler>)>,
@@ -278,13 +280,12 @@ impl Registrar {
         self.registrations.prompt_build.push((priority, handler));
     }
 
-    pub fn on_compact(
-        &mut self,
-        event: CompactEvent,
-        priority: i32,
-        handler: Arc<dyn CompactHandler>,
-    ) {
-        self.registrations.compact.push((event, priority, handler));
+    pub fn on_pre_compact(&mut self, priority: i32, handler: Arc<dyn PreCompactHandler>) {
+        self.registrations.pre_compact.push((priority, handler));
+    }
+
+    pub fn on_post_compact(&mut self, priority: i32, handler: Arc<dyn PostCompactHandler>) {
+        self.registrations.post_compact.push((priority, handler));
     }
 
     pub fn on_continue_after_stop(
@@ -382,8 +383,12 @@ impl ExtensionRegistrations {
         &self.prompt_build
     }
 
-    pub fn compact(&self) -> &[(CompactEvent, i32, Arc<dyn CompactHandler>)] {
-        &self.compact
+    pub fn pre_compact(&self) -> &[(i32, Arc<dyn PreCompactHandler>)] {
+        &self.pre_compact
+    }
+
+    pub fn post_compact(&self) -> &[(i32, Arc<dyn PostCompactHandler>)] {
+        &self.post_compact
     }
 
     pub fn continue_after_stop(
@@ -439,7 +444,7 @@ impl ExtensionRegistrations {
         require_capability(
             extension_id,
             capabilities,
-            !self.compact.is_empty(),
+            !self.pre_compact.is_empty() || !self.post_compact.is_empty(),
             "compact",
             ExtensionCapability::SessionHistory,
         )?;
@@ -728,7 +733,8 @@ mod tests {
     use crate::{
         builder::{command, command_handler, manifest, tool, tool_handler},
         extension::{
-            CommandDiscovery, CommandDiscoveryContext, ExtensionCommandResult, ExtensionError,
+            CommandDiscovery, CommandDiscoveryContext, CustomEventDelivery, ExtensionCommandResult,
+            ExtensionError,
         },
         tool::{ToolPlan, ToolResult},
     };
@@ -750,7 +756,7 @@ mod tests {
         registrar.declare_custom_event(CustomEventDeclaration {
             event_type: "test.completed".into(),
             schema_version: 1,
-            durable: true,
+            delivery: CustomEventDelivery::SessionDurable,
             max_payload_bytes,
         });
         registrar
@@ -809,7 +815,7 @@ mod tests {
         registrar.declare_custom_event(CustomEventDeclaration {
             event_type: "  review.completed  ".into(),
             schema_version: 1,
-            durable: true,
+            delivery: CustomEventDelivery::SessionDurable,
             max_payload_bytes: 1024,
         });
 

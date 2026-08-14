@@ -25,8 +25,9 @@ use std::{path::Path, sync::Arc};
 use astrcode_extension_sdk::{
     builder::{ExtensionToolDefinition, manifest},
     extension::{
-        CommandContext, CommandHandler, Extension, ExtensionCall, ExtensionCapability,
-        ExtensionCommandResult, ExtensionError, ExtensionManifest, ExtensionPaths,
+        CommandContext, CommandHandler, CompactContributions, CompactRetainedContext, Extension,
+        ExtensionCall, ExtensionCapability, ExtensionCommandResult, ExtensionError,
+        ExtensionManifest, ExtensionPaths, PreCompactContext, PreCompactHandler, PreCompactResult,
         PreToolUseContext, PreToolUseHandler, PreToolUseResult, PreparedProviderContribution,
         PreparedProviderEffect, ProviderContext, ProviderContributionHandler,
         ProviderContributionId, ProviderSettlementContext, Registrar, SlashCommand,
@@ -69,6 +70,7 @@ impl Extension for ModeExtension {
             .version(env!("CARGO_PKG_VERSION"))
             .description(env!("CARGO_PKG_DESCRIPTION"))
             .capability(ExtensionCapability::ProviderRequest)
+            .capability(ExtensionCapability::SessionHistory)
             .capability(ExtensionCapability::ToolIntercept)
             .build()
     }
@@ -97,6 +99,7 @@ impl Extension for ModeExtension {
             }),
         );
         reg.on_provider_contribution(50, Arc::new(ModeProviderHandler));
+        reg.on_pre_compact(100, Arc::new(ModePreCompactHandler));
         // 注册快捷键：Shift+Tab 切换模式
         reg.keybinding(astrcode_extension_sdk::extension::Keybinding {
             key: "shift+tab".into(),
@@ -201,6 +204,25 @@ impl PreToolUseHandler for ModePreToolUseHandler {
 }
 
 struct ModeProviderHandler;
+
+struct ModePreCompactHandler;
+
+#[async_trait::async_trait]
+impl PreCompactHandler for ModePreCompactHandler {
+    async fn handle(&self, ctx: PreCompactContext) -> Result<PreCompactResult, ExtensionError> {
+        let plan_dir = store::plan_dir_from_base(session_data_dir(ctx.paths())?);
+        let Some(plan) = store::load_plan(&plan_dir).map_err(ExtensionError::Internal)? else {
+            return Ok(PreCompactResult::Allow);
+        };
+        Ok(PreCompactResult::Contributions(CompactContributions {
+            instructions: Vec::new(),
+            retained_context: vec![CompactRetainedContext::Note {
+                title: "Session Plan".into(),
+                body: plan,
+            }],
+        }))
+    }
+}
 
 /// /mode 斜杠命令处理器：切换或设置当前模式。
 struct ModeSlashCommandHandler {

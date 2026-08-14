@@ -109,6 +109,8 @@ pub enum HandlerError {
     /// Command actor 通道已关闭，服务不可用。
     #[error("Command actor is unavailable")]
     ActorUnavailable,
+    #[error("Config publication failed: {0}")]
+    ConfigPublication(String),
     /// 验证失败或状态不满足前置条件。
     #[error("Invalid request: {0}")]
     InvalidRequest(String),

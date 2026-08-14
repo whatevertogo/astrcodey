@@ -16,4 +16,10 @@ impl ResolvedExtensionManifest {
     pub(super) fn capabilities(&self) -> &[astrcode_extension_sdk::extension::ExtensionCapability] {
         self.author.capabilities()
     }
+
+    pub(super) fn required_transport_features(
+        &self,
+    ) -> &[astrcode_extension_sdk::extension::TransportFeature] {
+        self.author.required_transport_features()
+    }
 }

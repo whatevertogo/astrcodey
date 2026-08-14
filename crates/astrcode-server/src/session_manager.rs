@@ -1095,7 +1095,6 @@ mod tests {
         time::Duration,
     };
 
-    use astrcode_context::NoopPostCompactEnricher;
     use astrcode_core::{
         config::{EffectiveConfig, LlmSettings},
         event::{CustomEventData, DurableEvent, DurableEventPayload, Event, StoredEvent},
@@ -1119,7 +1118,8 @@ mod tests {
     use astrcode_storage::{
         CompactSnapshotInput, EventReader, SessionEventJournal, SessionPathResolver, SessionReader,
         ToolResultArtifactInput, ToolResultArtifactRef, ToolResultArtifactStore,
-        in_memory::InMemoryEventStore, session_repo::FileSystemSessionRepository,
+        in_memory::InMemoryEventStore,
+        testing::{fail_next_durable_sync, filesystem_session_repository},
     };
     use tokio::sync::{Notify, Semaphore, mpsc};
 
@@ -1172,7 +1172,6 @@ mod tests {
                 hooks,
                 noop.clone(),
             ),
-            Arc::new(NoopPostCompactEnricher),
         ))
     }
 
@@ -2155,6 +2154,7 @@ mod tests {
                     extension_id: "producer".into(),
                     event_type: "close.recovered".into(),
                     schema_version: 1,
+                    audience: astrcode_core::event::CustomEventAudience::Session,
                     causation_id: None,
                     cascade_depth: 0,
                     payload: serde_json::json!({}),
@@ -2189,6 +2189,7 @@ mod tests {
                     extension_id: "producer".into(),
                     event_type: "job.completed".into(),
                     schema_version: 1,
+                    audience: astrcode_core::event::CustomEventAudience::Session,
                     causation_id: None,
                     cascade_depth: 0,
                     payload: serde_json::json!({"jobId": "blocked"}),
@@ -2225,9 +2226,7 @@ mod tests {
     #[tokio::test]
     async fn replay_custom_events_includes_nested_sessions() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(FileSystemSessionRepository::for_testing(
-            temp.path().join("projects"),
-        ));
+        let store = Arc::new(filesystem_session_repository(temp.path().join("projects")));
         let store_port: Arc<dyn SessionStore> = store.clone();
         let services = test_runtime_services();
         let root = create_root_session(Arc::clone(&store_port), Arc::clone(&services)).await;
@@ -2252,6 +2251,7 @@ mod tests {
                         extension_id: "producer".into(),
                         event_type: "job.completed".into(),
                         schema_version: 1,
+                        audience: astrcode_core::event::CustomEventAudience::Session,
                         causation_id: None,
                         cascade_depth: 0,
                         payload: serde_json::json!({}),
@@ -2284,9 +2284,7 @@ mod tests {
     #[tokio::test]
     async fn operation_admission_retries_exact_uncertain_sync_once_before_publish() {
         let temp = tempfile::tempdir().unwrap();
-        let store = Arc::new(FileSystemSessionRepository::for_testing(
-            temp.path().join("projects"),
-        ));
+        let store = Arc::new(filesystem_session_repository(temp.path().join("projects")));
         let store_port: Arc<dyn SessionStore> = store.clone();
         let manager = Arc::new(SessionManager::new(
             Arc::clone(&store_port),
@@ -2294,10 +2292,7 @@ mod tests {
             vec![],
         ));
         let session_id = manager.create("/workspace").await.unwrap().id().clone();
-        store
-            .fail_next_durable_sync_for_testing(&session_id)
-            .await
-            .unwrap();
+        fail_next_durable_sync(&store, &session_id).await.unwrap();
         let error = store
             .append_events_and_sync(vec![DurableEvent::session(
                 session_id.clone(),
@@ -2323,10 +2318,7 @@ mod tests {
             .event_bus()
             .subscribe_conversation_events(&session_id);
 
-        store
-            .fail_next_durable_sync_for_testing(&session_id)
-            .await
-            .unwrap();
+        fail_next_durable_sync(&store, &session_id).await.unwrap();
         assert!(matches!(
             scheduler.begin_session_operation(&session_id).await,
             Err(crate::turn_scheduler::TurnScheduleError::SessionManager(

@@ -153,7 +153,7 @@ export type ConversationBlock =
       kind: 'user'
       id: string
       text: string
-      attachments?: PromptAttachmentWire[]
+      attachments: PromptAttachmentWire[]
     }
   | {
       kind: 'assistant'

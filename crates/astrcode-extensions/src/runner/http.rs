@@ -1,11 +1,28 @@
-use std::sync::{Arc, Weak};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 use astrcode_extension_sdk::extension::{
     internal::{http_context, match_extension_http_route},
     *,
 };
 
-use super::{ExtensionCallContextInput, ExtensionRunner, ExtensionView};
+use super::{
+    CustomEventLanes, CustomEventQuiescing, ExtensionCallContextFactory, ExtensionCallContextInput,
+    ExtensionDiagnostics, ExtensionRunner, ExtensionView, HandlerIndex,
+};
+
+struct PinnedPublicHttpDispatcher {
+    index: Weak<HandlerIndex>,
+    diagnostics: Arc<parking_lot::RwLock<BTreeMap<String, ExtensionDiagnostics>>>,
+    operation_timeout: Duration,
+    call_context_factory: ExtensionCallContextFactory,
+    custom_event_permits: Arc<tokio::sync::Semaphore>,
+    custom_event_lanes: Arc<CustomEventLanes>,
+    custom_event_quiescing: Arc<CustomEventQuiescing>,
+}
 
 #[derive(Debug, Clone)]
 pub enum ExtensionHttpDispatchResult {
@@ -17,6 +34,21 @@ pub enum ExtensionHttpDispatchResult {
 }
 
 impl ExtensionView {
+    pub(super) fn public_http_dispatcher_for_index(
+        &self,
+        index: &Arc<HandlerIndex>,
+    ) -> Arc<dyn crate::host_router::PublicHttpDispatcher> {
+        Arc::new(PinnedPublicHttpDispatcher {
+            index: Arc::downgrade(index),
+            diagnostics: Arc::clone(&self.diagnostics),
+            operation_timeout: self.operation_timeout,
+            call_context_factory: self.call_context_factory.clone(),
+            custom_event_permits: Arc::clone(&self.custom_event_permits),
+            custom_event_lanes: Arc::clone(&self.custom_event_lanes),
+            custom_event_quiescing: Arc::clone(&self.custom_event_quiescing),
+        })
+    }
+
     pub async fn dispatch_public_http_route(
         &self,
         request: ExtensionHttpRequest,
@@ -148,6 +180,24 @@ impl ExtensionView {
     }
 }
 
+impl PinnedPublicHttpDispatcher {
+    fn extension_view(&self) -> Result<ExtensionView, ExtensionError> {
+        let index = self.index.upgrade().ok_or_else(|| {
+            ExtensionError::NotFound("extension HTTP generation is no longer available".into())
+        })?;
+        Ok(ExtensionView {
+            generation: index.generation,
+            index,
+            diagnostics: Arc::clone(&self.diagnostics),
+            operation_timeout: self.operation_timeout,
+            call_context_factory: self.call_context_factory.clone(),
+            custom_event_permits: Arc::clone(&self.custom_event_permits),
+            custom_event_lanes: Arc::clone(&self.custom_event_lanes),
+            custom_event_quiescing: Arc::clone(&self.custom_event_quiescing),
+        })
+    }
+}
+
 impl ExtensionRunner {
     /// Returns a dispatcher that does not keep the runner alive through its bound host router.
     pub fn public_http_dispatcher(
@@ -224,38 +274,61 @@ impl crate::host_router::PublicHttpDispatcher for ExtensionRunner {
         caller_extension_id: &str,
         mut request: ExtensionHttpRequest,
     ) -> Result<ExtensionHttpResponse, ExtensionError> {
-        let body = if request.body.is_null() {
-            Vec::new()
-        } else {
-            serde_json::to_vec(&request.body)
-                .map_err(|error| ExtensionError::Internal(error.to_string()))?
-        };
-        request.body = serde_json::Value::Null;
-        match self
-            .dispatch_public_http_route_from(caller_extension_id, request, &body)
-            .await?
-        {
-            ExtensionHttpDispatchResult::Response(response) => Ok(response),
-            ExtensionHttpDispatchResult::NotFound => Ok(ExtensionHttpResponse::error(
-                404,
-                "extension_route_not_found",
-                "extension public HTTP route not found",
-            )),
-            ExtensionHttpDispatchResult::MethodNotAllowed => Ok(ExtensionHttpResponse::error(
-                405,
-                "extension_http_method_not_allowed",
-                "extension public HTTP route does not support this method",
-            )),
-            ExtensionHttpDispatchResult::PayloadTooLarge { max_body_bytes } => {
-                Ok(ExtensionHttpResponse::error(
-                    413,
-                    "extension_http_body_too_large",
-                    format!("extension HTTP body exceeds {max_body_bytes} bytes"),
-                ))
-            },
-            ExtensionHttpDispatchResult::InvalidJson { message } => Ok(
-                ExtensionHttpResponse::error(400, "invalid_extension_http_json", message),
-            ),
-        }
+        let view = self.extension_view().await;
+        dispatch_public_http_from_view(&view, caller_extension_id, request).await
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::host_router::PublicHttpDispatcher for PinnedPublicHttpDispatcher {
+    async fn dispatch_public_http(
+        &self,
+        caller_extension_id: &str,
+        request: ExtensionHttpRequest,
+    ) -> Result<ExtensionHttpResponse, ExtensionError> {
+        let view = self.extension_view()?;
+        dispatch_public_http_from_view(&view, caller_extension_id, request).await
+    }
+}
+
+async fn dispatch_public_http_from_view(
+    view: &ExtensionView,
+    caller_extension_id: &str,
+    mut request: ExtensionHttpRequest,
+) -> Result<ExtensionHttpResponse, ExtensionError> {
+    let body = if request.body.is_null() {
+        Vec::new()
+    } else {
+        serde_json::to_vec(&request.body)
+            .map_err(|error| ExtensionError::Internal(error.to_string()))?
+    };
+    request.body = serde_json::Value::Null;
+    match view
+        .dispatch_public_http_route_from(caller_extension_id, request, &body)
+        .await?
+    {
+        ExtensionHttpDispatchResult::Response(response) => Ok(response),
+        ExtensionHttpDispatchResult::NotFound => Ok(ExtensionHttpResponse::error(
+            404,
+            "extension_route_not_found",
+            "extension public HTTP route not found",
+        )),
+        ExtensionHttpDispatchResult::MethodNotAllowed => Ok(ExtensionHttpResponse::error(
+            405,
+            "extension_http_method_not_allowed",
+            "extension public HTTP route does not support this method",
+        )),
+        ExtensionHttpDispatchResult::PayloadTooLarge { max_body_bytes } => {
+            Ok(ExtensionHttpResponse::error(
+                413,
+                "extension_http_body_too_large",
+                format!("extension HTTP body exceeds {max_body_bytes} bytes"),
+            ))
+        },
+        ExtensionHttpDispatchResult::InvalidJson { message } => Ok(ExtensionHttpResponse::error(
+            400,
+            "invalid_extension_http_json",
+            message,
+        )),
     }
 }

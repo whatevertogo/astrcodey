@@ -11,8 +11,8 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        CustomEventDeclaration, ExtensionCallContext, ExtensionCapability, ExtensionError,
-        ExtensionTasks,
+        CustomEventDeclaration, CustomEventDelivery, ExtensionCallContext, ExtensionCapability,
+        ExtensionError, ExtensionTasks,
         internal::{
             CustomEventSink, RuntimeHookCallContext, custom_event_emitter, extension_call_context,
             extension_paths,
@@ -29,7 +29,8 @@ use tokio_util::sync::CancellationToken;
 
 use super::{ExtensionRunner, ExtensionView, HandlerIndex};
 use crate::host_router::{
-    ExtensionGenerationGate, ExtensionInstanceId, HostRouter, InvokeContext, decls_to_map,
+    ExtensionGenerationGate, ExtensionInstanceId, HostRouter, InvokeContext, PublicHttpDispatcher,
+    decls_to_map,
 };
 
 pub(super) struct ExtensionCallContextInput {
@@ -44,6 +45,7 @@ pub(super) struct ExtensionCallContextInput {
     pub(super) tool_result_reader: Option<Arc<dyn astrcode_core::tool::ToolResultArtifactReader>>,
     pub(super) llm_providers: Option<LlmProviderBindings>,
     pub(super) generation_gate: ExtensionGenerationGate,
+    pub(super) public_http_dispatcher: Option<Arc<dyn PublicHttpDispatcher>>,
     pub(super) cancellation: CancellationToken,
 }
 
@@ -112,7 +114,7 @@ impl CustomEventSink for BoundCustomEventSink {
         &self,
         event_type: &str,
         schema_version: u32,
-        durable: bool,
+        delivery: CustomEventDelivery,
         payload: serde_json::Value,
     ) -> Result<EventDeliveryReceipt, EventSendError> {
         self.ensure_permitted()?;
@@ -121,7 +123,7 @@ impl CustomEventSink for BoundCustomEventSink {
                 &self.extension_id,
                 event_type,
                 schema_version,
-                durable,
+                delivery,
                 self.causation.clone(),
                 payload,
             ))
@@ -132,7 +134,7 @@ impl CustomEventSink for BoundCustomEventSink {
         &self,
         event_type: &str,
         schema_version: u32,
-        durable: bool,
+        delivery: CustomEventDelivery,
         payload: serde_json::Value,
     ) -> Result<(), EventSendError> {
         self.ensure_permitted()?;
@@ -140,7 +142,7 @@ impl CustomEventSink for BoundCustomEventSink {
             &self.extension_id,
             event_type,
             schema_version,
-            durable,
+            delivery,
             self.causation.clone(),
             payload,
         ))
@@ -161,6 +163,7 @@ impl ExtensionCallContextInput {
             tool_result_reader: None,
             llm_providers: None,
             generation_gate: ExtensionGenerationGate::default(),
+            public_http_dispatcher: None,
             cancellation,
         }
     }
@@ -183,6 +186,7 @@ impl ExtensionCallContextInput {
             tool_result_reader: None,
             llm_providers: runtime.llm_providers().cloned(),
             generation_gate: ExtensionGenerationGate::default(),
+            public_http_dispatcher: None,
             cancellation,
         }
     }
@@ -226,6 +230,7 @@ impl ExtensionCallContextFactory {
             tool_result_reader,
             llm_providers,
             generation_gate,
+            public_http_dispatcher,
             cancellation,
         } = input;
         let cancellation = linked_call_cancellation(&tasks, cancellation);
@@ -284,6 +289,7 @@ impl ExtensionCallContextFactory {
             event_declarations: decls_to_map(declarations),
             declared_capabilities: capabilities.to_vec(),
             generation_gate,
+            public_http_dispatcher,
             on_peer_io_thread: false,
         };
         let scope = HostScope::new(
@@ -307,7 +313,7 @@ impl ExtensionCallContextFactory {
         );
         let events = custom_event_emitter(declarations.iter().cloned(), event_sink);
 
-        extension_call_context(extension_id, paths, host, events, tasks, cancellation)
+        extension_call_context(extension_id, paths, host, events, cancellation)
     }
 }
 
@@ -376,7 +382,7 @@ impl ExtensionView {
 
     pub(super) fn make_registered_extension_call_context_from_index(
         &self,
-        index: &HandlerIndex,
+        index: &Arc<HandlerIndex>,
         extension_id: &str,
         mut input: ExtensionCallContextInput,
     ) -> Result<ExtensionCallContext, ExtensionError> {
@@ -386,6 +392,7 @@ impl ExtensionView {
             ))
         })?;
         input.generation_gate = generation.generation_gate.clone();
+        input.public_http_dispatcher = Some(self.public_http_dispatcher_for_index(index));
         Ok(self.call_context_factory.make_extension_call_context(
             extension_id,
             generation.instance_id,
@@ -475,6 +482,7 @@ mod tests {
                     tool_result_reader: None,
                     llm_providers: None,
                     generation_gate: ExtensionGenerationGate::default(),
+                    public_http_dispatcher: None,
                     cancellation: cancellation.clone(),
                 },
             );

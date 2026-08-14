@@ -13,6 +13,7 @@ use astrcode_core::config::defaults::astrcode_dir;
 use astrcode_extension_sdk::{
     extension::{Extension, ExtensionPackageManifest},
     manifest::validate_extension_id,
+    transport::{TransportFeature, TransportProfile},
     wire::protocol::S5R_VERSION,
 };
 use sha2::{Digest, Sha256};
@@ -89,7 +90,32 @@ pub struct ExtensionLoadContext {
     pub working_dir: Option<String>,
     /// 磁盘 s5r 扩展加载时必需。
     pub host_router: Option<Arc<HostRouter>>,
+    pub transport_profile: TransportProfile,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtensionAdmissionError {
+    pub extension_id: String,
+    pub missing: Vec<TransportFeature>,
+}
+
+impl std::fmt::Display for ExtensionAdmissionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let missing = self
+            .missing
+            .iter()
+            .map(|feature| feature.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        write!(
+            formatter,
+            "extension {} requires unavailable transport features: {missing}",
+            self.extension_id
+        )
+    }
+}
+
+impl std::error::Error for ExtensionAdmissionError {}
 
 #[async_trait::async_trait]
 pub trait ExtensionSource: Send + Sync {
@@ -202,6 +228,15 @@ pub async fn prepare_extension_generation(
                 continue;
             },
         };
+        if let Err(error) = admit_candidate(&extension, &ctx.transport_profile) {
+            runner.record_extension_load_failure(
+                &extension_id,
+                error.to_string(),
+                Some(started.elapsed()),
+            );
+            tracing::warn!(%error, "extension candidate rejected by transport admission");
+            continue;
+        }
         runner.record_extension_load_success(&extension_id, Some(started.elapsed()));
         entries.push(SourceGenerationEntry::Start {
             extension,
@@ -218,6 +253,21 @@ pub async fn prepare_extension_generation(
         .prepare_source_generation(source_transaction, entries, ctx.working_dir.as_deref())
         .await
         .map_err(|error| vec![error.to_string()])
+}
+
+fn admit_candidate(
+    extension: &Arc<dyn Extension>,
+    transport_profile: &TransportProfile,
+) -> Result<(), ExtensionAdmissionError> {
+    let manifest = extension.manifest();
+    let missing = transport_profile.missing(manifest.required_transport_features().iter().copied());
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(ExtensionAdmissionError {
+        extension_id: manifest.id().to_owned(),
+        missing,
+    })
 }
 
 fn configured_source_fingerprint(source: &str, config: &serde_json::Value) -> String {

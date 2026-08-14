@@ -195,7 +195,7 @@ impl ModelSelectionFlow {
                     HandlerError::InvalidRequest(format!("Failed to write config: {error}"))
                 },
                 ConfigUpdateError::Transaction(error) => {
-                    HandlerError::Internal(format!("Failed to publish model selection: {error}"))
+                    HandlerError::ConfigPublication(error.to_string())
                 },
             })
     }

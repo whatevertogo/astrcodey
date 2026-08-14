@@ -91,16 +91,26 @@ impl PromptContributions {
     }
 }
 
-/// 插件在 PreCompact hook 中提供的 compact 摘要指令。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// Extension-owned context that must remain visible after a transcript rewrite.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum CompactRetainedContext {
+    File { path: String, content: String },
+    Note { title: String, body: String },
+}
+
+/// Contributions collected before compacting a transcript snapshot.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CompactContributions {
-    #[serde(default)]
     pub instructions: Vec<String>,
+    pub retained_context: Vec<CompactRetainedContext>,
 }
 
 impl CompactContributions {
     pub fn merge(&mut self, other: CompactContributions) {
         self.instructions.extend(other.instructions);
+        self.retained_context.extend(other.retained_context);
     }
 }
 

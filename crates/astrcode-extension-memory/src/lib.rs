@@ -16,6 +16,7 @@ mod prompts;
 mod scope;
 mod store;
 mod turn_recall;
+mod workers;
 
 use std::sync::Arc;
 
@@ -42,19 +43,25 @@ use crate::config::MemoryConfig;
 /// 返回记忆扩展；所需宿主能力在标准 `start()` 生命周期中取得。
 pub fn extension() -> Arc<dyn Extension> {
     let store_pool = Arc::new(MemoryStorePool::new());
-    let pipeline = Arc::new(handlers::MemoryPipelineCoordinator::default());
     let session_prefs = Arc::new(SessionPrefsCache::default());
     Arc::new(MemoryExtension {
         store_pool,
-        pipeline,
+        workers: Arc::new(workers::MemoryWorkers::default()),
         session_prefs,
         config: Arc::new(RwLock::new(MemoryConfig::default())),
     })
 }
 
+/// Validate a candidate configuration without constructing extension runtime state.
+pub fn validate_config(config: &ExtensionConfig) -> Result<(), ExtensionError> {
+    MemoryConfig::from_extension_config(config)
+        .map(|_| ())
+        .map_err(Into::into)
+}
+
 struct MemoryExtension {
     store_pool: Arc<MemoryStorePool>,
-    pipeline: Arc<handlers::MemoryPipelineCoordinator>,
+    workers: Arc<workers::MemoryWorkers>,
     session_prefs: Arc<SessionPrefsCache>,
     config: Arc<RwLock<MemoryConfig>>,
 }
@@ -73,9 +80,7 @@ impl Extension for MemoryExtension {
     }
 
     fn validate_config(&self, config: &ExtensionConfig) -> Result<(), ExtensionError> {
-        MemoryConfig::from_extension_config(config)
-            .map(|_| ())
-            .map_err(Into::into)
+        validate_config(config)
     }
 
     async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
@@ -96,11 +101,17 @@ impl Extension for MemoryExtension {
             ));
         }
         *self.config.write() = MemoryConfig::from_extension_config(ctx.config())?;
+        self.workers.start(
+            ctx.tasks(),
+            self.store_pool.clone(),
+            ctx.host().clone(),
+            self.config.clone(),
+            self.session_prefs.clone(),
+        )?;
         Ok(())
     }
 
     async fn stop(&self, _ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
-        self.pipeline.reset();
         self.session_prefs.reset();
         Ok(())
     }
@@ -112,15 +123,14 @@ impl Extension for MemoryExtension {
         reg.tool(
             handlers::memory_save_definition(),
             Arc::new(MemorySaveHandler {
-                store_pool: self.store_pool.clone(),
-                pipeline: self.pipeline.clone(),
+                workers: self.workers.clone(),
                 config: self.config.clone(),
             }),
         );
         reg.tool(
             handlers::memory_delete_definition(),
             Arc::new(MemoryDeleteHandler {
-                store_pool: self.store_pool.clone(),
+                workers: self.workers.clone(),
             }),
         );
         reg.tool(
@@ -156,10 +166,8 @@ impl Extension for MemoryExtension {
             HookMode::NonBlocking,
             0,
             Arc::new(MemorySessionStartHandler {
-                store_pool: self.store_pool.clone(),
-                pipeline: self.pipeline.clone(),
+                workers: self.workers.clone(),
                 config: self.config.clone(),
-                session_prefs: self.session_prefs.clone(),
             }),
         );
     }

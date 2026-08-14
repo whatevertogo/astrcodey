@@ -38,12 +38,26 @@ pub struct SessionStarted {
     pub initial_system_prompt: PersistedSystemPrompt,
 }
 
+/// Host-attributed audience for a custom event.
+///
+/// Persistence remains encoded by the outer durable/live payload type. The audience is carried
+/// with the event so transport fan-out never has to infer product semantics from an extension id
+/// or event name.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CustomEventAudience {
+    Session,
+    Global,
+}
+
 /// 自定义事件的公共事实；是否持久化由外层事件类型表达。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct CustomEventData {
     pub extension_id: String,
     pub event_type: String,
     pub schema_version: u32,
+    pub audience: CustomEventAudience,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub causation_id: Option<EventId>,
     pub cascade_depth: u8,
@@ -295,12 +309,14 @@ mod tests {
             extension_id: "ext".into(),
             event_type: "thing".into(),
             schema_version: 1,
+            audience: CustomEventAudience::Session,
             causation_id: None,
             cascade_depth: 0,
             payload: serde_json::json!({}),
         });
         let canonical = serde_json::to_value(&payload).unwrap();
         assert_eq!(canonical["type"], "custom_event");
+        assert_eq!(canonical["audience"], "session");
         assert!(canonical.get("causation_id").is_none());
         assert_eq!(canonical["cascade_depth"], 0);
         assert_eq!(
@@ -308,11 +324,18 @@ mod tests {
             payload
         );
 
-        let mut incomplete_custom_event = canonical;
+        let mut incomplete_custom_event = canonical.clone();
         incomplete_custom_event
             .as_object_mut()
             .unwrap()
             .remove("cascade_depth");
+        assert!(serde_json::from_value::<DurableEventPayload>(incomplete_custom_event).is_err());
+
+        let mut incomplete_custom_event = canonical;
+        incomplete_custom_event
+            .as_object_mut()
+            .unwrap()
+            .remove("audience");
         assert!(serde_json::from_value::<DurableEventPayload>(incomplete_custom_event).is_err());
 
         let mut configured = serde_json::json!({

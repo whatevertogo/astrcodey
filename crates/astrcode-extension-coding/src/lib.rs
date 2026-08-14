@@ -1,5 +1,6 @@
 //! First-party coding tools authored as a normal AstrCode Extension.
 
+mod compact;
 mod files;
 mod process;
 
@@ -25,6 +26,11 @@ const MAX_SHELL_TIMEOUT_SECS: u64 = 600;
 
 pub fn extension() -> Arc<dyn Extension> {
     Arc::new(CodingExtension::default())
+}
+
+/// Validate a candidate configuration without constructing extension runtime state.
+pub fn validate_config(config: &ExtensionConfig) -> Result<(), ExtensionError> {
+    CodingExtension::parse_config(config).map(|_| ())
 }
 
 struct CodingExtension {
@@ -88,16 +94,18 @@ impl Extension for CodingExtension {
             .capability(ExtensionCapability::WorkspaceWrite)
             .capability(ExtensionCapability::ToolResultRead)
             .capability(ExtensionCapability::ProcessSpawn)
+            .capability(ExtensionCapability::SessionHistory)
             .build()
     }
 
     fn register(&self, registrar: &mut Registrar) {
+        compact::register(registrar);
         files::register(registrar);
         process::register(registrar, Arc::clone(&self.default_shell_timeout_secs));
     }
 
     fn validate_config(&self, config: &ExtensionConfig) -> Result<(), ExtensionError> {
-        Self::parse_config(config).map(|_| ())
+        validate_config(config)
     }
 
     async fn start(&self, context: ExtensionStartContext) -> Result<(), ExtensionError> {
@@ -130,6 +138,7 @@ mod tests {
                 ExtensionCapability::WorkspaceWrite,
                 ExtensionCapability::ToolResultRead,
                 ExtensionCapability::ProcessSpawn,
+                ExtensionCapability::SessionHistory,
             ]
         );
 

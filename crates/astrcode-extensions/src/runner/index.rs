@@ -51,7 +51,7 @@ pub(super) struct HttpRouteEntry {
 /// 预排序的 handler 索引。
 ///
 /// 在每次 registration 发布后从所有运行时清单重建，确保分发时无需遍历+排序。
-/// 各列表按 priority 降序排列，provider/compact/lifecycle 按 event 分组。
+/// 各列表按 priority 降序排列，provider/lifecycle 按 event 分组。
 #[derive(Default)]
 #[allow(clippy::type_complexity)]
 pub(super) struct HandlerIndex {
@@ -62,7 +62,8 @@ pub(super) struct HandlerIndex {
     pub(super) provider: HashMap<ProviderEvent, Vec<ExtensionHandler<dyn ProviderHandler>>>,
     pub(super) provider_contributions: Vec<SimpleExtensionHandler<dyn ProviderContributionHandler>>,
     pub(super) prompt_build: Vec<SimpleExtensionHandler<dyn PromptBuildHandler>>,
-    pub(super) compact: HashMap<CompactEvent, Vec<SimpleExtensionHandler<dyn CompactHandler>>>,
+    pub(super) pre_compact: Vec<SimpleExtensionHandler<dyn PreCompactHandler>>,
+    pub(super) post_compact: Vec<SimpleExtensionHandler<dyn PostCompactHandler>>,
     pub(super) continue_after_stop:
         Vec<ContinueAfterStopExtensionHandler<dyn ContinueAfterStopHandler>>,
     pub(super) user_message_envelope: Vec<SimpleExtensionHandler<dyn UserMessageEnvelopeHandler>>,
@@ -87,7 +88,8 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
     let mut provider = Vec::new();
     let mut provider_contributions = Vec::new();
     let mut prompt_build = Vec::new();
-    let mut compact = Vec::new();
+    let mut pre_compact = Vec::new();
+    let mut post_compact = Vec::new();
     let mut continue_after_stop = Vec::new();
     let mut user_message_envelope = Vec::new();
     let mut lifecycle = Vec::new();
@@ -163,12 +165,11 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         for (priority, handler) in registrations.prompt_build() {
             prompt_build.push((*priority, (extension_id.clone(), Arc::clone(handler))));
         }
-        for (event, priority, handler) in registrations.compact() {
-            compact.push((
-                *event,
-                *priority,
-                (extension_id.clone(), Arc::clone(handler)),
-            ));
+        for (priority, handler) in registrations.pre_compact() {
+            pre_compact.push((*priority, (extension_id.clone(), Arc::clone(handler))));
+        }
+        for (priority, handler) in registrations.post_compact() {
+            post_compact.push((*priority, (extension_id.clone(), Arc::clone(handler))));
         }
         for registration in registrations.continue_after_stop() {
             continue_after_stop.push((
@@ -249,7 +250,8 @@ pub(super) fn build_handler_index(extensions: &[HostedExtension], generation: u6
         provider: handlers_by_event(provider),
         provider_contributions: handlers_by_priority(provider_contributions),
         prompt_build: handlers_by_priority(prompt_build),
-        compact: handlers_by_event(compact),
+        pre_compact: handlers_by_priority(pre_compact),
+        post_compact: handlers_by_priority(post_compact),
         continue_after_stop: handlers_by_priority(continue_after_stop),
         user_message_envelope: handlers_by_priority(user_message_envelope),
         lifecycle: handlers_by_event(lifecycle),
@@ -299,7 +301,8 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
     let mut post: Vec<(&str, i32, HookMode, ToolHookTarget)> = Vec::new();
     let mut provider: Vec<(&str, ProviderEvent, i32, HookMode)> = Vec::new();
     let mut prompt: Vec<(&str, i32)> = Vec::new();
-    let mut compact: Vec<(&str, CompactEvent, i32)> = Vec::new();
+    let mut pre_compact: Vec<(&str, i32)> = Vec::new();
+    let mut post_compact: Vec<(&str, i32)> = Vec::new();
     let mut lifecycle: Vec<(&str, LifecycleEvent, i32, HookMode)> = Vec::new();
 
     let mut ordered_extensions = extensions.iter().collect::<Vec<_>>();
@@ -329,8 +332,11 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
         for (priority, _) in registrations.prompt_build() {
             prompt.push((id, *priority));
         }
-        for (event, priority, _) in registrations.compact() {
-            compact.push((id, *event, *priority));
+        for (priority, _) in registrations.pre_compact() {
+            pre_compact.push((id, *priority));
+        }
+        for (priority, _) in registrations.post_compact() {
+            post_compact.push((id, *priority));
         }
         for (event, mode, priority, _) in registrations.lifecycle() {
             lifecycle.push((id, event.clone(), *priority, *mode));
@@ -342,7 +348,8 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
     post.sort_by_key(|x| std::cmp::Reverse(x.1));
     provider.sort_by_key(|x| std::cmp::Reverse(x.2));
     prompt.sort_by_key(|x| std::cmp::Reverse(x.1));
-    compact.sort_by_key(|x| std::cmp::Reverse(x.2));
+    pre_compact.sort_by_key(|x| std::cmp::Reverse(x.1));
+    post_compact.sort_by_key(|x| std::cmp::Reverse(x.1));
     lifecycle.sort_by_key(|x| std::cmp::Reverse(x.2));
 
     if !transform.is_empty() {
@@ -360,8 +367,11 @@ pub(super) fn log_handler_dispatch_order(extensions: &[HostedExtension]) {
     if !prompt.is_empty() {
         tracing::debug!(target: "astrcode_extensions", order = ?prompt, "prompt_build dispatch order");
     }
-    if !compact.is_empty() {
-        tracing::debug!(target: "astrcode_extensions", order = ?compact, "compact dispatch order");
+    if !pre_compact.is_empty() {
+        tracing::debug!(target: "astrcode_extensions", order = ?pre_compact, "pre_compact dispatch order");
+    }
+    if !post_compact.is_empty() {
+        tracing::debug!(target: "astrcode_extensions", order = ?post_compact, "post_compact dispatch order");
     }
     if !lifecycle.is_empty() {
         tracing::debug!(target: "astrcode_extensions", order = ?lifecycle, "lifecycle dispatch order");

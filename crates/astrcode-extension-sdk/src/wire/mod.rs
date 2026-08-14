@@ -18,9 +18,12 @@ pub mod protocol;
 pub mod session;
 pub mod session_inspect;
 pub mod stream;
+pub mod transport;
 
 pub use capability::ExtensionCapability;
-pub use custom_event::{CustomEventDeclaration, CustomEventSourceFilter, CustomEventSubscription};
+pub use custom_event::{
+    CustomEventDeclaration, CustomEventDelivery, CustomEventSourceFilter, CustomEventSubscription,
+};
 pub use effects::{
     CallContinuation, HandlerEffect, HandlerResult, ProviderContributionData,
     ProviderContributionEffect, ToolOutcome,
@@ -45,3 +48,4 @@ pub use protocol::{
     HandlerKind, InitializeMsg, InitializeOutput, PeerInfo, WireMessage,
 };
 pub use stream::TerminalStream;
+pub use transport::TransportFeature;

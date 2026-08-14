@@ -3,13 +3,13 @@ use std::sync::Arc;
 use astrcode_core::tool::{SessionOperations, Tool};
 
 use crate::extension::{
-    CompactEvent, CompactResult, ContinueAfterStopResult, ExtensionError, LifecycleEvent,
-    PostToolUseResult, PreToolUseAdmission, PromptContributions, ProviderContributionHandler,
-    ProviderContributionId, ProviderEvent, ProviderResult, UserMessageEnvelopeResult,
+    ContinueAfterStopResult, ExtensionError, LifecycleEvent, PostToolUseResult, PreCompactResult,
+    PreToolUseAdmission, PromptContributions, ProviderContributionHandler, ProviderContributionId,
+    ProviderEvent, ProviderResult, UserMessageEnvelopeResult,
     internal::{
-        RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeLifecycleContext,
-        RuntimePostToolUseContext, RuntimePreToolUseContext, RuntimePromptBuildContext,
-        RuntimeProviderContext, RuntimeProviderSettlementContext,
+        RuntimeContinueAfterStopContext, RuntimeLifecycleContext, RuntimePostCompactContext,
+        RuntimePostToolUseContext, RuntimePreCompactContext, RuntimePreToolUseContext,
+        RuntimePromptBuildContext, RuntimeProviderContext, RuntimeProviderSettlementContext,
         RuntimeUserMessageEnvelopeContext,
     },
 };
@@ -223,12 +223,18 @@ pub trait TurnHooks: Send + Sync {
         Ok(())
     }
 
-    async fn emit_compact(
+    async fn collect_pre_compact(
         &self,
-        _event: CompactEvent,
-        _ctx: RuntimeCompactContext,
-    ) -> Result<CompactResult, ExtensionError> {
-        Ok(CompactResult::Allow)
+        _ctx: RuntimePreCompactContext,
+    ) -> Result<PreCompactResult, ExtensionError> {
+        Ok(PreCompactResult::Allow)
+    }
+
+    async fn notify_post_compact(
+        &self,
+        _ctx: RuntimePostCompactContext,
+    ) -> Result<(), ExtensionError> {
+        Ok(())
     }
 
     async fn emit_continue_after_stop(

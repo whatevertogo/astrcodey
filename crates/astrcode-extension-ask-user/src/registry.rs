@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     builder::custom_event,
-    extension::{CustomEventDeclaration, CustomEventEmitter, ExtensionError},
+    extension::{CustomEventDeclaration, CustomEventDelivery, CustomEventEmitter, ExtensionError},
 };
 use parking_lot::Mutex;
 use serde_json::json;
@@ -15,8 +15,12 @@ pub(crate) const RESOLVED_EVENT_TYPE: &str = "ask_user.resolved";
 
 pub(crate) fn custom_event_declarations() -> [CustomEventDeclaration; 2] {
     [
-        custom_event(PENDING_EVENT_TYPE).durable(false).build(),
-        custom_event(RESOLVED_EVENT_TYPE).durable(false).build(),
+        custom_event(PENDING_EVENT_TYPE)
+            .delivery(CustomEventDelivery::GlobalLive)
+            .build(),
+        custom_event(RESOLVED_EVENT_TYPE)
+            .delivery(CustomEventDelivery::GlobalLive)
+            .build(),
     ]
 }
 

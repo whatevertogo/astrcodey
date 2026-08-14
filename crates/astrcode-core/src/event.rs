@@ -13,8 +13,8 @@ pub use envelope::{
 };
 pub use fingerprint::{stable_hash_hex, transcript_prefix_fingerprint};
 pub use payload::{
-    CompactionDetails, CustomEventData, DurableEventPayload, LiveEventPayload, ParentSessionRef,
-    SessionStarted, TranscriptRewriteReason,
+    CompactionDetails, CustomEventAudience, CustomEventData, DurableEventPayload, LiveEventPayload,
+    ParentSessionRef, SessionStarted, TranscriptRewriteReason,
 };
 use serde::{Deserialize, Serialize};
 

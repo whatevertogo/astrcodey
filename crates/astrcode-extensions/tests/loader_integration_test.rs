@@ -14,12 +14,13 @@ use astrcode_extension_sdk::{
         tool, tool_handler,
     },
     extension::{
-        Extension, ExtensionCall, ExtensionCapability, ExtensionCommandResult, ExtensionError,
+        Extension, ExtensionCapability, ExtensionCommandResult, ExtensionError,
         ExtensionHttpMethod, ExtensionHttpRequest, ExtensionHttpResponse, ExtensionManifest,
         ExtensionStartContext, Registrar,
     },
     runtime_ports::{RuntimeSnapshotProvider, RuntimeSnapshotState},
     tool::{ToolPlan, ToolResult},
+    transport::{TransportFeature, TransportProfile},
 };
 use astrcode_extensions::{
     loader::{
@@ -66,6 +67,8 @@ struct BatchObserverExtension {
 }
 
 struct NamedExtension(&'static str);
+
+struct AuthenticatedHttpExtension;
 
 struct CatalogExtension {
     id: &'static str,
@@ -146,6 +149,17 @@ impl Extension for BatchObserverExtension {
 impl Extension for NamedExtension {
     fn manifest(&self) -> ExtensionManifest {
         test_manifest(self.0)
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for AuthenticatedHttpExtension {
+    fn manifest(&self) -> ExtensionManifest {
+        manifest("astrcode-ask-user")
+            .version("test")
+            .description("Authenticated HTTP admission probe")
+            .requires_transport(TransportFeature::AuthenticatedHttp)
+            .build()
     }
 }
 
@@ -368,6 +382,7 @@ async fn sync_sources_records_load_failure_diagnostics() {
         &ExtensionLoadContext {
             working_dir: None,
             host_router: None,
+            transport_profile: Default::default(),
         },
         &[&source],
     )
@@ -396,6 +411,7 @@ async fn sync_sources_does_not_load_disabled_candidates() {
         &ExtensionLoadContext {
             working_dir: None,
             host_router: None,
+            transport_profile: Default::default(),
         },
         &[&source],
     )
@@ -404,6 +420,56 @@ async fn sync_sources_does_not_load_disabled_candidates() {
     assert!(errors.is_empty());
     assert_eq!(loads.load(Ordering::SeqCst), 0);
     assert!(runner.registered_extension_ids().await.is_empty());
+}
+
+#[tokio::test]
+async fn transport_profiles_admit_only_extensions_with_satisfied_requirements() {
+    for (transport, profile, should_load) in [
+        ("stdio", TransportProfile::default(), false),
+        ("acp", TransportProfile::default(), false),
+        (
+            "http",
+            TransportProfile::new([TransportFeature::AuthenticatedHttp]),
+            true,
+        ),
+    ] {
+        let runner = Arc::new(ExtensionRunner::new(std::time::Duration::from_secs(1)));
+        let source = BatchSource {
+            extensions: vec![Arc::new(AuthenticatedHttpExtension)],
+        };
+
+        let errors = sync_extension_sources(
+            &runner,
+            &ExtensionLoadContext {
+                working_dir: None,
+                host_router: None,
+                transport_profile: profile,
+            },
+            &[&source],
+        )
+        .await;
+
+        assert!(errors.is_empty(), "{transport} load failed: {errors:?}");
+        assert_eq!(
+            runner.registered_extension_ids().await == ["astrcode-ask-user"],
+            should_load,
+            "unexpected {transport} admission result"
+        );
+        let diagnostics = runner.diagnostics_snapshot();
+        let load = &diagnostics["astrcode-ask-user"].load;
+        if should_load {
+            assert_eq!(load.status, ExtensionStageStatus::Succeeded);
+        } else {
+            assert_eq!(load.status, ExtensionStageStatus::Failed);
+            assert!(
+                load.error
+                    .as_deref()
+                    .is_some_and(|error| error.contains("authenticated_http")),
+                "{transport} rejection must name the missing transport feature"
+            );
+        }
+        assert!(runner.shutdown().await.is_empty());
+    }
 }
 
 #[tokio::test]
@@ -431,6 +497,7 @@ async fn sync_sources_activates_tasks_after_publishing_the_complete_batch() {
         &ExtensionLoadContext {
             working_dir: None,
             host_router: None,
+            transport_profile: Default::default(),
         },
         &[&source],
     )
@@ -450,6 +517,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
     let ctx = ExtensionLoadContext {
         working_dir: None,
         host_router: None,
+        transport_profile: Default::default(),
     };
     let initial = FingerprintSource {
         entries: vec![
@@ -532,6 +600,7 @@ async fn sync_sources_publishes_reload_batches_as_one_coherent_generation() {
                 &ExtensionLoadContext {
                     working_dir: None,
                     host_router: None,
+                    transport_profile: Default::default(),
                 },
                 &[&updated],
             )
@@ -660,6 +729,7 @@ async fn sync_sources_reconciles_only_changed_sources_and_preserves_source_order
     let ctx = ExtensionLoadContext {
         working_dir: None,
         host_router: None,
+        transport_profile: Default::default(),
     };
     let (old_a, old_a_starts, old_a_stops) = counting("a");
     let (replacement_a, replacement_a_starts, replacement_a_stops) = counting("a");
@@ -753,6 +823,7 @@ async fn failed_candidate_batch_is_discarded_without_disturbing_the_committed_ge
     let ctx = ExtensionLoadContext {
         working_dir: None,
         host_router: None,
+        transport_profile: Default::default(),
     };
     let errors = sync_extension_sources(&runner, &ctx, &[&initial]).await;
     assert!(errors.is_empty(), "initial sync failed: {errors:?}");

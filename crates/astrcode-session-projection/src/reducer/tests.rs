@@ -3,9 +3,9 @@ use std::sync::Arc;
 use astrcode_core::{
     compaction::CompactStrategy,
     event::{
-        CompactionDetails, DurableEvent, DurableEventPayload, PersistedSystemPrompt, Phase,
-        SessionStarted, StoredEvent, SystemPromptSource, TranscriptRewriteReason,
-        transcript_prefix_fingerprint,
+        CompactionDetails, CustomEventAudience, CustomEventData, DurableEvent, DurableEventPayload,
+        PersistedSystemPrompt, Phase, SessionStarted, StoredEvent, SystemPromptSource,
+        TranscriptRewriteReason, transcript_prefix_fingerprint,
     },
     llm::{
         LlmMessage, LlmRole, LlmTokenUsage, TranscriptMessage, TranscriptMessageOrigin,
@@ -866,6 +866,22 @@ fn projection_rejects_invalid_stream_shapes_without_mutating_valid_state() {
         )),
         Err(ProjectionError::InvalidTranscriptRewriteSource { .. })
     ));
+    assert_eq!(
+        projection.apply(&event(
+            1,
+            &session_id,
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "producer".into(),
+                event_type: "invalid.global".into(),
+                schema_version: 1,
+                audience: CustomEventAudience::Global,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({}),
+            }),
+        )),
+        Err(ProjectionError::InvalidDurableCustomEventAudience(1))
+    );
     assert_eq!(
         projection.apply(&event(2, &session_id, DurableEventPayload::TurnStarted)),
         Err(ProjectionError::NonContiguousSequence {

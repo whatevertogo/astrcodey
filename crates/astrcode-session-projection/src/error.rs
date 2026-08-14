@@ -24,6 +24,8 @@ pub enum ProjectionError {
     SessionStartedHasTurn,
     #[error("duplicate SessionStarted at seq {0}")]
     DuplicateSessionStarted(u64),
+    #[error("durable custom event at seq {0} must have session audience")]
+    InvalidDurableCustomEventAudience(u64),
     #[error("expected event seq {expected}, got {actual}")]
     NonContiguousSequence { expected: u64, actual: u64 },
     #[error("transcript rewrite source seq {source_seq} exceeds current seq {current_seq}")]

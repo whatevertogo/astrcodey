@@ -1,17 +1,22 @@
 //! File-system config store with atomic writes.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use astrcode_core::config::{
     Config, ConfigOverlay, ConfigStore, ConfigStoreError, defaults::astrcode_dir,
 };
 use serde::{Serialize, de::DeserializeOwned};
+use tempfile::NamedTempFile;
+
+use crate::session_repo::sync_directory;
 
 /// File-system implementation of ConfigStore.
 ///
 /// Reads/writes `~/.astrcode/config.toml` with atomic write semantics
-/// (write to `.tmp`, then rename). Legacy `config.json` files are loaded as a
-/// fallback when the TOML file is absent.
+/// (write and sync a temporary file, rename, then sync the directory).
 pub struct FileConfigStore {
     path: PathBuf,
 }
@@ -45,12 +50,10 @@ impl FileConfigStore {
     pub async fn load_last_known_good(&self) -> Result<Option<Config>, ConfigStoreError> {
         let path = self.last_known_good_path();
         run_blocking_io(move || {
-            let Some(loaded_path) = first_existing_path(&path) else {
+            if !path.exists() {
                 return Ok(None);
-            };
-            let config = read_config_value(&loaded_path)?;
-            backfill_primary_config(&config, &loaded_path, &path);
-            Ok(Some(config))
+            }
+            read_config_value(&path).map(Some)
         })
         .await
     }
@@ -66,102 +69,41 @@ where
         .map_err(|e| ConfigStoreError::Io(std::io::Error::other(e)))?
 }
 
-#[derive(Clone, Copy)]
-enum ConfigFileFormat {
-    Json,
-    Toml,
-}
-
-impl ConfigFileFormat {
-    fn from_path(path: &Path) -> Self {
-        match path.extension().and_then(|ext| ext.to_str()) {
-            Some("json") => Self::Json,
-            _ => Self::Toml,
-        }
-    }
-
-    fn extension(self) -> &'static str {
-        match self {
-            Self::Json => "json",
-            Self::Toml => "toml",
-        }
-    }
-}
-
-fn first_existing_path(primary_path: &Path) -> Option<PathBuf> {
-    if primary_path.exists() {
-        return Some(primary_path.to_path_buf());
-    }
-    let fallback_path = legacy_json_path(primary_path);
-    fallback_path.exists().then_some(fallback_path)
-}
-
-fn legacy_json_path(path: &Path) -> PathBuf {
-    path.with_extension("json")
-}
-
 fn read_config_value<T: DeserializeOwned>(path: &Path) -> Result<T, ConfigStoreError> {
     let data = std::fs::read_to_string(path)?;
-    match ConfigFileFormat::from_path(path) {
-        ConfigFileFormat::Json => {
-            serde_json::from_str(&data).map_err(|e| friendly_deser_error(e.to_string(), path))
-        },
-        ConfigFileFormat::Toml => {
-            toml::from_str(&data).map_err(|e| friendly_deser_error(e.to_string(), path))
-        },
-    }
+    toml::from_str(&data).map_err(|error| friendly_deser_error(error.to_string(), path))
 }
 
 fn serialize_config_value<T: Serialize>(
     value: &T,
     path: &Path,
 ) -> Result<String, ConfigStoreError> {
-    match ConfigFileFormat::from_path(path) {
-        ConfigFileFormat::Json => Ok(serde_json::to_string_pretty(value)?),
-        ConfigFileFormat::Toml => toml::to_string_pretty(value).map_err(|e| {
-            ConfigStoreError::Invalid(format!(
-                "配置文件 {} 序列化为 TOML 失败: {e}",
-                path.display()
-            ))
-        }),
-    }
+    toml::to_string_pretty(value).map_err(|error| {
+        ConfigStoreError::Invalid(format!(
+            "配置文件 {} 序列化为 TOML 失败: {error}",
+            path.display()
+        ))
+    })
 }
 
 fn write_atomic(path: &Path, data: &str) -> Result<(), std::io::Error> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    let tmp_path = path.with_extension(format!(
-        "{}.tmp",
-        ConfigFileFormat::from_path(path).extension()
-    ));
-    std::fs::write(&tmp_path, data)?;
-    std::fs::rename(&tmp_path, path)?;
-    Ok(())
-}
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_created = !parent.exists();
+    std::fs::create_dir_all(parent)?;
 
-fn backfill_primary_config<T: Serialize>(value: &T, loaded_path: &Path, primary_path: &Path) {
-    if is_same_config_path(loaded_path, primary_path) {
-        return;
+    let mut temporary = NamedTempFile::new_in(parent)?;
+    temporary.write_all(data.as_bytes())?;
+    temporary.as_file().sync_all()?;
+    let file = temporary.persist(path).map_err(|error| error.error)?;
+    file.sync_all()?;
+    sync_directory(Some(parent))?;
+    if parent_created {
+        sync_directory(parent.parent())?;
     }
-    match serialize_config_value(value, primary_path) {
-        Ok(data) => {
-            if let Err(error) = write_atomic(primary_path, &data) {
-                tracing::warn!(
-                    path = %primary_path.display(),
-                    %error,
-                    "failed to migrate legacy JSON config to TOML"
-                );
-            }
-        },
-        Err(error) => {
-            tracing::warn!(
-                path = %primary_path.display(),
-                %error,
-                "failed to serialize legacy JSON config as TOML"
-            );
-        },
-    }
+    Ok(())
 }
 
 #[async_trait::async_trait]
@@ -169,17 +111,13 @@ impl ConfigStore for FileConfigStore {
     async fn load(&self) -> Result<Config, ConfigStoreError> {
         let path = self.path.clone();
         run_blocking_io(move || {
-            let Some(loaded_path) = first_existing_path(&path) else {
+            if !path.exists() {
                 let config = Config::default();
-                if let Ok(data) = serialize_config_value(&config, &path) {
-                    let _ = write_atomic(&path, &data);
-                }
+                let data = serialize_config_value(&config, &path)?;
+                write_atomic(&path, &data)?;
                 return Ok(config);
-            };
-            let config: Config = read_config_value(&loaded_path)?;
-            // Re-serialize to backfill any new fields added since the file was written.
-            backfill_primary_config(&config, &loaded_path, &path);
-            Ok(config)
+            }
+            read_config_value(&path)
         })
         .await
     }
@@ -201,18 +139,14 @@ impl ConfigStore for FileConfigStore {
         let overlay_path = PathBuf::from(working_dir)
             .join(".astrcode")
             .join("config.toml");
-        if is_same_config_path(&self.path, &overlay_path)
-            || is_same_config_path(&self.path, &legacy_json_path(&overlay_path))
-        {
+        if is_same_config_path(&self.path, &overlay_path) {
             return Ok(None);
         }
         run_blocking_io(move || {
-            let Some(loaded_path) = first_existing_path(&overlay_path) else {
+            if !overlay_path.exists() {
                 return Ok(None);
-            };
-            let overlay: ConfigOverlay = read_config_value(&loaded_path)?;
-            backfill_primary_config(&overlay, &loaded_path, &overlay_path);
-            Ok(Some(overlay))
+            }
+            read_config_value(&overlay_path).map(Some)
         })
         .await
     }
@@ -287,27 +221,6 @@ mod tests {
 
     use super::*;
 
-    fn json_config(active_profile: &str, active_model: &str) -> String {
-        format!(
-            r#"{{
-  "version": "1",
-  "activeProfile": "{active_profile}",
-  "activeModel": "{active_model}",
-  "profiles": [
-    {{
-      "name": "{active_profile}",
-      "providerKind": "openai",
-      "wireFormat": "openai_chat_completions",
-      "authScheme": "bearer",
-      "baseUrl": "https://example.com",
-      "apiKey": "test-key",
-      "models": [{{ "id": "{active_model}" }}]
-    }}
-  ]
-}}"#
-        )
-    }
-
     fn toml_config(active_profile: &str, active_model: &str) -> String {
         format!(
             r#"version = "1"
@@ -339,17 +252,9 @@ activeModel = "{active_model}"
     #[tokio::test]
     async fn load_overlay_skips_global_config_when_working_dir_is_home() {
         let temp = tempfile::tempdir().unwrap();
-        let config_path = temp.path().join(".astrcode").join("config.json");
+        let config_path = temp.path().join(".astrcode").join("config.toml");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &config_path,
-            r#"{
-  "version": "1",
-  "activeProfile": "zhipu-coding",
-  "activeModel": "glm-5.2"
-}"#,
-        )
-        .unwrap();
+        std::fs::write(&config_path, toml_config("zhipu-coding", "glm-5.2")).unwrap();
         let store = FileConfigStore::new(config_path);
 
         let overlay = store
@@ -374,39 +279,21 @@ activeModel = "{active_model}"
     }
 
     #[tokio::test]
-    async fn load_reads_legacy_json_when_toml_is_missing_and_backfills_toml() {
+    async fn load_reads_toml_config() {
         let temp = tempfile::tempdir().unwrap();
         let config_path = temp.path().join(".astrcode").join("config.toml");
-        let legacy_path = config_path.with_extension("json");
-        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
-        std::fs::write(&legacy_path, json_config("legacy", "legacy-model")).unwrap();
-        let store = FileConfigStore::new(config_path.clone());
-
-        let config = store.load().await.unwrap();
-
-        assert_eq!(config.active_profile, "legacy");
-        assert_eq!(config.active_model, "legacy-model");
-        assert!(config_path.exists());
-    }
-
-    #[tokio::test]
-    async fn load_prefers_toml_over_legacy_json() {
-        let temp = tempfile::tempdir().unwrap();
-        let config_path = temp.path().join(".astrcode").join("config.toml");
-        let legacy_path = config_path.with_extension("json");
         std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
-        std::fs::write(&config_path, toml_config("toml", "toml-model")).unwrap();
-        std::fs::write(&legacy_path, json_config("legacy", "legacy-model")).unwrap();
+        std::fs::write(&config_path, toml_config("configured", "configured-model")).unwrap();
         let store = FileConfigStore::new(config_path);
 
         let config = store.load().await.unwrap();
 
-        assert_eq!(config.active_profile, "toml");
-        assert_eq!(config.active_model, "toml-model");
+        assert_eq!(config.active_profile, "configured");
+        assert_eq!(config.active_model, "configured-model");
     }
 
     #[tokio::test]
-    async fn load_overlay_prefers_toml_over_legacy_json() {
+    async fn load_overlay_reads_toml_config() {
         let temp = tempfile::tempdir().unwrap();
         let global_path = temp
             .path()
@@ -415,17 +302,8 @@ activeModel = "{active_model}"
             .join("config.toml");
         let workspace = temp.path().join("workspace");
         let overlay_path = workspace.join(".astrcode").join("config.toml");
-        let legacy_overlay_path = overlay_path.with_extension("json");
         std::fs::create_dir_all(overlay_path.parent().unwrap()).unwrap();
         std::fs::write(&overlay_path, toml_overlay("toml-overlay", "toml-model")).unwrap();
-        std::fs::write(
-            &legacy_overlay_path,
-            r#"{
-  "activeProfile": "legacy-overlay",
-  "activeModel": "legacy-model"
-}"#,
-        )
-        .unwrap();
         let store = FileConfigStore::new(global_path);
 
         let overlay = store
@@ -436,42 +314,6 @@ activeModel = "{active_model}"
 
         assert_eq!(overlay.active_profile.as_deref(), Some("toml-overlay"));
         assert_eq!(overlay.active_model.as_deref(), Some("toml-model"));
-    }
-
-    #[tokio::test]
-    async fn load_overlay_reads_legacy_json_and_backfills_toml() {
-        let temp = tempfile::tempdir().unwrap();
-        let global_path = temp
-            .path()
-            .join("home")
-            .join(".astrcode")
-            .join("config.toml");
-        let workspace = temp.path().join("workspace");
-        let overlay_path = workspace.join(".astrcode").join("config.toml");
-        let legacy_overlay_path = overlay_path.with_extension("json");
-        std::fs::create_dir_all(legacy_overlay_path.parent().unwrap()).unwrap();
-        std::fs::write(
-            &legacy_overlay_path,
-            r#"{
-  "activeProfile": "legacy-overlay",
-  "activeModel": "legacy-model"
-}"#,
-        )
-        .unwrap();
-        let store = FileConfigStore::new(global_path);
-
-        let overlay = store
-            .load_overlay(workspace.to_str().unwrap())
-            .await
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(overlay.active_profile.as_deref(), Some("legacy-overlay"));
-        assert_eq!(overlay.active_model.as_deref(), Some("legacy-model"));
-        assert!(overlay_path.exists());
-        assert!(legacy_overlay_path.exists());
-        let migrated = std::fs::read_to_string(overlay_path).unwrap();
-        assert!(migrated.contains("activeProfile = \"legacy-overlay\""));
     }
 
     #[tokio::test]
@@ -503,7 +345,7 @@ activeModel = "{active_model}"
     }
 
     #[tokio::test]
-    async fn last_known_good_saves_toml_and_loads_legacy_json_fallback() {
+    async fn last_known_good_round_trips_toml() {
         let temp = tempfile::tempdir().unwrap();
         let config_path = temp.path().join(".astrcode").join("config.toml");
         let store = FileConfigStore::new(config_path);
@@ -519,16 +361,8 @@ activeModel = "{active_model}"
         assert!(snapshot_path.exists());
         assert!(!snapshot_path.with_extension("json").exists());
 
-        std::fs::remove_file(&snapshot_path).unwrap();
-        std::fs::write(
-            snapshot_path.with_extension("json"),
-            json_config("legacy-snapshot", "legacy-snapshot-model"),
-        )
-        .unwrap();
-
         let loaded = store.load_last_known_good().await.unwrap().unwrap();
-        assert_eq!(loaded.active_profile, "legacy-snapshot");
-        assert_eq!(loaded.active_model, "legacy-snapshot-model");
-        assert!(snapshot_path.exists());
+        assert_eq!(loaded.active_profile, "snapshot");
+        assert_eq!(loaded.active_model, "snapshot-model");
     }
 }

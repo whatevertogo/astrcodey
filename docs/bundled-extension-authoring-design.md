@@ -383,7 +383,7 @@ impl Registrar {
 | `http_route` | 路由定义与 handler 原子绑定；校验 scope capability、路径、body 上限和冲突。 | handler 取得 `HttpContext`；新增认证模式通过 access enum 和边界映射扩展。 |
 | `keybinding` | 将按键映射到本 extension 已注册命令；目标不存在时安装失败。 | 只声明 UI 意图，不直接执行前端代码。 |
 | `status_item` | 声明一个可由命令结果或 custom event 更新的状态项。 | id 在 extension 内唯一；未来样式字段保持可选且不改变语义。 |
-| `declare_custom_event` | 声明 extension 可发射的事件名、schema version、durability 和 payload 上限。 | 发射时必须匹配声明；schema 演进以 version 为边界，不静默接受未知大 payload。 |
+| `declare_custom_event` | 声明 extension 可发射的事件名、schema version、类型化 delivery 和 payload 上限。 | 发射时必须匹配声明；schema 演进以 version 为边界，不静默接受未知大 payload。 |
 
 `Registrar` 的读取 accessor 只供运行时内部使用；作者只看到写入 API。`finish(manifest)` 完成所有
 局部校验，并把 manifest 与冻结后的 aggregate 成对返回。全局名称冲突等需要当前 runtime 上下文的
@@ -531,11 +531,16 @@ declaration、capability 与 intent 一致。server 仍在调用 handler 前重�
 http_route(method, path).public().max_body_bytes(...).description(...).build();
 keybinding(key, command).arguments(...).description(...).build();
 status_item(id, text).priority(...).build();
-custom_event(name).schema_version(...).durable(...).max_payload_bytes(...).build();
+custom_event(name)
+    .schema_version(...)
+    .delivery(CustomEventDelivery::SessionDurable)
+    .max_payload_bytes(...)
+    .build();
 ```
 
 HTTP 默认应保持 authenticated，而不是 Vvbot 当前 builder 的 admin 命名，也不能为了更省代码默认
-公开。事件 durability 默认值应保持现有行为，变更默认值属于持久化契约变更。
+公开。事件 delivery 默认是 `SessionDurable`；需要 live session 或进程级实时 fan-out 时显式选择
+`SessionLive` 或 `GlobalLive`。类型中不存在无有效 owner 的 global durable 组合。
 
 ### 7.6 统一 context
 
@@ -602,8 +607,8 @@ impl CustomEventEmitter {
 ```
 
 `emit` 根据当前 extension attribution 查找声明，验证事件名、schema version 对应的 payload 大小
-和当前调用是否具有 event sink。durable/live 由声明决定，调用方不能在每次 emit 时改写；需要改变
-durability 时必须声明新的 event version。未来若引入生成式 typed event handle，它只能包装这套
+和当前调用是否具有 event sink。delivery 由声明决定，调用方不能在每次 emit 时改写；需要改变
+delivery 时必须声明新的 event version。未来若引入生成式 typed event handle，它只能包装这套
 校验，不能形成第二条发射路径。
 
 ### 7.7 `ExtensionHost` 与领域客户端

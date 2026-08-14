@@ -6,18 +6,36 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use astrcode_extension_sdk::extension::{Extension, internal::extension_config};
+use astrcode_extension_sdk::extension::{
+    Extension, ExtensionConfig, ExtensionError, internal::extension_config,
+};
 use astrcode_extensions::{
     loader::{DiscoverExtensionsResult, ExtensionCandidate, ExtensionLoadContext, ExtensionSource},
     runner::ExtensionConfigValidationError,
 };
 
 type ExtensionFactory = fn() -> Arc<dyn Extension>;
+type ConfigValidator = fn(&ExtensionConfig) -> Result<(), ExtensionError>;
 
 struct BundledExtensionSpec {
     id: &'static str,
     default_enabled: bool,
     factory: ExtensionFactory,
+    validate_config: ConfigValidator,
+}
+
+fn reject_non_empty_config(config: &ExtensionConfig) -> Result<(), ExtensionError> {
+    if config.is_empty() {
+        Ok(())
+    } else {
+        Err(ExtensionError::InvalidInput {
+            code: astrcode_extension_sdk::WireErrorCode::InvalidInput
+                .as_str()
+                .into(),
+            message: "this extension does not accept configuration".into(),
+            hint: None,
+        })
+    }
 }
 
 const BUNDLED_EXTENSION_CATALOG: &[BundledExtensionSpec] = &[
@@ -26,72 +44,84 @@ const BUNDLED_EXTENSION_CATALOG: &[BundledExtensionSpec] = &[
         id: "astrcode-agent-tools",
         default_enabled: true,
         factory: astrcode_extension_agent_tools::extension,
+        validate_config: reject_non_empty_config,
     },
     #[cfg(feature = "coding")]
     BundledExtensionSpec {
         id: "astrcode-coding",
         default_enabled: true,
         factory: astrcode_extension_coding::extension,
+        validate_config: astrcode_extension_coding::validate_config,
     },
     #[cfg(feature = "mcp")]
     BundledExtensionSpec {
         id: "astrcode-mcp",
         default_enabled: true,
         factory: astrcode_extension_mcp::extension,
+        validate_config: reject_non_empty_config,
     },
     #[cfg(feature = "skill")]
     BundledExtensionSpec {
         id: "astrcode-skill",
         default_enabled: true,
         factory: astrcode_extension_skill::extension,
+        validate_config: reject_non_empty_config,
     },
     #[cfg(feature = "todo-tool")]
     BundledExtensionSpec {
         id: "astrcode-todo-tool",
         default_enabled: true,
         factory: astrcode_extension_todo_tool::extension,
+        validate_config: reject_non_empty_config,
     },
     #[cfg(feature = "mode")]
     BundledExtensionSpec {
         id: "astrcode-mode",
         default_enabled: true,
         factory: astrcode_extension_mode::extension,
+        validate_config: reject_non_empty_config,
     },
     #[cfg(feature = "ask-user")]
     BundledExtensionSpec {
         id: "astrcode-ask-user",
         default_enabled: true,
         factory: astrcode_extension_ask_user::extension,
+        validate_config: reject_non_empty_config,
     },
     #[cfg(feature = "goal")]
     BundledExtensionSpec {
         id: "astrcode-goal",
         default_enabled: true,
         factory: astrcode_extension_goal::extension,
+        validate_config: reject_non_empty_config,
     },
     #[cfg(feature = "memory")]
     BundledExtensionSpec {
         id: "astrcode.memory",
         default_enabled: false,
         factory: astrcode_extension_memory::extension,
+        validate_config: astrcode_extension_memory::validate_config,
     },
     #[cfg(feature = "channels")]
     BundledExtensionSpec {
         id: "astrcode-channels",
         default_enabled: false,
         factory: astrcode_extension_channels::extension,
+        validate_config: astrcode_extension_channels::validate_config,
     },
     #[cfg(feature = "web-tools")]
     BundledExtensionSpec {
         id: "astrcode-web-tools",
         default_enabled: true,
         factory: astrcode_extension_web_tools::extension,
+        validate_config: astrcode_extension_web_tools::validate_config,
     },
     #[cfg(feature = "session-commands")]
     BundledExtensionSpec {
         id: "astrcode-session-commands",
         default_enabled: true,
         factory: astrcode_extension_session_commands::extension,
+        validate_config: reject_non_empty_config,
     },
 ];
 
@@ -156,7 +186,6 @@ pub fn validate_bundled_extension_configs(
     configs: &BTreeMap<String, serde_json::Value>,
 ) -> Result<(), ExtensionConfigValidationError> {
     for spec in BUNDLED_EXTENSION_CATALOG {
-        let extension = (spec.factory)();
         let config = extension_config(
             spec.id,
             configs
@@ -164,8 +193,7 @@ pub fn validate_bundled_extension_configs(
                 .cloned()
                 .unwrap_or_else(|| serde_json::json!({})),
         );
-        extension
-            .validate_config(&config)
+        (spec.validate_config)(&config)
             .map_err(|source| ExtensionConfigValidationError::new(spec.id, source))?;
     }
     Ok(())
@@ -250,40 +278,56 @@ mod tests {
     }
 
     #[test]
-    fn config_owning_bundled_extensions_reject_invalid_candidates() {
+    fn catalog_validates_config_owners_and_rejects_config_for_extensions_without_config() {
         for spec in BUNDLED_EXTENSION_CATALOG {
             assert_eq!((spec.factory)().manifest().id(), spec.id);
         }
         validate_bundled_extension_configs(&BTreeMap::new())
             .expect("every bundled extension must accept an absent config");
 
-        let invalid_configs: BTreeMap<&str, serde_json::Value> = BTreeMap::from([
+        let config_cases: &[(&str, serde_json::Value, serde_json::Value)] = &[
             #[cfg(feature = "coding")]
             (
                 "astrcode-coding",
+                serde_json::json!({ "shellTimeoutSecs": 180 }),
                 serde_json::json!({ "shellTimeoutSecs": 0 }),
             ),
             #[cfg(feature = "memory")]
             (
                 "astrcode.memory",
+                serde_json::json!({ "maxContexts": 20 }),
                 serde_json::json!({ "maxContexts": "many" }),
             ),
             #[cfg(feature = "channels")]
             (
                 "astrcode-channels",
+                serde_json::json!({ "telegram": {} }),
                 serde_json::json!({ "unexpected": true }),
             ),
             #[cfg(feature = "web-tools")]
             (
                 "astrcode-web-tools",
+                serde_json::json!({ "search": { "provider": "duckduckgo" } }),
                 serde_json::json!({ "unexpected": true }),
             ),
-        ]);
+            #[cfg(feature = "agent-tools")]
+            (
+                "astrcode-agent-tools",
+                serde_json::json!({}),
+                serde_json::json!({ "unexpected": true }),
+            ),
+        ];
 
-        for (extension_id, config) in invalid_configs {
+        for (extension_id, valid, invalid) in config_cases {
+            validate_bundled_extension_configs(&BTreeMap::from([(
+                (*extension_id).to_owned(),
+                valid.clone(),
+            )]))
+            .unwrap_or_else(|error| panic!("{extension_id} should accept valid config: {error}"));
+
             let error = validate_bundled_extension_configs(&BTreeMap::from([(
-                extension_id.to_owned(),
-                config,
+                (*extension_id).to_owned(),
+                invalid.clone(),
             )]))
             .expect_err("every bundled config owner must reject its invalid candidate");
             assert!(error.to_string().contains(extension_id), "{error}");

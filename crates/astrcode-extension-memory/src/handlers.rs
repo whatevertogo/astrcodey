@@ -4,25 +4,25 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     extension::{
-        ExtensionCall, ExtensionError, ExtensionTasks, HookResult, LifecycleContext,
-        LifecycleHandler, PromptBuildContext, PromptBuildHandler, PromptContributions, ToolContext,
-        ToolHandler, ToolPlanContext,
+        ExtensionCall, ExtensionError, HookResult, LifecycleContext, LifecycleHandler,
+        PromptBuildContext, PromptBuildHandler, PromptContributions, ToolContext, ToolHandler,
+        ToolPlanContext,
     },
-    host::ExtensionHost,
     tool::{
         ExecutionMode, HostResource, ResourceAccess, ToolDefinition, ToolOrigin, ToolPlan,
         ToolResult,
     },
 };
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
     config::MemoryConfig,
-    pipeline, prompts,
+    prompts,
     scope::ScopedMemoryStores,
     store::{AppendResult, MemoryStorePool},
+    workers::MemoryWorkers,
 };
 
 // ─── 常量 ────────────────────────────────────────────────────────────
@@ -112,27 +112,10 @@ async fn with_scoped_stores<T: Send + 'static>(
     .map_err(|error| ExtensionError::Internal(error.to_string()))
 }
 
-async fn mutate_scoped_stores<T: Send + 'static>(
-    tasks: &ExtensionTasks,
-    task_name: &'static str,
-    store_pool: Arc<MemoryStorePool>,
-    working_dir: String,
-    operation: impl FnOnce(ScopedMemoryStores) -> std::io::Result<T> + Send + 'static,
-) -> Result<T, ExtensionError> {
-    tasks
-        .run_to_completion(
-            task_name,
-            with_scoped_stores(store_pool, working_dir, operation),
-        )
-        .await
-        .map_err(|error| ExtensionError::Internal(error.to_string()))?
-}
-
 // ─── Save Handler ────────────────────────────────────────────────────
 
 pub(crate) struct MemorySaveHandler {
-    pub store_pool: Arc<MemoryStorePool>,
-    pub pipeline: Arc<MemoryPipelineCoordinator>,
+    pub workers: Arc<MemoryWorkers>,
     pub config: Arc<RwLock<MemoryConfig>>,
 }
 
@@ -170,16 +153,11 @@ impl ToolHandler for MemorySaveHandler {
         let replace = args.replace_match.filter(|s| !s.trim().is_empty());
 
         // replace_match 路径：精准 upsert，不经过 delete
-        if let Some(ref replaces) = replace {
-            let replaces = replaces.clone();
-            let changed = mutate_scoped_stores(
-                ctx.tasks(),
-                "memory-save-upsert",
-                self.store_pool.clone(),
-                working_dir,
-                move |stores| stores.upsert(&category, &content, Some(replaces.as_str())),
-            )
-            .await?;
+        if let Some(replaces) = replace {
+            let changed = self
+                .workers
+                .upsert(working_dir, category, content, replaces)
+                .await?;
             return Ok(ok_text(
                 if changed {
                     "Memory updated."
@@ -194,14 +172,10 @@ impl ToolHandler for MemorySaveHandler {
         // 正常新增路径
         let category_for_emit = category.clone();
         let content_for_emit = content.clone();
-        let result = mutate_scoped_stores(
-            ctx.tasks(),
-            "memory-save-append",
-            self.store_pool.clone(),
-            working_dir.clone(),
-            move |stores| stores.append(&category, &content),
-        )
-        .await?;
+        let result = self
+            .workers
+            .append(working_dir.clone(), category, content)
+            .await?;
 
         match result {
             AppendResult::Saved => {
@@ -212,17 +186,8 @@ impl ToolHandler for MemorySaveHandler {
                 if let Err(error) = ctx.events().emit(MEMORY_CREATED_EVENT_TYPE, &payload).await {
                     tracing::warn!(%error, "memory creation event was not published");
                 }
-                let cfg = self.config.read().clone();
-                if cfg.auto_extract_after_save {
-                    spawn_memory_pipeline(
-                        ctx.tasks(),
-                        self.pipeline.clone(),
-                        self.store_pool.clone(),
-                        ctx.host().clone(),
-                        self.config.clone(),
-                        session_id,
-                        working_dir,
-                    );
+                if self.config.read().auto_extract_after_save {
+                    self.workers.request_pipeline(session_id, working_dir);
                 }
                 Ok(ok_text("Memory saved.".to_string()).into())
             },
@@ -242,7 +207,7 @@ impl ToolHandler for MemorySaveHandler {
 // ─── Delete Handler ──────────────────────────────────────────────────
 
 pub(crate) struct MemoryDeleteHandler {
-    pub store_pool: Arc<MemoryStorePool>,
+    pub workers: Arc<MemoryWorkers>,
 }
 
 #[derive(Deserialize)]
@@ -271,14 +236,7 @@ impl ToolHandler for MemoryDeleteHandler {
         }
         let pattern = args.match_pattern;
         let pattern_for_emit = pattern.clone();
-        let removed = mutate_scoped_stores(
-            ctx.tasks(),
-            "memory-delete",
-            self.store_pool.clone(),
-            working_dir,
-            move |stores| stores.delete_by_content(&pattern),
-        )
-        .await?;
+        let removed = self.workers.delete(working_dir, pattern).await?;
 
         if !removed.is_empty() {
             let payload = json!({
@@ -398,222 +356,37 @@ impl PromptBuildHandler for MemoryRecallHandler {
     }
 }
 
-// ─── SessionStart + pipeline coordinator ───────────────────────────
-
-#[derive(Default)]
-pub(crate) struct MemoryPipelineCoordinator {
-    state: Mutex<PipelineState>,
-}
-
-#[derive(Default)]
-struct PipelineState {
-    running: bool,
-    pending: bool,
-    latest_session_id: Option<String>,
-    latest_working_dir: Option<String>,
-}
-
-impl MemoryPipelineCoordinator {
-    fn request_run(&self, session_id: String, working_dir: String) -> Option<(String, String)> {
-        let mut state = self.state.lock();
-        state.latest_session_id = Some(session_id.clone());
-        state.latest_working_dir = Some(working_dir.clone());
-        if state.running {
-            state.pending = true;
-            None
-        } else {
-            state.running = true;
-            Some((session_id, working_dir))
-        }
-    }
-
-    fn complete_run(&self) -> Option<(String, String)> {
-        let mut state = self.state.lock();
-        if state.pending {
-            state.pending = false;
-            Some((
-                state.latest_session_id.clone()?,
-                state.latest_working_dir.clone()?,
-            ))
-        } else {
-            state.running = false;
-            None
-        }
-    }
-
-    pub(crate) fn reset(&self) {
-        *self.state.lock() = PipelineState::default();
-    }
-}
-
-pub(crate) fn spawn_memory_pipeline(
-    tasks: &ExtensionTasks,
-    pipeline: Arc<MemoryPipelineCoordinator>,
-    store_pool: Arc<MemoryStorePool>,
-    host: ExtensionHost,
-    config: Arc<RwLock<MemoryConfig>>,
-    session_id: String,
-    working_dir: String,
-) {
-    let Some((mut current_session_id, mut working_dir)) =
-        pipeline.request_run(session_id, working_dir)
-    else {
-        tracing::debug!("memory pipeline queued");
-        return;
-    };
-
-    let cancellation = tasks.cancellation();
-
-    tasks.spawn("memory-pipeline", async move {
-        let session_inspect = match host.session_inspect() {
-            Ok(inspect) => inspect,
-            Err(error) => {
-                tracing::warn!(%error, "memory pipeline: session inspection unavailable");
-                pipeline.reset();
-                return;
-            },
-        };
-        let models = host.models();
-        match models.small_available() {
-            Ok(true) => {},
-            Ok(false) => {
-                tracing::warn!("memory pipeline: small model unavailable");
-                pipeline.reset();
-                return;
-            },
-            Err(error) => {
-                tracing::warn!(%error, "memory pipeline: small model unavailable");
-                pipeline.reset();
-                return;
-            },
-        }
-
-        loop {
-            let scoped = match store_pool.get_scoped(&working_dir) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "memory pipeline: scoped store failed");
-                    break;
-                },
-            };
-            let cfg = config.read().clone();
-            let run = pipeline::run(
-                &scoped,
-                session_inspect.clone(),
-                &models,
-                &current_session_id,
-                &cfg,
-            );
-
-            tokio::select! {
-                _ = cancellation.cancelled() => {
-                    tracing::debug!("memory pipeline stopped");
-                    break;
-                },
-                result = run => {
-                    if let Err(e) = result {
-                        tracing::warn!(
-                            error = %e,
-                            session_id = %current_session_id,
-                            "memory pipeline failed"
-                        );
-                    }
-                },
-            }
-
-            if cancellation.is_cancelled() {
-                break;
-            }
-            let Some((next_id, next_dir)) = pipeline.complete_run() else {
-                break;
-            };
-            current_session_id = next_id;
-            working_dir = next_dir;
-        }
-
-        while pipeline.complete_run().is_some() {}
-    });
-}
+// ─── SessionStart ────────────────────────────────────────────────────
 
 pub(crate) struct MemorySessionStartHandler {
-    pub store_pool: Arc<MemoryStorePool>,
-    pub pipeline: Arc<MemoryPipelineCoordinator>,
+    pub workers: Arc<MemoryWorkers>,
     pub config: Arc<RwLock<MemoryConfig>>,
-    pub session_prefs: Arc<crate::turn_recall::SessionPrefsCache>,
 }
 
 #[async_trait::async_trait]
 impl LifecycleHandler for MemorySessionStartHandler {
     async fn handle(&self, ctx: LifecycleContext) -> Result<HookResult, ExtensionError> {
         let session_id = ctx.session_id().to_string();
-        let tasks = ctx.tasks();
-        if tasks.cancellation().is_cancelled() {
-            return Ok(HookResult::Allow);
-        }
 
         // 把 user_prefs 锚定在 session 边界：session 内只读，`memory_save`
         // 写入的新偏好不影响当前 session 的 system prompt（KV cache 稳定）。
         // 预加载幂等，即使赶不上首次 PromptBuild，兜底加载仍保证一致。
         // 预加载失败不阻塞——PromptBuild 的 lines_for_session 会兜底。
-        let store_pool = self.store_pool.clone();
-        let session_prefs = self.session_prefs.clone();
         let working_dir = ctx.working_dir().to_string_lossy().into_owned();
-        let preload_working_dir = working_dir.clone();
-        let preload_session_id = session_id.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || {
-            let scoped = store_pool.get_scoped(&preload_working_dir)?;
-            session_prefs
-                .preload_for_session(&preload_session_id, || scoped.all_user_preference_lines())
-        })
-        .await
-        .map_err(|e| ExtensionError::Internal(e.to_string()))?
+        if let Err(error) = self
+            .workers
+            .preload_preferences(working_dir.clone(), session_id.clone())
+            .await
         {
-            tracing::debug!(error = %e, "memory: user_prefs preload failed, will lazy-load on prompt build");
+            tracing::debug!(%error, "memory: user_prefs preload failed, will lazy-load on prompt build");
         }
 
         if !self.config.read().auto_extract {
             return Ok(HookResult::Allow);
         }
 
-        spawn_memory_pipeline(
-            tasks,
-            self.pipeline.clone(),
-            self.store_pool.clone(),
-            ctx.host().clone(),
-            self.config.clone(),
-            session_id,
-            working_dir,
-        );
+        self.workers.request_pipeline(session_id, working_dir);
 
         Ok(HookResult::Allow)
-    }
-}
-
-// ─── Tests ───────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pipeline_coordinator_coalesces_pending_runs() {
-        let coord = MemoryPipelineCoordinator::default();
-
-        // First run starts immediately
-        let run1 = coord.request_run("s1".into(), "/a".into());
-        assert!(run1.is_some());
-
-        // Second run is queued (coalesced)
-        let run2 = coord.request_run("s2".into(), "/b".into());
-        assert!(run2.is_none());
-
-        // Completing the first run dequeues the pending one
-        let next = coord.complete_run();
-        assert!(next.is_some());
-        assert_eq!(next.unwrap().0, "s2");
-
-        // No more pending
-        let done = coord.complete_run();
-        assert!(done.is_none());
     }
 }

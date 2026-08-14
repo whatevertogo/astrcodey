@@ -26,6 +26,8 @@ use astrcode_extension_sdk::{
 pub(crate) struct ExtensionRegistration {
     pub(crate) extension_id: String,
     pub(crate) version: String,
+    pub(crate) required_transport_features:
+        Vec<astrcode_extension_sdk::extension::TransportFeature>,
     pub(crate) capabilities: Vec<ExtensionCapability>,
     pub(crate) tools: Vec<ToolDefinition>,
     pub(crate) commands: Vec<SlashCommand>,
@@ -99,6 +101,15 @@ fn registration_from_manifest(
     let extension_id = identity.id().to_owned();
     let version = identity.version().to_owned();
 
+    let required_transport_features = manifest.required_transport_features;
+    if required_transport_features
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .len()
+        != required_transport_features.len()
+    {
+        return Err("initialize manifest contains duplicate required transport features".into());
+    }
     let capabilities = manifest.capabilities;
 
     let tools = manifest
@@ -127,6 +138,7 @@ fn registration_from_manifest(
     Ok(ExtensionRegistration {
         extension_id,
         version,
+        required_transport_features,
         capabilities,
         tools,
         commands,
@@ -283,6 +295,7 @@ mod tests {
         }
 
         let manifest: InitializeManifest = serde_json::from_value(json!({
+            "required_transport_features": ["authenticated_http"],
             "tools": [
                 {
                     "name": "defaulted",
@@ -307,7 +320,12 @@ mod tests {
                 "execution": {"kind": "extension"}
             }],
             "hooks": [{"on": "turn_end", "mode": "non_blocking"}],
-            "custom_events": [{"event_type": "defaulted.event"}]
+            "custom_events": [{
+                "event_type": "defaulted.event",
+                "schema_version": 1,
+                "delivery": "session_durable",
+                "max_payload_bytes": 65536
+            }]
         }))
         .unwrap();
         let registration = registration_from_s5r_manifest(
@@ -321,6 +339,10 @@ mod tests {
 
         assert_eq!(registration.extension_id, "defaults");
         assert_eq!(registration.version, "test");
+        assert_eq!(
+            registration.required_transport_features,
+            [astrcode_extension_sdk::extension::TransportFeature::AuthenticatedHttp]
+        );
         assert!(!registration.tools[0].strict);
         assert_eq!(
             registration.tools[0].execution_mode,
@@ -339,7 +361,10 @@ mod tests {
                     && *options == ContinueAfterStopOptions::default()
         ));
         assert_eq!(registration.custom_events[0].schema_version, 1);
-        assert!(registration.custom_events[0].durable);
+        assert_eq!(
+            registration.custom_events[0].delivery,
+            astrcode_extension_sdk::extension::CustomEventDelivery::SessionDurable
+        );
         assert_eq!(registration.custom_events[0].max_payload_bytes, 64 * 1024);
         assert!(
             validate_registration_features(&registration, &BTreeSet::new()).is_err(),

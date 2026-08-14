@@ -13,6 +13,7 @@ pub struct ExtensionDeclarationSnapshot {
     pub generation: u64,
     pub runtime_state: ExtensionRuntimeState,
     pub capabilities: Vec<ExtensionCapability>,
+    pub required_transport_features: Vec<TransportFeature>,
     pub tools: Vec<ToolDefinition>,
     pub dynamic_tools: bool,
     pub commands: Vec<astrcode_extension_sdk::extension::SlashCommand>,
@@ -65,6 +66,9 @@ impl ExtensionRunner {
                         generation: runtime.generation,
                         runtime_state: (&runtime.state).into(),
                         capabilities: manifest.capabilities().to_vec(),
+                        required_transport_features: manifest
+                            .required_transport_features()
+                            .to_vec(),
                         tools: registrations
                             .tools()
                             .iter()

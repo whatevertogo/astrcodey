@@ -16,11 +16,11 @@ use std::{
 };
 
 use astrcode_ai::create_provider;
-use astrcode_context::post_compact_enricher::DefaultPostCompactEnricher;
 use astrcode_core::{
     config::{Config, ConfigStore, ConfigStoreError, EffectiveConfig, LlmSettings, ResolveError},
     llm::{LlmClientConfig, LlmProvider},
 };
+use astrcode_extension_sdk::transport::TransportProfile;
 use astrcode_extensions::{
     loader::{DiskExtensionSource, ExtensionLoadContext, prepare_extension_generation},
     runner::{ExtensionConfigValidationError, ExtensionRunner, PreparedExtensionGeneration},
@@ -29,12 +29,14 @@ use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices};
 use futures_util::FutureExt;
 use parking_lot::RwLock;
 use tokio::sync::{Notify, oneshot};
+use tracing::Instrument;
 
 pub struct ConfigManager {
     config_store: Arc<dyn ConfigStore>,
     raw_config: Arc<RwLock<Config>>,
     extension_runner: Arc<ExtensionRunner>,
     extension_working_dir: PathBuf,
+    transport_profile: TransportProfile,
     /// 共享给所有 session 的运行时能力。
     ///
     /// `effective` 与 `llm_provider` 的真正存储位置在这里，避免双份事实。
@@ -75,9 +77,13 @@ enum ConfigPersistence {
     AlreadyPersisted,
 }
 
+#[derive(Debug, thiserror::Error)]
 enum ConfigPublicationError {
+    #[error(transparent)]
     ExtensionValidation(ExtensionConfigValidationError),
+    #[error("extension candidate: {0}")]
     ExtensionCandidate(String),
+    #[error("config store: {0}")]
     Store(ConfigStoreError),
 }
 
@@ -109,10 +115,13 @@ impl ConfigTransactionTasks {
         let completion = ConfigTransactionCompletion {
             state: Arc::clone(&self.state),
         };
-        tokio::spawn(async move {
-            let _completion = completion;
-            task.await;
-        });
+        tokio::spawn(
+            async move {
+                let _completion = completion;
+                task.await;
+            }
+            .instrument(tracing::info_span!("config.publication")),
+        );
     }
 
     async fn drain(&self) {
@@ -158,7 +167,6 @@ pub(crate) fn assemble_session_runtime_services(
         small_llm,
         effective,
         SessionExtensionPorts::from_adapter(extension_runner),
-        Arc::new(DefaultPostCompactEnricher),
     ))
 }
 
@@ -173,6 +181,7 @@ impl ConfigManager {
         effective: EffectiveConfig,
         extension_runner: Arc<astrcode_extensions::runner::ExtensionRunner>,
         extension_working_dir: PathBuf,
+        transport_profile: TransportProfile,
     ) -> Result<(Self, Arc<SessionRuntimeServices>), astrcode_core::llm::LlmError> {
         let runtime_services = assemble_session_runtime_services(
             build_provider_from_settings(&effective.llm)?,
@@ -185,6 +194,7 @@ impl ConfigManager {
             raw_config: Arc::new(RwLock::new(raw_config)),
             extension_runner,
             extension_working_dir,
+            transport_profile,
             runtime_services: Arc::clone(&runtime_services),
             update_lock: Arc::new(tokio::sync::Mutex::new(())),
             transactions: ConfigTransactionTasks::default(),
@@ -206,6 +216,7 @@ impl ConfigManager {
             raw_config: Arc::new(RwLock::new(raw_config)),
             extension_runner,
             extension_working_dir,
+            transport_profile: TransportProfile::default(),
             runtime_services,
             update_lock: Arc::new(tokio::sync::Mutex::new(())),
             transactions: ConfigTransactionTasks::default(),
@@ -264,12 +275,14 @@ impl ConfigManager {
         let runtime_services = Arc::clone(&self.runtime_services);
         let extension_runner = Arc::clone(&self.extension_runner);
         let extension_working_dir = self.extension_working_dir.clone();
+        let transport_profile = self.transport_profile.clone();
         let (result_tx, result_rx) = oneshot::channel();
         self.transactions.spawn(async move {
             let _update = update;
             let extension_candidate = AssertUnwindSafe(Self::prepare_extension_candidate(
                 &extension_runner,
                 &extension_working_dir,
+                &transport_profile,
                 &prepared,
             ))
             .catch_unwind()
@@ -282,7 +295,7 @@ impl ConfigManager {
             let extension_candidate = match extension_candidate {
                 Ok(candidate) => candidate,
                 Err(error) => {
-                    let _ = result_tx.send(Err(error));
+                    Self::report_publication_result(result_tx, Err(error));
                     return;
                 },
             };
@@ -314,9 +327,24 @@ impl ConfigManager {
                 );
                 std::process::abort();
             });
-            let _ = result_tx.send(publication);
+            Self::report_publication_result(result_tx, publication);
         });
         result_rx
+    }
+
+    fn report_publication_result(
+        result_tx: oneshot::Sender<Result<(), ConfigPublicationError>>,
+        result: Result<(), ConfigPublicationError>,
+    ) {
+        if let Err(result) = result_tx.send(result) {
+            match result {
+                Ok(()) => tracing::debug!("config publication completed after caller detached"),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "config publication failed after caller detached"
+                ),
+            }
+        }
     }
 
     async fn await_publication<E>(
@@ -369,6 +397,7 @@ impl ConfigManager {
     async fn prepare_extension_candidate(
         extension_runner: &Arc<ExtensionRunner>,
         extension_working_dir: &std::path::Path,
+        transport_profile: &TransportProfile,
         prepared: &PreparedConfig,
     ) -> Result<PreparedExtensionGeneration, ConfigPublicationError> {
         astrcode_bundled_extensions::validate_bundled_extension_configs(
@@ -385,6 +414,7 @@ impl ConfigManager {
             &ExtensionLoadContext {
                 working_dir: Some(extension_working_dir.to_string_lossy().into_owned()),
                 host_router: Some(extension_runner.host_router()),
+                transport_profile: transport_profile.clone(),
             },
             &[&bundled_source, &disk_source],
             &prepared.effective.extensions.extension_configs,

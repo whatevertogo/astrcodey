@@ -1,8 +1,7 @@
 use std::sync::Arc;
 
 use astrcode_context::{
-    ContextAssembler, ContextPrepareInput, NoopPostCompactEnricher, PreparedContext,
-    context_assembler::LlmContextAssembler,
+    ContextAssembler, ContextPrepareInput, PreparedContext, context_assembler::LlmContextAssembler,
 };
 use astrcode_core::{
     config::{
@@ -143,7 +142,6 @@ fn test_runtime_services_with_context_and_extensions(
         effective_config(context),
         extension_ports,
         context_assembler,
-        Arc::new(NoopPostCompactEnricher),
     ))
 }
 

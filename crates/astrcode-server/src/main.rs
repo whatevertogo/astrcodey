@@ -23,7 +23,7 @@ async fn main() {
 
     let runtime = match astrcode_server::bootstrap::bootstrap_with(
         astrcode_server::bootstrap::BootstrapOptions {
-            disabled_extension_ids: std::collections::BTreeSet::from(["astrcode-ask-user".into()]),
+            transport_profile: astrcode_extension_sdk::transport::TransportProfile::default(),
             ..Default::default()
         },
     )

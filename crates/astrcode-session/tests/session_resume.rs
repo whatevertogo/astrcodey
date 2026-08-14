@@ -1,7 +1,7 @@
 //! Session 跨实例恢复时 extra_system_prompt 不丢失。
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -12,7 +12,7 @@ use astrcode_core::{
         ExecutionMode, SessionToolSelection, Tool, ToolDefinition, ToolError, ToolExecutionContext,
         ToolOrigin,
     },
-    types::{SessionId, ToolCallId, new_session_id},
+    types::{SessionId, ToolCallId, new_session_id, new_turn_id},
 };
 use astrcode_extension_sdk::{
     extension::{
@@ -34,6 +34,11 @@ use tokio::sync::mpsc;
 mod common;
 
 struct UnusedLlm;
+
+#[derive(Default)]
+struct RecordingToolsLlm {
+    requested_tools: Mutex<Vec<String>>,
+}
 
 struct FailingPromptContributor;
 
@@ -131,6 +136,34 @@ impl LlmProvider for UnusedLlm {
     }
 }
 
+#[async_trait::async_trait]
+impl LlmProvider for RecordingToolsLlm {
+    async fn generate_request(
+        &self,
+        request: astrcode_core::llm::LlmRequest,
+    ) -> Result<mpsc::UnboundedReceiver<LlmEvent>, LlmError> {
+        *self.requested_tools.lock().unwrap() =
+            request.tools.into_iter().map(|tool| tool.name).collect();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tx.send(LlmEvent::ContentDelta {
+            delta: "done".into(),
+        })
+        .unwrap();
+        tx.send(LlmEvent::Done {
+            finish_reason: "stop".into(),
+        })
+        .unwrap();
+        Ok(rx)
+    }
+
+    fn model_limits(&self) -> ModelLimits {
+        ModelLimits {
+            max_input_tokens: 200_000,
+            max_output_tokens: 4096,
+        }
+    }
+}
+
 fn test_caps() -> Arc<SessionRuntimeServices> {
     let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
     common::test_runtime_services(llm)
@@ -185,8 +218,10 @@ async fn reopen_restores_native_extra_system_prompt() {
 #[tokio::test]
 async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
-    let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
-    let caps = common::test_runtime_services_with_tool_catalog(llm, Arc::new(ReadWriteToolCatalog));
+    let llm = Arc::new(RecordingToolsLlm::default());
+    let provider: Arc<dyn LlmProvider> = llm.clone();
+    let caps =
+        common::test_runtime_services_with_tool_catalog(provider, Arc::new(ReadWriteToolCatalog));
     let parent_selection = SessionToolSelection::Only {
         names: vec!["write".into(), "read".into()],
     };
@@ -285,9 +320,20 @@ async fn child_tool_selection_stays_within_parent_boundary_and_survives_reopen()
         })
         .await
         .unwrap();
-    let effective_registry = reopened.tool_registry_snapshot(".").await.unwrap();
+    let result = reopened
+        .submit("verify effective tools".into(), new_turn_id(), None)
+        .await
+        .unwrap()
+        .wait()
+        .await
+        .unwrap();
     assert!(
-        effective_registry.list_definitions().is_empty(),
+        result.output.is_ok(),
+        "the reopened child turn should complete: {:?}",
+        result.output
+    );
+    assert!(
+        llm.requested_tools.lock().unwrap().is_empty(),
         "a reopened child must not retain tools removed from its parent boundary",
     );
 }

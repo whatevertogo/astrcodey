@@ -5,13 +5,13 @@ use std::sync::Arc;
 use super::{
     commands::{CommandCompletions, ExtensionCommandResult, SlashCommand},
     contexts::{
-        CommandCompletionContext, CommandContext, CommandDiscoveryContext, CompactContext,
-        ContinueAfterStopContext, LifecycleContext, PostToolUseContext, PreToolUseContext,
-        PromptBuildContext, ProviderContext, ProviderSettlementContext, ToolDiscoveryContext,
-        UserMessageEnvelopeContext,
+        CommandCompletionContext, CommandContext, CommandDiscoveryContext,
+        ContinueAfterStopContext, LifecycleContext, PostCompactContext, PostToolUseContext,
+        PreCompactContext, PreToolUseContext, PromptBuildContext, ProviderContext,
+        ProviderSettlementContext, ToolDiscoveryContext, UserMessageEnvelopeContext,
     },
     results::{
-        CompactResult, ContinueAfterStopResult, HookResult, PostToolUseResult, PreToolUseResult,
+        ContinueAfterStopResult, HookResult, PostToolUseResult, PreCompactResult, PreToolUseResult,
         PreparedProviderContribution, ProviderResult, ToolInputTransformResult,
         UserMessageEnvelopeResult,
     },
@@ -70,10 +70,16 @@ pub trait PromptBuildHandler: Send + Sync {
     ) -> Result<super::types::PromptContributions, ExtensionError>;
 }
 
-/// Compact 钩子处理器。
+/// Collects instructions and extension-owned context before compacting.
 #[async_trait::async_trait]
-pub trait CompactHandler: Send + Sync {
-    async fn handle(&self, ctx: CompactContext) -> Result<CompactResult, ExtensionError>;
+pub trait PreCompactHandler: Send + Sync {
+    async fn handle(&self, ctx: PreCompactContext) -> Result<PreCompactResult, ExtensionError>;
+}
+
+/// Receives a notification after the transcript rewrite is durably committed.
+#[async_trait::async_trait]
+pub trait PostCompactHandler: Send + Sync {
+    async fn handle(&self, ctx: PostCompactContext) -> Result<(), ExtensionError>;
 }
 
 /// 通用生命周期钩子处理器。

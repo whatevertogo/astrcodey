@@ -120,7 +120,8 @@ impl TurnHooks for RecordingHooks {
             )
         });
         self.acknowledged_after_durable_facts.store(
-            matches!((assistant, usage), (Some(assistant), Some(usage)) if assistant < usage),
+            self.store.sync_count() > 0
+                && matches!((assistant, usage), (Some(assistant), Some(usage)) if assistant < usage),
             Ordering::SeqCst,
         );
         self.acknowledgements.fetch_add(1, Ordering::SeqCst);

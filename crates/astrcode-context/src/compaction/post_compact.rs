@@ -1,289 +1,119 @@
-//! Post-compact context helpers.
+//! Generic rendering and budgeting for extension-contributed compact context.
 
-use std::collections::{HashMap, HashSet};
-
-use astrcode_core::llm::{LlmContent, LlmMessage, LlmRole};
+use astrcode_core::llm::LlmMessage;
 
 use super::assemble::collapse_compaction_whitespace;
 use crate::{
-    ContextSettings, POST_COMPACT_CONTEXT_MARKER,
-    token_budget::{estimate_text_tokens, truncate_chars, truncate_text_to_tokens},
+    CompactResult, CompactRetainedContext, ContextSettings, POST_COMPACT_CONTEXT_MARKER,
+    token_budget::{estimate_text_tokens, truncate_text_to_tokens},
 };
 
 const POST_COMPACT_CONTEXT_END: &str = "</post_compact_context>";
-const TRUNCATION_MARKER: &str = "\n\n[... file content truncated after compaction; use read on \
-                                 this path if more detail is needed]";
-const POST_COMPACT_TRUNCATION_MARKER: &str = "\n\n[... post-compact context truncated]";
+const TRUNCATION_MARKER: &str = "\n\n[... retained context truncated after compaction]";
 
-#[derive(Debug, Clone)]
-pub(crate) struct PostCompactFile {
-    pub(crate) path: String,
-    pub(crate) content: String,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct PostCompactNote {
-    pub(crate) title: String,
-    pub(crate) body: String,
-}
-
-pub(crate) fn recent_read_paths(
-    source_messages: &[LlmMessage],
-    retained_messages: &[LlmMessage],
-    settings: &ContextSettings,
-) -> Vec<String> {
-    let retained_index = scan_tool_messages(retained_messages);
-    let retained_paths = read_paths(&retained_index);
-    let source_index = scan_tool_messages(source_messages);
-    let mut seen_paths = HashSet::new();
-    let mut paths = Vec::new();
-    for path in read_paths_in_order(&source_index).into_iter().rev() {
-        if retained_paths.contains(&path) || !seen_paths.insert(path.clone()) {
-            continue;
-        }
-        paths.push(path);
-        if paths.len() >= settings.post_compact_max_files {
-            break;
-        }
-    }
-    paths.reverse();
-    paths
-}
-
-pub(crate) fn agent_status_note(
-    messages: &[LlmMessage],
-    max_entries: usize,
-    max_chars: usize,
-) -> Option<PostCompactNote> {
-    let index = scan_tool_messages(messages);
-    let mut entries = Vec::new();
-    for result in &index.results {
-        if !is_agent_tool(result.tool_name.as_deref()) {
-            continue;
-        }
-        let Some(call_id) = result.tool_call_id.as_deref() else {
-            continue;
-        };
-        let description = index
-            .calls
-            .get(call_id)
-            .and_then(|call| call.description.as_deref())
-            .unwrap_or("agent task");
-        let status = if result.is_error {
-            "failed"
-        } else {
-            "completed"
-        };
-        entries.push(format!(
-            "- {description}: {status}\n{}",
-            truncate_chars(&result.content, 1200, POST_COMPACT_TRUNCATION_MARKER)
-        ));
-    }
-    if entries.is_empty() {
-        return None;
-    }
-    let start = entries.len().saturating_sub(max_entries);
-    Some(PostCompactNote {
-        title: "Agent Task Status".into(),
-        body: truncate_chars(
-            &entries[start..].join("\n\n"),
-            max_chars,
-            POST_COMPACT_TRUNCATION_MARKER,
-        ),
-    })
-}
-
-pub(crate) fn append_post_compact_context(
-    compaction: &mut crate::CompactResult,
-    files: Vec<PostCompactFile>,
-    notes: Vec<PostCompactNote>,
+/// Append extension-owned retained context after the compact summary.
+///
+/// Contributions retain dispatcher order. The context crate knows only how to budget and render
+/// the typed values; discovering plans, files, agent state, or any other domain fact remains the
+/// contributing extension's responsibility.
+pub fn append_compact_retained_context(
+    compaction: &mut CompactResult,
+    contributions: Vec<CompactRetainedContext>,
     settings: &ContextSettings,
 ) {
-    if let Some(message) = post_compact_context_message(files, notes, settings) {
-        compaction.summary_messages.push(message);
+    let contributions = budget_contributions(contributions, settings);
+    if contributions.is_empty() {
+        return;
     }
+    compaction
+        .summary_messages
+        .push(LlmMessage::user(render_retained_context(&contributions)));
 }
 
-fn post_compact_context_message(
-    files: Vec<PostCompactFile>,
-    notes: Vec<PostCompactNote>,
+fn budget_contributions(
+    contributions: Vec<CompactRetainedContext>,
     settings: &ContextSettings,
-) -> Option<LlmMessage> {
-    let files = budget_files(files, settings);
-    if files.is_empty() && notes.is_empty() {
-        return None;
-    }
-    Some(LlmMessage::user(render_post_compact_context(
-        &files, &notes,
-    )))
-}
-
-fn budget_files(files: Vec<PostCompactFile>, settings: &ContextSettings) -> Vec<PostCompactFile> {
-    let mut used_tokens = 0usize;
+) -> Vec<CompactRetainedContext> {
+    let mut remaining_tokens = settings.post_compact_token_budget;
+    let mut retained_files = 0usize;
     let mut kept = Vec::new();
-    for file in files.into_iter().take(settings.post_compact_max_files) {
-        let content = truncate_to_tokens(&file.content, settings.post_compact_max_tokens_per_file);
-        let tokens = estimate_text_tokens(&file.path) + estimate_text_tokens(&content);
-        if used_tokens.saturating_add(tokens) > settings.post_compact_token_budget {
-            continue;
+
+    for contribution in contributions {
+        if remaining_tokens == 0 {
+            break;
         }
-        used_tokens += tokens;
-        kept.push(PostCompactFile {
-            path: file.path,
-            content,
-        });
+
+        let contribution = match contribution {
+            CompactRetainedContext::File { path, content } => {
+                if retained_files >= settings.post_compact_max_files || path.trim().is_empty() {
+                    continue;
+                }
+                let header_tokens = estimate_text_tokens(&path);
+                let content_budget = remaining_tokens
+                    .saturating_sub(header_tokens)
+                    .min(settings.post_compact_max_tokens_per_file);
+                let Some(content) = budget_body(&content, content_budget) else {
+                    continue;
+                };
+                retained_files += 1;
+                CompactRetainedContext::File { path, content }
+            },
+            CompactRetainedContext::Note { title, body } => {
+                if title.trim().is_empty() {
+                    continue;
+                }
+                let header_tokens = estimate_text_tokens(&title);
+                let content_budget = remaining_tokens.saturating_sub(header_tokens);
+                let Some(body) = budget_body(&body, content_budget) else {
+                    continue;
+                };
+                CompactRetainedContext::Note { title, body }
+            },
+        };
+
+        remaining_tokens = remaining_tokens.saturating_sub(contribution.estimated_tokens());
+        kept.push(contribution);
     }
     kept
 }
 
-fn read_paths(index: &ToolMessageIndex) -> HashSet<String> {
-    index
-        .calls
-        .values()
-        .filter(|call| is_read_tool(&call.name))
-        .filter_map(|call| call.path.clone())
-        .collect()
-}
-
-fn read_paths_in_order(index: &ToolMessageIndex) -> Vec<String> {
-    let mut paths = Vec::new();
-    for result in &index.results {
-        if result.is_error || !result.tool_name.as_deref().is_some_and(is_read_tool) {
-            continue;
-        }
-        let Some(call_id) = result.tool_call_id.as_deref() else {
-            continue;
-        };
-        if let Some(path) = index.calls.get(call_id).and_then(|call| call.path.as_ref()) {
-            paths.push(path.clone());
-        }
+fn budget_body(content: &str, max_tokens: usize) -> Option<String> {
+    if content.trim().is_empty() {
+        return None;
     }
-    paths
-}
-
-#[derive(Debug, Default)]
-struct ToolMessageIndex {
-    calls: HashMap<String, ToolCallInfo>,
-    results: Vec<ToolResultEntry>,
-}
-
-#[derive(Debug)]
-struct ToolCallInfo {
-    name: String,
-    path: Option<String>,
-    description: Option<String>,
-}
-
-#[derive(Debug)]
-struct ToolResultEntry {
-    tool_name: Option<String>,
-    tool_call_id: Option<String>,
-    content: String,
-    is_error: bool,
-}
-
-fn scan_tool_messages(messages: &[LlmMessage]) -> ToolMessageIndex {
-    let mut index = ToolMessageIndex::default();
-    for message in messages {
-        match message.role {
-            LlmRole::Assistant => {
-                for content in &message.content {
-                    let LlmContent::ToolCall {
-                        call_id,
-                        name,
-                        arguments,
-                        ..
-                    } = content
-                    else {
-                        continue;
-                    };
-                    let description = arguments
-                        .get("description")
-                        .and_then(|value| value.as_str())
-                        .or_else(|| {
-                            arguments
-                                .get("subagent_type")
-                                .and_then(|value| value.as_str())
-                        })
-                        .map(str::to_string);
-                    index.calls.insert(
-                        call_id.clone(),
-                        ToolCallInfo {
-                            name: name.clone(),
-                            path: arguments
-                                .get("path")
-                                .and_then(|value| value.as_str())
-                                .map(str::to_string),
-                            description,
-                        },
-                    );
-                }
-            },
-            LlmRole::Tool => {
-                for content in &message.content {
-                    let LlmContent::ToolResult {
-                        tool_call_id,
-                        content,
-                        is_error,
-                    } = content
-                    else {
-                        continue;
-                    };
-                    index.results.push(ToolResultEntry {
-                        tool_name: message.name.clone(),
-                        tool_call_id: Some(tool_call_id.clone()),
-                        content: content.clone(),
-                        is_error: *is_error,
-                    });
-                }
-            },
-            _ => {},
-        }
+    if estimate_text_tokens(content) <= max_tokens {
+        return Some(content.to_string());
     }
-    index
+    if max_tokens < estimate_text_tokens(TRUNCATION_MARKER) {
+        return None;
+    }
+    Some(truncate_text_to_tokens(
+        content,
+        max_tokens,
+        TRUNCATION_MARKER,
+    ))
 }
 
-fn is_agent_tool(name: Option<&str>) -> bool {
-    name.is_some_and(|tool_name| tool_name.eq_ignore_ascii_case("agent"))
-}
-
-fn is_read_tool(name: &str) -> bool {
-    name.eq_ignore_ascii_case("read")
-}
-
-fn truncate_to_tokens(content: &str, max_tokens: usize) -> String {
-    truncate_text_to_tokens(content, max_tokens, TRUNCATION_MARKER)
-}
-
-fn render_post_compact_context(files: &[PostCompactFile], notes: &[PostCompactNote]) -> String {
+fn render_retained_context(contributions: &[CompactRetainedContext]) -> String {
     let mut lines = vec![
         POST_COMPACT_CONTEXT_MARKER.to_string(),
-        "The compact summary removed some operational context. The entries below were restored \
-         after compaction for continuity."
+        "Extensions retained the ordered context below because the compact summary may no longer \
+         contain it."
             .to_string(),
     ];
 
-    if !files.is_empty() {
-        lines.extend([String::new(), "## Recent Read Files".to_string()]);
-        for file in files {
-            lines.extend([
-                String::new(),
-                format!("### {}", file.path),
+    for contribution in contributions {
+        lines.push(String::new());
+        match contribution {
+            CompactRetainedContext::File { path, content } => lines.extend([
+                format!("## File: {path}"),
                 "```text".to_string(),
-                collapse_compaction_whitespace(&file.content),
+                collapse_compaction_whitespace(content),
                 "```".to_string(),
-            ]);
-        }
-    }
-
-    if !notes.is_empty() {
-        lines.extend([String::new(), "## Runtime Notes".to_string()]);
-        for note in notes {
-            lines.extend([
-                String::new(),
-                format!("### {}", note.title),
-                collapse_compaction_whitespace(&note.body),
-            ]);
+            ]),
+            CompactRetainedContext::Note { title, body } => {
+                lines.extend([format!("## {title}"), collapse_compaction_whitespace(body)])
+            },
         }
     }
 
@@ -293,144 +123,89 @@ fn render_post_compact_context(files: &[PostCompactFile], notes: &[PostCompactNo
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-
     use super::*;
 
-    fn read_call(call_id: &str, path: &str) -> LlmMessage {
-        LlmMessage {
-            role: LlmRole::Assistant,
-            content: vec![LlmContent::ToolCall {
-                call_id: call_id.into(),
-                name: "read".into(),
-                arguments: json!({ "path": path }),
-                raw_arguments: None,
-            }],
-            name: None,
-            reasoning_content: None,
-        }
-    }
-
-    fn read_result(call_id: &str) -> LlmMessage {
-        LlmMessage::tool("read", call_id, "read content", false)
-    }
-
-    fn file(path: &str, content: &str) -> PostCompactFile {
-        PostCompactFile {
+    fn file(path: &str, content: &str) -> CompactRetainedContext {
+        CompactRetainedContext::File {
             path: path.into(),
             content: content.into(),
         }
     }
 
-    fn render(files: Vec<PostCompactFile>) -> String {
-        let settings = ContextSettings::default();
-        let message = post_compact_context_message(files, Vec::new(), &settings).unwrap();
-        message.joined_display_text("\n")
-    }
-
-    fn read_result_with_content(call_id: &str, content: &str) -> LlmMessage {
-        LlmMessage::tool("read", call_id, content, false)
-    }
-
-    fn default_settings() -> ContextSettings {
-        ContextSettings::default()
-    }
-
-    #[test]
-    fn extracts_recent_read_paths_excluded_from_retained_tail() {
-        let source = vec![
-            read_call("old", "src/old.rs"),
-            read_result("old"),
-            LlmMessage::assistant("answer"),
-            read_call("recent", "src/recent.rs"),
-            read_result("recent"),
-        ];
-        let retained = vec![LlmMessage::assistant("answer")];
-
-        let paths = recent_read_paths(&source, &retained, &default_settings());
-
-        assert_eq!(paths, ["src/old.rs", "src/recent.rs"]);
-    }
-
-    #[test]
-    fn skips_reads_already_visible_in_retained_tail() {
-        let source = vec![
-            read_call("old", "src/old.rs"),
-            read_result("old"),
-            read_call("recent", "src/recent.rs"),
-            read_result("recent"),
-        ];
-        let retained = vec![read_call("recent", "src/recent.rs"), read_result("recent")];
-
-        let paths = recent_read_paths(&source, &retained, &default_settings());
-
-        assert_eq!(paths, ["src/old.rs"]);
-    }
-
-    #[test]
-    fn keeps_most_recent_unique_reads_under_count_limit() {
-        let mut source = Vec::new();
-        for index in 0..7 {
-            let call_id = format!("call-{index}");
-            source.push(read_call(&call_id, &format!("src/{index}.rs")));
-            source.push(read_result(&call_id));
+    fn note(title: &str, body: &str) -> CompactRetainedContext {
+        CompactRetainedContext::Note {
+            title: title.into(),
+            body: body.into(),
         }
+    }
 
-        let paths = recent_read_paths(&source, &[], &default_settings());
-
+    #[test]
+    fn retained_context_preserves_order_and_applies_one_global_budget() {
         assert_eq!(
-            paths,
-            ["src/2.rs", "src/3.rs", "src/4.rs", "src/5.rs", "src/6.rs"]
+            budget_body("fits", estimate_text_tokens("fits")),
+            Some("fits".into())
         );
-    }
 
-    #[test]
-    fn renders_restored_files_and_runtime_notes() {
-        let settings = default_settings();
-        let message = post_compact_context_message(
-            vec![file("src/lib.rs", "fresh content")],
-            vec![PostCompactNote {
-                title: "Plan File".into(),
-                body: "plan body".into(),
-            }],
-            &settings,
-        )
-        .unwrap();
-
-        let text = message.joined_display_text("\n");
-        assert!(text.contains("<post_compact_context>"));
-        assert!(text.contains("src/lib.rs"));
-        assert!(text.contains("fresh content"));
-        assert!(text.contains("Plan File"));
-        assert!(text.contains("plan body"));
-    }
-
-    #[test]
-    fn render_truncates_large_file_content() {
-        let settings = default_settings();
-        let text = render(vec![file(
-            "huge.rs",
-            &"x".repeat(settings.post_compact_max_tokens_per_file * 5),
-        )]);
-
-        assert!(text.contains("huge.rs"));
-        assert!(text.contains("file content truncated after compaction"));
-        assert!(estimate_text_tokens(&text) < settings.post_compact_max_tokens_per_file + 200);
-    }
-
-    #[test]
-    fn ignores_failed_read_results() {
-        let source = vec![
-            read_call("ok", "src/ok.rs"),
-            read_result("ok"),
-            read_call("err", "src/err.rs"),
-            LlmMessage::tool("read", "err", "failed", true),
-            read_call("manual", "src/manual.rs"),
-            read_result_with_content("manual", "manual content"),
+        let mut settings = ContextSettings {
+            post_compact_max_files: 1,
+            post_compact_token_budget: 80,
+            post_compact_max_tokens_per_file: 30,
+            ..ContextSettings::default()
+        };
+        let contributions = vec![
+            note("Session Plan", "implement the typed compact boundary"),
+            file("src/lib.rs", &"x".repeat(1_000)),
+            file("src/ignored.rs", "file count limit"),
+            note("Agent Status", &"y".repeat(1_000)),
         ];
+        let budgeted = budget_contributions(contributions, &settings);
 
-        let paths = recent_read_paths(&source, &[], &default_settings());
+        assert_eq!(budgeted.len(), 3);
+        assert!(matches!(
+            &budgeted[0],
+            CompactRetainedContext::Note { title, .. } if title == "Session Plan"
+        ));
+        assert!(matches!(
+            &budgeted[1],
+            CompactRetainedContext::File { path, content }
+                if path == "src/lib.rs" && content.contains("retained context truncated")
+        ));
+        assert!(matches!(
+            &budgeted[2],
+            CompactRetainedContext::Note { title, body }
+                if title == "Agent Status" && body.contains("retained context truncated")
+        ));
+        assert!(
+            budgeted
+                .iter()
+                .map(CompactRetainedContext::estimated_tokens)
+                .sum::<usize>()
+                <= settings.post_compact_token_budget
+        );
 
-        assert_eq!(paths, ["src/ok.rs", "src/manual.rs"]);
+        let mut compaction = CompactResult {
+            pre_tokens: 100,
+            post_tokens: 10,
+            summary: "summary".into(),
+            messages_removed: 3,
+            summary_messages: vec![LlmMessage::user("summary")],
+            retained_messages: Vec::new(),
+            transcript_path: None,
+        };
+        append_compact_retained_context(&mut compaction, budgeted, &settings);
+        let rendered = compaction.summary_messages[1].joined_display_text("\n");
+        let plan = rendered.find("Session Plan").expect("plan contribution");
+        let file = rendered.find("src/lib.rs").expect("file contribution");
+        let agent = rendered.find("Agent Status").expect("agent contribution");
+        assert!(plan < file && file < agent);
+        assert!(!rendered.contains("ignored.rs"));
+
+        settings.post_compact_token_budget = 0;
+        append_compact_retained_context(
+            &mut compaction,
+            vec![note("Not rendered", "no budget")],
+            &settings,
+        );
+        assert_eq!(compaction.summary_messages.len(), 2);
     }
 }

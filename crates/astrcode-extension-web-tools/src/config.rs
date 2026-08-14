@@ -1,4 +1,7 @@
-use astrcode_extension_sdk::extension::ExtensionConfig;
+use astrcode_extension_sdk::{
+    WireErrorCode,
+    extension::{ExtensionConfig, ExtensionError},
+};
 use serde::Deserialize;
 
 pub(crate) const EXTENSION_ID: &str = "astrcode-web-tools";
@@ -62,6 +65,8 @@ pub(crate) struct FetchConfig {
     pub(crate) max_content_bytes: usize,
     #[serde(default = "default_max_output_chars")]
     pub(crate) max_output_chars: usize,
+    #[serde(default = "default_summarizer_max_output_tokens")]
+    pub(crate) summarizer_max_output_tokens: usize,
     #[serde(default = "default_user_agent")]
     pub(crate) user_agent: String,
     #[serde(default = "default_cache_ttl_secs")]
@@ -80,6 +85,7 @@ impl Default for FetchConfig {
             request_timeout_secs: default_fetch_timeout_secs(),
             max_content_bytes: default_max_content_bytes(),
             max_output_chars: default_max_output_chars(),
+            summarizer_max_output_tokens: default_summarizer_max_output_tokens(),
             user_agent: default_user_agent(),
             cache_ttl_secs: default_cache_ttl_secs(),
             cache_max_entries: default_cache_max_entries(),
@@ -109,6 +115,10 @@ const fn default_max_output_chars() -> usize {
     100_000
 }
 
+const fn default_summarizer_max_output_tokens() -> usize {
+    4_096
+}
+
 fn default_user_agent() -> String {
     "AstrCode/1.0 (+https://github.com/astrcode/astrcode)".into()
 }
@@ -129,10 +139,29 @@ const fn default_max_redirects() -> usize {
     10
 }
 
-pub(crate) fn load_config(
-    config: &ExtensionConfig,
-) -> Result<WebToolsConfig, astrcode_extension_sdk::extension::ExtensionConfigError> {
-    config.deserialize_or_default()
+pub(crate) fn load_config(config: &ExtensionConfig) -> Result<WebToolsConfig, ExtensionError> {
+    let config = config.deserialize_or_default::<WebToolsConfig>()?;
+    if config.fetch.max_output_chars == 0 {
+        return Err(invalid_fetch_config(
+            "maxOutputChars must be greater than zero",
+        ));
+    }
+    if config.fetch.summarizer_max_output_tokens == 0 {
+        return Err(invalid_fetch_config(
+            "summarizerMaxOutputTokens must be greater than zero",
+        ));
+    }
+    Ok(config)
+}
+
+fn invalid_fetch_config(message: impl Into<String>) -> ExtensionError {
+    ExtensionError::InvalidInput {
+        code: WireErrorCode::InvalidInput.as_str().into(),
+        message: message.into(),
+        hint: Some(format!(
+            "set extensions.{EXTENSION_ID}.fetch to valid positive limits"
+        )),
+    }
 }
 
 pub(crate) fn resolve_api_key(inline: Option<&str>, env_name: Option<&str>) -> Option<String> {
@@ -166,5 +195,21 @@ mod tests {
         assert_eq!(config.search.provider, SearchProvider::DuckDuckGo);
         assert_eq!(config.search.default_max_results, 5);
         assert_eq!(config.fetch.max_output_chars, 100_000);
+        assert_eq!(config.fetch.summarizer_max_output_tokens, 4_096);
+    }
+
+    #[test]
+    fn fetch_output_limits_must_be_positive() {
+        for value in [
+            serde_json::json!({ "fetch": { "maxOutputChars": 0 } }),
+            serde_json::json!({ "fetch": { "summarizerMaxOutputTokens": 0 } }),
+        ] {
+            let config =
+                astrcode_extension_sdk::extension::internal::extension_config(EXTENSION_ID, value);
+            assert!(matches!(
+                load_config(&config),
+                Err(ExtensionError::InvalidInput { .. })
+            ));
+        }
     }
 }

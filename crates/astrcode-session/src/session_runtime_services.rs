@@ -10,9 +10,7 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use astrcode_context::{
-    ContextAssembler, PostCompactEnricher, context_assembler::LlmContextAssembler,
-};
+use astrcode_context::{ContextAssembler, context_assembler::LlmContextAssembler};
 use astrcode_core::{
     config::EffectiveConfig,
     llm::{
@@ -32,7 +30,6 @@ use crate::{
 pub struct SessionRuntimeServices {
     runtime_generation: Arc<ArcSwap<RuntimeGeneration>>,
     extension_ports: SessionExtensionPorts,
-    post_compact_enricher: Arc<dyn PostCompactEnricher>,
     session_resources: SessionResourceStore,
 }
 
@@ -138,7 +135,6 @@ impl SessionRuntimeServices {
         small_llm: Arc<dyn LlmProvider>,
         effective_config: EffectiveConfig,
         extension_ports: SessionExtensionPorts,
-        post_compact_enricher: Arc<dyn PostCompactEnricher>,
     ) -> Self {
         let context_assembler =
             Arc::new(LlmContextAssembler::new(effective_config.context.clone()));
@@ -148,7 +144,6 @@ impl SessionRuntimeServices {
             effective_config,
             extension_ports,
             context_assembler,
-            post_compact_enricher,
         )
     }
 
@@ -161,7 +156,6 @@ impl SessionRuntimeServices {
         effective_config: EffectiveConfig,
         extension_ports: SessionExtensionPorts,
         context_assembler: Arc<dyn ContextAssembler>,
-        post_compact_enricher: Arc<dyn PostCompactEnricher>,
     ) -> Self {
         let extension_generation = match extension_ports.runtime_snapshot_state() {
             RuntimeSnapshotState::Stable(generation) => generation,
@@ -176,7 +170,6 @@ impl SessionRuntimeServices {
                 extension_generation,
             })),
             extension_ports,
-            post_compact_enricher,
             session_resources: SessionResourceStore::default(),
         }
     }
@@ -260,10 +253,6 @@ impl SessionRuntimeServices {
         }
     }
 
-    pub(crate) fn post_compact_enricher(&self) -> &dyn PostCompactEnricher {
-        self.post_compact_enricher.as_ref()
-    }
-
     pub fn read_effective(&self) -> Arc<EffectiveConfig> {
         Arc::clone(&self.runtime_generation.load_full().effective_config)
     }
@@ -324,7 +313,7 @@ mod tests {
         time::Duration,
     };
 
-    use astrcode_context::{CompactResult, ContextAssembler, PostCompactEnrichInput};
+    use astrcode_context::ContextAssembler;
     use astrcode_core::{
         config::ContextSettings,
         llm::{LlmError, LlmEvent, LlmProvider, LlmRequest, ModelLimits},
@@ -336,9 +325,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
-    use crate::test_support::{
-        CountingPostCompactEnricher, NoopContextAssembler, UnusedLlm, test_effective_config,
-    };
+    use crate::test_support::{NoopContextAssembler, UnusedLlm, test_effective_config};
 
     struct TaggedLlm {
         max_input_tokens: usize,
@@ -420,7 +407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepts_custom_context_services() {
+    async fn accepts_custom_context_assembler() {
         let llm: Arc<dyn LlmProvider> = Arc::new(UnusedLlm);
         let context = ContextSettings {
             auto_compact_enabled: false,
@@ -435,37 +422,11 @@ mod tests {
             test_effective_config(context),
             SessionExtensionPorts::default(),
             Arc::clone(&context_assembler),
-            Arc::new(CountingPostCompactEnricher),
         );
 
         let runtime_generation = services.pin_runtime_generation();
         let active_context = runtime_generation.context_assembler();
         assert!(!active_context.auto_compact_enabled());
-        let mut compaction = CompactResult {
-            pre_tokens: 1,
-            post_tokens: 1,
-            summary: "compact".into(),
-            messages_removed: 0,
-            summary_messages: Vec::new(),
-            retained_messages: Vec::new(),
-            transcript_path: None,
-        };
-        services
-            .post_compact_enricher()
-            .enrich(
-                &mut compaction,
-                PostCompactEnrichInput {
-                    session_id: "session-test",
-                    source_messages: &[],
-                    working_dir: ".",
-                    system_prompt: None,
-                    tools: &[],
-                    settings: active_context.settings(),
-                    session_store_dir: None,
-                },
-            )
-            .await;
-        assert_eq!(compaction.summary, "compact enriched");
     }
 
     #[tokio::test]
@@ -483,7 +444,6 @@ mod tests {
             test_effective_config(context.clone()),
             SessionExtensionPorts::from_adapter(Arc::clone(&extension_runtime)),
             Arc::new(NoopContextAssembler::new(context)),
-            Arc::new(CountingPostCompactEnricher),
         );
         let runtime_for_update = Arc::clone(&extension_runtime);
         tokio::spawn(async move {
@@ -516,7 +476,6 @@ mod tests {
             old_effective,
             SessionExtensionPorts::from_adapter(Arc::clone(&extension_runtime)),
             Arc::new(NoopContextAssembler::new(context.clone())),
-            Arc::new(CountingPostCompactEnricher),
         ));
 
         extension_runtime.updating.store(true, Ordering::Release);
@@ -565,7 +524,6 @@ mod tests {
             }),
             effective,
             SessionExtensionPorts::default(),
-            Arc::new(CountingPostCompactEnricher),
         );
         let live_main = services.live_llm();
         let live_small = services.live_small_llm();

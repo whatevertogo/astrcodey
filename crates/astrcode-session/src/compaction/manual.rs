@@ -5,7 +5,10 @@ use std::sync::Arc;
 use astrcode_core::compaction::CompactStrategy;
 
 use super::pipeline::{CompactionPipeline, CompactionPipelineOutcome};
-use crate::{SessionError, session::Session, turn_context::hook_call_context_for_read_model};
+use crate::{
+    SessionError, projection_context::context_snapshot, session::Session,
+    turn_context::hook_call_context_for_read_model,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ManualCompactionOutcome {
@@ -24,6 +27,7 @@ pub async fn compact_manual_session(
     let state = session.read_model().await?;
     let hook_call =
         hook_call_context_for_read_model(session.id(), &state, session.session_store_dir().await);
+    let pre_hook_messages = context_snapshot(&state).messages;
     let tool_registry = session
         .tool_registry_snapshot_for_view(&runtime_view, &state.identity.working_dir)
         .await?;
@@ -35,7 +39,7 @@ pub async fn compact_manual_session(
         context_assembler: Arc::clone(runtime_generation.context_assembler()),
         extension_runner: extension_runner.as_ref(),
         hook_call,
-        pre_hook_message_count: state.model_context.messages.len(),
+        pre_hook_messages,
         tools: &tools,
         strategy: CompactStrategy::Manual { keep_recent_turns },
         use_llm: true,

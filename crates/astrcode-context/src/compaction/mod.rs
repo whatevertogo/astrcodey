@@ -21,11 +21,12 @@ const MAX_SUMMARY_LINE_CHARS: usize = 320;
 mod assemble;
 mod parse;
 mod plan;
-pub(crate) mod post_compact;
+mod post_compact;
 mod prompt;
 
 use parse::{CompactParseError, parse_compact_output};
 use plan::{PreparedCompactInput, visible_message_text};
+pub use post_compact::append_compact_retained_context;
 
 use crate::{
     COMPACT_SUMMARY_MARKER, CompactError, CompactResult, CompactSkipReason,

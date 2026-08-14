@@ -123,6 +123,11 @@ impl TelegramChannelsExtension {
     }
 }
 
+/// Validate a candidate configuration without constructing extension runtime state.
+pub fn validate_config(config: &ExtensionConfig) -> Result<(), ExtensionError> {
+    TelegramChannelsExtension::load_config(config).map(|_| ())
+}
+
 #[async_trait::async_trait]
 impl Extension for TelegramChannelsExtension {
     fn manifest(&self) -> ExtensionManifest {
@@ -137,7 +142,7 @@ impl Extension for TelegramChannelsExtension {
     fn register(&self, _: &mut Registrar) {}
 
     fn validate_config(&self, config: &ExtensionConfig) -> Result<(), ExtensionError> {
-        Self::load_config(config).map(|_| ())
+        validate_config(config)
     }
 
     async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {

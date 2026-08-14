@@ -494,24 +494,8 @@ impl TurnLoop {
         self.persist_token_usage(hooks.publisher, usage, request.context_window)
             .await?;
 
-        let LlmRequestSnapshot {
-            request_id,
-            messages,
-            acknowledgements,
-            ..
-        } = request;
-        let hook_messages = state.provider_response_messages(messages);
-        self.tools_stage(
-            hooks.extension_runner,
-            request_id,
-            acknowledgements,
-            state,
-            &tool_calls,
-            early_results,
-            hooks.publisher,
-            hook_messages,
-        )
-        .await?;
+        self.tools_stage(hooks, request, state, &tool_calls, early_results)
+            .await?;
 
         on_step_end_best_effort(hooks.extension_runner, hooks.lifecycle_ctx).await;
         Ok(StepOutcome::Continue)
@@ -773,17 +757,21 @@ impl TurnLoop {
 
     async fn tools_stage(
         &self,
-        extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
-        request_id: ProviderRequestId,
-        acknowledgements: astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
+        hooks: &StepHooks<'_>,
+        request: LlmRequestSnapshot,
         state: &mut TurnState,
         tool_calls: &[crate::tool_types::StreamedToolCall],
         early_results: Vec<crate::early_tool_scheduler::EarlyExecutionEntry>,
-        publisher: &Arc<TurnEvents>,
-        hook_messages: Vec<LlmMessage>,
     ) -> Result<(), TurnError> {
+        let LlmRequestSnapshot {
+            request_id,
+            messages,
+            acknowledgements,
+            ..
+        } = request;
+        let hook_messages = state.provider_response_messages(messages);
         self.dispatch_after_provider_response(
-            extension_runner,
+            hooks.extension_runner,
             request_id.clone(),
             hook_messages,
             state,
@@ -796,10 +784,12 @@ impl TurnLoop {
             .tools
             .prepare_tool_batch(tool_calls, early_results, &visible_tools, state)
             .await?;
-        self.tools.declare_tool_batch(&plan, publisher).await?;
+        self.tools
+            .declare_tool_batch(&plan, hooks.publisher)
+            .await?;
         self.acknowledge_provider_request(
-            extension_runner,
-            publisher,
+            hooks.extension_runner,
+            hooks.publisher,
             &request_id,
             &acknowledgements,
         )
@@ -811,7 +801,7 @@ impl TurnLoop {
                 batch: plan,
                 tools: &visible_tools,
                 state,
-                publisher: Arc::clone(publisher),
+                publisher: Arc::clone(hooks.publisher),
             })
             .await
         {

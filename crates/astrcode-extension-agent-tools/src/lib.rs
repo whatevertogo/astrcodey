@@ -5,16 +5,18 @@
 
 mod agent;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use astrcode_extension_sdk::{
     builder::{ExtensionToolDefinition, manifest},
     discovery::DiscoveryCache,
     extension::{
-        Extension, ExtensionCall, ExtensionCapability, ExtensionError, ExtensionManifest,
-        PromptBuildContext, PromptBuildHandler, PromptContributions, Registrar, ToolContext,
-        ToolHandler, ToolPlanContext,
+        CompactContributions, CompactRetainedContext, Extension, ExtensionCall,
+        ExtensionCapability, ExtensionError, ExtensionManifest, PreCompactContext,
+        PreCompactHandler, PreCompactResult, PromptBuildContext, PromptBuildHandler,
+        PromptContributions, Registrar, ToolContext, ToolHandler, ToolPlanContext,
     },
+    llm::{LlmContent, LlmMessage, LlmRole},
     session::{
         HostCreateSessionRequest, HostRecycleSessionRequest, HostSubmitTurnOutput,
         HostSubmitTurnRequest,
@@ -43,6 +45,7 @@ impl Extension for AgentToolsExtension {
             .version(env!("CARGO_PKG_VERSION"))
             .description(env!("CARGO_PKG_DESCRIPTION"))
             .capability(ExtensionCapability::SessionControl)
+            .capability(ExtensionCapability::SessionHistory)
             .capability(ExtensionCapability::SmallModel)
             .build()
     }
@@ -57,6 +60,7 @@ impl Extension for AgentToolsExtension {
             }),
         );
         reg.on_prompt_build(0, Arc::new(AgentPromptBuildHandler { shared }));
+        reg.on_pre_compact(0, Arc::new(AgentPreCompactHandler));
     }
 }
 
@@ -96,10 +100,11 @@ const AGENT_TOOL_DESCRIPTION: &str =
      (do not poll or re-run the task)";
 
 const AGENT_TOOL_PARAMETERS: &str = r#"{"type":"object","properties":{"description":{"type":"string","description":"3-5 word task summary."},"prompt":{"type":"string","description":"Focused task packet: objective, scope, constraints, acceptance criteria, and known file/symbol anchors. Omit parent transcript and already-visible generic instructions."},"subagentType":{"type":"string","description":"Agent name from [Agents] section."},"waitForResult":{"type":"boolean","default":true,"description":"true: block until done. false: run in background, continue immediately."}},"required":["prompt","description"]}"#;
+const AGENT_TOOL_NAME: &str = "agent";
 
 fn agent_tool_definition() -> ToolDefinition {
     ToolDefinition {
-        name: "agent".into(),
+        name: AGENT_TOOL_NAME.into(),
         description: AGENT_TOOL_DESCRIPTION.into(),
         parameters: serde_json::from_str(AGENT_TOOL_PARAMETERS)
             .unwrap_or_else(|_| json!({ "type": "object", "properties": {} })),
@@ -140,7 +145,7 @@ impl ToolHandler for AgentToolHandler {
         &self,
         ctx: ToolContext,
     ) -> Result<astrcode_extension_sdk::tool::ToolExecutionResult, ExtensionError> {
-        if ctx.tool_name() != "agent" {
+        if ctx.tool_name() != AGENT_TOOL_NAME {
             return Err(ExtensionError::NotFound(ctx.tool_name().into()));
         }
 
@@ -279,6 +284,103 @@ impl ToolHandler for AgentToolHandler {
 
 struct AgentPromptBuildHandler {
     shared: Arc<AgentShared>,
+}
+
+struct AgentPreCompactHandler;
+
+#[async_trait::async_trait]
+impl PreCompactHandler for AgentPreCompactHandler {
+    async fn handle(&self, ctx: PreCompactContext) -> Result<PreCompactResult, ExtensionError> {
+        let Some(body) = agent_status(ctx.source_messages()) else {
+            return Ok(PreCompactResult::Allow);
+        };
+        Ok(PreCompactResult::Contributions(CompactContributions {
+            instructions: Vec::new(),
+            retained_context: vec![CompactRetainedContext::Note {
+                title: "Agent Task Status".into(),
+                body,
+            }],
+        }))
+    }
+}
+
+fn agent_status(messages: &[LlmMessage]) -> Option<String> {
+    let mut descriptions = HashMap::new();
+    let mut entries = Vec::new();
+
+    for message in messages {
+        match message.role {
+            LlmRole::Assistant => {
+                for content in &message.content {
+                    let LlmContent::ToolCall {
+                        call_id,
+                        name,
+                        arguments,
+                        ..
+                    } = content
+                    else {
+                        continue;
+                    };
+                    if name != AGENT_TOOL_NAME {
+                        continue;
+                    }
+                    let description = arguments
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .or_else(|| {
+                            arguments
+                                .get("subagentType")
+                                .and_then(serde_json::Value::as_str)
+                        })
+                        .unwrap_or("agent task");
+                    descriptions.insert(call_id.as_str(), description);
+                }
+            },
+            LlmRole::Tool if message.name.as_deref() == Some(AGENT_TOOL_NAME) => {
+                for content in &message.content {
+                    let LlmContent::ToolResult {
+                        tool_call_id,
+                        content,
+                        is_error,
+                    } = content
+                    else {
+                        continue;
+                    };
+                    let description = descriptions
+                        .get(tool_call_id.as_str())
+                        .copied()
+                        .unwrap_or("agent task");
+                    let status = if *is_error {
+                        "failed"
+                    } else if content.lines().any(|line| line.trim() == "status: running") {
+                        "running"
+                    } else {
+                        "completed"
+                    };
+                    let mut entry = format!("- {description}: {status}");
+                    let excerpt = truncate_agent_result(content, 1_200);
+                    if !excerpt.is_empty() {
+                        entry.push('\n');
+                        entry.push_str(&excerpt);
+                    }
+                    entries.push(entry);
+                }
+            },
+            _ => {},
+        }
+    }
+
+    let start = entries.len().saturating_sub(5);
+    (!entries.is_empty()).then(|| entries[start..].join("\n\n"))
+}
+
+fn truncate_agent_result(content: &str, max_chars: usize) -> String {
+    if content.chars().count() <= max_chars {
+        return content.to_string();
+    }
+    let mut excerpt = content.chars().take(max_chars).collect::<String>();
+    excerpt.push_str("\n\n[... agent result truncated]");
+    excerpt
 }
 
 #[async_trait::async_trait]
@@ -470,6 +572,30 @@ mod tests {
         assert!(enhanced.contains("within about 600 tokens"));
         assert!(enhanced.contains("Never trade correctness for brevity"));
         assert!(enhanced.contains("working directory is /workspace"));
+
+        let status = agent_status(&[
+            LlmMessage {
+                role: LlmRole::Assistant,
+                content: vec![LlmContent::ToolCall {
+                    call_id: "running-agent".into(),
+                    name: AGENT_TOOL_NAME.into(),
+                    arguments: json!({"description": "inspect compact flow"}),
+                    raw_arguments: None,
+                }],
+                name: None,
+                reasoning_content: None,
+            },
+            LlmMessage::tool(
+                AGENT_TOOL_NAME,
+                "running-agent",
+                "task_id: task-1\nstatus: running",
+                false,
+            ),
+            LlmMessage::tool(AGENT_TOOL_NAME, "unknown-agent", "worker failed", true),
+        ])
+        .expect("agent results contribute compact status");
+        assert!(status.contains("inspect compact flow: running"));
+        assert!(status.contains("agent task: failed"));
     }
 
     #[test]

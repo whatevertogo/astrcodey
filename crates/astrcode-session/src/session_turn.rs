@@ -719,7 +719,6 @@ mod tests {
             Arc::new(NoopContextAssembler::new(
                 astrcode_core::config::ContextSettings::default(),
             )),
-            Arc::new(astrcode_context::NoopPostCompactEnricher),
         ));
         state
             .runtime_services

@@ -5,7 +5,9 @@
 use std::{collections::HashMap, sync::Arc};
 
 use astrcode_core::{
-    event::{DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase},
+    event::{
+        CustomEventAudience, DurableEventPayload, Event, EventPayload, LiveEventPayload, Phase,
+    },
     types::{MessageId, SessionId},
 };
 use astrcode_protocol::events::ClientNotification;
@@ -15,10 +17,6 @@ use parking_lot::Mutex;
 use tokio::sync::broadcast;
 
 use crate::protocol_mapping::session_snapshot;
-
-const ASK_USER_EXTENSION_ID: &str = "astrcode-ask-user";
-const ASK_USER_PENDING_EVENT_TYPE: &str = "ask_user.pending";
-const ASK_USER_RESOLVED_EVENT_TYPE: &str = "ask_user.resolved";
 
 pub(crate) struct StreamingSnapshot {
     pub message_id: String,
@@ -178,13 +176,7 @@ impl ServerEventBus {
         let Some(LiveEventPayload::CustomEvent(custom_event)) = event.payload.as_live() else {
             return;
         };
-        if custom_event.extension_id != ASK_USER_EXTENSION_ID {
-            return;
-        }
-        if !matches!(
-            custom_event.event_type.as_str(),
-            ASK_USER_PENDING_EVENT_TYPE | ASK_USER_RESOLVED_EVENT_TYPE
-        ) {
+        if custom_event.audience != CustomEventAudience::Global {
             return;
         }
         let _ = self
@@ -547,24 +539,67 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ask_user_pending_broadcasts_to_global_notifications() {
+    async fn custom_event_audience_routes_session_and_global_delivery() {
         use astrcode_core::event::CustomEventData;
 
         let bus = ServerEventBus::new();
         let session_id = SessionId::new("session-1");
+        let mut conversation_rx = bus.subscribe_conversation_events(&session_id);
         let mut global_rx = bus.subscribe_global_notifications();
+
+        bus.publish_event(durable(
+            session_id.clone(),
+            DurableEventPayload::CustomEvent(CustomEventData {
+                extension_id: "audit".into(),
+                event_type: "audit.recorded".into(),
+                schema_version: 1,
+                audience: CustomEventAudience::Session,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({}),
+            }),
+        ));
+        assert!(matches!(
+            conversation_rx.recv().await,
+            Ok(event) if matches!(&event.payload, EventPayload::Durable(
+                DurableEventPayload::CustomEvent(_)
+            ))
+        ));
+        assert!(matches!(global_rx.try_recv(), Err(TryRecvError::Empty)));
 
         bus.publish_event(live(
             session_id.clone(),
             LiveEventPayload::CustomEvent(CustomEventData {
-                extension_id: "astrcode-ask-user".into(),
-                event_type: "ask_user.pending".into(),
+                extension_id: "progress".into(),
+                event_type: "progress.changed".into(),
                 schema_version: 1,
+                audience: CustomEventAudience::Session,
+                causation_id: None,
+                cascade_depth: 0,
+                payload: serde_json::json!({}),
+            }),
+        ));
+        assert!(matches!(
+            conversation_rx.recv().await,
+            Ok(event) if matches!(&event.payload, EventPayload::Live(
+                LiveEventPayload::CustomEvent(_)
+            ))
+        ));
+        assert!(matches!(global_rx.try_recv(), Err(TryRecvError::Empty)));
+
+        bus.publish_event(live(
+            session_id.clone(),
+            LiveEventPayload::CustomEvent(CustomEventData {
+                extension_id: "questions".into(),
+                event_type: "question.pending".into(),
+                schema_version: 1,
+                audience: CustomEventAudience::Global,
                 causation_id: None,
                 cascade_depth: 0,
                 payload: serde_json::json!({ "callId": "call-1" }),
             }),
         ));
+        assert!(conversation_rx.recv().await.is_ok());
         assert!(matches!(
             global_rx.recv().await,
             Ok(ClientNotification::GlobalCustomEvent {
@@ -574,39 +609,8 @@ mod tests {
                 schema_version: 1,
                 ..
             }) if broadcast_session == session_id.to_string()
-                && extension_id == "astrcode-ask-user"
-                && event_type == "ask_user.pending"
+                && extension_id == "questions"
+                && event_type == "question.pending"
         ));
-
-        // resolved 同样广播；其他扩展的事件不广播。
-        bus.publish_event(live(
-            session_id.clone(),
-            LiveEventPayload::CustomEvent(CustomEventData {
-                extension_id: "astrcode-ask-user".into(),
-                event_type: "ask_user.resolved".into(),
-                schema_version: 1,
-                causation_id: None,
-                cascade_depth: 0,
-                payload: serde_json::json!({ "callId": "call-1" }),
-            }),
-        ));
-        assert!(matches!(
-            global_rx.recv().await,
-            Ok(ClientNotification::GlobalCustomEvent { event_type, .. })
-                if event_type == "ask_user.resolved"
-        ));
-
-        bus.publish_event(live(
-            session_id,
-            LiveEventPayload::CustomEvent(CustomEventData {
-                extension_id: "other-extension".into(),
-                event_type: "whatever".into(),
-                schema_version: 1,
-                causation_id: None,
-                cascade_depth: 0,
-                payload: serde_json::json!({}),
-            }),
-        ));
-        assert!(matches!(global_rx.try_recv(), Err(TryRecvError::Empty)));
     }
 }

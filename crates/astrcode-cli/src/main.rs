@@ -15,6 +15,7 @@ use std::path::PathBuf;
 use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 
 use astrcode_core::permission::ApprovalMode;
+use astrcode_extension_sdk::transport::{TransportFeature, TransportProfile};
 use astrcode_protocol::framing::PROTOCOL_VERSION;
 use astrcode_server::bootstrap::{BootstrapOptions, ServerApp};
 use clap::{Parser, Subcommand};
@@ -30,7 +31,7 @@ fn cli_approval_bootstrap_opts(yolo: bool, manual: bool) -> BootstrapOptions {
     BootstrapOptions {
         default_approval_mode_if_unset: Some(ApprovalMode::Yolo),
         approval_mode_override,
-        disabled_extension_ids: std::collections::BTreeSet::from(["astrcode-ask-user".into()]),
+        transport_profile: TransportProfile::default(),
         ..Default::default()
     }
 }
@@ -258,8 +259,13 @@ enum Commands {
 }
 
 /// 程序入口：解析命令行参数并分发到对应子命令处理函数。
-async fn bootstrap_server_app() -> Arc<ServerApp> {
-    match astrcode_server::bootstrap::bootstrap().await {
+async fn bootstrap_server_app(transport_profile: TransportProfile) -> Arc<ServerApp> {
+    match astrcode_server::bootstrap::bootstrap_with(BootstrapOptions {
+        transport_profile,
+        ..BootstrapOptions::default()
+    })
+    .await
+    {
         Ok(runtime) => {
             let app = ServerApp::new(Arc::new(runtime));
             app.initialize().await;
@@ -333,14 +339,16 @@ async fn main() -> ExitCode {
             }
         },
         Commands::Server { addr } => {
-            let server_app = bootstrap_server_app().await;
+            let server_app =
+                bootstrap_server_app(TransportProfile::new([TransportFeature::AuthenticatedHttp]))
+                    .await;
             if let Err(e) = astrcode_server::http::run_http_server(server_app, addr).await {
                 tracing::error!("Server failed: {e}");
                 return ExitCode::from(1);
             }
         },
         Commands::Acp => {
-            let server_app = bootstrap_server_app().await;
+            let server_app = bootstrap_server_app(TransportProfile::default()).await;
             if let Err(e) = astrcode_server::acp::run_acp_server(server_app).await {
                 tracing::error!("ACP server failed: {e}");
                 return ExitCode::from(1);

@@ -18,11 +18,10 @@ use crate::{config::MemoryConfig, prompts, store::MemoryStorePool};
 
 /// 用户偏好的 per-session 只读快照。
 ///
-/// `MemoryExtension` 是全局共享单例（runner 在 bootstrap 时创建一次，所有
-/// session 复用同一实例），所以这里按 `session_id` 隔离缓存。一个 session
-/// 首次加载后，整个 session 生命期内只返回同一份内容——`memory_save` 写入
-/// 新偏好不影响它，system prompt 指纹保持稳定，KV cache 不被破坏。只有下一
-/// 个 session 的 SessionStart 才重新加载最新值。
+/// 同一扩展 generation 内的所有 session 复用一个 `MemoryExtension` 实例，所以这里按
+/// `session_id` 隔离缓存。一个 session 首次加载后，在该 generation 内只返回同一份内容：
+/// `memory_save` 写入新偏好不影响它，system prompt 指纹保持稳定，KV cache 不被破坏。
+/// 下一个 session 或热重载后的新 generation 才会加载最新值。
 ///
 /// 缓存随活跃 session 增长，在 `stop()`（扩展卸载）时整体清空。进程重启后
 /// 内存清零，resume 的 session 会重新加载。

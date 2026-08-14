@@ -24,7 +24,6 @@ pub struct ExtensionCallContext {
     paths: ExtensionPaths,
     host: ExtensionHost,
     events: CustomEventEmitter,
-    tasks: ExtensionTasks,
     cancellation: Arc<CallCancellation>,
 }
 
@@ -47,7 +46,6 @@ impl ExtensionCallContext {
         paths: ExtensionPaths,
         host: ExtensionHost,
         events: CustomEventEmitter,
-        tasks: ExtensionTasks,
         cancellation: CancellationToken,
     ) -> Self {
         Self {
@@ -55,7 +53,6 @@ impl ExtensionCallContext {
             paths,
             host,
             events,
-            tasks,
             cancellation: Arc::new(CallCancellation {
                 token: cancellation,
                 cancel_on_drop: AtomicBool::new(true),
@@ -90,10 +87,6 @@ impl ExtensionCallContext {
         &self.events
     }
 
-    pub fn tasks(&self) -> &ExtensionTasks {
-        &self.tasks
-    }
-
     pub fn cancellation(&self) -> &CancellationToken {
         &self.cancellation.token
     }
@@ -104,6 +97,17 @@ impl ExtensionCallContext {
 /// Each context type implements only [`ExtensionCall::call`]; all delegating accessors are
 /// provided methods, so names, return types, and error codes/messages cannot drift between
 /// contexts.
+///
+/// Generation-owned tasks are intentionally absent from ordinary calls. Long-lived work must be
+/// registered from [`ExtensionStartContext`] and reached through an extension-owned queue.
+///
+/// ```compile_fail
+/// use astrcode_extension_sdk::extension::{ExtensionCall, ToolContext};
+///
+/// fn spawn_from_tool_call(ctx: &ToolContext) {
+///     ctx.tasks().spawn("escaped-turn-work", async {});
+/// }
+/// ```
 pub trait ExtensionCall {
     fn call(&self) -> &ExtensionCallContext;
 
@@ -121,10 +125,6 @@ pub trait ExtensionCall {
 
     fn events(&self) -> &CustomEventEmitter {
         self.call().events()
-    }
-
-    fn tasks(&self) -> &ExtensionTasks {
-        self.call().tasks()
     }
 
     fn cancellation(&self) -> &CancellationToken {
@@ -238,6 +238,7 @@ impl std::fmt::Debug for ExtensionCallContext {
 #[derive(Clone)]
 pub struct ExtensionStartContext {
     call: ExtensionCallContext,
+    tasks: ExtensionTasks,
     config: ExtensionConfig,
     startup_working_dir: Option<PathBuf>,
 }
@@ -245,11 +246,13 @@ pub struct ExtensionStartContext {
 impl ExtensionStartContext {
     pub(crate) fn from_runtime(
         call: ExtensionCallContext,
+        tasks: ExtensionTasks,
         config: ExtensionConfig,
         startup_working_dir: Option<PathBuf>,
     ) -> Self {
         Self {
             call,
+            tasks,
             config,
             startup_working_dir,
         }
@@ -257,6 +260,11 @@ impl ExtensionStartContext {
 
     pub fn config(&self) -> &ExtensionConfig {
         &self.config
+    }
+
+    /// Returns the generation-owned task supervisor available only during startup.
+    pub fn tasks(&self) -> &ExtensionTasks {
+        &self.tasks
     }
 
     pub fn startup_working_dir(&self) -> Option<&Path> {
@@ -331,11 +339,11 @@ mod tests {
             ExtensionPaths::from_runtime("startup-probe", Some(Path::new("/global")), None),
             host,
             CustomEventEmitter::default(),
-            ExtensionTasks::new("startup-probe"),
             cancellation,
         );
         let ctx = ExtensionStartContext::from_runtime(
             call,
+            ExtensionTasks::new("startup-probe"),
             ExtensionConfig::from_runtime("startup-probe", json!({ "token": "secret" })),
             Some(PathBuf::from("/workspace")),
         );
@@ -376,7 +384,6 @@ mod tests {
             ExtensionPaths::default(),
             host,
             CustomEventEmitter::default(),
-            ExtensionTasks::new("drop-probe"),
             cancellation,
         );
 
@@ -405,7 +412,6 @@ mod tests {
             ExtensionPaths::default(),
             host,
             CustomEventEmitter::default(),
-            ExtensionTasks::new("generation-probe"),
             cancellation,
         )
         .retain_cancellation_after_context_drop();

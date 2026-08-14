@@ -273,7 +273,7 @@ cargo run --features dev-mode -- eval
 
 ## Configuration
 
-AstrCode uses a TOML-based configuration system stored in `~/.astrcode/config.toml`. Legacy `config.json` files are still loaded as a migration fallback and are automatically written out as `config.toml` on first load. The configuration supports multiple LLM providers, model selection, runtime behavior tuning, and project-level overrides.
+AstrCode uses a TOML-based configuration system stored in `~/.astrcode/config.toml`. The configuration supports multiple LLM providers, model selection, runtime behavior tuning, and project-level overrides.
 
 **Key configuration features:**
 - Multi-provider support (Anthropic and OpenAI-compatible providers)
@@ -370,7 +370,7 @@ The Cargo workspace under [`crates/`](crates/) contains **28 crates**, plus [`sr
 | [`astrcode-extensions`](crates/astrcode-extensions) | Host-side extension lifecycle, hook dispatch, capability gating, and disk IPC loader |
 | [`astrcode-bundled-extensions`](crates/astrcode-bundled-extensions) | Composition root that registers all first-party extension crates |
 | [`astrcode-extension-agent-tools`](crates/astrcode-extension-agent-tools) | Sub-agent delegation and agent discovery (Claude Code compatible) |
-| [`astrcode-extension-coding`](crates/astrcode-extension-coding) | Nine first-party tools—read, read_tool_result, write, edit, patch, glob, grep, shell, and terminal—using only SDK host capabilities |
+| [`astrcode-extension-coding`](crates/astrcode-extension-coding) | Eight first-party tools—read, read_tool_result, write, edit, patch, glob, grep, and shell—using only SDK host capabilities |
 | [`astrcode-extension-mcp`](crates/astrcode-extension-mcp) | MCP client: stdio/HTTP transports, persistent process pool, pre-warm, and health checks |
 | [`astrcode-extension-skill`](crates/astrcode-extension-skill) | Slash-command skill discovery and Skill tool dispatch |
 | [`astrcode-extension-todo-tool`](crates/astrcode-extension-todo-tool) | Progress-tracking todo list tool |

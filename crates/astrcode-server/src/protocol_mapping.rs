@@ -4,7 +4,7 @@ use astrcode_context::is_compact_summary_message;
 use astrcode_core::llm::{LlmContent, LlmMessage};
 use astrcode_extension_sdk::extension::{
     CustomEventDeclaration, CustomEventSourceFilter, CustomEventSubscription, ExtensionCapability,
-    ExtensionHttpMethod, Keybinding, SlashCommand, StatusItem,
+    ExtensionHttpMethod, Keybinding, SlashCommand, StatusItem, TransportFeature,
 };
 use astrcode_protocol::{
     agent_session_link::{AgentSessionLinkDto, AgentSessionStatusDto},
@@ -12,8 +12,9 @@ use astrcode_protocol::{
         ExtensionCommandInfoDto, KeybindingDto, MessageDto, SessionSnapshot, StatusItemInfoDto,
     },
     http::{
-        CustomEventDeclarationDto, CustomEventSourceFilterDto, CustomEventSubscriptionDto,
-        ExtensionSlashCommandDto, SlashCommandInfoDto, StatusItemDto,
+        CustomEventDeclarationDto, CustomEventDeliveryDto, CustomEventSourceFilterDto,
+        CustomEventSubscriptionDto, ExtensionSlashCommandDto, SlashCommandInfoDto, StatusItemDto,
+        TransportFeatureDto,
     },
     wire::{
         CommandAvailabilityDto, CommandExecutionDto, ExtensionCapabilityDto,
@@ -130,6 +131,12 @@ pub(crate) fn extension_capability_to_dto(
     }
 }
 
+pub(crate) fn transport_feature_to_dto(feature: TransportFeature) -> TransportFeatureDto {
+    match feature {
+        TransportFeature::AuthenticatedHttp => TransportFeatureDto::AuthenticatedHttp,
+    }
+}
+
 pub(crate) fn extension_http_method_to_dto(method: ExtensionHttpMethod) -> ExtensionHttpMethodDto {
     match method {
         ExtensionHttpMethod::Get => ExtensionHttpMethodDto::Get,
@@ -230,7 +237,17 @@ pub(crate) fn custom_event_declaration_to_dto(
     CustomEventDeclarationDto {
         event_type: event.event_type,
         schema_version: event.schema_version,
-        durable: event.durable,
+        delivery: match event.delivery {
+            astrcode_extension_sdk::extension::CustomEventDelivery::SessionDurable => {
+                CustomEventDeliveryDto::SessionDurable
+            },
+            astrcode_extension_sdk::extension::CustomEventDelivery::SessionLive => {
+                CustomEventDeliveryDto::SessionLive
+            },
+            astrcode_extension_sdk::extension::CustomEventDelivery::GlobalLive => {
+                CustomEventDeliveryDto::GlobalLive
+            },
+        },
         max_payload_bytes: event.max_payload_bytes,
     }
 }

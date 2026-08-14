@@ -542,30 +542,73 @@ pub type PromptBuildContext = HookContext<PromptBuildPayload>;
 #[doc(hidden)]
 pub type RuntimePromptBuildContext = HookInput<PromptBuildPayload>;
 
-/// Compact 钩子载荷。
+/// Facts available while collecting PreCompact contributions.
 #[derive(Clone, Debug)]
-pub struct CompactPayload {
+pub struct PreCompactPayload {
     trigger: CompactTrigger,
-    message_count: usize,
-    pre_tokens: Option<usize>,
-    post_tokens: Option<usize>,
-    summary: Option<Arc<str>>,
+    source_messages: Arc<[crate::llm::LlmMessage]>,
+    retained_file_limit: usize,
 }
 
-impl CompactPayload {
+impl PreCompactPayload {
+    pub(crate) fn new(
+        trigger: CompactTrigger,
+        source_messages: Vec<crate::llm::LlmMessage>,
+        retained_file_limit: usize,
+    ) -> Self {
+        Self {
+            trigger,
+            source_messages: source_messages.into(),
+            retained_file_limit,
+        }
+    }
+
+    pub fn trigger(&self) -> CompactTrigger {
+        self.trigger
+    }
+
+    pub fn message_count(&self) -> usize {
+        self.source_messages.len()
+    }
+
+    pub fn source_messages(&self) -> &[crate::llm::LlmMessage] {
+        &self.source_messages
+    }
+
+    pub fn retained_file_limit(&self) -> usize {
+        self.retained_file_limit
+    }
+}
+
+pub type PreCompactContext = HookContext<PreCompactPayload>;
+
+#[doc(hidden)]
+pub type RuntimePreCompactContext = HookInput<PreCompactPayload>;
+
+/// Facts delivered after a compact rewrite is durably committed.
+#[derive(Clone, Debug)]
+pub struct PostCompactPayload {
+    trigger: CompactTrigger,
+    message_count: usize,
+    pre_tokens: usize,
+    post_tokens: usize,
+    summary: Arc<str>,
+}
+
+impl PostCompactPayload {
     pub(crate) fn new(
         trigger: CompactTrigger,
         message_count: usize,
-        pre_tokens: Option<usize>,
-        post_tokens: Option<usize>,
-        summary: Option<String>,
+        pre_tokens: usize,
+        post_tokens: usize,
+        summary: String,
     ) -> Self {
         Self {
             trigger,
             message_count,
             pre_tokens,
             post_tokens,
-            summary: summary.map(Arc::from),
+            summary: Arc::from(summary),
         }
     }
 
@@ -577,24 +620,23 @@ impl CompactPayload {
         self.message_count
     }
 
-    pub fn pre_tokens(&self) -> Option<usize> {
+    pub fn pre_tokens(&self) -> usize {
         self.pre_tokens
     }
 
-    pub fn post_tokens(&self) -> Option<usize> {
+    pub fn post_tokens(&self) -> usize {
         self.post_tokens
     }
 
-    pub fn summary(&self) -> Option<&str> {
-        self.summary.as_deref()
+    pub fn summary(&self) -> &str {
+        &self.summary
     }
 }
 
-/// Compact 钩子上下文。
-pub type CompactContext = HookContext<CompactPayload>;
+pub type PostCompactContext = HookContext<PostCompactPayload>;
 
 #[doc(hidden)]
-pub type RuntimeCompactContext = HookInput<CompactPayload>;
+pub type RuntimePostCompactContext = HookInput<PostCompactPayload>;
 
 /// 通用生命周期钩子载荷。
 #[derive(Clone, Debug)]

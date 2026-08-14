@@ -2,7 +2,7 @@
 
 > 以当前代码为准（`astrcode-core::config`、`astrcode-storage::config_store`、`astrcode-server` 启动流程）。
 
-AstrCode 默认使用 **TOML 配置文件 + 环境变量** 管理 LLM、运行时行为、权限与内置扩展参数。迁移期仍兼容旧的 `config.json`；当同目录同时存在 `config.toml` 和 `config.json` 时优先读取 TOML。首次从旧 JSON 读取主配置、项目覆盖或 last-known-good 快照时，会自动写出对应的 TOML 文件；旧 JSON 会保留为备份。所有用户可见字段使用 **camelCase**；未知字段会导致反序列化失败（`deny_unknown_fields`），拼写错误时错误信息会提示可能的 camelCase 写法。
+AstrCode 使用 **TOML 配置文件 + 环境变量** 管理 LLM、运行时行为、权限与内置扩展参数。所有用户可见字段使用 **camelCase**；未知字段会导致反序列化失败（`deny_unknown_fields`），拼写错误时错误信息会提示可能的 camelCase 写法。
 
 ---
 
@@ -14,17 +14,18 @@ AstrCode 默认使用 **TOML 配置文件 + 环境变量** 管理 LLM、运行�
 | 项目覆盖 | `<workspace>/.astrcode/config.toml` | [`ConfigOverlay`] | 仅写需覆盖的字段；**服务启动时**按启动工作目录合并进主配置 |
 | 全局 MCP | `~/.astrcode/mcp.json` | `mcpServers` | MCP 客户端（与 `config.toml` 分离） |
 | 项目 MCP | `<workspace>/.astrcode/mcp.json` | 同上 | 默认**不加载**；设置 `ASTRCODE_ENABLE_PROJECT_MCP=1` 后启用，同名 server 覆盖全局 |
-| 上次可用快照 | `~/.astrcode/.last-known-good.toml` | `Config` | 解析成功时自动写入，启动失败时回退；旧 `.last-known-good.json` 仍可读取 |
+| 上次可用快照 | `~/.astrcode/.last-known-good.toml` | `Config` | 解析成功时自动写入，启动失败时回退 |
 
 [`Config`]: ../crates/astrcode-core/src/config/raw.rs
 [`ConfigOverlay`]: ../crates/astrcode-core/src/config/raw.rs
 
-**项目覆盖生效范围**：在 `astrcode-server` / CLI 启动时，对 **启动时的工作目录**（默认 `std::env::current_dir()`）读取 `.astrcode/config.toml` 并合并；旧 `.astrcode/config.json` 在 TOML 不存在时作为 fallback。之后在其他目录创建的 session 仍使用已合并后的全局有效配置；若需按仓库分别覆盖，请在该仓库目录下启动进程。
+**项目覆盖生效范围**：在 `astrcode-server` / CLI 启动时，对 **启动时的工作目录**（默认 `std::env::current_dir()`）读取 `.astrcode/config.toml` 并合并。之后在其他目录创建的 session 仍使用已合并后的全局有效配置；若需按仓库分别覆盖，请在该仓库目录下启动进程。
 
-**热更新**：修改 `~/.astrcode/config.toml` 后可通过设置页或 `POST` 重载。宿主先解析 core
-配置，并在当前运行代之外构造发生变化的 Extension 实例；所有候选完成配置校验和 `start()` 后才
-保存配置并发布新代。任一候选失败时会被停止并丢弃，磁盘与运行态继续使用上一已提交代。未变化
-Extension 的来源指纹与规范化配置完全相同时复用原实例，不会因无关 core 配置更新而重启。
+**热更新**：设置页/API 更新时，宿主先解析 core 配置，并在当前运行代之外构造发生变化的
+Extension 实例；所有候选完成配置校验和 `start()` 后才保存配置并发布新代。任一候选失败时会被
+停止并丢弃，磁盘与运行态继续使用上一已提交代。直接修改磁盘文件再触发 reload 时，文件本身已经
+是 desired config；候选失败只保留上一运行代，磁盘内容不会被宿主反向覆盖，修正后可再次 reload。
+未变化 Extension 的来源指纹与规范化配置完全相同时复用原实例，不会因无关 core 配置更新而重启。
 
 ---
 
@@ -333,6 +334,7 @@ shellTimeoutSecs = 180
 | `requestTimeoutSecs` | `60` | 请求超时 |
 | `maxContentBytes` | `10485760` | 响应体上限 |
 | `maxOutputChars` | `100000` | 返回给模型的字符上限 |
+| `summarizerMaxOutputTokens` | `4096` | 小模型摘要请求的输出 token 上限；实际值仍受模型能力上限约束 |
 | `userAgent` | AstrCode 默认 UA | HTTP User-Agent |
 | `cacheTtlSecs` | `900` | 缓存 TTL |
 | `cacheMaxEntries` | `64` | 缓存条目数 |
@@ -428,7 +430,7 @@ braveApiKeyEnv = "BRAVE_API_KEY"
 
 - `Config::effective_from()` 要求 `activeProfile` / `activeModel` 存在且可解析 API key。
 - 配置文件含未知字段 → **加载失败**（不自动覆盖你的文件）；修正字段名或删除废弃键后重试。成功加载时可能回写 `config.toml` 以补齐新版本字段（不删除已有自定义段）。
-- 解析失败时服务尝试 `.last-known-good.toml`，再 fallback 到旧 `.last-known-good.json`；仍失败则使用 dummy LLM（HTTP 仍可用，但无法对话直至修复配置）。
+- 解析失败时服务尝试 `.last-known-good.toml`；仍失败则使用 dummy LLM（HTTP 仍可用，但无法对话直至修复配置）。
 
 实现入口：[`resolve.rs`](../crates/astrcode-core/src/config/resolve.rs)、启动 [`bootstrap/mod.rs`](../crates/astrcode-server/src/bootstrap/mod.rs)。
 

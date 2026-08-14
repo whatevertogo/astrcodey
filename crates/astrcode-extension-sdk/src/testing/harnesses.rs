@@ -282,9 +282,8 @@ impl ExtensionLifecycleHarness {
             ));
         }
         let extension_id = self.registered.manifest().id().to_owned();
-        let mut call = CallContextBuilder::new(&extension_id)
-            .tasks(self.tasks.clone())
-            .cancellation(self.tasks.cancellation());
+        let mut call =
+            CallContextBuilder::new(&extension_id).cancellation(self.tasks.cancellation());
         for capability in self.registered.manifest().capabilities() {
             call = call.capability(*capability);
         }
@@ -299,6 +298,7 @@ impl ExtensionLifecycleHarness {
         }
         let start = ExtensionStartContext::from_runtime(
             call.build().retain_cancellation_after_context_drop(),
+            self.tasks.clone(),
             ExtensionConfig::from_runtime(&extension_id, self.config.clone()),
             self.startup_working_dir.clone(),
         );

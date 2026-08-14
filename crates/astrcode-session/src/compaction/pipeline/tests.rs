@@ -14,8 +14,8 @@ use astrcode_core::{
 };
 use astrcode_extension_sdk::{
     extension::{
-        CompactEvent, CompactResult as HookCompactResult, ExtensionError,
-        internal::RuntimeCompactContext,
+        CompactContributions, CompactRetainedContext, ExtensionError, PreCompactResult,
+        internal::{RuntimePostCompactContext, RuntimePreCompactContext},
     },
     runtime_ports::TurnHooks,
 };
@@ -256,23 +256,44 @@ struct RecordingHooks {
 
 #[async_trait::async_trait]
 impl TurnHooks for RecordingHooks {
-    async fn emit_compact(
+    async fn collect_pre_compact(
         &self,
-        event: CompactEvent,
-        _ctx: RuntimeCompactContext,
-    ) -> Result<HookCompactResult, ExtensionError> {
-        match event {
-            CompactEvent::PreCompact => {
-                self.calls.lock().push("pre");
-                if matches!(self.scenario, Scenario::Blocked) {
-                    return Ok(HookCompactResult::Block {
-                        reason: "blocked by test hook".into(),
-                    });
-                }
-            },
-            CompactEvent::PostCompact => self.calls.lock().push("post"),
+        ctx: RuntimePreCompactContext,
+    ) -> Result<PreCompactResult, ExtensionError> {
+        self.calls.lock().push("pre");
+        assert_eq!(ctx.message_count(), 8);
+        if matches!(self.scenario, Scenario::Blocked) {
+            return Ok(PreCompactResult::Block {
+                reason: "blocked by test hook".into(),
+            });
         }
-        Ok(HookCompactResult::Allow)
+        Ok(PreCompactResult::Contributions(CompactContributions {
+            instructions: vec!["preserve extension facts".into()],
+            retained_context: vec![
+                CompactRetainedContext::Note {
+                    title: "First".into(),
+                    body: "first contribution".into(),
+                },
+                CompactRetainedContext::File {
+                    path: "src/lib.rs".into(),
+                    content: "fresh file content".into(),
+                },
+                CompactRetainedContext::Note {
+                    title: "Last".into(),
+                    body: "last contribution".into(),
+                },
+            ],
+        }))
+    }
+
+    async fn notify_post_compact(
+        &self,
+        ctx: RuntimePostCompactContext,
+    ) -> Result<(), ExtensionError> {
+        assert_eq!(ctx.message_count(), 8);
+        assert!(!ctx.summary().is_empty());
+        self.calls.lock().push("post");
+        Ok(())
     }
 }
 
@@ -376,6 +397,7 @@ async fn pipeline_orders_durability_hooks_and_exactly_one_terminal_for_each_outc
             &model,
             session.session_store_dir().await,
         );
+        let pre_hook_messages = crate::projection_context::context_snapshot(&model).messages;
         let outcome = CompactionPipeline {
             session: &session,
             llm: session.runtime_services().llm(),
@@ -387,7 +409,7 @@ async fn pipeline_orders_durability_hooks_and_exactly_one_terminal_for_each_outc
             ),
             extension_runner: hooks.as_ref(),
             hook_call,
-            pre_hook_message_count: model.model_context.messages.len(),
+            pre_hook_messages,
             tools: &[],
             strategy: CompactStrategy::Manual {
                 keep_recent_turns: Some(1),
@@ -421,6 +443,20 @@ async fn pipeline_orders_durability_hooks_and_exactly_one_terminal_for_each_outc
                     CompactionPipelineOutcome::Failed { .. }
                 )
         ));
+        if matches!(scenario, Scenario::Success | Scenario::CheckpointFailed) {
+            let model = session.read_model().await.unwrap();
+            let retained_context = model
+                .model_context
+                .messages
+                .iter()
+                .map(|entry| entry.message.joined_display_text("\n"))
+                .find(|text| text.contains("<post_compact_context>"))
+                .expect("durable rewrite must include extension contributions");
+            let first = retained_context.find("First").unwrap();
+            let file = retained_context.find("src/lib.rs").unwrap();
+            let last = retained_context.find("Last").unwrap();
+            assert!(first < file && file < last);
+        }
 
         let mut started = 0;
         let mut terminals = Vec::new();

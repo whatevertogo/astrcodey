@@ -66,6 +66,7 @@ pub fn assemble_server_runtime(
         scheduler,
         extension_runner,
         runtime_services,
+        transport_profile: Default::default(),
         startup_working_dir,
         shutdown_token: tokio_util::sync::CancellationToken::new(),
     }

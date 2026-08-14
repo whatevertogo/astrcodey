@@ -89,7 +89,7 @@ pub(crate) async fn prepare_provider_history(
         Some(plan) => {
             let (snapshot, _) = run_compaction(
                 host,
-                initial_snapshot.messages.len(),
+                initial_snapshot.messages.clone(),
                 plan,
                 tools,
                 publisher,
@@ -129,7 +129,7 @@ pub(crate) async fn run_reactive_compaction(
     let tools = state.visible_tools();
     let (_, outcome) = run_compaction(
         host,
-        snapshot.messages.len(),
+        snapshot.messages.clone(),
         CompactionPlan {
             strategy: CompactStrategy::ReactivePromptTooLong,
             use_llm: true,
@@ -146,7 +146,7 @@ pub(crate) async fn run_reactive_compaction(
 
 async fn run_compaction(
     host: &CompactionHost<'_>,
-    probe_message_count: usize,
+    probe_messages: Vec<LlmMessage>,
     plan: CompactionPlan,
     tools: &[ToolDefinition],
     publisher: &TurnEvents,
@@ -168,7 +168,7 @@ async fn run_compaction(
         context_assembler: Arc::clone(host.context_assembler),
         extension_runner: host.extension_runner,
         hook_call: host.hook_call.clone(),
-        pre_hook_message_count: probe_message_count,
+        pre_hook_messages: probe_messages,
         tools,
         strategy,
         use_llm,

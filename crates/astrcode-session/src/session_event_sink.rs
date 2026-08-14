@@ -629,7 +629,10 @@ mod tests {
         tool::SessionToolSelection,
         types::new_message_id,
     };
-    use astrcode_storage::{SessionReader, session_repo::FileSystemSessionRepository};
+    use astrcode_storage::{
+        SessionReader,
+        testing::{fail_next_durable_sync, filesystem_session_repository},
+    };
     use tempfile::tempdir;
     use tokio::sync::{Semaphore, mpsc};
 
@@ -742,9 +745,7 @@ mod tests {
     async fn synced_append_is_published_only_after_exact_uncertain_retry() {
         let dir = tempdir().unwrap();
         let session_id = SessionId::new("sink-uncertain-compact");
-        let journal = Arc::new(FileSystemSessionRepository::for_testing(
-            dir.path().join("projects"),
-        ));
+        let journal = Arc::new(filesystem_session_repository(dir.path().join("projects")));
         let journal_port: Arc<dyn SessionEventJournal> = journal.clone();
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let sink = SessionEventSink::new(ChannelObserver::new(events_tx));
@@ -797,10 +798,7 @@ mod tests {
             .iter()
             .map(|message| message.message.clone())
             .collect::<Vec<_>>();
-        journal
-            .fail_next_durable_sync_for_testing(&session_id)
-            .await
-            .unwrap();
+        fail_next_durable_sync(&journal, &session_id).await.unwrap();
         let error = sink
             .append_and_sync(
                 Arc::clone(&journal_port),
@@ -1152,6 +1150,7 @@ mod tests {
                             extension_id: "ask-user".into(),
                             event_type: "pending".into(),
                             schema_version: 1,
+                            audience: astrcode_core::event::CustomEventAudience::Session,
                             causation_id: None,
                             cascade_depth: 0,
                             payload: serde_json::json!({}),

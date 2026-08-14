@@ -9,18 +9,18 @@ use astrcode_extension_sdk::{
     builder::manifest,
     extension::{
         CommandCompletionContext, CommandCompletions, CommandContext, CommandHandler,
-        CompactContext, CompactHandler, CompactResult, ContinueAfterStopContext,
-        ContinueAfterStopHandler, ContinueAfterStopResult, CustomEventContext,
-        CustomEventDisposition, CustomEventHandler, Extension, ExtensionCall, ExtensionCallContext,
-        ExtensionCommandResult, ExtensionError, ExtensionHttpHandler, ExtensionHttpResponse,
-        ExtensionPackageManifest, ExtensionStartContext, ExtensionStopContext, HookResult,
-        HttpContext, LifecycleContext, LifecycleEvent, LifecycleHandler, PostToolUseContext,
-        PostToolUseHandler, PostToolUseResult, PreToolUseContext, PreToolUseHandler,
-        PreToolUseResult, PreparedProviderContribution, PromptBuildContext, PromptBuildHandler,
-        PromptContributions, ProviderContext, ProviderContributionHandler, ProviderHandler,
-        ProviderResult, ProviderSettlementContext, Registrar, ToolContext, ToolHandler,
-        ToolInputTransformHandler, ToolInputTransformResult, ToolPlanContext,
-        internal::extension_config_value,
+        ContinueAfterStopContext, ContinueAfterStopHandler, ContinueAfterStopResult,
+        CustomEventContext, CustomEventDisposition, CustomEventHandler, Extension, ExtensionCall,
+        ExtensionCallContext, ExtensionCommandResult, ExtensionError, ExtensionHttpHandler,
+        ExtensionHttpResponse, ExtensionPackageManifest, ExtensionStartContext,
+        ExtensionStopContext, HookResult, HttpContext, LifecycleContext, LifecycleEvent,
+        LifecycleHandler, PostCompactContext, PostCompactHandler, PostToolUseContext,
+        PostToolUseHandler, PostToolUseResult, PreCompactContext, PreCompactHandler,
+        PreCompactResult, PreToolUseContext, PreToolUseHandler, PreToolUseResult,
+        PreparedProviderContribution, PromptBuildContext, PromptBuildHandler, PromptContributions,
+        ProviderContext, ProviderContributionHandler, ProviderHandler, ProviderResult,
+        ProviderSettlementContext, Registrar, ToolContext, ToolHandler, ToolInputTransformHandler,
+        ToolInputTransformResult, ToolPlanContext, internal::extension_config_value,
     },
     s5r::{ToolInvocationPhase, ToolInvocationRequest, ToolInvocationScope, ToolPlanDto},
     tool::{ExecutionMode, ToolPlan},
@@ -33,11 +33,11 @@ use crate::{
     host_router::{HostRouter, InvokeContext},
     s5r_ext::v3_session::S5rV3Session as S5rSession,
     s5r_handler::{
-        handler_id, parse_command_completions, parse_command_result, parse_compact_result,
+        handler_id, parse_command_completions, parse_command_result,
         parse_continue_after_stop_result, parse_http_response, parse_lifecycle_result,
-        parse_post_tool_use_result, parse_pre_tool_use_result, parse_prompt_build_result,
-        parse_provider_contribution, parse_provider_result, parse_tool_input_transform_result,
-        parse_tool_result,
+        parse_post_compact_result, parse_post_tool_use_result, parse_pre_compact_result,
+        parse_pre_tool_use_result, parse_prompt_build_result, parse_provider_contribution,
+        parse_provider_result, parse_tool_input_transform_result, parse_tool_result,
     },
 };
 
@@ -98,16 +98,19 @@ fn parse_env(manifest: &ExtensionPackageManifest) -> Vec<(String, String)> {
 impl Extension for S5rExtension {
     fn manifest(&self) -> astrcode_extension_sdk::extension::ExtensionManifest {
         let registration = self.session.registration();
+        let builder = registration.capabilities.iter().copied().fold(
+            manifest(&registration.extension_id)
+                .version(&registration.version)
+                .description("External S5R extension"),
+            |builder, capability| builder.capability(capability),
+        );
         registration
-            .capabilities
+            .required_transport_features
             .iter()
             .copied()
-            .fold(
-                manifest(&registration.extension_id)
-                    .version(&registration.version)
-                    .description("External S5R extension"),
-                |builder, capability| builder.capability(capability),
-            )
+            .fold(builder, |builder, feature| {
+                builder.requires_transport(feature)
+            })
             .build()
     }
 
@@ -160,16 +163,27 @@ impl Extension for S5rExtension {
             let session = Arc::clone(&self.session);
             let ext_id = registration.extension_id.clone();
             match subscription {
-                HookSubscription::Compact(event) => {
-                    reg.on_compact(
-                        *event,
-                        0,
-                        Arc::new(S5rCompactHandler {
-                            session,
-                            ext_id,
-                            on: event_name.into(),
-                        }),
-                    );
+                HookSubscription::Compact(event) => match event {
+                    astrcode_extension_sdk::extension::CompactEvent::PreCompact => {
+                        reg.on_pre_compact(
+                            0,
+                            Arc::new(S5rPreCompactHandler {
+                                session,
+                                ext_id,
+                                on: event_name.into(),
+                            }),
+                        );
+                    },
+                    astrcode_extension_sdk::extension::CompactEvent::PostCompact => {
+                        reg.on_post_compact(
+                            0,
+                            Arc::new(S5rPostCompactHandler {
+                                session,
+                                ext_id,
+                                on: event_name.into(),
+                            }),
+                        );
+                    },
                 },
                 HookSubscription::Lifecycle {
                     event,
@@ -685,10 +699,27 @@ s5r_hook_handler!(
 );
 
 s5r_hook_handler!(
-    S5rCompactHandler,
-    CompactHandler,
-    CompactContext,
-    CompactResult,
+    S5rPreCompactHandler,
+    PreCompactHandler,
+    PreCompactContext,
+    PreCompactResult,
+    |ctx| json!({
+        "session_id": ctx.session_id().to_string(),
+        "working_dir": ctx.working_dir().display().to_string(),
+        "model": ctx.model(),
+        "trigger": ctx.trigger(),
+        "message_count": ctx.message_count(),
+        "source_messages": ctx.source_messages(),
+        "retained_file_limit": ctx.retained_file_limit(),
+    }),
+    parse_pre_compact_result
+);
+
+s5r_hook_handler!(
+    S5rPostCompactHandler,
+    PostCompactHandler,
+    PostCompactContext,
+    (),
     |ctx| json!({
         "session_id": ctx.session_id().to_string(),
         "working_dir": ctx.working_dir().display().to_string(),
@@ -699,7 +730,7 @@ s5r_hook_handler!(
         "post_tokens": ctx.post_tokens(),
         "summary": ctx.summary(),
     }),
-    parse_compact_result
+    parse_post_compact_result
 );
 
 s5r_hook_handler!(

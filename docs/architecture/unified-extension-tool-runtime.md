@@ -834,15 +834,15 @@ token。扩展并不知道当前 provider 的 tokenizer，也不应各自实现�
 handle 必须是不可猜测的 opaque ID，并绑定：
 
 ```text
-(session_id, extension_id, process_id)
+(session_id, extension_instance_id, process_id)
 ```
 
 规则：
 
-- 同 Extension ID reload 后可以继续访问已有 handle；
-- 其他 Extension 即使猜到 process ID 也不能访问；
+- 同 Extension ID 的新旧 generation 也不能互相访问 handle；
+- 其他 Extension instance 即使猜到 process ID 也不能访问；
 - session close 后所有 handle 失效；
-- Extension disable/uninstall 后关闭该 Extension ID 的所有 handle；
+- Extension reload/disable/uninstall 在旧 instance drain 与 stop 后关闭该 instance 的所有 handle；
 - foreground 调用取消时默认终止进程；
 - 显式 background handle 不随单次 tool call cancellation 自动终止，但随 session scope 终止；
 - Host 负责 process group / Job Object，不能只杀父进程留下子进程。

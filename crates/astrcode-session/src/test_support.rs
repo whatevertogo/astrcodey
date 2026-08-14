@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
 use astrcode_context::{
-    CompactResult, ContextAssembler, ContextPrepareInput, NoopPostCompactEnricher,
-    PostCompactEnrichInput, PostCompactEnricher, PreparedContext,
-    context_assembler::LlmContextAssembler,
+    ContextAssembler, ContextPrepareInput, PreparedContext, context_assembler::LlmContextAssembler,
 };
 use astrcode_core::{
     config::{
@@ -126,16 +124,6 @@ impl ContextAssembler for NoopContextAssembler {
     }
 }
 
-/// 追加标记文本的 post-compact enricher 桩。
-pub(crate) struct CountingPostCompactEnricher;
-
-#[async_trait::async_trait]
-impl PostCompactEnricher for CountingPostCompactEnricher {
-    async fn enrich(&self, compaction: &mut CompactResult, _input: PostCompactEnrichInput<'_>) {
-        compaction.summary.push_str(" enriched");
-    }
-}
-
 /// 事件观察者桩：转发到 mpsc 通道供断言。
 pub(crate) struct ChannelObserver(mpsc::UnboundedSender<Arc<Event>>);
 
@@ -167,6 +155,5 @@ pub(crate) fn test_runtime_services_with_hooks(
         test_effective_config(ContextSettings::default()),
         crate::SessionExtensionPorts::with_turn_hooks(turn_hooks),
         Arc::new(NoopContextAssembler::new(ContextSettings::default())),
-        Arc::new(NoopPostCompactEnricher),
     ))
 }

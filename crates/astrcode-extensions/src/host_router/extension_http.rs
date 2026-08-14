@@ -12,8 +12,8 @@ use astrcode_extension_sdk::{
 use serde_json::Value;
 
 use super::{
-    HOST_INVOKE_TIMEOUT, PublicHttpDispatcher, backend_unavailable, invalid_group_operation,
-    parse_wire_request,
+    HOST_INVOKE_TIMEOUT, InvokeContext, PublicHttpDispatcher, backend_unavailable,
+    invalid_group_operation, parse_wire_request,
 };
 
 #[derive(Default)]
@@ -34,12 +34,11 @@ impl ExtensionHttpGroup {
         &self,
         operation: HostOperation,
         input: Value,
-        caller_extension_id: &str,
+        context: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
         match operation {
             HostOperation::ExtensionHttpPublic => {
-                self.dispatch_public(operation, input, caller_extension_id)
-                    .await
+                self.dispatch_public(operation, input, context).await
             },
             _ => Err(invalid_group_operation(
                 operation,
@@ -48,26 +47,30 @@ impl ExtensionHttpGroup {
         }
     }
 
-    pub(super) fn is_available(&self) -> bool {
-        self.dispatcher.is_some()
+    pub(super) fn is_available(
+        &self,
+        scoped_dispatcher: Option<&Arc<dyn PublicHttpDispatcher>>,
+    ) -> bool {
+        scoped_dispatcher.is_some() || self.dispatcher.is_some()
     }
 
     async fn dispatch_public(
         &self,
         operation: HostOperation,
         input: Value,
-        caller_extension_id: &str,
+        context: &InvokeContext,
     ) -> Result<Value, ErrorPayload> {
-        let dispatcher = self
-            .dispatcher
+        let dispatcher = context
+            .public_http_dispatcher
             .as_ref()
+            .or(self.dispatcher.as_ref())
             .ok_or_else(|| backend_unavailable("public HTTP dispatcher is not configured"))?;
         let request: ExtensionHttpDispatchRequest =
             parse_wire_request(&input, operation.wire_name())?;
         let request = ExtensionHttpRequest::from(request);
         tokio::time::timeout(
             HOST_INVOKE_TIMEOUT,
-            dispatcher.dispatch_public_http(caller_extension_id, request),
+            dispatcher.dispatch_public_http(&context.extension_id, request),
         )
         .await
         .map_err(|_| ErrorPayload::new(WireErrorCode::Timeout, "public HTTP dispatch timed out"))?

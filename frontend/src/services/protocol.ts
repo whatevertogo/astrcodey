@@ -41,15 +41,6 @@ function arrayField(source: JsonObject, name: string): unknown[] {
   return value
 }
 
-/** 缺省或 `null` 视为 `[]`（与 serde `skip_serializing_if` 省略字段对齐）。 */
-function optionalArrayField(source: JsonObject, name: string): unknown[] {
-  const value = source[name]
-  if (value == null) return []
-  if (!Array.isArray(value))
-    throw new ProtocolDecodeError(`expected array ${name}`)
-  return value
-}
-
 function requiredString(source: JsonObject, name: string): string {
   const value = source[name]
   if (typeof value !== 'string')
@@ -168,16 +159,13 @@ export function decodeConversationBlock(value: unknown): ConversationBlock {
 
   switch (kind) {
     case 'user': {
-      const rawAttachments = optionalArrayField(object, 'attachments')
-      const attachments =
-        rawAttachments.length > 0
-          ? rawAttachments.map(decodePromptAttachmentWire)
-          : undefined
       return {
         kind,
         id,
         text: requiredString(object, 'text'),
-        attachments,
+        attachments: arrayField(object, 'attachments').map(
+          decodePromptAttachmentWire
+        ),
       }
     }
     case 'assistant':

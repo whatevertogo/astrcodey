@@ -541,14 +541,15 @@ pub enum ResourceAccess {
 ### 6.3 Process handle 所有权
 
 最终 Host process capability 只接受 stdin/stdout/stderr pipes，不存在 PTY mode 或 resize。handle 必须
-绑定 `(session_id, extension_id, process_id)`，并由 Host session resource scope 持有。
+绑定 `(session_id, ExtensionInstanceId, process_id)`，并由 Host session resource scope 持有；
+`ExtensionInstanceId` 是 runtime attribution，不进入 author API 或 wire。
 
 必须满足：
 
 - 其他 session 或 Extension 猜到 ID 也无法访问；
 - call-owned process 随 invocation cancellation 终止并释放 quota；
 - session-owned process 可跨单次调用读取，但随 session close 回收；
-- Extension reload 的访问策略明确，不依赖 handler 内 static；
+- 同 ID reload 的新旧 instance 彼此隔离，旧 instance drain 后只回收自己的 handles；
 - Unix process group 或 Windows Job Object 终止完整进程树，而不是只 kill direct child；
 - spawn 成功到 handle 登记之间由 RAII owner 覆盖。
 
@@ -1000,8 +1001,10 @@ source fingerprint 与规范化后的完整 Extension config 一起构成候选 
 
 任一 discovery、load、register、validate、start 或 S5R activation 失败都会停止本批已经启动的 fresh
 instances、取消其 managed/call resources，并按 instance identity 清理 Host-owned resources。旧 index、
-core generation、raw snapshot 和磁盘配置均不变。Extension 若绕过 Host API 直接制造外部事实，宿主
-无法回滚；author contract 因此禁止 candidate startup 执行不可撤销外部写入。
+core generation 与 raw snapshot 均不变；API 更新尚未保存，因此磁盘也不变。若配置是外部先写入
+磁盘再触发 reload，失败时磁盘保留 desired config，运行态保留 last-known-good，修正后再次 reload。
+Extension 若绕过 Host API 直接制造外部事实，宿主无法回滚；author contract 因此禁止 candidate
+startup 执行不可撤销外部写入。
 
 ### 12.4 save 与 coherent publication
 
@@ -1035,6 +1038,10 @@ fail-stop，重启时从已经保存的配置重新构造完整 generation。这
 runtime 旧代”伪装成 last-known-good；正常的候选错误和存储错误都在这个不可失败边界之前返回 typed
 error。
 
+这里的“保存成功”仅指 `ConfigStore::save` 返回成功。当前文件实现是临时文件写入后 rename，没有对
+文件和父目录执行 fsync，因此不宣称断电级 durability；如果进程在 rename 与 runtime publication 之间
+崩溃，重启会从磁盘新配置重新构造完整 generation，而存活进程不会继续运行一个可观察的混合代。
+
 ### 12.5 旧代 drain、取消与 Host resource ownership
 
 发布不强制取消已经 pin 旧 view 的 active turn。每个 HandlerIndex 持有其引用到的 publication lease；
@@ -1057,6 +1064,17 @@ workspace 和 memory 等持久化临界区，超过 budget 后会告警但继续
 因此上述 cleanup 对正常返回的 Host I/O 是 eventual guarantee，不是无条件的时间上界：如果底层文件
 系统调用永久卡死，旧 instance 的 stop 与 Host resource cleanup 也会被推迟。turn context 只能撤销后续
 Host 权限并取消 owned task，既不能回滚已经发生的外部事实，也不能安全中断已经进入内核的持久写。
+
+`ExtensionTasks` 也不能成为普通 handler 的逃生口。`ExtensionCallContext`、`ToolContext`、hook、HTTP
+和 command context 都不暴露 generation task owner；只有 `ExtensionStartContext` 能取得它。需要跨越
+单次 call 的工作必须在 `Extension::start` 中建立有明确输入队列和 shutdown owner 的 worker，handler
+只提交 typed request 并等待结果。Memory 是当前真实用例：保存、删除和 session preference preload
+进入有界 store queue；已经接纳的文件写由 generation 的 `MustFinish` 跟踪，即使等待它的 handler
+future 被取消也会完成；rollout extraction 由另一个可取消、只保留最新 pending request 的 generation
+worker 执行。热重载先让旧 view 排空，再撤销旧 gate、关闭 worker、等待已接纳写入，新的 handler 只
+持有新实例自己的 queue。这个边界能清理宿主拥有的任务和能力，仍不声称回滚已完成的文件、网络或
+durable event 副作用。可信的进程内 Rust Extension 仍可自行调用 `tokio::spawn` 或直接 I/O；那属于
+author contract 与代码审查边界，不能由 context Drop 伪装成事务保证。
 
 ### 12.6 Extension-owned config 与 S5R parity
 
@@ -1155,15 +1173,19 @@ SDK 因此用 `CommandExecution::Host(SessionCommandKind)` 声明执行 owner，
 
 ### 13.6 custom-event audience 与 transport requirement 不能按 Extension ID 特判
 
-ServerEventBus 目前只把 `astrcode-ask-user` 的两个 event type 转为 global custom event；stdio 启动也
-通过 `disabled_extension_ids={"astrcode-ask-user"}` 排除它。这两处都泄漏了具体 Extension 产品知识。
+ServerEventBus 不识别 Extension ID 或 event type。custom-event declaration 直接使用不能表达无效组合的
+`CustomEventDelivery::{SessionDurable, SessionLive, GlobalLive}`；builder 的作者侧默认值是
+`SessionDurable`，S5R wire 的 `delivery` 则始终必填。Host 在 emit ingress 把 delivery 映射成外层
+durable/live payload 与 host-attributed `CustomEventAudience`，ServerEventBus 只对
+`Live + Global` 做通用进程级 fan-out。EventLog 是跨信任边界，projection reducer 会拒绝
+`Durable + Global`，不能仅依赖正常 emitter 永远不构造它。
 
-长期契约应分别表达两个事实：
-
-1. custom-event declaration 声明 delivery audience（默认 Session，可选 Global）；Host 在 emit 时根据
-   已验证 declaration 把 audience 写入内部 event，ServerEventBus 只按 audience 通用 fan-out；
-2. manifest/declaration 声明 required transport capabilities；bootstrap 提供
-   `TransportProfile`，stdio 不提供 authenticated HTTP，于是 loader 产生通用 admission diagnostic。
+transport admission 表达另一个独立事实。manifest/S5R declaration 的
+`required_transport_features: Vec<TransportFeature>` 是严格必填 wire 字段；`BootstrapOptions` 与
+`ServerRuntime` 持有本入口实际提供的 `TransportProfile`。HTTP server 提供
+`AuthenticatedHttp`，stdio、TUI、exec 与 ACP 提供空 profile。loader 在候选 publication 前统一比较
+requirements，缺失时记录类型化 admission diagnostic；`astrcode-ask-user` 只声明自身 requirement，
+CLI 与 Server 均不知道这个具体 Extension ID。
 
 不要把“声明了 AuthenticatedHttp capability”直接猜成 required：capability 是授权面，requirement 是
 加载前置条件，两者生命周期不同。也不要仅把 ask-user 字符串移成共享常量，那只会统一特判，
@@ -1199,6 +1221,7 @@ EventLog HTTP 旁路。
 | 区域 | 唯一职责 |
 | --- | --- |
 | `extension/*` | 作者注册、handler、hook、lifecycle、manifest、纯 config validation |
+| `extension/call_context.rs` | call/turn attribution 与取消；generation tasks 只属于 startup context |
 | `extension/internal.rs` | 唯一 runtime SPI façade；host-only constructors/mutators 不从作者根 API 暴露 |
 | `host/*` | typed domain clients、Host error mapping、author-facing call API |
 | `wire/*` | 严格 S5R DTO、operation/error catalog、frame 与 bounded decoding |
@@ -1224,7 +1247,17 @@ EventLog HTTP 旁路。
 | `host_router/tool_result.rs` | session-scoped artifact read adapter |
 | `s5r_ext/*` | worker transport 到相同 runtime semantics 的 adapter |
 
-### 14.3 Coding Extension
+### 14.3 Memory Extension
+
+| 文件 | 唯一职责 |
+| --- | --- |
+| `handlers.rs` | 工具与 lifecycle author boundary；只解析输入、提交 worker request、映射结果和发事件 |
+| `workers.rs` | generation-owned store/pipeline workers、typed queue、取消与 must-finish 写入边界 |
+| `store.rs` / `scope.rs` / `index.rs` | 同步存储原语、用户/项目分域与索引；不知道 handler lifecycle |
+| `pipeline.rs` | 给定 scoped store、SessionInspect 与 ModelClient 执行一次 extraction |
+| `turn_recall.rs` | turn-end project recall candidate 与 provider contribution exact ack |
+
+### 14.4 Coding Extension
 
 | 文件 | 唯一职责 |
 | --- | --- |
@@ -1240,7 +1273,7 @@ EventLog HTTP 旁路。
 Coding 不再拥有 `result.rs` 计时包装；Session tool executor 是 `duration_ms` 的唯一权威 owner，文件与
 进程工具直接构造带自身 metadata 的 `ToolResult`。shell 只保留 promotion deadline 所需的 `Instant`。
 
-### 14.4 Storage
+### 14.5 Storage
 
 | 文件/区域 | 唯一职责 |
 | --- | --- |
@@ -1492,6 +1525,19 @@ Storage 不应知道 `read_tool_result` 的 provider schema，也不应决定 30
 - unscoped Host LLM contract 仍使用 live fallback。
 
 这只验收 turn binding，不把 core 与 Extension 的两个 publication 边界误写成原子 generation。
+
+### 18.8 Handler task scope 与热重载 cleanup
+
+- SDK `compile_fail` doctest 锁定 `ToolContext` 即使导入 `ExtensionCall` 也没有 `tasks()`；
+- lifecycle harness 继续证明只有 `ExtensionStartContext` 能登记 managed task，且 stop 前先 cancel/drain；
+- 一条 Memory worker 多样回归验证：首个已入队写入即使调用方放弃 oneshot 结果仍会完成，后续写入保持
+  FIFO，generation shutdown 会等待已接纳写入并拒绝 late request；pipeline 保留 active request，等待中
+  的多次触发只执行最新一个；
+- Runner generation 回归验证旧 turn 的 view lease 排空前不撤权，排空后旧 call、Host client、event
+  emitter 和 worker 都不能跨入新 generation。
+
+这些测试验证的是 capability revocation、owned task cleanup 与 durable critical section，不把 Drop 或
+cancel 描述为外部副作用回滚。
 
 ---
 

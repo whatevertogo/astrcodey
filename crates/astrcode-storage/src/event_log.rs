@@ -280,6 +280,7 @@ static FAIL_NEXT_OPEN_SYNC_PATHS: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 
 enum WriteCommand {
+    #[cfg(test)]
     AppendBatch {
         events: Vec<DurableEvent>,
         done: oneshot::Sender<Result<Vec<StoredEvent>, StorageError>>,
@@ -337,6 +338,7 @@ impl WriterState {
         })
     }
 
+    #[cfg(test)]
     fn append_batch(
         &mut self,
         events: Vec<DurableEvent>,
@@ -476,6 +478,7 @@ fn write_loop(
 ) {
     while let Some(cmd) = rx.blocking_recv() {
         match cmd {
+            #[cfg(test)]
             WriteCommand::AppendBatch { events, done } => {
                 let result = state.append_batch(events);
                 if result.is_ok() {
@@ -699,7 +702,7 @@ fn recover_incomplete_tail(path: &Path) -> Result<(), StorageError> {
 ///   │           └── dirty tracking (deferred fsync)
 ///   └── next_seq (AtomicU64, lock-free count)
 /// ```
-pub struct EventLog {
+pub(crate) struct EventLog {
     path: PathBuf,
     tx: mpsc::Sender<WriteCommand>,
     next_seq: Arc<AtomicU64>,
@@ -713,7 +716,7 @@ impl Drop for EventLog {
 
 impl EventLog {
     /// Create a new event log file with an initial event.
-    pub async fn create(
+    pub(crate) async fn create(
         path: PathBuf,
         initial_event: DurableEvent,
     ) -> Result<(Self, StoredEvent), StorageError> {
@@ -723,7 +726,7 @@ impl EventLog {
     }
 
     /// Open an existing event log.
-    pub async fn open(path: PathBuf) -> Result<Self, StorageError> {
+    pub(crate) async fn open(path: PathBuf) -> Result<Self, StorageError> {
         let state = run_blocking_io(move || open_at_path(path)).await?;
         Ok(Self::from_writer_state(state))
     }
@@ -768,7 +771,8 @@ impl EventLog {
     /// The writer thread assigns `seq`, serializes, and writes the line —
     /// no mutex contention on the write path.
     /// Writes to the OS page cache immediately; call [`force_sync`] for fsync.
-    pub async fn append(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
+    #[cfg(test)]
+    async fn append(&self, event: DurableEvent) -> Result<StoredEvent, StorageError> {
         self.append_batch(vec![event])
             .await?
             .pop()
@@ -776,7 +780,8 @@ impl EventLog {
     }
 
     /// Append a prevalidated batch as one recoverable file write.
-    pub async fn append_batch(
+    #[cfg(test)]
+    async fn append_batch(
         &self,
         events: Vec<DurableEvent>,
     ) -> Result<Vec<StoredEvent>, StorageError> {
@@ -804,7 +809,7 @@ impl EventLog {
     }
 
     /// Replay all events from the beginning.
-    pub async fn replay_all(&self) -> Result<Vec<StoredEvent>, StorageError> {
+    pub(crate) async fn replay_all(&self) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
         run_blocking_io(move || replay_events_at_path(&path, None, None, None)).await
     }
@@ -822,7 +827,7 @@ impl EventLog {
     ///
     /// This is used when recovering from a snapshot: only the events that
     /// occurred after the snapshot point need to be replayed, not the whole log.
-    pub async fn replay_after(&self, seq: u64) -> Result<Vec<StoredEvent>, StorageError> {
+    pub(crate) async fn replay_after(&self, seq: u64) -> Result<Vec<StoredEvent>, StorageError> {
         let path = self.path.clone();
         run_blocking_io(move || replay_events_at_path(&path, None, Some(seq), None)).await
     }

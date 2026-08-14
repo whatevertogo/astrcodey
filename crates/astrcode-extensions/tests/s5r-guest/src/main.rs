@@ -9,8 +9,8 @@ use astrcode_extension_sdk::{
     WireErrorCode,
     builder::tool,
     extension::{
-        CustomEventDeclaration, ExtensionHttpDispatchRequest, ExtensionHttpMethod,
-        ExtensionHttpResponse, ExtensionHttpRoute,
+        CustomEventDeclaration, CustomEventDelivery, ExtensionHttpDispatchRequest,
+        ExtensionHttpMethod, ExtensionHttpResponse, ExtensionHttpRoute,
     },
     s5r::{CallContinuation, ErrorPayload, HandlerEffect, HandlerResult},
     tool::ExecutionMode,
@@ -126,7 +126,7 @@ async fn run() -> Result<(), ErrorPayload> {
         .custom_event(CustomEventDeclaration {
             event_type: "s5r_guest.probe".into(),
             schema_version: 1,
-            durable: true,
+            delivery: CustomEventDelivery::SessionDurable,
             max_payload_bytes: 4096,
         });
 

@@ -110,6 +110,11 @@ impl WebToolsShared {
     }
 }
 
+/// Validate a candidate configuration without constructing extension runtime state.
+pub fn validate_config(config: &ExtensionConfig) -> Result<(), ExtensionError> {
+    load_config(config).map(|_| ())
+}
+
 #[async_trait::async_trait]
 impl Extension for WebToolsExtension {
     fn manifest(&self) -> ExtensionManifest {
@@ -122,7 +127,7 @@ impl Extension for WebToolsExtension {
     }
 
     fn validate_config(&self, config: &ExtensionConfig) -> Result<(), ExtensionError> {
-        load_config(config).map(|_| ()).map_err(Into::into)
+        validate_config(config)
     }
 
     async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
@@ -251,7 +256,7 @@ impl ToolHandler for FetchUrlToolHandler {
 
         match run_fetch_url(&config, &cache, network, small_llm, args).await {
             Ok(FetchUrlResult::Content(outcome)) => {
-                let content = render_fetch_content(&outcome);
+                let content = render_fetch_content(&outcome, config.max_output_chars);
                 Ok(ToolResult::text(
                     content,
                     false,
@@ -268,7 +273,7 @@ impl ToolHandler for FetchUrlToolHandler {
                 .into())
             },
             Ok(FetchUrlResult::Redirect(outcome)) => Ok(ToolResult::text(
-                render_fetch_redirect(&outcome),
+                render_fetch_redirect(&outcome, config.max_output_chars),
                 false,
                 tool_metadata([
                     ("url", json!(requested_url)),

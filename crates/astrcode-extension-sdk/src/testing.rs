@@ -18,18 +18,19 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     config::ModelSelection,
     extension::{
-        CommandCompletionContext, CommandContext, CompactContext, CompactPayload,
-        ContinueAfterStopContext, ContinueAfterStopPayload, CustomEventEmitter, ExchangeSummary,
-        ExtensionCallContext, ExtensionCapability, ExtensionHttpRequest, ExtensionHttpRoute,
-        ExtensionPaths, ExtensionTasks, HttpContext, LifecycleContext, LifecyclePayload,
-        PostToolUseContext, PostToolUsePayload, PreToolUseContext, PreToolUsePayload,
-        PromptBuildContext, PromptBuildPayload, ProviderContext, ProviderPayload,
-        ProviderRequestId, SessionCallContext, ToolContext, UserMessageEnvelopeContext,
-        UserMessageEnvelopePayload,
+        CommandCompletionContext, CommandContext, ContinueAfterStopContext,
+        ContinueAfterStopPayload, CustomEventEmitter, ExchangeSummary, ExtensionCallContext,
+        ExtensionCapability, ExtensionHttpRequest, ExtensionHttpRoute, ExtensionPaths, HttpContext,
+        LifecycleContext, LifecyclePayload, PostCompactContext, PostCompactPayload,
+        PostToolUseContext, PostToolUsePayload, PreCompactContext, PreCompactPayload,
+        PreToolUseContext, PreToolUsePayload, PromptBuildContext, PromptBuildPayload,
+        ProviderContext, ProviderPayload, ProviderRequestId, SessionCallContext, ToolContext,
+        UserMessageEnvelopeContext, UserMessageEnvelopePayload,
         internal::{
-            RuntimeCompactContext, RuntimeContinueAfterStopContext, RuntimeHookCallContext,
-            RuntimeLifecycleContext, RuntimePostToolUseContext, RuntimePreToolUseContext,
-            RuntimePromptBuildContext, RuntimeProviderContext, RuntimeUserMessageEnvelopeContext,
+            RuntimeContinueAfterStopContext, RuntimeHookCallContext, RuntimeLifecycleContext,
+            RuntimePostCompactContext, RuntimePostToolUseContext, RuntimePreCompactContext,
+            RuntimePreToolUseContext, RuntimePromptBuildContext, RuntimeProviderContext,
+            RuntimeUserMessageEnvelopeContext,
         },
     },
     host::{
@@ -52,7 +53,6 @@ struct CallContextBuilder {
     grants: Vec<ExtensionCapability>,
     host: Option<ExtensionHost>,
     events: Option<CustomEventEmitter>,
-    tasks: Option<ExtensionTasks>,
     cancellation: CancellationToken,
 }
 
@@ -68,7 +68,6 @@ impl CallContextBuilder {
             grants: Vec::new(),
             host: None,
             events: None,
-            tasks: None,
             cancellation: CancellationToken::new(),
         }
     }
@@ -117,11 +116,6 @@ impl CallContextBuilder {
         self
     }
 
-    fn tasks(mut self, tasks: ExtensionTasks) -> Self {
-        self.tasks = Some(tasks);
-        self
-    }
-
     fn cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
         self
@@ -146,15 +140,11 @@ impl CallContextBuilder {
             self.global_store_dir.as_deref(),
             self.session_store_dir.as_deref(),
         );
-        let tasks = self
-            .tasks
-            .unwrap_or_else(|| ExtensionTasks::new(self.extension_id.as_str()));
         ExtensionCallContext::from_runtime(
             self.extension_id,
             paths,
             host,
             self.events.unwrap_or_default(),
-            tasks,
             self.cancellation,
         )
     }
@@ -196,11 +186,6 @@ macro_rules! call_context_builder_methods {
 
         pub fn events(mut self, events: CustomEventEmitter) -> Self {
             self.call = self.call.events(events);
-            self
-        }
-
-        pub fn tasks(mut self, tasks: ExtensionTasks) -> Self {
-            self.call = self.call.tasks(tasks);
             self
         }
 
@@ -409,20 +394,40 @@ impl HookContextBuilder {
         PromptBuildContext::from_runtime(call, &input)
     }
 
-    pub fn build_compact(
+    pub fn build_pre_compact(
+        self,
+        trigger: CompactTrigger,
+        source_messages: Vec<LlmMessage>,
+        retained_file_limit: usize,
+    ) -> PreCompactContext {
+        let (call, runtime_call) = self.into_parts();
+        let input = RuntimePreCompactContext::new(
+            runtime_call,
+            PreCompactPayload::new(trigger, source_messages, retained_file_limit),
+        );
+        PreCompactContext::from_runtime(call, &input)
+    }
+
+    pub fn build_post_compact(
         self,
         trigger: CompactTrigger,
         message_count: usize,
-        pre_tokens: Option<usize>,
-        post_tokens: Option<usize>,
-        summary: Option<String>,
-    ) -> CompactContext {
+        pre_tokens: usize,
+        post_tokens: usize,
+        summary: impl Into<String>,
+    ) -> PostCompactContext {
         let (call, runtime_call) = self.into_parts();
-        let input = RuntimeCompactContext::new(
+        let input = RuntimePostCompactContext::new(
             runtime_call,
-            CompactPayload::new(trigger, message_count, pre_tokens, post_tokens, summary),
+            PostCompactPayload::new(
+                trigger,
+                message_count,
+                pre_tokens,
+                post_tokens,
+                summary.into(),
+            ),
         );
-        CompactContext::from_runtime(call, &input)
+        PostCompactContext::from_runtime(call, &input)
     }
 
     pub fn build_lifecycle(
@@ -641,18 +646,27 @@ mod tests {
         let prompt = scoped_hook_builder().build_prompt(vec![visible_tool()]);
         assert_eq!(prompt.tools()[0].name, "visible");
 
-        let compact = scoped_hook_builder().build_compact(
+        let pre_compact = scoped_hook_builder().build_pre_compact(
+            CompactTrigger::ManualCommand,
+            vec![LlmMessage::user("before compact")],
+            5,
+        );
+        assert_eq!(pre_compact.trigger(), CompactTrigger::ManualCommand);
+        assert_eq!(pre_compact.message_count(), 1);
+        assert_eq!(pre_compact.retained_file_limit(), 5);
+
+        let post_compact = scoped_hook_builder().build_post_compact(
             CompactTrigger::ManualCommand,
             12,
-            Some(100),
-            Some(40),
-            Some("summary".into()),
+            100,
+            40,
+            "summary",
         );
-        assert_eq!(compact.trigger(), CompactTrigger::ManualCommand);
-        assert_eq!(compact.message_count(), 12);
-        assert_eq!(compact.pre_tokens(), Some(100));
-        assert_eq!(compact.post_tokens(), Some(40));
-        assert_eq!(compact.summary(), Some("summary"));
+        assert_eq!(post_compact.trigger(), CompactTrigger::ManualCommand);
+        assert_eq!(post_compact.message_count(), 12);
+        assert_eq!(post_compact.pre_tokens(), 100);
+        assert_eq!(post_compact.post_tokens(), 40);
+        assert_eq!(post_compact.summary(), "summary");
 
         let lifecycle = HookContextBuilder::new("hook-fixture").build_lifecycle(
             Some(ExchangeSummary {

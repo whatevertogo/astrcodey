@@ -156,6 +156,7 @@ async fn extension_config_candidate_is_published_only_after_validation_and_save(
         effective,
         Arc::clone(&runner),
         temp_dir.path().to_path_buf(),
+        Default::default(),
     )
     .unwrap();
     manager.initialize_extensions::<()>().await.unwrap();
@@ -237,6 +238,7 @@ async fn cancelled_config_request_is_owned_through_publication_and_shutdown() {
         effective,
         Arc::clone(&runner),
         temp_dir.path().to_path_buf(),
+        Default::default(),
     )
     .unwrap();
     let manager = Arc::new(manager);
@@ -314,6 +316,7 @@ async fn disabled_bundled_extension_configs_validate_before_commit() {
         effective,
         Arc::clone(&runner),
         temp_dir.path().to_path_buf(),
+        Default::default(),
     )
     .unwrap();
     let initial_effective = manager.read_effective();
