@@ -37,7 +37,7 @@ enum CompactionOutcome {
 
 pub(crate) struct PreparedProviderHistory {
     pub snapshot: ContextSnapshot,
-    pub messages: Vec<LlmMessage>,
+    pub messages: Vec<Arc<LlmMessage>>,
 }
 
 pub(crate) struct CompactionHost<'a> {
@@ -170,7 +170,7 @@ pub(crate) async fn run_reactive_compaction(
 
 async fn run_compaction(
     host: &CompactionHost<'_>,
-    probe_messages: Vec<LlmMessage>,
+    probe_messages: Vec<Arc<LlmMessage>>,
     plan: CompactionPlan,
     tools: &[ToolDefinition],
     publisher: &TurnEvents,

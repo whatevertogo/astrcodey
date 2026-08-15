@@ -718,7 +718,7 @@ impl SessionManager {
             messages: transcript_messages
                 .into_iter()
                 .map(|entry| TranscriptMessage {
-                    message: entry.message,
+                    message: Arc::unwrap_or_clone(entry.message),
                     origin: entry.origin,
                 })
                 .collect(),
@@ -1685,14 +1685,6 @@ mod tests {
             self.inner
                 .reset_event_consumer_checkpoint(session_id, consumer_id, reset)
                 .await
-        }
-
-        async fn checkpoint(
-            &self,
-            session_id: &SessionId,
-            cursor: &Cursor,
-        ) -> Result<(), StorageError> {
-            self.inner.checkpoint(session_id, cursor).await
         }
 
         async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {

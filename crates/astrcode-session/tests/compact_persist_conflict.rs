@@ -122,7 +122,7 @@ fn projected_provider_messages(model: &SessionReadModel) -> Vec<LlmMessage> {
             .model_context
             .messages
             .iter()
-            .map(|message| message.message.clone())
+            .map(|message| (*message.message).clone())
             .collect(),
     )
 }

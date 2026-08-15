@@ -123,10 +123,6 @@ impl Session {
         Ok(self.state_source.latest_cursor(self.id()).await?)
     }
 
-    pub async fn checkpoint(&self, cursor: &Cursor) -> Result<(), SessionError> {
-        Ok(self.runtime.store().checkpoint(self.id(), cursor).await?)
-    }
-
     pub async fn write_compact_snapshot(
         &self,
         snapshot: CompactSnapshotInput,

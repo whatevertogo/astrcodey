@@ -1,7 +1,9 @@
 //! 从 durable projection 派生运行时 context。
 
+use std::sync::Arc;
+
 use astrcode_context::ContextSnapshot;
-use astrcode_core::llm::TranscriptMessage;
+use astrcode_core::llm::SharedTranscriptMessage;
 use astrcode_session_projection::SessionReadModel;
 
 pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
@@ -9,19 +11,19 @@ pub(crate) fn context_snapshot(model: &SessionReadModel) -> ContextSnapshot {
         .model_context
         .messages
         .iter()
-        .map(|entry| TranscriptMessage {
-            message: entry.message.clone(),
+        .map(|entry| SharedTranscriptMessage {
+            message: Arc::clone(&entry.message),
             origin: entry.origin,
         })
         .collect();
     let Some(usage) = &model.model_context.usage else {
-        return ContextSnapshot::from_transcript(
+        return ContextSnapshot::from_shared_transcript(
             model.stats.last_seq,
             model.system_prompt.text.clone(),
             transcript,
         );
     };
-    let snapshot = ContextSnapshot::from_transcript(
+    let snapshot = ContextSnapshot::from_shared_transcript(
         model.stats.last_seq,
         model.system_prompt.text.clone(),
         transcript,
@@ -47,17 +49,17 @@ mod tests {
     fn sample_model() -> SessionReadModel {
         let mut model = read_model(new_session_id());
         model.model_context.messages.push(SequencedLlmMessage {
-            message: LlmMessage::user("hello"),
+            message: Arc::new(LlmMessage::user("hello")),
             updated_seq: 1,
             origin: Some(TranscriptMessageOrigin::TurnAborted),
         });
         model.model_context.messages.push(SequencedLlmMessage {
-            message: LlmMessage::system("stale system in store"),
+            message: Arc::new(LlmMessage::system("stale system in store")),
             updated_seq: 2,
             origin: None,
         });
         model.model_context.messages.push(SequencedLlmMessage {
-            message: LlmMessage::assistant("ctx"),
+            message: Arc::new(LlmMessage::assistant("ctx")),
             updated_seq: 3,
             origin: None,
         });
@@ -75,9 +77,14 @@ mod tests {
                 .iter()
                 .all(|message| message.role != LlmRole::System)
         );
+        let owned_messages = snapshot
+            .messages
+            .iter()
+            .map(|message| (**message).clone())
+            .collect::<Vec<_>>();
         assert_eq!(
             snapshot
-                .retained_transcript_messages(&snapshot.messages)
+                .retained_transcript_messages(&owned_messages)
                 .unwrap()[0]
                 .origin,
             Some(TranscriptMessageOrigin::TurnAborted)

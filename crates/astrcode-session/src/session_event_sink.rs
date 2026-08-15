@@ -2,10 +2,7 @@
 
 use std::{
     collections::{HashMap, HashSet},
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::Arc,
 };
 
 use astrcode_core::{
@@ -620,7 +617,7 @@ fn publish_durable(observer: &dyn SessionEventObserver, kind: DurableCommit, sto
 mod tests {
     use std::{
         future::Future,
-        sync::atomic::{AtomicBool, AtomicU64},
+        sync::atomic::{AtomicBool, AtomicU64, Ordering},
         task::Poll,
     };
 
@@ -802,7 +799,7 @@ mod tests {
             .model_context
             .messages
             .iter()
-            .map(|message| message.message.clone())
+            .map(|message| Arc::clone(&message.message))
             .collect::<Vec<_>>();
         fail_next_durable_sync(&journal, &session_id).await.unwrap();
         let error = sink

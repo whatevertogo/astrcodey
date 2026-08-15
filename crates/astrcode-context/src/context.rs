@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use astrcode_core::llm::{
-    LlmError, LlmMessage, TranscriptMessage, TranscriptMessageOrigin, provider_transcript_messages,
-    provider_visible_messages, token_estimate::estimate_provider_message_tokens,
+    LlmError, LlmMessage, SharedTranscriptMessage, TranscriptMessage, TranscriptMessageOrigin,
+    provider_transcript_messages, provider_transcript_shared_messages,
+    provider_visible_shared_messages, token_estimate::estimate_provider_message_tokens,
 };
 
 use crate::prompt_engine::system_messages_from_prompt;
@@ -10,11 +13,14 @@ use crate::prompt_engine::system_messages_from_prompt;
 /// Compact candidate 从该 snapshot 生成；提交时 `source_seq` 用于保留之后到达的 transcript tail。
 ///
 /// `origins` 与 `messages` 等长平行存储,避免 transcript 元数据导致消息双份存放。
+///
+/// `messages` 经 `Arc` 与读模型共享,构造后不可变;请求组装只 clone `Arc` 指针,
+/// 不复制消息体。
 #[derive(Debug, Clone)]
 pub struct ContextSnapshot {
     pub source_seq: u64,
     pub system_prompt: String,
-    pub messages: Vec<LlmMessage>,
+    pub messages: Vec<Arc<LlmMessage>>,
     origins: Vec<Option<TranscriptMessageOrigin>>,
     input_token_anchor: Option<InputTokenAnchor>,
 }
@@ -42,6 +48,26 @@ impl ContextSnapshot {
     ) -> Self {
         let (messages, origins) = provider_transcript_messages(messages)
             .into_iter()
+            .map(|entry| (Arc::new(entry.message), entry.origin))
+            .unzip();
+        Self {
+            source_seq,
+            system_prompt,
+            messages,
+            origins,
+            input_token_anchor: None,
+        }
+    }
+
+    /// 从读模型的共享 transcript 构建;与 [`Self::from_transcript`] 走同一归一化,
+    /// 消息体经 `Arc` 零拷贝复用。
+    pub fn from_shared_transcript(
+        source_seq: u64,
+        system_prompt: String,
+        messages: Vec<SharedTranscriptMessage>,
+    ) -> Self {
+        let (messages, origins) = provider_transcript_shared_messages(messages)
+            .into_iter()
             .map(|entry| (entry.message, entry.origin))
             .unzip();
         Self {
@@ -59,7 +85,11 @@ impl ContextSnapshot {
         retained_messages: &[LlmMessage],
     ) -> Option<Vec<TranscriptMessage>> {
         let start = self.messages.len().checked_sub(retained_messages.len())?;
-        if self.messages[start..] != *retained_messages {
+        if self.messages[start..]
+            .iter()
+            .map(|message| message.as_ref())
+            .ne(retained_messages.iter())
+        {
             return None;
         }
         Some(
@@ -67,7 +97,7 @@ impl ContextSnapshot {
                 .iter()
                 .zip(&self.origins[start..])
                 .map(|(message, origin)| TranscriptMessage {
-                    message: message.clone(),
+                    message: (**message).clone(),
                     origin: *origin,
                 })
                 .collect(),
@@ -92,11 +122,15 @@ impl ContextSnapshot {
     }
 
     /// 将可见 transcript 与当前 system prompt 组装为完整 provider 请求。
-    pub fn request_messages(&self, messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
+    pub fn request_messages(&self, messages: Vec<Arc<LlmMessage>>) -> Vec<Arc<LlmMessage>> {
         let mut request = Vec::with_capacity(messages.len().saturating_add(4));
-        request.extend(system_messages_from_prompt(&self.system_prompt));
+        request.extend(
+            system_messages_from_prompt(&self.system_prompt)
+                .into_iter()
+                .map(Arc::new),
+        );
         request.extend(messages);
-        provider_visible_messages(request)
+        provider_visible_shared_messages(request)
     }
 
     /// 估算由本 snapshot 直接组装的请求的输入 token,不物化请求 Vec。
@@ -115,7 +149,7 @@ impl ContextSnapshot {
             estimate_provider_message_tokens(
                 system_messages_from_prompt(&self.system_prompt)
                     .iter()
-                    .chain(&self.messages),
+                    .chain(self.messages.iter().map(|message| message.as_ref())),
             )
             .saturating_add(tools_tokens)
         };
@@ -130,7 +164,9 @@ impl ContextSnapshot {
         };
         anchor
             .context_tokens
-            .saturating_add(estimate_provider_message_tokens(trailing_messages))
+            .saturating_add(estimate_provider_message_tokens(
+                trailing_messages.iter().map(|message| message.as_ref()),
+            ))
             // 与 estimate_input_tokens 相同:再次计入工具是有意的保守上界。
             .saturating_add(tools_tokens)
     }
@@ -138,34 +174,47 @@ impl ContextSnapshot {
     /// 估算最终 provider 请求输入。优先复用最近 provider usage，仅估算新增尾部。
     pub fn estimate_input_tokens(
         &self,
-        request_messages: &[LlmMessage],
+        request_messages: &[Arc<LlmMessage>],
         tools_tokens: usize,
         model_context_window: usize,
     ) -> usize {
+        let full_estimate = || {
+            estimate_provider_message_tokens(
+                request_messages.iter().map(|message| message.as_ref()),
+            )
+            .saturating_add(tools_tokens)
+        };
         let Some(anchor) = &self.input_token_anchor else {
-            return estimate_provider_message_tokens(request_messages).saturating_add(tools_tokens);
+            return full_estimate();
         };
         if anchor.model_context_window != model_context_window {
-            return estimate_provider_message_tokens(request_messages).saturating_add(tools_tokens);
+            return full_estimate();
         }
         let system_messages = system_messages_from_prompt(&self.system_prompt);
         let Some(covered_messages) = self.messages.get(..anchor.covered_message_count) else {
-            return estimate_provider_message_tokens(request_messages).saturating_add(tools_tokens);
+            return full_estimate();
         };
         let prefix_len = system_messages.len().saturating_add(covered_messages.len());
         let Some(request_prefix) = request_messages.get(..prefix_len) else {
-            return estimate_provider_message_tokens(request_messages).saturating_add(tools_tokens);
+            return full_estimate();
         };
-        if !request_prefix[..system_messages.len()].eq(system_messages.as_slice())
-            || !request_prefix[system_messages.len()..].eq(covered_messages)
+        if !request_prefix[..system_messages.len()]
+            .iter()
+            .map(|message| message.as_ref())
+            .eq(system_messages.iter())
+            || !request_prefix[system_messages.len()..]
+                .iter()
+                .eq(covered_messages.iter())
         {
-            return estimate_provider_message_tokens(request_messages).saturating_add(tools_tokens);
+            return full_estimate();
         }
         let trailing_messages = &request_messages[prefix_len..];
 
         anchor
             .context_tokens
-            .saturating_add(estimate_provider_message_tokens(trailing_messages))
+            .saturating_add(estimate_provider_message_tokens(
+                trailing_messages.iter().map(|message| message.as_ref()),
+            ))
             // Provider usage 已包含上一请求的工具；再次计入当前工具是有意的保守上界，
             // 同时覆盖 turn 中 deferred tool 激活或工具目录热更新。
             .saturating_add(tools_tokens)
@@ -292,14 +341,18 @@ mod tests {
 
     #[test]
     fn input_estimate_reuses_only_matching_provider_usage_prefix() {
+        let shared = |messages: Vec<LlmMessage>| messages.into_iter().map(Arc::new).collect();
+        let owned = |messages: &[Arc<LlmMessage>]| {
+            messages.iter().map(|m| (**m).clone()).collect::<Vec<_>>()
+        };
         let covered_messages = vec![LlmMessage::user("first"), LlmMessage::assistant("response")];
         let snapshot = ContextSnapshot::new(2, "system".into(), covered_messages)
             .with_input_token_anchor(655_859, 1_000_000, 2);
-        let request_messages = snapshot.request_messages(vec![
+        let request_messages = snapshot.request_messages(shared(vec![
             LlmMessage::user("first"),
             LlmMessage::assistant("response"),
             LlmMessage::user("tail"),
-        ]);
+        ]));
         let tools = vec![ToolDefinition {
             name: "read".into(),
             description: "Read a file".into(),
@@ -311,7 +364,7 @@ mod tests {
         let tools_tokens = estimate_tool_definition_tokens(&tools);
 
         let anchored = snapshot.estimate_input_tokens(&request_messages, tools_tokens, 1_000_000);
-        let local = estimate_provider_request_tokens(&request_messages, &tools);
+        let local = estimate_provider_request_tokens(&owned(&request_messages), &tools);
         assert!(anchored > 655_859);
         assert!(anchored > local);
         assert_eq!(
@@ -319,10 +372,10 @@ mod tests {
             local
         );
 
-        let changed_prefix = snapshot.request_messages(vec![LlmMessage::user("changed")]);
+        let changed_prefix = snapshot.request_messages(shared(vec![LlmMessage::user("changed")]));
         assert_eq!(
             snapshot.estimate_input_tokens(&changed_prefix, tools_tokens, 1_000_000),
-            estimate_provider_request_tokens(&changed_prefix, &tools)
+            estimate_provider_request_tokens(&owned(&changed_prefix), &tools)
         );
     }
 }

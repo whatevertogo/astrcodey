@@ -17,7 +17,7 @@ use super::{
     owner_lease::SessionOwnerLease,
     validate_storage_session_id,
 };
-use crate::{SessionEventJournal, StorageError, event_log::EventLog, snapshot::SnapshotManager};
+use crate::{SessionEventJournal, StorageError, event_log::EventLog};
 
 #[async_trait::async_trait]
 impl SessionEventJournal for FileSystemSessionRepository {
@@ -53,8 +53,7 @@ impl SessionEventJournal for FileSystemSessionRepository {
         let projection = replay(session_id.clone(), std::slice::from_ref(&stored_event))
             .map_err(invalid_event)?;
 
-        let snapshot_mgr = SnapshotManager::new(dir.join("snapshots"));
-        let meta = SessionMeta::new(dir, owner_lease, log, snapshot_mgr, projection).await?;
+        let meta = SessionMeta::new(dir, owner_lease, log, projection).await?;
         self.sessions
             .write()
             .await

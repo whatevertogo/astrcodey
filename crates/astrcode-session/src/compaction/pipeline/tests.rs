@@ -41,7 +41,6 @@ enum Scenario {
     Success,
     Blocked,
     SyncFailed,
-    CheckpointFailed,
 }
 
 #[derive(Default)]
@@ -49,16 +48,11 @@ struct RecordingStore {
     inner: InMemoryEventStore,
     calls: Arc<Mutex<Vec<&'static str>>>,
     fail_sync: AtomicBool,
-    fail_checkpoint: AtomicBool,
 }
 
 impl RecordingStore {
     fn fail_next_sync(&self) {
         self.fail_sync.store(true, Ordering::SeqCst);
-    }
-
-    fn fail_next_checkpoint(&self) {
-        self.fail_checkpoint.store(true, Ordering::SeqCst);
     }
 }
 
@@ -230,20 +224,6 @@ impl SessionStore for RecordingStore {
             .await
     }
 
-    async fn checkpoint(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<(), StorageError> {
-        self.calls.lock().push("checkpoint");
-        if self.fail_checkpoint.swap(false, Ordering::SeqCst) {
-            return Err(StorageError::InvalidEvent(
-                "injected checkpoint failure".into(),
-            ));
-        }
-        self.inner.checkpoint(session_id, cursor).await
-    }
-
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
         self.inner.delete_session(session_id).await
     }
@@ -319,12 +299,7 @@ fn record_compaction_event(
 
 #[tokio::test]
 async fn pipeline_orders_durability_hooks_and_exactly_one_terminal_for_each_outcome() {
-    for scenario in [
-        Scenario::Success,
-        Scenario::Blocked,
-        Scenario::SyncFailed,
-        Scenario::CheckpointFailed,
-    ] {
+    for scenario in [Scenario::Success, Scenario::Blocked, Scenario::SyncFailed] {
         let calls = Arc::new(Mutex::new(Vec::new()));
         let store = Arc::new(RecordingStore {
             calls: Arc::clone(&calls),
@@ -387,7 +362,6 @@ async fn pipeline_orders_durability_hooks_and_exactly_one_terminal_for_each_outc
         while event_rx.try_recv().is_ok() {}
         match scenario {
             Scenario::SyncFailed => store.fail_next_sync(),
-            Scenario::CheckpointFailed => store.fail_next_checkpoint(),
             Scenario::Success | Scenario::Blocked => {},
         }
 
@@ -420,22 +394,15 @@ async fn pipeline_orders_durability_hooks_and_exactly_one_terminal_for_each_outc
         .await;
 
         let (expected_calls, expected_terminal) = match scenario {
-            Scenario::Success => (
-                vec!["pre", "append", "sync", "checkpoint", "post"],
-                "completed",
-            ),
+            Scenario::Success => (vec!["pre", "append", "sync", "post"], "completed"),
             Scenario::Blocked => (vec!["pre"], "skipped"),
             Scenario::SyncFailed => (vec!["pre", "append", "sync"], "failed"),
-            Scenario::CheckpointFailed => (
-                vec!["pre", "append", "sync", "checkpoint", "post"],
-                "completed",
-            ),
         };
         assert_eq!(*calls.lock(), expected_calls);
         assert!(matches!(
             (scenario, &outcome),
             (
-                Scenario::Success | Scenario::CheckpointFailed,
+                Scenario::Success,
                 CompactionPipelineOutcome::Compacted { .. }
             ) | (Scenario::Blocked, CompactionPipelineOutcome::Skipped { .. })
                 | (
@@ -443,7 +410,7 @@ async fn pipeline_orders_durability_hooks_and_exactly_one_terminal_for_each_outc
                     CompactionPipelineOutcome::Failed { .. }
                 )
         ));
-        if matches!(scenario, Scenario::Success | Scenario::CheckpointFailed) {
+        if matches!(scenario, Scenario::Success) {
             let model = session.read_model().await.unwrap();
             let retained_context = model
                 .model_context

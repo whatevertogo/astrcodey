@@ -430,6 +430,8 @@ fn visible_ui_text(message: &LlmMessage) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use astrcode_core::llm::{
         LlmContent, LlmMessage, LlmRole, TranscriptMessageOrigin, turn_aborted_context_message,
     };
@@ -441,12 +443,12 @@ mod tests {
     fn transcript_blocks_interprets_message_origins() {
         let messages = vec![
             SequencedLlmMessage {
-                message: LlmMessage::user("visible"),
+                message: Arc::new(LlmMessage::user("visible")),
                 updated_seq: 1,
                 origin: None,
             },
             SequencedLlmMessage {
-                message: turn_aborted_context_message(),
+                message: Arc::new(turn_aborted_context_message()),
                 updated_seq: 2,
                 origin: Some(TranscriptMessageOrigin::TurnAborted),
             },
@@ -482,7 +484,7 @@ mod tests {
             ),
         ];
         let mut messages = vec![SequencedLlmMessage {
-            message: LlmMessage {
+            message: Arc::new(LlmMessage {
                 role: LlmRole::Assistant,
                 content: cases
                     .iter()
@@ -495,7 +497,7 @@ mod tests {
                     .collect(),
                 name: None,
                 reasoning_content: None,
-            },
+            }),
             updated_seq: 1,
             origin: None,
         }];
@@ -505,7 +507,7 @@ mod tests {
                 .enumerate()
                 .map(
                     |(index, (call_id, origin, is_error, _))| SequencedLlmMessage {
-                        message: LlmMessage::tool("probe", *call_id, *call_id, *is_error),
+                        message: Arc::new(LlmMessage::tool("probe", *call_id, *call_id, *is_error)),
                         updated_seq: index as u64 + 2,
                         origin: *origin,
                     },
@@ -535,12 +537,12 @@ mod tests {
     fn transcript_blocks_only_exposes_precise_fork_points() {
         let messages = [
             SequencedLlmMessage {
-                message: LlmMessage::assistant("compacted reply"),
+                message: Arc::new(LlmMessage::assistant("compacted reply")),
                 updated_seq: 5,
                 origin: None,
             },
             SequencedLlmMessage {
-                message: LlmMessage::assistant("tail reply"),
+                message: Arc::new(LlmMessage::assistant("tail reply")),
                 updated_seq: 8,
                 origin: None,
             },

@@ -14,7 +14,7 @@ use astrcode_core::{
     types::{SessionId, new_message_id},
 };
 use astrcode_storage::{
-    SessionEventJournal, SessionReader, SessionStore, testing::filesystem_session_repository,
+    SessionEventJournal, SessionReader, testing::filesystem_session_repository,
 };
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
@@ -131,27 +131,9 @@ fn bench_cold_open(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(8));
 
     for event_count in [1_000u64, 10_000] {
-        let (dir, session_id, last_seq) = prepare_session(event_count);
+        let (dir, session_id, _last_seq) = prepare_session(event_count);
         let base = dir.path().to_path_buf();
-        group.bench_function(format!("{event_count}/without_snapshot"), |b| {
-            b.to_async(&runtime).iter_batched(
-                || filesystem_session_repository(base.clone()),
-                |repo| {
-                    let session_id = session_id.clone();
-                    async move {
-                        repo.session_read_model(&session_id).await.unwrap();
-                    }
-                },
-                BatchSize::SmallInput,
-            );
-        });
-
-        let repo = filesystem_session_repository(base.clone());
-        runtime
-            .block_on(repo.checkpoint(&session_id, &last_seq.to_string().into()))
-            .unwrap();
-        drop(repo);
-        group.bench_function(format!("{event_count}/with_snapshot"), |b| {
+        group.bench_function(format!("{event_count}"), |b| {
             b.to_async(&runtime).iter_batched(
                 || filesystem_session_repository(base.clone()),
                 |repo| {

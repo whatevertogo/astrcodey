@@ -2490,14 +2490,6 @@ impl SessionStore for TestEventStore {
             .reset_event_consumer_checkpoint(session_id, consumer_id, reset)
             .await
     }
-
-    async fn checkpoint(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<(), StorageError> {
-        self.inner.checkpoint(session_id, cursor).await
-    }
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
         self.inner.delete_session(session_id).await
     }

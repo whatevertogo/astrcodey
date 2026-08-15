@@ -1,6 +1,6 @@
 //! Turn pipeline stage state shared by the turn runner.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
     llm::{LlmContent, LlmMessage, LlmRole, provider_visible_messages},
@@ -116,8 +116,14 @@ impl TurnTranscript {
 
     pub(crate) fn provider_response_messages(
         &self,
-        mut request_messages: Vec<LlmMessage>,
+        request_messages: Vec<Arc<LlmMessage>>,
     ) -> Vec<LlmMessage> {
+        // AfterResponse hook 边界(`ProviderContext`)按值持有 `Vec<LlmMessage>`,
+        // 此处一次性 deref clone;消除它是 extension-sdk 的 API 演进,不在 PR-1 范围。
+        let mut request_messages: Vec<LlmMessage> = request_messages
+            .iter()
+            .map(|message| (**message).clone())
+            .collect();
         if let Some(message) = &self.latest_provider_response {
             request_messages.push(message.clone());
         }
@@ -251,7 +257,7 @@ impl TurnState {
 
     pub(crate) fn provider_response_messages(
         &self,
-        request_messages: Vec<LlmMessage>,
+        request_messages: Vec<Arc<LlmMessage>>,
     ) -> Vec<LlmMessage> {
         self.transcript.provider_response_messages(request_messages)
     }
@@ -305,9 +311,9 @@ impl TurnState {
 }
 
 pub(crate) struct PreparedProviderRequest {
-    pub(crate) llm: std::sync::Arc<dyn astrcode_core::llm::LlmProvider>,
+    pub(crate) llm: Arc<dyn astrcode_core::llm::LlmProvider>,
     pub(crate) request_id: astrcode_extension_sdk::extension::ProviderRequestId,
-    pub(crate) messages: Vec<astrcode_core::llm::LlmMessage>,
+    pub(crate) messages: Vec<Arc<astrcode_core::llm::LlmMessage>>,
     pub(crate) max_output_tokens: usize,
     pub(crate) acknowledgements:
         astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,

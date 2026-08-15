@@ -26,7 +26,7 @@ pub struct ForkSourceRef {
 ///
 /// 这是 storage/domain 边界类型，不是 wire DTO。它只能由事件日志重建，并由上层映射
 /// 到具体传输协议。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SessionReadModel {
     pub identity: SessionIdentity,
     pub stats: SessionEventStats,

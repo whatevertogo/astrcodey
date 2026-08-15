@@ -111,7 +111,7 @@ pub(super) async fn provider_messages(
             .model_context
             .messages
             .iter()
-            .map(|message| message.message.clone())
+            .map(|message| (*message.message).clone())
             .collect(),
     );
     Ok(SessionInspectProviderMessagesOutput {
@@ -218,7 +218,7 @@ pub(super) fn read_model_dto(model: SessionReadModel) -> SessionInspectReadModel
 
 fn sequenced_message_dto(message: SequencedLlmMessage) -> SessionInspectSequencedMessage {
     SessionInspectSequencedMessage {
-        message: message_dto(message.message),
+        message: message_dto(Arc::unwrap_or_clone(message.message)),
         updated_seq: message.updated_seq,
         origin: message.origin.map(message_origin_dto),
     }
@@ -334,7 +334,7 @@ mod tests {
         .unwrap();
         model.execution.phase = Phase::CallingTool;
         model.model_context.messages.push(SequencedLlmMessage {
-            message: LlmMessage::tool("probe", "call-1", "failed", true),
+            message: Arc::new(LlmMessage::tool("probe", "call-1", "failed", true)),
             updated_seq: 2,
             origin: Some(TranscriptMessageOrigin::ToolCallFailed),
         });

@@ -36,7 +36,7 @@ pub(crate) struct CompactionPipeline<'a> {
     pub context_assembler: Arc<dyn ContextAssembler>,
     pub extension_runner: &'a dyn TurnHooks,
     pub hook_call: RuntimeHookCallContext,
-    pub pre_hook_messages: Vec<LlmMessage>,
+    pub pre_hook_messages: Vec<Arc<LlmMessage>>,
     pub tools: &'a [ToolDefinition],
     pub strategy: CompactStrategy,
     pub use_llm: bool,
@@ -103,7 +103,11 @@ impl CompactionPipeline<'_> {
             self.extension_runner,
             self.hook_call.clone(),
             trigger,
-            self.pre_hook_messages.clone(),
+            // PreCompact hook 边界按值持有 `Vec<LlmMessage>`,此处一次性 deref clone。
+            self.pre_hook_messages
+                .iter()
+                .map(|message| (**message).clone())
+                .collect(),
             self.context_assembler.settings().post_compact_max_files,
         )
         .await
@@ -142,7 +146,11 @@ impl CompactionPipeline<'_> {
                     model_id: source_model.identity.model_id.clone(),
                     working_dir: source_model.identity.working_dir.clone(),
                     system_prompt: Some(source_snapshot.system_prompt.clone()),
-                    provider_messages: source_snapshot.messages.clone(),
+                    provider_messages: source_snapshot
+                        .messages
+                        .iter()
+                        .map(|message| (**message).clone())
+                        .collect(),
                 })
                 .await
             {
@@ -168,10 +176,16 @@ impl CompactionPipeline<'_> {
             transcript_path,
             custom_instructions: contributions.instructions.clone(),
         };
+        // compact 的摘要输入、durable rewrite 均为按值契约,compaction 路径一次性 deref clone。
+        let source_messages: Vec<LlmMessage> = source_snapshot
+            .messages
+            .iter()
+            .map(|message| (**message).clone())
+            .collect();
         let execution = if self.use_llm {
             let max_output_tokens = context_assembler.settings().compact_max_output_tokens;
             compact_messages_with_fallback(
-                &source_snapshot.messages,
+                &source_messages,
                 Some(&source_snapshot.system_prompt),
                 context_assembler.settings(),
                 &contributions.instructions,
@@ -184,7 +198,7 @@ impl CompactionPipeline<'_> {
             .await
         } else {
             compact_messages_deterministic(
-                &source_snapshot.messages,
+                &source_messages,
                 Some(&source_snapshot.system_prompt),
                 &render_options,
                 keep_recent_turns,
@@ -251,7 +265,7 @@ impl CompactionPipeline<'_> {
 pub(crate) async fn try_provider_input_tokens(
     session: &Session,
     llm: &Arc<dyn LlmProvider>,
-    messages: Vec<LlmMessage>,
+    messages: Vec<Arc<LlmMessage>>,
     tools: &[ToolDefinition],
     stage: &'static str,
 ) -> Option<usize> {
@@ -260,6 +274,8 @@ pub(crate) async fn try_provider_input_tokens(
         stage,
         "provider count_tokens call"
     );
+    // `LlmProvider::count_input_tokens` 按值持有消息,compaction 路径一次性 deref clone。
+    let messages: Vec<LlmMessage> = messages.iter().map(|message| (**message).clone()).collect();
     match llm.count_input_tokens(messages, tools.to_vec()).await {
         Ok(count) => match usize::try_from(count.input_tokens) {
             Ok(tokens) => Some(tokens),
@@ -301,7 +317,7 @@ async fn update_compaction_token_counts(
         .summary_messages
         .iter()
         .chain(&compaction.retained_messages)
-        .cloned()
+        .map(|message| Arc::new(message.clone()))
         .collect();
     if let Some(tokens) = try_provider_input_tokens(
         session,

@@ -30,6 +30,8 @@ pub(crate) fn has_pending_mid_turn_user_messages(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use astrcode_core::{llm::LlmMessage, types::SessionId};
     use astrcode_session_projection::SequencedLlmMessage;
 
@@ -42,7 +44,7 @@ mod tests {
             .into_iter()
             .enumerate()
             .map(|(updated_seq, message)| SequencedLlmMessage {
-                message,
+                message: Arc::new(message),
                 updated_seq: updated_seq as u64,
                 origin: None,
             })

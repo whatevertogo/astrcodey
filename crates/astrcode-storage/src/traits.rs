@@ -423,9 +423,6 @@ pub trait SessionStore:
         reset: EventConsumerCheckpointReset,
     ) -> Result<EventConsumerState, StorageError>;
 
-    async fn checkpoint(&self, session_id: &SessionId, cursor: &Cursor)
-    -> Result<(), StorageError>;
-
     async fn open_session(&self, _session_id: &SessionId) -> Result<(), StorageError> {
         Ok(())
     }

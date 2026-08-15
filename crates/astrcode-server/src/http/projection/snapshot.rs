@@ -149,7 +149,7 @@ mod tests {
             .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
-                message: LlmMessage {
+                message: std::sync::Arc::new(LlmMessage {
                     role: LlmRole::Assistant,
                     content: vec![LlmContent::ToolCall {
                         call_id: call_id.into(),
@@ -159,7 +159,7 @@ mod tests {
                     }],
                     name: None,
                     reasoning_content: None,
-                },
+                }),
                 updated_seq: 1,
                 origin: None,
             });
@@ -174,7 +174,7 @@ mod tests {
             .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
-                message: LlmMessage::assistant("hello"),
+                message: std::sync::Arc::new(LlmMessage::assistant("hello")),
                 updated_seq: 4,
                 origin: None,
             });
@@ -204,7 +204,12 @@ mod tests {
             .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
-                message: LlmMessage::tool("read", "tool-1", "file contents", false),
+                message: std::sync::Arc::new(LlmMessage::tool(
+                    "read",
+                    "tool-1",
+                    "file contents",
+                    false,
+                )),
                 updated_seq: 2,
                 origin: None,
             });
@@ -274,7 +279,7 @@ mod tests {
             .model_context
             .messages
             .push(astrcode_session_projection::SequencedLlmMessage {
-                message: LlmMessage::user("latest user"),
+                message: std::sync::Arc::new(LlmMessage::user("latest user")),
                 updated_seq: 1,
                 origin: None,
             });

@@ -32,13 +32,13 @@ pub fn stable_hash_hex(parts: &[&str]) -> String {
 /// 当前 `LlmContent` 只含 `String`/`bool`/`serde_json::Value`，序列化实际不会失败；
 /// 但该不变量未被类型系统编码——未来新增字段（如裸 `f64`）可能引入 JSON 无法编码
 /// 的值。因此返回 `Result`，把潜在失败交由调用方显式处理，而非在持久化路径上 panic。
-pub fn transcript_prefix_fingerprint(
+pub fn transcript_prefix_fingerprint<M: std::borrow::Borrow<LlmMessage>>(
     system_prompt: &str,
-    messages: &[LlmMessage],
+    messages: &[M],
 ) -> Result<String, serde_json::Error> {
     let serialized_messages: Vec<String> = messages
         .iter()
-        .map(serde_json::to_string)
+        .map(|message| serde_json::to_string(message.borrow()))
         .collect::<Result<_, _>>()?;
     let mut parts: Vec<&str> = Vec::with_capacity(serialized_messages.len() + 1);
     parts.push(system_prompt);

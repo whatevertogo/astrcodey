@@ -166,6 +166,17 @@ impl TranscriptMessage {
     }
 }
 
+/// 运行时共享的 transcript 消息：与 [`TranscriptMessage`] 同构，但消息体经 `Arc`
+/// 跨读模型与请求组装共享。
+///
+/// 共享消息构造后即不可变；任何改写必须先 `Arc::make_mut` copy-on-write，
+/// 否则改动会跨快照泄漏。持久化/wire 格式不使用本类型。
+#[derive(Debug, Clone)]
+pub struct SharedTranscriptMessage {
+    pub message: Arc<LlmMessage>,
+    pub origin: Option<TranscriptMessageOrigin>,
+}
+
 impl LlmMessage {
     /// 创建一条用户文本消息。
     pub fn user(text: impl Into<String>) -> Self {
@@ -337,20 +348,13 @@ pub fn turn_aborted_context_message() -> LlmMessage {
 /// tool result。这里是所有 provider request 的最后一道边界，负责过滤空消息、
 /// 合并旧日志中的拆分 assistant/tool-call 消息，并裁掉尚未结算的半轮工具调用。
 pub fn provider_visible_messages(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
-    provider_visible_transcript(messages.into_iter().map(TranscriptMessage::plain).collect())
-        .into_iter()
-        .map(|entry| entry.message)
-        .collect()
+    provider_visible_entries(messages)
 }
 
-fn provider_visible_transcript(messages: Vec<TranscriptMessage>) -> Vec<TranscriptMessage> {
-    let mut messages = messages
-        .into_iter()
-        .filter(|entry| entry.message.has_provider_visible_content())
-        .collect::<Vec<_>>();
-    normalize_tool_call_messages(&mut messages);
-    truncate_incomplete_tool_protocol(&mut messages);
-    messages
+/// [`provider_visible_messages`] 的共享版本：未受归一化影响的消息零拷贝复用，
+/// 仅被合并的 assistant 消息经 `Arc::make_mut` copy-on-write，不写穿共享快照。
+pub fn provider_visible_shared_messages(messages: Vec<Arc<LlmMessage>>) -> Vec<Arc<LlmMessage>> {
+    provider_visible_entries(messages)
 }
 
 /// 返回指纹与 compact 共用的 provider transcript：provider 可见消息中剔除 System 角色。
@@ -366,29 +370,110 @@ pub fn provider_transcript(messages: Vec<LlmMessage>) -> Vec<LlmMessage> {
 
 /// 归一化 durable transcript，同时保持每条保留消息的来源元数据。
 pub fn provider_transcript_messages(messages: Vec<TranscriptMessage>) -> Vec<TranscriptMessage> {
-    let mut messages = provider_visible_transcript(messages);
+    let mut messages = provider_visible_entries(messages);
     messages.retain(|entry| entry.message.role != LlmRole::System);
     messages
 }
 
-fn normalize_tool_call_messages(messages: &mut Vec<TranscriptMessage>) {
-    let mut merged: Vec<TranscriptMessage> = Vec::with_capacity(messages.len());
+/// [`provider_transcript_messages`] 的共享版本，语义与 owned 路径一致。
+pub fn provider_transcript_shared_messages(
+    messages: Vec<SharedTranscriptMessage>,
+) -> Vec<SharedTranscriptMessage> {
+    let mut messages = provider_visible_entries(messages);
+    messages.retain(|entry| entry.message.role != LlmRole::System);
+    messages
+}
+
+/// `provider_visible_*` 归一化的条目抽象，让 owned 与 `Arc` 共享条目共用同一套
+/// 过滤/合并/截断逻辑，保证两条路径输出一致。
+trait ProviderVisibleEntry {
+    fn message(&self) -> &LlmMessage;
+    /// 将 `other`(assistant + tool calls)并入 self;`other` 随即被丢弃。
+    fn absorb_assistant(&mut self, other: Self);
+}
+
+impl ProviderVisibleEntry for LlmMessage {
+    fn message(&self) -> &LlmMessage {
+        self
+    }
+
+    fn absorb_assistant(&mut self, mut other: Self) {
+        self.content.append(&mut other.content);
+        if self.reasoning_content.is_none() {
+            self.reasoning_content = other.reasoning_content;
+        }
+    }
+}
+
+impl ProviderVisibleEntry for TranscriptMessage {
+    fn message(&self) -> &LlmMessage {
+        &self.message
+    }
+
+    fn absorb_assistant(&mut self, mut other: Self) {
+        self.message.content.append(&mut other.message.content);
+        if self.message.reasoning_content.is_none() {
+            self.message.reasoning_content = other.message.reasoning_content;
+        }
+        self.origin = self.origin.or(other.origin);
+    }
+}
+
+impl ProviderVisibleEntry for Arc<LlmMessage> {
+    fn message(&self) -> &LlmMessage {
+        self
+    }
+
+    fn absorb_assistant(&mut self, other: Self) {
+        Arc::make_mut(self).append(other.message());
+    }
+}
+
+impl ProviderVisibleEntry for SharedTranscriptMessage {
+    fn message(&self) -> &LlmMessage {
+        &self.message
+    }
+
+    fn absorb_assistant(&mut self, other: Self) {
+        Arc::make_mut(&mut self.message).append(&other.message);
+        self.origin = self.origin.or(other.origin);
+    }
+}
+
+impl LlmMessage {
+    /// 并入一条 assistant + tool calls 消息（`provider_visible_*` 的合并分支）。
+    fn append(&mut self, other: &Self) {
+        self.content.extend(other.content.iter().cloned());
+        if self.reasoning_content.is_none() {
+            self.reasoning_content = other.reasoning_content.clone();
+        }
+    }
+}
+
+fn provider_visible_entries<E: ProviderVisibleEntry>(messages: Vec<E>) -> Vec<E> {
+    let mut messages: Vec<E> = messages
+        .into_iter()
+        .filter(|entry| entry.message().has_provider_visible_content())
+        .collect();
+    normalize_tool_call_entries(&mut messages);
+    truncate_incomplete_tool_entries(&mut messages);
+    messages
+}
+
+fn normalize_tool_call_entries<E: ProviderVisibleEntry>(messages: &mut Vec<E>) {
+    let mut merged: Vec<E> = Vec::with_capacity(messages.len());
     for entry in messages.drain(..) {
-        let has_tool_calls = entry.message.role == LlmRole::Assistant
+        let has_tool_calls = entry.message().role == LlmRole::Assistant
             && entry
-                .message
+                .message()
                 .content
                 .iter()
                 .any(|c| matches!(c, LlmContent::ToolCall { .. }));
         if has_tool_calls
             && let Some(last) = merged.last_mut()
-            && last.message.role == LlmRole::Assistant
+            && last.message().role == LlmRole::Assistant
         {
-            last.message.content.extend(entry.message.content);
-            if last.message.reasoning_content.is_none() {
-                last.message.reasoning_content = entry.message.reasoning_content;
-            }
-            last.origin = last.origin.or(entry.origin);
+            last.absorb_assistant(entry);
             continue;
         }
         merged.push(entry);
@@ -396,13 +481,13 @@ fn normalize_tool_call_messages(messages: &mut Vec<TranscriptMessage>) {
     *messages = merged;
 }
 
-fn truncate_incomplete_tool_protocol(messages: &mut Vec<TranscriptMessage>) {
+fn truncate_incomplete_tool_entries<E: ProviderVisibleEntry>(messages: &mut Vec<E>) {
     use std::collections::HashSet;
 
     let mut pending: Option<(usize, HashSet<String>, HashSet<String>)> = None;
 
     for index in 0..messages.len() {
-        let message = &messages[index].message;
+        let message = messages[index].message();
         if message.role == LlmRole::Tool {
             let tool_result_ids: Vec<String> = message
                 .content
@@ -1105,6 +1190,42 @@ mod tests {
         let visible = provider_visible_messages(messages);
         assert_eq!(visible.len(), 1);
         assert!(matches!(visible[0].role, LlmRole::User));
+    }
+
+    #[test]
+    fn provider_visible_shared_matches_owned_and_never_writes_through() {
+        let assistant_text = LlmMessage::assistant("text");
+        let assistant_tool_call = LlmMessage {
+            role: LlmRole::Assistant,
+            content: vec![LlmContent::ToolCall {
+                call_id: "call-1".into(),
+                name: "shell".into(),
+                arguments: serde_json::json!({"command": "sleep"}),
+                raw_arguments: None,
+            }],
+            name: None,
+            reasoning_content: None,
+        };
+        let tool_result = LlmMessage::tool("shell", "call-1", "ok", false);
+        let messages = vec![
+            LlmMessage::user("start"),
+            assistant_text.clone(),
+            assistant_tool_call.clone(),
+            tool_result.clone(),
+        ];
+        let shared: Vec<Arc<LlmMessage>> = messages.iter().cloned().map(Arc::new).collect();
+
+        let visible = provider_visible_shared_messages(shared.clone());
+
+        // 与 owned 路径输出一致(assistant 文本并入带 tool call 的前一条)。
+        assert_eq!(
+            visible.iter().map(|m| (**m).clone()).collect::<Vec<_>>(),
+            provider_visible_messages(messages)
+        );
+        // 合并走 copy-on-write:共享输入的消息体不被写穿。
+        assert_eq!(*shared[1], assistant_text);
+        assert_eq!(*shared[2], assistant_tool_call);
+        assert!(Arc::ptr_eq(&shared[3], &visible[2]));
     }
 
     #[test]

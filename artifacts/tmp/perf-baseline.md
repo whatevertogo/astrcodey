@@ -47,3 +47,16 @@
 
 注:Phase 1 的 1.1–1.4 均不改存储层热路径,存储基准持平是预期;turn 链路(count_tokens 调用消除、clone 收敛、live 直发、工具估算 memo)的收
 益需要用 `astrcode::perf` 计时点在真实负载下对照,微基准覆盖不到。
+
+## 后续测量:snapshot 恢复是负优化(2026-08-16)
+
+单遍冷打开(open 返回已验证事件直接供恢复)落地后,snapshot 不再节省文件扫描,只剩「省 reduce、付模型 JSON 反序列化」的交换,实测在所有规模都是净亏:
+
+| 冷打开 | replay | snapshot(改 compact JSON 前) | snapshot(改后) |
+|---|---|---|---|
+| 1000 事件 | 869 µs | 1.09 ms(1.25×) | 1.03 ms(1.24×) |
+| 10000 事件 | 7.28–7.56 ms | 9.44 ms(1.25×) | 8.90 ms(1.22×) |
+
+已做:`snapshot.rs` 的 `to_vec_pretty` → `to_vec`(快照是机器读的恢复加速器,pretty 空白纯膨胀,收益 ~5%)。
+
+**建议(需设计决策,未执行)**:移除 snapshot 恢复与 `SessionStore::checkpoint` 机制。涉及 `SessionStore` trait、`session_manager.rs:1695`、`compaction/persistence.rs:38`、`session.rs:127`、in_memory 实现与架构文档(「快照是恢复加速器」的论述需要改写为测量结论)。删除前如需保留紧凑恢复能力,方向是把快照内容缩减为「身份 + 消息 + 最小状态」的紧格式,但应先 profile 确认模型反序列化的主要构成。

@@ -500,14 +500,6 @@ impl SessionStore for BlockingChildCreateStore {
             .await
     }
 
-    async fn checkpoint(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<(), StorageError> {
-        self.inner.checkpoint(session_id, cursor).await
-    }
-
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
         if self.block_next_delete.swap(false, Ordering::AcqRel) {
             self.delete_started.add_permits(1);

@@ -3,7 +3,7 @@ name = "astrcode-storage"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Session persistence: JSONL event log, snapshots, config storage"
+description = "Session persistence: JSONL event log and config storage"
 
 [features]
 # 启用纯内存事件存储实现，用于集成测试和测试辅助启动路径。

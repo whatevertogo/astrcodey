@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use astrcode_core::types::{Cursor, SessionId};
+use astrcode_core::types::SessionId;
 use chrono::Utc;
 use uuid::Uuid;
 
@@ -166,27 +166,6 @@ impl SessionStore for FileSystemSessionRepository {
             Ok(ConsumerStateEdit::Changed(state.clone()))
         })
         .await
-    }
-
-    async fn checkpoint(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<(), StorageError> {
-        let meta = self.get_or_open_meta(session_id).await?;
-        let _permit = meta.acquire_confirmed_commit_lane(session_id).await?;
-        let model = meta.projection.snapshot().await;
-        let latest_cursor = model.cursor();
-        // Checkpoints are only written when the cursor matches the current
-        // recovered projection state. This prevents stale or out-of-order
-        // checkpoint snapshots from being persisted.
-        if cursor != &latest_cursor {
-            return Err(StorageError::InvalidId(format!(
-                "checkpoint cursor {cursor} does not match latest cursor {latest_cursor}"
-            )));
-        }
-        meta.snapshot_mgr.create_snapshot((*model).clone()).await?;
-        Ok(())
     }
 
     async fn open_session(&self, session_id: &SessionId) -> Result<(), StorageError> {

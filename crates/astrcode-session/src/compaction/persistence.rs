@@ -6,7 +6,7 @@ use astrcode_storage::StorageError;
 
 use crate::{payload::transcript_rewritten_payload, session::Session, session_error::SessionError};
 
-/// 追加 rewrite，确认 EventLog 已 fsync，再以 best-effort 方式创建恢复快照。
+/// 追加 rewrite 并确认 EventLog 已 fsync。
 pub(crate) async fn persist_compaction(
     session: &Session,
     compaction: &CompactResult,
@@ -22,7 +22,7 @@ pub(crate) async fn persist_compaction(
         })?;
     let fingerprint = transcript_prefix_fingerprint(&snapshot.system_prompt, &snapshot.messages)
         .map_err(|error| SessionError::Storage(StorageError::Serialization(error)))?;
-    let event = session
+    session
         .emit_durable_and_sync(
             None,
             transcript_rewritten_payload(
@@ -34,15 +34,6 @@ pub(crate) async fn persist_compaction(
             ),
         )
         .await?;
-
-    if let Err(error) = session.checkpoint(&event.seq.to_string()).await {
-        tracing::warn!(
-            session_id = %session.id(),
-            seq = event.seq,
-            error = %error,
-            "transcript rewrite is durable but checkpoint was skipped"
-        );
-    }
 
     Ok(())
 }

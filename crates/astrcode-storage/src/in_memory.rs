@@ -459,24 +459,6 @@ impl SessionStore for InMemoryEventStore {
         Ok(state.clone())
     }
 
-    async fn checkpoint(
-        &self,
-        session_id: &SessionId,
-        cursor: &Cursor,
-    ) -> Result<(), StorageError> {
-        let map = self.sessions.lock().await;
-        let session = map
-            .get(session_id)
-            .ok_or_else(|| StorageError::NotFound(session_id.clone()))?;
-        let latest_cursor = session.projection.cursor();
-        if cursor != &latest_cursor {
-            return Err(StorageError::InvalidId(format!(
-                "checkpoint cursor {cursor} does not match latest cursor {latest_cursor}"
-            )));
-        }
-        Ok(())
-    }
-
     async fn delete_session(&self, session_id: &SessionId) -> Result<(), StorageError> {
         self.sessions.lock().await.remove(session_id);
         Ok(())

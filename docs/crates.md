@@ -29,7 +29,7 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 | `astrcode-core` | `crates/astrcode-core` | lib | 稳定领域契约：事件、工具、配置、LLM 与基础 session 类型 |
 | `astrcode-protocol` | `crates/astrcode-protocol` | lib | JSON-RPC、HTTP DTO、事件通知、协议版本等 wire 类型 |
 | `astrcode-ai` | `crates/astrcode-ai` | lib | OpenAI/Anthropic provider、流式解码、重试 |
-| `astrcode-storage` | `crates/astrcode-storage` | lib | JSONL EventLog、快照、session 仓库、配置与 artifact 存储 |
+| `astrcode-storage` | `crates/astrcode-storage` | lib | JSONL EventLog、session 仓库、配置与 artifact 存储 |
 | `astrcode-session-projection` | `crates/astrcode-session-projection` | lib | session read model、summary 和纯事件 reducer |
 | `astrcode-context` | `crates/astrcode-context` | lib | prompt 组装、上下文裁剪、token 预算、compact |
 | `astrcode-session` | `crates/astrcode-session` | lib | session/turn 运行时、工具管线、权限链、compact 持久化 |
@@ -121,24 +121,23 @@ AstrCode 当前 workspace 有 29 个成员：`crates/` 下 28 个 crate，加上
 
 路径：`crates/astrcode-storage`
 
-职责：实现持久化层：append-only JSONL EventLog、快照、session repository、配置存储和大工具结果 artifact；持有唯一的可变 session projection，并通过 copy-on-write `Arc` 共享不可变读快照；read model 的纯投影逻辑由 `astrcode-session-projection` 提供。
+职责：实现持久化层：append-only JSONL EventLog、session repository、配置存储和大工具结果 artifact；持有唯一的可变 session projection，并通过 copy-on-write `Arc` 共享不可变读快照；read model 的纯投影逻辑由 `astrcode-session-projection` 提供。
 
 主要模块：
 
 - `event_log`：JSONL EventLog 读写，维护事件 seq 和 append-only 持久化。
-- `snapshot`：快照管理，用于恢复时减少重放成本。
 - `session_repo`：文件系统 session repository，负责 session 目录、列表、fork/recycle/delete/restore，
   以及版本化的 durable event-consumer checkpoint。consumer state 使用同步后原子替换，保存
   quarantine/skip 单调总数和最近 128 条有界审计。
 - `config_store`：配置文件原子读写。
 - `tool_artifacts`：大工具结果文件名、写入、切片和摘要引用。
 - `traits`：独立调用方使用 journal、事件读取、状态读取、路径和 artifact 窄端口；
-  `SessionStore` 组合完整 repository 所需的生命周期、checkpoint 和 compact snapshot 能力。
+  `SessionStore` 组合完整 repository 所需的生命周期和 compact snapshot 能力。
 - `in_memory`：`testing` feature 下的内存存储，供测试使用。
 
 依赖边界：依赖 `astrcode-core` 和 `astrcode-session-projection`；不依赖 session/server。按“右侧可以依赖左侧”表示，运行时主方向为 `core → session-projection → storage → session → server`；协议支线为 `core → protocol → server` 和 `protocol → frontend`，`context → session`、`extension-sdk → session` 是另外两条显式输入边。
 
-测试线索：`event_log/tests.rs`、`session_repo/tests.rs` 和 `in_memory/tests.rs` 覆盖日志校验、尾部恢复、projection 恢复与并发追加；`snapshot.rs`、`tool_artifacts.rs` 有模块内测试。任何事件 payload 或持久化格式变更都应同时验证 replay 和 session repository。
+测试线索：`event_log/tests.rs`、`session_repo/tests.rs` 和 `in_memory/tests.rs` 覆盖日志校验、尾部恢复、projection 恢复与并发追加；`tool_artifacts.rs` 有模块内测试。任何事件 payload 或持久化格式变更都应同时验证 replay 和 session repository。
 
 ## `astrcode-session-projection`
 

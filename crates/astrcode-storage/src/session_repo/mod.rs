@@ -31,21 +31,17 @@ use std::{
 
 use astrcode_core::{
     config::defaults::astrcode_dir,
-    event::{DurableEvent, StoredEvent},
+    event::DurableEvent,
     types::{Cursor, SessionId, validate_session_id},
 };
-use astrcode_session_projection::{ProjectionError, SessionReadModel, reduce, replay};
+use astrcode_session_projection::{ProjectionError, SessionReadModel, replay};
 use parking_lot::Mutex;
 use tokio::sync::{RwLock, Semaphore};
 
 use self::{
     durability::UncertainDurability, owner_lease::SessionOwnerLease, projection::SessionProjection,
 };
-use crate::{
-    StorageError,
-    event_log::EventLog,
-    snapshot::{SessionProjectionSnapshot, SnapshotManager},
-};
+use crate::{StorageError, event_log::EventLog};
 
 fn validate_storage_session_id(id: &SessionId) -> Result<(), StorageError> {
     validate_session_id(id.as_str()).map_err(|error| StorageError::InvalidId(error.to_string()))
@@ -89,7 +85,7 @@ pub struct FileSystemSessionRepository {
     projects_base: PathBuf,
 }
 
-/// 会话的内部元数据，持有事件日志和快照管理器。
+/// 会话的内部元数据，持有事件日志。
 struct SessionMeta {
     /// 本进程对该 session 目录的所有权租约。
     ///
@@ -98,8 +94,6 @@ struct SessionMeta {
     _owner_lease: SessionOwnerLease,
     /// 事件日志实例，负责追加式写入和重放
     log: EventLog,
-    /// 快照管理器，负责创建和列出恢复点
-    snapshot_mgr: SnapshotManager,
     /// 当前会话所在目录。
     dir: PathBuf,
     /// `dir` 的 canonical 形式。会话目录在 meta 存活期内不移动,打开时解析一次,
@@ -127,14 +121,12 @@ impl SessionMeta {
         dir: PathBuf,
         owner_lease: SessionOwnerLease,
         log: EventLog,
-        snapshot_mgr: SnapshotManager,
         projection: SessionReadModel,
     ) -> Result<Self, StorageError> {
         let canonical_dir = tokio::fs::canonicalize(&dir).await?;
         Ok(Self {
             _owner_lease: owner_lease,
             log,
-            snapshot_mgr,
             dir,
             canonical_dir,
             projection: SessionProjection::new(projection),
@@ -242,15 +234,13 @@ impl FileSystemSessionRepository {
         }
 
         // 磁盘打开与 projection 恢复可能较慢；不得持 `sessions` 写锁跨越 await，
-        // 否则会阻塞同实例上的 append/checkpoint，并在 Windows 上与未释放的
+        // 否则会阻塞同实例上的 append，并在 Windows 上与未释放的
         // EventLog 句柄争用同一 JSONL 文件。
         let dir = self.existing_session_dir(session_id).await?;
         let owner_lease = SessionOwnerLease::acquire(&dir, &self.owner).await?;
         let (log, events) = EventLog::open(Self::event_log_path(&dir, session_id)).await?;
-        let snapshot_mgr = SnapshotManager::new(dir.join("snapshots"));
-        let projection = Self::restore_projection(session_id, &snapshot_mgr, &events).await?;
-        let opened =
-            Arc::new(SessionMeta::new(dir, owner_lease, log, snapshot_mgr, projection).await?);
+        let projection = replay(session_id.clone(), &events).map_err(corrupt_projection)?;
+        let opened = Arc::new(SessionMeta::new(dir, owner_lease, log, projection).await?);
 
         let mut sessions = self.sessions.write().await;
         Ok(if let Some(meta) = sessions.get(session_id) {
@@ -260,56 +250,4 @@ impl FileSystemSessionRepository {
             opened
         })
     }
-
-    /// 从冷打开时已验证的事件恢复 projection;快照命中时只在内存里补尾部。
-    async fn restore_projection(
-        session_id: &SessionId,
-        snapshot_mgr: &SnapshotManager,
-        events: &[StoredEvent],
-    ) -> Result<SessionReadModel, StorageError> {
-        // Snapshot first because it's faster than replaying the full event log.
-        if let Some(snapshot) = snapshot_mgr.latest_snapshot().await? {
-            match restore_from_snapshot(session_id, events, snapshot) {
-                Ok(model) => return Ok(model),
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = %session_id,
-                        "Falling back to full event replay after snapshot restore failed: {error}"
-                    );
-                },
-            }
-        }
-
-        replay(session_id.clone(), events).map_err(corrupt_projection)
-    }
-}
-
-fn restore_from_snapshot(
-    expected_session_id: &SessionId,
-    events: &[StoredEvent],
-    snapshot: SessionProjectionSnapshot,
-) -> Result<SessionReadModel, StorageError> {
-    if snapshot.model.identity.session_id != *expected_session_id {
-        return Err(StorageError::CorruptLog(format!(
-            "projection snapshot belongs to session {}, expected {}",
-            snapshot.model.identity.session_id, expected_session_id
-        )));
-    }
-    let latest_seq = snapshot.model.stats.last_seq;
-
-    // 事件流经过打开时的连续 seq 校验,事件数即下一条待分配的 seq。
-    let next_seq = events.len() as u64;
-    if latest_seq >= next_seq {
-        return Err(StorageError::InvalidId(format!(
-            "snapshot latest_seq {latest_seq} is outside event log (next_seq={next_seq})"
-        )));
-    }
-
-    let mut model = snapshot.model;
-    // Reapply only the events that occurred after the snapshot. The snapshot
-    // serves as a recovery checkpoint, not as an authoritative source of truth.
-    for event in events.iter().filter(|event| event.seq > latest_seq) {
-        reduce(event, &mut model).map_err(corrupt_projection)?;
-    }
-    Ok(model)
 }

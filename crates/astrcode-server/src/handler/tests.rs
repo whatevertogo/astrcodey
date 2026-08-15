@@ -53,7 +53,7 @@ impl ProviderMessages for SessionReadModel {
             self.model_context
                 .messages
                 .iter()
-                .map(|message| message.message.clone())
+                .map(|message| (*message.message).clone())
                 .collect(),
         )
     }

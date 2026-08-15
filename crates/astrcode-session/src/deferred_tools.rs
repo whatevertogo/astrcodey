@@ -1,6 +1,6 @@
 //! Deferred tool visibility for provider requests.
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
     llm::LlmMessage,
@@ -35,7 +35,7 @@ pub(crate) fn provider_visible_tools(
 }
 
 pub(crate) fn append_deferred_tools_reminder(
-    messages: &mut Vec<LlmMessage>,
+    messages: &mut Vec<Arc<LlmMessage>>,
     tools: &[ToolSnapshot],
     active_deferred_tools: &HashSet<String>,
 ) {
@@ -58,7 +58,7 @@ pub(crate) fn append_deferred_tools_reminder(
         text.push('\n');
     }
     text.push_str("</available-deferred-tools>");
-    messages.push(LlmMessage::system(text));
+    messages.push(Arc::new(LlmMessage::system(text)));
 }
 
 pub(crate) fn activate_deferred_tools(

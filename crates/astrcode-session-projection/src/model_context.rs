@@ -1,6 +1,6 @@
 //! Provider 可见上下文、system prompt、usage 与 compact rewrite 投影。
 
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::Arc};
 
 use astrcode_core::{
     compaction::CompactStrategy,
@@ -32,9 +32,12 @@ pub struct CompactionView {
 }
 
 /// 会话读模型里带有 durable seq 的 provider 消息。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+///
+/// `message` 经 `Arc` 跨读模型快照与请求组装共享,构造后不可变;reducer 的
+/// 原地改尾必须经 `Arc::make_mut` copy-on-write,避免写穿已发布的快照。
+#[derive(Debug, Clone, PartialEq)]
 pub struct SequencedLlmMessage {
-    pub message: LlmMessage,
+    pub message: Arc<LlmMessage>,
     /// 普通消息记录最近更新它的事件 seq；rewrite 输出锚定到其 source seq。
     pub updated_seq: u64,
     /// provider 不可见的投影来源元数据。
@@ -44,7 +47,7 @@ pub struct SequencedLlmMessage {
 impl SequencedLlmMessage {
     fn plain(message: LlmMessage, updated_seq: u64) -> Self {
         Self {
-            message,
+            message: Arc::new(message),
             updated_seq,
             origin: None,
         }
@@ -74,12 +77,10 @@ pub struct SessionSystemPrompt {
 }
 
 /// 当前发送给 provider 的有序上下文及其压缩、用量元数据。
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionModelContext {
     pub messages: Vec<SequencedLlmMessage>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ContextUsageView>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compactions: Vec<CompactionView>,
 }
 
@@ -131,7 +132,7 @@ fn validate_rewrite_fingerprint_against(
         messages
             .iter()
             .filter(|message| message.updated_seq <= *source_seq)
-            .map(|message| message.message.clone())
+            .map(|message| (*message.message).clone())
             .collect(),
     );
     let actual = transcript_prefix_fingerprint(system_prompt, &prefix)
@@ -225,7 +226,7 @@ fn apply_provider_event(
             event_seq,
         )),
         DurableEventPayload::TurnAbortedContext => messages.push(SequencedLlmMessage {
-            message: turn_aborted_context_message(),
+            message: Arc::new(turn_aborted_context_message()),
             updated_seq: event_seq,
             origin: Some(TranscriptMessageOrigin::TurnAborted),
         }),
@@ -252,7 +253,7 @@ fn apply_provider_event(
             };
             match messages.last_mut() {
                 Some(last) if last.message.role == LlmRole::Assistant => {
-                    last.message.content.push(tool_call);
+                    Arc::make_mut(&mut last.message).content.push(tool_call);
                     last.updated_seq = event_seq;
                 },
                 _ => messages.push(SequencedLlmMessage::plain(
@@ -319,7 +320,7 @@ fn apply_provider_event(
             *messages = forked
                 .iter()
                 .map(|entry| SequencedLlmMessage {
-                    message: entry.message.clone(),
+                    message: Arc::new(entry.message.clone()),
                     updated_seq: event_seq,
                     origin: entry.origin,
                 })
@@ -341,7 +342,7 @@ fn apply_transcript_rewrite(
     *current = rewritten
         .iter()
         .map(|entry| SequencedLlmMessage {
-            message: entry.message.clone(),
+            message: Arc::new(entry.message.clone()),
             updated_seq: source_seq,
             origin: entry.origin,
         })
@@ -359,7 +360,7 @@ fn apply_tool_terminal(
     event_seq: u64,
 ) {
     messages.push(SequencedLlmMessage {
-        message: LlmMessage {
+        message: Arc::new(LlmMessage {
             role: LlmRole::Tool,
             content: vec![LlmContent::ToolResult {
                 tool_call_id: call_id.to_string(),
@@ -368,7 +369,7 @@ fn apply_tool_terminal(
             }],
             name: Some(tool_name.to_owned()),
             reasoning_content: None,
-        },
+        }),
         updated_seq: event_seq,
         origin,
     });

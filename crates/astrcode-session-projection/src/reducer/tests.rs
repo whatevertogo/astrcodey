@@ -451,7 +451,7 @@ fn projection_builds_complete_grouped_state_and_evolves_transcript() {
                         .messages
                         .iter()
                         .map(|entry| TranscriptMessage {
-                            message: entry.message.clone(),
+                            message: (*entry.message).clone(),
                             origin: entry.origin,
                         })
                         .collect(),
@@ -788,7 +788,7 @@ fn projection_event_family_matrix_preserves_identity_execution_and_lineage() {
                         .messages
                         .iter()
                         .map(|entry| TranscriptMessage {
-                            message: entry.message.clone(),
+                            message: (*entry.message).clone(),
                             origin: entry.origin,
                         })
                         .collect(),
@@ -917,7 +917,7 @@ fn prefix_fingerprint(model: &SessionReadModel, source_seq: u64) -> String {
             .messages
             .iter()
             .filter(|message| message.updated_seq <= source_seq)
-            .map(|message| message.message.clone())
+            .map(|message| (*message.message).clone())
             .collect(),
     );
     transcript_prefix_fingerprint(&model.system_prompt.text, &prefix).unwrap()

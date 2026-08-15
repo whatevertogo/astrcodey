@@ -35,8 +35,6 @@ async fn in_memory_store_enforces_creation_and_updates_projection_atomically() {
         store.latest_cursor(&session_id).await.unwrap(),
         Some("1".into())
     );
-    assert!(store.checkpoint(&session_id, &"0".into()).await.is_err());
-    store.checkpoint(&session_id, &"1".into()).await.unwrap();
 
     assert_eq!(
         store

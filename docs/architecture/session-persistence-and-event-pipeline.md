@@ -29,7 +29,7 @@
 |---|---|---:|---|
 | 领域事实 | `DurableEvent` / `StoredEvent` | 是 | EventLog |
 | 实时信号 | `LiveEvent` | 否 | 仅在途 |
-| 读模型 | `SessionReadModel` / `Arc<SessionReadModel>` | checkpoint 可选 | storage |
+| 读模型 | `SessionReadModel` / `Arc<SessionReadModel>` | 否(打开时从 EventLog 重建) | storage |
 | 运行时资源 | event sink、审批 sender、file observation、工具缓存 | 否 | `SessionRuntimeState` |
 | 大结果/诊断输入 | tool artifact、compact snapshot | 独立文件 | storage |
 
@@ -71,7 +71,7 @@ storage 保留有独立调用方的窄能力：
 | `SessionPathResolver` | session 路径 |
 | `ToolResultArtifactStore` | 大工具结果 |
 
-生命周期、checkpoint 和 compact snapshot 只有完整 repository 使用，直接归入
+生命周期和 compact snapshot 只有完整 repository 使用，直接归入
 `SessionStore`，不再各建一个单实现 trait。
 
 runtime 持有一次完整 repository；state source 和 event sink 分别从它
@@ -147,16 +147,12 @@ projection 的三种“所有权”必须分开：
 
 - 规则所有权：`astrcode-session-projection` 定义 model、`replay`、`reduce` 和序列校验；
 - 实例所有权：storage 的 `SessionMeta` 持有唯一的当前可变 `SessionReadModel`；
-- 事实所有权：EventLog 永远是可恢复事实，checkpoint 只是加速器。
+- 事实所有权：EventLog 永远是可恢复事实，也是唯一的持久化来源。
 
-打开 session 时：
-
-```text
-加载最新 checkpoint
-  -> 校验 session_id / cursor
-  -> replay checkpoint 之后的事件
-  -> checkpoint 无效则全量 replay EventLog
-```
+打开 session 时全量 replay EventLog(`EventLog::open` 单遍完成完整性校验并把
+事件交给恢复路径)。曾有的 projection 快照/checkpoint 加速器已于 2026-08 删除:
+基准显示在该设计下恢复恒慢于直接 replay 约 1.25 倍(模型 JSON 反序列化与日志
+内容同阶,快照省不掉打开时的全量校验扫描)。
 
 此前 turn 内的 `model_cache` 已删除。它复制完整 projection，还需要
 invalidate/reload/reduce 三套手工同步路径，容易形成第二个状态源。
@@ -262,8 +258,7 @@ streaming snapshot、全局通知和 legacy 映射；event sink 只负责单 ses
 - live 入队失败：`Session::emit_live` warning；
 - event sink worker panic：shutdown 时 error；
 - durable 重试耗尽：turn ingress error；
-- owner 冲突、日志损坏、projection 损坏：typed storage error；
-- checkpoint 无效：warning 后回退 EventLog replay。
+- owner 冲突、日志损坏、projection 损坏：typed storage error。
 
 关键代码：
 

@@ -13,7 +13,8 @@ use astrcode_core::{
     event::{DurableEventPayload, LiveEventPayload},
     llm::{
         LlmContent, LlmError, LlmEvent, LlmMessage, LlmRequest, LlmRole, LlmTokenUsage,
-        LlmTokenUsageSource, provider_visible_messages, token_estimate,
+        LlmTokenUsageSource, provider_visible_messages, provider_visible_shared_messages,
+        token_estimate,
     },
     tool::ToolDefinition,
     types::*,
@@ -83,7 +84,7 @@ struct StepHooks<'a> {
 /// LLM 请求被消费前抓取的快照，供 outcome 后续阶段使用。
 struct LlmRequestSnapshot {
     request_id: ProviderRequestId,
-    messages: Vec<LlmMessage>,
+    messages: Vec<Arc<LlmMessage>>,
     context_window: usize,
     acknowledgements: astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
 }
@@ -564,7 +565,7 @@ impl TurnLoop {
         let mut messages = snapshot.request_messages(messages);
         if let Some(reminder) = state.tool_deduplicator().check_reminder() {
             tracing::debug!("injecting tool deduplication system-reminder");
-            messages.push(LlmMessage::user(reminder));
+            messages.push(Arc::new(LlmMessage::user(reminder)));
         }
         let request_id = ProviderRequestId::new(uuid::Uuid::new_v4().to_string());
         let (messages, acknowledgements) = self
@@ -703,7 +704,7 @@ impl TurnLoop {
         &self,
         mut outcome: StreamOutcome,
         llm: &Arc<dyn astrcode_core::llm::LlmProvider>,
-        request_messages: Vec<LlmMessage>,
+        request_messages: Vec<Arc<LlmMessage>>,
         tools: &[ToolDefinition],
     ) -> StreamOutcome {
         match &mut outcome {
@@ -721,9 +722,15 @@ impl TurnLoop {
     async fn fallback_token_usage(
         &self,
         llm: &Arc<dyn astrcode_core::llm::LlmProvider>,
-        request_messages: Vec<LlmMessage>,
+        request_messages: Vec<Arc<LlmMessage>>,
         tools: &[ToolDefinition],
     ) -> Option<LlmTokenUsage> {
+        // provider 契约按值持有消息;fallback 只在 provider 未上报 usage 时触发,
+        // 此处一次性 deref clone。
+        let request_messages: Vec<LlmMessage> = request_messages
+            .iter()
+            .map(|message| (**message).clone())
+            .collect();
         let effective = self.runtime_generation.effective();
         let (input_tokens, source) = match llm
             .count_input_tokens(request_messages.clone(), tools.to_vec())
@@ -854,25 +861,30 @@ impl TurnLoop {
 
     /// 运行 `BeforeRequest` 扩展钩子。返回值覆盖 LLM 请求的 messages。
     ///
-    /// `send_messages.clone()` 不可消除：`ProviderContext` 持有 `Vec<LlmMessage>` 所有权，
+    /// 入参的 deref clone 不可消除：`ProviderContext` 持有 `Vec<LlmMessage>` 所有权，
     /// 而 `emit_provider` 需 `&self` 借用。消除 clone 是 extension-sdk 的 API 演进
     /// （`ProviderContext.messages` 改 `Arc<Vec<LlmMessage>>` + copy-on-write），不在本任务范围。
     async fn apply_before_provider_request_hook(
         &self,
         extension_runner: &dyn astrcode_extension_sdk::runtime_ports::TurnHooks,
         request_id: ProviderRequestId,
-        send_messages: Vec<LlmMessage>,
+        send_messages: Vec<Arc<LlmMessage>>,
     ) -> Result<
         (
-            Vec<LlmMessage>,
+            Vec<Arc<LlmMessage>>,
             astrcode_extension_sdk::runtime_ports::ProviderRequestAcknowledgements,
         ),
         TurnError,
     > {
         let preparation = extension_runner
             .prepare_provider_request(
-                self.shared()
-                    .provider_ctx(request_id, send_messages.clone()),
+                self.shared().provider_ctx(
+                    request_id,
+                    send_messages
+                        .iter()
+                        .map(|message| (**message).clone())
+                        .collect(),
+                ),
             )
             .await?;
         let (result, acknowledgements) = preparation.into_parts();
@@ -884,7 +896,10 @@ impl TurnLoop {
                     "BeforeProviderRequest ReplaceMessages applies only to this LLM request (not \
                      durable)"
                 );
-                Ok(provider_visible_messages(messages))
+                Ok(provider_visible_messages(messages)
+                    .into_iter()
+                    .map(Arc::new)
+                    .collect())
             },
             ProviderResult::AppendMessages { messages } => {
                 tracing::debug!(
@@ -893,8 +908,8 @@ impl TurnLoop {
                      durable)"
                 );
                 let mut combined = send_messages;
-                combined.extend(messages);
-                Ok(provider_visible_messages(combined))
+                combined.extend(messages.into_iter().map(Arc::new));
+                Ok(provider_visible_shared_messages(combined))
             },
             ProviderResult::Allow => Ok(send_messages),
         }?;
@@ -904,7 +919,7 @@ impl TurnLoop {
     async fn start_provider_stream(
         &self,
         llm: &Arc<dyn astrcode_core::llm::LlmProvider>,
-        send_messages: Vec<LlmMessage>,
+        send_messages: Vec<Arc<LlmMessage>>,
         tools: &[ToolDefinition],
         max_output_tokens: usize,
         publisher: &TurnEvents,
@@ -912,7 +927,12 @@ impl TurnLoop {
         let result = tokio::select! {
             _ = self.cancellation_token.cancelled() => return Err(TurnError::Aborted),
             result = llm.generate_request(
-                LlmRequest::new(send_messages, tools.to_vec())
+                // PR-1 保留 clone 点:`LlmRequest.messages` 按值持有 `Vec<LlmMessage>`
+                // (Arc 化属 PR-2),发送边界一次性 deref clone。
+                LlmRequest::new(
+                    send_messages.iter().map(|message| (**message).clone()).collect(),
+                    tools.to_vec(),
+                )
                     .with_max_output_tokens(max_output_tokens)
             ) => result,
         };

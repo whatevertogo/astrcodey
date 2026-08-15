@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     InvokeContext, acknowledgement, dispatch, invalid_group_operation,
-    path::canonicalize_workspace_path, process_handles::ProcessHandleStore, run_blocking_io,
+    path::canonicalize_host_path, process_handles::ProcessHandleStore, run_blocking_io,
 };
 use crate::process_supervision::SupervisedCommand;
 
@@ -419,7 +419,8 @@ pub(super) fn resolve_cwd(
     let root = working_dir.ok_or_else(|| {
         ErrorPayload::new(WireErrorCode::BackendUnavailable, "working_dir not set")
     })?;
-    let path = canonicalize_workspace_path(root, relative_cwd.unwrap_or("."))?;
+    // 与文件工具一致：绝对路径按文件系统解析，相对路径仍限工作区内。
+    let path = canonicalize_host_path(root, relative_cwd.unwrap_or("."))?;
     if !path.is_dir() {
         return Err(ErrorPayload::new(
             WireErrorCode::InvalidInput,
@@ -575,5 +576,30 @@ mod tests {
             .expect_err("parent cwd must be rejected");
 
         assert_eq!(error.code_enum(), Some(WireErrorCode::PermissionDenied));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawns_with_absolute_cwd_outside_workspace() {
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside cwd");
+        let runner = ProcessRunner::default();
+        let mut request = HostProcessRequest::new("/bin/sh");
+        request.args = vec!["-c".into(), "pwd".into()];
+        request.cwd = Some(outside.path().to_str().expect("utf-8 cwd").into());
+        let output = runner
+            .spawn(request, workspace.path().to_str(), None)
+            .await
+            .expect("absolute cwd outside the workspace must be allowed");
+
+        assert!(output.success);
+        let expected = outside.path().canonicalize().expect("canonical cwd");
+        assert!(
+            output
+                .stdout
+                .contains(expected.to_str().expect("utf-8 path")),
+            "stdout: {:?}",
+            output.stdout
+        );
     }
 }

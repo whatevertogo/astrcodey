@@ -177,7 +177,7 @@ async fn event_consumer_quarantines_once_at_the_failure_limit_and_persists_the_a
 }
 
 #[tokio::test]
-async fn filesystem_repository_rebuilds_grouped_projection_and_snapshot_tail() {
+async fn filesystem_repository_rebuilds_grouped_projection() {
     let dir = tempdir().unwrap();
     let session_id = SessionId::new("session-1");
     let repo = FileSystemSessionRepository::with_projects_base(dir.path().into());
@@ -188,7 +188,6 @@ async fn filesystem_repository_rebuilds_grouped_projection_and_snapshot_tail() {
     repo.append_event(user_event(&session_id, "first"))
         .await
         .unwrap();
-    repo.checkpoint(&session_id, &"1".into()).await.unwrap();
     repo.append_event(user_event(&session_id, "second"))
         .await
         .unwrap();
@@ -651,46 +650,4 @@ async fn session_listing_skips_unreadable_event_logs() {
     );
     // 直接打开该会话仍按严格解码失败，不被列表的跳过掩盖。
     assert!(reopened.session_read_model(&corrupt_id).await.is_err());
-}
-
-#[tokio::test]
-async fn filesystem_repository_rejects_snapshot_from_another_session() {
-    let dir = tempdir().unwrap();
-    let source_id = SessionId::new("session-snapshot-source");
-    let target_id = SessionId::new("session-snapshot-target");
-    let repo = FileSystemSessionRepository::with_projects_base(dir.path().into());
-
-    repo.create_session(started_event(&source_id))
-        .await
-        .unwrap();
-    repo.append_event(user_event(&source_id, "source message"))
-        .await
-        .unwrap();
-    repo.checkpoint(&source_id, &"1".into()).await.unwrap();
-
-    repo.create_session(started_event(&target_id))
-        .await
-        .unwrap();
-    repo.append_event(user_event(&target_id, "target message"))
-        .await
-        .unwrap();
-    repo.sync_durable_events(&target_id).await.unwrap();
-
-    let source_dir = repo.find_session_dir(&source_id).await.unwrap();
-    let target_dir = repo.find_session_dir(&target_id).await.unwrap();
-    drop(repo);
-
-    let target_snapshots = target_dir.join("snapshots");
-    tokio::fs::create_dir_all(&target_snapshots).await.unwrap();
-    tokio::fs::copy(
-        source_dir.join("snapshots/snapshot-1.json"),
-        target_snapshots.join("snapshot-1.json"),
-    )
-    .await
-    .unwrap();
-
-    let reopened = FileSystemSessionRepository::with_projects_base(dir.path().into());
-    let model = reopened.session_read_model(&target_id).await.unwrap();
-    assert_eq!(model.identity.session_id, target_id);
-    assert_eq!(model.first_user_message(), Some("target message"));
 }

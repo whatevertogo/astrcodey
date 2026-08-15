@@ -46,17 +46,22 @@ impl CommandHandler {
                 .model_context
                 .messages
                 .iter()
-                .map(|message| message.message.clone())
+                .map(|message| (*message.message).clone())
                 .collect(),
         );
         let mut transcript = snapshot.messages.clone();
-        transcript.push(astrcode_core::llm::LlmMessage::user(RECAP_PROMPT));
+        transcript.push(std::sync::Arc::new(astrcode_core::llm::LlmMessage::user(
+            RECAP_PROMPT,
+        )));
         let messages = snapshot.request_messages(transcript);
 
         // 单次调用，无 tools
         let llm = self.runtime.runtime_services().llm();
         let rx = llm
-            .generate_request(astrcode_core::llm::LlmRequest::new(messages, vec![]))
+            .generate_request(astrcode_core::llm::LlmRequest::new(
+                messages.iter().map(|message| (**message).clone()).collect(),
+                vec![],
+            ))
             .await
             .map_err(HandlerError::Llm)?;
 

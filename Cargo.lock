@@ -309,6 +309,7 @@ version = "0.3.14"
 dependencies = [
  "astrcode-core",
  "async-trait",
+ "criterion",
  "serde_json",
  "tokio",
  "tracing",

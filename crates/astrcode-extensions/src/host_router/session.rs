@@ -413,7 +413,7 @@ impl SessionGroup {
             .iter()
             .filter(|message| extension_visible_message(&message.message))
             .map(|message| HostSessionTranscriptMessage {
-                message: llm_message_to_wire(message.message.clone()),
+                message: llm_message_to_wire((*message.message).clone()),
                 origin: message.origin.map(message_origin_dto),
             })
             .collect();
@@ -437,7 +437,7 @@ impl SessionGroup {
                 .model_context
                 .messages
                 .iter()
-                .map(|message| message.message.clone())
+                .map(|message| (*message.message).clone())
                 .collect(),
         );
         Ok(HostSessionProviderMessagesOutput {
