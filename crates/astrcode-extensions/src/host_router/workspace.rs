@@ -37,7 +37,10 @@ use walkdir::{DirEntry, WalkDir};
 
 use super::{
     InvokeContext, backend_unavailable, invalid_group_operation, io_error, parse_wire_request,
-    path::{canonicalize_workspace_path, validate_relative_path_components},
+    path::{
+        canonicalize_host_path, canonicalize_workspace_path, validate_absolute_path_components,
+        validate_relative_path_components,
+    },
     run_blocking_io, run_blocking_io_to_completion, serialize_wire_response,
 };
 
@@ -1039,6 +1042,10 @@ pub(super) fn resolve_existing_path(
     relative_path: &str,
     capability: &str,
 ) -> Result<PathBuf, ErrorPayload> {
+    if Path::new(relative_path).is_absolute() {
+        // 绝对路径由作者显式命名，没有工作区根可逃逸；`..`/NUL 校验在 path.rs。
+        return canonicalize_host_path(root, relative_path);
+    }
     let canonical_root = canonical_root(root)?;
     reject_symlink_components(&canonical_root, Path::new(relative_path), capability)?;
     canonicalize_workspace_path(root, relative_path)
@@ -1051,6 +1058,9 @@ pub(super) fn resolve_write_target(
     create_dirs: bool,
 ) -> Result<(PathBuf, OsString, bool), ErrorPayload> {
     let relative = Path::new(relative_path);
+    if relative.is_absolute() {
+        return resolve_absolute_write_target(relative_path, create_dirs);
+    }
     validate_relative_path_components(relative)?;
     let file_name = relative
         .file_name()
@@ -1080,6 +1090,42 @@ pub(super) fn resolve_write_target(
             "path escapes the workspace root",
         ));
     }
+    Ok((canonical_parent, file_name, parent_created))
+}
+
+/// 绝对路径写入目标：作者显式命名，无工作区根约束；仍拒绝 NUL、`..` 与空文件名。
+/// 中间符号链接按文件系统原样解析（如 macOS 的 /tmp -> /private/tmp）。
+fn resolve_absolute_write_target(
+    relative_path: &str,
+    create_dirs: bool,
+) -> Result<(PathBuf, OsString, bool), ErrorPayload> {
+    if relative_path.contains('\0') {
+        return Err(ErrorPayload::new(
+            WireErrorCode::InvalidInput,
+            "path contains NUL",
+        ));
+    }
+    let absolute = Path::new(relative_path);
+    validate_absolute_path_components(absolute)?;
+    let file_name = absolute
+        .file_name()
+        .filter(|name| *name != OsStr::new(".."))
+        .ok_or_else(|| {
+            ErrorPayload::new(WireErrorCode::InvalidInput, "path must reference a file")
+        })?
+        .to_owned();
+    let parent = absolute.parent().unwrap_or_else(|| Path::new(""));
+    let parent_created = !parent.exists();
+    if parent_created {
+        if !create_dirs {
+            return Err(ErrorPayload::new(
+                WireErrorCode::InvalidInput,
+                "parent directory does not exist; set create_dirs=true to create it",
+            ));
+        }
+        std::fs::create_dir_all(parent).map_err(io_error)?;
+    }
+    let canonical_parent = std::fs::canonicalize(parent).map_err(io_error)?;
     Ok((canonical_parent, file_name, parent_created))
 }
 
@@ -1642,6 +1688,74 @@ mod tests {
             sensitive_read.code_enum(),
             Some(WireErrorCode::PermissionDenied)
         );
+    }
+
+    #[test]
+    fn write_edit_and_read_absolute_paths_outside_the_workspace() {
+        let workspace = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside scratch");
+        let root = workspace.path().to_str().expect("utf-8 workspace");
+        let target = outside.path().join("scratch/note.txt");
+        let target = target.to_str().expect("utf-8 target");
+
+        let written = write(
+            root,
+            HostWorkspaceWriteRequest {
+                path: target.into(),
+                content: "hello\n".into(),
+                create_dirs: true,
+            },
+            HostOperation::WorkspaceWrite.wire_name(),
+            None,
+        )
+        .expect("absolute write outside the workspace");
+        assert!(written.created);
+
+        let read_result = read(
+            root,
+            HostWorkspaceReadRequest {
+                path: target.into(),
+                max_bytes: None,
+                line_offset: 0,
+                line_limit: None,
+            },
+            HostOperation::WorkspaceRead.wire_name(),
+            None,
+        )
+        .expect("absolute read outside the workspace");
+        let HostWorkspaceReadOutput::Text { content, .. } = read_result else {
+            panic!("expected text output");
+        };
+        assert_eq!(content, "hello");
+
+        let edited = edit(
+            root,
+            HostWorkspaceEditRequest {
+                path: target.into(),
+                old_text: Some("hello".into()),
+                new_text: Some("world".into()),
+                replace_all: false,
+                edits: Vec::new(),
+            },
+            HostOperation::WorkspaceEdit.wire_name(),
+            None,
+        )
+        .expect("absolute edit outside the workspace");
+        assert_eq!(edited.replacements, 1);
+
+        let traversal = outside.path().join("sub").join("..").join("note.txt");
+        let error = write(
+            root,
+            HostWorkspaceWriteRequest {
+                path: traversal.to_str().expect("utf-8 traversal").into(),
+                content: "x".into(),
+                create_dirs: false,
+            },
+            HostOperation::WorkspaceWrite.wire_name(),
+            None,
+        )
+        .expect_err("absolute parent traversal must fail");
+        assert_eq!(error.code_enum(), Some(WireErrorCode::InvalidInput));
     }
 
     #[cfg(unix)]

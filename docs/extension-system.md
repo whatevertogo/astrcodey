@@ -347,8 +347,8 @@ operation。`host_supports == true` 不是授权或可用性承诺；每次调�
 | `tool_intercept` | Blocking tool transform/admission 与 post-tool hooks | `ToolInputTransform` 先按确定顺序折叠输入；Session normalize 后，全部 `PreToolUse` handler 在同一 canonical arguments 上聚合 Ask 或返回 Block；`PostToolUse` 处理结果。 |
 | `turn_continuation_control` | Continue-after-stop hook | 决定 LLM 自然停止后是否继续一个 agent step。 |
 | `tool_result_read` | `astrcode.tool_result.read` | 读取当前 session 拥有的 opaque 工具结果 artifact；按 `4..=20_000` UTF-8 字节分页，并使用响应中的 `next_byte_offset` 续读。 |
-| `workspace_read` | `astrcode.workspace.read/list/grep/glob` | 有界读取、目录遍历、正则搜索和 glob；拒绝越界路径、symlink 和密钥类路径，默认忽略 `.git`/`node_modules`。 |
-| `workspace_write` | `astrcode.workspace.write` / `astrcode.workspace.edit` | 创建、替换或精确编辑工作区内的非敏感文件；拒绝越界路径、symlink 和密钥类路径。 |
+| `workspace_read` | `astrcode.workspace.read/list/grep/glob` | 有界读取、目录遍历、正则搜索和 glob；相对路径限定工作区内并拒绝 symlink 组件，绝对路径按文件系统解析；均拒绝 `..` 穿越与密钥类路径，默认忽略 `.git`/`node_modules`。 |
+| `workspace_write` | `astrcode.workspace.write` / `astrcode.workspace.edit` | 创建、替换或精确编辑非敏感文件；相对路径限定工作区内并拒绝 symlink 组件，绝对路径按文件系统解析；写入目标为 symlink 时拒绝；均拒绝 `..` 穿越与密钥类路径。 |
 | `process_spawn` | `astrcode.process.*` | 在工作区目录运行并管理受监管的 stdin/stdout/stderr pipes process。并发、总时长、stdin 和输出均受限；Unix 用 process group、Windows 用 Job Object 管理完整进程树；不提供 PTY 或 resize operation。 |
 | `network_client` | `astrcode.network.client` | 向公网发起 HTTP(S) 请求。worker 与进程内扩展共用同一个宿主出站网络服务；统一拒绝本机、内网、链路本地地址及解析到这些地址的域名。作者 API 接收原始响应字节，线缆使用 base64；`max_bytes <= 10 MiB`，`timeout_ms` 为 `1..=60_000`，`Manual` 不跟随重定向但返回有界 3xx body。同名响应头不保留重复值，并通过 `final_url` 返回最终地址。并发、总时长和重定向次数均受限；并发上限全局共享，当前不承诺 extension 级公平配额。 |
 

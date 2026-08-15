@@ -3,6 +3,7 @@
 //! JSONL event log, snapshots, and atomic config writes.
 
 pub mod config_store;
+mod durable_write;
 mod error;
 mod event_log;
 #[cfg(feature = "testing")]

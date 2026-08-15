@@ -255,6 +255,11 @@ pub(crate) async fn try_provider_input_tokens(
     tools: &[ToolDefinition],
     stage: &'static str,
 ) -> Option<usize> {
+    tracing::debug!(
+        target: "astrcode::perf",
+        stage,
+        "provider count_tokens call"
+    );
     match llm.count_input_tokens(messages, tools.to_vec()).await {
         Ok(count) => match usize::try_from(count.input_tokens) {
             Ok(tokens) => Some(tokens),

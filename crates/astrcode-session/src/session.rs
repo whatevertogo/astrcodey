@@ -155,16 +155,13 @@ impl Session {
 impl Session {
     pub fn emit_live(&self, turn_id: Option<&TurnId>, payload: LiveEventPayload) {
         let event = LiveEvent::new(self.id().clone(), turn_id.cloned(), payload);
-        if let Err(error) = self
-            .runtime
-            .event_sink()
-            .publish_live(self.runtime.store().clone(), event)
-        {
-            // best-effort 事件丢弃是常态；仅按 2 的幂次（1、2、4…）记录，避免刷屏。
-            if matches!(
-                &error,
-                SessionEventPublishError::Full { dropped } if !dropped.is_power_of_two()
-            ) {
+        if let Err(error) = self.runtime.event_sink().publish_live(event) {
+            // best-effort 事件在 session 释放/关闭后到达属常态,不值得告警。
+            if matches!(error, SessionEventPublishError::Closed) {
+                tracing::debug!(
+                    session_id = %self.id(),
+                    "live event dropped after session event sink closed"
+                );
                 return;
             }
             tracing::warn!(

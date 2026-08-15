@@ -90,6 +90,43 @@ pub async fn spawn_session_with_services(
     spawn_session_with_context_and_services(llm, ContextSettings::default()).await
 }
 
+/// 与 [`spawn_session_with_context_and_services`] 相同,但使用真实的
+/// [`LlmContextAssembler`](按 token 阈值判定),而非测试用的恒真判定。
+#[allow(dead_code)] // Each integration-test binary imports this shared module independently.
+pub async fn spawn_session_with_llm_assembler(
+    llm: Arc<dyn LlmProvider>,
+    context: ContextSettings,
+) -> (Session, Arc<dyn SessionStore>, SessionId) {
+    let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
+    let context_assembler: Arc<dyn ContextAssembler> =
+        Arc::new(LlmContextAssembler::new(context.clone()));
+    let caps = Arc::new(SessionRuntimeServices::new_with_context_assembler(
+        llm.clone(),
+        llm,
+        effective_config(context),
+        SessionExtensionPorts::default(),
+        context_assembler,
+    ));
+    let sid = new_session_id();
+    let runtime = Arc::new(SessionRuntimeState::new(sid.clone(), store.clone()));
+    let working_dir = std::env::temp_dir().join(sid.as_str());
+    std::fs::create_dir_all(&working_dir).unwrap();
+    let session = Session::create_with_params(SessionCreateParams {
+        working_dir: working_dir.to_string_lossy().into_owned(),
+        model_id: "mock-model".into(),
+        parent_session_id: None,
+        tool_selection: None,
+        source_extension: None,
+        extra_system_prompt: None,
+        initial_system_prompt: None,
+        runtime,
+        runtime_services: caps,
+    })
+    .await
+    .unwrap();
+    (session, store, sid)
+}
+
 pub async fn spawn_session_with_context_and_services(
     llm: Arc<dyn LlmProvider>,
     context: ContextSettings,

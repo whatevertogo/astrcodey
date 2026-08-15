@@ -10,7 +10,7 @@ use astrcode_core::tool::ToolResultArtifactSlice;
 use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
-use crate::{ToolResultArtifactInput, ToolResultArtifactRef, session_repo::sync_directory};
+use crate::{ToolResultArtifactInput, ToolResultArtifactRef, durable_write::sync_directory};
 
 pub(crate) fn validate_tool_result_artifact_id(artifact_id: &str) -> Result<(), &'static str> {
     let mut components = Path::new(artifact_id).components();

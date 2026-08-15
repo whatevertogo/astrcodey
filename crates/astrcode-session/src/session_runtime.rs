@@ -35,10 +35,11 @@ impl EventPublisher for SessionScopedEventPublisher {
         match payload {
             EventPayload::Live(payload) => self
                 .event_sink
-                .publish_live(
-                    self.store.clone(),
-                    LiveEvent::new(self.session_id.clone(), self.turn_id.clone(), payload),
-                )
+                .publish_live(LiveEvent::new(
+                    self.session_id.clone(),
+                    self.turn_id.clone(),
+                    payload,
+                ))
                 .map_err(map_event_publish_error),
             // durable-in-try_send 与 turn 路径（`crate::turn_publish` 的
             // `TurnEventPublisher`，入队由 ingress worker 持久化）语义不同：session

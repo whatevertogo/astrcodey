@@ -1,17 +1,13 @@
 //! File-system config store with atomic writes.
 
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use astrcode_core::config::{
     Config, ConfigOverlay, ConfigStore, ConfigStoreError, defaults::astrcode_dir,
 };
 use serde::{Serialize, de::DeserializeOwned};
-use tempfile::NamedTempFile;
 
-use crate::session_repo::sync_directory;
+use crate::durable_write::replace_durable_file;
 
 /// File-system implementation of ConfigStore.
 ///
@@ -44,7 +40,7 @@ impl FileConfigStore {
     pub async fn save_last_known_good(&self, config: &Config) -> Result<(), ConfigStoreError> {
         let path = self.last_known_good_path();
         let data = serialize_config_value(config, &path)?;
-        run_blocking_io(move || Ok(write_atomic(&path, &data)?)).await
+        run_blocking_io(move || Ok(replace_durable_file(&path, data.as_bytes())?)).await
     }
 
     pub async fn load_last_known_good(&self) -> Result<Option<Config>, ConfigStoreError> {
@@ -86,26 +82,6 @@ fn serialize_config_value<T: Serialize>(
     })
 }
 
-fn write_atomic(path: &Path, data: &str) -> Result<(), std::io::Error> {
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let parent_created = !parent.exists();
-    std::fs::create_dir_all(parent)?;
-
-    let mut temporary = NamedTempFile::new_in(parent)?;
-    temporary.write_all(data.as_bytes())?;
-    temporary.as_file().sync_all()?;
-    let file = temporary.persist(path).map_err(|error| error.error)?;
-    file.sync_all()?;
-    sync_directory(Some(parent))?;
-    if parent_created {
-        sync_directory(parent.parent())?;
-    }
-    Ok(())
-}
-
 #[async_trait::async_trait]
 impl ConfigStore for FileConfigStore {
     async fn load(&self) -> Result<Config, ConfigStoreError> {
@@ -114,7 +90,7 @@ impl ConfigStore for FileConfigStore {
             if !path.exists() {
                 let config = Config::default();
                 let data = serialize_config_value(&config, &path)?;
-                write_atomic(&path, &data)?;
+                replace_durable_file(&path, data.as_bytes())?;
                 return Ok(config);
             }
             read_config_value(&path)
@@ -125,7 +101,7 @@ impl ConfigStore for FileConfigStore {
     async fn save(&self, config: &Config) -> Result<(), ConfigStoreError> {
         let path = self.path.clone();
         let data = serialize_config_value(config, &path)?;
-        run_blocking_io(move || Ok(write_atomic(&path, &data)?)).await
+        run_blocking_io(move || Ok(replace_durable_file(&path, data.as_bytes())?)).await
     }
 
     fn path(&self) -> PathBuf {
@@ -159,7 +135,7 @@ impl ConfigStore for FileConfigStore {
         let overlay_dir = PathBuf::from(working_dir).join(".astrcode");
         let overlay_path = overlay_dir.join("config.toml");
         let data = serialize_config_value(overlay, &overlay_path)?;
-        run_blocking_io(move || Ok(write_atomic(&overlay_path, &data)?)).await
+        run_blocking_io(move || Ok(replace_durable_file(&overlay_path, data.as_bytes())?)).await
     }
 }
 

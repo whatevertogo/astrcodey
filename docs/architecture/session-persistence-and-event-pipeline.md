@@ -275,7 +275,7 @@ streaming snapshot、全局通知和 legacy 映射；event sink 只负责单 ses
 | runtime binding | `crates/astrcode-session/src/session_runtime.rs` |
 | turn ingress | `crates/astrcode-session/src/turn_publish.rs` |
 | storage ports | `crates/astrcode-storage/src/traits.rs` |
-| projection/lease/commit | `crates/astrcode-storage/src/session_repo.rs` |
+| projection/lease/commit | `crates/astrcode-storage/src/session_repo/` |
 | file writer | `crates/astrcode-storage/src/event_log.rs` |
 | lifecycle registry | `crates/astrcode-server/src/session_manager.rs` |
 

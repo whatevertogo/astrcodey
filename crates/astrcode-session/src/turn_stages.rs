@@ -135,6 +135,8 @@ pub(crate) struct TurnState {
     active_deferred_tools: HashSet<String>,
     all_tools: Vec<ToolSnapshot>,
     visible_tools: Vec<ToolSnapshot>,
+    /// `visible_tools` 定义序列化估算;可见集变更时重算。
+    tools_token_estimate: usize,
     tool_deduplicator: ToolCallDeduplicator,
     next_step_index: u32,
     resumed_attempt: Option<u32>,
@@ -154,6 +156,10 @@ impl TurnState {
             .collect::<Vec<_>>();
         let active_deferred_tools = HashSet::new();
         let visible_tools = provider_visible_tools(&all_tools, &active_deferred_tools);
+        let tools_token_estimate =
+            astrcode_core::llm::token_estimate::estimate_tool_definition_tokens(
+                &ToolSnapshot::definitions(&visible_tools),
+            );
 
         Self {
             transcript: TurnTranscript::default(),
@@ -163,6 +169,7 @@ impl TurnState {
             active_deferred_tools,
             all_tools,
             visible_tools,
+            tools_token_estimate,
             tool_deduplicator: ToolCallDeduplicator::new(),
             next_step_index: active_step.map_or(0, |step| {
                 if step.completed {
@@ -269,6 +276,13 @@ impl TurnState {
         ToolSnapshot::definitions(&self.visible_tools)
     }
 
+    /// 当前可见工具集的定义 token 估算,随可见集变更重算。
+    ///
+    /// 逐工具 schema 序列化是估算里最贵的部分;可见集在一个 step 内不变。
+    pub(crate) fn tools_token_estimate(&self) -> usize {
+        self.tools_token_estimate
+    }
+
     pub(crate) fn active_deferred_tools(&self) -> &HashSet<String> {
         &self.active_deferred_tools
     }
@@ -282,6 +296,10 @@ impl TurnState {
         if changed {
             self.visible_tools =
                 provider_visible_tools(&self.all_tools, &self.active_deferred_tools);
+            self.tools_token_estimate =
+                astrcode_core::llm::token_estimate::estimate_tool_definition_tokens(
+                    &ToolSnapshot::definitions(&self.visible_tools),
+                );
         }
     }
 }

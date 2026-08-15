@@ -63,6 +63,12 @@ pub fn compact_threshold_tokens(effective_window: usize, threshold_percent: f32)
     ((effective_window as f64) * f64::from(threshold_percent) / 100.0).floor() as usize
 }
 
+/// 本地估算达到 compact 阈值的这一比例后,才调 provider count_tokens 精确判定。
+///
+/// 低于该水位时本地锚点估算足够安全:估算偏差只会推迟 auto compaction,
+/// 由 reactive compaction(ContextWindowExceeded 恢复)兜底。
+pub const PROVIDER_COUNT_GATE_RATIO: f64 = 0.9;
+
 /// 判断当前请求是否已经达到 compact 阈值。
 pub fn should_compact(snapshot: PromptTokenSnapshot) -> bool {
     snapshot.context_tokens >= snapshot.threshold_tokens

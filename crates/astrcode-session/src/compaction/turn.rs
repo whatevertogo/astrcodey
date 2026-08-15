@@ -2,7 +2,10 @@
 
 use std::sync::Arc;
 
-use astrcode_context::{ContextAssembler, ContextPrepareInput, ContextSnapshot};
+use astrcode_context::{
+    ContextAssembler, ContextPrepareInput, ContextSnapshot,
+    token_budget::{PROVIDER_COUNT_GATE_RATIO, compact_threshold_tokens},
+};
 use astrcode_core::{
     compaction::CompactStrategy,
     llm::{LlmMessage, LlmProvider},
@@ -50,24 +53,45 @@ pub(crate) async fn plan_auto_compaction(
     host: &CompactionHost<'_>,
     snapshot: &ContextSnapshot,
     tools: &[ToolDefinition],
+    tools_tokens: usize,
 ) -> Option<CompactionPlan> {
-    let provider_input_tokens = try_provider_input_tokens(
-        host.session,
-        host.llm,
-        snapshot.request_messages(snapshot.messages.clone()),
-        tools,
-        "compact_gate",
-    )
-    .await;
+    if !host.context_assembler.auto_compact_enabled() {
+        return None;
+    }
+    let model_limits = host.llm.model_limits();
+    // 本地锚点估算明显低于阈值时跳过 provider count_tokens:每 step 一次
+    // HTTP 调用太贵,估算偏差由 reactive compaction 兜底。gate 判定用
+    // snapshot 自估算,不物化请求 Vec。
+    let threshold_tokens = compact_threshold_tokens(
+        model_limits.max_input_tokens,
+        host.context_assembler.settings().compact_threshold_percent,
+    );
+    let gate_floor = (threshold_tokens as f64 * PROVIDER_COUNT_GATE_RATIO) as usize;
+    let provider_input_tokens = if snapshot
+        .estimate_own_input_tokens(tools_tokens, model_limits.max_input_tokens)
+        >= gate_floor
+    {
+        let request_messages = snapshot.request_messages(snapshot.messages.clone());
+        try_provider_input_tokens(
+            host.session,
+            host.llm,
+            request_messages,
+            tools,
+            "compact_gate",
+        )
+        .await
+    } else {
+        None
+    };
     let threshold_met = host
         .context_assembler
         .should_auto_compact(&ContextPrepareInput {
-            messages: snapshot.messages.clone(),
+            messages: &snapshot.messages,
             system_prompt: Some(&snapshot.system_prompt),
-            model_limits: host.llm.model_limits(),
+            model_limits,
             provider_input_tokens,
         });
-    if !host.context_assembler.auto_compact_enabled() || !threshold_met {
+    if !threshold_met {
         return None;
     }
 
@@ -109,7 +133,7 @@ pub(crate) async fn prepare_provider_history(
     let messages = host
         .context_assembler
         .prepare_messages(ContextPrepareInput {
-            messages,
+            messages: &messages,
             system_prompt: Some(&snapshot.system_prompt),
             model_limits: host.llm.model_limits(),
             provider_input_tokens: None,

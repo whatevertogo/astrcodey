@@ -257,12 +257,24 @@ impl SessionEventSink {
             .await
     }
 
-    pub fn publish_live(
-        &self,
-        journal: Arc<dyn SessionEventJournal>,
-        event: LiveEvent,
-    ) -> Result<(), SessionEventPublishError> {
-        self.lane(&event.session_id, journal)?.publish_live(event)
+    /// best-effort live 事件直发 observer,不进 lane。
+    ///
+    /// lane 在 durable commit 期间会 `await` 磁盘;live 事件入队会被写盘延迟
+    /// 阻塞(尤其流式 delta)。直发打破「live 与 in-flight durable 严格同序」
+    /// 的保证,保留的语义是:同一线程按序产生的事件按序到达(durable 发送方
+    /// 在发后续 live 前都会 await durable 提交)。需要与 durable 严格同序的
+    /// live 事件走 [`Self::publish_live_required`]。
+    pub fn publish_live(&self, event: LiveEvent) -> Result<(), SessionEventPublishError> {
+        {
+            let state = self.state.lock();
+            if state.closed || state.inactive_sessions.contains(&event.session_id) {
+                return Err(SessionEventPublishError::Closed);
+            }
+        }
+        let event = Event::from(event);
+        perf_snapshot::capture_event("session.emit_live", &event);
+        self.publication.publish(Arc::new(event));
+        Ok(())
     }
 
     pub async fn publish_live_required(
@@ -366,7 +378,6 @@ enum DurableCommit {
 
 struct SessionEventLane {
     commands: mpsc::Sender<PublishCommand>,
-    dropped_live: AtomicU64,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
@@ -380,7 +391,6 @@ impl SessionEventLane {
         let task = tokio::spawn(run_lane(session_id, journal, observer, receiver));
         Self {
             commands,
-            dropped_live: AtomicU64::new(0),
             task: Mutex::new(Some(task)),
         }
     }
@@ -406,19 +416,6 @@ impl SessionEventLane {
     ) -> Result<StoredEvent, SessionEventPublishError> {
         self.request(|reply| PublishCommand::Durable { kind, event, reply })
             .await
-    }
-
-    fn publish_live(&self, event: LiveEvent) -> Result<(), SessionEventPublishError> {
-        self.commands
-            .try_send(PublishCommand::Live(event))
-            .map_err(|error| match error {
-                mpsc::error::TrySendError::Full(_) => SessionEventPublishError::Full {
-                    // 累计值：`session.rs` 的幂次限频依赖"自 lane 启动以来丢弃总数"
-                    // 的单调递增语义，不要改成"本次丢弃数"。
-                    dropped: self.dropped_live.fetch_add(1, Ordering::Relaxed) + 1,
-                },
-                mpsc::error::TrySendError::Closed(_) => SessionEventPublishError::Closed,
-            })
     }
 
     async fn publish_live_required(
@@ -508,11 +505,20 @@ async fn run_lane(
                     }
                 }
 
+                let batch_len = events.len();
+                let commit_started = std::time::Instant::now();
                 let result = match kind {
                     DurableCommit::Append => journal.append_events(events).await,
                     DurableCommit::AppendAndSync => journal.append_events_and_sync(events).await,
                     DurableCommit::Create => unreachable!("create commits are handled above"),
                 };
+                tracing::debug!(
+                    target: "astrcode::perf",
+                    %session_id,
+                    batch_len,
+                    elapsed_ms = commit_started.elapsed().as_secs_f64() * 1000.0,
+                    "durable commit blocks the session event lane"
+                );
                 match result
                     .map_err(SessionEventPublishError::from)
                     .and_then(|stored_events| {
@@ -897,10 +903,10 @@ mod tests {
         });
         journal.append_started.acquire().await.unwrap().forget();
 
-        sink.publish_live(
-            Arc::clone(&journal_port),
-            LiveEvent::session(session_id.clone(), LiveEventPayload::AgentRunStarted),
-        )
+        sink.publish_live(LiveEvent::session(
+            session_id.clone(),
+            LiveEventPayload::AgentRunStarted,
+        ))
         .unwrap();
         let mut second = Box::pin(sink.append(
             Arc::clone(&journal_port),
@@ -921,8 +927,9 @@ mod tests {
             events_rx.recv().await.unwrap(),
             events_rx.recv().await.unwrap(),
         ];
-        assert_eq!(events[0].seq, Some(0));
-        assert!(matches!(events[1].payload, EventPayload::Live(_)));
+        // best-effort live 直发,不再排在 in-flight durable 之后。
+        assert!(matches!(events[0].payload, EventPayload::Live(_)));
+        assert_eq!(events[1].seq, Some(0));
         assert_eq!(events[2].seq, Some(1));
 
         journal.fail_next.store(true, Ordering::Release);
@@ -938,10 +945,10 @@ mod tests {
 
         journal.fail_next_sync.store(true, Ordering::Release);
         assert!(sink.release(journal.as_ref(), &session_id).await.is_err());
-        sink.publish_live(
-            Arc::clone(&journal_port),
-            LiveEvent::session(session_id.clone(), LiveEventPayload::AgentRunStarted),
-        )
+        sink.publish_live(LiveEvent::session(
+            session_id.clone(),
+            LiveEventPayload::AgentRunStarted,
+        ))
         .unwrap();
         assert!(matches!(
             events_rx.recv().await.unwrap().payload,
@@ -951,25 +958,27 @@ mod tests {
         sink.release(journal.as_ref(), &session_id).await.unwrap();
         assert_eq!(journal.sync_count.load(Ordering::Acquire), 2);
         assert!(matches!(
-            sink.publish_live(
-                Arc::clone(&journal_port),
-                LiveEvent::session(session_id.clone(), LiveEventPayload::AgentRunStarted),
-            ),
+            sink.publish_live(LiveEvent::session(
+                session_id.clone(),
+                LiveEventPayload::AgentRunStarted,
+            )),
             Err(SessionEventPublishError::Closed)
         ));
 
         sink.activate(&session_id).unwrap();
-        sink.publish_live(
-            journal_port,
-            LiveEvent::session(session_id.clone(), LiveEventPayload::AgentRunStarted),
-        )
+        sink.publish_live(LiveEvent::session(
+            session_id.clone(),
+            LiveEventPayload::AgentRunStarted,
+        ))
         .unwrap();
         assert!(matches!(
             events_rx.recv().await.unwrap().payload,
             EventPayload::Live(_)
         ));
         sink.shutdown().await;
-        assert_eq!(journal.sync_count.load(Ordering::Acquire), 3);
+        // publish_live 不再创建 lane:最后一个 release 已摘除 lane 并完成 sync,
+        // shutdown 时没有 lane 可停,sync 计数保持不变。
+        assert_eq!(journal.sync_count.load(Ordering::Acquire), 2);
         assert!(matches!(
             sink.activate(&session_id),
             Err(SessionEventPublishError::Closed)
@@ -1067,10 +1076,10 @@ mod tests {
         )
         .await
         .unwrap();
-        sink.publish_live(
-            Arc::clone(&journal_port),
-            LiveEvent::session(session_id.clone(), LiveEventPayload::AgentRunStarted),
-        )
+        sink.publish_live(LiveEvent::session(
+            session_id.clone(),
+            LiveEventPayload::AgentRunStarted,
+        ))
         .unwrap();
         sink.sync(Arc::clone(&journal_port), &session_id)
             .await
@@ -1102,13 +1111,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn required_live_events_wait_for_a_full_publisher_lane() {
-        let session_id = SessionId::new("required-live-session");
+    async fn best_effort_live_bypasses_the_lane_while_required_waits() {
+        let session_id = SessionId::new("live-bypass-session");
         let journal = Arc::new(ControlledJournal::new());
         let journal_port: Arc<dyn SessionEventJournal> = journal.clone();
         let (events_tx, mut events_rx) = mpsc::unbounded_channel();
         let sink = Arc::new(SessionEventSink::new(ChannelObserver::new(events_tx)));
 
+        // lane 被一个 gated durable commit 占住。
         let commit_sink = Arc::clone(&sink);
         let commit_journal = Arc::clone(&journal_port);
         let commit_session_id = session_id.clone();
@@ -1122,25 +1132,24 @@ mod tests {
         });
         journal.append_started.acquire().await.unwrap().forget();
 
-        for _ in 0..EVENT_PUBLISH_CAPACITY {
-            sink.publish_live(
-                Arc::clone(&journal_port),
-                LiveEvent::session(session_id.clone(), LiveEventPayload::AgentRunStarted),
-            )
-            .unwrap();
-        }
+        // best-effort live 直发 observer,不被 in-flight durable 的写盘阻塞。
+        sink.publish_live(LiveEvent::session(
+            session_id.clone(),
+            LiveEventPayload::AgentRunStarted,
+        ))
+        .unwrap();
         assert!(matches!(
-            sink.publish_live(
-                Arc::clone(&journal_port),
-                LiveEvent::session(session_id.clone(), LiveEventPayload::AgentRunStarted),
-            ),
-            Err(SessionEventPublishError::Full { .. })
+            events_rx.recv().await.unwrap().payload,
+            EventPayload::Live(LiveEventPayload::AgentRunStarted)
         ));
+        assert!(events_rx.try_recv().is_err());
 
+        // required live 仍走 lane:提交在 in-flight durable 之后排队,
+        // 在 durable commit 完成前不会被 observer 看到。
         let required_sink = Arc::clone(&sink);
         let required_journal = Arc::clone(&journal_port);
         let required_session_id = session_id.clone();
-        let mut required = tokio::spawn(async move {
+        let required = tokio::spawn(async move {
             required_sink
                 .publish_live_required(
                     required_journal,
@@ -1159,29 +1168,21 @@ mod tests {
                 )
                 .await
         });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(25), &mut required)
-                .await
-                .is_err()
-        );
+        required.await.unwrap().unwrap();
+        // durable commit 未放行,lane 停在写盘上:required live 已入队但不可见。
+        assert!(events_rx.try_recv().is_err());
 
         journal.append_release.add_permits(1);
         commit.await.unwrap().unwrap();
-        required.await.unwrap().unwrap();
         sink.shutdown().await;
 
-        let mut saw_required = false;
-        while let Ok(event) = events_rx.try_recv() {
-            if matches!(
-                event.payload,
-                EventPayload::Live(LiveEventPayload::CustomEvent(CustomEventData {
-                    ref event_type,
-                    ..
-                })) if event_type == "pending"
-            ) {
-                saw_required = true;
-            }
-        }
-        assert!(saw_required);
+        assert_eq!(events_rx.recv().await.unwrap().seq, Some(0));
+        assert!(matches!(
+            events_rx.recv().await.unwrap().payload,
+            EventPayload::Live(LiveEventPayload::CustomEvent(CustomEventData {
+                ref event_type,
+                ..
+            })) if event_type == "pending"
+        ));
     }
 }

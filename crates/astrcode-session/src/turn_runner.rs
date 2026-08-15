@@ -315,9 +315,11 @@ impl TurnLoop {
             .await?;
 
         let visible_tools = state.visible_tools();
-        let prepared = match self
-            .prepare_stage(extension_runner, state, &visible_tools, publisher)
-            .await
+        let prepared = match timed_stage(
+            "prepare",
+            self.prepare_stage(extension_runner, state, &visible_tools, publisher),
+        )
+        .await
         {
             Ok(prepared) => prepared,
             Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
@@ -338,15 +340,17 @@ impl TurnLoop {
             acknowledgements: prepared.acknowledgements.clone(),
         };
         let dedup_for_early = state.tool_deduplicator_mut();
-        let outcome = match self
-            .llm_stage(
+        let outcome = match timed_stage(
+            "llm",
+            self.llm_stage(
                 prepared,
                 &visible_tools,
                 publisher,
                 Some(dedup_for_early),
                 visible_tools.clone(),
-            )
-            .await
+            ),
+        )
+        .await
         {
             Ok(outcome) => outcome,
             Err(TurnError::Llm(LlmError::ContextWindowExceeded { .. })) => {
@@ -364,11 +368,18 @@ impl TurnLoop {
         };
         match outcome {
             StreamOutcome::Complete { .. } => {
-                self.complete_stage(&hooks, state, outcome, user_text, request)
-                    .await
+                timed_stage(
+                    "complete",
+                    self.complete_stage(&hooks, state, outcome, user_text, request),
+                )
+                .await
             },
             StreamOutcome::ToolCalls { .. } => {
-                self.tool_calls_stage(&hooks, state, outcome, request).await
+                timed_stage(
+                    "tool_calls",
+                    self.tool_calls_stage(&hooks, state, outcome, request),
+                )
+                .await
             },
         }
     }
@@ -536,7 +547,9 @@ impl TurnLoop {
         let model = publisher.snapshot_model().await?;
         let snapshot = context_snapshot(&model);
         let llm = Arc::clone(host.llm);
-        let compaction_plan = plan_auto_compaction(&host, &snapshot, visible_tools).await;
+        let tools_tokens = state.tools_token_estimate();
+        let compaction_plan =
+            plan_auto_compaction(&host, &snapshot, visible_tools, tools_tokens).await;
 
         let PreparedProviderHistory { snapshot, messages } = prepare_provider_history(
             &host,
@@ -562,7 +575,7 @@ impl TurnLoop {
         let token_snapshot = PromptTokenSnapshot {
             context_tokens: snapshot.estimate_input_tokens(
                 &messages,
-                visible_tools,
+                tools_tokens,
                 model_context_window,
             ),
             threshold_tokens: compact_threshold_tokens(
@@ -1030,6 +1043,19 @@ fn extract_last_assistant_text(messages: &[LlmMessage]) -> Option<String> {
         .rev()
         .find(|m| m.role == LlmRole::Assistant)
         .map(|message| message.joined_text(""))
+}
+
+/// turn 各阶段耗时采样,供性能回归排查;`astrcode::perf` target,默认 debug 级不开启。
+async fn timed_stage<T>(stage: &'static str, future: impl std::future::Future<Output = T>) -> T {
+    let started = std::time::Instant::now();
+    let output = future.await;
+    tracing::debug!(
+        target: "astrcode::perf",
+        stage,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "turn stage timing"
+    );
+    output
 }
 
 fn extract_text_from_messages(messages: &[LlmMessage]) -> String {

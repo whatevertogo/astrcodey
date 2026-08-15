@@ -14,7 +14,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct ContextPrepareInput<'a> {
     /// 不包含 system prompt 的可见对话消息。
-    pub messages: Vec<LlmMessage>,
+    pub messages: &'a [LlmMessage],
     /// 已组装好的 system prompt，仅参与 token 估算。
     pub system_prompt: Option<&'a str>,
     pub model_limits: ModelLimits,
@@ -79,7 +79,7 @@ impl ContextAssembler for LlmContextAssembler {
     }
 
     fn prepare_messages(&self, input: ContextPrepareInput<'_>) -> PreparedContext {
-        let messages = provider_visible_messages(input.messages);
+        let messages = provider_visible_messages(input.messages.to_vec());
         let token_snapshot = self.snapshot(
             &messages,
             input.system_prompt,
@@ -121,12 +121,13 @@ mod tests {
     #[test]
     fn prepares_provider_messages_and_uses_current_token_source() {
         let assembler = LlmContextAssembler::new(ContextSettings::default());
+        let messages = [
+            LlmMessage::system("stale"),
+            LlmMessage::user("hello"),
+            LlmMessage::assistant("world"),
+        ];
         let input = ContextPrepareInput {
-            messages: vec![
-                LlmMessage::system("stale"),
-                LlmMessage::user("hello"),
-                LlmMessage::assistant("world"),
-            ],
+            messages: &messages,
             system_prompt: Some("current system"),
             model_limits: ModelLimits {
                 max_input_tokens: 10_000,
@@ -155,7 +156,7 @@ mod tests {
             LlmMessage::user("current"),
         ];
         let input = |max_input_tokens| ContextPrepareInput {
-            messages: messages.clone(),
+            messages: &messages,
             system_prompt: None,
             model_limits: ModelLimits {
                 max_input_tokens,

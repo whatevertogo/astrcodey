@@ -163,6 +163,7 @@ caller cancellation;handler 返回时 `drop_guard` 结束 call(token 不被外�
 | F-4 | High | 测试 helper 以 Direct 起源注册 bundled 扩展(如 astrcode-mode),随后任何 config update 的 source reconcile 把同 id 作为 Start 候选,`accepted` 含 Direct 实例 → 自冲突 → HTTP 500 `extension_candidate_failed`;且 reload/publication 会用 config 重建的 provider 覆盖测试注入的 LLM | `prepare_source_generation` accepted 集含 `ExtensionOrigin::Direct`(runner/mod.rs:1062-1066);commit_with 对 Direct 恒 retained;`ConfigManager::publish_to` 用 `build_provider_from_settings` 重建 provider(config_manager.rs:443-456)。失败自 5a0ece23 后存在(远端 Test job 在 conformance 步失败,从未执行 workspace tests,故 CI 未暴露) | http_routes helper 改为:测试自定义扩展走 façade(Direct);bundled 扩展经 `prepare_extension_generation` + `commit_with` 以 Source 起源加载,publication 回调用**测试注入的 LLM** 发布 matching epoch(不覆盖 provider);新增 `test_support::bind_extension_host_router_for_test` 复用生产接线 | Verified |
 | F-5 | Low | `InteractiveCommandProbeExtension` 声明 `argument_completions(true)` 但 handler 未 override `supports_argument_completions()` → `InvalidRegistration` | registrar.rs:540 校验;handler/tests.rs:438-455 | fixture 补 `supports_argument_completions() -> true`(handler 本就实现 `complete`) | Verified |
 | F-6 | Info | `check_health`/`ExtensionHealthReport` 与 `bind_startup_event_channel`/`startup_event_tx` 在仓内无 production 调用方,但 README.md:466 将其宣传为宿主 API | diagnostics.rs:51-95;runner/mod.rs:1354 | 保留:属于对外 host SPI 而非测试专用接口;startup 事件通道在 production 未接线意味着 startup 期进程级事件当前不送达——记录为已知产品缺口而非本轮删除对象 | Deferred |
+| F-7 | High | 磁盘上存在任一旧格式/损坏 session 日志时,`list_session_summaries`/`list_all_session_summaries` 整体失败 → `/api/sessions` 恒 500 → 桌面端 `start_server` 健康检查永不通过,用户看到误导性的"关闭残留进程"提示,产品完全不可用 | 用户机器 11/11 个旧格式日志全部触发 `CorruptLog: missing field source`(严格解码是本 PR 有意决策,不回退);`server_ready` 要求 2xx(commands.rs:84-91);既有测试 `synced_append_stays_hidden_and_sticky_until_exact_retry_or_reopen` 锁定 Io/durability 错误必须传播 | 枚举边界按错误类型隔离:仅 `CorruptLog`/`Serialization`(解码失败)跳过该会话并 warn;`Io`/`DurabilityUncertain` 等继续传播(跳过会把未确认写入伪装成会话不存在);直接打开该会话仍严格失败 | Verified |
 
 ## 6. 实施记录
 
@@ -214,6 +215,8 @@ caller cancellation;handler 返回时 `drop_guard` 结束 call(token 不被外�
 | `CARGO_INCREMENTAL=0 cargo test --workspace --all-features --no-fail-fast` | 全部 `test result: ok`,无 FAILED 行 | 全仓行为测试 | 含 S5R E2E 18/18、SDK、session/server/storage 等 |
 | `RUSTUP_TOOLCHAIN=1.88.0 cargo check --workspace --all-targets --all-features` + guest check | 通过(workspace 3m04s;guest 2.96s) | MSRV | |
 | S5R conformance(`s5r-conformance` + release guest) | 通过:initialize/activate、unary、streaming、nested invoke、cancellation、unknown error、clean shutdown、malformed/oversized frame 拒绝 8 项全过 | S5R wire 契约 | 真实行为输出,非 0 tests(日志中两条 "s5r guest failed" 是负例场景的期望拒绝) |
+| `cargo test -p astrcode-storage --all-features` + clippy | 30/30 通过,clippy 干净 | 含新回归 `session_listing_skips_unreadable_event_logs` 与既有 durability 传播测试 | F-7 |
+| 真实数据手动验收(F-7) | 新 sidecar 对用户真实 `~/.astrcode` 数据:`/api/sessions` 从 500 → 200 `{"sessions":[]}`,旧日志逐条 warn 跳过 | 桌面端启动健康检查 | 临时副本运行,避免 tauri dev watcher 覆写竞态 |
 
 ## 9. 远端 CI
 

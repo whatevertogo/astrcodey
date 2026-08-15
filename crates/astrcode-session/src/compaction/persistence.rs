@@ -27,7 +27,7 @@ pub(crate) async fn persist_compaction(
             None,
             transcript_rewritten_payload(
                 compaction,
-                retained_messages,
+                &retained_messages,
                 snapshot.source_seq,
                 fingerprint,
                 strategy,

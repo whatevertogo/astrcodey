@@ -11,7 +11,7 @@ use astrcode_core::{
 };
 use tempfile::tempdir;
 
-use super::{FileSystemSessionRepository, event_consumer_state_path};
+use super::{FileSystemSessionRepository, consumer_state::event_consumer_state_path};
 use crate::{
     EventConsumerCheckpointOutcome, EventConsumerCheckpointReset, EventConsumerFailureOutcome,
     EventReader, SessionEventJournal, SessionPathResolver, SessionReader, SessionStore,
@@ -605,6 +605,52 @@ async fn all_session_summaries_include_nested_lineage_while_catalog_stays_root_o
         invalid_repo.list_all_sessions().await,
         Err(StorageError::Io(_))
     ));
+}
+
+#[tokio::test]
+async fn session_listing_skips_unreadable_event_logs() {
+    let dir = tempdir().unwrap();
+    let good_id = SessionId::new("summary-good");
+    let corrupt_id = SessionId::new("summary-corrupt");
+    let repo = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    repo.create_session(started_event(&good_id)).await.unwrap();
+    repo.append_event(user_event(&good_id, "visible"))
+        .await
+        .unwrap();
+    repo.sync_durable_events(&good_id).await.unwrap();
+    repo.create_session(started_event(&corrupt_id))
+        .await
+        .unwrap();
+    repo.sync_durable_events(&corrupt_id).await.unwrap();
+
+    let corrupt_dir = repo.find_session_dir(&corrupt_id).await.unwrap();
+    drop(repo);
+
+    // 模拟旧版本写入的日志：合法 JSON，但缺当前严格解码要求的字段。
+    std::fs::write(
+        corrupt_dir.join(format!("session-{corrupt_id}.jsonl")),
+        "{\"seq\":0,\"id\":\"e01e3057-faa3-4cc0-9a05-fddbd136b8e9\"}\n",
+    )
+    .unwrap();
+
+    let reopened = FileSystemSessionRepository::with_projects_base(dir.path().into());
+    let catalog = reopened.list_session_summaries().await.unwrap();
+    assert_eq!(
+        catalog
+            .iter()
+            .map(|summary| &summary.session_id)
+            .collect::<Vec<_>>(),
+        vec![&good_id]
+    );
+    let all = reopened.list_all_session_summaries().await.unwrap();
+    assert_eq!(
+        all.iter()
+            .map(|summary| &summary.session_id)
+            .collect::<Vec<_>>(),
+        vec![&good_id]
+    );
+    // 直接打开该会话仍按严格解码失败，不被列表的跳过掩盖。
+    assert!(reopened.session_read_model(&corrupt_id).await.is_err());
 }
 
 #[tokio::test]

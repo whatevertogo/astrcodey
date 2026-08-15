@@ -21,9 +21,6 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::StorageError;
 
-/// `(first_event, last_event)` from a single log scan.
-type EventLogEnds = (Option<StoredEvent>, Option<StoredEvent>);
-
 async fn run_blocking_io<F, T>(f: F) -> Result<T, StorageError>
 where
     F: FnOnce() -> Result<T, StorageError> + Send + 'static,
@@ -181,8 +178,9 @@ fn scan_events_at_path(
     let mut reader = BufReader::new(file.take(max_bytes.unwrap_or(u64::MAX)));
     let mut validator = EventStreamValidator::default();
     let mut line_number = 0usize;
+    let mut line = String::new();
     loop {
-        let mut line = String::new();
+        line.clear();
         let bytes_read = reader.read_line(&mut line).map_err(|e| {
             StorageError::Io(std::io::Error::new(e.kind(), enhance_read_error(path, e)))
         })?;
@@ -228,25 +226,6 @@ fn replay_events_at_path(
         Ok(!max_events.is_some_and(|limit| events.len() >= limit))
     })?;
     Ok(events)
-}
-
-fn read_first_and_last_at_path(
-    path: &Path,
-    max_bytes: Option<u64>,
-) -> Result<EventLogEnds, StorageError> {
-    if !path.exists() {
-        return Ok((None, None));
-    }
-    let mut first: Option<StoredEvent> = None;
-    let mut last: Option<StoredEvent> = None;
-    scan_events_at_path(path, max_bytes, |event| {
-        if first.is_none() {
-            first = Some(event.clone());
-        }
-        last = Some(event);
-        Ok(true)
-    })?;
-    Ok((first, last))
 }
 
 fn read_summary_at_path(
@@ -565,7 +544,7 @@ fn create_at_path(
     ))
 }
 
-fn open_at_path(path: PathBuf) -> Result<WriterState, StorageError> {
+fn open_at_path(path: PathBuf) -> Result<(WriterState, Vec<StoredEvent>), StorageError> {
     if !path.exists() {
         return Err(std::io::Error::new(
             ErrorKind::NotFound,
@@ -575,14 +554,18 @@ fn open_at_path(path: PathBuf) -> Result<WriterState, StorageError> {
     }
     recover_incomplete_tail(&path)?;
     let confirmed_len = sync_existing_log(&path)?;
-    let (first, last) = read_first_and_last_at_path(&path, Some(confirmed_len))?;
-    let first = first
-        .as_ref()
+    // 冷打开只扫一遍文件:校验事件流的同时把事件交给调用方做 projection 恢复,
+    // 避免 open 与 replay 各自全量读一次。
+    let events = replay_events_at_path(&path, Some(confirmed_len), None, None)?;
+    let first = events
+        .first()
         .ok_or_else(|| StorageError::CorruptLog(format!("{} is empty", path.display())))?;
-    let next_seq = last
+    let next_seq = events
+        .last()
         .and_then(|event| event.seq.checked_add(1))
         .ok_or_else(|| StorageError::CorruptLog("session event sequence overflow".into()))?;
-    WriterState::open_append(path, first.session_id.clone(), next_seq)
+    let state = WriterState::open_append(path, first.session_id.clone(), next_seq)?;
+    Ok((state, events))
 }
 
 /// A previous process may have observed an ambiguous fsync result. Existing records are not
@@ -725,10 +708,12 @@ impl EventLog {
         Ok((Self::from_writer_state(state), stored_event))
     }
 
-    /// Open an existing event log.
-    pub(crate) async fn open(path: PathBuf) -> Result<Self, StorageError> {
-        let state = run_blocking_io(move || open_at_path(path)).await?;
-        Ok(Self::from_writer_state(state))
+    /// Open an existing event log, returning the events validated during the scan.
+    ///
+    /// 调用方(冷打开的 projection 恢复)直接使用这批事件,不再二次读盘。
+    pub(crate) async fn open(path: PathBuf) -> Result<(Self, Vec<StoredEvent>), StorageError> {
+        let (state, events) = run_blocking_io(move || open_at_path(path)).await?;
+        Ok((Self::from_writer_state(state), events))
     }
 
     pub(crate) async fn replay_read_only(path: PathBuf) -> Result<Vec<StoredEvent>, StorageError> {
@@ -845,8 +830,8 @@ impl EventLog {
     }
 
     /// Count total events (lock-free read of the writer thread's seq counter).
-    pub(crate) async fn count(&self) -> Result<u64, StorageError> {
-        Ok(self.next_seq.load(Ordering::Acquire))
+    pub(crate) fn count(&self) -> u64 {
+        self.next_seq.load(Ordering::Acquire)
     }
 
     /// Force-fsync the event log if there are pending writes.

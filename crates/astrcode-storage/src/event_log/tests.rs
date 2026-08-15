@@ -27,7 +27,8 @@ async fn event_log_round_trip_reopen_and_append_guards_share_one_sequence_contra
     assert_eq!(log.replay_all().await.unwrap().len(), 2);
     drop(log);
 
-    let log = EventLog::open(path.clone()).await.unwrap();
+    let (log, events) = EventLog::open(path.clone()).await.unwrap();
+    assert_eq!(events.len(), 2);
     let assistant = log
         .append(astrcode_core::event::DurableEvent::session(
             session_id.clone(),
@@ -48,7 +49,7 @@ async fn event_log_round_trip_reopen_and_append_guards_share_one_sequence_contra
     assert!(matches!(wrong_session, StorageError::InvalidEvent(_)));
     let duplicate_start = log.append(started_event(&session_id)).await.unwrap_err();
     assert!(matches!(duplicate_start, StorageError::InvalidEvent(_)));
-    assert_eq!(log.count().await.unwrap(), 3);
+    assert_eq!(log.count(), 3);
 }
 
 #[tokio::test]
@@ -69,7 +70,7 @@ async fn event_log_batch_is_atomic_and_assigns_consecutive_sequences() {
         .await
         .unwrap_err();
     assert!(matches!(error, StorageError::InvalidEvent(_)));
-    assert_eq!(log.count().await.unwrap(), 1);
+    assert_eq!(log.count(), 1);
     assert_eq!(log.replay_all().await.unwrap().len(), 1);
 
     let stored = log
