@@ -126,42 +126,44 @@ fn prepare_session(event_count: u64) -> (tempfile::TempDir, SessionId, u64) {
 
 fn bench_cold_open(c: &mut Criterion) {
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let mut group = c.benchmark_group("cold_open_1000_events");
+    let mut group = c.benchmark_group("cold_open");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(8));
 
-    let (dir, session_id, last_seq) = prepare_session(1000);
-    let base = dir.path().to_path_buf();
-    group.bench_function("without_snapshot", |b| {
-        b.to_async(&runtime).iter_batched(
-            || filesystem_session_repository(base.clone()),
-            |repo| {
-                let session_id = session_id.clone();
-                async move {
-                    repo.session_read_model(&session_id).await.unwrap();
-                }
-            },
-            BatchSize::SmallInput,
-        );
-    });
+    for event_count in [1_000u64, 10_000] {
+        let (dir, session_id, last_seq) = prepare_session(event_count);
+        let base = dir.path().to_path_buf();
+        group.bench_function(format!("{event_count}/without_snapshot"), |b| {
+            b.to_async(&runtime).iter_batched(
+                || filesystem_session_repository(base.clone()),
+                |repo| {
+                    let session_id = session_id.clone();
+                    async move {
+                        repo.session_read_model(&session_id).await.unwrap();
+                    }
+                },
+                BatchSize::SmallInput,
+            );
+        });
 
-    let repo = filesystem_session_repository(base.clone());
-    runtime
-        .block_on(repo.checkpoint(&session_id, &last_seq.to_string().into()))
-        .unwrap();
-    drop(repo);
-    group.bench_function("with_snapshot", |b| {
-        b.to_async(&runtime).iter_batched(
-            || filesystem_session_repository(base.clone()),
-            |repo| {
-                let session_id = session_id.clone();
-                async move {
-                    repo.session_read_model(&session_id).await.unwrap();
-                }
-            },
-            BatchSize::SmallInput,
-        );
-    });
+        let repo = filesystem_session_repository(base.clone());
+        runtime
+            .block_on(repo.checkpoint(&session_id, &last_seq.to_string().into()))
+            .unwrap();
+        drop(repo);
+        group.bench_function(format!("{event_count}/with_snapshot"), |b| {
+            b.to_async(&runtime).iter_batched(
+                || filesystem_session_repository(base.clone()),
+                |repo| {
+                    let session_id = session_id.clone();
+                    async move {
+                        repo.session_read_model(&session_id).await.unwrap();
+                    }
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
     group.finish();
 }
 
