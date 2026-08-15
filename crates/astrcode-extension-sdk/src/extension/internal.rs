@@ -260,7 +260,7 @@ pub fn replace_post_tool_result(context: &mut RuntimePostToolUseContext, content
 pub fn runtime_provider_context(
     call: RuntimeHookCallContext,
     request_id: ProviderRequestId,
-    messages: Vec<LlmMessage>,
+    messages: Vec<std::sync::Arc<LlmMessage>>,
 ) -> RuntimeProviderContext {
     HookInput::new(call, ProviderPayload::new(request_id, messages))
 }

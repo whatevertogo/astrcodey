@@ -2619,14 +2619,28 @@ mod tests {
         {
             let captured = main_provider.requests.lock().expect("main requests");
             assert_eq!(captured.len(), 1);
-            assert_eq!(captured[0].messages, messages);
+            assert_eq!(
+                captured[0]
+                    .messages
+                    .iter()
+                    .map(|m| m.as_ref())
+                    .collect::<Vec<_>>(),
+                messages.iter().collect::<Vec<_>>()
+            );
             assert_eq!(captured[0].max_output_tokens, Some(321));
             assert!(captured[0].tools.is_empty());
         }
         {
             let captured = small_provider.requests.lock().expect("small requests");
             assert_eq!(captured.len(), 1);
-            assert_eq!(captured[0].messages, messages);
+            assert_eq!(
+                captured[0]
+                    .messages
+                    .iter()
+                    .map(|m| m.as_ref())
+                    .collect::<Vec<_>>(),
+                messages.iter().collect::<Vec<_>>()
+            );
             assert_eq!(captured[0].max_output_tokens, None);
             assert!(captured[0].tools.is_empty());
         }

@@ -423,13 +423,13 @@ pub type RuntimePostToolUseContext = HookInput<PostToolUsePayload>;
 #[derive(Clone, Debug)]
 pub struct ProviderPayload {
     request_id: ProviderRequestId,
-    messages: Arc<[crate::llm::LlmMessage]>,
+    messages: Arc<[Arc<crate::llm::LlmMessage>]>,
 }
 
 impl ProviderPayload {
     pub(crate) fn new(
         request_id: ProviderRequestId,
-        messages: Vec<crate::llm::LlmMessage>,
+        messages: Vec<Arc<crate::llm::LlmMessage>>,
     ) -> Self {
         Self {
             request_id,
@@ -441,17 +441,28 @@ impl ProviderPayload {
         &self.request_id
     }
 
-    pub fn messages(&self) -> &[crate::llm::LlmMessage] {
+    /// 共享的消息存储：零拷贝只读访问。
+    pub fn shared_messages(&self) -> &[Arc<crate::llm::LlmMessage>] {
         &self.messages
     }
 
+    #[deprecated(
+        note = "按值复制全量消息；改用 `shared_messages()` 零拷贝访问。本访问器保留一个版本后移除"
+    )]
+    pub fn messages(&self) -> Vec<crate::llm::LlmMessage> {
+        self.shared_messages()
+            .iter()
+            .map(|message| (**message).clone())
+            .collect()
+    }
+
     pub(crate) fn replace_messages(&mut self, messages: Vec<crate::llm::LlmMessage>) {
-        self.messages = messages.into();
+        self.messages = messages.into_iter().map(Arc::new).collect();
     }
 
     pub(crate) fn append_messages(&mut self, messages: Vec<crate::llm::LlmMessage>) {
         let mut merged = self.messages.to_vec();
-        merged.extend(messages);
+        merged.extend(messages.into_iter().map(Arc::new));
         self.messages = merged.into();
     }
 }

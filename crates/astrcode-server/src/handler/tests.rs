@@ -317,7 +317,7 @@ struct RecordingLifecycleExtension {
 
 #[derive(Clone, Default)]
 struct CapturingLlm {
-    messages: Arc<Mutex<Vec<LlmMessage>>>,
+    messages: Arc<Mutex<Vec<Arc<LlmMessage>>>>,
 }
 
 struct StaticCommandExtension {

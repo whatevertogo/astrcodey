@@ -274,8 +274,6 @@ pub(crate) async fn try_provider_input_tokens(
         stage,
         "provider count_tokens call"
     );
-    // `LlmProvider::count_input_tokens` 按值持有消息,compaction 路径一次性 deref clone。
-    let messages: Vec<LlmMessage> = messages.iter().map(|message| (**message).clone()).collect();
     match llm.count_input_tokens(messages, tools.to_vec()).await {
         Ok(count) => match usize::try_from(count.input_tokens) {
             Ok(tokens) => Some(tokens),
@@ -415,7 +413,8 @@ async fn request_compact_summary(
 ) -> Result<String, CompactError> {
     let rx = llm
         .generate_request(
-            LlmRequest::new(messages, vec![]).with_max_output_tokens(max_output_tokens),
+            LlmRequest::new(messages.into_iter().map(Arc::new).collect(), vec![])
+                .with_max_output_tokens(max_output_tokens),
         )
         .await
         .map_err(CompactError::Llm)?;

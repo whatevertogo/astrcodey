@@ -1,5 +1,7 @@
 //! Turn 基础设施 — 事件通道、共享上下文、错误类型。
 
+use std::sync::Arc;
+
 use astrcode_core::{
     config::ModelSelection,
     llm::{LlmMessage, LlmProviderBindings},
@@ -113,11 +115,11 @@ impl SharedTurnContext {
         }
     }
 
-    /// 构造 provider hook 的 ctx，附带本次 LLM 请求的 messages。
+    /// 构造 provider hook 的 ctx，附带本次 LLM 请求的 messages（共享 `Arc`，零拷贝）。
     pub(crate) fn provider_ctx(
         &self,
         request_id: astrcode_extension_sdk::extension::ProviderRequestId,
-        messages: Vec<LlmMessage>,
+        messages: Vec<Arc<LlmMessage>>,
     ) -> RuntimeProviderContext {
         runtime_provider_context(self.hook_call_context(), request_id, messages)
     }

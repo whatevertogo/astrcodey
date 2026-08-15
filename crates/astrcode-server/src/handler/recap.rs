@@ -58,10 +58,7 @@ impl CommandHandler {
         // 单次调用，无 tools
         let llm = self.runtime.runtime_services().llm();
         let rx = llm
-            .generate_request(astrcode_core::llm::LlmRequest::new(
-                messages.iter().map(|message| (**message).clone()).collect(),
-                vec![],
-            ))
+            .generate_request(astrcode_core::llm::LlmRequest::new(messages, vec![]))
             .await
             .map_err(HandlerError::Llm)?;
 

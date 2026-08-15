@@ -13,9 +13,16 @@ const REQUEST_PADDING_NUMERATOR: usize = 4;
 const REQUEST_PADDING_DENOMINATOR: usize = 3;
 
 /// 估算 provider 请求的输入 token，并加入保守 padding。
-pub fn estimate_request_tokens(messages: &[LlmMessage], system_prompt: Option<&str>) -> usize {
+pub fn estimate_request_tokens<M: std::borrow::Borrow<LlmMessage>>(
+    messages: &[M],
+    system_prompt: Option<&str>,
+) -> usize {
     let system_tokens = system_prompt.map_or(0, estimate_text_tokens);
-    let raw_total = system_tokens + messages.iter().map(estimate_message_tokens).sum::<usize>();
+    let raw_total = system_tokens
+        + messages
+            .iter()
+            .map(|message| estimate_message_tokens(message.borrow()))
+            .sum::<usize>();
     apply_request_padding(raw_total)
 }
 

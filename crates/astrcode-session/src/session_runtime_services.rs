@@ -112,7 +112,7 @@ impl LlmProvider for LiveLlmProvider {
 
     async fn count_input_tokens(
         &self,
-        messages: Vec<LlmMessage>,
+        messages: Vec<Arc<LlmMessage>>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         self.current().count_input_tokens(messages, tools).await

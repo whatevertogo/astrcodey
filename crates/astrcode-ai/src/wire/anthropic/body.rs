@@ -2,6 +2,8 @@
 //! cache breakpoints, and count-token body shape. SSE event handling lives in [`super::parser`]
 //! and byte-stream transport in [`super::transport`].
 
+use std::sync::Arc;
+
 use astrcode_core::{
     llm::{
         LlmContent, LlmMessage, LlmRole,
@@ -46,7 +48,7 @@ pub(crate) fn count_tokens_endpoint(base_url: &str) -> String {
 
 pub(crate) fn build_request_body(
     config: AnthropicRequestConfig<'_>,
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
     tools: &[ToolDefinition],
     stream: bool,
 ) -> Result<serde_json::Value, astrcode_core::llm::LlmError> {
@@ -118,7 +120,7 @@ fn apply_anthropic_thinking(
 
 pub(crate) fn build_count_tokens_body(
     config: AnthropicRequestConfig<'_>,
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
     tools: &[ToolDefinition],
 ) -> serde_json::Value {
     build_request_without_thinking(config, messages, tools)
@@ -127,7 +129,7 @@ pub(crate) fn build_count_tokens_body(
 /// Build request body without any thinking fields (used for count-tokens).
 fn build_request_without_thinking(
     config: AnthropicRequestConfig<'_>,
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
     tools: &[ToolDefinition],
 ) -> serde_json::Value {
     let (system, api_messages) = convert_messages(messages);
@@ -145,7 +147,7 @@ fn build_request_without_thinking(
 }
 
 fn convert_messages(
-    messages: &[LlmMessage],
+    messages: &[Arc<LlmMessage>],
 ) -> (Option<serde_json::Value>, Vec<serde_json::Value>) {
     let mut system_blocks: Vec<serde_json::Value> = Vec::new();
     let mut api_messages: Vec<serde_json::Value> = Vec::new();
@@ -379,7 +381,7 @@ mod tests {
 
     #[test]
     fn user_message_converts_text() {
-        let msg = LlmMessage::user("hello");
+        let msg = Arc::new(LlmMessage::user("hello"));
         let json = AnthropicMapper::map_user(&msg);
         assert_eq!(json["role"], "user");
         assert_eq!(json["content"][0]["type"], "text");
@@ -419,9 +421,9 @@ mod tests {
     #[test]
     fn tool_results_merge_into_same_user_message() {
         let messages = vec![
-            LlmMessage::assistant("I'll check"),
-            LlmMessage::tool("read", "call_1", "file content", false),
-            LlmMessage::tool("grep", "call_2", "match found", false),
+            Arc::new(LlmMessage::assistant("I'll check")),
+            Arc::new(LlmMessage::tool("read", "call_1", "file content", false)),
+            Arc::new(LlmMessage::tool("grep", "call_2", "match found", false)),
         ];
         let (_system, api_messages) = convert_messages(&messages);
 
@@ -475,7 +477,10 @@ mod tests {
         };
         let body = build_count_tokens_body(
             config,
-            &[LlmMessage::system("s"), LlmMessage::user("hi")],
+            &[
+                Arc::new(LlmMessage::system("s")),
+                Arc::new(LlmMessage::user("hi")),
+            ],
             &tools,
         );
 
@@ -530,8 +535,8 @@ mod tests {
     #[test]
     fn convert_messages_extracts_system() {
         let messages = vec![
-            LlmMessage::system("You are helpful"),
-            LlmMessage::user("hello"),
+            Arc::new(LlmMessage::system("You are helpful")),
+            Arc::new(LlmMessage::user("hello")),
         ];
         let (system, api_messages) = convert_messages(&messages);
         let sys = system.expect("system should be present");

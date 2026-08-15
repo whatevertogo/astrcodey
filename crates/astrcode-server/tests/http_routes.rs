@@ -248,11 +248,11 @@ impl LlmProvider for SummaryLlm {
 }
 
 #[tokio::test]
-async fn http_routes_require_bearer_token() {
+async fn http_routes_do_not_require_auth_token() {
     let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    let (app, token) = router(Arc::clone(&runtime)).unwrap();
+    let (app, _token) = router(Arc::clone(&runtime)).unwrap();
 
-    let unauthorized = app
+    let no_auth = app
         .clone()
         .oneshot(
             Request::builder()
@@ -263,20 +263,7 @@ async fn http_routes_require_bearer_token() {
         )
         .await
         .unwrap();
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
-
-    let authorized = app
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/api/sessions")
-                .header("authorization", format!("Bearer {token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(authorized.status(), StatusCode::OK);
+    assert_eq!(no_auth.status(), StatusCode::OK);
 }
 
 #[tokio::test]
@@ -449,18 +436,19 @@ async fn extension_http_routes_allow_only_declared_public_routes() {
     assert_eq!(public.status(), StatusCode::CREATED);
 
     let protected_path = "/api/extensions/http-routes-test/protected-probe/8";
-    let unauthorized = app
+    let no_auth = app
         .clone()
         .oneshot(
             Request::builder()
                 .method(Method::POST)
                 .uri(protected_path)
-                .body(Body::from("{}"))
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"source":"authenticated"}"#))
                 .unwrap(),
         )
         .await
         .unwrap();
-    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    assert_eq!(no_auth.status(), StatusCode::CREATED);
 
     let authorized = app
         .clone()

@@ -307,7 +307,7 @@ impl LlmProvider for NoUsageCountingLlm {
 
     async fn count_input_tokens(
         &self,
-        _messages: Vec<LlmMessage>,
+        _messages: Vec<Arc<LlmMessage>>,
         _tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         Ok(ProviderInputTokenCount::provider_count(321))

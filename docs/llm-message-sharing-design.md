@@ -1,7 +1,24 @@
 # 模型历史零拷贝设计:LlmMessage 共享化(Phase 2.1 RFC)
 
-> 状态:PR-1 已实施(2026-08-16):projection/context/turn 内部共享化完成,
-> `LlmRequest`/SDK 边界的 PR-2 未动。验收基准在 `astrcode-context/benches/context_snapshot.rs`。
+> 状态:PR-1(projection/context/turn 内部共享化)与 PR-2(`LlmRequest`/provider trait/
+> SDK `ProviderContext` 边界)均已实施(2026-08-16)。验收基准在
+> `astrcode-context/benches/context_snapshot.rs`。
+
+## 实施记录(PR-2 收尾时补记)
+
+- **SDK 边界落地形态**:`ProviderPayload.messages` 改 `Arc<[Arc<LlmMessage>]>`;新增
+  `shared_messages()` 零拷贝访问器,原 `messages()` 改为按值 deep clone 并标
+  `#[deprecated]`(保留一个版本)。扩展输出(`ReplaceMessages`/`AppendMessages`)保持
+  owned,边界处包 `Arc`;s5r 传输序列化 `Vec<&LlmMessage>`,JSON 逐字节不变,未引入
+  serde `rc` feature。
+- **不变式封装评估(不做的理由)**:`SequencedLlmMessage.message` 保持 pub。改为私有字段
+  + 访问器会触及 22 个文件(含 10+ 个跨 crate 测试的构造/读取点),超过预设阈值;且读模型
+  对 crate 外只以 `&SessionReadModel` 暴露,外部无法对条目 `Arc::make_mut`,可变入口本就
+  收敛在 projection reducer 内。不变式继续由类型注释 + reducer 纪律维持。
+- **归一化可见性扫描不短路**:`has_provider_visible_content` 的 `trim()` 本来就是两侧
+  早退;O(字节) 只出现在全空白/巨前缀空白文本,而证明「trim 后为空」必须扫描,无法安全
+  短路。基准实测(2000 条 × 约 1.8KB 普通文本):可见性过滤约 7µs,`request_messages`
+  约 18µs,无优化空间;早期疑似瓶颈是基准数据用空格填充文本造成的假象。
 
 ## 问题
 

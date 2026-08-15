@@ -1,35 +1,12 @@
 //! HTTP 鉴权中间件、Bearer token 加载与 CORS 来源收集。
+//!
+//! 鉴权已停用（服务器不再校验 Authorization 头）；token 仍生成并写入
+//! `run.json` 以兼容现有客户端，`ASTRCODE_HTTP_TOKEN` 环境变量保留。
 
-use axum::{
-    extract::State,
-    http::{HeaderValue, StatusCode, header},
-    middleware::Next,
-    response::Response,
-};
+use axum::http::HeaderValue;
 use uuid::Uuid;
 
-use super::error_response;
-
 const ASTRCODE_HTTP_TOKEN_ENV: &str = "ASTRCODE_HTTP_TOKEN";
-
-pub(super) async fn auth_middleware(
-    State(expected_bearer): State<String>,
-    request: axum::extract::Request,
-    next: Next,
-) -> Response {
-    let auth = request
-        .headers()
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
-    match auth {
-        Some(v) if v == expected_bearer => next.run(request).await,
-        _ => error_response(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Invalid or missing auth token",
-        ),
-    }
-}
 
 fn generate_auth_token() -> String {
     Uuid::new_v4().simple().to_string()

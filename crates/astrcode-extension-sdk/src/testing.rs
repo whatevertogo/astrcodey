@@ -383,7 +383,10 @@ impl HookContextBuilder {
         let (call, runtime_call) = self.into_parts();
         let input = RuntimeProviderContext::new(
             runtime_call,
-            ProviderPayload::new(ProviderRequestId::new("test-provider-request"), messages),
+            ProviderPayload::new(
+                ProviderRequestId::new("test-provider-request"),
+                messages.into_iter().map(std::sync::Arc::new).collect(),
+            ),
         );
         ProviderContext::from_runtime(call, &input)
     }
@@ -641,7 +644,7 @@ mod tests {
 
         let provider =
             scoped_hook_builder().build_provider(vec![LlmMessage::user("provider input")]);
-        assert_eq!(provider.messages().len(), 1);
+        assert_eq!(provider.shared_messages().len(), 1);
 
         let prompt = scoped_hook_builder().build_prompt(vec![visible_tool()]);
         assert_eq!(prompt.tools()[0].name, "visible");

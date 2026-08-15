@@ -48,7 +48,7 @@ const VALID_COMPACT_SUMMARY: &str = r#"<summary>
    - (none)
 </summary>"#;
 
-fn is_compact_summary_request(messages: &[LlmMessage]) -> bool {
+fn is_compact_summary_request(messages: &[Arc<LlmMessage>]) -> bool {
     messages.last().is_some_and(|message| {
         message.role == LlmRole::User
             && message
@@ -132,7 +132,7 @@ fn projected_provider_messages(model: &SessionReadModel) -> Vec<LlmMessage> {
 /// 事件在 mock 内部、LLM 返回前注入，避免测试侧与 mock 之间的 Notify/oneshot 竞态。
 struct RaceOnCompactLlm {
     main_calls: AtomicUsize,
-    main_requests: Arc<std::sync::Mutex<Vec<Vec<LlmMessage>>>>,
+    main_requests: Arc<std::sync::Mutex<Vec<Vec<Arc<LlmMessage>>>>>,
     session_to_race: Arc<std::sync::Mutex<Option<Arc<Session>>>>,
     race_message: String,
 }
@@ -242,7 +242,7 @@ async fn auto_compact_preserves_concurrent_tail_and_uses_summary() {
         .pop()
         .expect("main provider request should be captured");
     assert!(
-        main_messages.iter().any(is_compact_summary_message),
+        main_messages.iter().any(|m| is_compact_summary_message(m)),
         "provider request should use the compact summary"
     );
     assert!(

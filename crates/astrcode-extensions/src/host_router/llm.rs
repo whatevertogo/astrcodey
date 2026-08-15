@@ -249,7 +249,10 @@ fn parse_llm_request(input: Value, model_label: &'static str) -> Result<LlmReque
         ));
     }
     Ok(LlmRequest {
-        messages: llm_messages_from_wire(request.messages),
+        messages: llm_messages_from_wire(request.messages)
+            .into_iter()
+            .map(std::sync::Arc::new)
+            .collect(),
         tools: vec![],
         max_output_tokens: request.max_output_tokens,
     })

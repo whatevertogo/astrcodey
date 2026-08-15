@@ -54,7 +54,7 @@ impl LlmProvider for CountingLlm {
 
     async fn count_input_tokens(
         &self,
-        _messages: Vec<LlmMessage>,
+        _messages: Vec<Arc<LlmMessage>>,
         _tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         self.count_calls.fetch_add(1, Ordering::SeqCst);

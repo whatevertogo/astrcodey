@@ -1706,7 +1706,11 @@ impl ExtensionView {
         }
         if modified {
             Ok(ProviderResult::ReplaceMessages {
-                messages: ctx.messages().to_vec(),
+                messages: ctx
+                    .shared_messages()
+                    .iter()
+                    .map(|message| (**message).clone())
+                    .collect(),
             })
         } else {
             Ok(ProviderResult::Allow)
@@ -1775,7 +1779,11 @@ impl ExtensionView {
         }
         let result = if modified {
             ProviderResult::ReplaceMessages {
-                messages: ctx.messages().to_vec(),
+                messages: ctx
+                    .shared_messages()
+                    .iter()
+                    .map(|message| (**message).clone())
+                    .collect(),
             }
         } else {
             ProviderResult::Allow

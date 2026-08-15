@@ -11,14 +11,13 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     http::{Method, header},
-    middleware,
     routing::{any, delete, get, post, put},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use super::{
     HttpState,
-    auth::{auth_middleware, collect_allowed_origins, configured_auth_token},
+    auth::{collect_allowed_origins, configured_auth_token},
     routes::{config, event_consumers, extensions, lifecycle, models, sessions},
     stream,
 };
@@ -42,8 +41,8 @@ pub enum HttpServerError {
 
 /// Build an axum router for the HTTP/SSE API.
 ///
-/// Returns `(Router, auth_token)` — the token must be passed to the frontend
-/// so it can include it in `Authorization: Bearer <token>` headers.
+/// Returns `(Router, auth_token)` — the token is retained for `run.json`/client
+/// compatibility but is no longer enforced by the server.
 pub fn router(server_app: Arc<ServerApp>) -> Result<(Router, String), HttpServerError> {
     let (router, auth_token, _) = router_parts(server_app);
     Ok((router, auth_token))
@@ -53,7 +52,6 @@ fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
     let auth_token = configured_auth_token();
     let event_bus = Arc::clone(server_app.event_bus());
     let state = HttpState { app: server_app };
-    let expected_bearer = format!("Bearer {auth_token}");
 
     let allowed_origins = collect_allowed_origins();
     let cors = CorsLayer::new()
@@ -160,11 +158,7 @@ fn router_parts(server_app: Arc<ServerApp>) -> RouterParts {
             get(models::get_small_current_model),
         )
         .route("/api/models/small/test", post(models::test_small_model))
-        .route("/api/shutdown", post(lifecycle::shutdown))
-        .layer(middleware::from_fn_with_state(
-            expected_bearer,
-            auth_middleware,
-        ));
+        .route("/api/shutdown", post(lifecycle::shutdown));
 
     let public_extension_http = Router::new()
         .fallback(extensions::dispatch_public_http)
@@ -188,7 +182,10 @@ pub async fn run_http_server(
     server_app.initialize().await;
     let shutdown_token = server_app.runtime().shutdown_token().clone();
     let (app, auth_token) = router(Arc::clone(&server_app))?;
-    tracing::info!("Auth token: {}", masked_token(&auth_token));
+    tracing::info!(
+        "HTTP auth is disabled; legacy client token: {}",
+        masked_token(&auth_token)
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|error| {
         tracing::error!("failed to bind HTTP server at {addr}: {error}");

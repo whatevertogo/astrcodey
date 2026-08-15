@@ -612,7 +612,7 @@ impl ProviderHandler for S5rProviderHandler {
             "session_id": ctx.session_id().to_string(),
             "working_dir": ctx.working_dir().display().to_string(),
             "model": ctx.model(),
-            "messages": ctx.messages(),
+            "messages": ctx.shared_messages().iter().map(|m| m.as_ref()).collect::<Vec<_>>(),
         });
         let response =
             invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;
@@ -639,7 +639,7 @@ impl ProviderContributionHandler for S5rProviderContributionHandler {
             "session_id": ctx.session_id().to_string(),
             "working_dir": ctx.working_dir().display().to_string(),
             "model": ctx.model(),
-            "messages": ctx.messages(),
+            "messages": ctx.shared_messages().iter().map(|m| m.as_ref()).collect::<Vec<_>>(),
         });
         let response =
             invoke_hook(&self.session, &self.ext_id, &self.on, &invoke_ctx, input).await?;

@@ -3,6 +3,8 @@
 //! 将 crate-internal 的 [`LlmMessage`] / [`LlmContent`] / [`ToolDefinition`]
 //! 转换为 OpenAI Chat Completions 和 Responses API 所需的 JSON 结构。
 
+use std::sync::Arc;
+
 use astrcode_core::{
     config::OpenAiApiMode,
     llm::{LlmContent, LlmMessage, LlmRole, PromptCacheRetention},
@@ -323,7 +325,7 @@ fn tool_call_arguments_text(arguments: &serde_json::Value, raw_arguments: Option
 
 // ─── Prompt cache 辅助 ─────────────────────────────────────────────────
 
-pub(crate) fn system_text(messages: &[LlmMessage]) -> String {
+pub(crate) fn system_text(messages: &[Arc<LlmMessage>]) -> String {
     LlmContent::join_text(
         messages
             .iter()

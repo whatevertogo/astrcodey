@@ -661,15 +661,19 @@ impl LlmTokenUsage {
 ///
 /// `max_output_tokens` 是请求级上限；缺失时 provider 使用模型配置上限。该字段必须
 /// 在最终消息和工具确定后计算，避免 input 与固定 output 上限共同挤爆上下文窗口。
+/// 单次 LLM 请求。
+///
+/// `messages` 经 `Arc` 与读模型/context snapshot 共享;provider 侧只读并序列化,
+/// 不得原地修改共享消息(需改写时 `Arc::make_mut` copy-on-write)。
 #[derive(Debug, Clone)]
 pub struct LlmRequest {
-    pub messages: Vec<LlmMessage>,
+    pub messages: Vec<Arc<LlmMessage>>,
     pub tools: Vec<ToolDefinition>,
     pub max_output_tokens: Option<usize>,
 }
 
 impl LlmRequest {
-    pub fn new(messages: Vec<LlmMessage>, tools: Vec<ToolDefinition>) -> Self {
+    pub fn new(messages: Vec<Arc<LlmMessage>>, tools: Vec<ToolDefinition>) -> Self {
         Self {
             messages,
             tools,
@@ -988,7 +992,7 @@ pub trait LlmProvider: Send + Sync {
     /// 统计一次 provider request 的 input token。
     async fn count_input_tokens(
         &self,
-        _messages: Vec<LlmMessage>,
+        _messages: Vec<Arc<LlmMessage>>,
         _tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         Err(LlmError::Unsupported {

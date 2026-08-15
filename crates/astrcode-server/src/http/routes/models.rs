@@ -42,7 +42,9 @@ async fn run_model_test(
     let start = std::time::Instant::now();
     match provider
         .generate_request(astrcode_core::llm::LlmRequest::new(
-            vec![astrcode_core::llm::LlmMessage::user("Hi")],
+            vec![std::sync::Arc::new(astrcode_core::llm::LlmMessage::user(
+                "Hi",
+            ))],
             vec![],
         ))
         .await

@@ -3,6 +3,8 @@
 //! 厂商 wire DTO、SSE 事件状态机与字节流传输都封装在 [`crate::wire::anthropic`] 内部，
 //! 本模块只暴露 provider 并连接配置/模型状态——结构与 [`crate::providers::openai`] 对称。
 
+use std::sync::Arc;
+
 use astrcode_core::{llm::*, tool::ToolDefinition};
 use tokio::sync::mpsc;
 
@@ -70,7 +72,7 @@ impl AnthropicProvider {
 
     fn build_request_body(
         &self,
-        messages: &[LlmMessage],
+        messages: &[Arc<LlmMessage>],
         tools: &[ToolDefinition],
         max_output_tokens: Option<usize>,
         stream: bool,
@@ -85,7 +87,7 @@ impl AnthropicProvider {
 
     fn build_count_tokens_body(
         &self,
-        messages: &[LlmMessage],
+        messages: &[Arc<LlmMessage>],
         tools: &[ToolDefinition],
     ) -> serde_json::Value {
         anthropic_wire::build_count_tokens_body(self.wire_config(None), messages, tools)
@@ -144,7 +146,7 @@ impl LlmProvider for AnthropicProvider {
 
     async fn count_input_tokens(
         &self,
-        messages: Vec<LlmMessage>,
+        messages: Vec<Arc<LlmMessage>>,
         mut tools: Vec<ToolDefinition>,
     ) -> Result<ProviderInputTokenCount, LlmError> {
         prepare_strict_tools(
@@ -216,7 +218,7 @@ mod tests {
         )
         .unwrap();
         let body = provider
-            .build_request_body(&[LlmMessage::user("hi")], &[], Some(123), true)
+            .build_request_body(&[Arc::new(LlmMessage::user("hi"))], &[], Some(123), true)
             .unwrap();
         assert_eq!(body["max_tokens"], 123);
 
@@ -230,7 +232,10 @@ mod tests {
         };
 
         let result = provider
-            .generate_request(LlmRequest::new(vec![LlmMessage::user("hi")], vec![invalid]))
+            .generate_request(LlmRequest::new(
+                vec![Arc::new(LlmMessage::user("hi"))],
+                vec![invalid],
+            ))
             .await;
 
         assert!(matches!(
