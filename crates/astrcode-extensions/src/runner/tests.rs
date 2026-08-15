@@ -48,7 +48,7 @@ use astrcode_extension_sdk::{
         },
     },
     host::{
-        HostProcessHandleOutput, HostProcessListOutput, HostProcessStartRequest,
+        ExtensionHost, HostProcessHandleOutput, HostProcessListOutput, HostProcessStartRequest,
         HostSessionStateReadRequest, HostSessionStateWriteRequest,
     },
     runtime_ports::{ToolCatalogCompleteness, ToolCatalogProvider},
@@ -151,9 +151,13 @@ struct HttpProbeExtension {
 
 struct HttpProbeHandler;
 
-struct GenerationHttpCaller;
+struct GenerationHttpCaller {
+    startup_host: Arc<Mutex<Option<ExtensionHost>>>,
+}
 
-struct GenerationHttpCallerHandler;
+struct GenerationHttpCallerHandler {
+    startup_host: Arc<Mutex<Option<ExtensionHost>>>,
+}
 
 struct GenerationHttpTarget {
     label: &'static str,
@@ -217,35 +221,56 @@ impl Extension for GenerationHttpCaller {
             "generation-http-caller",
             &[
                 ExtensionCapability::ToolIntercept,
-                ExtensionCapability::PublicHttp,
+                ExtensionCapability::PublicHttpDispatch,
             ],
         )
     }
 
     fn register(&self, registrar: &mut Registrar) {
-        registrar.on_pre_tool_use(0, Arc::new(GenerationHttpCallerHandler));
+        registrar.on_pre_tool_use(
+            0,
+            Arc::new(GenerationHttpCallerHandler {
+                startup_host: Arc::clone(&self.startup_host),
+            }),
+        );
+    }
+
+    async fn start(&self, ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        *self.startup_host.lock().unwrap() = Some(ctx.host().clone());
+        Ok(())
     }
 }
 
 #[async_trait::async_trait]
 impl PreToolUseHandler for GenerationHttpCallerHandler {
     async fn handle(&self, ctx: PreToolUseContext) -> Result<PreToolUseResult, ExtensionError> {
-        let response = ctx
-            .host()
-            .extension_http()?
-            .dispatch_public(ExtensionHttpDispatchRequest::new(
-                ExtensionHttpMethod::Get,
-                "/generation",
-            ))
-            .await?;
-        let label = response.body["generation"]
-            .as_str()
-            .ok_or_else(|| ExtensionError::Internal("missing generation label".into()))?;
+        let startup_host = self
+            .startup_host
+            .lock()
+            .unwrap()
+            .clone()
+            .ok_or_else(|| ExtensionError::Internal("startup host was not captured".into()))?;
+        let handler_label = generation_http_label(ctx.host()).await?;
+        let startup_label = generation_http_label(&startup_host).await?;
         Ok(PreToolUseResult::Ask {
-            prompt: label.to_owned(),
+            prompt: format!("{handler_label}/{startup_label}"),
             rule_key: None,
         })
     }
+}
+
+async fn generation_http_label(host: &ExtensionHost) -> Result<String, ExtensionError> {
+    let response = host
+        .extension_http()?
+        .dispatch_public(ExtensionHttpDispatchRequest::new(
+            ExtensionHttpMethod::Get,
+            "/generation",
+        ))
+        .await?;
+    response.body["generation"]
+        .as_str()
+        .map(str::to_owned)
+        .ok_or_else(|| ExtensionError::Internal("missing generation label".into()))
 }
 
 #[async_trait::async_trait]
@@ -337,6 +362,15 @@ struct CancelledStartupExtension {
     stop_reason: Arc<Mutex<Option<StopReason>>>,
     stops: Arc<AtomicUsize>,
     lifecycle: Arc<Mutex<Vec<&'static str>>>,
+}
+
+struct PanickingSourceCandidate {
+    stop_entered: Arc<Notify>,
+    stop_release: Arc<Notify>,
+}
+
+struct ReplacementSourceCandidate {
+    started: Arc<AtomicBool>,
 }
 
 struct StartFailingExtension;
@@ -860,6 +894,36 @@ impl Extension for CancelledStartupExtension {
         self.stop_release.notified().await;
         self.lifecycle.lock().unwrap().push("v1_stop");
         self.stops.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for PanickingSourceCandidate {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("panicking-source-candidate", &[])
+    }
+
+    async fn start(&self, _ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        panic!("injected source candidate start panic");
+    }
+
+    async fn stop(&self, ctx: ExtensionStopContext) -> Result<(), ExtensionError> {
+        assert_eq!(ctx.reason(), StopReason::StartupFailed);
+        self.stop_entered.notify_one();
+        self.stop_release.notified().await;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl Extension for ReplacementSourceCandidate {
+    fn manifest(&self) -> ExtensionManifest {
+        extension_manifest("panicking-source-candidate", &[])
+    }
+
+    async fn start(&self, _ctx: ExtensionStartContext) -> Result<(), ExtensionError> {
+        self.started.store(true, Ordering::Release);
         Ok(())
     }
 }
@@ -1660,6 +1724,89 @@ async fn cancelled_start_hands_registration_to_the_retirement_barrier() {
     assert!(runner.shutdown().await.is_empty());
     assert_eq!(version_one_stops.load(Ordering::SeqCst), 1);
     assert_eq!(version_two_stops.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn panicking_source_start_finishes_rollback_before_the_next_reconcile() {
+    let stop_entered = Arc::new(Notify::new());
+    let stop_release = Arc::new(Notify::new());
+    let replacement_waiting = Arc::new(Notify::new());
+    let replacement_started = Arc::new(AtomicBool::new(false));
+    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
+
+    let failed_candidate = {
+        let runner = Arc::clone(&runner);
+        let stop_entered = Arc::clone(&stop_entered);
+        let stop_release = Arc::clone(&stop_release);
+        tokio::spawn(async move {
+            let source_transaction = runner.begin_source_transaction().await;
+            runner
+                .prepare_source_generation(
+                    source_transaction,
+                    vec![SourceGenerationEntry::Start {
+                        extension: Arc::new(PanickingSourceCandidate {
+                            stop_entered,
+                            stop_release,
+                        }),
+                        key: "panicking-source-candidate".into(),
+                        fingerprint: "panicking-v1".into(),
+                        config: json!({}),
+                    }],
+                    None,
+                )
+                .await
+                .map(|_| ())
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), stop_entered.notified())
+        .await
+        .expect("panicking candidate must enter StartupFailed cleanup");
+
+    let mut replacement = {
+        let runner = Arc::clone(&runner);
+        let replacement_waiting = Arc::clone(&replacement_waiting);
+        let replacement_started = Arc::clone(&replacement_started);
+        tokio::spawn(async move {
+            replacement_waiting.notify_one();
+            let source_transaction = runner.begin_source_transaction().await;
+            let candidate = runner
+                .prepare_source_generation(
+                    source_transaction,
+                    vec![SourceGenerationEntry::Start {
+                        extension: Arc::new(ReplacementSourceCandidate {
+                            started: replacement_started,
+                        }),
+                        key: "panicking-source-candidate".into(),
+                        fingerprint: "replacement-v2".into(),
+                        config: json!({}),
+                    }],
+                    None,
+                )
+                .await?;
+            candidate.commit_with(|_| {}).await;
+            Ok::<_, ExtensionError>(())
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(1), replacement_waiting.notified())
+        .await
+        .expect("replacement must attempt to acquire the source transaction");
+    assert!(!replacement_started.load(Ordering::Acquire));
+
+    stop_release.notify_one();
+    let error = tokio::time::timeout(Duration::from_secs(1), failed_candidate)
+        .await
+        .expect("panic rollback should finish")
+        .expect("candidate task should return a typed error")
+        .expect_err("panicking candidate must fail");
+    assert!(error.to_string().contains("start panicked"));
+    tokio::time::timeout(Duration::from_secs(1), &mut replacement)
+        .await
+        .expect("replacement should resume after rollback")
+        .expect("replacement task should not panic")
+        .expect("replacement should publish");
+    assert!(replacement_started.load(Ordering::Acquire));
+
+    assert!(runner.shutdown().await.is_empty());
 }
 
 #[tokio::test]
@@ -2889,6 +3036,7 @@ async fn extension_http_uses_the_callers_pinned_generation_while_external_http_u
         HostBackends::default(),
         runner.clone(),
     ));
+    let startup_host = Arc::new(Mutex::new(None));
 
     let source_transaction = runner.begin_source_transaction().await;
     runner
@@ -2896,7 +3044,9 @@ async fn extension_http_uses_the_callers_pinned_generation_while_external_http_u
             source_transaction,
             vec![
                 SourceGenerationEntry::Start {
-                    extension: Arc::new(GenerationHttpCaller),
+                    extension: Arc::new(GenerationHttpCaller {
+                        startup_host: Arc::clone(&startup_host),
+                    }),
                     key: "generation-http-caller".into(),
                     fingerprint: "caller-v1".into(),
                     config: json!({}),
@@ -2915,8 +3065,10 @@ async fn extension_http_uses_the_callers_pinned_generation_while_external_http_u
         .commit_with(|_| {})
         .await;
     let version_one_view = runner.extension_view().await;
+    let version_one_generation = version_one_view.generation();
 
     let source_transaction = runner.begin_source_transaction().await;
+    let publication_probe = Arc::clone(&runner);
     runner
         .prepare_source_generation(
             source_transaction,
@@ -2937,7 +3089,13 @@ async fn extension_http_uses_the_callers_pinned_generation_while_external_http_u
         )
         .await
         .unwrap()
-        .commit_with(|_| {})
+        .commit_with(move |_| {
+            assert_eq!(
+                publication_probe.turn_extension_view().generation(),
+                version_one_generation,
+                "synchronous observers must not see the candidate before activation"
+            );
+        })
         .await;
 
     let old_turn_admission = version_one_view
@@ -2948,7 +3106,7 @@ async fn extension_http_uses_the_callers_pinned_generation_while_external_http_u
         panic!("the caller should return its target generation");
     };
     assert_eq!(requirements.len(), 1);
-    assert_eq!(requirements[0].prompt, "v1");
+    assert_eq!(requirements[0].prompt, "v1/v1");
 
     let external = runner
         .dispatch_public_http_route(

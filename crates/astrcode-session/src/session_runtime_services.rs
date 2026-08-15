@@ -263,21 +263,6 @@ impl SessionRuntimeServices {
         }
     }
 
-    pub fn publish_runtime_generation(
-        &self,
-        effective_config: EffectiveConfig,
-        llm: Arc<dyn LlmProvider>,
-        small_llm: Arc<dyn LlmProvider>,
-    ) {
-        let extension_generation = self.runtime_generation.load_full().extension_generation;
-        self.publish_runtime_generation_for_extension(
-            effective_config,
-            llm,
-            small_llm,
-            extension_generation,
-        );
-    }
-
     pub fn publish_runtime_generation_for_extension(
         &self,
         effective_config: EffectiveConfig,
@@ -547,7 +532,8 @@ mod tests {
         let mut new_effective = test_effective_config(new_context.clone());
         new_effective.llm.model_id = "new-main".into();
         new_effective.small_llm.model_id = "new-small".into();
-        services.publish_runtime_generation(
+        let extension_generation = services.runtime_generation.load_full().extension_generation;
+        services.publish_runtime_generation_for_extension(
             new_effective,
             Arc::new(TaggedLlm {
                 max_input_tokens: 3,
@@ -555,6 +541,7 @@ mod tests {
             Arc::new(TaggedLlm {
                 max_input_tokens: 4,
             }),
+            extension_generation,
         );
         let new_generation = services.pin_runtime_generation();
 

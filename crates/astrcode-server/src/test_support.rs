@@ -48,6 +48,17 @@ pub fn router_with_event_bus(
     Ok((router, auth_token, event_bus))
 }
 
+/// Mirrors the production bootstrap host-router wiring so integration tests load
+/// bundled extensions against the same backends instead of re-deriving them.
+pub fn bind_extension_host_router_for_test(
+    runner: &Arc<ExtensionRunner>,
+    runtime_services: &astrcode_session::SessionRuntimeServices,
+    session_store: Arc<dyn SessionStore>,
+    cwd: &std::path::Path,
+) {
+    crate::bootstrap::bind_extension_host_router(runner, runtime_services, session_store, cwd);
+}
+
 /// Builds a runtime from already assembled test components.
 #[allow(clippy::too_many_arguments)] // Mirrors the runtime's owned components.
 pub fn assemble_server_runtime(

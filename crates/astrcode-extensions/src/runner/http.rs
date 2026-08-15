@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeMap,
-    sync::{Arc, Weak},
+    sync::{Arc, OnceLock, Weak},
     time::Duration,
 };
 
@@ -14,8 +14,8 @@ use super::{
     ExtensionDiagnostics, ExtensionRunner, ExtensionView, HandlerIndex,
 };
 
-struct PinnedPublicHttpDispatcher {
-    index: Weak<HandlerIndex>,
+pub(super) struct GenerationPublicHttpDispatcher {
+    index: OnceLock<Weak<HandlerIndex>>,
     diagnostics: Arc<parking_lot::RwLock<BTreeMap<String, ExtensionDiagnostics>>>,
     operation_timeout: Duration,
     call_context_factory: ExtensionCallContextFactory,
@@ -38,15 +38,17 @@ impl ExtensionView {
         &self,
         index: &Arc<HandlerIndex>,
     ) -> Arc<dyn crate::host_router::PublicHttpDispatcher> {
-        Arc::new(PinnedPublicHttpDispatcher {
-            index: Arc::downgrade(index),
+        let dispatcher = Arc::new(GenerationPublicHttpDispatcher {
+            index: OnceLock::new(),
             diagnostics: Arc::clone(&self.diagnostics),
             operation_timeout: self.operation_timeout,
             call_context_factory: self.call_context_factory.clone(),
             custom_event_permits: Arc::clone(&self.custom_event_permits),
             custom_event_lanes: Arc::clone(&self.custom_event_lanes),
             custom_event_quiescing: Arc::clone(&self.custom_event_quiescing),
-        })
+        });
+        dispatcher.bind_once(index);
+        dispatcher
     }
 
     pub async fn dispatch_public_http_route(
@@ -180,9 +182,25 @@ impl ExtensionView {
     }
 }
 
-impl PinnedPublicHttpDispatcher {
+impl GenerationPublicHttpDispatcher {
+    pub(super) fn for_candidate(runner: &ExtensionRunner) -> Arc<Self> {
+        Arc::new(Self {
+            index: OnceLock::new(),
+            diagnostics: Arc::clone(&runner.diagnostics),
+            operation_timeout: runner.operation_timeout,
+            call_context_factory: runner.extension_call_context_factory(),
+            custom_event_permits: Arc::clone(&runner.custom_event_permits),
+            custom_event_lanes: Arc::clone(&runner.custom_event_lanes),
+            custom_event_quiescing: Arc::clone(&runner.custom_event_quiescing),
+        })
+    }
+
+    pub(super) fn bind_once(&self, index: &Arc<HandlerIndex>) {
+        self.index.get_or_init(|| Arc::downgrade(index));
+    }
+
     fn extension_view(&self) -> Result<ExtensionView, ExtensionError> {
-        let index = self.index.upgrade().ok_or_else(|| {
+        let index = self.index.get().and_then(Weak::upgrade).ok_or_else(|| {
             ExtensionError::NotFound("extension HTTP generation is no longer available".into())
         })?;
         Ok(ExtensionView {
@@ -230,18 +248,6 @@ impl ExtensionRunner {
             .dispatch_authenticated_http_route(extension_id, request, body)
             .await
     }
-
-    pub async fn dispatch_public_http_route_from(
-        &self,
-        caller_extension_id: &str,
-        request: ExtensionHttpRequest,
-        body: &[u8],
-    ) -> Result<ExtensionHttpDispatchResult, ExtensionError> {
-        self.extension_view()
-            .await
-            .dispatch_public_http_route_from(caller_extension_id, request, body)
-            .await
-    }
 }
 
 struct WeakRunnerPublicHttpDispatcher {
@@ -280,7 +286,7 @@ impl crate::host_router::PublicHttpDispatcher for ExtensionRunner {
 }
 
 #[async_trait::async_trait]
-impl crate::host_router::PublicHttpDispatcher for PinnedPublicHttpDispatcher {
+impl crate::host_router::PublicHttpDispatcher for GenerationPublicHttpDispatcher {
     async fn dispatch_public_http(
         &self,
         caller_extension_id: &str,

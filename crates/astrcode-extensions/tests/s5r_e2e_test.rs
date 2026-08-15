@@ -32,12 +32,13 @@ use astrcode_extension_sdk::{
     },
 };
 use astrcode_extensions::{
-    HostBackends, build_host_router, build_host_router_with_public_http_dispatcher,
+    HostBackends, build_host_router_with_public_http_dispatcher,
     loader::{
         DiskExtensionSource, ExtensionLoadContext, ExtensionSource, prepare_extension_generation,
     },
     runner::ExtensionRunner,
     s5r_ext::S5rExtension,
+    testing::extension_runner_with_extensions,
 };
 use astrcode_storage::{EventReader, SessionReader, in_memory::InMemoryEventStore};
 use async_trait::async_trait;
@@ -108,11 +109,13 @@ fn minimal_router() -> Arc<astrcode_extensions::HostRouter> {
     let store = Arc::new(InMemoryEventStore::new());
     let event_reader: Arc<dyn EventReader> = store.clone();
     let session_reader: Arc<dyn SessionReader> = store;
-    build_host_router(HostBackends {
-        event_reader: Some(event_reader),
-        session_reader: Some(session_reader),
-        ..HostBackends::default()
-    })
+    Arc::new(astrcode_extensions::HostRouter::from_backends(
+        HostBackends {
+            event_reader: Some(event_reader),
+            session_reader: Some(session_reader),
+            ..HostBackends::default()
+        },
+    ))
 }
 
 struct MockLlm;
@@ -184,13 +187,15 @@ fn mock_router() -> Arc<astrcode_extensions::HostRouter> {
     let store = Arc::new(InMemoryEventStore::new());
     let event_reader: Arc<dyn EventReader> = store.clone();
     let session_reader: Arc<dyn SessionReader> = store;
-    build_host_router(HostBackends {
-        main_llm: Some(Arc::new(MockLlm)),
-        small_llm: Some(Arc::new(MockLlm)),
-        event_reader: Some(event_reader),
-        session_reader: Some(session_reader),
-        ..HostBackends::default()
-    })
+    Arc::new(astrcode_extensions::HostRouter::from_backends(
+        HostBackends {
+            main_llm: Some(Arc::new(MockLlm)),
+            small_llm: Some(Arc::new(MockLlm)),
+            event_reader: Some(event_reader),
+            session_reader: Some(session_reader),
+            ..HostBackends::default()
+        },
+    ))
 }
 
 async fn load_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<S5rExtension> {
@@ -228,9 +233,10 @@ async fn register_s5r(
 }
 
 async fn runner_with_s5r(router: Arc<astrcode_extensions::HostRouter>) -> Arc<ExtensionRunner> {
-    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
-    register_s5r(&runner, router).await;
-    runner
+    let extension = load_s5r(Arc::clone(&router)).await;
+    extension_runner_with_extensions(Duration::from_secs(5), Some(router), vec![extension])
+        .await
+        .expect("assemble s5r runner")
 }
 
 async fn runner_tool(
@@ -430,9 +436,10 @@ async fn s5r_health_is_unavailable_until_runner_activation() {
         "initialized worker must not become callable before registration"
     );
 
-    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
-    runner.bind_host_router(router);
-    runner.register(ext.clone()).await.unwrap();
+    let runner =
+        extension_runner_with_extensions(Duration::from_secs(5), Some(router), vec![ext.clone()])
+            .await
+            .unwrap();
     ext.health().await.expect("extension/ping via health()");
     runner.shutdown().await;
 }
@@ -527,9 +534,9 @@ async fn s5r_workspace_read_via_host_invoke() {
     let ext = S5rExtension::load(&ext_dir, &manifest, Arc::clone(&router))
         .await
         .expect("load");
-    let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(5)));
-    runner.bind_host_router(router);
-    runner.register(ext).await.unwrap();
+    let runner = extension_runner_with_extensions(Duration::from_secs(5), Some(router), vec![ext])
+        .await
+        .unwrap();
     let tool = runner_tool(&runner, "read_workspace", &wd_str).await;
     let result = tool
         .execute(serde_json::json!({}), &core_tool_ctx(&wd_str))

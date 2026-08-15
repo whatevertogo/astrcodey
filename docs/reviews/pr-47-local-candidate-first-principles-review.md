@@ -3,7 +3,7 @@
 > 日期：2026-08-14
 > 分支：`whatevertogo/s5r3-phase-0`
 > 远端 PR：[feat(extensions): S5R 3.0 协议升级与作者/宿主契约统一（Phase 0，WIP）](https://github.com/whatevertogo/astrcodey/pull/47)
-> 审查对象：远端 PR head `c9c07e58ef4f2ab4e300f808b1fbcdfa9d031c6d`，以及其上的本地未提交候选
+> 审查起点：远端 PR head `c9c07e58ef4f2ab4e300f808b1fbcdfa9d031c6d`；当前远端 head `d5ccdc87c5bda41fab5601f555ad7e866c501f57`，以及其上的本地未提交收口
 > 设计前提：不保留旧架构兼容路径；以长期可维护性、单一事实来源、清晰依赖方向和可证明的安全边界为优先级
 > 关系：`docs/architecture/unified-extension-tool-runtime.md` 规定最终 Extension 工具架构；本文记录为什么这样设计、当前实现到达了哪里、审查中修了什么以及还不能忽略什么
 
@@ -44,11 +44,11 @@
 | `HEAD` 到本地工作区 | 229 files，`+5,457 / -3,447` | 本轮 Projection/Compact 收敛、边界清理和问题修复 |
 | `origin/main` 到本地工作区 | 480 files，`+61,101 / -32,091` | 用户最终会审阅的实际本地候选 |
 
-远端 PR 当前为 `OPEN`、`MERGEABLE`，但远端 head `c9c07e5` 的 Test、三平台 MSRV、
-Windows check 与 Contract Test 仍失败；其他 fmt、Clippy、依赖方向、安全和前端静态检查通过。
-这些结果只描述远端 head，**不能证明当前未提交候选**。本轮已重新完成 Rust、前端、
-协议生成、依赖边界、Rust 1.88 和 S5R conformance 的本地验证；只有推送后触发的新 CI
-才能替代远端失败结果并证明 Windows 等本机无法覆盖的平台。
+远端 PR 当前为 `OPEN`、`MERGEABLE`。最新 head `d5ccdc87` 的 fmt、依赖方向、安全审计、
+cargo-deny 与前端静态检查通过；Contract Test、S5R conformance 以及被同一个跨 crate private-field
+编译错误阻断的 Clippy/三平台 check/MSRV 失败。这些结果只描述远端 head，**不能证明当前未提交
+候选**。本地已分别修正严格 attachments fixture、S5R fixed-mode 注册与 internal `InvokeContext` 测试
+构造方式；只有完整复验、再次推送并触发新 CI，才能替代这些失败并证明 Windows 等本机无法覆盖的平台。
 
 远端六个红 check 实际是四个已知根因，而不是六套独立设计失败：
 
@@ -129,28 +129,36 @@ catalog 也不再有 PTY/resize。所有 Host process 都是由 Host 自己 spaw
 终止回归；Windows Job Object 路径仍必须由新一轮真实 Windows CI 证明，macOS 编译或 Unix E2E
 不能替代这项验收。
 
-本轮同时收口了两个此前的 turn 内一致性缺口：
+本轮同时收口了此前的 turn 与 runtime generation 一致性缺口：
 
 - `PreToolUse` 已拆成有确定顺序的 input transform 与 admission 两阶段。全部 transform 先折叠成
   canonical args；admission 在同一份参数上收集全部 Ask，任意 Block 覆盖，然后 Session 再与 core
   permission requirements 组合；
 - Session 在首个 turn hook 前固定 main/small `LlmProviderBindings`，并显式贯穿 hook/tool call 到
   HostRouter。旧 turn 在 reload 后继续使用旧 provider，新 turn 才使用新 provider；只有明确的
-  startup/unscoped 调用使用 live fallback。
+  startup/unscoped 调用使用 live fallback；
+- 配置更新先在旧代之外构造 fresh Extension candidate，保存成功后把 core config、providers、context
+  assembler 与 HandlerIndex 作为同一 epoch 发布；`Stable(epoch)` 是新 turn 可观察到新代的唯一线性化点；
+- `/compact` 与 `/model` 由只依赖 SDK 的 session-command Extension 声明，Server 只执行类型化 Host
+  intent，不再维护 builtin command 表或按命令名分流；
+- custom event 用严格的 `SessionDurable | SessionLive | GlobalLive` 声明 delivery，transport requirement
+  独立建模；Server/CLI 不再识别 ask-user 的 Extension ID 或 event type。
 
-这两项修复不改变 config/runtime publication 的剩余边界。仍应明确保留在 merge assessment 中的风险：
+仍应明确保留在 merge assessment 中的风险：
 
-- core runtime generation 与 Extension runtime generation 仍是两个发布边界，config reload 不能被描述为全运行时原子；
-- Extension reload 仍缺 generation-aware reconcile，child session 仍用当前 model ID 字符串反推 tier；
+- child session 仍用当前 model ID 字符串反推 tier；small model A 切到 B 后，durable identity A 可能被
+  静默路由到 main，后续应持久化 `ModelBinding::{Main, Small, Exact}`；
 - Compact fsync 模糊失败采用“本次调用未观察到确认”的 `Failed` 语义；后续 exact retry/reopen
   可能确认 rewrite，而 `PostCompact` 不是最终 durable rewrite 的 exactly-once 通知；
-- `/compact`、`/model` 仍是 server-owned 命令，因为 SDK 尚无对应 typed Host operation；
-- ask-user 的 global custom-event 路由与 stdio 禁用仍按具体 Extension ID 特判，尚未进入通用
-  event audience / transport requirement 契约；
+- turn/call Drop 能撤销后续 Host 权限、停止 owned task 并清理 Host-owned process handle，但不能回滚
+  已完成的文件写入、durable event、网络请求、第三方调用或 Extension 绕过 Host 产生的直接 I/O；
+- `ExtensionRunner::register/unregister` 仍是过宽的公开 mutation 测试入口；在 runtime services 固定
+  expected epoch 后调用会使 turn admission 等待到 `RuntimeUnstable`，应收回 testing façade；
 - `read_tool_result` 尚缺一条穿过 Coding → lease → HostRouter → Session/Storage → commit 的整链集成测试；
 - artifact 已收敛为同目录 temp → file fsync → no-clobber persist → directory fsync，但还缺 fsync/rename 故障注入；
-- 本地候选已经完成整仓、MSRV、frontend 与 conformance 验证，但远端 head 仍是旧提交；
-  新候选在推送并通过多平台 CI 前不能宣称跨平台验收完成。
+- 远端 head `d5ccdc87` 的最新 CI 暴露了严格 attachments fixture、外部测试构造 internal
+  `InvokeContext`、S5R guest 沿用旧 fixed-hook 注册三处漏迁移；本地修复和整仓复验完成并再次推送前，
+  不能宣称新候选已通过多平台验收。
 
 ### 2.3 不应重新引入的“简化”
 
@@ -649,6 +657,11 @@ llm_chat_request(Vec<LlmMessage>)
 token 预算塞回 shell/read 等工具 schema。普通 `main_chat(messages)` 仍只是上述请求的 `None` 便捷入口，
 不会形成第二条 provider 语义路径。
 
+Web fetch 是这三层预算必须分开的具体例子：`summarizerMaxOutputTokens` 只进入小模型
+`HostLlmChatRequest.maxOutputTokens`；`maxOutputChars` 只限制最终返回给 provider 的完整 ToolResult，
+无小模型、HTTP error、redirect 与摘要成功路径都必须遵守同一字符上限。摘要输入另用固定的防御性
+字符上限，不能拿输出 token 配置去切输入，也不能让无 small-model fallback 返回整页正文。
+
 ---
 
 ## 8. Tool-result artifact 设计
@@ -1006,6 +1019,10 @@ core generation 与 raw snapshot 均不变；API 更新尚未保存，因此磁�
 Extension 若绕过 Host API 直接制造外部事实，宿主无法回滚；author contract 因此禁止 candidate
 startup 执行不可撤销外部写入。
 
+candidate `start()` 的 panic 也必须在这条 prepare 边界内收敛成 typed failure：Runner 捕获 unwind，
+把该 instance 同步移交 retirement 并等待 stop/task/Host-resource cleanup 完成，之后才释放 source
+transaction。下一次同 ID reconcile 在 rollback 完成前不能启动，不能依赖 `Drop` 异步排队后立即放行。
+
 ### 12.4 save 与 coherent publication
 
 prepare 成功后，`ConfigManager` 先把 update guard、candidate、待保存 config 和 publication sender
@@ -1038,9 +1055,11 @@ fail-stop，重启时从已经保存的配置重新构造完整 generation。这
 runtime 旧代”伪装成 last-known-good；正常的候选错误和存储错误都在这个不可失败边界之前返回 typed
 error。
 
-这里的“保存成功”仅指 `ConfigStore::save` 返回成功。当前文件实现是临时文件写入后 rename，没有对
-文件和父目录执行 fsync，因此不宣称断电级 durability；如果进程在 rename 与 runtime publication 之间
-崩溃，重启会从磁盘新配置重新构造完整 generation，而存活进程不会继续运行一个可观察的混合代。
+`ConfigStore::save` 的成功边界是：同目录临时文件写入并 `sync_all`，rename/persist 到最终路径，再
+`sync_all` 最终文件和父目录；首次创建配置目录时还会同步其父目录。Unix 路径因此覆盖文件内容与目录
+项的断电持久性；非 Unix 的目录同步实现当前是 no-op，仍需真实 Windows CI/故障注入才能扩大承诺。
+如果进程在 config durable success 与 runtime publication 之间触发内部 panic，进程 fail-stop，重启从
+已经持久化的新配置构造完整 generation；存活进程不会继续服务一个可观察的混合代。
 
 ### 12.5 旧代 drain、取消与 Host resource ownership
 
@@ -1059,11 +1078,24 @@ lease drain 与 stop 尝试结束后，只清理对应 instance 的 session-life
 撤权并回收 Host-owned resources，但已经提交到外部系统的事实仍不可回滚，这也是 startup purity 约束
 存在的原因。
 
+同一代约束还包括 Extension-to-Extension public HTTP：旧 turn 的调用上下文携带绑定旧
+`HandlerIndex` 的弱 dispatcher，G1 的 A 在 G2 发布后调用 B 仍解析 G1/B；只有来自 Server 的外部 HTTP
+入口读取当前 `Stable` view。dispatcher 不强持 index，避免形成自环并阻止旧代 retirement。
+
 普通 background task 在共享 shutdown budget 后会被 abort；`MustFinish` 只用于本地 session state、
 workspace 和 memory 等持久化临界区，超过 budget 后会告警但继续等待，避免用强制取消制造半写入。
 因此上述 cleanup 对正常返回的 Host I/O 是 eventual guarantee，不是无条件的时间上界：如果底层文件
 系统调用永久卡死，旧 instance 的 stop 与 Host resource cleanup 也会被推迟。turn context 只能撤销后续
 Host 权限并取消 owned task，既不能回滚已经发生的外部事实，也不能安全中断已经进入内核的持久写。
+
+| turn/Extension 产生的状态 | owner | 旧 view 最后一个 lease 释放后 | 是否回滚已完成事实 |
+| --- | --- | --- | --- |
+| call-scoped Host lease、event sink、ModelClient | call cancellation + generation gate | 立即拒绝后续调用 | 否；只撤权 |
+| generation-owned background worker | `ExtensionTasks` + retirement supervisor | 关闭 admission，cancel/drain；`MustFinish` 临界区等待完成 | 否；保证完成或停止，不做反向操作 |
+| Host process handle | `(session_id, ExtensionInstanceId)` | stop 后终止并清理该 instance 的 handle | 只终止仍存活进程，不撤销其既有输出/外部写入 |
+| Extension-to-Extension HTTP | pinned weak `HandlerIndex` dispatcher | 旧代存活期间只解析旧代；retire 后不可升级 | 不适用；防止跨代调用 |
+| EventLog、Extension state、workspace 文件 | Storage/对应领域 owner | 保留 durable fact | 否；需要业务级 CAS、ack 或补偿事件 |
+| 网络/第三方 API/Extension 直接 I/O | 外部系统/Extension author | Host 无法统一发现或清理 | 否；必须幂等或提供显式补偿 |
 
 `ExtensionTasks` 也不能成为普通 handler 的逃生口。`ExtensionCallContext`、`ToolContext`、hook、HTTP
 和 command context 都不暴露 generation task owner；只有 `ExtensionStartContext` 能取得它。需要跨越
@@ -1079,15 +1111,15 @@ author contract 与代码审查边界，不能由 context Drop 伪装成事务�
 ### 12.6 Extension-owned config 与 S5R parity
 
 Server 只把每个 Extension 的原始 JSON 值纳入 canonical fingerprint 并传入候选，不解释
-`shellTimeoutSecs`、`maxOutputTokens` 等作者字段。进程内 Extension 通过 `ExtensionConfig` 做 typed
+`shellTimeoutSecs`、`summarizerMaxOutputTokens` 等作者字段。进程内 Extension 通过 `ExtensionConfig` 做 typed
 deserialize/validation；S5R `ActivateMsg` 携带同一完整 config，worker activation handler 在 ready 前
 确认或拒绝。不存在 Reconfigure/on-config-changed 兼容路径：配置变化总是生成 fresh instance，失败则
 保留 last-known-good generation。
 
 如果未来需要 manifest JSON schema，它只能作为无需实例化的早期错误报告层；不能替代 Extension
-自己的运行时 invariant 校验，也不能在 validation 失败时卸载旧代。`maxOutputTokens` 之类行为应成为
-Extension author contract 或 Host typed request 的字段，而不是为了兼容旧 builtin 在 core 中保留同名
-影子配置。
+自己的运行时 invariant 校验，也不能在 validation 失败时卸载旧代。请求级 token 上限应进入 typed
+`HostLlmChatRequest.maxOutputTokens`；Extension 自己的配置可以用准确领域名决定何时传这个值，但不能
+为了兼容旧 builtin 在 core 中保留同名影子配置。
 
 ### 12.7 模型 tier 不能由当前 model ID 字符串反推
 
@@ -1524,7 +1556,9 @@ Storage 不应知道 `read_tool_result` 的 provider schema，也不应决定 30
   不混代；
 - unscoped Host LLM contract 仍使用 live fallback。
 
-这只验收 turn binding，不把 core 与 Extension 的两个 publication 边界误写成原子 generation。
+这条回归只验证 turn 内 Host model binding；另由 coherent-generation 回归验证 core `Arc`、expected
+Extension epoch、Runner `Stable(epoch)` 与 HandlerIndex 的双重校验。两者合起来才构成原子 runtime
+generation 承诺，不能用其中任一条单测代替另一条。
 
 ### 18.8 Handler task scope 与热重载 cleanup
 
@@ -1534,7 +1568,10 @@ Storage 不应知道 `read_tool_result` 的 provider schema，也不应决定 30
   FIFO，generation shutdown 会等待已接纳写入并拒绝 late request；pipeline 保留 active request，等待中
   的多次触发只执行最新一个；
 - Runner generation 回归验证旧 turn 的 view lease 排空前不撤权，排空后旧 call、Host client、event
-  emitter 和 worker 都不能跨入新 generation。
+  emitter 和 worker 都不能跨入新 generation；
+- 一条 pinned HTTP 回归验证 G1/A → G1/B 在 G2 发布后仍得到 B v1，而 Server 外部入口得到 B v2；
+- 一条 candidate panic 回归让 `stop(StartupFailed)` 人为阻塞，验证下一次同 ID reconcile 在 rollback
+  完成前不能启动 replacement。
 
 这些测试验证的是 capability revocation、owned task cleanup 与 durable critical section，不把 Drop 或
 cancel 描述为外部副作用回滚。
@@ -1624,7 +1661,7 @@ cargo test -p astrcode-server --features testing
 4. `[x]` `PreToolUse` 已拆成 transform/admission 两阶段；全部 Ask 聚合，Block 覆盖，plan 使用 canonical args；
 5. `[x]` PTY supervision 已作最终决定：删除 `terminal`/PTY/resize/`portable-pty`，Host 只提供 supervised pipes；
 6. `[x]` turn-scoped Host LLM binding 已覆盖 hook 与 tool，旧 turn 不随 live provider publication 漂移；
-7. `[ ]` 对 config/runtime generation 做范围决定：若宣称原子 runtime reload，就必须把 core、Extension view 与 turn 内 Host model binding 放进同一代；否则明确降级当前承诺并另立阻塞任务；
+7. `[x]` config/runtime generation 使用单一 Extension epoch 发布 core config/providers/context 与 HandlerIndex；turn pin 与 Host model binding 均来自同一代；
 8. `[x]` `read_tool_result` 整链测试缺口与 artifact fault-injection 缺口已明确记录，未伪装成已验收能力；
 9. `[ ]` 新提交触发远端多平台 CI，并在真实 Windows runner 验证 Job Object descendant cleanup，而不是复用旧 head 结果。
 

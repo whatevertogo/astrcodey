@@ -2,6 +2,7 @@
 
 use std::{
     collections::BTreeMap,
+    panic::AssertUnwindSafe,
     sync::{
         Arc, RwLock as StdRwLock,
         atomic::{AtomicBool, Ordering},
@@ -33,6 +34,7 @@ use astrcode_extension_sdk::{
         TurnExtensionViewProvider, TurnHooks,
     },
 };
+use futures_util::FutureExt;
 use tokio::sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, RwLock, Semaphore, mpsc};
 
 mod commands;
@@ -67,6 +69,7 @@ pub use diagnostics::{
 pub(crate) use host_invoker::transport_invoke_context;
 use host_invoker::{ExtensionCallContextFactory, ExtensionCallContextInput};
 pub use http::ExtensionHttpDispatchResult;
+use http::GenerationPublicHttpDispatcher;
 use index::{
     ExtensionGenerationEntry, HandlerIndex, build_handler_index, log_handler_dispatch_order,
 };
@@ -154,7 +157,7 @@ struct LifecycleCoordination {
 struct RuntimeRegistry {
     /// 已发布的扩展实例、清单与生命周期资源。
     extensions: RwLock<Vec<HostedExtension>>,
-    /// 预计算的 handler 索引；writer 活跃时可能是释放旧代租约所需的批次中间态。
+    /// 最后一个完成激活的 handler 索引。
     index: ArcSwap<HandlerIndex>,
     publication: parking_lot::Mutex<RuntimePublication>,
     publication_stable: Notify,
@@ -237,11 +240,16 @@ struct HostedExtension {
     supervisor: ExtensionSupervisor,
     publication_lease: Arc<ExtensionPublicationLease>,
     generation_gate: ExtensionGenerationGate,
+    public_http_dispatcher: Arc<GenerationPublicHttpDispatcher>,
 }
 
 enum ExtensionOrigin {
+    #[cfg(any(test, feature = "testing"))]
     Direct,
-    Source { key: String, fingerprint: String },
+    Source {
+        key: String,
+        fingerprint: String,
+    },
 }
 
 pub(crate) struct RegisteredSourceExtension {
@@ -303,6 +311,7 @@ pub struct PreparedExtensionGeneration {
     changed: bool,
 }
 
+#[cfg(any(test, feature = "testing"))]
 enum RegistrationPublication {
     Published(ExtensionTasks),
     Skipped,
@@ -346,6 +355,7 @@ impl PreparedExtensionGeneration {
         let mut previous = std::mem::take(&mut *active);
         let mut next = previous
             .extract_if(.., |hosted| match &hosted.origin {
+                #[cfg(any(test, feature = "testing"))]
                 ExtensionOrigin::Direct => true,
                 ExtensionOrigin::Source { key, fingerprint } => retained.contains(&(
                     hosted.manifest.id().to_owned(),
@@ -390,15 +400,16 @@ impl PreparedExtensionGeneration {
         };
         let index = Arc::new(build_handler_index(&next, generation));
         for hosted in &next {
+            hosted.public_http_dispatcher.bind_once(&index);
             hosted.supervisor.mark_ready(generation);
         }
-        runner.registry.index.store(index);
         *active = next;
         publish(generation);
         for hosted in active.iter() {
             hosted.generation_gate.activate();
             activate_extension_tasks(&hosted.tasks);
         }
+        runner.registry.index.store(index);
         drop(fresh_operation_guards);
         drop(active);
         drop(lifecycle);
@@ -491,11 +502,13 @@ impl ExtensionRunner {
     }
 
     /// 注册一个扩展。
+    #[cfg(any(test, feature = "testing"))]
     pub async fn register(&self, ext: Arc<dyn Extension>) -> Result<bool, ExtensionError> {
         self.register_with_startup_working_dir(ext, None).await
     }
 
     /// 注册扩展，并向 `start()` 传递宿主启动时已知的项目目录。
+    #[cfg(any(test, feature = "testing"))]
     pub async fn register_with_startup_working_dir(
         &self,
         ext: Arc<dyn Extension>,
@@ -523,6 +536,7 @@ impl ExtensionRunner {
         Ok(true)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     async fn publish_registration_locked(
         &self,
         ext: Arc<dyn Extension>,
@@ -604,6 +618,7 @@ impl ExtensionRunner {
         let ext_config = serde_json::Value::Null;
         let runtime_config = extension_config(&id, ext_config.clone());
         let generation_gate = ExtensionGenerationGate::candidate();
+        let public_http_dispatcher = GenerationPublicHttpDispatcher::for_candidate(self);
         let instance_id = ExtensionInstanceId::new();
 
         self.record_stage_running(&id, DiagnosticStage::Start);
@@ -631,6 +646,7 @@ impl ExtensionRunner {
                         working_dir: startup_working_dir.map(std::path::PathBuf::from),
                         event_tx: startup_event_tx,
                         generation_gate: generation_gate.clone(),
+                        public_http_dispatcher: Some(public_http_dispatcher.clone()),
                         ..ExtensionCallContextInput::unscoped(tasks.cancellation())
                     },
                 ),
@@ -704,6 +720,7 @@ impl ExtensionRunner {
                 supervisor,
                 publication_lease: ExtensionPublicationLease::new(),
                 generation_gate: generation_gate.clone(),
+                public_http_dispatcher,
             });
             self.rebuild_index_before_stable(&extensions, || {
                 generation_gate.activate();
@@ -714,6 +731,7 @@ impl ExtensionRunner {
         Ok(RegistrationPublication::Published(tasks))
     }
 
+    #[cfg(any(test, feature = "testing"))]
     async fn finish_registration(
         &self,
         publication: RegistrationPublication,
@@ -738,6 +756,7 @@ impl ExtensionRunner {
         }
     }
 
+    #[cfg(any(test, feature = "testing"))]
     async fn lock_registration_operation(
         &self,
         extension_id: &str,
@@ -753,7 +772,7 @@ impl ExtensionRunner {
     ///
     /// 返回是否从当前分发表移除了该扩展。generation gate 会先关闭并排空调用，
     /// 停止失败会记录日志，并由等待该退休结果的调用方或 [`Self::shutdown`] 汇总。
-    pub async fn unregister(
+    async fn unregister(
         &self,
         extension_id: &str,
         reason: StopReason,
@@ -863,7 +882,7 @@ impl ExtensionRunner {
         {
             let _lifecycle = self.coordination.registry.lock().await;
         }
-        let ids = self.registered_extension_ids().await;
+        let ids = self.snapshot_registered_extension_ids().await;
         let mut errors = Vec::new();
         for id in ids {
             if let Err(e) = self.unregister(&id, StopReason::Shutdown).await {
@@ -880,7 +899,12 @@ impl ExtensionRunner {
     }
 
     /// 返回当前已注册扩展的 id 列表。
+    #[cfg(any(test, feature = "testing"))]
     pub async fn registered_extension_ids(&self) -> Vec<String> {
+        self.snapshot_registered_extension_ids().await
+    }
+
+    async fn snapshot_registered_extension_ids(&self) -> Vec<String> {
         self.registry
             .extensions
             .read()
@@ -897,6 +921,7 @@ impl ExtensionRunner {
             .await
             .iter()
             .filter_map(|hosted| match &hosted.origin {
+                #[cfg(any(test, feature = "testing"))]
                 ExtensionOrigin::Direct => None,
                 ExtensionOrigin::Source { key, fingerprint } => Some(RegisteredSourceExtension {
                     id: hosted.manifest.id().to_owned(),
@@ -1042,6 +1067,7 @@ impl ExtensionRunner {
             let mut accepted = extensions
                 .iter()
                 .filter(|hosted| match &hosted.origin {
+                    #[cfg(any(test, feature = "testing"))]
                     ExtensionOrigin::Direct => true,
                     ExtensionOrigin::Source { key, fingerprint } => resolved.iter().any(|entry| {
                         matches!(
@@ -1097,6 +1123,7 @@ impl ExtensionRunner {
             .await
             .iter()
             .filter_map(|hosted| match &hosted.origin {
+                #[cfg(any(test, feature = "testing"))]
                 ExtensionOrigin::Direct => None,
                 ExtensionOrigin::Source { key, fingerprint }
                     if retained.contains(&(
@@ -1161,6 +1188,7 @@ impl ExtensionRunner {
         let capabilities = manifest.capabilities().to_vec();
         let tasks = suspended_extension_tasks(extension_id.clone());
         let generation_gate = ExtensionGenerationGate::candidate();
+        let public_http_dispatcher = GenerationPublicHttpDispatcher::for_candidate(self);
         let instance_id = ExtensionInstanceId::new();
         let operation_gate = Arc::new(AsyncMutex::new(()));
         let operation_guard = Arc::clone(&operation_gate).lock_owned().await;
@@ -1178,6 +1206,7 @@ impl ExtensionRunner {
                         working_dir: startup_working_dir.map(std::path::PathBuf::from),
                         event_tx: startup_event_tx,
                         generation_gate: generation_gate.clone(),
+                        public_http_dispatcher: Some(public_http_dispatcher.clone()),
                         ..ExtensionCallContextInput::unscoped(tasks.cancellation())
                     },
                 ),
@@ -1203,17 +1232,32 @@ impl ExtensionRunner {
 
         self.record_stage_running(&extension_id, DiagnosticStage::Start);
         let started = std::time::Instant::now();
-        if let Err(error) = self.run_with_timeout(extension.start(context)).await {
+        let start_result = AssertUnwindSafe(self.run_with_timeout(extension.start(context)))
+            .catch_unwind()
+            .await;
+        let start_error = match start_result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error),
+            Err(_) => Some(ExtensionError::Internal(format!(
+                "extension {extension_id} start panicked"
+            ))),
+        };
+        if let Some(error) = start_error {
             self.record_stage_result(
                 &extension_id,
                 DiagnosticStage::Start,
                 Some(started.elapsed()),
                 StageOutcome::Failed(error.to_string()),
             );
-            if let Ok(retirement) = pending.retire()
-                && let Err(rollback) = retirement.wait().await
-            {
-                tracing::warn!(extension_id, error = %rollback, "candidate startup rollback failed");
+            match pending.retire() {
+                Ok(retirement) => {
+                    if let Err(rollback) = retirement.wait().await {
+                        tracing::warn!(extension_id, error = %rollback, "candidate startup rollback failed");
+                    }
+                },
+                Err(rollback) => {
+                    tracing::warn!(extension_id, error = %rollback, "candidate startup rollback handoff failed");
+                },
             }
             return Err(error);
         }
@@ -1237,6 +1281,7 @@ impl ExtensionRunner {
                 supervisor: ExtensionSupervisor::spawn(extension_id),
                 publication_lease: ExtensionPublicationLease::new(),
                 generation_gate,
+                public_http_dispatcher,
             },
             operation_guard,
         })
@@ -1284,10 +1329,11 @@ impl ExtensionRunner {
         };
         let index = Arc::new(build_handler_index(extensions, generation));
         for hosted in extensions {
+            hosted.public_http_dispatcher.bind_once(&index);
             hosted.supervisor.mark_ready(generation);
         }
-        self.registry.index.store(index);
         before_stable();
+        self.registry.index.store(index);
     }
 
     /// 绑定会话原子操作能力。
@@ -1299,10 +1345,11 @@ impl ExtensionRunner {
     }
 
     /// 获取共享的 session_ops 引用（供 HandlerTool 使用）。
-    pub fn session_ops_ref(&self) -> Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>> {
+    fn session_ops_ref(&self) -> Arc<StdRwLock<Option<Arc<dyn SessionOperations>>>> {
         Arc::clone(&self.bindings.read().session_ops)
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn count(&self) -> usize {
         self.registry.extensions.read().await.len()
     }
@@ -2028,6 +2075,7 @@ impl ExtensionRunner {
         run_with_timeout(self.operation_timeout, future).await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn transform_tool_input(
         &self,
         ctx: RuntimePreToolUseContext,
@@ -2035,6 +2083,7 @@ impl ExtensionRunner {
         self.extension_view().await.transform_tool_input(ctx).await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn emit_pre_tool_use(
         &self,
         ctx: RuntimePreToolUseContext,
@@ -2042,6 +2091,7 @@ impl ExtensionRunner {
         self.extension_view().await.emit_pre_tool_use(ctx).await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn emit_post_tool_use(
         &self,
         ctx: RuntimePostToolUseContext,
@@ -2049,6 +2099,7 @@ impl ExtensionRunner {
         self.extension_view().await.emit_post_tool_use(ctx).await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn emit_provider(
         &self,
         event: ProviderEvent,
@@ -2057,6 +2108,7 @@ impl ExtensionRunner {
         self.extension_view().await.emit_provider(event, ctx).await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn collect_prompt_contributions_typed(
         &self,
         ctx: RuntimePromptBuildContext,
@@ -2067,6 +2119,7 @@ impl ExtensionRunner {
             .await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn collect_pre_compact(
         &self,
         ctx: RuntimePreCompactContext,
@@ -2074,6 +2127,7 @@ impl ExtensionRunner {
         self.extension_view().await.collect_pre_compact(ctx).await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn notify_post_compact(
         &self,
         ctx: RuntimePostCompactContext,
@@ -2081,6 +2135,7 @@ impl ExtensionRunner {
         self.extension_view().await.notify_post_compact(ctx).await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn emit_continue_after_stop(
         &self,
         ctx: RuntimeContinueAfterStopContext,
@@ -2091,6 +2146,7 @@ impl ExtensionRunner {
             .await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn emit_user_message_envelope(
         &self,
         ctx: RuntimeUserMessageEnvelopeContext,
@@ -2101,6 +2157,7 @@ impl ExtensionRunner {
             .await
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub async fn emit_lifecycle(
         &self,
         event: LifecycleEvent,

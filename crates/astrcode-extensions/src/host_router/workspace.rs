@@ -1317,14 +1317,18 @@ pub(super) fn write_file_atomic(path: &Path, content: &[u8]) -> std::io::Result<
     Ok(())
 }
 
+#[cfg(unix)]
 fn no_follow_options() -> std::fs::OpenOptions {
+    use std::os::unix::fs::OpenOptionsExt;
+
     let mut options = std::fs::OpenOptions::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
-    }
+    options.custom_flags(libc::O_NOFOLLOW);
     options
+}
+
+#[cfg(not(unix))]
+fn no_follow_options() -> std::fs::OpenOptions {
+    std::fs::OpenOptions::new()
 }
 
 fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {

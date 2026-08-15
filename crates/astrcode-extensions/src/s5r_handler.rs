@@ -196,7 +196,12 @@ pub(crate) fn parse_pre_compact_result(
     resp: &HandlerResult,
 ) -> Result<PreCompactResult, ExtensionError> {
     match resp.effect {
-        HandlerEffect::Ok => return Ok(PreCompactResult::Allow),
+        HandlerEffect::Ok if resp.data.is_null() => return Ok(PreCompactResult::Allow),
+        HandlerEffect::Ok => {
+            return Err(ExtensionError::Internal(
+                "pre_compact allow result must return no data".into(),
+            ));
+        },
         HandlerEffect::CompactContributions => {},
         effect => return Err(unexpected_effect("pre_compact", effect)),
     }
@@ -348,6 +353,7 @@ mod tests {
                     && contributions.retained_context.len() == 2
         ));
         assert!(parse_pre_compact_result(&incomplete_compact).is_err());
+        assert!(parse_pre_compact_result(&post_with_data).is_err());
         assert!(parse_post_compact_result(&HandlerResult::ok()).is_ok());
         assert!(parse_post_compact_result(&post_with_data).is_err());
         assert!(parse_post_compact_result(&compact).is_err());

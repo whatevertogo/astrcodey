@@ -551,6 +551,7 @@ dependencies = [
  "arc-swap",
  "astrcode-core",
  "astrcode-extension-sdk",
+ "astrcode-extensions",
  "astrcode-session-projection",
  "astrcode-storage",
  "async-trait",

@@ -28,7 +28,7 @@ use astrcode_extension_sdk::{
         SessionCommandKind,
     },
 };
-use astrcode_extensions::Extension;
+use astrcode_extensions::{Extension, testing::extension_runner_with_extensions};
 use astrcode_protocol::{commands::ClientCommand, events::ClientNotification};
 use astrcode_session_projection::SessionReadModel;
 use astrcode_storage::{SessionStore, in_memory::InMemoryEventStore};
@@ -452,6 +452,10 @@ impl astrcode_extension_sdk::extension::CommandHandler for InteractiveCommandPro
         self.completion_calls.fetch_add(1, Ordering::SeqCst);
         Ok(CommandCompletions::default())
     }
+
+    fn supports_argument_completions(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait::async_trait]
@@ -797,6 +801,37 @@ fn test_runtime_with_settings(
     llm_provider: Arc<dyn LlmProvider>,
     context_settings: astrcode_context::ContextSettings,
 ) -> Arc<ServerRuntime> {
+    test_runtime_with_runner(
+        llm_provider,
+        context_settings,
+        Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
+            Duration::from_secs(1),
+        )),
+    )
+}
+
+/// 扩展必须在 SessionRuntimeServices 之前完成装配，否则 runner generation
+/// 与 expected epoch 不匹配,turn 执行会以 RuntimeUnstable 失败。
+async fn test_runtime_with_extensions(
+    llm_provider: Arc<dyn LlmProvider>,
+    extensions: Vec<Arc<dyn Extension>>,
+) -> Arc<ServerRuntime> {
+    let extension_runner =
+        extension_runner_with_extensions(Duration::from_secs(1), None, extensions)
+            .await
+            .expect("assemble test extension runner");
+    test_runtime_with_runner(
+        llm_provider,
+        astrcode_context::ContextSettings::default(),
+        extension_runner,
+    )
+}
+
+fn test_runtime_with_runner(
+    llm_provider: Arc<dyn LlmProvider>,
+    context_settings: astrcode_context::ContextSettings,
+    extension_runner: Arc<astrcode_extensions::runner::ExtensionRunner>,
+) -> Arc<ServerRuntime> {
     let effective = EffectiveConfig {
         llm: LlmSettings {
             provider_kind: "mock".into(),
@@ -861,9 +896,6 @@ fn test_runtime_with_settings(
         extensions: ExtensionSettings::default(),
     };
     let event_store = Arc::new(InMemoryEventStore::new()) as Arc<dyn SessionStore>;
-    let extension_runner = Arc::new(astrcode_extensions::runner::ExtensionRunner::new(
-        Duration::from_secs(1),
-    ));
     let runtime_services = crate::config_manager::assemble_session_runtime_services(
         llm_provider.clone(),
         llm_provider,
@@ -913,28 +945,18 @@ fn test_runtime() -> Arc<ServerRuntime> {
     test_runtime_with_llm(Arc::new(MockLlm))
 }
 
-async fn register_coding_extension(runtime: &ServerRuntime) {
-    let extension = astrcode_bundled_extensions::bundled_extensions(&Default::default())
+fn coding_extension() -> Arc<dyn Extension> {
+    astrcode_bundled_extensions::bundled_extensions(&Default::default())
         .into_iter()
         .find(|extension| extension.manifest().id() == "astrcode-coding")
-        .expect("coding extension is included in server test features");
-    runtime
-        .extension_runner()
-        .register(extension)
-        .await
-        .expect("register coding extension");
+        .expect("coding extension is included in server test features")
 }
 
-async fn register_session_commands(runtime: &ServerRuntime) {
-    let extension = astrcode_bundled_extensions::bundled_extensions(&Default::default())
+fn session_commands_extension() -> Arc<dyn Extension> {
+    astrcode_bundled_extensions::bundled_extensions(&Default::default())
         .into_iter()
         .find(|extension| extension.manifest().id() == "astrcode-session-commands")
-        .expect("session command extension is included in server test features");
-    runtime
-        .extension_runner()
-        .register(extension)
-        .await
-        .expect("register session command extension");
+        .expect("session command extension is included in server test features")
 }
 
 fn test_scheduler(runtime: &Arc<ServerRuntime>) -> Arc<crate::turn_scheduler::TurnScheduler> {
@@ -1339,15 +1361,14 @@ async fn create_session_persists_initial_system_prompt() {
 
 #[tokio::test]
 async fn client_create_session_ignores_start_observer_failure() {
-    let runtime = test_runtime();
     let calls = Arc::new(AtomicUsize::new(0));
-    runtime
-        .extension_runner
-        .register(Arc::new(FailingSessionStartObserver {
+    let runtime = test_runtime_with_extensions(
+        Arc::new(MockLlm),
+        vec![Arc::new(FailingSessionStartObserver {
             calls: Arc::clone(&calls),
-        }))
-        .await
-        .unwrap();
+        })],
+    )
+    .await;
     let event_tx = event_channel(1024);
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
 
@@ -1362,15 +1383,14 @@ async fn client_create_session_ignores_start_observer_failure() {
 
 #[tokio::test]
 async fn reopening_persisted_session_emits_resume_once_per_runtime() {
-    let runtime = test_runtime();
     let events = Arc::new(Mutex::new(Vec::new()));
-    runtime
-        .extension_runner
-        .register(Arc::new(RecordSessionResumeExtension {
+    let runtime = test_runtime_with_extensions(
+        Arc::new(MockLlm),
+        vec![Arc::new(RecordSessionResumeExtension {
             events: Arc::clone(&events),
-        }))
-        .await
-        .unwrap();
+        })],
+    )
+    .await;
     let sid = new_session_id();
     runtime
         .event_store()
@@ -1390,15 +1410,14 @@ async fn reopening_persisted_session_emits_resume_once_per_runtime() {
 
 #[tokio::test]
 async fn failed_session_resume_observer_does_not_fail_or_repeat_open() {
-    let runtime = test_runtime();
     let calls = Arc::new(AtomicUsize::new(0));
-    runtime
-        .extension_runner
-        .register(Arc::new(FailingSessionResumeObserver {
+    let runtime = test_runtime_with_extensions(
+        Arc::new(MockLlm),
+        vec![Arc::new(FailingSessionResumeObserver {
             calls: Arc::clone(&calls),
-        }))
-        .await
-        .unwrap();
+        })],
+    )
+    .await;
     let sid = new_session_id();
     runtime
         .event_store()
@@ -1417,19 +1436,18 @@ async fn failed_session_resume_observer_does_not_fail_or_repeat_open() {
 
 #[tokio::test]
 async fn concurrent_open_waits_for_initial_session_resume() {
-    let runtime = test_runtime();
     let calls = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    runtime
-        .extension_runner
-        .register(Arc::new(AwaitedSessionResumeObserver {
+    let runtime = test_runtime_with_extensions(
+        Arc::new(MockLlm),
+        vec![Arc::new(AwaitedSessionResumeObserver {
             calls: Arc::clone(&calls),
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
-        }))
-        .await
-        .unwrap();
+        })],
+    )
+    .await;
     let sid = new_session_id();
     runtime
         .event_store()
@@ -1462,19 +1480,18 @@ async fn concurrent_open_waits_for_initial_session_resume() {
 
 #[tokio::test]
 async fn cancelled_initial_resume_allows_retry() {
-    let runtime = test_runtime();
     let calls = Arc::new(AtomicUsize::new(0));
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
-    runtime
-        .extension_runner
-        .register(Arc::new(AwaitedSessionResumeObserver {
+    let runtime = test_runtime_with_extensions(
+        Arc::new(MockLlm),
+        vec![Arc::new(AwaitedSessionResumeObserver {
             calls: Arc::clone(&calls),
             entered: Arc::clone(&entered),
             release: Arc::clone(&release),
-        }))
-        .await
-        .unwrap();
+        })],
+    )
+    .await;
     let sid = new_session_id();
     runtime
         .event_store()
@@ -1944,15 +1961,14 @@ async fn queued_inputs_run_fifo_for_same_session() {
 
 #[tokio::test]
 async fn successful_text_turn_dispatches_after_provider_response_before_turn_end() {
-    let runtime = test_runtime_with_llm(Arc::new(CapturingLlm::default()));
     let events = Arc::new(Mutex::new(Vec::new()));
-    runtime
-        .extension_runner
-        .register(Arc::new(RecordingLifecycleExtension {
+    let runtime = test_runtime_with_extensions(
+        Arc::new(CapturingLlm::default()),
+        vec![Arc::new(RecordingLifecycleExtension {
             events: Arc::clone(&events),
-        }))
-        .await
-        .unwrap();
+        })],
+    )
+    .await;
     let event_tx = event_channel(1024);
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
     let sid = handler.create_session(".".into()).await.unwrap();
@@ -1975,15 +1991,14 @@ async fn successful_text_turn_dispatches_after_provider_response_before_turn_end
 
 #[tokio::test]
 async fn stream_error_still_dispatches_turn_end() {
-    let runtime = test_runtime_with_llm(Arc::new(StreamErrorLlm));
     let events = Arc::new(Mutex::new(Vec::new()));
-    runtime
-        .extension_runner
-        .register(Arc::new(RecordingLifecycleExtension {
+    let runtime = test_runtime_with_extensions(
+        Arc::new(StreamErrorLlm),
+        vec![Arc::new(RecordingLifecycleExtension {
             events: Arc::clone(&events),
-        }))
-        .await
-        .unwrap();
+        })],
+    )
+    .await;
     let event_tx = event_channel(1024);
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
     let sid = handler.create_session(".".into()).await.unwrap();
@@ -2003,10 +2018,13 @@ async fn read_before_edit_guard_survives_across_turns() {
     let workspace = unique_workspace("read-before-edit-cross-turn");
     let path = workspace.join("note.txt");
     fs::write(&path, "alpha").unwrap();
-    let runtime = test_runtime_with_llm(Arc::new(ReadThenEditAcrossTurnsLlm {
-        call_count: AtomicUsize::new(0),
-    }));
-    register_coding_extension(&runtime).await;
+    let runtime = test_runtime_with_extensions(
+        Arc::new(ReadThenEditAcrossTurnsLlm {
+            call_count: AtomicUsize::new(0),
+        }),
+        vec![coding_extension()],
+    )
+    .await;
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -2129,16 +2147,17 @@ async fn abort_stops_inner_turn_before_late_provider_events_are_persisted() {
 async fn slash_compact_rejects_running_turn_without_input_or_compaction_events() {
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
-    let runtime = test_runtime_with_llm(Arc::new(PendingLlm));
-    register_session_commands(&runtime).await;
     let compact_handler_calls = Arc::new(AtomicUsize::new(0));
-    runtime
-        .extension_runner
-        .register(Arc::new(BusyCompactProbeExtension {
-            execute_calls: Arc::clone(&compact_handler_calls),
-        }))
-        .await
-        .unwrap();
+    let runtime = test_runtime_with_extensions(
+        Arc::new(PendingLlm),
+        vec![
+            session_commands_extension(),
+            Arc::new(BusyCompactProbeExtension {
+                execute_calls: Arc::clone(&compact_handler_calls),
+            }),
+        ],
+    )
+    .await;
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
 
     let sid = handler.create_session(".".into()).await.unwrap();
@@ -2237,11 +2256,8 @@ async fn compact_command_rewrites_transcript_with_summary() {
 
 #[tokio::test]
 async fn slash_compact_uses_backend_command_without_user_message() {
-    let runtime = test_runtime_with_settings(
-        Arc::new(MockLlm),
-        astrcode_context::ContextSettings::default(),
-    );
-    register_session_commands(&runtime).await;
+    let runtime =
+        test_runtime_with_extensions(Arc::new(MockLlm), vec![session_commands_extension()]).await;
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -2328,15 +2344,14 @@ async fn empty_slash_falls_through_as_regular_prompt() {
 
 #[tokio::test]
 async fn extension_display_slash_command_returns_content_in_handled_message() {
-    let runtime = test_runtime();
-    runtime
-        .extension_runner
-        .register(Arc::new(StaticCommandExtension {
+    let runtime = test_runtime_with_extensions(
+        Arc::new(MockLlm),
+        vec![Arc::new(StaticCommandExtension {
             id: "test-extension",
             command_name: "demo-cmd",
-        }))
-        .await
-        .unwrap();
+        })],
+    )
+    .await;
     let event_tx = event_channel(1024);
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
     let sid = handler.create_session(".".into()).await.unwrap();
@@ -2357,15 +2372,14 @@ async fn extension_display_slash_command_returns_content_in_handled_message() {
 
 #[tokio::test]
 async fn invoke_command_normalizes_name_at_session_boundary() {
-    let runtime = test_runtime();
-    runtime
-        .extension_runner
-        .register(Arc::new(StaticCommandExtension {
+    let runtime = test_runtime_with_extensions(
+        Arc::new(MockLlm),
+        vec![Arc::new(StaticCommandExtension {
             id: "test-extension",
             command_name: "demo-cmd",
-        }))
-        .await
-        .unwrap();
+        })],
+    )
+    .await;
     let event_tx = event_channel(1024);
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
     let sid = handler.create_session(".".into()).await.unwrap();
@@ -2394,12 +2408,9 @@ async fn skill_slash_command_uses_skill_content_as_user_message() {
     );
     let llm = CapturingLlm::default();
     let captured_messages = Arc::clone(&llm.messages);
-    let runtime = test_runtime_with_llm(Arc::new(llm));
-    runtime
-        .extension_runner
-        .register(astrcode_extension_skill::extension())
-        .await
-        .unwrap();
+    let runtime =
+        test_runtime_with_extensions(Arc::new(llm), vec![astrcode_extension_skill::extension()])
+            .await;
     let event_tx = event_channel(1024);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
@@ -2470,31 +2481,24 @@ async fn session_commands_share_extension_resolution_and_transport_admission() {
         "reviewnow",
         "---\ndescription: Skill named reviewnow.\n---\nShould not override extension.",
     );
-    let runtime = test_runtime();
-    register_session_commands(&runtime).await;
-    runtime
-        .extension_runner
-        .register(astrcode_extension_skill::extension())
-        .await
-        .unwrap();
-    runtime
-        .extension_runner
-        .register(Arc::new(StaticCommandExtension {
-            id: "test-extension",
-            command_name: "reviewnow",
-        }))
-        .await
-        .unwrap();
     let interactive_execute_calls = Arc::new(AtomicUsize::new(0));
     let interactive_completion_calls = Arc::new(AtomicUsize::new(0));
-    runtime
-        .extension_runner
-        .register(Arc::new(InteractiveCommandProbeExtension {
-            execute_calls: Arc::clone(&interactive_execute_calls),
-            completion_calls: Arc::clone(&interactive_completion_calls),
-        }))
-        .await
-        .unwrap();
+    let runtime = test_runtime_with_extensions(
+        Arc::new(MockLlm),
+        vec![
+            session_commands_extension(),
+            astrcode_extension_skill::extension(),
+            Arc::new(StaticCommandExtension {
+                id: "test-extension",
+                command_name: "reviewnow",
+            }),
+            Arc::new(InteractiveCommandProbeExtension {
+                execute_calls: Arc::clone(&interactive_execute_calls),
+                completion_calls: Arc::clone(&interactive_completion_calls),
+            }),
+        ],
+    )
+    .await;
     let event_tx = event_channel(1024);
     let handler = spawn_test_actor(Arc::clone(&runtime), event_tx);
     let sid = handler
@@ -3099,8 +3103,7 @@ async fn streaming_tool_call_completed_executes_tools() {
     let llm = Arc::new(StreamingToolCallLlm {
         call_count: AtomicUsize::new(0),
     });
-    let runtime = test_runtime_with_llm(llm);
-    register_coding_extension(&runtime).await;
+    let runtime = test_runtime_with_extensions(llm, vec![coding_extension()]).await;
     let event_tx = event_channel(128);
     let mut event_rx = event_tx.subscribe();
     let handler = spawn_test_actor(runtime.clone(), event_tx);

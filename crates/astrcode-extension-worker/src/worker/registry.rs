@@ -888,6 +888,8 @@ impl HandlerRegistry {
 
 fn fixed_worker_hook_hint(event: &LifecycleEvent) -> &'static str {
     match event {
+        LifecycleEvent::ToolInputTransform => "use Worker::on_tool_input_transform(...) instead",
+        LifecycleEvent::PreToolUse => "use Worker::on_pre_tool_use(...) instead",
         LifecycleEvent::AfterProviderResponse => {
             "use Worker::on_after_provider_response(...) instead"
         },
@@ -976,12 +978,33 @@ mod tests {
 
         let fixed = registry
             .register_hook(
-                LifecycleEvent::AfterProviderResponse,
-                HookMode::Advisory,
-                handler,
+                LifecycleEvent::PreToolUse,
+                HookMode::Blocking,
+                Arc::clone(&handler),
             )
             .expect_err("fixed-mode lifecycle event must use its typed registration API");
         assert_eq!(fixed.code_enum(), Some(WireErrorCode::TypedHookRequired));
+
+        for event in [
+            LifecycleEvent::ToolInputTransform,
+            LifecycleEvent::PreToolUse,
+            LifecycleEvent::AfterProviderResponse,
+        ] {
+            registry
+                .register_fixed_hook(event, Arc::clone(&handler))
+                .unwrap();
+        }
+
+        let fixed_hooks = &registry.manifest.hooks[1..];
+        assert_eq!(fixed_hooks[0].on, LifecycleEvent::ToolInputTransform.into());
+        assert_eq!(fixed_hooks[0].mode, HookMode::Blocking);
+        assert_eq!(fixed_hooks[1].on, LifecycleEvent::PreToolUse.into());
+        assert_eq!(fixed_hooks[1].mode, HookMode::Blocking);
+        assert_eq!(
+            fixed_hooks[2].on,
+            LifecycleEvent::AfterProviderResponse.into()
+        );
+        assert_eq!(fixed_hooks[2].mode, HookMode::Advisory);
     }
 
     #[test]

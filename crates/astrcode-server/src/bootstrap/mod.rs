@@ -300,7 +300,7 @@ impl ServerRuntime {
 }
 
 /// 将扩展加载到已有的 runner 中。
-fn bind_extension_host_router(
+pub(crate) fn bind_extension_host_router(
     runner: &Arc<ExtensionRunner>,
     runtime_services: &SessionRuntimeServices,
     session_store: Arc<dyn SessionStore>,
@@ -319,7 +319,6 @@ fn bind_extension_host_router(
             event_reader: Some(event_reader),
             session_reader: Some(session_reader),
             default_working_dir: Some(working_dir.clone()),
-            public_http_dispatcher: None,
             outbound_network: Some(outbound_network),
         },
         runner.public_http_dispatcher(),

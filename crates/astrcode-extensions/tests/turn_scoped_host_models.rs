@@ -18,7 +18,7 @@ use astrcode_extension_sdk::{
     },
     tool::{ExecutionMode, ToolDefinition, ToolOrigin, ToolPlan, ToolResult},
 };
-use astrcode_extensions::{HostBackends, HostRouter, runner::ExtensionRunner};
+use astrcode_extensions::{HostBackends, HostRouter, testing::extension_runner_with_extensions};
 
 struct TaggedProvider(&'static str);
 
@@ -207,15 +207,16 @@ async fn hooks_and_tools_keep_their_turn_models_after_live_publication() {
         small_llm: Some(live_small.clone()),
         ..Default::default()
     }));
-    let runner = ExtensionRunner::new(std::time::Duration::from_secs(1));
-    runner.bind_host_router(router);
     let hook_calls = Arc::new(Mutex::new(Vec::new()));
-    runner
-        .register(Arc::new(ModelBindingProbeExtension {
+    let runner = extension_runner_with_extensions(
+        std::time::Duration::from_secs(1),
+        Some(router),
+        vec![Arc::new(ModelBindingProbeExtension {
             hook_calls: Arc::clone(&hook_calls),
-        }))
-        .await
-        .unwrap();
+        })],
+    )
+    .await
+    .unwrap();
     let tool = runner
         .tool_catalog_snapshot_typed("/workspace")
         .await

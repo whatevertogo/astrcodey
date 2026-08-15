@@ -300,7 +300,6 @@ pub struct HostBackends {
     pub event_reader: Option<Arc<dyn EventReader>>,
     pub session_reader: Option<Arc<dyn SessionReader>>,
     pub default_working_dir: Option<String>,
-    pub public_http_dispatcher: Option<Arc<dyn PublicHttpDispatcher>>,
     pub outbound_network: Option<Arc<dyn OutboundNetworkService>>,
 }
 
@@ -332,7 +331,6 @@ impl HostRouter {
             event_reader,
             session_reader,
             default_working_dir,
-            public_http_dispatcher,
             outbound_network,
         } = backends;
         Self {
@@ -342,7 +340,7 @@ impl HostRouter {
             workspace: WorkspaceGroup::new(default_working_dir.clone()),
             process: ProcessGroup::new(default_working_dir),
             network: NetworkGroup::new(outbound_network),
-            extension_http: ExtensionHttpGroup::new(public_http_dispatcher),
+            extension_http: ExtensionHttpGroup::default(),
         }
     }
 
@@ -795,10 +793,6 @@ pub(crate) fn decls_to_map(
         .collect()
 }
 
-pub fn build_host_router(backends: HostBackends) -> Arc<HostRouter> {
-    Arc::new(HostRouter::from_backends(backends))
-}
-
 /// 构造 trusted bundled extensions 与 worker 共用的受限出站网络服务。
 pub fn default_outbound_network_service() -> Arc<dyn OutboundNetworkService> {
     Arc::new(network::RestrictedNetworkService::default())
@@ -844,8 +838,8 @@ mod tests {
             HOST_NETWORK_MAX_BYTES, HOST_NETWORK_MAX_REQUEST_BODY_BYTES,
             HOST_NETWORK_MAX_TIMEOUT_MS, HOST_PROCESS_MAX_TIMEOUT_MS,
             HOST_SESSION_STATE_KEY_MAX_LENGTH, HOST_SESSION_STATE_VALUE_MAX_BYTES,
-            HostLlmChatOutput, HostNetworkRedirectPolicy, HostNetworkRequest, HostNetworkResponse,
-            HostProcessRequest, HostWorkspaceGrepRequest,
+            HOST_WORKSPACE_MAX_FILE_BYTES, HostLlmChatOutput, HostNetworkRedirectPolicy,
+            HostNetworkRequest, HostNetworkResponse, HostProcessRequest, HostWorkspaceGrepRequest,
         },
     };
     use astrcode_storage::{
@@ -1223,6 +1217,80 @@ mod tests {
             missing_attribution.code_enum(),
             Some(WireErrorCode::ContextUnavailable)
         );
+    }
+
+    #[tokio::test]
+    async fn workspace_read_stays_within_root_and_enforces_the_size_bound() {
+        let directory = tempfile::tempdir().expect("workspace parent");
+        let root = directory.path().join("workspace");
+        std::fs::create_dir_all(&root).expect("create workspace");
+        std::fs::write(root.join("note.txt"), "inside").expect("seed workspace file");
+        std::fs::write(
+            root.join("huge.bin"),
+            vec![b'x'; HOST_WORKSPACE_MAX_FILE_BYTES + 1],
+        )
+        .expect("seed oversized file");
+        let router = HostRouter::from_backends(HostBackends::default());
+        let context = InvokeContext {
+            working_dir: Some(root.to_string_lossy().into_owned()),
+            declared_capabilities: vec![ExtensionCapability::WorkspaceRead],
+            ..Default::default()
+        };
+
+        let traversal = router
+            .invoke(
+                "astrcode.workspace.read",
+                json!({ "path": "../secret.txt" }),
+                &context,
+            )
+            .await
+            .expect_err("parent traversal must be rejected");
+        assert_eq!(traversal.code_enum(), Some(WireErrorCode::PermissionDenied));
+
+        let outside = directory.path().join("outside.txt");
+        std::fs::write(&outside, "outside").expect("seed outside file");
+        let link = root.join("link.txt");
+        let linked = {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&outside, &link)
+            }
+            #[cfg(windows)]
+            {
+                std::os::windows::fs::symlink_file(&outside, &link)
+            }
+        };
+        if linked.is_ok() {
+            let symlink = router
+                .invoke(
+                    "astrcode.workspace.read",
+                    json!({ "path": "link.txt" }),
+                    &context,
+                )
+                .await
+                .expect_err("symlink escape must be rejected");
+            assert_eq!(symlink.code_enum(), Some(WireErrorCode::PermissionDenied));
+        }
+
+        let oversized = router
+            .invoke(
+                "astrcode.workspace.read",
+                json!({ "path": "huge.bin" }),
+                &context,
+            )
+            .await
+            .expect_err("oversized file must be rejected");
+        assert_eq!(oversized.code_enum(), Some(WireErrorCode::FileTooLarge));
+
+        let allowed = router
+            .invoke(
+                "astrcode.workspace.read",
+                json!({ "path": "note.txt" }),
+                &context,
+            )
+            .await
+            .expect("file inside the workspace should be readable");
+        assert_eq!(allowed["content"], "inside");
     }
 
     #[tokio::test]

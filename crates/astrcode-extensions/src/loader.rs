@@ -94,9 +94,9 @@ pub struct ExtensionLoadContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExtensionAdmissionError {
-    pub extension_id: String,
-    pub missing: Vec<TransportFeature>,
+struct ExtensionAdmissionError {
+    extension_id: String,
+    missing: Vec<TransportFeature>,
 }
 
 impl std::fmt::Display for ExtensionAdmissionError {

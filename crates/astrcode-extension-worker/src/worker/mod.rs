@@ -151,6 +151,23 @@ impl Worker {
         Ok(self)
     }
 
+    /// 注册 tool input transform。该 hook 固定为 blocking。
+    pub fn on_tool_input_transform(
+        &mut self,
+        handler: HookHandlerFn,
+    ) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_fixed_hook(LifecycleEvent::ToolInputTransform, handler)?;
+        Ok(self)
+    }
+
+    /// 注册 PreToolUse 准入 hook。该 hook 固定为 blocking。
+    pub fn on_pre_tool_use(&mut self, handler: HookHandlerFn) -> Result<&mut Self, ErrorPayload> {
+        self.registry
+            .register_fixed_hook(LifecycleEvent::PreToolUse, handler)?;
+        Ok(self)
+    }
+
     /// 注册 provider response observer。该 hook 固定为 advisory。
     pub fn on_after_provider_response(
         &mut self,

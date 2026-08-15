@@ -26,6 +26,7 @@ use super::{
 
 impl ExtensionView {
     /// 从 HandlerIndex 缓存收集工具适配器。
+    #[cfg(any(test, feature = "testing"))]
     pub async fn tool_catalog_snapshot_typed(&self, working_dir: &str) -> ToolCatalogSnapshot {
         let scope = ToolCatalogScope {
             working_dir: working_dir.to_owned(),
@@ -130,6 +131,7 @@ impl ExtensionView {
 }
 
 impl ExtensionRunner {
+    #[cfg(any(test, feature = "testing"))]
     pub async fn tool_catalog_snapshot_typed(&self, working_dir: &str) -> ToolCatalogSnapshot {
         self.extension_view()
             .await

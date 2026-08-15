@@ -22,10 +22,6 @@ pub(super) struct ExtensionHttpGroup {
 }
 
 impl ExtensionHttpGroup {
-    pub(super) fn new(dispatcher: Option<Arc<dyn PublicHttpDispatcher>>) -> Self {
-        Self { dispatcher }
-    }
-
     pub(super) fn set_dispatcher(&mut self, dispatcher: Arc<dyn PublicHttpDispatcher>) {
         self.dispatcher = Some(dispatcher);
     }

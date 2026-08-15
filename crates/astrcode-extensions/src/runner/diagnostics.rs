@@ -41,6 +41,8 @@ pub(super) enum ExtensionDiagnosticStage {
 pub(super) enum ExtensionStageOutcome {
     Succeeded,
     Failed(String),
+    // 仅 direct register 路径（test/testing feature）会记录 Skipped。
+    #[cfg(any(test, feature = "testing"))]
     Skipped,
 }
 
@@ -92,7 +94,11 @@ impl ExtensionRunner {
         reports
     }
 
-    pub fn record_extension_load_success(&self, extension_id: &str, elapsed: Option<Duration>) {
+    pub(crate) fn record_extension_load_success(
+        &self,
+        extension_id: &str,
+        elapsed: Option<Duration>,
+    ) {
         self.record_stage_result(
             extension_id,
             ExtensionDiagnosticStage::Load,
@@ -101,7 +107,7 @@ impl ExtensionRunner {
         );
     }
 
-    pub fn record_extension_load_failure(
+    pub(crate) fn record_extension_load_failure(
         &self,
         extension_id: &str,
         error: impl Into<String>,
@@ -134,6 +140,7 @@ impl ExtensionRunner {
         let (status, error) = match outcome {
             ExtensionStageOutcome::Succeeded => (ExtensionStageStatus::Succeeded, None),
             ExtensionStageOutcome::Failed(error) => (ExtensionStageStatus::Failed, Some(error)),
+            #[cfg(any(test, feature = "testing"))]
             ExtensionStageOutcome::Skipped => (ExtensionStageStatus::Skipped, None),
         };
         let mut diagnostics = self.diagnostics.write();

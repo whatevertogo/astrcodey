@@ -1111,6 +1111,7 @@ mod tests {
         },
         runtime_ports::{NoopRuntimePorts, TurnHooks},
     };
+    use astrcode_extensions::testing::extension_runner_with_extensions;
     use astrcode_session::{SessionExtensionPorts, SessionRuntimeServices, SpawnChildParams};
     use astrcode_session_projection::{
         AgentSessionLinkView, AgentSessionStatus, SessionReadModel, SessionSummary,
@@ -2173,12 +2174,14 @@ mod tests {
             test_runtime_services(),
             vec![],
         ));
-        let runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
         let handler = Arc::new(BlockingCustomEventHandler::new());
-        runner
-            .register(Arc::new(BlockingCustomEventExtension(Arc::clone(&handler))))
-            .await
-            .unwrap();
+        let runner = extension_runner_with_extensions(
+            Duration::from_secs(1),
+            None,
+            vec![Arc::new(BlockingCustomEventExtension(Arc::clone(&handler)))],
+        )
+        .await
+        .unwrap();
         manager.bind_custom_event_runner(Arc::clone(&runner));
 
         let session_id = manager.create(".").await.unwrap().id().clone();
@@ -2262,13 +2265,15 @@ mod tests {
         }
 
         let manager = SessionManager::new(Arc::clone(&store_port), services, vec![]);
-        let runner = ExtensionRunner::new(Duration::from_secs(1));
         let handler = Arc::new(BlockingCustomEventHandler::new());
         handler.release.add_permits(2);
-        runner
-            .register(Arc::new(BlockingCustomEventExtension(Arc::clone(&handler))))
-            .await
-            .unwrap();
+        let runner = extension_runner_with_extensions(
+            Duration::from_secs(1),
+            None,
+            vec![Arc::new(BlockingCustomEventExtension(Arc::clone(&handler)))],
+        )
+        .await
+        .unwrap();
 
         manager.replay_custom_events(&runner).await.unwrap();
         tokio::time::timeout(Duration::from_secs(1), handler.wait_until_entered_count(2))

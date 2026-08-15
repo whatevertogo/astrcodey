@@ -23,7 +23,7 @@ use astrcode_extension_sdk::{
         UserMessageEnvelopeContext, UserMessageEnvelopeHandler, UserMessageEnvelopeResult,
     },
 };
-use astrcode_extensions::runner::ExtensionRunner;
+use astrcode_extensions::{runner::ExtensionRunner, testing::extension_runner_with_extensions};
 use astrcode_server::test_support::{
     ChildSessionCoordinator, DeliveryOutcome, InputDelivery, MAX_PENDING_INPUTS_PER_SESSION,
     MAX_PROMPT_TEXT_BYTES, SessionManager, StartedExecution, TurnRegistry, TurnScheduleError,
@@ -534,13 +534,15 @@ async fn queued_input_retries_after_a_transient_start_failure() {
     let store: Arc<dyn SessionStore> = Arc::new(InMemoryEventStore::new());
     let release = Arc::new(Semaphore::new(0));
     let envelope_calls = Arc::new(AtomicUsize::new(0));
-    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    extension_runner
-        .register(Arc::new(FailSecondEnvelope {
+    let extension_runner = extension_runner_with_extensions(
+        Duration::from_secs(1),
+        None,
+        vec![Arc::new(FailSecondEnvelope {
             calls: Arc::clone(&envelope_calls),
-        }))
-        .await
-        .unwrap();
+        })],
+    )
+    .await
+    .unwrap();
     let scheduler = build_scheduler_with_runtime(
         Arc::clone(&store),
         Arc::new(GateFirstLlm {

@@ -446,33 +446,29 @@ async fn run() -> Result<(), ErrorPayload> {
         }),
     )?;
 
-    worker.hook(
-        LifecycleEvent::PreToolUse,
-        HookMode::Blocking,
-        hook_handler_args(|input: PreToolInput, _ctx| async move {
-            if input.tool_name == "emit_hook_probe" {
-                // This probe must inherit the active hook's request-scoped event context.
-                HostClient::events()
-                    .emit(HostEventEmitRequest {
-                        event_type: "s5r_guest.probe".into(),
-                        schema_version: 1,
-                        payload: json!({ "from": "pre_tool_use" }),
-                    })
-                    .await?;
-                return Ok(HandlerResult::ok());
+    worker.on_pre_tool_use(hook_handler_args(|input: PreToolInput, _ctx| async move {
+        if input.tool_name == "emit_hook_probe" {
+            // This probe must inherit the active hook's request-scoped event context.
+            HostClient::events()
+                .emit(HostEventEmitRequest {
+                    event_type: "s5r_guest.probe".into(),
+                    schema_version: 1,
+                    payload: json!({ "from": "pre_tool_use" }),
+                })
+                .await?;
+            return Ok(HandlerResult::ok());
+        }
+        if input.tool_name == "bash" {
+            let cmd = input.tool_input["command"].as_str().unwrap_or("");
+            if cmd.contains("rm -rf") {
+                return Ok(HandlerResult::effect(
+                    HandlerEffect::Block,
+                    json!({ "reason": "dangerous rm -rf blocked by s5r-guest-demo" }),
+                ));
             }
-            if input.tool_name == "bash" {
-                let cmd = input.tool_input["command"].as_str().unwrap_or("");
-                if cmd.contains("rm -rf") {
-                    return Ok(HandlerResult::effect(
-                        HandlerEffect::Block,
-                        json!({ "reason": "dangerous rm -rf blocked by s5r-guest-demo" }),
-                    ));
-                }
-            }
-            Ok(HandlerResult::ok())
-        }),
-    )?;
+        }
+        Ok(HandlerResult::ok())
+    }))?;
 
     worker.hook(
         LifecycleEvent::TurnEnd,

@@ -207,7 +207,13 @@ async fn top_level_turn_persists_the_current_main_model_before_running() {
         common::spawn_session_with_services(Arc::new(UsageLlm)).await;
     let mut effective = services.read_effective().as_ref().clone();
     effective.llm.model_id = "new-main-model".into();
-    services.publish_runtime_generation(effective, services.llm(), services.small_llm());
+    // 默认 extension ports 无真实 runner,extension epoch 恒为 0。
+    services.publish_runtime_generation_for_extension(
+        effective,
+        services.llm(),
+        services.small_llm(),
+        0,
+    );
 
     let handle = session
         .submit("use current model".into(), new_turn_id(), None)

@@ -10,9 +10,10 @@ mod process_supervision;
 pub mod runner;
 pub mod s5r_ext;
 mod s5r_handler;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use astrcode_extension_sdk::extension::Extension;
 pub use host_router::{
-    HostBackends, HostRouter, PublicHttpDispatcher, build_host_router,
-    build_host_router_with_public_http_dispatcher,
+    HostBackends, HostRouter, PublicHttpDispatcher, build_host_router_with_public_http_dispatcher,
 };

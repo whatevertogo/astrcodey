@@ -36,7 +36,12 @@ libc = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 process-wrap = { workspace = true, features = ["job-object", "kill-on-drop", "tokio1"] }
 
+[features]
+testing = []
+
 [dev-dependencies]
+# 自引用让 tests/ 下的集成测试看到 `testing` feature gate 的 API(feature unification)。
+astrcode-extensions = { path = ".", features = ["testing"] }
 tokio = { workspace = true, features = ["fs", "rt-multi-thread", "macros"] }
 astrcode-storage = { path = "../astrcode-storage", features = ["testing"] }
 tempfile = { workspace = true }

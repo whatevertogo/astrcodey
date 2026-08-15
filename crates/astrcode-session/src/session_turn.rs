@@ -635,7 +635,10 @@ mod tests {
             self.state.current_generation.store(2, Ordering::Release);
             if !self.state.runtime_published.swap(true, Ordering::AcqRel) {
                 let runtime_services = self.state.runtime_services.get().unwrap();
-                runtime_services.publish_runtime_generation(
+                // 与生产 commit_with 的 publish 回调一致:发布新 core generation 时携带
+                // 与其匹配的 extension epoch,否则下一 turn 的 pin 永远无法收敛。
+                let extension_generation = self.state.current_generation.load(Ordering::Acquire);
+                runtime_services.publish_runtime_generation_for_extension(
                     runtime_services.read_effective().as_ref().clone(),
                     Arc::new(TaggedLlm {
                         max_input_tokens: 3,
@@ -643,6 +646,7 @@ mod tests {
                     Arc::new(TaggedLlm {
                         max_input_tokens: 4,
                     }),
+                    extension_generation,
                 );
             }
             Ok(UserMessageEnvelopeResult::Allow)
@@ -695,7 +699,7 @@ mod tests {
     #[tokio::test]
     async fn turn_pins_extension_and_model_generations_before_first_hook() {
         let state = Arc::new(SwitchingState {
-            current_generation: AtomicU64::new(9),
+            current_generation: AtomicU64::new(1),
             runtime_services: OnceLock::new(),
             runtime_published: AtomicBool::new(false),
             calls: Mutex::new(Vec::new()),

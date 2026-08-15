@@ -268,7 +268,7 @@ assert.throws(
   ProtocolDecodeError
 )
 
-const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
+const snapshot = decodeConversationSnapshot({
   sessionId: 's-1',
   sessionTitle: 'title',
   cursor: { value: '0' },
@@ -284,7 +284,7 @@ const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
     },
   },
   blocks: [
-    { kind: 'user', id: 'u-1', text: 'prior message' },
+    { kind: 'user', id: 'u-1', text: 'prior message', attachments: [] },
     {
       kind: 'assistant',
       id: 'a-1',
@@ -302,12 +302,9 @@ const snapshotWithoutAttachmentFields = decodeConversationSnapshot({
     },
   ],
 })
-assert.equal(snapshotWithoutAttachmentFields.blocks.length, 2)
-assert.equal(
-  snapshotWithoutAttachmentFields.agentSessions[0].agentName,
-  'explorer'
-)
-assert.deepEqual(snapshotWithoutAttachmentFields.control.retryStatus, {
+assert.equal(snapshot.blocks.length, 2)
+assert.equal(snapshot.agentSessions[0].agentName, 'explorer')
+assert.deepEqual(snapshot.control.retryStatus, {
   status: 503,
   attempt: 2,
   maxRetries: 5,
@@ -315,9 +312,9 @@ assert.deepEqual(snapshotWithoutAttachmentFields.control.retryStatus, {
 })
 
 const transportRetrySnapshot = decodeConversationSnapshot({
-  ...snapshotWithoutAttachmentFields,
+  ...snapshot,
   control: {
-    ...snapshotWithoutAttachmentFields.control,
+    ...snapshot.control,
     retryStatus: {
       attempt: 1,
       maxRetries: 3,
@@ -337,7 +334,7 @@ for (const [description, decode] of [
     'unknown agent status',
     () =>
       decodeConversationSnapshot({
-        ...snapshotWithoutAttachmentFields,
+        ...snapshot,
         agentSessions: [
           {
             childSessionId: 'child',
@@ -381,7 +378,7 @@ for (const [description, decode] of [
     'snapshot without agent sessions',
     () =>
       decodeConversationSnapshot({
-        ...snapshotWithoutAttachmentFields,
+        ...snapshot,
         agentSessions: undefined,
       }),
   ],

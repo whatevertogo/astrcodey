@@ -31,7 +31,7 @@ use astrcode_extension_sdk::{
         MAX_EXTENSION_HTTP_BODY_BYTES, Registrar,
     },
 };
-use astrcode_extensions::{Extension, runner::ExtensionRunner};
+use astrcode_extensions::{Extension, testing::extension_runner_with_extensions};
 use astrcode_protocol::{
     events::ClientNotification,
     http::{
@@ -430,12 +430,8 @@ async fn session_tools_are_applied_at_creation_reconfigured_and_validated() {
 
 #[tokio::test]
 async fn extension_http_routes_allow_only_declared_public_routes() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    runtime
-        .extension_runner()
-        .register(Arc::new(HttpRoutesExtension))
-        .await
-        .unwrap();
+    let runtime =
+        runtime_with_extensions(Arc::new(ImmediateLlm), vec![Arc::new(HttpRoutesExtension)]).await;
     let (app, token) = router(Arc::clone(&runtime)).unwrap();
 
     let public = app
@@ -1455,12 +1451,11 @@ async fn stream_suppresses_current_session_ask_user_global_copy() {
 
 #[tokio::test]
 async fn event_consumer_http_control_reports_pending_events_and_updates_persisted_state() {
-    let runtime = runtime(Arc::new(ImmediateLlm)).await;
-    runtime
-        .extension_runner()
-        .register(Arc::new(EventConsumerHttpExtension))
-        .await
-        .unwrap();
+    let runtime = runtime_with_extensions(
+        Arc::new(ImmediateLlm),
+        vec![Arc::new(EventConsumerHttpExtension)],
+    )
+    .await;
     let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     runtime
@@ -2095,11 +2090,8 @@ async fn prompt_route_compact_returns_handled_and_rewrites_transcript() {
 
 #[tokio::test]
 async fn compact_route_returns_same_session_and_hydrates_post_compact_context() {
-    let coding = astrcode_bundled_extensions::bundled_extensions(&BTreeMap::new())
-        .into_iter()
-        .find(|extension| extension.manifest().id() == "astrcode-coding")
-        .expect("bundled coding extension");
-    let runtime = runtime_with_extensions(Arc::new(SummaryLlm), vec![coding]).await;
+    // bundled set(含 astrcode-coding)已由 runtime helper 经 source generation 加载。
+    let runtime = runtime(Arc::new(SummaryLlm)).await;
     let (app, token) = router(Arc::clone(&runtime)).unwrap();
     let session_id = create_session(app.clone(), &token).await;
     let sid = SessionId::from(session_id.clone());
@@ -2295,7 +2287,7 @@ async fn read_sse_until(mut body: Body, needle: &str) -> String {
 
     loop {
         tokio::select! {
-            _ = &mut deadline => panic!("timed out waiting for SSE payload containing {needle}"),
+            _ = &mut deadline => panic!("timed out waiting for SSE payload containing {needle}; collected: {collected}"),
             frame = body.frame() => {
                 let frame = frame.expect("sse body should stay open").unwrap();
                 let Some(chunk) = frame.data_ref() else {
@@ -2522,6 +2514,30 @@ async fn runtime_with_extensions(
     runtime_with_event_store(llm_provider, Arc::new(TestEventStore::new()), extensions).await
 }
 
+fn mock_llm_settings() -> LlmSettings {
+    LlmSettings {
+        provider_kind: "mock".into(),
+        base_url: String::new(),
+        api_key: String::new(),
+        wire_format: ProviderWireFormat::OpenAiChatCompletions,
+        auth_scheme: ProviderAuthScheme::Bearer,
+        model_id: "mock-model".into(),
+        max_tokens: 1024,
+        context_limit: 1024,
+        connect_timeout_secs: 1,
+        read_timeout_secs: 1,
+        max_retries: 0,
+        retry_base_delay_ms: 0,
+        supports_prompt_cache_key: false,
+        supports_stream_usage: false,
+        supports_strict_tool_use: false,
+        prompt_cache_retention: None,
+        thinking: Default::default(),
+        thinking_capability: None,
+        thinking_configured: false,
+    }
+}
+
 async fn runtime_with_event_store(
     llm_provider: Arc<dyn LlmProvider>,
     event_store: Arc<dyn SessionStore>,
@@ -2530,48 +2546,8 @@ async fn runtime_with_event_store(
     static NEXT_CONFIG_ID: AtomicU64 = AtomicU64::new(0);
 
     let effective = EffectiveConfig {
-        llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            wire_format: ProviderWireFormat::OpenAiChatCompletions,
-            auth_scheme: ProviderAuthScheme::Bearer,
-            model_id: "mock-model".into(),
-            max_tokens: 1024,
-            context_limit: 1024,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            supports_stream_usage: false,
-            supports_strict_tool_use: false,
-            prompt_cache_retention: None,
-            thinking: Default::default(),
-            thinking_capability: None,
-            thinking_configured: false,
-        },
-        small_llm: LlmSettings {
-            provider_kind: "mock".into(),
-            base_url: String::new(),
-            api_key: String::new(),
-            wire_format: ProviderWireFormat::OpenAiChatCompletions,
-            auth_scheme: ProviderAuthScheme::Bearer,
-            model_id: "mock-model".into(),
-            max_tokens: 1024,
-            context_limit: 1024,
-            connect_timeout_secs: 1,
-            read_timeout_secs: 1,
-            max_retries: 0,
-            retry_base_delay_ms: 0,
-            supports_prompt_cache_key: false,
-            supports_stream_usage: false,
-            supports_strict_tool_use: false,
-            prompt_cache_retention: None,
-            thinking: Default::default(),
-            thinking_capability: None,
-            thinking_configured: false,
-        },
+        llm: mock_llm_settings(),
+        small_llm: mock_llm_settings(),
         context: ContextSettings {
             auto_compact_enabled: true,
             predictive_compact_enabled: false,
@@ -2590,19 +2566,24 @@ async fn runtime_with_event_store(
         permissions: Default::default(),
         extensions: ExtensionSettings::default(),
     };
-    let extension_runner = Arc::new(ExtensionRunner::new(Duration::from_secs(1)));
-    extension_runner
-        .register(astrcode_extension_mode::extension())
-        .await
-        .unwrap();
-    for extension in extensions {
-        extension_runner.register(extension).await.unwrap();
-    }
+    // 测试自定义扩展随 runner 一次性装配;bundled extensions(含 astrcode-mode)
+    // 与生产 bootstrap 一样经 source generation 加载——若以 Direct 起源预注册,
+    // 后续 config update 的 source reconcile 会与同名 Direct 实例冲突。
+    let extension_runner =
+        extension_runner_with_extensions(Duration::from_secs(1), None, extensions)
+            .await
+            .unwrap();
     let capabilities = astrcode_server::test_support::assemble_session_runtime_services_for_test(
         llm_provider.clone(),
-        llm_provider,
-        effective,
+        llm_provider.clone(),
+        effective.clone(),
         extension_runner.clone(),
+    );
+    astrcode_server::test_support::bind_extension_host_router_for_test(
+        &extension_runner,
+        &capabilities,
+        event_store.clone(),
+        &std::env::temp_dir(),
     );
     let config = Arc::new(ConfigManager::new(
         Arc::new(astrcode_storage::config_store::FileConfigStore::new(
@@ -2628,6 +2609,34 @@ async fn runtime_with_event_store(
         Arc::clone(&child_sessions),
     ));
     child_sessions.spawn_completion_watcher(Arc::clone(&scheduler));
+    // bundled extensions(含 astrcode-mode、session-commands、coding)经 source
+    // generation 加载,与生产 reconcile 同 origin;publication 用测试注入的 LLM
+    // 发布同一 extension epoch,既不覆盖测试 provider,也让 turn pin 的 expected
+    // epoch 与 runner Stable 一致。
+    let bundled_source = astrcode_bundled_extensions::BundledExtensionSource::default();
+    let load_context = astrcode_extensions::loader::ExtensionLoadContext {
+        working_dir: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+        host_router: Some(extension_runner.host_router()),
+        transport_profile: Default::default(),
+    };
+    let publish_capabilities = Arc::clone(&capabilities);
+    astrcode_extensions::loader::prepare_extension_generation(
+        &extension_runner,
+        &load_context,
+        &[&bundled_source],
+        &BTreeMap::new(),
+    )
+    .await
+    .unwrap_or_else(|errors| panic!("bundled extension load failed: {errors:?}"))
+    .commit_with(move |extension_generation| {
+        publish_capabilities.publish_runtime_generation_for_extension(
+            effective,
+            llm_provider.clone(),
+            llm_provider,
+            extension_generation,
+        );
+    })
+    .await;
     Arc::new(assemble_server_runtime(
         event_store,
         config,

@@ -1,8 +1,9 @@
+#[cfg(any(test, feature = "testing"))]
+use std::{collections::HashMap, sync::Weak};
 use std::{
-    collections::HashMap,
     panic::AssertUnwindSafe,
     sync::{
-        Arc, Weak,
+        Arc,
         atomic::{AtomicU64, AtomicUsize, Ordering},
     },
 };
@@ -12,8 +13,10 @@ use astrcode_extension_sdk::extension::{
     internal::{cancel_extension_tasks, extension_stop_context, wait_extension_tasks},
 };
 use futures_util::FutureExt;
+#[cfg(any(test, feature = "testing"))]
+use tokio::sync::Mutex as AsyncMutex;
 use tokio::{
-    sync::{Mutex as AsyncMutex, Notify, OwnedMutexGuard, oneshot},
+    sync::{Notify, OwnedMutexGuard, oneshot},
     task::JoinSet,
 };
 use tracing::Instrument;
@@ -86,6 +89,8 @@ pub(super) struct RetirementSupervisor {
     tasks: parking_lot::Mutex<JoinSet<()>>,
     pending: Arc<AtomicUsize>,
     completed: Arc<Notify>,
+    // 仅 direct register 路径（test/testing feature）需要按扩展 keyed 的注册 gate。
+    #[cfg(any(test, feature = "testing"))]
     operation_gates: parking_lot::Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
     next_retirement_id: AtomicU64,
     completed_errors: Arc<parking_lot::Mutex<Vec<RecordedRetirementError>>>,
@@ -273,12 +278,14 @@ impl RetirementSupervisor {
             tasks: parking_lot::Mutex::new(JoinSet::new()),
             pending: Arc::new(AtomicUsize::new(0)),
             completed: Arc::new(Notify::new()),
+            #[cfg(any(test, feature = "testing"))]
             operation_gates: parking_lot::Mutex::new(HashMap::new()),
             next_retirement_id: AtomicU64::new(1),
             completed_errors: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
 
+    #[cfg(any(test, feature = "testing"))]
     pub(super) fn operation_gate(&self, extension_id: &str) -> Arc<AsyncMutex<()>> {
         let mut gates = self.operation_gates.lock();
         gates.retain(|_, gate| gate.strong_count() > 0);
